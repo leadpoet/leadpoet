@@ -18,7 +18,7 @@ from gateway.research_lab.v2_authority import build_allocation_v2
 from gateway.research_lab.bundles import contains_secret_material, sha256_json
 from gateway.research_lab.chain import resolve_hotkey_uids
 from gateway.research_lab.config import ResearchLabGatewayConfig
-from gateway.research_lab.store import create_research_lab_emission_allocation_snapshot, select_all, select_one
+from gateway.research_lab.store import create_research_lab_emission_allocation_snapshot, select_all
 from leadpoet_verifier.economics import allocate_research_lab_epoch
 
 
@@ -27,6 +27,7 @@ ACTIVE_SCHEDULE_STATUSES = {"scheduled"}
 ACTIVE_CHAMPION_STATUSES = {"active", "queued", "partially_paid"}
 SETTLEMENT_TRACKED_CHAMPION_STATUSES = ACTIVE_CHAMPION_STATUSES | {"paid"}
 RATE_QUANT = Decimal("0.000001")
+POSTGREST_IN_FILTER_CHUNK = 50
 logger = logging.getLogger(__name__)
 
 
@@ -236,19 +237,43 @@ async def _active_reimbursement_obligations(
         for row in schedule_rows
         if str(row.get("schedule_status") or "") in ACTIVE_SCHEDULE_STATUSES and _epoch_active(row, epoch)
     ]
+    award_ids = sorted(
+        {
+            str(schedule.get("award_id") or "")
+            for schedule in active_schedule_rows
+            if str(schedule.get("award_id") or "")
+        }
+    )
     awards_by_id: dict[str, dict[str, Any]] = {}
-    for schedule in active_schedule_rows:
-        award_id = str(schedule.get("award_id") or "")
-        if not award_id or award_id in awards_by_id:
-            continue
-        award = await select_one(
+    for offset in range(0, len(award_ids), POSTGREST_IN_FILTER_CHUNK):
+        chunk = award_ids[offset : offset + POSTGREST_IN_FILTER_CHUNK]
+        award_rows = await select_all(
             "research_reimbursement_award_current",
             filters=(
-                ("award_id", award_id),
+                ("award_id", "in", chunk),
                 ("current_award_status", "awarded"),
             ),
+            max_rows=len(chunk) + 1,
+            allow_partial=False,
         )
-        if award and str(award.get("current_award_status") or award.get("award_status") or "") in ACTIVE_REIMBURSEMENT_STATUSES:
+        for award in award_rows:
+            award_id = str(award.get("award_id") or "")
+            status = str(
+                award.get("current_award_status")
+                or award.get("award_status")
+                or ""
+            )
+            if (
+                award_id not in chunk
+                or status not in ACTIVE_REIMBURSEMENT_STATUSES
+            ):
+                raise ValueError(
+                    "Research Lab reimbursement award batch differs"
+                )
+            if award_id in awards_by_id:
+                raise ValueError(
+                    "Research Lab reimbursement award is ambiguous"
+                )
             awards_by_id[award_id] = award
     hotkeys = [str(row.get("miner_hotkey") or "") for row in awards_by_id.values()]
     hotkey_uids = await resolve_hotkey_uids(hotkeys)

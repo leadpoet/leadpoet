@@ -14,13 +14,15 @@ from leadpoet_canonical.attested_v2 import sha256_json
 from leadpoet_canonical.events import compute_event_hash
 from leadpoet_canonical.legacy_settlement_v2 import (
     LegacySettlementV2Error,
+    validate_legacy_allocation_nonfinalization_v2,
     validate_legacy_finalized_settlement_v2,
+    validate_legacy_nonfinalization_document_v2,
     validate_legacy_settlement_document_v2,
 )
 from leadpoet_canonical.weights import bundle_weights_hash
 
 
-def _fixture() -> dict:
+def _fixture(*, allocation_netuid=71) -> dict:
     netuid = 71
     epoch = 100
     block = epoch * 360 + 20
@@ -48,10 +50,11 @@ def _fixture() -> dict:
     allocation_body = {
         "schema_version": "1.0",
         "epoch": epoch,
-        "netuid": netuid,
         "champion_allocations": [],
         "queued_champion_allocations": [],
     }
+    if allocation_netuid is not None:
+        allocation_body["netuid"] = allocation_netuid
     allocation = {
         **allocation_body,
         "allocation_hash": sha256_json(allocation_body),
@@ -158,6 +161,20 @@ def test_historical_settlement_binds_allocation_bundle_chain_and_checkpoint():
     assert validate_legacy_settlement_document_v2(document) == document
 
 
+def test_historical_settlement_accepts_hash_bound_allocation_without_netuid():
+    inputs = _fixture(allocation_netuid=None)
+    document = validate_legacy_finalized_settlement_v2(**inputs)
+    assert "netuid" not in document["allocation_doc"]
+    assert validate_legacy_settlement_document_v2(document) == document
+
+
+def test_historical_settlement_rejects_mismatched_embedded_netuid():
+    with pytest.raises(LegacySettlementV2Error, match="allocation document scope"):
+        validate_legacy_finalized_settlement_v2(
+            **_fixture(allocation_netuid=72)
+        )
+
+
 @pytest.mark.parametrize("tamper", ("chain", "checkpoint", "allocation"))
 def test_historical_settlement_fails_closed_on_tampered_evidence(tamper):
     inputs = _fixture()
@@ -182,3 +199,38 @@ def test_persisted_settlement_hash_prevents_partial_restart_substitution():
     tampered["validator_uid"] += 1
     with pytest.raises(LegacySettlementV2Error, match="hash differs"):
         validate_legacy_settlement_document_v2(tampered)
+
+
+def test_historical_nonfinalization_preserves_unpaid_allocation():
+    inputs = _fixture()
+    inputs.pop("arweave_checkpoint")
+    inputs["chain_evidence"]["weights"][0][1] += 5
+
+    finding = validate_legacy_allocation_nonfinalization_v2(**inputs)
+
+    assert finding["epoch_id"] == 100
+    assert finding["differing_uid_count"] == 1
+    assert finding["allocation_hash"] == inputs["allocation_doc"][
+        "allocation_hash"
+    ]
+    assert validate_legacy_nonfinalization_document_v2(finding) == finding
+
+
+def test_historical_nonfinalization_rejects_matching_chain_vector():
+    inputs = _fixture()
+    inputs.pop("arweave_checkpoint")
+
+    with pytest.raises(LegacySettlementV2Error, match="matches"):
+        validate_legacy_allocation_nonfinalization_v2(**inputs)
+
+
+def test_persisted_nonfinalization_hash_rejects_tampering():
+    inputs = _fixture()
+    inputs.pop("arweave_checkpoint")
+    inputs["chain_evidence"]["weights"][0][1] += 5
+    finding = validate_legacy_allocation_nonfinalization_v2(**inputs)
+    tampered = copy.deepcopy(finding)
+    tampered["differing_uid_count"] += 1
+
+    with pytest.raises(LegacySettlementV2Error, match="hash differs"):
+        validate_legacy_nonfinalization_document_v2(tampered)

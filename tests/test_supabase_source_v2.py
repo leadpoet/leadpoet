@@ -238,6 +238,36 @@ def test_historical_settlement_queries_are_fixed_and_epoch_bound():
     provider = FakeProvider([{"rows": []}])
     _read(
         provider,
+        policy_id="legacy_allocation_by_hash",
+        parameters={
+            "allocation_hash": "sha256:" + "1" * 64,
+            "netuid": 71,
+            "epoch_id": 100,
+        },
+    )
+    url = provider.requests[0]["url"]
+    assert "/rest/v1/research_lab_emission_allocation_snapshots?" in url
+    assert "allocation_hash=eq.sha256%3A" + "1" * 64 in url
+    assert "netuid=eq.71" in url
+    assert "epoch=eq.100" in url
+    assert "limit=2" in url
+
+    provider = FakeProvider([{"rows": []}])
+    with pytest.raises(SupabaseSourceV2Error, match="allocation_hash"):
+        _read(
+            provider,
+            policy_id="legacy_allocation_by_hash",
+            parameters={
+                "allocation_hash": "sha256:" + "1" * 64 + "&select=secret",
+                "netuid": 71,
+                "epoch_id": 100,
+            },
+        )
+    assert provider.requests == []
+
+    provider = FakeProvider([{"rows": []}])
+    _read(
+        provider,
         policy_id="legacy_finalized_allocation_migrations",
         parameters={"netuid": 71, "start_epoch": 90, "end_epoch": 100},
     )

@@ -344,6 +344,56 @@ async def test_v2_graph_loader_reconstructs_complete_persisted_ancestry(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_v2_batch_graph_loader_reuses_shared_ancestry(monkeypatch):
+    graph = _graph(with_transport=True, with_parent=True)
+    rows = _persisted_rows(graph)
+    root = graph["root_receipt_hash"]
+    parent = next(
+        receipt["receipt_hash"]
+        for receipt in graph["receipts"]
+        if receipt["receipt_hash"] != root
+    )
+    receipt_queries = []
+
+    async def _select_all(table, *, filters, **_kwargs):
+        field, operator, values = filters[0]
+        assert operator == "in"
+        if table == attested_v2_store.RECEIPT_TABLE:
+            receipt_queries.append(set(values))
+        return [
+            dict(row)
+            for row in rows.get(table, [])
+            if row.get(field) in set(values)
+        ]
+
+    monkeypatch.setattr(attested_v2_store, "select_all", _select_all)
+    loaded = await attested_v2_store.load_receipt_graphs_v2(
+        (root, parent)
+    )
+
+    assert set(loaded) == {root, parent}
+    assert {
+        receipt["receipt_hash"] for receipt in loaded[root]["receipts"]
+    } == {root, parent}
+    assert [
+        receipt["receipt_hash"] for receipt in loaded[parent]["receipts"]
+    ] == [parent]
+    assert receipt_queries == [{root, parent}]
+
+
+@pytest.mark.asyncio
+async def test_v2_batch_graph_loader_rejects_shared_failed_allowance():
+    with pytest.raises(
+        attested_v2_store.AttestedV2StoreError,
+        match="failed receipt allowance requires one graph root",
+    ):
+        await attested_v2_store.load_receipt_graphs_v2(
+            ("sha256:" + "1" * 64, "sha256:" + "2" * 64),
+            allowed_failed_receipt_hashes=("sha256:" + "1" * 64,),
+        )
+
+
+@pytest.mark.asyncio
 async def test_v2_graph_loader_rejects_missing_persisted_parent_edge(monkeypatch):
     graph = _graph(with_parent=True)
     rows = _persisted_rows(graph)
@@ -909,6 +959,54 @@ async def test_business_artifact_lookup_rejects_ambiguous_rows(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_business_artifact_batch_lookup_loads_all_roots_once(monkeypatch):
+    first = ("champion_reward_decision", "champion_reward:1")
+    second = ("champion_reward_decision", "champion_reward:2")
+    first_root = "sha256:" + "1" * 64
+    second_root = "sha256:" + "2" * 64
+    rows = [
+        {
+            "artifact_kind": first[0],
+            "artifact_ref": first[1],
+            "artifact_hash": "sha256:" + "3" * 64,
+            "receipt_hash": first_root,
+        },
+        {
+            "artifact_kind": second[0],
+            "artifact_ref": second[1],
+            "artifact_hash": "sha256:" + "4" * 64,
+            "receipt_hash": second_root,
+        },
+    ]
+    loaded_roots = []
+
+    async def select(_table, *, filters, **_kwargs):
+        refs = set(filters[1][2])
+        return [dict(row) for row in rows if row["artifact_ref"] in refs]
+
+    async def load_graphs(roots, **_kwargs):
+        loaded_roots.append(set(roots))
+        return {
+            root: {"root_receipt_hash": root}
+            for root in roots
+        }
+
+    monkeypatch.setattr(attested_v2_store, "select_all", select)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_receipt_graphs_v2",
+        load_graphs,
+    )
+
+    result = await attested_v2_store.load_business_artifact_graphs_by_ref_v2(
+        (first, second)
+    )
+
+    assert set(result) == {first, second}
+    assert loaded_roots == [{first_root, second_root}]
+
+
+@pytest.mark.asyncio
 async def test_legacy_settlement_concurrent_retries_persist_one_exact_row(
     monkeypatch,
 ):
@@ -975,3 +1073,60 @@ async def test_legacy_settlement_concurrent_retries_persist_one_exact_row(
     assert {result["durable_readback_hash"] for result in results} == {
         results[0]["durable_readback_hash"]
     }
+
+
+@pytest.mark.asyncio
+async def test_legacy_nonfinalization_persists_without_payment_credit(
+    monkeypatch,
+):
+    from leadpoet_canonical import legacy_settlement_v2
+
+    document = {
+        "schema_version": "leadpoet.legacy_allocation_nonfinalization.v2",
+        "netuid": 71,
+        "epoch_id": 100,
+        "allocation_hash": HASH_B,
+        "finding_hash": HASH_C,
+        "allocation_doc": {"allocation_hash": HASH_B},
+    }
+    receipt_doc = {
+        "receipt_hash": HASH,
+        "role": "gateway_coordinator",
+        "purpose": "research_lab.legacy_finalized_allocation.v2",
+        "status": "succeeded",
+        "output_root": attested_v2_store.sha256_json(document),
+    }
+    inserted = []
+
+    async def select(table, *, filters):
+        assert table == attested_v2_store.RECEIPT_TABLE
+        assert filters == (("receipt_hash", HASH),)
+        return {"receipt_doc": receipt_doc}
+
+    async def insert(table, row, *, key_filters):
+        inserted.append((table, dict(row), key_filters))
+        return dict(row)
+
+    monkeypatch.setattr(
+        legacy_settlement_v2,
+        "validate_legacy_nonfinalization_document_v2",
+        lambda value: dict(value),
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "validate_signed_execution_receipt",
+        lambda _value: None,
+    )
+    monkeypatch.setattr(attested_v2_store, "select_one", select)
+    monkeypatch.setattr(attested_v2_store, "_insert_exact", insert)
+
+    result = (
+        await attested_v2_store.persist_legacy_allocation_nonfinalization_v2(
+            finding=document,
+            receipt_hash=HASH,
+        )
+    )
+
+    assert inserted[0][0] == attested_v2_store.LEGACY_NONFINALIZATION_TABLE
+    assert inserted[0][2] == (("netuid", 71), ("epoch_id", 100))
+    assert result["finding_hash"] == HASH_C

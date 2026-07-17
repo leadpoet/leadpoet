@@ -189,6 +189,90 @@ class TestAllocationSnapshotPersistenceDecision:
         assert self._decide(23891, "anything", configured="") == "key_not_configured"
 
 
+@pytest.mark.asyncio
+async def test_reimbursement_awards_use_bounded_set_queries(monkeypatch):
+    from gateway.research_lab import allocations
+
+    schedules = [
+        {
+            "schedule_id": f"schedule:{index}",
+            "award_id": f"award:{index}",
+            "schedule_status": "scheduled",
+            "start_epoch": 90,
+            "epoch_count": 20,
+            "total_microusd": 1000,
+        }
+        for index in range(125)
+    ]
+    awards = {
+        f"award:{index}": {
+            "award_id": f"award:{index}",
+            "current_award_status": "awarded",
+            "miner_hotkey": f"hotkey:{index}",
+            "target_reimbursement_microusd": 1000,
+        }
+        for index in range(125)
+    }
+    batch_sizes = []
+
+    async def select_all(table, *, filters, **_kwargs):
+        if table == "research_reimbursement_schedules":
+            return list(schedules)
+        assert table == "research_reimbursement_award_current"
+        requested = list(filters[0][2])
+        batch_sizes.append(len(requested))
+        return [dict(awards[award_id]) for award_id in requested]
+
+    async def resolve(hotkeys):
+        return {
+            hotkey: index + 1
+            for index, hotkey in enumerate(sorted(set(hotkeys)))
+        }
+
+    monkeypatch.setattr(allocations, "select_all", select_all)
+    monkeypatch.setattr(allocations, "resolve_hotkey_uids", resolve)
+
+    obligations, skipped = await allocations._active_reimbursement_obligations(
+        100,
+        policy={"reimbursement_epochs": 20},
+    )
+
+    assert len(obligations) == 125
+    assert skipped == []
+    assert batch_sizes == [50, 50, 25]
+
+
+@pytest.mark.asyncio
+async def test_reimbursement_award_batch_rejects_ambiguous_rows(monkeypatch):
+    from gateway.research_lab import allocations
+
+    schedule = {
+        "schedule_id": "schedule:1",
+        "award_id": "award:1",
+        "schedule_status": "scheduled",
+        "start_epoch": 90,
+        "epoch_count": 20,
+    }
+    award = {
+        "award_id": "award:1",
+        "current_award_status": "awarded",
+        "miner_hotkey": "hotkey:1",
+    }
+
+    async def select_all(table, **_kwargs):
+        if table == "research_reimbursement_schedules":
+            return [dict(schedule)]
+        return [dict(award), dict(award)]
+
+    monkeypatch.setattr(allocations, "select_all", select_all)
+
+    with pytest.raises(ValueError, match="award is ambiguous"):
+        await allocations._active_reimbursement_obligations(
+            100,
+            policy={"reimbursement_epochs": 20},
+        )
+
+
 class _FakeSession:
     def __init__(self, failures):
         self.failures = failures

@@ -27,21 +27,24 @@ class FakeReader:
 
     def read(self, *, policy_id, parameters, **_kwargs):
         self.calls.append((policy_id, dict(parameters)))
-        if policy_id == "research_lab_allocation_current":
+        if policy_id == "legacy_audit_anchor_by_epoch":
             return [
                 {
+                    "allocation_hash": "sha256:" + "1" * 64,
+                    "weights_hash": "2" * 64,
+                    "current_transparency_event_hash": "3" * 64,
+                    "current_arweave_tx_id": "A" * 43,
+                }
+            ]
+        if policy_id == "legacy_allocation_by_hash":
+            return [
+                {
+                    "epoch": 100,
+                    "netuid": 71,
                     "allocation_hash": "sha256:" + "1" * 64,
                     "allocation_doc": {
                         "allocation_hash": "sha256:" + "1" * 64,
                     },
-                }
-            ]
-        if policy_id == "legacy_audit_anchor_by_epoch":
-            return [
-                {
-                    "weights_hash": "2" * 64,
-                    "current_transparency_event_hash": "3" * 64,
-                    "current_arweave_tx_id": "A" * 43,
                 }
             ]
         if policy_id == "legacy_transparency_event_by_hash":
@@ -85,10 +88,11 @@ class FakeArweave:
     def __call__(self, request):
         self.calls.append(dict(request))
         authenticated = not (self.fail_first and len(self.calls) == 1)
-        body = json.dumps(
+        checkpoint_body = json.dumps(
             {"header": {}, "signature": "x", "events_compressed": "", "tree_levels": []},
             separators=(",", ":"),
         ).encode()
+        body = base64.urlsafe_b64encode(checkpoint_body).rstrip(b"=")
         attempt = build_transport_attempt(
             request_id=("%032x" % len(self.calls)),
             logical_operation_id=request["logical_operation_id"],
@@ -143,12 +147,20 @@ def test_measured_legacy_settlement_source_binds_all_evidence(monkeypatch):
 
     def verify(**kwargs):
         captured.update(kwargs)
-        return {"settlement_hash": "sha256:" + "9" * 64}
+        return {
+            "schema_version": "leadpoet.legacy_finalized_allocation.v2",
+            "settlement_hash": "sha256:" + "9" * 64,
+        }
 
     monkeypatch.setattr(
         source_module,
         "validate_legacy_finalized_settlement_v2",
         verify,
+    )
+    monkeypatch.setattr(
+        source_module,
+        "legacy_chain_vector_matches_bundle_v2",
+        lambda **_kwargs: True,
     )
     source = CoordinatorLegacySettlementSourceV2(
         reader=reader,
@@ -171,17 +183,63 @@ def test_measured_legacy_settlement_source_binds_all_evidence(monkeypatch):
         context=context,
     )
 
-    assert result == {"settlement_hash": "sha256:" + "9" * 64}
+    assert result == {
+        "schema_version": "leadpoet.legacy_finalized_allocation.v2",
+        "settlement_hash": "sha256:" + "9" * 64,
+    }
     assert [item[0] for item in reader.calls] == [
-        "research_lab_allocation_current",
         "legacy_audit_anchor_by_epoch",
+        "legacy_allocation_by_hash",
         "legacy_transparency_event_by_hash",
         "legacy_weight_bundles_by_epoch",
     ]
+    assert reader.calls[1][1]["allocation_hash"] == "sha256:" + "1" * 64
     assert captured["weight_bundle"]["validator_hotkey"] == "validator-1"
     assert captured["chain_evidence"] == {"chain": "evidence"}
     assert chain.calls[0]["epoch_id"] == 100
     assert len(provider.calls) == 2
-    assert provider.calls[1]["url"] == "https://arweave.net/" + "A" * 43
+    assert provider.calls[1]["url"] == "https://arweave.net/tx/" + "A" * 43 + "/data"
     assert sleeps == [1.0]
     assert len(context.transport_attempts) == 2
+
+
+def test_nonfinalized_classification_does_not_require_arweave(monkeypatch):
+    reader = FakeReader()
+    chain = FakeChainSource()
+    provider = FakeArweave()
+    finding = {
+        "schema_version": "leadpoet.legacy_allocation_nonfinalization.v2",
+        "finding_hash": "sha256:" + "f" * 64,
+    }
+    monkeypatch.setattr(
+        source_module,
+        "legacy_chain_vector_matches_bundle_v2",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        source_module,
+        "validate_legacy_allocation_nonfinalization_v2",
+        lambda **_kwargs: finding,
+    )
+    source = CoordinatorLegacySettlementSourceV2(
+        reader=reader,
+        chain_source=chain,
+        execute_provider=provider,
+        retry_policy_hash="sha256:" + "8" * 64,
+    )
+
+    result = source.resolve_classification(
+        payload={
+            "schema_version": LEGACY_SETTLEMENT_REQUEST_SCHEMA_VERSION,
+            "netuid": 71,
+            "epoch_id": 100,
+        },
+        context=ExecutionContextV2(
+            job_id="legacy-classification:100",
+            purpose="research_lab.legacy_finalized_allocation.v2",
+            epoch_id=101,
+        ),
+    )
+
+    assert result == finding
+    assert provider.calls == []

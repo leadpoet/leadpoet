@@ -99,6 +99,18 @@ QUERY_POLICIES = {
         order="created_at.desc",
         limit=1,
     ),
+    "legacy_allocation_by_hash": SupabaseQueryV2(
+        policy_id="legacy_allocation_by_hash",
+        table="research_lab_emission_allocation_snapshots",
+        select=(
+            "allocation_id,epoch,netuid,snapshot_status,allocation_hash,"
+            "allocation_doc,created_at"
+        ),
+        parameter_names=("allocation_hash", "epoch_id", "netuid"),
+        max_pages=1,
+        order="created_at.asc",
+        limit=2,
+    ),
     "active_private_model_current": SupabaseQueryV2(
         policy_id="active_private_model_current",
         table="research_lab_private_model_version_current",
@@ -551,6 +563,15 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
         )
     if policy.policy_id == "research_lab_allocation_current":
         return (
+            ("epoch", "eq.%d" % _non_negative_int(parameters["epoch_id"], "epoch_id")),
+            ("netuid", "eq.%d" % _non_negative_int(parameters["netuid"], "netuid")),
+        )
+    if policy.policy_id == "legacy_allocation_by_hash":
+        allocation_hash = str(parameters["allocation_hash"] or "").strip().lower()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", allocation_hash):
+            raise SupabaseSourceV2Error("allocation_hash is invalid")
+        return (
+            ("allocation_hash", "eq.%s" % allocation_hash),
             ("epoch", "eq.%d" % _non_negative_int(parameters["epoch_id"], "epoch_id")),
             ("netuid", "eq.%d" % _non_negative_int(parameters["netuid"], "netuid")),
         )

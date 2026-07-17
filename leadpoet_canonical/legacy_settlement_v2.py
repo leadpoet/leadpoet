@@ -26,6 +26,9 @@ from leadpoet_canonical.weights import (
 
 
 LEGACY_SETTLEMENT_SCHEMA_VERSION = "leadpoet.legacy_finalized_allocation.v2"
+LEGACY_NONFINALIZATION_SCHEMA_VERSION = (
+    "leadpoet.legacy_allocation_nonfinalization.v2"
+)
 LEGACY_SETTLEMENT_REQUEST_SCHEMA_VERSION = (
     "leadpoet.legacy_finalized_allocation_request.v2"
 )
@@ -62,6 +65,28 @@ _SETTLEMENT_FIELDS = {
     "arweave_tx_id",
     "settlement_hash",
 }
+_NONFINALIZATION_FIELDS = {
+    "schema_version",
+    "netuid",
+    "epoch_id",
+    "allocation_hash",
+    "allocation_doc",
+    "validator_hotkey",
+    "legacy_bundle_weights_hash",
+    "legacy_bundle_block",
+    "chain_compare_hash",
+    "chain_vector_tolerance_u16",
+    "chain_target_block",
+    "chain_target_block_hash",
+    "chain_finalized_head_block",
+    "validator_uid",
+    "weights_storage_key_hash",
+    "audit_event_hash",
+    "audit_payload_hash",
+    "differing_uid_count",
+    "difference_hash",
+    "finding_hash",
+}
 
 
 def _raw_hash(value: Any, field: str) -> str:
@@ -92,6 +117,34 @@ def _integer(value: Any, field: str, *, positive: bool = False) -> int:
     if normalized < (1 if positive else 0):
         raise LegacySettlementV2Error("%s is invalid" % field)
     return normalized
+
+
+def _chain_weights(value: Any) -> list[Tuple[int, int]]:
+    if not isinstance(value, list):
+        raise LegacySettlementV2Error("historical chain vector is missing")
+    pairs: list[Tuple[int, int]] = []
+    for item in value:
+        if (
+            not isinstance(item, (list, tuple))
+            or len(item) != 2
+            or isinstance(item[0], bool)
+            or isinstance(item[1], bool)
+        ):
+            raise LegacySettlementV2Error("historical chain vector is invalid")
+        uid = _integer(item[0], "chain UID")
+        weight = _integer(item[1], "chain weight", positive=True)
+        if uid > 0xFFFF or weight > 0xFFFF:
+            raise LegacySettlementV2Error(
+                "historical chain vector is out of range"
+            )
+        pairs.append((uid, weight))
+    if (
+        not pairs
+        or pairs != sorted(pairs)
+        or len({uid for uid, _weight in pairs}) != len(pairs)
+    ):
+        raise LegacySettlementV2Error("historical chain vector is invalid")
+    return pairs
 
 
 def validate_legacy_weight_bundle_v2(
@@ -160,6 +213,41 @@ def validate_legacy_weight_bundle_v2(
         "weights_hash": weights_hash,
         "weights": [[uid, weight] for uid, weight in pairs],
     }
+
+
+def legacy_chain_vector_matches_bundle_v2(
+    *,
+    weight_bundle: Mapping[str, Any],
+    chain_evidence: Mapping[str, Any],
+    expected_netuid: int,
+    expected_epoch_id: int,
+) -> bool:
+    """Return whether finalized chain state matches one signed legacy bundle."""
+
+    bundle = validate_legacy_weight_bundle_v2(
+        weight_bundle,
+        expected_netuid=int(expected_netuid),
+        expected_epoch_id=int(expected_epoch_id),
+    )
+    if not isinstance(chain_evidence, Mapping):
+        raise LegacySettlementV2Error("historical chain evidence is missing")
+    if (
+        _integer(chain_evidence.get("epoch_id"), "chain epoch")
+        != int(expected_epoch_id)
+        or _integer(
+            chain_evidence.get("netuid"), "chain netuid", positive=True
+        )
+        != int(expected_netuid)
+        or str(chain_evidence.get("validator_hotkey") or "")
+        != bundle["validator_hotkey"]
+    ):
+        raise LegacySettlementV2Error("historical chain evidence scope differs")
+    chain_weights = _chain_weights(chain_evidence.get("weights"))
+    return weights_within_tolerance(
+        [(int(uid), int(weight)) for uid, weight in bundle["weights"]],
+        chain_weights,
+        tolerance=AUDITOR_WEIGHT_TOLERANCE,
+    )
 
 
 def validate_legacy_audit_event_v2(
@@ -277,9 +365,11 @@ def validate_legacy_finalized_settlement_v2(
         {key: value for key, value in allocation.items() if key != "allocation_hash"}
     ) != allocation_hash:
         raise LegacySettlementV2Error("allocation document hash differs")
+    if _integer(allocation.get("epoch"), "allocation epoch") != normalized_epoch:
+        raise LegacySettlementV2Error("allocation document scope differs")
     if (
-        _integer(allocation.get("epoch"), "allocation epoch") != normalized_epoch
-        or _integer(allocation.get("netuid"), "allocation netuid", positive=True)
+        "netuid" in allocation
+        and _integer(allocation.get("netuid"), "allocation netuid", positive=True)
         != normalized_netuid
     ):
         raise LegacySettlementV2Error("allocation document scope differs")
@@ -309,18 +399,8 @@ def validate_legacy_finalized_settlement_v2(
         != bundle["validator_hotkey"]
     ):
         raise LegacySettlementV2Error("historical chain evidence scope differs")
-    chain_weights_value = chain_evidence.get("weights")
-    if not isinstance(chain_weights_value, list):
-        raise LegacySettlementV2Error("historical chain vector is missing")
-    try:
-        chain_weights = [
-            (int(item[0]), int(item[1]))
-            for item in chain_weights_value
-            if isinstance(item, (list, tuple)) and len(item) == 2
-        ]
-    except (TypeError, ValueError) as exc:
-        raise LegacySettlementV2Error("historical chain vector is invalid") from exc
-    if len(chain_weights) != len(chain_weights_value) or not weights_within_tolerance(
+    chain_weights = _chain_weights(chain_evidence.get("weights"))
+    if not weights_within_tolerance(
         [(int(uid), int(weight)) for uid, weight in bundle["weights"]],
         chain_weights,
         tolerance=AUDITOR_WEIGHT_TOLERANCE,
@@ -391,6 +471,255 @@ def validate_legacy_finalized_settlement_v2(
     )
 
 
+def validate_legacy_allocation_nonfinalization_v2(
+    *,
+    netuid: int,
+    epoch_id: int,
+    allocation_doc: Mapping[str, Any],
+    weight_bundle: Mapping[str, Any],
+    audit_anchor: Mapping[str, Any],
+    transparency_log_row: Mapping[str, Any],
+    chain_evidence: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Prove a signed pre-V2 allocation bundle did not reach epoch-end state."""
+
+    normalized_netuid = _integer(netuid, "netuid", positive=True)
+    normalized_epoch = _integer(epoch_id, "epoch_id")
+    allocation = dict(allocation_doc)
+    allocation_hash = _sha256_ref(
+        allocation.get("allocation_hash"), "allocation hash"
+    )
+    if (
+        sha256_json(
+            {
+                key: value
+                for key, value in allocation.items()
+                if key != "allocation_hash"
+            }
+        )
+        != allocation_hash
+        or _integer(allocation.get("epoch"), "allocation epoch")
+        != normalized_epoch
+        or (
+            "netuid" in allocation
+            and _integer(
+                allocation.get("netuid"),
+                "allocation netuid",
+                positive=True,
+            )
+            != normalized_netuid
+        )
+    ):
+        raise LegacySettlementV2Error("allocation document scope differs")
+
+    bundle = validate_legacy_weight_bundle_v2(
+        weight_bundle,
+        expected_netuid=normalized_netuid,
+        expected_epoch_id=normalized_epoch,
+    )
+    audit = validate_legacy_audit_event_v2(
+        log_row=transparency_log_row,
+        anchor=audit_anchor,
+        expected_netuid=normalized_netuid,
+        expected_epoch_id=normalized_epoch,
+        expected_allocation_hash=allocation_hash,
+        expected_weights_hash=bundle["weights_hash"],
+        expected_validator_hotkey=bundle["validator_hotkey"],
+    )
+    if not isinstance(chain_evidence, Mapping):
+        raise LegacySettlementV2Error("historical chain evidence is missing")
+    if (
+        _integer(chain_evidence.get("epoch_id"), "chain epoch")
+        != normalized_epoch
+        or _integer(
+            chain_evidence.get("netuid"), "chain netuid", positive=True
+        )
+        != normalized_netuid
+        or str(chain_evidence.get("validator_hotkey") or "")
+        != bundle["validator_hotkey"]
+    ):
+        raise LegacySettlementV2Error("historical chain evidence scope differs")
+    chain_weights = _chain_weights(chain_evidence.get("weights"))
+    bundle_weights = [
+        (int(uid), int(weight)) for uid, weight in bundle["weights"]
+    ]
+    if weights_within_tolerance(
+        bundle_weights,
+        chain_weights,
+        tolerance=AUDITOR_WEIGHT_TOLERANCE,
+    ):
+        raise LegacySettlementV2Error(
+            "historical chain vector matches the signed bundle"
+        )
+
+    target_block = (normalized_epoch + 1) * 360 - 1
+    if (
+        _integer(chain_evidence.get("target_block"), "settlement block")
+        != target_block
+        or _integer(
+            chain_evidence.get("finalized_head_block"),
+            "finalized head block",
+        )
+        < target_block
+    ):
+        raise LegacySettlementV2Error("historical settlement is not finalized")
+    expected_by_uid = dict(bundle_weights)
+    actual_by_uid = dict(chain_weights)
+    differing_uids = sorted(
+        uid
+        for uid in set(expected_by_uid) | set(actual_by_uid)
+        if abs(expected_by_uid.get(uid, 0) - actual_by_uid.get(uid, 0))
+        > AUDITOR_WEIGHT_TOLERANCE
+    )
+    if not differing_uids:
+        raise LegacySettlementV2Error(
+            "historical chain difference is below policy tolerance"
+        )
+    difference_hash = sha256_json(
+        {
+            "expected": [[uid, weight] for uid, weight in bundle_weights],
+            "actual": [[uid, weight] for uid, weight in chain_weights],
+            "tolerance_u16": int(AUDITOR_WEIGHT_TOLERANCE),
+        }
+    )
+    body = {
+        "schema_version": LEGACY_NONFINALIZATION_SCHEMA_VERSION,
+        "netuid": normalized_netuid,
+        "epoch_id": normalized_epoch,
+        "allocation_hash": allocation_hash,
+        "allocation_doc": allocation,
+        "validator_hotkey": bundle["validator_hotkey"],
+        "legacy_bundle_weights_hash": bundle["weights_hash"],
+        "legacy_bundle_block": bundle["block"],
+        "chain_compare_hash": "sha256:"
+        + compare_weights_hash(
+            normalized_netuid,
+            normalized_epoch,
+            chain_weights,
+        ),
+        "chain_vector_tolerance_u16": int(AUDITOR_WEIGHT_TOLERANCE),
+        "chain_target_block": target_block,
+        "chain_target_block_hash": _sha256_ref(
+            chain_evidence.get("target_block_hash"),
+            "chain target block hash",
+        ),
+        "chain_finalized_head_block": _integer(
+            chain_evidence.get("finalized_head_block"),
+            "finalized head block",
+        ),
+        "validator_uid": _integer(
+            chain_evidence.get("validator_uid"), "validator UID"
+        ),
+        "weights_storage_key_hash": sha256_json(
+            {
+                "storage_key": str(
+                    chain_evidence.get("weights_storage_key") or ""
+                )
+            }
+        ),
+        "audit_event_hash": "sha256:" + audit["event_hash"],
+        "audit_payload_hash": audit["payload_hash"],
+        "differing_uid_count": len(differing_uids),
+        "difference_hash": difference_hash,
+    }
+    return validate_legacy_nonfinalization_document_v2(
+        {**body, "finding_hash": sha256_json(body)}
+    )
+
+
+def validate_legacy_nonfinalization_document_v2(
+    document: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Validate one persisted proof that a legacy allocation was not paid."""
+
+    if not isinstance(document, Mapping) or set(document) != _NONFINALIZATION_FIELDS:
+        raise LegacySettlementV2Error(
+            "legacy nonfinalization fields are invalid"
+        )
+    normalized = dict(document)
+    if normalized.get("schema_version") != LEGACY_NONFINALIZATION_SCHEMA_VERSION:
+        raise LegacySettlementV2Error(
+            "legacy nonfinalization schema is invalid"
+        )
+    netuid = _integer(normalized.get("netuid"), "finding netuid", positive=True)
+    epoch_id = _integer(normalized.get("epoch_id"), "finding epoch")
+    allocation = normalized.get("allocation_doc")
+    if not isinstance(allocation, Mapping):
+        raise LegacySettlementV2Error(
+            "nonfinalization allocation is missing"
+        )
+    allocation_hash = _sha256_ref(
+        normalized.get("allocation_hash"), "finding allocation hash"
+    )
+    if (
+        allocation.get("allocation_hash") != allocation_hash
+        or _integer(allocation.get("epoch"), "finding allocation epoch")
+        != epoch_id
+        or (
+            "netuid" in allocation
+            and _integer(
+                allocation.get("netuid"),
+                "finding allocation netuid",
+                positive=True,
+            )
+            != netuid
+        )
+        or sha256_json(
+            {
+                key: value
+                for key, value in allocation.items()
+                if key != "allocation_hash"
+            }
+        )
+        != allocation_hash
+    ):
+        raise LegacySettlementV2Error(
+            "nonfinalization allocation differs"
+        )
+    _raw_hash(
+        normalized.get("legacy_bundle_weights_hash"),
+        "legacy bundle weights hash",
+    )
+    for field in (
+        "chain_compare_hash",
+        "chain_target_block_hash",
+        "weights_storage_key_hash",
+        "audit_event_hash",
+        "audit_payload_hash",
+        "difference_hash",
+    ):
+        _sha256_ref(normalized.get(field), field)
+    if not str(normalized.get("validator_hotkey") or "").strip():
+        raise LegacySettlementV2Error(
+            "nonfinalization validator hotkey is missing"
+        )
+    for field in (
+        "legacy_bundle_block",
+        "chain_vector_tolerance_u16",
+        "chain_target_block",
+        "chain_finalized_head_block",
+        "validator_uid",
+        "differing_uid_count",
+    ):
+        _integer(
+            normalized.get(field),
+            field,
+            positive=field == "differing_uid_count",
+        )
+    body = {
+        key: value
+        for key, value in normalized.items()
+        if key != "finding_hash"
+    }
+    if _sha256_ref(
+        normalized.get("finding_hash"), "finding hash"
+    ) != sha256_json(body):
+        raise LegacySettlementV2Error(
+            "legacy nonfinalization hash differs"
+        )
+    return normalized
+
+
 def validate_legacy_settlement_document_v2(
     document: Mapping[str, Any],
 ) -> Dict[str, Any]:
@@ -413,10 +742,15 @@ def validate_legacy_settlement_document_v2(
         allocation.get("allocation_hash") != allocation_hash
         or _integer(allocation.get("epoch"), "settlement allocation epoch")
         != epoch_id
-        or _integer(
-            allocation.get("netuid"), "settlement allocation netuid", positive=True
+        or (
+            "netuid" in allocation
+            and _integer(
+                allocation.get("netuid"),
+                "settlement allocation netuid",
+                positive=True,
+            )
+            != netuid
         )
-        != netuid
         or sha256_json(
             {key: value for key, value in allocation.items() if key != "allocation_hash"}
         )

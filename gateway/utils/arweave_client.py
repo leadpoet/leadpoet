@@ -17,6 +17,8 @@ Cost: ~$0.001 per KB, ~$10-50/month for expected volume
 import os
 import json
 import asyncio
+import base64
+import binascii
 from typing import Dict, List, Optional
 from pathlib import Path
 
@@ -35,6 +37,40 @@ MAX_RETRY_DELAY = 30  # seconds
 # Global client instance (initialized on first use)
 _wallet: Optional[Wallet] = None
 _peer = None  # Arweave peer/client
+
+
+def checkpoint_payload_bytes(
+    *,
+    header: Dict,
+    signature: str,
+    events: bytes,
+    tree_levels: List[List[str]],
+) -> bytes:
+    """Return the exact canonical bytes signed into an Arweave transaction."""
+
+    payload = {
+        "header": header,
+        "signature": signature,
+        "events_compressed": base64.b64encode(events).decode("ascii"),
+        "tree_levels": tree_levels,
+    }
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+
+
+def _decode_arweave_data(encoded: bytes) -> bytes:
+    text = encoded.strip()
+    if not text:
+        raise ValueError("Arweave transaction data is empty")
+    text += b"=" * (-len(text) % 4)
+    try:
+        return base64.b64decode(text, altchars=b"-_", validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("Arweave transaction data is not base64url") from exc
 
 
 def _initialize_client():
@@ -347,28 +383,19 @@ async def upload_checkpoint(
     print(f"   Merkle root: {header['merkle_root'][:16]}...")
     
     try:
-        import base64
-        
-        # Build checkpoint payload
-        checkpoint_payload = {
-            "header": header,
-            "signature": signature,
-            "events_compressed": base64.b64encode(events).decode('utf-8'),
-            "tree_levels": tree_levels
-        }
-        
-        payload_json = json.dumps(checkpoint_payload, default=str)  # Handle datetime objects
-        payload_bytes = payload_json.encode('utf-8')
+        payload_bytes = checkpoint_payload_bytes(
+            header=header,
+            signature=signature,
+            events=events,
+            tree_levels=tree_levels,
+        )
         
         print(f"   Total payload size: {len(payload_bytes)} bytes ({len(payload_bytes)/1024:.2f} KB)")
         
         loop = asyncio.get_event_loop()
         
-        def create_and_send_transaction():
-            # Create transaction (peer is optional, will use default gateway)
+        def create_transaction():
             tx = Transaction(_wallet, data=payload_bytes)
-            
-            # Add checkpoint-specific tags
             tx.add_tag("App", "leadpoet")
             tx.add_tag("Type", "checkpoint")
             tx.add_tag("Version", "1")
@@ -377,20 +404,21 @@ async def upload_checkpoint(
             tx.add_tag("Merkle-Root", header['merkle_root'])
             tx.add_tag("Time-Start", header['time_range']['start'])
             tx.add_tag("Time-End", header['time_range']['end'])
-            
-            # Sign and send
             tx.sign()
+            return tx
+
+        tx = await loop.run_in_executor(None, create_transaction)
+
+        def send_transaction():
             tx.send()
-            
             return tx.id
-        
-        # Execute with retries
+
         retry_delay = INITIAL_RETRY_DELAY
         last_error = None
         
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                tx_id = await loop.run_in_executor(None, create_and_send_transaction)
+                tx_id = await loop.run_in_executor(None, send_transaction)
                 
                 print(f"✅ Checkpoint uploaded successfully")
                 print(f"   TX ID: {tx_id}")
@@ -415,7 +443,13 @@ async def upload_checkpoint(
         raise
 
 
-async def wait_for_confirmation(tx_id: str, timeout: int = 300) -> bool:
+async def wait_for_confirmation(
+    tx_id: str,
+    *,
+    expected_payload: bytes,
+    timeout: int = 1800,
+    min_confirmations: int = 1,
+) -> bool:
     """
     Wait for Arweave transaction confirmation.
     
@@ -424,13 +458,19 @@ async def wait_for_confirmation(tx_id: str, timeout: int = 300) -> bool:
     
     Args:
         tx_id: Arweave transaction ID
-        timeout: Maximum seconds to wait (default: 5 minutes)
+        expected_payload: Exact transaction data bytes that must read back
+        timeout: Maximum seconds to wait (default: 30 minutes)
+        min_confirmations: Required Arweave confirmation count
     
     Returns:
         bool: True if confirmed, False if timeout
     
     Example:
-        >>> confirmed = await wait_for_confirmation(tx_id, timeout=300)
+        >>> confirmed = await wait_for_confirmation(
+        ...     tx_id,
+        ...     expected_payload=b"{}",
+        ...     timeout=300,
+        ... )
         >>> if confirmed:
         ...     print("Transaction confirmed!")
     """
@@ -445,21 +485,48 @@ async def wait_for_confirmation(tx_id: str, timeout: int = 300) -> bool:
     loop = asyncio.get_event_loop()
     
     def check_confirmation():
-        url = f"{ARWEAVE_GATEWAY_URL}/tx/{tx_id}/status"
+        status_url = f"{ARWEAVE_GATEWAY_URL}/tx/{tx_id}/status"
         try:
-            response = requests.get(url, timeout=30)
+            response = requests.get(status_url, timeout=30)
             if response.status_code == 200:
                 status_data = response.json()
-                # Check if transaction has been confirmed
-                if status_data.get("confirmed"):
-                    return True
+                confirmations = int(
+                    status_data.get("number_of_confirmations") or 0
+                )
+                if (
+                    confirmations < int(min_confirmations)
+                    or not status_data.get("block_indep_hash")
+                    or int(status_data.get("block_height") or 0) <= 0
+                ):
+                    return False
+                data_response = requests.get(
+                    f"{ARWEAVE_GATEWAY_URL}/tx/{tx_id}/data",
+                    timeout=30,
+                )
+                if data_response.status_code in {202, 404}:
+                    return False
+                data_response.raise_for_status()
+                observed_payload = _decode_arweave_data(
+                    data_response.content
+                )
+                if observed_payload != expected_payload:
+                    raise RuntimeError(
+                        "confirmed Arweave checkpoint readback differs"
+                    )
+                return True
             elif response.status_code == 404:
                 # Transaction not yet propagated
                 return False
             elif response.status_code == 202:
                 # Transaction pending
                 return False
-        except Exception:
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            print(
+                "⚠️  arweave_checkpoint_confirmation_poll_failed "
+                f"tx={tx_id[:12]} error={str(exc)[:200]}"
+            )
             return False
         return False
     
@@ -561,4 +628,3 @@ if __name__ == "__main__":
     
     # Run tests
     asyncio.run(test_arweave())
-

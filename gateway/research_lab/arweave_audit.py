@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Mapping, Sequence
+
+from leadpoet_canonical.events import verify_log_entry
 
 from .bundles import contains_secret_material, sha256_json
 from .config import ResearchLabGatewayConfig
@@ -43,6 +46,73 @@ def _normalize_sha256_ref(value: object) -> str:
     if not raw:
         return ""
     return raw if raw.startswith("sha256:") else f"sha256:{raw}"
+
+
+def _verified_rebuffer_event(
+    *,
+    anchor: Mapping[str, Any],
+    log_row: Mapping[str, Any],
+) -> dict[str, Any]:
+    signed_log_entry = log_row.get("signed_log_entry")
+    if not isinstance(signed_log_entry, Mapping):
+        raise ValueError("signed transparency-log entry is missing")
+    enclave_pubkey = str(log_row.get("enclave_pubkey") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", enclave_pubkey):
+        raise ValueError("stored transparency-log enclave key is invalid")
+    if not verify_log_entry(
+        dict(signed_log_entry),
+        expected_pubkey=enclave_pubkey,
+    ):
+        raise ValueError("signed transparency-log entry is invalid")
+
+    signed_event = signed_log_entry.get("signed_event")
+    payload = (
+        signed_event.get("payload")
+        if isinstance(signed_event, Mapping)
+        else None
+    )
+    if (
+        not isinstance(signed_event, Mapping)
+        or not isinstance(payload, Mapping)
+        or signed_event.get("event_type")
+        != RESEARCH_LAB_EPOCH_AUDIT_EVENT_TYPE
+        or payload.get("event_type")
+        != RESEARCH_LAB_EPOCH_AUDIT_EVENT_TYPE
+    ):
+        raise ValueError("signed Research Lab audit event type is invalid")
+    if (
+        int(payload.get("epoch", -1)) != int(anchor.get("epoch", -2))
+        or int(payload.get("netuid", -1)) != int(anchor.get("netuid", -2))
+        or payload.get("audit_kind") != anchor.get("audit_kind")
+    ):
+        raise ValueError("signed Research Lab audit event scope differs")
+
+    event_hash = str(signed_log_entry.get("event_hash") or "")
+    stored_event_hash = str(log_row.get("event_hash") or "")
+    anchor_event_hash = str(
+        anchor.get("current_transparency_event_hash")
+        or anchor.get("transparency_event_hash")
+        or ""
+    )
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", event_hash)
+        or stored_event_hash != event_hash
+        or anchor_event_hash != event_hash
+    ):
+        raise ValueError("Research Lab audit event hash differs")
+
+    payload_hash = sha256_json(dict(payload))
+    if (
+        _normalize_sha256_ref(log_row.get("payload_hash")) != payload_hash
+        or _normalize_sha256_ref(anchor.get("payload_hash")) != payload_hash
+    ):
+        raise ValueError("Research Lab audit payload hash differs")
+    return {
+        "event_type": RESEARCH_LAB_EPOCH_AUDIT_EVENT_TYPE,
+        "event_hash": event_hash,
+        "payload_hash": payload_hash,
+        "signed_log_entry": dict(signed_log_entry),
+    }
 
 
 async def publish_research_lab_epoch_audit(
@@ -307,7 +377,11 @@ async def rebuffer_research_lab_buffered_audit_events(*, limit: int = 200) -> in
     """
     rows = await select_many(
         "research_lab_arweave_epoch_audit_anchor_current",
-        columns="anchor_id,payload_hash,transparency_event_hash,current_transparency_event_hash,current_anchor_status,current_status_at",
+        columns=(
+            "anchor_id,epoch,netuid,audit_kind,payload_hash,"
+            "transparency_event_hash,current_transparency_event_hash,"
+            "current_anchor_status,current_status_at"
+        ),
         filters=(("current_anchor_status", "eq", "buffered"),),
         order_by=(("current_status_at", False),),
         limit=max(1, int(limit)),
@@ -348,7 +422,10 @@ async def rebuffer_research_lab_buffered_audit_events(*, limit: int = 200) -> in
             continue
         log_row = await select_one(
             "transparency_log",
-            columns="event_type,event_hash,payload_hash,signed_log_entry",
+            columns=(
+                "event_type,event_hash,payload_hash,enclave_pubkey,"
+                "signed_log_entry"
+            ),
             filters=(("event_hash", event_hash),),
         )
         if not log_row:
@@ -358,23 +435,21 @@ async def rebuffer_research_lab_buffered_audit_events(*, limit: int = 200) -> in
                 event_hash[:16],
             )
             continue
-        signed_log_entry = log_row.get("signed_log_entry")
-        if not isinstance(signed_log_entry, Mapping):
+        try:
+            rebuffer_event = _verified_rebuffer_event(
+                anchor=row,
+                log_row=log_row,
+            )
+        except (TypeError, ValueError) as exc:
             logger.warning(
-                "research_lab_arweave_rebuffer_missing_signed_log_entry anchor_id=%s event_hash=%s",
+                "research_lab_arweave_rebuffer_invalid_signed_event "
+                "anchor_id=%s event_hash=%s error=%s",
                 row.get("anchor_id"),
                 event_hash[:16],
+                str(exc)[:200],
             )
             continue
-        event_type = str(log_row.get("event_type") or RESEARCH_LAB_EPOCH_AUDIT_EVENT_TYPE)
-        await tee_client.append_event(
-            {
-                "event_type": event_type,
-                "event_hash": event_hash,
-                "payload_hash": log_row.get("payload_hash") or row.get("payload_hash"),
-                "signed_log_entry": signed_log_entry,
-            }
-        )
+        await tee_client.append_event(rebuffer_event)
         existing_event_hashes.add(event_hash)
         rebuffered += 1
     if rebuffered:
@@ -384,6 +459,181 @@ async def rebuffer_research_lab_buffered_audit_events(*, limit: int = 200) -> in
             limit,
         )
     return rebuffered
+
+
+async def recover_research_lab_checkpointed_audit_epochs(
+    *,
+    epochs: Sequence[int],
+    netuid: int,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Recheckpoint selected historical anchors using their exact signed events.
+
+    This is an explicit recovery for old rows that were marked checkpointed
+    before durable Arweave confirmation was enforced. It never rewrites the
+    old lifecycle row. The new ``buffered`` event retains the prior transaction
+    reference, and the normal hourly task must confirm exact Arweave readback
+    before appending a replacement ``checkpointed`` event.
+    """
+
+    normalized_epochs = sorted({int(value) for value in epochs})
+    if not normalized_epochs or normalized_epochs[0] < 0:
+        raise ValueError("at least one non-negative epoch is required")
+    normalized_netuid = int(netuid)
+    if normalized_netuid <= 0:
+        raise ValueError("netuid must be positive")
+
+    try:
+        from gateway.utils.tee_client import tee_client
+    except ImportError:
+        from utils.tee_client import tee_client
+
+    existing_event_hashes: set[str] = set()
+    if not dry_run:
+        current_buffer = await tee_client.get_buffer()
+        if isinstance(current_buffer, list):
+            existing_event_hashes = {
+                str(event.get("event_hash") or "")
+                for event in current_buffer
+                if isinstance(event, Mapping) and event.get("event_hash")
+            }
+
+    planned: list[dict[str, Any]] = []
+    recovered: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    for epoch in normalized_epochs:
+        anchors = await select_many(
+            "research_lab_arweave_epoch_audit_anchor_current",
+            columns=(
+                "anchor_id,epoch,netuid,audit_kind,payload_hash,"
+                "transparency_event_hash,current_transparency_event_hash,"
+                "current_anchor_status,current_arweave_tx_id,"
+                "current_checkpoint_number,current_checkpoint_merkle_root,"
+                "current_status_at"
+            ),
+            filters=(
+                ("epoch", epoch),
+                ("netuid", normalized_netuid),
+                ("audit_kind", "active"),
+            ),
+            order_by=(("current_status_at", True),),
+            limit=2,
+        )
+        if len(anchors) != 1:
+            blocked.append(
+                {
+                    "epoch": epoch,
+                    "reason": "active_audit_anchor_missing_or_ambiguous",
+                    "anchor_count": len(anchors),
+                }
+            )
+            continue
+        anchor = anchors[0]
+        current_status = str(anchor.get("current_anchor_status") or "")
+        if current_status not in {"buffered", "checkpointed"}:
+            blocked.append(
+                {
+                    "epoch": epoch,
+                    "reason": "audit_anchor_status_not_recoverable",
+                    "current_anchor_status": current_status,
+                }
+            )
+            continue
+
+        event_hash = str(
+            anchor.get("current_transparency_event_hash")
+            or anchor.get("transparency_event_hash")
+            or ""
+        )
+        log_row = await select_one(
+            "transparency_log",
+            columns=(
+                "event_type,event_hash,payload_hash,enclave_pubkey,"
+                "signed_log_entry"
+            ),
+            filters=(("event_hash", event_hash),),
+        )
+        if not log_row:
+            blocked.append(
+                {
+                    "epoch": epoch,
+                    "reason": "signed_transparency_event_missing",
+                    "event_hash": event_hash,
+                }
+            )
+            continue
+        try:
+            rebuffer_event = _verified_rebuffer_event(
+                anchor=anchor,
+                log_row=log_row,
+            )
+        except (TypeError, ValueError) as exc:
+            blocked.append(
+                {
+                    "epoch": epoch,
+                    "reason": "signed_transparency_event_invalid",
+                    "error": str(exc)[:240],
+                }
+            )
+            continue
+
+        item = {
+            "epoch": epoch,
+            "anchor_id": str(anchor.get("anchor_id") or ""),
+            "event_hash": rebuffer_event["event_hash"],
+            "previous_anchor_status": current_status,
+            "previous_arweave_tx_id": str(
+                anchor.get("current_arweave_tx_id") or ""
+            ),
+            "previous_checkpoint_number": anchor.get(
+                "current_checkpoint_number"
+            ),
+        }
+        planned.append(item)
+        if dry_run:
+            continue
+
+        already_buffered = event_hash in existing_event_hashes
+        if not already_buffered:
+            await tee_client.append_event(rebuffer_event)
+            existing_event_hashes.add(event_hash)
+        if current_status != "buffered":
+            await create_arweave_epoch_audit_anchor_event(
+                anchor_id=item["anchor_id"],
+                event_type="buffered",
+                anchor_status="buffered",
+                transparency_event_hash=event_hash,
+                event_doc={
+                    "reason": "operator_selected_historical_recheckpoint",
+                    "previous_anchor_status": current_status,
+                    "previous_arweave_tx_id": item[
+                        "previous_arweave_tx_id"
+                    ],
+                    "previous_checkpoint_number": item[
+                        "previous_checkpoint_number"
+                    ],
+                    "signed_event_reused": True,
+                },
+            )
+        recovered.append(
+            {
+                **item,
+                "tee_event_already_buffered": already_buffered,
+            }
+        )
+
+    return {
+        "ok": not blocked,
+        "dry_run": bool(dry_run),
+        "action": "recover-arweave-audit-epochs",
+        "netuid": normalized_netuid,
+        "requested_epochs": normalized_epochs,
+        "planned_count": len(planned),
+        "planned": planned,
+        "recovered_count": len(recovered),
+        "recovered": recovered,
+        "blocked": blocked,
+    }
 
 
 async def latest_arweave_anchor(epoch: int, netuid: int | None = None) -> dict[str, Any] | None:

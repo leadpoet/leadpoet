@@ -19,12 +19,18 @@ Cost: ~$0.10/month for 3-hour batching (vs $300+/month for per-event writes)
 import asyncio
 import gzip
 import json
+import os
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 
 # Import gateway utilities
 from gateway.utils.tee_client import tee_client
-from gateway.utils.arweave_client import upload_checkpoint, get_wallet_balance
+from gateway.utils.arweave_client import (
+    checkpoint_payload_bytes,
+    get_wallet_balance,
+    upload_checkpoint,
+    wait_for_confirmation,
+)
 from gateway.utils.logger import log_event
 from gateway.config import BUILD_ID
 from gateway.research_lab.arweave_audit import (
@@ -37,6 +43,9 @@ from gateway.research_lab.arweave_audit import (
 BATCH_INTERVAL = 10800  # 3 hours in seconds
 EMERGENCY_BATCH_THRESHOLD = 8000  # Trigger early batch if buffer hits this size
 MAX_UPLOAD_RETRIES = 3  # Retry failed uploads
+ARWEAVE_CONFIRMATION_TIMEOUT_SECONDS = int(
+    os.getenv("ARWEAVE_CONFIRMATION_TIMEOUT_SECONDS", "1800")
+)
 
 
 def build_arweave_checkpoint_log_event(
@@ -203,28 +212,21 @@ async def hourly_batch_task():
             print(f"\n🔄 Requesting checkpoint from TEE...")
             checkpoint_data = await tee_client.build_checkpoint()
             
-            # Handle empty buffer - still upload for continuous audit trail
+            # Empty host-authored checkpoints have no enclave signature and
+            # create no audit value. Wait for an enclave event instead.
             if checkpoint_data.get("status") == "empty":
                 print("ℹ️  No events in TEE buffer")
-                print("   Uploading empty checkpoint to maintain continuous audit trail...")
-                
-                # Create empty checkpoint
-                checkpoint_data = {
-                    "header": {
-                        "checkpoint_number": batch_count,
-                        "event_count": 0,
-                        "merkle_root": "0" * 64,  # Empty tree
-                        "time_range": {
-                            "start": datetime.utcnow().isoformat(),
-                            "end": datetime.utcnow().isoformat()
-                        }
-                    },
-                    "signature": "empty_checkpoint",
-                    "events": [],
-                    "tree_levels": []
-                }
-                
-                # Continue with empty upload (don't skip)
+                print(
+                    f"   Waiting {BATCH_INTERVAL/60:.0f} minutes "
+                    "for the next batch."
+                )
+                await asyncio.sleep(BATCH_INTERVAL)
+                continue
+            if checkpoint_data.get("status") != "success":
+                raise RuntimeError(
+                    "TEE checkpoint build failed: "
+                    + str(checkpoint_data.get("error") or "unknown error")
+                )
             
             # Extract checkpoint components
             header = checkpoint_data["header"]
@@ -286,20 +288,23 @@ async def hourly_batch_task():
                 await asyncio.sleep(BATCH_INTERVAL)
                 continue
             
-            # Step 5: Verify upload succeeded
-            print(f"\n🔍 Verifying upload to Arweave...")
-            try:
-                import requests
-                # Check if content is immediately available (usually is)
-                verify_response = requests.get(f"https://arweave.net/{tx_id}", timeout=10)
-                if verify_response.status_code == 200:
-                    print(f"✅ Upload verified: Content is available ({len(verify_response.content)} bytes)")
-                elif verify_response.status_code == 202:
-                    print(f"⏳ Upload accepted: Transaction pending confirmation")
-                else:
-                    print(f"⚠️  Upload status unclear: HTTP {verify_response.status_code}")
-            except Exception as e:
-                print(f"⚠️  Verification check failed (upload likely succeeded): {e}")
+            # Step 5: Require confirmed immutable readback of the exact bytes.
+            print(f"\n🔍 Verifying confirmed Arweave readback...")
+            expected_payload = checkpoint_payload_bytes(
+                header=header,
+                signature=signature,
+                events=compressed_events,
+                tree_levels=tree_levels,
+            )
+            confirmed = await wait_for_confirmation(
+                tx_id,
+                expected_payload=expected_payload,
+                timeout=ARWEAVE_CONFIRMATION_TIMEOUT_SECONDS,
+            )
+            if not confirmed:
+                raise RuntimeError(
+                    "Arweave checkpoint was not confirmed before timeout"
+                )
             
             print(f"\n✅ Checkpoint uploaded to Arweave")
             print(f"   TX ID: {tx_id}")
@@ -307,41 +312,49 @@ async def hourly_batch_task():
                 print(f"   Note: Empty checkpoint (maintains continuous audit trail)")
             else:
                 print(f"   Events: {header['event_count']}")
-                try:
-                    recorded_lab_events = await record_research_lab_checkpointed_events(
+                recorded_lab_events = (
+                    await record_research_lab_checkpointed_events(
                         events=events,
                         header=header,
                         arweave_tx_id=tx_id,
                     )
-                    if recorded_lab_events:
-                        print(f"   Research Lab audit anchors checkpointed: {recorded_lab_events}")
-                except Exception as e:
-                    print(f"⚠️  Failed to record Research Lab Arweave audit checkpoint links: {e}")
-            print(f"   Note: Full confirmation takes 2-20 minutes to propagate")
+                )
+                if recorded_lab_events:
+                    print(
+                        "   Research Lab audit anchors checkpointed: "
+                        f"{recorded_lab_events}"
+                    )
             print(f"   Content URL: https://arweave.net/{tx_id}")
             print(f"   ViewBlock: https://viewblock.io/arweave/tx/{tx_id}")
             
             # Step 6: Log checkpoint to transparency log
             print(f"\n📝 Logging checkpoint to transparency log...")
-            try:
-                checkpoint_log = build_arweave_checkpoint_log_event(
-                    tx_id=tx_id,
-                    header=header,
-                    compressed_size_bytes=len(compressed_events),
-                )
-                result = await log_event(checkpoint_log)
-                tee_sequence = result.get("sequence")
-                print(f"✅ Checkpoint logged (seq={tee_sequence}, tx={tx_id})")
-                        
-            except Exception as e:
-                print(f"⚠️  Failed to log checkpoint: {e}")
-                print(f"   (Upload succeeded, but logging failed - TX ID: {tx_id})")
+            checkpoint_log = build_arweave_checkpoint_log_event(
+                tx_id=tx_id,
+                header=header,
+                compressed_size_bytes=len(compressed_events),
+            )
+            result = await log_event(checkpoint_log)
+            tee_sequence = result.get("sequence")
+            print(f"✅ Checkpoint logged (seq={tee_sequence}, tx={tx_id})")
             
-            # Step 7: Clear TEE buffer
-            print(f"\n🧹 Clearing TEE buffer...")
-            clear_result = await tee_client.clear_buffer()
-            print(f"✅ Buffer cleared: {clear_result.get('cleared_count', 0)} events removed")
-            print(f"   Next checkpoint starts: {clear_result.get('next_checkpoint_at', 'N/A')}")
+            # Step 7: Acknowledge only the exact confirmed event prefix.
+            print(f"\n🧹 Acknowledging confirmed TEE checkpoint...")
+            ack_result = await tee_client.acknowledge_checkpoint(
+                checkpoint_number=int(header["checkpoint_number"]),
+                merkle_root=str(header["merkle_root"]),
+                sequence_range=dict(header["sequence_range"]),
+            )
+            if ack_result.get("status") != "acknowledged":
+                raise RuntimeError("TEE checkpoint acknowledgement failed")
+            print(
+                "✅ Checkpoint acknowledged: "
+                f"{ack_result.get('removed_count', 0)} events removed"
+            )
+            print(
+                "   Events retained after checkpoint: "
+                f"{ack_result.get('remaining_count', 0)}"
+            )
             
             # Step 8: Log success
             print(f"\n" + "="*80)

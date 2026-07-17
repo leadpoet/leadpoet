@@ -9,6 +9,16 @@ SQL = (
     / "scripts"
     / "99-research-lab-v2-champion-settlement.sql"
 ).read_text(encoding="utf-8")
+COMPAT_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "102-research-lab-legacy-allocation-netuid-compat.sql"
+).read_text(encoding="utf-8")
+NONFINALIZATION_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "103-research-lab-legacy-allocation-nonfinalization.sql"
+).read_text(encoding="utf-8")
 
 
 def test_finalized_allocation_view_requires_bundle_publication_and_finalization():
@@ -31,6 +41,40 @@ def test_legacy_settlement_migration_is_append_only_and_receipt_backed():
     assert "prevent_research_lab_attested_v2_mutation" in SQL
     assert "ENABLE ROW LEVEL SECURITY" in SQL
     assert "GRANT SELECT, INSERT" in SQL
+
+
+def test_historical_allocation_netuid_is_optional_but_must_match_when_present():
+    expected_guard = "WHEN NOT (allocation_doc ? 'netuid') THEN TRUE"
+    expected_match = "(allocation_doc->>'netuid')::NUMERIC = netuid"
+    assert expected_guard in SQL
+    assert expected_match in SQL
+    assert expected_guard in COMPAT_SQL
+    assert expected_match in COMPAT_SQL
+    assert "UPDATE public." not in COMPAT_SQL
+    assert "DELETE FROM public." not in COMPAT_SQL
+    assert (
+        "VALIDATE CONSTRAINT research_lab_legacy_allocation_doc_netuid_check"
+        in COMPAT_SQL
+    )
+
+
+def test_legacy_nonfinalization_is_append_only_and_creates_no_payment_view():
+    assert "research_lab_legacy_allocation_nonfinalizations_v2" in (
+        NONFINALIZATION_SQL
+    )
+    assert "leadpoet.legacy_allocation_nonfinalization.v2" in (
+        NONFINALIZATION_SQL
+    )
+    assert "PRIMARY KEY (netuid, epoch_id)" in NONFINALIZATION_SQL
+    assert "finding_receipt_hash" in NONFINALIZATION_SQL
+    assert "prevent_research_lab_attested_v2_mutation" in (
+        NONFINALIZATION_SQL
+    )
+    assert "ENABLE ROW LEVEL SECURITY" in NONFINALIZATION_SQL
+    assert "GRANT SELECT, INSERT" in NONFINALIZATION_SQL
+    assert "research_lab_finalized_allocation_epochs_v2" not in (
+        NONFINALIZATION_SQL
+    )
 
 
 def test_deployed_receipt_allowlist_accepts_measured_legacy_settlement():

@@ -52,6 +52,7 @@ OP_PREFLIGHT_OPENROUTER_CREDENTIAL_V2 = "preflight_openrouter_credential_v2"
 OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2 = (
     "attest_legacy_finalized_allocation_v2"
 )
+OP_CLASSIFY_LEGACY_ALLOCATION_V2 = "classify_legacy_allocation_v2"
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 _COORDINATOR_WEIGHT_INPUT_PURPOSES = {
@@ -71,6 +72,9 @@ COORDINATOR_OPERATIONS_V2 = {
         {"research_lab.reward_decision.v2"}
     ),
     OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2: frozenset(
+        {"research_lab.legacy_finalized_allocation.v2"}
+    ),
+    OP_CLASSIFY_LEGACY_ALLOCATION_V2: frozenset(
         {"research_lab.legacy_finalized_allocation.v2"}
     ),
     OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2: frozenset(
@@ -198,6 +202,9 @@ class CoordinatorExecutorV2:
         legacy_settlement_source_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
+        legacy_allocation_classification_resolver: Optional[
+            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
+        ] = None,
         source_add_catalog_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
@@ -232,6 +239,9 @@ class CoordinatorExecutorV2:
         self._reward_source_resolver = reward_source_resolver
         self._legacy_settlement_source_resolver = (
             legacy_settlement_source_resolver
+        )
+        self._legacy_allocation_classification_resolver = (
+            legacy_allocation_classification_resolver
         )
         self._source_add_catalog_resolver = source_add_catalog_resolver
         self._provider_outcome_supplier = provider_outcome_supplier
@@ -283,6 +293,41 @@ class CoordinatorExecutorV2:
                     str(document["audit_event_hash"]),
                     str(document["checkpoint_merkle_root"]),
                 ),
+            )
+        if operation == OP_CLASSIFY_LEGACY_ALLOCATION_V2:
+            if self._legacy_allocation_classification_resolver is None:
+                raise ValueError(
+                    "measured legacy allocation classifier is unavailable"
+                )
+            document = dict(
+                self._legacy_allocation_classification_resolver(
+                    payload,
+                    context,
+                )
+            )
+            if "settlement_hash" in document:
+                artifacts = (
+                    str(document["settlement_hash"]),
+                    str(document["allocation_hash"]),
+                    str(document["chain_compare_hash"]),
+                    str(document["audit_event_hash"]),
+                    str(document["checkpoint_merkle_root"]),
+                )
+            elif "finding_hash" in document:
+                artifacts = (
+                    str(document["finding_hash"]),
+                    str(document["allocation_hash"]),
+                    str(document["chain_compare_hash"]),
+                    str(document["audit_event_hash"]),
+                    str(document["difference_hash"]),
+                )
+            else:
+                raise ValueError(
+                    "legacy allocation classification result is invalid"
+                )
+            return ExecutionResultV2(
+                output=document,
+                artifact_hashes=artifacts,
             )
         if operation == OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2:
             document = attest_subnet_epoch_cutover_v2(payload, context)

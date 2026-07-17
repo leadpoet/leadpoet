@@ -32,6 +32,7 @@ COORDINATOR_METHODS = frozenset(
         "get_event_signing_identity",
         "get_buffer",
         "clear_buffer",
+        "acknowledge_checkpoint",
         "get_buffer_size",
         "get_buffer_stats",
         "build_checkpoint",

@@ -31,6 +31,7 @@ import sys
 import os
 import hashlib
 import base64
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
@@ -100,6 +101,8 @@ keypair_lock = Lock()
 prev_checkpoint_root: Optional[bytes] = None  # Merkle root of previous checkpoint
 checkpoint_count: int = 0  # Monotonic counter for checkpoint sequence
 checkpoint_start_time: datetime = datetime.utcnow()
+pending_checkpoint: Optional[Dict[str, Any]] = None
+checkpoint_state_lock = Lock()
 
 # Attestation document caching (doesn't change unless enclave restarts)
 cached_attestation_doc: Optional[bytes] = None
@@ -431,51 +434,67 @@ def get_buffer() -> List[Dict[str, Any]]:
 
 
 def clear_buffer() -> Dict[str, Any]:
-    """
-    Clear event buffer after successful Arweave upload.
-    
-    CRITICAL: This should ONLY be called by parent EC2 AFTER confirming
-    successful Arweave upload. Clearing before upload = data loss!
-    
-    SECURITY NOTE:
-    - sequence_counter is NOT reset (monotonically increasing forever)
-    - This prevents miners from detecting gaps or reordering attacks
-    - Each event across all checkpoints has a unique sequence number
-    
-    Returns:
-        Response dict with status, cleared count, and next checkpoint time
-    """
-    global prev_checkpoint_root, checkpoint_start_time
-    
-    with event_buffer_lock:
-        cleared_count = len(event_buffer)
-        
-        # Store sequence range before clearing (for logging)
-        if event_buffer:
-            first_seq = event_buffer[0]["sequence"]
-            last_seq = event_buffer[-1]["sequence"]
-        else:
-            first_seq = last_seq = None
-        
-        event_buffer.clear()
-    
-    # Update checkpoint time (for next batch)
-    checkpoint_start_time = datetime.utcnow()
-    next_checkpoint_time = checkpoint_start_time
-    
-    print(f"[TEE] ✅ Buffer cleared: {cleared_count} events", flush=True)
-    if first_seq is not None:
-        print(f"[TEE]    Sequence range: {first_seq} → {last_seq}", flush=True)
-    print(f"[TEE]    Next checkpoint starts: {next_checkpoint_time.isoformat()}", flush=True)
-    
+    """Reject the legacy unauthenticated all-buffer deletion operation."""
+
     return {
-        "status": "cleared",
-        "cleared_count": cleared_count,
-        "sequence_range": {
-            "first": first_seq,
-            "last": last_seq
-        } if first_seq is not None else None,
-        "next_checkpoint_at": next_checkpoint_time.isoformat()
+        "status": "rejected",
+        "reason": "checkpoint_acknowledgement_required",
+        "cleared_count": 0,
+    }
+
+
+def acknowledge_checkpoint(
+    *,
+    checkpoint_number: Any,
+    merkle_root: Any,
+    sequence_range: Any,
+) -> Dict[str, Any]:
+    """Commit one confirmed checkpoint and remove only its exact buffer prefix."""
+
+    global checkpoint_count, checkpoint_start_time
+    global pending_checkpoint, prev_checkpoint_root
+
+    with checkpoint_state_lock:
+        if not isinstance(pending_checkpoint, dict):
+            raise ValueError("no pending checkpoint exists")
+        header = pending_checkpoint.get("header")
+        events = pending_checkpoint.get("events")
+        if not isinstance(header, dict) or not isinstance(events, list):
+            raise ValueError("pending checkpoint is invalid")
+        expected_range = header.get("sequence_range")
+        normalized_range = (
+            dict(sequence_range) if isinstance(sequence_range, dict) else None
+        )
+        if (
+            int(checkpoint_number) != int(header["checkpoint_number"])
+            or str(merkle_root or "") != str(header["merkle_root"])
+            or normalized_range != expected_range
+        ):
+            raise ValueError("checkpoint acknowledgement differs")
+        with event_buffer_lock:
+            event_count = len(events)
+            if len(event_buffer) < event_count:
+                raise ValueError("checkpoint buffer prefix is missing")
+            if event_buffer[:event_count] != events:
+                raise ValueError("checkpoint buffer prefix differs")
+            del event_buffer[:event_count]
+        prev_checkpoint_root = bytes.fromhex(str(header["merkle_root"]))
+        checkpoint_count = int(header["checkpoint_number"]) + 1
+        checkpoint_start_time = datetime.utcnow()
+        pending_checkpoint = None
+
+    print(
+        f"[TEE] ✅ Checkpoint #{checkpoint_count - 1} acknowledged: "
+        f"{event_count} events",
+        flush=True,
+    )
+    return {
+        "status": "acknowledged",
+        "checkpoint_number": checkpoint_count - 1,
+        "removed_count": event_count,
+        "sequence_range": normalized_range,
+        "remaining_count": get_buffer_size(),
+        "next_checkpoint_at": checkpoint_start_time.isoformat(),
     }
 
 
@@ -576,7 +595,7 @@ def build_checkpoint() -> Dict[str, Any]:
     4. TEE signs header with enclave private key
     5. TEE returns signed checkpoint + events + tree
     6. Parent EC2 uploads to Arweave
-    7. Parent EC2 calls clear_buffer() after confirmation
+    7. Parent EC2 acknowledges the exact checkpoint after confirmation
     
     Security Properties:
     - Merkle root commits to all events (tamper-evident)
@@ -608,95 +627,105 @@ def build_checkpoint() -> Dict[str, Any]:
     Note: This does NOT clear the buffer. That's a separate step after
     successful Arweave confirmation (ensures no data loss).
     """
-    global prev_checkpoint_root, checkpoint_count
+    global pending_checkpoint
     
-    # Get current time for checkpoint header
-    now = datetime.utcnow()
-    
-    # Copy events from buffer (thread-safe)
-    with event_buffer_lock:
-        events = event_buffer.copy()
-    
-    # Handle empty buffer
-    if not events:
-        return {
-            "status": "empty",
-            "message": "No events to checkpoint",
-            "next_checkpoint_at": (now.replace(minute=0, second=0, microsecond=0)).isoformat() + "Z"
-        }
-    
-    print(f"[TEE] 📦 Building checkpoint #{checkpoint_count} for {len(events)} events...", flush=True)
-    
-    try:
-        # Compute Merkle tree
-        merkle_root, tree_levels = compute_merkle_tree(events)
-        print(f"[TEE]    Merkle root: {merkle_root.hex()[:16]}...", flush=True)
-        
-        # Compute code hash (proves which code is running)
-        code_hash = compute_code_hash()
-        
-        # Get attestation hash (cached, only computed once per enclave lifetime)
-        attestation_hash = get_cached_attestation_hash()
-        
-        # Build checkpoint header
-        checkpoint_header = {
-            "checkpoint_version": 1,
-            "checkpoint_number": checkpoint_count,
-            "time_range": {
-                "start": checkpoint_start_time.isoformat() + "Z",
-                "end": now.isoformat() + "Z"
-            },
-            "event_count": len(events),
-            "sequence_range": {
-                "first": events[0]["sequence"],
-                "last": events[-1]["sequence"]
-            },
-            "merkle_root": merkle_root.hex(),
-            "prev_checkpoint_root": prev_checkpoint_root.hex() if prev_checkpoint_root else None,
-            "code_hash": code_hash,
-            "attestation_hash": attestation_hash
-        }
-        
-        # Sign checkpoint header with enclave private key
-        # This proves the checkpoint came from verified code running in this TEE
-        header_json = json.dumps(checkpoint_header, sort_keys=True)
-        header_bytes = header_json.encode('utf-8')
-        header_hash = hashlib.sha256(header_bytes).digest()
-        
-        checkpoint_signature = sign_data(header_hash)
-        print(f"[TEE]    Signature: {checkpoint_signature.hex()[:16]}...", flush=True)
-        
-        # Update state for next checkpoint (IMPORTANT: Chain continuity)
-        prev_checkpoint_root = merkle_root
-        checkpoint_count += 1
-        
-        # Convert tree levels to hex strings for JSON serialization
-        tree_levels_hex = [
-            [node.hex() for node in level]
-            for level in tree_levels
-        ]
-        
-        print(f"[TEE] ✅ Checkpoint #{checkpoint_count - 1} built successfully", flush=True)
-        print(f"     Events: {len(events)}", flush=True)
-        print(f"     Tree Depth: {len(tree_levels)} levels", flush=True)
-        print(f"     Prev Root: {prev_checkpoint_root.hex()[:16] if prev_checkpoint_root else 'None'}...", flush=True)
-        
-        return {
-            "status": "success",
-            "header": checkpoint_header,
-            "signature": checkpoint_signature.hex(),
-            "events": events,
-            "tree_levels": tree_levels_hex
-        }
-    
-    except Exception as e:
-        print(f"[TEE] ❌ Checkpoint build failed: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-        return {
-            "status": "error",
-            "error": str(e)
-        }
+    with checkpoint_state_lock:
+        if pending_checkpoint is not None:
+            return deepcopy(pending_checkpoint)
+
+        now = datetime.utcnow()
+        with event_buffer_lock:
+            events = deepcopy(event_buffer)
+
+        if not events:
+            return {
+                "status": "empty",
+                "message": "No events to checkpoint",
+                "next_checkpoint_at": (
+                    now.replace(minute=0, second=0, microsecond=0)
+                ).isoformat()
+                + "Z",
+            }
+
+        print(
+            f"[TEE] 📦 Building checkpoint #{checkpoint_count} "
+            f"for {len(events)} events...",
+            flush=True,
+        )
+
+        try:
+            merkle_root, tree_levels = compute_merkle_tree(events)
+            print(
+                f"[TEE]    Merkle root: {merkle_root.hex()[:16]}...",
+                flush=True,
+            )
+            code_hash = compute_code_hash()
+            attestation_hash = get_cached_attestation_hash()
+            checkpoint_header = {
+                "checkpoint_version": 1,
+                "checkpoint_number": checkpoint_count,
+                "time_range": {
+                    "start": checkpoint_start_time.isoformat() + "Z",
+                    "end": now.isoformat() + "Z",
+                },
+                "event_count": len(events),
+                "sequence_range": {
+                    "first": events[0]["sequence"],
+                    "last": events[-1]["sequence"],
+                },
+                "merkle_root": merkle_root.hex(),
+                "prev_checkpoint_root": (
+                    prev_checkpoint_root.hex()
+                    if prev_checkpoint_root
+                    else None
+                ),
+                "code_hash": code_hash,
+                "attestation_hash": attestation_hash,
+            }
+            header_json = json.dumps(checkpoint_header, sort_keys=True)
+            header_hash = hashlib.sha256(
+                header_json.encode("utf-8")
+            ).digest()
+            checkpoint_signature = sign_data(header_hash)
+            print(
+                f"[TEE]    Signature: "
+                f"{checkpoint_signature.hex()[:16]}...",
+                flush=True,
+            )
+            tree_levels_hex = [
+                [node.hex() for node in level]
+                for level in tree_levels
+            ]
+            print(
+                f"[TEE] ✅ Checkpoint #{checkpoint_count} built and pending",
+                flush=True,
+            )
+            print(f"     Events: {len(events)}", flush=True)
+            print(
+                f"     Tree Depth: {len(tree_levels)} levels",
+                flush=True,
+            )
+            print(
+                "     Prev Root: "
+                f"{prev_checkpoint_root.hex()[:16] if prev_checkpoint_root else 'None'}...",
+                flush=True,
+            )
+            pending_checkpoint = {
+                "status": "success",
+                "header": checkpoint_header,
+                "signature": checkpoint_signature.hex(),
+                "events": events,
+                "tree_levels": tree_levels_hex,
+            }
+            return deepcopy(pending_checkpoint)
+        except Exception as e:
+            print(f"[TEE] ❌ Checkpoint build failed: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "error": str(e)
+            }
 
 
 # ============================================================================
@@ -2014,6 +2043,14 @@ def get_v2_coordinator_job_manager():
                         context=context,
                     )
                 ),
+                legacy_allocation_classification_resolver=(
+                    lambda payload, context: (
+                        legacy_settlement_source.resolve_classification(
+                            payload=payload,
+                            context=context,
+                        )
+                    )
+                ),
                 source_add_catalog_resolver=lambda payload, context: (
                     reward_source.catalog_snapshot(payload=payload, context=context)
                 ),
@@ -2401,6 +2438,15 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         
         elif method == "clear_buffer":
             return {"result": clear_buffer()}
+
+        elif method == "acknowledge_checkpoint":
+            return {
+                "result": acknowledge_checkpoint(
+                    checkpoint_number=params.get("checkpoint_number"),
+                    merkle_root=params.get("merkle_root"),
+                    sequence_range=params.get("sequence_range"),
+                )
+            }
         
         elif method == "get_buffer_size":
             return {"result": get_buffer_size()}

@@ -377,7 +377,7 @@ def _extract_tls_metadata(response: Any) -> Tuple[str, str]:
     try:
         stream = response.extensions["network_stream"]
         ssl_object = stream.get_extra_info("ssl_object")
-        certificate = ssl_object.getpeercert(binary_form=True)
+        certificate = ssl_object.getpeercert(True)
         protocol = ssl_object.version()
     except Exception as exc:
         raise ProviderBrokerV2Error("authenticated response lacks TLS evidence") from exc

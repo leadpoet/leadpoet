@@ -39,8 +39,11 @@ BUSINESS_ARTIFACT_TABLE = "research_lab_attested_business_artifact_links_v2"
 TRANSITION_TABLE = "research_lab_signed_transition_commands_v2"
 SOURCING_EPOCH_TABLE = "validator_sourcing_epoch_inputs_v2"
 LEGACY_SETTLEMENT_TABLE = "research_lab_legacy_finalized_allocation_migrations_v2"
+LEGACY_NONFINALIZATION_TABLE = (
+    "research_lab_legacy_allocation_nonfinalizations_v2"
+)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-_GRAPH_QUERY_CHUNK = 200
+_GRAPH_QUERY_CHUNK = 50
 _MAX_GRAPH_ROWS = 10000
 
 
@@ -341,19 +344,34 @@ async def persist_receipt_graph_v2(
     }
 
 
-async def load_receipt_graph_v2(
-    root_receipt_hash: str,
+async def load_receipt_graphs_v2(
+    root_receipt_hashes: Iterable[str],
     *,
     allowed_failed_receipt_hashes: Iterable[str] = (),
-) -> dict[str, Any]:
-    """Reconstruct one complete persisted ancestry graph and reject partial rows."""
+) -> dict[str, dict[str, Any]]:
+    """Reconstruct complete persisted ancestry for many roots in set queries."""
 
-    root_hash = str(root_receipt_hash or "")
-    if not _HASH_RE.fullmatch(root_hash):
+    root_hashes = sorted({str(value or "") for value in root_receipt_hashes})
+    if not root_hashes:
+        return {}
+    if (
+        len(root_hashes) > _MAX_GRAPH_ROWS
+        or any(not _HASH_RE.fullmatch(value) for value in root_hashes)
+    ):
         raise AttestedV2StoreError("V2 graph root receipt hash is invalid")
+    allowed_failed = {
+        str(value or "") for value in allowed_failed_receipt_hashes
+    }
+    if any(not _HASH_RE.fullmatch(value) for value in allowed_failed):
+        raise AttestedV2StoreError("V2 allowed failed receipt hash is invalid")
+    if allowed_failed and len(root_hashes) != 1:
+        raise AttestedV2StoreError(
+            "V2 failed receipt allowance requires one graph root"
+        )
 
     receipt_docs: dict[str, dict[str, Any]] = {}
-    pending = {root_hash}
+    parents_by_child: dict[str, list[str]] = {}
+    pending = set(root_hashes)
     while pending:
         requested = set(pending)
         pending.clear()
@@ -376,7 +394,6 @@ async def load_receipt_graph_v2(
             field="child_receipt_hash",
             values=requested,
         )
-        parents_by_child: dict[str, list[str]] = {}
         edge_pairs = set()
         for row in edge_rows:
             child_hash = str(row.get("child_receipt_hash") or "")
@@ -385,7 +402,9 @@ async def load_receipt_graph_v2(
             if pair in edge_pairs or child_hash not in requested:
                 raise AttestedV2StoreError("V2 receipt edge is duplicated or invalid")
             edge_pairs.add(pair)
-            parents_by_child.setdefault(child_hash, []).append(parent_hash)
+            parents_by_child[child_hash] = (
+                parents_by_child.get(child_hash, []) + [parent_hash]
+            )
 
         for receipt_hash in sorted(requested):
             row = by_hash[receipt_hash]
@@ -405,6 +424,7 @@ async def load_receipt_graph_v2(
                 for parent_hash in expected_parents
                 if parent_hash not in receipt_docs
             )
+        pending.difference_update(receipt_docs)
         if len(receipt_docs) + len(pending) > _MAX_GRAPH_ROWS:
             raise AttestedV2StoreError("V2 receipt graph exceeds row limit")
 
@@ -431,6 +451,10 @@ async def load_receipt_graph_v2(
         raise AttestedV2StoreError("V2 receipt graph is missing a boot identity")
 
     receipt_hashes = set(receipt_docs)
+    if not allowed_failed.issubset(receipt_hashes):
+        raise AttestedV2StoreError(
+            "V2 allowed failed receipt is absent from loaded graphs"
+        )
     link_rows = await _select_by_values(
         RECEIPT_TRANSPORT_TABLE,
         field="receipt_hash",
@@ -438,12 +462,14 @@ async def load_receipt_graph_v2(
     )
     link_pairs = set()
     attempt_hashes = set()
+    attempt_hashes_by_receipt: dict[str, set[str]] = {}
     for row in link_rows:
         pair = (str(row.get("receipt_hash") or ""), str(row.get("attempt_hash") or ""))
         if pair in link_pairs or pair[0] not in receipt_hashes:
             raise AttestedV2StoreError("V2 receipt transport link is duplicated or invalid")
         link_pairs.add(pair)
         attempt_hashes.add(pair[1])
+        attempt_hashes_by_receipt.setdefault(pair[0], set()).add(pair[1])
     attempt_rows = await _select_by_values(
         TRANSPORT_TABLE,
         field="attempt_hash",
@@ -468,7 +494,7 @@ async def load_receipt_graph_v2(
         field="receipt_hash",
         values=receipt_hashes,
     )
-    host_operations = []
+    host_operations_by_receipt: dict[str, list[dict[str, Any]]] = {}
     seen_requests = set()
     for row in host_rows:
         request = row.get("request_doc")
@@ -485,20 +511,75 @@ async def load_receipt_graph_v2(
             receipt_hash=str(row.get("receipt_hash") or ""),
         )
         _assert_stored_row(HOST_OPERATION_TABLE, row, expected_row)
-        host_operations.append(record)
+        receipt_hash = str(row.get("receipt_hash") or "")
+        if receipt_hash not in receipt_hashes:
+            raise AttestedV2StoreError(
+                "V2 host operation receipt link is invalid"
+            )
+        host_operations_by_receipt.setdefault(receipt_hash, []).append(record)
 
-    graph = build_receipt_graph(
-        root_receipt_hash=root_hash,
-        boot_identities=[boots[key] for key in sorted(boots)],
-        receipts=[receipt_docs[key] for key in sorted(receipt_docs)],
-        transport_attempts=[attempts[key] for key in sorted(attempts)],
-        host_operations=sorted(
-            host_operations,
-            key=lambda record: record["request"]["request_hash"],
-        ),
+    graphs: dict[str, dict[str, Any]] = {}
+    for root_hash in root_hashes:
+        closure: set[str] = set()
+        graph_pending = {root_hash}
+        while graph_pending:
+            receipt_hash = graph_pending.pop()
+            if receipt_hash in closure:
+                continue
+            if receipt_hash not in receipt_docs:
+                raise AttestedV2StoreError(
+                    "V2 receipt graph is missing a receipt row"
+                )
+            closure.add(receipt_hash)
+            graph_pending.update(parents_by_child.get(receipt_hash, ()))
+            if len(closure) + len(graph_pending) > _MAX_GRAPH_ROWS:
+                raise AttestedV2StoreError("V2 receipt graph exceeds row limit")
+
+        graph_boot_hashes = {
+            str(receipt_docs[receipt_hash]["boot_identity_hash"])
+            for receipt_hash in closure
+        }
+        graph_attempt_hashes: set[str] = set()
+        graph_host_operations: list[dict[str, Any]] = []
+        for receipt_hash in closure:
+            graph_attempt_hashes.update(
+                attempt_hashes_by_receipt.get(receipt_hash, ())
+            )
+            graph_host_operations.extend(
+                host_operations_by_receipt.get(receipt_hash, ())
+            )
+        graph_allowed_failed = allowed_failed.intersection(closure)
+        graphs[root_hash] = build_receipt_graph(
+            root_receipt_hash=root_hash,
+            boot_identities=[
+                boots[key] for key in sorted(graph_boot_hashes)
+            ],
+            receipts=[receipt_docs[key] for key in sorted(closure)],
+            transport_attempts=[
+                attempts[key] for key in sorted(graph_attempt_hashes)
+            ],
+            host_operations=sorted(
+                graph_host_operations,
+                key=lambda record: record["request"]["request_hash"],
+            ),
+            allowed_failed_receipt_hashes=graph_allowed_failed,
+        )
+    return graphs
+
+
+async def load_receipt_graph_v2(
+    root_receipt_hash: str,
+    *,
+    allowed_failed_receipt_hashes: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Reconstruct one complete persisted ancestry graph and reject partial rows."""
+
+    root_hash = str(root_receipt_hash or "")
+    graphs = await load_receipt_graphs_v2(
+        (root_hash,),
         allowed_failed_receipt_hashes=allowed_failed_receipt_hashes,
     )
-    return graph
+    return graphs[root_hash]
 
 
 async def persist_sourcing_epoch_v2(
@@ -781,25 +862,103 @@ async def load_business_artifact_graph_by_ref_v2(
     ref = str(artifact_ref or "").strip()
     if not kind or not ref:
         raise AttestedV2StoreError("V2 business artifact reference is invalid")
-    rows = await select_all(
-        BUSINESS_ARTIFACT_TABLE,
-        filters=(("artifact_kind", kind), ("artifact_ref", ref)),
+    graphs = await load_business_artifact_graphs_by_ref_v2(
+        ((kind, ref),),
+        allow_failed_root=allow_failed_root,
     )
-    if len(rows) != 1:
+    return graphs[(kind, ref)]
+
+
+async def load_business_artifact_graphs_by_ref_v2(
+    artifacts: Iterable[tuple[str, str]],
+    *,
+    allow_failed_root: bool = False,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Resolve immutable business-artifact graphs with bounded set queries."""
+
+    requested = sorted(
+        {
+            (str(kind or "").strip(), str(ref or "").strip())
+            for kind, ref in artifacts
+        }
+    )
+    if not requested:
+        return {}
+    if (
+        len(requested) > _MAX_GRAPH_ROWS
+        or any(not kind or not ref for kind, ref in requested)
+    ):
+        raise AttestedV2StoreError("V2 business artifact reference is invalid")
+
+    requested_set = set(requested)
+    refs_by_kind: dict[str, list[str]] = {}
+    for kind, ref in requested:
+        refs_by_kind.setdefault(kind, []).append(ref)
+
+    rows_by_key: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for kind in sorted(refs_by_kind):
+        refs = sorted(set(refs_by_kind[kind]))
+        for offset in range(0, len(refs), _GRAPH_QUERY_CHUNK):
+            chunk = refs[offset : offset + _GRAPH_QUERY_CHUNK]
+            rows = await select_all(
+                BUSINESS_ARTIFACT_TABLE,
+                filters=(
+                    ("artifact_kind", kind),
+                    ("artifact_ref", "in", chunk),
+                ),
+                max_rows=_MAX_GRAPH_ROWS,
+                allow_partial=False,
+            )
+            for row in rows:
+                key = (
+                    str(row.get("artifact_kind") or ""),
+                    str(row.get("artifact_ref") or ""),
+                )
+                if key not in requested_set or key in rows_by_key:
+                    raise AttestedV2StoreError(
+                        "V2 business artifact reference is missing or ambiguous"
+                    )
+                digest = str(row.get("artifact_hash") or "").lower()
+                receipt_hash = str(row.get("receipt_hash") or "").lower()
+                if (
+                    not _HASH_RE.fullmatch(digest)
+                    or not _HASH_RE.fullmatch(receipt_hash)
+                ):
+                    raise AttestedV2StoreError(
+                        "V2 business artifact reference hash is invalid"
+                    )
+                rows_by_key[key] = row
+
+    if set(rows_by_key) != requested_set:
         raise AttestedV2StoreError(
             "V2 business artifact reference is missing or ambiguous"
         )
-    digest = str(rows[0].get("artifact_hash") or "").lower()
-    if not _HASH_RE.fullmatch(digest):
-        raise AttestedV2StoreError("V2 business artifact reference hash is invalid")
-    kwargs = {
-        "artifact_kind": kind,
-        "artifact_ref": ref,
-        "artifact_hash": digest,
+    receipt_hashes = {
+        str(row["receipt_hash"]).lower() for row in rows_by_key.values()
     }
     if allow_failed_root:
-        kwargs["allow_failed_root"] = True
-    return await load_business_artifact_graph_v2(**kwargs)
+        graphs = {
+            receipt_hash: await load_receipt_graph_v2(
+                receipt_hash,
+                allowed_failed_receipt_hashes=(receipt_hash,),
+            )
+            for receipt_hash in sorted(receipt_hashes)
+        }
+    else:
+        graphs = await load_receipt_graphs_v2(receipt_hashes)
+    resolved: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, row in rows_by_key.items():
+        receipt_hash = str(row["receipt_hash"]).lower()
+        graph = graphs.get(receipt_hash)
+        if (
+            not isinstance(graph, Mapping)
+            or graph.get("root_receipt_hash") != receipt_hash
+        ):
+            raise AttestedV2StoreError(
+                "V2 business artifact graph root differs"
+            )
+        resolved[key] = dict(graph)
+    return resolved
 
 
 async def persist_transition_commands_v2(commands: Any) -> dict[str, Any]:
@@ -908,6 +1067,79 @@ async def persist_legacy_finalized_allocation_migration_v2(
         "allocation_hash": row["allocation_hash"],
         "settlement_hash": row["settlement_hash"],
         "settlement_receipt_hash": normalized_receipt_hash,
+        "durable_readback_hash": sha256_json(
+            {key: stored[key] for key in row}
+        ),
+    }
+
+
+async def persist_legacy_allocation_nonfinalization_v2(
+    *,
+    finding: Mapping[str, Any],
+    receipt_hash: str,
+) -> dict[str, Any]:
+    """Persist proof that one signed legacy allocation was not paid on chain."""
+
+    from leadpoet_canonical.legacy_settlement_v2 import (
+        validate_legacy_nonfinalization_document_v2,
+    )
+
+    document = validate_legacy_nonfinalization_document_v2(finding)
+    normalized_receipt_hash = str(receipt_hash or "").lower()
+    if not _HASH_RE.fullmatch(normalized_receipt_hash):
+        raise AttestedV2StoreError(
+            "legacy nonfinalization receipt hash is invalid"
+        )
+    stored_receipt = await select_one(
+        RECEIPT_TABLE,
+        filters=(("receipt_hash", normalized_receipt_hash),),
+    )
+    receipt_doc = (
+        stored_receipt.get("receipt_doc")
+        if isinstance(stored_receipt, Mapping)
+        else None
+    )
+    if not isinstance(receipt_doc, Mapping):
+        raise AttestedV2StoreError(
+            "legacy nonfinalization receipt is not durable"
+        )
+    validate_signed_execution_receipt(receipt_doc)
+    if (
+        receipt_doc.get("receipt_hash") != normalized_receipt_hash
+        or receipt_doc.get("role") != "gateway_coordinator"
+        or receipt_doc.get("purpose")
+        != "research_lab.legacy_finalized_allocation.v2"
+        or receipt_doc.get("status") != "succeeded"
+        or receipt_doc.get("output_root") != sha256_json(document)
+    ):
+        raise AttestedV2StoreError(
+            "legacy nonfinalization receipt differs"
+        )
+    row = {
+        "netuid": int(document["netuid"]),
+        "epoch_id": int(document["epoch_id"]),
+        "schema_version": str(document["schema_version"]),
+        "allocation_hash": str(document["allocation_hash"]),
+        "finding_hash": str(document["finding_hash"]),
+        "finding_receipt_hash": normalized_receipt_hash,
+        "allocation_doc": dict(document["allocation_doc"]),
+        "finding_doc": dict(document),
+    }
+    stored = await _insert_exact(
+        LEGACY_NONFINALIZATION_TABLE,
+        row,
+        key_filters=(
+            ("netuid", row["netuid"]),
+            ("epoch_id", row["epoch_id"]),
+        ),
+    )
+    return {
+        "schema_version": document["schema_version"],
+        "netuid": row["netuid"],
+        "epoch_id": row["epoch_id"],
+        "allocation_hash": row["allocation_hash"],
+        "finding_hash": row["finding_hash"],
+        "finding_receipt_hash": normalized_receipt_hash,
         "durable_readback_hash": sha256_json(
             {key: stored[key] for key in row}
         ),

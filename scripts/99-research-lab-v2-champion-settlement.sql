@@ -171,7 +171,14 @@ CREATE TABLE IF NOT EXISTS public.research_lab_legacy_finalized_allocation_migra
     created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (netuid, epoch_id),
     CHECK ((allocation_doc->>'epoch')::INTEGER = epoch_id),
-    CHECK ((allocation_doc->>'netuid')::INTEGER = netuid),
+    CHECK (
+        CASE
+            WHEN NOT (allocation_doc ? 'netuid') THEN TRUE
+            WHEN allocation_doc->>'netuid' ~ '^[1-9][0-9]*$'
+                THEN (allocation_doc->>'netuid')::NUMERIC = netuid
+            ELSE FALSE
+        END
+    ),
     CHECK (allocation_doc->>'allocation_hash' = allocation_hash),
     CHECK (settlement_doc->>'schema_version' = schema_version),
     CHECK ((settlement_doc->>'epoch_id')::INTEGER = epoch_id),

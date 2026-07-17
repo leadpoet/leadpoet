@@ -45,6 +45,7 @@ from .production_shadow import (
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "validator_integration_fixtures.json"
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
 PERCENT_EPSILON = 0.000001
+WEIGHT_INPUT_FETCH_TIMEOUT_SECONDS = 90
 ATTESTED_ALLOCATION_SCHEMA_VERSION = "leadpoet.attested_allocation_bundle.v2"
 ATTESTED_ALLOCATION_PURPOSE = "research_lab.allocation.v1"
 IMMUTABLE_ECR_IMAGE_RE = re.compile(
@@ -414,7 +415,7 @@ def fetch_research_lab_allocation_bundle(
     gateway_url: str,
     epoch: int,
     *,
-    timeout_seconds: int = 20,
+    timeout_seconds: int = WEIGHT_INPUT_FETCH_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Fetch the live Research Lab allocation bundle for an epoch.
 
@@ -435,7 +436,7 @@ def fetch_research_lab_attested_allocation_bundle(
     gateway_url: str,
     epoch: int,
     *,
-    timeout_seconds: int = 30,
+    timeout_seconds: int = WEIGHT_INPUT_FETCH_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Fetch the additive enclave receipt for one live allocation bundle."""
 

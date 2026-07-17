@@ -19,6 +19,7 @@ from gateway.tee.source_add_runtime_v2 import (
 )
 from gateway.tee.coordinator_executor_v2 import (
     OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2,
+    OP_CLASSIFY_LEGACY_ALLOCATION_V2,
     OP_PROMOTION_GATE_DECISION,
     OP_PROMOTION_IMPROVEMENT,
     OP_RESEARCH_LAB_ALLOCATION,
@@ -584,6 +585,128 @@ async def attest_historical_champion_settlement_v2(
         "status": "matched",
         "artifact_link_status": link,
         "migration_status": durable,
+    }
+
+
+async def classify_historical_champion_allocation_v2(
+    *,
+    epoch_id: int,
+    netuid: int,
+    settlement_epoch_id: int,
+    execute: Any = execute_coordinator_v2,
+    persist_links: Any = None,
+    persist_migration: Any = None,
+    persist_nonfinalization: Any = None,
+) -> dict[str, Any]:
+    """Classify one signed pre-V2 allocation without inventing payment credit."""
+
+    from leadpoet_canonical.legacy_settlement_v2 import (
+        LEGACY_NONFINALIZATION_SCHEMA_VERSION,
+        LEGACY_SETTLEMENT_REQUEST_SCHEMA_VERSION,
+        LEGACY_SETTLEMENT_SCHEMA_VERSION,
+        validate_legacy_nonfinalization_document_v2,
+        validate_legacy_settlement_document_v2,
+    )
+
+    normalized_netuid = int(netuid)
+    normalized_settlement_epoch = int(settlement_epoch_id)
+    if normalized_netuid <= 0 or normalized_settlement_epoch < 0:
+        raise ResearchLabV2AuthorityError(
+            "champion allocation classification scope is invalid"
+        )
+    outcome = await execute(
+        operation=OP_CLASSIFY_LEGACY_ALLOCATION_V2,
+        purpose="research_lab.legacy_finalized_allocation.v2",
+        epoch_id=int(epoch_id),
+        sequence=normalized_settlement_epoch,
+        payload={
+            "schema_version": LEGACY_SETTLEMENT_REQUEST_SCHEMA_VERSION,
+            "netuid": normalized_netuid,
+            "epoch_id": normalized_settlement_epoch,
+        },
+        parent_graphs=(),
+        input_artifact_hashes=(),
+    )
+    result = outcome.get("result")
+    if not isinstance(result, Mapping):
+        raise ResearchLabV2AuthorityError(
+            "champion allocation classification result is missing"
+        )
+    schema_version = str(result.get("schema_version") or "")
+    if schema_version == LEGACY_SETTLEMENT_SCHEMA_VERSION:
+        document = validate_legacy_settlement_document_v2(result)
+        artifact_kind = "legacy_finalized_allocation"
+        artifact_hash = str(document["settlement_hash"])
+        status = "finalized"
+    elif schema_version == LEGACY_NONFINALIZATION_SCHEMA_VERSION:
+        document = validate_legacy_nonfinalization_document_v2(result)
+        artifact_kind = "legacy_allocation_nonfinalization"
+        artifact_hash = str(document["finding_hash"])
+        status = "not_finalized"
+    else:
+        raise ResearchLabV2AuthorityError(
+            "champion allocation classification schema is invalid"
+        )
+    if (
+        int(document["netuid"]) != normalized_netuid
+        or int(document["epoch_id"]) != normalized_settlement_epoch
+    ):
+        raise ResearchLabV2AuthorityError(
+            "champion allocation classification result scope differs"
+        )
+    receipt = outcome.get("execution_receipt") or outcome.get("receipt")
+    if not isinstance(receipt, Mapping):
+        raise ResearchLabV2AuthorityError(
+            "champion allocation classification receipt is missing"
+        )
+    receipt_hash = str(receipt.get("receipt_hash") or "")
+    if receipt.get("output_root") != sha256_json(document):
+        raise ResearchLabV2AuthorityError(
+            "champion allocation classification output root differs"
+        )
+    link = await _persist_business_links(
+        outcome,
+        (
+            {
+                "artifact_kind": artifact_kind,
+                "artifact_ref": "%d:%d"
+                % (normalized_netuid, normalized_settlement_epoch),
+                "artifact_hash": artifact_hash,
+            },
+        ),
+        persist_links=persist_links,
+    )
+    if status == "finalized":
+        if persist_migration is None:
+            from gateway.research_lab.attested_v2_store import (
+                persist_legacy_finalized_allocation_migration_v2,
+            )
+
+            persist_migration = (
+                persist_legacy_finalized_allocation_migration_v2
+            )
+        durable = await persist_migration(
+            settlement=document,
+            receipt_hash=receipt_hash,
+        )
+    else:
+        if persist_nonfinalization is None:
+            from gateway.research_lab.attested_v2_store import (
+                persist_legacy_allocation_nonfinalization_v2,
+            )
+
+            persist_nonfinalization = (
+                persist_legacy_allocation_nonfinalization_v2
+            )
+        durable = await persist_nonfinalization(
+            finding=document,
+            receipt_hash=receipt_hash,
+        )
+    return {
+        **dict(outcome),
+        "status": status,
+        "artifact_link_status": link,
+        "classification_status": durable,
     }
 
 
@@ -1201,6 +1324,10 @@ async def build_allocation_v2(
     using_default_parent_loader = load_allocation_parent_graphs is None
     if load_allocation_parent_graphs is None:
         load_allocation_parent_graphs = _load_allocation_parent_graphs_v2
+    finalized_history: list[dict[str, Any]] = []
+    readiness_business_graphs: dict[
+        tuple[str, str], dict[str, Any]
+    ] = {}
     if using_default_parent_loader:
         from gateway.research_lab.champion_settlement_v2 import (
             champion_v2_cutover_readiness,
@@ -1209,33 +1336,46 @@ async def build_allocation_v2(
         readiness = await champion_v2_cutover_readiness(
             epoch=int(epoch_id),
             netuid=int(netuid),
+            _finalized_history_out=finalized_history,
+            _business_graphs_out=readiness_business_graphs,
         )
         if (
             readiness.get("ready") is not True
             or float(readiness.get("receipt_coverage") or 0.0) != 1.0
             or float(
-                readiness.get("historical_settlement_coverage") or 0.0
+                readiness.get("historical_classification_coverage")
+                or readiness.get("historical_settlement_coverage")
+                or 0.0
             )
             != 1.0
         ):
             raise ResearchLabV2AuthorityError(
                 "champion V2 cutover blocked: %d obligations and %d "
-                "historical settlements lack authoritative receipts"
+                "historical allocations lack authoritative classifications"
                 % (
                     len(readiness.get("missing") or ()),
                     len(
-                        readiness.get("missing_historical_settlements")
+                        readiness.get(
+                            "missing_historical_classifications"
+                        )
+                        or readiness.get("missing_historical_settlements")
                         or ()
                     ),
                 )
             )
-    graphs = list(
-        await load_allocation_parent_graphs(
-            epoch_id=int(epoch_id),
-            netuid=int(netuid),
-            policy=dict(policy),
+    parent_loader_kwargs = {
+        "epoch_id": int(epoch_id),
+        "netuid": int(netuid),
+        "policy": dict(policy),
+    }
+    if using_default_parent_loader:
+        parent_loader_kwargs.update(
+            {
+                "finalized_champion_history": finalized_history,
+                "preloaded_business_graphs": readiness_business_graphs,
+            }
         )
-    )
+    graphs = list(await load_allocation_parent_graphs(**parent_loader_kwargs))
     bindings = []
     for graph in graphs:
         validate_receipt_graph(graph)
@@ -1357,14 +1497,19 @@ async def _load_allocation_parent_graphs_v2(
     epoch_id: int,
     netuid: int,
     policy: Mapping[str, Any],
+    finalized_champion_history: Sequence[Mapping[str, Any]] | None = None,
+    preloaded_business_graphs: Mapping[
+        tuple[str, str], Mapping[str, Any]
+    ] | None = None,
 ) -> list[dict[str, Any]]:
     """Load candidate parent graphs; the enclave independently checks completeness."""
 
     from gateway.research_lab.attested_v2_store import (
-        load_business_artifact_graph_by_ref_v2,
-        load_receipt_graph_v2,
+        load_business_artifact_graphs_by_ref_v2,
+        load_receipt_graphs_v2,
     )
     from gateway.research_lab.allocations import (
+        POSTGREST_IN_FILTER_CHUNK,
         _champion_obligation_caps,
         _champion_paid_alpha_to_date_from_snapshots,
         _champion_replay_obligation,
@@ -1372,24 +1517,24 @@ async def _load_allocation_parent_graphs_v2(
     from gateway.research_lab.champion_settlement_v2 import (
         load_finalized_allocation_history_v2,
     )
-    from gateway.research_lab.store import select_all, select_one
+    from gateway.research_lab.store import select_all
 
     graphs: dict[str, dict[str, Any]] = {}
+    artifact_refs: set[tuple[str, str]] = set()
+    receipt_roots: set[str] = set()
+    preloaded = dict(preloaded_business_graphs or {})
 
-    async def add(kind: str, ref: str) -> None:
-        graph = await load_business_artifact_graph_by_ref_v2(
-            artifact_kind=kind,
-            artifact_ref=ref,
-        )
-        graphs[str(graph["root_receipt_hash"])] = graph
+    def add(kind: str, ref: str) -> None:
+        key = (str(kind or ""), str(ref or ""))
+        graph = preloaded.get(key)
+        if isinstance(graph, Mapping):
+            normalized = dict(graph)
+            graphs[str(normalized.get("root_receipt_hash") or "")] = normalized
+            return
+        artifact_refs.add(key)
 
-    async def add_receipt_root(receipt_hash: str) -> None:
-        graph = await load_receipt_graph_v2(str(receipt_hash))
-        if str(graph.get("root_receipt_hash") or "") != str(receipt_hash):
-            raise ResearchLabV2AuthorityError(
-                "allocation finalized-chain graph root differs"
-            )
-        graphs[str(receipt_hash)] = graph
+    def add_receipt_root(receipt_hash: str) -> None:
+        receipt_roots.add(str(receipt_hash or ""))
 
     try:
         epoch_span = max(1, int(policy.get("reimbursement_epochs") or 20))
@@ -1404,16 +1549,44 @@ async def _load_allocation_parent_graphs_v2(
         ),
         order_by=(("start_epoch", True),),
     )
-    for schedule in schedules:
-        if not _allocation_epoch_active(schedule, int(epoch_id)):
-            continue
-        award_id = str(schedule.get("award_id") or "")
-        award = await select_one(
+    award_ids = sorted(
+        {
+            str(schedule.get("award_id") or "")
+            for schedule in schedules
+            if _allocation_epoch_active(schedule, int(epoch_id))
+            and str(schedule.get("award_id") or "")
+        }
+    )
+    awards_by_id: dict[str, dict[str, Any]] = {}
+    for offset in range(0, len(award_ids), POSTGREST_IN_FILTER_CHUNK):
+        chunk = award_ids[offset : offset + POSTGREST_IN_FILTER_CHUNK]
+        award_rows = await select_all(
             "research_reimbursement_award_current",
-            filters=(("award_id", award_id), ("current_award_status", "awarded")),
+            filters=(
+                ("award_id", "in", chunk),
+                ("current_award_status", "awarded"),
+            ),
+            max_rows=len(chunk) + 1,
+            allow_partial=False,
         )
-        if award:
-            await add("reimbursement_decision", award_id)
+        for award in award_rows:
+            award_id = str(award.get("award_id") or "")
+            status = str(
+                award.get("current_award_status")
+                or award.get("award_status")
+                or ""
+            )
+            if award_id not in chunk or status != "awarded":
+                raise ResearchLabV2AuthorityError(
+                    "allocation reimbursement award batch differs"
+                )
+            if award_id in awards_by_id:
+                raise ResearchLabV2AuthorityError(
+                    "allocation reimbursement award is ambiguous"
+                )
+            awards_by_id[award_id] = dict(award)
+    for award_id in sorted(awards_by_id):
+        add("reimbursement_decision", award_id)
 
     active_statuses = ("active", "queued", "partially_paid")
     champion_rows = []
@@ -1442,15 +1615,34 @@ async def _load_allocation_parent_graphs_v2(
         for row in champion_rows
         if int(row.get("start_epoch") or 0) <= int(epoch_id)
     ]
-    finalized_champion_history = []
+    normalized_finalized_history: list[dict[str, Any]] = []
     if champion_starts and int(epoch_id) > 0:
-        finalized_champion_history = await load_finalized_allocation_history_v2(
-            netuid=int(netuid),
-            start_epoch=min(champion_starts),
-            end_epoch=int(epoch_id) - 1,
-        )
+        history_start = min(champion_starts)
+        if finalized_champion_history is None:
+            normalized_finalized_history = (
+                await load_finalized_allocation_history_v2(
+                    netuid=int(netuid),
+                    start_epoch=history_start,
+                    end_epoch=int(epoch_id) - 1,
+                )
+            )
+        else:
+            normalized_finalized_history = [
+                dict(row)
+                for row in finalized_champion_history
+                if history_start
+                <= int(row.get("epoch") or -1)
+                < int(epoch_id)
+            ]
+            if any(
+                int(row.get("netuid") or -1) != int(netuid)
+                for row in normalized_finalized_history
+            ):
+                raise ResearchLabV2AuthorityError(
+                    "allocation finalized history netuid differs"
+                )
     paid_by_reward = _champion_paid_alpha_to_date_from_snapshots(
-        finalized_champion_history,
+        normalized_finalized_history,
         obligation_caps=_champion_obligation_caps(champion_rows),
     )
     for row in champion_rows:
@@ -1460,22 +1652,22 @@ async def _load_allocation_parent_graphs_v2(
             epoch=int(epoch_id),
         ) is None:
             continue
-        await add(
+        add(
             "champion_reward_decision",
             str(row.get("champion_reward_id") or ""),
         )
-    for row in finalized_champion_history:
+    for row in normalized_finalized_history:
         authority_types = set(row.get("authority_types") or ())
         if "native_v2_finalization" in authority_types:
-            await add("allocation", "epoch:%d" % int(row.get("epoch") or 0))
+            add("allocation", "epoch:%d" % int(row.get("epoch") or 0))
             for receipt_hash in row.get("finalization_receipt_hashes") or ():
-                await add_receipt_root(str(receipt_hash))
+                add_receipt_root(str(receipt_hash))
         if "legacy_finalized_chain_migration_v2" in authority_types:
-            await add_receipt_root(
+            add_receipt_root(
                 str(row.get("legacy_settlement_receipt_hash") or "")
             )
     for row in source_rows:
-        await add(
+        add(
             "source_add_reward_decision",
             str(row.get("reward_ref") or ""),
         )
@@ -1499,7 +1691,20 @@ async def _load_allocation_parent_graphs_v2(
             allow_partial=True,
         )
         for row in history:
-            await add("allocation", "epoch:%d" % int(row.get("epoch") or 0))
+            add("allocation", "epoch:%d" % int(row.get("epoch") or 0))
+
+    loaded_business_graphs = await load_business_artifact_graphs_by_ref_v2(
+        artifact_refs
+    )
+    for graph in loaded_business_graphs.values():
+        graphs[str(graph["root_receipt_hash"])] = graph
+    loaded_receipt_graphs = await load_receipt_graphs_v2(receipt_roots)
+    for receipt_hash, graph in loaded_receipt_graphs.items():
+        if str(graph.get("root_receipt_hash") or "") != receipt_hash:
+            raise ResearchLabV2AuthorityError(
+                "allocation finalized-chain graph root differs"
+            )
+        graphs[receipt_hash] = graph
     return [graphs[root] for root in sorted(graphs)]
 
 

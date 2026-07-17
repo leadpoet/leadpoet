@@ -11,6 +11,7 @@ from gateway.tee.provider_broker_v2 import (
     PROVIDER_BROKER_SCHEMA_VERSION,
     ProviderBrokerV2,
     ProviderBrokerV2Error,
+    _extract_tls_metadata,
     credential_reference_hash,
     credential_value_hash,
     expected_job_credential_slot_ref_hashes,
@@ -25,6 +26,29 @@ from leadpoet_canonical.attested_v2 import sha256_bytes
 
 HASH = "sha256:" + "a" * 64
 NOW = "2026-07-10T20:00:00Z"
+
+
+def test_tls_metadata_supports_python39_positional_only_peer_certificate():
+    class PositionalOnlyTLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class Stream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return PositionalOnlyTLS()
+
+    class Response:
+        extensions = {"network_stream": Stream()}
+
+    assert _extract_tls_metadata(Response()) == (
+        sha256_bytes(b"peer-certificate"),
+        "TLSv1.3",
+    )
 
 
 def test_provider_registry_hash_binds_measured_https_routes():

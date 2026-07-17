@@ -8,31 +8,9 @@ import sys
 import types
 
 
-arweave_client_stub = types.ModuleType("gateway.utils.arweave_client")
-arweave_client_stub.upload_checkpoint = None
-arweave_client_stub.get_wallet_balance = None
-sys.modules.setdefault("gateway.utils.arweave_client", arweave_client_stub)
-
 logger_stub = types.ModuleType("gateway.utils.logger")
 logger_stub.log_event = None
 sys.modules.setdefault("gateway.utils.logger", logger_stub)
-
-arweave_audit_stub = types.ModuleType("gateway.research_lab.arweave_audit")
-arweave_audit_stub.record_research_lab_checkpointed_events = None
-arweave_audit_stub.rebuffer_research_lab_buffered_audit_events = None
-
-
-async def _publish_research_lab_epoch_audit_stub(*args, **kwargs):
-    return {"ok": True, "status": "stubbed"}
-
-
-async def _latest_arweave_anchor_stub(*args, **kwargs):
-    return None
-
-
-arweave_audit_stub.publish_research_lab_epoch_audit = _publish_research_lab_epoch_audit_stub
-arweave_audit_stub.latest_arweave_anchor = _latest_arweave_anchor_stub
-sys.modules.setdefault("gateway.research_lab.arweave_audit", arweave_audit_stub)
 
 from gateway.tasks.hourly_batch import build_arweave_checkpoint_log_event
 

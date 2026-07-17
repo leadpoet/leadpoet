@@ -1,5 +1,7 @@
 from pathlib import Path
+import inspect
 
+from research_lab import validator_integration
 from validator_tee.enclave import tee_service
 
 
@@ -34,6 +36,18 @@ def test_primary_weight_path_uses_only_v2_allocation_handoff():
     assert "fetch_research_lab_shadow_bundle" not in handoff
     assert "fetch_research_lab_allocation_bundle" not in handoff
     assert "fetch_research_lab_evaluation_bundle_page" not in handoff
+
+
+def test_weight_input_fetch_budget_leaves_time_for_chain_submission():
+    assert validator_integration.WEIGHT_INPUT_FETCH_TIMEOUT_SECONDS == 90
+    for fetcher in (
+        validator_integration.fetch_research_lab_allocation_bundle,
+        validator_integration.fetch_research_lab_attested_allocation_bundle,
+    ):
+        assert (
+            inspect.signature(fetcher).parameters["timeout_seconds"].default
+            == 90
+        )
 
 
 def test_primary_validator_rejects_inherited_host_weight_authority():

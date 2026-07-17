@@ -11,8 +11,12 @@ from typing import Any, Callable, Dict, Mapping, Optional
 from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
 from leadpoet_canonical.attested_v2 import sha256_bytes
 from leadpoet_canonical.legacy_settlement_v2 import (
+    LEGACY_NONFINALIZATION_SCHEMA_VERSION,
+    LEGACY_SETTLEMENT_SCHEMA_VERSION,
     LEGACY_SETTLEMENT_REQUEST_SCHEMA_VERSION,
     LegacySettlementV2Error,
+    legacy_chain_vector_matches_bundle_v2,
+    validate_legacy_allocation_nonfinalization_v2,
     validate_legacy_finalized_settlement_v2,
 )
 
@@ -52,6 +56,24 @@ class CoordinatorLegacySettlementSourceV2:
         payload: Mapping[str, Any],
         context: Any,
     ) -> Dict[str, Any]:
+        """Resolve only allocations proven finalized for legacy callers."""
+
+        result = self.resolve_classification(
+            payload=payload,
+            context=context,
+        )
+        if result.get("schema_version") != LEGACY_SETTLEMENT_SCHEMA_VERSION:
+            raise CoordinatorLegacySettlementV2Error(
+                "legacy allocation did not reach finalized chain state"
+            )
+        return result
+
+    def resolve_classification(
+        self,
+        *,
+        payload: Mapping[str, Any],
+        context: Any,
+    ) -> Dict[str, Any]:
         if not isinstance(payload, Mapping) or set(payload) != {
             "schema_version",
             "netuid",
@@ -81,26 +103,6 @@ class CoordinatorLegacySettlementSourceV2:
                 "legacy settlement request scope is invalid"
             )
 
-        allocation_rows = self._read(
-            policy_id="research_lab_allocation_current",
-            parameters={"netuid": netuid, "epoch_id": epoch_id},
-            context=context,
-        )
-        if len(allocation_rows) != 1:
-            raise CoordinatorLegacySettlementV2Error(
-                "legacy allocation row is missing or ambiguous"
-            )
-        allocation_row = allocation_rows[0]
-        allocation_doc = allocation_row.get("allocation_doc")
-        if (
-            not isinstance(allocation_doc, Mapping)
-            or allocation_row.get("allocation_hash")
-            != allocation_doc.get("allocation_hash")
-        ):
-            raise CoordinatorLegacySettlementV2Error(
-                "legacy allocation row differs from its document"
-            )
-
         anchor_rows = self._read(
             policy_id="legacy_audit_anchor_by_epoch",
             parameters={"netuid": netuid, "epoch_id": epoch_id},
@@ -111,6 +113,37 @@ class CoordinatorLegacySettlementSourceV2:
                 "checkpointed active audit anchor is missing or ambiguous"
             )
         anchor = anchor_rows[0]
+        allocation_hash = str(anchor.get("allocation_hash") or "").lower()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", allocation_hash):
+            raise CoordinatorLegacySettlementV2Error(
+                "checkpointed allocation hash is invalid"
+            )
+        allocation_rows = self._read(
+            policy_id="legacy_allocation_by_hash",
+            parameters={
+                "allocation_hash": allocation_hash,
+                "netuid": netuid,
+                "epoch_id": epoch_id,
+            },
+            context=context,
+        )
+        if len(allocation_rows) != 1:
+            raise CoordinatorLegacySettlementV2Error(
+                "anchor-bound legacy allocation row is missing or ambiguous"
+            )
+        allocation_row = allocation_rows[0]
+        allocation_doc = allocation_row.get("allocation_doc")
+        if (
+            not isinstance(allocation_doc, Mapping)
+            or allocation_row.get("allocation_hash") != allocation_hash
+            or allocation_doc.get("allocation_hash") != allocation_hash
+            or int(allocation_row.get("epoch") or -1) != epoch_id
+            or int(allocation_row.get("netuid") or -1) != netuid
+        ):
+            raise CoordinatorLegacySettlementV2Error(
+                "anchor-bound legacy allocation row differs from its scope"
+            )
+
         event_hash = str(
             anchor.get("current_transparency_event_hash")
             or anchor.get("transparency_event_hash")
@@ -167,6 +200,41 @@ class CoordinatorLegacySettlementSourceV2:
             validator_hotkey=expected_validator,
             context=context,
         )
+        try:
+            chain_matches = legacy_chain_vector_matches_bundle_v2(
+                weight_bundle=bundle,
+                chain_evidence=chain_evidence,
+                expected_netuid=netuid,
+                expected_epoch_id=epoch_id,
+            )
+        except LegacySettlementV2Error as exc:
+            raise CoordinatorLegacySettlementV2Error(
+                "legacy chain evidence verification failed"
+            ) from exc
+        if not chain_matches:
+            try:
+                finding = validate_legacy_allocation_nonfinalization_v2(
+                    netuid=netuid,
+                    epoch_id=epoch_id,
+                    allocation_doc=allocation_doc,
+                    weight_bundle=bundle,
+                    audit_anchor=anchor,
+                    transparency_log_row=log_row,
+                    chain_evidence=chain_evidence,
+                )
+            except LegacySettlementV2Error as exc:
+                raise CoordinatorLegacySettlementV2Error(
+                    "legacy nonfinalization evidence verification failed"
+                ) from exc
+            if (
+                finding.get("schema_version")
+                != LEGACY_NONFINALIZATION_SCHEMA_VERSION
+            ):
+                raise CoordinatorLegacySettlementV2Error(
+                    "legacy nonfinalization schema differs"
+                )
+            return finding
+
         tx_id = str(anchor.get("current_arweave_tx_id") or "")
         checkpoint = self._read_arweave_checkpoint(
             tx_id=tx_id,
@@ -232,7 +300,7 @@ class CoordinatorLegacySettlementSourceV2:
                         "provider_id": "arweave",
                         "attempt_number": attempt_number,
                         "method": "GET",
-                        "url": "%s/%s" % (ARWEAVE_ORIGIN, tx_id),
+                        "url": "%s/tx/%s/data" % (ARWEAVE_ORIGIN, tx_id),
                         "headers": {"accept": "application/json"},
                         "body_b64": base64.b64encode(b"").decode("ascii"),
                         "timeout_ms": ARWEAVE_TIMEOUT_MS,
@@ -257,7 +325,13 @@ class CoordinatorLegacySettlementSourceV2:
                     body = base64.b64decode(
                         str(result.get("body_b64") or ""), validate=True
                     )
-                    checkpoint = json.loads(body.decode("utf-8"))
+                    encoded_checkpoint = body.strip()
+                    checkpoint_bytes = base64.b64decode(
+                        encoded_checkpoint + b"=" * (-len(encoded_checkpoint) % 4),
+                        altchars=b"-_",
+                        validate=True,
+                    )
+                    checkpoint = json.loads(checkpoint_bytes.decode("utf-8"))
                 except Exception:
                     last_error = "malformed_json"
                 else:

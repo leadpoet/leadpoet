@@ -2088,16 +2088,16 @@ async def backfill_champion_settlement_v2_authority(
     limit: int = 1000,
     dry_run: bool = True,
 ) -> dict[str, Any]:
-    """Attest missing pre-V2 finalized champion allocation epochs.
+    """Classify missing pre-V2 champion allocation epochs.
 
     The cutover readiness report is the source of work. Invalid historical
     rows and allocation-hash conflicts remain blocking findings; they are
-    never converted into settlement authority by this command.
+    never converted into payment authority by this command.
     """
 
     from gateway.config import BITTENSOR_NETUID
     from gateway.research_lab.v2_authority import (
-        attest_historical_champion_settlement_v2,
+        classify_historical_champion_allocation_v2,
     )
     from gateway.utils.epoch import get_current_epoch_id_async
 
@@ -2112,7 +2112,11 @@ async def backfill_champion_settlement_v2_authority(
         epoch=effective_epoch,
         netuid=effective_netuid,
     )
-    missing = list(before.get("missing_historical_settlements") or ())
+    missing = list(
+        before.get("missing_historical_classifications")
+        or before.get("missing_historical_settlements")
+        or ()
+    )
     planned = [
         {
             "epoch": int(item["epoch"]),
@@ -2121,7 +2125,7 @@ async def backfill_champion_settlement_v2_authority(
         for item in missing
         if isinstance(item, Mapping)
         and item.get("reason")
-        == "missing_finalized_chain_settlement_authority"
+        == "missing_finalized_chain_classification_authority"
         and item.get("epoch") is not None
         and item.get("allocation_hash")
     ]
@@ -2134,7 +2138,7 @@ async def backfill_champion_settlement_v2_authority(
         if not (
             isinstance(item, Mapping)
             and item.get("reason")
-            == "missing_finalized_chain_settlement_authority"
+            == "missing_finalized_chain_classification_authority"
         )
     ]
     if dry_run:
@@ -2150,12 +2154,12 @@ async def backfill_champion_settlement_v2_authority(
             "readiness_before": before,
         }
 
-    migrated: list[dict[str, Any]] = []
+    classified: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     for item in planned:
         settlement_epoch = int(item["epoch"])
         try:
-            outcome = await attest_historical_champion_settlement_v2(
+            outcome = await classify_historical_champion_allocation_v2(
                 epoch_id=effective_epoch,
                 netuid=effective_netuid,
                 settlement_epoch_id=settlement_epoch,
@@ -2165,13 +2169,16 @@ async def backfill_champion_settlement_v2_authority(
                 or outcome.get("receipt")
                 or {}
             )
-            migrated.append(
+            result = outcome.get("result") or {}
+            classification = str(outcome.get("status") or "")
+            classified.append(
                 {
                     **item,
+                    "classification": classification,
                     "settlement_hash": str(
-                        (outcome.get("result") or {}).get("settlement_hash")
-                        or ""
+                        result.get("settlement_hash") or ""
                     ),
+                    "finding_hash": str(result.get("finding_hash") or ""),
                     "receipt_hash": str(receipt.get("receipt_hash") or ""),
                 }
             )
@@ -2199,8 +2206,20 @@ async def backfill_champion_settlement_v2_authority(
         "epoch": effective_epoch,
         "netuid": effective_netuid,
         "planned_count": len(planned),
-        "migrated_count": len(migrated),
-        "migrated": migrated,
+        "classified_count": len(classified),
+        "finalized_count": sum(
+            1
+            for item in classified
+            if item.get("classification") == "finalized"
+        ),
+        "nonfinalized_count": sum(
+            1
+            for item in classified
+            if item.get("classification") == "not_finalized"
+        ),
+        # Compatibility aliases for the existing operator command response.
+        "migrated_count": len(classified),
+        "migrated": classified,
         "blocked": blocked,
         "failed": failed,
         "readiness_before": before,

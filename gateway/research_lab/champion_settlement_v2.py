@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import defaultdict
 from decimal import Decimal
 import logging
+import re
 from typing import Any, Mapping, Sequence
 
 from leadpoet_canonical.attested_v2 import (
@@ -18,6 +19,7 @@ from leadpoet_canonical.attested_v2 import (
     validate_receipt_graph,
 )
 from leadpoet_canonical.legacy_settlement_v2 import (
+    validate_legacy_nonfinalization_document_v2,
     validate_legacy_settlement_document_v2,
 )
 from leadpoet_canonical.weight_authority_v2 import (
@@ -29,6 +31,9 @@ from leadpoet_canonical.weight_authority_v2 import (
 FINALIZED_ALLOCATION_VIEW_V2 = "research_lab_finalized_allocation_epochs_v2"
 LEGACY_SETTLEMENT_TABLE_V2 = (
     "research_lab_legacy_finalized_allocation_migrations_v2"
+)
+LEGACY_NONFINALIZATION_TABLE_V2 = (
+    "research_lab_legacy_allocation_nonfinalizations_v2"
 )
 logger = logging.getLogger(__name__)
 
@@ -341,6 +346,90 @@ def validate_legacy_settlement_migrations_v2(
     return sorted(settled, key=lambda item: int(item["epoch"]))
 
 
+def validate_legacy_allocation_nonfinalizations_v2(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    receipt_graphs: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate append-only proof that legacy allocations were not paid."""
+
+    findings: list[dict[str, Any]] = []
+    seen_epochs: set[tuple[int, int]] = set()
+    for raw_row in rows:
+        row = dict(raw_row)
+        document_value = row.get("finding_doc")
+        if not isinstance(document_value, Mapping):
+            raise ChampionSettlementV2Error(
+                "legacy nonfinalization document is missing"
+            )
+        document = validate_legacy_nonfinalization_document_v2(
+            document_value
+        )
+        expected = {
+            "netuid": int(document["netuid"]),
+            "epoch_id": int(document["epoch_id"]),
+            "schema_version": str(document["schema_version"]),
+            "allocation_hash": str(document["allocation_hash"]),
+            "finding_hash": str(document["finding_hash"]),
+            "allocation_doc": dict(document["allocation_doc"]),
+            "finding_doc": dict(document),
+        }
+        for field, value in expected.items():
+            if row.get(field) != value:
+                raise ChampionSettlementV2Error(
+                    "legacy nonfinalization row differs at %s" % field
+                )
+        key = (expected["netuid"], expected["epoch_id"])
+        if key in seen_epochs:
+            raise ChampionSettlementV2Error(
+                "legacy nonfinalization epoch is duplicated"
+            )
+        seen_epochs.add(key)
+        receipt_hash = str(row.get("finding_receipt_hash") or "")
+        graph = receipt_graphs.get(receipt_hash)
+        if not isinstance(graph, Mapping):
+            raise ChampionSettlementV2Error(
+                "legacy nonfinalization receipt graph is missing"
+            )
+        validate_receipt_graph(graph)
+        if graph.get("root_receipt_hash") != receipt_hash:
+            raise ChampionSettlementV2Error(
+                "legacy nonfinalization receipt graph root differs"
+            )
+        root = next(
+            (
+                receipt
+                for receipt in graph.get("receipts") or ()
+                if isinstance(receipt, Mapping)
+                and receipt.get("receipt_hash") == receipt_hash
+            ),
+            None,
+        )
+        if (
+            not isinstance(root, Mapping)
+            or root.get("role") != "gateway_coordinator"
+            or root.get("purpose")
+            != "research_lab.legacy_finalized_allocation.v2"
+            or root.get("status") != "succeeded"
+            or root.get("output_root") != sha256_json(document)
+        ):
+            raise ChampionSettlementV2Error(
+                "legacy nonfinalization receipt differs"
+            )
+        findings.append(
+            {
+                "epoch": expected["epoch_id"],
+                "netuid": expected["netuid"],
+                "allocation_hash": expected["allocation_hash"],
+                "allocation_doc": expected["allocation_doc"],
+                "finding_hash": expected["finding_hash"],
+                "finding_receipt_hash": receipt_hash,
+                "finding_doc": expected["finding_doc"],
+            }
+        )
+    return sorted(findings, key=lambda item: int(item["epoch"]))
+
+
 def merge_finalized_allocation_histories_v2(
     native_rows: Sequence[Mapping[str, Any]],
     legacy_rows: Sequence[Mapping[str, Any]],
@@ -405,7 +494,7 @@ async def load_finalized_allocation_history_v2(
 
     if int(end_epoch) < int(start_epoch):
         return []
-    from gateway.research_lab.attested_v2_store import load_receipt_graph_v2
+    from gateway.research_lab.attested_v2_store import load_receipt_graphs_v2
     from gateway.research_lab.store import select_all
 
     native_rows = await select_all(
@@ -430,16 +519,29 @@ async def load_finalized_allocation_history_v2(
         max_rows=max(1000, int(end_epoch) - int(start_epoch) + 1),
         allow_partial=False,
     )
-    graphs: dict[str, Mapping[str, Any]] = {}
-    for row in native_rows:
-        root = str(row.get("finalization_receipt_hash") or "")
-        if root and root not in graphs:
-            graphs[root] = await load_receipt_graph_v2(root)
-    migration_graphs: dict[str, Mapping[str, Any]] = {}
-    for row in legacy_rows:
-        root = str(row.get("settlement_receipt_hash") or "")
-        if root and root not in migration_graphs:
-            migration_graphs[root] = await load_receipt_graph_v2(root)
+    native_roots = {
+        str(row.get("finalization_receipt_hash") or "")
+        for row in native_rows
+        if row.get("finalization_receipt_hash")
+    }
+    migration_roots = {
+        str(row.get("settlement_receipt_hash") or "")
+        for row in legacy_rows
+        if row.get("settlement_receipt_hash")
+    }
+    loaded_graphs = await load_receipt_graphs_v2(
+        native_roots | migration_roots
+    )
+    graphs = {
+        root: loaded_graphs[root]
+        for root in native_roots
+        if root in loaded_graphs
+    }
+    migration_graphs = {
+        root: loaded_graphs[root]
+        for root in migration_roots
+        if root in loaded_graphs
+    }
     native = validate_finalized_allocation_authorities_v2(
         native_rows,
         finalization_graphs=graphs,
@@ -451,10 +553,118 @@ async def load_finalized_allocation_history_v2(
     return merge_finalized_allocation_histories_v2(native, migrated)
 
 
+async def load_legacy_allocation_nonfinalizations_v2(
+    *,
+    netuid: int,
+    start_epoch: int,
+    end_epoch: int,
+) -> list[dict[str, Any]]:
+    """Load measured findings that create no historical payment credit."""
+
+    if int(end_epoch) < int(start_epoch):
+        return []
+    from gateway.research_lab.attested_v2_store import load_receipt_graphs_v2
+    from gateway.research_lab.store import select_all
+
+    rows = await select_all(
+        LEGACY_NONFINALIZATION_TABLE_V2,
+        filters=(
+            ("netuid", int(netuid)),
+            ("epoch_id", "gte", int(start_epoch)),
+            ("epoch_id", "lte", int(end_epoch)),
+        ),
+        order_by=(("epoch_id", False),),
+        max_rows=max(1000, int(end_epoch) - int(start_epoch) + 1),
+        allow_partial=False,
+    )
+    roots = {
+        str(row.get("finding_receipt_hash") or "")
+        for row in rows
+        if row.get("finding_receipt_hash")
+    }
+    loaded_graphs = await load_receipt_graphs_v2(roots)
+    graphs = {
+        root: loaded_graphs[root]
+        for root in roots
+        if root in loaded_graphs
+    }
+    return validate_legacy_allocation_nonfinalizations_v2(
+        rows,
+        receipt_graphs=graphs,
+    )
+
+
+def _legacy_allocation_active_champion_payment_v2(
+    raw_row: Mapping[str, Any],
+    *,
+    netuid: int,
+    active_reward_ids: set[str],
+) -> tuple[int, str, bool]:
+    allocation = raw_row.get("allocation_doc")
+    allocation_hash = str(raw_row.get("allocation_hash") or "")
+    try:
+        row_epoch = int(raw_row.get("epoch"))
+        row_netuid = int(raw_row.get("netuid"))
+    except (TypeError, ValueError) as exc:
+        raise ChampionSettlementV2Error(
+            "historical allocation scope is invalid"
+        ) from exc
+    if (
+        not isinstance(allocation, Mapping)
+        or row_netuid != int(netuid)
+        or int(allocation.get("epoch")) != row_epoch
+        or (
+            "netuid" in allocation
+            and int(allocation.get("netuid")) != int(netuid)
+        )
+        or allocation.get("allocation_hash") != allocation_hash
+        or sha256_json(
+            {
+                key: value
+                for key, value in allocation.items()
+                if key != "allocation_hash"
+            }
+        )
+        != allocation_hash
+    ):
+        raise ChampionSettlementV2Error("historical allocation hash differs")
+
+    pays_active = False
+    for section in (
+        "champion_allocations",
+        "queued_champion_allocations",
+    ):
+        values = allocation.get(section) or []
+        if not isinstance(values, list):
+            raise ChampionSettlementV2Error(
+                "historical champion allocation list is invalid"
+            )
+        for item in values:
+            if not isinstance(item, Mapping):
+                raise ChampionSettlementV2Error(
+                    "historical champion allocation is invalid"
+                )
+            reward_id = str(
+                item.get("source_id")
+                or item.get("champion_reward_id")
+                or ""
+            )
+            if (
+                reward_id in active_reward_ids
+                and Decimal(str(item.get("paid_alpha_percent") or 0)) > 0
+            ):
+                pays_active = True
+    return row_epoch, allocation_hash, pays_active
+
+
 async def champion_v2_cutover_readiness(
     *,
     epoch: int,
     netuid: int,
+    _finalized_history_out: list[dict[str, Any]] | None = None,
+    _business_graphs_out: dict[
+        tuple[str, str], dict[str, Any]
+    ] | None = None,
 ) -> dict[str, Any]:
     """Prove every positive-balance champion has one exact V2 receipt."""
 
@@ -465,6 +675,7 @@ async def champion_v2_cutover_readiness(
     )
     from gateway.research_lab.attested_v2_store import (
         load_business_artifact_graph_by_ref_v2,
+        load_business_artifact_graphs_by_ref_v2,
     )
     from gateway.research_lab.store import select_all
     from gateway.tee.reward_executor_v2 import champion_reward_row_projection_v2
@@ -494,6 +705,18 @@ async def champion_v2_cutover_readiness(
         if starts and int(epoch) > 0
         else []
     )
+    nonfinalized = (
+        await load_legacy_allocation_nonfinalizations_v2(
+            netuid=int(netuid),
+            start_epoch=min(starts),
+            end_epoch=int(epoch) - 1,
+        )
+        if starts and int(epoch) > 0
+        else []
+    )
+    if _finalized_history_out is not None:
+        _finalized_history_out.clear()
+        _finalized_history_out.extend(dict(item) for item in finalized)
     legacy_allocations = (
         await select_all(
             "research_lab_emission_allocation_current",
@@ -537,14 +760,38 @@ async def champion_v2_cutover_readiness(
 
     covered: list[str] = []
     missing: list[dict[str, Any]] = []
+    decision_graphs: dict[tuple[str, str], dict[str, Any]] = {}
+    decision_refs = {
+        (
+            "champion_reward_decision",
+            str(item["champion_reward_id"]),
+        )
+        for item in positive
+    }
+    if decision_refs:
+        try:
+            decision_graphs = await load_business_artifact_graphs_by_ref_v2(
+                decision_refs
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_champion_v2_cutover_batch_receipt_fallback "
+                "count=%d error=%s",
+                len(decision_refs),
+                str(exc)[:240],
+            )
     for item in positive:
         row = item["row"]
         reward_id = str(item["champion_reward_id"])
         try:
-            graph = await load_business_artifact_graph_by_ref_v2(
-                artifact_kind="champion_reward_decision",
-                artifact_ref=reward_id,
+            graph = decision_graphs.get(
+                ("champion_reward_decision", reward_id)
             )
+            if not isinstance(graph, Mapping):
+                graph = await load_business_artifact_graph_by_ref_v2(
+                    artifact_kind="champion_reward_decision",
+                    artifact_ref=reward_id,
+                )
             root_hash = str(graph.get("root_receipt_hash") or "")
             root = next(
                 (
@@ -566,6 +813,10 @@ async def champion_v2_cutover_readiness(
                     "champion reward receipt projection differs"
                 )
             covered.append(reward_id)
+            if _business_graphs_out is not None:
+                _business_graphs_out[
+                    ("champion_reward_decision", reward_id)
+                ] = dict(graph)
         except Exception as exc:
             logger.warning(
                 "research_lab_champion_v2_cutover_receipt_uncovered "
@@ -591,61 +842,37 @@ async def champion_v2_cutover_readiness(
     finalized_by_epoch = {
         int(item["epoch"]): item for item in finalized
     }
-    required_settlements: dict[int, str] = {}
+    nonfinalized_by_epoch = {
+        int(item["epoch"]): item for item in nonfinalized
+    }
+    conflicting_classification_epochs = sorted(
+        set(finalized_by_epoch) & set(nonfinalized_by_epoch)
+    )
     invalid_settlements: list[dict[str, Any]] = []
+    for conflict_epoch in conflicting_classification_epochs:
+        invalid_settlements.append(
+            {
+                "epoch": conflict_epoch,
+                "reason": "conflicting_historical_chain_classifications",
+            }
+        )
+    current_payment_allocations: dict[int, str] = {}
     for row in legacy_allocations:
-        allocation = row.get("allocation_doc")
-        allocation_hash = str(row.get("allocation_hash") or "")
         try:
-            row_epoch = int(row.get("epoch"))
-            if (
-                not isinstance(allocation, Mapping)
-                or int(allocation.get("epoch")) != row_epoch
-                or int(allocation.get("netuid")) != int(netuid)
-                or allocation.get("allocation_hash") != allocation_hash
-                or sha256_json(
-                    {
-                        key: value
-                        for key, value in allocation.items()
-                        if key != "allocation_hash"
-                    }
+            row_epoch, allocation_hash, pays_active = (
+                _legacy_allocation_active_champion_payment_v2(
+                    row,
+                    netuid=int(netuid),
+                    active_reward_ids=active_reward_ids,
                 )
-                != allocation_hash
-            ):
-                raise ChampionSettlementV2Error(
-                    "historical allocation hash differs"
-                )
-            pays_active = False
-            for section in (
-                "champion_allocations",
-                "queued_champion_allocations",
-            ):
-                values = allocation.get(section) or []
-                if not isinstance(values, list):
-                    raise ChampionSettlementV2Error(
-                        "historical champion allocation list is invalid"
-                    )
-                for item in values:
-                    if not isinstance(item, Mapping):
-                        raise ChampionSettlementV2Error(
-                            "historical champion allocation is invalid"
-                        )
-                    reward_id = str(
-                        item.get("source_id")
-                        or item.get("champion_reward_id")
-                        or ""
-                    )
-                    if reward_id not in active_reward_ids:
-                        continue
-                    if Decimal(str(item.get("paid_alpha_percent") or 0)) > 0:
-                        pays_active = True
+            )
             if pays_active:
-                existing_hash = required_settlements.get(row_epoch)
+                existing_hash = current_payment_allocations.get(row_epoch)
                 if existing_hash and existing_hash != allocation_hash:
                     raise ChampionSettlementV2Error(
                         "historical allocation epoch is ambiguous"
                     )
-                required_settlements[row_epoch] = allocation_hash
+                current_payment_allocations[row_epoch] = allocation_hash
         except Exception as exc:
             invalid_settlements.append(
                 {
@@ -654,20 +881,334 @@ async def champion_v2_cutover_readiness(
                     "error": str(exc)[:240],
                 }
             )
-    missing_settlements: list[dict[str, Any]] = list(invalid_settlements)
-    covered_settlement_epochs: list[int] = []
-    for settlement_epoch, allocation_hash in sorted(required_settlements.items()):
-        authority = finalized_by_epoch.get(settlement_epoch)
-        if authority is None:
-            missing_settlements.append(
+
+    candidate_anchors: list[dict[str, Any]] = []
+    candidate_bundles: list[dict[str, Any]] = []
+    historical_snapshots: list[dict[str, Any]] = []
+    if starts and int(epoch) > 0:
+        candidate_start = min(starts)
+        candidate_end = int(epoch) - 1
+        candidate_max_rows = max(
+            10000,
+            (candidate_end - candidate_start + 1) * 100,
+        )
+        candidate_anchors = await select_all(
+            "research_lab_arweave_epoch_audit_anchor_current",
+            filters=(
+                ("netuid", int(netuid)),
+                ("epoch", "gte", candidate_start),
+                ("epoch", "lte", candidate_end),
+                ("audit_kind", "active"),
+                ("current_anchor_status", "checkpointed"),
+            ),
+            order_by=(("epoch", False), ("current_status_at", False)),
+            max_rows=candidate_max_rows,
+            allow_partial=False,
+        )
+        candidate_bundles = await select_all(
+            "published_weight_bundles",
+            filters=(
+                ("netuid", int(netuid)),
+                ("epoch_id", "gte", candidate_start),
+                ("epoch_id", "lte", candidate_end),
+            ),
+            order_by=(("epoch_id", False), ("created_at", False)),
+            max_rows=candidate_max_rows,
+            allow_partial=False,
+        )
+        historical_snapshots = await select_all(
+            "research_lab_emission_allocation_snapshots",
+            filters=(
+                ("netuid", int(netuid)),
+                ("epoch", "gte", candidate_start),
+                ("epoch", "lte", candidate_end),
+            ),
+            order_by=(("epoch", False), ("created_at", False)),
+            max_rows=candidate_max_rows,
+            allow_partial=False,
+        )
+
+    anchors_by_epoch: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for row in candidate_anchors:
+        try:
+            anchors_by_epoch[int(row.get("epoch"))].append(dict(row))
+        except (TypeError, ValueError):
+            invalid_settlements.append(
+                {
+                    "epoch": row.get("epoch"),
+                    "reason": "invalid_historical_settlement_candidate",
+                    "error": "checkpointed audit anchor epoch is invalid",
+                }
+            )
+    bundles_by_epoch: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for row in candidate_bundles:
+        try:
+            bundles_by_epoch[int(row.get("epoch_id"))].append(dict(row))
+        except (TypeError, ValueError):
+            invalid_settlements.append(
+                {
+                    "epoch": row.get("epoch_id"),
+                    "reason": "invalid_historical_settlement_candidate",
+                    "error": "published weight bundle epoch is invalid",
+                }
+            )
+    snapshots_by_hash: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in historical_snapshots:
+        snapshots_by_hash[str(row.get("allocation_hash") or "")].append(
+            dict(row)
+        )
+
+    historical_payment_allocations: dict[int, str] = {}
+    required_settlements: dict[int, str] = {}
+    unproven_allocations: list[dict[str, Any]] = []
+    unproven_keys: set[tuple[int, str, str]] = set()
+
+    def add_unproven(epoch_id: int, allocation_hash: str, reason: str) -> None:
+        key = (int(epoch_id), str(allocation_hash), str(reason))
+        if key in unproven_keys:
+            return
+        unproven_keys.add(key)
+        unproven_allocations.append(
+            {
+                "epoch": key[0],
+                "allocation_hash": key[1],
+                "reason": key[2],
+            }
+        )
+
+    for settlement_epoch, authority in sorted(finalized_by_epoch.items()):
+        try:
+            authority_epoch, allocation_hash, pays_active = (
+                _legacy_allocation_active_champion_payment_v2(
+                    {
+                        "epoch": settlement_epoch,
+                        "netuid": authority.get("netuid"),
+                        "allocation_hash": authority.get("allocation_hash"),
+                        "allocation_doc": authority.get("allocation_doc"),
+                    },
+                    netuid=int(netuid),
+                    active_reward_ids=active_reward_ids,
+                )
+            )
+            if pays_active:
+                historical_payment_allocations[authority_epoch] = (
+                    allocation_hash
+                )
+        except Exception as exc:
+            invalid_settlements.append(
+                {
+                    "epoch": settlement_epoch,
+                    "reason": "invalid_finalized_historical_allocation",
+                    "error": str(exc)[:240],
+                }
+            )
+
+    candidate_epochs = sorted(
+        set(current_payment_allocations) | set(anchors_by_epoch)
+    )
+    for settlement_epoch in candidate_epochs:
+        current_hash = current_payment_allocations.get(settlement_epoch)
+        epoch_anchors = anchors_by_epoch.get(settlement_epoch, [])
+        if not epoch_anchors:
+            if (
+                current_hash
+                and settlement_epoch not in historical_payment_allocations
+            ):
+                add_unproven(
+                    settlement_epoch,
+                    current_hash,
+                    "no_checkpointed_audit_anchor",
+                )
+            continue
+        if len(epoch_anchors) != 1:
+            relevant = bool(current_hash)
+            for candidate in epoch_anchors:
+                candidate_hash = str(candidate.get("allocation_hash") or "")
+                candidate_rows = snapshots_by_hash.get(candidate_hash, [])
+                if len(candidate_rows) != 1:
+                    relevant = True
+                    continue
+                try:
+                    _, _, candidate_pays = (
+                        _legacy_allocation_active_champion_payment_v2(
+                            candidate_rows[0],
+                            netuid=int(netuid),
+                            active_reward_ids=active_reward_ids,
+                        )
+                    )
+                except Exception:
+                    relevant = True
+                else:
+                    relevant = relevant or candidate_pays
+            if relevant:
+                invalid_settlements.append(
+                    {
+                        "epoch": settlement_epoch,
+                        "allocation_hash": current_hash or "",
+                        "reason": "ambiguous_checkpointed_audit_anchor",
+                    }
+                )
+            continue
+        anchor = epoch_anchors[0]
+        allocation_hash = str(anchor.get("allocation_hash") or "")
+        if not allocation_hash:
+            add_unproven(
+                settlement_epoch,
+                current_hash or "",
+                "checkpointed_anchor_has_no_allocation",
+            )
+            continue
+        exact_snapshots = snapshots_by_hash.get(allocation_hash, [])
+        if len(exact_snapshots) != 1:
+            if current_hash:
+                invalid_settlements.append(
+                    {
+                        "epoch": settlement_epoch,
+                        "allocation_hash": current_hash,
+                        "anchor_allocation_hash": allocation_hash,
+                        "reason": "anchor_bound_allocation_snapshot_missing_or_ambiguous",
+                    }
+                )
+            else:
+                add_unproven(
+                    settlement_epoch,
+                    allocation_hash,
+                    "anchor_bound_allocation_snapshot_missing_or_ambiguous",
+                )
+            continue
+        try:
+            snapshot_epoch, snapshot_hash, anchor_pays_active = (
+                _legacy_allocation_active_champion_payment_v2(
+                    exact_snapshots[0],
+                    netuid=int(netuid),
+                    active_reward_ids=active_reward_ids,
+                )
+            )
+            if (
+                snapshot_epoch != settlement_epoch
+                or snapshot_hash != allocation_hash
+            ):
+                raise ChampionSettlementV2Error(
+                    "anchor-bound allocation scope differs"
+                )
+        except Exception as exc:
+            invalid_settlements.append(
                 {
                     "epoch": settlement_epoch,
                     "allocation_hash": allocation_hash,
-                    "reason": "missing_finalized_chain_settlement_authority",
+                    "reason": "invalid_anchor_bound_historical_allocation",
+                    "error": str(exc)[:240],
                 }
             )
-        elif authority.get("allocation_hash") != allocation_hash:
-            missing_settlements.append(
+            continue
+
+        existing_hash = historical_payment_allocations.get(settlement_epoch)
+        if existing_hash:
+            if anchor_pays_active and existing_hash != allocation_hash:
+                invalid_settlements.append(
+                    {
+                        "epoch": settlement_epoch,
+                        "allocation_hash": allocation_hash,
+                        "finalized_allocation_hash": existing_hash,
+                        "reason": "finalized_chain_allocation_hash_mismatch",
+                    }
+                )
+            if current_hash and current_hash != existing_hash:
+                add_unproven(
+                    settlement_epoch,
+                    current_hash,
+                    "current_allocation_not_finalized",
+                )
+            continue
+        if not anchor_pays_active:
+            if current_hash:
+                add_unproven(
+                    settlement_epoch,
+                    current_hash,
+                    "current_allocation_not_checkpointed",
+                )
+            continue
+
+        anchor_weights_hash = str(anchor.get("weights_hash") or "").removeprefix(
+            "sha256:"
+        )
+        arweave_tx_id = str(anchor.get("current_arweave_tx_id") or "")
+        transparency_event_hash = str(
+            anchor.get("current_transparency_event_hash") or ""
+        ).removeprefix("sha256:")
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", anchor_weights_hash)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{43}", arweave_tx_id)
+            or not re.fullmatch(r"[0-9a-f]{64}", transparency_event_hash)
+        ):
+            invalid_settlements.append(
+                {
+                    "epoch": settlement_epoch,
+                    "allocation_hash": allocation_hash,
+                    "reason": "invalid_checkpointed_audit_anchor",
+                }
+            )
+            continue
+        epoch_bundles = bundles_by_epoch.get(settlement_epoch, [])
+        if not epoch_bundles:
+            add_unproven(
+                settlement_epoch,
+                allocation_hash,
+                "no_published_weight_bundle",
+            )
+            continue
+        matching_bundles = [
+            row
+            for row in epoch_bundles
+            if str(row.get("weights_hash") or "").removeprefix("sha256:")
+            == anchor_weights_hash
+        ]
+        if not matching_bundles:
+            invalid_settlements.append(
+                {
+                    "epoch": settlement_epoch,
+                    "allocation_hash": allocation_hash,
+                    "reason": "published_weight_bundle_hash_mismatch",
+                }
+            )
+            continue
+        historical_payment_allocations[settlement_epoch] = allocation_hash
+        required_settlements[settlement_epoch] = allocation_hash
+        if current_hash and current_hash != allocation_hash:
+            add_unproven(
+                settlement_epoch,
+                current_hash,
+                "current_allocation_not_checkpointed",
+            )
+
+    missing_classifications: list[dict[str, Any]] = list(
+        invalid_settlements
+    )
+    covered_settlement_epochs: list[int] = []
+    covered_nonfinalization_epochs: list[int] = []
+    for settlement_epoch, allocation_hash in sorted(
+        historical_payment_allocations.items()
+    ):
+        authority = finalized_by_epoch.get(settlement_epoch)
+        finding = nonfinalized_by_epoch.get(settlement_epoch)
+        if (
+            authority is not None
+            and finding is not None
+        ):
+            missing_classifications.append(
+                {
+                    "epoch": settlement_epoch,
+                    "allocation_hash": allocation_hash,
+                    "reason": "conflicting_historical_chain_classifications",
+                }
+            )
+        elif (
+            authority is not None
+            and authority.get("allocation_hash") == allocation_hash
+        ):
+            covered_settlement_epochs.append(settlement_epoch)
+        elif authority is not None:
+            missing_classifications.append(
                 {
                     "epoch": settlement_epoch,
                     "allocation_hash": allocation_hash,
@@ -675,34 +1216,96 @@ async def champion_v2_cutover_readiness(
                     "reason": "finalized_chain_allocation_hash_mismatch",
                 }
             )
-        else:
-            covered_settlement_epochs.append(settlement_epoch)
-    settlement_required_count = len(required_settlements) + len(
-        invalid_settlements
+        elif (
+            finding is not None
+            and finding.get("allocation_hash") == allocation_hash
+        ):
+            covered_nonfinalization_epochs.append(settlement_epoch)
+            add_unproven(
+                settlement_epoch,
+                allocation_hash,
+                "finalized_chain_vector_mismatch",
+            )
+        elif finding is not None:
+            missing_classifications.append(
+                {
+                    "epoch": settlement_epoch,
+                    "allocation_hash": allocation_hash,
+                    "nonfinalized_allocation_hash": finding.get(
+                        "allocation_hash"
+                    ),
+                    "reason": "nonfinalized_chain_allocation_hash_mismatch",
+                }
+            )
+        elif settlement_epoch in required_settlements:
+            missing_classifications.append(
+                {
+                    "epoch": settlement_epoch,
+                    "allocation_hash": allocation_hash,
+                    "reason": "missing_finalized_chain_classification_authority",
+                }
+            )
+    classification_required_count = (
+        len(covered_settlement_epochs)
+        + len(covered_nonfinalization_epochs)
+        + len(missing_classifications)
     )
-    settlement_covered_count = len(covered_settlement_epochs)
+    classification_covered_count = (
+        len(covered_settlement_epochs)
+        + len(covered_nonfinalization_epochs)
+    )
     return {
         "schema_version": "leadpoet.champion_v2_cutover_readiness.v1",
         "epoch": int(epoch),
         "netuid": int(netuid),
         "ready": (
             required_count == covered_count
-            and settlement_required_count == settlement_covered_count
+            and classification_required_count
+            == classification_covered_count
         ),
         "required_positive_balance_count": required_count,
         "covered_positive_balance_count": covered_count,
         "receipt_coverage": coverage,
         "covered_champion_reward_ids": sorted(covered),
         "missing": missing,
-        "required_historical_settlement_count": settlement_required_count,
-        "covered_historical_settlement_count": settlement_covered_count,
+        "required_historical_classification_count": (
+            classification_required_count
+        ),
+        "covered_historical_classification_count": (
+            classification_covered_count
+        ),
+        "historical_classification_coverage": (
+            1.0
+            if classification_required_count == 0
+            else classification_covered_count
+            / classification_required_count
+        ),
+        "covered_historical_classification_epochs": sorted(
+            covered_settlement_epochs + covered_nonfinalization_epochs
+        ),
+        "covered_historical_nonfinalization_epochs": (
+            covered_nonfinalization_epochs
+        ),
+        "missing_historical_classifications": missing_classifications,
+        # Compatibility aliases for the existing operator API. The gate now
+        # requires a measured finalized/nonfinalized classification, not an
+        # assumption that every published legacy bundle reached chain state.
+        "required_historical_settlement_count": (
+            classification_required_count
+        ),
+        "covered_historical_settlement_count": (
+            classification_covered_count
+        ),
         "historical_settlement_coverage": (
             1.0
-            if settlement_required_count == 0
-            else settlement_covered_count / settlement_required_count
+            if classification_required_count == 0
+            else classification_covered_count
+            / classification_required_count
         ),
         "covered_historical_settlement_epochs": covered_settlement_epochs,
-        "missing_historical_settlements": missing_settlements,
+        "missing_historical_settlements": missing_classifications,
+        "unproven_historical_allocation_count": len(unproven_allocations),
+        "unproven_historical_allocations": unproven_allocations,
         "zero_balance_active_rows": settled,
         "finalized_allocation_epoch_count": len(finalized),
         "native_finalized_allocation_epoch_count": sum(
@@ -716,4 +1319,5 @@ async def champion_v2_cutover_readiness(
             if "legacy_finalized_chain_migration_v2"
             in (item.get("authority_types") or ())
         ),
+        "measured_nonfinalized_allocation_epoch_count": len(nonfinalized),
     }

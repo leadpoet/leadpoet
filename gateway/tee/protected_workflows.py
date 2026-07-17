@@ -98,9 +98,19 @@ PROTECTED_SYMBOLS = {
     "gateway/research_lab/champion_settlement_v2.py": (
         "validate_finalized_allocation_authorities_v2",
         "validate_legacy_settlement_migrations_v2",
+        "validate_legacy_allocation_nonfinalizations_v2",
         "merge_finalized_allocation_histories_v2",
         "load_finalized_allocation_history_v2",
+        "load_legacy_allocation_nonfinalizations_v2",
         "champion_v2_cutover_readiness",
+    ),
+    "gateway/research_lab/attested_v2_store.py": (
+        "load_receipt_graph_v2",
+        "load_receipt_graphs_v2",
+        "load_business_artifact_graph_by_ref_v2",
+        "load_business_artifact_graphs_by_ref_v2",
+        "persist_legacy_finalized_allocation_migration_v2",
+        "persist_legacy_allocation_nonfinalization_v2",
     ),
     "gateway/research_lab/autoresearch_authority_v2.py": (
         "run_authoritative_autoresearch_v2",
@@ -198,9 +208,16 @@ PROTECTED_SYMBOLS = {
         "backfill_champion_settlement_v2_authority",
         "champion_v2_cutover_readiness_report",
     ),
+    "gateway/research_lab/arweave_audit.py": (
+        "_verified_rebuffer_event",
+        "record_research_lab_checkpointed_events",
+        "rebuffer_research_lab_buffered_audit_events",
+        "recover_research_lab_checkpointed_audit_epochs",
+    ),
     "gateway/research_lab/v2_authority.py": (
         "attest_historical_champion_reward_v2",
         "attest_historical_champion_settlement_v2",
+        "classify_historical_champion_allocation_v2",
         "build_allocation_v2",
         "_load_allocation_parent_graphs_v2",
     ),
@@ -232,7 +249,10 @@ PROTECTED_SYMBOLS = {
     ),
     "leadpoet_canonical/legacy_settlement_v2.py": (
         "validate_legacy_weight_bundle_v2",
+        "legacy_chain_vector_matches_bundle_v2",
         "validate_legacy_audit_event_v2",
+        "validate_legacy_allocation_nonfinalization_v2",
+        "validate_legacy_nonfinalization_document_v2",
         "validate_legacy_finalized_settlement_v2",
         "validate_legacy_settlement_document_v2",
     ),
@@ -286,12 +306,30 @@ PROTECTED_SYMBOLS = {
         "RunscModelSandboxV2",
     ),
     "gateway/tee/provider_broker_v2.py": (
+        "_extract_tls_metadata",
         "HTTPXProviderTransport",
         "ProviderBrokerV2",
         "provider_registry_document",
     ),
     "gateway/tee/provider_semantics_v2.py": (
         "ProviderSemanticsAuthorityV2",
+    ),
+    "gateway/tee/tee_service.py": (
+        "acknowledge_checkpoint",
+        "build_checkpoint",
+    ),
+    "gateway/tee/rpc_authority.py": (
+        "allowed_exact_methods",
+        "rpc_method_allowed",
+    ),
+    "gateway/utils/arweave_client.py": (
+        "checkpoint_payload_bytes",
+        "upload_checkpoint",
+        "wait_for_confirmation",
+    ),
+    "gateway/tasks/hourly_batch.py": (
+        "build_arweave_checkpoint_log_event",
+        "hourly_batch_task",
     ),
     "gateway/tee/reward_executor_v2.py": (
         "reward_receipt_projection_v2",

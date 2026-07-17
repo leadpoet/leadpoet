@@ -262,22 +262,31 @@ async def test_cutover_requires_receipts_for_every_positive_balance(
         )
         return rows if requested_status == "active" else []
 
+    finalized_allocation_body = {
+        "schema_version": "1.0",
+        "epoch": 100,
+        "champion_allocations": [
+            {
+                "source_id": settled_id,
+                "paid_alpha_percent": 10.0,
+            },
+            {
+                "source_id": positive_id,
+                "paid_alpha_percent": 5.0,
+            },
+        ],
+        "queued_champion_allocations": [],
+    }
+    finalized_allocation = {
+        **finalized_allocation_body,
+        "allocation_hash": sha256_json(finalized_allocation_body),
+    }
     finalized = [
         {
             "epoch": 100,
-            "allocation_doc": {
-                "champion_allocations": [
-                    {
-                        "source_id": settled_id,
-                        "paid_alpha_percent": 10.0,
-                    },
-                    {
-                        "source_id": positive_id,
-                        "paid_alpha_percent": 5.0,
-                    },
-                ],
-                "queued_champion_allocations": [],
-            },
+            "netuid": 71,
+            "allocation_hash": finalized_allocation["allocation_hash"],
+            "allocation_doc": finalized_allocation,
         }
     ]
 
@@ -300,6 +309,15 @@ async def test_cutover_requires_receipts_for_every_positive_balance(
             ],
         }
 
+    async def load_graphs(artifacts):
+        return {
+            key: await load_graph(
+                artifact_kind=key[0],
+                artifact_ref=key[1],
+            )
+            for key in artifacts
+        }
+
     monkeypatch.setattr(store, "select_all", select_all)
     monkeypatch.setattr(
         settlement,
@@ -310,6 +328,11 @@ async def test_cutover_requires_receipts_for_every_positive_balance(
         attested_v2_store,
         "load_business_artifact_graph_by_ref_v2",
         load_graph,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_by_ref_v2",
+        load_graphs,
     )
 
     ready = await settlement.champion_v2_cutover_readiness(
@@ -326,10 +349,18 @@ async def test_cutover_requires_receipts_for_every_positive_balance(
     async def missing_graph(**_kwargs):
         raise RuntimeError("not migrated")
 
+    async def missing_graphs(_artifacts):
+        raise RuntimeError("not migrated")
+
     monkeypatch.setattr(
         attested_v2_store,
         "load_business_artifact_graph_by_ref_v2",
         missing_graph,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_by_ref_v2",
+        missing_graphs,
     )
     blocked = await settlement.champion_v2_cutover_readiness(
         epoch=102,
@@ -362,10 +393,19 @@ async def test_cutover_does_not_trust_paid_status_when_chain_balance_remains(
     }
 
     async def select_all(table, *, filters=(), **_kwargs):
-        if table == "research_lab_emission_allocation_current":
+        if table in {
+            "research_lab_emission_allocation_current",
+            "research_lab_emission_allocation_snapshots",
+            "research_lab_arweave_epoch_audit_anchor_current",
+            "published_weight_bundles",
+        }:
             return []
         status = next(
-            (value for field, value in filters if field == "current_reward_status"),
+            (
+                item[1]
+                for item in filters
+                if len(item) == 2 and item[0] == "current_reward_status"
+            ),
             "",
         )
         return [reward] if status == "paid" else []
@@ -374,6 +414,9 @@ async def test_cutover_does_not_trust_paid_status_when_chain_balance_remains(
         return []
 
     async def no_receipt(**_kwargs):
+        raise RuntimeError("not migrated")
+
+    async def no_receipts(_artifacts):
         raise RuntimeError("not migrated")
 
     monkeypatch.setattr(store, "select_all", select_all)
@@ -386,6 +429,11 @@ async def test_cutover_does_not_trust_paid_status_when_chain_balance_remains(
         attested_v2_store,
         "load_business_artifact_graph_by_ref_v2",
         no_receipt,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_by_ref_v2",
+        no_receipts,
     )
 
     readiness = await settlement.champion_v2_cutover_readiness(
@@ -428,7 +476,6 @@ async def test_cutover_blocks_until_every_historical_payment_epoch_is_attested(
     allocation_body = {
         "schema_version": "1.0",
         "epoch": 100,
-        "netuid": 71,
         "champion_allocations": [
             {
                 "source_id": reward_id,
@@ -444,13 +491,33 @@ async def test_cutover_blocks_until_every_historical_payment_epoch_is_attested(
     }
 
     async def select_all(table, *, filters=(), **_kwargs):
-        if table == "research_lab_emission_allocation_current":
+        if table in {
+            "research_lab_emission_allocation_current",
+            "research_lab_emission_allocation_snapshots",
+        }:
             return [
                 {
                     "epoch": 100,
                     "netuid": 71,
                     "allocation_hash": allocation["allocation_hash"],
                     "allocation_doc": allocation,
+                }
+            ]
+        if table == "research_lab_arweave_epoch_audit_anchor_current":
+            return [
+                {
+                    "epoch": 100,
+                    "allocation_hash": allocation["allocation_hash"],
+                    "weights_hash": "sha256:" + "a" * 64,
+                    "current_arweave_tx_id": "A" * 43,
+                    "current_transparency_event_hash": "b" * 64,
+                }
+            ]
+        if table == "published_weight_bundles":
+            return [
+                {
+                    "epoch_id": 100,
+                    "weights_hash": "a" * 64,
                 }
             ]
         status = next(
@@ -463,10 +530,13 @@ async def test_cutover_blocks_until_every_historical_payment_epoch_is_attested(
         )
         return [reward] if status == "active" else []
 
-    state = {"finalized": []}
+    state = {"finalized": [], "nonfinalized": []}
 
     async def load_finalized(**_kwargs):
         return list(state["finalized"])
+
+    async def load_nonfinalized(**_kwargs):
+        return list(state["nonfinalized"])
 
     root_hash = "sha256:" + "9" * 64
 
@@ -485,6 +555,15 @@ async def test_cutover_blocks_until_every_historical_payment_epoch_is_attested(
             ],
         }
 
+    async def load_graphs(artifacts):
+        return {
+            key: await load_graph(
+                artifact_kind=key[0],
+                artifact_ref=key[1],
+            )
+            for key in artifacts
+        }
+
     monkeypatch.setattr(store, "select_all", select_all)
     monkeypatch.setattr(
         settlement,
@@ -492,9 +571,19 @@ async def test_cutover_blocks_until_every_historical_payment_epoch_is_attested(
         load_finalized,
     )
     monkeypatch.setattr(
+        settlement,
+        "load_legacy_allocation_nonfinalizations_v2",
+        load_nonfinalized,
+    )
+    monkeypatch.setattr(
         attested_v2_store,
         "load_business_artifact_graph_by_ref_v2",
         load_graph,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_by_ref_v2",
+        load_graphs,
     )
 
     blocked = await settlement.champion_v2_cutover_readiness(
@@ -508,10 +597,37 @@ async def test_cutover_blocks_until_every_historical_payment_epoch_is_attested(
         {
             "epoch": 100,
             "allocation_hash": allocation["allocation_hash"],
-            "reason": "missing_finalized_chain_settlement_authority",
+                "reason": "missing_finalized_chain_classification_authority",
         }
     ]
 
+    state["nonfinalized"] = [
+        {
+            "epoch": 100,
+            "netuid": 71,
+            "allocation_hash": allocation["allocation_hash"],
+            "allocation_doc": allocation,
+            "finding_hash": "sha256:" + "f" * 64,
+        }
+    ]
+    classified_unpaid = await settlement.champion_v2_cutover_readiness(
+        epoch=102,
+        netuid=71,
+    )
+    assert classified_unpaid["ready"] is True
+    assert classified_unpaid[
+        "covered_historical_nonfinalization_epochs"
+    ] == [100]
+    assert classified_unpaid["migrated_finalized_allocation_epoch_count"] == 0
+    assert classified_unpaid["unproven_historical_allocations"] == [
+        {
+            "epoch": 100,
+            "allocation_hash": allocation["allocation_hash"],
+            "reason": "finalized_chain_vector_mismatch",
+        }
+    ]
+
+    state["nonfinalized"] = []
     state["finalized"] = [
         {
             "epoch": 100,
@@ -527,6 +643,330 @@ async def test_cutover_blocks_until_every_historical_payment_epoch_is_attested(
     )
     assert ready["ready"] is True
     assert ready["historical_settlement_coverage"] == 1.0
+
+    mismatched_body = {
+        key: value
+        for key, value in allocation.items()
+        if key != "allocation_hash"
+    }
+    mismatched_body["netuid"] = 72
+    allocation.clear()
+    allocation.update(
+        {
+            **mismatched_body,
+            "allocation_hash": sha256_json(mismatched_body),
+        }
+    )
+    blocked_scope = await settlement.champion_v2_cutover_readiness(
+        epoch=102,
+        netuid=71,
+    )
+    assert blocked_scope["ready"] is False
+    assert blocked_scope["missing_historical_settlements"][0]["reason"] == (
+        "invalid_historical_allocation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cutover_uses_anchor_bound_snapshot_not_later_current_view(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store, store
+    from gateway.tee.reward_executor_v2 import champion_reward_row_projection_v2
+
+    reward_id = "champion_reward:sha256:" + "1" * 64
+    reward = {
+        "champion_reward_id": reward_id,
+        "score_bundle_id": "score-anchor",
+        "candidate_id": "candidate-anchor",
+        "run_id": "run-anchor",
+        "miner_hotkey": "miner-anchor",
+        "miner_uid": 1,
+        "island": "generalist",
+        "evaluation_epoch": 99,
+        "start_epoch": 100,
+        "epoch_count": 2,
+        "improvement_points": 2.0,
+        "threshold_points": 1.0,
+        "desired_alpha_percent": 5.0,
+        "input_hash": "sha256:" + "2" * 64,
+        "anchored_hash": "sha256:" + "3" * 64,
+        "current_reward_status": "active",
+    }
+    anchored_body = {
+        "schema_version": "1.0",
+        "epoch": 100,
+        "champion_allocations": [
+            {
+                "source_id": reward_id,
+                "paid_alpha_percent": 5.0,
+                "base_desired_alpha_percent": 5.0,
+            }
+        ],
+        "queued_champion_allocations": [],
+        "snapshot_generation": "submitted",
+    }
+    anchored = {
+        **anchored_body,
+        "allocation_hash": sha256_json(anchored_body),
+    }
+    current_body = {
+        **anchored_body,
+        "snapshot_generation": "recomputed",
+    }
+    current = {
+        **current_body,
+        "allocation_hash": sha256_json(current_body),
+    }
+
+    async def select_all(table, *, filters=(), **_kwargs):
+        if table == "research_lab_emission_allocation_current":
+            documents = [current]
+        elif table == "research_lab_emission_allocation_snapshots":
+            documents = [anchored, current]
+        else:
+            documents = []
+        if documents:
+            return [
+                {
+                    "epoch": 100,
+                    "netuid": 71,
+                    "allocation_hash": document["allocation_hash"],
+                    "allocation_doc": document,
+                }
+                for document in documents
+            ]
+        if table == "research_lab_arweave_epoch_audit_anchor_current":
+            return [
+                {
+                    "epoch": 100,
+                    "allocation_hash": anchored["allocation_hash"],
+                    "weights_hash": "sha256:" + "4" * 64,
+                    "current_arweave_tx_id": "A" * 43,
+                    "current_transparency_event_hash": "5" * 64,
+                }
+            ]
+        if table == "published_weight_bundles":
+            return [{"epoch_id": 100, "weights_hash": "4" * 64}]
+        status = next(
+            (
+                item[1]
+                for item in filters
+                if len(item) == 2 and item[0] == "current_reward_status"
+            ),
+            "",
+        )
+        return [reward] if status == "active" else []
+
+    state = {"finalized": []}
+
+    async def load_finalized(**_kwargs):
+        return list(state["finalized"])
+
+    root_hash = "sha256:" + "6" * 64
+    receipt_graph = {
+        "root_receipt_hash": root_hash,
+        "receipts": [
+            {
+                "receipt_hash": root_hash,
+                "role": "gateway_coordinator",
+                "purpose": "research_lab.reward_decision.v2",
+                "output_root": sha256_json(
+                    champion_reward_row_projection_v2(reward)
+                ),
+            }
+        ],
+    }
+
+    async def load_graph(**_kwargs):
+        return receipt_graph
+
+    async def load_graphs(artifacts):
+        return {key: receipt_graph for key in artifacts}
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(
+        settlement,
+        "load_finalized_allocation_history_v2",
+        load_finalized,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_by_ref_v2",
+        load_graph,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_by_ref_v2",
+        load_graphs,
+    )
+
+    blocked = await settlement.champion_v2_cutover_readiness(
+        epoch=102,
+        netuid=71,
+    )
+
+    assert blocked["missing_historical_settlements"] == [
+        {
+            "epoch": 100,
+            "allocation_hash": anchored["allocation_hash"],
+                "reason": "missing_finalized_chain_classification_authority",
+        }
+    ]
+    assert blocked["unproven_historical_allocations"] == [
+        {
+            "epoch": 100,
+            "allocation_hash": current["allocation_hash"],
+            "reason": "current_allocation_not_checkpointed",
+        }
+    ]
+
+    state["finalized"] = [
+        {
+            "epoch": 100,
+            "netuid": 71,
+            "allocation_hash": anchored["allocation_hash"],
+            "allocation_doc": anchored,
+            "authority_types": ["legacy_finalized_chain_migration_v2"],
+        }
+    ]
+    ready = await settlement.champion_v2_cutover_readiness(
+        epoch=102,
+        netuid=71,
+    )
+    assert ready["ready"] is True
+    assert ready["covered_historical_settlement_epochs"] == [100]
+
+
+@pytest.mark.asyncio
+async def test_cutover_does_not_credit_unsubmitted_historical_allocation(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store, store
+    from gateway.tee.reward_executor_v2 import champion_reward_row_projection_v2
+
+    reward_id = "champion_reward:sha256:" + "3" * 64
+    reward = {
+        "champion_reward_id": reward_id,
+        "score_bundle_id": "score-3",
+        "candidate_id": "candidate-3",
+        "run_id": "run-3",
+        "miner_hotkey": "miner-3",
+        "miner_uid": 3,
+        "island": "generalist",
+        "evaluation_epoch": 99,
+        "start_epoch": 100,
+        "epoch_count": 2,
+        "improvement_points": 2.0,
+        "threshold_points": 1.0,
+        "desired_alpha_percent": 5.0,
+        "input_hash": "sha256:" + "4" * 64,
+        "anchored_hash": "sha256:" + "5" * 64,
+        "current_reward_status": "active",
+    }
+    allocation_body = {
+        "schema_version": "1.0",
+        "epoch": 100,
+        "champion_allocations": [
+            {
+                "source_id": reward_id,
+                "paid_alpha_percent": 5.0,
+                "base_desired_alpha_percent": 5.0,
+            }
+        ],
+        "queued_champion_allocations": [],
+    }
+    allocation = {
+        **allocation_body,
+        "allocation_hash": sha256_json(allocation_body),
+    }
+
+    async def select_all(table, *, filters=(), **_kwargs):
+        if table in {
+            "research_lab_emission_allocation_current",
+            "research_lab_emission_allocation_snapshots",
+        }:
+            return [
+                {
+                    "epoch": 100,
+                    "netuid": 71,
+                    "allocation_hash": allocation["allocation_hash"],
+                    "allocation_doc": allocation,
+                }
+            ]
+        if table in {
+            "research_lab_arweave_epoch_audit_anchor_current",
+            "published_weight_bundles",
+        }:
+            return []
+        status = next(
+            (
+                item[1]
+                for item in filters
+                if len(item) == 2 and item[0] == "current_reward_status"
+            ),
+            "",
+        )
+        return [reward] if status == "active" else []
+
+    async def no_finalized_payments(**_kwargs):
+        return []
+
+    root_hash = "sha256:" + "6" * 64
+    receipt_graph = {
+        "root_receipt_hash": root_hash,
+        "receipts": [
+            {
+                "receipt_hash": root_hash,
+                "role": "gateway_coordinator",
+                "purpose": "research_lab.reward_decision.v2",
+                "output_root": sha256_json(
+                    champion_reward_row_projection_v2(reward)
+                ),
+            }
+        ],
+    }
+
+    async def load_graph(**_kwargs):
+        return receipt_graph
+
+    async def load_graphs(artifacts):
+        return {key: receipt_graph for key in artifacts}
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(
+        settlement,
+        "load_finalized_allocation_history_v2",
+        no_finalized_payments,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_by_ref_v2",
+        load_graph,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_by_ref_v2",
+        load_graphs,
+    )
+
+    readiness = await settlement.champion_v2_cutover_readiness(
+        epoch=102,
+        netuid=71,
+    )
+
+    assert readiness["ready"] is True
+    assert readiness["required_positive_balance_count"] == 1
+    assert readiness["covered_positive_balance_count"] == 1
+    assert readiness["required_historical_settlement_count"] == 0
+    assert readiness["unproven_historical_allocation_count"] == 1
+    assert readiness["unproven_historical_allocations"] == [
+        {
+            "epoch": 100,
+            "allocation_hash": allocation["allocation_hash"],
+            "reason": "no_checkpointed_audit_anchor",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -728,7 +1168,7 @@ async def test_champion_settlement_backfill_is_dry_run_safe_and_resumable(
     missing = {
         "epoch": 100,
         "allocation_hash": "sha256:" + "1" * 64,
-        "reason": "missing_finalized_chain_settlement_authority",
+        "reason": "missing_finalized_chain_classification_authority",
     }
     state = {"covered": False}
     calls = []
@@ -737,15 +1177,16 @@ async def test_champion_settlement_backfill_is_dry_run_safe_and_resumable(
         assert kwargs == {"epoch": 102, "netuid": 71}
         return {
             "ready": state["covered"],
-            "missing_historical_settlements": (
-                [] if state["covered"] else [missing]
-            ),
+                "missing_historical_classifications": (
+                    [] if state["covered"] else [missing]
+                ),
         }
 
-    async def attest(**kwargs):
+    async def classify(**kwargs):
         calls.append(kwargs)
         state["covered"] = True
         return {
+            "status": "finalized",
             "result": {"settlement_hash": "sha256:" + "2" * 64},
             "execution_receipt": {"receipt_hash": "sha256:" + "3" * 64},
         }
@@ -757,8 +1198,8 @@ async def test_champion_settlement_backfill_is_dry_run_safe_and_resumable(
     )
     monkeypatch.setattr(
         v2_authority,
-        "attest_historical_champion_settlement_v2",
-        attest,
+        "classify_historical_champion_allocation_v2",
+        classify,
     )
     dry = await maintenance.backfill_champion_settlement_v2_authority(
         epoch=102,

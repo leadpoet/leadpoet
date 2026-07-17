@@ -332,6 +332,73 @@ async def test_historical_settlement_authority_is_scope_bound_and_durable(
 
 
 @pytest.mark.asyncio
+async def test_historical_nonfinalization_is_persisted_without_settlement(
+    monkeypatch,
+):
+    from leadpoet_canonical import legacy_settlement_v2
+
+    document = {
+        "schema_version": "leadpoet.legacy_allocation_nonfinalization.v2",
+        "netuid": 71,
+        "epoch_id": 100,
+        "finding_hash": HASH_B,
+    }
+    links = []
+    findings = []
+    settlements = []
+
+    async def execute(**_kwargs):
+        receipt = {
+            "receipt_hash": HASH_A,
+            "output_root": v2_authority.sha256_json(document),
+        }
+        return {
+            "status": "succeeded",
+            "result": document,
+            "execution_receipt": receipt,
+            "receipt_graph": {
+                "root_receipt_hash": HASH_A,
+                "receipts": [receipt],
+            },
+        }
+
+    async def persist_links(**kwargs):
+        links.append(kwargs)
+        return {"business_artifact_link_count": 1}
+
+    async def persist_finding(**kwargs):
+        findings.append(kwargs)
+        return {"finding_hash": HASH_B}
+
+    async def persist_settlement(**kwargs):
+        settlements.append(kwargs)
+
+    monkeypatch.setattr(
+        legacy_settlement_v2,
+        "validate_legacy_nonfinalization_document_v2",
+        lambda value: dict(value),
+    )
+    result = await v2_authority.classify_historical_champion_allocation_v2(
+        epoch_id=101,
+        netuid=71,
+        settlement_epoch_id=100,
+        execute=execute,
+        persist_links=persist_links,
+        persist_migration=persist_settlement,
+        persist_nonfinalization=persist_finding,
+    )
+
+    assert result["status"] == "not_finalized"
+    assert links[0]["artifacts"][0] == {
+        "artifact_kind": "legacy_allocation_nonfinalization",
+        "artifact_ref": "71:100",
+        "artifact_hash": HASH_B,
+    }
+    assert findings == [{"finding": document, "receipt_hash": HASH_A}]
+    assert settlements == []
+
+
+@pytest.mark.asyncio
 async def test_historical_champion_reward_migration_runs_before_v2_cutover(
     monkeypatch,
 ):
@@ -430,18 +497,26 @@ async def test_allocation_parent_loader_uses_legacy_settlement_receipt(
             }
         ]
 
-    async def load_business(*, artifact_kind, artifact_ref):
-        business_refs.append((artifact_kind, artifact_ref))
+    async def load_business(artifacts):
+        requested = sorted(artifacts)
+        business_refs.extend(requested)
         return {
-            "root_receipt_hash": reward_receipt,
-            "receipts": [{"receipt_hash": reward_receipt}],
+            key: {
+                "root_receipt_hash": reward_receipt,
+                "receipts": [{"receipt_hash": reward_receipt}],
+            }
+            for key in requested
         }
 
-    async def load_receipt(receipt_hash):
-        receipt_roots.append(receipt_hash)
+    async def load_receipts(receipt_hashes):
+        requested = sorted(receipt_hashes)
+        receipt_roots.extend(requested)
         return {
-            "root_receipt_hash": receipt_hash,
-            "receipts": [{"receipt_hash": receipt_hash}],
+            receipt_hash: {
+                "root_receipt_hash": receipt_hash,
+                "receipts": [{"receipt_hash": receipt_hash}],
+            }
+            for receipt_hash in requested
         }
 
     monkeypatch.setattr(store, "select_all", select_all)
@@ -453,13 +528,13 @@ async def test_allocation_parent_loader_uses_legacy_settlement_receipt(
     )
     monkeypatch.setattr(
         attested_v2_store,
-        "load_business_artifact_graph_by_ref_v2",
+        "load_business_artifact_graphs_by_ref_v2",
         load_business,
     )
     monkeypatch.setattr(
         attested_v2_store,
-        "load_receipt_graph_v2",
-        load_receipt,
+        "load_receipt_graphs_v2",
+        load_receipts,
     )
 
     graphs = await v2_authority._load_allocation_parent_graphs_v2(
@@ -474,3 +549,121 @@ async def test_allocation_parent_loader_uses_legacy_settlement_receipt(
         reward_receipt,
         settlement_receipt,
     }
+
+
+@pytest.mark.asyncio
+async def test_allocation_parent_loader_batches_reimbursement_awards(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store, store
+
+    schedules = [
+        {
+            "award_id": f"award:{index}",
+            "schedule_status": "scheduled",
+            "start_epoch": 90,
+            "epoch_count": 20,
+        }
+        for index in range(125)
+    ]
+    awards = {
+        f"award:{index}": {
+            "award_id": f"award:{index}",
+            "current_award_status": "awarded",
+        }
+        for index in range(125)
+    }
+    batch_sizes = []
+    business_refs = []
+
+    async def select_all(table, *, filters=(), **_kwargs):
+        if table == "research_reimbursement_schedules":
+            return list(schedules)
+        if table == "research_reimbursement_award_current":
+            requested = list(filters[0][2])
+            batch_sizes.append(len(requested))
+            return [dict(awards[award_id]) for award_id in requested]
+        if table in {
+            "research_lab_champion_reward_current",
+            "research_lab_source_add_reward_current",
+        }:
+            return []
+        raise AssertionError(f"unexpected table: {table}")
+
+    async def load_business(artifacts):
+        requested = sorted(artifacts)
+        business_refs.extend(requested)
+        return {
+            key: {
+                "root_receipt_hash": HASH_A,
+                "receipts": [{"receipt_hash": HASH_A}],
+            }
+            for key in requested
+        }
+
+    async def load_receipts(receipt_hashes):
+        assert not list(receipt_hashes)
+        return {}
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_by_ref_v2",
+        load_business,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_receipt_graphs_v2",
+        load_receipts,
+    )
+
+    graphs = await v2_authority._load_allocation_parent_graphs_v2(
+        epoch_id=100,
+        netuid=71,
+        policy={"reimbursement_epochs": 20},
+    )
+
+    assert batch_sizes == [50, 50, 25]
+    assert business_refs == [
+        ("reimbursement_decision", f"award:{index}")
+        for index in sorted(range(125), key=lambda value: f"award:{value}")
+    ]
+    assert [graph["root_receipt_hash"] for graph in graphs] == [HASH_A]
+
+
+@pytest.mark.asyncio
+async def test_allocation_parent_loader_rejects_ambiguous_reimbursement_award(
+    monkeypatch,
+):
+    from gateway.research_lab import store
+
+    award = {
+        "award_id": "award:1",
+        "current_award_status": "awarded",
+    }
+
+    async def select_all(table, **_kwargs):
+        if table == "research_reimbursement_schedules":
+            return [
+                {
+                    "award_id": "award:1",
+                    "schedule_status": "scheduled",
+                    "start_epoch": 90,
+                    "epoch_count": 20,
+                }
+            ]
+        if table == "research_reimbursement_award_current":
+            return [dict(award), dict(award)]
+        return []
+
+    monkeypatch.setattr(store, "select_all", select_all)
+
+    with pytest.raises(
+        v2_authority.ResearchLabV2AuthorityError,
+        match="reimbursement award is ambiguous",
+    ):
+        await v2_authority._load_allocation_parent_graphs_v2(
+            epoch_id=100,
+            netuid=71,
+            policy={"reimbursement_epochs": 20},
+        )

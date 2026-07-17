@@ -325,8 +325,8 @@ def build_parser() -> argparse.ArgumentParser:
     champion_v2_settlement_backfill = sub.add_parser(
         "backfill-champion-v2-settlements",
         help=(
-            "Attest finalized pre-V2 champion allocation epochs into V2 "
-            "settlement authority"
+            "Classify pre-V2 champion allocations as finalized or "
+            "nonfinalized using measured chain state"
         ),
     )
     champion_v2_settlement_backfill.add_argument(
@@ -351,6 +351,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     champion_v2_readiness.add_argument("--epoch", type=int, default=None)
     champion_v2_readiness.add_argument("--netuid", type=int, default=None)
+
+    recover_arweave_audits = sub.add_parser(
+        "recover-arweave-audit-epochs",
+        help=(
+            "Recheckpoint selected historical Research Lab audit anchors "
+            "using their exact original signed transparency events"
+        ),
+    )
+    recover_arweave_audits.add_argument(
+        "--epoch",
+        action="append",
+        dest="epochs",
+        type=int,
+        required=True,
+        help="historical epoch to recheckpoint (repeatable)",
+    )
+    recover_arweave_audits.add_argument("--netuid", type=int, default=None)
+    recover_arweave_audits.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=True,
+    )
+    recover_arweave_audits.add_argument(
+        "--write",
+        dest="dry_run",
+        action="store_false",
+    )
 
     reconcile_tickets = sub.add_parser(
         "reconcile-terminal-tickets",
@@ -1790,6 +1818,21 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         return await champion_v2_cutover_readiness_report(
             epoch=args.epoch,
             netuid=args.netuid,
+        )
+    if args.command == "recover-arweave-audit-epochs":
+        from gateway.config import BITTENSOR_NETUID
+        from gateway.research_lab.arweave_audit import (
+            recover_research_lab_checkpointed_audit_epochs,
+        )
+
+        return await recover_research_lab_checkpointed_audit_epochs(
+            epochs=args.epochs,
+            netuid=(
+                int(args.netuid)
+                if args.netuid is not None
+                else int(BITTENSOR_NETUID)
+            ),
+            dry_run=args.dry_run,
         )
     if args.command == "reconcile-terminal-tickets":
         return await reconcile_terminal_ticket_statuses(

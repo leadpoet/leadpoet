@@ -275,6 +275,24 @@ class TEEClient:
             {"status": "cleared", "cleared_events": N, "next_checkpoint_at": "ISO8601"}
         """
         return await self._send_rpc("clear_buffer", {})
+
+    async def acknowledge_checkpoint(
+        self,
+        *,
+        checkpoint_number: int,
+        merkle_root: str,
+        sequence_range: Dict,
+    ) -> Dict:
+        """Commit one confirmed checkpoint and remove its exact event prefix."""
+
+        return await self._send_rpc(
+            "acknowledge_checkpoint",
+            {
+                "checkpoint_number": int(checkpoint_number),
+                "merkle_root": str(merkle_root),
+                "sequence_range": dict(sequence_range),
+            },
+        )
     
     async def get_public_key(self) -> bytes:
         """

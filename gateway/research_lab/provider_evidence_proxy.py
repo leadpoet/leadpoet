@@ -720,7 +720,8 @@ class SdConcurrencyGate:
     in-container: 17 of 165 /scrape calls succeeding during a
     full-concurrency window while lone runs succeed). Every ScrapingDog
     request counts against the same account limit, so all of them share
-    one semaphore; set SD_MAX_CONCURRENCY to the account's plan limit.
+    one semaphore; the default stays well under the account allowance
+    (SD_MAX_CONCURRENCY tunes it).
     The wait MUST stay below the model's shortest scrape timeout (30s
     static tier) so a queued caller receives a clean transient 429 —
     which its retry ladder already backs off on — rather than hanging up
@@ -728,7 +729,7 @@ class SdConcurrencyGate:
     """
 
     def __init__(self) -> None:
-        self.request_limit = max(1, int(os.getenv("SD_MAX_CONCURRENCY", "125")))
+        self.request_limit = max(1, int(os.getenv("SD_MAX_CONCURRENCY", "25")))
         self._sem = threading.BoundedSemaphore(self.request_limit)
         self._wait_seconds = float(os.getenv("SD_GATE_WAIT_SECONDS", "20"))
 

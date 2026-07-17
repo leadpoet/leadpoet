@@ -23,7 +23,26 @@ INDEX_SQL = (
     / "scripts"
     / "100-stateful-subnet-epoch-high-water-indexes.concurrent.sql"
 ).read_text(encoding="utf-8")
+INDEX_VALIDATION_MATCH = re.search(
+    r"(DO \$\$.*?\n\$\$;)\n\n-- The DO block above",
+    INDEX_SQL,
+    re.DOTALL,
+)
+if INDEX_VALIDATION_MATCH is None:
+    raise RuntimeError("stateful epoch index validation block is missing")
+INDEX_VALIDATION_SQL = INDEX_VALIDATION_MATCH.group(1)
 REPO_ROOT = Path(__file__).resolve().parents[1]
+RUNBOOK = (
+    REPO_ROOT / "docs" / "stateful_subnet_epoch_cutover_runbook.md"
+).read_text(encoding="utf-8")
+AMCHECK_SQL_MATCH = re.search(
+    r"```sql\n(BEGIN READ ONLY;.*?\$amcheck\$;\n\nCOMMIT;)\n```",
+    RUNBOOK,
+    re.DOTALL,
+)
+if AMCHECK_SQL_MATCH is None:
+    raise RuntimeError("stateful epoch amcheck runbook block is missing")
+AMCHECK_SQL = AMCHECK_SQL_MATCH.group(1)
 
 
 TABLES = (
@@ -97,6 +116,25 @@ def test_high_water_prerequisite_is_nontransactional_and_covers_live_gaps():
     assert "SKIP_VIEW: research_lab_epoch_payouts" in INDEX_SQL
     assert "public.research_lab_epoch_payouts(epoch DESC)" not in INDEX_SQL
     assert "idx_rl_epoch_payouts_epoch_identity_v1" not in INDEX_SQL
+    for contract_fragment in (
+        "pg_stat_progress_create_index",
+        "progress.datname = pg_catalog.current_database()",
+        "index_namespace.nspname = 'public'",
+        "index_meta.indrelid = table_relation.oid",
+        "access_method.amname = 'btree'",
+        "index_meta.indisvalid",
+        "index_meta.indisready",
+        "index_meta.indislive",
+        "index_meta.indpred IS NULL",
+        "index_meta.indexprs IS NULL",
+        "index_meta.indnatts = 1",
+        "index_meta.indnkeyatts = 1",
+        "index_meta.indkey[0] = column_meta.attnum",
+        "operator_class.opcdefault",
+        "operator_class.opcmethod = index_relation.relam",
+        "wrong exact definition",
+    ):
+        assert contract_fragment in INDEX_SQL
     assert "scripts/101-stateful-subnet-epoch-authority.sql" in INDEX_SQL
 
 
@@ -304,6 +342,7 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
         pytest.skip("Docker is required for the PostgreSQL 15 integration test")
 
     container = f"leadpoet-stateful-epoch-pg15-{uuid.uuid4().hex[:10]}"
+    background_processes = []
 
     def sha(number: int) -> str:
         return f"sha256:{number:064x}"
@@ -348,6 +387,35 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
         result = psql(statement, check=False)
         assert result.returncode != 0, result.stdout
         assert message in result.stderr, result.stderr
+
+    def background_psql(statement: str, application_name: str):
+        process = subprocess.Popen(
+            [
+                "docker",
+                "exec",
+                "--env",
+                f"PGAPPNAME={application_name}",
+                "-i",
+                container,
+                "psql",
+                "-X",
+                "-A",
+                "-t",
+                "-U",
+                "postgres",
+                "-d",
+                "leadpoet",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-c",
+                statement,
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        background_processes.append(process)
+        return process
 
     try:
         subprocess.run(
@@ -427,6 +495,14 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
         # Execute the real non-transactional production prerequisite through
         # psql, which dispatches each concurrent index statement separately.
         psql(INDEX_SQL)
+        psql(
+            "CREATE SCHEMA extensions; "
+            "CREATE EXTENSION amcheck WITH SCHEMA extensions;"
+        )
+        amcheck_result = psql(AMCHECK_SQL)
+        assert "idx_epoch_audit_logs_epoch_identity_v1" in amcheck_result.stderr
+        assert "test_legacy_epoch_identity" in amcheck_result.stderr
+        assert "test_legacy_evaluation_epoch_identity" in amcheck_result.stderr
         payout_view_probe = psql(
             "SELECT relation.relkind, "
             "pg_catalog.to_regclass("
@@ -436,6 +512,173 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
             "'public.research_lab_epoch_payouts'::pg_catalog.regclass;"
         )
         assert "v|t" in payout_view_probe.stdout
+
+        # IF NOT EXISTS is name-only.  Keep an independent correct covering
+        # index in place and prove the named contract still rejects every
+        # valid-looking but noncanonical definition instead of being masked by
+        # the generic physical-column coverage check.
+        psql(
+            "ALTER TABLE public.epoch_audit_logs ADD COLUMN other_key INTEGER;"
+            "CREATE INDEX test_epoch_audit_alternate "
+            "ON public.epoch_audit_logs(epoch_id);"
+            "CREATE TABLE public.index_adversary_wrong_target(epoch_id INTEGER);"
+            "CREATE INDEX test_wrong_target_epoch_cover "
+            "ON public.index_adversary_wrong_target(epoch_id);"
+        )
+        plain_index_name = "idx_epoch_audit_logs_epoch_identity_v1"
+        malformed_named_indexes = (
+            "CREATE INDEX idx_epoch_audit_logs_epoch_identity_v1 "
+            "ON public.index_adversary_wrong_target(epoch_id DESC);",
+            "CREATE INDEX idx_epoch_audit_logs_epoch_identity_v1 "
+            "ON public.epoch_audit_logs(other_key DESC);",
+            "CREATE INDEX idx_epoch_audit_logs_epoch_identity_v1 "
+            "ON public.epoch_audit_logs(epoch_id DESC) "
+            "WHERE epoch_id IS NOT NULL;",
+            "CREATE INDEX idx_epoch_audit_logs_epoch_identity_v1 "
+            "ON public.epoch_audit_logs(((epoch_id + 0)) DESC);",
+            "CREATE INDEX idx_epoch_audit_logs_epoch_identity_v1 "
+            "ON public.epoch_audit_logs USING hash(epoch_id);",
+            "CREATE INDEX idx_epoch_audit_logs_epoch_identity_v1 "
+            "ON public.epoch_audit_logs(other_key) INCLUDE(epoch_id);",
+            "CREATE INDEX idx_epoch_audit_logs_epoch_identity_v1 "
+            "ON public.epoch_audit_logs(other_key, epoch_id);",
+            "CREATE INDEX idx_epoch_audit_logs_epoch_identity_v1 "
+            "ON public.epoch_audit_logs(epoch_id ASC);",
+            "CREATE INDEX idx_epoch_audit_logs_epoch_identity_v1 "
+            "ON public.epoch_audit_logs(epoch_id DESC, other_key);",
+            "CREATE INDEX idx_epoch_audit_logs_epoch_identity_v1 "
+            "ON public.epoch_audit_logs(epoch_id DESC) INCLUDE(other_key);",
+            "CREATE UNIQUE INDEX idx_epoch_audit_logs_epoch_identity_v1 "
+            "ON public.epoch_audit_logs(epoch_id DESC);",
+        )
+        for malformed_index_sql in malformed_named_indexes:
+            psql(f"DROP INDEX public.{plain_index_name};")
+            psql(malformed_index_sql)
+            rejected(
+                INDEX_VALIDATION_SQL,
+                plain_index_name,
+            )
+
+        psql(f"DROP INDEX public.{plain_index_name};")
+        rejected(INDEX_VALIDATION_SQL, plain_index_name)
+
+        # A failed concurrent unique build leaves a real invalid pg_index row.
+        # The exact validator must reject it even though an alternate valid
+        # physical identity index still exists.
+        psql(
+            "INSERT INTO public.epoch_audit_logs(epoch_id) VALUES (7), (7);"
+        )
+        invalid_build = psql(
+            "CREATE UNIQUE INDEX CONCURRENTLY "
+            "idx_epoch_audit_logs_epoch_identity_v1 "
+            "ON public.epoch_audit_logs(epoch_id DESC);",
+            check=False,
+        )
+        assert invalid_build.returncode != 0
+        invalid_flags = psql(
+            "SELECT index_meta.indisvalid, index_meta.indisready, "
+            "index_meta.indislive "
+            "FROM pg_catalog.pg_index index_meta "
+            "WHERE index_meta.indexrelid="
+            "'public.idx_epoch_audit_logs_epoch_identity_v1'::pg_catalog.regclass;"
+        )
+        assert invalid_flags.stdout.strip() in {"f|f|t", "f|t|t"}
+        rejected(INDEX_VALIDATION_SQL, plain_index_name)
+        psql(
+            f"DROP INDEX public.{plain_index_name};"
+            "DELETE FROM public.epoch_audit_logs WHERE epoch_id=7;"
+            "CREATE INDEX idx_epoch_audit_logs_epoch_identity_v1 "
+            "ON public.epoch_audit_logs(epoch_id DESC);"
+        )
+
+        # A client timeout can leave PostgreSQL legitimately building.  Hold a
+        # writer open, start a real concurrent build, and prove validation says
+        # to wait rather than misclassifying it as an invalid remnant to drop.
+        psql(f"DROP INDEX public.{plain_index_name};")
+        blocker = background_psql(
+            "BEGIN; "
+            "INSERT INTO public.epoch_audit_logs(epoch_id) VALUES (8); "
+            "SELECT pg_catalog.pg_sleep(4); "
+            "COMMIT;",
+            "stateful-epoch-index-blocker",
+        )
+        for _ in range(40):
+            blocker_state = psql(
+                "SELECT COUNT(*) FROM pg_catalog.pg_stat_activity "
+                "WHERE application_name='stateful-epoch-index-blocker' "
+                "AND state='active';"
+            )
+            if blocker_state.stdout.strip() == "1":
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("index-build blocker did not become active")
+
+        builder = background_psql(
+            "CREATE INDEX CONCURRENTLY "
+            "idx_epoch_audit_logs_epoch_identity_v1 "
+            "ON public.epoch_audit_logs(epoch_id DESC);",
+            "stateful-epoch-index-builder",
+        )
+        for _ in range(60):
+            build_phase = psql(
+                "SELECT progress.phase "
+                "FROM pg_catalog.pg_stat_progress_create_index progress "
+                "JOIN pg_catalog.pg_stat_activity activity "
+                "ON activity.pid=progress.pid "
+                "WHERE activity.application_name="
+                "'stateful-epoch-index-builder';"
+            )
+            if build_phase.stdout.strip():
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("concurrent index build did not report progress")
+
+        rejected(INDEX_VALIDATION_SQL, "indexes are still building")
+        assert blocker.wait(timeout=10) == 0, blocker.stderr.read()
+        assert builder.wait(timeout=10) == 0, builder.stderr.read()
+        psql(INDEX_VALIDATION_SQL)
+        psql("DELETE FROM public.epoch_audit_logs WHERE epoch_id=8;")
+
+        # Same names in unrelated schemas must not poison exact public-schema
+        # validation, which was a false failure in the original global lookup.
+        psql(
+            "CREATE SCHEMA index_adversary;"
+            "CREATE TABLE index_adversary.other(epoch_id INTEGER);"
+            "CREATE INDEX idx_epoch_audit_logs_epoch_identity_v1 "
+            "ON index_adversary.other(epoch_id);"
+        )
+        psql(INDEX_VALIDATION_SQL)
+        psql("DROP SCHEMA index_adversary CASCADE;")
+
+        # The payload expression and all three predicate clauses are an exact
+        # contract, not substring evidence that happens to mention the regex.
+        psql("DROP INDEX public.idx_transparency_log_payload_epoch_identity_v1;")
+        psql(
+            "CREATE INDEX idx_transparency_log_payload_epoch_identity_v1 "
+            "ON public.transparency_log "
+            "(((payload->>'epoch_id')::BIGINT) DESC) "
+            "WHERE payload ? 'epoch_id' "
+            "AND payload->>'epoch_id' ~ '^[0-9]+$';"
+        )
+        rejected(
+            INDEX_VALIDATION_SQL,
+            "idx_transparency_log_payload_epoch_identity_v1",
+        )
+        psql(
+            "DROP INDEX public.idx_transparency_log_payload_epoch_identity_v1;"
+            "CREATE INDEX idx_transparency_log_payload_epoch_identity_v1 "
+            "ON public.transparency_log "
+            "(((payload->>'epoch_id')::BIGINT) DESC) "
+            "WHERE pg_catalog.jsonb_typeof(payload)='object' "
+            "AND payload ? 'epoch_id' "
+            "AND payload->>'epoch_id' ~ '^[0-9]+$';"
+            "DROP INDEX public.test_epoch_audit_alternate;"
+            "DROP TABLE public.index_adversary_wrong_target;"
+            "ALTER TABLE public.epoch_audit_logs DROP COLUMN other_key;"
+        )
+        psql(INDEX_VALIDATION_SQL)
         psql(SQL)
 
         # The public runtime contract is an exact, sanitized singleton RPC.
@@ -1459,3 +1702,10 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
             check=False,
             timeout=30,
         )
+        for process in background_processes:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()

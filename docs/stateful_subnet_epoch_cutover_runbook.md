@@ -61,7 +61,53 @@ Use a direct PostgreSQL connection with a database owner/migration role. Do not
 put credentials in shell history, source control, or this runbook.
 
 Migration 100 contains `CREATE INDEX CONCURRENTLY` and must run outside an
-explicit transaction. Migration 101 is transactional.
+explicit transaction. Do not run it through the Supabase SQL Editor: the
+Dashboard request can time out while PostgreSQL is still building, and a
+cancelled concurrent build can leave an invalid same-name index that
+`IF NOT EXISTS` will not repair. Use a persistent direct connection or the
+Supavisor **session-mode** endpoint on port 5432, never transaction mode on
+port 6543. Migration 101 is transactional.
+
+Before retrying any timed-out build, inspect active progress. If this returns a
+row, wait; do not drop or recreate that index:
+
+```sql
+SELECT progress.pid,
+       table_relation.oid::pg_catalog.regclass AS table_name,
+       index_relation.oid::pg_catalog.regclass AS index_name,
+       progress.phase,
+       progress.blocks_done,
+       progress.blocks_total
+FROM pg_catalog.pg_stat_progress_create_index AS progress
+JOIN pg_catalog.pg_class AS table_relation
+  ON table_relation.oid = progress.relid
+LEFT JOIN pg_catalog.pg_class AS index_relation
+  ON index_relation.oid = progress.index_relid
+WHERE progress.datname = pg_catalog.current_database()
+ORDER BY progress.pid;
+```
+
+When no build is active, `indisvalid = false` or `indisready = false` can be an
+interrupted build remnant. `indislive = false` can instead mean that a
+concurrent drop is still in progress. Before changing any such index, inspect
+`pg_stat_activity` and `pg_locks` for an active `CREATE INDEX`, `REINDEX`, or
+`DROP INDEX` touching the exact index/table and wait for that DDL to finish.
+Only after the catalog state is stable should you drop a confirmed invalid
+remnant using a standalone
+`DROP INDEX CONCURRENTLY public.<exact_name>;`, then rerun its exact standalone
+`CREATE INDEX CONCURRENTLY` statement from migration 100. Never wrap either
+statement in `BEGIN`, a `DO` block, or a function. A missing name only needs its
+exact `CREATE` statement. `research_lab_epoch_payouts` is an ordinary derived
+view and is intentionally not indexed; its physical source identities are
+covered by the catalog catch-all.
+
+A same-name index can also have all three flags true while targeting the wrong
+table/key or using the wrong method, ordering, expression, predicate, included
+columns, or operator class. In that case `IF NOT EXISTS` will never repair it.
+Use migration 100's full `index_definition`/`actual_table_name` report and exact
+validation error to identify the mismatch. After the same active-DDL checks,
+drop only the confirmed wrong same-name index concurrently and run its canonical
+standalone `CREATE INDEX CONCURRENTLY` statement from migration 100.
 
 ```bash
 cd /path/to/Bittensor-subnet
@@ -69,7 +115,148 @@ cd /path/to/Bittensor-subnet
 psql "$SUPABASE_DB_URL" \
   -v ON_ERROR_STOP=1 \
   -f scripts/100-stateful-subnet-epoch-high-water-indexes.concurrent.sql
+```
 
+Migration 100's final `DO` block proves the exact catalog contract: each named
+index belongs to the expected table, has the expected sole key/expression,
+uses the built-in default B-tree operator class and canonical descending order,
+and has no unexpected predicate, `INCLUDE` column, or uniqueness property. The
+`indisvalid`, `indisready`, and `indislive` flags alone are not sufficient.
+
+Those catalog checks cannot detect damaged B-tree pages or missing heap tuples.
+Before the production fence, discover whether PostgreSQL's `amcheck` extension
+is available and enabled:
+
+```sql
+SELECT available.name,
+       available.default_version,
+       installed.extversion AS installed_version,
+       extension_namespace.nspname AS installed_schema
+FROM pg_catalog.pg_available_extensions AS available
+LEFT JOIN pg_catalog.pg_extension AS installed
+  ON installed.extname = available.name
+LEFT JOIN pg_catalog.pg_namespace AS extension_namespace
+  ON extension_namespace.oid = installed.extnamespace
+WHERE available.name = 'amcheck';
+```
+
+If `installed_version` is null, enable `amcheck` through the Supabase Database
+Extensions page or the approved migration role, then rerun the discovery query.
+Run the following through the same persistent direct/session-mode connection in
+an off-peak window. It checks both B-tree structure and that every visible heap
+tuple has a matching index tuple. `heapallindexed => true` is intentionally the
+stronger and more I/O-intensive form; it retains `AccessShareLock`-level
+relation locking but can take several times longer than the structural-only
+check.
+
+```sql
+BEGIN READ ONLY;
+SET LOCAL lock_timeout = '2s';
+SET LOCAL statement_timeout = '30min';
+
+DO $amcheck$
+DECLARE
+    amcheck_schema NAME;
+    target_index RECORD;
+BEGIN
+    SELECT extension_namespace.nspname
+    INTO amcheck_schema
+    FROM pg_catalog.pg_extension AS extension_meta
+    JOIN pg_catalog.pg_namespace AS extension_namespace
+      ON extension_namespace.oid = extension_meta.extnamespace
+    WHERE extension_meta.extname = 'amcheck';
+
+    IF amcheck_schema IS NULL THEN
+        RAISE EXCEPTION 'amcheck is not installed';
+    END IF;
+
+    FOR target_index IN
+        WITH RECURSIVE accepted_index_roots(index_oid) AS (
+            SELECT DISTINCT index_relation.oid
+            FROM pg_catalog.pg_class AS relation
+            JOIN pg_catalog.pg_namespace AS relation_namespace
+              ON relation_namespace.oid = relation.relnamespace
+            JOIN pg_catalog.pg_attribute AS column_meta
+              ON column_meta.attrelid = relation.oid
+            JOIN pg_catalog.pg_index AS index_meta
+              ON index_meta.indrelid = relation.oid
+            JOIN pg_catalog.pg_class AS index_relation
+              ON index_relation.oid = index_meta.indexrelid
+            JOIN pg_catalog.pg_am AS access_method
+              ON access_method.oid = index_relation.relam
+            JOIN pg_catalog.pg_opclass AS operator_class
+              ON operator_class.oid = index_meta.indclass[0]
+            WHERE relation_namespace.nspname = 'public'
+              AND relation.relkind IN ('r', 'p')
+              AND column_meta.attnum > 0
+              AND NOT column_meta.attisdropped
+              AND column_meta.atttypid IN (20, 21, 23)
+              AND column_meta.attname IN (
+                  'epoch', 'epoch_id', 'evaluation_epoch'
+              )
+              AND index_relation.relkind IN ('i', 'I')
+              AND access_method.amname = 'btree'
+              AND index_meta.indisvalid
+              AND index_meta.indisready
+              AND index_meta.indislive
+              AND index_meta.indpred IS NULL
+              AND index_meta.indexprs IS NULL
+              AND index_meta.indnkeyatts >= 1
+              AND index_meta.indkey[0] = column_meta.attnum
+              AND operator_class.opcdefault
+              AND operator_class.opcmethod = index_relation.relam
+              AND operator_class.opcintype = column_meta.atttypid
+        ), accepted_index_tree(index_oid) AS (
+            SELECT index_oid
+            FROM accepted_index_roots
+            UNION ALL
+            SELECT inheritance.inhrelid
+            FROM accepted_index_tree AS parent_index
+            JOIN pg_catalog.pg_inherits AS inheritance
+              ON inheritance.inhparent = parent_index.index_oid
+        ), physical_index_targets(index_oid) AS (
+            SELECT DISTINCT index_tree.index_oid
+            FROM accepted_index_tree AS index_tree
+            JOIN pg_catalog.pg_class AS index_relation
+              ON index_relation.oid = index_tree.index_oid
+            WHERE index_relation.relkind = 'i'
+            UNION
+            SELECT 'public.idx_transparency_log_payload_epoch_identity_v1'::pg_catalog.regclass::OID
+        )
+        SELECT physical_target.index_oid,
+               physical_target.index_oid::pg_catalog.regclass::TEXT AS index_name
+        FROM physical_index_targets AS physical_target
+        ORDER BY index_name
+    LOOP
+        RAISE NOTICE 'amcheck: %', target_index.index_name;
+        EXECUTE pg_catalog.format(
+            'SELECT %I.bt_index_check(index => $1, heapallindexed => true)',
+            amcheck_schema
+        ) USING target_index.index_oid::pg_catalog.regclass;
+    END LOOP;
+END;
+$amcheck$;
+
+COMMIT;
+```
+
+This intentionally checks every physical B-tree accepted by the migration's
+catalog catch-all, including pre-existing source-table indexes behind derived
+views, plus the JSONB payload expression index. An empty successful result
+(only the per-index notices) is the expected result.
+Any exception, timeout, or unavailable extension is an unresolved physical-
+integrity evidence gap; do not describe the indexes as physically verified or
+run the production fence until it is resolved. `amcheck` greatly strengthens
+the proof but cannot establish the absolute absence of every possible storage
+or hardware fault. This result is point-in-time evidence. Rerun the same
+`heapallindexed => true` block immediately before the step 3 fence, with
+epoch-key writers quiesced if operationally possible, and record the check time
+and output; writes after a check are not covered by that check.
+
+After the exact catalog validation and physical check pass, apply migration
+101:
+
+```bash
 psql "$SUPABASE_DB_URL" \
   -v ON_ERROR_STOP=1 \
   -f scripts/101-stateful-subnet-epoch-authority.sql
@@ -116,6 +303,11 @@ immediate successor is reserved as `FIRST_SETTLEMENT_EPOCH_ID`. Run the fence
 early enough that no process can create the reserved key before the ceremony.
 The RPC measures every physical Supabase epoch-key column under locks and fails
 if the proposed high-water or vacancy is wrong.
+
+Immediately before invoking the fence, rerun the migration-100 exact catalog
+validator and the full `amcheck` block from step 1. Quiesce epoch-key writers
+during those checks and the fence call if operationally possible. Do not use an
+older point-in-time check as proof of fence-time physical integrity.
 
 ```bash
 export NETWORK_GENESIS_HASH='0x...'

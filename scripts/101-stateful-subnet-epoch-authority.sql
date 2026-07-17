@@ -1271,36 +1271,65 @@ BEGIN
         FROM pg_catalog.pg_index index_meta
         JOIN pg_catalog.pg_class index_relation
           ON index_relation.oid = index_meta.indexrelid
+        JOIN pg_catalog.pg_namespace index_namespace
+          ON index_namespace.oid = index_relation.relnamespace
+        JOIN pg_catalog.pg_class table_relation
+          ON table_relation.oid = index_meta.indrelid
+        JOIN pg_catalog.pg_namespace table_namespace
+          ON table_namespace.oid = table_relation.relnamespace
+        JOIN pg_catalog.pg_attribute payload_column
+          ON payload_column.attrelid = table_relation.oid
+         AND payload_column.attname = 'payload'
         JOIN pg_catalog.pg_am access_method
           ON access_method.oid = index_relation.relam
+        JOIN pg_catalog.pg_opclass operator_class
+          ON operator_class.oid = index_meta.indclass[0]
+        JOIN pg_catalog.pg_namespace operator_class_namespace
+          ON operator_class_namespace.oid = operator_class.opcnamespace
         WHERE index_meta.indrelid =
               'public.transparency_log'::pg_catalog.regclass
+          AND table_namespace.nspname = 'public'
+          AND table_relation.relname = 'transparency_log'
+          AND table_relation.relkind = 'r'
+          AND payload_column.attnum > 0
+          AND NOT payload_column.attisdropped
+          AND payload_column.atttypid =
+              'pg_catalog.jsonb'::pg_catalog.regtype
+          AND index_namespace.nspname = 'public'
           AND index_relation.relname =
               'idx_transparency_log_payload_epoch_identity_v1'
+          AND index_relation.relkind = 'i'
+          AND index_relation.relpersistence = table_relation.relpersistence
           AND access_method.amname = 'btree'
           AND index_meta.indisvalid
           AND index_meta.indisready
+          AND index_meta.indislive
+          AND NOT index_meta.indisunique
+          AND NOT index_meta.indisprimary
+          AND NOT index_meta.indisexclusion
+          AND index_meta.indnatts = 1
           AND index_meta.indnkeyatts = 1
+          AND index_meta.indkey[0] = 0
+          AND index_meta.indoption[0] = 3
+          AND index_meta.indcollation[0] = 0
+          AND operator_class.opcdefault
+          AND operator_class.opcmethod = index_relation.relam
+          AND operator_class.opcintype =
+              'pg_catalog.int8'::pg_catalog.regtype
+          AND operator_class.opcname = 'int8_ops'
+          AND operator_class_namespace.nspname = 'pg_catalog'
           AND index_meta.indexprs IS NOT NULL
           AND index_meta.indpred IS NOT NULL
           AND pg_catalog.pg_get_expr(
                   index_meta.indexprs,
-                  index_meta.indrelid
+                  index_meta.indrelid,
+                  FALSE
               ) = '((payload ->> ''epoch_id''::text))::bigint'
-          AND pg_catalog.strpos(
-                  pg_catalog.pg_get_expr(
-                      index_meta.indpred,
-                      index_meta.indrelid
-                  ),
-                  'jsonb_typeof(payload)'
-              ) > 0
-          AND pg_catalog.strpos(
-                  pg_catalog.pg_get_expr(
-                      index_meta.indpred,
-                      index_meta.indrelid
-                  ),
-                  '^[0-9]+$'
-              ) > 0
+          AND pg_catalog.pg_get_expr(
+                  index_meta.indpred,
+                  index_meta.indrelid,
+                  FALSE
+              ) = '((jsonb_typeof(payload) = ''object''::text) AND (payload ? ''epoch_id''::text) AND ((payload ->> ''epoch_id''::text) ~ ''^[0-9]+$''::text))'
     ) THEN
         RAISE EXCEPTION
             'stateful epoch fence prerequisite payload identity index is missing or invalid';
@@ -1369,7 +1398,7 @@ BEGIN
         -- reward_expires_epoch must not raise the high-water mark because it
         -- is a future schedule/reference, not an allocated epoch identity.
         SELECT c.oid AS relation_oid, n.nspname, c.relname,
-               a.attname, a.attnum
+               a.attname, a.attnum, a.atttypid
         FROM pg_catalog.pg_class c
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
@@ -1394,14 +1423,21 @@ BEGIN
               ON index_relation.oid = index_meta.indexrelid
             JOIN pg_catalog.pg_am access_method
               ON access_method.oid = index_relation.relam
+            JOIN pg_catalog.pg_opclass operator_class
+              ON operator_class.oid = index_meta.indclass[0]
             WHERE index_meta.indrelid = epoch_column.relation_oid
+              AND index_relation.relkind IN ('i', 'I')
               AND access_method.amname = 'btree'
               AND index_meta.indisvalid
               AND index_meta.indisready
+              AND index_meta.indislive
               AND index_meta.indpred IS NULL
               AND index_meta.indexprs IS NULL
               AND index_meta.indnkeyatts >= 1
               AND index_meta.indkey[0] = epoch_column.attnum
+              AND operator_class.opcdefault
+              AND operator_class.opcmethod = index_relation.relam
+              AND operator_class.opcintype = epoch_column.atttypid
         ) THEN
             RAISE EXCEPTION
                 'stateful epoch fence prerequisite btree index is missing for %.%',

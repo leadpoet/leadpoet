@@ -7,6 +7,7 @@ import pytest
 
 from gateway.tee.bootstrap_acceptance_corpus_v2 import (
     AcceptanceCorpusBootstrapV2Error,
+    _timestamp,
     build_fixture_index,
 )
 
@@ -129,3 +130,10 @@ def test_bootstrap_rejects_secret_markers_before_signing(tmp_path):
             _Reader(secret_provider=True),
             corpus_root=tmp_path / "corpus",
         )
+
+
+def test_timestamp_accepts_postgrest_five_digit_fraction_on_python_39():
+    assert (
+        _timestamp("2026-07-14T06:27:29.75749+00:00")
+        == "2026-07-14T06:27:29.757490Z"
+    )

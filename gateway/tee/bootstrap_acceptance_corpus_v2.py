@@ -29,6 +29,10 @@ from research_lab.eval.promotion_metric import promotion_gate_decision
 
 
 _HASH_RE = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")
+_ISO_FRACTION_RE = re.compile(
+    r"^(?P<head>.*[Tt ]\d{2}:\d{2}:\d{2})\."
+    r"(?P<fraction>\d+)(?P<zone>Z|[+-]\d{2}:\d{2})$"
+)
 _FORBIDDEN = re.compile(
     r"(sk-or-|sb_secret|service_role|raw_secret|api[_-]?key|authorization|"
     r"proxy[_-]?(?:url|authorization)|request_body|response_body|provider_output|"
@@ -71,6 +75,15 @@ def _normalized_hash(value: Any, *, fallback: Any) -> str:
 
 def _timestamp(value: Any) -> str:
     text = str(value or "")
+    fraction_match = _ISO_FRACTION_RE.fullmatch(text)
+    if fraction_match:
+        fraction = (fraction_match.group("fraction") + "000000")[:6]
+        text = (
+            fraction_match.group("head")
+            + "."
+            + fraction
+            + fraction_match.group("zone")
+        )
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:

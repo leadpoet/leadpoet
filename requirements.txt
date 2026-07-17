@@ -8,6 +8,11 @@ async-substrate-interface==2.2.1; python_version >= "3.10"
 # The Python 3.9 gateway performs synchronous historical-block inspection.
 # py-scale-codec conflicts with the cyscale namespace required by Bittensor 10.
 substrate-interface==1.7.11; python_version < "3.10"
+# The V2 validator hotkey tools import sr25519 directly
+# (validator_tee/host/prepare_hotkey_assets_v2.py, enclave
+# hotkey_authority_v2.py). It arrived transitively via substrate-interface,
+# which the Bittensor 10 line no longer installs on Python >= 3.10.
+py-sr25519-bindings>=0.2.0; python_version >= "3.10"
 
 # HTTP and networking
 requests>=2.31.0

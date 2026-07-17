@@ -712,36 +712,34 @@ _EXA_GATE = ExaConcurrencyGate()
 
 
 class SdConcurrencyGate:
-    """Account-wide ScrapingDog render concurrency, enforced at the proxy.
+    """Account-wide ScrapingDog concurrency, enforced at the proxy.
 
-    Parallel container validation bursts far past what the ScrapingDog
-    account tolerates; the provider then sheds load as empty-body 400s,
-    500s, and stalled renders (observed in-container: 10% /scrape success
-    during a full-concurrency window while lone runs succeed). Queue the
-    heavy render endpoints briefly here instead. The wait MUST stay below
-    the model's shortest scrape timeout (30s static tier) so a queued
-    caller receives a clean transient 429 — which its retry ladder already
-    backs off on — rather than hanging up mid-queue.
+    The account allows a bounded number of concurrent requests; parallel
+    container validation can burst past it, and the provider then sheds
+    load as empty-body 400s, 500s, and stalled renders (observed
+    in-container: 17 of 165 /scrape calls succeeding during a
+    full-concurrency window while lone runs succeed). Every ScrapingDog
+    request counts against the same account limit, so all of them share
+    one semaphore; set SD_MAX_CONCURRENCY to the account's plan limit.
+    The wait MUST stay below the model's shortest scrape timeout (30s
+    static tier) so a queued caller receives a clean transient 429 —
+    which its retry ladder already backs off on — rather than hanging up
+    mid-queue.
     """
 
-    _GATED_PREFIXES = ("/scrape", "/google")
-
     def __init__(self) -> None:
-        self.scrape_limit = max(1, int(os.getenv("SD_SCRAPE_MAX_CONCURRENCY", "12")))
-        self._sem = threading.BoundedSemaphore(self.scrape_limit)
+        self.request_limit = max(1, int(os.getenv("SD_MAX_CONCURRENCY", "125")))
+        self._sem = threading.BoundedSemaphore(self.request_limit)
         self._wait_seconds = float(os.getenv("SD_GATE_WAIT_SECONDS", "20"))
 
     def acquire(self, provider: str, path: str) -> tuple[str, bool]:
         """Returns (kind, acquired). kind '' means this request is not gated."""
         if provider != "sd":
             return "", True
-        clean = (path or "").split("?")[0]
-        if not clean.startswith(self._GATED_PREFIXES):
-            return "", True
-        return "sd_render", self._sem.acquire(timeout=self._wait_seconds)
+        return "sd_request", self._sem.acquire(timeout=self._wait_seconds)
 
     def release(self, kind: str) -> None:
-        if kind == "sd_render":
+        if kind == "sd_request":
             try:
                 self._sem.release()
             except ValueError:

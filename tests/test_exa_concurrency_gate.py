@@ -111,28 +111,29 @@ def _sd_gate(limit=2, wait="0.05"):
     from gateway.research_lab.provider_evidence_proxy import SdConcurrencyGate
 
     with mock.patch.dict(os.environ, {
-        "SD_SCRAPE_MAX_CONCURRENCY": str(limit),
+        "SD_MAX_CONCURRENCY": str(limit),
         "SD_GATE_WAIT_SECONDS": wait,
     }):
         return SdConcurrencyGate()
 
 
-def test_sd_gate_only_covers_render_endpoints():
+def test_sd_gate_covers_every_sd_endpoint_only():
     g = _sd_gate()
     assert g.acquire("exa", "/scrape") == ("", True)
-    assert g.acquire("sd", "/profile?slug=acme") == ("", True)
-    assert g.acquire("sd", "/search?q=acme") == ("", True)
-    assert g.acquire("sd", "/scrape?url=x")[0] == "sd_render"
-    assert g.acquire("sd", "/google/ai_mode?q=x")[0] == "sd_render"
+    # Every request counts against the shared account limit, so all gate.
+    assert g.acquire("sd", "/profile?slug=acme")[0] == "sd_request"
+    assert g.acquire("sd", "/search?q=acme")[0] == "sd_request"
+    assert g.acquire("sd", "/scrape?url=x")[0] == "sd_request"
+    assert g.acquire("sd", "/google/ai_mode?q=x")[0] == "sd_request"
 
 
 def test_sd_gate_limits_and_releases():
     g = _sd_gate(limit=1)
     kind, ok = g.acquire("sd", "/scrape?url=a")
-    assert (kind, ok) == ("sd_render", True)
+    assert (kind, ok) == ("sd_request", True)
     _, blocked = g.acquire("sd", "/scrape?url=b")
     assert not blocked  # queue-wait timeout -> caller gets a transient 429
-    g.release("sd_render")
+    g.release("sd_request")
     _, ok2 = g.acquire("sd", "/scrape?url=c")
     assert ok2
     g.release("")  # ungated kind is a no-op, never over-releases

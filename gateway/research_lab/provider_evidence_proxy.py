@@ -711,6 +711,46 @@ class ExaConcurrencyGate:
 _EXA_GATE = ExaConcurrencyGate()
 
 
+class SdConcurrencyGate:
+    """Account-wide ScrapingDog render concurrency, enforced at the proxy.
+
+    Parallel container validation bursts far past what the ScrapingDog
+    account tolerates; the provider then sheds load as empty-body 400s,
+    500s, and stalled renders (observed in-container: 10% /scrape success
+    during a full-concurrency window while lone runs succeed). Queue the
+    heavy render endpoints briefly here instead. The wait MUST stay below
+    the model's shortest scrape timeout (30s static tier) so a queued
+    caller receives a clean transient 429 — which its retry ladder already
+    backs off on — rather than hanging up mid-queue.
+    """
+
+    _GATED_PREFIXES = ("/scrape", "/google")
+
+    def __init__(self) -> None:
+        self.scrape_limit = max(1, int(os.getenv("SD_SCRAPE_MAX_CONCURRENCY", "12")))
+        self._sem = threading.BoundedSemaphore(self.scrape_limit)
+        self._wait_seconds = float(os.getenv("SD_GATE_WAIT_SECONDS", "20"))
+
+    def acquire(self, provider: str, path: str) -> tuple[str, bool]:
+        """Returns (kind, acquired). kind '' means this request is not gated."""
+        if provider != "sd":
+            return "", True
+        clean = (path or "").split("?")[0]
+        if not clean.startswith(self._GATED_PREFIXES):
+            return "", True
+        return "sd_render", self._sem.acquire(timeout=self._wait_seconds)
+
+    def release(self, kind: str) -> None:
+        if kind == "sd_render":
+            try:
+                self._sem.release()
+            except ValueError:
+                pass
+
+
+_SD_GATE = SdConcurrencyGate()
+
+
 class ProviderUsageLedger:
     """Per-call usage ledger + per-day live-call counters.
 
@@ -1506,6 +1546,16 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                             "transient": True}).encode("utf-8"),
             )
             return
+        sd_gate_kind, sd_gate_ok = _SD_GATE.acquire(entry.id, rest)
+        if not sd_gate_ok:
+            if is_leader:
+                self.store.release_lead(fingerprint)
+            self._respond(
+                429,
+                json.dumps({"error": "scrapingdog concurrency gate wait timeout",
+                            "transient": True}).encode("utf-8"),
+            )
+            return
         try:
             with urllib.request.urlopen(request, timeout=180) as response:
                 status = int(getattr(response, "status", None) or getattr(response, "code", 0) or 0)
@@ -1523,6 +1573,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             # No recordable result (transport failure): release leadership so a
             # waiting caller can retry rather than block on us.
             _EXA_GATE.release_on_failure(gate_kind)
+            _SD_GATE.release(sd_gate_kind)
             if is_leader:
                 self.store.release_lead(fingerprint)
             event = cost_ledger.record_live_event(
@@ -1554,6 +1605,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         # agent run keeps its slot until a poll reports terminal (or TTL).
         _EXA_GATE.finish(gate_kind, path=rest, status=status, body=body)
         _EXA_GATE.observe_agent_poll(rest, body)
+        _SD_GATE.release(sd_gate_kind)
 
         recordable = _response_is_recordable(entry.id, upstream_url, status, body)
         evidence_label = "recorded" if recordable else "live_unrecorded"

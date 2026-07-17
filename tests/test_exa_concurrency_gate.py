@@ -105,3 +105,34 @@ def test_ttl_reaper_cancels_run_upstream():
         g.acquire("exa", "POST", "/agent/runs")
         assert done.wait(2.0)
     assert cancelled == ["agent_run_y"]
+
+
+def _sd_gate(limit=2, wait="0.05"):
+    from gateway.research_lab.provider_evidence_proxy import SdConcurrencyGate
+
+    with mock.patch.dict(os.environ, {
+        "SD_SCRAPE_MAX_CONCURRENCY": str(limit),
+        "SD_GATE_WAIT_SECONDS": wait,
+    }):
+        return SdConcurrencyGate()
+
+
+def test_sd_gate_only_covers_render_endpoints():
+    g = _sd_gate()
+    assert g.acquire("exa", "/scrape") == ("", True)
+    assert g.acquire("sd", "/profile?slug=acme") == ("", True)
+    assert g.acquire("sd", "/search?q=acme") == ("", True)
+    assert g.acquire("sd", "/scrape?url=x")[0] == "sd_render"
+    assert g.acquire("sd", "/google/ai_mode?q=x")[0] == "sd_render"
+
+
+def test_sd_gate_limits_and_releases():
+    g = _sd_gate(limit=1)
+    kind, ok = g.acquire("sd", "/scrape?url=a")
+    assert (kind, ok) == ("sd_render", True)
+    _, blocked = g.acquire("sd", "/scrape?url=b")
+    assert not blocked  # queue-wait timeout -> caller gets a transient 429
+    g.release("sd_render")
+    _, ok2 = g.acquire("sd", "/scrape?url=c")
+    assert ok2
+    g.release("")  # ungated kind is a no-op, never over-releases

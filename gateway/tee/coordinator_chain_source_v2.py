@@ -8,6 +8,12 @@ import json
 import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
+from Leadpoet.utils.subnet_epoch import (
+    LEGACY_EPOCH_MODE,
+    STATEFUL_EPOCH_MODE,
+    SubnetEpochCutover,
+    SubnetEpochError,
+)
 from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
 from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
 from leadpoet_canonical.chain_source_v2 import (
@@ -18,6 +24,7 @@ from leadpoet_canonical.chain_source_v2 import (
     CHAIN_RPC_RETRY_BACKOFF_SECONDS,
     CHAIN_RPC_TIMEOUT_MS,
     ChainSourceV2Error,
+    decode_subnet_epoch_storage,
     decode_weights_storage,
     decode_selective_metagraph_result,
     encode_selective_metagraph_params,
@@ -25,6 +32,7 @@ from leadpoet_canonical.chain_source_v2 import (
     normalize_raw_hash,
     parse_finalized_header,
     parse_json_rpc_response,
+    subnet_epoch_storage_key,
     weights_storage_key,
 )
 
@@ -60,6 +68,7 @@ class CoordinatorChainSourceV2:
         *,
         execute_provider: Callable[[Mapping[str, Any]], Mapping[str, Any]],
         retry_policy_hashes: Mapping[str, str],
+        epoch_authority: Optional[Mapping[str, Any]] = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
@@ -69,11 +78,255 @@ class CoordinatorChainSourceV2:
         }
         self._sleep = sleep
         self._clock = clock
+        authority = dict(
+            epoch_authority
+            if epoch_authority is not None
+            else {"mode": LEGACY_EPOCH_MODE, "cutover": None}
+        )
+        if set(authority) != {"mode", "cutover"}:
+            raise CoordinatorChainSourceV2Error(
+                "coordinator epoch authority fields are invalid"
+            )
+        self._epoch_mode = str(authority.get("mode") or "").strip().lower()
+        self._epoch_cutover = None
+        if self._epoch_mode == STATEFUL_EPOCH_MODE:
+            try:
+                self._epoch_cutover = SubnetEpochCutover.from_mapping(
+                    authority.get("cutover")
+                )
+            except (SubnetEpochError, TypeError) as exc:
+                raise CoordinatorChainSourceV2Error(
+                    "coordinator stateful epoch cutover is invalid"
+                ) from exc
+        elif (
+            self._epoch_mode != LEGACY_EPOCH_MODE
+            or authority.get("cutover") is not None
+        ):
+            raise CoordinatorChainSourceV2Error(
+                "coordinator epoch authority is invalid"
+            )
         for provider_id in ("bittensor_chain", "coingecko"):
             if not self._retry_policy_hashes.get(provider_id):
                 raise CoordinatorChainSourceV2Error(
                     "%s retry policy is unavailable" % provider_id
                 )
+        if (
+            self._epoch_mode == STATEFUL_EPOCH_MODE
+            and not self._retry_policy_hashes.get("bittensor_archive")
+        ):
+            raise CoordinatorChainSourceV2Error(
+                "bittensor_archive retry policy is unavailable"
+            )
+
+    def _read_finalized_epoch_authority(
+        self,
+        *,
+        netuid: int,
+        finalized_hash: str,
+        header: Mapping[str, Any],
+        context: Any,
+        attempt_number: int,
+    ) -> Dict[str, Any]:
+        """Bind a finalized header to the configured workflow epoch scheme."""
+
+        if self._epoch_mode == LEGACY_EPOCH_MODE:
+            return {
+                "mode": LEGACY_EPOCH_MODE,
+                "workflow_epoch_id": (
+                    int(header["block"]) // CHAIN_FINALIZATION_EPOCH_BLOCKS
+                ),
+                "official_subnet_epoch_id": None,
+                "cutover_mapping_hash": None,
+                "state": None,
+            }
+        cutover = self._epoch_cutover
+        if cutover is None or cutover.netuid != int(netuid):
+            raise CoordinatorChainSourceV2Error(
+                "coordinator epoch cutover netuid differs"
+            )
+        if int(header["block"]) < cutover.cutover_block:
+            raise CoordinatorChainSourceV2Error(
+                "coordinator finalized head predates the epoch cutover"
+            )
+
+        def chain_call(
+            method: str,
+            params: Sequence[Any],
+            request_id: int,
+            operation: str,
+        ) -> Any:
+            return self._chain_call(
+                method=method,
+                params=params,
+                request_id=request_id,
+                logical_operation_id=(
+                    "%s:epoch-authority:%s" % (context.job_id, operation)
+                ),
+                attempt_number=attempt_number,
+                context=context,
+            )
+
+        def archive_call(
+            method: str,
+            params: Sequence[Any],
+            request_id: int,
+            operation: str,
+        ) -> Any:
+            return self._archive_call(
+                method=method,
+                params=params,
+                request_id=request_id,
+                logical_operation_id=(
+                    "%s:epoch-authority:%s" % (context.job_id, operation)
+                ),
+                context=context,
+            )
+
+        genesis_hash = "0x" + normalize_raw_hash(
+            archive_call("chain_getBlockHash", (0,), 10, "genesis-hash"),
+            "coordinator genesis block hash",
+        )
+        cutover_hash = "0x" + normalize_raw_hash(
+            archive_call(
+                "chain_getBlockHash",
+                (cutover.cutover_block,),
+                11,
+                "cutover-hash",
+            ),
+            "coordinator cutover block hash",
+        )
+        if genesis_hash != cutover.network_genesis_hash:
+            raise CoordinatorChainSourceV2Error(
+                "coordinator epoch cutover targets a different chain"
+            )
+        if cutover_hash != cutover.cutover_block_hash:
+            raise CoordinatorChainSourceV2Error(
+                "coordinator epoch cutover block hash differs"
+            )
+        cutover_header = parse_finalized_header(
+            archive_call(
+                "chain_getHeader",
+                (cutover_hash,),
+                12,
+                "cutover-header",
+            )
+        )
+        predecessor_hash = "0x" + normalize_raw_hash(
+            archive_call(
+                "chain_getBlockHash",
+                (cutover.cutover_block - 1,),
+                13,
+                "cutover-predecessor-hash",
+            ),
+            "coordinator cutover predecessor block hash",
+        )
+        if (
+            cutover.cutover_block <= 0
+            or int(cutover_header["block"]) != cutover.cutover_block
+            or "0x" + str(cutover_header["parent_hash"]) != predecessor_hash
+        ):
+            raise CoordinatorChainSourceV2Error(
+                "coordinator epoch cutover boundary is inconsistent"
+            )
+
+        def storage(
+            storage_name: str,
+            at_hash: str,
+            request_id: int,
+            operation: str,
+            *,
+            historical: bool = False,
+        ) -> int:
+            try:
+                return decode_subnet_epoch_storage(
+                    (archive_call if historical else chain_call)(
+                        "state_getStorage",
+                        (
+                            subnet_epoch_storage_key(
+                                storage_name=storage_name,
+                                netuid=int(netuid),
+                            ),
+                            at_hash,
+                        ),
+                        request_id,
+                        operation,
+                    ),
+                    storage_name=storage_name,
+                )
+            except ChainSourceV2Error as exc:
+                raise CoordinatorChainSourceV2Error(
+                    "coordinator subnet epoch storage is invalid"
+                ) from exc
+
+        cutover_index = storage(
+            "SubnetEpochIndex",
+            cutover_hash,
+            14,
+            "cutover-index",
+            historical=True,
+        )
+        cutover_last_epoch_block = storage(
+            "LastEpochBlock",
+            cutover_hash,
+            15,
+            "cutover-last-epoch-block",
+            historical=True,
+        )
+        predecessor_index = storage(
+            "SubnetEpochIndex",
+            predecessor_hash,
+            16,
+            "cutover-predecessor-index",
+            historical=True,
+        )
+        if (
+            cutover_index != cutover.first_subnet_epoch_index
+            or cutover_last_epoch_block != cutover.cutover_block
+            or predecessor_index + 1 != cutover_index
+        ):
+            raise CoordinatorChainSourceV2Error(
+                "coordinator epoch cutover is not an official transition"
+            )
+
+        state = {}
+        for offset, storage_name in enumerate(
+            (
+                "Tempo",
+                "LastEpochBlock",
+                "PendingEpochAt",
+                "SubnetEpochIndex",
+                "BlocksSinceLastStep",
+            ),
+            start=17,
+        ):
+            state[storage_name] = storage(
+                storage_name,
+                "0x" + finalized_hash,
+                offset,
+                "finalized-%s" % storage_name.lower(),
+            )
+        if (
+            state["Tempo"] <= 0
+            or state["LastEpochBlock"] > int(header["block"])
+        ):
+            raise CoordinatorChainSourceV2Error(
+                "coordinator finalized subnet epoch state is inconsistent"
+            )
+        try:
+            workflow_epoch = cutover.settlement_epoch_id(
+                state["SubnetEpochIndex"]
+            )
+        except SubnetEpochError as exc:
+            raise CoordinatorChainSourceV2Error(
+                "coordinator finalized subnet epoch predates the cutover"
+            ) from exc
+        return {
+            "mode": STATEFUL_EPOCH_MODE,
+            "workflow_epoch_id": workflow_epoch,
+            "official_subnet_epoch_id": state["SubnetEpochIndex"],
+            "cutover_mapping_hash": cutover.mapping_hash,
+            "state": state,
+        }
 
     def read_finalized_metagraph(
         self,
@@ -119,10 +372,22 @@ class CoordinatorChainSourceV2:
             raise CoordinatorChainSourceV2Error(
                 "allocation metagraph and finalized header differ"
             )
+        epoch_authority = self._read_finalized_epoch_authority(
+            netuid=int(netuid),
+            finalized_hash=finalized_hash,
+            header=header,
+            context=context,
+            attempt_number=attempt_number,
+        )
         return {
             "finalized_block_hash": finalized_hash,
             "header": header,
             "metagraph": metagraph,
+            "workflow_epoch_id": epoch_authority["workflow_epoch_id"],
+            "official_subnet_epoch_id": epoch_authority[
+                "official_subnet_epoch_id"
+            ],
+            "epoch_authority": epoch_authority,
         }
 
     def read_tao_per_alpha(

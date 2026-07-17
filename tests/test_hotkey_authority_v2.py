@@ -19,6 +19,7 @@ from leadpoet_canonical.hotkey_authority_v2 import (
     encode_mortal_era,
     encode_serve_axon_call,
     encode_weight_signature_payload,
+    subnet_epoch_candidate_authorization_message_v1,
     validate_application_signature_request_v2,
     validate_chain_signing_profile,
     validate_serve_axon_extrinsic_authorization_v2,
@@ -370,6 +371,30 @@ def test_weight_input_request_rejects_other_hotkeys_and_inverted_windows():
     with pytest.raises(HotkeyAuthorityV2Error, match="hotkey differs"):
         classify_application_message_v2(
             weight_inputs_request_message_v2(request).encode("utf-8"),
+            validator_hotkey=HOTKEY,
+        )
+
+
+def test_subnet_epoch_candidate_message_is_exact_and_hotkey_bound():
+    message = subnet_epoch_candidate_authorization_message_v1(
+        validator_hotkey=HOTKEY,
+        candidate_payload_hash="sha256:" + "7" * 64,
+    )
+    assert (
+        classify_application_message_v2(
+            message.encode("utf-8"),
+            validator_hotkey=HOTKEY,
+        )
+        == "validator.subnet_epoch_candidate.v2"
+    )
+    with pytest.raises(HotkeyAuthorityV2Error, match="hotkey differs"):
+        classify_application_message_v2(
+            message.replace(HOTKEY, TARGET).encode("utf-8"),
+            validator_hotkey=HOTKEY,
+        )
+    with pytest.raises(HotkeyAuthorityV2Error):
+        classify_application_message_v2(
+            message.replace("sha256:", "sha256x").encode("utf-8"),
             validator_hotkey=HOTKEY,
         )
 

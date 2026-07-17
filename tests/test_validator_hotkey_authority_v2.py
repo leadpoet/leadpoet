@@ -10,6 +10,7 @@ from leadpoet_canonical.attested_v2 import sha256_json
 from leadpoet_canonical.binding import create_binding_message
 from leadpoet_canonical.hotkey_authority_v2 import (
     CHAIN_SIGNING_PROFILE_SCHEMA_VERSION,
+    subnet_epoch_candidate_authorization_message_v1,
 )
 from validator_tee.enclave import hotkey_authority_v2 as module
 from validator_tee.enclave.hotkey_authority_v2 import (
@@ -264,6 +265,24 @@ def test_application_signer_rejects_unknown_message_or_unwanted_parent(monkeypat
             message_hex=("GET_EPOCH_LEADS:23860:%s" % HOTKEY).encode().hex(),
             parent_receipt_hash="sha256:" + "a" * 64,
         )
+
+
+def test_application_signer_authorizes_exact_subnet_epoch_candidate(monkeypatch):
+    authority, *_rest = _authority(monkeypatch)
+    _provision(authority)
+    message = subnet_epoch_candidate_authorization_message_v1(
+        validator_hotkey=HOTKEY,
+        candidate_payload_hash="sha256:" + "7" * 64,
+    )
+
+    result = authority.sign_application_message(
+        message_hex=message.encode("utf-8").hex()
+    )
+
+    assert result["purpose"] == "validator.subnet_epoch_candidate.v2"
+    assert result["receipt"]["purpose"] == "validator.hotkey_signature.v2"
+    assert result["receipt"]["parent_receipt_hashes"] == []
+    assert len(bytes.fromhex(result["signature"])) == 64
 
 
 def _prepare(monkeypatch):

@@ -535,6 +535,8 @@ async def test_v2_publication_is_acknowledged_only_after_receipt_and_readback(
         "receipt_hash": "sha256:" + "e" * 64,
         "role": "gateway_coordinator",
         "purpose": "gateway.weights.publication.v2",
+        "status": "succeeded",
+        "epoch_id": 10,
         "parent_receipt_hashes": [HASH_B],
         "output_root": attested_v2_store.sha256_json(publication_doc),
     }
@@ -572,12 +574,120 @@ async def test_v2_publication_is_acknowledged_only_after_receipt_and_readback(
             "bundle_hash": HASH,
             "root_receipt_hash": HASH_B,
             "durable_readback_hash": HASH_C,
+            "epoch_id": 10,
         },
         publication_graph=graph,
         publication_doc=publication_doc,
     )
     assert result["weight_submission_event_hash"].startswith("sha256:")
     assert result["publication_receipt_hash"] == publication_receipt["receipt_hash"]
+
+
+@pytest.mark.asyncio
+async def test_load_v2_publication_reproves_exact_bundle_parent(monkeypatch):
+    bundle_doc = {"schema_version": "leadpoet.published_weight_bundle.v2"}
+    verified = {
+        "bundle_hash": HASH,
+        "netuid": 71,
+        "epoch_id": 10,
+        "block": 3600,
+        "validator_hotkey": "validator",
+        "root_receipt_hash": HASH_B,
+        "weights_hash": "c" * 64,
+        "snapshot_hash": HASH_C,
+    }
+    bundle_row = {
+        "bundle_hash": HASH,
+        "schema_version": bundle_doc["schema_version"],
+        "netuid": 71,
+        "epoch_id": 10,
+        "block": 3600,
+        "validator_hotkey": "validator",
+        "root_receipt_hash": HASH_B,
+        "weights_hash": "c" * 64,
+        "snapshot_hash": HASH_C,
+        "bundle_doc": bundle_doc,
+    }
+    bundle_readback_hash = attested_v2_store.sha256_json(
+        {field: bundle_row[field] for field in sorted(bundle_row)}
+    )
+    publication_doc = {
+        "schema_version": "leadpoet.weight_publication.v2",
+        "bundle_hash": HASH,
+        "root_receipt_hash": HASH_B,
+        "durable_readback_hash": bundle_readback_hash,
+        "transparency_event_hash": "sha256:" + "d" * 64,
+    }
+    receipt_hash = "sha256:" + "e" * 64
+    event_hash = attested_v2_store.sha256_json(
+        {
+            "bundle_hash": HASH,
+            "publication_receipt_hash": receipt_hash,
+            "transparency_event_hash": publication_doc[
+                "transparency_event_hash"
+            ],
+            "durable_readback_hash": bundle_readback_hash,
+        }
+    )
+    publication_row = {
+        "weight_submission_event_hash": event_hash,
+        "bundle_hash": HASH,
+        "publication_receipt_hash": receipt_hash,
+        "transparency_event_hash": publication_doc[
+            "transparency_event_hash"
+        ],
+        "durable_readback_hash": bundle_readback_hash,
+        "publication_doc": publication_doc,
+    }
+    graph = {
+        "root_receipt_hash": receipt_hash,
+        "receipts": [
+            {
+                "receipt_hash": receipt_hash,
+                "role": "gateway_coordinator",
+                "purpose": "gateway.weights.publication.v2",
+                "status": "succeeded",
+                "epoch_id": 10,
+                "parent_receipt_hashes": [HASH_B],
+                "output_root": attested_v2_store.sha256_json(
+                    publication_doc
+                ),
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "validate_published_weight_bundle_v2",
+        lambda _bundle: dict(verified),
+    )
+
+    async def select(table, *, filters):
+        assert filters == (("bundle_hash", HASH),)
+        if table == attested_v2_store.PUBLICATION_TABLE:
+            return dict(publication_row)
+        if table == attested_v2_store.BUNDLE_TABLE:
+            return dict(bundle_row)
+        raise AssertionError(table)
+
+    async def load_graph(value):
+        assert value == receipt_hash
+        return graph
+
+    monkeypatch.setattr(attested_v2_store, "select_one", select)
+    monkeypatch.setattr(attested_v2_store, "load_receipt_graph_v2", load_graph)
+
+    loaded = await attested_v2_store.load_weight_publication_v2(
+        bundle_hash=HASH
+    )
+    assert loaded == publication_row
+
+    graph["receipts"][0]["parent_receipt_hashes"] = [HASH_C]
+    with pytest.raises(
+        attested_v2_store.AttestedV2StoreError,
+        match="does not bind its bundle",
+    ):
+        await attested_v2_store.load_weight_publication_v2(bundle_hash=HASH)
 
 
 @pytest.mark.asyncio

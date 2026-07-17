@@ -1,8 +1,8 @@
 """Parent-side opaque relay for validator-enclave chain TLS.
 
-The relay can connect only to the measured Finney endpoint.  It never sees an
-HTTP request or response because the TLS session originates and terminates in
-the validator enclave.
+The relay can connect only to the measured Finney live or archive endpoint.  It
+never sees an HTTP request or response because the TLS session originates and
+terminates in the validator enclave.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import time
 from typing import Any, Callable, Iterable, Optional
 
 from leadpoet_canonical.chain_source_v2 import (
+    CHAIN_ARCHIVE_ENDPOINT_HOST,
     CHAIN_ENDPOINT_HOST,
     CHAIN_ENDPOINT_PORT,
     chain_source_policy_hash,
@@ -74,7 +75,7 @@ def _read_control(connection: Any) -> dict:
     return value
 
 
-def _validate_control(value: Any) -> None:
+def _validate_control(value: Any) -> str:
     if not isinstance(value, dict) or set(value) != {
         "schema_version",
         "host",
@@ -84,18 +85,27 @@ def _validate_control(value: Any) -> None:
         raise ValidatorChainRelayV2Error("relay control fields are invalid")
     if value.get("schema_version") != "leadpoet.validator_chain_relay.v2":
         raise ValidatorChainRelayV2Error("relay schema is invalid")
-    if value.get("host") != CHAIN_ENDPOINT_HOST or value.get("port") != CHAIN_ENDPOINT_PORT:
+    destination_host = value.get("host")
+    if (
+        destination_host
+        not in (CHAIN_ENDPOINT_HOST, CHAIN_ARCHIVE_ENDPOINT_HOST)
+        or value.get("port") != CHAIN_ENDPOINT_PORT
+    ):
         raise ValidatorChainRelayV2Error("relay destination is not the measured chain")
     if value.get("policy_hash") != chain_source_policy_hash():
         raise ValidatorChainRelayV2Error("relay policy hash differs")
+    return str(destination_host)
 
 
 def _global_addresses(
+    destination_host: str,
     resolver: Callable[..., Iterable[Any]] = socket.getaddrinfo,
 ) -> list:
+    if destination_host not in (CHAIN_ENDPOINT_HOST, CHAIN_ARCHIVE_ENDPOINT_HOST):
+        raise ValidatorChainRelayV2Error("chain destination is not measured")
     try:
         entries = resolver(
-            CHAIN_ENDPOINT_HOST,
+            destination_host,
             CHAIN_ENDPOINT_PORT,
             type=socket.SOCK_STREAM,
         )
@@ -118,12 +128,16 @@ def _global_addresses(
 
 
 def _connect_chain(
+    destination_host: str,
     *,
     resolver: Callable[..., Iterable[Any]] = socket.getaddrinfo,
     socket_factory: Callable[..., Any] = socket.socket,
 ) -> Any:
     last_error = None
-    for family, socktype, protocol, address in _global_addresses(resolver):
+    for family, socktype, protocol, address in _global_addresses(
+        destination_host,
+        resolver,
+    ):
         connection = socket_factory(family, socktype, protocol)
         try:
             connection.settimeout(CONNECT_TIMEOUT_SECONDS)
@@ -166,13 +180,13 @@ def _relay(left: Any, right: Any) -> None:
 
 
 def handle_chain_relay_connection(
-    connection: Any, *, connector: Callable[[], Any] = _connect_chain
+    connection: Any, *, connector: Callable[[str], Any] = _connect_chain
 ) -> None:
     upstream = None
     try:
         request = _read_control(connection)
-        _validate_control(request)
-        upstream = connector()
+        destination_host = _validate_control(request)
+        upstream = connector(destination_host)
         _send_control(
             connection,
             {
@@ -196,7 +210,7 @@ class ValidatorChainRelayV2:
         *,
         port: int = CHAIN_RELAY_VSOCK_PORT,
         socket_factory: Callable[..., Any] = socket.socket,
-        connector: Callable[[], Any] = _connect_chain,
+        connector: Callable[[str], Any] = _connect_chain,
     ) -> None:
         self.port = int(port)
         self._socket_factory = socket_factory

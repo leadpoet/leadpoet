@@ -29,7 +29,20 @@ class FakeReader:
 class FakeChain:
     def read_finalized_metagraph(self, *, netuid, context):
         assert netuid == 71
-        return {"header": {"block": context.epoch_id * 360}}
+        return {
+            "header": {"block": context.epoch_id * 360},
+            "workflow_epoch_id": context.epoch_id,
+        }
+
+
+class MissingWorkflowEpochChain(FakeChain):
+    def read_finalized_metagraph(self, *, netuid, context):
+        result = super().read_finalized_metagraph(
+            netuid=netuid,
+            context=context,
+        )
+        result.pop("workflow_epoch_id")
+        return result
 
 
 def _config():
@@ -208,6 +221,29 @@ def test_leg1_replaces_host_reward_rows_with_authenticated_rows():
         ("source_add_submission_by_id", {"submission_id": SUBMISSION_ID}),
         ("source_add_functional_probe_by_submission", {"submission_id": SUBMISSION_ID}),
     ]
+
+
+def test_reward_never_falls_back_to_finalized_block_modulo():
+    resolver = CoordinatorRewardSourceV2(
+        reader=FakeReader({}),
+        chain_source=MissingWorkflowEpochChain(),
+        config_supplier=_config,
+    )
+
+    with pytest.raises(
+        CoordinatorRewardSourceV2Error,
+        match="execution epoch differs",
+    ):
+        resolver.resolve(
+            payload={
+                "decision_kind": "source_add_leg1",
+                "decision_payload": {
+                    "adapter_id": "adapter:test",
+                    "start_epoch": 101,
+                },
+            },
+            context=_context(),
+        )
 
 
 def test_champion_migration_reconstructs_exact_measured_reward_and_bundle():

@@ -23,6 +23,7 @@ import bittensor as bt
 import argparse
 import json
 import gc  # For explicit memory cleanup
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from Leadpoet.base.validator import BaseValidatorNeuron
 from Leadpoet.protocol import LeadRequest
@@ -41,6 +42,18 @@ from Leadpoet.base.utils.pool import (
 from Leadpoet.validator import reward as reward_module
 from Leadpoet.utils import cloud_db as cloud_db_module
 from Leadpoet.utils.bittensor_sdk import ExtrinsicOutcome
+from Leadpoet.utils.subnet_epoch import (
+    LEGACY_EPOCH_MODE,
+    OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT,
+    STATEFUL_EPOCH_MODE,
+    SubnetEpochCutover,
+    SubnetEpochError,
+    SubnetEpochSnapshot,
+    get_epoch_mode,
+    load_subnet_epoch_cutover,
+    read_subnet_epoch_snapshot,
+    validate_subnet_epoch_cutover_anchor,
+)
 from Leadpoet.validator.reward import start_epoch_monitor, stop_epoch_monitor
 import asyncio
 from typing import List, Dict, Mapping, Optional, Any
@@ -294,6 +307,179 @@ QUALIFICATION_PROXY_ENV_RE = re.compile(r"^QUALIFICATION_WEBSHARE_PROXY_(\d+)$")
 QUALIFICATION_WORK_FILE_RE = re.compile(r"^qual_worker_(\d+)_work_(\d+)$")
 
 _TRUTHY_ENV_VALUES = {"true", "1", "yes", "y", "on"}
+_SHARED_EPOCH_SCHEMA_VERSION = "leadpoet.validator_shared_epoch.v2"
+_LEGACY_EPOCH_BLOCKS = 360
+
+
+@dataclass(frozen=True)
+class _ValidatorEpochState:
+    """One coherent epoch decision used by validator and worker code."""
+
+    mode: str
+    current_block: int
+    workflow_epoch_id: int
+    epoch_block: int
+    blocks_remaining: int
+    epoch_start_block: int
+    next_epoch_block: int
+    tempo: int
+    subnet_epoch_index: Optional[int] = None
+    epoch_ref: Optional[str] = None
+    snapshot: Optional[SubnetEpochSnapshot] = None
+
+    @classmethod
+    def legacy(cls, block: int) -> "_ValidatorEpochState":
+        normalized_block = int(block)
+        epoch_id, epoch_block = divmod(normalized_block, _LEGACY_EPOCH_BLOCKS)
+        next_block = (epoch_id + 1) * _LEGACY_EPOCH_BLOCKS
+        return cls(
+            mode=LEGACY_EPOCH_MODE,
+            current_block=normalized_block,
+            workflow_epoch_id=epoch_id,
+            epoch_block=epoch_block,
+            blocks_remaining=next_block - normalized_block,
+            epoch_start_block=epoch_id * _LEGACY_EPOCH_BLOCKS,
+            next_epoch_block=next_block,
+            tempo=_LEGACY_EPOCH_BLOCKS,
+        )
+
+    @classmethod
+    def stateful(
+        cls,
+        snapshot: SubnetEpochSnapshot,
+        cutover: SubnetEpochCutover,
+    ) -> "_ValidatorEpochState":
+        return cls(
+            mode=STATEFUL_EPOCH_MODE,
+            current_block=snapshot.current_block,
+            workflow_epoch_id=snapshot.settlement_epoch_id(cutover),
+            epoch_block=snapshot.epoch_block,
+            blocks_remaining=snapshot.blocks_remaining,
+            epoch_start_block=snapshot.last_epoch_block,
+            next_epoch_block=snapshot.next_epoch_block,
+            tempo=snapshot.tempo,
+            subnet_epoch_index=snapshot.subnet_epoch_index,
+            epoch_ref=snapshot.epoch_ref,
+            snapshot=snapshot,
+        )
+
+    @property
+    def identity(self) -> int:
+        if self.mode == STATEFUL_EPOCH_MODE:
+            if self.subnet_epoch_index is None:
+                raise SubnetEpochError("stateful epoch identity is unavailable")
+            return self.subnet_epoch_index
+        return self.workflow_epoch_id
+
+    def same_epoch(self, other: "_ValidatorEpochState") -> bool:
+        return self.mode == other.mode and self.identity == other.identity
+
+    def deadline_reached(self, legacy_elapsed_block: int) -> bool:
+        """Preserve one legacy deadline as blocks remaining in stateful mode."""
+
+        threshold = int(legacy_elapsed_block)
+        if not 0 <= threshold <= _LEGACY_EPOCH_BLOCKS:
+            raise ValueError("legacy epoch deadline is outside 0..360")
+        if self.mode == STATEFUL_EPOCH_MODE:
+            return self.blocks_remaining <= (_LEGACY_EPOCH_BLOCKS - threshold)
+        return self.epoch_block >= threshold
+
+    def to_shared_document(self) -> Dict[str, Any]:
+        cutover = (
+            load_subnet_epoch_cutover()
+            if self.mode == STATEFUL_EPOCH_MODE
+            else None
+        )
+        authority = (
+            self.snapshot.to_dict(cutover=cutover)
+            if self.snapshot is not None and cutover is not None
+            else None
+        )
+        return {
+            "schema_version": _SHARED_EPOCH_SCHEMA_VERSION,
+            "mode": self.mode,
+            "block": self.current_block,
+            "epoch": self.workflow_epoch_id,
+            "blocks_into_epoch": self.epoch_block,
+            "blocks_remaining": self.blocks_remaining,
+            "epoch_start_block": self.epoch_start_block,
+            "next_epoch_block": self.next_epoch_block,
+            "tempo": self.tempo,
+            "subnet_epoch_index": self.subnet_epoch_index,
+            "epoch_ref": self.epoch_ref,
+            "authority": authority,
+            "timestamp": int(time.time()),
+        }
+
+
+def _read_shared_epoch_state_file(*, max_age_seconds: int) -> _ValidatorEpochState:
+    path = Path("validator_weights") / "current_block.json"
+    if not path.exists():
+        raise FileNotFoundError("Coordinator hasn't written block file yet")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SubnetEpochError("shared epoch file is unreadable") from exc
+    expected_fields = {
+        "schema_version",
+        "mode",
+        "block",
+        "epoch",
+        "blocks_into_epoch",
+        "blocks_remaining",
+        "epoch_start_block",
+        "next_epoch_block",
+        "tempo",
+        "subnet_epoch_index",
+        "epoch_ref",
+        "authority",
+        "timestamp",
+    }
+    if not isinstance(document, dict) or set(document) != expected_fields:
+        raise SubnetEpochError("shared epoch file fields are invalid")
+    if document.get("schema_version") != _SHARED_EPOCH_SCHEMA_VERSION:
+        raise SubnetEpochError("shared epoch file schema is unsupported")
+    configured_mode = get_epoch_mode()
+    if document.get("mode") != configured_mode:
+        raise SubnetEpochError("shared epoch file mode differs from this worker")
+    try:
+        age = int(time.time()) - int(document["timestamp"])
+    except (TypeError, ValueError) as exc:
+        raise SubnetEpochError("shared epoch file timestamp is invalid") from exc
+    if age < -30 or age > int(max_age_seconds):
+        raise SubnetEpochError(f"shared epoch file is stale ({age}s old)")
+
+    if configured_mode == STATEFUL_EPOCH_MODE:
+        authority = document.get("authority")
+        if not isinstance(authority, dict):
+            raise SubnetEpochError("shared stateful epoch authority is missing")
+        snapshot = SubnetEpochSnapshot.from_mapping(authority)
+        cutover = load_subnet_epoch_cutover()
+        if authority != snapshot.to_dict(cutover=cutover):
+            raise SubnetEpochError(
+                "shared stateful epoch authority is not canonical"
+            )
+        state = _ValidatorEpochState.stateful(
+            snapshot,
+            cutover,
+        )
+    else:
+        state = _ValidatorEpochState.legacy(int(document["block"]))
+
+    observed = {
+        "block": state.current_block,
+        "epoch": state.workflow_epoch_id,
+        "blocks_into_epoch": state.epoch_block,
+        "blocks_remaining": state.blocks_remaining,
+        "epoch_start_block": state.epoch_start_block,
+        "next_epoch_block": state.next_epoch_block,
+        "tempo": state.tempo,
+        "subnet_epoch_index": state.subnet_epoch_index,
+        "epoch_ref": state.epoch_ref,
+    }
+    if any(document[key] != value for key, value in observed.items()):
+        raise SubnetEpochError("shared epoch file derived fields are inconsistent")
+    return state
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -791,6 +977,86 @@ class Validator(BaseValidatorNeuron):
             "direct set_weights is disabled; use authoritative V2 epoch publication"
         )
 
+    def _uses_production_epoch_cutover_authority(self) -> bool:
+        """Return whether the fixed durable cutover authority governs us."""
+
+        subtensor_config = getattr(self.config, "subtensor", None)
+        network = str(
+            getattr(subtensor_config, "network", "") or ""
+        ).strip().lower()
+        return int(self.config.netuid) == 71 and network == "finney"
+
+    def _validate_durable_epoch_runtime_lifecycle(
+        self,
+        epoch_id: int,
+        *,
+        force_refresh: bool,
+    ) -> dict:
+        """Bind this process mode to the durable Supabase cutover singleton."""
+
+        mode = getattr(self, "_epoch_mode", LEGACY_EPOCH_MODE)
+        if not self._uses_production_epoch_cutover_authority():
+            if mode == STATEFUL_EPOCH_MODE:
+                cutover = getattr(self, "_epoch_cutover", None)
+                if cutover is None:
+                    raise SubnetEpochError("stateful epoch cutover is unavailable")
+                return {
+                    "lifecycle_state": "stateful_manifest_only",
+                    "mapping_hash": cutover.mapping_hash,
+                }
+            return {"lifecycle_state": "legacy_open", "mapping_hash": None}
+
+        from gateway.utils.epoch import validate_epoch_runtime_lifecycle
+
+        return validate_epoch_runtime_lifecycle(
+            mode=mode,
+            epoch_id=int(epoch_id) if mode == LEGACY_EPOCH_MODE else None,
+            cutover=(
+                getattr(self, "_epoch_cutover", None)
+                if mode == STATEFUL_EPOCH_MODE
+                else None
+            ),
+            force_refresh=force_refresh,
+            network=str(self.config.subtensor.network),
+            netuid=int(self.config.netuid),
+        )
+
+    def _validate_durable_epoch_runtime_startup(self) -> None:
+        """Fail startup unless the configured mode matches durable authority."""
+
+        mode = getattr(self, "_epoch_mode", LEGACY_EPOCH_MODE)
+        if mode == STATEFUL_EPOCH_MODE:
+            cutover = getattr(self, "_epoch_cutover", None)
+            if cutover is None:
+                raise SubnetEpochError("stateful epoch cutover is unavailable")
+            if self._uses_production_epoch_cutover_authority():
+                from gateway.utils.epoch import validate_stateful_cutover_authority
+
+                # The full startup check proves the immutable receipt-backed
+                # manifest. Non-production stateful runtimes already performed
+                # their manifest/archive validation during construction.
+                validate_stateful_cutover_authority(
+                    cutover,
+                    network=str(self.config.subtensor.network),
+                    netuid=int(self.config.netuid),
+                )
+            self._validate_durable_epoch_runtime_lifecycle(
+                cutover.first_settlement_epoch_id,
+                force_refresh=True,
+            )
+            return
+
+        block = (
+            self.subtensor.block
+            if hasattr(self.subtensor, "block")
+            else self.subtensor.get_current_block()
+        )
+        state = _ValidatorEpochState.legacy(block)
+        self._validate_durable_epoch_runtime_lifecycle(
+            state.workflow_epoch_id,
+            force_refresh=True,
+        )
+
     def __init__(self, config=None):
         self._weight_protocol = _validator_weight_protocol()
         if self._weight_protocol != AUTHORITATIVE_V2_PROTOCOL:
@@ -814,6 +1080,31 @@ class Validator(BaseValidatorNeuron):
             client=self._validator_v2_client,
         )
         super().__init__(config=config, wallet=enclave_wallet)
+        self._epoch_mode = get_epoch_mode()
+        self._epoch_cutover = (
+            load_subnet_epoch_cutover()
+            if self._epoch_mode == STATEFUL_EPOCH_MODE
+            else None
+        )
+        if (
+            self._epoch_cutover is not None
+            and int(self._epoch_cutover.netuid) != int(self.config.netuid)
+        ):
+            raise SubnetEpochError(
+                "validator netuid differs from subnet epoch cutover manifest"
+            )
+        if self._epoch_cutover is not None:
+            self._epoch_archive_subtensor = bt.Subtensor(
+                network=OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
+            )
+            validate_subnet_epoch_cutover_anchor(
+                self._epoch_archive_subtensor,
+                self._epoch_cutover,
+            )
+        else:
+            self._epoch_archive_subtensor = None
+        self._epoch_snapshot_lock = threading.Lock()
+        self._validate_durable_epoch_runtime_startup()
         journal_path = Path(
             os.environ.get("VALIDATOR_V2_PUBLICATION_JOURNAL_PATH")
             or (
@@ -958,32 +1249,167 @@ class Validator(BaseValidatorNeuron):
         # This avoids WebSocket subscription conflicts from AsyncSubtensor
         # Block queries are frequent (every few seconds) and fast, so sync is preferred
         return self.subtensor.block
-    
-    def _write_shared_block_file(self, block: int, epoch: int, blocks_into_epoch: int):
+
+    def _read_epoch_state_sync(self, subtensor=None) -> _ValidatorEpochState:
+        """Read one coherent epoch state from one Subtensor connection."""
+
+        source = subtensor or self.subtensor
+        if getattr(self, "_epoch_mode", LEGACY_EPOCH_MODE) == LEGACY_EPOCH_MODE:
+            block = (
+                source.block
+                if hasattr(source, "block")
+                else source.get_current_block()
+            )
+            state = _ValidatorEpochState.legacy(block)
+            self._validate_durable_epoch_runtime_lifecycle(
+                state.workflow_epoch_id,
+                force_refresh=False,
+            )
+            return state
+        if self._epoch_cutover is None:
+            raise SubnetEpochError("stateful epoch cutover is unavailable")
+        self._validate_durable_epoch_runtime_lifecycle(
+            self._epoch_cutover.first_settlement_epoch_id,
+            force_refresh=False,
+        )
+        with self._epoch_snapshot_lock:
+            snapshot = read_subnet_epoch_snapshot(
+                source,
+                netuid=int(self.config.netuid),
+                finalized=True,
+            )
+        return _ValidatorEpochState.stateful(snapshot, self._epoch_cutover)
+
+    async def _get_epoch_state_async(self) -> _ValidatorEpochState:
+        state = await asyncio.to_thread(self._read_epoch_state_sync)
+        self._latest_epoch_state = state
+        return state
+
+    def _read_best_epoch_state_sync(self, subtensor=None) -> _ValidatorEpochState:
+        """Read best-head state only as a stateful epoch liveness veto.
+
+        Finalized state remains the authority for epoch identity and settlement.
+        The best head is read separately so an old finalized snapshot cannot
+        authorize another signature after the live chain crossed its boundary.
         """
-        Write current block/epoch info to shared file for worker containers.
+
+        source = subtensor or self.subtensor
+        if getattr(self, "_epoch_mode", LEGACY_EPOCH_MODE) == LEGACY_EPOCH_MODE:
+            return self._read_epoch_state_sync(source)
+        if self._epoch_cutover is None:
+            raise SubnetEpochError("stateful epoch cutover is unavailable")
+        with self._epoch_snapshot_lock:
+            snapshot = read_subnet_epoch_snapshot(
+                source,
+                netuid=int(self.config.netuid),
+                finalized=False,
+            )
+        return _ValidatorEpochState.stateful(snapshot, self._epoch_cutover)
+
+    async def _get_best_epoch_state_async(self) -> _ValidatorEpochState:
+        return await asyncio.to_thread(self._read_best_epoch_state_sync)
+
+    async def _weight_submission_epoch_is_current(
+        self,
+        *,
+        epoch_id: int,
+        subnet_epoch_index: Optional[int],
+    ) -> bool:
+        """Require fresh durable authority plus matching finalized/live heads."""
+
+        try:
+            await asyncio.to_thread(
+                self._validate_durable_epoch_runtime_lifecycle,
+                int(epoch_id),
+                force_refresh=True,
+            )
+            finalized_state = await self._get_epoch_state_async()
+            if finalized_state.workflow_epoch_id != int(epoch_id):
+                return False
+            if getattr(self, "_epoch_mode", LEGACY_EPOCH_MODE) != STATEFUL_EPOCH_MODE:
+                return True
+            if finalized_state.subnet_epoch_index != subnet_epoch_index:
+                return False
+            best_state = await self._get_best_epoch_state_async()
+            return (
+                best_state.workflow_epoch_id == int(epoch_id)
+                and best_state.subnet_epoch_index == subnet_epoch_index
+                and best_state.current_block >= finalized_state.current_block
+                and best_state.blocks_remaining > 0
+            )
+        except Exception as exc:
+            bt.logging.error(
+                "weight_submission_epoch_authority_unavailable "
+                f"epoch={epoch_id} type={type(exc).__name__} "
+                f"error={str(exc)[:200]}"
+            )
+            return False
+
+    async def _weight_submission_lifecycle_is_open(
+        self,
+        *,
+        epoch_id: int,
+    ) -> bool:
+        """Force-refresh only the durable fence immediately before one write."""
+
+        try:
+            await asyncio.to_thread(
+                self._validate_durable_epoch_runtime_lifecycle,
+                int(epoch_id),
+                force_refresh=True,
+            )
+            return True
+        except Exception as exc:
+            bt.logging.error(
+                "weight_submission_durable_lifecycle_closed "
+                f"epoch={epoch_id} type={type(exc).__name__} "
+                f"error={str(exc)[:200]}"
+            )
+            return False
+
+    def _subnet_index_for_workflow_epoch(self, epoch_id: int) -> Optional[int]:
+        if getattr(self, "_epoch_mode", LEGACY_EPOCH_MODE) == LEGACY_EPOCH_MODE:
+            return None
+        cutover = self._epoch_cutover
+        if cutover is None:
+            raise SubnetEpochError("stateful epoch cutover is unavailable")
+        normalized_epoch = int(epoch_id)
+        if normalized_epoch < cutover.first_settlement_epoch_id:
+            raise SubnetEpochError("workflow epoch predates stateful cutover")
+        return cutover.first_subnet_epoch_index + (
+            normalized_epoch - cutover.first_settlement_epoch_id
+        )
+
+    def _write_shared_block_file(self, state: _ValidatorEpochState):
+        """
+        Atomically write the complete epoch authority for worker containers.
         
         This allows workers to check block/epoch without connecting to Bittensor.
         Only coordinator calls this (every 12 seconds).
         """
-        import json
-        import time
-        from pathlib import Path
-        
+        if not isinstance(state, _ValidatorEpochState):
+            raise TypeError("shared block writer requires one epoch state")
         block_file = Path("validator_weights") / "current_block.json"
-        data = {
-            "block": block,
-            "epoch": epoch,
-            "blocks_into_epoch": blocks_into_epoch,
-            "timestamp": int(time.time())
-        }
-        
+        block_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary = block_file.with_name(
+            f".{block_file.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
         try:
-            with open(block_file, 'w') as f:
-                json.dump(data, f, indent=2)
+            with open(temporary, "w", encoding="utf-8") as file_handle:
+                json.dump(state.to_shared_document(), file_handle, indent=2)
+                file_handle.flush()
+                os.fsync(file_handle.fileno())
+            os.replace(temporary, block_file)
         except Exception as e:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
             bt.logging.warning(f"Failed to write shared block file: {e}")
-    
+
+    def _read_shared_epoch_state(self) -> _ValidatorEpochState:
+        return _read_shared_epoch_state_file(max_age_seconds=30)
+
     def _read_shared_block_file(self) -> tuple:
         """
         Read current block/epoch info from shared file (for worker containers).
@@ -994,28 +1420,14 @@ class Validator(BaseValidatorNeuron):
         Raises:
             Exception: If file doesn't exist, is too old (>30s), or is corrupted
         """
-        import json
-        import time
-        from pathlib import Path
-        
-        block_file = Path("validator_weights") / "current_block.json"
-        
-        if not block_file.exists():
-            raise Exception("Shared block file not found (coordinator hasn't written it yet)")
-        
         try:
-            with open(block_file, 'r') as f:
-                data = json.load(f)
-            
-            # Check if data is stale (>30 seconds old)
-            current_time = int(time.time())
-            file_age = current_time - data.get("timestamp", 0)
-            
-            if file_age > 30:
-                raise Exception(f"Shared block file is stale ({file_age}s old)")
-            
-            return (data["block"], data["epoch"], data["blocks_into_epoch"])
-        
+            state = self._read_shared_epoch_state()
+            self._last_shared_epoch_state = state
+            return (
+                state.current_block,
+                state.workflow_epoch_id,
+                state.epoch_block,
+            )
         except Exception as e:
             raise Exception(f"Failed to read shared block file: {e}")
     
@@ -1921,8 +2333,8 @@ class Validator(BaseValidatorNeuron):
                     # mount point — this dir is bind-mounted to the host.
                     _ff_heartbeat = Path("validator_weights") / "ff_poll_heartbeat"
 
-                    async def _safe_block_read(timeout: float = 15.0):
-                        """Read ``thread_subtensor.block`` with a hard timeout.
+                    async def _safe_epoch_read(timeout: float = 15.0):
+                        """Read one coherent thread-local epoch state with a hard timeout.
 
                         Observed 2026-05-18 00:55–02:43 UTC: this property
                         access (a Bittensor RPC over websocket) hung for
@@ -1943,7 +2355,10 @@ class Validator(BaseValidatorNeuron):
                         """
                         try:
                             return await asyncio.wait_for(
-                                asyncio.to_thread(lambda: thread_subtensor.block),
+                                asyncio.to_thread(
+                                    self._read_epoch_state_sync,
+                                    thread_subtensor,
+                                ),
                                 timeout=timeout,
                             )
                         except asyncio.TimeoutError:
@@ -1953,12 +2368,12 @@ class Validator(BaseValidatorNeuron):
                         consec_block_timeouts = 0
                         while not self.should_exit:
                             try:
-                                current_block = await _safe_block_read(timeout=15.0)
+                                current_epoch_state = await _safe_epoch_read(timeout=15.0)
                             except Exception as e:
                                 print(f"⚠️  Fulfillment tick: block query failed: {e}")
-                                current_block = None
+                                current_epoch_state = None
 
-                            if current_block is None:
+                            if current_epoch_state is None:
                                 consec_block_timeouts += 1
                                 print(
                                     f"⚠️  Fulfillment tick: block read returned None "
@@ -1970,7 +2385,7 @@ class Validator(BaseValidatorNeuron):
                                 try:
                                     await asyncio.wait_for(
                                         self.process_fulfillment_workflow(
-                                            current_block_override=current_block,
+                                            current_block_override=current_epoch_state,
                                         ),
                                         timeout=300,
                                     )
@@ -2278,16 +2693,17 @@ class Validator(BaseValidatorNeuron):
                 # WORKER: Read from shared block file (no Bittensor connection)
                 try:
                     current_block, current_epoch, blocks_into_epoch = self._read_shared_block_file()
+                    epoch_state = self._last_shared_epoch_state
                 except Exception as e:
                     print(f"⏳ Worker: Waiting for coordinator to write block file... ({e})")
                     await asyncio.sleep(5)
                     return
             else:
-                # COORDINATOR or SINGLE: Use Bittensor connection
-                current_block = await self.get_current_block_async()
-                epoch_length = 360  # blocks per epoch
-                current_epoch = current_block // epoch_length
-                blocks_into_epoch = current_block % epoch_length
+                # COORDINATOR or SINGLE: read one exact-hash epoch snapshot.
+                epoch_state = await self._get_epoch_state_async()
+                current_block = epoch_state.current_block
+                current_epoch = epoch_state.workflow_epoch_id
+                blocks_into_epoch = epoch_state.epoch_block
                 
                 # Write block info to shared file for workers (if coordinator/single mode)
                 # This happens inline (no separate thread) to avoid websocket concurrency issues
@@ -2296,17 +2712,18 @@ class Validator(BaseValidatorNeuron):
                     if not hasattr(self, '_block_file_write_counter'):
                         self._block_file_write_counter = 0
                         # CRITICAL: Write immediately on first run to prevent worker deadlock
-                        self._write_shared_block_file(current_block, current_epoch, blocks_into_epoch)
+                        self._write_shared_block_file(epoch_state)
                     
                     self._block_file_write_counter += 1
                     if self._block_file_write_counter >= 12:
-                        self._write_shared_block_file(current_block, current_epoch, blocks_into_epoch)
+                        self._write_shared_block_file(epoch_state)
                         self._block_file_write_counter = 0
             
             # DEBUG: Always log epoch status
             print(
                 f"[DEBUG] Current epoch: {current_epoch}, Block: {current_block}, "
-                f"Epoch block: {blocks_into_epoch}/360, "
+                f"Epoch block: {blocks_into_epoch}, remaining: {epoch_state.blocks_remaining}, "
+                f"subnet index: {epoch_state.subnet_epoch_index}, "
                 f"Last processed: {getattr(self, '_last_processed_epoch', 'None')}"
             )
             
@@ -2483,12 +2900,13 @@ class Validator(BaseValidatorNeuron):
                     # CRITICAL: Check current block and epoch from shared file
                     try:
                         check_block, check_epoch, blocks_into_epoch = self._read_shared_block_file()
+                        check_state = self._last_shared_epoch_state
                     except Exception as e:
                         # Coordinator hasn't updated file yet, keep waiting
                         continue
                     
                     # Epoch changed while waiting - abort this epoch
-                    if check_epoch > current_epoch:
+                    if not check_state.same_epoch(epoch_state):
                         print(f"❌ Worker: Epoch changed ({current_epoch} → {check_epoch}) while waiting")
                         print(f"   Aborting - will process epoch {check_epoch} in next iteration")
                         await asyncio.sleep(10)
@@ -2497,8 +2915,11 @@ class Validator(BaseValidatorNeuron):
                     # Too late to start validation (coordinator aggregates at block 300)
                     # Workers need ~8-10 min to process leads, so cutoff at block 260
                     # gives them 40 blocks (8 min) before coordinator forces aggregation
-                    if blocks_into_epoch >= 260:
-                        print(f"❌ Worker: Too late to start validation (block {blocks_into_epoch}/360)")
+                    if check_state.deadline_reached(260):
+                        print(
+                            "❌ Worker: Too late to start validation "
+                            f"({check_state.blocks_remaining} blocks remaining)"
+                        )
                         print(f"   Coordinator aggregates at block 300 - not enough time to finish")
                         print(f"   Skipping epoch {current_epoch}, will process next epoch")
                         await asyncio.sleep(10)
@@ -2506,7 +2927,11 @@ class Validator(BaseValidatorNeuron):
                     
                     # Log progress every 5 minutes
                     if waited % log_interval == 0:
-                        print(f"   ⏳ Still waiting for coordinator... ({waited}s elapsed, block {blocks_into_epoch}/360)")
+                        print(
+                            f"   ⏳ Still waiting for coordinator... ({waited}s elapsed, "
+                            f"block {blocks_into_epoch}/{check_state.tempo}, "
+                            f"{check_state.blocks_remaining} remaining)"
+                        )
                         print(f"      Checking for: {leads_file}")
                 
                 # Read leads from shared file
@@ -2687,14 +3112,15 @@ class Validator(BaseValidatorNeuron):
                 while True:
                     try:
                         await asyncio.sleep(10)  # Update every 10 seconds
-                        current_block_bg = await self.get_current_block_async()
-                        current_epoch_bg = current_block_bg // 360
-                        blocks_into_epoch_bg = current_block_bg % 360
-                        self._write_shared_block_file(current_block_bg, current_epoch_bg, blocks_into_epoch_bg)
+                        epoch_state_bg = await self._get_epoch_state_async()
+                        current_block_bg = epoch_state_bg.current_block
+                        current_epoch_bg = epoch_state_bg.workflow_epoch_id
+                        blocks_into_epoch_bg = epoch_state_bg.epoch_block
+                        self._write_shared_block_file(epoch_state_bg)
                         
                         # CRITICAL: Check for weight submission at block 345+
                         # This ensures weights are submitted even if Stage 4-5 is still running
-                        if blocks_into_epoch_bg >= 345:
+                        if epoch_state_bg.deadline_reached(345):
                             try:
                                 await self.submit_weights_at_epoch_end()
                             except Exception as weight_err:
@@ -2881,16 +3307,17 @@ class Validator(BaseValidatorNeuron):
                         await self.submit_weights_at_epoch_end()
                         
                         # Check if epoch changed - if so, stop processing old epoch's leads
-                        new_block = await self.get_current_block_async()
-                        new_epoch = new_block // 360
-                        blocks_into_epoch = new_block % 360
+                        new_epoch_state = await self._get_epoch_state_async()
+                        new_block = new_epoch_state.current_block
+                        new_epoch = new_epoch_state.workflow_epoch_id
+                        blocks_into_epoch = new_epoch_state.epoch_block
                         
                         # Update block file for workers
                         container_mode_check = getattr(self.config.neuron, 'mode', None)
                         if container_mode_check != "worker":
-                            self._write_shared_block_file(new_block, new_epoch, blocks_into_epoch)
+                            self._write_shared_block_file(new_epoch_state)
                         
-                        if new_epoch > current_epoch:
+                        if not new_epoch_state.same_epoch(epoch_state):
                             print(f"\n{'='*80}")
                             print(f"⚠️  EPOCH CHANGED: {current_epoch} → {new_epoch}")
                             print(f"   Stopping validation of epoch {current_epoch} leads ({idx}/{len(leads)} complete)")
@@ -2901,9 +3328,16 @@ class Validator(BaseValidatorNeuron):
                         # FORCE STOP at block 345 for WORKERS (weight submission time)
                         # Coordinator needs to submit weights, workers must finish before that
                         container_mode = getattr(self.config.neuron, 'mode', None)
-                        if container_mode == "worker" and blocks_into_epoch >= 345:
+                        if (
+                            container_mode == "worker"
+                            and new_epoch_state.deadline_reached(345)
+                        ):
                             print(f"\n{'='*80}")
-                            print(f"⏰ WORKER FORCE STOP: Block 345+ reached (block {blocks_into_epoch}/360)")
+                            print(
+                                "⏰ WORKER FORCE STOP: weight deadline reached "
+                                f"(block {blocks_into_epoch}/{new_epoch_state.tempo}, "
+                                f"{new_epoch_state.blocks_remaining} remaining)"
+                            )
                             print(f"   Workers must complete before coordinator submits weights")
                             print(f"   Completed: {idx}/{len(leads)} leads")
                             print(f"   📦 Saving partial results for coordinator to aggregate")
@@ -2991,17 +3425,18 @@ class Validator(BaseValidatorNeuron):
                     all_workers_ready = all(os.path.exists(wf[1]) for wf in worker_files)
                     if not all_workers_ready:
                         # Check if we're approaching block 335 (hash submission deadline)
-                        current_block_check = await self.get_current_block_async()
-                        current_epoch_check = current_block_check // 360
-                        blocks_into_epoch_check = current_block_check % 360
+                        check_epoch_state = await self._get_epoch_state_async()
+                        current_block_check = check_epoch_state.current_block
+                        current_epoch_check = check_epoch_state.workflow_epoch_id
+                        blocks_into_epoch_check = check_epoch_state.epoch_block
                         
                         # CRITICAL: Update block file so workers get fresh epoch/block info
                         # Without this, workers see stale data and get stuck in "too late" loop
-                        self._write_shared_block_file(current_block_check, current_epoch_check, blocks_into_epoch_check)
+                        self._write_shared_block_file(check_epoch_state)
                         
                         # EPOCH CHANGE CHECK: If epoch changed, abort immediately
                         # Without this, coordinator sits in wait loop for 60min doing nothing
-                        if current_epoch_check > current_epoch:
+                        if not check_epoch_state.same_epoch(epoch_state):
                             print(f"\n{'='*60}")
                             print(f"❌ COORDINATOR: EPOCH CHANGED while waiting for workers!")
                             print(f"   Started: epoch {current_epoch}")
@@ -3014,9 +3449,12 @@ class Validator(BaseValidatorNeuron):
                         # Block 280 = 56 min into epoch, leaves 16 min before epoch ends
                         # Weight accumulation (~5 min) + gateway submit (~5 sec) = ~5 min total
                         # Buffer: 16 - 5 = ~11 minutes spare
-                        if blocks_into_epoch_check >= 280:
-                            print(f"   ⏰ BLOCK 280+ REACHED: Force proceeding with available results")
-                            print(f"      Block: {blocks_into_epoch_check}/360")
+                        if check_epoch_state.deadline_reached(280):
+                            print(f"   ⏰ AGGREGATION DEADLINE REACHED: Force proceeding with available results")
+                            print(
+                                f"      Block: {blocks_into_epoch_check}/{check_epoch_state.tempo}; "
+                                f"{check_epoch_state.blocks_remaining} remaining"
+                            )
                             print(f"      ~16 minutes remaining for weight accumulation + gateway submission")
                             missing = [f"Container-{wf[0]}" for wf in worker_files if not os.path.exists(wf[1])]
                             print(f"      Missing workers: {missing}")
@@ -3024,7 +3462,12 @@ class Validator(BaseValidatorNeuron):
                             break
                         
                         missing = [f"Container-{wf[0]}" for wf in worker_files if not os.path.exists(wf[1])]
-                        print(f"   ⏳ Waiting for workers: {missing} ({waited}s / {max_wait}s, block {blocks_into_epoch_check}/360)")
+                        print(
+                            f"   ⏳ Waiting for workers: {missing} "
+                            f"({waited}s / {max_wait}s, block "
+                            f"{blocks_into_epoch_check}/{check_epoch_state.tempo}, "
+                            f"{check_epoch_state.blocks_remaining} remaining)"
+                        )
                         await asyncio.sleep(check_interval)
                         waited += check_interval
                     else:
@@ -3132,10 +3575,11 @@ class Validator(BaseValidatorNeuron):
             print(f"{'='*80}")
             
             # Check if epoch changed before attempting submission
-            submit_block = await self.get_current_block_async()
-            submit_epoch = submit_block // 360
+            submit_epoch_state = await self._get_epoch_state_async()
+            submit_block = submit_epoch_state.current_block
+            submit_epoch = submit_epoch_state.workflow_epoch_id
             
-            if submit_epoch > current_epoch:
+            if not submit_epoch_state.same_epoch(epoch_state):
                 print(f"⚠️  Epoch changed ({current_epoch} → {submit_epoch}) - skipping validation submission")
                 print(f"   {len(validation_results)} validations for epoch {current_epoch} cannot be submitted")
                 print(f"   (Weights already submitted, epoch will be marked as processed)")
@@ -3229,9 +3673,10 @@ class Validator(BaseValidatorNeuron):
             weights_file = weights_dir / "validator_weights"
             history_file = weights_dir / "validator_weights_history"
             
-            # Get current epoch using async subtensor
-            current_block = await self.get_current_block_async()
-            current_epoch = current_block // 360
+            # One coherent epoch decision owns both identity and boundaries.
+            epoch_state = await self._get_epoch_state_async()
+            current_block = epoch_state.current_block
+            current_epoch = epoch_state.workflow_epoch_id
             
             # ═══════════════════════════════════════════════════════════
             # 1. UPDATE validator_weights (current epoch only)
@@ -3246,8 +3691,11 @@ class Validator(BaseValidatorNeuron):
             if str(current_epoch) not in weights_data:
                 weights_data[str(current_epoch)] = {
                     "epoch": current_epoch,
-                    "start_block": current_epoch * 360,
-                    "end_block": (current_epoch + 1) * 360,
+                    "start_block": epoch_state.epoch_start_block,
+                    "end_block": epoch_state.next_epoch_block,
+                    "epoch_scheme": epoch_state.mode,
+                    "subnet_epoch_index": epoch_state.subnet_epoch_index,
+                    "epoch_ref": epoch_state.epoch_ref,
                     "miner_scores": {},
                     "approved_lead_count": 0,  # Track number of approved leads for linear emissions
                     "max_leads_per_epoch": getattr(self, '_max_leads_per_epoch', 3000),  # Persist for restart recovery
@@ -3308,8 +3756,11 @@ class Validator(BaseValidatorNeuron):
             # Update history with same epoch data (or create new entry)
             history_data[str(current_epoch)] = {
                 "epoch": current_epoch,
-                "start_block": current_epoch * 360,
-                "end_block": (current_epoch + 1) * 360,
+                "start_block": epoch_state.epoch_start_block,
+                "end_block": epoch_state.next_epoch_block,
+                "epoch_scheme": epoch_state.mode,
+                "subnet_epoch_index": epoch_state.subnet_epoch_index,
+                "epoch_ref": epoch_state.epoch_ref,
                 "miner_scores": epoch_data["miner_scores"].copy(),  # Deep copy of scores
                 "approved_lead_count": epoch_data.get("approved_lead_count", 0),  # Track for linear emissions
                 "max_leads_per_epoch": getattr(self, '_max_leads_per_epoch', epoch_data.get("max_leads_per_epoch", 3000)),  # Persist for restart recovery
@@ -3462,6 +3913,7 @@ class Validator(BaseValidatorNeuron):
     async def _publish_and_set_weights(
         self,
         *,
+        epoch_state: _ValidatorEpochState,
         snapshot: Dict[str, Any],
         host_uids: List[int],
         host_weights: List[float],
@@ -3472,6 +3924,7 @@ class Validator(BaseValidatorNeuron):
         """Persist V2 authority, then submit its enclave-computed vector."""
 
         return await self._authorize_and_set_weights_v2(
+            epoch_state=epoch_state,
             snapshot=snapshot,
             host_uids=host_uids,
             host_weights=host_weights,
@@ -3483,6 +3936,7 @@ class Validator(BaseValidatorNeuron):
     async def _authorize_and_set_weights_v2(
         self,
         *,
+        epoch_state: _ValidatorEpochState,
         snapshot: Dict[str, Any],
         host_uids: List[int],
         host_weights: List[float],
@@ -3533,6 +3987,7 @@ class Validator(BaseValidatorNeuron):
         )
         submitted = await self._set_weights_until_epoch_end(
             epoch_id=int(snapshot["epoch_id"]),
+            subnet_epoch_index=epoch_state.subnet_epoch_index,
             uids=list(publication["uids"]),
             weights=list(publication["weights"]),
             weight_authorization_id=publication["weight_authorization_id"],
@@ -3593,6 +4048,7 @@ class Validator(BaseValidatorNeuron):
         if not signed_extrinsics:
             submitted = await self._set_weights_until_epoch_end(
                 epoch_id=epoch_id,
+                subnet_epoch_index=self._subnet_index_for_workflow_epoch(epoch_id),
                 uids=list(weight_result["uids"]),
                 weights=list(weight_result["weights"]),
                 weight_authorization_id=authorization_id,
@@ -3615,6 +4071,16 @@ class Validator(BaseValidatorNeuron):
                 # before the original SDK call. The enclave independently
                 # proves finalized inclusion; this host response is not trusted.
                 latest = signed_extrinsics[-1]
+                if not await self._weight_submission_epoch_is_current(
+                    epoch_id=epoch_id,
+                    subnet_epoch_index=self._subnet_index_for_workflow_epoch(
+                        epoch_id
+                    ),
+                ):
+                    raise RuntimeError(
+                        "journaled authoritative weight publication is no longer "
+                        "authorized by the durable epoch lifecycle"
+                    )
                 try:
                     await asyncio.to_thread(
                         self.subtensor.substrate.rpc_request,
@@ -3654,6 +4120,7 @@ class Validator(BaseValidatorNeuron):
         self,
         *,
         epoch_id: int,
+        subnet_epoch_index: Optional[int] = None,
         uids,
         weights,
         weight_authorization_id: str,
@@ -3661,6 +4128,15 @@ class Validator(BaseValidatorNeuron):
         on_signed_extrinsic=None,
     ) -> bool:
         """Retry the unchanged chain call under one enclave authorization."""
+
+        # Refuse stale journal recovery before the enclave signs or the SDK is
+        # allowed to issue even one extrinsic.
+        if not await self._weight_submission_epoch_is_current(
+            epoch_id=epoch_id,
+            subnet_epoch_index=subnet_epoch_index,
+        ):
+            print(f"   ⏹️ Refusing stale weight submission for epoch {epoch_id}")
+            return False
 
         attempt = 0
         with AuthoritativeSetWeightsContextV2(
@@ -3671,6 +4147,20 @@ class Validator(BaseValidatorNeuron):
             on_signed_extrinsic=on_signed_extrinsic,
         ) as signing_context:
             while True:
+                # Re-read Supabase after entering the signing context and again
+                # before every retry. A fence/activation racing with preparation
+                # must win before the SDK receives any extrinsic.
+                if not await self._weight_submission_lifecycle_is_open(
+                    epoch_id=epoch_id,
+                ):
+                    self._last_weight_extrinsic_receipts_v2 = list(
+                        signing_context.extrinsic_signature_results
+                    )
+                    print(
+                        f"   ⏹️ Durable epoch authority closed before weight "
+                        f"submission for epoch {epoch_id}"
+                    )
+                    return False
                 attempt += 1
                 outcome = ExtrinsicOutcome.from_sdk(
                     self.subtensor.set_weights(
@@ -3693,14 +4183,16 @@ class Validator(BaseValidatorNeuron):
                     f"{outcome.message}"
                 )
                 await asyncio.sleep(12)
-                current_block = await self.get_current_block_async()
-                if current_block // 360 != epoch_id:
+                if not await self._weight_submission_epoch_is_current(
+                    epoch_id=epoch_id,
+                    subnet_epoch_index=subnet_epoch_index,
+                ):
                     self._last_weight_extrinsic_receipts_v2 = list(
                         signing_context.extrinsic_signature_results
                     )
                     print(
-                        f"   ⏹️ Epoch {epoch_id} ended before the weight submission "
-                        "was accepted"
+                        f"   ⏹️ Epoch {epoch_id} ended before the weight "
+                        "submission was accepted"
                     )
                     return False
 
@@ -3718,13 +4210,13 @@ class Validator(BaseValidatorNeuron):
                 bt.logging.info("⏸️  Weight submission disabled (--neuron.disable_set_weights flag is set)")
                 return False
             
-            current_block = await self.get_current_block_async()
-            epoch_length = 360
-            current_epoch = current_block // 360
-            blocks_into_epoch = current_block % epoch_length
+            epoch_state = await self._get_epoch_state_async()
+            current_block = epoch_state.current_block
+            current_epoch = epoch_state.workflow_epoch_id
+            blocks_into_epoch = epoch_state.epoch_block
             
             # Only submit after block 345 (near end of epoch)
-            if blocks_into_epoch < 345:
+            if not epoch_state.deadline_reached(345):
                 return False
             
             # ═══════════════════════════════════════════════════════════════════
@@ -4026,6 +4518,7 @@ class Validator(BaseValidatorNeuron):
                         return False
 
                     result = await self._publish_and_set_weights(
+                        epoch_state=epoch_state,
                         snapshot=_weight_snapshot(),
                         host_uids=[BURN_TARGET_UID],
                         host_weights=[1.0],
@@ -4054,7 +4547,11 @@ class Validator(BaseValidatorNeuron):
             print(f"\n{'='*80}")
             print(f"⚖️  SUBMITTING WEIGHTS FOR EPOCH {current_epoch}")
             print(f"{'='*80}")
-            print(f"   Block: {current_block} (block {blocks_into_epoch}/360 into epoch)")
+            print(
+                f"   Block: {current_block} (block "
+                f"{blocks_into_epoch}/{epoch_state.tempo}, "
+                f"{epoch_state.blocks_remaining} remaining)"
+            )
             print(f"   Rolling {ROLLING_WINDOW} epoch miners: {len(rolling_scores)}")
             print(f"   Rolling {ROLLING_WINDOW} epoch leads: {rolling_lead_count:,}")
             print(f"   Sourcing floor threshold: {SOURCING_FLOOR_THRESHOLD:,}")
@@ -4162,6 +4659,7 @@ class Validator(BaseValidatorNeuron):
                     return False
 
                 result = await self._publish_and_set_weights(
+                    epoch_state=epoch_state,
                     snapshot=_weight_snapshot(),
                     host_uids=[BURN_TARGET_UID],
                     host_weights=[1.0],
@@ -4501,6 +4999,7 @@ class Validator(BaseValidatorNeuron):
 
             print(f"\n📡 Submitting weights to Bittensor chain...")
             result = await self._publish_and_set_weights(
+                epoch_state=epoch_state,
                 snapshot=authoritative_snapshot,
                 host_uids=list(uids),
                 host_weights=list(normalized_weights),
@@ -4980,11 +5479,18 @@ class Validator(BaseValidatorNeuron):
             return
 
         try:
-            if current_block_override is not None:
-                current_block = current_block_override
+            if isinstance(current_block_override, _ValidatorEpochState):
+                epoch_state = current_block_override
+            elif current_block_override is not None:
+                if self._epoch_mode == STATEFUL_EPOCH_MODE:
+                    raise SubnetEpochError(
+                        "stateful fulfillment requires a coherent epoch snapshot"
+                    )
+                epoch_state = _ValidatorEpochState.legacy(current_block_override)
             else:
-                current_block = await self.get_current_block_async()
-            current_epoch = current_block // 360
+                epoch_state = await self._get_epoch_state_async()
+            current_block = epoch_state.current_block
+            current_epoch = epoch_state.workflow_epoch_id
             weights_dir = Path("validator_weights")
             weights_dir.mkdir(exist_ok=True)
         except Exception as e:
@@ -5437,9 +5943,10 @@ class Validator(BaseValidatorNeuron):
                 self._qual_dedicated_results_logged = set()
             
             try:
-                current_block = self.subtensor.block
-                current_epoch = current_block // 360
-                blocks_into_epoch = current_block % 360
+                epoch_state = await self._get_epoch_state_async()
+                current_block = epoch_state.current_block
+                current_epoch = epoch_state.workflow_epoch_id
+                blocks_into_epoch = epoch_state.epoch_block
             except:
                 return
             
@@ -5502,7 +6009,7 @@ class Validator(BaseValidatorNeuron):
             # without penalizing still-running workers.
             force_due_to_window = epochs_since_assignment >= QUALIFICATION_EVAL_EPOCH_WINDOW
             past_cutoff_in_final_epoch = (
-                force_due_to_window and blocks_into_epoch >= 335
+                force_due_to_window and epoch_state.deadline_reached(335)
             )
             force_submit = past_cutoff_in_final_epoch
             
@@ -5562,7 +6069,10 @@ class Validator(BaseValidatorNeuron):
                 print(f"🎯 QUALIFICATION: Collecting worker results")
                 print(f"{'='*70}")
                 print(f"   Current epoch: {current_epoch}, Work epoch: {active_work_epoch}")
-                print(f"   Block: {blocks_into_epoch}/360")
+                print(
+                    f"   Block: {blocks_into_epoch}/{epoch_state.tempo}; "
+                    f"{epoch_state.blocks_remaining} remaining"
+                )
                 if force_due_to_window and not all_workers_done:
                     print(f"   ⚠️ {QUALIFICATION_EVAL_EPOCH_WINDOW}-epoch window expired — "
                           f"submitting available results and clearing workers")
@@ -6606,8 +7116,8 @@ class Validator(BaseValidatorNeuron):
             
             # Get current epoch for tracking rebenchmark timing
             try:
-                current_block = self.subtensor.block
-                current_epoch = current_block // 360
+                epoch_state = self._latest_epoch_state
+                current_epoch = epoch_state.workflow_epoch_id
             except Exception:
                 current_epoch = 0
             
@@ -7006,8 +7516,9 @@ class Validator(BaseValidatorNeuron):
             
             # Get current block and calculate epoch timing
             try:
-                current_block = self.subtensor.block
-                current_epoch = current_block // 360
+                epoch_state = self._latest_epoch_state
+                current_block = epoch_state.current_block
+                current_epoch = epoch_state.workflow_epoch_id
             except Exception:
                 bt.logging.warning("Could not get current block for rebenchmark check")
                 return None
@@ -7016,7 +7527,7 @@ class Validator(BaseValidatorNeuron):
             # Calculate when the CURRENT EPOCH STARTED in UTC
             # Each epoch is 360 blocks, each block is ~12 seconds
             # ═══════════════════════════════════════════════════════════════════
-            epoch_start_block = current_epoch * 360
+            epoch_start_block = epoch_state.epoch_start_block
             blocks_since_epoch_start = current_block - epoch_start_block
             seconds_since_epoch_start = blocks_since_epoch_start * 12  # ~12 sec per block
             
@@ -9372,20 +9883,13 @@ def run_lightweight_worker(config):
             
         def _read_shared_block_file(self):
             """Read current block from shared file (written by coordinator)"""
-            block_file = Path("validator_weights") / "current_block.json"
-            
-            if not block_file.exists():
-                raise FileNotFoundError("Coordinator hasn't written block file yet")
-            
-            # Check if file is stale (> 60 seconds old)
-            import time
-            file_age = time.time() - block_file.stat().st_mtime
-            if file_age > 60:
-                raise Exception(f"Shared block file is stale ({int(file_age)}s old)")
-            
-            with open(block_file, 'r') as f:
-                data = json.load(f)
-                return data['block'], data['epoch'], data['blocks_into_epoch']
+            state = _read_shared_epoch_state_file(max_age_seconds=60)
+            self._shared_epoch_state = state
+            return (
+                state.current_block,
+                state.workflow_epoch_id,
+                state.epoch_block,
+            )
         
         async def process_gateway_validation_workflow(self):
             """
@@ -9421,6 +9925,7 @@ def run_lightweight_worker(config):
                     # Read current epoch from coordinator's shared file
                     try:
                         current_block, current_epoch, blocks_into_epoch = self._read_shared_block_file()
+                        epoch_state = self._shared_epoch_state
                     except FileNotFoundError:
                         print("⏳ Worker: Waiting for coordinator to write block file...")
                         await asyncio.sleep(5)
@@ -9431,7 +9936,11 @@ def run_lightweight_worker(config):
                         await asyncio.sleep(5)
                         continue
                     
-                    print(f"\n🔍 WORKER EPOCH {current_epoch}: Starting validation (block {blocks_into_epoch}/360)")
+                    print(
+                        f"\n🔍 WORKER EPOCH {current_epoch}: Starting validation "
+                        f"(block {blocks_into_epoch}/{epoch_state.tempo}, "
+                        f"{epoch_state.blocks_remaining} remaining)"
+                    )
                     
                     # CRITICAL FIX: Check if we already completed this epoch using IN-MEMORY tracking
                     # (Not file-based, because coordinator deletes result files after aggregation)
@@ -9462,11 +9971,12 @@ def run_lightweight_worker(config):
                         # Check current block and epoch from shared file
                         try:
                             check_block, check_epoch, blocks_into_epoch = self._read_shared_block_file()
+                            check_state = self._shared_epoch_state
                         except Exception:
                             continue
                         
                         # Epoch changed while waiting - abort
-                        if check_epoch > current_epoch:
+                        if not check_state.same_epoch(epoch_state):
                             print(f"❌ Worker: Epoch changed ({current_epoch} → {check_epoch}) while waiting")
                             await asyncio.sleep(10)
                             break
@@ -9474,8 +9984,11 @@ def run_lightweight_worker(config):
                         # Too late to start validation (coordinator aggregates at block 300)
                         # Workers need ~8-10 min to process 50 leads, so cutoff at block 260
                         # gives them 40 blocks (8 min) before coordinator forces aggregation
-                        if blocks_into_epoch >= 260:
-                            print(f"❌ Worker: Too late to start validation (block {blocks_into_epoch}/360)")
+                        if check_state.deadline_reached(260):
+                            print(
+                                "❌ Worker: Too late to start validation "
+                                f"({check_state.blocks_remaining} blocks remaining)"
+                            )
                             print(f"   Coordinator aggregates at block 300 - not enough time to finish")
                             await asyncio.sleep(10)
                             break
@@ -9596,7 +10109,8 @@ def run_lightweight_worker(config):
                     # ════════════════════════════════════════════════════════════════════
                     try:
                         post_validation_block, post_validation_epoch, _ = self._read_shared_block_file()
-                        if post_validation_epoch > current_epoch:
+                        post_validation_state = self._shared_epoch_state
+                        if not post_validation_state.same_epoch(epoch_state):
                             print(f"\n❌ Worker {container_id}: EPOCH CHANGED during validation!")
                             print(f"   Started processing: epoch {current_epoch}")
                             print(f"   Current epoch now: {post_validation_epoch}")
@@ -9797,22 +10311,13 @@ def run_dedicated_qualification_worker(config):
             
         def _read_shared_block_file(self):
             """Read current block from shared file (written by coordinator)"""
-            block_file = Path("validator_weights") / "current_block.json"
-            
-            if not block_file.exists():
-                raise FileNotFoundError("Coordinator hasn't written block file yet")
-            
-            # Check if file is stale (> 1800 seconds = 30 minutes for qualification workers)
-            # NOTE: Coordinator only updates block file during batch validation phase.
-            # Between epochs, the file may be 15-20 minutes old. This is NORMAL.
-            # We use 30 minutes as threshold to detect truly crashed coordinators.
-            file_age = time.time() - block_file.stat().st_mtime
-            if file_age > 1800:
-                raise Exception(f"Shared block file is stale ({int(file_age)}s old)")
-            
-            with open(block_file, 'r') as f:
-                data = json.load(f)
-                return data['block'], data['epoch'], data['blocks_into_epoch']
+            state = _read_shared_epoch_state_file(max_age_seconds=1800)
+            self._shared_epoch_state = state
+            return (
+                state.current_block,
+                state.workflow_epoch_id,
+                state.epoch_block,
+            )
 
         async def _process_research_lab_candidate(self, model: dict, runs: list, work_epoch: int) -> dict:
             """Reject stale Research Lab candidate work files.
@@ -10439,7 +10944,11 @@ def run_dedicated_qualification_worker(config):
                     
                     # New epoch - check for work
                     if current_epoch != last_epoch:
-                        print(f"\n📅 Epoch {current_epoch} (block {blocks_into_epoch}/360)")
+                        print(
+                            f"\n📅 Epoch {current_epoch} (block "
+                            f"{blocks_into_epoch}/{self._shared_epoch_state.tempo}, "
+                            f"{self._shared_epoch_state.blocks_remaining} remaining)"
+                        )
                         last_epoch = current_epoch
                     
                     # Process qualification models
@@ -10524,15 +11033,13 @@ def run_dedicated_fulfillment_worker(config):
 
         def _read_shared_block_file(self):
             """Read current block from shared file (written by coordinator)."""
-            block_file = Path("validator_weights") / "current_block.json"
-            if not block_file.exists():
-                raise FileNotFoundError("Coordinator hasn't written block file yet")
-            file_age = time.time() - block_file.stat().st_mtime
-            if file_age > 1800:
-                raise Exception(f"Shared block file is stale ({int(file_age)}s old)")
-            with open(block_file, 'r') as f:
-                data = json.load(f)
-                return data['block'], data['epoch'], data['blocks_into_epoch']
+            state = _read_shared_epoch_state_file(max_age_seconds=1800)
+            self._shared_epoch_state = state
+            return (
+                state.current_block,
+                state.workflow_epoch_id,
+                state.epoch_block,
+            )
 
         async def process_fulfillment_leads(self, current_epoch: int):
             """Score fulfillment leads assigned to this worker.
@@ -10863,7 +11370,11 @@ def run_dedicated_fulfillment_worker(config):
                         continue
 
                     if current_epoch != last_epoch:
-                        print(f"\n📅 Epoch {current_epoch} (block {blocks_into_epoch}/360)")
+                        print(
+                            f"\n📅 Epoch {current_epoch} (block "
+                            f"{blocks_into_epoch}/{self._shared_epoch_state.tempo}, "
+                            f"{self._shared_epoch_state.blocks_remaining} remaining)"
+                        )
                         last_epoch = current_epoch
 
                     await self.process_fulfillment_leads(current_epoch)

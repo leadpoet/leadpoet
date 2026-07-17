@@ -25,9 +25,14 @@ from leadpoet_canonical.weight_authority_v2 import (
     validate_published_weight_bundle_v2,
 )
 from validator_tee.enclave.hotkey_authority_v2 import load_chain_signing_profile
+from validator_tee.host.weight_authority_v2 import (
+    HostWeightAuthorityV2Error,
+    validate_stateful_epoch_evidence_v1,
+)
 
 
-JOURNAL_SCHEMA_VERSION = "leadpoet.validator_weight_publication_journal.v2"
+LEGACY_JOURNAL_SCHEMA_VERSION = "leadpoet.validator_weight_publication_journal.v2"
+JOURNAL_SCHEMA_VERSION = "leadpoet.validator_weight_publication_journal.v3"
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _EXTRINSIC_HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _SIGNATURE_RE = re.compile(r"^[0-9a-f]{128}$")
@@ -99,7 +104,7 @@ def validate_publication_journal_v2(
     *,
     chain_profile: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    fields = {
+    base_fields = {
         "schema_version",
         "state",
         "revision",
@@ -110,9 +115,18 @@ def validate_publication_journal_v2(
         "updated_at",
         "journal_hash",
     }
+    schema_version = value.get("schema_version") if isinstance(value, Mapping) else None
+    fields = (
+        base_fields
+        if schema_version == LEGACY_JOURNAL_SCHEMA_VERSION
+        else base_fields | {"epoch_evidence"}
+    )
     if not isinstance(value, Mapping) or set(value) != fields:
         raise WeightPublicationJournalV2Error("publication journal fields are invalid")
-    if value.get("schema_version") != JOURNAL_SCHEMA_VERSION:
+    if schema_version not in {
+        LEGACY_JOURNAL_SCHEMA_VERSION,
+        JOURNAL_SCHEMA_VERSION,
+    }:
         raise WeightPublicationJournalV2Error("publication journal schema is invalid")
     if value.get("state") not in {"prepared", "published", "signed"}:
         raise WeightPublicationJournalV2Error("publication journal state is invalid")
@@ -128,6 +142,19 @@ def validate_publication_journal_v2(
     if not isinstance(bundle, Mapping):
         raise WeightPublicationJournalV2Error("publication journal bundle is missing")
     verified = validate_published_weight_bundle_v2(bundle)
+    try:
+        epoch_evidence = validate_stateful_epoch_evidence_v1(
+            (
+                None
+                if schema_version == LEGACY_JOURNAL_SCHEMA_VERSION
+                else value.get("epoch_evidence")
+            ),
+            published_bundle=bundle,
+        )
+    except HostWeightAuthorityV2Error as exc:
+        raise WeightPublicationJournalV2Error(
+            "publication journal epoch evidence is invalid"
+        ) from exc
     publication = value.get("publication")
     signatures = value.get("extrinsic_signature_results")
     if not isinstance(signatures, list):
@@ -211,6 +238,11 @@ def validate_publication_journal_v2(
         "published_bundle": dict(bundle),
         "publication": dict(publication) if isinstance(publication, Mapping) else None,
         "extrinsic_signature_results": normalized_signatures,
+        **(
+            {"epoch_evidence": epoch_evidence}
+            if schema_version == JOURNAL_SCHEMA_VERSION
+            else {}
+        ),
         "journal_hash": value["journal_hash"],
     }
 
@@ -258,6 +290,11 @@ class AuthoritativeWeightPublicationJournalV2:
                     prepared["weight_authorization_id"]
                 ),
                 "published_bundle": dict(prepared["published_bundle"]),
+                "epoch_evidence": (
+                    dict(prepared["epoch_evidence"])
+                    if isinstance(prepared.get("epoch_evidence"), Mapping)
+                    else None
+                ),
                 "publication": None,
                 "extrinsic_signature_results": [],
                 "updated_at": _timestamp(),

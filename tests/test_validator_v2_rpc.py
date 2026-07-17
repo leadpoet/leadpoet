@@ -145,6 +145,36 @@ def test_validator_host_client_uses_authoritative_rpc_shapes(monkeypatch):
     assert requests[-1][1] == 180
 
 
+def test_validator_host_client_exposes_explicit_epoch_boundary_capture(monkeypatch):
+    client = ValidatorEnclaveClient(enclave_cid=16)
+    observed = {}
+
+    def send(request, *, timeout_seconds=30):
+        observed["request"] = dict(request)
+        observed["timeout"] = timeout_seconds
+        return {
+            "status": "ok",
+            "capture_result": {
+                "schema_version": "leadpoet.subnet_epoch_boundary_capture.v1"
+            },
+        }
+
+    monkeypatch.setattr(client, "_send_request", send)
+    result = client.capture_subnet_epoch_boundary_v2(
+        cutover_manifest={"mapping_hash": "sha256:" + "1" * 64},
+        settlement_epoch_id=100,
+    )
+    assert result["schema_version"] == "leadpoet.subnet_epoch_boundary_capture.v1"
+    assert observed["request"] == {
+        "command": "capture_subnet_epoch_boundary_v2",
+        "capture_request": {
+            "cutover_manifest": {"mapping_hash": "sha256:" + "1" * 64},
+            "settlement_epoch_id": 100,
+        },
+    }
+    assert observed["timeout"] == 180
+
+
 def test_validator_rpc_exposes_only_structured_hotkey_operations(monkeypatch):
     calls = []
 

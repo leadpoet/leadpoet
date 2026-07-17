@@ -145,7 +145,11 @@ def deterministic_lead_assignment(
     return assigned_leads
 
 
-async def get_validator_set(epoch_id: int) -> List[str]:
+async def get_validator_set(
+    epoch_id: int,
+    *,
+    fail_closed: bool = False,
+) -> List[str]:
     """
     Get list of eligible validators for given epoch (ASYNC VERSION).
     
@@ -199,6 +203,10 @@ async def get_validator_set(epoch_id: int) -> List[str]:
         print(f"❌ Failed to get validator set: {e}")
         import traceback
         traceback.print_exc()
+        if fail_closed:
+            raise RuntimeError(
+                "stateful_epoch_validator_set_unavailable"
+            ) from e
         return []
 
 
@@ -363,4 +371,3 @@ def get_assignment_stats(
         'backlog': backlog,
         'utilization': round(utilization, 3)
     }
-

@@ -13,7 +13,6 @@ from gateway.tee.source_add_runtime_v2 import (
 )
 from gateway.tee.supabase_source_v2 import SupabaseSourceReaderV2
 from leadpoet_canonical.attested_v2 import sha256_json
-from leadpoet_canonical.chain_source_v2 import CHAIN_FINALIZATION_EPOCH_BLOCKS
 
 
 class CoordinatorRewardSourceV2Error(RuntimeError):
@@ -74,10 +73,7 @@ class CoordinatorRewardSourceV2:
             netuid=int(getattr(config, "netuid", 71) or 71),
             context=context,
         )
-        chain_epoch = (
-            int(chain_state["header"]["block"])
-            // CHAIN_FINALIZATION_EPOCH_BLOCKS
-        )
+        chain_epoch = int(chain_state.get("workflow_epoch_id", -1))
         if chain_epoch != int(context.epoch_id):
             raise CoordinatorRewardSourceV2Error(
                 "reward execution epoch differs from finalized chain state"
@@ -448,10 +444,7 @@ class CoordinatorRewardSourceV2:
             netuid=int(getattr(config, "netuid", 71) or 71),
             context=context,
         )
-        chain_epoch = (
-            int(chain_state["header"]["block"])
-            // CHAIN_FINALIZATION_EPOCH_BLOCKS
-        )
+        chain_epoch = int(chain_state.get("workflow_epoch_id", -1))
         if chain_epoch != int(context.epoch_id):
             raise CoordinatorRewardSourceV2Error(
                 "reimbursement epoch differs from finalized chain state"

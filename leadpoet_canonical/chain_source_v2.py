@@ -27,6 +27,7 @@ CHAIN_RPC_METHOD = "SubnetInfoRuntimeApi_get_selective_mechagraph"
 CHAIN_SELECTIVE_FIELDS = (0, 5, 7, 52)
 CHAIN_SS58_FORMAT = 42
 CHAIN_FINALIZATION_EPOCH_BLOCKS = 360
+CHAIN_SUBTENSOR_MAX_TEMPO = 50_400
 CHAIN_MAX_HOTKEYS = 4096
 CHAIN_MAX_RPC_RESPONSE_BYTES = 8 * 1024 * 1024
 CHAIN_RPC_TIMEOUT_MS = 30_000
@@ -196,6 +197,72 @@ def _twox128(value: bytes) -> bytes:
 def _twox64_concat(value: bytes) -> bytes:
     raw = bytes(value)
     return xxhash64(raw, seed=0).to_bytes(8, "little") + raw
+
+
+_SUBNET_EPOCH_STORAGE_WIDTHS = {
+    "Tempo": 2,
+    "LastEpochBlock": 8,
+    "PendingEpochAt": 8,
+    "SubnetEpochIndex": 8,
+    "BlocksSinceLastStep": 8,
+}
+
+
+def subnet_epoch_storage_key(*, storage_name: str, netuid: int) -> str:
+    """Build an exact Identity-map key for Subtensor epoch scheduler state."""
+
+    normalized_name = str(storage_name or "")
+    normalized_netuid = int(netuid)
+    if normalized_name not in _SUBNET_EPOCH_STORAGE_WIDTHS:
+        raise ChainSourceV2Error("subnet epoch storage name is invalid")
+    if not 0 <= normalized_netuid <= 0xFFFF:
+        raise ChainSourceV2Error("subnet epoch storage netuid is invalid")
+    key = b"".join(
+        (
+            _twox128(b"SubtensorModule"),
+            _twox128(normalized_name.encode("ascii")),
+            normalized_netuid.to_bytes(2, "little"),
+        )
+    )
+    return "0x" + key.hex()
+
+
+def decode_subnet_epoch_storage(value: Any, *, storage_name: str) -> int:
+    """Decode one fixed-width SCALE scheduler storage value."""
+
+    normalized_name = str(storage_name or "")
+    width = _SUBNET_EPOCH_STORAGE_WIDTHS.get(normalized_name)
+    text = str(value or "")
+    if width is None or not text.startswith("0x"):
+        raise ChainSourceV2Error("subnet epoch storage value is invalid")
+    try:
+        raw = bytes.fromhex(text[2:])
+    except ValueError as exc:
+        raise ChainSourceV2Error("subnet epoch storage value is invalid") from exc
+    if len(raw) != width:
+        raise ChainSourceV2Error("subnet epoch storage width is invalid")
+    return int.from_bytes(raw, "little")
+
+
+def timestamp_now_storage_key() -> str:
+    """Build the exact plain storage key for ``Timestamp.Now``."""
+
+    return "0x" + (_twox128(b"Timestamp") + _twox128(b"Now")).hex()
+
+
+def decode_timestamp_now_storage(value: Any) -> int:
+    """Decode ``Timestamp.Now`` as milliseconds since the Unix epoch."""
+
+    text = str(value or "")
+    if not text.startswith("0x"):
+        raise ChainSourceV2Error("timestamp storage value is invalid")
+    try:
+        raw = bytes.fromhex(text[2:])
+    except ValueError as exc:
+        raise ChainSourceV2Error("timestamp storage value is invalid") from exc
+    if len(raw) != 8:
+        raise ChainSourceV2Error("timestamp storage width is invalid")
+    return int.from_bytes(raw, "little")
 
 
 def timelocked_weight_commits_storage_key(*, netuid: int, mechid: int = 0) -> str:

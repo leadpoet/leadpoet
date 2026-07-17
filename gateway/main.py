@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 import sys
 import os
 import asyncio
+import json
 import time
 
 # Add import roots for gateway package and attested Research Lab runtime deps.
@@ -265,14 +266,55 @@ async def lifespan(app: FastAPI):
         # AsyncSubtensor. Provide a bounded, fresh epoch hint before spawning
         # Research Lab workers so baseline scoring cannot hang on direct chain
         # fallback during local/testnet startup.
+        legacy_namespace_state = None
+        if epoch_utils.get_epoch_mode() != epoch_utils.STATEFUL_EPOCH_MODE:
+            try:
+                legacy_namespace_state = (
+                    await epoch_utils.get_legacy_epoch_namespace_state_async(
+                        force_refresh=True
+                    )
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    "durable epoch namespace startup preflight failed"
+                ) from e
         try:
-            current_block = int(await asyncio.wait_for(epoch_utils._get_current_block_async(), timeout=20))
-            current_epoch = current_block // epoch_utils.EPOCH_DURATION_BLOCKS
+            epoch_snapshot, current_epoch = await asyncio.wait_for(
+                epoch_utils.get_current_epoch_context_async(), timeout=20
+            )
+            current_block = epoch_snapshot.current_block
             os.environ["RESEARCH_LAB_GATEWAY_EPOCH_HINT"] = str(current_epoch)
             os.environ["RESEARCH_LAB_GATEWAY_BLOCK_HINT"] = str(current_block)
             os.environ["RESEARCH_LAB_GATEWAY_EPOCH_HINT_TS"] = str(int(time.time()))
-            print(f"✅ Research Lab worker epoch hint set: epoch={current_epoch}, block={current_block}")
+            os.environ["RESEARCH_LAB_GATEWAY_EPOCH_SNAPSHOT_HINT"] = json.dumps(
+                epoch_snapshot.to_dict(), sort_keys=True, separators=(",", ":")
+            )
+            print(
+                "✅ Research Lab worker epoch hint set: "
+                f"workflow_epoch={current_epoch}, "
+                f"official_subnet_epoch="
+                f"{getattr(epoch_snapshot, 'subnet_epoch_index', 'legacy')}, "
+                f"block={current_block}"
+            )
         except Exception as e:
+            if epoch_utils.get_epoch_mode() == epoch_utils.STATEFUL_EPOCH_MODE:
+                raise RuntimeError(
+                    "stateful epoch authority startup preflight failed"
+                ) from e
+            try:
+                legacy_namespace_state = (
+                    await epoch_utils.get_legacy_epoch_namespace_state_async(
+                        force_refresh=True
+                    )
+                )
+            except Exception as state_exc:
+                raise RuntimeError(
+                    "durable epoch namespace startup preflight failed"
+                ) from state_exc
+            if legacy_namespace_state.get("lifecycle_state") != "legacy_open":
+                raise RuntimeError(
+                    "legacy epoch runtime cannot start after the cutover fence"
+                ) from e
             print(f"⚠️  Could not set Research Lab worker epoch hint: {e}")
 
         # ════════════════════════════════════════════════════════════════

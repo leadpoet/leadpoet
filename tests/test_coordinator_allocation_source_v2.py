@@ -32,6 +32,7 @@ class FakeChainSource:
         return {
             "finalized_block_hash": "a" * 64,
             "header": {"block": 100 * 360 + 10},
+            "workflow_epoch_id": 100,
             "metagraph": {
                 "netuid": 71,
                 "block": 100 * 360 + 10,
@@ -42,6 +43,13 @@ class FakeChainSource:
 
     def resolve_live_prices(self, **_kwargs):
         raise AssertionError("dynamic pricing is disabled in this fixture")
+
+
+class MissingWorkflowEpochChainSource(FakeChainSource):
+    def read_finalized_metagraph(self, **kwargs):
+        result = super().read_finalized_metagraph(**kwargs)
+        result.pop("workflow_epoch_id")
+        return result
 
 
 def _policy():
@@ -106,6 +114,24 @@ def test_allocation_is_built_from_measured_empty_sources():
     assert result["source_state_hash"] == sha256_json(result["source_state"])
     assert ("allocation_champion_rewards", {"epoch_id": 100}) in reader.calls
     assert ("allocation_source_add_rewards", {"epoch_id": 100}) in reader.calls
+
+
+def test_allocation_never_falls_back_to_finalized_block_modulo():
+    resolver = CoordinatorAllocationSourceV2(
+        reader=FakeReader(),
+        chain_source=MissingWorkflowEpochChainSource(),
+        config_supplier=_config,
+        network_supplier=lambda: "finney",
+    )
+
+    with pytest.raises(
+        CoordinatorAllocationSourceV2Error,
+        match="finalized chain state differs",
+    ):
+        resolver.resolve(
+            payload={"epoch": 100, "netuid": 71},
+            context=_context(),
+        )
 
 
 def test_unreceipted_source_add_reward_fails_closed():

@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from Leadpoet.utils.subnet_epoch import STATEFUL_EPOCH_MODE, get_epoch_mode
 from gateway.research_lab.bundles import contains_secret_material, sha256_json
 from gateway.research_lab.attested_scoring import (
     compare_promotion_gate_decision,
@@ -2589,6 +2590,8 @@ class ResearchLabPromotionController:
                 self.config.evaluation_epoch
             )
         except Exception as exc:
+            if get_epoch_mode() == STATEFUL_EPOCH_MODE:
+                raise
             logger.warning(
                 "research_lab_champion_reward_epoch_resolution_failed_using_bundle_epoch "
                 "candidate=%s error=%s",
@@ -2774,6 +2777,8 @@ class ResearchLabPromotionController:
                     getattr(self.config, "evaluation_epoch", 0)
                 )
             except Exception as exc:
+                if get_epoch_mode() == STATEFUL_EPOCH_MODE:
+                    raise
                 logger.warning(
                     "research_lab_source_add_reward_epoch_resolution_failed_using_bundle_epoch "
                     "candidate=%s error=%s",

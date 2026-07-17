@@ -8,6 +8,17 @@ import numpy as np
 import threading
 import time
 
+from Leadpoet.utils.subnet_epoch import (
+    LEGACY_EPOCH_MODE,
+    OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT,
+    STATEFUL_EPOCH_MODE,
+    SubnetEpochSnapshot,
+    get_epoch_mode,
+    load_subnet_epoch_cutover,
+    read_subnet_epoch_snapshot,
+    validate_subnet_epoch_cutover_anchor,
+)
+
 
 # Epoch configuration
 EPOCH_DURATION_MINUTES = 72
@@ -16,17 +27,64 @@ BITTENSOR_BLOCK_TIME_SECONDS = 12
 
 # Epoch state tracking
 _current_epoch = None
+_current_subnet_epoch_index = None
 _epoch_start_block = None
 _epoch_lock = threading.Lock()
 _epoch_network = "finney"  # Default to mainnet
 
-# Block caching for resilient estimation
+# Legacy-only block caching for resilient estimation. Stateful mode never uses it.
 _last_known_block = None
 _last_known_block_time = None
 _block_cache_lock = threading.Lock()
 
 # Async subtensor instance (injected from validator)
 _async_subtensor = None
+_stateful_sync_subtensor = None
+_stateful_archive_subtensor = None
+_stateful_subtensor_lock = threading.Lock()
+_validated_stateful_anchor_sources = set()
+
+
+def _read_stateful_epoch(
+    subtensor=None,
+) -> tuple[SubnetEpochSnapshot, int]:
+    """Read one exact-hash stateful epoch and its settlement ordinal."""
+
+    global _stateful_sync_subtensor, _stateful_archive_subtensor
+    if get_epoch_mode() != STATEFUL_EPOCH_MODE:
+        raise RuntimeError("stateful epoch authority is not enabled")
+    source = subtensor
+    if source is None:
+        with _stateful_subtensor_lock:
+            if _stateful_sync_subtensor is None:
+                import bittensor as bt
+
+                _stateful_sync_subtensor = bt.Subtensor(network=_epoch_network)
+            source = _stateful_sync_subtensor
+    cutover = load_subnet_epoch_cutover()
+    with _stateful_subtensor_lock:
+        if _stateful_archive_subtensor is None:
+            import bittensor as bt
+
+            _stateful_archive_subtensor = bt.Subtensor(
+                network=OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
+            )
+        archive_key = (
+            id(_stateful_archive_subtensor),
+            str(cutover.mapping_hash),
+        )
+        if archive_key not in _validated_stateful_anchor_sources:
+            validate_subnet_epoch_cutover_anchor(
+                _stateful_archive_subtensor,
+                cutover,
+            )
+            _validated_stateful_anchor_sources.add(archive_key)
+    snapshot = read_subnet_epoch_snapshot(
+        source,
+        netuid=int(os.getenv("BITTENSOR_NETUID", "71")),
+        finalized=True,
+    )
+    return snapshot, snapshot.settlement_epoch_id(cutover)
 
 
 def inject_async_subtensor(async_subtensor):
@@ -54,7 +112,8 @@ async def _get_current_block_async() -> int:
     Get current block number from injected async subtensor (ASYNC VERSION).
     
     Use this from async contexts or from background thread with event loop.
-    Falls back to cached block + time-based estimation if subtensor unavailable.
+    Stateful mode returns an exact finalized scheduler snapshot and fails closed;
+    only legacy mode may fall back to cached block + time-based estimation.
     
     Returns:
         Current block number
@@ -63,6 +122,12 @@ async def _get_current_block_async() -> int:
         Exception: If async_subtensor not injected or query fails with no cache
     """
     global _epoch_network, _last_known_block, _last_known_block_time
+
+    if get_epoch_mode() == STATEFUL_EPOCH_MODE:
+        snapshot, _settlement_epoch = await asyncio.to_thread(
+            _read_stateful_epoch
+        )
+        return snapshot.current_block
     
     if _async_subtensor is None:
         raise Exception(
@@ -162,6 +227,10 @@ def _calculate_epoch_number(block_number: int) -> int:
     Returns:
         Epoch number (incremental counter)
     """
+    if get_epoch_mode() == STATEFUL_EPOCH_MODE:
+        raise RuntimeError(
+            "stateful epoch identity cannot be derived from a block number"
+        )
     return block_number // EPOCH_DURATION_BLOCKS
 
 def _get_epoch_boundaries(epoch_number: int) -> tuple:
@@ -174,6 +243,10 @@ def _get_epoch_boundaries(epoch_number: int) -> tuple:
     Returns:
         Tuple of (start_block, end_block)
     """
+    if get_epoch_mode() == STATEFUL_EPOCH_MODE:
+        raise RuntimeError(
+            "stateful historical boundaries require a persisted epoch snapshot"
+        )
     start_block = epoch_number * EPOCH_DURATION_BLOCKS
     end_block = start_block + EPOCH_DURATION_BLOCKS - 1
     return start_block, end_block
@@ -212,9 +285,19 @@ def _background_epoch_monitor():
                     import bittensor as bt
                     subtensor = bt.Subtensor(network=_epoch_network)
                 
-                current_block = subtensor.get_current_block()
-                
-                epoch_ended = _is_epoch_ended(current_block)
+                if get_epoch_mode() == STATEFUL_EPOCH_MODE:
+                    epoch_snapshot, _settlement_epoch = _read_stateful_epoch(
+                        subtensor
+                    )
+                    current_block = epoch_snapshot.current_block
+                else:
+                    epoch_snapshot = None
+                    current_block = subtensor.get_current_block()
+
+                epoch_ended = _is_epoch_ended(
+                    current_block,
+                    epoch_snapshot=epoch_snapshot,
+                )
                 
                 if epoch_ended:
                     print(f"\n🔄 AUTOMATIC EPOCH TRANSITION DETECTED (Background Monitor)")
@@ -260,6 +343,13 @@ def start_epoch_monitor(network: str = "finney"):
     
     # Set the network for epoch tracking
     _epoch_network = network
+    if get_epoch_mode() == STATEFUL_EPOCH_MODE:
+        cutover = load_subnet_epoch_cutover()
+        configured_netuid = int(os.getenv("BITTENSOR_NETUID", "71"))
+        if cutover.netuid != configured_netuid:
+            raise RuntimeError(
+                "reward monitor netuid differs from epoch cutover manifest"
+            )
     
     with _epoch_monitor_lock:
         if _epoch_monitor_running:
@@ -296,7 +386,11 @@ def stop_epoch_monitor():
 
 # ===== MODIFIED EPOCH DETECTION =====
 
-def _is_epoch_ended(current_block: int) -> bool:
+def _is_epoch_ended(
+    current_block: int,
+    *,
+    epoch_snapshot: SubnetEpochSnapshot = None,
+) -> bool:
     """
     Check if the current 72-minute epoch has ended.
     
@@ -306,27 +400,48 @@ def _is_epoch_ended(current_block: int) -> bool:
     Returns:
         True if epoch has ended and we should calculate weights
     """
-    global _current_epoch, _epoch_start_block
-    
+    global _current_epoch, _current_subnet_epoch_index, _epoch_start_block
+
     with _epoch_lock:
-        current_epoch = _calculate_epoch_number(current_block)
-        
+        if get_epoch_mode() == STATEFUL_EPOCH_MODE:
+            if epoch_snapshot is None:
+                epoch_snapshot, current_epoch = _read_stateful_epoch()
+            else:
+                current_epoch = epoch_snapshot.settlement_epoch_id(
+                    load_subnet_epoch_cutover()
+                )
+            if int(current_block) != epoch_snapshot.current_block:
+                raise RuntimeError("epoch decision combines different chain blocks")
+            current_identity = epoch_snapshot.subnet_epoch_index
+            current_start_block = epoch_snapshot.last_epoch_block
+            blocks_in_epoch = epoch_snapshot.epoch_block
+        else:
+            current_epoch = _calculate_epoch_number(current_block)
+            current_identity = current_epoch
+            current_start_block = current_epoch * EPOCH_DURATION_BLOCKS
+            blocks_in_epoch = current_block - current_start_block
+
         # Initialize on first run
         if _current_epoch is None:
             _current_epoch = current_epoch
-            _epoch_start_block = current_epoch * EPOCH_DURATION_BLOCKS
-            
-            # Calculate current position in epoch for cleaner display
-            blocks_in_epoch = current_block - _epoch_start_block
+            _current_subnet_epoch_index = current_identity
+            _epoch_start_block = current_start_block
             
             print(f"🕐 EPOCH TRACKING INITIALIZED:")
             print(f"   Current block: {current_block}")
             print(f"   Current epoch: {current_epoch}")
-            print(f"   Epoch block: {blocks_in_epoch + 1}/360")
+            epoch_span = (
+                epoch_snapshot.tempo
+                if epoch_snapshot is not None
+                else EPOCH_DURATION_BLOCKS
+            )
+            print(f"   Epoch block: {blocks_in_epoch}/{epoch_span}")
             return False
         
         # Check if we've moved to a new epoch
-        if current_epoch > _current_epoch:
+        if current_identity != _current_subnet_epoch_index:
+            if current_identity < _current_subnet_epoch_index:
+                raise RuntimeError("subnet epoch index moved backwards")
             print(f"🕐 EPOCH TRANSITION DETECTED:")
             print(f"   Previous epoch: {_current_epoch}")
             print(f"   New epoch: {current_epoch}")
@@ -335,7 +450,8 @@ def _is_epoch_ended(current_block: int) -> bool:
             # Update epoch tracking
             old_epoch = _current_epoch
             _current_epoch = current_epoch
-            _epoch_start_block = current_epoch * EPOCH_DURATION_BLOCKS
+            _current_subnet_epoch_index = current_identity
+            _epoch_start_block = current_start_block
             
             print(f"   Epoch {old_epoch} has ended - transition detected!")
             return True
@@ -351,6 +467,29 @@ def _get_epoch_status() -> Dict:
         Dict with epoch timing information
     """
     try:
+        if get_epoch_mode() == STATEFUL_EPOCH_MODE:
+            snapshot, current_epoch = _read_stateful_epoch()
+            blocks_elapsed = snapshot.epoch_block
+            blocks_remaining = snapshot.blocks_remaining
+            scheduled_span = max(1, blocks_elapsed + blocks_remaining)
+            return {
+                "current_block": snapshot.current_block,
+                "current_epoch": current_epoch,
+                "subnet_epoch_index": snapshot.subnet_epoch_index,
+                "epoch_ref": snapshot.epoch_ref,
+                "epoch_start_block": snapshot.last_epoch_block,
+                "epoch_end_block": snapshot.next_epoch_block,
+                "blocks_elapsed": blocks_elapsed,
+                "blocks_remaining": blocks_remaining,
+                "progress_percentage": (blocks_elapsed / scheduled_span) * 100,
+                "estimated_minutes_remaining": (
+                    blocks_remaining * BITTENSOR_BLOCK_TIME_SECONDS / 60
+                ),
+                "epoch_duration_blocks": snapshot.tempo,
+                "epoch_duration_minutes": (
+                    snapshot.tempo * BITTENSOR_BLOCK_TIME_SECONDS / 60
+                ),
+            }
         current_block = _get_current_block()
         current_epoch = _calculate_epoch_number(current_block)
         start_block, end_block = _get_epoch_boundaries(current_epoch)
@@ -680,8 +819,16 @@ def calculate_weights(total_emission: float = 100.0, validator_wallet=None, vali
         
         # ===== BACKWARD COMPATIBILITY: OLD EPOCH TIMING CHECK =====
         # If no validator_hotkey provided, use old logic for backward compatibility
-        current_block = _get_current_block()
-        epoch_ended = _is_epoch_ended(current_block)
+        if get_epoch_mode() == STATEFUL_EPOCH_MODE:
+            epoch_snapshot, _settlement_epoch = _read_stateful_epoch()
+            current_block = epoch_snapshot.current_block
+        else:
+            epoch_snapshot = None
+            current_block = _get_current_block()
+        epoch_ended = _is_epoch_ended(
+            current_block,
+            epoch_snapshot=epoch_snapshot,
+        )
         
         if not epoch_ended:
             # Epoch still in progress - return accumulated data without clearing
@@ -791,8 +938,16 @@ def is_epoch_calculation_ready() -> bool:
         True if epoch has ended and full calculation should occur
     """
     try:
-        current_block = _get_current_block()
-        return _is_epoch_ended(current_block)
+        if get_epoch_mode() == STATEFUL_EPOCH_MODE:
+            epoch_snapshot, _settlement_epoch = _read_stateful_epoch()
+            current_block = epoch_snapshot.current_block
+        else:
+            epoch_snapshot = None
+            current_block = _get_current_block()
+        return _is_epoch_ended(
+            current_block,
+            epoch_snapshot=epoch_snapshot,
+        )
     except Exception as e:
         print(f"⚠️  Error checking epoch readiness: {e}")
         return False
@@ -803,6 +958,8 @@ def force_epoch_calculation():
     Useful for testing or manual triggers.
     """
     global _current_epoch
+    if get_epoch_mode() == STATEFUL_EPOCH_MODE:
+        raise RuntimeError("cannot force an official Subtensor epoch transition")
     print(f"🔧 FORCING EPOCH CALCULATION")
     
     with _epoch_lock:

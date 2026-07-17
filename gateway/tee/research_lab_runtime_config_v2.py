@@ -16,6 +16,14 @@ import os
 import re
 from typing import Any, Dict, Mapping, Optional
 
+from Leadpoet.utils.subnet_epoch import (
+    LEGACY_EPOCH_MODE,
+    STATEFUL_EPOCH_MODE,
+    SubnetEpochCutover,
+    SubnetEpochError,
+    get_epoch_mode,
+    load_subnet_epoch_cutover,
+)
 from gateway.research_lab.config import (
     DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI,
     DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG,
@@ -44,7 +52,7 @@ from research_lab.eval.snapshot_store import (
 )
 
 
-SCHEMA_VERSION = "leadpoet.research_lab_execution_config.v2"
+SCHEMA_VERSION = "leadpoet.research_lab_execution_config.v3"
 _CONFIG_FIELD_NAMES_HASH = (
     "sha256:7b7b8623e08d23e400fe2e75f40f076c7b6e6a2c2e58df8779c41c393d2224d6"
 )
@@ -245,6 +253,34 @@ def _normalized_environment(value: Mapping[str, Any]) -> Dict[str, Optional[str]
     return normalized
 
 
+def _normalized_epoch_authority(value: Mapping[str, Any]) -> Dict[str, Any]:
+    """Validate the non-secret epoch authority committed into the enclave."""
+
+    if not isinstance(value, Mapping) or set(value) != {"mode", "cutover"}:
+        raise ResearchLabRuntimeConfigV2Error(
+            "Research Lab epoch authority fields are invalid"
+        )
+    mode = str(value.get("mode") or "").strip().lower()
+    cutover_value = value.get("cutover")
+    if mode == LEGACY_EPOCH_MODE:
+        if cutover_value is not None:
+            raise ResearchLabRuntimeConfigV2Error(
+                "legacy Research Lab epoch authority cannot include a cutover"
+            )
+        return {"mode": LEGACY_EPOCH_MODE, "cutover": None}
+    if mode != STATEFUL_EPOCH_MODE or not isinstance(cutover_value, Mapping):
+        raise ResearchLabRuntimeConfigV2Error(
+            "stateful Research Lab epoch authority requires a cutover"
+        )
+    try:
+        cutover = SubnetEpochCutover.from_mapping(cutover_value)
+    except (SubnetEpochError, TypeError) as exc:
+        raise ResearchLabRuntimeConfigV2Error(
+            "Research Lab epoch cutover is invalid"
+        ) from exc
+    return {"mode": STATEFUL_EPOCH_MODE, "cutover": cutover.to_dict()}
+
+
 def build_research_lab_execution_config(
     *,
     config: Optional[ResearchLabGatewayConfig] = None,
@@ -285,6 +321,17 @@ def build_research_lab_execution_config(
         raise ResearchLabRuntimeConfigV2Error("Research Lab netuid is invalid") from exc
     if resolved_netuid < 0:
         raise ResearchLabRuntimeConfigV2Error("Research Lab netuid is invalid")
+    try:
+        epoch_mode = get_epoch_mode(source_environment)
+        epoch_cutover = (
+            load_subnet_epoch_cutover(source_environment).to_dict()
+            if epoch_mode == STATEFUL_EPOCH_MODE
+            else None
+        )
+    except SubnetEpochError as exc:
+        raise ResearchLabRuntimeConfigV2Error(
+            "Research Lab epoch authority is invalid"
+        ) from exc
     document = {
         "schema_version": SCHEMA_VERSION,
         "deployment": {
@@ -295,6 +342,9 @@ def build_research_lab_execution_config(
         "host_only_secret_fields": sorted(HOST_ONLY_SECRET_FIELDS),
         "credential_environment_names": sorted(
             name for name in MODEL_CREDENTIAL_ENV_NAMES if name in source_environment
+        ),
+        "epoch_authority": _normalized_epoch_authority(
+            {"mode": epoch_mode, "cutover": epoch_cutover}
         ),
         "behavior_environment": _normalized_environment(
             {
@@ -315,6 +365,7 @@ def validate_research_lab_execution_config(value: Mapping[str, Any]) -> Dict[str
         "fields",
         "host_only_secret_fields",
         "credential_environment_names",
+        "epoch_authority",
         "behavior_environment",
     }:
         raise ResearchLabRuntimeConfigV2Error(
@@ -364,6 +415,9 @@ def validate_research_lab_execution_config(value: Mapping[str, Any]) -> Dict[str
         "fields": _normalized_fields(value.get("fields")),
         "host_only_secret_fields": sorted(HOST_ONLY_SECRET_FIELDS),
         "credential_environment_names": list(credential_names),
+        "epoch_authority": _normalized_epoch_authority(
+            value.get("epoch_authority")
+        ),
         "behavior_environment": _normalized_environment(
             value.get("behavior_environment")
         ),

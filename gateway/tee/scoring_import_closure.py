@@ -113,6 +113,7 @@ ROLE_ENTRYPOINT_MODULES = {
         "gateway.tee.coordinator_active_model_source_v2",
         "gateway.tee.coordinator_allocation_source_v2",
         "gateway.tee.coordinator_chain_source_v2",
+        "gateway.tee.coordinator_epoch_cutover_v2",
         "gateway.tee.coordinator_executor_v2",
         "gateway.tee.coordinator_reward_source_v2",
         "gateway.tee.coordinator_source_add_v2",

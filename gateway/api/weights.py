@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 # Canonical imports (MUST use shared module)
 from leadpoet_canonical.weights import bundle_weights_hash, compare_weights_hash
@@ -52,6 +52,7 @@ from leadpoet_canonical.weight_bundle_v2 import (
 )
 from leadpoet_canonical.attested_v2 import sha256_json, verify_boot_identity_nitro
 from leadpoet_canonical.hotkey_authority_v2 import (
+    subnet_epoch_candidate_authorization_message_v1,
     validate_weight_inputs_request_v2,
     weight_inputs_request_message_v2,
 )
@@ -62,7 +63,22 @@ from leadpoet_canonical.weight_authority_v2 import (
 )
 from gateway.research_lab.arweave_audit import publish_research_lab_epoch_audit
 from gateway.research_lab.config import ResearchLabGatewayConfig
+from gateway.utils.subnet_epoch_archive import (
+    validate_cutover_anchor_from_archive,
+)
 from gateway.utils.signature import verify_wallet_signature
+from gateway.utils.epoch import (
+    LegacyEpochNamespaceFencedError,
+    assert_legacy_epoch_namespace_open_async,
+)
+from Leadpoet.utils.subnet_epoch import (
+    LEGACY_EPOCH_MODE,
+    STATEFUL_EPOCH_MODE,
+    SubnetEpochCutover,
+    get_epoch_mode,
+    load_subnet_epoch_cutover,
+    read_subnet_epoch_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +92,7 @@ router = APIRouter(prefix="/weights", tags=["weights"])
 from gateway.config import BITTENSOR_NETWORK
 
 MAX_BLOCK_DRIFT = 30  # Max allowed drift from gateway-observed block
+STATEFUL_FINALIZED_SUBMISSION_MAX_REMAINING = 30
 
 # Build identifier for transparency log
 BUILD_ID = os.environ.get("BUILD_ID", "production-gateway-tee")
@@ -113,6 +130,160 @@ def get_subtensor():
         import bittensor as bt
         _subtensor = bt.Subtensor()
     return _subtensor
+
+
+async def _verify_epoch_block_authority(
+    *,
+    netuid: int,
+    epoch_id: int,
+    submitted_block: int,
+    require_submission_window: bool,
+) -> Dict[str, Any]:
+    """Verify a workflow epoch against one exact on-chain scheduler state.
+
+    Stateful ``epoch_id`` is the monotonic settlement ordinal.  The official
+    Bittensor identity is read from ``SubnetEpochIndex`` at ``submitted_block``
+    and translated only through the validated cutover manifest.
+    """
+
+    subtensor = await asyncio.to_thread(get_subtensor)
+    mode = get_epoch_mode()
+    if mode != STATEFUL_EPOCH_MODE:
+        gateway_block = int(await asyncio.to_thread(subtensor.get_current_block))
+        gateway_epoch = gateway_block // EPOCH_LENGTH
+        try:
+            await assert_legacy_epoch_namespace_open_async(
+                gateway_epoch,
+                force_refresh=True,
+            )
+        except LegacyEpochNamespaceFencedError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="legacy epoch namespace is fenced for stateful cutover",
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="durable epoch namespace state is unavailable",
+            ) from exc
+        if abs(gateway_block - int(submitted_block)) > MAX_BLOCK_DRIFT:
+            raise HTTPException(status_code=400, detail="block drift is too large")
+        valid_epochs = (
+            {gateway_epoch, gateway_epoch - 1}
+            if gateway_block % EPOCH_LENGTH < 30
+            else {gateway_epoch}
+        )
+        if int(epoch_id) not in valid_epochs:
+            raise HTTPException(
+                status_code=400,
+                detail=f"epoch_id {epoch_id} not in valid range {valid_epochs}",
+            )
+        if int(epoch_id) != int(submitted_block) // EPOCH_LENGTH:
+            raise HTTPException(status_code=400, detail="epoch does not match block")
+        if (
+            require_submission_window
+            and int(submitted_block) % EPOCH_LENGTH
+            < WEIGHT_SUBMISSION_BLOCK - 15
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="weight submission is too early",
+            )
+        return {
+            "mode": mode,
+            "gateway_block": gateway_block,
+            "workflow_epoch_id": int(epoch_id),
+            "legacy_epoch_block": int(submitted_block) % EPOCH_LENGTH,
+        }
+
+    cutover = load_subnet_epoch_cutover()
+    try:
+        from gateway.utils.epoch import validate_stateful_cutover_authority_async
+
+        await validate_stateful_cutover_authority_async(cutover)
+        await asyncio.to_thread(
+            validate_cutover_anchor_from_archive,
+            cutover,
+        )
+        current = await asyncio.to_thread(
+            read_subnet_epoch_snapshot,
+            subtensor,
+            netuid=int(netuid),
+        )
+        if abs(current.current_block - int(submitted_block)) > MAX_BLOCK_DRIFT:
+            raise HTTPException(status_code=400, detail="block drift is too large")
+        submitted = (
+            current
+            if current.current_block == int(submitted_block)
+            else await asyncio.to_thread(
+                read_subnet_epoch_snapshot,
+                subtensor,
+                netuid=int(netuid),
+                block_number=int(submitted_block),
+            )
+        )
+        current_epoch = current.settlement_epoch_id(cutover)
+        expected_epoch = submitted.settlement_epoch_id(cutover)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="authoritative subnet epoch state is unavailable",
+        ) from exc
+    if int(epoch_id) != expected_epoch:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"settlement epoch {epoch_id} does not map to official subnet "
+                f"epoch {submitted.subnet_epoch_index} at block {submitted_block}"
+            ),
+        )
+    if require_submission_window:
+        live_window = EPOCH_LENGTH - WEIGHT_SUBMISSION_BLOCK
+        if current_epoch != expected_epoch:
+            raise HTTPException(
+                status_code=400,
+                detail="weight submission snapshot is not in the live official subnet epoch",
+            )
+        if not (0 < current.blocks_remaining <= live_window):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "weight submission is outside the live official subnet epoch window; "
+                    f"blocks remaining: {current.blocks_remaining}"
+                ),
+            )
+        # The enclave computes from one finalized exact-hash snapshot while
+        # the host starts the submission window from best head.  Finality can
+        # lag by a few blocks, so accepting the submitted authority up to 30
+        # blocks before the boundary preserves the existing lag buffer.  The
+        # live best head above must still be in the strict final 15 blocks and
+        # both snapshots must resolve to the same official epoch.
+        if not (
+            0
+            < submitted.blocks_remaining
+            <= STATEFUL_FINALIZED_SUBMISSION_MAX_REMAINING
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "finalized weight snapshot is outside the permitted official "
+                    "subnet epoch lag buffer; "
+                    f"blocks remaining: {submitted.blocks_remaining}"
+                ),
+            )
+    return {
+        "mode": mode,
+        "gateway_block": current.current_block,
+        "workflow_epoch_id": expected_epoch,
+        "official_subnet_epoch_id": submitted.subnet_epoch_index,
+        "epoch_ref": submitted.epoch_ref,
+        "epoch_block": submitted.epoch_block,
+        "blocks_remaining": submitted.blocks_remaining,
+        "block_hash": submitted.block_hash,
+        "cutover_mapping_hash": cutover.mapping_hash,
+    }
 
 
 def _extract_commit_hash_from_allowlist_entry(entry: dict) -> Optional[str]:
@@ -301,6 +472,36 @@ class WeightInputsV2Response(BaseModel):
     upstream_receipt_set: Dict[str, Any]
 
 
+class SubnetEpochCandidateSubmissionV1(BaseModel):
+    """Hotkey-authorized, non-activating official-boundary candidate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    validator_hotkey: str
+    validator_hotkey_signature: str
+    cutover_manifest: Dict[str, Any]
+    capture: Dict[str, Any]
+
+
+class SubnetEpochEvidenceSubmissionV1(BaseModel):
+    """Validator evidence for one normal post-cutover weight publication."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    validator_hotkey: str
+    bundle_hash: str
+    cutover_mapping_hash: str
+    epoch_authority: Dict[str, Any]
+    epoch_authority_hash: str
+    epoch_authority_receipt_hash: str
+    epoch_boundary: Dict[str, Any]
+    epoch_boundary_hash: str
+    epoch_boundary_receipt_hash: str
+    receipt_graph: Dict[str, Any]
+
+
 def _gateway_v2_release_manifest() -> Dict[str, Any]:
     from gateway.tee.release_manifest_v2 import validate_release_manifest
 
@@ -337,13 +538,24 @@ def _verify_authoritative_v2_boot(identity: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(expected, dict):
             raise ValueError("gateway boot role is absent from the approved release")
         comparisons = {
-            "commit_sha": identity.get("commit_sha"),
-            "pcr0": identity.get("pcr0"),
-            "build_manifest_hash": identity.get("build_manifest_hash"),
-            "dependency_lock_hash": identity.get("dependency_lock_hash"),
+            "commit_sha": (identity.get("commit_sha"), "commit_sha"),
+            "pcr0": (identity.get("pcr0"), "pcr0"),
+            # Boot identities use the generic receipt field name while the
+            # independently reproduced release records the same commitment as
+            # the role execution manifest.
+            "build_manifest_hash": (
+                identity.get("build_manifest_hash"),
+                "execution_manifest_hash",
+            ),
+            "dependency_lock_hash": (
+                identity.get("dependency_lock_hash"),
+                "dependency_lock_hash",
+            ),
         }
-        for field, observed in comparisons.items():
-            if str(observed or "").lower() != str(expected[field]).lower():
+        for field, (observed, release_field) in comparisons.items():
+            if str(observed or "").lower() != str(
+                expected.get(release_field) or ""
+            ).lower():
                 raise ValueError("gateway boot differs from approved release at %s" % field)
     return verify_boot_identity_nitro(
         identity,
@@ -526,6 +738,392 @@ def verify_ed25519_signature(digest_bytes: bytes, signature_hex: str, pubkey_hex
 # ============================================================================
 
 
+async def _stage_subnet_epoch_candidate_v1(
+    submission: SubnetEpochCandidateSubmissionV1,
+    *,
+    persist_candidate,
+    boot_attestation_verifier=None,
+) -> Dict[str, Any]:
+    """Validate one candidate and delegate its final durable/preview step."""
+
+    resolved_boot_verifier = (
+        _verify_authoritative_v2_boot
+        if boot_attestation_verifier is None
+        else boot_attestation_verifier
+    )
+
+    if submission.schema_version != (
+        "leadpoet.subnet_epoch_boundary_candidate_submission.v1"
+    ):
+        raise HTTPException(status_code=400, detail="Invalid candidate schema")
+    try:
+        cutover = SubnetEpochCutover.from_mapping(submission.cutover_manifest)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid subnet epoch cutover manifest",
+        ) from exc
+    if submission.cutover_manifest != cutover.to_dict():
+        raise HTTPException(
+            status_code=400,
+            detail="Subnet epoch cutover manifest is not canonical",
+        )
+    try:
+        mode = get_epoch_mode()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Gateway epoch mode is invalid",
+        ) from exc
+    if mode != LEGACY_EPOCH_MODE:
+        raise HTTPException(
+            status_code=409,
+            detail="A pre-cutover boundary candidate requires legacy epoch mode",
+        )
+    if not PRIMARY_VALIDATOR_HOTKEYS:
+        raise HTTPException(
+            status_code=503,
+            detail="PRIMARY_VALIDATOR_HOTKEYS is required for epoch cutover",
+        )
+    if submission.validator_hotkey not in PRIMARY_VALIDATOR_HOTKEYS:
+        raise HTTPException(status_code=403, detail="Unauthorized validator hotkey")
+    if ALLOWED_NETUIDS and cutover.netuid not in ALLOWED_NETUIDS:
+        raise HTTPException(status_code=400, detail="Invalid cutover netuid")
+
+    signed_payload = {
+        "schema_version": submission.schema_version,
+        "cutover_manifest": cutover.to_dict(),
+        "capture": submission.capture,
+    }
+    candidate_payload_hash = sha256_json(signed_payload)
+    try:
+        authorization_message = subnet_epoch_candidate_authorization_message_v1(
+            validator_hotkey=submission.validator_hotkey,
+            candidate_payload_hash=candidate_payload_hash,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid candidate authorization message",
+        ) from exc
+    if not await asyncio.to_thread(
+        verify_wallet_signature,
+        authorization_message,
+        submission.validator_hotkey_signature,
+        submission.validator_hotkey,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid subnet epoch candidate signature",
+        )
+    candidate_authorization_hash = sha256_json(
+        {
+            "validator_hotkey": submission.validator_hotkey,
+            "candidate_payload_hash": candidate_payload_hash,
+            "validator_hotkey_signature": submission.validator_hotkey_signature,
+        }
+    )
+
+    try:
+        from leadpoet_canonical.attested_v2 import validate_receipt_graph
+        from gateway.research_lab.stateful_epoch_authority_v1 import (
+            CAPTURE_SCHEMA_VERSION,
+            validate_epoch_evidence_envelope_v1,
+        )
+
+        if submission.capture.get("schema_version") != CAPTURE_SCHEMA_VERSION:
+            raise ValueError("candidate capture schema is invalid")
+        await asyncio.to_thread(
+            validate_receipt_graph,
+            submission.capture.get("receipt_graph"),
+            required_purposes={"validator.subnet_epoch_snapshot.v2"},
+            boot_attestation_verifier=resolved_boot_verifier,
+            require_boot_attestation_verification=True,
+        )
+        normalized = await asyncio.to_thread(
+            validate_epoch_evidence_envelope_v1,
+            submission.capture,
+            cutover=cutover,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "stateful_epoch_candidate_failed mapping=%s type=%s error=%s",
+            cutover.mapping_hash,
+            type(exc).__name__,
+            str(exc)[:300],
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="Subnet epoch candidate verification failed closed",
+        ) from exc
+
+    try:
+        await asyncio.to_thread(
+            validate_cutover_anchor_from_archive,
+            cutover,
+        )
+    except Exception as exc:
+        logger.error(
+            "stateful_epoch_candidate_archive_unavailable mapping=%s type=%s error=%s",
+            cutover.mapping_hash,
+            type(exc).__name__,
+            str(exc)[:300],
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Official archive cutover authority is unavailable",
+        ) from exc
+
+    try:
+        durable = await persist_candidate(
+            submission.capture,
+            cutover=cutover.to_dict(),
+            validator_hotkey=submission.validator_hotkey,
+            candidate_payload_hash=candidate_payload_hash,
+            validator_hotkey_signature=submission.validator_hotkey_signature,
+            candidate_authorization_hash=candidate_authorization_hash,
+        )
+    except Exception as exc:
+        from gateway.research_lab.stateful_epoch_authority_v1 import (
+            StatefulEpochAuthorityStoreError,
+        )
+
+        status = 409 if isinstance(exc, StatefulEpochAuthorityStoreError) else 503
+        logger.error(
+            "stateful_epoch_candidate_persistence_failed mapping=%s status=%s type=%s error=%s",
+            cutover.mapping_hash,
+            status,
+            type(exc).__name__,
+            str(exc)[:300],
+        )
+        raise HTTPException(
+            status_code=status,
+            detail=(
+                "Subnet epoch candidate conflicts with durable state"
+                if status == 409
+                else "Subnet epoch candidate persistence is unavailable"
+            ),
+        ) from exc
+
+    boundary = normalized["boundary"]
+    return {
+        "schema_version": "leadpoet.subnet_epoch_boundary_candidate_ack.v1",
+        "candidate_hash": candidate_payload_hash,
+        "validator_hotkey": submission.validator_hotkey,
+        "candidate_authorization_hash": candidate_authorization_hash,
+        "mapping_hash": cutover.mapping_hash,
+        "subnet_epoch_index": boundary.subnet_epoch_index,
+        "settlement_epoch_id": boundary.settlement_epoch_id(cutover),
+        "boundary_block": boundary.current_block,
+        "boundary_hash": normalized["boundary_hash"],
+        "boundary_receipt_hash": normalized["boundary_receipt"]["receipt_hash"],
+        "receipt_graph_hash": sha256_json(submission.capture["receipt_graph"]),
+        "durable_readback_hash": sha256_json(durable),
+    }
+
+
+@router.post("/subnet-epoch/candidate/v1")
+async def stage_subnet_epoch_candidate_v1(
+    submission: SubnetEpochCandidateSubmissionV1,
+) -> Dict[str, Any]:
+    """Stage, but never activate, one exact finalized cutover boundary."""
+
+    from gateway.research_lab.stateful_epoch_authority_v1 import (
+        persist_pre_cutover_candidate_v1,
+    )
+
+    return await _stage_subnet_epoch_candidate_v1(
+        submission,
+        persist_candidate=persist_pre_cutover_candidate_v1,
+    )
+
+
+@router.post("/subnet-epoch/boundary/v1")
+async def persist_subnet_epoch_evidence_v1(
+    submission: SubnetEpochEvidenceSubmissionV1,
+) -> Dict[str, Any]:
+    """Persist the exact current snapshot and stable official epoch boundary."""
+
+    payload = submission.model_dump(mode="python")
+    if submission.schema_version != "leadpoet.validator_subnet_epoch_evidence.v1":
+        raise HTTPException(status_code=400, detail="Invalid epoch evidence schema")
+    if not PRIMARY_VALIDATOR_HOTKEYS:
+        raise HTTPException(
+            status_code=503,
+            detail="PRIMARY_VALIDATOR_HOTKEYS is required for epoch evidence",
+        )
+    if submission.validator_hotkey not in PRIMARY_VALIDATOR_HOTKEYS:
+        raise HTTPException(status_code=403, detail="Unauthorized validator hotkey")
+    try:
+        if get_epoch_mode() != STATEFUL_EPOCH_MODE:
+            raise HTTPException(
+                status_code=409,
+                detail="Stateful subnet epoch mode is not active",
+            )
+        cutover = load_subnet_epoch_cutover()
+        from gateway.utils.epoch import validate_stateful_cutover_authority_async
+
+        await validate_stateful_cutover_authority_async(cutover)
+        await asyncio.to_thread(
+            validate_cutover_anchor_from_archive,
+            cutover,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Authoritative subnet epoch cutover is unavailable",
+        ) from exc
+
+    from leadpoet_canonical.attested_v2 import validate_receipt_graph
+    from gateway.research_lab.attested_v2_store import (
+        AttestedV2StoreError,
+        load_weight_bundle_v2,
+        load_weight_publication_v2,
+    )
+    from gateway.research_lab.stateful_epoch_authority_v1 import (
+        StatefulEpochAuthorityStoreError,
+        persist_post_cutover_evidence_v1,
+        validate_epoch_evidence_envelope_v1,
+    )
+
+    try:
+        await asyncio.to_thread(
+            validate_receipt_graph,
+            submission.receipt_graph,
+            required_purposes={"validator.subnet_epoch_snapshot.v2"},
+            boot_attestation_verifier=_verify_authoritative_v2_boot,
+            require_boot_attestation_verification=True,
+        )
+        normalized = await asyncio.to_thread(
+            validate_epoch_evidence_envelope_v1,
+            payload,
+            cutover=cutover,
+        )
+        current = normalized["current"]
+        if ALLOWED_NETUIDS and current.netuid not in ALLOWED_NETUIDS:
+            raise ValueError("epoch evidence netuid is not allowed")
+        if submission.cutover_mapping_hash != cutover.mapping_hash:
+            raise ValueError("epoch evidence mapping hash differs")
+    except Exception as exc:
+        logger.error(
+            "stateful_epoch_evidence_invalid bundle=%s type=%s error=%s",
+            submission.bundle_hash,
+            type(exc).__name__,
+            str(exc)[:300],
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="Stateful subnet epoch evidence verification failed closed",
+        ) from exc
+
+    try:
+        stored_bundle = await load_weight_bundle_v2(
+            netuid=current.netuid,
+            epoch_id=current.settlement_epoch_id(cutover),
+            validator_hotkey=submission.validator_hotkey,
+        )
+    except AttestedV2StoreError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Authoritative V2 weight bundle conflicts with durable state",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Authoritative V2 weight bundle store is unavailable",
+        ) from exc
+    if not isinstance(stored_bundle, dict):
+        raise HTTPException(
+            status_code=409,
+            detail="Authoritative V2 weight bundle is not durable yet",
+        )
+
+    try:
+        bundle_model = WeightSubmissionV2.model_validate(stored_bundle)
+        bundle_verified, _validator_boot = await asyncio.to_thread(
+            _validate_authoritative_v2_submission,
+            bundle_model,
+        )
+        if (
+            submission.bundle_hash != bundle_verified["bundle_hash"]
+            or submission.validator_hotkey != bundle_verified["validator_hotkey"]
+            or current.netuid != bundle_verified["netuid"]
+            or current.settlement_epoch_id(cutover) != bundle_verified["epoch_id"]
+            or current.current_block != bundle_verified["block"]
+            or submission.receipt_graph != stored_bundle.get("receipt_graph")
+        ):
+            raise ValueError("epoch evidence differs from the durable V2 bundle")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Stateful subnet epoch evidence differs from its V2 bundle",
+        ) from exc
+
+    try:
+        publication = await load_weight_publication_v2(
+            bundle_hash=submission.bundle_hash,
+        )
+    except AttestedV2StoreError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Authoritative V2 publication conflicts with durable state",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Authoritative V2 publication store is unavailable",
+        ) from exc
+    if not isinstance(publication, dict):
+        raise HTTPException(
+            status_code=409,
+            detail="Authoritative V2 publication is not durable yet",
+        )
+
+    try:
+        durable = await persist_post_cutover_evidence_v1(
+            payload,
+            cutover=cutover.to_dict(),
+        )
+    except StatefulEpochAuthorityStoreError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Stateful subnet epoch evidence conflicts with durable state",
+        ) from exc
+    except Exception as exc:
+        logger.error(
+            "stateful_epoch_evidence_persistence_unavailable bundle=%s type=%s error=%s",
+            submission.bundle_hash,
+            type(exc).__name__,
+            str(exc)[:300],
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Stateful subnet epoch evidence persistence is unavailable",
+        ) from exc
+
+    boundary = normalized["boundary"]
+    return {
+        "schema_version": "leadpoet.subnet_epoch_boundary_ack.v1",
+        "bundle_hash": submission.bundle_hash,
+        "mapping_hash": cutover.mapping_hash,
+        "subnet_epoch_index": boundary.subnet_epoch_index,
+        "settlement_epoch_id": boundary.settlement_epoch_id(cutover),
+        "boundary_block": boundary.current_block,
+        "boundary_hash": normalized["boundary_hash"],
+        "boundary_receipt_hash": normalized["boundary_receipt"]["receipt_hash"],
+        "epoch_authority_hash": normalized["current_hash"],
+        "epoch_authority_receipt_hash": normalized["current_receipt"][
+            "receipt_hash"
+        ],
+        "receipt_graph_hash": durable["receipt_graph_hash"],
+        "durable_readback_hash": durable["durable_readback_hash"],
+    }
+
+
 @router.post("/inputs/v2")
 async def get_weight_inputs_v2(
     authorization: WeightInputsV2Authorization,
@@ -577,29 +1175,12 @@ async def get_weight_inputs_v2(
     ):
         raise HTTPException(status_code=403, detail="Invalid V2 weight input signature")
 
-    subtensor = get_subtensor()
-    gateway_block = await asyncio.to_thread(subtensor.get_current_block)
-    if abs(gateway_block - request["block"]) > MAX_BLOCK_DRIFT:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Block drift too large: requested {request['block']}, "
-                f"gateway sees {gateway_block}"
-            ),
-        )
-    gateway_epoch = gateway_block // EPOCH_LENGTH
-    valid_epochs = (
-        {gateway_epoch, gateway_epoch - 1}
-        if gateway_block % EPOCH_LENGTH < 30
-        else {gateway_epoch}
+    await _verify_epoch_block_authority(
+        netuid=request["netuid"],
+        epoch_id=request["epoch_id"],
+        submitted_block=request["block"],
+        require_submission_window=False,
     )
-    if request["epoch_id"] not in valid_epochs:
-        raise HTTPException(
-            status_code=400,
-            detail=f"epoch_id {request['epoch_id']} not in valid range {valid_epochs}",
-        )
-    if request["epoch_id"] != request["block"] // EPOCH_LENGTH:
-        raise HTTPException(status_code=400, detail="epoch_id does not match requested block")
 
     try:
         from gateway.research_lab.attested_v2_store import (
@@ -727,29 +1308,15 @@ async def submit_weights_v2(submission: WeightSubmissionV2) -> WeightSubmissionV
                 message="Authoritative V2 bundle was already durably published",
             )
 
-    if existing is None:
-        subtensor = get_subtensor()
-        gateway_block = await asyncio.to_thread(subtensor.get_current_block)
-        if abs(gateway_block - verified["block"]) > MAX_BLOCK_DRIFT:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Block drift too large: submitted {verified['block']}, gateway sees {gateway_block}",
-            )
-        gateway_epoch = gateway_block // EPOCH_LENGTH
-        valid_epochs = (
-            {gateway_epoch, gateway_epoch - 1}
-            if gateway_block % EPOCH_LENGTH < 30
-            else {gateway_epoch}
-        )
-        if verified["epoch_id"] not in valid_epochs:
-            raise HTTPException(
-                status_code=400,
-                detail=f"epoch_id {verified['epoch_id']} not in valid range {valid_epochs}",
-            )
-        if verified["epoch_id"] != verified["block"] // EPOCH_LENGTH:
-            raise HTTPException(status_code=400, detail="epoch_id does not match submitted block")
-        if verified["block"] % EPOCH_LENGTH < WEIGHT_SUBMISSION_BLOCK - 15:
-            raise HTTPException(status_code=400, detail="Block is too early for weight submission")
+    # Verify on every attempt, including publication retries after the immutable
+    # bundle was already inserted.  Otherwise the retry event would persist an
+    # empty authority document and bypass the current chain/window checks.
+    weight_epoch_authority = await _verify_epoch_block_authority(
+        netuid=verified["netuid"],
+        epoch_id=verified["epoch_id"],
+        submitted_block=verified["block"],
+        require_submission_window=True,
+    )
     try:
         bundle_result = await persist_weight_bundle_v2(
             submission.model_dump(mode="python")
@@ -766,6 +1333,7 @@ async def submit_weights_v2(submission: WeightSubmissionV2) -> WeightSubmissionV
                 "weights_hash": verified["weights_hash"],
                 "bundle_hash": verified["bundle_hash"],
                 "root_receipt_hash": verified["root_receipt_hash"],
+                "epoch_authority": weight_epoch_authority,
             },
         )
         raw_transparency_hash = str(transparency.get("event_hash") or "").lower()
@@ -803,6 +1371,7 @@ async def submit_weights_v2(submission: WeightSubmissionV2) -> WeightSubmissionV
                 transparency_hash,
             ),
             persist_graph=persist_receipt_graph_v2,
+            boot_verifier=_verify_authoritative_v2_boot,
         )
         publication_result = await persist_weight_publication_v2(
             bundle_result=bundle_result,
@@ -999,22 +1568,12 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
     if await asyncio.to_thread(_existing_bundle):
         raise HTTPException(status_code=409, detail="duplicate submission for this epoch")
 
-    subtensor = await asyncio.to_thread(get_subtensor)
-    gateway_block = int(await asyncio.to_thread(subtensor.get_current_block))
-    gateway_epoch = gateway_block // EPOCH_LENGTH
-    if abs(gateway_block - submission.block) > MAX_BLOCK_DRIFT:
-        raise HTTPException(status_code=400, detail="block drift is too large")
-    valid_epochs = (
-        {gateway_epoch, gateway_epoch - 1}
-        if gateway_block % EPOCH_LENGTH < 30
-        else {gateway_epoch}
+    await _verify_epoch_block_authority(
+        netuid=submission.netuid,
+        epoch_id=submission.epoch_id,
+        submitted_block=submission.block,
+        require_submission_window=True,
     )
-    if submission.epoch_id not in valid_epochs:
-        raise HTTPException(status_code=400, detail="epoch is outside the valid range")
-    if submission.epoch_id != submission.block // EPOCH_LENGTH:
-        raise HTTPException(status_code=400, detail="epoch does not match block")
-    if submission.block % EPOCH_LENGTH < WEIGHT_SUBMISSION_BLOCK - 15:
-        raise HTTPException(status_code=400, detail="weight submission is too early")
 
     attestation_valid, attestation_data = await asyncio.to_thread(
         verify_validator_attestation,

@@ -95,6 +95,11 @@ def _validator(journal, client):
         substrate=SimpleNamespace(rpc_request=rpc_request)
     )
     validator.substrate_calls = substrate_calls
+
+    async def epoch_is_current(**_kwargs):
+        return True
+
+    validator._weight_submission_epoch_is_current = epoch_is_current
     return validator
 
 
@@ -138,6 +143,46 @@ async def test_prepared_crash_replays_gateway_then_uses_epoch_bounded_chain_call
 
 
 @pytest.mark.asyncio
+async def test_prepared_stateful_crash_never_signs_before_epoch_evidence_replay(
+    monkeypatch,
+):
+    record = _record(published=False, signatures=[])
+    record["epoch_evidence"] = {
+        "schema_version": "leadpoet.validator_subnet_epoch_evidence.v1"
+    }
+    journal = _Journal(record)
+    client = _Client(signed_extrinsics=[])
+    validator = _validator(journal, client)
+    signed = []
+
+    async def fail_epoch_evidence_replay(**kwargs):
+        assert kwargs["journal_record"]["epoch_evidence"] == record[
+            "epoch_evidence"
+        ]
+        raise RuntimeError("stateful epoch evidence was not durable")
+
+    async def set_weights(**kwargs):
+        signed.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        validator_module,
+        "resume_prepared_weight_publication_v2",
+        fail_epoch_evidence_replay,
+    )
+    validator._set_weights_until_epoch_end = set_weights
+
+    with pytest.raises(RuntimeError, match="epoch evidence was not durable"):
+        await validator._recover_weight_publication_journal_v2(
+            gateway_url="https://gateway.example"
+        )
+
+    assert signed == []
+    assert client.calls == []
+    assert not any(name == "published" for name, _value in journal.calls)
+
+
+@pytest.mark.asyncio
 async def test_signed_crash_rebroadcasts_only_exact_enclave_bytes_then_finalizes(
     monkeypatch,
 ):
@@ -167,6 +212,34 @@ async def test_signed_crash_rebroadcasts_only_exact_enclave_bytes_then_finalizes
         ("author_submitExtrinsic", ["0xaabbcc"])
     ]
     assert journal.calls[-1] == ("clear", EVENT)
+
+
+@pytest.mark.asyncio
+async def test_signed_crash_never_rebroadcasts_after_durable_lifecycle_closes():
+    recovered_extrinsic = {
+        "authorization_hash": "sha256:" + "4" * 64,
+        "extrinsic_hash": "0x" + "5" * 64,
+        "extrinsic_hex": "aabbcc",
+    }
+    journal = _Journal(_record(published=True, signatures=[{"receipt": True}]))
+    client = _Client(
+        signed_extrinsics=[recovered_extrinsic],
+        confirm_error=True,
+    )
+    validator = _validator(journal, client)
+
+    async def lifecycle_closed(**_kwargs):
+        return False
+
+    validator._weight_submission_epoch_is_current = lifecycle_closed
+
+    with pytest.raises(RuntimeError, match="durable epoch lifecycle"):
+        await validator._recover_weight_publication_journal_v2(
+            gateway_url="https://gateway.example"
+        )
+
+    assert validator.substrate_calls == []
+    assert not any(name == "clear" for name, _value in journal.calls)
 
 
 @pytest.mark.asyncio

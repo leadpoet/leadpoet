@@ -3,11 +3,13 @@ from __future__ import annotations
 import pytest
 import struct
 
+from leadpoet_canonical.attested_v2 import sha256_json
 from validator_tee.host import authoritative_weight_flow_v2 as flow_module
 from validator_tee.host.authoritative_weight_flow_v2 import (
     AuthoritativeWeightFlowV2Error,
     finalize_authoritative_weight_publication_v2,
     prepare_authoritative_weight_publication_v2,
+    publish_stateful_epoch_evidence_v1,
     resume_prepared_weight_publication_v2,
 )
 
@@ -114,6 +116,47 @@ def _ack(**overrides):
     return value
 
 
+def _epoch_evidence():
+    graph = {"root_receipt_hash": "sha256:" + "5" * 64, "receipts": []}
+    boundary = {
+        "subnet_epoch_index": 35,
+        "settlement_epoch_id": 100,
+        "current_block": 36_000,
+    }
+    return {
+        "schema_version": "leadpoet.validator_subnet_epoch_evidence.v1",
+        "validator_hotkey": HOTKEY,
+        "bundle_hash": "sha256:" + "6" * 64,
+        "cutover_mapping_hash": "sha256:" + "7" * 64,
+        "epoch_authority": {**boundary, "current_block": 36_099},
+        "epoch_authority_hash": "sha256:" + "8" * 64,
+        "epoch_authority_receipt_hash": "sha256:" + "9" * 64,
+        "epoch_boundary": boundary,
+        "epoch_boundary_hash": "sha256:" + "a" * 64,
+        "epoch_boundary_receipt_hash": "sha256:" + "b" * 64,
+        "receipt_graph": graph,
+    }
+
+
+def _epoch_ack(evidence):
+    return {
+        "schema_version": "leadpoet.subnet_epoch_boundary_ack.v1",
+        "bundle_hash": evidence["bundle_hash"],
+        "mapping_hash": evidence["cutover_mapping_hash"],
+        "subnet_epoch_index": evidence["epoch_boundary"]["subnet_epoch_index"],
+        "settlement_epoch_id": evidence["epoch_boundary"]["settlement_epoch_id"],
+        "boundary_block": evidence["epoch_boundary"]["current_block"],
+        "epoch_authority_hash": evidence["epoch_authority_hash"],
+        "epoch_authority_receipt_hash": evidence[
+            "epoch_authority_receipt_hash"
+        ],
+        "boundary_hash": evidence["epoch_boundary_hash"],
+        "boundary_receipt_hash": evidence["epoch_boundary_receipt_hash"],
+        "receipt_graph_hash": sha256_json(evidence["receipt_graph"]),
+        "durable_readback_hash": "sha256:" + "c" * 64,
+    }
+
+
 @pytest.mark.asyncio
 async def test_flow_orders_inputs_compute_parent_binding_and_durable_publication(monkeypatch):
     monkeypatch.setattr(flow_module, "build_authoritative_weight_bundle_v2", _bundle)
@@ -179,6 +222,64 @@ async def test_prepared_publication_replays_exact_bundle_and_validates_ack():
     )
     assert observed["payload"] is bundle
     assert acknowledgment["weight_submission_event_hash"] == EVENT
+
+
+@pytest.mark.asyncio
+async def test_stateful_recovery_replays_bundle_then_epoch_evidence_before_return():
+    bundle = _bundle(
+        enclave_response=Client().compute_authoritative_weights_v2({}),
+        validator_hotkey=HOTKEY,
+        binding_message="binding",
+        binding_signature_result={"signature": "a" * 128},
+    )
+    evidence = _epoch_evidence()
+    calls = []
+
+    async def post(url, payload, timeout):
+        calls.append((url, payload, timeout))
+        if url.endswith("/weights/submit/v2"):
+            return _ack()
+        assert url.endswith("/weights/subnet-epoch/boundary/v1")
+        return _epoch_ack(evidence)
+
+    acknowledgment = await resume_prepared_weight_publication_v2(
+        journal_record={
+            "published_bundle": bundle,
+            "epoch_evidence": evidence,
+        },
+        gateway_url="https://gateway.example",
+        post_json=post,
+    )
+    assert acknowledgment["weight_submission_event_hash"] == EVENT
+    assert [item[0].rsplit("/", 3)[-3:] for item in calls] == [
+        ["weights", "submit", "v2"],
+        ["subnet-epoch", "boundary", "v1"],
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changed_field",
+    (
+        "epoch_authority_hash",
+        "epoch_authority_receipt_hash",
+        "epoch_boundary_hash",
+    ),
+)
+async def test_stateful_epoch_evidence_ack_mismatch_fails_closed(changed_field):
+    evidence = _epoch_evidence()
+
+    async def post(_url, _payload, _timeout):
+        return _epoch_ack(
+            {**evidence, changed_field: "sha256:" + "d" * 64}
+        )
+
+    with pytest.raises(AuthoritativeWeightFlowV2Error, match="evidence acknowledgment"):
+        await publish_stateful_epoch_evidence_v1(
+            epoch_evidence=evidence,
+            gateway_url="https://gateway.example",
+            post_json=post,
+        )
 
 
 @pytest.mark.asyncio

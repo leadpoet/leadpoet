@@ -11626,19 +11626,21 @@ class ResearchLabGatewayScoringWorker:
         return _env_flag("RESEARCH_LAB_BASELINE_ANY_WORKER")
 
     async def _resolve_evaluation_epoch(self) -> int:
-        now = time.monotonic()
-        if self._resolved_epoch_cache is not None:
-            cached_epoch, cached_at = self._resolved_epoch_cache
-            if now - cached_at <= 60.0:
-                return cached_epoch
-
-        epoch, block, source = await resolve_research_lab_evaluation_epoch(self.config.evaluation_epoch)
+        # Always enter the shared resolver before consulting any chain-value
+        # cache.  It force-refreshes the durable cutover lifecycle first, so a
+        # long-running legacy worker cannot reuse an old ordinal after the
+        # singleton flips to stateful_active.  The shared resolver retains its
+        # own legacy chain-value cache only after that fresh lifecycle gate.
+        self._resolved_epoch_cache = None
+        epoch, block, source = await resolve_research_lab_evaluation_epoch(
+            self.config.evaluation_epoch
+        )
 
         if epoch <= 0:
             raise RuntimeError(
                 "Research Lab evaluation epoch resolved to 0; refusing to write epoch-0 score/audit bundles"
             )
-        self._resolved_epoch_cache = (epoch, now)
+        self._resolved_epoch_cache = None
         logger.info(
             "Research Lab scoring worker resolved evaluation epoch: epoch=%s block=%s source=%s",
             epoch,

@@ -609,15 +609,15 @@ async def get_current_block() -> int:
 
 async def get_current_bittensor_epoch() -> int:
     """
-    Get the current Bittensor epoch.
-    
-    Epoch = block_number // TEMPO
+    Get the current workflow epoch from the shared gateway authority.
     
     Returns:
-        Current epoch number
+        Legacy global bucket before cutover, then the collision-safe settlement
+        ordinal mapped from the official SubnetEpochIndex.
     """
-    block = await get_current_block()
-    return block // TEMPO
+    from gateway.utils.epoch import get_current_epoch_id_async
+
+    return await get_current_epoch_id_async()
 
 
 # =============================================================================

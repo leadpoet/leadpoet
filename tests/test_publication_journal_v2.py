@@ -5,6 +5,7 @@ import os
 
 import pytest
 
+from leadpoet_canonical.attested_v2 import sha256_json
 from leadpoet_canonical.hotkey_authority_v2 import (
     build_weight_extrinsic_authorization_v2,
     encode_signed_extrinsic_v2,
@@ -17,6 +18,8 @@ from tests.test_validator_hotkey_authority_v2 import _profile
 from tests.test_weight_authority_v2 import _bundle
 from validator_tee.host.publication_journal_v2 import (
     AuthoritativeWeightPublicationJournalV2,
+    JOURNAL_SCHEMA_VERSION,
+    LEGACY_JOURNAL_SCHEMA_VERSION,
     WeightPublicationJournalV2Error,
 )
 
@@ -91,6 +94,8 @@ def test_journal_fsyncs_before_publication_and_survives_restart(tmp_path):
         }
     )
     assert prepared["state"] == "prepared"
+    assert prepared["schema_version"] == JOURNAL_SCHEMA_VERSION
+    assert prepared["epoch_evidence"] is None
     assert prepared["publication"] is None
     assert path.exists()
     assert os.stat(path).st_mode & 0o777 == 0o600
@@ -150,3 +155,30 @@ def test_journal_will_not_replace_an_unfinished_epoch(tmp_path):
                 "published_bundle": bundle,
             }
         )
+
+
+def test_journal_reads_an_unfinished_legacy_v2_record(tmp_path):
+    bundle = _bundle()
+    path = tmp_path / "weight-publication.json"
+    journal = AuthoritativeWeightPublicationJournalV2(
+        path, chain_profile=_profile()
+    )
+    current = journal.record_prepared(
+        {
+            "weight_authorization_id": AUTHORIZATION,
+            "published_bundle": bundle,
+        }
+    )
+    legacy_body = {
+        key: value
+        for key, value in current.items()
+        if key not in {"journal_hash", "epoch_evidence"}
+    }
+    legacy_body["schema_version"] = LEGACY_JOURNAL_SCHEMA_VERSION
+    legacy = {**legacy_body, "journal_hash": sha256_json(legacy_body)}
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = journal.load()
+    assert loaded["schema_version"] == LEGACY_JOURNAL_SCHEMA_VERSION
+    assert "epoch_evidence" not in loaded
+    assert loaded["published_bundle"] == bundle

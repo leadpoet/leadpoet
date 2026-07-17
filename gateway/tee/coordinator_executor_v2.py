@@ -34,6 +34,10 @@ from gateway.tee.coordinator_source_add_v2 import (
 from gateway.tee.provider_outcome_v2 import (
     validate_provider_outcome_snapshot_v2,
 )
+from gateway.tee.coordinator_epoch_cutover_v2 import (
+    OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2,
+    attest_subnet_epoch_cutover_v2,
+)
 
 
 OP_ATTEST_ARTIFACT_PERSISTENCE = "attest_artifact_persistence"
@@ -68,6 +72,9 @@ COORDINATOR_OPERATIONS_V2 = {
     ),
     OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2: frozenset(
         {"research_lab.legacy_finalized_allocation.v2"}
+    ),
+    OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2: frozenset(
+        {"research_lab.subnet_epoch_cutover.v2"}
     ),
     OP_SOURCE_ADD_PROVENANCE_V2: frozenset(
         {"research_lab.source_add_provenance.v2"}
@@ -275,6 +282,17 @@ class CoordinatorExecutorV2:
                     str(document["chain_compare_hash"]),
                     str(document["audit_event_hash"]),
                     str(document["checkpoint_merkle_root"]),
+                ),
+            )
+        if operation == OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2:
+            document = attest_subnet_epoch_cutover_v2(payload, context)
+            return ExecutionResultV2(
+                output=document,
+                artifact_hashes=(
+                    str(document["mapping_hash"]),
+                    str(document["first_snapshot_hash"]),
+                    str(document["last_legacy_bundle_hash"]),
+                    str(document["last_legacy_weight_finalization_event_hash"]),
                 ),
             )
         if operation == OP_RESEARCH_LAB_ALLOCATION:

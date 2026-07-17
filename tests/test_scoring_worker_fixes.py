@@ -843,6 +843,52 @@ async def test_stale_parent_rebase_failure_auto_routes_to_regeneration(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_stateful_evaluation_epoch_is_never_worker_cached(monkeypatch):
+    epochs = iter((24001, 24002))
+    calls = []
+
+    async def resolve(_configured):
+        epoch = next(epochs)
+        calls.append(epoch)
+        return epoch, 8_640_000 + epoch, "finalized-test"
+
+    monkeypatch.setattr(sw, "resolve_research_lab_evaluation_epoch", resolve)
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.config = SimpleNamespace(evaluation_epoch=0)
+    worker._resolved_epoch_cache = None
+
+    assert await worker._resolve_evaluation_epoch() == 24001
+    assert await worker._resolve_evaluation_epoch() == 24002
+    assert calls == [24001, 24002]
+    assert worker._resolved_epoch_cache is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_worker_cache_cannot_bypass_lifecycle_flip(monkeypatch):
+    calls = 0
+
+    async def resolve(_configured):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 100, 36_359, "legacy-open"
+        raise RuntimeError("legacy runtime disabled after stateful_active")
+
+    monkeypatch.setattr(sw, "resolve_research_lab_evaluation_epoch", resolve)
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.config = SimpleNamespace(evaluation_epoch=0)
+    worker._resolved_epoch_cache = (99, 1.0)
+
+    assert await worker._resolve_evaluation_epoch() == 100
+    worker._resolved_epoch_cache = (100, 1.0)
+    with pytest.raises(RuntimeError, match="stateful_active"):
+        await worker._resolve_evaluation_epoch()
+
+    assert calls == 2
+    assert worker._resolved_epoch_cache is None
+
+
+@pytest.mark.asyncio
 async def test_private_baseline_waits_before_scheduled_utc_start(monkeypatch):
     class FixedDateTime(datetime):
         @classmethod

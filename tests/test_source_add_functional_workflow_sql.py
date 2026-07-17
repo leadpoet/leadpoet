@@ -226,7 +226,7 @@ def test_v2_receipt_allowlist_adds_source_add_without_removing_protected_purpose
     assert "validator.weights.finalized.v2" in SQL
 
 
-def test_v2_receipt_allowlist_exactly_matches_canonical_role_contract():
+def test_migration_96_receipt_allowlist_matches_pre_stateful_epoch_contract():
     for role, expected_purposes in ROLE_PURPOSES.items():
         match = re.search(
             rf"role = '{re.escape(role)}' AND purpose IN \((.*?)\n\s*\)\)",
@@ -235,4 +235,9 @@ def test_v2_receipt_allowlist_exactly_matches_canonical_role_contract():
         )
         assert match is not None, role
         migrated_purposes = set(re.findall(r"'([^']+)'", match.group(1)))
-        assert migrated_purposes == set(expected_purposes), role
+        expected_at_96 = set(expected_purposes)
+        if role == "gateway_coordinator":
+            expected_at_96.discard("research_lab.subnet_epoch_cutover.v2")
+        if role == "validator_weights":
+            expected_at_96.discard("validator.subnet_epoch_snapshot.v2")
+        assert migrated_purposes == expected_at_96, role

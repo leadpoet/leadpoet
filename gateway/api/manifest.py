@@ -15,7 +15,7 @@ import json
 from uuid import uuid4
 
 from gateway.utils.signature import verify_wallet_signature
-from gateway.utils.epoch import is_epoch_closed
+from gateway.utils.epoch import is_epoch_closed_async
 from gateway.utils.merkle import compute_merkle_root
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BUILD_ID
 from supabase import create_client
@@ -103,7 +103,7 @@ async def submit_epoch_manifest(
     # ========================================
     # Step 2: Verify epoch is closed
     # ========================================
-    if not is_epoch_closed(payload.epoch_id):
+    if not await is_epoch_closed_async(payload.epoch_id):
         raise HTTPException(
             status_code=400,
             detail=f"Epoch {payload.epoch_id} is still active. Wait for epoch to close to submit manifest."
@@ -318,4 +318,3 @@ async def get_validator_manifests(
             status_code=500,
             detail=f"Failed to get validator manifests: {str(e)}"
         )
-

@@ -9,13 +9,16 @@ Timing Windows:
 - Blocks 351-355: Validation submission window (no new lead fetches)
 - Blocks 356-359: Buffer period (epoch closing)
 - Block 360+: Epoch closed (reveal phase begins)
+
+Those block ranges describe staged legacy mode.  In stateful mode, lead fetch
+closes at 30 blocks remaining so no new validation batch can arrive after the
+coherent consensus window begins (30 through 16 remaining).
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from typing import List
 from datetime import datetime
 
-from gateway.utils.epoch import get_current_epoch_id, is_epoch_active, get_epoch_info
 from gateway.utils.assignment import get_validator_set  # deterministic_lead_assignment no longer needed here
 from gateway.utils.signature import verify_wallet_signature
 from gateway.utils.registry import is_registered_hotkey_async  # Use async version
@@ -73,6 +76,24 @@ def _rebuild_blob(row: dict) -> dict:
 
 # Create router
 router = APIRouter(prefix="/epoch", tags=["Epoch"])
+
+
+@router.get("/state")
+async def get_epoch_state(response: Response):
+    """Expose the exact-hash SN71 scheduler state used for cutover verification."""
+
+    from gateway.utils.epoch import get_epoch_authority_status_async
+
+    try:
+        result = await get_epoch_authority_status_async()
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Pragma"] = "no-cache"
+        return result
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Authoritative subnet epoch state unavailable: {exc}",
+        ) from exc
 
 
 @router.get("/{epoch_id}/leads")
@@ -164,28 +185,51 @@ async def get_epoch_leads(
             detail="Only validators can fetch epoch leads"
         )
     
-    # Step 3: Verify epoch is active
-    from gateway.utils.epoch import is_epoch_active_async, get_current_epoch_id_async
-    if not await is_epoch_active_async(epoch_id):
-        # Only allow fetching for the current epoch
-        current_epoch = await get_current_epoch_id_async()
-        if epoch_id != current_epoch:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Epoch {epoch_id} is not active. Current epoch: {current_epoch}"
-            )
-    
-    # Step 3.5: Verify within lead distribution window (blocks 0-350)
-    from gateway.utils.epoch import get_block_within_epoch_async
-    
-    block_within_epoch = await get_block_within_epoch_async()
-    if block_within_epoch > 350:
+    # Finalized state owns the workflow key. Best state is a separate liveness
+    # veto and timing observation so finality lag cannot serve stale work.
+    from gateway.utils.epoch import (
+        STATEFUL_EPOCH_MODE,
+        get_current_epoch_admission_context_async,
+        get_epoch_blocks_remaining,
+        get_epoch_elapsed,
+        get_epoch_mode,
+    )
+    from Leadpoet.utils.subnet_epoch import SubnetEpochError
+
+    try:
+        _epoch_authority, epoch_timing, current_epoch = (
+            await get_current_epoch_admission_context_async()
+        )
+    except SubnetEpochError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Authoritative subnet epoch admission state is unavailable",
+        ) from exc
+    if epoch_id != current_epoch:
         raise HTTPException(
             status_code=400,
-            detail=f"Lead distribution window closed at block 350. Current block within epoch: {block_within_epoch}. Validators must fetch leads before block 351."
+            detail=f"Epoch {epoch_id} is not active. Current workflow epoch: {current_epoch}",
+        )
+    block_within_epoch = get_epoch_elapsed(epoch_timing)
+    blocks_remaining = get_epoch_blocks_remaining(epoch_timing)
+    window_closed = (
+        blocks_remaining <= 30
+        if get_epoch_mode() == STATEFUL_EPOCH_MODE
+        else block_within_epoch > 350
+    )
+    if window_closed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Lead distribution window closed. "
+                f"Epoch block: {block_within_epoch}; blocks remaining: {blocks_remaining}."
+            ),
         )
     
-    print(f"✅ Step 3.5: Within lead distribution window (block {block_within_epoch}/350)")
+    print(
+        "✅ Step 3.5: Within lead distribution window "
+        f"(epoch block {block_within_epoch}, {blocks_remaining} remaining)"
+    )
     
     # ========================================================================
     # Step 3.6: Check if validator has already submitted validations for this epoch
@@ -265,17 +309,38 @@ async def get_epoch_leads(
         # Query EPOCH_INITIALIZATION from transparency_log
         # NOTE: epoch_id is stored INSIDE payload JSON, not as a column
         try:
-            init_result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    lambda: supabase.table("transparency_log")
-                        .select("payload")
-                        .eq("event_type", "EPOCH_INITIALIZATION")
-                        .eq("payload->>epoch_id", str(epoch_id))
-                        .limit(1)
-                        .execute()
-                ),
-                timeout=30.0
-            )
+            from gateway.utils.epoch import STATEFUL_EPOCH_MODE, get_epoch_mode
+
+            stateful_epoch_mode = get_epoch_mode() == STATEFUL_EPOCH_MODE
+            if stateful_epoch_mode:
+                from gateway.tasks.epoch_lifecycle import (
+                    get_durable_epoch_event,
+                )
+
+                durable_init = await asyncio.wait_for(
+                    get_durable_epoch_event(
+                        "EPOCH_INITIALIZATION", epoch_id
+                    ),
+                    timeout=30.0,
+                )
+
+                class DurableInitializationResult:
+                    def __init__(self, row):
+                        self.data = [] if row is None else [row]
+
+                init_result = DurableInitializationResult(durable_init)
+            else:
+                init_result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        lambda: supabase.table("transparency_log")
+                            .select("payload")
+                            .eq("event_type", "EPOCH_INITIALIZATION")
+                            .eq("payload->>epoch_id", str(epoch_id))
+                            .limit(1)
+                            .execute()
+                    ),
+                    timeout=30.0
+                )
         except asyncio.TimeoutError:
             print(f"⚠️  EPOCH_INITIALIZATION query timed out, falling back to direct query...")
             use_direct_query = True
@@ -285,7 +350,11 @@ async def get_epoch_leads(
             # Extract assigned_lead_ids from EPOCH_INITIALIZATION payload
             epoch_payload = init_result.data[0].get("payload", {})
             assigned_lead_ids = epoch_payload.get("assignment", {}).get("assigned_lead_ids", [])
-            queue_root = epoch_payload.get("queue", {}).get("queue_root", "unknown")
+            queue_document = epoch_payload.get("queue_state") or epoch_payload.get("queue") or {}
+            queue_root = queue_document.get(
+                "queue_merkle_root",
+                queue_document.get("queue_root", "unknown"),
+            )
             validator_count = epoch_payload.get("assignment", {}).get("validator_count", 0)
             
             print(f"   ✅ EPOCH_INITIALIZATION found: {len(assigned_lead_ids)} leads assigned")
@@ -302,6 +371,22 @@ async def get_epoch_leads(
     # Fallback: Query leads directly AND create EPOCH_INITIALIZATION to ensure consistency
     # CRITICAL: We must create EPOCH_INITIALIZATION so /validate uses the same snapshot
     leads_result = None  # Will be set by fallback or Step 5
+
+    # In stateful mode only the finalized-boundary monitor may originate the
+    # immutable queue assignment.  A request-time fallback would race the
+    # monitor, use a different queue snapshot, and create duplicate
+    # EPOCH_INITIALIZATION rows that make validation fail closed.
+    if (
+        get_epoch_mode() == STATEFUL_EPOCH_MODE
+        and (use_direct_query or assigned_lead_ids is None)
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Durable EPOCH_INITIALIZATION for epoch {epoch_id} is not "
+                "available yet"
+            ),
+        )
     
     if use_direct_query or assigned_lead_ids is None:
         try:
@@ -648,7 +733,9 @@ async def get_epoch_information(epoch_id: int):
         GET /epoch/100/info
     """
     try:
-        info = get_epoch_info(epoch_id)
+        from gateway.utils.epoch import get_epoch_info_async
+
+        info = await get_epoch_info_async(epoch_id)
         return info
     
     except Exception as e:
@@ -675,9 +762,13 @@ async def get_current_epoch():
         GET /epoch/current
     """
     try:
-        from gateway.utils.epoch import get_current_epoch_id_async
-        current_epoch = await get_current_epoch_id_async()
-        info = get_epoch_info(current_epoch)
+        from gateway.utils.epoch import (
+            get_current_epoch_context_async,
+            get_current_epoch_info_from_snapshot,
+        )
+
+        epoch_snapshot, current_epoch = await get_current_epoch_context_async()
+        info = get_current_epoch_info_from_snapshot(epoch_snapshot)
         
         return {
             "current_epoch_id": current_epoch,
@@ -689,4 +780,3 @@ async def get_current_epoch():
             status_code=500,
             detail=f"Failed to get current epoch: {str(e)}"
         )
-

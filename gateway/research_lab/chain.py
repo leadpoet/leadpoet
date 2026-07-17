@@ -11,6 +11,8 @@ import sys
 import time
 from typing import Any, Iterable
 
+from Leadpoet.utils.subnet_epoch import STATEFUL_EPOCH_MODE, get_epoch_mode
+
 
 logger = logging.getLogger(__name__)
 _EPOCH_CACHE: tuple[int, int | None, str, float] | None = None
@@ -26,57 +28,144 @@ _DIRECT_EPOCH_RESULT_PREFIX = "LEADPOET_EPOCH_RESULT="
 
 async def resolve_research_lab_evaluation_epoch(configured_epoch: int | str | None = None) -> tuple[int, int | None, str]:
     """Resolve the live Bittensor epoch without requiring an operator override."""
+    mode = get_epoch_mode()
+    from gateway.utils.epoch import (
+        LegacyEpochNamespaceFencedError,
+        assert_legacy_epoch_namespace_open_async,
+        get_current_epoch_context_async,
+        get_current_epoch_id_async,
+        get_legacy_epoch_namespace_state_async,
+    )
+
+    legacy_state = None
+    legacy_fenced = False
+    if mode != STATEFUL_EPOCH_MODE:
+        try:
+            legacy_state = await get_legacy_epoch_namespace_state_async(
+                force_refresh=True
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Research Lab durable epoch namespace state is unavailable"
+            ) from exc
+        legacy_fenced = legacy_state.get("lifecycle_state") != "legacy_open"
     try:
         configured = int(configured_epoch or 0)
     except (TypeError, ValueError):
         configured = 0
     if configured > 0:
+        if mode == STATEFUL_EPOCH_MODE or legacy_fenced:
+            raise RuntimeError(
+                "configured Research Lab epoch overrides are forbidden during stateful cutover"
+            )
         return configured, None, "configured"
 
     global _EPOCH_CACHE
     now = time.monotonic()
-    if _EPOCH_CACHE is not None:
+    if legacy_fenced:
+        _EPOCH_CACHE = None
+    if mode != STATEFUL_EPOCH_MODE and not legacy_fenced and _EPOCH_CACHE is not None:
         epoch, block, source, cached_at = _EPOCH_CACHE
         if now - cached_at <= 60.0 and epoch > 0:
             return epoch, block, source
 
     try:
-        from gateway.utils.epoch import get_current_epoch_id_async
-
         timeout_seconds = _direct_epoch_timeout_seconds()
-        epoch = int(await asyncio.wait_for(get_current_epoch_id_async(), timeout=timeout_seconds))
-        block = None
-        source = "gateway_epoch_utils"
-    except Exception as exc:
-        hint = _read_gateway_epoch_hint(require_fresh=True)
-        if hint is not None:
-            epoch, block, source = hint
+        if mode == STATEFUL_EPOCH_MODE:
+            snapshot, epoch = await asyncio.wait_for(
+                get_current_epoch_context_async(finalized=True),
+                timeout=timeout_seconds,
+            )
+            block = snapshot.current_block
+            source = "gateway_epoch_utils:finalized"
         else:
-            logger.warning("research_lab_epoch_gateway_utils_failed_fallback_hint: %s", str(exc)[:200])
+            epoch = int(
+                await asyncio.wait_for(
+                    get_current_epoch_id_async(), timeout=timeout_seconds
+                )
+            )
+            block = None
+            source = "gateway_epoch_utils"
+    except LegacyEpochNamespaceFencedError as exc:
+        raise RuntimeError(
+            "Research Lab legacy epoch namespace is fenced for stateful cutover"
+        ) from exc
+    except Exception as exc:
+        if mode == STATEFUL_EPOCH_MODE:
+            logger.warning(
+                "research_lab_stateful_epoch_gateway_utils_failed_direct_probe: %s",
+                str(exc)[:200],
+            )
             try:
                 epoch, block, network = await asyncio.wait_for(
                     asyncio.to_thread(_fetch_current_chain_epoch_direct),
                     timeout=_direct_epoch_timeout_seconds(),
                 )
-                source = f"direct_subtensor:{network}"
+                source = f"direct_subtensor_stateful:{network}"
             except Exception as direct_exc:
-                stale_hint = _read_gateway_epoch_hint(require_fresh=False)
-                if stale_hint is not None:
-                    logger.warning(
-                        "research_lab_epoch_direct_failed_using_stale_gateway_hint: %s",
-                        str(direct_exc)[:200],
+                raise RuntimeError(
+                    "Research Lab stateful evaluation epoch could not be resolved "
+                    "from an exact-hash Subtensor snapshot"
+                ) from direct_exc
+        elif legacy_fenced:
+            logger.warning(
+                "research_lab_fenced_epoch_gateway_utils_failed_direct_probe: %s",
+                str(exc)[:200],
+            )
+            try:
+                epoch, block, network = await asyncio.wait_for(
+                    asyncio.to_thread(_fetch_current_chain_epoch_direct),
+                    timeout=_direct_epoch_timeout_seconds(),
+                )
+                source = f"direct_subtensor_fenced:{network}"
+            except Exception as direct_exc:
+                raise RuntimeError(
+                    "Research Lab evaluation epoch could not be resolved from "
+                    "live chain state while the legacy namespace is fenced"
+                ) from direct_exc
+        else:
+            hint = _read_gateway_epoch_hint(require_fresh=True)
+            if hint is not None:
+                epoch, block, source = hint
+            else:
+                logger.warning("research_lab_epoch_gateway_utils_failed_fallback_hint: %s", str(exc)[:200])
+                try:
+                    epoch, block, network = await asyncio.wait_for(
+                        asyncio.to_thread(_fetch_current_chain_epoch_direct),
+                        timeout=_direct_epoch_timeout_seconds(),
                     )
-                    epoch, block, source = stale_hint
-                    source = f"{source}:stale_fallback"
-                else:
-                    raise RuntimeError(
-                        "Research Lab evaluation epoch could not be resolved from gateway utils, "
-                        "gateway epoch hint, or direct subtensor"
-                    ) from direct_exc
+                    source = f"direct_subtensor:{network}"
+                except Exception as direct_exc:
+                    stale_hint = _read_gateway_epoch_hint(require_fresh=False)
+                    if stale_hint is not None:
+                        logger.warning(
+                            "research_lab_epoch_direct_failed_using_stale_gateway_hint: %s",
+                            str(direct_exc)[:200],
+                        )
+                        epoch, block, source = stale_hint
+                        source = f"{source}:stale_fallback"
+                    else:
+                        raise RuntimeError(
+                            "Research Lab evaluation epoch could not be resolved from gateway utils, "
+                            "gateway epoch hint, or direct subtensor"
+                        ) from direct_exc
 
     if epoch <= 0:
         raise RuntimeError("Research Lab evaluation epoch resolved to 0")
-    _EPOCH_CACHE = (epoch, block, source, now)
+    if mode != STATEFUL_EPOCH_MODE:
+        try:
+            resolved_state = await assert_legacy_epoch_namespace_open_async(
+                int(epoch),
+                force_refresh=True,
+            )
+        except LegacyEpochNamespaceFencedError as exc:
+            raise RuntimeError(
+                "Research Lab legacy epoch namespace is fenced for stateful cutover"
+            ) from exc
+        if resolved_state.get("lifecycle_state") == "legacy_open":
+            _EPOCH_CACHE = (epoch, block, source, now)
+        else:
+            _EPOCH_CACHE = None
     return epoch, block, source
 
 
@@ -158,16 +247,56 @@ def _fetch_current_chain_epoch_direct() -> tuple[int, int, str]:
 import json
 import os
 import bittensor as bt
+from Leadpoet.utils.subnet_epoch import (
+    STATEFUL_EPOCH_MODE,
+    get_epoch_mode,
+    load_subnet_epoch_cutover,
+    read_subnet_epoch_snapshot,
+)
+from gateway.utils.epoch import validate_stateful_cutover_authority
+from gateway.utils.epoch import assert_legacy_epoch_namespace_open
+from gateway.utils.subnet_epoch_archive import (
+    validate_cutover_anchor_from_archive,
+)
 
 network = os.getenv("BITTENSOR_NETWORK", "finney")
+netuid = int(os.getenv("BITTENSOR_NETUID", "71"))
 subtensor = bt.Subtensor(network=network)
 try:
-    block = int(subtensor.block)
+    mode = get_epoch_mode()
+    if mode == STATEFUL_EPOCH_MODE:
+        snapshot = read_subnet_epoch_snapshot(
+            subtensor,
+            netuid=netuid,
+            finalized=True,
+        )
+        cutover = load_subnet_epoch_cutover()
+        epoch = snapshot.settlement_epoch_id(cutover)
+        block = snapshot.current_block
+        validate_stateful_cutover_authority(cutover)
+        validate_cutover_anchor_from_archive(cutover)
+        official = {
+            "official_subnet_epoch_id": snapshot.subnet_epoch_index,
+            "epoch_ref": snapshot.epoch_ref,
+        }
+    else:
+        # Preserve the pre-cutover probe exactly: legacy rollout must not
+        # depend on new scheduler storage being available or decodable.
+        block = int(subtensor.block)
+        epoch = block // 360
+        assert_legacy_epoch_namespace_open(epoch, force_refresh=True)
+        official = {}
 finally:
     close = getattr(subtensor, "close", None)
     if callable(close):
         close()
-print(%r + json.dumps({"block": block, "network": network}, separators=(",", ":")))
+result = {
+    "epoch": epoch,
+    "block": block,
+    "network": network,
+}
+result.update(official)
+print(%r + json.dumps(result, separators=(",", ":")))
 """ % _DIRECT_EPOCH_RESULT_PREFIX
     timeout_seconds = max(1.0, _direct_epoch_timeout_seconds() - 1.0)
     try:
@@ -199,13 +328,16 @@ print(%r + json.dumps({"block": block, "network": network}, separators=(",", ":"
     )
     try:
         result = json.loads(result_line)
+        epoch = int(result["epoch"])
         block = int(result["block"])
         result_network = str(result["network"])
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise RuntimeError("direct subtensor epoch probe returned invalid output") from exc
     if block <= 0 or result_network != network:
         raise RuntimeError("direct subtensor epoch probe returned inconsistent output")
-    return block // 360, block, network
+    if epoch <= 0:
+        raise RuntimeError("direct subtensor epoch probe returned an invalid epoch")
+    return epoch, block, network
 
 
 def _fetch_metagraph_direct() -> Any:

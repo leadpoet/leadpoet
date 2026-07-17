@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
 from validator_tee.enclave.runtime_v2 import (
     VALIDATOR_RUNTIME_CONFIG_SCHEMA_VERSION,
+    VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION,
     ValidatorRuntimeIdentityV2,
     ValidatorRuntimeV2Error,
     compute_app_manifest_hash,
@@ -36,6 +37,29 @@ def _configuration():
                 ("gateway_scoring", "2"),
                 ("gateway_autoresearch", "4"),
             )
+        },
+    }
+
+
+def _stateful_configuration():
+    configuration = _configuration()
+    body = {
+        "schema_version": "leadpoet.subnet_epoch_cutover.v1",
+        "epoch_scheme": "bittensor.subnet_epoch_index.v1",
+        "network_genesis_hash": "0x" + "1" * 64,
+        "netuid": 71,
+        "cutover_block": 8_637_156,
+        "cutover_block_hash": "0x" + "2" * 64,
+        "first_subnet_epoch_index": 23_927,
+        "first_settlement_epoch_id": 23_992,
+        "last_legacy_epoch_id": 23_991,
+    }
+    return {
+        **configuration,
+        "schema_version": VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION,
+        "epoch_authority": {
+            "mode": "stateful_v1",
+            "cutover_manifest": {**body, "mapping_hash": sha256_json(body)},
         },
     }
 
@@ -93,6 +117,33 @@ def test_validator_runtime_rejects_zero_pcr_and_manifest_drift():
     changed = {**configuration, "build_manifest_hash": _hash("9")}
     with pytest.raises(ValidatorRuntimeV2Error, match="app manifest"):
         runtime.configure(changed, expected_config_hash=sha256_json(changed))
+
+
+def test_stateful_runtime_binds_cutover_and_returns_defensive_copy():
+    runtime, _, _ = _runtime()
+    configuration = _stateful_configuration()
+    runtime.configure(
+        configuration,
+        expected_config_hash=sha256_json(configuration),
+    )
+
+    authority = runtime.epoch_authority()
+    assert authority == configuration["epoch_authority"]
+    authority["cutover_manifest"]["netuid"] = 1
+    assert runtime.epoch_authority()["cutover_manifest"]["netuid"] == 71
+
+
+def test_stateful_runtime_rejects_tampered_cutover_mapping():
+    runtime, _, _ = _runtime()
+    configuration = _stateful_configuration()
+    configuration["epoch_authority"]["cutover_manifest"]["mapping_hash"] = (
+        "sha256:" + "0" * 64
+    )
+    with pytest.raises(ValidatorRuntimeV2Error, match="hash mismatch"):
+        runtime.configure(
+            configuration,
+            expected_config_hash=sha256_json(configuration),
+        )
 
 
 def test_app_manifest_hash_covers_paths_modes_and_bytes(tmp_path: Path):

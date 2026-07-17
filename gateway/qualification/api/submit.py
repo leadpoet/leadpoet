@@ -49,7 +49,6 @@ from gateway.qualification.utils.helpers import (
 from gateway.qualification.utils.chain import (
     verify_hotkey_signature as chain_verify_hotkey_signature,
     is_hotkey_registered as chain_is_hotkey_registered,
-    get_current_bittensor_epoch as chain_get_current_bittensor_epoch,
     get_chain_info,
     BITTENSOR_NETWORK,
     BITTENSOR_NETUID,
@@ -805,16 +804,18 @@ async def get_submission_count_this_set(miner_hotkey: str, set_id: int) -> int:
 
 async def get_current_bittensor_epoch() -> int:
     """
-    Get the current Bittensor epoch (block // 360).
+    Get the current workflow epoch from the configured chain epoch authority.
+
+    Stateful mode returns the monotonic settlement ordinal mapped from the
+    official on-chain ``SubnetEpochIndex``; it is not a global block bucket.
     
-    Uses the cached epoch from the metagraph registry - no live chain query needed.
-    This is more resilient as it doesn't fail if the chain connection is stale.
+    Stateful mode reads one finalized exact-hash scheduler snapshot and fails
+    closed if that authority is unavailable. Legacy mode retains the existing
+    block cache/estimation behavior until the coordinated cutover.
     
     Returns:
         Current epoch number
     """
-    # Use cached epoch from gateway's epoch utilities (same as metagraph uses)
-    # This avoids chain connection issues for operations that don't need live data
     from gateway.utils.epoch import get_current_epoch_id_async
     return await get_current_epoch_id_async()
 

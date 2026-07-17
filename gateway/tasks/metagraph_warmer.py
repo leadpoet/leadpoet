@@ -36,7 +36,7 @@ async def metagraph_warmer_task():
     print("="*80 + "\n")
     
     # Import here to avoid circular dependency
-    from gateway.utils.epoch import get_current_epoch_id
+    from gateway.utils.epoch import get_current_epoch_id_async
     from gateway.utils.registry import warm_metagraph_cache
     
     # CRITICAL: Declare global to avoid UnboundLocalError when checking/modifying
@@ -51,7 +51,7 @@ async def metagraph_warmer_task():
             
             # Get current epoch
             try:
-                current_epoch = get_current_epoch_id()
+                current_epoch = await get_current_epoch_id_async()
             except Exception as e:
                 print(f"🔥 Metagraph warmer: Failed to get current epoch: {e}")
                 print(f"   Will retry in 30s...")
@@ -130,4 +130,3 @@ def _warm_cache_sync(target_epoch: int):
         # Reset flag
         with _warming_lock:
             _warming_in_progress = False
-

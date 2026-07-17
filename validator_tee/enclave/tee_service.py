@@ -195,7 +195,14 @@ def configure_authoritative_v2(
         expected_config_hash=expected_config_hash,
     )
     if validator_chain_source_v2 is None:
-        validator_chain_source_v2 = ValidatorChainSourceV2()
+        epoch_authority_supplier = getattr(
+            validator_runtime_v2,
+            "epoch_authority",
+            lambda: None,
+        )
+        validator_chain_source_v2 = ValidatorChainSourceV2(
+            epoch_authority_supplier=epoch_authority_supplier,
+        )
     if validator_weight_authority_v2 is None:
         validator_weight_authority_v2 = ValidatorWeightAuthorityV2(
             boot_identity_supplier=validator_runtime_v2.boot_identity,
@@ -269,6 +276,12 @@ def compute_authoritative_weights_v2(request: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def capture_subnet_epoch_boundary_v2(request: Dict[str, Any]) -> Dict[str, Any]:
+    if validator_weight_authority_v2 is None:
+        raise RuntimeError("validator authoritative V2 runtime is not configured")
+    return validator_weight_authority_v2.capture_epoch_boundary(request)
+
+
 def _authoritative_v2_enabled() -> bool:
     return validator_runtime_v2 is not None
 
@@ -294,6 +307,7 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
     - recover_weight_publication_v2: Validate and restore public signed state
     - sign_serve_axon_extrinsic_v2: Sign the exact measured serve_axon payload
     - compute_authoritative_weights_v2: Verify ancestry, compute, and sign weights
+    - capture_subnet_epoch_boundary_v2: Prove a proposed stateful cutover boundary
     - health: Health check
     """
     command = request.get("command")
@@ -517,6 +531,20 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
             return {
                 "status": "ok",
                 **compute_authoritative_weights_v2(weight_request),
+            }
+
+        elif command == "capture_subnet_epoch_boundary_v2":
+            capture_request = request.get("capture_request")
+            if not isinstance(capture_request, dict):
+                return {
+                    "status": "error",
+                    "error": "Missing subnet epoch boundary capture request",
+                }
+            return {
+                "status": "ok",
+                "capture_result": capture_subnet_epoch_boundary_v2(
+                    capture_request
+                ),
             }
 
         elif command == "health":

@@ -4,14 +4,26 @@ import base64
 from datetime import datetime, timezone
 import json
 
-from gateway.tee.coordinator_chain_source_v2 import CoordinatorChainSourceV2
+import pytest
+
+from Leadpoet.utils.subnet_epoch import (
+    STATEFUL_EPOCH_MODE,
+    SubnetEpochCutover,
+)
+from gateway.tee.coordinator_chain_source_v2 import (
+    CoordinatorChainSourceV2,
+    CoordinatorChainSourceV2Error,
+)
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from leadpoet_canonical.attested_v2 import (
     build_transport_attempt,
     sha256_bytes,
     sha256_json,
 )
-from leadpoet_canonical.chain_source_v2 import ss58_encode_account_id
+from leadpoet_canonical.chain_source_v2 import (
+    ss58_encode_account_id,
+    subnet_epoch_storage_key,
+)
 
 
 HASH = "sha256:" + "a" * 64
@@ -32,8 +44,10 @@ def _selective_fixture(block):
 
 
 class FakeBroker:
-    def __init__(self, block):
+    def __init__(self, block, *, cutover=None, predecessor_index=None):
         self.block = int(block)
+        self.cutover = cutover
+        self.predecessor_index = predecessor_index
         self.calls = []
 
     def execute(self, request):
@@ -49,16 +63,89 @@ class FakeBroker:
             rpc = json.loads(request_body)
             if rpc["method"] == "chain_getFinalizedHead":
                 result = "0x" + "b" * 64
+            elif rpc["method"] == "chain_getBlockHash":
+                requested_block = int(rpc["params"][0])
+                if requested_block == 0 and self.cutover is not None:
+                    result = self.cutover.network_genesis_hash
+                elif (
+                    self.cutover is not None
+                    and requested_block == self.cutover.cutover_block
+                ):
+                    result = self.cutover.cutover_block_hash
+                elif (
+                    self.cutover is not None
+                    and requested_block == self.cutover.cutover_block - 1
+                ):
+                    result = "0x" + "9" * 64
+                else:
+                    raise AssertionError("unexpected block-hash request")
             elif rpc["method"] == "chain_getHeader":
+                at_hash = str(rpc["params"][0])
+                is_cutover = (
+                    self.cutover is not None
+                    and at_hash == self.cutover.cutover_block_hash
+                )
                 result = {
-                    "number": hex(self.block),
+                    "number": hex(
+                        self.cutover.cutover_block if is_cutover else self.block
+                    ),
                     "stateRoot": "0x" + "c" * 64,
-                    "parentHash": "0x" + "d" * 64,
+                    "parentHash": (
+                        "0x" + "9" * 64 if is_cutover else "0x" + "d" * 64
+                    ),
                     "extrinsicsRoot": "0x" + "e" * 64,
                     "digest": {"logs": []},
                 }
-            elif rpc["params"][0] == "SubnetInfoRuntimeApi_get_selective_mechagraph":
-                result = _selective_fixture(self.block)
+            elif rpc["method"] == "state_call":
+                result = (
+                    _selective_fixture(self.block)
+                    if rpc["params"][0]
+                    == "SubnetInfoRuntimeApi_get_selective_mechagraph"
+                    else "0x9a0f4f0000000000"
+                )
+            elif rpc["method"] == "state_getStorage":
+                if self.cutover is None:
+                    raise AssertionError("unexpected stateful storage request")
+                storage_key, at_hash = rpc["params"]
+                storage_name = next(
+                    name
+                    for name in (
+                        "Tempo",
+                        "LastEpochBlock",
+                        "PendingEpochAt",
+                        "SubnetEpochIndex",
+                        "BlocksSinceLastStep",
+                    )
+                    if storage_key
+                    == subnet_epoch_storage_key(storage_name=name, netuid=71)
+                )
+                if at_hash == self.cutover.cutover_block_hash:
+                    values = {
+                        "SubnetEpochIndex": self.cutover.first_subnet_epoch_index,
+                        "LastEpochBlock": self.cutover.cutover_block,
+                    }
+                elif at_hash == "0x" + "9" * 64:
+                    values = {
+                        "SubnetEpochIndex": (
+                            self.cutover.first_subnet_epoch_index - 1
+                            if self.predecessor_index is None
+                            else self.predecessor_index
+                        )
+                    }
+                else:
+                    values = {
+                        "Tempo": 360,
+                        "LastEpochBlock": self.cutover.cutover_block,
+                        "PendingEpochAt": 0,
+                        "SubnetEpochIndex": self.cutover.first_subnet_epoch_index,
+                        "BlocksSinceLastStep": (
+                            self.block - self.cutover.cutover_block
+                        ),
+                    }
+                width = 2 if storage_name == "Tempo" else 8
+                result = "0x" + int(values[storage_name]).to_bytes(
+                    width, "little"
+                ).hex()
             else:
                 result = "0x9a0f4f0000000000"
             response_body = json.dumps(
@@ -77,7 +164,11 @@ class FakeBroker:
             destination_host=(
                 "api.coingecko.com"
                 if request["provider_id"] == "coingecko"
-                else "entrypoint-finney.opentensor.ai"
+                else (
+                    "archive.chain.opentensor.ai"
+                    if request["provider_id"] == "bittensor_archive"
+                    else "entrypoint-finney.opentensor.ai"
+                )
             ),
             destination_port=443,
             path_hash=HASH,
@@ -113,7 +204,8 @@ def test_finalized_metagraph_and_prices_are_bound_to_terminal_records():
         execute_provider=broker.execute,
         retry_policy_hashes={
             "bittensor_chain": "sha256:" + "1" * 64,
-            "coingecko": "sha256:" + "2" * 64,
+            "bittensor_archive": "sha256:" + "2" * 64,
+            "coingecko": "sha256:" + "3" * 64,
         },
         sleep=lambda _seconds: None,
         clock=lambda: datetime(2026, 7, 10, 20, 0, tzinfo=timezone.utc),
@@ -136,6 +228,117 @@ def test_finalized_metagraph_and_prices_are_bound_to_terminal_records():
         "bittensor_chain",
         "coingecko",
     }
+
+
+def _stateful_cutover():
+    return SubnetEpochCutover(
+        network_genesis_hash="0x" + "1" * 64,
+        netuid=71,
+        cutover_block=1_000,
+        cutover_block_hash="0x" + "2" * 64,
+        first_subnet_epoch_index=10,
+        first_settlement_epoch_id=101,
+        last_legacy_epoch_id=100,
+    )
+
+
+def _stateful_source(broker, cutover):
+    return CoordinatorChainSourceV2(
+        execute_provider=broker.execute,
+        retry_policy_hashes={
+            "bittensor_chain": "sha256:" + "1" * 64,
+            "bittensor_archive": "sha256:" + "2" * 64,
+            "coingecko": "sha256:" + "3" * 64,
+        },
+        epoch_authority={
+            "mode": STATEFUL_EPOCH_MODE,
+            "cutover": cutover.to_dict(),
+        },
+        sleep=lambda _seconds: None,
+    )
+
+
+def test_stateful_finalized_metagraph_uses_exact_scheduler_and_cutover_proof():
+    cutover = _stateful_cutover()
+    broker = FakeBroker(1_310, cutover=cutover)
+    source = _stateful_source(broker, cutover)
+    context = ExecutionContextV2(
+        job_id="allocation-v2:stateful",
+        purpose="research_lab.allocation.v2",
+        epoch_id=101,
+    )
+
+    result = source.read_finalized_metagraph(netuid=71, context=context)
+
+    assert result["workflow_epoch_id"] == 101
+    assert result["official_subnet_epoch_id"] == 10
+    assert result["epoch_authority"] == {
+        "mode": STATEFUL_EPOCH_MODE,
+        "workflow_epoch_id": 101,
+        "official_subnet_epoch_id": 10,
+        "cutover_mapping_hash": cutover.mapping_hash,
+        "state": {
+            "Tempo": 360,
+            "LastEpochBlock": 1_000,
+            "PendingEpochAt": 0,
+            "SubnetEpochIndex": 10,
+            "BlocksSinceLastStep": 310,
+        },
+    }
+    assert len(broker.calls) == 15
+    assert len(context.transport_attempts) == 15
+    historical_calls = [
+        call
+        for call in broker.calls
+        if call["provider_id"] == "bittensor_archive"
+    ]
+    live_calls = [
+        call
+        for call in broker.calls
+        if call["provider_id"] == "bittensor_chain"
+    ]
+    assert len(historical_calls) == 7
+    assert len(live_calls) == 8
+    for call in historical_calls:
+        rpc = json.loads(base64.b64decode(call["body_b64"]))
+        if rpc["method"] == "state_getStorage":
+            assert rpc["params"][1] in {
+                cutover.cutover_block_hash,
+                "0x" + "9" * 64,
+            }
+    for call in live_calls:
+        rpc = json.loads(base64.b64decode(call["body_b64"]))
+        assert not (
+            rpc["method"] == "state_getStorage"
+            and rpc["params"][1]
+            in {cutover.cutover_block_hash, "0x" + "9" * 64}
+        )
+    assert sum(
+        json.loads(base64.b64decode(call["body_b64"]))["method"]
+        == "state_getStorage"
+        for call in broker.calls
+    ) == 8
+
+
+def test_stateful_coordinator_rejects_skipped_cutover_index():
+    cutover = _stateful_cutover()
+    broker = FakeBroker(
+        1_310,
+        cutover=cutover,
+        predecessor_index=cutover.first_subnet_epoch_index - 2,
+    )
+    source = _stateful_source(broker, cutover)
+    context = ExecutionContextV2(
+        job_id="allocation-v2:skipped-index",
+        purpose="research_lab.allocation.v2",
+        epoch_id=101,
+    )
+
+    with pytest.raises(
+        CoordinatorChainSourceV2Error,
+        match="not an official transition",
+    ):
+        source.read_finalized_metagraph(netuid=71, context=context)
 
 
 class HistoricalBroker:

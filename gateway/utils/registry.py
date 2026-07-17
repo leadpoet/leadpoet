@@ -109,6 +109,9 @@ async def get_metagraph_async() -> bt.Metagraph:
     global _metagraph_cache, _cache_epoch, _cache_epoch_timestamp, _fetch_in_progress
     import time
     import asyncio
+    from Leadpoet.utils.subnet_epoch import STATEFUL_EPOCH_MODE, get_epoch_mode
+
+    stateful_epoch_mode = get_epoch_mode() == STATEFUL_EPOCH_MODE
     
     if _async_subtensor is None:
         raise Exception(
@@ -121,7 +124,11 @@ async def get_metagraph_async() -> bt.Metagraph:
     # ═══════════════════════════════════════════════════════════════════════════
     with _cache_lock:
         # Fast path: Check if cache is still valid based on time
-        if _metagraph_cache is not None and _cache_epoch_timestamp is not None:
+        if (
+            not stateful_epoch_mode
+            and _metagraph_cache is not None
+            and _cache_epoch_timestamp is not None
+        ):
             time_since_cache = time.time() - _cache_epoch_timestamp
             
             # If less than 72 minutes (one epoch) have passed, cache is definitely still valid
@@ -132,7 +139,7 @@ async def get_metagraph_async() -> bt.Metagraph:
         # Check if another task is already fetching
         if _fetch_in_progress:
             # Another task is fetching - use cache if available, otherwise wait
-            if _metagraph_cache is not None:
+            if not stateful_epoch_mode and _metagraph_cache is not None:
                 print(f"⏳ Metagraph fetch in progress - using existing cache for epoch {_cache_epoch}")
                 return _metagraph_cache
             # No cache and fetch in progress - we'll proceed (rare race condition)
@@ -278,7 +285,7 @@ async def get_metagraph_async() -> bt.Metagraph:
         # Use fallback cache
         with _cache_lock:
             _fetch_in_progress = False
-            if _metagraph_cache is not None:
+            if not stateful_epoch_mode and _metagraph_cache is not None:
                 print(f"⚠️  Using metagraph from previous epoch {_cache_epoch} as fallback")
                 print(f"⚠️  This may not include validators who registered in epoch {current_epoch}")
                 _cache_epoch_timestamp = time.time()

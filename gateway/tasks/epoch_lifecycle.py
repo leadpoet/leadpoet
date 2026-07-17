@@ -11,21 +11,33 @@ Background task that manages epoch lifecycle events:
 Runs every 30 seconds to check for epoch transitions.
 """
 
+from __future__ import annotations
+
 import asyncio
 from datetime import datetime, timedelta
-from typing import Dict, Optional
-from uuid import uuid4
+from typing import Any, Awaitable, Callable, Dict, Optional
+from uuid import NAMESPACE_URL, uuid4, uuid5
 import hashlib
 import json
 
+from Leadpoet.utils.subnet_epoch import (
+    SubnetEpochSnapshot,
+    load_subnet_epoch_cutover,
+)
+
 from gateway.utils.epoch import (
+    STATEFUL_EPOCH_MODE,
+    get_current_epoch_context_async,
+    get_current_epoch_times,
     get_current_epoch_id_async,
+    get_epoch_blocks_remaining,
+    get_epoch_elapsed,
+    get_epoch_mode,
     get_epoch_start_time_async,
     get_epoch_end_time_async,
     get_epoch_close_time_async,
     is_epoch_active,
     is_epoch_closed,
-    get_block_within_epoch
 )
 from gateway.utils.merkle import compute_merkle_root
 from gateway.utils.linkedin import normalize_linkedin_url, compute_linkedin_combo_hash
@@ -57,6 +69,223 @@ supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 # This ensures consensus has its own httpx connection pool, isolated from miner traffic
 # Both clients use the same Supabase project - separation is at Python httpx level only
 consensus_supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+
+_DURABLE_EPOCH_EVENT_TYPES = {
+    "EPOCH_INITIALIZATION",
+    "EPOCH_END",
+    "EPOCH_INPUTS",
+}
+_TRANSPARENCY_PAGE_SIZE = 1000
+
+
+def _canonical_payload(payload: dict) -> str:
+    """Return the exact JSON representation used for idempotency checks."""
+
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _durable_epoch_nonce(event_type: str, epoch_id: int) -> str:
+    """Use the log's UNIQUE nonce as the concurrent-writer idempotency key."""
+
+    return str(
+        uuid5(
+            NAMESPACE_URL,
+            f"leadpoet:epoch-lifecycle:v1:{event_type}:{epoch_id}",
+        )
+    )
+
+
+def build_epoch_event_row(
+    event_type: str,
+    epoch_id: int,
+    payload: dict,
+    *,
+    event_timestamp: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Build the exact legacy-format transparency row used by lifecycle events."""
+
+    if not isinstance(payload, dict) or payload.get("epoch_id") != epoch_id:
+        raise ValueError("epoch event payload must contain the exact epoch_id")
+    timestamp = event_timestamp or datetime.utcnow()
+    timestamp_value = (
+        timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp)
+    )
+    payload_json = _canonical_payload(payload)
+    return {
+        "event_type": event_type,
+        "actor_hotkey": "system",
+        "nonce": _durable_epoch_nonce(event_type, epoch_id),
+        "ts": timestamp_value,
+        "payload_hash": hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+        "build_id": BUILD_ID,
+        "signature": "system",
+        "payload": payload,
+    }
+
+
+async def get_durable_epoch_event(
+    event_type: str,
+    epoch_id: int,
+    *,
+    expected_payload: dict | None = None,
+) -> dict | None:
+    """Read one lifecycle event by its exact JSON epoch key.
+
+    The transparency log is append-only, so more than one matching lifecycle
+    event is an integrity failure rather than a result that can be resolved by
+    choosing the newest row.  Pagination is deliberate: PostgREST otherwise
+    truncates at its configured maximum row count and can hide duplicates.
+    """
+
+    if event_type not in _DURABLE_EPOCH_EVENT_TYPES:
+        raise ValueError(f"unsupported durable epoch event type: {event_type}")
+    if isinstance(epoch_id, bool) or not isinstance(epoch_id, int) or epoch_id < 0:
+        raise ValueError("epoch_id must be a non-negative integer")
+
+    stateful_epoch_mode = get_epoch_mode() == STATEFUL_EPOCH_MODE
+
+    def _fetch_page(start: int):
+        query = (
+            supabase.table("transparency_log")
+            .select(
+                "id,event_type,actor_hotkey,nonce,ts,payload_hash,build_id,"
+                "signature,payload,tee_sequence,event_hash"
+            )
+            .eq("event_type", event_type)
+            .eq("payload->>epoch_id", str(epoch_id))
+        )
+        if stateful_epoch_mode:
+            query = query.eq(
+                "payload->>epoch_key_semantics", "settlement_ordinal"
+            )
+        return (
+            query.order("id")
+            .range(start, start + _TRANSPARENCY_PAGE_SIZE - 1)
+            .execute()
+        )
+
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        result = await asyncio.to_thread(
+            _fetch_page,
+            offset,
+        )
+        page = list(result.data or [])
+        rows.extend(page)
+        if len(page) < _TRANSPARENCY_PAGE_SIZE:
+            break
+        offset += _TRANSPARENCY_PAGE_SIZE
+
+    for row in rows:
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"{event_type} for epoch {epoch_id} has a non-object payload"
+            )
+        stored_epoch_id = payload.get("epoch_id")
+        if (
+            isinstance(stored_epoch_id, bool)
+            or not isinstance(stored_epoch_id, int)
+            or stored_epoch_id != epoch_id
+        ):
+            raise RuntimeError(
+                f"{event_type} has a conflicting payload epoch_id for epoch "
+                f"{epoch_id}"
+            )
+        if stateful_epoch_mode and payload.get(
+            "epoch_key_semantics"
+        ) != "settlement_ordinal":
+            raise RuntimeError(
+                f"{event_type} for epoch {epoch_id} is not a settlement-ordinal event"
+            )
+
+    if len(rows) > 1:
+        ids = [row.get("id") for row in rows]
+        raise RuntimeError(
+            f"duplicate {event_type} events for epoch {epoch_id}: ids={ids}"
+        )
+    if not rows:
+        return None
+
+    row = rows[0]
+    if expected_payload is not None and _canonical_payload(
+        row["payload"]
+    ) != _canonical_payload(expected_payload):
+        raise RuntimeError(
+            f"conflicting {event_type} payload already exists for epoch "
+            f"{epoch_id}"
+        )
+    return row
+
+
+def _validate_stateful_epoch_authority_document(
+    epoch_id: int,
+    value: Any,
+) -> dict:
+    """Validate the canonical scheduler authority bound to one ordinal."""
+
+    if not isinstance(value, dict):
+        raise RuntimeError(
+            f"stateful epoch {epoch_id} is missing its epoch authority"
+        )
+    cutover = load_subnet_epoch_cutover()
+    try:
+        snapshot = SubnetEpochSnapshot.from_mapping(value)
+        expected = snapshot.to_dict(cutover=cutover)
+    except Exception as exc:
+        raise RuntimeError(
+            f"stateful epoch {epoch_id} has invalid epoch authority"
+        ) from exc
+    if expected != value:
+        raise RuntimeError(
+            f"stateful epoch {epoch_id} epoch authority is not canonical"
+        )
+    if (
+        expected.get("settlement_epoch_id") != epoch_id
+        or expected.get("cutover_mapping_hash") != cutover.mapping_hash
+    ):
+        raise RuntimeError(
+            f"stateful epoch {epoch_id} authority differs from the active cutover"
+        )
+    return dict(expected)
+
+
+async def load_stateful_epoch_initialization_authority(epoch_id: int) -> dict:
+    """Load the exact authority committed by durable EPOCH_INITIALIZATION.
+
+    EPOCH_END and EPOCH_INPUTS must carry this identical document.  They may
+    not reconstruct authority from a later chain head because the official
+    scheduler can already have advanced by the time validation-end processing
+    runs.
+    """
+
+    initialization = await get_durable_epoch_event(
+        "EPOCH_INITIALIZATION",
+        epoch_id,
+    )
+    if initialization is None:
+        raise RuntimeError(
+            f"stateful EPOCH_INITIALIZATION for epoch {epoch_id} is missing"
+        )
+    payload = initialization.get("payload")
+    if (
+        not isinstance(payload, dict)
+        or payload.get("epoch_key_semantics") != "settlement_ordinal"
+    ):
+        raise RuntimeError(
+            f"stateful EPOCH_INITIALIZATION for epoch {epoch_id} is invalid"
+        )
+    return _validate_stateful_epoch_authority_document(
+        epoch_id,
+        payload.get("epoch_authority"),
+    )
 
 
 async def fetch_full_leads_for_epoch(epoch_id: int) -> list:
@@ -160,12 +389,21 @@ async def epoch_lifecycle_task():
     
     while True:
         try:
-            current_epoch = await get_current_epoch_id_async()
+            stateful = get_epoch_mode() == STATEFUL_EPOCH_MODE
+            epoch_snapshot, current_epoch = await get_current_epoch_context_async(
+                finalized=True if stateful else None
+            )
             now = datetime.utcnow()
-            
-            epoch_start = await get_epoch_start_time_async(current_epoch)
-            epoch_end = await get_epoch_end_time_async(current_epoch)
-            epoch_close = await get_epoch_close_time_async(current_epoch)
+            if stateful:
+                epoch_start, epoch_end, epoch_close = get_current_epoch_times(
+                    epoch_snapshot
+                )
+            else:
+                epoch_start = await get_epoch_start_time_async(current_epoch)
+                epoch_end = await get_epoch_end_time_async(current_epoch)
+                epoch_close = await get_epoch_close_time_async(current_epoch)
+            block_within_epoch = get_epoch_elapsed(epoch_snapshot)
+            blocks_remaining = get_epoch_blocks_remaining(epoch_snapshot)
             
             # Debug: Show lifecycle task is running (every 30 seconds)
             time_to_end = (epoch_end - now).total_seconds()
@@ -190,7 +428,13 @@ async def epoch_lifecycle_task():
                 # Compute and log single atomic EPOCH_INITIALIZATION event
                 # If this fails, we DON'T update last_epoch_id so next 30s cycle retries automatically
                 try:
-                    await compute_and_log_epoch_initialization(current_epoch, epoch_start, epoch_end, epoch_close)
+                    await compute_and_log_epoch_initialization(
+                        current_epoch,
+                        epoch_start,
+                        epoch_end,
+                        epoch_close,
+                        epoch_snapshot=epoch_snapshot if stateful else None,
+                    )
                 except Exception as init_error:
                     print(f"   ❌ EPOCH_INITIALIZATION failed: {init_error}")
                     print(f"   ⚠️  Will retry on next 30s cycle (NOT updating last_epoch_id)")
@@ -209,10 +453,13 @@ async def epoch_lifecycle_task():
             # Check if it's time to prefetch next epoch leads (blocks 351-360)
             # ========================================================================
             try:
-                block_within_epoch = get_block_within_epoch()
-                
                 # Trigger prefetch once when we reach block 351
-                if (351 <= block_within_epoch <= 360 and 
+                prefetch_window = (
+                    0 < blocks_remaining <= 9
+                    if stateful
+                    else 351 <= block_within_epoch <= 360
+                )
+                if (prefetch_window and
                     current_epoch not in prefetch_triggered_epochs and 
                     not is_prefetch_in_progress()):
                     
@@ -223,7 +470,7 @@ async def epoch_lifecycle_task():
                     print(f"{'='*80}")
                     print(f"   Current epoch: {current_epoch}")
                     print(f"   Prefetching for: epoch {next_epoch}")
-                    print(f"   Time remaining: {360 - block_within_epoch} blocks (~{(360 - block_within_epoch) * 12}s)")
+                    print(f"   Time remaining: {blocks_remaining} blocks (~{blocks_remaining * 12}s)")
                     print(f"{'='*80}\n")
                     
                     # Mark as triggered immediately to prevent duplicate prefetch
@@ -253,11 +500,14 @@ async def epoch_lifecycle_task():
             # Consensus can run at block 330+ (same epoch) instead of waiting for next epoch.
             # This eliminates the reveal phase entirely and reduces latency.
             try:
-                block_within_epoch = get_block_within_epoch()
-                
                 # Run consensus once when we reach block 330+ (but before epoch ends)
                 # This gives validators until block ~300-320 to submit their validations
-                if (330 <= block_within_epoch <= 358 and 
+                consensus_window = (
+                    16 <= blocks_remaining <= 30
+                    if stateful
+                    else 330 <= block_within_epoch <= 358
+                )
+                if (consensus_window and
                     current_epoch not in consensus_computed_epochs):
                     
                     print(f"\n{'='*80}")
@@ -301,7 +551,11 @@ async def epoch_lifecycle_task():
             # Check if validation phase just ended (t=67)
             # ========================================================================
             time_since_end = (now - epoch_end).total_seconds()
-            if 0 <= time_since_end < 60 and current_epoch not in validation_ended_epochs:
+            if (
+                not stateful
+                and 0 <= time_since_end < 60
+                and current_epoch not in validation_ended_epochs
+            ):
                 print(f"\n{'='*80}")
                 print(f"⏰ EPOCH {current_epoch} VALIDATION PHASE ENDED")
                 print(f"{'='*80}")
@@ -334,8 +588,11 @@ async def epoch_lifecycle_task():
                     continue  # Already processed
                 
                 # Calculate close time for THIS epoch
-                check_epoch_close = await get_epoch_close_time_async(check_epoch)
-                time_since_close = (now - check_epoch_close).total_seconds()
+                if stateful and check_epoch < current_epoch:
+                    time_since_close = 0.0
+                else:
+                    check_epoch_close = await get_epoch_close_time_async(check_epoch)
+                    time_since_close = (now - check_epoch_close).total_seconds()
                 
                 if time_since_close >= 0:  # This epoch has closed
                     print(f"   ⚠️  EPOCH {check_epoch} IS CLOSED - Checking for evidence...")
@@ -440,38 +697,134 @@ async def log_epoch_event(event_type: str, epoch_id: int, payload: dict):
         payload: Event data
     
     Returns:
-        str: Arweave transaction ID if successful, None if failed
+        Durable TEE sequence/event identifier. Existing identical events are
+        returned idempotently.
+
+    Raises:
+        RuntimeError: If the write is rejected, cannot be read back, or
+            conflicts with an existing lifecycle event.
     """
-    try:
-        from gateway.utils.logger import log_event
-        
-        payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'), default=str)  # Handle datetime objects
-        payload_hash = hashlib.sha256(payload_json.encode('utf-8')).hexdigest()
-        
+    from gateway.utils.logger import log_event
+
+    if not isinstance(payload, dict):
+        raise ValueError("epoch event payload must be an object")
+    payload_epoch_id = payload.get("epoch_id")
+    if (
+        isinstance(payload_epoch_id, bool)
+        or not isinstance(payload_epoch_id, int)
+        or payload_epoch_id != epoch_id
+    ):
+        raise ValueError("epoch event payload must contain the exact epoch_id")
+
+    protected = (
+        event_type in _DURABLE_EPOCH_EVENT_TYPES
+        and get_epoch_mode() == STATEFUL_EPOCH_MODE
+    )
+    if protected and payload.get("epoch_key_semantics") != "settlement_ordinal":
+        raise ValueError(
+            "stateful lifecycle event must use settlement_ordinal key semantics"
+        )
+    if protected:
+        try:
+            _validate_stateful_epoch_authority_document(
+                epoch_id,
+                payload.get("epoch_authority"),
+            )
+        except RuntimeError as exc:
+            raise ValueError(str(exc)) from exc
+    if protected:
+        existing = await get_durable_epoch_event(
+            event_type,
+            epoch_id,
+            expected_payload=payload,
+        )
+        if existing is not None:
+            print(
+                f"   ℙ️  Reusing durable {event_type} for epoch {epoch_id} "
+                f"(id={existing.get('id')})"
+            )
+            return (
+                existing.get("tee_sequence")
+                or existing.get("event_hash")
+                or existing.get("id")
+            )
+
+    if protected:
+        log_entry = build_epoch_event_row(event_type, epoch_id, payload)
+    else:
+        payload_json = _canonical_payload(payload)
         log_entry = {
             "event_type": event_type,
-            "actor_hotkey": "system",  # System-generated event
+            "actor_hotkey": "system",
             "nonce": str(uuid4()),
             "ts": datetime.utcnow().isoformat(),
-            "payload_hash": payload_hash,
+            "payload_hash": hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
             "build_id": BUILD_ID,
-            "signature": "system",  # No signature for system events
-            "payload": payload
+            "signature": "system",
+            "payload": payload,
         }
-        
-        # Write to TEE buffer (hardware-protected)
+
+    try:
         result = await log_event(log_entry)
-        
-        tee_sequence = result.get("sequence")
-        print(f"   📝 Logged {event_type} for epoch {epoch_id} to TEE buffer (seq={tee_sequence})")
-        return tee_sequence
-    
-    except Exception as e:
-        print(f"   ❌ Failed to log {event_type}: {e}")
-        return None
+    except Exception:
+        # A concurrent process can win the deterministic-nonce insert.  Only
+        # convert that failure to success after an exact durable readback.
+        if protected:
+            existing = await get_durable_epoch_event(
+                event_type,
+                epoch_id,
+                expected_payload=payload,
+            )
+            if existing is not None:
+                return (
+                    existing.get("tee_sequence")
+                    or existing.get("event_hash")
+                    or existing.get("id")
+                )
+        raise
+
+    if not isinstance(result, dict) or result.get("status") == "not_stored":
+        raise RuntimeError(
+            f"{event_type} for epoch {epoch_id} was not durably stored"
+        )
+
+    if protected:
+        stored = await get_durable_epoch_event(
+            event_type,
+            epoch_id,
+            expected_payload=payload,
+        )
+        if stored is None:
+            raise RuntimeError(
+                f"{event_type} for epoch {epoch_id} has no durable readback"
+            )
+        durable_identifier = (
+            stored.get("tee_sequence")
+            or stored.get("event_hash")
+            or stored.get("id")
+        )
+    else:
+        durable_identifier = result.get("sequence")
+
+    print(
+        f"   📝 Logged {event_type} for epoch {epoch_id} to TEE buffer "
+        f"(seq={durable_identifier})"
+    )
+    return durable_identifier
 
 
-async def compute_and_log_epoch_initialization(epoch_id: int, epoch_start: datetime, epoch_end: datetime, epoch_close: datetime):
+async def compute_and_log_epoch_initialization(
+    epoch_id: int,
+    epoch_start: datetime,
+    epoch_end: datetime,
+    epoch_close: datetime,
+    epoch_snapshot=None,
+    *,
+    event_writer: Optional[
+        Callable[[str, int, dict], Awaitable[Any]]
+    ] = None,
+    payload_timestamp: datetime | str | None = None,
+):
     """
     Compute and log single atomic EPOCH_INITIALIZATION event.
     
@@ -488,7 +841,50 @@ async def compute_and_log_epoch_initialization(epoch_id: int, epoch_start: datet
         epoch_close: Epoch close time
     """
     try:
-        from gateway.utils.assignment import deterministic_lead_assignment, get_validator_set
+        from gateway.utils.assignment import get_validator_set
+
+        existing = (
+            await get_durable_epoch_event(
+                "EPOCH_INITIALIZATION",
+                epoch_id,
+            )
+            if epoch_snapshot is not None
+            else None
+        )
+        if existing is not None:
+            existing_payload = existing["payload"]
+            if epoch_snapshot is not None:
+                authority = existing_payload.get("epoch_authority")
+                if not isinstance(authority, dict):
+                    raise RuntimeError(
+                        "stateful EPOCH_INITIALIZATION is missing epoch authority"
+                    )
+                expected_authority = epoch_snapshot.to_dict(
+                    cutover=load_subnet_epoch_cutover()
+                )
+                for field in (
+                    "settlement_epoch_id",
+                    "subnet_epoch_index",
+                    "epoch_ref",
+                    "cutover_mapping_hash",
+                ):
+                    if authority.get(field) != expected_authority.get(field):
+                        raise RuntimeError(
+                            "stateful EPOCH_INITIALIZATION conflicts with the "
+                            f"observed {field}"
+                        )
+                if (
+                    existing_payload.get("epoch_key_semantics")
+                    != "settlement_ordinal"
+                ):
+                    raise RuntimeError(
+                        "stateful EPOCH_INITIALIZATION has legacy key semantics"
+                    )
+            print(
+                f"   ℙ️  Epoch {epoch_id} already has one durable "
+                "EPOCH_INITIALIZATION"
+            )
+            return existing
         
         # ========================================================================
         # 1. Query pending leads from queue (FIFO order) - RUN IN THREAD
@@ -540,20 +936,29 @@ async def compute_and_log_epoch_initialization(epoch_id: int, epoch_start: datet
         # ========================================================================
         # 2. Get validator set for this epoch (ASYNC CALL - no thread needed)
         # ========================================================================
-        validator_set = await get_validator_set(epoch_id)  # Returns List[str] of hotkeys
+        validator_set = await get_validator_set(
+            epoch_id,
+            fail_closed=epoch_snapshot is not None,
+        )
         validator_hotkeys = validator_set  # Already a list of hotkey strings
         validator_count = len(validator_hotkeys)
+        if epoch_snapshot is not None and validator_count == 0:
+            raise RuntimeError(
+                "stateful_epoch_validator_set_empty"
+            )
         
         print(f"   👥 Validator Set: {validator_count} active validators")
         
         # ========================================================================
         # 3. Compute deterministic lead assignment (first N leads, FIFO)
         # ========================================================================
-        assigned_lead_ids = deterministic_lead_assignment(
-            queue_merkle_root, 
-            validator_set, 
-            epoch_id, 
-            max_leads_per_epoch=MAX_LEADS_PER_EPOCH
+        # Bind assignment to the exact queue list collected above. Calling the
+        # legacy helper here would query the queue a second time and could
+        # silently assign a different set than the committed Merkle root.
+        assigned_lead_ids = (
+            lead_ids[:MAX_LEADS_PER_EPOCH]
+            if validator_set
+            else []
         )
         
         print(f"   📋 Assignment: {len(assigned_lead_ids)} leads assigned to all validators (max={MAX_LEADS_PER_EPOCH})")
@@ -561,14 +966,44 @@ async def compute_and_log_epoch_initialization(epoch_id: int, epoch_start: datet
         # ========================================================================
         # 4. Create single atomic EPOCH_INITIALIZATION event
         # ========================================================================
+        if epoch_snapshot is not None:
+            epoch_authority = epoch_snapshot.to_dict(
+                cutover=load_subnet_epoch_cutover()
+            )
+            boundary_document = {
+                "start_block": epoch_snapshot.last_epoch_block,
+                "end_block": epoch_snapshot.next_epoch_block,
+                "expected_end_block": epoch_snapshot.next_epoch_block,
+                "pending_epoch_at": epoch_snapshot.pending_epoch_at,
+                "tempo": epoch_snapshot.tempo,
+                "start_timestamp": epoch_start.isoformat(),
+                "estimated_end_timestamp": epoch_end.isoformat(),
+            }
+        else:
+            epoch_authority = None
+            boundary_document = {
+                "start_block": epoch_id * 360,
+                "end_block": (epoch_id * 360) + 360,
+                "expected_end_block": (epoch_id * 360) + 360,
+                "start_timestamp": epoch_start.isoformat(),
+                "estimated_end_timestamp": epoch_end.isoformat(),
+            }
+
+        initialization_timestamp = payload_timestamp or datetime.utcnow()
+        initialization_timestamp_value = (
+            initialization_timestamp.isoformat()
+            if isinstance(initialization_timestamp, datetime)
+            else str(initialization_timestamp)
+        )
         payload = {
             "epoch_id": epoch_id,
-            "epoch_boundaries": {
-                "start_block": epoch_id * 360,  # Approximate - actual block from blockchain
-                "end_block": (epoch_id * 360) + 360,
-                "start_timestamp": epoch_start.isoformat(),
-                "estimated_end_timestamp": epoch_end.isoformat()
-            },
+            "epoch_key_semantics": (
+                "settlement_ordinal"
+                if epoch_authority is not None
+                else "legacy_global_360"
+            ),
+            "epoch_authority": epoch_authority,
+            "epoch_boundaries": boundary_document,
             "queue_state": {
                 "queue_merkle_root": queue_merkle_root,
                 "pending_lead_count": pending_lead_count
@@ -578,10 +1013,13 @@ async def compute_and_log_epoch_initialization(epoch_id: int, epoch_start: datet
                 "assigned_to_validators": validator_hotkeys,
                 "validator_count": validator_count
             },
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": initialization_timestamp_value
         }
-        
-        await log_epoch_event("EPOCH_INITIALIZATION", epoch_id, payload)
+
+        writer = event_writer or log_epoch_event
+        sequence = await writer("EPOCH_INITIALIZATION", epoch_id, payload)
+        if sequence is None:
+            raise RuntimeError("EPOCH_INITIALIZATION was not durably accepted")
         
         print(f"   ✅ EPOCH_INITIALIZATION logged: {len(assigned_lead_ids)} leads, {validator_count} validators")
     
@@ -592,7 +1030,13 @@ async def compute_and_log_epoch_initialization(epoch_id: int, epoch_start: datet
         raise  # Re-raise so caller can retry
 
 
-async def compute_and_log_epoch_inputs(epoch_id: int):
+async def compute_and_log_epoch_inputs(
+    epoch_id: int,
+    *,
+    epoch_start: datetime | None = None,
+    epoch_end: datetime | None = None,
+    epoch_authority: dict | None = None,
+):
     """
     Compute hash of all events in epoch and log EPOCH_INPUTS event.
     
@@ -603,20 +1047,43 @@ async def compute_and_log_epoch_inputs(epoch_id: int):
         epoch_id: Epoch ID
     """
     try:
-        epoch_start = await get_epoch_start_time_async(epoch_id)
-        epoch_end = await get_epoch_end_time_async(epoch_id)
-        
-        # Query all events in epoch (during validation phase) - RUN IN THREAD
-        result = await asyncio.to_thread(
-            lambda: supabase.table("transparency_log")
-                .select("id, event_type, payload_hash")
-                .gte("ts", epoch_start.isoformat())
-                .lte("ts", epoch_end.isoformat())
-                .order("id")
-                .execute()
+        stateful = get_epoch_mode() == STATEFUL_EPOCH_MODE
+        existing = (
+            await get_durable_epoch_event("EPOCH_INPUTS", epoch_id)
+            if stateful
+            else None
         )
-        
-        events = result.data
+        if existing is not None:
+            print(
+                f"   ℙ️  Epoch {epoch_id} already has one durable "
+                "EPOCH_INPUTS"
+            )
+            return existing
+
+        if epoch_start is None:
+            epoch_start = await get_epoch_start_time_async(epoch_id)
+        if epoch_end is None:
+            epoch_end = await get_epoch_end_time_async(epoch_id)
+
+        # Query every event in bounded pages. PostgREST's configured row cap
+        # must not silently change the committed epoch input hash.
+        events: list[dict] = []
+        offset = 0
+        while True:
+            result = await asyncio.to_thread(
+                lambda start=offset: supabase.table("transparency_log")
+                    .select("id,event_type,payload_hash")
+                    .gte("ts", epoch_start.isoformat())
+                    .lte("ts", epoch_end.isoformat())
+                    .order("id")
+                    .range(start, start + _TRANSPARENCY_PAGE_SIZE - 1)
+                    .execute()
+            )
+            page = list(result.data or [])
+            events.extend(page)
+            if len(page) < _TRANSPARENCY_PAGE_SIZE:
+                break
+            offset += _TRANSPARENCY_PAGE_SIZE
         
         # Compute hash of all event hashes
         if events:
@@ -626,18 +1093,39 @@ async def compute_and_log_epoch_inputs(epoch_id: int):
         else:
             inputs_hash = "0" * 64
         
-        await log_epoch_event("EPOCH_INPUTS", epoch_id, {
+        payload = {
             "epoch_id": epoch_id,
             "inputs_hash": inputs_hash,
             "event_count": len(events),
             "start_time": epoch_start.isoformat(),
-            "end_time": epoch_end.isoformat()
-        })
+            "end_time": epoch_end.isoformat(),
+        }
+        if stateful:
+            durable_authority = (
+                await load_stateful_epoch_initialization_authority(epoch_id)
+            )
+            if (
+                epoch_authority is not None
+                and epoch_authority != durable_authority
+            ):
+                raise RuntimeError(
+                    "EPOCH_INPUTS epoch authority differs from "
+                    "durable EPOCH_INITIALIZATION"
+                )
+            payload["epoch_key_semantics"] = "settlement_ordinal"
+            payload["epoch_authority"] = durable_authority
+        durable_identifier = await log_epoch_event(
+            "EPOCH_INPUTS",
+            epoch_id,
+            payload,
+        )
         
         print(f"   🔢 EPOCH_INPUTS: {inputs_hash[:16]}... ({len(events)} events)")
+        return durable_identifier
     
     except Exception as e:
         print(f"   ❌ Failed to compute EPOCH_INPUTS: {e}")
+        raise
 
 
 # ═══════════════════════════════════════════════════════════════════

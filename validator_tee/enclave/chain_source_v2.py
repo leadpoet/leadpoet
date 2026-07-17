@@ -20,6 +20,7 @@ from leadpoet_canonical.attested_v2 import (
     validate_transport_attempt,
 )
 from leadpoet_canonical.chain_source_v2 import (
+    CHAIN_ARCHIVE_ENDPOINT_HOST,
     CHAIN_ENDPOINT_HOST,
     CHAIN_ENDPOINT_PATH,
     CHAIN_ENDPOINT_PORT,
@@ -29,8 +30,10 @@ from leadpoet_canonical.chain_source_v2 import (
     CHAIN_RPC_METHOD,
     CHAIN_RPC_RETRY_BACKOFF_SECONDS,
     CHAIN_RPC_TIMEOUT_MS,
+    CHAIN_SUBTENSOR_MAX_TEMPO,
     ChainSourceV2Error,
     chain_source_policy_hash,
+    decode_timestamp_now_storage,
     decode_timelocked_weight_commits,
     decode_selective_metagraph_result,
     encode_selective_metagraph_params,
@@ -39,6 +42,9 @@ from leadpoet_canonical.chain_source_v2 import (
     parse_finalized_block_extrinsics,
     parse_finalized_header,
     parse_json_rpc_response,
+    decode_subnet_epoch_storage,
+    subnet_epoch_storage_key,
+    timestamp_now_storage_key,
     timelocked_weight_commits_storage_key,
 )
 from leadpoet_canonical.hotkey_authority_v2 import signed_extrinsic_hash_v2
@@ -60,6 +66,11 @@ def _timestamp(clock: Callable[[], datetime]) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _chain_timestamp(timestamp_ms: int) -> str:
+    value = datetime.fromtimestamp(int(timestamp_ms) / 1000.0, tz=timezone.utc)
+    return value.isoformat().replace("+00:00", "Z")
 
 
 def _recv_exact(connection: Any, size: int) -> bytes:
@@ -107,12 +118,22 @@ class EnclaveChainRpcTransportV2:
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleep: Callable[[float], None] = time.sleep,
         ca_bundle_path: str = DEFAULT_CA_BUNDLE,
+        destination_host: str = CHAIN_ENDPOINT_HOST,
     ) -> None:
         self._socket_factory = socket_factory
         self._clock = clock
         self._sleep = sleep
         self._ca_bundle_path = str(ca_bundle_path)
         self._ssl_context_factory = ssl_context_factory or self._default_context
+        if destination_host == CHAIN_ENDPOINT_HOST:
+            self._provider_id = "bittensor_chain"
+        elif destination_host == CHAIN_ARCHIVE_ENDPOINT_HOST:
+            self._provider_id = "bittensor_archive"
+        else:
+            raise ValidatorChainSourceV2Error(
+                "chain RPC destination is outside measured policy"
+            )
+        self._destination_host = str(destination_host)
 
     def _default_context(self) -> Any:
         if not os.path.isfile(self._ca_bundle_path):
@@ -130,7 +151,7 @@ class EnclaveChainRpcTransportV2:
             request = canonical_json(
                 {
                     "schema_version": "leadpoet.validator_chain_relay.v2",
-                    "host": CHAIN_ENDPOINT_HOST,
+                    "host": self._destination_host,
                     "port": CHAIN_ENDPOINT_PORT,
                     "policy_hash": chain_source_policy_hash(),
                 }
@@ -151,7 +172,7 @@ class EnclaveChainRpcTransportV2:
                 raise ValidatorChainSourceV2Error("chain relay refused measured policy")
             return self._ssl_context_factory().wrap_socket(
                 parent,
-                server_hostname=CHAIN_ENDPOINT_HOST,
+                server_hostname=self._destination_host,
             )
         except Exception:
             parent.close()
@@ -163,7 +184,7 @@ class EnclaveChainRpcTransportV2:
             request = b"".join(
                 (
                     b"POST / HTTP/1.1\r\n",
-                    ("Host: %s\r\n" % CHAIN_ENDPOINT_HOST).encode("ascii"),
+                    ("Host: %s\r\n" % self._destination_host).encode("ascii"),
                     b"Content-Type: application/json\r\n",
                     b"Accept: application/json\r\n",
                     b"Accept-Encoding: identity\r\n",
@@ -234,17 +255,17 @@ class EnclaveChainRpcTransportV2:
                     logical_operation_id=logical_operation_id,
                     job_id=job_id,
                     purpose=purpose,
-                    provider_id="bittensor_chain",
+                    provider_id=self._provider_id,
                     attempt_number=attempt_number,
                     method="POST",
-                    destination_host=CHAIN_ENDPOINT_HOST,
+                    destination_host=self._destination_host,
                     destination_port=CHAIN_ENDPOINT_PORT,
                     path_hash=sha256_json({"path": CHAIN_ENDPOINT_PATH}),
                     nonsecret_headers_hash=sha256_json(
                         {
                             "accept": "application/json",
                             "content-type": "application/json",
-                            "host": CHAIN_ENDPOINT_HOST,
+                            "host": self._destination_host,
                         }
                     ),
                     body_hash=sha256_bytes(body),
@@ -287,17 +308,17 @@ class EnclaveChainRpcTransportV2:
                     logical_operation_id=logical_operation_id,
                     job_id=job_id,
                     purpose=purpose,
-                    provider_id="bittensor_chain",
+                    provider_id=self._provider_id,
                     attempt_number=attempt_number,
                     method="POST",
-                    destination_host=CHAIN_ENDPOINT_HOST,
+                    destination_host=self._destination_host,
                     destination_port=CHAIN_ENDPOINT_PORT,
                     path_hash=sha256_json({"path": CHAIN_ENDPOINT_PATH}),
                     nonsecret_headers_hash=sha256_json(
                         {
                             "accept": "application/json",
                             "content-type": "application/json",
-                            "host": CHAIN_ENDPOINT_HOST,
+                            "host": self._destination_host,
                         }
                     ),
                     body_hash=sha256_bytes(body),
@@ -335,8 +356,685 @@ class ValidatorChainSourceV2:
         self,
         *,
         rpc_call: Optional[Callable[..., Mapping[str, Any]]] = None,
+        archive_rpc_call: Optional[Callable[..., Mapping[str, Any]]] = None,
+        epoch_authority_supplier: Optional[
+            Callable[[], Optional[Mapping[str, Any]]]
+        ] = None,
     ) -> None:
         self._rpc_call = rpc_call or EnclaveChainRpcTransportV2().call
+        if archive_rpc_call is not None:
+            self._archive_rpc_call = archive_rpc_call
+        elif rpc_call is None:
+            self._archive_rpc_call = EnclaveChainRpcTransportV2(
+                destination_host=CHAIN_ARCHIVE_ENDPOINT_HOST,
+            ).call
+        else:
+            self._archive_rpc_call = None
+        self._epoch_authority_supplier = epoch_authority_supplier or (lambda: None)
+
+    def _read_stateful_epoch_authority(
+        self,
+        *,
+        configuration: Mapping[str, Any],
+        finalized_hash: str,
+        header: Mapping[str, Any],
+        netuid: int,
+        settlement_epoch_id: int,
+        chain_job: str,
+        request_id_start: int,
+        snapshot_job_override: Optional[str] = None,
+        boundary_job_override: Optional[str] = None,
+        historical_snapshot: bool = False,
+    ) -> Dict[str, Any]:
+        if not isinstance(configuration, Mapping) or set(configuration) != {
+            "mode",
+            "cutover_manifest",
+        }:
+            raise ValidatorChainSourceV2Error(
+                "measured epoch authority configuration is invalid"
+            )
+        if configuration.get("mode") != "stateful_v1":
+            raise ValidatorChainSourceV2Error("measured epoch mode is invalid")
+        cutover = configuration.get("cutover_manifest")
+        cutover_fields = {
+            "schema_version",
+            "epoch_scheme",
+            "network_genesis_hash",
+            "netuid",
+            "cutover_block",
+            "cutover_block_hash",
+            "first_subnet_epoch_index",
+            "first_settlement_epoch_id",
+            "last_legacy_epoch_id",
+            "mapping_hash",
+        }
+        if not isinstance(cutover, Mapping) or set(cutover) != cutover_fields:
+            raise ValidatorChainSourceV2Error("measured epoch cutover is absent")
+        if (
+            cutover.get("schema_version") != "leadpoet.subnet_epoch_cutover.v1"
+            or cutover.get("epoch_scheme") != "bittensor.subnet_epoch_index.v1"
+        ):
+            raise ValidatorChainSourceV2Error("measured epoch cutover schema is invalid")
+        for field in (
+            "netuid",
+            "cutover_block",
+            "first_subnet_epoch_index",
+            "first_settlement_epoch_id",
+            "last_legacy_epoch_id",
+        ):
+            if (
+                not isinstance(cutover.get(field), int)
+                or isinstance(cutover.get(field), bool)
+                or int(cutover[field]) < 0
+            ):
+                raise ValidatorChainSourceV2Error(
+                    "measured epoch cutover %s is invalid" % field
+                )
+        try:
+            normalize_raw_hash(cutover["network_genesis_hash"], "network genesis")
+            normalize_raw_hash(cutover["cutover_block_hash"], "cutover block hash")
+        except ChainSourceV2Error as exc:
+            raise ValidatorChainSourceV2Error(
+                "measured epoch cutover hash is invalid"
+            ) from exc
+        cutover_body = {
+            field: cutover[field]
+            for field in (
+                "schema_version",
+                "epoch_scheme",
+                "network_genesis_hash",
+                "netuid",
+                "cutover_block",
+                "cutover_block_hash",
+                "first_subnet_epoch_index",
+                "first_settlement_epoch_id",
+                "last_legacy_epoch_id",
+            )
+        }
+        if (
+            int(cutover["first_settlement_epoch_id"])
+            != int(cutover["last_legacy_epoch_id"]) + 1
+            or str(cutover.get("mapping_hash") or "").lower()
+            != sha256_json(cutover_body)
+        ):
+            raise ValidatorChainSourceV2Error("measured epoch cutover mapping is invalid")
+        if int(cutover.get("netuid", -1)) != int(netuid):
+            raise ValidatorChainSourceV2Error("measured epoch cutover netuid differs")
+
+        attempts = []
+        artifacts = []
+        request_id = int(request_id_start)
+        snapshot_job = snapshot_job_override or (
+            "subnet-epoch-snapshot:%d:%d"
+            % (int(settlement_epoch_id), int(header["block"]))
+        )
+
+        def invoke(
+            adapter: Callable[..., Dict[str, Any]],
+            method: str,
+            params: Sequence[Any],
+            operation: str,
+        ) -> Any:
+            nonlocal request_id
+            result = adapter(
+                method=method,
+                params=params,
+                request_id=request_id,
+                job_id=snapshot_job,
+                purpose="validator.subnet_epoch_snapshot.v2",
+                logical_operation_id=snapshot_job + ":" + operation,
+            )
+            request_id += 1
+            attempts.extend(result["attempts"])
+            artifacts.extend(result["artifacts"])
+            return result["result"]
+
+        def live_call(method: str, params: Sequence[Any], operation: str) -> Any:
+            return invoke(self._call, method, params, operation)
+
+        def archive_call(
+            method: str,
+            params: Sequence[Any],
+            operation: str,
+        ) -> Any:
+            return invoke(self._archive_call, method, params, operation)
+
+        genesis_hash = normalize_raw_hash(
+            archive_call("chain_getBlockHash", [0], "genesis-hash"),
+            "genesis block hash",
+        )
+        cutover_block = int(cutover["cutover_block"])
+        observed_cutover_hash = normalize_raw_hash(
+            archive_call(
+                "chain_getBlockHash",
+                [cutover_block],
+                "cutover-block-hash",
+            ),
+            "cutover block hash",
+        )
+        if "0x" + genesis_hash != str(cutover["network_genesis_hash"]):
+            raise ValidatorChainSourceV2Error("chain genesis differs from cutover")
+        if "0x" + observed_cutover_hash != str(cutover["cutover_block_hash"]):
+            raise ValidatorChainSourceV2Error("chain cutover block hash differs")
+        if cutover_block <= 0:
+            raise ValidatorChainSourceV2Error(
+                "measured cutover block has no predecessor"
+            )
+        cutover_header = parse_finalized_header(
+            archive_call(
+                "chain_getHeader",
+                ["0x" + observed_cutover_hash],
+                "cutover-header",
+            )
+        )
+        if int(cutover_header["block"]) != cutover_block:
+            raise ValidatorChainSourceV2Error(
+                "chain cutover header block differs"
+            )
+        cutover_index_key = subnet_epoch_storage_key(
+            storage_name="SubnetEpochIndex",
+            netuid=int(netuid),
+        )
+        cutover_index = decode_subnet_epoch_storage(
+            archive_call(
+                "state_getStorage",
+                [cutover_index_key, "0x" + observed_cutover_hash],
+                "cutover-subnet-epoch-index",
+            ),
+            storage_name="SubnetEpochIndex",
+        )
+        predecessor_hash = normalize_raw_hash(
+            archive_call(
+                "chain_getBlockHash",
+                [cutover_block - 1],
+                "cutover-predecessor-hash",
+            ),
+            "cutover predecessor block hash",
+        )
+        predecessor_index = decode_subnet_epoch_storage(
+            archive_call(
+                "state_getStorage",
+                [cutover_index_key, "0x" + predecessor_hash],
+                "cutover-predecessor-subnet-epoch-index",
+            ),
+            storage_name="SubnetEpochIndex",
+        )
+        if (
+            cutover_index != int(cutover["first_subnet_epoch_index"])
+            or predecessor_index + 1 != cutover_index
+        ):
+            raise ValidatorChainSourceV2Error(
+                "measured cutover is not an official epoch transition"
+            )
+
+        snapshot_call = archive_call if historical_snapshot else live_call
+        decoded = {}
+        for storage_name in (
+            "Tempo",
+            "LastEpochBlock",
+            "PendingEpochAt",
+            "SubnetEpochIndex",
+            "BlocksSinceLastStep",
+        ):
+            storage_value = snapshot_call(
+                "state_getStorage",
+                [
+                    subnet_epoch_storage_key(
+                        storage_name=storage_name,
+                        netuid=int(netuid),
+                    ),
+                    "0x" + finalized_hash,
+                ],
+                "epoch-storage-" + storage_name.lower(),
+            )
+            decoded[storage_name] = decode_subnet_epoch_storage(
+                storage_value,
+                storage_name=storage_name,
+            )
+        current_observed_at = _chain_timestamp(
+            decode_timestamp_now_storage(
+                snapshot_call(
+                    "state_getStorage",
+                    [timestamp_now_storage_key(), "0x" + finalized_hash],
+                    "epoch-storage-timestamp-now",
+                )
+            )
+        )
+
+        current_block = int(header["block"])
+        tempo = int(decoded["Tempo"])
+        last_epoch_block = int(decoded["LastEpochBlock"])
+        pending_epoch_at = int(decoded["PendingEpochAt"])
+        subnet_epoch_index = int(decoded["SubnetEpochIndex"])
+        blocks_since_last_step = int(decoded["BlocksSinceLastStep"])
+        if tempo <= 0 or last_epoch_block > current_block:
+            raise ValidatorChainSourceV2Error("finalized epoch schedule is invalid")
+        first_index = int(cutover["first_subnet_epoch_index"])
+        if subnet_epoch_index < first_index:
+            raise ValidatorChainSourceV2Error(
+                "finalized epoch state predates measured cutover"
+            )
+        mapped_epoch = int(cutover["first_settlement_epoch_id"]) + (
+            subnet_epoch_index - first_index
+        )
+        if mapped_epoch != int(settlement_epoch_id):
+            raise ValidatorChainSourceV2Error(
+                "finalized subnet epoch differs from requested settlement epoch"
+            )
+        if current_block < cutover_block:
+            raise ValidatorChainSourceV2Error("finalized block predates cutover")
+        automatic_next = last_epoch_block + tempo
+        if blocks_since_last_step > CHAIN_SUBTENSOR_MAX_TEMPO:
+            next_epoch_block = current_block
+        else:
+            safety_next = current_block + (
+                CHAIN_SUBTENSOR_MAX_TEMPO + 1 - blocks_since_last_step
+            )
+            next_epoch_block = (
+                min(automatic_next, pending_epoch_at, safety_next)
+                if pending_epoch_at > 0
+                else min(automatic_next, safety_next)
+            )
+        epoch_ref = sha256_json(
+            {
+                "epoch_scheme": cutover["epoch_scheme"],
+                "network_genesis_hash": cutover["network_genesis_hash"],
+                "netuid": int(netuid),
+                "subnet_epoch_index": subnet_epoch_index,
+            }
+        )
+        boundary_job = boundary_job_override or (
+            "subnet-epoch-boundary:%d" % int(settlement_epoch_id)
+        )
+
+        def boundary_call(
+            method: str,
+            params: Sequence[Any],
+            operation: str,
+        ) -> Any:
+            nonlocal request_id
+            result = self._archive_call(
+                method=method,
+                params=params,
+                request_id=request_id,
+                job_id=boundary_job,
+                purpose="validator.subnet_epoch_snapshot.v2",
+                logical_operation_id=boundary_job + ":" + operation,
+            )
+            request_id += 1
+            attempts.extend(result["attempts"])
+            artifacts.extend(result["artifacts"])
+            return result["result"]
+
+        index_key = subnet_epoch_storage_key(
+            storage_name="SubnetEpochIndex",
+            netuid=int(netuid),
+        )
+        probed = {}
+
+        def probe_index(
+            block_number: int,
+            known_hash: Optional[str] = None,
+            *,
+            live: bool = False,
+        ) -> Any:
+            normalized_block = int(block_number)
+            cached = probed.get(normalized_block)
+            if cached is not None:
+                return cached
+            block_hash = known_hash or normalize_raw_hash(
+                boundary_call(
+                    "chain_getBlockHash",
+                    [normalized_block],
+                    "search-block-hash-%d" % normalized_block,
+                ),
+                "subnet epoch search block hash",
+            )
+            index_call = live_call if live else boundary_call
+            observed_index = decode_subnet_epoch_storage(
+                index_call(
+                    "state_getStorage",
+                    [index_key, "0x" + block_hash],
+                    "search-index-%d" % normalized_block,
+                ),
+                storage_name="SubnetEpochIndex",
+            )
+            probed[normalized_block] = (block_hash, observed_index)
+            return probed[normalized_block]
+
+        _current_hash, current_index_for_search = probe_index(
+            current_block,
+            finalized_hash,
+            live=not historical_snapshot,
+        )
+        if current_index_for_search != subnet_epoch_index:
+            raise ValidatorChainSourceV2Error(
+                "finalized subnet epoch changed during boundary search"
+            )
+        if subnet_epoch_index == first_index:
+            boundary_block = cutover_block
+            boundary_hash, boundary_index = probe_index(
+                boundary_block,
+                observed_cutover_hash,
+            )
+            if boundary_index != subnet_epoch_index:
+                raise ValidatorChainSourceV2Error(
+                    "cutover boundary subnet epoch index differs"
+                )
+        else:
+            high = current_block
+            step = 1
+            low = None
+            while low is None:
+                candidate = max(cutover_block, current_block - step)
+                _candidate_hash, candidate_index = probe_index(candidate)
+                if candidate_index > subnet_epoch_index:
+                    raise ValidatorChainSourceV2Error(
+                        "historical subnet epoch index is not monotonic"
+                    )
+                if candidate_index < subnet_epoch_index:
+                    low = candidate
+                    break
+                high = candidate
+                if candidate == cutover_block:
+                    raise ValidatorChainSourceV2Error(
+                        "subnet epoch boundary does not follow cutover"
+                    )
+                step *= 2
+            while high - low > 1:
+                midpoint = low + (high - low) // 2
+                _midpoint_hash, midpoint_index = probe_index(midpoint)
+                if midpoint_index > subnet_epoch_index:
+                    raise ValidatorChainSourceV2Error(
+                        "historical subnet epoch index is not monotonic"
+                    )
+                if midpoint_index < subnet_epoch_index:
+                    low = midpoint
+                else:
+                    high = midpoint
+            boundary_block = high
+            boundary_hash, boundary_index = probe_index(boundary_block)
+            _predecessor_hash, predecessor_index = probe_index(boundary_block - 1)
+            if (
+                boundary_index != subnet_epoch_index
+                or predecessor_index + 1 != subnet_epoch_index
+            ):
+                raise ValidatorChainSourceV2Error(
+                    "subnet epoch boundary transition is invalid"
+                )
+        boundary_header = parse_finalized_header(
+            boundary_call(
+                "chain_getHeader",
+                ["0x" + boundary_hash],
+                "boundary-header",
+            )
+        )
+        if int(boundary_header["block"]) != boundary_block:
+            raise ValidatorChainSourceV2Error(
+                "subnet epoch boundary header block differs"
+            )
+        boundary_decoded = {}
+        for storage_name in (
+            "Tempo",
+            "LastEpochBlock",
+            "PendingEpochAt",
+            "SubnetEpochIndex",
+            "BlocksSinceLastStep",
+        ):
+            boundary_decoded[storage_name] = decode_subnet_epoch_storage(
+                boundary_call(
+                    "state_getStorage",
+                    [
+                        subnet_epoch_storage_key(
+                            storage_name=storage_name,
+                            netuid=int(netuid),
+                        ),
+                        "0x" + boundary_hash,
+                    ],
+                    "boundary-storage-" + storage_name.lower(),
+                ),
+                storage_name=storage_name,
+            )
+        boundary_observed_at = _chain_timestamp(
+            decode_timestamp_now_storage(
+                boundary_call(
+                    "state_getStorage",
+                    [timestamp_now_storage_key(), "0x" + boundary_hash],
+                    "boundary-storage-timestamp-now",
+                )
+            )
+        )
+        boundary_tempo = int(boundary_decoded["Tempo"])
+        boundary_last_epoch_block = int(boundary_decoded["LastEpochBlock"])
+        boundary_pending_epoch_at = int(boundary_decoded["PendingEpochAt"])
+        boundary_subnet_epoch_index = int(boundary_decoded["SubnetEpochIndex"])
+        boundary_blocks_since_last_step = int(
+            boundary_decoded["BlocksSinceLastStep"]
+        )
+        if (
+            boundary_tempo <= 0
+            or boundary_last_epoch_block != boundary_block
+            or boundary_subnet_epoch_index != subnet_epoch_index
+        ):
+            raise ValidatorChainSourceV2Error(
+                "historical subnet epoch boundary state differs"
+            )
+        boundary_next_epoch_block = boundary_last_epoch_block + boundary_tempo
+        if boundary_blocks_since_last_step > CHAIN_SUBTENSOR_MAX_TEMPO:
+            boundary_next_epoch_block = boundary_block
+        else:
+            boundary_safety_next = boundary_block + (
+                CHAIN_SUBTENSOR_MAX_TEMPO
+                + 1
+                - boundary_blocks_since_last_step
+            )
+            boundary_next_epoch_block = (
+                min(
+                    boundary_next_epoch_block,
+                    boundary_pending_epoch_at,
+                    boundary_safety_next,
+                )
+                if boundary_pending_epoch_at > 0
+                else min(boundary_next_epoch_block, boundary_safety_next)
+            )
+        boundary_snapshot = {
+            "schema_version": "leadpoet.subnet_epoch_snapshot.v1",
+            "epoch_scheme": cutover["epoch_scheme"],
+            "network_genesis_hash": cutover["network_genesis_hash"],
+            "netuid": int(netuid),
+            "head_kind": "finalized",
+            "block_hash": "0x" + boundary_hash,
+            "current_block": boundary_last_epoch_block,
+            "last_epoch_block": boundary_last_epoch_block,
+            "pending_epoch_at": boundary_pending_epoch_at,
+            "subnet_epoch_index": boundary_subnet_epoch_index,
+            "tempo": boundary_tempo,
+            "blocks_since_last_step": boundary_blocks_since_last_step,
+            "observed_at": boundary_observed_at,
+            "epoch_id": boundary_subnet_epoch_index,
+            "epoch_ref": epoch_ref,
+            "epoch_block": 0,
+            "next_epoch_block": boundary_next_epoch_block,
+            "blocks_remaining": max(
+                0,
+                boundary_next_epoch_block - boundary_last_epoch_block,
+            ),
+            "settlement_epoch_id": mapped_epoch,
+            "cutover_mapping_hash": cutover["mapping_hash"],
+        }
+        return {
+            "authority": {
+                "schema_version": "leadpoet.subnet_epoch_snapshot.v1",
+                "epoch_scheme": cutover["epoch_scheme"],
+                "network_genesis_hash": cutover["network_genesis_hash"],
+                "netuid": int(netuid),
+                "head_kind": "finalized",
+                "block_hash": "0x" + finalized_hash,
+                "current_block": current_block,
+                "last_epoch_block": last_epoch_block,
+                "pending_epoch_at": pending_epoch_at,
+                "subnet_epoch_index": subnet_epoch_index,
+                "tempo": tempo,
+                "blocks_since_last_step": blocks_since_last_step,
+                "observed_at": current_observed_at,
+                "epoch_id": subnet_epoch_index,
+                "epoch_block": current_block - last_epoch_block,
+                "next_epoch_block": next_epoch_block,
+                "blocks_remaining": max(0, next_epoch_block - current_block),
+                "epoch_ref": epoch_ref,
+                "settlement_epoch_id": mapped_epoch,
+                "cutover_mapping_hash": cutover["mapping_hash"],
+            },
+            "boundary_snapshot": boundary_snapshot,
+            "snapshot_job": snapshot_job,
+            "boundary_job": boundary_job,
+            "attempts": attempts,
+            "artifacts": artifacts,
+            "next_request_id": request_id,
+        }
+
+    def capture_stateful_epoch_boundary(
+        self,
+        *,
+        cutover_manifest: Mapping[str, Any],
+        settlement_epoch_id: int,
+    ) -> Dict[str, Any]:
+        """Capture a proposed stateful cutover without activating stateful mode.
+
+        This explicit shadow path is usable while the validator's measured
+        runtime remains in legacy mode.  The proposed manifest is not trusted:
+        ``_read_stateful_epoch_authority`` authenticates its genesis, cutover
+        block, official index, and predecessor transition against exact chain
+        state before returning either signed-document candidate.  A proposed
+        boundary may be historical, but it must already be at or below the
+        authenticated finalized head and its exact height must still resolve
+        to the manifest's canonical block hash.
+        """
+
+        if (
+            not isinstance(settlement_epoch_id, int)
+            or isinstance(settlement_epoch_id, bool)
+            or settlement_epoch_id < 0
+        ):
+            raise ValidatorChainSourceV2Error(
+                "candidate settlement epoch is invalid"
+            )
+        configuration = {
+            "mode": "stateful_v1",
+            "cutover_manifest": dict(cutover_manifest),
+        }
+        cutover_block = cutover_manifest.get("cutover_block")
+        if (
+            not isinstance(cutover_block, int)
+            or isinstance(cutover_block, bool)
+            or cutover_block <= 0
+        ):
+            raise ValidatorChainSourceV2Error(
+                "candidate cutover block is invalid"
+            )
+        current_job = "subnet-epoch-capture-current:%d" % settlement_epoch_id
+        attempts = []
+        artifacts = []
+
+        finalized = self._call(
+            method="chain_getFinalizedHead",
+            params=[],
+            request_id=1,
+            job_id=current_job,
+            purpose="validator.subnet_epoch_snapshot.v2",
+            logical_operation_id=current_job + ":finalized-head",
+        )
+        attempts.extend(finalized["attempts"])
+        artifacts.extend(finalized["artifacts"])
+        finalized_hash = normalize_raw_hash(
+            finalized["result"], "candidate finalized head"
+        )
+        header_result = self._call(
+            method="chain_getHeader",
+            params=["0x" + finalized_hash],
+            request_id=2,
+            job_id=current_job,
+            purpose="validator.subnet_epoch_snapshot.v2",
+            logical_operation_id=current_job + ":finalized-header",
+        )
+        attempts.extend(header_result["attempts"])
+        artifacts.extend(header_result["artifacts"])
+        finalized_header = parse_finalized_header(header_result["result"])
+        if int(finalized_header["block"]) < cutover_block:
+            raise ValidatorChainSourceV2Error(
+                "candidate cutover block is not finalized"
+            )
+        canonical_cutover = self._archive_call(
+            method="chain_getBlockHash",
+            params=[cutover_block],
+            request_id=3,
+            job_id=current_job,
+            purpose="validator.subnet_epoch_snapshot.v2",
+            logical_operation_id=current_job + ":canonical-cutover-hash",
+        )
+        attempts.extend(canonical_cutover["attempts"])
+        artifacts.extend(canonical_cutover["artifacts"])
+        canonical_cutover_hash = normalize_raw_hash(
+            canonical_cutover["result"], "candidate canonical cutover block"
+        )
+        try:
+            manifest_cutover_hash = normalize_raw_hash(
+                cutover_manifest.get("cutover_block_hash"),
+                "candidate manifest cutover block",
+            )
+        except ChainSourceV2Error as exc:
+            raise ValidatorChainSourceV2Error(
+                "candidate cutover block hash is invalid"
+            ) from exc
+        if canonical_cutover_hash != manifest_cutover_hash:
+            raise ValidatorChainSourceV2Error(
+                "candidate cutover block is not canonical"
+            )
+        cutover_header_result = self._archive_call(
+            method="chain_getHeader",
+            params=["0x" + canonical_cutover_hash],
+            request_id=4,
+            job_id=current_job,
+            purpose="validator.subnet_epoch_snapshot.v2",
+            logical_operation_id=current_job + ":canonical-cutover-header",
+        )
+        attempts.extend(cutover_header_result["attempts"])
+        artifacts.extend(cutover_header_result["artifacts"])
+        cutover_header = parse_finalized_header(cutover_header_result["result"])
+        if int(cutover_header["block"]) != cutover_block:
+            raise ValidatorChainSourceV2Error(
+                "candidate canonical cutover header differs"
+            )
+        stateful = self._read_stateful_epoch_authority(
+            configuration=configuration,
+            finalized_hash=canonical_cutover_hash,
+            header=cutover_header,
+            netuid=int(cutover_manifest.get("netuid", -1)),
+            settlement_epoch_id=settlement_epoch_id,
+            chain_job=current_job,
+            request_id_start=5,
+            snapshot_job_override=current_job,
+            boundary_job_override=current_job,
+            historical_snapshot=True,
+        )
+        attempts.extend(stateful["attempts"])
+        artifacts.extend(stateful["artifacts"])
+        if stateful["authority"] != stateful["boundary_snapshot"]:
+            raise ValidatorChainSourceV2Error(
+                "candidate capture did not resolve the proposed boundary"
+            )
+        return {
+            "finalized_block_hash": finalized_hash,
+            "header": finalized_header,
+            "epoch_authority": stateful["authority"],
+            "epoch_boundary": stateful["boundary_snapshot"],
+            "attempts": attempts,
+            "artifacts": artifacts,
+            "jobs": {
+                "subnet_epoch_snapshot": current_job,
+                "subnet_epoch_boundary": stateful["boundary_job"],
+            },
+        }
 
     def read_finalized_snapshot(self, *, netuid: int, epoch_id: int) -> Dict[str, Any]:
         chain_job = "chain-state:%d" % int(epoch_id)
@@ -367,10 +1065,34 @@ class ValidatorChainSourceV2:
         all_attempts.extend(header_result["attempts"])
         all_artifacts.extend(header_result["artifacts"])
         header = parse_finalized_header(header_result["result"])
-        if int(header["block"]) // CHAIN_FINALIZATION_EPOCH_BLOCKS != int(epoch_id):
-            raise ValidatorChainSourceV2Error(
-                "finalized chain block differs from requested epoch"
+        epoch_configuration = self._epoch_authority_supplier()
+        epoch_authority = None
+        epoch_boundary = None
+        epoch_snapshot_job = None
+        epoch_boundary_job = None
+        next_request_id = 3
+        if epoch_configuration is None:
+            if int(header["block"]) // CHAIN_FINALIZATION_EPOCH_BLOCKS != int(epoch_id):
+                raise ValidatorChainSourceV2Error(
+                    "finalized chain block differs from requested epoch"
+                )
+        else:
+            stateful = self._read_stateful_epoch_authority(
+                configuration=epoch_configuration,
+                finalized_hash=finalized_hash,
+                header=header,
+                netuid=int(netuid),
+                settlement_epoch_id=int(epoch_id),
+                chain_job=chain_job,
+                request_id_start=next_request_id,
             )
+            epoch_authority = stateful["authority"]
+            epoch_boundary = stateful["boundary_snapshot"]
+            epoch_snapshot_job = stateful["snapshot_job"]
+            epoch_boundary_job = stateful["boundary_job"]
+            all_attempts.extend(stateful["attempts"])
+            all_artifacts.extend(stateful["artifacts"])
+            next_request_id = int(stateful["next_request_id"])
 
         metagraph_result = self._call(
             method="state_call",
@@ -379,7 +1101,7 @@ class ValidatorChainSourceV2:
                 encode_selective_metagraph_params(netuid=int(netuid)),
                 "0x" + finalized_hash,
             ],
-            request_id=3,
+            request_id=next_request_id,
             job_id=metagraph_job,
             purpose="validator.metagraph_state.v2",
             logical_operation_id=metagraph_job + ":selective-metagraph",
@@ -395,11 +1117,15 @@ class ValidatorChainSourceV2:
             "finalized_block_hash": finalized_hash,
             "header": header,
             "metagraph": metagraph,
+            "epoch_authority": epoch_authority,
+            "epoch_boundary": epoch_boundary,
             "attempts": all_attempts,
             "artifacts": all_artifacts,
             "jobs": {
                 "chain_state": chain_job,
                 "metagraph_state": metagraph_job,
+                "subnet_epoch_snapshot": epoch_snapshot_job,
+                "subnet_epoch_boundary": epoch_boundary_job,
             },
         }
 
@@ -584,7 +1310,39 @@ class ValidatorChainSourceV2:
         )
 
     def _call(self, **kwargs: Any) -> Dict[str, Any]:
-        result = self._rpc_call(**kwargs)
+        return self._adapter_call(
+            self._rpc_call,
+            provider_id="bittensor_chain",
+            destination_host=CHAIN_ENDPOINT_HOST,
+            **kwargs,
+        )
+
+    def _archive_call(self, **kwargs: Any) -> Dict[str, Any]:
+        if self._archive_rpc_call is None:
+            raise ValidatorChainSourceV2Error(
+                "archive RPC adapter is required for historical epoch state"
+            )
+        result = self._adapter_call(
+            self._archive_rpc_call,
+            provider_id="bittensor_archive",
+            destination_host=CHAIN_ARCHIVE_ENDPOINT_HOST,
+            **kwargs,
+        )
+        if not result["attempts"]:
+            raise ValidatorChainSourceV2Error(
+                "archive RPC adapter omitted measured transport evidence"
+            )
+        return result
+
+    @staticmethod
+    def _adapter_call(
+        adapter: Callable[..., Mapping[str, Any]],
+        *,
+        provider_id: str,
+        destination_host: str,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        result = adapter(**kwargs)
         if not isinstance(result, Mapping) or set(result) != {
             "result",
             "attempts",
@@ -593,6 +1351,14 @@ class ValidatorChainSourceV2:
             raise ValidatorChainSourceV2Error("chain RPC adapter result is invalid")
         for attempt in result["attempts"]:
             validate_transport_attempt(attempt)
+            if (
+                attempt.get("provider_id") != provider_id
+                or attempt.get("destination_host") != destination_host
+                or attempt.get("destination_port") != CHAIN_ENDPOINT_PORT
+            ):
+                raise ValidatorChainSourceV2Error(
+                    "chain RPC adapter used the wrong measured endpoint"
+                )
         return {
             "result": result["result"],
             "attempts": [dict(item) for item in result["attempts"]],

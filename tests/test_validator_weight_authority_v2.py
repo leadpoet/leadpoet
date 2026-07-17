@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import copy
 from datetime import datetime, timezone
+import json
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -26,6 +27,10 @@ from leadpoet_canonical.attested_v2 import (
     sha256_bytes,
     sha256_json,
 )
+from leadpoet_canonical.binding import create_binding_message
+from leadpoet_canonical.hotkey_authority_v2 import (
+    build_application_signature_request_v2,
+)
 from leadpoet_canonical.weight_authority_v2 import (
     GATEWAY_WEIGHT_INPUT_CATEGORIES,
     WEIGHT_INPUT_PURPOSES,
@@ -41,6 +46,24 @@ from validator_tee.enclave.weight_authority_v2 import (
     ValidatorWeightAuthorityV2,
     ValidatorWeightAuthorityV2Error,
 )
+from validator_tee.host import subnet_epoch_boundary_capture_v2 as capture_module
+from validator_tee.host.subnet_epoch_boundary_capture_v2 import (
+    SubnetEpochBoundaryCaptureV2Error,
+    build_subnet_epoch_candidate_authorization_message_v1,
+    capture_subnet_epoch_boundary_v2,
+    publish_subnet_epoch_boundary_candidate_v1,
+)
+from validator_tee.host.publication_journal_v2 import (
+    LEGACY_JOURNAL_SCHEMA_VERSION,
+    WeightPublicationJournalV2Error,
+    validate_publication_journal_v2,
+)
+from validator_tee.host.weight_authority_v2 import (
+    HostWeightAuthorityV2Error,
+    build_authoritative_weight_bundle_v2,
+    build_stateful_epoch_evidence_v1,
+    validate_stateful_epoch_evidence_v1,
+)
 
 
 NOW = datetime(2026, 7, 10, 20, 0, tzinfo=timezone.utc)
@@ -54,6 +77,7 @@ VALIDATOR_LOCK = "sha256:" + "3" * 64
 GATEWAY_LOCK = "sha256:" + "4" * 64
 VALIDATOR_BOOT_CONFIG = "sha256:" + "5" * 64
 GATEWAY_BOOT_CONFIG = "sha256:" + "6" * 64
+VALIDATOR_HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
 
 
 def _keypair():
@@ -240,7 +264,7 @@ def _calculation_snapshot(parent_hashes, allocation_hash):
     return snapshot
 
 
-def _fixture(*, category_output_override=None):
+def _fixture(*, category_output_override=None, stateful=False):
     validator_key, validator_pub = _keypair()
     gateway_key, gateway_pub = _keypair()
     validator_boot = _boot(
@@ -338,7 +362,7 @@ def _fixture(*, category_output_override=None):
         input_hashes["research_lab_allocation"],
     )
     request = {
-        "validator_hotkey": "5ValidatorHotkey",
+        "validator_hotkey": VALIDATOR_HOTKEY,
         "calculation_snapshot": calculation,
         "input_receipt_hashes": input_hashes,
         "gateway_authority_event_hash": gateway_authority_event_hash,
@@ -366,8 +390,7 @@ def _fixture(*, category_output_override=None):
 
     chain_artifacts = []
     chain_attempts = []
-    for offset, (job_id, purpose, operation) in enumerate(
-        (
+    chain_operations = [
             ("chain-state:100", "validator.chain_state.v2", "head"),
             ("chain-state:100", "validator.chain_state.v2", "header"),
             (
@@ -375,8 +398,23 @@ def _fixture(*, category_output_override=None):
                 "validator.metagraph_state.v2",
                 "metagraph",
             ),
+    ]
+    if stateful:
+        chain_operations.extend(
+            [
+                (
+                    "subnet-epoch-snapshot:100:36099",
+                    "validator.subnet_epoch_snapshot.v2",
+                    "current",
+                ),
+                (
+                    "subnet-epoch-boundary:100",
+                    "validator.subnet_epoch_snapshot.v2",
+                    "boundary",
+                ),
+            ]
         )
-    ):
+    for offset, (job_id, purpose, operation) in enumerate(chain_operations):
         request_body = ("request:" + operation).encode("ascii")
         response_body = ("response:" + operation).encode("ascii")
         request_hash = sha256_bytes(request_body)
@@ -428,7 +466,7 @@ def _fixture(*, category_output_override=None):
         def read_finalized_snapshot(self, *, netuid, epoch_id):
             assert netuid == 71
             assert epoch_id == 100
-            return {
+            value = {
                 "finalized_block_hash": "ab" * 32,
                 "header": {
                     "block": 36099,
@@ -448,6 +486,98 @@ def _fixture(*, category_output_override=None):
                 "jobs": {
                     "chain_state": "chain-state:100",
                     "metagraph_state": "metagraph-state:100",
+                },
+            }
+            if stateful:
+                cutover_body = {
+                    "schema_version": "leadpoet.subnet_epoch_cutover.v1",
+                    "epoch_scheme": "bittensor.subnet_epoch_index.v1",
+                    "network_genesis_hash": "0x" + "1" * 64,
+                    "netuid": 71,
+                    "cutover_block": 36_000,
+                    "cutover_block_hash": "0x" + "2" * 64,
+                    "first_subnet_epoch_index": 35,
+                    "first_settlement_epoch_id": 100,
+                    "last_legacy_epoch_id": 99,
+                }
+                cutover_mapping_hash = sha256_json(cutover_body)
+                value["epoch_boundary"] = {
+                    "schema_version": "leadpoet.subnet_epoch_snapshot.v1",
+                    "epoch_scheme": "bittensor.subnet_epoch_index.v1",
+                    "network_genesis_hash": "0x" + "1" * 64,
+                    "netuid": 71,
+                    "head_kind": "finalized",
+                    "block_hash": "0x" + "2" * 64,
+                    "current_block": 36_000,
+                    "last_epoch_block": 36_000,
+                    "pending_epoch_at": 0,
+                    "subnet_epoch_index": 35,
+                    "tempo": 360,
+                    "blocks_since_last_step": 0,
+                    "observed_at": "2026-07-10T19:59:00Z",
+                    "epoch_id": 35,
+                    "epoch_ref": "sha256:" + "8" * 64,
+                    "epoch_block": 0,
+                    "next_epoch_block": 36_360,
+                    "blocks_remaining": 360,
+                    "settlement_epoch_id": 100,
+                    "cutover_mapping_hash": cutover_mapping_hash,
+                }
+                value["epoch_authority"] = {
+                    **value["epoch_boundary"],
+                    "block_hash": "0x" + "3" * 64,
+                    "current_block": 36_099,
+                    "last_epoch_block": 36_000,
+                    "observed_at": "2026-07-10T20:08:54Z",
+                    "epoch_block": 99,
+                    "blocks_remaining": 261,
+                }
+                value["jobs"]["subnet_epoch_snapshot"] = (
+                    "subnet-epoch-snapshot:100:36099"
+                )
+                value["jobs"]["subnet_epoch_boundary"] = (
+                    "subnet-epoch-boundary:100"
+                )
+            return value
+
+        def capture_stateful_epoch_boundary(
+            self, *, cutover_manifest, settlement_epoch_id
+        ):
+            assert stateful is True
+            assert settlement_epoch_id == 100
+            assert cutover_manifest["first_settlement_epoch_id"] == 100
+            value = self.read_finalized_snapshot(netuid=71, epoch_id=100)
+            capture_attempts = [
+                item
+                for item in value["attempts"]
+                if item["job_id"] == value["jobs"]["subnet_epoch_boundary"]
+            ]
+            capture_artifact_hashes = {
+                artifact_hash
+                for item in capture_attempts
+                for artifact_hash in (
+                    item["request_artifact_hash"],
+                    item["response_artifact_hash"],
+                )
+            }
+            return {
+                "finalized_block_hash": value["finalized_block_hash"],
+                "header": value["header"],
+                "epoch_authority": value["epoch_boundary"],
+                "epoch_boundary": value["epoch_boundary"],
+                "attempts": capture_attempts,
+                "artifacts": [
+                    item
+                    for item in value["artifacts"]
+                    if item["artifact_hash"] in capture_artifact_hashes
+                ],
+                "jobs": {
+                    "subnet_epoch_snapshot": value["jobs"][
+                        "subnet_epoch_boundary"
+                    ],
+                    "subnet_epoch_boundary": value["jobs"][
+                        "subnet_epoch_boundary"
+                    ],
                 },
             }
 
@@ -499,6 +629,443 @@ def test_validator_authority_computes_and_signs_exact_canonical_weights():
         fixture["validator_boot"]["boot_identity_hash"],
         fixture["gateway_boot"]["boot_identity_hash"],
     }
+
+
+def test_stateful_authority_emits_dedicated_current_and_boundary_receipts():
+    fixture = _fixture(stateful=True)
+    value = fixture["authority"].compute(fixture["request"])
+    receipts = value["receipt_graph"]["receipts"]
+    epoch_receipts = [
+        item
+        for item in receipts
+        if item["purpose"] == "validator.subnet_epoch_snapshot.v2"
+    ]
+    assert len(epoch_receipts) == 2
+    source = fixture["chain_source"].read_finalized_snapshot(
+        netuid=71,
+        epoch_id=100,
+    )
+    boundary = source["epoch_boundary"]
+    current = source["epoch_authority"]
+    boundary_receipt = next(
+        item for item in epoch_receipts if item["output_root"] == sha256_json(boundary)
+    )
+    current_receipt = next(
+        item for item in epoch_receipts if item["output_root"] == sha256_json(current)
+    )
+    assert boundary_receipt["output_root"] == sha256_json(boundary)
+    assert boundary_receipt["issued_at"] == boundary["observed_at"]
+    assert current_receipt["issued_at"] == current["observed_at"]
+    assert current_receipt["parent_receipt_hashes"] == [
+        boundary_receipt["receipt_hash"]
+    ]
+    assert value["epoch_authority"] == current
+    assert value["epoch_boundary"] == boundary
+    chain_receipt = next(
+        item for item in receipts if item["purpose"] == "validator.chain_state.v2"
+    )
+    assert chain_receipt["parent_receipt_hashes"] == [
+        current_receipt["receipt_hash"]
+    ]
+    boundary_attempts = [
+        item
+        for item in value["receipt_graph"]["transport_attempts"]
+        if item["purpose"] == "validator.subnet_epoch_snapshot.v2"
+    ]
+    assert len(boundary_attempts) == 2
+
+
+def test_host_preserves_stateful_epoch_evidence_outside_unchanged_v2_bundle():
+    fixture = _fixture(stateful=True)
+    enclave_response = fixture["authority"].compute(fixture["request"])
+    enclave_response["weight_authorization_id"] = "sha256:" + "a" * 64
+    boot = fixture["validator_boot"]
+    validator_hotkey = fixture["request"]["validator_hotkey"]
+    binding_message = create_binding_message(
+        netuid=71,
+        chain="wss://entrypoint-finney.opentensor.ai:443",
+        enclave_pubkey=boot["signing_pubkey"],
+        validator_code_hash=boot["build_manifest_hash"],
+        version=boot["commit_sha"],
+    )
+    application_request = build_application_signature_request_v2(
+        message=binding_message.encode("utf-8"),
+        validator_hotkey=validator_hotkey,
+        boot_identity_hash=boot["boot_identity_hash"],
+    )
+    hotkey_signature = "f" * 128
+    output = {
+        "schema_version": "leadpoet.application_signature_result.v2",
+        "request_hash": application_request["request_hash"],
+        "purpose": "validator.gateway_binding.v2",
+        "validator_hotkey": validator_hotkey,
+        "signature": hotkey_signature,
+    }
+    binding_body = build_execution_receipt_body(
+        role="validator_weights",
+        purpose="validator.hotkey_signature.v2",
+        job_id="application-signature:%s"
+        % application_request["request_hash"].split(":", 1)[1][:32],
+        epoch_id=100,
+        sequence=0,
+        commit_sha=boot["commit_sha"],
+        pcr0=boot["pcr0"],
+        build_manifest_hash=boot["build_manifest_hash"],
+        dependency_lock_hash=boot["dependency_lock_hash"],
+        config_hash=boot["config_hash"],
+        boot_identity_hash=boot["boot_identity_hash"],
+        input_root=application_request["request_hash"],
+        output_root=sha256_json(output),
+        transport_root_hash=EMPTY_TRANSPORT_ROOT,
+        host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
+        artifact_root=EMPTY_ARTIFACT_ROOT,
+        parent_receipt_hashes=(
+            enclave_response["receipt_graph"]["root_receipt_hash"],
+        ),
+        status="succeeded",
+        failure_code=None,
+        issued_at="2026-07-10T20:00:00Z",
+    )
+    binding_receipt = create_signed_execution_receipt(
+        body=binding_body,
+        enclave_pubkey=boot["signing_pubkey"],
+        sign_digest=fixture["validator_key"].sign,
+    )
+    bundle = build_authoritative_weight_bundle_v2(
+        enclave_response=enclave_response,
+        validator_hotkey=validator_hotkey,
+        binding_message=binding_message,
+        binding_signature_result={
+            **output,
+            "receipt": binding_receipt,
+        },
+    )
+    evidence = build_stateful_epoch_evidence_v1(
+        enclave_response=enclave_response,
+        published_bundle=bundle,
+    )
+
+    assert set(bundle) == {
+        "schema_version",
+        "validator_hotkey",
+        "binding_message",
+        "validator_hotkey_signature",
+        "weight_snapshot",
+        "weight_result",
+        "weights_signature",
+        "receipt_graph",
+    }
+    assert evidence["bundle_hash"].startswith("sha256:")
+    assert evidence["epoch_authority"] == enclave_response["epoch_authority"]
+    assert evidence["epoch_boundary"] == enclave_response["epoch_boundary"]
+    assert evidence["receipt_graph"] == bundle["receipt_graph"]
+    with pytest.raises(HostWeightAuthorityV2Error, match="missing its epoch evidence"):
+        validate_stateful_epoch_evidence_v1(
+            None,
+            published_bundle=bundle,
+        )
+    legacy_journal_body = {
+        "schema_version": LEGACY_JOURNAL_SCHEMA_VERSION,
+        "state": "prepared",
+        "revision": 0,
+        "weight_authorization_id": "sha256:" + "a" * 64,
+        "published_bundle": bundle,
+        "publication": None,
+        "extrinsic_signature_results": [],
+        "updated_at": "2026-07-10T20:00:00Z",
+    }
+    legacy_journal = {
+        **legacy_journal_body,
+        "journal_hash": sha256_json(legacy_journal_body),
+    }
+    with pytest.raises(
+        WeightPublicationJournalV2Error,
+        match="epoch evidence is invalid",
+    ):
+        validate_publication_journal_v2(legacy_journal)
+
+
+@pytest.mark.asyncio
+async def test_explicit_boundary_capture_deduplicates_identical_snapshot_receipt():
+    fixture = _fixture(stateful=True)
+    cutover_body = {
+        "schema_version": "leadpoet.subnet_epoch_cutover.v1",
+        "epoch_scheme": "bittensor.subnet_epoch_index.v1",
+        "network_genesis_hash": "0x" + "1" * 64,
+        "netuid": 71,
+        "cutover_block": 36_000,
+        "cutover_block_hash": "0x" + "2" * 64,
+        "first_subnet_epoch_index": 35,
+        "first_settlement_epoch_id": 100,
+        "last_legacy_epoch_id": 99,
+    }
+    cutover_manifest = {
+        **cutover_body,
+        "mapping_hash": sha256_json(cutover_body),
+    }
+    result = fixture["authority"].capture_epoch_boundary(
+        {
+            "cutover_manifest": cutover_manifest,
+            "settlement_epoch_id": 100,
+        }
+    )
+    assert result["schema_version"] == "leadpoet.subnet_epoch_boundary_capture.v1"
+    assert result["epoch_boundary"]["current_block"] == 36_000
+    assert result["epoch_authority"] == result["epoch_boundary"]
+    assert result["epoch_authority_receipt_hash"] == result[
+        "epoch_boundary_receipt_hash"
+    ]
+    receipts = {
+        item["receipt_hash"]: item for item in result["receipt_graph"]["receipts"]
+    }
+    assert len(receipts) == 1
+    boundary_receipt = receipts[result["epoch_boundary_receipt_hash"]]
+    assert boundary_receipt["output_root"] == sha256_json(
+        result["epoch_boundary"]
+    )
+    assert boundary_receipt["parent_receipt_hashes"] == []
+    assert result["receipt_graph"]["root_receipt_hash"] == boundary_receipt[
+        "receipt_hash"
+    ]
+    assert result["source_artifacts"]
+
+    class FakeClient:
+        def capture_subnet_epoch_boundary_v2(self, **kwargs):
+            assert kwargs == {
+                "cutover_manifest": cutover_manifest,
+                "settlement_epoch_id": 100,
+            }
+            return result
+
+    observed_boot_verification = {}
+
+    def verify_capture_boot(_identity, *, expected_pcr0):
+        observed_boot_verification["expected_pcr0"] = expected_pcr0
+        return {"verified": True}
+
+    host_result = capture_subnet_epoch_boundary_v2(
+        cutover_manifest=cutover_manifest,
+        expected_pcr0=VALIDATOR_PCR0,
+        client=FakeClient(),
+        boot_verifier=verify_capture_boot,
+    )
+    assert host_result == result
+    assert observed_boot_verification == {"expected_pcr0": VALIDATOR_PCR0}
+
+    with pytest.raises(
+        SubnetEpochBoundaryCaptureV2Error,
+        match="approved validator PCR0",
+    ):
+        capture_subnet_epoch_boundary_v2(
+            cutover_manifest=cutover_manifest,
+            expected_pcr0=VALIDATOR_PCR0[:-1] + "g",
+            client=FakeClient(),
+            boot_verifier=verify_capture_boot,
+        )
+
+    observed = {}
+    wallet = type(
+        "Wallet",
+        (),
+        {
+            "hotkey": type(
+                "Hotkey",
+                (),
+                {
+                    "ss58_address": VALIDATOR_HOTKEY,
+                    "sign": lambda _self, message: (
+                        observed.update(signed_message=message.decode("utf-8"))
+                        or bytes.fromhex("c" * 128)
+                    ),
+                },
+            )()
+        },
+    )()
+
+    async def post(url, payload, timeout):
+        observed.update(url=url, payload=payload, timeout=timeout)
+        unsigned_payload = {
+            "schema_version": payload["schema_version"],
+            "cutover_manifest": payload["cutover_manifest"],
+            "capture": payload["capture"],
+        }
+        payload_hash = sha256_json(unsigned_payload)
+        authorization_hash = sha256_json(
+            {
+                "validator_hotkey": VALIDATOR_HOTKEY,
+                "candidate_payload_hash": payload_hash,
+                "validator_hotkey_signature": "0x" + "c" * 128,
+            }
+        )
+        return {
+            "schema_version": "leadpoet.subnet_epoch_boundary_candidate_ack.v1",
+            "candidate_hash": payload_hash,
+            "validator_hotkey": VALIDATOR_HOTKEY,
+            "candidate_authorization_hash": authorization_hash,
+            "mapping_hash": cutover_manifest["mapping_hash"],
+            "subnet_epoch_index": 35,
+            "settlement_epoch_id": 100,
+            "boundary_block": 36_000,
+            "boundary_hash": sha256_json(result["epoch_boundary"]),
+            "boundary_receipt_hash": result["epoch_boundary_receipt_hash"],
+            "receipt_graph_hash": sha256_json(result["receipt_graph"]),
+            "durable_readback_hash": "sha256:" + "b" * 64,
+        }
+
+    acknowledgment = await publish_subnet_epoch_boundary_candidate_v1(
+        cutover_manifest=cutover_manifest,
+        capture=result,
+        gateway_url="https://gateway.example",
+        wallet=wallet,
+        post_json=post,
+    )
+    assert observed["url"].endswith("/weights/subnet-epoch/candidate/v1")
+    assert observed["payload"] == {
+        "schema_version": "leadpoet.subnet_epoch_boundary_candidate_submission.v1",
+        "validator_hotkey": VALIDATOR_HOTKEY,
+        "validator_hotkey_signature": "0x" + "c" * 128,
+        "cutover_manifest": cutover_manifest,
+        "capture": result,
+    }
+    unsigned_payload = {
+        "schema_version": observed["payload"]["schema_version"],
+        "cutover_manifest": cutover_manifest,
+        "capture": result,
+    }
+    assert observed["signed_message"] == (
+        build_subnet_epoch_candidate_authorization_message_v1(
+            validator_hotkey=VALIDATOR_HOTKEY,
+            candidate_payload=unsigned_payload,
+        )
+    )
+    assert acknowledgment["candidate_hash"] == sha256_json(unsigned_payload)
+
+    async def tampered_ack(url, payload, timeout):
+        value = await post(url, payload, timeout)
+        return {
+            **value,
+            "candidate_authorization_hash": "sha256:" + "f" * 64,
+        }
+
+    with pytest.raises(
+        SubnetEpochBoundaryCaptureV2Error,
+        match="acknowledgment differs",
+    ):
+        await publish_subnet_epoch_boundary_candidate_v1(
+            cutover_manifest=cutover_manifest,
+            capture=result,
+            gateway_url="https://gateway.example",
+            wallet=wallet,
+            post_json=tampered_ack,
+        )
+
+
+def test_candidate_cli_writes_exact_signed_body_without_a_gateway(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    cutover_body = {
+        "schema_version": "leadpoet.subnet_epoch_cutover.v1",
+        "epoch_scheme": "bittensor.subnet_epoch_index.v1",
+        "network_genesis_hash": "0x" + "1" * 64,
+        "netuid": 71,
+        "cutover_block": 36_000,
+        "cutover_block_hash": "0x" + "2" * 64,
+        "first_subnet_epoch_index": 35,
+        "first_settlement_epoch_id": 100,
+        "last_legacy_epoch_id": 99,
+    }
+    manifest = {**cutover_body, "mapping_hash": sha256_json(cutover_body)}
+    manifest_path = tmp_path / "cutover.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    candidate_path = tmp_path / "handoff" / "candidate.json"
+    capture = {
+        "schema_version": "leadpoet.subnet_epoch_boundary_capture.v1",
+        "offline_fixture": True,
+    }
+    wallet = type(
+        "Wallet",
+        (),
+        {
+            "hotkey": type(
+                "Hotkey",
+                (),
+                {
+                    "ss58_address": VALIDATOR_HOTKEY,
+                    "sign": lambda _self, _message: bytes.fromhex("c" * 128),
+                },
+            )()
+        },
+    )()
+    observed = {}
+
+    def fake_capture(**kwargs):
+        observed.update(kwargs)
+        return capture
+
+    monkeypatch.setattr(
+        capture_module,
+        "_approved_validator_pcr0",
+        lambda _path: VALIDATOR_PCR0,
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "capture_subnet_epoch_boundary_v2",
+        fake_capture,
+    )
+    from validator_tee.host import enclave_hotkey_v2
+
+    monkeypatch.setattr(
+        enclave_hotkey_v2,
+        "build_enclave_backed_wallet_v2",
+        lambda **_kwargs: wallet,
+    )
+    argv = [
+        "--cutover-manifest",
+        str(manifest_path),
+        "--validator-release-manifest",
+        str(tmp_path / "release.json"),
+        "--wallet-name",
+        "validator_72",
+        "--wallet-hotkey",
+        "default",
+        "--candidate-output",
+        str(candidate_path),
+    ]
+    assert capture_module.main(argv) == 0
+    capsys.readouterr()
+    signed = json.loads(candidate_path.read_text(encoding="utf-8"))
+    assert signed == capture_module.build_signed_subnet_epoch_candidate_submission_v1(
+        cutover_manifest=manifest,
+        capture=capture,
+        wallet=wallet,
+    )
+    assert candidate_path.stat().st_mode & 0o777 == 0o600
+    assert observed["expected_pcr0"] == VALIDATOR_PCR0
+
+    with pytest.raises(
+        SubnetEpochBoundaryCaptureV2Error,
+        match="explicit overwrite",
+    ):
+        capture_module.main(argv)
+    assert capture_module.main(
+        [*argv, "--overwrite-candidate-output"]
+    ) == 0
+    capsys.readouterr()
+    assert candidate_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_candidate_cli_requires_enclave_wallet_for_offline_output(tmp_path):
+    with pytest.raises(SystemExit):
+        capture_module.main(
+            [
+                "--cutover-manifest",
+                str(tmp_path / "cutover.json"),
+                "--candidate-output",
+                str(tmp_path / "candidate.json"),
+            ]
+        )
 
 
 def test_validator_authority_rejects_missing_semantic_input_category():

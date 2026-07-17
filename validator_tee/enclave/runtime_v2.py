@@ -22,6 +22,9 @@ from leadpoet_canonical.attested_v2 import (
 
 
 VALIDATOR_RUNTIME_CONFIG_SCHEMA_VERSION = "leadpoet.validator_runtime_config.v2"
+VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION = (
+    "leadpoet.validator_runtime_config.v3"
+)
 VALIDATOR_PHYSICAL_ROLE = "validator_weights"
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
@@ -33,10 +36,90 @@ _GATEWAY_ROLES = frozenset(
         "gateway_autoresearch",
     }
 )
+_STATEFUL_EPOCH_MODE = "stateful_v1"
+_EPOCH_SCHEME = "bittensor.subnet_epoch_index.v1"
+_CUTOVER_SCHEMA_VERSION = "leadpoet.subnet_epoch_cutover.v1"
 
 
 class ValidatorRuntimeV2Error(RuntimeError):
     """The validator enclave cannot prove its hardware/runtime identity."""
+
+
+def _validate_epoch_authority(value: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "mode",
+        "cutover_manifest",
+    }:
+        raise ValidatorRuntimeV2Error("validator epoch authority fields are invalid")
+    if value.get("mode") != _STATEFUL_EPOCH_MODE:
+        raise ValidatorRuntimeV2Error("validator epoch authority mode is invalid")
+    manifest = value.get("cutover_manifest")
+    fields = {
+        "schema_version",
+        "epoch_scheme",
+        "network_genesis_hash",
+        "netuid",
+        "cutover_block",
+        "cutover_block_hash",
+        "first_subnet_epoch_index",
+        "first_settlement_epoch_id",
+        "last_legacy_epoch_id",
+        "mapping_hash",
+    }
+    if not isinstance(manifest, Mapping) or set(manifest) != fields:
+        raise ValidatorRuntimeV2Error("validator epoch cutover fields are invalid")
+    normalized = dict(manifest)
+    if normalized.get("schema_version") != _CUTOVER_SCHEMA_VERSION:
+        raise ValidatorRuntimeV2Error("validator epoch cutover schema is invalid")
+    if normalized.get("epoch_scheme") != _EPOCH_SCHEME:
+        raise ValidatorRuntimeV2Error("validator epoch scheme is invalid")
+    for field in (
+        "netuid",
+        "cutover_block",
+        "first_subnet_epoch_index",
+        "first_settlement_epoch_id",
+        "last_legacy_epoch_id",
+    ):
+        raw = normalized.get(field)
+        if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
+            raise ValidatorRuntimeV2Error(
+                "validator epoch cutover %s is invalid" % field
+            )
+    if normalized["netuid"] <= 0:
+        raise ValidatorRuntimeV2Error("validator epoch cutover netuid is invalid")
+    for field in ("network_genesis_hash", "cutover_block_hash"):
+        raw_hash = str(normalized.get(field) or "").lower()
+        if not re.fullmatch(r"0x[0-9a-f]{64}", raw_hash):
+            raise ValidatorRuntimeV2Error(
+                "validator epoch cutover %s is invalid" % field
+            )
+        normalized[field] = raw_hash
+    if normalized["first_settlement_epoch_id"] != (
+        normalized["last_legacy_epoch_id"] + 1
+    ):
+        raise ValidatorRuntimeV2Error(
+            "validator epoch settlement mapping is not monotonic"
+        )
+    body = {
+        key: normalized[key]
+        for key in (
+            "schema_version",
+            "epoch_scheme",
+            "network_genesis_hash",
+            "netuid",
+            "cutover_block",
+            "cutover_block_hash",
+            "first_subnet_epoch_index",
+            "first_settlement_epoch_id",
+            "last_legacy_epoch_id",
+        )
+    }
+    if normalized.get("mapping_hash") != sha256_json(body):
+        raise ValidatorRuntimeV2Error("validator epoch cutover hash mismatch")
+    return {
+        "mode": _STATEFUL_EPOCH_MODE,
+        "cutover_manifest": {**body, "mapping_hash": normalized["mapping_hash"]},
+    }
 
 
 def compute_app_manifest_hash(app_root: Path = Path("/app")) -> str:
@@ -93,7 +176,7 @@ def dependency_lock_hash(
 
 
 def _validate_configuration(value: Mapping[str, Any]) -> Dict[str, Any]:
-    fields = {
+    legacy_fields = {
         "schema_version",
         "commit_sha",
         "build_manifest_hash",
@@ -102,9 +185,23 @@ def _validate_configuration(value: Mapping[str, Any]) -> Dict[str, Any]:
         "gateway_role_expectations",
         "hotkey_authority_config_hash",
     }
-    if not isinstance(value, Mapping) or set(value) != fields:
+    stateful_fields = legacy_fields | {"epoch_authority"}
+    if not isinstance(value, Mapping):
         raise ValidatorRuntimeV2Error("validator V2 runtime fields are invalid")
-    if value.get("schema_version") != VALIDATOR_RUNTIME_CONFIG_SCHEMA_VERSION:
+    observed_fields = frozenset(value)
+    if observed_fields not in {
+        frozenset(legacy_fields),
+        frozenset(stateful_fields),
+    }:
+        raise ValidatorRuntimeV2Error("validator V2 runtime fields are invalid")
+    schema_version = value.get("schema_version")
+    if observed_fields == frozenset(legacy_fields):
+        if schema_version != VALIDATOR_RUNTIME_CONFIG_SCHEMA_VERSION:
+            raise ValidatorRuntimeV2Error("validator V2 runtime schema is invalid")
+        epoch_authority = None
+    elif schema_version == VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION:
+        epoch_authority = _validate_epoch_authority(value["epoch_authority"])
+    else:
         raise ValidatorRuntimeV2Error("validator V2 runtime schema is invalid")
     commit = str(value.get("commit_sha") or "").lower()
     if not _COMMIT_RE.fullmatch(commit):
@@ -143,8 +240,8 @@ def _validate_configuration(value: Mapping[str, Any]) -> Dict[str, Any]:
             "pcr0": expected_pcr0,
             "build_manifest_hash": expected_manifest,
         }
-    return {
-        "schema_version": VALIDATOR_RUNTIME_CONFIG_SCHEMA_VERSION,
+    normalized = {
+        "schema_version": schema_version,
         "commit_sha": commit,
         "build_manifest_hash": str(value["build_manifest_hash"]).lower(),
         "dependency_lock_hash": str(value["dependency_lock_hash"]).lower(),
@@ -157,6 +254,9 @@ def _validate_configuration(value: Mapping[str, Any]) -> Dict[str, Any]:
             for role in sorted(normalized_expectations)
         },
     }
+    if epoch_authority is not None:
+        normalized["epoch_authority"] = epoch_authority
+    return normalized
 
 
 def _nsm_attest(*, user_data: bytes, public_key: bytes) -> bytes:
@@ -287,6 +387,18 @@ class ValidatorRuntimeIdentityV2:
                 for role, value in self._configuration[
                     "gateway_role_expectations"
                 ].items()
+            }
+
+    def epoch_authority(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            if self._configuration is None:
+                raise ValidatorRuntimeV2Error("validator V2 runtime is not configured")
+            value = self._configuration.get("epoch_authority")
+            if value is None:
+                return None
+            return {
+                "mode": value["mode"],
+                "cutover_manifest": dict(value["cutover_manifest"]),
             }
 
     def hotkey_authority_config_hash(self) -> str:

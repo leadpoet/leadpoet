@@ -34,6 +34,9 @@ SERVE_AXON_EXTRINSIC_AUTHORIZATION_SCHEMA_VERSION = (
 APPLICATION_SIGNATURE_SCHEMA_VERSION = "leadpoet.application_signature.v2"
 WEIGHT_INPUT_REQUEST_SCHEMA_VERSION = "leadpoet.weight_inputs_request.v2"
 WEIGHT_INPUT_REQUEST_PREFIX = "LEADPOET_WEIGHT_INPUTS_V2|"
+SUBNET_EPOCH_CANDIDATE_MESSAGE_PREFIX = (
+    "LEADPOET_SUBNET_EPOCH_BOUNDARY_CANDIDATE_V1"
+)
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RAW_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -705,6 +708,23 @@ def _application_message_text(message: bytes) -> str:
         raise HotkeyAuthorityV2Error("application message must be UTF-8") from exc
 
 
+def subnet_epoch_candidate_authorization_message_v1(
+    *, validator_hotkey: str, candidate_payload_hash: str
+) -> str:
+    """Canonical hotkey authorization for one exact cutover candidate body."""
+
+    hotkey = str(validator_hotkey or "")
+    _require(bool(_HOTKEY_RE.fullmatch(hotkey)), "validator_hotkey is invalid")
+    payload_hash = _hash(candidate_payload_hash, "candidate_payload_hash")
+    return (
+        SUBNET_EPOCH_CANDIDATE_MESSAGE_PREFIX
+        + "|validator_hotkey="
+        + hotkey
+        + "|candidate_payload_hash="
+        + payload_hash
+    )
+
+
 def build_weight_inputs_request_v2(
     *,
     validator_hotkey: str,
@@ -803,6 +823,25 @@ def classify_application_message_v2(message: bytes, *, validator_hotkey: str) ->
             "weight input request hotkey differs",
         )
         return "validator.gateway_weight_inputs.v2"
+
+    if text.startswith(SUBNET_EPOCH_CANDIDATE_MESSAGE_PREFIX + "|"):
+        expected_prefix = (
+            SUBNET_EPOCH_CANDIDATE_MESSAGE_PREFIX
+            + "|validator_hotkey="
+            + hotkey
+            + "|candidate_payload_hash="
+        )
+        _require(
+            text.startswith(expected_prefix),
+            "subnet epoch candidate hotkey differs",
+        )
+        payload_hash = text[len(expected_prefix) :]
+        expected = subnet_epoch_candidate_authorization_message_v1(
+            validator_hotkey=hotkey,
+            candidate_payload_hash=payload_hash,
+        )
+        _require(text == expected, "subnet epoch candidate message is invalid")
+        return "validator.subnet_epoch_candidate.v2"
 
     if text.startswith("LEADPOET_VALIDATOR_BINDING|"):
         from leadpoet_canonical.binding import parse_binding_message

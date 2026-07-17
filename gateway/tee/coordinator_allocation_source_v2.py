@@ -38,7 +38,6 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
     validate_signed_execution_receipt,
 )
-from leadpoet_canonical.chain_source_v2 import CHAIN_FINALIZATION_EPOCH_BLOCKS
 from leadpoet_verifier.economics import allocate_research_lab_epoch
 
 
@@ -255,7 +254,7 @@ class CoordinatorAllocationSourceV2:
                 miner_alpha_per_epoch=config.reimbursement_miner_alpha_per_epoch,
                 reason="dynamic_alpha_price_disabled",
             )
-        if int(chain_state["header"]["block"]) // CHAIN_FINALIZATION_EPOCH_BLOCKS != epoch:
+        if int(chain_state.get("workflow_epoch_id", -1)) != epoch:
             raise CoordinatorAllocationSourceV2Error(
                 "finalized chain state differs from allocation epoch"
             )

@@ -138,7 +138,24 @@ def _weight_inputs_authorization():
     )
 
 
+def _patch_legacy_namespace_open(monkeypatch):
+    async def _legacy_namespace_open(*_args, **_kwargs):
+        return {
+            "lifecycle_state": "legacy_open",
+            "mapping_hash": None,
+            "last_legacy_epoch_id": None,
+            "first_settlement_epoch_id": None,
+        }
+
+    monkeypatch.setattr(
+        weights_api,
+        "assert_legacy_epoch_namespace_open_async",
+        _legacy_namespace_open,
+    )
+
+
 def _patch_common(monkeypatch):
+    _patch_legacy_namespace_open(monkeypatch)
     monkeypatch.setattr(
         weights_api,
         "_validate_authoritative_v2_submission",
@@ -180,6 +197,7 @@ async def test_authoritative_v2_persists_and_publishes_before_ack(monkeypatch):
     async def _coordinator(**kwargs):
         calls.append("coordinator")
         assert kwargs["purpose"] == "gateway.weights.publication.v2"
+        assert kwargs["boot_verifier"] is weights_api._verify_authoritative_v2_boot
         return {
             "result": {
                 "schema_version": "leadpoet.weight_publication.v2",
@@ -290,6 +308,7 @@ async def test_weight_inputs_v2_authenticates_and_returns_complete_measured_set(
         },
     }
     calls = []
+    _patch_legacy_namespace_open(monkeypatch)
 
     async def load_graph(**kwargs):
         calls.append(("load", kwargs))
@@ -344,6 +363,7 @@ async def test_weight_inputs_v2_fails_closed_on_missing_allocation_lineage(monke
     from gateway.research_lab import attested_v2_store
 
     authorization = _weight_inputs_authorization()
+    _patch_legacy_namespace_open(monkeypatch)
 
     async def missing(**_kwargs):
         raise RuntimeError("lineage missing")

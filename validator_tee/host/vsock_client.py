@@ -340,7 +340,27 @@ class ValidatorEnclaveClient:
             "boot_identity": response["boot_identity"],
             "weight_authorization_id": response["weight_authorization_id"],
             "source_artifacts": response["source_artifacts"],
+            "epoch_authority": response.get("epoch_authority"),
+            "epoch_boundary": response.get("epoch_boundary"),
         }
+
+    def capture_subnet_epoch_boundary_v2(
+        self,
+        *,
+        cutover_manifest: Dict[str, Any],
+        settlement_epoch_id: int,
+    ) -> Dict[str, Any]:
+        response = self._send_request(
+            {
+                "command": "capture_subnet_epoch_boundary_v2",
+                "capture_request": {
+                    "cutover_manifest": dict(cutover_manifest),
+                    "settlement_epoch_id": int(settlement_epoch_id),
+                },
+            },
+            timeout_seconds=180,
+        )
+        return dict(response["capture_result"])
 
 
 # ============================================================================

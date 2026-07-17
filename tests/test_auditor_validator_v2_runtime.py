@@ -196,6 +196,44 @@ def test_pending_v2_bundle_is_unavailable():
     assert status == "v2_unavailable"
 
 
+def test_stateful_bundle_epoch_verification_uses_archive_subtensor(monkeypatch):
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.epoch_mode = auditor_module.STATEFUL_EPOCH_MODE
+    auditor.epoch_cutover = object()
+    auditor.subtensor = object()
+    auditor.epoch_archive_subtensor = object()
+    auditor.config = SimpleNamespace(netuid=71)
+    observed = []
+
+    class Snapshot:
+        def settlement_epoch_id(self, cutover):
+            assert cutover is auditor.epoch_cutover
+            return 101
+
+    def read_snapshot(subtensor, **kwargs):
+        observed.append((subtensor, kwargs))
+        return Snapshot()
+
+    monkeypatch.setattr(
+        auditor_module,
+        "read_subnet_epoch_snapshot",
+        read_snapshot,
+    )
+
+    auditor._verify_stateful_bundle_epoch(
+        {"block": 8_637_160, "epoch_id": 101}
+    )
+
+    assert observed == [
+        (
+            auditor.epoch_archive_subtensor,
+            {"netuid": 71, "block_number": 8_637_160},
+        )
+    ]
+
+
 def test_verifier_failure_emits_no_diagnostic_rows(monkeypatch, caplog):
     auditor = auditor_module.AuditorValidator.__new__(
         auditor_module.AuditorValidator

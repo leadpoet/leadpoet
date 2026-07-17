@@ -1002,6 +1002,7 @@ async def persist_weight_publication_v2(
         "bundle_hash",
         "root_receipt_hash",
         "durable_readback_hash",
+        "epoch_id",
     }
     if not isinstance(bundle_result, Mapping) or not required_bundle_fields <= set(
         bundle_result
@@ -1040,6 +1041,9 @@ async def persist_weight_publication_v2(
         not isinstance(root_receipt, Mapping)
         or root_receipt.get("role") != "gateway_coordinator"
         or root_receipt.get("purpose") != "gateway.weights.publication.v2"
+        or root_receipt.get("status") != "succeeded"
+        or int(root_receipt.get("epoch_id", -1))
+        != int(bundle_result["epoch_id"])
         or root_receipt.get("parent_receipt_hashes")
         != [bundle_result["root_receipt_hash"]]
         or root_receipt.get("output_root") != sha256_json(expected_publication)
@@ -1096,7 +1100,7 @@ async def persist_weight_publication_v2(
 async def load_weight_publication_v2(
     *, bundle_hash: str
 ) -> dict[str, Any] | None:
-    """Read back and verify one durable pre-chain V2 publication."""
+    """Read back and re-prove one durable publication and its exact bundle."""
 
     normalized_bundle_hash = str(bundle_hash or "").lower()
     if not _HASH_RE.fullmatch(normalized_bundle_hash):
@@ -1107,6 +1111,37 @@ async def load_weight_publication_v2(
     )
     if not isinstance(row, Mapping):
         return None
+    bundle_row = await select_one(
+        BUNDLE_TABLE,
+        filters=(("bundle_hash", normalized_bundle_hash),),
+    )
+    bundle_doc = (
+        bundle_row.get("bundle_doc")
+        if isinstance(bundle_row, Mapping)
+        else None
+    )
+    if not isinstance(bundle_doc, Mapping):
+        raise AttestedV2StoreError("stored V2 publication bundle is missing")
+    bundle = validate_published_weight_bundle_v2(bundle_doc)
+    expected_bundle_row = {
+        "bundle_hash": bundle["bundle_hash"],
+        "schema_version": bundle_doc["schema_version"],
+        "netuid": bundle["netuid"],
+        "epoch_id": bundle["epoch_id"],
+        "block": bundle["block"],
+        "validator_hotkey": bundle["validator_hotkey"],
+        "root_receipt_hash": bundle["root_receipt_hash"],
+        "weights_hash": bundle["weights_hash"],
+        "snapshot_hash": bundle["snapshot_hash"],
+        "bundle_doc": dict(bundle_doc),
+    }
+    _assert_stored_row(BUNDLE_TABLE, bundle_row, expected_bundle_row)
+    bundle_readback_hash = sha256_json(
+        {
+            field: expected_bundle_row[field]
+            for field in sorted(expected_bundle_row)
+        }
+    )
     publication_doc = row.get("publication_doc")
     if not isinstance(publication_doc, Mapping):
         raise AttestedV2StoreError("stored V2 publication document is missing")
@@ -1122,6 +1157,19 @@ async def load_weight_publication_v2(
         or publication_doc.get("schema_version")
         != "leadpoet.weight_publication.v2"
         or publication_doc.get("bundle_hash") != normalized_bundle_hash
+        or publication_doc.get("root_receipt_hash")
+        != bundle["root_receipt_hash"]
+        or publication_doc.get("durable_readback_hash")
+        != bundle_readback_hash
+        or any(
+            not _HASH_RE.fullmatch(str(publication_doc.get(field) or ""))
+            for field in (
+                "bundle_hash",
+                "root_receipt_hash",
+                "durable_readback_hash",
+                "transparency_event_hash",
+            )
+        )
     ):
         raise AttestedV2StoreError("stored V2 publication document is invalid")
     event_hash = sha256_json(
@@ -1151,7 +1199,30 @@ async def load_weight_publication_v2(
             raise AttestedV2StoreError(
                 "stored V2 publication conflicts at %s" % field
             )
-    await load_receipt_graph_v2(str(row.get("publication_receipt_hash") or ""))
+    graph = await load_receipt_graph_v2(
+        str(row.get("publication_receipt_hash") or "")
+    )
+    receipt_by_hash = {
+        str(receipt.get("receipt_hash") or ""): receipt
+        for receipt in graph.get("receipts") or ()
+        if isinstance(receipt, Mapping)
+    }
+    root_hash = str(graph.get("root_receipt_hash") or "")
+    root = receipt_by_hash.get(root_hash)
+    if (
+        root_hash != row.get("publication_receipt_hash")
+        or not isinstance(root, Mapping)
+        or root.get("role") != "gateway_coordinator"
+        or root.get("purpose") != "gateway.weights.publication.v2"
+        or root.get("status") != "succeeded"
+        or int(root.get("epoch_id", -1)) != int(bundle["epoch_id"])
+        or root.get("parent_receipt_hashes")
+        != [bundle["root_receipt_hash"]]
+        or root.get("output_root") != sha256_json(dict(publication_doc))
+    ):
+        raise AttestedV2StoreError(
+            "stored V2 publication receipt does not bind its bundle"
+        )
     return expected
 
 

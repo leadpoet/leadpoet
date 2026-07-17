@@ -1922,6 +1922,9 @@ def get_v2_coordinator_job_manager():
         chain_source = CoordinatorChainSourceV2(
             execute_provider=get_v2_provider_broker().execute,
             retry_policy_hashes=retry_hashes,
+            epoch_authority=configuration[
+                "research_lab_execution_config"
+            ]["epoch_authority"],
         )
         legacy_settlement_source = CoordinatorLegacySettlementSourceV2(
             reader=source_reader,

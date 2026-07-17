@@ -172,7 +172,11 @@ class ScoringExecutorV2:
         )
         self._transport.install()
         self._qualification_executor = qualification_executor or QualificationExecutorV2(
-            epoch_checker=QualificationEpochGuardV2(self._transport)
+            epoch_checker=QualificationEpochGuardV2(
+                self._transport,
+                epoch_authority=self._execution_config["epoch_authority"],
+                netuid=self._execution_config["deployment"]["netuid"],
+            )
         )
         self._qualification_network = SecureQualificationNetworkV2()
         self._qualification_network.install()

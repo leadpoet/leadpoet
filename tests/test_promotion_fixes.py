@@ -1345,6 +1345,48 @@ async def test_reward_start_epoch_falls_back_to_bundle_epoch_when_chain_unreacha
     assert captured[0]["start_epoch"] == 101
 
 
+async def test_stateful_champion_reward_fails_closed_when_epoch_authority_is_unavailable(
+    store,
+    monkeypatch,
+):
+    captured = _capture_obligation(monkeypatch)
+
+    async def _resolve(_hotkey: str) -> int | None:
+        return 5
+
+    async def _broken_epoch(_configured: Any = None) -> tuple[int, int | None, str]:
+        raise RuntimeError("subtensor unreachable")
+
+    monkeypatch.setattr(promotion, "_resolve_miner_uid", _resolve)
+    monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _broken_epoch)
+    monkeypatch.setattr(
+        promotion,
+        "get_epoch_mode",
+        lambda: promotion.STATEFUL_EPOCH_MODE,
+    )
+    controller = ResearchLabPromotionController(_epoch_config(), worker_ref="test-worker")
+
+    with pytest.raises(RuntimeError, match="subtensor unreachable"):
+        await controller._maybe_create_champion_reward(
+            candidate={
+                "candidate_id": "cand-stateful",
+                "miner_hotkey": "hk-stateful",
+                "ticket_id": "ticket-stateful",
+                "run_id": "run-stateful",
+            },
+            score_bundle_row={"score_bundle_id": "sb-stateful"},
+            score_bundle={
+                "evaluation_epoch": 100,
+                "aggregates": {"per_icp_results": []},
+            },
+            improvement_points=2.5,
+            threshold=1.0,
+        )
+
+    assert captured == []
+    assert store.reward_obligation_writes == []
+
+
 def _source_add_reward_config() -> Any:
     return SimpleNamespace(
         source_add_rewards_enabled=True,
@@ -1464,6 +1506,68 @@ async def test_source_add_leg2_created_when_llm_judge_says_helped(store, monkeyp
     assert obligation["trigger_evidence_doc"]["llm_verdict"] == "helped"
     events = [event for event in store.promotion_event_writes if event["event_type"] == "promotion_checked"]
     assert any((event["event_doc"] or {}).get("reason") == "source_add_leg2_reward_created" for event in events)
+
+
+async def test_stateful_source_add_leg2_fails_closed_when_epoch_authority_is_unavailable(
+    store,
+    monkeypatch,
+):
+    store.select_many_results["research_lab_source_add_provisioning_current"] = [
+        {
+            "provision_ref": "source_add_provision:" + "2" * 16,
+            "catalog_id": "source_catalog:" + "1" * 16,
+            "adapter_id": "adapter:test-api-source",
+            "miner_hotkey": "hk-source-owner",
+            "registry_provider_id": "test_api_source",
+            "provision_status": "provisioned_autoresearch_eligible",
+        }
+    ]
+    store.select_many_results["research_lab_source_add_reward_current"] = []
+    store.select_many_results["research_lab_candidate_promotion_events"] = []
+
+    async def _broken_epoch(_configured: Any = None) -> tuple[int, int | None, str]:
+        raise RuntimeError("subtensor unreachable")
+
+    async def _judge(**_kwargs: Any) -> SourceAddJudgeVerdict:
+        return SourceAddJudgeVerdict(
+            verdict="helped",
+            confidence=0.91,
+            source_used=True,
+            adapter_id="adapter:test-api-source",
+            registry_provider_id="test_api_source",
+            model_id="test/judge",
+        )
+
+    monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _broken_epoch)
+    monkeypatch.setattr(
+        promotion,
+        "get_epoch_mode",
+        lambda: promotion.STATEFUL_EPOCH_MODE,
+    )
+    _install_source_add_v2_judge(monkeypatch, _judge)
+    controller = ResearchLabPromotionController(
+        _source_add_reward_config(),
+        worker_ref="test-worker",
+    )
+
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={"candidate_id": "candidate:" + "1" * 64},
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle=_source_add_attribution_bundle(),
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status={
+            "champion_reward_status": "created",
+            "champion_reward_id": "cr-1",
+        },
+    )
+
+    assert result["source_add_reward_status"] == "failed"
+    assert result["error_class"] == "RuntimeError"
+    assert not any(
+        table == "research_lab_source_add_reward_obligations"
+        for table, _row in store.generic_insert_writes
+    )
 
 
 async def test_source_add_leg2_blocks_when_llm_judge_says_not_helped(store, monkeypatch):

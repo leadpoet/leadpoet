@@ -21,6 +21,9 @@ SCHEMA_VERSION = "leadpoet.protected_workflows.v2"
 DEFAULT_MANIFEST = Path(__file__).with_name("protected_workflows.json")
 
 PROTECTED_SYMBOLS = {
+    "gateway/tee/coordinator_epoch_cutover_v2.py": (
+        "attest_subnet_epoch_cutover_v2",
+    ),
     "gateway/research_lab/tee_protocol.py": (
         "normalize_tee_protocol",
     ),

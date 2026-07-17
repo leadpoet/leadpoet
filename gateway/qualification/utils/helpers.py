@@ -772,28 +772,15 @@ def cleanup_temp_files(directory: Path) -> None:
 
 async def get_current_bittensor_epoch() -> int:
     """
-    Get the current Bittensor block number (epoch).
+    Get the current workflow epoch from the shared gateway authority.
     
     Returns:
-        Current block number
+        Legacy global bucket before cutover, then the collision-safe settlement
+        ordinal mapped from the official SubnetEpochIndex.
     """
-    try:
-        import bittensor as bt
-        
-        loop = asyncio.get_event_loop()
-        
-        def _get_block():
-            subtensor = bt.Subtensor(network="finney")
-            return subtensor.block
-        
-        return await loop.run_in_executor(None, _get_block)
-        
-    except ImportError:
-        logger.warning("bittensor not installed - returning mock epoch")
-        return 1000000  # Mock value for testing
-    except Exception as e:
-        logger.error(f"Failed to get Bittensor epoch: {e}")
-        return 0
+    from gateway.utils.epoch import get_current_epoch_id_async
+
+    return await get_current_epoch_id_async()
 
 
 async def get_tao_price_usd() -> float:

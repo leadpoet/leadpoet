@@ -578,6 +578,24 @@ def resolve_provider_credential(
     return "", ""
 
 
+def _cancel_abandoned_exa_run(run_id: str) -> None:
+    """Best-effort upstream cancel for a TTL-reaped Exa agent run."""
+    try:
+        entry = next(e for e in seed_provider_registry() if e.id == "exa")
+        credential, _ = resolve_provider_credential(entry)
+        if not credential:
+            return
+        req = urllib.request.Request(
+            f"{entry.base_url}/agent/runs/{run_id}/cancel", data=b"", method="POST",
+            headers={"x-api-key": credential, "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            print(f"exa_gate_agent_run_ttl_cancel run={run_id[:24]} status={resp.status}",
+                  flush=True)
+    except Exception as exc:  # noqa: BLE001 - cleanup must never break gating
+        print(f"exa_gate_agent_run_ttl_cancel_failed run={run_id[:24]} "
+              f"error={str(exc)[:120]}", flush=True)
+
+
 class ExaConcurrencyGate:
     """Account-wide Exa concurrency limits, enforced at the one place every
     scoring/hosted container's provider traffic converges: this proxy.
@@ -620,6 +638,12 @@ class ExaConcurrencyGate:
                 self._agent_sem.release()
             except ValueError:
                 pass
+            # Releasing only our semaphore leaves the reaped run active on
+            # the account, where it still holds one of the provider-side
+            # concurrent agent-run slots and queues every new run behind it.
+            threading.Thread(
+                target=_cancel_abandoned_exa_run, args=(rid,), daemon=True
+            ).start()
 
     def acquire(self, provider: str, method: str, path: str) -> tuple[str, bool]:
         """Returns (kind, acquired). kind '' means this request is not gated."""

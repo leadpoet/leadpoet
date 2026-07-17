@@ -81,3 +81,27 @@ def test_ttl_reaper_recovers_lost_slots():
     # reaper runs inside acquire and frees the leaked slot
     _, ok2 = g.acquire("exa", "POST", "/agent/runs")
     assert ok2
+
+
+def test_ttl_reaper_cancels_run_upstream():
+    import threading
+    import gateway.research_lab.provider_evidence_proxy as proxy_module
+
+    cancelled = []
+    done = threading.Event()
+
+    def _recorder(rid):
+        cancelled.append(rid)
+        done.set()
+
+    g = _gate(agent=1)
+    g._run_ttl = -1.0
+    _, ok = g.acquire("exa", "POST", "/agent/runs")
+    assert ok
+    g.finish("agent_run", path="/agent/runs", status=200, body=_run_body("agent_run_y"))
+    with mock.patch.object(proxy_module, "_cancel_abandoned_exa_run", _recorder):
+        # reaper runs inside acquire; the upstream cancel is fired so the
+        # abandoned run stops holding a provider-side agent-run slot
+        g.acquire("exa", "POST", "/agent/runs")
+        assert done.wait(2.0)
+    assert cancelled == ["agent_run_y"]

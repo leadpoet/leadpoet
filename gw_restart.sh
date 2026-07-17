@@ -39,6 +39,7 @@ export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HO
 export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:-$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT/validator-runtime}"
 GATEWAY_DEPLOY_STAGE="${GATEWAY_DEPLOY_STAGE:-bootstrap}"
 GATEWAY_DEPLOY_COMPLETED=0
+GATEWAY_PREFLIGHT_TREE=""
 V2_CREDENTIAL_ENVELOPES=(
   "$GATEWAY_V2_CONFIG_DIR/artifact_master_key.json"
   "$GATEWAY_V2_CONFIG_DIR/openrouter.json"
@@ -98,12 +99,22 @@ finalize_deployment_record() {
 
 on_gateway_restart_exit() {
   local status="$?"
+  if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ]; then
+    rm -rf "$GATEWAY_PREFLIGHT_TREE"
+  fi
   if [ "$status" -ne 0 ] \
       && [ "$GATEWAY_DEPLOY_COMPLETED" != "1" ] \
       && [ -f "$GATEWAY_DEPLOY_PLAN_FILE" ] \
       && [ -f "$GATEWAY_GIT_HELPER" ]; then
     finalize_deployment_record failed "$GATEWAY_DEPLOY_STAGE" >/dev/null 2>&1 || true
   fi
+}
+
+run_prepared_gateway_module() {
+  (
+    cd "$GATEWAY_PREFLIGHT_TREE"
+    PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" python3 -m "$@"
+  )
 }
 trap on_gateway_restart_exit EXIT
 
@@ -553,8 +564,16 @@ PREPARED_GATEWAY_SHA="$(
 )"
 echo "Prepared gateway commit: $PREPARED_GATEWAY_SHA"
 
+echo "Materializing the prepared commit for pre-shutdown V2 tooling"
+GATEWAY_PREFLIGHT_TREE="$(mktemp -d /tmp/gateway-v2-preflight.XXXXXX)"
+if ! git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA" \
+    | tar -xf - -C "$GATEWAY_PREFLIGHT_TREE"; then
+  echo "ERROR: unable to materialize the prepared commit for V2 preflight" >&2
+  exit 1
+fi
+
 echo "Acquiring the independently built V2 release channel"
-if ! PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.tee.release_channel_v2 \
+if ! run_prepared_gateway_module gateway.tee.release_channel_v2 \
     --ensure \
     --expected-commit "$PREPARED_GATEWAY_SHA" \
     --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
@@ -566,7 +585,7 @@ if ! PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.tee.release_channel_v2 
 fi
 
 echo "Preparing commit-bound KMS credential envelopes"
-if ! PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.tee.prepare_gateway_envelopes_v2 \
+if ! run_prepared_gateway_module gateway.tee.prepare_gateway_envelopes_v2 \
     --install \
     --env-file "$ENV_CLONE" \
     --kms-key-id "$GATEWAY_V2_KMS_KEY_ID" \
@@ -656,18 +675,11 @@ fi
 echo "Validating the prepared V2 release before production shutdown"
   GATEWAY_DEPLOY_STAGE="v2_pre_shutdown_preflight"
   export GATEWAY_DEPLOY_STAGE
-  GATEWAY_PREFLIGHT_TREE="$(mktemp -d /tmp/gateway-v2-preflight.XXXXXX)"
-  if ! git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA" \
-      | tar -xf - -C "$GATEWAY_PREFLIGHT_TREE"; then
-    rm -rf "$GATEWAY_PREFLIGHT_TREE"
-    echo "ERROR: unable to materialize the prepared commit for V2 preflight" >&2
-    exit 1
-  fi
   V2_PREFLIGHT_CREDENTIAL_ARGS=()
   for envelope in "${V2_CREDENTIAL_ENVELOPES[@]}"; do
     V2_PREFLIGHT_CREDENTIAL_ARGS+=(--credential-envelope "$envelope")
   done
-  if ! PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" python3 -m gateway.tee.restart_preflight_v2 \
+  if ! run_prepared_gateway_module gateway.tee.restart_preflight_v2 \
       --deploy-commit "$PREPARED_GATEWAY_SHA" \
       --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
       --topology-manifest "$GATEWAY_PREFLIGHT_TREE/gateway/tee/topology.json" \
@@ -685,13 +697,16 @@ echo "Validating the prepared V2 release before production shutdown"
   echo "Preparing exact hash-locked V2 build artifacts before production shutdown"
   GATEWAY_DEPLOY_STAGE="v2_offline_artifact_prepare"
   export GATEWAY_DEPLOY_STAGE
-  if ! GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
-      bash "$GATEWAY_PREFLIGHT_TREE/gateway/tee/prepare_offline_artifacts_v2.sh"; then
-    rm -rf "$GATEWAY_PREFLIGHT_TREE"
+  if ! (
+      cd "$GATEWAY_PREFLIGHT_TREE"
+      GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
+        bash "$GATEWAY_PREFLIGHT_TREE/gateway/tee/prepare_offline_artifacts_v2.sh"
+    ); then
     echo "ERROR: V2 offline artifact preparation failed before shutdown" >&2
     exit 1
   fi
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
+GATEWAY_PREFLIGHT_TREE=""
 
 echo "Stopping existing gateway and Research Lab worker processes"
 pkill -9 -f "python3 main.py" 2>/dev/null || true

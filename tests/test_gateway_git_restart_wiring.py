@@ -61,6 +61,15 @@ def test_gateway_restart_fails_closed_on_all_authoritative_readiness_routes() ->
 
 def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    materialize = script.index(
+        'echo "Materializing the prepared commit for pre-shutdown V2 tooling"'
+    )
+    release_channel = script.index(
+        'run_prepared_gateway_module gateway.tee.release_channel_v2'
+    )
+    credential_envelopes = script.index(
+        'run_prepared_gateway_module gateway.tee.prepare_gateway_envelopes_v2'
+    )
     preflight = script.index(
         'echo "Validating the prepared V2 release before production shutdown"'
     )
@@ -70,9 +79,20 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     artifact_prepare = script.index(
         'echo "Preparing exact hash-locked V2 build artifacts before production shutdown"'
     )
+    assert materialize < release_channel < credential_envelopes < preflight
     assert preflight < shutdown
     assert preflight < artifact_prepare < shutdown
-    assert script.index('git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA"') < shutdown
+    assert (
+        script.index(
+            'git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA"'
+        )
+        < release_channel
+    )
+    assert (
+        'PYTHONPATH="$LEADPOET_REPO_ROOT" '
+        "python3 -m gateway.tee.release_channel_v2"
+    ) not in script
+    assert 'cd "$GATEWAY_PREFLIGHT_TREE"' in script
     assert script.index("gateway.tee.restart_preflight_v2") < shutdown
     assert script.index('--deploy-commit "$PREPARED_GATEWAY_SHA"') < shutdown
     assert script.index('--release-manifest "$GATEWAY_V2_RELEASE_MANIFEST"') < shutdown

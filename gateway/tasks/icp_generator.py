@@ -292,6 +292,47 @@ GEOGRAPHIES = [
     "United States, Southwest",
 ]
 
+# International geographies for the 20% international quota —
+# English-speaking business markets only, so sourcing/verification content
+# (news, job posts, company sites) stays reliably parseable. Country-first
+# format only ("Country" or "Country, Region"): the deployed scorer gate
+# reads the country from the first comma segment, so bare region names
+# ("Europe") would zero every company until the dynamic geography gate is
+# deployed. Broad country-level values keep real-candidate supply high.
+INTERNATIONAL_GEOGRAPHIES = [
+    "United Kingdom",
+    "United Kingdom, London",
+    "Ireland",
+    "Canada",
+    "Canada, Toronto",
+    "Australia",
+    "Australia, Sydney",
+    "New Zealand",
+    "Singapore",
+    "United Arab Emirates, Dubai",
+    "United Arab Emirates, Abu Dhabi",
+]
+
+# Share of each generated set that must use international geographies.
+INTERNATIONAL_ICP_SHARE = 0.20
+
+
+def international_icp_target(total_icps: int) -> int:
+    """How many ICPs of a set must be international (20%, at least 1)."""
+    return max(1, round(total_icps * INTERNATIONAL_ICP_SHARE))
+
+
+def count_international_icps(icps: List[Dict[str, Any]]) -> int:
+    """ICPs whose country is set and is not the United States."""
+    count = 0
+    for icp in icps:
+        if not isinstance(icp, dict):
+            continue
+        country = str(icp.get("country") or "").strip().lower()
+        if country and country not in ("united states", "usa", "us"):
+            count += 1
+    return count
+
 # Products/Services by industry (what the miner's model should help sell)
 # One entry per industry in INDUSTRY_DISTRIBUTION.
 PRODUCTS_BY_INDUSTRY = {
@@ -712,10 +753,20 @@ ALLOWED EMPLOYEE BANDS — USE THESE EXACT LINKEDIN BUCKETS ONLY:
 - Do not use fake broad ranges like "51-5000".
 
 ALLOWED GEOGRAPHIES — STRONGLY PREFER BROAD VALUES:
-- "United States" (whole country — use this for ~50% of ICPs)
-- "United States, West Coast" / "Northeast" / "Midwest" / "South" / "Southwest" (use for ~40%)
+EXACTLY {international_target} of the {total_icps} ICPs MUST use an international geography from this list (pick industries where that market genuinely thrives, e.g. FinTech in London, Mining tech in Australia, Payments in Singapore):
+- "United Kingdom" / "United Kingdom, London"
+- "Ireland"
+- "Canada" / "Canada, Toronto"
+- "Australia" / "Australia, Sydney"
+- "New Zealand"
+- "Singapore"
+- "United Arab Emirates, Dubai" / "United Arab Emirates, Abu Dhabi"
+These are English-speaking business markets only; never use any other country and never use a bare region name like "Europe" or "APAC". For international ICPs, `country` must be the country portion of the geography (e.g. "United Kingdom", "Canada").
+
+The remaining {domestic_count} ICPs are United States:
+- "United States" (whole country — use this for ~50% of the US ICPs)
+- "United States, West Coast" / "Northeast" / "Midwest" / "South" / "Southwest" (~40%)
 - "United States, <State>" only when the industry has a known concentration there (~10%)
-- "United Arab Emirates, Dubai" or "United Arab Emirates, Abu Dhabi" — at most 1 ICP, only when financial services / lending naturally fits
 
 INDUSTRY × INTENT PAIRING (Sonar should naturally honor these):
 - Service industries (Consulting, Legal, Accounting, Recruiting) → leadership change, hiring, expansion, acquisition, partnership — NOT product launch
@@ -740,7 +791,7 @@ OUTPUT — JSON ONLY, NO PROSE, NO MARKDOWN
       "industry": "<from industry list, in order>",
       "sub_industry": "<natural sub-industry>",
       "geography": "<from allowed geographies, prefer broad>",
-      "country": "United States",
+      "country": "<the country portion of the geography, e.g. United States, United Kingdom, Canada>",
       "employee_count": ["<3-5 contiguous allowed LinkedIn buckets>"],
       "company_stage": "<from allowed stages>",
       "product_service": "<broad category — NOT a single named tool>",
@@ -763,7 +814,16 @@ FINAL CHECK before output (for every ICP):
 3. Does the intent signal fit the industry's shape?
 4. Is the geography broad enough that real candidates exist?
 5. Are there exactly 20 ICPs, one per industry in the listed order?
-6. No job titles, no seniority, no contact-level descriptors in the prompts?"""
+6. Are EXACTLY {international_target} ICPs international (non-US, from the allowed international list) with `country` matching their geography?
+7. No job titles, no seniority, no contact-level descriptors in the prompts?"""
+
+    international_target = international_icp_target(total_icps)
+    system_prompt = (
+        system_prompt
+        .replace("{international_target}", str(international_target))
+        .replace("{total_icps}", str(total_icps))
+        .replace("{domestic_count}", str(total_icps - international_target))
+    )
 
     user_prompt = f"""Generate 20 ICPs for set_id={set_id}. Follow every instruction in the system message exactly. Output JSON only, no commentary."""
 
@@ -892,14 +952,26 @@ FINAL CHECK before output (for every ICP):
             # intersection unnecessarily and cause downstream empty markets.
             geography = icp.get("geography", "United States")
 
-            # Allow US and UAE only; override anything else to whole-US.
-            if geography and "United Arab Emirates" in geography:
-                country = "United Arab Emirates"
-            elif geography and "United States" in geography:
+            # Allow the US plus the English-speaking international markets
+            # (20% quota); override anything else to whole-US. Geography is
+            # country-first, so the country is its first comma segment.
+            international_match = next(
+                (
+                    candidate
+                    for candidate in INTERNATIONAL_GEOGRAPHIES
+                    if geography
+                    and geography.split(",")[0].strip().lower()
+                    == candidate.split(",")[0].strip().lower()
+                ),
+                None,
+            )
+            if geography and "United States" in geography:
                 country = "United States"
+            elif international_match:
+                country = international_match.split(",")[0].strip()
             else:
                 logger.warning(
-                    f"ICP {icp_id} has non-US/UAE geography {geography!r}, "
+                    f"ICP {icp_id} has unsupported geography {geography!r}, "
                     f"overriding to 'United States' (whole-country, broad supply)"
                 )
                 geography = "United States"
@@ -962,10 +1034,27 @@ FINAL CHECK before output (for every ICP):
         
         # If the distribution is slightly imperfect, that's OK - the LLM output is approximate
         logger.info(f"Validated {len(validated_icps)} ICPs with distribution: {actual_distribution}")
-        
+
+        # International quota (20% of the set, English-speaking markets). The
+        # generation prompt demands the exact count; a short set still ships
+        # (template fallback would be worse) but never silently — the tag
+        # below is the alert hook for drift.
+        international_count = count_international_icps(validated_icps)
+        if international_count < international_target:
+            logger.warning(
+                "icp_international_quota_missed generated=%d target=%d total=%d",
+                international_count,
+                international_target,
+                len(validated_icps),
+            )
+        else:
+            logger.info(
+                f"International ICP quota met: {international_count}/{international_target}"
+            )
+
         # Compute hash
         icp_set_hash = compute_icp_set_hash(validated_icps)
-        
+
         return validated_icps, actual_distribution, icp_set_hash
         
     except httpx.TimeoutException:

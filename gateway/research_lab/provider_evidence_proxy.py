@@ -621,8 +621,14 @@ class ExaConcurrencyGate:
         self._search_sem = threading.BoundedSemaphore(self.search_limit)
         self._active_runs: dict[str, float] = {}
         self._lock = threading.Lock()
-        self._run_ttl = float(os.getenv("EXA_AGENT_RUN_TTL_SECONDS", "960"))
-        self._wait_seconds = float(os.getenv("EXA_GATE_WAIT_SECONDS", "240"))
+        # Real agent runs complete in ~100-200s, so a leaked slot recycles
+        # within minutes rather than a quarter hour.
+        self._run_ttl = float(os.getenv("EXA_AGENT_RUN_TTL_SECONDS", "300"))
+        # MUST stay below the model client's 60s HTTP timeout. A longer wait
+        # makes the client hang up mid-queue while this thread later acquires
+        # a slot and creates a run nobody will ever poll: the slot then leaks
+        # until TTL, and under load those orphans saturate the whole gate.
+        self._wait_seconds = float(os.getenv("EXA_GATE_WAIT_SECONDS", "45"))
 
     def _reap_expired_runs(self) -> None:
         now = time.time()

@@ -12,17 +12,17 @@
       "symbol": "get_attested_weights_v2"
     },
     {
-      "ast_sha256": "sha256:07cb692ded381efe5f58d01072dd3a6563737d6ba1736033f563a604009cebf7",
+      "ast_sha256": "sha256:404aac960c54c076101dd67a89b2132caaf3665e60946f76459e6181c7d54313",
       "path": "gateway/api/weights.py",
       "symbol": "get_weight_inputs_v2"
     },
     {
-      "ast_sha256": "sha256:529881ae8794681804e98ac55b4fbd729bde21a1081389d989f7ff42fdbb207a",
+      "ast_sha256": "sha256:a45b1371bee122cfe1479ee53ecf024fa9b10ec37c08e2db333ab807fa68ea9e",
       "path": "gateway/api/weights.py",
       "symbol": "submit_weights"
     },
     {
-      "ast_sha256": "sha256:19941ff03a967b4b6c6129deb75a3f6c490688211f9b998d70bea8916793bcc9",
+      "ast_sha256": "sha256:253057c01440904b9f1d3b0f043acc19914a46d13d50d52fb9fe8e51b6adfb7b",
       "path": "gateway/api/weights.py",
       "symbol": "submit_weights_v2"
     },
@@ -377,17 +377,22 @@
       "symbol": "CoordinatorActiveModelSourceV2"
     },
     {
-      "ast_sha256": "sha256:64a6864a27afc489bbe2f0ee4fca90d8fff574029ed2e0275c6fc3be4a158129",
+      "ast_sha256": "sha256:0403d2ca7ae3d3803b6d245fdd19d78c4bcf88df3c4d559602fb0c38d3807ff7",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
     {
-      "ast_sha256": "sha256:cdeb652ef9c73a3c6b1a5c184599f38a7dca353601a21f9b3073b63dc3438d3d",
+      "ast_sha256": "sha256:10b56c547ef238a2ac01f554b951f04111e050a23767ae3124e57e3f33a37858",
       "path": "gateway/tee/coordinator_chain_source_v2.py",
       "symbol": "CoordinatorChainSourceV2"
     },
     {
-      "ast_sha256": "sha256:29c74afa2d61c9476a3cc4f4e40f07c8788003e9b75ce2340187c0c125e8a4ef",
+      "ast_sha256": "sha256:b11f527cd02841d8c0062d2cbdf03cd44f3770a4fc6e827063e5f6a23a110358",
+      "path": "gateway/tee/coordinator_epoch_cutover_v2.py",
+      "symbol": "attest_subnet_epoch_cutover_v2"
+    },
+    {
+      "ast_sha256": "sha256:9a6626cf7de59653334cf6039a11bd451388ff40f5556fbc6664beb6d2ac8c11",
       "path": "gateway/tee/coordinator_executor_v2.py",
       "symbol": "CoordinatorExecutorV2"
     },
@@ -397,7 +402,7 @@
       "symbol": "CoordinatorLegacySettlementSourceV2"
     },
     {
-      "ast_sha256": "sha256:43e23098d3ca6318fbdbe9659872714c808ed04aed4154724fab0316b4d166a4",
+      "ast_sha256": "sha256:419297674c08a7952542da5ca744114b388d3ac71df36af7300cf345486ada85",
       "path": "gateway/tee/coordinator_reward_source_v2.py",
       "symbol": "CoordinatorRewardSourceV2"
     },
@@ -467,7 +472,7 @@
       "symbol": "source_add_reward_row_projection_v2"
     },
     {
-      "ast_sha256": "sha256:e92935292ee1a1d6fc376bc436c63b0e4005978f19d51cd6987496f473cc785b",
+      "ast_sha256": "sha256:f814f8d1545ab082dd4ccd7c599c1f61a29f834d22b525c44607dbdc10bb72c9",
       "path": "gateway/tee/scoring_executor_v2.py",
       "symbol": "ScoringExecutorV2"
     },
@@ -907,7 +912,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:b94233877631e95da6f86deac3d9cb58015c88eb8ac2700fae8a975aedfedf46",
-  "protected_source_commit": "c62caef72b68c14c62386117e6143255dd89f636",
+  "manifest_hash": "sha256:b3e2d554a266336c5dfdbd231e55360fb3f3ca06b7515a371647033b15feaa21",
+  "protected_source_commit": "3d8dd006c6f9ace4e6ab72f2ac13056e18d48f72",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

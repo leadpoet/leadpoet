@@ -37,7 +37,7 @@
       "symbol": "build_weight_extrinsic_authorization_v2"
     },
     {
-      "ast_sha256": "sha256:c68e0e4ba91c21993eeed3d546f78b684f94dc2fb64c8d7d5b273fe85e3123dc",
+      "ast_sha256": "sha256:9966553e4180653a17bda402811344646939acc8edd5fa79bec5b96f1f43e036",
       "path": "leadpoet_canonical/hotkey_authority_v2.py",
       "symbol": "classify_application_message_v2"
     },
@@ -122,37 +122,37 @@
       "symbol": "AuditorValidator.fetch_verified_weight_authority"
     },
     {
-      "ast_sha256": "sha256:343e15bc5961263d19d9c4dd81309f4995130b699efea6801986d9d8d07210c9",
+      "ast_sha256": "sha256:d1b73a65bc7bd4912575e25f5afc4bcafb978c5f5fa7ac5ecf1e763574d29fbd",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.run"
     },
     {
-      "ast_sha256": "sha256:9943ad3e074a70af19b39296bfddfbc3783d5a311677953f96f367adfd9b71ed",
+      "ast_sha256": "sha256:c0bab6612e1524338e40ac5d6554306e1b5bd945b9e355635d9dfa736216e5dd",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.submit_weights_to_chain"
     },
     {
-      "ast_sha256": "sha256:0f7392ada9e02e2e106cd2da23543fcf0805f7f10915b374d64972958f2b3c53",
+      "ast_sha256": "sha256:6947e893138adb5bce387a218d72d002b3b64ada9431be7049c41d0827c34b91",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.verify_attested_weights_v2"
     },
     {
-      "ast_sha256": "sha256:d5c7d0e40d19bdf1052a11aa7e877d87ed031cb52b342ae3462fe9cbd947c110",
+      "ast_sha256": "sha256:88499d0534d46818498ee33aca1b1c269752b6236d7ef8a21ccc1d92d4edfdf8",
       "path": "neurons/validator.py",
       "symbol": "Validator.__init__"
     },
     {
-      "ast_sha256": "sha256:7ccab3215cbc848e3e6aa822729b50f30bc23687837b31ecc91094d6a7e71238",
+      "ast_sha256": "sha256:59c4247cd7a2d4d1a5c3ed45ba5b30e4294f4ef417d6debf628f68f30b543d46",
       "path": "neurons/validator.py",
       "symbol": "Validator._authorize_and_set_weights_v2"
     },
     {
-      "ast_sha256": "sha256:7128ebe106f3c31e8390bc3074e73eee4e6c03b93f22e6c492151bc7c54579b4",
+      "ast_sha256": "sha256:f2b6913e83d295bec3394947d311994bcaa7497dde4fff46195d8717d719ae18",
       "path": "neurons/validator.py",
       "symbol": "Validator._publish_and_set_weights"
     },
     {
-      "ast_sha256": "sha256:32c9a532de3d4ec3239c7e55f3fdc4e662a6672fb1a8b751ea00e32f3e130997",
+      "ast_sha256": "sha256:850eb751cf458037ec1df2326812e1696c46fa1ae2f4acec295c726403a8a118",
       "path": "neurons/validator.py",
       "symbol": "Validator._recover_weight_publication_journal_v2"
     },
@@ -162,7 +162,7 @@
       "symbol": "Validator._research_lab_pre_weight_submission_guard"
     },
     {
-      "ast_sha256": "sha256:915905581088890d3db53ac38fa4644102765dc19c4fec29f24470d48f940a90",
+      "ast_sha256": "sha256:0538f8818f1b882b86a2c3ccf76687cefecccfb10bb0daa4e0a05ba9c8195577",
       "path": "neurons/validator.py",
       "symbol": "Validator._set_weights_until_epoch_end"
     },
@@ -172,7 +172,7 @@
       "symbol": "Validator.set_weights"
     },
     {
-      "ast_sha256": "sha256:158f990b7b20a62542867f254cb049dbf1f7ece8d14db747ec6e8dae01919d26",
+      "ast_sha256": "sha256:a01ef0afb1bd542808200560dacf9627db9755a50ec6b5812d120a4787a20305",
       "path": "neurons/validator.py",
       "symbol": "Validator.submit_weights_at_epoch_end"
     },
@@ -182,7 +182,7 @@
       "symbol": "_validator_weight_protocol"
     },
     {
-      "ast_sha256": "sha256:b835f96a311d8f2fe85df170f2f3ed5b9f09fbcb53d7eb40b03e61e10acc2c0d",
+      "ast_sha256": "sha256:8378dda2394a9a15c8fd059dc20e1b74da7d599d8344396c1409568c0d90c3f5",
       "path": "validator_tee/enclave/chain_source_v2.py",
       "symbol": "EnclaveChainRpcTransportV2.call"
     },
@@ -192,7 +192,7 @@
       "symbol": "ValidatorChainSourceV2.find_finalized_extrinsic_inclusion"
     },
     {
-      "ast_sha256": "sha256:d68816858fe3b9367933067d90993dba78a423c8755fe010f6c8549707865ce7",
+      "ast_sha256": "sha256:027adfe9c181f4a32a20a009a1fde9453768fe103ecbe22f96f215b5ef819c82",
       "path": "validator_tee/enclave/chain_source_v2.py",
       "symbol": "ValidatorChainSourceV2.read_finalized_snapshot"
     },
@@ -232,7 +232,7 @@
       "symbol": "ValidatorHotkeyAuthorityV2.sign_weight_extrinsic"
     },
     {
-      "ast_sha256": "sha256:6446a456d7dc33630c3ba3a3ddd4f8fe05021ba5cc6a060f31dc76dcc43d95ec",
+      "ast_sha256": "sha256:b22ba5a627c0dfae4e343041a8abd2ecae1f8aaad10f997534714c92fed0f7e0",
       "path": "validator_tee/enclave/weight_authority_v2.py",
       "symbol": "ValidatorWeightAuthorityV2.compute"
     },
@@ -247,12 +247,12 @@
       "symbol": "finalize_authoritative_weight_publication_v2"
     },
     {
-      "ast_sha256": "sha256:9a273d010e7a4e3a9069a8ff539d892c268692c1d984fa775196f709069af5f4",
+      "ast_sha256": "sha256:905e821cfc8b349c9eb080d94649dfe1d3a48966402fdee014f151a848c4a78e",
       "path": "validator_tee/host/authoritative_weight_flow_v2.py",
       "symbol": "prepare_authoritative_weight_publication_v2"
     },
     {
-      "ast_sha256": "sha256:1c37c2ecea9b27b62dc67f311564d0a5fb55a2e1b70d03e95a14d28e439e90c6",
+      "ast_sha256": "sha256:d49b761e92e12f5edb13a0461c08cd18c1b1dfdcb70416ce961bcc7cb85b9e3c",
       "path": "validator_tee/host/authoritative_weight_flow_v2.py",
       "symbol": "resume_prepared_weight_publication_v2"
     },
@@ -262,7 +262,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:35b34cad1b085d9e2f8ccb570f345eb86efb2248c6e435fc99420db3d889d4c4",
-  "protected_source_commit": "4fbbce26527808904c063ca3599fd82a0985133e",
+  "manifest_hash": "sha256:f7b61d82e878a8c72dda938c831178d0f3d8a52de5d75bc442e01f782ae6e90b",
+  "protected_source_commit": "3d8dd006c6f9ace4e6ab72f2ac13056e18d48f72",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

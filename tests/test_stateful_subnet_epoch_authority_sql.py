@@ -76,14 +76,13 @@ def test_high_water_prerequisite_is_nontransactional_and_covers_live_gaps():
     )
     assert "BEGIN;" not in executable
     assert "COMMIT;" not in executable
-    assert INDEX_SQL.count("CREATE INDEX CONCURRENTLY IF NOT EXISTS") == 14
+    assert INDEX_SQL.count("CREATE INDEX CONCURRENTLY IF NOT EXISTS") == 13
     for relation_and_key in (
         "public.epoch_audit_logs(epoch_id DESC)",
         "public.published_weight_bundles(epoch_id DESC)",
         "public.research_lab_attested_weight_bundles(epoch_id DESC)",
         "public.research_lab_attested_weight_bundles_v2(epoch_id DESC)",
         "public.research_lab_champion_reward_obligations(evaluation_epoch DESC)",
-        "public.research_lab_epoch_payouts(epoch DESC)",
         "public.research_lab_legacy_finalized_allocation_migrations_v2(epoch_id DESC)",
         "public.research_lab_private_model_benchmark_bundles(evaluation_epoch DESC)",
         "public.research_lab_scoring_runs(evaluation_epoch DESC)",
@@ -95,6 +94,9 @@ def test_high_water_prerequisite_is_nontransactional_and_covers_live_gaps():
         assert relation_and_key in INDEX_SQL
     assert "idx_transparency_log_payload_epoch_identity_v1" in INDEX_SQL
     assert "((payload->>'epoch_id')::BIGINT) DESC" in INDEX_SQL
+    assert "SKIP_VIEW: research_lab_epoch_payouts" in INDEX_SQL
+    assert "public.research_lab_epoch_payouts(epoch DESC)" not in INDEX_SQL
+    assert "idx_rl_epoch_payouts_epoch_identity_v1" not in INDEX_SQL
     assert "scripts/101-stateful-subnet-epoch-authority.sql" in INDEX_SQL
 
 
@@ -408,7 +410,8 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
             "CREATE TABLE IF NOT EXISTS public.published_weight_bundles(epoch_id INTEGER);"
             "CREATE TABLE IF NOT EXISTS public.research_lab_attested_weight_bundles(epoch_id INTEGER);"
             "CREATE TABLE IF NOT EXISTS public.research_lab_champion_reward_obligations(evaluation_epoch INTEGER);"
-            "CREATE TABLE IF NOT EXISTS public.research_lab_epoch_payouts(epoch INTEGER);"
+            "CREATE VIEW public.research_lab_epoch_payouts AS "
+            "SELECT NULL::INTEGER AS epoch WHERE FALSE;"
             "CREATE TABLE IF NOT EXISTS public.research_lab_private_model_benchmark_bundles(evaluation_epoch INTEGER);"
             "CREATE TABLE IF NOT EXISTS public.research_lab_scoring_runs(evaluation_epoch INTEGER);"
             "CREATE TABLE IF NOT EXISTS public.validation_evidence_private(epoch_id INTEGER);"
@@ -424,6 +427,15 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
         # Execute the real non-transactional production prerequisite through
         # psql, which dispatches each concurrent index statement separately.
         psql(INDEX_SQL)
+        payout_view_probe = psql(
+            "SELECT relation.relkind, "
+            "pg_catalog.to_regclass("
+            "'public.idx_rl_epoch_payouts_epoch_identity_v1') IS NULL "
+            "FROM pg_catalog.pg_class relation "
+            "WHERE relation.oid="
+            "'public.research_lab_epoch_payouts'::pg_catalog.regclass;"
+        )
+        assert "v|t" in payout_view_probe.stdout
         psql(SQL)
 
         # The public runtime contract is an exact, sanitized singleton RPC.

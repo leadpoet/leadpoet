@@ -24,8 +24,9 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rl_attested_weight_bundles_v2_epoch_
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rl_champion_rewards_eval_epoch_identity_v1
     ON public.research_lab_champion_reward_obligations(evaluation_epoch DESC);
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rl_epoch_payouts_epoch_identity_v1
-    ON public.research_lab_epoch_payouts(epoch DESC);
+-- SKIP_VIEW: research_lab_epoch_payouts is a derived view in production.  The
+-- physical epoch identities that feed it are indexed independently below and
+-- by the catalog catch-all. PostgreSQL cannot create an index on a view.
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rl_legacy_finalized_epoch_identity_v1
     ON public.research_lab_legacy_finalized_allocation_migrations_v2(epoch_id DESC);
@@ -114,7 +115,6 @@ BEGIN
         'idx_rl_attested_weight_bundles_epoch_identity_v1',
         'idx_rl_attested_weight_bundles_v2_epoch_identity_v1',
         'idx_rl_champion_rewards_eval_epoch_identity_v1',
-        'idx_rl_epoch_payouts_epoch_identity_v1',
         'idx_rl_legacy_finalized_epoch_identity_v1',
         'idx_rl_private_benchmark_eval_epoch_identity_v1',
         'idx_rl_scoring_runs_eval_epoch_identity_v1',
@@ -177,7 +177,6 @@ WHERE index_relation.relname IN (
     'idx_rl_attested_weight_bundles_epoch_identity_v1',
     'idx_rl_attested_weight_bundles_v2_epoch_identity_v1',
     'idx_rl_champion_rewards_eval_epoch_identity_v1',
-    'idx_rl_epoch_payouts_epoch_identity_v1',
     'idx_rl_legacy_finalized_epoch_identity_v1',
     'idx_rl_private_benchmark_eval_epoch_identity_v1',
     'idx_rl_scoring_runs_eval_epoch_identity_v1',

@@ -162,7 +162,7 @@
       "symbol": "Validator._research_lab_pre_weight_submission_guard"
     },
     {
-      "ast_sha256": "sha256:59aeca18fc26f91bf6399c50247d72b0599989d68f73f7769c6a49cfa6e75ffa",
+      "ast_sha256": "sha256:915905581088890d3db53ac38fa4644102765dc19c4fec29f24470d48f940a90",
       "path": "neurons/validator.py",
       "symbol": "Validator._set_weights_until_epoch_end"
     },
@@ -202,7 +202,7 @@
       "symbol": "ValidatorHotkeyAuthorityV2.confirm_weight_publication"
     },
     {
-      "ast_sha256": "sha256:3f784ec8ab776d9cb8b0bb39919a387f3561305851d1e2054771fb7669207981",
+      "ast_sha256": "sha256:06862e20612217792f1c8cc78514b2c1525b9c4104af77dd03d3fc93e6ddb29e",
       "path": "validator_tee/enclave/hotkey_authority_v2.py",
       "symbol": "ValidatorHotkeyAuthorityV2.prepare_weight_commit"
     },
@@ -262,7 +262,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:f2d50607b4ee82909fc1d17fcff93505449910bf35fabc49c8f07423d0b860b9",
-  "protected_source_commit": "c62caef72b68c14c62386117e6143255dd89f636",
+  "manifest_hash": "sha256:35b34cad1b085d9e2f8ccb570f345eb86efb2248c6e435fc99420db3d889d4c4",
+  "protected_source_commit": "4fbbce26527808904c063ca3599fd82a0985133e",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

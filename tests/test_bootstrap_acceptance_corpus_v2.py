@@ -89,6 +89,29 @@ class _Reader:
         raise AssertionError(table)
 
 
+class _AllHoldoutReader(_Reader):
+    def rows(self, table, **kwargs):
+        rows = super().rows(table, **kwargs)
+        if table != "research_evaluation_score_bundles":
+            return rows
+        for index, row in enumerate(rows):
+            if index == 42:
+                gate = {
+                    "decision": "private_holdout_approved",
+                    "private_holdout_evaluated": True,
+                    "baseline_aggregate_score": 40.0,
+                    "candidate_total_score": 42.0,
+                    "candidate_delta_vs_daily_baseline": 2.0,
+                }
+            else:
+                gate = {
+                    "decision": "rejected_before_private_holdout",
+                    "private_holdout_evaluated": False,
+                }
+            row["score_bundle_doc"]["private_holdout_gate"] = gate
+        return rows
+
+
 def test_bootstrap_uses_real_rows_and_replays_every_promotion_branch(tmp_path):
     fixtures = build_fixture_index(_Reader(), corpus_root=tmp_path / "corpus")
     counts = {}
@@ -137,3 +160,23 @@ def test_timestamp_accepts_postgrest_five_digit_fraction_on_python_39():
         _timestamp("2026-07-14T06:27:29.75749+00:00")
         == "2026-07-14T06:27:29.757490Z"
     )
+
+
+def test_bootstrap_selects_authoritative_pass_when_every_row_has_holdout_gate(
+    tmp_path,
+):
+    fixtures = build_fixture_index(
+        _AllHoldoutReader(),
+        corpus_root=tmp_path / "corpus",
+    )
+    passed = next(
+        fixture
+        for fixture in fixtures
+        if fixture["kind"] == "promotion_branch"
+        and fixture["metadata"]["status"] == "promotion_passed"
+    )
+    artifact = json.loads(
+        (tmp_path / "corpus" / passed["artifact_path"]).read_text()
+    )
+    assert artifact["source_score_bundle_hash"] == _hash("score:42")
+    assert artifact["expected_decision"]["status"] == "promotion_passed"

@@ -276,7 +276,27 @@ def build_fixture_index(reader: PostgrestHistoryReader, *, corpus_root: Path) ->
             metadata={"benchmark_date": str(row["benchmark_date"])},
         ))
 
-    usable = next((row for row in reversed(scores) if "private_holdout_gate" not in _promotion_input(row.get("score_bundle_doc") or {})), scores[-1])
+    usable = next(
+        (
+            row
+            for row in reversed(scores)
+            if promotion_gate_decision(
+                _promotion_input(row.get("score_bundle_doc") or {}),
+                candidate_kind="image_build",
+                candidate_parent="sha256:historical-parent",
+                active_parent="sha256:historical-parent",
+                threshold_points=-1_000_000.0,
+                auto_promotion_enabled=True,
+            ).status
+            == "promotion_passed"
+        ),
+        None,
+    )
+    if usable is None:
+        raise AcceptanceCorpusBootstrapV2Error(
+            "production history has no score bundle that authoritatively "
+            "replays to promotion_passed"
+        )
     rejected = next(
         (
             row

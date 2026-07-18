@@ -25,6 +25,7 @@ CRITICAL_IMPORTS = (
     "lxml",
     "numpy",
     "pydantic",
+    "publicsuffix2",
     "requests",
     "trafilatura",
     "whois",

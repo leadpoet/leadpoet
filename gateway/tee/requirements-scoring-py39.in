@@ -37,6 +37,7 @@ propcache==0.4.1
 pycparser==2.21
 pydantic==2.12.4
 pydantic-core==2.41.5
+publicsuffix2==2.20191221
 python-dotenv==1.2.1
 python-dateutil==2.9.0
 python-whois==0.9.6

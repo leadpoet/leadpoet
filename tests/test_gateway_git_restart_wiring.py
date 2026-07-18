@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -171,6 +172,11 @@ def test_gateway_restart_has_fail_closed_lock_and_no_validator_deploy_gate() -> 
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     assert 'flock -n 9' in script
     assert 'another gateway restart is already running' in script
+    assert "Recovering gateway restart lock inherited by a detached runtime process" in script
+    assert (
+        '-m gateway.utils.tee_inter_enclave_relay \\\n'
+        '    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null 9>&- &'
+    ) in script
     assert 'VALIDATOR_GATEWAY_PCR0_CACHE_FILE' not in script
     assert 'independent_gateway_identity' not in script
 
@@ -235,6 +241,64 @@ except BlockingIOError:
     assert "another gateway restart is already running" in result.stderr
     assert "Hydrating gateway env" not in result.stdout
     assert "Stopping existing gateway" not in result.stdout
+
+
+def test_restart_recovers_lock_inherited_by_detached_relay(tmp_path: Path) -> None:
+    if not Path("/proc/self/fd").exists() or shutil.which("flock") is None:
+        return
+
+    lock_file = tmp_path / "gateway-restart.lock"
+    holder_code = """
+import fcntl
+import sys
+import time
+
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    print("ready", flush=True)
+    time.sleep(30)
+"""
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            holder_code,
+            "gateway.utils.tee_inter_enclave_relay",
+            str(lock_file),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "ready"
+        result = subprocess.run(
+            ["bash", str(ROOT / "gw_restart.sh")],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={
+                **os.environ,
+                "GATEWAY_ROOT": str(tmp_path / "missing-gateway"),
+                "GATEWAY_RESTART_LOCK_FILE": str(lock_file),
+                "GATEWAY_RESTART_RECOVERY_LOCK_FILE": str(
+                    tmp_path / "gateway-restart.recovery.lock"
+                ),
+                "GATEWAY_DEPLOYMENT_DIR": str(tmp_path / "deployments"),
+                "GATEWAY_DEPLOY_PLAN_FILE": str(tmp_path / "plan.json"),
+            },
+        )
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
+
+    assert result.returncode != 0
+    assert (
+        "Recovering gateway restart lock inherited by a detached runtime process"
+        in result.stdout
+    )
+    assert "another gateway restart is already running" not in result.stderr
 
 
 def test_gateway_fallback_logs_stay_outside_canonical_checkout(tmp_path: Path) -> None:

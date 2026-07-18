@@ -32,7 +32,7 @@ def test_production_scoring_lock_is_exact_complete_and_matches_input():
     inputs = _input_records(input_path)
     locked = _lock_records(lock_path)
 
-    assert len(inputs) == 53
+    assert len(inputs) == 54
     assert inputs == {name: value[0] for name, value in locked.items()}
     assert all(len(digest) == 64 for _version, digest in locked.values())
     assert inputs["python-dateutil"] == "2.9.0"

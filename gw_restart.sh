@@ -20,6 +20,7 @@ ENV_BACKUP_DIR="/home/ec2-user/.config/leadpoet/env-backups"
 GATEWAY_GIT_HELPER="${GATEWAY_GIT_HELPER:-$LEADPOET_REPO_ROOT/scripts/gateway_git_deploy.py}"
 GATEWAY_RESTART_PHASE="${GATEWAY_RESTART_PHASE:-prepare}"
 GATEWAY_RESTART_LOCK_FILE="${GATEWAY_RESTART_LOCK_FILE:-/home/ec2-user/.config/leadpoet/gateway-restart.lock}"
+GATEWAY_RESTART_RECOVERY_LOCK_FILE="${GATEWAY_RESTART_RECOVERY_LOCK_FILE:-${GATEWAY_RESTART_LOCK_FILE}.recovery}"
 GATEWAY_DEPLOY_PLAN_FILE="${GATEWAY_DEPLOY_PLAN_FILE:-/tmp/gateway_git_deploy.$$.json}"
 GATEWAY_DEPLOYMENT_DIR="${GATEWAY_DEPLOYMENT_DIR:-/home/ec2-user/.config/leadpoet/deployments}"
 GATEWAY_DEPLOYMENT_MANIFEST="${GATEWAY_DEPLOYMENT_MANIFEST:-$GATEWAY_DEPLOYMENT_DIR/gateway-current.json}"
@@ -297,19 +298,74 @@ stop_research_lab_private_model_containers() {
   echo "$ids" | xargs -r sudo docker stop -t 10
 }
 
+acquire_gateway_restart_lock() {
+  local lock_holder_found=0
+  local lock_holder_is_stale=1
+  local fd_path holder_pid holder_command stale_lock_file
+
+  exec 8>"$GATEWAY_RESTART_RECOVERY_LOCK_FILE"
+  chmod 600 "$GATEWAY_RESTART_RECOVERY_LOCK_FILE"
+  flock 8
+
+  exec 9>"$GATEWAY_RESTART_LOCK_FILE"
+  chmod 600 "$GATEWAY_RESTART_LOCK_FILE"
+  if flock -n 9; then
+    flock -u 8
+    exec 8>&-
+    return 0
+  fi
+
+  for fd_path in /proc/[0-9]*/fd/*; do
+    if [ "$(readlink "$fd_path" 2>/dev/null || true)" != "$GATEWAY_RESTART_LOCK_FILE" ]; then
+      continue
+    fi
+    holder_pid="${fd_path#/proc/}"
+    holder_pid="${holder_pid%%/*}"
+    if [ "$holder_pid" = "$$" ]; then
+      continue
+    fi
+    lock_holder_found=1
+    holder_command="$(tr '\0' ' ' < "/proc/$holder_pid/cmdline" 2>/dev/null || true)"
+    case "$holder_command" in
+      *"gateway.utils.tee_inter_enclave_relay"*|*" -m gateway.main "*)
+        ;;
+      *)
+        lock_holder_is_stale=0
+        ;;
+    esac
+  done
+
+  if [ "$lock_holder_found" -ne 1 ] || [ "$lock_holder_is_stale" -ne 1 ]; then
+    echo "ERROR: another gateway restart is already running" >&2
+    exit 1
+  fi
+
+  stale_lock_file="${GATEWAY_RESTART_LOCK_FILE}.stale.$$"
+  echo "Recovering gateway restart lock inherited by a detached runtime process"
+  mv -- "$GATEWAY_RESTART_LOCK_FILE" "$stale_lock_file"
+  exec 9>&-
+  exec 9>"$GATEWAY_RESTART_LOCK_FILE"
+  chmod 600 "$GATEWAY_RESTART_LOCK_FILE"
+  if ! flock -n 9; then
+    echo "ERROR: gateway restart lock recovery lost a concurrency race" >&2
+    exit 1
+  fi
+  rm -f -- "$stale_lock_file"
+  flock -u 8
+  exec 8>&-
+}
+
 if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then
-  mkdir -p "$(dirname "$GATEWAY_RESTART_LOCK_FILE")" "$GATEWAY_DEPLOYMENT_DIR"
+  mkdir -p \
+    "$(dirname "$GATEWAY_RESTART_LOCK_FILE")" \
+    "$(dirname "$GATEWAY_RESTART_RECOVERY_LOCK_FILE")" \
+    "$GATEWAY_DEPLOYMENT_DIR"
   chmod 700 "$(dirname "$GATEWAY_RESTART_LOCK_FILE")" "$GATEWAY_DEPLOYMENT_DIR"
   command -v flock >/dev/null 2>&1 || {
     echo "ERROR: flock is required for gateway Git deployments" >&2
     exit 1
   }
-  exec 9>"$GATEWAY_RESTART_LOCK_FILE"
-  chmod 600 "$GATEWAY_RESTART_LOCK_FILE"
-  if ! flock -n 9; then
-    echo "ERROR: another gateway restart is already running" >&2
-    exit 1
-  fi
+  acquire_gateway_restart_lock
   export GATEWAY_RESTART_LOCK_HELD=1
 elif [ "$GATEWAY_RESTART_PHASE" = "post_activate" ]; then
   if [ "${GATEWAY_RESTART_LOCK_HELD:-0}" != "1" ] || [ ! -e "/proc/$$/fd/9" ]; then
@@ -1001,7 +1057,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   echo "Starting opaque inter-enclave TLS relay"
   cd "$LEADPOET_REPO_ROOT"
   PYTHONPATH="$LEADPOET_REPO_ROOT" setsid "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_inter_enclave_relay \
-    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null &
+    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null 9>&- &
   INTER_ENCLAVE_RELAY_PID="$!"
   sleep 2
   if ! ps -p "$INTER_ENCLAVE_RELAY_PID" >/dev/null 2>&1; then

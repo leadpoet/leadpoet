@@ -72,6 +72,8 @@ pydantic==2.12.4 \
     --hash=sha256:92d3d202a745d46f9be6df459ac5a064fdaa3c1c4cd8adcfa332ccf3c05f871e
 pydantic-core==2.41.5 \
     --hash=sha256:707625ef0983fcfb461acfaf14de2067c5942c6bb0f3b4c99158bed6fedd3cf3
+publicsuffix2==2.20191221 \
+    --hash=sha256:786b5e36205b88758bd3518725ec8cfe7a8173f5269354641f581c6b80a99893
 python-dotenv==1.2.1 \
     --hash=sha256:b81ee9561e9ca4004139c6cbba3a238c32b03e4894671e181b671e8cb8425d61
 python-dateutil==2.9.0 \

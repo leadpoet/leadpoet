@@ -197,6 +197,14 @@ def test_gateway_eif_build_enforces_scoring_manifest():
     assert 'pip download' in prepare_script
     assert '--require-hashes' in prepare_script
     assert '--no-index --find-links=/tmp/wheelhouse' in dockerfile
+    requirements_input = (
+        ROOT / "gateway" / "tee" / "requirements-scoring-py39.in"
+    ).read_text(encoding="utf-8")
+    requirements_lock = (
+        ROOT / "gateway" / "tee" / "requirements-scoring-py39.lock"
+    ).read_text(encoding="utf-8")
+    assert "publicsuffix2==2.20191221" in requirements_input
+    assert "publicsuffix2==2.20191221" in requirements_lock
     assert 'requirements-scoring-py39.lock' in stage_script
     assert 'requirements-scoring-py39.lock' in dockerfile
     assert '--python-version 39' in prepare_script

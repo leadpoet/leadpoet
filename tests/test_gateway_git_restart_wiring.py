@@ -26,9 +26,9 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
         script,
         (
             'echo "Preparing exact gateway commit from configured GitHub branch"',
+            'echo "Capturing the official subnet restart window before release acquisition"',
             'echo "Validating the prepared V2 release before production shutdown"',
             'echo "Preparing exact hash-locked V2 build artifacts before production shutdown"',
-            'echo "Verifying official subnet restart window immediately before shutdown"',
             'echo "Stopping existing gateway and Research Lab worker processes"',
             'echo "Waiting for :8000 to free"',
             'echo "Activating prepared gateway Git commit after process shutdown"',
@@ -69,6 +69,9 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     release_channel = script.index(
         'run_prepared_gateway_module gateway.tee.release_channel_v2'
     )
+    restart_window = script.index(
+        'echo "Capturing the official subnet restart window before release acquisition"'
+    )
     credential_envelopes = script.index(
         'run_prepared_gateway_module gateway.tee.prepare_gateway_envelopes_v2'
     )
@@ -84,7 +87,7 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     dependency_preflight = script.index(
         'echo "Installing gateway host Python dependencies before production shutdown"'
     )
-    assert materialize < release_channel < credential_envelopes < preflight
+    assert materialize < restart_window < release_channel < credential_envelopes < preflight
     assert preflight < shutdown
     assert preflight < artifact_prepare < shutdown
     assert dependency_preflight < preflight < shutdown
@@ -139,6 +142,11 @@ def test_gateway_restart_installs_declared_host_dependencies_before_shutdown() -
     assert "publicsuffix2>=2.20191221" in requirements
     assert "leadpoet-subnet substrate-interface" in script
     assert "py-scale-codec scalecodec" in script
+    metadata_cleanup = script.index(
+        'rm -rf -- "$legacy_project_metadata"'
+    )
+    dependency_check = script.index('"$GATEWAY_PYTHON_BIN" -m pip check')
+    assert metadata_cleanup < dependency_check
     assert '"$GATEWAY_PYTHON_BIN" -m pip check' in script
     assert script.count("install_gateway_python_dependencies") == 3
     assert dependency_preflight < shutdown < post_activate_install
@@ -163,6 +171,12 @@ def test_gateway_restart_uses_one_canonical_checkout_for_host_processes() -> Non
     assert 'chmod +x "$GATEWAY_ROOT"/tee/*.sh' not in script
     assert 'bash ./start_enclave.sh' in script
     assert 'setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main' in script
+    assert 'GATEWAY_LAUNCHER_PID="$!"' in script
+    assert (
+        'pgrep -f "^$GATEWAY_PYTHON_BIN -u -m gateway[.]main$"'
+        in script
+    )
+    assert 'GATEWAY_PID="$!"' not in script
     assert 'pkill -9 -f "python3 -u -m gateway.main"' in script
 
 
@@ -213,9 +227,11 @@ def test_gateway_restart_has_fail_closed_lock_and_official_epoch_gate() -> None:
     assert 'VALIDATOR_GATEWAY_PCR0_CACHE_FILE' not in script
     assert 'independent_gateway_identity' not in script
     gate = "Leadpoet.utils.restart_epoch_gate"
+    release = "gateway.tee.release_channel_v2"
     shutdown = 'echo "Stopping existing gateway and Research Lab worker processes"'
     assert gate in script
-    assert script.index(gate) < script.index(shutdown)
+    assert script.index(gate) < script.index(release) < script.index(shutdown)
+    assert "waiting inside the valid restart invocation" in script
     assert "--maximum" not in script
 
 

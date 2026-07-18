@@ -56,7 +56,7 @@ GATEWAY_HOST_EXTRA_PYTHON_PACKAGES=(
 )
 
 install_gateway_python_dependencies() {
-  local pip_scope=() requirements_file
+  local legacy_project_metadata pip_scope=() requirements_file
   if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ] \
       && [ -f "$GATEWAY_PREFLIGHT_TREE/requirements.txt" ]; then
     requirements_file="$GATEWAY_PREFLIGHT_TREE/requirements.txt"
@@ -88,6 +88,11 @@ install_gateway_python_dependencies() {
     "${pip_scope[@]}" \
     --requirement "$requirements_file" \
     "${GATEWAY_HOST_EXTRA_PYTHON_PACKAGES[@]}"
+  legacy_project_metadata="$LEADPOET_REPO_ROOT/leadpoet_subnet.egg-info"
+  if [ -d "$legacy_project_metadata" ]; then
+    echo "Removing generated legacy project metadata before dependency validation"
+    rm -rf -- "$legacy_project_metadata"
+  fi
   "$GATEWAY_PYTHON_BIN" -m pip check
 }
 
@@ -730,13 +735,30 @@ if ! git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA" \
   exit 1
 fi
 
+echo "Capturing the official subnet restart window before release acquisition"
+if ! run_prepared_gateway_module Leadpoet.utils.restart_epoch_gate \
+    --network "${BITTENSOR_NETWORK:-finney}" \
+    --netuid "${BITTENSOR_NETUID:-71}"; then
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 75
+fi
+
 echo "Acquiring the independently built V2 release channel"
-if ! run_prepared_gateway_module gateway.tee.release_channel_v2 \
-    --ensure \
-    --expected-commit "$PREPARED_GATEWAY_SHA" \
-    --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
-    --prefix "$GATEWAY_V2_RELEASE_PREFIX" \
-    --gateway-output "$GATEWAY_V2_RELEASE_MANIFEST"; then
+V2_RELEASE_READY=0
+for attempt in $(seq 1 300); do
+  if run_prepared_gateway_module gateway.tee.release_channel_v2 \
+      --ensure \
+      --expected-commit "$PREPARED_GATEWAY_SHA" \
+      --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
+      --prefix "$GATEWAY_V2_RELEASE_PREFIX" \
+      --gateway-output "$GATEWAY_V2_RELEASE_MANIFEST"; then
+    V2_RELEASE_READY=1
+    break
+  fi
+  echo "Approved V2 release is not published yet; waiting inside the valid restart invocation (${attempt}/300)"
+  sleep 12
+done
+if [ "$V2_RELEASE_READY" != "1" ]; then
   echo "ERROR: independently approved V2 release is not published for $PREPARED_GATEWAY_SHA" >&2
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 75
@@ -853,14 +875,6 @@ echo "Validating the prepared V2 release before production shutdown"
     echo "ERROR: V2 offline artifact preparation failed before shutdown" >&2
     exit 1
   fi
-
-echo "Verifying official subnet restart window immediately before shutdown"
-if ! run_prepared_gateway_module Leadpoet.utils.restart_epoch_gate \
-    --network "${BITTENSOR_NETWORK:-finney}" \
-    --netuid "${BITTENSOR_NETUID:-71}"; then
-  echo "Gateway remains running; production shutdown has not started." >&2
-  exit 75
-fi
 
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
@@ -1216,7 +1230,21 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_
 cd "$LEADPOET_REPO_ROOT"
 setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null 9>&- &
 
-GATEWAY_PID="$!"
+GATEWAY_LAUNCHER_PID="$!"
+GATEWAY_PID=""
+echo "gateway launcher pid: $GATEWAY_LAUNCHER_PID"
+for attempt in $(seq 1 15); do
+  GATEWAY_PID="$(pgrep -f "^$GATEWAY_PYTHON_BIN -u -m gateway[.]main$" | head -1 || true)"
+  if [ -n "$GATEWAY_PID" ]; then
+    break
+  fi
+  sleep 1
+done
+if [ -z "$GATEWAY_PID" ]; then
+  tail -160 "$GATEWAY_LOG_FILE"
+  echo "ERROR: gateway process was not discoverable after launch" >&2
+  exit 1
+fi
 echo "relaunched main pid: $GATEWAY_PID"
 rm -f "$ENV_CLONE" "$ENV_SECRET"
 
@@ -1224,7 +1252,8 @@ GATEWAY_DEPLOY_STAGE="gateway_health_check"
 export GATEWAY_DEPLOY_STAGE
 GATEWAY_HEALTH_READY=0
 for attempt in $(seq 1 120); do
-  if ! ps -p "$GATEWAY_PID" >/dev/null 2>&1; then
+  GATEWAY_PID="$(pgrep -f "^$GATEWAY_PYTHON_BIN -u -m gateway[.]main$" | head -1 || true)"
+  if [ -z "$GATEWAY_PID" ]; then
     tail -160 "$GATEWAY_LOG_FILE"
     echo "ERROR: gateway exited during startup" >&2
     exit 1

@@ -809,6 +809,8 @@ rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
 
 echo "Stopping existing gateway and Research Lab worker processes"
+sudo systemctl stop leadpoet-tee-egress-forwarder.service 2>/dev/null || true
+sudo systemctl reset-failed leadpoet-tee-egress-forwarder.service 2>/dev/null || true
 pkill -9 -f "python3 main.py" 2>/dev/null || true
 pkill -9 -f "python3 -u main.py" 2>/dev/null || true
 pkill -9 -f "python3 -u -m gateway.main" 2>/dev/null || true

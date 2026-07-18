@@ -15,6 +15,7 @@ import os
 import select
 import socket
 import ssl
+import struct
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -33,6 +34,9 @@ MAX_TUNNEL_BYTES_PER_DIRECTION = 256 * 1024 * 1024
 DEFAULT_IDLE_TIMEOUT_SECONDS = 300.0
 RELAY_CHUNK_BYTES = 64 * 1024
 UPSTREAM_PROXY_HEADER = "x-leadpoet-upstream-proxy-b64"
+SIOCGIFFLAGS = 0x8913
+SIOCSIFFLAGS = 0x8914
+IFF_UP = 0x1
 
 _AIOHTTP_PATCH_LOCK = threading.Lock()
 _AIOHTTP_PROXY_URL = ""
@@ -81,6 +85,70 @@ def _canonical_json(value: Any) -> bytes:
 
 def _destination_ref(host: str, port: int) -> str:
     return hashlib.sha256((host + ":" + str(port)).encode("ascii")).hexdigest()[:16]
+
+
+def _ensure_loopback_interface(
+    *,
+    ioctl: Optional[Callable[..., bytes]] = None,
+    socket_factory: Callable[..., Any] = socket.socket,
+) -> None:
+    """Bring Linux loopback up before the enclave-local proxy is exposed."""
+
+    if ioctl is None:
+        import fcntl
+
+        ioctl = fcntl.ioctl
+    control = socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
+    request = struct.pack("16sH22s", b"lo", 0, b"")
+    try:
+        response = ioctl(control.fileno(), SIOCGIFFLAGS, request)
+        _name, flags, _padding = struct.unpack("16sH22s", response)
+        if not flags & IFF_UP:
+            ioctl(
+                control.fileno(),
+                SIOCSIFFLAGS,
+                struct.pack("16sH22s", b"lo", flags | IFF_UP, b""),
+            )
+            response = ioctl(control.fileno(), SIOCGIFFLAGS, request)
+            _name, flags, _padding = struct.unpack("16sH22s", response)
+        if not flags & IFF_UP:
+            raise EnclaveEgressProxyError("enclave loopback interface is not up")
+    except EnclaveEgressProxyError:
+        raise
+    except Exception as exc:
+        raise EnclaveEgressProxyError(
+            "enclave loopback interface initialization failed"
+        ) from exc
+    finally:
+        control.close()
+
+
+def _verify_loopback_listener(
+    listener: Any,
+    *,
+    local_port: int,
+    socket_factory: Callable[..., Any] = socket.socket,
+) -> None:
+    """Prove the local HTTP client can reach the proxy before provider work."""
+
+    client = None
+    accepted = None
+    try:
+        client = socket_factory(socket.AF_INET, socket.SOCK_STREAM)
+        client.settimeout(2.0)
+        client.connect(("127.0.0.1", int(local_port)))
+        accepted, _address = listener.accept()
+    except Exception as exc:
+        raise EnclaveEgressProxyError(
+            "enclave loopback proxy self-test failed"
+        ) from exc
+    finally:
+        for candidate in (accepted, client):
+            if candidate is not None:
+                try:
+                    candidate.close()
+                except Exception:
+                    pass
 
 
 def _read_headers(connection: Any) -> Tuple[bytes, bytes]:
@@ -213,15 +281,18 @@ class EnclaveEgressProxy:
         forwarder_port: int = DEFAULT_FORWARDER_PORT,
         socket_factory: Callable[..., Any] = socket.socket,
         idle_timeout_seconds: float = DEFAULT_IDLE_TIMEOUT_SECONDS,
+        loopback_initializer: Callable[[], None] = _ensure_loopback_interface,
     ) -> None:
         self.local_port = int(local_port)
         self.forwarder_port = int(forwarder_port)
         self._recv_exact = recv_exact
         self._socket_factory = socket_factory
         self._idle_timeout_seconds = float(idle_timeout_seconds)
+        self._loopback_initializer = loopback_initializer
         self._listener = None
         self._thread = None
         self._stop = threading.Event()
+        self._loopback_verified = False
         self._status_lock = threading.Lock()
         self._last_failure = None  # type: Optional[Dict[str, Any]]
         self._last_tunnel = None  # type: Optional[Dict[str, Any]]
@@ -233,11 +304,27 @@ class EnclaveEgressProxy:
     def start(self) -> Dict[str, Any]:
         if self.running:
             return self.status()
-        listener = self._socket_factory(socket.AF_INET, socket.SOCK_STREAM)
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(("127.0.0.1", self.local_port))
-        listener.listen(64)
+        listener = None
+        self._loopback_initializer()
+        try:
+            listener = self._socket_factory(socket.AF_INET, socket.SOCK_STREAM)
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", self.local_port))
+            listener.listen(64)
+            _verify_loopback_listener(
+                listener,
+                local_port=self.local_port,
+                socket_factory=self._socket_factory,
+            )
+        except Exception:
+            if listener is not None:
+                try:
+                    listener.close()
+                except Exception:
+                    pass
+            raise
         self._listener = listener
+        self._loopback_verified = True
         self._thread = threading.Thread(
             target=self._accept_loop,
             name="gateway-enclave-egress-proxy",
@@ -259,6 +346,7 @@ class EnclaveEgressProxy:
             "https_tls_terminates_in_enclave": True,
             "external_plaintext_http_allowed": False,
             "loopback_http_allowed": True,
+            "loopback_listener_verified": self._loopback_verified,
             "tls_upstream_proxy_supported": True,
         }
         if last_failure:
@@ -275,6 +363,7 @@ class EnclaveEgressProxy:
             except Exception:
                 pass
         self._listener = None
+        self._loopback_verified = False
 
     def _configure_environment(self) -> None:
         proxy_url = "http://127.0.0.1:%s" % self.local_port

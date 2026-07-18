@@ -16,7 +16,15 @@ from gateway.tee.egress_policy import (
     normalize_destination,
 )
 from gateway.tee import egress_proxy
-from gateway.tee.egress_proxy import EnclaveEgressProxy, _parse_proxy_request
+from gateway.tee.egress_proxy import (
+    IFF_UP,
+    SIOCGIFFLAGS,
+    SIOCSIFFLAGS,
+    EnclaveEgressProxy,
+    EnclaveEgressProxyError,
+    _ensure_loopback_interface,
+    _parse_proxy_request,
+)
 from gateway.utils.tee_client import _recv_exact
 from gateway.utils.tee_egress_forwarder import (
     TEEEgressForwarderError,
@@ -224,6 +232,87 @@ def test_enclave_proxy_rejects_external_plaintext_http():
             b"GET http://archive.org/wayback/available?url=x HTTP/1.1\r\n"
             b"Host: archive.org\r\nProxy-Authorization: Basic secret\r\n\r\n"
         )
+
+
+def test_enclave_proxy_brings_loopback_interface_up_before_use():
+    observed = []
+    flags = {"value": 0}
+
+    class _ControlSocket:
+        def fileno(self):
+            return 7
+
+        def close(self):
+            observed.append("close")
+
+    def ioctl(file_descriptor, operation, request):
+        observed.append((file_descriptor, operation))
+        name, requested_flags, padding = egress_proxy.struct.unpack(
+            "16sH22s",
+            request,
+        )
+        assert name.rstrip(b"\0") == b"lo"
+        if operation == SIOCGIFFLAGS:
+            return egress_proxy.struct.pack(
+                "16sH22s",
+                name,
+                flags["value"],
+                padding,
+            )
+        assert operation == SIOCSIFFLAGS
+        flags["value"] = requested_flags
+        return request
+
+    _ensure_loopback_interface(
+        ioctl=ioctl,
+        socket_factory=lambda *_args: _ControlSocket(),
+    )
+
+    assert flags["value"] & IFF_UP
+    assert observed == [
+        (7, SIOCGIFFLAGS),
+        (7, SIOCSIFFLAGS),
+        (7, SIOCGIFFLAGS),
+        "close",
+    ]
+
+
+def test_enclave_proxy_start_proves_loopback_listener_before_ready(monkeypatch):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        local_port = int(reservation.getsockname()[1])
+
+    initialized = []
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        local_port=local_port,
+        loopback_initializer=lambda: initialized.append(True),
+    )
+    monkeypatch.setattr(proxy, "_configure_environment", lambda: None)
+
+    status = proxy.start()
+    try:
+        assert initialized == [True]
+        assert status["status"] == "running"
+        assert status["loopback_listener_verified"] is True
+    finally:
+        proxy.stop()
+
+
+def test_enclave_proxy_start_fails_closed_when_loopback_initialization_fails():
+    def fail_loopback():
+        raise EnclaveEgressProxyError("loopback unavailable")
+
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        loopback_initializer=fail_loopback,
+    )
+
+    with pytest.raises(EnclaveEgressProxyError, match="loopback unavailable"):
+        proxy.start()
+
+    assert proxy.status()["status"] == "stopped"
+    assert proxy.status()["loopback_listener_verified"] is False
 
 
 def test_enclave_parent_handshake_uses_same_length_prefixed_json_contract():

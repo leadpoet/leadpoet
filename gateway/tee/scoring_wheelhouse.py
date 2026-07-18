@@ -27,6 +27,7 @@ CRITICAL_IMPORTS = (
     "pydantic",
     "publicsuffix2",
     "requests",
+    "supabase",
     "trafilatura",
     "whois",
 )

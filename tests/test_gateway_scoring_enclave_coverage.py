@@ -205,6 +205,8 @@ def test_gateway_eif_build_enforces_scoring_manifest():
     ).read_text(encoding="utf-8")
     assert "publicsuffix2==2.20191221" in requirements_input
     assert "publicsuffix2==2.20191221" in requirements_lock
+    assert "supabase==2.22.0" in requirements_input
+    assert "supabase==2.22.0" in requirements_lock
     assert 'requirements-scoring-py39.lock' in stage_script
     assert 'requirements-scoring-py39.lock' in dockerfile
     assert '--python-version 39' in prepare_script

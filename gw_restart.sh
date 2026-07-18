@@ -1227,6 +1227,12 @@ export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="${RESEARCH_LAB_PRIVATE_MODEL_MAN
 unset RESEARCH_LAB_EVIDENCE_PROXY_URL RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 
+echo "Repairing and verifying the authoritative V2 validator weight input"
+GATEWAY_DEPLOY_STAGE="validator_weight_input_repair"
+export GATEWAY_DEPLOY_STAGE
+PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+  -m gateway.tee.verify_weight_submission_ready_v2 --repair
+
 cd "$LEADPOET_REPO_ROOT"
 setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null 9>&- &
 
@@ -1275,6 +1281,12 @@ if ! timeout 60 curl -fsS http://localhost:8000/health/v2-authority >/dev/null; 
   echo "ERROR: authoritative V2 enclave/worker readiness failed" >&2
   exit 1
 fi
+echo "Verifying the exact HTTP handoff consumed by automatic validator weights"
+GATEWAY_DEPLOY_STAGE="validator_weight_input_http_check"
+export GATEWAY_DEPLOY_STAGE
+PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+  -m gateway.tee.verify_weight_submission_ready_v2 \
+  --gateway-url http://localhost:8000
 
 BUILD_INFO_RESPONSE="$(timeout 15 curl -fsS http://localhost:8000/build-info)"
 python3 - "$GATEWAY_DEPLOY_SHA" "$BUILD_INFO_RESPONSE" <<'VERIFY_BUILD_INFO'

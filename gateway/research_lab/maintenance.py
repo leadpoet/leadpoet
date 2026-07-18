@@ -1854,11 +1854,9 @@ async def reconcile_champion_reward_statuses(
         _decimal,
         _rate_float,
     )
-    from gateway.utils.epoch import get_current_epoch_id_async
-
     from .store import create_champion_reward_event
 
-    effective_epoch = int(epoch) if epoch is not None else await get_current_epoch_id_async()
+    effective_epoch = await _resolve_maintenance_epoch(epoch)
     effective_netuid = int(netuid) if netuid is not None else int(BITTENSOR_NETUID)
     reward_rows: list[dict[str, Any]] = []
     for status in sorted(ACTIVE_CHAMPION_STATUSES):
@@ -1972,12 +1970,9 @@ async def backfill_champion_reward_v2_authority(
         attest_historical_champion_reward_v2,
     )
     from gateway.tee.reward_executor_v2 import champion_reward_row_projection_v2
-    from gateway.utils.epoch import get_current_epoch_id_async
     from leadpoet_canonical.attested_v2 import sha256_json
 
-    effective_epoch = (
-        int(epoch) if epoch is not None else await get_current_epoch_id_async()
-    )
+    effective_epoch = await _resolve_maintenance_epoch(epoch)
     rows: list[dict[str, Any]] = []
     for status in sorted(SETTLEMENT_TRACKED_CHAMPION_STATUSES):
         rows.extend(
@@ -2099,11 +2094,7 @@ async def backfill_champion_settlement_v2_authority(
     from gateway.research_lab.v2_authority import (
         classify_historical_champion_allocation_v2,
     )
-    from gateway.utils.epoch import get_current_epoch_id_async
-
-    effective_epoch = (
-        int(epoch) if epoch is not None else await get_current_epoch_id_async()
-    )
+    effective_epoch = await _resolve_maintenance_epoch(epoch)
     effective_netuid = (
         int(netuid) if netuid is not None else int(BITTENSOR_NETUID)
     )
@@ -2238,11 +2229,7 @@ async def champion_v2_cutover_readiness_report(
     from gateway.research_lab.champion_settlement_v2 import (
         champion_v2_cutover_readiness,
     )
-    from gateway.utils.epoch import get_current_epoch_id_async
-
-    effective_epoch = (
-        int(epoch) if epoch is not None else await get_current_epoch_id_async()
-    )
+    effective_epoch = await _resolve_maintenance_epoch(epoch)
     effective_netuid = (
         int(netuid) if netuid is not None else int(BITTENSOR_NETUID)
     )
@@ -2250,3 +2237,16 @@ async def champion_v2_cutover_readiness_report(
         epoch=effective_epoch,
         netuid=effective_netuid,
     )
+
+
+async def _resolve_maintenance_epoch(epoch: int | None) -> int:
+    """Resolve an operator command epoch without requiring gateway lifespan state."""
+
+    if epoch is not None:
+        return int(epoch)
+    from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
+
+    resolved_epoch, _block, _source = (
+        await resolve_research_lab_evaluation_epoch()
+    )
+    return int(resolved_epoch)

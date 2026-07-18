@@ -61,6 +61,34 @@ def test_gateway_restart_fails_closed_on_all_authoritative_readiness_routes() ->
     assert "http://localhost:8000/attest || true" not in script
 
 
+def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    runtime_ready = script.index(
+        '"$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready'
+    )
+    repair = script.index(
+        "-m gateway.tee.verify_weight_submission_ready_v2 --repair"
+    )
+    launch = script.index(
+        'setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main'
+    )
+    base_health = script.index(
+        "curl -fsS http://localhost:8000/health >/dev/null"
+    )
+    http_handoff = script.index(
+        "--gateway-url http://localhost:8000"
+    )
+    install = script.index(
+        'GATEWAY_DEPLOY_STAGE="host_restart_script_install"'
+    )
+
+    assert runtime_ready < repair < launch < base_health < http_handoff < install
+    assert 'GATEWAY_DEPLOY_STAGE="validator_weight_input_repair"' in script
+    assert (
+        'GATEWAY_DEPLOY_STAGE="validator_weight_input_http_check"' in script
+    )
+
+
 def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     materialize = script.index(

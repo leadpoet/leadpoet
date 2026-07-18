@@ -20,3 +20,11 @@ def test_release_workflow_is_valid_yaml():
     document = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
 
     assert document["name"] == "Attested V2 Release"
+
+
+def test_attested_release_builders_are_not_block_gated():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "Wait for safe subnet build window" not in workflow
+    assert "subnet71_position" not in workflow
+    assert "chain.get_current_block()" not in workflow

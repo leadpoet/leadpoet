@@ -34,22 +34,6 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - name: Wait for safe subnet build window
-        run: |
-          while true; do
-            read -r block position < <(python3 - <<'PY'
-          import bittensor as bt
-          chain = bt.Subtensor(network="finney")
-          block = int(chain.get_current_block())
-          tempo = int(chain.tempo(71))
-          print(block, (block + 72) % (tempo + 1))
-          PY
-            )
-            echo "Finney block=$block subnet71_position=$position"
-            [ "$position" -le 300 ] && break
-            sleep 60
-          done
-
       - name: Reclaim unreferenced gateway build space
         run: |
           docker image prune --all --force
@@ -110,22 +94,6 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-
-      - name: Wait for safe subnet build window
-        run: |
-          while true; do
-            read -r block position < <(python3 - <<'PY'
-          import bittensor as bt
-          chain = bt.Subtensor(network="finney")
-          block = int(chain.get_current_block())
-          tempo = int(chain.tempo(71))
-          print(block, (block + 72) % (tempo + 1))
-          PY
-            )
-            echo "Finney block=$block subnet71_position=$position"
-            [ "$position" -le 300 ] && break
-            sleep 60
-          done
 
       - name: Reclaim unreferenced validator build space
         run: |

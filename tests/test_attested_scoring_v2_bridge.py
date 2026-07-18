@@ -161,6 +161,60 @@ class _Client:
         return list(self.manager.transitions(job_id))
 
 
+class _CoordinatorClient(_Client):
+    def __init__(self, release):
+        super().__init__(release)
+        role = "gateway_coordinator"
+        summary = release["roles"][role]
+        pubkey = self.key.public_key().public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        ).hex()
+        body = build_boot_identity_body(
+            role=role,
+            physical_role=role,
+            commit_sha=summary["commit_sha"],
+            pcr0=summary["pcr0"],
+            build_manifest_hash=summary["execution_manifest_hash"],
+            dependency_lock_hash=summary["dependency_lock_hash"],
+            config_hash=_hash("9"),
+            boot_nonce="e" * 32,
+            signing_pubkey=pubkey,
+            transport_pubkey="f" * 64,
+            transport_certificate_hash=_hash("a"),
+            attestation_user_data_hash=_hash("b"),
+            issued_at="2026-07-10T00:00:00Z",
+        )
+        self.boot = create_boot_identity(
+            body=body,
+            attestation_document_b64=base64.b64encode(b"nitro").decode(),
+        )
+        self.manager = ExecutionJobManagerV2(
+            boot_identity_supplier=lambda: self.boot,
+            sign_digest=self.key.sign,
+            operations=COORDINATOR_OPERATIONS_V2,
+            executor=lambda operation, payload, context: {
+                "operation": operation,
+                "echo": payload,
+            },
+            worker_count=1,
+            configured_worker_count=0,
+        )
+
+    coordinator_v2_health = _Client.scoring_v2_health
+    coordinator_v2_submit_job = _Client.scoring_v2_submit_job
+    coordinator_v2_put_chunk = _Client.scoring_v2_put_chunk
+    coordinator_v2_seal_job = _Client.scoring_v2_seal_job
+    coordinator_v2_get_status = _Client.scoring_v2_get_status
+    coordinator_v2_cancel_job = _Client.scoring_v2_cancel_job
+    coordinator_v2_get_result = _Client.scoring_v2_get_result
+    coordinator_v2_get_receipt = _Client.scoring_v2_get_receipt
+    coordinator_v2_get_receipts = _Client.scoring_v2_get_receipts
+    coordinator_v2_get_transport_attempts = _Client.scoring_v2_get_transport_attempts
+    coordinator_v2_get_artifact_hashes = _Client.scoring_v2_get_artifact_hashes
+    coordinator_v2_get_transitions = _Client.scoring_v2_get_transitions
+
+
 @pytest.mark.asyncio
 async def test_v2_bridge_returns_only_durable_release_verified_result():
     release = _release()
@@ -210,6 +264,42 @@ async def test_v2_bridge_returns_only_durable_release_verified_result():
     assert result["status"] == "succeeded"
     assert result["physical_role"] == "gateway_scoring"
     assert persisted[0]["root_receipt_hash"] == result["receipt"]["receipt_hash"]
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_accepts_measured_coordinator_internal_worker_capacity():
+    release = _release()
+    client = _CoordinatorClient(release)
+
+    async def persist(graph):
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    result = await execute_scoring_v2(
+        operation="promotion_improvement",
+        purpose="research_lab.ranking.v2",
+        epoch_id=12,
+        sequence=0,
+        payload={"score_bundle": {}},
+        worker_index=0,
+        provider_profile_loader=lambda *args, **kwargs: {
+            "profile": "default",
+            "credential_ref_hashes": {},
+            "envelopes": [],
+        },
+        release_manifest=release,
+        client=client,
+        persist_graph=persist,
+        boot_verifier=lambda identity: identity,
+        poll_seconds=0.001,
+        operation_registry=COORDINATOR_OPERATIONS_V2,
+        physical_role_override="gateway_coordinator",
+        expected_service_role="gateway_coordinator",
+        rpc_namespace="coordinator_v2",
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["physical_role"] == "gateway_coordinator"
+    assert client.manager.health()["configured_worker_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -658,6 +748,7 @@ class _ArtifactCoordinator:
                 ]
             ),
             worker_count=1,
+            configured_worker_count=0,
         )
 
     async def v2_list_encrypted_artifacts(self, *, job_id, purpose):

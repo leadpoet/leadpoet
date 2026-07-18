@@ -310,15 +310,24 @@ async def execute_scoring_v2(
     health = await rpc_method("health")()
     execution_worker_count = health.get("worker_count")
     configured_worker_count = health.get("configured_worker_count")
+    coordinator_capacity_valid = (
+        physical_role == "gateway_coordinator"
+        and configured_worker_count == 0
+        and normalized_worker_index == 0
+    )
+    configured_capacity_valid = (
+        physical_role != "gateway_coordinator"
+        and type(configured_worker_count) is int
+        and 1 <= configured_worker_count <= 500
+        and normalized_worker_index < configured_worker_count
+    )
     if (
         health.get("authority") != "v2_only"
         or health.get("role") != expected_service_role
         or health.get("physical_role") != physical_role
         or type(execution_worker_count) is not int
         or not 1 <= execution_worker_count <= 10
-        or type(configured_worker_count) is not int
-        or not 1 <= configured_worker_count <= 500
-        or normalized_worker_index >= configured_worker_count
+        or not (coordinator_capacity_valid or configured_capacity_valid)
         or not health.get("workers_alive")
     ):
         raise AttestedScoringV2Error("V2 scoring enclave health is invalid")

@@ -312,6 +312,46 @@ def test_enclave_proxy_health_exposes_bounded_last_failure_stage():
     client.close()
 
 
+def test_enclave_proxy_health_exposes_bounded_clean_tunnel_summary():
+    client, proxy_side = socket.socketpair()
+    parent_side, upstream = socket.socketpair()
+    proxy = EnclaveEgressProxy(recv_exact=_recv_exact)
+
+    def open_parent(_host, _port):
+        return parent_side
+
+    proxy._open_parent_tunnel = open_parent
+
+    thread = threading.Thread(
+        target=proxy._handle_client,
+        args=(proxy_side,),
+        daemon=True,
+    )
+    thread.start()
+    client.sendall(
+        b"CONNECT qplwoislplkcegvdmbim.supabase.co:443 HTTP/1.1\r\n"
+        b"Host: qplwoislplkcegvdmbim.supabase.co:443\r\n\r\n"
+    )
+    assert client.recv(4096).startswith(b"HTTP/1.1 200 Connection Established")
+    client.sendall(b"client hello")
+    assert upstream.recv(64) == b"client hello"
+    upstream.sendall(b"server hello")
+    upstream.shutdown(socket.SHUT_WR)
+    assert client.recv(64) == b"server hello"
+    client.shutdown(socket.SHUT_WR)
+    thread.join(timeout=2)
+
+    assert proxy.status()["last_tunnel"] == {
+        "stage": "relay_tls_tunnel",
+        "destination_ref": "4877532cd3300944",
+        "client_to_parent_bytes": 12,
+        "parent_to_client_bytes": 12,
+        "first_closed": "parent",
+    }
+    client.close()
+    upstream.close()
+
+
 def test_aiohttp_requests_are_forced_through_enclave_local_proxy(monkeypatch):
     import aiohttp
 

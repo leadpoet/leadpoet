@@ -167,10 +167,11 @@ def _relay_bidirectional(
     right: Any,
     *,
     idle_timeout_seconds: float = DEFAULT_IDLE_TIMEOUT_SECONDS,
-) -> None:
+) -> Dict[str, Any]:
     peers = {left: right, right: left}
     active = {left, right}
     transferred = {left: 0, right: 0}
+    first_closed = ""
     last_activity = time.monotonic()
     while active:
         remaining = max(0.0, idle_timeout_seconds - (time.monotonic() - last_activity))
@@ -183,6 +184,8 @@ def _relay_bidirectional(
             data = source.recv(RELAY_CHUNK_BYTES)
             destination = peers[source]
             if not data:
+                if not first_closed:
+                    first_closed = "client" if source is left else "parent"
                 active.discard(source)
                 try:
                     destination.shutdown(socket.SHUT_WR)
@@ -194,6 +197,11 @@ def _relay_bidirectional(
                 raise EnclaveEgressProxyError("proxy tunnel byte limit exceeded")
             destination.sendall(data)
             last_activity = time.monotonic()
+    return {
+        "client_to_parent_bytes": transferred[left],
+        "parent_to_client_bytes": transferred[right],
+        "first_closed": first_closed or "unknown",
+    }
 
 
 class EnclaveEgressProxy:
@@ -216,6 +224,7 @@ class EnclaveEgressProxy:
         self._stop = threading.Event()
         self._status_lock = threading.Lock()
         self._last_failure = None  # type: Optional[Dict[str, Any]]
+        self._last_tunnel = None  # type: Optional[Dict[str, Any]]
 
     @property
     def running(self) -> bool:
@@ -241,6 +250,7 @@ class EnclaveEgressProxy:
     def status(self) -> Dict[str, Any]:
         with self._status_lock:
             last_failure = dict(self._last_failure or {})
+            last_tunnel = dict(self._last_tunnel or {})
         result = {
             "status": "running" if self.running else "stopped",
             "local_port": self.local_port,
@@ -253,6 +263,8 @@ class EnclaveEgressProxy:
         }
         if last_failure:
             result["last_failure"] = last_failure
+        if last_tunnel:
+            result["last_tunnel"] = last_tunnel
         return result
 
     def stop(self) -> None:
@@ -431,11 +443,17 @@ class EnclaveEgressProxy:
             if remainder:
                 parent.sendall(remainder)
             failure_stage = "relay_tls_tunnel"
-            _relay_bidirectional(
+            relay = _relay_bidirectional(
                 client,
                 parent,
                 idle_timeout_seconds=self._idle_timeout_seconds,
             )
+            with self._status_lock:
+                self._last_tunnel = {
+                    "stage": failure_stage,
+                    "destination_ref": destination_ref,
+                    **relay,
+                }
         except Exception as exc:
             with self._status_lock:
                 self._last_failure = {

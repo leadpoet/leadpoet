@@ -360,7 +360,7 @@ def ensure_tee_egress_forwarder() -> Dict[str, Any]:
 def main() -> int:
     """Run the parent forwarder for the lifetime of the gateway deployment."""
 
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, force=True)
     status = ensure_tee_egress_forwarder()
     if status.get("status") != "running":
         raise TEEEgressForwarderError(

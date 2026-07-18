@@ -12,6 +12,8 @@ TEE_PROTOCOL="$(
   printf '%s' "${RESEARCH_LAB_TEE_PROTOCOL:-v2}" \
     | tr '[:upper:]' '[:lower:]'
 )"
+ROLE_READY_TIMEOUT_SECONDS="${GATEWAY_TEE_ROLE_READY_TIMEOUT_SECONDS:-180}"
+ROLE_READY_RETRY_SECONDS="${GATEWAY_TEE_ROLE_READY_RETRY_SECONDS:-5}"
 case "$TEE_PROTOCOL" in
   v2|authoritative_v2) TEE_PROTOCOL="v2" ;;
   *)
@@ -24,6 +26,22 @@ ALL_ROLES=(
   gateway_scoring
   gateway_autoresearch
 )
+
+for numeric_setting in \
+  ROLE_READY_TIMEOUT_SECONDS \
+  ROLE_READY_RETRY_SECONDS; do
+  numeric_value="${!numeric_setting}"
+  case "$numeric_value" in
+    ""|*[!0-9]*)
+      echo "ERROR: ${numeric_setting} must be a positive integer" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$numeric_value" -le 0 ]; then
+    echo "ERROR: ${numeric_setting} must be a positive integer" >&2
+    exit 1
+  fi
+done
 
 python3 "$SCRIPT_DIR/topology.py" --verify "$SCRIPT_DIR/topology.json"
 
@@ -89,19 +107,40 @@ verify_roles() {
     python3 "$SCRIPT_DIR/verify_topology.py" "${verify_args[@]}" "$@"
 }
 
+wait_for_roles() {
+  local deadline=$((SECONDS + ROLE_READY_TIMEOUT_SECONDS))
+  local attempt=1
+  local output=""
+  local roles="$*"
+
+  while true; do
+    if output="$(verify_roles "$@" 2>&1)"; then
+      printf '%s\n' "$output"
+      return 0
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      printf '%s\n' "$output" >&2
+      echo "ERROR: enclave roles did not become ready within ${ROLE_READY_TIMEOUT_SECONDS}s: ${roles}" >&2
+      sudo nitro-cli describe-enclaves >&2 || true
+      return 1
+    fi
+    echo "Waiting for measured enclave role readiness: ${roles} (attempt ${attempt})"
+    printf '%s\n' "$output" | tail -1
+    attempt=$((attempt + 1))
+    sleep "$ROLE_READY_RETRY_SECONDS"
+  done
+}
+
 if [ "$TOPOLOGY_MODE" = "full" ]; then
   start_role gateway_coordinator
-  sleep 15
-  verify_roles gateway_coordinator
+  wait_for_roles gateway_coordinator
   for role in gateway_scoring gateway_autoresearch; do
     start_role "$role"
   done
-  sleep 15
-  verify_roles "${ROLES[@]}"
+  wait_for_roles "${ROLES[@]}"
 else
   start_role "${ROLES[0]}"
-  sleep 15
-  verify_roles "${ROLES[@]}"
+  wait_for_roles "${ROLES[@]}"
 fi
 
 sudo nitro-cli describe-enclaves

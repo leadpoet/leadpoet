@@ -175,10 +175,28 @@ def test_startup_proves_coordinator_release_before_starting_runners():
         encoding="utf-8"
     )
     coordinator = script.index("start_role gateway_coordinator")
-    coordinator_health = script.index("verify_roles gateway_coordinator")
+    coordinator_health = script.index("wait_for_roles gateway_coordinator")
     runners = script.index(
         "for role in gateway_scoring gateway_autoresearch"
     )
-    final_health = script.index('verify_roles "${ROLES[@]}"')
+    final_health = script.index('wait_for_roles "${ROLES[@]}"')
     assert coordinator < coordinator_health < runners < final_health
     assert '--release-manifest "$RELEASE_MANIFEST"' in script
+
+
+def test_startup_retries_strict_role_health_during_enclave_cold_start():
+    script = (ROOT / "gateway" / "tee" / "start_enclave.sh").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        'ROLE_READY_TIMEOUT_SECONDS="${GATEWAY_TEE_ROLE_READY_TIMEOUT_SECONDS:-180}"'
+        in script
+    )
+    assert (
+        'ROLE_READY_RETRY_SECONDS="${GATEWAY_TEE_ROLE_READY_RETRY_SECONDS:-5}"'
+        in script
+    )
+    assert 'if output="$(verify_roles "$@" 2>&1)"; then' in script
+    assert 'if [ "$SECONDS" -ge "$deadline" ]; then' in script
+    assert "sudo nitro-cli describe-enclaves >&2 || true" in script
+    assert "sleep 15" not in script

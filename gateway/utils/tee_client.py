@@ -187,7 +187,7 @@ class TEEClient:
             response = json.loads(response_bytes.decode('utf-8'))
             
             # Check status
-            if response.get("status") == "error":
+            if response.get("status") == "error" or "error" in response:
                 raise RuntimeError(f"Enclave error: {response.get('error')}")
             
             return response.get("result", {})

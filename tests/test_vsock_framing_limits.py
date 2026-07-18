@@ -26,6 +26,14 @@ class _FragmentSocket:
         return value
 
 
+class _RPCSocket(_FragmentSocket):
+    def sendall(self, data):
+        self.request = data
+
+    def close(self):
+        pass
+
+
 def test_gateway_exact_reader_handles_fragmented_prefix_and_body():
     assert gateway_service._recv_exact(_FragmentSocket(b"abcdefgh", 1), 8) == b"abcdefgh"
     assert gateway_client._recv_exact(_FragmentSocket(b"abcdefgh", 3), 8) == b"abcdefgh"
@@ -55,3 +63,18 @@ def test_validator_rejects_oversized_frame_before_reading_body():
 
 def test_validator_client_exact_reader_handles_fragments():
     assert validator_client._recv_exact(_FragmentSocket(b"response", 1), 8) == b"response"
+
+
+@pytest.mark.asyncio
+async def test_gateway_client_surfaces_enclave_error_without_status_field():
+    body = json.dumps({"error": "credential hash mismatch"}).encode()
+    client = gateway_client.TEEClient(cid=16)
+    client._socket = _RPCSocket(len(body).to_bytes(4, "big") + body)
+
+    async def already_connected():
+        return None
+
+    client._ensure_connected = already_connected
+
+    with pytest.raises(RuntimeError, match="credential hash mismatch"):
+        await client._send_rpc("v2_provision_encrypted_secret", {})

@@ -46,7 +46,7 @@ jobs:
           PY
             )
             echo "Finney block=$block subnet71_position=$position"
-            [ "$position" -le 180 ] && break
+            [ "$position" -le 300 ] && break
             sleep 60
           done
 
@@ -123,7 +123,7 @@ jobs:
           PY
             )
             echo "Finney block=$block subnet71_position=$position"
-            [ "$position" -le 180 ] && break
+            [ "$position" -le 300 ] && break
             sleep 60
           done
 

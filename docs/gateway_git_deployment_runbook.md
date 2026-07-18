@@ -21,7 +21,7 @@ therefore always follow the fetched head of `GITHUB_BRANCH`.
 ## One-Time Cutover
 
 Only perform the cutover after the intended migration commit is on the
-configured GitHub branch and before block 300 of the current epoch.
+configured GitHub branch and at or before block 300 of the current epoch.
 
 ```bash
 /home/ec2-user/bin/research-lab-admin pause-scoring \

@@ -34,6 +34,7 @@ def test_validator_restart_preserves_build_order_and_starts_chain_relay():
     ).read_text(encoding="utf-8")
     assert "--offline-artifact-root" in build_script
     assert "--allow-download" not in build_script
+    assert "scripts/build_drand_cabi_v2.sh" in build_script
     assert 'pkill -TERM -f "validator_tee.host.chain_relay_v2"' in script
     assert 'pkill -KILL -f "validator_tee.host.chain_relay_v2"' in script
     assert 'VALIDATOR_PYTHON_BIN="${VALIDATOR_PYTHON_BIN:-python3}"' in script
@@ -67,6 +68,31 @@ def test_validator_restart_preserves_build_order_and_starts_chain_relay():
             "bash",
             "-n",
             str(ROOT / "validator_models" / "containerizing" / "deploy_dynamic.sh"),
+        ],
+        check=True,
+    )
+
+
+def test_validator_drand_helper_is_built_for_the_enclave_abi():
+    builder = (
+        ROOT / "validator_tee" / "Dockerfile.drand-builder"
+    ).read_text(encoding="utf-8")
+    script = (
+        ROOT / "validator_tee" / "scripts" / "build_drand_cabi_v2.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "amazonlinux:2@sha256:" in builder
+    assert "rust@sha256:" in builder
+    assert "python3-3.7.16-1.amzn2.0.24" in builder
+    assert "target-al2-glibc226" in script
+    assert "enclave maximum is GLIBC_2.26" in script
+    for symbol in ("cr_generate_commit_v2", "cr_free", "cr_free_str"):
+        assert symbol in script
+    subprocess.run(
+        [
+            "bash",
+            "-n",
+            str(ROOT / "validator_tee" / "scripts" / "build_drand_cabi_v2.sh"),
         ],
         check=True,
     )

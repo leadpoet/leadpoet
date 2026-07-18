@@ -1,0 +1,21 @@
+FROM rust@sha256:d9c3c6f1264a547d84560e06ffd79ed7a799ce0bff0980b26cf10d29af888377 AS rust_toolchain
+
+FROM amazonlinux:2@sha256:0b09112ad58d45fd7e46a399048133f4572a834b8ccfeebbfb6215b0092acfc6
+
+COPY --from=rust_toolchain /usr/local/rustup /usr/local/rustup
+COPY --from=rust_toolchain /usr/local/cargo /usr/local/cargo
+
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV PATH=/usr/local/cargo/bin:${PATH}
+
+# Link the measured helper against the enclave's Amazon Linux 2 ABI.
+RUN yum install -y \
+        gcc-7.3.1-18.amzn2 \
+        gcc-c++-7.3.1-18.amzn2 \
+        git-2.47.3-1.amzn2.0.1 \
+        gzip-1.5-10.amzn2.0.1 \
+        python3-3.7.16-1.amzn2.0.24 \
+        tar-1.26-35.amzn2.0.4 \
+    && yum clean all \
+    && rm -rf /var/cache/yum/*

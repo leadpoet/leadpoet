@@ -168,6 +168,21 @@ def test_gateway_restart_disables_the_retired_host_provider_proxy() -> None:
     ) in script
 
 
+def test_gateway_restart_starts_tee_egress_before_v2_readiness() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    cleanup = 'pkill -9 -f "gateway.utils.tee_egress_forwarder"'
+    launch = (
+        '-m gateway.utils.tee_egress_forwarder \\\n'
+        '    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" '
+        '2>&1 < /dev/null 9>&- &'
+    )
+    readiness = "python3 -m gateway.tee.verify_v2_runtime_ready"
+
+    assert cleanup in script
+    assert launch in script
+    assert script.index(cleanup) < script.index(launch) < script.index(readiness)
+
+
 def test_gateway_restart_has_fail_closed_lock_and_no_validator_deploy_gate() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     assert 'flock -n 9' in script

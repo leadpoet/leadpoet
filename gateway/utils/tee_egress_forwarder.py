@@ -338,3 +338,24 @@ def ensure_tee_egress_forwarder() -> Dict[str, Any]:
             }
         _FORWARDER = candidate
         return status
+
+
+def main() -> int:
+    """Run the parent forwarder for the lifetime of the gateway deployment."""
+
+    logging.basicConfig(level=logging.INFO)
+    status = ensure_tee_egress_forwarder()
+    if status.get("status") != "running":
+        raise TEEEgressForwarderError(
+            "gateway TEE egress forwarder port is already owned"
+        )
+    print(json.dumps(status, sort_keys=True), flush=True)
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

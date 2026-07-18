@@ -327,7 +327,9 @@ acquire_gateway_restart_lock() {
     lock_holder_found=1
     holder_command="$(tr '\0' ' ' < "/proc/$holder_pid/cmdline" 2>/dev/null || true)"
     case "$holder_command" in
-      *"gateway.utils.tee_inter_enclave_relay"*|*" -m gateway.main "*)
+      *"gateway.utils.tee_inter_enclave_relay"*|\
+      *"gateway.utils.tee_egress_forwarder"*|\
+      *" -m gateway.main "*)
         ;;
       *)
         lock_holder_is_stale=0
@@ -817,6 +819,7 @@ pkill -9 -f "run_research_lab_scoring_worker" 2>/dev/null || true
 pkill -9 -f "gateway.research_lab.provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "gateway.utils.tee_inter_enclave_relay" 2>/dev/null || true
+pkill -9 -f "gateway.utils.tee_egress_forwarder" 2>/dev/null || true
 stop_research_lab_private_model_containers
 
 echo "Stopping stuck private-model Docker builds or pip installs"
@@ -1053,6 +1056,18 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     GATEWAY_ENV_FILE="$GATEWAY_ENV_FILE" \
     RESEARCH_LAB_TEE_PROTOCOL="$RESEARCH_LAB_TEE_PROTOCOL" \
     bash ./start_enclave.sh
+
+  echo "Starting parent-side opaque enclave egress forwarder"
+  cd "$LEADPOET_REPO_ROOT"
+  PYTHONPATH="$LEADPOET_REPO_ROOT" setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.utils.tee_egress_forwarder \
+    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" 2>&1 < /dev/null 9>&- &
+  TEE_EGRESS_FORWARDER_PID="$!"
+  sleep 2
+  if ! ps -p "$TEE_EGRESS_FORWARDER_PID" >/dev/null 2>&1; then
+    tail -80 "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" || true
+    echo "ERROR: parent-side enclave egress forwarder did not start" >&2
+    exit 1
+  fi
 
   echo "Starting opaque inter-enclave TLS relay"
   cd "$LEADPOET_REPO_ROOT"

@@ -127,6 +127,12 @@ def _configured_value(
     return str(explicit or os.getenv(name) or env_file_values.get(name) or default).strip()
 
 
+def _operator_only_value(name: str, explicit: str | None, default: str) -> str:
+    """Resolve one-invocation controls without consulting persistent runtime config."""
+
+    return str(explicit or os.getenv(name) or default).strip()
+
+
 def _sanitize_remote(remote: str) -> str:
     value = str(remote or "").strip()
     try:
@@ -442,8 +448,8 @@ def main(argv: list[str] | None = None) -> int:
                 plan_file=args.plan_file,
                 manifest_file=args.manifest_file,
                 last_good_file=args.last_good_file,
-                deploy_commit=_configured_value(
-                    "GATEWAY_DEPLOY_COMMIT", args.deploy_commit, env_values, ""
+                deploy_commit=_operator_only_value(
+                    "GATEWAY_DEPLOY_COMMIT", args.deploy_commit, ""
                 ),
             )
             print(document["target_sha"])

@@ -13,6 +13,11 @@ stops the existing processes, fast-forwards the checkout to that exact commit,
 and then runs the existing cleanup, PCR0, enclave, dependency, process launch,
 and health workflow. It does not add a validator-side deployment gate.
 
+`GATEWAY_DEPLOY_COMMIT` is an operator-only, one-invocation rollback control.
+Persistent copies in Secrets Manager or the cached/runtime environment are
+ignored and are not inherited by the relaunched gateway. Normal restarts
+therefore always follow the fetched head of `GITHUB_BRANCH`.
+
 ## One-Time Cutover
 
 Only perform the cutover after the intended migration commit is on the

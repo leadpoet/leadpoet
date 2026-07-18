@@ -331,12 +331,14 @@ aws secretsmanager get-secret-value \
 
 python3 - "$SECRET_TMP" "$GATEWAY_ENV_FILE" <<'PY'
 import json
+import shlex
 import sys
 from pathlib import Path
 
 src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
 raw = src.read_text()
+restart_only_keys = {"GATEWAY_DEPLOY_COMMIT"}
 
 try:
     parsed = json.loads(raw)
@@ -346,12 +348,31 @@ except Exception:
 if isinstance(parsed, dict):
     lines = []
     for key, value in parsed.items():
+        if key in restart_only_keys:
+            continue
         if isinstance(value, (dict, list)):
             value = json.dumps(value, separators=(",", ":"))
         elif value is None:
             value = ""
         lines.append(f"{key}={value}")
     raw = "\n".join(lines) + "\n"
+else:
+    lines = []
+    for raw_line in raw.replace("\x00", "\n").splitlines():
+        line = raw_line.strip()
+        candidate = line[7:].strip() if line.startswith("export ") else line
+        try:
+            parts = shlex.split(candidate, posix=True)
+        except ValueError:
+            parts = [candidate]
+        assignment = parts[0] if len(parts) == 1 else candidate
+        key = assignment.split("=", 1)[0].strip() if "=" in assignment else ""
+        if key in restart_only_keys:
+            continue
+        lines.append(raw_line)
+    raw = "\n".join(lines)
+    if lines:
+        raw += "\n"
 
 dst.parent.mkdir(parents=True, exist_ok=True)
 dst.write_text(raw)
@@ -373,6 +394,7 @@ skip_keys = {
     "AWS_SESSION_TOKEN",
     "AWS_SECURITY_TOKEN",
     "AWS_PROFILE",
+    "GATEWAY_DEPLOY_COMMIT",
     "LEADPOET_REPO_ROOT",
     "GATEWAY_ROOT",
     "GATEWAY_LOG_ROOT",
@@ -450,6 +472,7 @@ skip_keys = {
     "AWS_SESSION_TOKEN",
     "AWS_SECURITY_TOKEN",
     "AWS_PROFILE",
+    "GATEWAY_DEPLOY_COMMIT",
     "LEADPOET_REPO_ROOT",
     "GATEWAY_ROOT",
     "GATEWAY_LOG_ROOT",
@@ -753,6 +776,7 @@ echo "Activated gateway commit: $ACTIVATED_GATEWAY_SHA"
 
 GATEWAY_DEPLOY_STAGE="restart_reexec"
 export GATEWAY_DEPLOY_STAGE
+unset GATEWAY_DEPLOY_COMMIT
 exec env \
   GATEWAY_RESTART_PHASE=post_activate \
   GATEWAY_RESTART_LOCK_HELD=1 \

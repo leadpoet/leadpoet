@@ -290,7 +290,11 @@ def test_prepare_cli_reads_repo_and_branch_from_hydrated_env_file(
     _git(git_fixture.source, "push", "-u", "origin", "gateway-release")
     env_file = tmp_path / "gateway.env"
     env_file.write_text(
-        f"GITHUB_REPO_URL={git_fixture.remote}\nGITHUB_BRANCH=gateway-release\n",
+        (
+            f"GITHUB_REPO_URL={git_fixture.remote}\n"
+            "GITHUB_BRANCH=gateway-release\n"
+            f"GATEWAY_DEPLOY_COMMIT={git_fixture.initial_sha}\n"
+        ),
         encoding="utf-8",
     )
     for key in ("GITHUB_REPO_URL", "GITHUB_BRANCH", "GATEWAY_DEPLOY_COMMIT"):
@@ -315,6 +319,41 @@ def test_prepare_cli_reads_repo_and_branch_from_hydrated_env_file(
         == 0
     )
     assert json.loads(plan.read_text(encoding="utf-8"))["target_sha"] == target
+
+
+def test_prepare_cli_honors_one_invocation_rollback_pin(
+    git_fixture: GitFixture,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _commit(git_fixture.source, "newer")
+    _git(git_fixture.source, "push", "origin", "main")
+    monkeypatch.setenv("GATEWAY_DEPLOY_COMMIT", git_fixture.initial_sha)
+    plan, manifest, last_good = _paths(tmp_path)
+
+    assert (
+        gateway_git_deploy.main(
+            [
+                "prepare",
+                "--repo-root",
+                str(git_fixture.checkout),
+                "--repo-url",
+                str(git_fixture.remote),
+                "--branch",
+                "main",
+                "--plan-file",
+                str(plan),
+                "--manifest-file",
+                str(manifest),
+                "--last-good-file",
+                str(last_good),
+            ]
+        )
+        == 0
+    )
+    document = json.loads(plan.read_text(encoding="utf-8"))
+    assert document["mode"] == "pinned"
+    assert document["target_sha"] == git_fixture.initial_sha
 
 
 def test_failed_finalize_does_not_replace_last_good(

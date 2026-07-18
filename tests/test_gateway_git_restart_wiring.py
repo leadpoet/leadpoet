@@ -141,7 +141,6 @@ def test_gateway_restart_has_fail_closed_lock_and_no_validator_deploy_gate() -> 
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     assert 'flock -n 9' in script
     assert 'another gateway restart is already running' in script
-    assert 'GATEWAY_DEPLOY_COMMIT' not in script  # The helper consumes the optional env safely.
     assert 'VALIDATOR_GATEWAY_PCR0_CACHE_FILE' not in script
     assert 'independent_gateway_identity' not in script
 
@@ -154,6 +153,7 @@ def test_gateway_restart_does_not_clone_restart_control_state_into_runtime() -> 
         "GATEWAY_DEPLOY_PLAN_FILE",
         "GATEWAY_DEPLOY_STAGE",
         "GATEWAY_DEPLOY_COMPLETED",
+        "GATEWAY_DEPLOY_COMMIT",
     )
 
     # Both the Secrets Manager parser and the live-process environment clone
@@ -161,6 +161,8 @@ def test_gateway_restart_does_not_clone_restart_control_state_into_runtime() -> 
     # stale per-restart /tmp plan path and the next rollout cannot finalize.
     for key in restart_only_keys:
         assert script.count(f'"{key}",') >= 2
+    assert 'restart_only_keys = {"GATEWAY_DEPLOY_COMMIT"}' in script
+    assert "unset GATEWAY_DEPLOY_COMMIT" in script
 
 
 def test_concurrent_restart_exits_before_checkout_or_process_changes(tmp_path: Path) -> None:

@@ -1044,6 +1044,7 @@ class ProviderBrokerV2:
         }
         terminal_kwargs = {}  # type: Dict[str, Any]
         response_payload = None
+        failure_stage = "provider_transport"
         try:
             transport_kwargs = {
                 "method": method,
@@ -1077,6 +1078,7 @@ class ProviderBrokerV2:
                     }
                 ).encode("utf-8")
                 response_artifact_kind = "provider_response_summary"
+            failure_stage = "response_artifact_persistence"
             artifact = dict(
                 self._artifact_sink(
                     response_artifact_body,
@@ -1132,6 +1134,8 @@ class ProviderBrokerV2:
             response_payload = {
                 "terminal_status": "transport_failure",
                 "failure_code": terminal_kwargs["failure_code"],
+                "failure_stage": failure_stage,
+                "failure_error_type": type(exc).__name__,
                 "encrypted_request_artifact_id": request_artifact_id,
             }
         attempt = build_transport_attempt(

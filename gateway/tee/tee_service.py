@@ -1246,7 +1246,13 @@ def handle_v2_runtime_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]
             )
         }
     if method == "v2_provider_broker_health":
-        return {"result": get_v2_provider_broker().health()}
+        health = get_v2_provider_broker().health()
+        return {
+            "result": {
+                **health,
+                "egress_proxy": get_provider_egress_proxy().status(),
+            }
+        }
     if method == "v2_provider_semantics_health":
         return {"result": get_v2_provider_semantics_authority().health()}
     if method == "v2_get_kms_recipient":

@@ -404,13 +404,20 @@ class ProviderOutcomeStoreV2:
                 if isinstance(attempt, Mapping)
                 else "missing_attempt"
             )
+            failure_stage = str(result.get("failure_stage") or "unknown")
+            failure_error_type = str(
+                result.get("failure_error_type") or "unknown"
+            )
             raise ProviderOutcomeStoreV2Error(
                 "provider outcome checkpoint authenticated read failed "
-                "(terminal_status=%s http_status=%d failure_code=%s)"
+                "(terminal_status=%s http_status=%d failure_code=%s "
+                "failure_stage=%s failure_error_type=%s)"
                 % (
                     str(result.get("terminal_status") or "missing"),
                     int(result.get("http_status") or 0),
                     failure_code,
+                    failure_stage,
+                    failure_error_type,
                 )
             )
         try:

@@ -106,6 +106,8 @@ class _Broker:
     def _failure(self, request):
         return {
             "terminal_status": "transport_failure",
+            "failure_stage": "provider_transport",
+            "failure_error_type": "ReadError",
             "transport_attempt": {
                 "attempt_hash": "sha256:" + "f" * 64,
                 "terminal_status": "transport_failure",
@@ -244,7 +246,9 @@ def test_outcome_checkpoint_rejects_tampering_and_transport_failure() -> None:
         match=(
             "authenticated read failed "
             r"\(terminal_status=transport_failure "
-            r"http_status=0 failure_code=timeout\)"
+            r"http_status=0 failure_code=timeout "
+            r"failure_stage=provider_transport "
+            r"failure_error_type=ReadError\)"
         ),
     ):
         store.load_latest(

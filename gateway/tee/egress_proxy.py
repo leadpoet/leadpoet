@@ -214,6 +214,8 @@ class EnclaveEgressProxy:
         self._listener = None
         self._thread = None
         self._stop = threading.Event()
+        self._status_lock = threading.Lock()
+        self._last_failure = None  # type: Optional[Dict[str, Any]]
 
     @property
     def running(self) -> bool:
@@ -237,7 +239,9 @@ class EnclaveEgressProxy:
         return self.status()
 
     def status(self) -> Dict[str, Any]:
-        return {
+        with self._status_lock:
+            last_failure = dict(self._last_failure or {})
+        result = {
             "status": "running" if self.running else "stopped",
             "local_port": self.local_port,
             "forwarder_port": self.forwarder_port,
@@ -247,6 +251,9 @@ class EnclaveEgressProxy:
             "loopback_http_allowed": True,
             "tls_upstream_proxy_supported": True,
         }
+        if last_failure:
+            result["last_failure"] = last_failure
+        return result
 
     def stop(self) -> None:
         self._stop.set()
@@ -397,33 +404,46 @@ class EnclaveEgressProxy:
     def _handle_client(self, client: Any) -> None:
         parent = None
         destination_ref = "unknown"
+        failure_stage = "read_client_headers"
         try:
             headers, remainder = _read_headers(client)
+            failure_stage = "parse_connect_request"
             request = _parse_proxy_request(headers)
             host = str(request["host"])
             port = int(request["port"])
             destination_ref = _destination_ref(host, port)
             upstream_proxy_url = str(request.get("upstream_proxy_url") or "")
             if upstream_proxy_url:
+                failure_stage = "open_upstream_proxy_tunnel"
                 parent = self._open_upstream_proxy_tunnel(
                     proxy_url=upstream_proxy_url,
                     destination_host=host,
                     destination_port=port,
                 )
             else:
+                failure_stage = "open_parent_tunnel"
                 parent = self._open_parent_tunnel(host, port)
+            failure_stage = "acknowledge_connect"
             if request["method"] == "CONNECT":
                 client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             else:
                 parent.sendall(request["forward_headers"])
             if remainder:
                 parent.sendall(remainder)
+            failure_stage = "relay_tls_tunnel"
             _relay_bidirectional(
                 client,
                 parent,
                 idle_timeout_seconds=self._idle_timeout_seconds,
             )
         except Exception as exc:
+            with self._status_lock:
+                self._last_failure = {
+                    "stage": failure_stage,
+                    "error_type": type(exc).__name__,
+                    "errno": int(getattr(exc, "errno", 0) or 0),
+                    "destination_ref": destination_ref,
+                }
             try:
                 client.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
             except Exception:

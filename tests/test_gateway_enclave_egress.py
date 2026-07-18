@@ -284,6 +284,34 @@ def test_enclave_parent_handshake_uses_same_length_prefixed_json_contract():
     parent.close()
 
 
+def test_enclave_proxy_health_exposes_bounded_last_failure_stage():
+    client, proxy_side = socket.socketpair()
+    proxy = EnclaveEgressProxy(recv_exact=_recv_exact)
+
+    def fail_parent(_host, _port):
+        error = OSError(111, "connection refused")
+        raise error
+
+    proxy._open_parent_tunnel = fail_parent
+    client.sendall(
+        b"CONNECT qplwoislplkcegvdmbim.supabase.co:443 HTTP/1.1\r\n"
+        b"Host: qplwoislplkcegvdmbim.supabase.co:443\r\n\r\n"
+    )
+    proxy._handle_client(proxy_side)
+    response = client.recv(4096)
+    status = proxy.status()
+
+    assert response.startswith(b"HTTP/1.1 502 Bad Gateway")
+    assert status["last_failure"] == {
+        "stage": "open_parent_tunnel",
+        "error_type": "OSError",
+        "errno": 111,
+        "destination_ref": "4877532cd3300944",
+    }
+    assert "supabase" not in str(status)
+    client.close()
+
+
 def test_aiohttp_requests_are_forced_through_enclave_local_proxy(monkeypatch):
     import aiohttp
 

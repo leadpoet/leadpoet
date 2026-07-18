@@ -1,5 +1,7 @@
 import base64
 import json
+import sys
+import types
 
 import pytest
 
@@ -11,6 +13,7 @@ from gateway.utils.tee_kms_provision_v2 import (
     JOB_PROVIDER_ENVELOPE_SCHEMA_VERSION,
     PROVIDER_ENVELOPE_SCHEMA_VERSION,
     TEEKMSProvisionV2Error,
+    _default_kms_client,
     build_provider_envelope_v2,
     kms_key_reference_hash,
     load_provider_envelopes,
@@ -40,6 +43,24 @@ def _envelope():
         "encryption_context": context,
         "encryption_context_hash": sha256_json(context),
     }
+
+
+def test_default_kms_client_has_region_without_aws_region_env(monkeypatch):
+    calls = []
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "boto3",
+        types.SimpleNamespace(
+            client=lambda service, **kwargs: calls.append((service, kwargs))
+            or object()
+        ),
+    )
+
+    _default_kms_client()
+
+    assert calls == [("kms", {"region_name": "us-east-1"})]
 
 
 class _Client:

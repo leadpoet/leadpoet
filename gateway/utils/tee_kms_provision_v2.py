@@ -12,6 +12,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
@@ -31,6 +32,17 @@ _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 class TEEKMSProvisionV2Error(RuntimeError):
     """An encrypted credential envelope or KMS recipient response is unsafe."""
+
+
+def _default_kms_client() -> Any:
+    import boto3
+
+    region_name = (
+        os.environ.get("AWS_REGION")
+        or os.environ.get("AWS_DEFAULT_REGION")
+        or "us-east-1"
+    )
+    return boto3.client("kms", region_name=region_name)
 
 
 def kms_key_reference_hash(key_id: str) -> str:
@@ -81,9 +93,7 @@ def build_provider_envelope_v2(
     if any(not name or not value or "\x00" in name + value for name, value in context.items()):
         raise TEEKMSProvisionV2Error("provider envelope context is invalid")
     if kms_client is None:
-        import boto3
-
-        kms_client = boto3.client("kms")
+        kms_client = _default_kms_client()
     response = kms_client.encrypt(
         KeyId=str(kms_key_id),
         Plaintext=payload,
@@ -193,9 +203,7 @@ async def provision_provider_envelope_v2(
     except Exception as exc:
         raise TEEKMSProvisionV2Error("coordinator KMS attestation is invalid") from exc
     if kms_client is None:
-        import boto3
-
-        kms_client = boto3.client("kms")
+        kms_client = _default_kms_client()
     response = await asyncio.to_thread(
         kms_client.decrypt,
         CiphertextBlob=normalized["ciphertext_blob"],
@@ -315,9 +323,7 @@ async def provision_job_provider_envelope_v2(
             "coordinator job KMS attestation is invalid"
         ) from exc
     if kms_client is None:
-        import boto3
-
-        kms_client = boto3.client("kms")
+        kms_client = _default_kms_client()
     response = await asyncio.to_thread(
         kms_client.decrypt,
         CiphertextBlob=normalized["ciphertext_blob"],

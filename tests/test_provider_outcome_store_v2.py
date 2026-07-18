@@ -110,6 +110,7 @@ class _Broker:
                 "attempt_hash": "sha256:" + "f" * 64,
                 "terminal_status": "transport_failure",
                 "response_hash": None,
+                "failure_code": "timeout",
             },
         }
 
@@ -238,7 +239,14 @@ def test_outcome_checkpoint_rejects_tampering_and_transport_failure() -> None:
         )
 
     broker.fail_reads = True
-    with pytest.raises(ProviderOutcomeStoreV2Error, match="authenticated read failed"):
+    with pytest.raises(
+        ProviderOutcomeStoreV2Error,
+        match=(
+            "authenticated read failed "
+            r"\(terminal_status=transport_failure "
+            r"http_status=0 failure_code=timeout\)"
+        ),
+    ):
         store.load_latest(
             utc_day="2026-07-11",
             job_id="restore",

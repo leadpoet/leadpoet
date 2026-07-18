@@ -398,8 +398,20 @@ class ProviderOutcomeStoreV2:
             result.get("terminal_status") != "authenticated_response"
             or not 200 <= int(result.get("http_status") or 0) < 300
         ):
+            attempt = result.get("transport_attempt")
+            failure_code = (
+                str(attempt.get("failure_code") or "none")
+                if isinstance(attempt, Mapping)
+                else "missing_attempt"
+            )
             raise ProviderOutcomeStoreV2Error(
-                "provider outcome checkpoint authenticated read failed"
+                "provider outcome checkpoint authenticated read failed "
+                "(terminal_status=%s http_status=%d failure_code=%s)"
+                % (
+                    str(result.get("terminal_status") or "missing"),
+                    int(result.get("http_status") or 0),
+                    failure_code,
+                )
             )
         try:
             body = base64.b64decode(str(result.get("body_b64") or ""), validate=True)

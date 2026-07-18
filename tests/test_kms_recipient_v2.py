@@ -63,6 +63,35 @@ def test_kms_recipient_unwraps_only_expected_credential_inside_enclave():
     assert manager.provisioned_slots() == ("openrouter",)
 
 
+def test_kms_recipient_refreshes_attestation_for_each_kms_request():
+    attestations = []
+
+    def attest(*, user_data, signing_pubkey):
+        attestations.append((user_data, signing_pubkey))
+        return f"nitro-attestation-{len(attestations)}".encode()
+
+    manager = KMSRecipientV2(
+        boot_identity_supplier=lambda: {
+            "boot_identity_hash": "sha256:" + "a" * 64
+        },
+        expected_credential_ref_hashes={
+            "openrouter": credential_reference_hash("provider-secret")
+        },
+        attestation_supplier=attest,
+    )
+
+    first = manager.recipient_request("openrouter")
+    second = manager.recipient_request("openrouter")
+
+    assert first["attestation_document_b64"] != second["attestation_document_b64"]
+    assert first["request_nonce"] != second["request_nonce"]
+    assert (
+        first["recipient_public_key_der_b64"]
+        == second["recipient_public_key_der_b64"]
+    )
+    assert len(attestations) == 2
+
+
 def test_kms_recipient_rejects_wrong_plaintext_and_reprovisioning():
     manager, _, secret = _manager()
     request = manager.recipient_request("openrouter")

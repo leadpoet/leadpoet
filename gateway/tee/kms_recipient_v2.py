@@ -106,9 +106,6 @@ class KMSRecipientV2:
         if normalized_slot not in self._expected:
             raise KMSRecipientV2Error("credential slot is not measured")
         with self._lock:
-            existing = self._requests.get(normalized_slot)
-            if existing is not None:
-                return dict(existing)
             boot = dict(self._boot_identity_supplier())
             public_hash = "sha256:" + hashlib.sha256(self._public_der).hexdigest()
             claim = {

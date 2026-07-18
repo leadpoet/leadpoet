@@ -54,12 +54,23 @@ class BaseNeuron:
     def config_neuron(self, path: str):
         if not hasattr(self.config, 'neuron') or self.config.neuron is None:
             self.config.neuron = bt.Config()
-            self.config.neuron.axon_off = False
-            self.config.neuron.num_concurrent_forwards = 1
-            self.config.neuron.full_path = path
-            self.config.neuron.moving_average_alpha = 0.1
-            self.config.neuron.sample_size = 5
-            bt.logging.debug("Initialized config.neuron with defaults")
+        defaults = {
+            "axon_off": False,
+            "num_concurrent_forwards": 1,
+            "full_path": path,
+            "moving_average_alpha": 0.1,
+            "sample_size": 5,
+        }
+        configured_defaults = []
+        for name, value in defaults.items():
+            if getattr(self.config.neuron, name, None) is None:
+                setattr(self.config.neuron, name, value)
+                configured_defaults.append(name)
+        if configured_defaults:
+            bt.logging.debug(
+                "Initialized missing config.neuron defaults: "
+                + ", ".join(configured_defaults)
+            )
 
     def config_axon(self, port: int):
         if not hasattr(self.config, 'axon') or self.config.axon is None:

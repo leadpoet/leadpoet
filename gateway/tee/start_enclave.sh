@@ -26,6 +26,13 @@ ALL_ROLES=(
   gateway_scoring
   gateway_autoresearch
 )
+# Nitro limits the number of discontiguous memory regions backing one enclave.
+# Allocate the largest EIFs first so smaller roles cannot fragment that pool.
+FULL_LAUNCH_ORDER=(
+  gateway_scoring
+  gateway_autoresearch
+  gateway_coordinator
+)
 
 for numeric_setting in \
   ROLE_READY_TIMEOUT_SECONDS \
@@ -132,10 +139,9 @@ wait_for_roles() {
 }
 
 if [ "$TOPOLOGY_MODE" = "full" ]; then
-  start_role gateway_coordinator
-  wait_for_roles gateway_coordinator
-  for role in gateway_scoring gateway_autoresearch; do
+  for role in "${FULL_LAUNCH_ORDER[@]}"; do
     start_role "$role"
+    wait_for_roles "$role"
   done
   wait_for_roles "${ROLES[@]}"
 else

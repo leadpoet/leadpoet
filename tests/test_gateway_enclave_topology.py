@@ -170,17 +170,18 @@ def test_topology_health_rejects_running_pcr_not_in_release(monkeypatch):
         asyncio.run(verify_topology.verify_roles([role], release_manifest=release))
 
 
-def test_startup_proves_coordinator_release_before_starting_runners():
+def test_startup_allocates_largest_roles_first_and_verifies_every_release():
     script = (ROOT / "gateway" / "tee" / "start_enclave.sh").read_text(
         encoding="utf-8"
     )
-    coordinator = script.index("start_role gateway_coordinator")
-    coordinator_health = script.index("wait_for_roles gateway_coordinator")
-    runners = script.index(
-        "for role in gateway_scoring gateway_autoresearch"
+    scoring_order = script.index(
+        "FULL_LAUNCH_ORDER=(\n  gateway_scoring\n  gateway_autoresearch\n"
+        "  gateway_coordinator"
     )
+    launch_loop = script.index('for role in "${FULL_LAUNCH_ORDER[@]}"')
+    per_role_health = script.index('wait_for_roles "$role"', launch_loop)
     final_health = script.index('wait_for_roles "${ROLES[@]}"')
-    assert coordinator < coordinator_health < runners < final_health
+    assert scoring_order < launch_loop < per_role_health < final_health
     assert '--release-manifest "$RELEASE_MANIFEST"' in script
 
 

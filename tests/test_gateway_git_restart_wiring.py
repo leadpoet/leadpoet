@@ -137,6 +137,7 @@ def test_gateway_restart_installs_declared_host_dependencies_before_shutdown() -
     assert "bittensor==10.5.0" in requirements
     assert "async-substrate-interface==2.2.1" in requirements
     assert "publicsuffix2>=2.20191221" in requirements
+    assert "leadpoet-subnet substrate-interface" in script
     assert "py-scale-codec scalecodec" in script
     assert '"$GATEWAY_PYTHON_BIN" -m pip check' in script
     assert script.count("install_gateway_python_dependencies") == 3

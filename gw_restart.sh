@@ -78,9 +78,12 @@ install_gateway_python_dependencies() {
   fi
   export PATH="$HOME/.local/bin:$PATH"
   # These legacy distributions install the same `scalecodec` import namespace
-  # as Cyscale and make Bittensor 10 fail at import time.
+  # as Cyscale and make Bittensor 10 fail at import time. The editable project
+  # metadata can also retain an obsolete Bittensor <10 requirement even though
+  # gateway modules load from the exact canonical checkout via PYTHONPATH.
   "$GATEWAY_PYTHON_BIN" -m pip uninstall -y \
-    substrate-interface py-scale-codec scalecodec >/dev/null 2>&1 || true
+    leadpoet-subnet substrate-interface py-scale-codec scalecodec \
+    >/dev/null 2>&1 || true
   "$GATEWAY_PYTHON_BIN" -m pip install \
     "${pip_scope[@]}" \
     --requirement "$requirements_file" \

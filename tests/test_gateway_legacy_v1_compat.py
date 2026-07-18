@@ -39,7 +39,8 @@ def test_gateway_restart_is_v2_only_and_keeps_the_release_gate() -> None:
     assert "build_role_enclaves.sh" in restart
     assert "legacy_v1" not in restart
     assert "prepare_legacy_enclave_artifacts.sh" not in restart
-    assert "GATEWAY_DEPLOY_COMMIT" not in restart
+    assert "export GATEWAY_DEPLOY_COMMIT=" not in restart
+    assert "unset GATEWAY_DEPLOY_COMMIT" in restart
     assert "07c81c7f" not in restart
 
 

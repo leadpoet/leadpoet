@@ -127,7 +127,11 @@ async def get_substrate_interface():
                 _substrate_interface = None
             
             try:
-                from substrateinterface import SubstrateInterface
+                # Bittensor 10 uses async-substrate-interface/Cyscale. Its
+                # synchronous facade preserves this module's existing
+                # to_thread contract without installing legacy py-scale-codec,
+                # whose `scalecodec` namespace conflicts with Cyscale.
+                from async_substrate_interface import SubstrateInterface
                 
                 logger.info(f"Connecting to Bittensor chain at {expected_endpoint} ({current_network})...")
                 

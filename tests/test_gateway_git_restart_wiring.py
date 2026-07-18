@@ -28,6 +28,7 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
             'echo "Preparing exact gateway commit from configured GitHub branch"',
             'echo "Validating the prepared V2 release before production shutdown"',
             'echo "Preparing exact hash-locked V2 build artifacts before production shutdown"',
+            'echo "Verifying official subnet restart window immediately before shutdown"',
             'echo "Stopping existing gateway and Research Lab worker processes"',
             'echo "Waiting for :8000 to free"',
             'echo "Activating prepared gateway Git commit after process shutdown"',
@@ -42,7 +43,7 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
             'echo "Relaunching gateway with cloned runtime env"',
             'unset RESEARCH_LAB_EVIDENCE_PROXY_URL RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH',
             'setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main',
-            'sleep 240',
+            'for attempt in $(seq 1 120)',
             'curl -fsS http://localhost:8000/health',
             'curl -fsS http://localhost:8000/health/v2-authority',
             'GATEWAY_DEPLOY_STAGE="host_restart_script_install"',
@@ -101,7 +102,7 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     assert (
         '(\n  cd "$GATEWAY_PREFLIGHT_TREE"\n'
         '  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \\\n'
-        '  python3 - "$ENV_CLONE" '
+        '  "$GATEWAY_PYTHON_BIN" - "$ENV_CLONE" '
         '"$GATEWAY_V2_CONFIG_DIR/gateway-v2-env-transition.json"'
     ) in script
     assert "scrub_parent_environment_file_v2" in script
@@ -130,7 +131,14 @@ def test_gateway_restart_installs_declared_host_dependencies_before_shutdown() -
     )
     post_activate_install = script.index('echo "Installing Python dependencies"')
 
-    assert '"publicsuffix2>=2.20191221"' in script
+    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    assert '--requirement "$requirements_file"' in script
+    assert 'requirements_file="$GATEWAY_PREFLIGHT_TREE/requirements.txt"' in script
+    assert "bittensor==10.5.0" in requirements
+    assert "async-substrate-interface==2.2.1" in requirements
+    assert "publicsuffix2>=2.20191221" in requirements
+    assert "py-scale-codec scalecodec" in script
+    assert '"$GATEWAY_PYTHON_BIN" -m pip check' in script
     assert script.count("install_gateway_python_dependencies") == 3
     assert dependency_preflight < shutdown < post_activate_install
     assert (
@@ -179,7 +187,7 @@ def test_gateway_restart_starts_tee_egress_before_v2_readiness() -> None:
         '    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" '
         '2>&1 < /dev/null 9>&- &'
     )
-    readiness = "python3 -m gateway.tee.verify_v2_runtime_ready"
+    readiness = '"$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready'
 
     assert managed_service_cleanup in script
     assert cleanup in script
@@ -192,7 +200,7 @@ def test_gateway_restart_starts_tee_egress_before_v2_readiness() -> None:
     )
 
 
-def test_gateway_restart_has_fail_closed_lock_and_no_validator_deploy_gate() -> None:
+def test_gateway_restart_has_fail_closed_lock_and_official_epoch_gate() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     assert 'flock -n 9' in script
     assert 'another gateway restart is already running' in script
@@ -203,6 +211,11 @@ def test_gateway_restart_has_fail_closed_lock_and_no_validator_deploy_gate() -> 
     ) in script
     assert 'VALIDATOR_GATEWAY_PCR0_CACHE_FILE' not in script
     assert 'independent_gateway_identity' not in script
+    gate = "Leadpoet.utils.restart_epoch_gate"
+    shutdown = 'echo "Stopping existing gateway and Research Lab worker processes"'
+    assert gate in script
+    assert script.index(gate) < script.index(shutdown)
+    assert "--maximum" not in script
 
 
 def test_gateway_restart_does_not_clone_restart_control_state_into_runtime() -> None:

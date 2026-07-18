@@ -10,8 +10,9 @@ WORKFLOW = ROOT / ".github" / "workflows" / "attested-v2-release.yml"
 def test_release_workflow_reclaims_all_unreferenced_docker_state():
     source = WORKFLOW.read_text(encoding="utf-8")
 
-    assert source.count("docker image prune --all --force") == 4
-    assert source.count("docker builder prune --all --force") == 4
+    assert source.count("docker image prune --all --force") == 3
+    assert source.count("docker builder prune --all --force") == 3
+    assert "validator_tee/scripts/reclaim_docker_storage_v2.sh" in source
     assert "docker image prune --force" not in source
     assert "docker builder prune --force" not in source
 

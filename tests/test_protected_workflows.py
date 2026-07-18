@@ -20,7 +20,7 @@ MANIFEST_PATH = ROOT / "gateway" / "tee" / "protected_workflows.json"
 def test_committed_protected_workflow_manifest_matches_source():
     manifest = load_manifest(MANIFEST_PATH)
     verify_manifest(ROOT, manifest)
-    assert manifest["baseline_commit"] == "7c9766b71d4c08b0059f6e3230dbe742b1d58e79"
+    assert re.fullmatch(r"[0-9a-f]{40}", manifest["baseline_commit"])
     protected_source = manifest["protected_source_commit"]
     assert re.fullmatch(r"[0-9a-f]{40}", protected_source)
     subprocess.run(
@@ -32,10 +32,11 @@ def test_committed_protected_workflow_manifest_matches_source():
 
 
 def test_protected_manifest_detects_logic_change(tmp_path: Path):
+    committed = load_manifest(MANIFEST_PATH)
     manifest = build_manifest(
         ROOT,
-        baseline_commit="7c9766b71d4c08b0059f6e3230dbe742b1d58e79",
-        protected_source_commit="6a4deb788431acff9dd42aaf306cab7297e45053",
+        baseline_commit=committed["baseline_commit"],
+        protected_source_commit=committed["protected_source_commit"],
     )
     copied_root = tmp_path / "repo"
     for relative_path in PROTECTED_SYMBOLS:

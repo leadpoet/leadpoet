@@ -95,14 +95,34 @@ echo ""
 # Validators just add WEBSHARE_PROXY_1 and WEBSHARE_PROXY_2 to their existing .env
 MAIN_ENV_PATH="../../.env"
 
-# validator_restart.sh loads the production runtime environment from AWS
-# Secrets Manager before invoking the validator. Preserve its gateway routing
-# values across the legacy .env/.env.docker loads below so stale host files
-# cannot silently redirect the coordinator or workers to an older endpoint.
+# validator_restart.sh loads the authoritative production environment from
+# Secrets Manager before invoking this script. Local .env files remain fallback
+# sources for legacy operator-only settings, but may not override any inherited
+# production value.
+INHERITED_ENV_FILE="$(mktemp /tmp/validator-inherited-env.XXXXXX)"
 INHERITED_GATEWAY_URL_SET="${GATEWAY_URL+x}"
 INHERITED_GATEWAY_URL="${GATEWAY_URL:-}"
 INHERITED_VALIDATOR_V2_GATEWAY_URL_SET="${VALIDATOR_V2_GATEWAY_URL+x}"
 INHERITED_VALIDATOR_V2_GATEWAY_URL="${VALIDATOR_V2_GATEWAY_URL:-}"
+python3 - "$INHERITED_ENV_FILE" <<'PY'
+import os
+import re
+import shlex
+import sys
+from pathlib import Path
+
+destination = Path(sys.argv[1])
+lines = []
+for key, value in os.environ.items():
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        lines.append(f"export {key}={shlex.quote(value)}")
+destination.write_text("\n".join(sorted(lines)) + "\n", encoding="utf-8")
+destination.chmod(0o600)
+PY
+cleanup_inherited_env() {
+    rm -f "$INHERITED_ENV_FILE"
+}
+trap cleanup_inherited_env EXIT
 
 if [ -f "$MAIN_ENV_PATH" ]; then
     echo "📋 Loading configuration from main .env file..."
@@ -127,6 +147,9 @@ if [ -f ".env.docker" ]; then
     echo "✅ Overrides loaded from .env.docker"
 fi
 
+# Restore every inherited exported value after local fallback files have been
+# read. This covers protocol, gateway, chain, feature, and secret settings.
+source "$INHERITED_ENV_FILE"
 if [ "$INHERITED_GATEWAY_URL_SET" = "x" ]; then
     GATEWAY_URL="$INHERITED_GATEWAY_URL"
 fi
@@ -690,6 +713,100 @@ echo "============================================================"
 echo ""
 echo "⏳ Waiting 30 seconds for validators to fully initialize..."
 sleep 30
+
+echo "🔐 Verifying authoritative validator coordinator runtime..."
+if [ "$(docker inspect -f '{{.State.Running}}' leadpoet-validator-main)" != "true" ]; then
+    echo "❌ ERROR: validator coordinator is not running" >&2
+    docker logs --tail 160 leadpoet-validator-main >&2 || true
+    exit 1
+fi
+if [ "$(docker inspect -f '{{.RestartCount}}' leadpoet-validator-main)" != "0" ]; then
+    echo "❌ ERROR: validator coordinator restarted during startup" >&2
+    docker logs --tail 160 leadpoet-validator-main >&2 || true
+    exit 1
+fi
+MAIN_RUNTIME_ENV="$(
+    docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
+        leadpoet-validator-main
+)"
+if [ "$(
+    printf '%s\n' "$MAIN_RUNTIME_ENV" \
+        | sed -n 's/^VALIDATOR_V2_DEPLOY_COMMIT=//p'
+)" != "$VALIDATOR_V2_DEPLOY_COMMIT" ]; then
+    echo "❌ ERROR: validator coordinator commit differs from approved release" >&2
+    exit 1
+fi
+if [ "$(
+    printf '%s\n' "$MAIN_RUNTIME_ENV" \
+        | sed -n 's/^VALIDATOR_WEIGHT_PROTOCOL=//p'
+)" != "authoritative_v2" ]; then
+    echo "❌ ERROR: validator coordinator is not using authoritative V2" >&2
+    exit 1
+fi
+if ! docker exec leadpoet-validator-main sh -c \
+    "tr '\\000' ' ' </proc/1/cmdline | grep -q 'neurons/validator.py'"; then
+    echo "❌ ERROR: validator coordinator process is not validator.py" >&2
+    exit 1
+fi
+docker exec -i leadpoet-validator-main python3 - <<'PY'
+import json
+import os
+import urllib.request
+
+import bittensor as bt
+
+from Leadpoet.utils.subnet_epoch import read_subnet_epoch_snapshot
+from validator_tee.host.vsock_client import ValidatorEnclaveClient
+
+if str(bt.__version__) != "10.5.0":
+    raise SystemExit(f"validator Bittensor SDK mismatch: {bt.__version__}")
+
+client = ValidatorEnclaveClient()
+health = client.health_check()
+if health.get("status") != "ok":
+    raise SystemExit(f"validator enclave health failed: {health}")
+hotkey_state = client.get_hotkey_state_v2()
+if hotkey_state.get("provisioned") is not True:
+    raise SystemExit("validator hotkey is not provisioned in Nitro")
+
+gateway_url = str(os.environ.get("VALIDATOR_V2_GATEWAY_URL") or "").rstrip("/")
+if not gateway_url:
+    raise SystemExit("VALIDATOR_V2_GATEWAY_URL is missing")
+with urllib.request.urlopen(
+    gateway_url + "/health/v2-authority",
+    timeout=30,
+) as response:
+    gateway_health = json.load(response)
+if gateway_health.get("status") != "ready":
+    raise SystemExit(f"gateway V2 authority is not ready: {gateway_health}")
+
+network = os.environ.get("SUBTENSOR_NETWORK", "finney")
+netuid = int(os.environ.get("NETUID", "71"))
+subtensor = bt.Subtensor(network=network)
+try:
+    epoch = read_subnet_epoch_snapshot(subtensor, netuid=netuid)
+finally:
+    close = getattr(subtensor, "close", None)
+    if callable(close):
+        close()
+
+print(
+    json.dumps(
+        {
+            "bittensor_version": str(bt.__version__),
+            "enclave_status": health.get("status"),
+            "hotkey_provisioned": True,
+            "gateway_authority_status": gateway_health.get("status"),
+            "gateway_commit": gateway_health.get("commit_sha"),
+            "subnet_epoch_index": epoch.subnet_epoch_index,
+            "subnet_epoch_block": epoch.epoch_block,
+        },
+        sort_keys=True,
+    )
+)
+PY
+echo "✅ Authoritative validator coordinator runtime verified"
+echo ""
 
 ALL_IPS=()
 

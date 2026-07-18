@@ -188,6 +188,13 @@ def _configured_proxy_envs(prefix: str, limit: int):
     return proxies
 
 if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1" and not _is_worker_mode:
+    force_container_deploy = _auto_container_env_flag(
+        "VALIDATOR_FORCE_CONTAINER_DEPLOY"
+    )
+    fail_closed_container_deploy = (
+        force_container_deploy
+        or _auto_container_env_flag("LEADPOET_WRAPPER_ACTIVE")
+    )
     legacy_sourcing_enabled = (
         _auto_container_env_flag("ENABLE_LEGACY_SOURCING")
         or _auto_container_env_flag("ENABLE_SOURCING_WORKERS")
@@ -207,7 +214,12 @@ if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1" a
         else []
     )
 
-    if sourcing_proxies or qualification_proxies or fulfillment_proxies:
+    if (
+        force_container_deploy
+        or sourcing_proxies
+        or qualification_proxies
+        or fulfillment_proxies
+    ):
         print("════════════════════════════════════════════════════════════════")
         print("🐳 AUTO-CONTAINERIZATION ACTIVATED")
         print("════════════════════════════════════════════════════════════════")
@@ -228,7 +240,10 @@ if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1" a
         
         # Check if deploy script exists
         if not os.path.exists(deploy_script):
-            print(f"❌ ERROR: Deploy script not found: {deploy_script}")
+            message = f"Deploy script not found: {deploy_script}"
+            print(f"❌ ERROR: {message}")
+            if fail_closed_container_deploy:
+                raise RuntimeError(message)
             print("   Falling back to non-containerized mode...")
             print("")
         else:
@@ -246,35 +261,45 @@ if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1" a
                 print("✅ Containerized deployment complete!")
                 print("   Validator coordinator and enabled worker containers are now running")
                 print("")
-                print("📺 Following main validator logs...")
-                print("   (Press Ctrl+C to detach - containers will keep running)")
-                print("════════════════════════════════════════════════════════════════")
-                print("")
-                
-                # Follow main container logs (blocking call)
-                try:
-                    subprocess.run(
-                        ["docker", "logs", "-f", "leadpoet-validator-main"],
-                        check=False  # Don't raise exception on Ctrl+C
-                    )
-                except KeyboardInterrupt:
-                    print("")
+                if _auto_container_env_flag(
+                    "VALIDATOR_AUTO_CONTAINER_FOLLOW_LOGS",
+                    default="true",
+                ):
+                    print("📺 Following main validator logs...")
+                    print("   (Press Ctrl+C to detach - containers will keep running)")
                     print("════════════════════════════════════════════════════════════════")
-                    print("🔌 Detached from logs (containers still running)")
                     print("")
-                    print("📋 To reattach: docker logs -f leadpoet-validator-main")
-                    print("📊 Check status: docker ps")
-                    print("🛑 Stop all: docker stop leadpoet-validator-main leadpoet-validator-worker-1 leadpoet-validator-worker-2")
-                    print("════════════════════════════════════════════════════════════════")
+
+                    # Follow main container logs (blocking call)
+                    try:
+                        subprocess.run(
+                            ["docker", "logs", "-f", "leadpoet-validator-main"],
+                            check=False  # Don't raise exception on Ctrl+C
+                        )
+                    except KeyboardInterrupt:
+                        print("")
+                        print("════════════════════════════════════════════════════════════════")
+                        print("🔌 Detached from logs (containers still running)")
+                        print("")
+                        print("📋 To reattach: docker logs -f leadpoet-validator-main")
+                        print("📊 Check status: docker ps")
+                        print("🛑 Stop all: docker stop leadpoet-validator-main leadpoet-validator-worker-1 leadpoet-validator-worker-2")
+                        print("════════════════════════════════════════════════════════════════")
                 
                 sys.exit(0)
                 
             except subprocess.CalledProcessError as e:
                 print(f"❌ ERROR: Deployment failed with exit code {e.returncode}")
+                if fail_closed_container_deploy:
+                    raise RuntimeError(
+                        "containerized validator deployment failed"
+                    ) from e
                 print("   Falling back to non-containerized mode...")
                 print("")
             except Exception as e:
                 print(f"❌ ERROR: {e}")
+                if fail_closed_container_deploy:
+                    raise
                 print("   Falling back to non-containerized mode...")
                 print("")
 

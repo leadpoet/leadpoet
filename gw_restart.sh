@@ -8,10 +8,10 @@ GATEWAY_LOG_ROOT="${GATEWAY_LOG_ROOT:-/home/ec2-user/gateway}"
 GATEWAY_LOG_FILE="${GATEWAY_LOG_FILE:-$GATEWAY_LOG_ROOT/gateway.log}"
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
 LEADPOET_GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-leadpoet/prod/gateway/env}"
-# Interpreter for the long-lived gateway processes (main, evidence proxy,
-# inter-enclave relay). Overridable via the hydrated env file so the runtime
-# can be cut over (and rolled back) without editing this script.
-GATEWAY_PYTHON_BIN="${GATEWAY_PYTHON_BIN:-python3}"
+# Interpreter for all gateway V2 tooling and long-lived processes. Production
+# uses the isolated Python 3.11 environment so Bittensor 10's Cyscale namespace
+# cannot collide with legacy py-scale-codec packages in the system interpreter.
+GATEWAY_PYTHON_BIN="${GATEWAY_PYTHON_BIN:-/home/ec2-user/venv311/bin/python3}"
 ENV_CLONE="/tmp/gw_env_clone.sh"
 ENV_SECRET="/tmp/gw_env_secret.sh"
 MIN_FREE_KB=$((10 * 1024 * 1024))
@@ -50,34 +50,73 @@ V2_CREDENTIAL_ENVELOPES=(
   "$GATEWAY_V2_CONFIG_DIR/supabase_service_role.json"
   "$GATEWAY_V2_CONFIG_DIR/truelist.json"
 )
-GATEWAY_HOST_PYTHON_PACKAGES=(
-  bittensor
-  fastapi
-  uvicorn
-  python-multipart
-  httpx
-  pydantic
-  requests
-  cbor2
-  cryptography
-  supabase
-  boto3
+GATEWAY_HOST_EXTRA_PYTHON_PACKAGES=(
   minio
-  arweave-python-client
-  substrate-interface
-  jsonschema
   awscli
-  "publicsuffix2>=2.20191221"
 )
 
 install_gateway_python_dependencies() {
-  if ! python3 -m pip --version >/dev/null 2>&1; then
+  local pip_scope=() requirements_file
+  if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ] \
+      && [ -f "$GATEWAY_PREFLIGHT_TREE/requirements.txt" ]; then
+    requirements_file="$GATEWAY_PREFLIGHT_TREE/requirements.txt"
+  else
+    requirements_file="$LEADPOET_REPO_ROOT/requirements.txt"
+  fi
+  if [ ! -r "$requirements_file" ]; then
+    echo "ERROR: exact gateway requirements are unavailable: $requirements_file" >&2
+    return 1
+  fi
+  if ! "$GATEWAY_PYTHON_BIN" -m pip --version >/dev/null 2>&1; then
     curl -fsS https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
-    python3 /tmp/get-pip.py --user
+    "$GATEWAY_PYTHON_BIN" /tmp/get-pip.py
     rm -f /tmp/get-pip.py
   fi
+  if ! "$GATEWAY_PYTHON_BIN" -c \
+      'import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)'; then
+    pip_scope=(--user)
+  fi
   export PATH="$HOME/.local/bin:$PATH"
-  python3 -m pip install --user "${GATEWAY_HOST_PYTHON_PACKAGES[@]}"
+  # These legacy distributions install the same `scalecodec` import namespace
+  # as Cyscale and make Bittensor 10 fail at import time.
+  "$GATEWAY_PYTHON_BIN" -m pip uninstall -y \
+    substrate-interface py-scale-codec scalecodec >/dev/null 2>&1 || true
+  "$GATEWAY_PYTHON_BIN" -m pip install \
+    "${pip_scope[@]}" \
+    --requirement "$requirements_file" \
+    "${GATEWAY_HOST_EXTRA_PYTHON_PACKAGES[@]}"
+  "$GATEWAY_PYTHON_BIN" -m pip check
+}
+
+select_gateway_python_runtime() {
+  local configured resolved version
+  configured="$(
+    set -a
+    . "$ENV_CLONE"
+    set +a
+    printf '%s' "${GATEWAY_PYTHON_BIN:-/home/ec2-user/venv311/bin/python3}"
+  )"
+  if [[ "$configured" = /* ]]; then
+    resolved="$configured"
+  else
+    resolved="$(command -v "$configured" || true)"
+  fi
+  if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
+    echo "ERROR: configured gateway Python is unavailable: $configured" >&2
+    return 1
+  fi
+  version="$(
+    "$resolved" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'
+  )"
+  if ! "$resolved" -c \
+      'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+    echo "ERROR: gateway V2 requires Python 3.11 or newer; observed $version" >&2
+    return 1
+  fi
+  GATEWAY_PYTHON_BIN="$resolved"
+  export GATEWAY_PYTHON_BIN
+  printf 'export GATEWAY_PYTHON_BIN=%q\n' "$GATEWAY_PYTHON_BIN" >> "$ENV_CLONE"
+  echo "Gateway Python runtime: $GATEWAY_PYTHON_BIN ($version)"
 }
 
 report_gateway_v2_bootstrap_pending() {
@@ -143,7 +182,7 @@ on_gateway_restart_exit() {
 run_prepared_gateway_module() {
   (
     cd "$GATEWAY_PREFLIGHT_TREE"
-    PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" python3 -m "$@"
+    PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -m "$@"
   )
 }
 trap on_gateway_restart_exit EXIT
@@ -622,6 +661,12 @@ grep -q "SUPABASE_SERVICE_ROLE_KEY" "$ENV_CLONE" || {
   exit 1
 }
 
+echo "Selecting one Python runtime for V2 preflight, bootstrap, and gateway processes"
+if ! select_gateway_python_runtime; then
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
+fi
+
 # Read the protocol only after the live environment and Secrets Manager have
 # been merged. Authoritative V2 is the sole production protocol.
 RESEARCH_LAB_TEE_PROTOCOL="$(
@@ -708,7 +753,7 @@ fi
 (
   cd "$GATEWAY_PREFLIGHT_TREE"
   PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
-  python3 - "$ENV_CLONE" "$GATEWAY_V2_CONFIG_DIR/gateway-v2-env-transition.json" <<'PY'
+  "$GATEWAY_PYTHON_BIN" - "$ENV_CLONE" "$GATEWAY_V2_CONFIG_DIR/gateway-v2-env-transition.json" <<'PY'
 import sys
 
 from gateway.tee.prepare_gateway_envelopes_v2 import (
@@ -805,6 +850,15 @@ echo "Validating the prepared V2 release before production shutdown"
     echo "ERROR: V2 offline artifact preparation failed before shutdown" >&2
     exit 1
   fi
+
+echo "Verifying official subnet restart window immediately before shutdown"
+if ! run_prepared_gateway_module Leadpoet.utils.restart_epoch_gate \
+    --network "${BITTENSOR_NETWORK:-finney}" \
+    --netuid "${BITTENSOR_NETUID:-71}"; then
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 75
+fi
+
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
 
@@ -872,6 +926,7 @@ exec env \
   GATEWAY_LAST_GOOD_MANIFEST="$GATEWAY_LAST_GOOD_MANIFEST" \
   GATEWAY_HOST_RESTART_SCRIPT="$GATEWAY_HOST_RESTART_SCRIPT" \
   GATEWAY_TEE_EIF_ROOT="$GATEWAY_TEE_EIF_ROOT" \
+  GATEWAY_PYTHON_BIN="$GATEWAY_PYTHON_BIN" \
   RESEARCH_LAB_TEE_PROTOCOL="$RESEARCH_LAB_TEE_PROTOCOL" \
   GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
   GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
@@ -982,11 +1037,17 @@ bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"
 echo "Preflight: importing host workers from the canonical Git checkout"
 GATEWAY_DEPLOY_STAGE="worker_import_preflight"
 export GATEWAY_DEPLOY_STAGE
-if ! LEADPOET_REPO_ROOT="$LEADPOET_REPO_ROOT" PYTHONPATH="$LEADPOET_REPO_ROOT" python3 - <<'PREFLIGHT_HOST'
+if ! LEADPOET_REPO_ROOT="$LEADPOET_REPO_ROOT" PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" - <<'PREFLIGHT_HOST'
 import importlib
 import os
 from pathlib import Path
 
+import bittensor as bt
+from async_substrate_interface import SubstrateInterface
+import scalecodec
+
+if str(bt.__version__) != "10.5.0":
+    raise RuntimeError(f"gateway Bittensor SDK mismatch: {bt.__version__}")
 repo_root = Path(os.environ["LEADPOET_REPO_ROOT"]).resolve()
 modules = (
     "gateway.research_lab.worker_process",
@@ -1011,7 +1072,7 @@ then
 fi
 
 echo "Preflight: importing gateway dependencies from staged attested runtime"
-if ! GATEWAY_ROOT="$GATEWAY_ROOT" LEADPOET_REPO_ROOT="$LEADPOET_REPO_ROOT" python3 - <<'PREFLIGHT_ATTESTED'
+if ! GATEWAY_ROOT="$GATEWAY_ROOT" LEADPOET_REPO_ROOT="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" - <<'PREFLIGHT_ATTESTED'
 import importlib
 import os
 import sys
@@ -1095,7 +1156,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     exit 1
   }
   echo "Verifying encrypted TLS proxy profiles for all V2 workers"
-  PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.research_lab.provider_profiles_v2 \
+  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.research_lab.provider_profiles_v2 \
     --config-dir "$GATEWAY_V2_CONFIG_DIR" \
     --require-worker-proxies
   V2_BOOTSTRAP_ARGS=()
@@ -1108,7 +1169,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     V2_BOOTSTRAP_ARGS+=(--credential-envelope "$envelope")
     V2_PROVISION_ARGS+=(--envelope "$envelope")
   done
-  PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.utils.tee_v2_bootstrap \
+  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_v2_bootstrap \
     --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
     "${V2_BOOTSTRAP_ARGS[@]}" \
     --protected-workflow-manifest "$GATEWAY_ROOT/_attested_runtime/protected_workflows.json" \
@@ -1118,13 +1179,13 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   echo "Provisioning KMS ciphertext directly to the attested coordinator"
   GATEWAY_DEPLOY_STAGE="v2_kms_provision"
   export GATEWAY_DEPLOY_STAGE
-  PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.utils.tee_kms_provision_v2 \
+  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_kms_provision_v2 \
     "${V2_PROVISION_ARGS[@]}"
 
 echo "Verifying V2 provider and execution-manager readiness"
 GATEWAY_DEPLOY_STAGE="v2_runtime_readiness"
 export GATEWAY_DEPLOY_STAGE
-PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.tee.verify_v2_runtime_ready
+PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready
 
 echo "Installing Python dependencies"
 GATEWAY_DEPLOY_STAGE="dependency_install"
@@ -1156,15 +1217,25 @@ GATEWAY_PID="$!"
 echo "relaunched main pid: $GATEWAY_PID"
 rm -f "$ENV_CLONE" "$ENV_SECRET"
 
-sleep 240
 GATEWAY_DEPLOY_STAGE="gateway_health_check"
 export GATEWAY_DEPLOY_STAGE
-if ! ps -p "$GATEWAY_PID" >/dev/null 2>&1; then
+GATEWAY_HEALTH_READY=0
+for attempt in $(seq 1 120); do
+  if ! ps -p "$GATEWAY_PID" >/dev/null 2>&1; then
+    tail -160 "$GATEWAY_LOG_FILE"
+    echo "ERROR: gateway exited during startup" >&2
+    exit 1
+  fi
+  if timeout 5 curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+    GATEWAY_HEALTH_READY=1
+    echo "Gateway base health ready after attempt $attempt"
+    break
+  fi
+  sleep 5
+done
+if [ "$GATEWAY_HEALTH_READY" != "1" ]; then
   tail -120 "$GATEWAY_LOG_FILE"
-  exit 1
-fi
-if ! timeout 15 curl -fsS http://localhost:8000/health >/dev/null; then
-  tail -120 "$GATEWAY_LOG_FILE"
+  echo "ERROR: gateway base health did not become ready within 10 minutes" >&2
   exit 1
 fi
 if ! timeout 60 curl -fsS http://localhost:8000/health/v2-authority >/dev/null; then

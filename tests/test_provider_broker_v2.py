@@ -196,6 +196,8 @@ def test_parent_or_network_error_cannot_masquerade_as_provider_status():
     assert result == {
         "terminal_status": "transport_failure",
         "failure_code": "proxy_failure",
+        "failure_stage": "provider_transport",
+        "failure_error_type": "RuntimeError",
         "encrypted_request_artifact_id": result[
             "encrypted_request_artifact_id"
         ],

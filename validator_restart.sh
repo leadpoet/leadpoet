@@ -297,6 +297,14 @@ if [ "$actual_aws_account" != "$EXPECTED_AWS_ACCOUNT" ]; then
   exit 1
 fi
 
+echo "Verifying official subnet restart window immediately before shutdown"
+if ! "$VALIDATOR_PYTHON_BIN" -m Leadpoet.utils.restart_epoch_gate \
+    --network "${VALIDATOR_SUBTENSOR_NETWORK:-finney}" \
+    --netuid "${VALIDATOR_NETUID:-71}"; then
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 75
+fi
+
 echo "Stopping validator processes and containers"
 sudo pkill -TERM -f ".auto_update_wrapper.sh" 2>/dev/null || true
 sudo pkill -TERM -f "neurons/validator.py" 2>/dev/null || true
@@ -397,9 +405,19 @@ python3 -m validator_tee.host.hotkey_bootstrap_v2 \
 echo "Starting validator"
 export PATH="$HOME/.local/bin:$PATH"
 export PYTHONPATH="${PYTHONPATH:-$VALIDATOR_ROOT}"
+export VALIDATOR_FORCE_CONTAINER_DEPLOY=1
+export VALIDATOR_AUTO_CONTAINER_FOLLOW_LOGS=0
 
 "$VALIDATOR_PYTHON_BIN" neurons/validator.py \
   --netuid "${VALIDATOR_NETUID:-71}" \
   --subtensor_network "${VALIDATOR_SUBTENSOR_NETWORK:-finney}" \
   --wallet_name "$VALIDATOR_WALLET_NAME" \
   --wallet_hotkey "$VALIDATOR_WALLET_HOTKEY"
+
+if [ "$(docker inspect -f '{{.State.Running}}' leadpoet-validator-main)" != "true" ] \
+    || [ "$(docker inspect -f '{{.RestartCount}}' leadpoet-validator-main)" != "0" ]; then
+  echo "ERROR: validator coordinator failed its final restart-wrapper check" >&2
+  docker logs --tail 160 leadpoet-validator-main >&2 || true
+  exit 1
+fi
+echo "SUCCESS: authoritative V2 validator restart completed and verified"

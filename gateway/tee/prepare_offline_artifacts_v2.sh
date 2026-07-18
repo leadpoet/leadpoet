@@ -12,6 +12,15 @@ RUNSC_LOCK="$SCRIPT_DIR/runsc-runtime.lock.json"
 SCORING_INPUT="$SCRIPT_DIR/requirements-scoring-py39.in"
 SCORING_LOCK="$SCRIPT_DIR/requirements-scoring-py39.lock"
 
+normalize_mtime() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+
+os.utime(sys.argv[1], ns=(0, 0))
+PY
+}
+
 mkdir -p "$ARTIFACT_ROOT"
 chmod 700 "$ARTIFACT_ROOT"
 TEMP_ROOT="$(mktemp -d "$ARTIFACT_ROOT/.prepare-v2.XXXXXX")"
@@ -66,7 +75,7 @@ PYTHONPATH="$REPO_ROOT" python3 "$SCRIPT_DIR/sandbox_runtime_artifact.py" verify
   --lock "$RUNSC_LOCK" \
   --artifact "$TEMP_ROOT/$RUNSC_NAME"
 chmod 755 "$TEMP_ROOT/$RUNSC_NAME"
-touch -d @0 "$TEMP_ROOT/$RUNSC_NAME"
+normalize_mtime "$TEMP_ROOT/$RUNSC_NAME"
 
 echo "Preparing hash-locked validator binary artifacts"
 if ! PYTHONPATH="$REPO_ROOT" python3 -m validator_tee.scripts.stage_runtime_artifacts_v2 \
@@ -85,7 +94,7 @@ mkdir -p "$(dirname "$WHEELHOUSE")"
 mv "$TEMP_ROOT/wheelhouse" "$WHEELHOUSE"
 mv "$TEMP_ROOT/validator-runtime" "$VALIDATOR_RUNTIME"
 install -m 755 "$TEMP_ROOT/$RUNSC_NAME" "$ARTIFACT_ROOT/$RUNSC_NAME"
-touch -d @0 "$ARTIFACT_ROOT/$RUNSC_NAME"
+normalize_mtime "$ARTIFACT_ROOT/$RUNSC_NAME"
 rm -rf "$TEMP_ROOT"
 
 python3 "$SCRIPT_DIR/scoring_wheelhouse.py" verify-wheelhouse \

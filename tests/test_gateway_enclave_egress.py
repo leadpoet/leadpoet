@@ -22,6 +22,7 @@ from gateway.utils.tee_egress_forwarder import (
     TEEEgressForwarderError,
     _global_address_infos,
     _handle_connection,
+    _relay_bidirectional,
 )
 
 
@@ -153,6 +154,41 @@ def test_parent_forwarder_rejects_policy_mismatch_before_connecting():
     finally:
         client.close()
         thread.join(timeout=2)
+
+
+def test_parent_relay_reports_directional_bytes_and_first_close():
+    enclave, parent = socket.socketpair()
+    upstream, provider = socket.socketpair()
+    observed = {}
+
+    def run():
+        observed.update(
+            _relay_bidirectional(
+                parent,
+                upstream,
+                idle_timeout_seconds=2,
+            )
+        )
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    enclave.sendall(b"request")
+    assert provider.recv(64) == b"request"
+    provider.sendall(b"response")
+    provider.shutdown(socket.SHUT_WR)
+    assert enclave.recv(64) == b"response"
+    enclave.shutdown(socket.SHUT_WR)
+    thread.join(timeout=2)
+
+    assert observed == {
+        "enclave_to_provider_bytes": 7,
+        "provider_to_enclave_bytes": 8,
+        "first_closed": "provider",
+    }
+    enclave.close()
+    parent.close()
+    upstream.close()
+    provider.close()
 
 
 def test_enclave_proxy_parses_connect_without_exposing_http_payload():

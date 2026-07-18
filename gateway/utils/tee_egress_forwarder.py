@@ -126,10 +126,11 @@ def _relay_bidirectional(
     right: Any,
     *,
     idle_timeout_seconds: float = DEFAULT_IDLE_TIMEOUT_SECONDS,
-) -> None:
+) -> Dict[str, Any]:
     peers = {left: right, right: left}
     active = {left, right}
     transferred = {left: 0, right: 0}
+    first_closed = ""
     last_activity = time.monotonic()
     while active:
         remaining = max(0.0, idle_timeout_seconds - (time.monotonic() - last_activity))
@@ -142,6 +143,8 @@ def _relay_bidirectional(
             data = source.recv(RELAY_CHUNK_BYTES)
             destination = peers[source]
             if not data:
+                if not first_closed:
+                    first_closed = "enclave" if source is left else "provider"
                 active.discard(source)
                 try:
                     destination.shutdown(socket.SHUT_WR)
@@ -153,6 +156,11 @@ def _relay_bidirectional(
                 raise TEEEgressForwarderError("egress tunnel byte limit exceeded")
             destination.sendall(data)
             last_activity = time.monotonic()
+    return {
+        "enclave_to_provider_bytes": transferred[left],
+        "provider_to_enclave_bytes": transferred[right],
+        "first_closed": first_closed or "unknown",
+    }
 
 
 def _handle_connection(
@@ -197,10 +205,19 @@ def _handle_connection(
             },
         )
         connected = True
-        _relay_bidirectional(
+        relay = _relay_bidirectional(
             connection,
             upstream,
             idle_timeout_seconds=idle_timeout_seconds,
+        )
+        logger.info(
+            "gateway_tee_egress_tunnel_closed destination_ref=%s "
+            "enclave_to_provider_bytes=%d provider_to_enclave_bytes=%d "
+            "first_closed=%s",
+            destination_ref,
+            relay["enclave_to_provider_bytes"],
+            relay["provider_to_enclave_bytes"],
+            relay["first_closed"],
         )
     except Exception as exc:
         if not connected:

@@ -280,7 +280,11 @@ async def bootstrap_gateway_enclaves_v2(
 
     for role in sorted(ROLE_SPECS):
         started = await role_clients[role].v2_start_tls_service()
-        if started.get("status") not in {"started", "already_running"}:
+        if started.get("status") not in {
+            "running",
+            "started",
+            "already_running",
+        }:
             raise TEEV2BootstrapError("%s TLS service did not start" % role)
 
     channels = []

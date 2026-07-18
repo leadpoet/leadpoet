@@ -105,7 +105,7 @@ class _Client:
         return {"physical_role": boot_identity["physical_role"]}
 
     async def v2_start_tls_service(self):
-        return {"status": "started"}
+        return {"status": "running"}
 
     async def v2_call_peer_health(self, role):
         return {"status": "healthy", "role": role}

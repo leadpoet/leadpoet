@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "c126acf91d5485a43d971976f0f75c0e58202572",
+  "baseline_commit": "805b6ef3d771f7197ad78b2d4a30e8a7e5472655",
   "entries": [
     {
       "ast_sha256": "sha256:d4d317a4bf47e5215d85be2913465c63202438a1de9798b899abc191fff2a48b",
@@ -1042,7 +1042,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:46b850878942df9507b9bc475275783712b412129aa6be686275a500e7a826a3",
-  "protected_source_commit": "c126acf91d5485a43d971976f0f75c0e58202572",
+  "manifest_hash": "sha256:56172eee1321da30abbc0b324b4964f48065ec5bc23b34571f2789c015c1edc3",
+  "protected_source_commit": "805b6ef3d771f7197ad78b2d4a30e8a7e5472655",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

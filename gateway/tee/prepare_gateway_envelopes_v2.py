@@ -126,6 +126,90 @@ def load_environment_file(path: Path) -> Dict[str, str]:
     return result
 
 
+def scrub_parent_environment_file_v2(
+    *,
+    environment_path: Path,
+    transition_report_path: Path,
+) -> Dict[str, Any]:
+    """Atomically remove every parent plaintext alias sealed for V2 workers."""
+
+    try:
+        report = json.loads(Path(transition_report_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise GatewayEnvelopePreparationV2Error(
+            "gateway V2 environment transition report is unavailable"
+        ) from exc
+    if not isinstance(report, Mapping):
+        raise GatewayEnvelopePreparationV2Error(
+            "gateway V2 environment transition report is invalid"
+        )
+    remove_names = {
+        str(value)
+        for value in report.get("plaintext_environment_names_to_remove") or ()
+    }
+    remove_refs = {
+        str(value)
+        for value in report.get("plaintext_credential_ref_hashes_to_remove") or ()
+    }
+    if not remove_refs:
+        raise GatewayEnvelopePreparationV2Error(
+            "gateway V2 plaintext credential commitments are unavailable"
+        )
+
+    environment_path = Path(environment_path)
+    try:
+        lines = environment_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise GatewayEnvelopePreparationV2Error(
+            "prepared gateway parent environment is unavailable"
+        ) from exc
+
+    kept = []
+    removed_names = set()
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            kept.append(raw_line)
+            continue
+        candidate = (
+            line[len("export ") :].strip()
+            if line.startswith("export ")
+            else line
+        )
+        try:
+            parts = shlex.split(candidate, posix=True)
+        except ValueError as exc:
+            raise GatewayEnvelopePreparationV2Error(
+                "prepared gateway parent environment is malformed"
+            ) from exc
+        if len(parts) != 1 or "=" not in parts[0]:
+            raise GatewayEnvelopePreparationV2Error(
+                "prepared gateway parent environment is malformed"
+            )
+        name, value = parts[0].split("=", 1)
+        if name in remove_names or credential_reference_hash(value) in remove_refs:
+            removed_names.add(name)
+            continue
+        kept.append(raw_line)
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".gateway-env-scrub.", dir=str(environment_path.parent)
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(kept).rstrip() + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_name, 0o600)
+        os.replace(temporary_name, environment_path)
+    finally:
+        Path(temporary_name).unlink(missing_ok=True)
+    return {
+        "removed_line_count": len(lines) - len(kept),
+        "removed_names": sorted(removed_names),
+    }
+
+
 def _secret(env: Mapping[str, str], names: Sequence[str]) -> tuple[str, str]:
     for name in names:
         value = str(env.get(name) or "").strip()
@@ -195,6 +279,7 @@ def prepare_gateway_envelopes_v2(
     staging = Path(tempfile.mkdtemp(prefix=".gateway-v2-envelopes.", dir=parent))
     os.chmod(staging, 0o700)
     removal_names = set()
+    removal_values = set()
     try:
         artifact_key = secrets.token_bytes(32)
         artifact_context = {
@@ -221,6 +306,7 @@ def prepare_gateway_envelopes_v2(
             source_name, value = _secret(environment, names)
             if slot not in _SHARED_PARENT_SLOTS:
                 removal_names.add(source_name)
+                removal_values.add(value)
             boot_values[slot] = value
             _write_json(
                 staging / (slot + ".json"),
@@ -242,6 +328,8 @@ def prepare_gateway_envelopes_v2(
             source_name, value = _secret(environment, names)
             if source_name.startswith("RESEARCH_LAB_V2_"):
                 removal_names.add(source_name)
+            if slot not in _SHARED_PARENT_SLOTS:
+                removal_values.add(value)
             _write_json(
                 staging / filename,
                 build_provider_envelope_v2(
@@ -283,6 +371,7 @@ def prepare_gateway_envelopes_v2(
                         "worker proxy source identity is unavailable"
                     )
                 removal_names.add(source_name)
+                removal_values.add(value)
                 _write_json(
                     staging / filename_template.format(index),
                     build_provider_envelope_v2(
@@ -299,6 +388,11 @@ def prepare_gateway_envelopes_v2(
                         kms_client=kms_client,
                     ),
                 )
+        removal_names.update(
+            str(name)
+            for name, value in environment.items()
+            if str(value) in removal_values
+        )
         report = {
             "schema_version": "leadpoet.gateway_envelope_transition.v2",
             "deploy_commit": commit,
@@ -313,6 +407,9 @@ def prepare_gateway_envelopes_v2(
                 ),
             },
             "plaintext_environment_names_to_remove": sorted(removal_names),
+            "plaintext_credential_ref_hashes_to_remove": sorted(
+                credential_reference_hash(value) for value in removal_values
+            ),
             "envelope_file_count": len(list(staging.glob("*.json"))) + 1,
         }
         _write_json(staging / "gateway-v2-env-transition.json", report)

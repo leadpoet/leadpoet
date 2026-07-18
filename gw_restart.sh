@@ -618,40 +618,18 @@ if ! run_prepared_gateway_module gateway.tee.prepare_gateway_envelopes_v2 \
   exit 75
 fi
 
+PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
 python3 - "$ENV_CLONE" "$GATEWAY_V2_CONFIG_DIR/gateway-v2-env-transition.json" <<'PY'
-import json
-import os
-from pathlib import Path
-import shlex
 import sys
-import tempfile
 
-environment_path = Path(sys.argv[1])
-report = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-remove = set(report.get("plaintext_environment_names_to_remove") or [])
-kept = []
-for raw in environment_path.read_text(encoding="utf-8").splitlines():
-    line = raw.strip()
-    candidate = line[7:].strip() if line.startswith("export ") else line
-    try:
-        parts = shlex.split(candidate, posix=True)
-    except ValueError:
-        parts = []
-    name = parts[0].split("=", 1)[0] if len(parts) == 1 and "=" in parts[0] else ""
-    if name not in remove:
-        kept.append(raw)
-descriptor, temporary_name = tempfile.mkstemp(
-    prefix=".gateway-env-scrub.", dir=str(environment_path.parent)
+from gateway.tee.prepare_gateway_envelopes_v2 import (
+    scrub_parent_environment_file_v2,
 )
-try:
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(kept).rstrip() + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(temporary_name, 0o600)
-    os.replace(temporary_name, environment_path)
-finally:
-    Path(temporary_name).unlink(missing_ok=True)
+
+scrub_parent_environment_file_v2(
+    environment_path=sys.argv[1],
+    transition_report_path=sys.argv[2],
+)
 print("Scrubbed commit-bound provider plaintext from prepared parent environment")
 PY
 

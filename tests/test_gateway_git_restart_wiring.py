@@ -93,6 +93,13 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
         "python3 -m gateway.tee.release_channel_v2"
     ) not in script
     assert 'cd "$GATEWAY_PREFLIGHT_TREE"' in script
+    assert (
+        '(\n  cd "$GATEWAY_PREFLIGHT_TREE"\n'
+        '  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \\\n'
+        '  python3 - "$ENV_CLONE" '
+        '"$GATEWAY_V2_CONFIG_DIR/gateway-v2-env-transition.json"'
+    ) in script
+    assert "scrub_parent_environment_file_v2" in script
     assert script.index("gateway.tee.restart_preflight_v2") < shutdown
     assert script.index('--deploy-commit "$PREPARED_GATEWAY_SHA"') < shutdown
     assert script.index('--release-manifest "$GATEWAY_V2_RELEASE_MANIFEST"') < shutdown

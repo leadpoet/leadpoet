@@ -618,8 +618,10 @@ if ! run_prepared_gateway_module gateway.tee.prepare_gateway_envelopes_v2 \
   exit 75
 fi
 
-PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
-python3 - "$ENV_CLONE" "$GATEWAY_V2_CONFIG_DIR/gateway-v2-env-transition.json" <<'PY'
+(
+  cd "$GATEWAY_PREFLIGHT_TREE"
+  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
+  python3 - "$ENV_CLONE" "$GATEWAY_V2_CONFIG_DIR/gateway-v2-env-transition.json" <<'PY'
 import sys
 
 from gateway.tee.prepare_gateway_envelopes_v2 import (
@@ -632,6 +634,7 @@ scrub_parent_environment_file_v2(
 )
 print("Scrubbed commit-bound provider plaintext from prepared parent environment")
 PY
+)
 
 if [ ! -e "$GATEWAY_V2_ARTIFACT_POLICY" ]; then
   echo "Installing the public production V2 artifact policy"

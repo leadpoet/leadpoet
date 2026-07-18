@@ -252,6 +252,11 @@ def test_existing_restart_scripts_preserve_attested_build_paths():
     ).read_text(encoding="utf-8")
     assert 'docker build' in role_builder
     assert '--build-arg "LEADPOET_ENCLAVE_ROLE=${role}"' in role_builder
+    assert (
+        '"${GATEWAY_ROOT%/gateway}/validator_tee/host/'
+        'docker_image_normalizer_v2.py"'
+    ) in role_builder
+    assert "validator_tee.host.docker_image_normalizer_v2" not in role_builder
     assert 'nitro-cli build-enclave' in role_builder
     assert 'bash validator_tee/scripts/build_enclave.sh' in validator_restart
     assert "nitro-cli run-enclave" in validator_restart

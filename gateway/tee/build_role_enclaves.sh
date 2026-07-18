@@ -41,8 +41,8 @@ for role in "${ROLES[@]}"; do
     -f "$GATEWAY_ROOT/tee/Dockerfile.enclave" \
     -t "$raw_image" \
     "$GATEWAY_ROOT/"
-  sudo env PYTHONPATH="${GATEWAY_ROOT%/gateway}" python3 -m \
-    validator_tee.host.docker_image_normalizer_v2 \
+  sudo python3 \
+    "${GATEWAY_ROOT%/gateway}/validator_tee/host/docker_image_normalizer_v2.py" \
     --source-image "$raw_image" \
     --normalized-image "$image"
   sudo docker image inspect -f '{{.Id}}' "$image" \

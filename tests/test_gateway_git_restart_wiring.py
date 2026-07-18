@@ -79,9 +79,13 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     artifact_prepare = script.index(
         'echo "Preparing exact hash-locked V2 build artifacts before production shutdown"'
     )
+    dependency_preflight = script.index(
+        'echo "Installing gateway host Python dependencies before production shutdown"'
+    )
     assert materialize < release_channel < credential_envelopes < preflight
     assert preflight < shutdown
     assert preflight < artifact_prepare < shutdown
+    assert dependency_preflight < preflight < shutdown
     assert (
         script.index(
             'git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA"'
@@ -113,6 +117,25 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     assert script.index('--topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}"') < shutdown
     assert script.index("prepare_offline_artifacts_v2.sh") < shutdown
     assert script.index('pkill -9 -f "python3 -u -m gateway.main"') > shutdown
+
+
+def test_gateway_restart_installs_declared_host_dependencies_before_shutdown() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    dependency_preflight = script.index(
+        'echo "Installing gateway host Python dependencies before production shutdown"'
+    )
+    shutdown = script.index(
+        'echo "Stopping existing gateway and Research Lab worker processes"'
+    )
+    post_activate_install = script.index('echo "Installing Python dependencies"')
+
+    assert '"publicsuffix2>=2.20191221"' in script
+    assert script.count("install_gateway_python_dependencies") == 3
+    assert dependency_preflight < shutdown < post_activate_install
+    assert (
+        'echo "Gateway remains running; production shutdown has not started." >&2'
+        in script[dependency_preflight:shutdown]
+    )
 
 
 def test_gateway_restart_uses_one_canonical_checkout_for_host_processes() -> None:

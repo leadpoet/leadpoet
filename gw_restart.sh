@@ -49,6 +49,35 @@ V2_CREDENTIAL_ENVELOPES=(
   "$GATEWAY_V2_CONFIG_DIR/supabase_service_role.json"
   "$GATEWAY_V2_CONFIG_DIR/truelist.json"
 )
+GATEWAY_HOST_PYTHON_PACKAGES=(
+  bittensor
+  fastapi
+  uvicorn
+  python-multipart
+  httpx
+  pydantic
+  requests
+  cbor2
+  cryptography
+  supabase
+  boto3
+  minio
+  arweave-python-client
+  substrate-interface
+  jsonschema
+  awscli
+  "publicsuffix2>=2.20191221"
+)
+
+install_gateway_python_dependencies() {
+  if ! python3 -m pip --version >/dev/null 2>&1; then
+    curl -fsS https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
+    python3 /tmp/get-pip.py --user
+    rm -f /tmp/get-pip.py
+  fi
+  export PATH="$HOME/.local/bin:$PATH"
+  python3 -m pip install --user "${GATEWAY_HOST_PYTHON_PACKAGES[@]}"
+}
 
 report_gateway_v2_bootstrap_pending() {
   local missing=() path
@@ -676,6 +705,15 @@ if report_gateway_v2_bootstrap_pending; then
   exit 75
 fi
 
+echo "Installing gateway host Python dependencies before production shutdown"
+GATEWAY_DEPLOY_STAGE="dependency_preflight"
+export GATEWAY_DEPLOY_STAGE
+if ! install_gateway_python_dependencies; then
+  echo "ERROR: gateway host dependency installation failed before shutdown" >&2
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
+fi
+
 echo "Validating the prepared V2 release before production shutdown"
   GATEWAY_DEPLOY_STAGE="v2_pre_shutdown_preflight"
   export GATEWAY_DEPLOY_STAGE
@@ -1018,14 +1056,8 @@ PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.tee.verify_v2_runtime_ready
 echo "Installing Python dependencies"
 GATEWAY_DEPLOY_STAGE="dependency_install"
 export GATEWAY_DEPLOY_STAGE
-if ! python3 -m pip --version >/dev/null 2>&1; then
-  curl -s https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
-  python3 /tmp/get-pip.py --user
-  rm /tmp/get-pip.py
-fi
-export PATH="$HOME/.local/bin:$PATH"
 cd "$GATEWAY_ROOT"
-python3 -m pip install --user bittensor fastapi uvicorn python-multipart httpx pydantic requests cbor2 cryptography supabase boto3 minio arweave-python-client substrate-interface jsonschema awscli
+install_gateway_python_dependencies
 
 echo "Relaunching gateway with cloned runtime env"
 GATEWAY_DEPLOY_STAGE="gateway_process_launch"

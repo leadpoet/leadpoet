@@ -258,6 +258,14 @@ PY
   exit 75
 fi
 
+echo "Refreshing public validator hotkey measurements for the selected release"
+python3 -m validator_tee.host.refresh_hotkey_config_v2 \
+  --config "$VALIDATOR_V2_HOTKEY_CONFIG" \
+  --chain-profile \
+    "$VALIDATOR_ROOT/validator_tee/enclave/chain_signing_profile_v2.json" \
+  --drand-hash \
+    "$VALIDATOR_ROOT/validator_tee/enclave/libbittensor_drand_v2.sha256"
+
 HOST_HOTKEY_ENTRY=""
 if [ -d "$HOST_HOTKEY_DIR" ]; then
   HOST_HOTKEY_ENTRY="$(find "$HOST_HOTKEY_DIR" -mindepth 1 -maxdepth 1 -print -quit)"

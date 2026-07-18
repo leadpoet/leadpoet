@@ -13,6 +13,9 @@ def test_validator_restart_preserves_build_order_and_starts_chain_relay():
     artifact_prepare = script.index(
         "python3 -m validator_tee.scripts.stage_runtime_artifacts_v2"
     )
+    config_refresh = script.index(
+        "python3 -m validator_tee.host.refresh_hotkey_config_v2"
+    )
     shutdown = script.index('echo "Stopping validator processes and containers"')
     build = script.index("bash validator_tee/scripts/build_enclave.sh")
     release_gate = script.index("python3 -m validator_tee.host.verify_release_gate_v2")
@@ -22,7 +25,9 @@ def test_validator_restart_preserves_build_order_and_starts_chain_relay():
     runtime = script.index("python3 -m validator_tee.host.runtime_v2_bootstrap")
     hotkey = script.index("python3 -m validator_tee.host.hotkey_bootstrap_v2")
     validator = script.index('echo "Starting validator"')
-    assert artifact_prepare < preflight < shutdown < build < release_gate < release_archive < enclave < relay < runtime < hotkey < validator
+    assert config_refresh < artifact_prepare < preflight < shutdown
+    assert shutdown < build < release_gate < release_archive < enclave
+    assert enclave < relay < runtime < hotkey < validator
     assert script.index("--allow-download") < shutdown
     build_script = (
         ROOT / "validator_tee" / "scripts" / "build_enclave.sh"

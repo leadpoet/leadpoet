@@ -316,7 +316,7 @@ docker ps -aq \
   --filter "name=leadpoet-ff-worker" \
   | xargs -r docker stop
 
-docker ps -aq \
+  docker ps -aq \
   --filter "name=leadpoet-validator" \
   --filter "name=leadpoet-qual-worker" \
   --filter "name=leadpoet-ff-worker" \
@@ -341,11 +341,12 @@ echo "Terminating existing validator Nitro enclaves"
     sleep 1
   done
 
-  docker image prune -f
+  echo "Reclaiming validator Docker storage before the independent rebuild"
+  VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
+    bash validator_tee/scripts/reclaim_docker_storage_v2.sh
 
-  echo "Deleting validator-base:v1 and Docker build cache so validator independently rebuilds it"
+  echo "Deleting validator-base:v1 so validator independently rebuilds it"
   docker rmi -f validator-base:v1 2>/dev/null || true
-  docker builder prune -af
 
   echo "Building validator enclave"
   bash validator_tee/scripts/build_enclave.sh

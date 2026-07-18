@@ -97,8 +97,8 @@ jobs:
 
       - name: Reclaim unreferenced validator build space
         run: |
-          docker image prune --all --force
-          docker builder prune --all --force
+          VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
+            bash validator_tee/scripts/reclaim_docker_storage_v2.sh
           df -h /
 
       - name: Prepare immutable build inputs

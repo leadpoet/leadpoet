@@ -1,4 +1,5 @@
 import base64
+import json
 
 import pytest
 
@@ -12,6 +13,7 @@ from gateway.utils.tee_kms_provision_v2 import (
     TEEKMSProvisionV2Error,
     build_provider_envelope_v2,
     kms_key_reference_hash,
+    load_provider_envelopes,
     provider_reference_hashes_from_envelopes,
     provision_provider_envelope_v2,
     provision_job_provider_envelope_v2,
@@ -207,6 +209,22 @@ async def test_parent_relays_only_kms_and_recipient_ciphertext():
     assert provider_reference_hashes_from_envelopes([_envelope()]) == {
         "openrouter": "sha256:" + "c" * 64
     }
+
+
+@pytest.mark.asyncio
+async def test_loaded_envelope_can_be_provisioned_without_field_drift(tmp_path):
+    path = tmp_path / "openrouter.json"
+    path.write_text(json.dumps(_envelope()), encoding="utf-8")
+
+    loaded = load_provider_envelopes([path])
+    assert "ciphertext_blob" not in loaded[0]
+
+    result = await provision_provider_envelope_v2(
+        loaded[0],
+        client=_Client(),
+        kms_client=_KMS(),
+    )
+    assert result["status"] == "ready"
 
 
 @pytest.mark.asyncio

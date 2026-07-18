@@ -436,7 +436,14 @@ def load_provider_envelopes(paths: Sequence[Path]) -> list[Dict[str, Any]]:
             raise TEEKMSProvisionV2Error(
                 "provider envelope file is unavailable: %s" % path
             ) from exc
-        envelopes.append(validate_provider_envelope(value))
+        normalized = validate_provider_envelope(value)
+        envelopes.append(
+            {
+                name: item
+                for name, item in normalized.items()
+                if name != "ciphertext_blob"
+            }
+        )
     slots = [item["credential_slot"] for item in envelopes]
     if len(slots) != len(set(slots)):
         raise TEEKMSProvisionV2Error("provider envelope slots are duplicated")

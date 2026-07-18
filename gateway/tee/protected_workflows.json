@@ -292,22 +292,22 @@
       "symbol": "GitTreeStore"
     },
     {
-      "ast_sha256": "sha256:4f2300cc0086d7631423e66043272e0448215f9747a922fea04f522ff281c596",
+      "ast_sha256": "sha256:79a6e31f540398eb9ec08f1038d3b826b23f788b1532e393801470a22e4f34c6",
       "path": "gateway/research_lab/maintenance.py",
       "symbol": "backfill_champion_reward_v2_authority"
     },
     {
-      "ast_sha256": "sha256:e9fb3067ff65f1443d94ad5fffff4c182fd0d45ea5c503f6ae125aedb5484682",
+      "ast_sha256": "sha256:a085c532555b1e08af54ca0f8e3f3ea4e59da077849593f22643ad4221ed1ded",
       "path": "gateway/research_lab/maintenance.py",
       "symbol": "backfill_champion_settlement_v2_authority"
     },
     {
-      "ast_sha256": "sha256:8934402857de3afe0e803314a5e72d16a3b6ba46510427a5e1dbe47d1385b9ed",
+      "ast_sha256": "sha256:16a9c33f58ade1fc827635d19493f8d6867e49d080dc92bc650c88aa07492ce6",
       "path": "gateway/research_lab/maintenance.py",
       "symbol": "champion_v2_cutover_readiness_report"
     },
     {
-      "ast_sha256": "sha256:b86cd33b148d25fab15968be07fa291b55ef438704f9901d976571478a4589e1",
+      "ast_sha256": "sha256:d82ed2d20519df1b5aa4c0c975e498047d0cb4c76e5da0674c025335d263bc30",
       "path": "gateway/research_lab/maintenance.py",
       "symbol": "reconcile_champion_reward_statuses"
     },
@@ -1047,7 +1047,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:e23976c2a1b4575af65b4658f9fb375c566b2643b005c5c8c25bad463ce6eb27",
+  "manifest_hash": "sha256:fe99de74e2649f30f0c04937f3a24deef8d66a20bafca1eeef51c3e33475f04f",
   "protected_source_commit": "ebf3af7d2714bf3e1832dcf9f46c689dd17226dc",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

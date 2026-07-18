@@ -26,3 +26,39 @@ async def test_coordinator_bridge_uses_strict_coordinator_role(monkeypatch):
     assert observed["physical_role_override"] == "gateway_coordinator"
     assert observed["expected_service_role"] == "gateway_coordinator"
     assert observed["rpc_namespace"] == "coordinator_v2"
+    assert observed["provider_profile_loader"]("default") == {
+        "profile": "default",
+        "credential_ref_hashes": {},
+        "envelopes": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_coordinator_bridge_preserves_explicit_provider_profile_loader(
+    monkeypatch,
+):
+    observed = {}
+
+    async def execute(**kwargs):
+        observed.update(kwargs)
+        return {"status": "succeeded"}
+
+    def load_profile(profile, **_kwargs):
+        return {
+            "profile": profile,
+            "credential_ref_hashes": {"openrouter": "sha256:" + ("a" * 64)},
+            "envelopes": [],
+        }
+
+    monkeypatch.setattr(attested_coordinator_v2, "execute_scoring_v2", execute)
+    await attested_coordinator_v2.execute_coordinator_v2(
+        operation="promotion_improvement",
+        purpose="research_lab.ranking.v2",
+        epoch_id=9,
+        sequence=1,
+        payload={"score_bundle": {}},
+        provider_profile_loader=load_profile,
+        client=object(),
+    )
+
+    assert observed["provider_profile_loader"] is load_profile

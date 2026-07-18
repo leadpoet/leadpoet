@@ -39,6 +39,8 @@ async def execute_coordinator_v2(
     persist_graph: Any = None,
     boot_verifier: Any = None,
 ) -> dict[str, Any]:
+    if provider_profile_loader is None:
+        provider_profile_loader = _empty_coordinator_provider_profile
     return await execute_scoring_v2(
         operation=operation,
         purpose=purpose,

@@ -278,12 +278,17 @@ def validate_job_provider_envelope(value: Mapping[str, Any]) -> Dict[str, Any]:
         raise TEEKMSProvisionV2Error(
             "job provider envelope credential commitment is invalid"
         )
-    return {
+    result = {
         **normalized,
         "schema_version": JOB_PROVIDER_ENVELOPE_SCHEMA_VERSION,
         "job_id": job_id,
         "credential_value_hash": credential_value_hash,
         "key_ref_hash": key_ref_hash,
+    }
+    return {
+        name: item
+        for name, item in result.items()
+        if name != "ciphertext_blob"
     }
 
 

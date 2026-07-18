@@ -17,6 +17,7 @@ from gateway.tee.provider_broker_v2 import credential_value_hash
 from gateway.utils.tee_kms_provision_v2 import (
     PROVIDER_ENVELOPE_SCHEMA_VERSION,
     kms_key_reference_hash,
+    validate_job_provider_envelope,
 )
 from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
 
@@ -68,6 +69,8 @@ def test_benchmark_profile_is_optional_and_binds_only_encrypted_commitments(tmp_
     assert bound[0]["credential_value_hash"] == profile[
         "credential_ref_hashes"
     ]["exa"]
+    assert "ciphertext_blob" not in bound[0]
+    assert validate_job_provider_envelope(bound[0]) == bound[0]
 
 
 @pytest.mark.asyncio

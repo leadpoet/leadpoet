@@ -124,18 +124,8 @@ def _verify(tmp_path: Path, monkeypatch, **overrides):
     worker_environment = {
         "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
         "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
-        **{
-            "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_%d" % (index + 1): (
-                "https://autoresearch-%d.example" % index
-            )
-            for index in range(10)
-        },
-        **{
-            "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_%d" % (index + 1): (
-                "https://scoring-%d.example" % index
-            )
-            for index in range(25)
-        },
+        "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "10",
+        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "25",
     }
     values = {
         "deploy_commit": COMMIT,
@@ -168,6 +158,10 @@ def test_full_restart_preflight_accepts_only_complete_approved_release(
     assert result["boot_credential_slot_count"] == 7
     assert result["parent_plaintext_provider_slot_count"] == 0
     assert result["worker_proxy_profile_count"] == 35
+    assert result["worker_counts"] == {
+        "gateway_autoresearch": 10,
+        "gateway_scoring": 25,
+    }
     assert result["acceptance_corpus_manifest_hash"] == "sha256:" + "e" * 64
 
 

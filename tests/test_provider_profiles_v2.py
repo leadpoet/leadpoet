@@ -10,6 +10,7 @@ from gateway.research_lab.provider_profiles_v2 import (
     bind_provider_profile_envelopes_v2,
     load_provider_profile_v2,
     provision_provider_profile_v2,
+    require_worker_proxy_profile_v2,
     verify_required_worker_proxy_profiles_v2,
 )
 from gateway.tee.provider_broker_v2 import credential_value_hash
@@ -136,6 +137,13 @@ def test_worker_proxy_profile_is_encrypted_scoped_and_required(tmp_path):
             worker_index=8,
             require_egress_proxy=True,
         )
+
+    required = require_worker_proxy_profile_v2(
+        config_dir=tmp_path,
+        execution_role="gateway_scoring",
+        worker_index=7,
+    )
+    assert required["credential_ref_hashes"] == profile["credential_ref_hashes"]
 
 
 def test_release_verifier_requires_all_worker_and_provider_profiles(tmp_path):

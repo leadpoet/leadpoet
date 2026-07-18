@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from gateway.research_lab.worker_autostart import (
+    build_research_lab_worker_autostart_plan,
+)
 from gateway.tee.prepare_gateway_envelopes_v2 import (
     install_gateway_envelopes_v2,
     load_environment_file,
@@ -160,7 +165,7 @@ def test_transition_removes_every_alias_of_sealed_parent_plaintext(tmp_path):
         )
         + "\n"
     )
-    scrub_parent_environment_file_v2(
+    transition = scrub_parent_environment_file_v2(
         environment_path=parent_environment,
         transition_report_path=tmp_path / "v2" / "gateway-v2-env-transition.json",
     )
@@ -173,3 +178,42 @@ def test_transition_removes_every_alias_of_sealed_parent_plaintext(tmp_path):
     assert scrubbed["SUPABASE_SERVICE_ROLE_KEY"] == "supabase-secret"
     assert scrubbed["TRUELIST_API_KEY"] == "truelist-secret"
     assert scrubbed["UNRELATED_RUNTIME_VALUE"] == "keep-me"
+    assert transition["installed_count_environment"] == {
+        "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "2",
+        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "3",
+    }
+    plan = build_research_lab_worker_autostart_plan(scrubbed)
+    assert plan.hosted.enabled
+    assert plan.hosted.worker_count == 2
+    assert plan.hosted.proxy_values == ()
+    assert plan.scoring.enabled
+    assert plan.scoring.worker_count == 3
+    assert plan.scoring.proxy_values == ()
+
+
+def test_transition_rejects_worker_counts_not_bound_to_sealed_profiles(tmp_path):
+    output = tmp_path / "v2"
+    prepare_gateway_envelopes_v2(
+        environment=_environment(),
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        output_dir=output,
+        kms_client=KMS(),
+    )
+    report_path = output / "gateway-v2-env-transition.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["required_count_environment"][
+        "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT"
+    ] = "99"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    parent_environment = tmp_path / "gateway-parent.env"
+    parent_environment.write_text("export KEEP_ME=true\n", encoding="utf-8")
+
+    with pytest.raises(
+        Exception,
+        match="differs from sealed profiles",
+    ):
+        scrub_parent_environment_file_v2(
+            environment_path=parent_environment,
+            transition_report_path=report_path,
+        )

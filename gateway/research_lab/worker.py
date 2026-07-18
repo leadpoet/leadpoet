@@ -79,6 +79,10 @@ from gateway.research_lab.provider_preflight import (
     PREFLIGHT_REASON_PREFIX,
     preflight_gate,
 )
+from gateway.research_lab.provider_profiles_v2 import (
+    ProviderProfileV2Error,
+    require_worker_proxy_profile_v2,
+)
 from gateway.research_lab.tee_protocol import (
     ResearchLabTeeProtocolError,
     v2_enabled,
@@ -1681,11 +1685,18 @@ class ResearchLabHostedWorker:
     def _require_worker_proxy_for_execution(self) -> None:
         if not self.config.hosted_worker_require_proxy:
             return
-        if not _worker_proxy_url(self.config):
+        if _worker_proxy_url(self.config):
+            return
+        try:
+            require_worker_proxy_profile_v2(
+                execution_role="gateway_autoresearch",
+                worker_index=int(self.config.hosted_worker_index or 0),
+            )
+        except ProviderProfileV2Error as exc:
             raise HostedResearchLabWorkerError(
                 "worker proxy is required for hosted auto-research execution; "
-                "set RESEARCH_LAB_HOSTED_WORKER_PROXY or per-worker RESEARCH_LAB_WORKER_PROXY_N"
-            )
+                "the encrypted worker proxy profile is unavailable or invalid"
+            ) from exc
 
     async def _next_queued_run(self) -> Mapping[str, Any] | None:
         rows = await select_many(

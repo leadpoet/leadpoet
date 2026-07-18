@@ -131,7 +131,7 @@ def scrub_parent_environment_file_v2(
     environment_path: Path,
     transition_report_path: Path,
 ) -> Dict[str, Any]:
-    """Atomically remove every parent plaintext alias sealed for V2 workers."""
+    """Install sealed-fleet counts while removing parent plaintext aliases."""
 
     try:
         report = json.loads(Path(transition_report_path).read_text(encoding="utf-8"))
@@ -155,6 +155,31 @@ def scrub_parent_environment_file_v2(
         raise GatewayEnvelopePreparationV2Error(
             "gateway V2 plaintext credential commitments are unavailable"
         )
+    count_fields = {
+        "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "hosted_worker_count",
+        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "scoring_worker_count",
+    }
+    raw_count_environment = report.get("required_count_environment")
+    if (
+        not isinstance(raw_count_environment, Mapping)
+        or set(raw_count_environment) != set(count_fields)
+    ):
+        raise GatewayEnvelopePreparationV2Error(
+            "gateway V2 worker count environment is invalid"
+        )
+    count_environment = {}
+    for name, report_field in count_fields.items():
+        raw_value = str(raw_count_environment.get(name) or "").strip()
+        if not raw_value.isdigit():
+            raise GatewayEnvelopePreparationV2Error(
+                "gateway V2 worker count environment is invalid"
+            )
+        count = int(raw_value)
+        if not 1 <= count <= 500 or report.get(report_field) != count:
+            raise GatewayEnvelopePreparationV2Error(
+                "gateway V2 worker count environment differs from sealed profiles"
+            )
+        count_environment[name] = str(count)
 
     environment_path = Path(environment_path)
     try:
@@ -166,6 +191,7 @@ def scrub_parent_environment_file_v2(
 
     kept = []
     removed_names = set()
+    removed_line_count = 0
     for raw_line in lines:
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -187,10 +213,17 @@ def scrub_parent_environment_file_v2(
                 "prepared gateway parent environment is malformed"
             )
         name, value = parts[0].split("=", 1)
+        if name in count_environment:
+            continue
         if name in remove_names or credential_reference_hash(value) in remove_refs:
             removed_names.add(name)
+            removed_line_count += 1
             continue
         kept.append(raw_line)
+    kept.extend(
+        "export %s=%s" % (name, shlex.quote(value))
+        for name, value in sorted(count_environment.items())
+    )
 
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=".gateway-env-scrub.", dir=str(environment_path.parent)
@@ -205,8 +238,9 @@ def scrub_parent_environment_file_v2(
     finally:
         Path(temporary_name).unlink(missing_ok=True)
     return {
-        "removed_line_count": len(lines) - len(kept),
+        "removed_line_count": removed_line_count,
         "removed_names": sorted(removed_names),
+        "installed_count_environment": dict(sorted(count_environment.items())),
     }
 
 

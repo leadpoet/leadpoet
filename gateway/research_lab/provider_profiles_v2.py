@@ -142,6 +142,28 @@ def load_provider_profile_v2(
     }
 
 
+def require_worker_proxy_profile_v2(
+    *,
+    execution_role: str,
+    worker_index: int,
+    config_dir: Path = DEFAULT_CONFIG_DIR,
+) -> Dict[str, Any]:
+    """Require one encrypted, worker-scoped egress proxy profile."""
+
+    document = load_provider_profile_v2(
+        DEFAULT_PROFILE,
+        config_dir=config_dir,
+        execution_role=execution_role,
+        worker_index=worker_index,
+        require_egress_proxy=True,
+    )
+    if set(document["credential_ref_hashes"]) != {"egress_proxy"}:
+        raise ProviderProfileV2Error(
+            "required worker TLS proxy profile is incomplete"
+        )
+    return document
+
+
 def bind_provider_profile_envelopes_v2(
     profile_document: Mapping[str, Any],
     *,

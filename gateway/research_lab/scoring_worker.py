@@ -79,6 +79,8 @@ from gateway.research_lab.provider_preflight import (
 from gateway.research_lab.provider_profiles_v2 import (
     BENCHMARK_MODEL_PROFILE,
     load_provider_profile_v2,
+    ProviderProfileV2Error,
+    require_worker_proxy_profile_v2,
 )
 from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabScoreBundleCreateRequest
@@ -3486,7 +3488,23 @@ class ResearchLabGatewayScoringWorker:
         if not self.config.production_writes_enabled or not self.config.evaluation_bundles_enabled:
             return {"processed": False, "status": "writes_or_eval_disabled"}
         if self.config.scoring_worker_require_proxy and not self.proxy_url:
-            return {"processed": False, "status": "scoring_worker_proxy_required"}
+            try:
+                require_worker_proxy_profile_v2(
+                    execution_role="gateway_scoring",
+                    worker_index=int(self.config.scoring_worker_index or 0),
+                )
+            except ProviderProfileV2Error as exc:
+                logger.warning(
+                    "research_lab_scoring_worker_proxy_profile_invalid "
+                    "worker_ref=%s worker_index=%s error=%s",
+                    self.worker_ref,
+                    int(self.config.scoring_worker_index or 0),
+                    _short_error(exc),
+                )
+                return {
+                    "processed": False,
+                    "status": "scoring_worker_proxy_required",
+                }
         maintenance_state = await get_scoring_maintenance_state()
         if bool(maintenance_state.get("paused")) and not str(
             maintenance_state.get("reason") or ""

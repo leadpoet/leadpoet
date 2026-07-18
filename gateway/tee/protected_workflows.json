@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "75a3001038ebbb3e4ec9a1b8bb9982f5e51be72a",
+  "baseline_commit": "7c9766b71d4c08b0059f6e3230dbe742b1d58e79",
   "entries": [
     {
       "ast_sha256": "sha256:d4d317a4bf47e5215d85be2913465c63202438a1de9798b899abc191fff2a48b",
@@ -632,6 +632,11 @@
       "symbol": "weights_storage_key"
     },
     {
+      "ast_sha256": "sha256:ca4917c451f42deb8c1a394125aa3bac38ff1d7bd605603be3eace8b0c5f11c6",
+      "path": "leadpoet_canonical/kms_recipient.py",
+      "symbol": "decrypt_kms_recipient_ciphertext"
+    },
+    {
       "ast_sha256": "sha256:8d6fa22037e4f06bee76059f43068f0f44b1574a3740ce1b3be459fa171d23b5",
       "path": "leadpoet_canonical/legacy_settlement_v2.py",
       "symbol": "legacy_chain_vector_matches_bundle_v2"
@@ -1042,7 +1047,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:b73f92e16c11e40b60ac8cf04b4e9dce614d2d7cc6e6c958730bde7af56c373f",
-  "protected_source_commit": "fdbdc4b6fffb0e9430afc9ed932353a0a311a19b",
+  "manifest_hash": "sha256:e61f02c89d8c218027b0cccb987c2002dbd8e169e915b428ff2cc252e032daab",
+  "protected_source_commit": "4374b7b42dd351a8d296b7620eb7aafbaad51dab",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

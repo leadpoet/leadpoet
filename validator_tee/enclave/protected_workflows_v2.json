@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "75a3001038ebbb3e4ec9a1b8bb9982f5e51be72a",
+  "baseline_commit": "7c9766b71d4c08b0059f6e3230dbe742b1d58e79",
   "entries": [
     {
       "ast_sha256": "sha256:4ba5a9fc7a26c836cd045bdce11281cbaeb71d142fe4f0f4ac9f42848c1e4c81",
@@ -60,6 +60,11 @@
       "ast_sha256": "sha256:1f14ad84f44765cfca8690ecf065b7f45c15844da8034d09f86a9505288c9e48",
       "path": "leadpoet_canonical/hotkey_authority_v2.py",
       "symbol": "validate_weight_extrinsic_authorization_v2"
+    },
+    {
+      "ast_sha256": "sha256:ca4917c451f42deb8c1a394125aa3bac38ff1d7bd605603be3eace8b0c5f11c6",
+      "path": "leadpoet_canonical/kms_recipient.py",
+      "symbol": "decrypt_kms_recipient_ciphertext"
     },
     {
       "ast_sha256": "sha256:9da83659412c65a826b0c1e9c6aa9d7b9cce7bf255ae164fc120ea09f0641378",
@@ -207,6 +212,11 @@
       "symbol": "ValidatorHotkeyAuthorityV2.prepare_weight_commit"
     },
     {
+      "ast_sha256": "sha256:360195177baf18d1c3b140113a888fbfea8650dbfb27b8d4e6f53504b4ae1bb6",
+      "path": "validator_tee/enclave/hotkey_authority_v2.py",
+      "symbol": "ValidatorHotkeyAuthorityV2.provision_seed"
+    },
+    {
       "ast_sha256": "sha256:ab04af0e81673ab0cd57af2395929c5a32a6fabf112a876e3b47850038830ab8",
       "path": "validator_tee/enclave/hotkey_authority_v2.py",
       "symbol": "ValidatorHotkeyAuthorityV2.recover_weight_publication"
@@ -262,7 +272,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:65aa0884a108827ee1d668e376185e945fed3917c56006d3780433a682129ac6",
-  "protected_source_commit": "fdbdc4b6fffb0e9430afc9ed932353a0a311a19b",
+  "manifest_hash": "sha256:1d000968189985ad638181d8a25a51dd4f23fed783589af0ee1eeaf3b7b03066",
+  "protected_source_commit": "4374b7b42dd351a8d296b7620eb7aafbaad51dab",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

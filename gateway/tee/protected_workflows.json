@@ -1042,7 +1042,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:90b14169595da0d72a26ec8b7a459346972625e94bd22759df0f6bc33f676a10",
-  "protected_source_commit": "ca278c2506924be9912fe62e6177f639289bf094",
+  "manifest_hash": "sha256:0475eede70f17828231d3b66df2978c3738ca20853bcf659946281d444031393",
+  "protected_source_commit": "a50173b8e56ee570bbcb051cc0076fe0445874fb",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

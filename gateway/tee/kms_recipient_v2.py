@@ -10,13 +10,14 @@ import secrets
 import threading
 from typing import Any, Callable, Dict, Mapping, Optional
 
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from gateway.tee.provider_broker_v2 import credential_reference_hash
 from gateway.tee.provider_broker_v2 import credential_value_hash
 from gateway.tee.source_add_runtime_v2 import source_add_dynamic_job_slot
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
+from leadpoet_canonical.kms_recipient import decrypt_kms_recipient_ciphertext
 
 
 KMS_RECIPIENT_SCHEMA_VERSION = "leadpoet.kms_recipient.v2"
@@ -168,13 +169,9 @@ class KMSRecipientV2:
         if not ciphertext or len(ciphertext) > MAX_CIPHERTEXT_FOR_RECIPIENT_BYTES:
             raise KMSRecipientV2Error("KMS recipient ciphertext is outside limit")
         try:
-            plaintext = self._private_key.decrypt(
+            plaintext = decrypt_kms_recipient_ciphertext(
+                self._private_key,
                 ciphertext,
-                padding.OAEP(
-                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                    algorithm=hashes.SHA256(),
-                    label=None,
-                ),
             )
         except Exception as exc:
             raise KMSRecipientV2Error("KMS recipient unwrap failed") from exc

@@ -21,6 +21,9 @@ SCHEMA_VERSION = "leadpoet.protected_workflows.v2"
 DEFAULT_MANIFEST = Path(__file__).with_name("protected_workflows.json")
 
 PROTECTED_SYMBOLS = {
+    "leadpoet_canonical/kms_recipient.py": (
+        "decrypt_kms_recipient_ciphertext",
+    ),
     "gateway/tee/coordinator_epoch_cutover_v2.py": (
         "attest_subnet_epoch_cutover_v2",
     ),

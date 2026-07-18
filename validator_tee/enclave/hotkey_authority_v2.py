@@ -12,8 +12,8 @@ import secrets
 import threading
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 
 from leadpoet_canonical.attested_v2 import (
     EMPTY_ARTIFACT_ROOT,
@@ -41,6 +41,7 @@ from leadpoet_canonical.hotkey_authority_v2 import (
     validate_chain_signing_profile,
     validate_weight_extrinsic_authorization_v2,
 )
+from leadpoet_canonical.kms_recipient import decrypt_kms_recipient_ciphertext
 from leadpoet_canonical.weight_authority_v2 import (
     validate_published_weight_bundle_v2,
     validate_weight_snapshot_v2,
@@ -277,13 +278,9 @@ class ValidatorHotkeyAuthorityV2:
             )
         try:
             seed = bytearray(
-                self._recipient_private_key.decrypt(
+                decrypt_kms_recipient_ciphertext(
+                    self._recipient_private_key,
                     ciphertext,
-                    padding.OAEP(
-                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                        algorithm=hashes.SHA256(),
-                        label=None,
-                    ),
                 )
             )
         except Exception as exc:

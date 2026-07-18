@@ -25,6 +25,9 @@ DEFAULT_MANIFEST = (
 )
 
 PROTECTED_SYMBOLS = {
+    "leadpoet_canonical/kms_recipient.py": (
+        "decrypt_kms_recipient_ciphertext",
+    ),
     "validator_tee/host/weight_protocol_v2.py": (
         "normalize_weight_protocol",
     ),
@@ -64,6 +67,7 @@ PROTECTED_SYMBOLS = {
         "ValidatorWeightAuthorityV2.compute",
     ),
     "validator_tee/enclave/hotkey_authority_v2.py": (
+        "ValidatorHotkeyAuthorityV2.provision_seed",
         "ValidatorHotkeyAuthorityV2.register_weight_result",
         "ValidatorHotkeyAuthorityV2.recover_weight_publication",
         "ValidatorHotkeyAuthorityV2.sign_application_message",

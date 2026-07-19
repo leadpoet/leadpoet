@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import boto3
 import pytest
 
 from gateway.utils.tee_artifact_store_v2 import (
@@ -61,6 +62,36 @@ class _S3:
     def generate_presigned_url(self, operation, **kwargs):
         self.presigns.append((operation, kwargs))
         return "https://immutable.example.s3.us-east-1.amazonaws.com/path?" + operation
+
+
+@pytest.mark.asyncio
+async def test_default_s3_client_uses_regional_virtual_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = {}
+    s3 = _S3()
+
+    def fake_client(service_name, **kwargs):
+        captured["service_name"] = service_name
+        captured.update(kwargs)
+        return s3
+
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setattr(boto3, "client", fake_client)
+
+    result = await persist_enclave_artifact_v2(
+        ARTIFACT_ID,
+        bucket="immutable-example",
+        attestation_job_id="artifact-lineage-job",
+        client=_Client(),
+    )
+
+    assert result["status"] == "persisted"
+    assert captured["service_name"] == "s3"
+    assert captured["region_name"] == "us-east-1"
+    assert captured["endpoint_url"] == "https://s3.us-east-1.amazonaws.com"
+    assert captured["config"].signature_version == "s3v4"
+    assert captured["config"].s3 == {"addressing_style": "virtual"}
 
 
 @pytest.mark.asyncio

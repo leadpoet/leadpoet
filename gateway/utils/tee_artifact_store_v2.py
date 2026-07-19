@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import os
 import re
 from typing import Any, Dict, Mapping, Optional
 
@@ -40,6 +41,27 @@ def _object_key(prefix: str, artifact_id: str) -> str:
     return "%s/%s.json" % (normalized_prefix, artifact_id.split(":", 1)[1])
 
 
+def _default_s3_client() -> Any:
+    import boto3
+    from botocore.config import Config
+
+    region = str(
+        os.getenv("AWS_REGION")
+        or os.getenv("AWS_DEFAULT_REGION")
+        or boto3.session.Session().region_name
+        or "us-east-1"
+    ).strip()
+    return boto3.client(
+        "s3",
+        region_name=region,
+        endpoint_url=f"https://s3.{region}.amazonaws.com",
+        config=Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "virtual"},
+        ),
+    )
+
+
 async def persist_enclave_artifact_v2(
     artifact_id: str,
     *,
@@ -69,9 +91,7 @@ async def persist_enclave_artifact_v2(
     body = canonical_json(dict(document)).encode("utf-8")
     key = _object_key(key_prefix, str(artifact_id))
     if s3_client is None:
-        import boto3
-
-        s3_client = boto3.client("s3")
+        s3_client = _default_s3_client()
     response = await asyncio.to_thread(
         s3_client.put_object,
         Bucket=normalized_bucket,

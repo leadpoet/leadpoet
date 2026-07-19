@@ -349,6 +349,21 @@ echo "Terminating existing validator Nitro enclaves"
     sleep 1
   done
 
+  echo "Trimming bounded, regenerable validator host caches and archived journals"
+  VALIDATOR_JOURNAL_VACUUM_SIZE="${VALIDATOR_JOURNAL_VACUUM_SIZE:-1G}"
+  if command -v journalctl >/dev/null 2>&1; then
+    if ! sudo journalctl --rotate \
+        || ! sudo journalctl \
+          --vacuum-size="$VALIDATOR_JOURNAL_VACUUM_SIZE"; then
+      echo "WARNING: validator_host_journal_cleanup_failed" >&2
+    fi
+  fi
+  if [ -d "$HOME/.cache/pip" ]; then
+    if ! rm -rf -- "$HOME/.cache/pip"; then
+      echo "WARNING: validator_host_pip_cache_cleanup_failed" >&2
+    fi
+  fi
+
   echo "Reclaiming validator Docker storage before the independent rebuild"
   VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
     bash validator_tee/scripts/reclaim_docker_storage_v2.sh

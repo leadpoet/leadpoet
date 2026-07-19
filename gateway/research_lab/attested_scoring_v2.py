@@ -275,6 +275,7 @@ async def execute_scoring_v2(
     artifact_lineage_attestor: Any = None,
     persist_sidecars: Any = None,
     receipt_output_projector: Any = None,
+    allow_persistence_bound_artifact_descriptors: bool = False,
 ) -> Dict[str, Any]:
     """Execute one scoring operation as V2 authority and persist its graph."""
 
@@ -884,10 +885,15 @@ async def execute_scoring_v2(
         }
         expected_counts = Counter(expected_artifact_hashes)
         observed_counts = Counter(observed_hashes)
+        observed_commitments = (
+            set(observed_hashes)
+            if allow_persistence_bound_artifact_descriptors
+            else observed_descriptor_hashes
+        )
         if (
             any(observed_counts[key] < count for key, count in expected_counts.items())
             or not expected_sealed_ids.issubset(observed_ids)
-            or not observed_descriptor_hashes.issubset(committed_hashes)
+            or not observed_commitments.issubset(committed_hashes)
         ):
             raise AttestedScoringV2Error(
                 "V2 encrypted artifacts differ from execution commitments"

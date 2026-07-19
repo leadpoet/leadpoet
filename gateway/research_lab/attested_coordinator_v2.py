@@ -76,6 +76,7 @@ async def execute_coordinator_v2(
         expected_service_role="gateway_coordinator",
         rpc_namespace="coordinator_v2",
         receipt_output_projector=coordinator_receipt_output_v2,
+        allow_persistence_bound_artifact_descriptors=True,
     )
 
 

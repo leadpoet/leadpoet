@@ -25,6 +25,10 @@ from gateway.tee.release_manifest_v2 import (
     role_expectation,
     validate_release_manifest,
 )
+from gateway.tee.release_lineage_v2 import (
+    build_release_lineage_boot_verifier_v2,
+    load_approved_release_lineage_v2,
+)
 from gateway.utils.tee_client import autoresearch_tee_client
 from leadpoet_canonical.attested_v2 import (
     EMPTY_ARTIFACT_ROOT,
@@ -320,6 +324,7 @@ async def execute_autoresearch_v2(
     provider_credential_ref_hashes: Optional[Mapping[str, str]] = None,
     release_manifest: Optional[Mapping[str, Any]] = None,
     release_manifest_path: Path = DEFAULT_RELEASE_MANIFEST_PATH,
+    release_channel_loader: Any = None,
     client: Any = autoresearch_tee_client,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
@@ -343,7 +348,7 @@ async def execute_autoresearch_v2(
         if release_manifest is not None
         else _load_release(release_manifest_path)
     )
-    verifier = boot_verifier or _release_boot_verifier(release)
+    current_release_verifier = boot_verifier or _release_boot_verifier(release)
     health = await client.autoresearch_v2_health()
     worker_count = health.get("worker_count")
     configured_worker_count = health.get("configured_worker_count")
@@ -359,9 +364,29 @@ async def execute_autoresearch_v2(
     ):
         raise AttestedAutoresearchV2Error("autoresearch enclave health is invalid")
     boot_identity = await client.v2_get_boot_identity()
-    verifier(boot_identity)
+    current_release_verifier(boot_identity)
+    expectation = role_expectation(release, "gateway_autoresearch")
+    if boot_identity.get("commit_sha") != expectation["commit_sha"]:
+        raise AttestedAutoresearchV2Error(
+            "autoresearch boot commit differs from current V2 release"
+        )
     if health.get("boot_identity_hash") != boot_identity.get("boot_identity_hash"):
         raise AttestedAutoresearchV2Error("autoresearch health boot differs")
+    if boot_verifier is not None:
+        verifier = boot_verifier
+    else:
+        try:
+            approved_lineage = await asyncio.to_thread(
+                load_approved_release_lineage_v2,
+                current_release=release,
+                parent_graphs=parent_graphs,
+                release_channel_loader=release_channel_loader,
+            )
+            verifier = build_release_lineage_boot_verifier_v2(approved_lineage)
+        except Exception as exc:
+            raise AttestedAutoresearchV2Error(
+                "autoresearch receipt release lineage is unavailable"
+            ) from exc
 
     if PARENT_RECEIPT_GRAPHS_FIELD in payload:
         raise AttestedAutoresearchV2Error(

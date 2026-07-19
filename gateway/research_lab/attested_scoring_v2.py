@@ -27,6 +27,10 @@ from gateway.tee.release_manifest_v2 import (
     role_expectation,
     validate_release_manifest,
 )
+from gateway.tee.release_lineage_v2 import (
+    build_release_lineage_boot_verifier_v2,
+    load_approved_release_lineage_v2,
+)
 from gateway.tee.scoring_executor_v2 import SCORING_OPERATIONS_V2
 from gateway.utils.tee_artifact_store_v2 import (
     ATTESTED_V2_ARTIFACT_KEY_PREFIX,
@@ -262,6 +266,7 @@ async def execute_scoring_v2(
     credential_coordinator_client: Any = coordinator_tee_client,
     release_manifest: Optional[Mapping[str, Any]] = None,
     release_manifest_path: Path = DEFAULT_RELEASE_MANIFEST_PATH,
+    release_channel_loader: Any = None,
     client: Any = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
@@ -340,10 +345,25 @@ async def execute_scoring_v2(
     expectation = role_expectation(release, physical_role)
     if health.get("boot_identity_hash") != boot_identity.get("boot_identity_hash"):
         raise AttestedScoringV2Error("V2 scoring health boot identity mismatch")
-    verifier = boot_verifier or _release_boot_verifier(release)
-    verifier(boot_identity)
+    current_release_verifier = boot_verifier or _release_boot_verifier(release)
+    current_release_verifier(boot_identity)
     if boot_identity.get("commit_sha") != expectation["commit_sha"]:
         raise AttestedScoringV2Error("V2 scoring commit differs from release")
+    if boot_verifier is not None:
+        verifier = boot_verifier
+    else:
+        try:
+            approved_lineage = await asyncio.to_thread(
+                load_approved_release_lineage_v2,
+                current_release=release,
+                parent_graphs=parent_graphs,
+                release_channel_loader=release_channel_loader,
+            )
+            verifier = build_release_lineage_boot_verifier_v2(approved_lineage)
+        except Exception as exc:
+            raise AttestedScoringV2Error(
+                "V2 receipt release lineage is unavailable"
+            ) from exc
 
     normalized_profile = str(provider_credential_profile or "default")
     if normalized_profile not in {

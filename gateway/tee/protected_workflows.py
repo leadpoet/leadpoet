@@ -350,6 +350,10 @@ PROTECTED_SYMBOLS = {
     "gateway/tee/verify_weight_submission_ready_v2.py": (
         "verify_weight_submission_ready_v2",
     ),
+    "gateway/tee/release_lineage_v2.py": (
+        "load_approved_release_lineage_v2",
+        "build_release_lineage_boot_verifier_v2",
+    ),
     "gateway/tee/scoring_executor_v2.py": (
         "ScoringExecutorV2",
     ),

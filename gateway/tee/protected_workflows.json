@@ -412,7 +412,7 @@
       "symbol": "_load_allocation_parent_graphs_v2"
     },
     {
-      "ast_sha256": "sha256:a3f1be07e8f9fb53a4b8cef49d53051597b810408c02b522f741627b8690d798",
+      "ast_sha256": "sha256:97c6e30f41231d7d97cd2f90fbd4d6d4a944b06914d46a96e1b27a5404ad8ff5",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "attest_historical_champion_reward_v2"
     },
@@ -437,7 +437,7 @@
       "symbol": "build_arweave_checkpoint_log_event"
     },
     {
-      "ast_sha256": "sha256:06c4dfcef80edebc44d5038587feab43d06f530f4a4291b203fb56eae7d68f80",
+      "ast_sha256": "sha256:7f371455c28391b6f3bd2605a15ddff64df84bc006615cdb0c0b5f410821c838",
       "path": "gateway/tasks/hourly_batch.py",
       "symbol": "hourly_batch_task"
     },
@@ -467,7 +467,7 @@
       "symbol": "attest_subnet_epoch_cutover_v2"
     },
     {
-      "ast_sha256": "sha256:49d20bc1d645f5982bcada82a3622c83d8c94b582dcda727e35edc030cfaf9c0",
+      "ast_sha256": "sha256:5055f30c817f5e430e2b48a25f1ee26bfee2a2840584c5f3fda750943e8df35f",
       "path": "gateway/tee/coordinator_executor_v2.py",
       "symbol": "CoordinatorExecutorV2"
     },
@@ -1047,7 +1047,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:fe99de74e2649f30f0c04937f3a24deef8d66a20bafca1eeef51c3e33475f04f",
+  "manifest_hash": "sha256:9fe06594df2f2c2d7a463a07b4bb077adaac33f8cd7bef9fc6c7078dbde0d7a6",
   "protected_source_commit": "ebf3af7d2714bf3e1832dcf9f46c689dd17226dc",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

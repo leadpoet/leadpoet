@@ -380,6 +380,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
     )
 
+    checkpoint_arweave_now = sub.add_parser(
+        "checkpoint-arweave-now",
+        help=(
+            "Run exactly one normal Arweave checkpoint batch immediately, "
+            "including confirmed immutable readback"
+        ),
+    )
+    checkpoint_arweave_now.add_argument(
+        "--write",
+        action="store_true",
+        help="perform the checkpoint upload and TEE acknowledgement",
+    )
+
     reconcile_tickets = sub.add_parser(
         "reconcile-terminal-tickets",
         help="Repair tickets still open after all expected queue runs are terminal",
@@ -1834,6 +1847,27 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             dry_run=args.dry_run,
         )
+    if args.command == "checkpoint-arweave-now":
+        if not args.write:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "action": "checkpoint-arweave-now",
+                "guidance": "pass --write to run one immediate checkpoint batch",
+            }
+        from gateway.tasks.hourly_batch import hourly_batch_task
+
+        result = await hourly_batch_task(
+            run_immediately=True,
+            max_batches=1,
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError("immediate Arweave checkpoint returned no result")
+        return {
+            **result,
+            "dry_run": False,
+            "action": "checkpoint-arweave-now",
+        }
     if args.command == "reconcile-terminal-tickets":
         return await reconcile_terminal_ticket_statuses(
             ticket_id=args.ticket_id,

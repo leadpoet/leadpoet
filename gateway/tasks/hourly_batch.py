@@ -83,7 +83,11 @@ def build_arweave_checkpoint_log_event(
     }
 
 
-async def hourly_batch_task():
+async def hourly_batch_task(
+    *,
+    run_immediately: bool = False,
+    max_batches: Optional[int] = None,
+) -> Optional[Dict]:
     """
     Main hourly batching task.
     
@@ -94,6 +98,9 @@ async def hourly_batch_task():
     - Retry logic with exponential backoff
     - Comprehensive logging
     """
+    if max_batches is not None and max_batches <= 0:
+        raise ValueError("max_batches must be positive")
+
     print("="*80)
     print("🚀 STARTING HOURLY ARWEAVE BATCH TASK")
     print("="*80)
@@ -119,12 +126,19 @@ async def hourly_batch_task():
     # Calculate time until next hour boundary (top of the hour)
     now = datetime.utcnow()
     next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    wait_seconds = int((next_hour - now).total_seconds())
+    wait_seconds = (
+        0
+        if run_immediately
+        else int((next_hour - now).total_seconds())
+    )
     
-    print(f"⏳ Waiting {wait_seconds/60:.1f} minutes until top of next hour...")
-    print(f"   Current time: {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-    print(f"   Next batch: {next_hour.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-    print(f"   Events will accumulate in TEE buffer during this time.\n")
+    if run_immediately:
+        print("⏩ Operator requested an immediate checkpoint batch.\n")
+    else:
+        print(f"⏳ Waiting {wait_seconds/60:.1f} minutes until top of next hour...")
+        print(f"   Current time: {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        print(f"   Next batch: {next_hour.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        print(f"   Events will accumulate in TEE buffer during this time.\n")
     
     next_batch = next_hour
     
@@ -216,6 +230,13 @@ async def hourly_batch_task():
             # create no audit value. Wait for an enclave event instead.
             if checkpoint_data.get("status") == "empty":
                 print("ℹ️  No events in TEE buffer")
+                if max_batches is not None and batch_count >= max_batches:
+                    return {
+                        "ok": True,
+                        "status": "empty",
+                        "batch_count": batch_count,
+                        "event_count": 0,
+                    }
                 print(
                     f"   Waiting {BATCH_INTERVAL/60:.0f} minutes "
                     "for the next batch."
@@ -283,6 +304,12 @@ async def hourly_batch_task():
                         print(f"   Will retry on next hourly batch.")
             
             if not upload_success:
+                if max_batches is not None and batch_count >= max_batches:
+                    return {
+                        "ok": False,
+                        "status": "upload_failed",
+                        "batch_count": batch_count,
+                    }
                 # Skip to next batch (events stay in buffer)
                 print(f"\n⏭️  Waiting {BATCH_INTERVAL/60:.0f} minutes for next batch...")
                 await asyncio.sleep(BATCH_INTERVAL)
@@ -366,12 +393,29 @@ async def hourly_batch_task():
             print(f"   View: https://viewblock.io/arweave/tx/{tx_id}")
             print(f"   Cost: ~${len(compressed_events) * 0.000002:.4f} (~$0.002 per KB)")
             print("="*80)
+
+            if max_batches is not None and batch_count >= max_batches:
+                return {
+                    "ok": True,
+                    "status": "checkpointed",
+                    "batch_count": batch_count,
+                    "checkpoint_number": int(header["checkpoint_number"]),
+                    "event_count": int(header["event_count"]),
+                    "arweave_tx_id": tx_id,
+                }
             
         except Exception as e:
             print(f"\n❌ BATCH #{batch_count} FAILED: {e}")
             print(f"   Events remain safe in TEE buffer.")
             import traceback
             traceback.print_exc()
+            if max_batches is not None and batch_count >= max_batches:
+                return {
+                    "ok": False,
+                    "status": "failed",
+                    "batch_count": batch_count,
+                    "error": str(e),
+                }
         
         # Wait for BATCH_INTERVAL before next batch
         wait_seconds = BATCH_INTERVAL

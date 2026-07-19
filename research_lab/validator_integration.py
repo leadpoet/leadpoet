@@ -325,23 +325,29 @@ def allocation_can_skip_score_bundle_verification(allocation_doc: Mapping[str, A
 
     if not isinstance(allocation_doc, Mapping):
         return False
+    allocation_sections = (
+        "source_add_allocations",
+        "reimbursement_allocations",
+        "champion_allocations",
+        "queued_champion_allocations",
+    )
+    present_sections = [
+        section for section in allocation_sections if section in allocation_doc
+    ]
+    if not present_sections or any(
+        not isinstance(allocation_doc.get(section), list)
+        for section in present_sections
+    ):
+        return False
     for section in ("champion_allocations", "queued_champion_allocations"):
-        rows = allocation_doc.get(section) or []
+        rows = allocation_doc.get(section, [])
         if any(
             float(row.get("paid_alpha_percent") or 0.0) > 0
             for row in rows
             if isinstance(row, Mapping)
         ):
             return False
-    for section in ("source_add_allocations", "reimbursement_allocations"):
-        rows = allocation_doc.get(section) or []
-        if any(
-            float(row.get("paid_alpha_percent") or 0.0) > 0
-            for row in rows
-            if isinstance(row, Mapping)
-        ):
-            return True
-    return False
+    return True
 
 
 def allocation_can_proceed_without_score_bundles(

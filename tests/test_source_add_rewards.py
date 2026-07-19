@@ -508,6 +508,14 @@ class TestAllocationRails:
                 True,
             ),
             ({"champion_allocations": [{"paid_alpha_percent": 1.0}]}, False),
+            (
+                {
+                    "reimbursement_allocations": [],
+                    "champion_allocations": [],
+                    "queued_champion_allocations": [],
+                },
+                True,
+            ),
             ({}, False),
         ],
     )

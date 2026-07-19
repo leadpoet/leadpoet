@@ -116,6 +116,22 @@ COORDINATOR_OPERATIONS_V2 = {
 }
 
 
+def coordinator_receipt_output_v2(
+    operation: str,
+    output: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the authoritative output projection signed by the coordinator."""
+
+    if operation == OP_RESEARCH_LAB_REWARD_DECISION:
+        return reward_receipt_projection_v2(output)
+    if operation == OP_RESEARCH_LAB_ALLOCATION:
+        allocation = output.get("allocation")
+        if not isinstance(allocation, Mapping):
+            raise ValueError("allocation receipt output is invalid")
+        return {"allocation": dict(allocation)}
+    return dict(output)
+
+
 def coordinator_failed_parent_graph_policy_v2(
     manifest: Mapping[str, Any],
     payload: Mapping[str, Any],
@@ -440,7 +456,7 @@ class CoordinatorExecutorV2:
             output = execute_reward_decision_v2(measured_payload)
             return ExecutionResultV2(
                 output=output,
-                receipt_output=reward_receipt_projection_v2(output),
+                receipt_output=coordinator_receipt_output_v2(operation, output),
                 artifact_hashes=(sha256_json(output),),
             )
         if operation == OP_PROMOTION_GATE_DECISION:
@@ -554,7 +570,7 @@ class CoordinatorExecutorV2:
         artifact_hashes.append(str(authority["source_state_hash"]))
         return ExecutionResultV2(
             output=authority,
-            receipt_output={"allocation": dict(authority["allocation"])},
+            receipt_output=coordinator_receipt_output_v2(operation, authority),
             artifact_hashes=tuple(artifact_hashes),
         )
 

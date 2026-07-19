@@ -1,7 +1,10 @@
 import pytest
 
 from gateway.research_lab import attested_coordinator_v2
-from gateway.tee.coordinator_executor_v2 import COORDINATOR_OPERATIONS_V2
+from gateway.tee.coordinator_executor_v2 import (
+    COORDINATOR_OPERATIONS_V2,
+    coordinator_receipt_output_v2,
+)
 
 
 @pytest.mark.asyncio
@@ -26,6 +29,7 @@ async def test_coordinator_bridge_uses_strict_coordinator_role(monkeypatch):
     assert observed["physical_role_override"] == "gateway_coordinator"
     assert observed["expected_service_role"] == "gateway_coordinator"
     assert observed["rpc_namespace"] == "coordinator_v2"
+    assert observed["receipt_output_projector"] is coordinator_receipt_output_v2
     assert observed["provider_profile_loader"]("default") == {
         "profile": "default",
         "credential_ref_hashes": {},

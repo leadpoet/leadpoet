@@ -11,7 +11,10 @@ from gateway.research_lab.attested_scoring_v2 import (
     DEFAULT_TIMEOUT_SECONDS,
     execute_scoring_v2,
 )
-from gateway.tee.coordinator_executor_v2 import COORDINATOR_OPERATIONS_V2
+from gateway.tee.coordinator_executor_v2 import (
+    COORDINATOR_OPERATIONS_V2,
+    coordinator_receipt_output_v2,
+)
 from gateway.utils.tee_client import coordinator_tee_client
 
 
@@ -72,6 +75,7 @@ async def execute_coordinator_v2(
         physical_role_override="gateway_coordinator",
         expected_service_role="gateway_coordinator",
         rpc_namespace="coordinator_v2",
+        receipt_output_projector=coordinator_receipt_output_v2,
     )
 
 

@@ -274,6 +274,7 @@ async def execute_scoring_v2(
     artifact_key_prefix: str = "attested-v2/artifacts",
     artifact_lineage_attestor: Any = None,
     persist_sidecars: Any = None,
+    receipt_output_projector: Any = None,
 ) -> Dict[str, Any]:
     """Execute one scoring operation as V2 authority and persist its graph."""
 
@@ -650,7 +651,16 @@ async def execute_scoring_v2(
             raise AttestedScoringV2Error("V2 scoring result is invalid JSON") from exc
         if not isinstance(result, dict) or _canonical_bytes(result) != bytes(result_bytes):
             raise AttestedScoringV2Error("V2 scoring result is not canonical")
-        if receipt.get("output_root") != sha256_bytes(bytes(result_bytes)):
+        receipt_output = result
+        if receipt_output_projector is not None:
+            receipt_output = receipt_output_projector(operation, result)
+            if not isinstance(receipt_output, Mapping):
+                raise AttestedScoringV2Error(
+                    "V2 scoring receipt projection is invalid"
+                )
+        if receipt.get("output_root") != sha256_bytes(
+            _canonical_bytes(dict(receipt_output))
+        ):
             raise AttestedScoringV2Error("V2 scoring receipt output mismatch")
     else:
         failure_code = str(status.get("error_code") or state)

@@ -267,6 +267,46 @@ async def test_v2_bridge_returns_only_durable_release_verified_result():
 
 
 @pytest.mark.asyncio
+async def test_v2_bridge_verifies_projected_receipt_output():
+    release = _release()
+    full_output = {
+        "allocation": {"allocation_hash": _hash("7")},
+        "source_state": {"epoch": 12},
+    }
+    receipt_output = {"allocation": full_output["allocation"]}
+    client = _Client(
+        release,
+        executor=lambda _operation, _payload, _context: ExecutionResultV2(
+            output=full_output,
+            receipt_output=receipt_output,
+        ),
+    )
+
+    async def persist(graph):
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    result = await execute_scoring_v2(
+        operation="benchmark_icp_score",
+        purpose="research_lab.benchmark.v2",
+        epoch_id=12,
+        sequence=0,
+        payload={"scores": [1.0]},
+        worker_index=0,
+        release_manifest=release,
+        client=client,
+        persist_graph=persist,
+        boot_verifier=lambda identity: identity,
+        poll_seconds=0.001,
+        receipt_output_projector=lambda _operation, output: {
+            "allocation": output["allocation"]
+        },
+    )
+
+    assert result["result"] == full_output
+    assert result["receipt"]["output_root"] == sha256_json(receipt_output)
+
+
+@pytest.mark.asyncio
 async def test_v2_bridge_accepts_measured_coordinator_internal_worker_capacity():
     release = _release()
     client = _CoordinatorClient(release)

@@ -852,6 +852,21 @@ async def execute_scoring_v2(
     expected_artifact_hashes = sorted(
         transport_artifact_hashes + expected_sealed_hashes
     )
+    graph = _merge_graphs(
+        root_receipt=receipt,
+        boot_identity=boot_identity,
+        local_receipts=local_receipts,
+        transport_attempts=transport_attempts,
+        parent_graphs=parent_graphs,
+        allowed_failed_receipt_hashes=allowed_failed,
+    )
+    validate_receipt_graph(
+        graph,
+        required_purposes=(purpose,),
+        allowed_failed_receipt_hashes=allowed_failed,
+        boot_attestation_verifier=verifier,
+        require_boot_attestation_verification=True,
+    )
     artifact_persistence = []
     reuse_persisted_artifacts = False
     if expected_artifact_hashes:
@@ -914,13 +929,19 @@ async def execute_scoring_v2(
             "artifact_ids": [item["artifact_id"] for item in artifacts],
             "artifact_plaintext_hashes": expected_artifact_hashes,
         }
+        lineage_payload_document = {
+            **lineage_payload,
+            PARENT_RECEIPT_GRAPHS_FIELD: [dict(graph)],
+        }
         lineage_job_id = derive_execution_job_id_v2(
             operation=OP_ATTEST_ARTIFACT_PERSISTENCE,
             purpose="leadpoet.artifact_persistence.v2",
             epoch_id=epoch_id,
             sequence=sequence,
-            payload_sha256=sha256_bytes(_canonical_bytes(lineage_payload)),
-            parent_receipt_hashes=(receipt["receipt_hash"],),
+            payload_sha256=sha256_bytes(
+                _canonical_bytes(lineage_payload_document)
+            ),
+            parent_receipt_hashes=(str(graph["root_receipt_hash"]),),
             input_artifact_hashes=(),
             release_hash=release["release_hash"],
             physical_role="gateway_coordinator",
@@ -954,21 +975,6 @@ async def execute_scoring_v2(
                         "V2 encrypted artifact persistence failed closed"
                     )
                 artifact_persistence.append(dict(persistence_result))
-    graph = _merge_graphs(
-        root_receipt=receipt,
-        boot_identity=boot_identity,
-        local_receipts=local_receipts,
-        transport_attempts=transport_attempts,
-        parent_graphs=parent_graphs,
-        allowed_failed_receipt_hashes=allowed_failed,
-    )
-    validate_receipt_graph(
-        graph,
-        required_purposes=(purpose,),
-        allowed_failed_receipt_hashes=allowed_failed,
-        boot_attestation_verifier=verifier,
-        require_boot_attestation_verification=True,
-    )
     if persist_graph is None:
         from gateway.research_lab.attested_v2_store import persist_receipt_graph_v2
 

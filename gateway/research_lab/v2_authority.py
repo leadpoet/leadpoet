@@ -363,6 +363,7 @@ async def evaluate_source_add_functional_probe_v2(
 async def authorize_reward_decision_v2(
     *,
     epoch_id: int,
+    sequence: int = 0,
     decision_kind: str,
     decision_payload: Mapping[str, Any],
     expected_result: Mapping[str, Any] | None,
@@ -421,7 +422,7 @@ async def authorize_reward_decision_v2(
         "operation": OP_RESEARCH_LAB_REWARD_DECISION,
         "purpose": "research_lab.reward_decision.v2",
         "epoch_id": int(epoch_id),
-        "sequence": 0,
+        "sequence": max(0, int(sequence)),
         "payload": {
             "decision_kind": str(decision_kind),
             "decision_payload": dict(decision_payload),
@@ -489,6 +490,7 @@ async def attest_historical_champion_reward_v2(
         raise ResearchLabV2AuthorityError("champion reward id is invalid")
     return await authorize_reward_decision_v2(
         epoch_id=int(epoch_id),
+        sequence=1,
         decision_kind="champion_migration",
         decision_payload={"champion_reward_id": reward_id},
         expected_result=None,

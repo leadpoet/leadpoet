@@ -444,6 +444,7 @@ async def test_historical_champion_reward_migration_runs_before_v2_cutover(
         "decision_kind": "champion_migration",
         "decision_payload": {"champion_reward_id": reward_id},
     }
+    assert captured["sequence"] == 1
 
 
 @pytest.mark.asyncio

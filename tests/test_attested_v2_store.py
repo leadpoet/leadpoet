@@ -486,6 +486,47 @@ async def test_duplicate_v2_row_must_match_exactly(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_duplicate_v2_row_accepts_equivalent_database_timestamp(
+    monkeypatch,
+):
+    row = {
+        "boot_identity_hash": HASH,
+        "issued_at": "2026-07-10T20:00:00Z",
+        "identity_doc": {"issued_at": "2026-07-10T20:00:00Z"},
+    }
+
+    async def _duplicate(_table, _row):
+        raise RuntimeError("duplicate key 23505")
+
+    async def _stored(_table, *, filters):
+        assert filters == (("boot_identity_hash", HASH),)
+        return {
+            **row,
+            "issued_at": "2026-07-10T20:00:00+00:00",
+        }
+
+    monkeypatch.setattr(attested_v2_store, "insert_row", _duplicate)
+    monkeypatch.setattr(attested_v2_store, "select_one", _stored)
+
+    stored = await attested_v2_store._insert_exact(
+        "example",
+        row,
+        key_filters=(("boot_identity_hash", HASH),),
+    )
+
+    assert stored["identity_doc"] == row["identity_doc"]
+
+
+def test_stored_timestamp_comparison_rejects_different_instant():
+    with pytest.raises(attested_v2_store.AttestedV2StoreError, match="issued_at"):
+        attested_v2_store._assert_stored_row(
+            "example",
+            {"issued_at": "2026-07-10T20:00:01+00:00"},
+            {"issued_at": "2026-07-10T20:00:00Z"},
+        )
+
+
+@pytest.mark.asyncio
 async def test_weight_bundle_is_acknowledged_only_after_durable_readback(monkeypatch):
     bundle = {"schema_version": "leadpoet.published_weight_bundle.v2"}
     verified = {

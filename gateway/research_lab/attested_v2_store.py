@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 import hashlib
 import re
 from typing import Any, Iterable, Mapping, Optional
@@ -56,6 +57,38 @@ def _is_duplicate_error(exc: BaseException) -> bool:
     return "duplicate" in message or "unique" in message or "23505" in message
 
 
+def _timestamp_instant(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _stored_value_matches(field: str, stored: Any, expected: Any) -> bool:
+    if stored == expected:
+        return True
+    if field.endswith("_at"):
+        stored_instant = _timestamp_instant(stored)
+        expected_instant = _timestamp_instant(expected)
+        return (
+            stored_instant is not None
+            and expected_instant is not None
+            and stored_instant == expected_instant
+        )
+    return False
+
+
 async def _insert_exact(
     table: str,
     row: Mapping[str, Any],
@@ -74,7 +107,7 @@ async def _insert_exact(
                 "%s duplicate could not be reloaded" % table
             ) from exc
     for field, value in expected.items():
-        if stored.get(field) != value:
+        if not _stored_value_matches(field, stored.get(field), value):
             raise AttestedV2StoreError(
                 "%s stored row conflicts at %s" % (table, field)
             )
@@ -209,7 +242,7 @@ def _assert_stored_row(
     table: str, stored: Mapping[str, Any], expected: Mapping[str, Any]
 ) -> None:
     for field, value in expected.items():
-        if stored.get(field) != value:
+        if not _stored_value_matches(field, stored.get(field), value):
             raise AttestedV2StoreError(
                 "%s stored row conflicts at %s" % (table, field)
             )

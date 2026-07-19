@@ -22,6 +22,7 @@ import binascii
 from typing import Dict, List, Optional
 from pathlib import Path
 
+import requests
 from arweave.arweave_lib import Wallet, Transaction
 
 
@@ -410,7 +411,22 @@ async def upload_checkpoint(
         tx = await loop.run_in_executor(None, create_transaction)
 
         def send_transaction():
-            tx.send()
+            response = requests.post(
+                f"{tx.api_url}/tx",
+                data=tx.json_data,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "text/plain",
+                },
+                timeout=60,
+            )
+            if response.status_code != 200:
+                response_text = str(response.text or "").strip()
+                raise RuntimeError(
+                    "Arweave transaction rejected "
+                    f"(HTTP {response.status_code}): "
+                    f"{response_text[:500] or '<empty response>'}"
+                )
             return tx.id
 
         retry_delay = INITIAL_RETRY_DELAY
@@ -474,8 +490,6 @@ async def wait_for_confirmation(
         >>> if confirmed:
         ...     print("Transaction confirmed!")
     """
-    import requests
-    
     print(f"⏳ Waiting for Arweave confirmation (timeout: {timeout}s)...")
     print(f"   TX ID: {tx_id}")
     

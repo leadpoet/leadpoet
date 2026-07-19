@@ -296,6 +296,7 @@ async def test_job_key_is_reencrypted_directly_to_attested_coordinator():
         kms_client=kms,
     )
     assert result["job_id"] == "autoresearch-v2:job-1"
+    assert kms.request["CiphertextBlob"] == b"kms-encrypted-provider-secret"
     assert kms.request["Recipient"]["AttestationDocument"] == b"nitro-job"
     assert client.job_provisioned[1] == b"rsa-encrypted-for-enclave"
 

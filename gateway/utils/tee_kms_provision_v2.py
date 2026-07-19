@@ -329,9 +329,18 @@ async def provision_job_provider_envelope_v2(
         ) from exc
     if kms_client is None:
         kms_client = _default_kms_client()
+    try:
+        ciphertext_blob = base64.b64decode(
+            normalized["ciphertext_blob_b64"],
+            validate=True,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise TEEKMSProvisionV2Error(
+            "job provider envelope ciphertext is invalid"
+        ) from exc
     response = await asyncio.to_thread(
         kms_client.decrypt,
-        CiphertextBlob=normalized["ciphertext_blob"],
+        CiphertextBlob=ciphertext_blob,
         EncryptionContext=normalized["encryption_context"],
         Recipient={
             "KeyEncryptionAlgorithm": KMS_KEY_ENCRYPTION_ALGORITHM,

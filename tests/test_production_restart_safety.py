@@ -32,8 +32,8 @@ def _snapshot(epoch_block: int) -> SubnetEpochSnapshot:
     )
 
 
-@pytest.mark.parametrize("epoch_block", [0, 300, 310])
-def test_restart_gate_accepts_official_epoch_block_at_or_before_310(
+@pytest.mark.parametrize("epoch_block", [0, 299, 300])
+def test_restart_gate_accepts_official_epoch_block_at_or_before_300(
     monkeypatch: pytest.MonkeyPatch,
     epoch_block: int,
 ) -> None:
@@ -45,21 +45,21 @@ def test_restart_gate_accepts_official_epoch_block_at_or_before_310(
 
     result = verify_restart_epoch_window(object(), netuid=71)
 
-    assert MAXIMUM_RESTART_EPOCH_BLOCK == 310
+    assert MAXIMUM_RESTART_EPOCH_BLOCK == 300
     assert result["epoch_block"] == epoch_block
     assert result["restart_allowed"] is True
 
 
-def test_restart_gate_rejects_official_epoch_block_after_310(
+def test_restart_gate_rejects_official_epoch_block_after_300(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         restart_epoch_gate,
         "read_subnet_epoch_snapshot",
-        lambda subtensor, *, netuid: _snapshot(311),
+        lambda subtensor, *, netuid: _snapshot(301),
     )
 
-    with pytest.raises(RestartEpochGateError, match="observed 311"):
+    with pytest.raises(RestartEpochGateError, match="observed 301"):
         verify_restart_epoch_window(object(), netuid=71)
 
 
@@ -79,7 +79,7 @@ def test_gateway_captures_start_gate_and_validator_gates_before_shutdown() -> No
 
     assert gateway_gate < gateway_release < gateway_shutdown
     assert validator_gate < validator_shutdown
-    assert "MAXIMUM_RESTART_EPOCH_BLOCK = 310" in (
+    assert "MAXIMUM_RESTART_EPOCH_BLOCK = 300" in (
         ROOT / "Leadpoet" / "utils" / "restart_epoch_gate.py"
     ).read_text(encoding="utf-8")
     assert "--maximum" not in gateway
@@ -104,6 +104,18 @@ def test_validator_restart_is_fail_closed_and_postflight_verified() -> None:
     assert "/health/v2-authority" in deploy
     assert "read_subnet_epoch_snapshot" in deploy
     assert "RestartCount" in deploy
+
+
+def test_validator_restart_does_not_require_a_live_gateway() -> None:
+    deploy = (
+        ROOT / "validator_models" / "containerizing" / "deploy_dynamic.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'gateway_authority_status = "deferred"' in deploy
+    assert 'gateway_authority_status = "not_aligned"' in deploy
+    assert '"gateway_authority_status": gateway_authority_status' in deploy
+    assert 'raise SystemExit("VALIDATOR_V2_GATEWAY_URL is missing")' not in deploy
+    assert "gateway V2 authority is not ready" not in deploy
 
 
 def test_validator_secret_environment_overrides_local_fallback_files() -> None:

@@ -26,6 +26,9 @@ from gateway.research_lab.worker_autostart import (
 )
 from gateway.tee.artifact_vault_v2 import artifact_master_key_reference_hash
 from gateway.tee.provider_broker_v2 import credential_reference_hash
+from gateway.tee.supabase_schema_preflight_v2 import (
+    verify_required_supabase_v2_schema,
+)
 from gateway.utils.tee_kms_provision_v2 import build_provider_envelope_v2
 
 
@@ -569,13 +572,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     function = install_gateway_envelopes_v2 if args.install else prepare_gateway_envelopes_v2
     keyword = "install_dir" if args.install else "output_dir"
+    environment = load_environment_file(args.env_file)
+    schema_result = (
+        verify_required_supabase_v2_schema(environment) if args.install else None
+    )
     result = function(
-        environment=load_environment_file(args.env_file),
+        environment=environment,
         kms_key_id=args.kms_key_id,
         deploy_commit=args.deploy_commit,
         kms_client=None,
         **{keyword: args.output_dir},
     )
+    if schema_result is not None:
+        result = {**result, "supabase_v2_schema": schema_result}
     print(json.dumps(result, sort_keys=True, indent=2))
     return 0
 

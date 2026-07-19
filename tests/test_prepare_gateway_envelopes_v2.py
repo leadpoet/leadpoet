@@ -7,6 +7,7 @@ import pytest
 from gateway.research_lab.worker_autostart import (
     build_research_lab_worker_autostart_plan,
 )
+from gateway.tee import prepare_gateway_envelopes_v2 as envelope_module
 from gateway.tee.prepare_gateway_envelopes_v2 import (
     install_gateway_envelopes_v2,
     load_environment_file,
@@ -217,3 +218,56 @@ def test_transition_rejects_worker_counts_not_bound_to_sealed_profiles(tmp_path)
             environment_path=parent_environment,
             transition_report_path=report_path,
         )
+
+
+def test_install_cli_checks_schema_before_writing_envelopes(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    environment = {
+        "SUPABASE_URL": "https://project.supabase.co",
+        "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
+    }
+    env_file = tmp_path / "gateway.env"
+    env_file.write_text(json.dumps(environment), encoding="utf-8")
+    calls = []
+
+    def verify_schema(observed_environment):
+        assert observed_environment == environment
+        calls.append("schema")
+        return {
+            "status": "ready",
+            "probe_count": 19,
+            "migration_files": ["scripts/95.sql", "scripts/97.sql"],
+        }
+
+    def install(**kwargs):
+        assert kwargs["environment"] == environment
+        calls.append("install")
+        return {"status": "installed"}
+
+    monkeypatch.setattr(
+        envelope_module,
+        "verify_required_supabase_v2_schema",
+        verify_schema,
+    )
+    monkeypatch.setattr(envelope_module, "install_gateway_envelopes_v2", install)
+
+    assert envelope_module.main(
+        [
+            "--install",
+            "--env-file",
+            str(env_file),
+            "--kms-key-id",
+            "alias/gateway-v2",
+            "--deploy-commit",
+            "1" * 40,
+            "--output-dir",
+            str(tmp_path / "v2"),
+        ]
+    ) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert calls == ["schema", "install"]
+    assert result["supabase_v2_schema"]["status"] == "ready"

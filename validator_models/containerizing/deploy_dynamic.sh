@@ -770,15 +770,31 @@ if hotkey_state.get("provisioned") is not True:
     raise SystemExit("validator hotkey is not provisioned in Nitro")
 
 gateway_url = str(os.environ.get("VALIDATOR_V2_GATEWAY_URL") or "").rstrip("/")
-if not gateway_url:
-    raise SystemExit("VALIDATOR_V2_GATEWAY_URL is missing")
-with urllib.request.urlopen(
-    gateway_url + "/health/v2-authority",
-    timeout=30,
-) as response:
-    gateway_health = json.load(response)
-if gateway_health.get("status") != "ready":
-    raise SystemExit(f"gateway V2 authority is not ready: {gateway_health}")
+gateway_health = {}
+gateway_authority_status = "deferred"
+gateway_authority_error_type = ""
+if gateway_url:
+    try:
+        with urllib.request.urlopen(
+            gateway_url + "/health/v2-authority",
+            timeout=30,
+        ) as response:
+            gateway_health = json.load(response)
+    except Exception as exc:
+        gateway_authority_error_type = type(exc).__name__
+    else:
+        live_commit = str(gateway_health.get("commit_sha") or "")
+        expected_commit = str(os.environ.get("VALIDATOR_V2_DEPLOY_COMMIT") or "")
+        if (
+            gateway_health.get("status") == "ready"
+            and live_commit
+            and live_commit == expected_commit
+        ):
+            gateway_authority_status = "ready"
+        else:
+            gateway_authority_status = "not_aligned"
+else:
+    gateway_authority_error_type = "gateway_url_not_configured"
 
 network = os.environ.get("SUBTENSOR_NETWORK", "finney")
 netuid = int(os.environ.get("NETUID", "71"))
@@ -796,7 +812,8 @@ print(
             "bittensor_version": str(bt.__version__),
             "enclave_status": health.get("status"),
             "hotkey_provisioned": True,
-            "gateway_authority_status": gateway_health.get("status"),
+            "gateway_authority_status": gateway_authority_status,
+            "gateway_authority_error_type": gateway_authority_error_type,
             "gateway_commit": gateway_health.get("commit_sha"),
             "subnet_epoch_index": epoch.subnet_epoch_index,
             "subnet_epoch_block": epoch.epoch_block,

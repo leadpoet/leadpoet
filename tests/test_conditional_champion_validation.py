@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import io
 import json
 from pathlib import Path
@@ -106,12 +107,118 @@ def _assignment() -> dict[str, Any]:
     )
 
 
+def _benchmark_row(
+    *,
+    bundle_id: str,
+    assignment: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    score_summary_doc: dict[str, Any] = {
+        "aggregate_score": 42.0,
+        "per_icp_summaries": [{"company_count": 1, "score": 42.0}],
+    }
+    if assignment is not None:
+        score_summary_doc["category_assignment"] = dict(assignment)
+    return {
+        "benchmark_bundle_id": bundle_id,
+        "private_model_manifest_hash": MODEL_HASH,
+        "rolling_window_hash": WINDOW_HASH,
+        "benchmark_quality": "passed",
+        "evaluation_epoch": 24000,
+        "score_summary_doc": score_summary_doc,
+        "current_benchmark_status": "completed",
+    }
+
+
 def test_default_policy_derives_40_with_20_retained() -> None:
     policy = _policy()
     assert policy.total_icps == 40
     assert policy.fresh_icp_count == 20
     assert policy.retained_icp_count == 20
     assert policy.to_dict()["threshold_points"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_policy_cutover_replaces_only_incompatible_same_day_baseline(
+    monkeypatch,
+) -> None:
+    expected_policy_hash = str(_policy().to_dict()["policy_hash"])
+    legacy = _benchmark_row(bundle_id="legacy")
+    matching = _benchmark_row(bundle_id="matching", assignment=_assignment())
+    rows = [legacy]
+
+    async def select_many(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return rows
+
+    monkeypatch.setattr(scoring_worker, "select_many", select_many)
+    worker = object.__new__(scoring_worker.ResearchLabGatewayScoringWorker)
+
+    assert scoring_worker._private_benchmark_matches_policy(
+        legacy,
+        expected_policy_hash=expected_policy_hash,
+    ) is False
+    assert scoring_worker._private_benchmark_matches_policy(
+        legacy,
+        expected_policy_hash="",
+    ) is True
+    assert scoring_worker._private_benchmark_matches_policy(
+        matching,
+        expected_policy_hash="",
+    ) is False
+    assert (
+        await worker._reusable_same_day_benchmark(
+            today="2026-07-19",
+            manifest_hash=MODEL_HASH,
+            expected_policy_hash=expected_policy_hash,
+        )
+        is None
+    )
+    assert (
+        await worker._same_day_reference_recorded_while_running(
+            today="2026-07-19",
+            window_hash=WINDOW_HASH,
+            manifest_hash=MODEL_HASH,
+            expected_policy_hash=expected_policy_hash,
+        )
+        is None
+    )
+
+    rows[:] = [legacy, matching]
+    assert (
+        await worker._reusable_same_day_benchmark(
+            today="2026-07-19",
+            manifest_hash=MODEL_HASH,
+            expected_policy_hash=expected_policy_hash,
+        )
+    )["benchmark_bundle_id"] == "matching"
+    assert (
+        await worker._same_day_reference_recorded_while_running(
+            today="2026-07-19",
+            window_hash=WINDOW_HASH,
+            manifest_hash=MODEL_HASH,
+            expected_policy_hash=expected_policy_hash,
+        )
+    )["benchmark_bundle_id"] == "matching"
+
+
+@pytest.mark.asyncio
+async def test_enforced_candidate_gate_rejects_legacy_same_day_baseline(
+    monkeypatch,
+) -> None:
+    async def select_many(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [_benchmark_row(bundle_id="legacy")]
+
+    monkeypatch.setattr(scoring_worker, "select_many", select_many)
+    worker = object.__new__(scoring_worker.ResearchLabGatewayScoringWorker)
+    worker.config = types.SimpleNamespace(conditional_validation_policy=_policy)
+
+    with pytest.raises(
+        scoring_worker.CandidateBaselineNotReady,
+        match="same_day_completed_private_baseline_required",
+    ):
+        await worker._daily_candidate_scoring_window_and_gate(
+            artifact=types.SimpleNamespace(manifest_hash=MODEL_HASH),
+            now=datetime(2026, 7, 19, tzinfo=timezone.utc),
+        )
 
 
 @pytest.mark.parametrize(

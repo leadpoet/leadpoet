@@ -1317,7 +1317,9 @@ def _artifact(artifact_hash: str = "sha256:" + "1" * 64) -> sw.PrivateModelArtif
 async def test_daily_candidate_scoring_uses_same_day_baseline_window(monkeypatch):
     artifact = _artifact()
     baseline_window_hash = "sha256:" + "4" * 64
-    worker = sw.ResearchLabGatewayScoringWorker(sw.ResearchLabGatewayConfig())
+    worker = sw.ResearchLabGatewayScoringWorker(
+        sw.ResearchLabGatewayConfig(conditional_validation_mode="off")
+    )
     reconstructed_window = SimpleNamespace(
         window_hash=baseline_window_hash,
         benchmark_id=f"research_lab:rolling_icp_window:{baseline_window_hash}",

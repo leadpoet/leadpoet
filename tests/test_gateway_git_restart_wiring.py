@@ -145,7 +145,13 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     dependency_preflight = script.index(
         'echo "Installing gateway host Python dependencies before production shutdown"'
     )
-    assert materialize < restart_window < release_channel < credential_envelopes < preflight
+    assert (
+        materialize
+        < restart_window
+        < release_channel
+        < credential_envelopes
+        < preflight
+    )
     assert preflight < shutdown
     assert preflight < artifact_prepare < shutdown
     assert dependency_preflight < preflight < shutdown
@@ -167,6 +173,7 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
         '"$GATEWAY_V2_CONFIG_DIR/gateway-v2-env-transition.json"'
     ) in script
     assert "scrub_parent_environment_file_v2" in script
+    assert credential_envelopes < script.index("scrub_parent_environment_file_v2")
     assert script.index("gateway.tee.restart_preflight_v2") < shutdown
     assert script.index('--deploy-commit "$PREPARED_GATEWAY_SHA"') < shutdown
     assert script.index('--release-manifest "$GATEWAY_V2_RELEASE_MANIFEST"') < shutdown

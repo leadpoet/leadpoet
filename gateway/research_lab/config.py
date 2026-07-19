@@ -622,7 +622,9 @@ class ResearchLabGatewayConfig:
     # private is the inverse regression holdout.
     public_benchmark_public_total_icps: Optional[int] = 10
     public_benchmark_public_weak_total: Optional[int] = 7
-    conditional_validation_mode: str = "off"
+    # The 40-ICP policy is production-ready by default. Operators retain the
+    # explicit "off" mode as a fail-safe rollback.
+    conditional_validation_mode: str = "enforce"
     private_holdout_total_icps: int = 10
     private_holdout_weak_total: int = 3
     conditional_holdout_total_icps: int = 20
@@ -763,8 +765,8 @@ class ResearchLabGatewayConfig:
         improvement_threshold_points = _improvement_threshold_points()
         conditional_validation_mode = os.getenv(
             "RESEARCH_LAB_CONDITIONAL_VALIDATION_MODE",
-            "off",
-        ).strip().lower() or "off"
+            "enforce",
+        ).strip().lower() or "enforce"
         legacy_champion_threshold = os.getenv("RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS")
         if legacy_champion_threshold not in (None, "", str(improvement_threshold_points)):
             logger.warning(

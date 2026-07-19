@@ -185,6 +185,7 @@ def test_parent_relay_reports_directional_bytes_and_first_close():
     provider.sendall(b"response")
     provider.shutdown(socket.SHUT_WR)
     assert enclave.recv(64) == b"response"
+    assert enclave.recv(1) == b""
     enclave.shutdown(socket.SHUT_WR)
     thread.join(timeout=2)
 
@@ -393,7 +394,7 @@ def test_enclave_proxy_health_exposes_bounded_last_failure_stage():
     assert response.startswith(b"HTTP/1.1 502 Bad Gateway")
     assert status["last_failure"] == {
         "stage": "open_parent_tunnel",
-        "error_type": "OSError",
+        "error_type": type(OSError(111, "connection refused")).__name__,
         "errno": 111,
         "destination_ref": "4877532cd3300944",
     }

@@ -4,10 +4,12 @@ import base64
 import json
 import os
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 
 from gateway.tee import restart_preflight_v2 as preflight
+from gateway.tee import supabase_schema_preflight_v2 as schema_preflight
 from gateway.tee.provider_broker_v2 import credential_reference_hash
 from gateway.tee.artifact_persistence_v2 import ARTIFACT_POLICY_SCHEMA_VERSION
 from gateway.tee.release_manifest_v2 import (
@@ -293,3 +295,77 @@ def test_parent_env_parser_does_not_execute_shell(tmp_path: Path) -> None:
         "PAYLOAD": "$(touch %s)" % marker,
     }
     assert not marker.exists()
+
+
+class _SchemaResponse:
+    def __init__(self, status: int = 200) -> None:
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def getcode(self) -> int:
+        return self.status
+
+    def read(self, _size: int = -1) -> bytes:
+        return b"["
+
+
+def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
+    requests = []
+
+    def opener(request, *, timeout):
+        requests.append((request, timeout))
+        return _SchemaResponse()
+
+    result = schema_preflight.verify_required_supabase_v2_schema(
+        {
+            "SUPABASE_URL": "https://project.supabase.co/",
+            "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
+        },
+        opener=opener,
+    )
+
+    assert result["status"] == "ready"
+    assert result["probe_count"] == len(
+        schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
+    )
+    assert len(requests) == result["probe_count"]
+    assert all("/rest/v1/" in request.full_url for request, _timeout in requests)
+    assert all("limit=0" in request.full_url for request, _timeout in requests)
+    assert "service-role-value" not in str(result)
+
+
+def test_required_supabase_v2_schema_names_missing_migration() -> None:
+    def opener(_request, *, timeout):
+        del timeout
+        raise HTTPError(
+            "https://project.supabase.co/rest/v1/missing",
+            404,
+            "Not Found",
+            {},
+            None,
+        )
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match=r"validator_sourcing_epoch_inputs_v2.*92-validator-sourcing",
+    ):
+        schema_preflight.verify_required_supabase_v2_schema(
+            {
+                "SUPABASE_URL": "https://project.supabase.co",
+                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
+            },
+            opener=opener,
+        )
+
+
+def test_required_supabase_v2_schema_requires_credentials() -> None:
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match="lacks Supabase V2 schema credentials",
+    ):
+        schema_preflight.verify_required_supabase_v2_schema({})

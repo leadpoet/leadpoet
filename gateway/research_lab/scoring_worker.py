@@ -8972,6 +8972,12 @@ class ResearchLabGatewayScoringWorker:
         artifact: PrivateModelArtifactManifest,
         window_hash: str,
     ) -> dict[str, Any]:
+        conditional_policy = self.config.conditional_validation_policy()
+        expected_policy_hash = (
+            str(conditional_policy.to_dict()["policy_hash"])
+            if conditional_policy.enabled
+            else ""
+        )
         rows = await select_many(
             "research_lab_private_model_benchmark_current",
             columns=(
@@ -8987,7 +8993,13 @@ class ResearchLabGatewayScoringWorker:
             limit=10,
         )
         for row in rows:
-            if not _private_benchmark_row_is_valid(row):
+            if (
+                not _private_benchmark_row_is_valid(row)
+                or not _private_benchmark_matches_policy(
+                    row,
+                    expected_policy_hash=expected_policy_hash,
+                )
+            ):
                 continue
             gate = _private_holdout_gate_from_baseline_row(row)
             if gate:
@@ -9011,6 +9023,12 @@ class ResearchLabGatewayScoringWorker:
         midnight.
         """
         today = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).date().isoformat()
+        conditional_policy = self.config.conditional_validation_policy()
+        expected_policy_hash = (
+            str(conditional_policy.to_dict()["policy_hash"])
+            if conditional_policy.enabled
+            else ""
+        )
         rows = await select_many(
             "research_lab_private_model_benchmark_current",
             columns=(
@@ -9026,7 +9044,13 @@ class ResearchLabGatewayScoringWorker:
             limit=25,
         )
         for row in rows:
-            if not _private_benchmark_row_is_valid(row):
+            if (
+                not _private_benchmark_row_is_valid(row)
+                or not _private_benchmark_matches_policy(
+                    row,
+                    expected_policy_hash=expected_policy_hash,
+                )
+            ):
                 continue
             gate = _private_holdout_gate_from_baseline_row(row)
             window_hash = str(row.get("rolling_window_hash") or "")
@@ -9301,6 +9325,11 @@ class ResearchLabGatewayScoringWorker:
         start = time.time()
         evaluation_epoch = await self._resolve_evaluation_epoch()
         conditional_policy = self.config.conditional_validation_policy()
+        expected_policy_hash = (
+            str(conditional_policy.to_dict()["policy_hash"])
+            if conditional_policy.enabled
+            else ""
+        )
         expected_icp_count = (
             conditional_policy.total_icps
             if conditional_policy.enabled
@@ -9398,15 +9427,21 @@ class ResearchLabGatewayScoringWorker:
             order_by=(("created_at", True),),
             limit=25,
         )
-        valid_existing = [row for row in existing if _private_benchmark_row_is_valid(row)]
+        valid_existing = [
+            row
+            for row in existing
+            if _private_benchmark_row_is_valid(row)
+            and _private_benchmark_matches_policy(
+                row,
+                expected_policy_hash=expected_policy_hash,
+            )
+        ]
         if valid_existing:
             if conditional_policy.enabled:
                 try:
                     await _repair_baseline_category_results_from_row(
                         valid_existing[0],
-                        expected_policy_hash=str(
-                            conditional_policy.to_dict()["policy_hash"]
-                        ),
+                        expected_policy_hash=expected_policy_hash,
                     )
                 except Exception as exc:
                     logger.warning(
@@ -9446,15 +9481,14 @@ class ResearchLabGatewayScoringWorker:
         same_day_reference = await self._reusable_same_day_benchmark(
             today=today,
             manifest_hash=artifact.manifest_hash,
+            expected_policy_hash=expected_policy_hash,
         )
         if same_day_reference is not None:
             if conditional_policy.enabled:
                 try:
                     await _repair_baseline_category_results_from_row(
                         same_day_reference,
-                        expected_policy_hash=str(
-                            conditional_policy.to_dict()["policy_hash"]
-                        ),
+                        expected_policy_hash=expected_policy_hash,
                     )
                 except Exception as exc:
                     logger.warning(
@@ -10265,15 +10299,14 @@ class ResearchLabGatewayScoringWorker:
             today=today,
             window_hash=window.window_hash,
             manifest_hash=artifact.manifest_hash,
+            expected_policy_hash=expected_policy_hash,
         )
         if pre_record_conflict is not None:
             if conditional_policy.enabled:
                 try:
                     await _repair_baseline_category_results_from_row(
                         pre_record_conflict,
-                        expected_policy_hash=str(
-                            conditional_policy.to_dict()["policy_hash"]
-                        ),
+                        expected_policy_hash=expected_policy_hash,
                     )
                 except Exception as exc:
                     logger.warning(
@@ -11398,12 +11431,13 @@ class ResearchLabGatewayScoringWorker:
         *,
         today: str,
         manifest_hash: str,
+        expected_policy_hash: str = "",
     ) -> dict[str, Any] | None:
         """Any valid benchmark already recorded today for this model (any window).
 
-        A restart used to silently re-run the baseline and replace the day's
-        promotion reference mid-day (§0.3); replacement must be deliberate via
-        RESEARCH_LAB_BASELINE_ALLOW_SAMEDAY_REPLACE.
+        A restart used to silently replace the day's promotion reference
+        mid-day (§0.3). Reuse therefore requires the active policy generation;
+        an actual policy cutover must produce its own baseline.
         """
         if _env_flag("RESEARCH_LAB_BASELINE_ALLOW_SAMEDAY_REPLACE"):
             return None
@@ -11418,7 +11452,13 @@ class ResearchLabGatewayScoringWorker:
             limit=25,
         )
         for row in rows:
-            if _private_benchmark_row_is_valid(row):
+            if (
+                _private_benchmark_row_is_valid(row)
+                and _private_benchmark_matches_policy(
+                    row,
+                    expected_policy_hash=expected_policy_hash,
+                )
+            ):
                 return dict(row)
         return None
 
@@ -11459,6 +11499,7 @@ class ResearchLabGatewayScoringWorker:
         today: str,
         window_hash: str,
         manifest_hash: str,
+        expected_policy_hash: str = "",
     ) -> dict[str, Any] | None:
         """Re-check just before recording: another worker (or a restart) may have
         recorded the day's reference while this multi-hour run was in flight."""
@@ -11479,7 +11520,13 @@ class ResearchLabGatewayScoringWorker:
             logger.warning("research_lab_baseline_pre_record_check_failed error=%s", str(exc)[:200])
             return None
         for row in rows:
-            if _private_benchmark_row_is_valid(row):
+            if (
+                _private_benchmark_row_is_valid(row)
+                and _private_benchmark_matches_policy(
+                    row,
+                    expected_policy_hash=expected_policy_hash,
+                )
+            ):
                 return dict(row)
         return None
 
@@ -12206,6 +12253,25 @@ def _private_benchmark_row_is_valid(row: Mapping[str, Any]) -> bool:
         return int(row.get("evaluation_epoch") or 0) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _private_benchmark_matches_policy(
+    row: Mapping[str, Any],
+    *,
+    expected_policy_hash: str,
+) -> bool:
+    doc = (
+        row.get("score_summary_doc")
+        if isinstance(row.get("score_summary_doc"), Mapping)
+        else {}
+    )
+    assignment = (
+        doc.get("category_assignment")
+        if isinstance(doc.get("category_assignment"), Mapping)
+        else {}
+    )
+    observed_policy_hash = str(assignment.get("policy_hash") or "")
+    return observed_policy_hash == expected_policy_hash
 
 
 def _validate_candidate_conditional_policy_stamp(

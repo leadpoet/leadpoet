@@ -28,6 +28,9 @@ from gateway.tee.release_manifest_v2 import (
     validate_release_manifest,
 )
 from gateway.tee.scoring_executor_v2 import SCORING_OPERATIONS_V2
+from gateway.utils.tee_artifact_store_v2 import (
+    ATTESTED_V2_ARTIFACT_KEY_PREFIX,
+)
 from gateway.utils.tee_client import coordinator_tee_client, scoring_tee_client
 from leadpoet_canonical.attested_v2 import (
     build_receipt_graph,
@@ -271,7 +274,7 @@ async def execute_scoring_v2(
     artifact_coordinator_client: Any = coordinator_tee_client,
     persist_artifact: Any = None,
     artifact_bucket: Optional[str] = None,
-    artifact_key_prefix: str = "attested-v2/artifacts",
+    artifact_key_prefix: str = ATTESTED_V2_ARTIFACT_KEY_PREFIX,
     artifact_lineage_attestor: Any = None,
     persist_sidecars: Any = None,
     receipt_output_projector: Any = None,

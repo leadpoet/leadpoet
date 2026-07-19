@@ -912,6 +912,7 @@ async def test_v2_bridge_persists_every_authenticated_provider_artifact_first():
     )
     assert {item[0] for item in persisted_artifacts} == {_hash("8"), _hash("9")}
     assert persisted_artifacts[0][1]["bucket"] == "immutable-bucket"
+    assert persisted_artifacts[0][1]["key_prefix"] == "encrypted-artifacts"
     assert result["artifact_persistence"][0]["status"] == "persisted"
     assert result["receipt"]["purpose"] == "leadpoet.artifact_persistence.v2"
     assert result["execution_receipt"]["purpose"] == "research_lab.benchmark.v2"

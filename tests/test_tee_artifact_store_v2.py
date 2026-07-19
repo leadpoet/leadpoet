@@ -6,6 +6,7 @@ import boto3
 import pytest
 
 from gateway.utils.tee_artifact_store_v2 import (
+    ATTESTED_V2_ARTIFACT_KEY_PREFIX,
     TEEArtifactStoreV2Error,
     persist_enclave_artifact_v2,
 )
@@ -109,6 +110,7 @@ async def test_parent_uploads_only_canonical_ciphertext_and_requests_readback() 
     body = json.loads(s3.put["Body"])
     assert body == _document()
     assert b"private response" not in s3.put["Body"]
+    assert s3.put["Key"].startswith(f"{ATTESTED_V2_ARTIFACT_KEY_PREFIX}/")
     assert s3.put["ObjectLockMode"] == "COMPLIANCE"
     assert [item[0] for item in s3.presigns] == ["get_object", "head_object"]
     assert client.verification["artifact_ref"].startswith("s3://immutable-example/")

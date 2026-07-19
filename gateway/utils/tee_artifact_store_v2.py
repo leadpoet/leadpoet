@@ -13,6 +13,7 @@ from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
 
 
 _ARTIFACT_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+ATTESTED_V2_ARTIFACT_KEY_PREFIX = "encrypted-artifacts"
 
 
 class TEEArtifactStoreV2Error(RuntimeError):
@@ -66,7 +67,7 @@ async def persist_enclave_artifact_v2(
     artifact_id: str,
     *,
     bucket: str,
-    key_prefix: str = "attested-v2/artifacts",
+    key_prefix: str = ATTESTED_V2_ARTIFACT_KEY_PREFIX,
     client: Any = coordinator_tee_client,
     s3_client: Any = None,
     presign_expires_seconds: int = 300,

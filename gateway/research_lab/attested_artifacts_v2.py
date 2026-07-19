@@ -9,7 +9,10 @@ from typing import Any, Mapping, Sequence
 
 from gateway.research_lab.attested_coordinator_v2 import execute_coordinator_v2
 from gateway.tee.coordinator_executor_v2 import OP_ATTEST_ARTIFACT_PERSISTENCE
-from gateway.utils.tee_artifact_store_v2 import persist_enclave_artifact_v2
+from gateway.utils.tee_artifact_store_v2 import (
+    ATTESTED_V2_ARTIFACT_KEY_PREFIX,
+    persist_enclave_artifact_v2,
+)
 from gateway.utils.tee_client import coordinator_tee_client
 from leadpoet_canonical.attested_v2 import (
     EMPTY_ARTIFACT_ROOT,
@@ -38,7 +41,7 @@ async def persist_execution_transport_artifacts_v2(
     release_manifest: Mapping[str, Any],
     client: Any = coordinator_tee_client,
     bucket: str | None = None,
-    key_prefix: str = "attested-v2/artifacts",
+    key_prefix: str = ATTESTED_V2_ARTIFACT_KEY_PREFIX,
 ) -> dict[str, Any]:
     allowed_failed = {
         str(item.get("receipt_hash") or "")

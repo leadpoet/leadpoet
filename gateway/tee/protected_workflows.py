@@ -27,6 +27,9 @@ PROTECTED_SYMBOLS = {
     "gateway/tee/coordinator_epoch_cutover_v2.py": (
         "attest_subnet_epoch_cutover_v2",
     ),
+    "gateway/tee/execution_job_manager_v2.py": (
+        "ExecutionJobManagerV2",
+    ),
     "gateway/research_lab/tee_protocol.py": (
         "normalize_tee_protocol",
     ),

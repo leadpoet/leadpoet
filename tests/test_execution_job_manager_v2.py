@@ -188,6 +188,71 @@ def test_success_receipt_binds_transport_artifacts_and_signed_transition():
     assert json.loads(base64.b64decode(result["data_b64"])) == {"score": 6}
 
 
+def test_capacity_evicts_only_the_oldest_terminal_job(monkeypatch):
+    monkeypatch.setattr(
+        "gateway.tee.execution_job_manager_v2.MAX_JOB_COUNT",
+        2,
+    )
+    monkeypatch.setattr(
+        "gateway.tee.execution_job_manager_v2.MIN_TERMINAL_EVICTION_AGE_SECONDS",
+        0,
+    )
+    manager, _ = _manager(
+        lambda _operation, payload, _context: {"value": payload["input"]}
+    )
+    payload = _payload()
+    first = _manifest(payload, job_id="score-job-1")
+    second = _manifest(payload, job_id="score-job-2")
+    third = _manifest(payload, job_id="score-job-3")
+
+    assert _run(manager, payload, first)["state"] == "succeeded"
+    assert _run(manager, payload, second)["state"] == "succeeded"
+    submitted = manager.submit(third)
+
+    assert submitted["state"] == "uploading"
+    with pytest.raises(ExecutionJobV2Error, match="job was not found"):
+        manager.status(first["job_id"])
+    assert manager.status(second["job_id"])["state"] == "succeeded"
+    health = manager.health()
+    assert health["terminal_eviction_count"] == 1
+    assert health["job_counts"] == {
+        "succeeded": 1,
+        "uploading": 1,
+    }
+
+
+def test_capacity_never_evicts_nonterminal_jobs(monkeypatch):
+    monkeypatch.setattr(
+        "gateway.tee.execution_job_manager_v2.MAX_JOB_COUNT",
+        2,
+    )
+    manager, _ = _manager(lambda _operation, _payload, _context: {})
+    payload = _payload()
+    manager.submit(_manifest(payload, job_id="score-job-1"))
+    manager.submit(_manifest(payload, job_id="score-job-2"))
+
+    with pytest.raises(ExecutionJobV2Error, match="capacity is full"):
+        manager.submit(_manifest(payload, job_id="score-job-3"))
+
+    assert manager.health()["terminal_eviction_count"] == 0
+
+
+def test_capacity_does_not_evict_recent_terminal_jobs(monkeypatch):
+    monkeypatch.setattr(
+        "gateway.tee.execution_job_manager_v2.MAX_JOB_COUNT",
+        1,
+    )
+    manager, _ = _manager(lambda _operation, _payload, _context: {})
+    payload = _payload()
+    assert _run(manager, payload)["state"] == "succeeded"
+
+    with pytest.raises(ExecutionJobV2Error, match="capacity is full"):
+        manager.submit(_manifest(payload, job_id="score-job-2"))
+
+    assert manager.status("score-job-1")["state"] == "succeeded"
+    assert manager.health()["terminal_eviction_count"] == 0
+
+
 def test_receipt_output_projection_binds_authoritative_result_only():
     full_output = {
         "allocation": {"allocation_hash": HASH},

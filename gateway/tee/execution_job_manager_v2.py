@@ -38,6 +38,7 @@ JOB_SCHEMA_VERSION = "leadpoet.enclave_execution_job.v2"
 PARENT_RECEIPT_GRAPHS_FIELD = "_v2_parent_receipt_graphs"
 MAX_JOB_COUNT = 256
 MAX_QUEUED_JOBS = 64
+MIN_TERMINAL_EVICTION_AGE_SECONDS = 300
 MAX_INPUT_BYTES = 64 * 1024 * 1024
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 MAX_CHUNK_BYTES = 1024 * 1024
@@ -381,6 +382,7 @@ class ExecutionJobManagerV2:
         self._queue = queue.Queue(maxsize=MAX_QUEUED_JOBS)
         self._active = set()
         self._workers = []
+        self._terminal_eviction_count = 0
         self._configured_worker_count = (
             int(worker_count)
             if configured_worker_count is None
@@ -415,6 +417,7 @@ class ExecutionJobManagerV2:
             "queue_depth": self._queue.qsize(),
             "active_job_ids": sorted(self._active),
             "job_counts": counts,
+            "terminal_eviction_count": self._terminal_eviction_count,
             "supported_operations": sorted(self._operations),
         }
 
@@ -435,6 +438,8 @@ class ExecutionJobManagerV2:
                         "job_id already exists with another manifest"
                     )
                 return self._summary(existing)
+            if len(self._jobs) >= MAX_JOB_COUNT:
+                self._evict_oldest_terminal_locked()
             if len(self._jobs) >= MAX_JOB_COUNT:
                 raise ExecutionJobV2Error("V2 job capacity is full")
             job = {
@@ -1030,3 +1035,25 @@ class ExecutionJobManagerV2:
         ]
         for job_id in expired:
             del self._jobs[job_id]
+
+    def _evict_oldest_terminal_locked(self) -> Optional[str]:
+        cutoff = self._clock() - MIN_TERMINAL_EVICTION_AGE_SECONDS
+        candidates = [
+            (
+                float(job["updated_at"]),
+                float(job["created_at"]),
+                job_id,
+            )
+            for job_id, job in self._jobs.items()
+            if (
+                job["state"] in TERMINAL_STATES
+                and job_id not in self._active
+                and float(job["updated_at"]) <= cutoff
+            )
+        ]
+        if not candidates:
+            return None
+        _, _, job_id = min(candidates)
+        del self._jobs[job_id]
+        self._terminal_eviction_count += 1
+        return job_id

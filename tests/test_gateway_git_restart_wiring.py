@@ -89,6 +89,22 @@ def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
     )
 
 
+def test_gateway_restart_exports_attested_artifact_bucket_to_runtime() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    assert (
+        'RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET="${'
+        'RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET:-$GATEWAY_V2_RELEASE_BUCKET}"'
+        in script
+    )
+    assert "export RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET" in script
+    assert (
+        'RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET="'
+        '$RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET" \\'
+        in script
+    )
+
+
 def test_gateway_weight_input_repair_runs_from_canonical_repo_root() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     repair_stage = script.index(

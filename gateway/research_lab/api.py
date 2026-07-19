@@ -527,6 +527,19 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
     _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
     _require_enabled(config.miner_submissions_enabled, "Research Lab miner submissions are disabled")
     _require_enabled(config.source_add_enabled, "Research Lab SOURCE_ADD submissions are disabled")
+    # SOURCE_ADD intake mints emission rewards, so a maintenance pause on
+    # scoring or autoresearch must also stop new source submissions: rewards
+    # granted while everything else is frozen only drain the burn share.
+    from gateway.research_lab.maintenance import (
+        is_autoresearch_maintenance_paused,
+        is_scoring_maintenance_paused,
+    )
+
+    if await is_scoring_maintenance_paused() or await is_autoresearch_maintenance_paused():
+        raise HTTPException(
+            status_code=503,
+            detail="Research Lab maintenance is active; source adapter intake is paused",
+        )
     await _verify_signed_miner(payload)
     await _enforce_research_lab_submission_rate_limit(payload.miner_hotkey, route="source_adapters")
 

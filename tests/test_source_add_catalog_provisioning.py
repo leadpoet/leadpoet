@@ -83,6 +83,14 @@ async def test_public_source_add_credential_recipient_is_retired(monkeypatch):
         staticmethod(lambda: SimpleNamespace(api_enabled=True, source_add_enabled=True)),
     )
     monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
+    from gateway.research_lab import maintenance
+
+    monkeypatch.setattr(
+        maintenance, "is_scoring_maintenance_paused", lambda *a, **k: _async_none()
+    )
+    monkeypatch.setattr(
+        maintenance, "is_autoresearch_maintenance_paused", lambda *a, **k: _async_none()
+    )
     async def fail_recipient(**_kwargs):
         raise AssertionError("public miner route must not create a recipient")
 
@@ -207,6 +215,14 @@ async def test_submission_delegates_identity_and_limits_to_atomic_rpc(monkeypatc
         ),
     )
     monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
+    from gateway.research_lab import maintenance
+
+    monkeypatch.setattr(
+        maintenance, "is_scoring_maintenance_paused", lambda *a, **k: _async_none()
+    )
+    monkeypatch.setattr(
+        maintenance, "is_autoresearch_maintenance_paused", lambda *a, **k: _async_none()
+    )
     monkeypatch.setattr(
         api,
         "_enforce_research_lab_submission_rate_limit",
@@ -265,6 +281,14 @@ async def test_duplicate_submission_response_is_exact_and_private(monkeypatch):
         ),
     )
     monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
+    from gateway.research_lab import maintenance
+
+    monkeypatch.setattr(
+        maintenance, "is_scoring_maintenance_paused", lambda *a, **k: _async_none()
+    )
+    monkeypatch.setattr(
+        maintenance, "is_autoresearch_maintenance_paused", lambda *a, **k: _async_none()
+    )
     monkeypatch.setattr(
         api,
         "_enforce_research_lab_submission_rate_limit",

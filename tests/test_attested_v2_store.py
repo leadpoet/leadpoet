@@ -517,6 +517,14 @@ async def test_duplicate_v2_row_accepts_equivalent_database_timestamp(
     assert stored["identity_doc"] == row["identity_doc"]
 
 
+def test_stored_retention_comparison_accepts_equivalent_database_timestamp():
+    attested_v2_store._assert_stored_row(
+        "example",
+        {"retain_until": "2027-07-10T20:00:00+00:00"},
+        {"retain_until": "2027-07-10T20:00:00Z"},
+    )
+
+
 def test_stored_timestamp_comparison_rejects_different_instant():
     with pytest.raises(attested_v2_store.AttestedV2StoreError, match="issued_at"):
         attested_v2_store._assert_stored_row(

@@ -78,7 +78,7 @@ def _timestamp_instant(value: Any) -> Optional[datetime]:
 def _stored_value_matches(field: str, stored: Any, expected: Any) -> bool:
     if stored == expected:
         return True
-    if field.endswith("_at"):
+    if field.endswith(("_at", "_until")):
         stored_instant = _timestamp_instant(stored)
         expected_instant = _timestamp_instant(expected)
         return (

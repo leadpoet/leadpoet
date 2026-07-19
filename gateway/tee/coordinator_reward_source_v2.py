@@ -56,6 +56,11 @@ class CoordinatorRewardSourceV2:
                 payload=payload,
                 context=context,
             )
+        if kind == "source_add_migration":
+            return self._resolve_source_add_migration(
+                payload=payload,
+                context=context,
+            )
         if kind not in {"source_add_leg1", "source_add_leg2"}:
             raise CoordinatorRewardSourceV2Error(
                 "reward source kind is unsupported"
@@ -319,6 +324,46 @@ class CoordinatorRewardSourceV2:
                     ),
                     "score_bundle_doc": dict(bundle_doc),
                 },
+            },
+        }
+
+    def _resolve_source_add_migration(
+        self,
+        *,
+        payload: Mapping[str, Any],
+        context: ExecutionContextV2,
+    ) -> Dict[str, Any]:
+        proposed = payload.get("decision_payload")
+        if not isinstance(proposed, Mapping) or set(proposed) != {"reward_ref"}:
+            raise CoordinatorRewardSourceV2Error(
+                "SOURCE_ADD migration request fields are invalid"
+            )
+        reward_ref = str(proposed.get("reward_ref") or "")
+        reward = self._one(
+            "source_add_reward_by_ref",
+            {"reward_ref": reward_ref},
+            context,
+        )
+        if str(reward.get("reward_ref") or "") != reward_ref:
+            raise CoordinatorRewardSourceV2Error(
+                "SOURCE_ADD migration reward differs from measured state"
+            )
+        trigger = reward.get("trigger_evidence_doc")
+        if not isinstance(trigger, Mapping):
+            raise CoordinatorRewardSourceV2Error(
+                "SOURCE_ADD migration trigger is invalid"
+            )
+        submission_id = str(trigger.get("submission_id") or "")
+        submission = self._one(
+            "source_add_submission_by_id",
+            {"submission_id": submission_id},
+            context,
+        )
+        return {
+            "decision_kind": "source_add_migration",
+            "decision_payload": {
+                "reward_row": dict(reward),
+                "source_submission": dict(submission),
             },
         }
 

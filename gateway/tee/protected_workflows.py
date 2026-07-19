@@ -212,6 +212,7 @@ PROTECTED_SYMBOLS = {
         "reconcile_champion_reward_statuses",
         "backfill_champion_reward_v2_authority",
         "backfill_champion_settlement_v2_authority",
+        "backfill_source_add_reward_v2_authority",
         "champion_v2_cutover_readiness_report",
     ),
     "gateway/research_lab/arweave_audit.py": (
@@ -223,6 +224,7 @@ PROTECTED_SYMBOLS = {
     "gateway/research_lab/v2_authority.py": (
         "attest_historical_champion_reward_v2",
         "attest_historical_champion_settlement_v2",
+        "attest_historical_source_add_reward_v2",
         "classify_historical_champion_allocation_v2",
         "build_allocation_v2",
         "_load_allocation_parent_graphs_v2",
@@ -343,6 +345,10 @@ PROTECTED_SYMBOLS = {
         "source_add_reward_row_projection_v2",
         "reimbursement_reward_row_projection_v2",
         "execute_reward_decision_v2",
+        "_source_add_migration",
+    ),
+    "gateway/tee/verify_weight_submission_ready_v2.py": (
+        "verify_weight_submission_ready_v2",
     ),
     "gateway/tee/scoring_executor_v2.py": (
         "ScoringExecutorV2",

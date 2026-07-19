@@ -42,6 +42,10 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
         calls.append(("rewards", kwargs))
         return {"ok": True, "migrated_count": 23}
 
+    async def source_rewards(**kwargs):
+        calls.append(("source_rewards", kwargs))
+        return {"ok": True, "migrated_count": 1}
+
     async def settlements(**kwargs):
         calls.append(("settlements", kwargs))
         return {"ok": True, "classified_count": 149}
@@ -69,6 +73,11 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
     monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
     monkeypatch.setattr(
         maintenance,
+        "backfill_source_add_reward_v2_authority",
+        source_rewards,
+    )
+    monkeypatch.setattr(
+        maintenance,
         "backfill_champion_reward_v2_authority",
         rewards,
     )
@@ -95,9 +104,11 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
     result = await readiness.verify_weight_submission_ready_v2(repair=True)
 
     assert result["status"] == "ready"
+    assert result["source_add_reward_receipts_created"] == 1
     assert result["champion_reward_receipts_created"] == 23
     assert result["historical_allocations_classified"] == 149
     assert [name for name, _kwargs in calls] == [
+        "source_rewards",
         "rewards",
         "settlements",
         "readiness",
@@ -109,6 +120,11 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
         "dry_run": False,
     }
     assert calls[1][1] == {
+        "epoch": 24032,
+        "limit": 10000,
+        "dry_run": False,
+    }
+    assert calls[2][1] == {
         "epoch": 24032,
         "netuid": 71,
         "limit": 10000,
@@ -125,6 +141,14 @@ async def test_weight_readiness_accepts_already_covered_reward(monkeypatch):
 
     async def rewards(**_kwargs):
         calls.append("rewards")
+        return {
+            "ok": True,
+            "already_covered_count": 1,
+            "migrated_count": 0,
+        }
+
+    async def source_rewards(**_kwargs):
+        calls.append("source_rewards")
         return {
             "ok": True,
             "already_covered_count": 1,
@@ -151,6 +175,11 @@ async def test_weight_readiness_accepts_already_covered_reward(monkeypatch):
     monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
     monkeypatch.setattr(
         maintenance,
+        "backfill_source_add_reward_v2_authority",
+        source_rewards,
+    )
+    monkeypatch.setattr(
+        maintenance,
         "backfill_champion_reward_v2_authority",
         rewards,
     )
@@ -177,8 +206,15 @@ async def test_weight_readiness_accepts_already_covered_reward(monkeypatch):
     result = await readiness.verify_weight_submission_ready_v2(repair=True)
 
     assert result["status"] == "ready"
+    assert result["source_add_reward_receipts_created"] == 0
     assert result["champion_reward_receipts_created"] == 0
-    assert calls == ["rewards", "settlements", "readiness", "handoff"]
+    assert calls == [
+        "source_rewards",
+        "rewards",
+        "settlements",
+        "readiness",
+        "handoff",
+    ]
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ from gateway.tee.reward_executor_v2 import (
     champion_reward_row_projection_v2,
     execute_reward_decision_v2,
     reimbursement_reward_row_projection_v2,
+    reward_receipt_projection_v2,
     source_add_reward_row_projection_v2,
 )
 from leadpoet_canonical.attested_v2 import sha256_json
@@ -195,6 +196,68 @@ def test_historical_champion_migration_preserves_exact_stored_obligation():
                         "score_bundle_id": "score-bundle-1",
                         "score_bundle_hash": bundle_doc["score_bundle_hash"],
                         "score_bundle_doc": bundle_doc,
+                    },
+                },
+            }
+        )
+
+
+def test_historical_source_add_migration_requires_exact_measured_provenance():
+    adapter_id = "adapter:uspto-patents-center-api-86bb73c0149e"
+    reward_ref = "source_add_reward:201a08f0d2b503bf"
+    submission_id = "source_add_submission:a3d8f3e562dca636"
+    reward_row = {
+        "reward_ref": reward_ref,
+        "adapter_id": adapter_id,
+        "miner_hotkey": "miner-hotkey",
+        "leg": 1,
+        "reward_kind": "source_acceptance",
+        "alpha_percent": 1.0,
+        "reward_epochs": 20,
+        "start_epoch": 23870,
+        "current_reward_status": "active",
+        "trigger_evidence_doc": {
+            "submission_id": submission_id,
+            "precheck_status": "provenance_precheck_passed",
+            "reward_trigger": "provenance_precheck_passed",
+        },
+        "public_label": "Source acceptance reward",
+    }
+    submission = {
+        "submission_id": submission_id,
+        "adapter_id": adapter_id,
+        "miner_hotkey": "miner-hotkey",
+        "precheck_status": "provenance_precheck_passed",
+    }
+    result = execute_reward_decision_v2(
+        {
+            "decision_kind": "source_add_migration",
+            "decision_payload": {
+                "reward_row": reward_row,
+                "source_submission": submission,
+            },
+        }
+    )
+
+    assert result["decision_kind"] == "source_add_leg1"
+    assert result["reward"]["reward_ref"] == reward_ref
+    assert result["reward"]["state"] == "active"
+    assert reward_receipt_projection_v2(result) == (
+        source_add_reward_row_projection_v2(
+            "source_add_leg1",
+            {**reward_row, "initial_reward_status": "active"},
+        )
+    )
+
+    with pytest.raises(RewardExecutorV2Error, match="measured submission"):
+        execute_reward_decision_v2(
+            {
+                "decision_kind": "source_add_migration",
+                "decision_payload": {
+                    "reward_row": reward_row,
+                    "source_submission": {
+                        **submission,
+                        "miner_hotkey": "other-miner",
                     },
                 },
             }

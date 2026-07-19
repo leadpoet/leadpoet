@@ -143,6 +143,30 @@ def test_typed_query_parameters_cannot_inject_postgrest_syntax():
     assert provider.requests == []
 
 
+def test_source_add_migration_reads_one_exact_measured_reward_reference():
+    reward_ref = "source_add_reward:201a08f0d2b503bf"
+    provider = FakeProvider([{"rows": [{"reward_ref": reward_ref}]}])
+    rows, attempts, _artifacts, _sleeps = _read(
+        provider,
+        policy_id="source_add_reward_by_ref",
+        parameters={"reward_ref": reward_ref},
+    )
+
+    assert rows == [{"reward_ref": reward_ref}]
+    assert len(attempts) == 1
+    url = provider.requests[0]["url"]
+    assert "research_lab_source_add_reward_current" in url
+    assert "reward_ref=eq.source_add_reward%3A201a08f0d2b503bf" in url
+    assert "limit=2" in url
+
+    with pytest.raises(SupabaseSourceV2Error, match="reward_ref"):
+        _read(
+            FakeProvider([{"rows": []}]),
+            policy_id="source_add_reward_by_ref",
+            parameters={"reward_ref": reward_ref + "&select=secret"},
+        )
+
+
 def test_unmeasured_policy_and_inverted_epoch_range_fail_before_network():
     provider = FakeProvider([{"rows": []}])
     with pytest.raises(SupabaseSourceV2Error, match="not measured"):

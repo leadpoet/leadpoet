@@ -445,6 +445,7 @@ class CoordinatorExecutorV2:
             measured_payload = payload
             if decision_kind in {
                 "champion_migration",
+                "source_add_migration",
                 "source_add_leg1",
                 "source_add_leg2",
                 "reimbursement",
@@ -490,10 +491,10 @@ class CoordinatorExecutorV2:
         context: ExecutionContextV2,
     ) -> None:
         kind = str(payload.get("decision_kind") or "")
-        if kind == "champion_migration":
+        if kind in {"champion_migration", "source_add_migration"}:
             if context.external_receipt_graphs or context.parent_receipt_hashes:
                 raise ValueError(
-                    "champion migration cannot inherit host-selected ancestry"
+                    "reward migration cannot inherit host-selected ancestry"
                 )
             return
         expected_purpose = {

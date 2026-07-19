@@ -12,7 +12,12 @@ from research_lab.reimbursements import (
     build_reimbursement_schedule,
     compute_reimbursement_award,
 )
-from research_lab.source_add_rewards import create_leg1_reward, create_leg2_reward
+from research_lab.source_add_rewards import (
+    PUBLIC_LABELS,
+    REWARD_KIND_SOURCE_ACCEPTANCE,
+    create_leg1_reward,
+    create_leg2_reward,
+)
 
 
 OP_RESEARCH_LAB_REWARD_DECISION = "research_lab_reward_decision"
@@ -23,6 +28,7 @@ REWARD_DECISION_KINDS = frozenset(
         "reimbursement",
         "source_add_leg1",
         "source_add_leg2",
+        "source_add_migration",
     }
 )
 
@@ -167,6 +173,8 @@ def execute_reward_decision_v2(payload: Mapping[str, Any]) -> Dict[str, Any]:
         return _champion(value)
     if kind == "champion_migration":
         return _champion_migration(value)
+    if kind == "source_add_migration":
+        return _source_add_migration(value)
     if kind == "reimbursement":
         return _reimbursement(value)
     return _source_add(kind, value)
@@ -368,6 +376,81 @@ def _source_add(kind: str, value: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "decision_kind": kind,
         "reward": reward.to_dict() if reward is not None else None,
+    }
+
+
+def _source_add_migration(value: Mapping[str, Any]) -> Dict[str, Any]:
+    """Attest the exact legacy Leg 1 provenance-precheck reward contract."""
+
+    if not isinstance(value, Mapping) or set(value) != {
+        "reward_row",
+        "source_submission",
+    }:
+        raise RewardExecutorV2Error("SOURCE_ADD migration fields are invalid")
+    reward = _mapping(value.get("reward_row"), "SOURCE_ADD migration reward")
+    submission = _mapping(
+        value.get("source_submission"), "SOURCE_ADD migration submission"
+    )
+    adapter_id = str(reward.get("adapter_id") or "")
+    reward_ref = str(reward.get("reward_ref") or "")
+    miner_hotkey = str(reward.get("miner_hotkey") or "")
+    trigger = _mapping(
+        reward.get("trigger_evidence_doc"), "SOURCE_ADD migration trigger"
+    )
+    submission_id = str(trigger.get("submission_id") or "")
+    expected_ref = (
+        "source_add_reward:"
+        + sha256_json({"adapter_id": adapter_id, "leg": 1}).split(":", 1)[1][:16]
+    )
+    if (
+        int(reward.get("leg") or 0) != 1
+        or str(reward.get("reward_kind") or "")
+        != REWARD_KIND_SOURCE_ACCEPTANCE
+        or reward_ref != expected_ref
+        or not adapter_id
+        or not miner_hotkey
+        or float(reward.get("alpha_percent") or 0.0) <= 0.0
+        or float(reward.get("alpha_percent") or 0.0) > 100.0
+        or int(reward.get("reward_epochs") or 0) <= 0
+        or int(reward.get("start_epoch") or -1) < 0
+        or str(reward.get("public_label") or "")
+        != PUBLIC_LABELS[REWARD_KIND_SOURCE_ACCEPTANCE]
+        or str(reward.get("current_reward_status") or "")
+        not in {"active", "queued", "partially_paid"}
+    ):
+        raise RewardExecutorV2Error(
+            "SOURCE_ADD migration reward differs from the legacy Leg 1 contract"
+        )
+    if (
+        trigger.get("precheck_status") != "provenance_precheck_passed"
+        or trigger.get("reward_trigger") != "provenance_precheck_passed"
+        or not re.fullmatch(r"source_add_submission:[0-9a-f]{16}", submission_id)
+        or str(submission.get("submission_id") or "") != submission_id
+        or str(submission.get("adapter_id") or "") != adapter_id
+        or str(submission.get("miner_hotkey") or "") != miner_hotkey
+        or str(submission.get("precheck_status") or "")
+        != "provenance_precheck_passed"
+    ):
+        raise RewardExecutorV2Error(
+            "SOURCE_ADD migration provenance differs from measured submission"
+        )
+    return {
+        "decision_kind": "source_add_leg1",
+        "reward": {
+            "reward_ref": reward_ref,
+            "adapter_id": adapter_id,
+            "miner_ref": miner_hotkey,
+            "leg": 1,
+            "alpha_percent": float(reward["alpha_percent"]),
+            "reward_epochs": int(reward["reward_epochs"]),
+            "start_epoch": int(reward["start_epoch"]),
+            "state": "active",
+            "reward_kind": REWARD_KIND_SOURCE_ACCEPTANCE,
+            "allocation_ref": "",
+            "trigger_evidence": dict(trigger),
+            "public_label": PUBLIC_LABELS[REWARD_KIND_SOURCE_ACCEPTANCE],
+            "stopped_reason": "",
+        },
     }
 
 

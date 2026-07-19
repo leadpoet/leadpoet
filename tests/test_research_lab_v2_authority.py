@@ -448,6 +448,55 @@ async def test_historical_champion_reward_migration_runs_before_v2_cutover(
 
 
 @pytest.mark.asyncio
+async def test_historical_source_add_migration_creates_reward_artifact_link(
+    monkeypatch,
+):
+    reward_ref = "source_add_reward:" + "c" * 16
+    result = {"decision_kind": "source_add_leg1", "reward": {"id": reward_ref}}
+    captured = {}
+
+    async def execute(**kwargs):
+        captured.update(kwargs)
+        projection = {"reward_ref": reward_ref}
+        receipt = {
+            "receipt_hash": HASH_A,
+            "output_root": v2_authority.sha256_json(projection),
+        }
+        return {
+            "status": "succeeded",
+            "result": result,
+            "execution_receipt": receipt,
+            "receipt_graph": {
+                "root_receipt_hash": HASH_A,
+                "receipts": [receipt],
+            },
+        }
+
+    async def persist_links(**_kwargs):
+        return {"business_artifact_link_count": 1}
+
+    monkeypatch.setattr(v2_authority, "legacy_v1_enabled", lambda: True)
+    monkeypatch.setattr(
+        v2_authority,
+        "reward_receipt_projection_v2",
+        lambda _result: {"reward_ref": reward_ref},
+    )
+    outcome = await v2_authority.attest_historical_source_add_reward_v2(
+        epoch_id=101,
+        reward_ref=reward_ref,
+        execute=execute,
+        persist_links=persist_links,
+    )
+
+    assert outcome["status"] == "matched"
+    assert captured["payload"] == {
+        "decision_kind": "source_add_migration",
+        "decision_payload": {"reward_ref": reward_ref},
+    }
+    assert captured["parent_graphs"] == ()
+
+
+@pytest.mark.asyncio
 async def test_allocation_parent_loader_uses_legacy_settlement_receipt(
     monkeypatch,
 ):

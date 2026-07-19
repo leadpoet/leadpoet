@@ -1952,6 +1952,136 @@ async def reconcile_champion_reward_statuses(
     }
 
 
+async def backfill_source_add_reward_v2_authority(
+    *,
+    epoch: int | None = None,
+    limit: int = 1000,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Idempotently attest measured pre-V2 SOURCE_ADD obligations."""
+
+    from gateway.research_lab.allocations import (
+        SETTLEMENT_TRACKED_CHAMPION_STATUSES,
+    )
+    from gateway.research_lab.attested_v2_store import (
+        load_business_artifact_graph_by_ref_v2,
+    )
+    from gateway.research_lab.v2_authority import (
+        attest_historical_source_add_reward_v2,
+    )
+    from gateway.tee.reward_executor_v2 import source_add_reward_row_projection_v2
+    from leadpoet_canonical.attested_v2 import sha256_json
+
+    effective_epoch = await _resolve_maintenance_epoch(epoch)
+    rows: list[dict[str, Any]] = []
+    for status in sorted(SETTLEMENT_TRACKED_CHAMPION_STATUSES):
+        rows.extend(
+            await select_all(
+                "research_lab_source_add_reward_current",
+                filters=(("current_reward_status", status),),
+                order_by=(("created_at", False),),
+                max_rows=max(1, int(limit)),
+                allow_partial=False,
+            )
+        )
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            int(row.get("start_epoch") or 0),
+            str(row.get("reward_ref") or ""),
+        ),
+    )[: max(1, int(limit))]
+    covered: list[str] = []
+    planned: list[str] = []
+    for row in rows:
+        reward_ref = str(row.get("reward_ref") or "")
+        expected_output = sha256_json(
+            source_add_reward_row_projection_v2(
+                "source_add_leg%d" % int(row.get("leg") or 0),
+                {**dict(row), "initial_reward_status": "active"},
+            )
+        )
+        try:
+            graph = await load_business_artifact_graph_by_ref_v2(
+                artifact_kind="source_add_reward_decision",
+                artifact_ref=reward_ref,
+            )
+            root_hash = str(graph.get("root_receipt_hash") or "")
+            root = next(
+                (
+                    receipt
+                    for receipt in graph.get("receipts") or ()
+                    if isinstance(receipt, Mapping)
+                    and receipt.get("receipt_hash") == root_hash
+                ),
+                None,
+            )
+            if (
+                not isinstance(root, Mapping)
+                or root.get("purpose") != "research_lab.reward_decision.v2"
+                or root.get("output_root") != expected_output
+            ):
+                raise RuntimeError("stored SOURCE_ADD V2 receipt differs")
+            covered.append(reward_ref)
+        except Exception as exc:
+            logger.info(
+                "research_lab_source_add_v2_backfill_required "
+                "reward_ref=%s reason=%s",
+                reward_ref,
+                str(exc)[:200],
+            )
+            planned.append(reward_ref)
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "action": "backfill-source-add-v2-authority",
+            "epoch": effective_epoch,
+            "inspected_count": len(rows),
+            "already_covered_count": len(covered),
+            "planned_count": len(planned),
+            "planned_reward_refs": planned,
+        }
+
+    migrated: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for reward_ref in planned:
+        try:
+            outcome = await attest_historical_source_add_reward_v2(
+                epoch_id=effective_epoch,
+                reward_ref=reward_ref,
+            )
+            receipt = outcome.get("execution_receipt") or outcome.get("receipt") or {}
+            migrated.append(
+                {
+                    "reward_ref": reward_ref,
+                    "receipt_hash": str(receipt.get("receipt_hash") or ""),
+                }
+            )
+        except Exception as exc:
+            logger.exception(
+                "research_lab_source_add_v2_backfill_failed reward_ref=%s",
+                reward_ref,
+            )
+            failed.append(
+                {
+                    "reward_ref": reward_ref,
+                    "error": str(exc)[:300],
+                }
+            )
+    return {
+        "ok": not failed,
+        "dry_run": False,
+        "action": "backfill-source-add-v2-authority",
+        "epoch": effective_epoch,
+        "inspected_count": len(rows),
+        "already_covered_count": len(covered),
+        "migrated_count": len(migrated),
+        "migrated": migrated,
+        "failed": failed,
+    }
+
+
 async def backfill_champion_reward_v2_authority(
     *,
     epoch: int | None = None,

@@ -199,6 +199,18 @@ QUERY_POLICIES = {
         max_pages=50,
         order="reward_ref.asc",
     ),
+    "source_add_reward_by_ref": SupabaseQueryV2(
+        policy_id="source_add_reward_by_ref",
+        table="research_lab_source_add_reward_current",
+        select=(
+            "reward_ref,adapter_id,miner_hotkey,leg,reward_kind,alpha_percent,"
+            "reward_epochs,start_epoch,current_reward_status,trigger_evidence_doc,"
+            "public_label"
+        ),
+        parameter_names=("reward_ref",),
+        max_pages=1,
+        limit=2,
+    ),
     "source_add_rewards_by_adapter": SupabaseQueryV2(
         policy_id="source_add_rewards_by_adapter",
         table="research_lab_source_add_reward_current",
@@ -631,6 +643,11 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
             ("current_reward_status", "in.(active,queued,partially_paid)"),
             ("start_epoch", "lte.%d" % epoch_id),
         )
+    if policy.policy_id == "source_add_reward_by_ref":
+        reward_ref = _identifier(parameters["reward_ref"], "reward_ref")
+        if not re.fullmatch(r"source_add_reward:[0-9a-f]{16}", reward_ref):
+            raise SupabaseSourceV2Error("reward_ref is invalid")
+        return (("reward_ref", "eq.%s" % reward_ref),)
     if policy.policy_id == "source_add_rewards_by_adapter":
         return (
             (

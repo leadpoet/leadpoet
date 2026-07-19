@@ -375,7 +375,10 @@ async def authorize_reward_decision_v2(
 ) -> dict[str, Any]:
     """Require the existing reward kernel to produce one exact signed decision."""
 
-    if legacy_v1_enabled() and decision_kind != "champion_migration":
+    if legacy_v1_enabled() and decision_kind not in {
+        "champion_migration",
+        "source_add_migration",
+    }:
         if not isinstance(expected_result, Mapping):
             raise ResearchLabV2AuthorityError(
                 "legacy reward decisions without a host result must use the legacy kernel"
@@ -496,6 +499,32 @@ async def attest_historical_champion_reward_v2(
         expected_result=None,
         artifact_kind="champion_reward_decision",
         artifact_ref=reward_id,
+        parent_graphs=(),
+        execute=execute,
+        persist_links=persist_links,
+    )
+
+
+async def attest_historical_source_add_reward_v2(
+    *,
+    epoch_id: int,
+    reward_ref: str,
+    execute: Any = execute_coordinator_v2,
+    persist_links: Any = None,
+) -> dict[str, Any]:
+    """Migrate one measured pre-V2 provenance reward into V2 authority."""
+
+    normalized_ref = str(reward_ref or "")
+    if not re.fullmatch(r"source_add_reward:[0-9a-f]{16}", normalized_ref):
+        raise ResearchLabV2AuthorityError("SOURCE_ADD reward ref is invalid")
+    return await authorize_reward_decision_v2(
+        epoch_id=int(epoch_id),
+        sequence=1,
+        decision_kind="source_add_migration",
+        decision_payload={"reward_ref": normalized_ref},
+        expected_result=None,
+        artifact_kind="source_add_reward_decision",
+        artifact_ref=normalized_ref,
         parent_graphs=(),
         execute=execute,
         persist_links=persist_links,

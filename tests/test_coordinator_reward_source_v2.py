@@ -308,6 +308,52 @@ def test_champion_migration_reconstructs_exact_measured_reward_and_bundle():
         )
 
 
+def test_source_add_migration_reconstructs_reward_and_measured_submission():
+    reward_ref = "source_add_reward:201a08f0d2b503bf"
+    submission_id = "source_add_submission:a3d8f3e562dca636"
+    reward = {
+        "reward_ref": reward_ref,
+        "trigger_evidence_doc": {"submission_id": submission_id},
+    }
+    submission = {
+        "submission_id": submission_id,
+        "adapter_id": "adapter:test",
+        "miner_hotkey": "miner",
+        "precheck_status": "provenance_precheck_passed",
+    }
+    reader = FakeReader(
+        {
+            "source_add_reward_by_ref": [reward],
+            "source_add_submission_by_id": [submission],
+        }
+    )
+    resolver = CoordinatorRewardSourceV2(
+        reader=reader,
+        chain_source=FakeChain(),
+        config_supplier=_config,
+    )
+
+    resolved = resolver.resolve(
+        payload={
+            "decision_kind": "source_add_migration",
+            "decision_payload": {"reward_ref": reward_ref},
+        },
+        context=_context(),
+    )
+
+    assert resolved == {
+        "decision_kind": "source_add_migration",
+        "decision_payload": {
+            "reward_row": reward,
+            "source_submission": submission,
+        },
+    }
+    assert reader.calls == [
+        ("source_add_reward_by_ref", {"reward_ref": reward_ref}),
+        ("source_add_submission_by_id", {"submission_id": submission_id}),
+    ]
+
+
 def test_leg1_daily_cap_is_not_rechecked_outside_atomic_slot_transaction():
     reader = FakeReader(
         {

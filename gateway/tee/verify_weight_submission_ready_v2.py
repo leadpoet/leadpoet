@@ -68,6 +68,7 @@ async def verify_weight_submission_ready_v2(
         _resolve_maintenance_epoch,
         backfill_champion_reward_v2_authority,
         backfill_champion_settlement_v2_authority,
+        backfill_source_add_reward_v2_authority,
         champion_v2_cutover_readiness_report,
     )
 
@@ -75,6 +76,15 @@ async def verify_weight_submission_ready_v2(
     effective_netuid = int(netuid) if netuid is not None else int(BITTENSOR_NETUID)
     repairs: dict[str, Any] = {}
     if repair:
+        source_reward_result = await backfill_source_add_reward_v2_authority(
+            epoch=effective_epoch,
+            limit=10000,
+            dry_run=False,
+        )
+        if source_reward_result.get("ok") is not True:
+            raise WeightSubmissionReadinessV2Error(
+                "SOURCE_ADD reward authority backfill failed"
+            )
         reward_result = await backfill_champion_reward_v2_authority(
             epoch=effective_epoch,
             limit=10000,
@@ -95,6 +105,9 @@ async def verify_weight_submission_ready_v2(
                 "champion settlement classification backfill failed"
             )
         repairs = {
+            "source_add_reward_receipts_created": int(
+                source_reward_result.get("migrated_count") or 0
+            ),
             "champion_reward_receipts_created": int(
                 reward_result.get("migrated_count") or 0
             ),

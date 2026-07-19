@@ -47,12 +47,12 @@ def _headers(**overrides):
     return values
 
 
-def _attempts(artifact_id):
+def _attempts(artifact_id, request_chars=("a", "b")):
     output = []
     for ordinal, method in enumerate(("GET", "HEAD")):
         output.append(
             build_transport_attempt(
-                request_id=("a" if ordinal == 0 else "b") * 32,
+                request_id=request_chars[ordinal] * 32,
                 logical_operation_id="%s:%s" % (artifact_id, method.lower()),
                 job_id=artifact_id,
                 purpose="leadpoet.artifact_persistence.v2",
@@ -257,6 +257,32 @@ def test_persistence_record_is_immutable() -> None:
             response_headers=_headers(),
             transport_attempts=_attempts(artifact_id),
         )
+
+
+def test_persistence_confirmation_is_idempotent_across_transport_retries() -> None:
+    vault = _vault()
+    artifact_id = _sealed(vault)["artifact_id"]
+    document = vault.export_ciphertext(artifact_id)["storage_document"]
+    first_attempts = _attempts(artifact_id)
+    vault.confirm_persistence(
+        artifact_id=artifact_id,
+        artifact_ref="s3://immutable-bucket/artifacts/job-1.json",
+        observed_storage_document=document,
+        response_headers=_headers(),
+        transport_attempts=first_attempts,
+    )
+    original_evidence = vault.persistence_evidence(artifact_id)
+
+    confirmed = vault.confirm_persistence(
+        artifact_id=artifact_id,
+        artifact_ref="s3://immutable-bucket/artifacts/job-1.json",
+        observed_storage_document=document,
+        response_headers=_headers(),
+        transport_attempts=_attempts(artifact_id, request_chars=("c", "d")),
+    )
+
+    assert confirmed["persisted"] is True
+    assert vault.persistence_evidence(artifact_id) == original_evidence
 
 
 def test_job_artifacts_are_job_and_purpose_scoped() -> None:

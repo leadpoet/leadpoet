@@ -1000,6 +1000,76 @@ async def test_v2_bridge_accepts_persistence_bound_encrypted_descriptors():
 
 
 @pytest.mark.asyncio
+async def test_v2_bridge_reuses_enclave_attested_persistence_on_replay():
+    release = _release()
+
+    def executor(operation, payload, context):
+        for digest in (_hash("8"), _hash("9"), _hash("6")):
+            context.record_artifact(digest)
+        return ExecutionResultV2(
+            output={"operation": operation, "echo": payload},
+            transport_attempts=(_authenticated_attempt(context),),
+        )
+
+    artifact_client = _ArtifactCoordinator(release, (_hash("8"), _hash("6")))
+    original_list = artifact_client.v2_list_encrypted_artifacts
+
+    async def list_persisted(*, job_id, purpose):
+        listed = await original_list(job_id=job_id, purpose=purpose)
+        return {
+            "artifacts": [
+                {
+                    **item,
+                    "artifact_kind": "provider_response",
+                    "ciphertext_hash": _hash("c"),
+                    "encryption_context_hash": _hash("e"),
+                    "persisted": True,
+                }
+                for item in listed["artifacts"]
+            ]
+        }
+
+    artifact_client.v2_list_encrypted_artifacts = list_persisted
+
+    async def reject_duplicate_upload(*_args, **_kwargs):
+        raise AssertionError("persisted artifact must not be uploaded again")
+
+    async def persist_graph(graph, **_kwargs):
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    persisted_sidecars = []
+
+    async def persist_sidecars(**kwargs):
+        persisted_sidecars.append(kwargs)
+        return {"artifact_link_count": len(kwargs["artifacts"])}
+
+    result = await execute_scoring_v2(
+        operation="benchmark_icp_score",
+        purpose="research_lab.benchmark.v2",
+        epoch_id=12,
+        sequence=0,
+        payload={"scores": [1.0]},
+        worker_index=0,
+        release_manifest=release,
+        client=_Client(release, executor=executor),
+        artifact_coordinator_client=artifact_client,
+        persist_artifact=reject_duplicate_upload,
+        persist_graph=persist_graph,
+        persist_sidecars=persist_sidecars,
+        boot_verifier=lambda identity: identity,
+        poll_seconds=0.001,
+        allow_persistence_bound_artifact_descriptors=True,
+    )
+
+    assert result["status"] == "succeeded"
+    assert len(result["artifact_persistence"]) == 2
+    assert all(
+        item["status"] == "persisted" for item in result["artifact_persistence"]
+    )
+    assert persisted_sidecars[0]["artifacts"] == result["artifact_persistence"]
+
+
+@pytest.mark.asyncio
 async def test_v2_bridge_rejects_missing_encrypted_provider_artifact():
     release = _release()
 

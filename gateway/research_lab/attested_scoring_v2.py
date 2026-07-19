@@ -853,6 +853,7 @@ async def execute_scoring_v2(
         transport_artifact_hashes + expected_sealed_hashes
     )
     artifact_persistence = []
+    reuse_persisted_artifacts = False
     if expected_artifact_hashes:
         listed = await artifact_coordinator_client.v2_list_encrypted_artifacts(
             job_id=job_id,
@@ -901,21 +902,9 @@ async def execute_scoring_v2(
             raise AttestedScoringV2Error(
                 "V2 encrypted artifacts differ from execution commitments"
             )
-        if persist_artifact is None:
-            from gateway.utils.tee_artifact_store_v2 import (
-                persist_enclave_artifact_v2,
-            )
-
-            persist_artifact = persist_enclave_artifact_v2
-        bucket = str(
-            artifact_bucket
-            or os.getenv("RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET", "")
-            or ""
-        ).strip()
-        if not bucket:
-            raise AttestedScoringV2Error(
-                "V2 encrypted artifact bucket is not configured"
-            )
+        reuse_persisted_artifacts = bool(artifacts) and all(
+            item.get("persisted") is True for item in artifacts
+        )
         from gateway.tee.coordinator_executor_v2 import (
             OP_ATTEST_ARTIFACT_PERSISTENCE,
         )
@@ -936,19 +925,35 @@ async def execute_scoring_v2(
             release_hash=release["release_hash"],
             physical_role="gateway_coordinator",
         )
-        for artifact in artifacts:
-            persistence_result = await persist_artifact(
-                str(artifact["artifact_id"]),
-                bucket=bucket,
-                key_prefix=artifact_key_prefix,
-                client=artifact_coordinator_client,
-                attestation_job_id=lineage_job_id,
-            )
-            if persistence_result.get("status") != "persisted":
-                raise AttestedScoringV2Error(
-                    "V2 encrypted artifact persistence failed closed"
+        if not reuse_persisted_artifacts:
+            if persist_artifact is None:
+                from gateway.utils.tee_artifact_store_v2 import (
+                    persist_enclave_artifact_v2,
                 )
-            artifact_persistence.append(dict(persistence_result))
+
+                persist_artifact = persist_enclave_artifact_v2
+            bucket = str(
+                artifact_bucket
+                or os.getenv("RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET", "")
+                or ""
+            ).strip()
+            if not bucket:
+                raise AttestedScoringV2Error(
+                    "V2 encrypted artifact bucket is not configured"
+                )
+            for artifact in artifacts:
+                persistence_result = await persist_artifact(
+                    str(artifact["artifact_id"]),
+                    bucket=bucket,
+                    key_prefix=artifact_key_prefix,
+                    client=artifact_coordinator_client,
+                    attestation_job_id=lineage_job_id,
+                )
+                if persistence_result.get("status") != "persisted":
+                    raise AttestedScoringV2Error(
+                        "V2 encrypted artifact persistence failed closed"
+                    )
+                artifact_persistence.append(dict(persistence_result))
     graph = _merge_graphs(
         root_receipt=receipt,
         boot_identity=boot_identity,
@@ -968,7 +973,7 @@ async def execute_scoring_v2(
         from gateway.research_lab.attested_v2_store import persist_receipt_graph_v2
 
         persist_graph = persist_receipt_graph_v2
-    if artifact_persistence:
+    if artifact_persistence or reuse_persisted_artifacts:
         if artifact_lineage_attestor is None:
             from gateway.research_lab.attested_coordinator_v2 import (
                 execute_coordinator_v2,
@@ -1033,6 +1038,44 @@ async def execute_scoring_v2(
             raise AttestedScoringV2Error(
                 "V2 encrypted artifact lineage ancestry is invalid"
             )
+        if reuse_persisted_artifacts:
+            lineage_result = lineage.get("result")
+            persisted = (
+                lineage_result.get("artifacts")
+                if isinstance(lineage_result, Mapping)
+                else None
+            )
+            descriptor_by_id = {
+                str(item["artifact_id"]): item for item in artifacts
+            }
+            if (
+                not isinstance(persisted, list)
+                or {str(item.get("artifact_id") or "") for item in persisted}
+                != set(descriptor_by_id)
+                or any(not isinstance(item, Mapping) for item in persisted)
+            ):
+                raise AttestedScoringV2Error(
+                    "V2 persisted artifact lineage output is invalid"
+                )
+            artifact_persistence = [
+                {
+                    "status": "persisted",
+                    "artifact_id": str(item["artifact_id"]),
+                    "artifact_ref": str(item["artifact_ref"]),
+                    "artifact_kind": str(
+                        descriptor_by_id[str(item["artifact_id"])]["artifact_kind"]
+                    ),
+                    "artifact_hash": str(item["ciphertext_hash"]),
+                    "encryption_context_hash": str(
+                        item["encryption_context_hash"]
+                    ),
+                    "object_lock_mode": str(item["object_lock_mode"]),
+                    "retain_until": str(item["retain_until"]),
+                    "storage_document_hash": str(item["storage_document_hash"]),
+                    "transport_root": str(item["transport_root"]),
+                }
+                for item in persisted
+            ]
         if persist_sidecars is None:
             from gateway.research_lab.attested_v2_store import (
                 persist_execution_sidecars_v2,

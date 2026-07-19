@@ -311,8 +311,23 @@ class EncryptedArtifactVaultV2:
                 "transport_root": transport_root(normalized_attempts),
             }
             existing = record["persistence"]
-            if existing is not None and existing != persistence:
-                raise ArtifactVaultV2Error("artifact persistence is immutable")
+            if existing is not None:
+                immutable_fields = (
+                    "artifact_ref",
+                    "ciphertext_hash",
+                    "object_lock_mode",
+                    "retain_until",
+                    "storage_document_hash",
+                )
+                if any(
+                    existing.get(field) != persistence.get(field)
+                    for field in immutable_fields
+                ):
+                    raise ArtifactVaultV2Error("artifact persistence is immutable")
+                return {
+                    **self.descriptor(artifact_id),
+                    "artifact_ref": existing["artifact_ref"],
+                }
             record["persistence"] = persistence
             return {
                 **self.descriptor(artifact_id),

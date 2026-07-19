@@ -1,3 +1,7 @@
+from pathlib import Path
+import subprocess
+import sys
+
 import pytest
 
 from gateway.tee import release_lineage_v2
@@ -11,6 +15,25 @@ from gateway.tee.release_manifest_v2 import (
     build_release_manifest,
 )
 from gateway.tee.topology import ROLE_SPECS, topology_hash
+
+
+def test_lineage_import_does_not_require_validator_package():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "sys.modules['validator_tee'] = None; "
+                "import gateway.tee.release_lineage_v2"
+            ),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _hash(character):

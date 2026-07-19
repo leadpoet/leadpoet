@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import json
+import re
 from typing import Any, Callable, Dict, Mapping, Sequence
 
-from gateway.tee.release_channel_v2 import DEFAULT_BUCKET, fetch_release_channel_v2
 from gateway.tee.release_manifest_v2 import (
     role_expectation,
     validate_release_manifest,
 )
-from leadpoet_canonical.attested_v2 import verify_boot_identity_nitro
+from leadpoet_canonical.attested_v2 import sha256_json, verify_boot_identity_nitro
+
+
+_RELEASE_CHANNEL_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
+_RELEASE_CHANNEL_PREFIX = "attested-v2/releases"
+_RELEASE_CHANNEL_SCHEMA = "leadpoet.attested_release_channel.v2"
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class ReleaseLineageV2Error(RuntimeError):
@@ -35,11 +42,50 @@ def _required_commits(
 
 @lru_cache(maxsize=512)
 def _fetch_historical_release(commit: str) -> Dict[str, Any]:
-    channel = fetch_release_channel_v2(
-        bucket=DEFAULT_BUCKET,
-        commit_sha=commit,
+    """Fetch a gateway release without importing validator-only packages."""
+
+    normalized_commit = str(commit or "").lower()
+    if not _COMMIT_RE.fullmatch(normalized_commit):
+        raise ReleaseLineageV2Error("historical release commit is invalid")
+
+    import boto3
+
+    key = (
+        f"{_RELEASE_CHANNEL_PREFIX}/{normalized_commit}/"
+        "release-channel-v2.json"
     )
-    return dict(channel["gateway_release_manifest"])
+    try:
+        response = boto3.client("s3").get_object(
+            Bucket=_RELEASE_CHANNEL_BUCKET,
+            Key=key,
+        )
+        channel = json.loads(response["Body"].read())
+    except Exception as exc:
+        raise ReleaseLineageV2Error(
+            "historical release channel is unavailable or invalid"
+        ) from exc
+
+    fields = {
+        "schema_version",
+        "commit_sha",
+        "gateway_release_manifest",
+        "validator_release_manifest",
+        "channel_hash",
+    }
+    if not isinstance(channel, Mapping) or set(channel) != fields:
+        raise ReleaseLineageV2Error("historical release channel fields are invalid")
+    if channel.get("schema_version") != _RELEASE_CHANNEL_SCHEMA:
+        raise ReleaseLineageV2Error("historical release channel schema is invalid")
+    if channel.get("commit_sha") != normalized_commit:
+        raise ReleaseLineageV2Error("historical release channel commit differs")
+    body = {key: channel[key] for key in fields - {"channel_hash"}}
+    if channel.get("channel_hash") != sha256_json(body):
+        raise ReleaseLineageV2Error("historical release channel hash differs")
+
+    release = validate_release_manifest(channel["gateway_release_manifest"])
+    if release.get("commit_sha") != normalized_commit:
+        raise ReleaseLineageV2Error("historical gateway release commit differs")
+    return release
 
 
 def load_approved_release_lineage_v2(

@@ -117,6 +117,71 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
 
 
 @pytest.mark.asyncio
+async def test_weight_readiness_accepts_already_covered_reward(monkeypatch):
+    calls = []
+
+    async def resolve(_epoch):
+        return 24036
+
+    async def rewards(**_kwargs):
+        calls.append("rewards")
+        return {
+            "ok": True,
+            "already_covered_count": 1,
+            "migrated_count": 0,
+        }
+
+    async def settlements(**_kwargs):
+        calls.append("settlements")
+        return {"ok": True, "classified_count": 0}
+
+    async def report(**_kwargs):
+        calls.append("readiness")
+        return {
+            "ready": True,
+            "receipt_coverage": 1.0,
+            "historical_classification_coverage": 1.0,
+        }
+
+    async def handoff(_epoch, x_leadpoet_internal_key):
+        assert x_leadpoet_internal_key is None
+        calls.append("handoff")
+        return {"handoff": True}
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        maintenance,
+        "backfill_champion_reward_v2_authority",
+        rewards,
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "backfill_champion_settlement_v2_authority",
+        settlements,
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "champion_v2_cutover_readiness_report",
+        report,
+    )
+    monkeypatch.setattr(api, "get_research_lab_attested_allocation", handoff)
+    monkeypatch.setattr(
+        readiness,
+        "_validate_handoff",
+        lambda value, **_kwargs: {
+            "allocation_hash": "sha256:" + "a" * 64,
+            "root_receipt_hash": "sha256:" + "b" * 64,
+        },
+    )
+
+    result = await readiness.verify_weight_submission_ready_v2(repair=True)
+
+    assert result["status"] == "ready"
+    assert result["champion_reward_receipts_created"] == 0
+    assert calls == ["rewards", "settlements", "readiness", "handoff"]
+
+
+@pytest.mark.asyncio
 async def test_weight_readiness_fails_before_handoff_when_authority_incomplete(
     monkeypatch,
 ):

@@ -1230,8 +1230,11 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_
 echo "Repairing and verifying the authoritative V2 validator weight input"
 GATEWAY_DEPLOY_STAGE="validator_weight_input_repair"
 export GATEWAY_DEPLOY_STAGE
-PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-  -m gateway.tee.verify_weight_submission_ready_v2 --repair
+(
+  cd "$LEADPOET_REPO_ROOT"
+  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+    -m gateway.tee.verify_weight_submission_ready_v2 --repair
+)
 
 cd "$LEADPOET_REPO_ROOT"
 setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null 9>&- &

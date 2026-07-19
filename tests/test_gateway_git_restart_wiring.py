@@ -89,6 +89,20 @@ def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
     )
 
 
+def test_gateway_weight_input_repair_runs_from_canonical_repo_root() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    repair_stage = script.index(
+        'GATEWAY_DEPLOY_STAGE="validator_weight_input_repair"'
+    )
+    repair_command = script.index(
+        "-m gateway.tee.verify_weight_submission_ready_v2 --repair",
+        repair_stage,
+    )
+    repair_block = script[repair_stage:repair_command]
+
+    assert '(\n  cd "$LEADPOET_REPO_ROOT"\n' in repair_block
+
+
 def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     materialize = script.index(

@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "4f6f977d2f668282b0ef62dc885e3365a8ceded7",
+  "baseline_commit": "a01b6d0d655c303b688765f818b2d15bf471ddf5",
   "entries": [
     {
       "ast_sha256": "sha256:d4d317a4bf47e5215d85be2913465c63202438a1de9798b899abc191fff2a48b",
@@ -612,7 +612,7 @@
       "symbol": "checkpoint_payload_bytes"
     },
     {
-      "ast_sha256": "sha256:1917d663a9c343cf23f1923b564cb3c11d182f34b981255ffe410382cfd9fb6d",
+      "ast_sha256": "sha256:16bb6b281c8be2d56144489e20c3f6d1889b676d52a85e22500b66932f9c825d",
       "path": "gateway/utils/arweave_client.py",
       "symbol": "upload_checkpoint"
     },
@@ -1052,7 +1052,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:6471a4802aae3adb42d677825b77f010f6e2ddd8c329003e3e6da2bf475eef09",
-  "protected_source_commit": "4f6f977d2f668282b0ef62dc885e3365a8ceded7",
+  "manifest_hash": "sha256:e51c35710c88f351d04c219a6861b61ef58e473a2e3da0af1acd7595006e7fa3",
+  "protected_source_commit": "a01b6d0d655c303b688765f818b2d15bf471ddf5",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -19,6 +19,7 @@ import json
 import asyncio
 import base64
 import binascii
+import tempfile
 from typing import Dict, List, Optional
 from pathlib import Path
 
@@ -34,6 +35,7 @@ ARWEAVE_GATEWAY_URL = os.getenv("ARWEAVE_GATEWAY_URL", "https://arweave.net")
 MAX_RETRIES = 3
 INITIAL_RETRY_DELAY = 2  # seconds
 MAX_RETRY_DELAY = 30  # seconds
+DIRECT_UPLOAD_MAX_PAYLOAD_BYTES = 5 * 1024 * 1024
 
 # Global client instance (initialized on first use)
 _wallet: Optional[Wallet] = None
@@ -395,8 +397,25 @@ async def upload_checkpoint(
         
         loop = asyncio.get_event_loop()
         
+        payload_file = None
+        if len(payload_bytes) > DIRECT_UPLOAD_MAX_PAYLOAD_BYTES:
+            payload_file = tempfile.NamedTemporaryFile(
+                mode="w+b",
+                prefix="leadpoet-arweave-checkpoint-",
+            )
+            payload_file.write(payload_bytes)
+            payload_file.flush()
+            payload_file.seek(0)
+
         def create_transaction():
-            tx = Transaction(_wallet, data=payload_bytes)
+            if payload_file is None:
+                tx = Transaction(_wallet, data=payload_bytes)
+            else:
+                tx = Transaction(
+                    _wallet,
+                    file_handler=payload_file,
+                    file_path=payload_file.name,
+                )
             tx.add_tag("App", "leadpoet")
             tx.add_tag("Type", "checkpoint")
             tx.add_tag("Version", "1")
@@ -410,49 +429,100 @@ async def upload_checkpoint(
 
         tx = await loop.run_in_executor(None, create_transaction)
 
+        def require_accepted(response, *, operation):
+            if 200 <= response.status_code < 300:
+                return
+            response_text = str(response.text or "").strip()
+            raise RuntimeError(
+                f"Arweave {operation} rejected "
+                f"(HTTP {response.status_code}): "
+                f"{response_text[:500] or '<empty response>'}"
+            )
+
         def send_transaction():
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+            }
+            if payload_file is None:
+                response = requests.post(
+                    f"{tx.api_url}/tx",
+                    data=tx.json_data,
+                    headers=headers,
+                    timeout=60,
+                )
+                require_accepted(response, operation="transaction")
+                return tx.id
+
+            tx.data = b""
             response = requests.post(
                 f"{tx.api_url}/tx",
                 data=tx.json_data,
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "text/plain",
-                },
+                headers=headers,
                 timeout=60,
             )
-            if response.status_code != 200:
-                response_text = str(response.text or "").strip()
-                raise RuntimeError(
-                    "Arweave transaction rejected "
-                    f"(HTTP {response.status_code}): "
-                    f"{response_text[:500] or '<empty response>'}"
+            require_accepted(response, operation="transaction header")
+
+            for chunk_index in range(len(tx.chunks["chunks"])):
+                chunk = dict(tx.get_chunk(chunk_index))
+                chunk["data_path"] = chunk["data_path"].decode("ascii")
+                chunk["chunk"] = chunk["chunk"].decode("ascii")
+                response = requests.post(
+                    f"{tx.api_url}/chunk",
+                    data=json.dumps(
+                        chunk,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    headers=headers,
+                    timeout=60,
+                )
+                require_accepted(
+                    response,
+                    operation=f"chunk {chunk_index + 1}/"
+                    f"{len(tx.chunks['chunks'])}",
                 )
             return tx.id
 
         retry_delay = INITIAL_RETRY_DELAY
         last_error = None
-        
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                tx_id = await loop.run_in_executor(None, send_transaction)
-                
-                print(f"✅ Checkpoint uploaded successfully")
-                print(f"   TX ID: {tx_id}")
-                print(f"   View: https://viewblock.io/arweave/tx/{tx_id}")
-                
-                return tx_id
-            
-            except Exception as e:
-                last_error = e
-                print(f"⚠️  Upload attempt {attempt}/{MAX_RETRIES} failed: {e}")
-                
-                if attempt < MAX_RETRIES:
-                    print(f"   Retrying in {retry_delay}s...")
-                    await asyncio.sleep(retry_delay)
-                    retry_delay = min(retry_delay * 2, MAX_RETRY_DELAY)
-        
-        # All retries failed
-        raise RuntimeError(f"Failed to upload checkpoint after {MAX_RETRIES} attempts: {last_error}")
+
+        try:
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    tx_id = await loop.run_in_executor(
+                        None,
+                        send_transaction,
+                    )
+
+                    print(f"✅ Checkpoint uploaded successfully")
+                    print(f"   TX ID: {tx_id}")
+                    print(f"   View: https://viewblock.io/arweave/tx/{tx_id}")
+
+                    return tx_id
+
+                except Exception as e:
+                    last_error = e
+                    print(
+                        f"⚠️  Upload attempt {attempt}/{MAX_RETRIES} "
+                        f"failed: {e}"
+                    )
+
+                    if attempt < MAX_RETRIES:
+                        print(f"   Retrying in {retry_delay}s...")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(
+                            retry_delay * 2,
+                            MAX_RETRY_DELAY,
+                        )
+
+            raise RuntimeError(
+                f"Failed to upload checkpoint after {MAX_RETRIES} "
+                f"attempts: {last_error}"
+            )
+        finally:
+            if payload_file is not None:
+                payload_file.close()
     
     except Exception as e:
         print(f"❌ Checkpoint upload failed: {e}")

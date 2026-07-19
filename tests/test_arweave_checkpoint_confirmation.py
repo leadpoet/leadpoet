@@ -145,6 +145,82 @@ async def test_checkpoint_upload_returns_id_after_http_200(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_large_checkpoint_uses_chunked_upload(monkeypatch):
+    class FakeTransaction:
+        api_url = "https://arweave.example"
+        id = "C" * 43
+
+        def __init__(self, wallet, **kwargs):
+            assert wallet is arweave_client._wallet
+            payload = kwargs["file_handler"].read()
+            assert payload.startswith(b'{"events_compressed":')
+            assert b"large-payload" not in payload
+            kwargs["file_handler"].seek(0)
+            assert kwargs["file_path"]
+            self.data = b""
+            self.chunks = {
+                "chunks": [object(), object()],
+            }
+
+        def add_tag(self, key, value):
+            return None
+
+        def sign(self):
+            return None
+
+        @property
+        def json_data(self):
+            assert self.data == b""
+            return '{"signed_header":true}'
+
+        def get_chunk(self, index):
+            return {
+                "data_root": "root",
+                "data_size": "13",
+                "data_path": f"path-{index}".encode(),
+                "offset": str(index),
+                "chunk": f"chunk-{index}".encode(),
+            }
+
+    posts = []
+
+    def post(url, *, data, headers, timeout):
+        posts.append({"url": url, "data": data})
+        return _Response(status_code=200)
+
+    monkeypatch.setattr(arweave_client, "_wallet", object())
+    monkeypatch.setattr(arweave_client, "Transaction", FakeTransaction)
+    monkeypatch.setattr(
+        arweave_client,
+        "DIRECT_UPLOAD_MAX_PAYLOAD_BYTES",
+        1,
+    )
+    monkeypatch.setattr(requests, "post", post)
+
+    tx_id = await arweave_client.upload_checkpoint(
+        header={
+            "checkpoint_number": 9,
+            "event_count": 1,
+            "merkle_root": "c" * 64,
+            "time_range": {"start": "start", "end": "end"},
+        },
+        signature="signature",
+        events=b"large-payload",
+        tree_levels=[["root"]],
+    )
+
+    assert tx_id == "C" * 43
+    assert [post["url"] for post in posts] == [
+        "https://arweave.example/tx",
+        "https://arweave.example/chunk",
+        "https://arweave.example/chunk",
+    ]
+    assert posts[0]["data"] == '{"signed_header":true}'
+    assert '"chunk":"chunk-0"' in posts[1]["data"]
+    assert '"data_path":"path-1"' in posts[2]["data"]
+
+
+@pytest.mark.asyncio
 async def test_confirmation_requires_exact_confirmed_readback(monkeypatch):
     expected = b'{"checkpoint":"exact"}'
     encoded = base64.urlsafe_b64encode(expected).rstrip(b"=")

@@ -599,6 +599,7 @@ def _legacy_allocation_active_champion_payment_v2(
     *,
     netuid: int,
     active_reward_ids: set[str],
+    active_source_reward_ids: set[str] | None = None,
 ) -> tuple[int, str, bool]:
     allocation = raw_row.get("allocation_doc")
     allocation_hash = str(raw_row.get("allocation_hash") or "")
@@ -654,6 +655,27 @@ def _legacy_allocation_active_champion_payment_v2(
                 and Decimal(str(item.get("paid_alpha_percent") or 0)) > 0
             ):
                 pays_active = True
+    source_values = allocation.get("source_add_allocations") or []
+    if not isinstance(source_values, list):
+        raise ChampionSettlementV2Error(
+            "historical SOURCE_ADD allocation list is invalid"
+        )
+    source_reward_ids = set(active_source_reward_ids or ())
+    for item in source_values:
+        if not isinstance(item, Mapping):
+            raise ChampionSettlementV2Error(
+                "historical SOURCE_ADD allocation is invalid"
+            )
+        reward_id = str(
+            item.get("source_add_reward_id")
+            or item.get("source_id")
+            or ""
+        )
+        if (
+            reward_id in source_reward_ids
+            and Decimal(str(item.get("paid_alpha_percent") or 0)) > 0
+        ):
+            pays_active = True
     return row_epoch, allocation_hash, pays_active
 
 
@@ -691,9 +713,20 @@ async def champion_v2_cutover_readiness(
                 allow_partial=False,
             )
         )
+    source_rows: list[dict[str, Any]] = []
+    for status in sorted(SETTLEMENT_TRACKED_CHAMPION_STATUSES):
+        source_rows.extend(
+            await select_all(
+                "research_lab_source_add_reward_current",
+                filters=(("current_reward_status", status),),
+                order_by=(("start_epoch", False), ("reward_ref", False)),
+                max_rows=10000,
+                allow_partial=False,
+            )
+        )
     starts = [
         int(row.get("start_epoch") or 0)
-        for row in rows
+        for row in rows + source_rows
         if int(row.get("start_epoch") or 0) <= int(epoch)
     ]
     finalized = (
@@ -839,6 +872,9 @@ async def champion_v2_cutover_readiness(
     active_reward_ids = {
         str(row.get("champion_reward_id") or "") for row in rows
     }
+    active_source_reward_ids = {
+        str(row.get("reward_ref") or "") for row in source_rows
+    }
     finalized_by_epoch = {
         int(item["epoch"]): item for item in finalized
     }
@@ -864,6 +900,7 @@ async def champion_v2_cutover_readiness(
                     row,
                     netuid=int(netuid),
                     active_reward_ids=active_reward_ids,
+                    active_source_reward_ids=active_source_reward_ids,
                 )
             )
             if pays_active:

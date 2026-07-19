@@ -127,7 +127,7 @@
       "symbol": "would_exceed_budget"
     },
     {
-      "ast_sha256": "sha256:4031389935371562383399c060926006933a383e7a5d75e3c4345d89c1e51385",
+      "ast_sha256": "sha256:68716136111c37ece228488ff58c92816ce159021563a3ebc376cde6f18c9b22",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "champion_v2_cutover_readiness"
     },
@@ -407,7 +407,7 @@
       "symbol": "normalize_tee_protocol"
     },
     {
-      "ast_sha256": "sha256:3441c6ffea8807a7fc55df9afb9caab827914ea0aef7c8993c6eca2d6827495f",
+      "ast_sha256": "sha256:93b089454ec32f79a49e5544c0c3088f0da4ca01a2c43f6b0219509ee16df716",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "_load_allocation_parent_graphs_v2"
     },
@@ -452,7 +452,7 @@
       "symbol": "CoordinatorActiveModelSourceV2"
     },
     {
-      "ast_sha256": "sha256:0403d2ca7ae3d3803b6d245fdd19d78c4bcf88df3c4d559602fb0c38d3807ff7",
+      "ast_sha256": "sha256:bbb1607f6e460337ba27be726873f3b8cf5791c6b2bcdbeeff9a059a385506ef",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
@@ -1052,7 +1052,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:e51c35710c88f351d04c219a6861b61ef58e473a2e3da0af1acd7595006e7fa3",
+  "manifest_hash": "sha256:a51a097dcd8d6441c0b7885758800d83676bfd7add2b77a7fde48178938033f7",
   "protected_source_commit": "a01b6d0d655c303b688765f818b2d15bf471ddf5",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

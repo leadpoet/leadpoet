@@ -1515,6 +1515,7 @@ async def _load_allocation_parent_graphs_v2(
         _champion_obligation_caps,
         _champion_paid_alpha_to_date_from_snapshots,
         _champion_replay_obligation,
+        _source_add_paid_alpha_to_date_from_snapshots,
     )
     from gateway.research_lab.champion_settlement_v2 import (
         load_finalized_allocation_history_v2,
@@ -1612,14 +1613,14 @@ async def _load_allocation_parent_graphs_v2(
                 ),
             )
         )
-    champion_starts = [
+    history_starts = [
         int(row.get("start_epoch") or 0)
-        for row in champion_rows
+        for row in champion_rows + source_rows
         if int(row.get("start_epoch") or 0) <= int(epoch_id)
     ]
     normalized_finalized_history: list[dict[str, Any]] = []
-    if champion_starts and int(epoch_id) > 0:
-        history_start = min(champion_starts)
+    if history_starts and int(epoch_id) > 0:
+        history_start = min(history_starts)
         if finalized_champion_history is None:
             normalized_finalized_history = (
                 await load_finalized_allocation_history_v2(
@@ -1668,32 +1669,29 @@ async def _load_allocation_parent_graphs_v2(
             add_receipt_root(
                 str(row.get("legacy_settlement_receipt_hash") or "")
             )
+    source_paid_by_reward = _source_add_paid_alpha_to_date_from_snapshots(
+        normalized_finalized_history
+    )
     for row in source_rows:
-        add(
-            "source_add_reward_decision",
-            str(row.get("reward_ref") or ""),
-        )
-
-    starts = [
-        int(row.get("start_epoch") or 0)
-        for row in source_rows
-        if int(row.get("start_epoch") or 0) <= int(epoch_id)
-    ]
-    if starts and int(epoch_id) > 0:
-        history = await select_all(
-            "research_lab_emission_allocation_current",
-            columns="epoch,allocation_hash",
-            filters=(
-                ("netuid", int(netuid)),
-                ("epoch", "gte", min(starts)),
-                ("epoch", "lt", int(epoch_id)),
-            ),
-            order_by=(("epoch", False),),
-            max_rows=max(10000, int(epoch_id) - min(starts) + 100),
-            allow_partial=True,
-        )
-        for row in history:
-            add("allocation", "epoch:%d" % int(row.get("epoch") or 0))
+        reward_ref = str(row.get("reward_ref") or "")
+        if _champion_replay_obligation(
+            {
+                "champion_reward_id": reward_ref,
+                "start_epoch": int(row.get("start_epoch") or 0),
+                "epoch_count": int(
+                    row.get("epoch_count") or row.get("reward_epochs") or 0
+                ),
+                "desired_alpha_percent": float(
+                    row.get("desired_alpha_percent")
+                    or row.get("alpha_percent")
+                    or 0.0
+                ),
+            },
+            paid_by_reward=source_paid_by_reward,
+            epoch=int(epoch_id),
+        ) is None:
+            continue
+        add("source_add_reward_decision", reward_ref)
 
     loaded_business_graphs = await load_business_artifact_graphs_by_ref_v2(
         artifact_refs

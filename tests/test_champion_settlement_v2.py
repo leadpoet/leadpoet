@@ -24,6 +24,40 @@ def _allocation(*, paid: float = 5.0) -> dict:
     return {**payload, "allocation_hash": sha256_json(payload)}
 
 
+def test_legacy_classification_detects_source_add_payments():
+    payload = {
+        "schema_version": "leadpoet.research_lab_allocation.v2",
+        "epoch": 100,
+        "champion_allocations": [],
+        "queued_champion_allocations": [],
+        "source_add_allocations": [
+            {
+                "source_add_reward_id": "source_add_reward:test",
+                "paid_alpha_percent": 1.0,
+            }
+        ],
+    }
+    allocation = {**payload, "allocation_hash": sha256_json(payload)}
+
+    epoch, allocation_hash, pays_active = (
+        settlement._legacy_allocation_active_champion_payment_v2(
+            {
+                "epoch": 100,
+                "netuid": 71,
+                "allocation_hash": allocation["allocation_hash"],
+                "allocation_doc": allocation,
+            },
+            netuid=71,
+            active_reward_ids=set(),
+            active_source_reward_ids={"source_add_reward:test"},
+        )
+    )
+
+    assert epoch == 100
+    assert allocation_hash == allocation["allocation_hash"]
+    assert pays_active is True
+
+
 def _authority_row(
     marker: str,
     *,

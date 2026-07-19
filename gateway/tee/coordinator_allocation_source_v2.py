@@ -106,25 +106,17 @@ class CoordinatorAllocationSourceV2:
         source_add_rows = self._read(
             "allocation_source_add_rewards", {"epoch_id": epoch}, context
         )
-        champion_history = self._finalized_champion_history(
+        finalized_reward_history = self._finalized_champion_history(
             epoch=epoch,
             netuid=netuid,
-            champion_rows=champion_source_rows,
-            context=context,
-            required_parents=required_parent_hashes,
-        )
-        source_add_history = self._allocation_history(
-            epoch=epoch,
-            netuid=netuid,
-            champion_rows=(),
-            source_add_rows=source_add_rows,
+            champion_rows=tuple(champion_source_rows) + tuple(source_add_rows),
             context=context,
             required_parents=required_parent_hashes,
         )
         champion_rows, champion_skipped = self._champions(
             epoch=epoch,
             rows=champion_source_rows,
-            history=champion_history,
+            history=finalized_reward_history,
             hotkey_uids=hotkey_uids,
             context=context,
             required_parents=required_parent_hashes,
@@ -132,7 +124,7 @@ class CoordinatorAllocationSourceV2:
         source_add_obligations, source_add_skipped = self._source_add(
             epoch=epoch,
             rows=source_add_rows,
-            history=source_add_history,
+            history=finalized_reward_history,
             hotkey_uids=hotkey_uids,
             context=context,
             required_parents=required_parent_hashes,
@@ -521,6 +513,24 @@ class CoordinatorAllocationSourceV2:
             if status not in ACTIVE_CHAMPION_STATUSES:
                 continue
             reward_ref = str(row.get("reward_ref") or "")
+            replay = _champion_replay_obligation(
+                {
+                    "champion_reward_id": reward_ref,
+                    "start_epoch": int(row.get("start_epoch") or 0),
+                    "epoch_count": int(
+                        row.get("epoch_count") or row.get("reward_epochs") or 0
+                    ),
+                    "desired_alpha_percent": float(
+                        row.get("desired_alpha_percent")
+                        or row.get("alpha_percent")
+                        or 0.0
+                    ),
+                },
+                paid_by_reward=paid,
+                epoch=epoch,
+            )
+            if replay is None:
+                continue
             self._require_reward_receipt(
                 artifact_kind="source_add_reward_decision",
                 artifact_ref=reward_ref,
@@ -545,24 +555,6 @@ class CoordinatorAllocationSourceV2:
                         "reason": "miner_hotkey_not_registered",
                     }
                 )
-                continue
-            replay = _champion_replay_obligation(
-                {
-                    "champion_reward_id": reward_ref,
-                    "start_epoch": int(row.get("start_epoch") or 0),
-                    "epoch_count": int(
-                        row.get("epoch_count") or row.get("reward_epochs") or 0
-                    ),
-                    "desired_alpha_percent": float(
-                        row.get("desired_alpha_percent")
-                        or row.get("alpha_percent")
-                        or 0.0
-                    ),
-                },
-                paid_by_reward=paid,
-                epoch=epoch,
-            )
-            if replay is None:
                 continue
             obligations.append(
                 {

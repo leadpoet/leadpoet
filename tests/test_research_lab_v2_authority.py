@@ -553,6 +553,107 @@ async def test_allocation_parent_loader_uses_legacy_settlement_receipt(
 
 
 @pytest.mark.asyncio
+async def test_allocation_parent_loader_skips_fully_paid_legacy_source_receipt(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store, champion_settlement_v2, store
+
+    reward_ref = "source_add_reward:test"
+    settlement_receipt = "sha256:" + "e" * 64
+    source_row = {
+        "reward_ref": reward_ref,
+        "current_reward_status": "active",
+        "start_epoch": 99,
+        "epoch_count": 1,
+        "desired_alpha_percent": 1.0,
+    }
+    business_refs = []
+    receipt_roots = []
+
+    async def select_all(table, **kwargs):
+        if table == "research_lab_source_add_reward_current":
+            filters = dict(
+                (item[0], item[1])
+                for item in kwargs.get("filters") or ()
+                if len(item) == 2
+            )
+            return [source_row] if filters.get("current_reward_status") == "active" else []
+        return []
+
+    async def load_history(**_kwargs):
+        allocation_payload = {
+            "epoch": 99,
+            "source_add_allocations": [
+                {
+                    "source_add_reward_id": reward_ref,
+                    "paid_alpha_percent": 1.0,
+                }
+            ],
+        }
+        allocation = {
+            **allocation_payload,
+            "allocation_hash": v2_authority.sha256_json(allocation_payload),
+        }
+        return [
+            {
+                "epoch": 99,
+                "netuid": 71,
+                "allocation_hash": allocation["allocation_hash"],
+                "allocation_doc": allocation,
+                "allocation_receipt_hash": settlement_receipt,
+                "legacy_settlement_receipt_hash": settlement_receipt,
+                "authority_types": ["legacy_finalized_chain_migration_v2"],
+                "finalized_bundle_hashes": [],
+                "finalization_receipt_hashes": [],
+            }
+        ]
+
+    async def load_business(artifacts):
+        business_refs.extend(sorted(artifacts))
+        return {}
+
+    async def load_receipts(receipt_hashes):
+        requested = sorted(receipt_hashes)
+        receipt_roots.extend(requested)
+        return {
+            receipt_hash: {
+                "root_receipt_hash": receipt_hash,
+                "receipts": [{"receipt_hash": receipt_hash}],
+            }
+            for receipt_hash in requested
+        }
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "load_finalized_allocation_history_v2",
+        load_history,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_by_ref_v2",
+        load_business,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_receipt_graphs_v2",
+        load_receipts,
+    )
+
+    graphs = await v2_authority._load_allocation_parent_graphs_v2(
+        epoch_id=100,
+        netuid=71,
+        policy={},
+    )
+
+    assert business_refs == []
+    assert receipt_roots == [settlement_receipt]
+    assert [graph["root_receipt_hash"] for graph in graphs] == [
+        settlement_receipt
+    ]
+
+
+@pytest.mark.asyncio
 async def test_allocation_parent_loader_batches_reimbursement_awards(
     monkeypatch,
 ):

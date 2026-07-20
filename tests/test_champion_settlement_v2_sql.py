@@ -19,6 +19,11 @@ NONFINALIZATION_SQL = (
     / "scripts"
     / "103-research-lab-legacy-allocation-nonfinalization.sql"
 ).read_text(encoding="utf-8")
+FENCE_REPAIR_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "106-repair-stateful-epoch-fence-trigger-coverage.sql"
+).read_text(encoding="utf-8")
 
 
 def test_finalized_allocation_view_requires_bundle_publication_and_finalization():
@@ -74,6 +79,19 @@ def test_legacy_nonfinalization_is_append_only_and_creates_no_payment_view():
     assert "GRANT SELECT, INSERT" in NONFINALIZATION_SQL
     assert "research_lab_finalized_allocation_epochs_v2" not in (
         NONFINALIZATION_SQL
+    )
+
+
+def test_legacy_nonfinalization_installs_and_repairs_stateful_epoch_fence():
+    trigger = "enforce_research_lab_stateful_epoch_fence_v1"
+    table = "research_lab_legacy_allocation_nonfinalizations_v2"
+    for sql in (NONFINALIZATION_SQL, FENCE_REPAIR_SQL):
+        assert trigger in sql
+        assert table in sql
+        assert "BEFORE INSERT OR UPDATE" in sql
+    assert "trigger_meta.tgenabled <> 'D'" in FENCE_REPAIR_SQL
+    assert "a.attname IN ('epoch', 'epoch_id', 'evaluation_epoch')" in (
+        FENCE_REPAIR_SQL
     )
 
 

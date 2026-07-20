@@ -57,6 +57,16 @@ CREATE TRIGGER prevent_research_lab_legacy_nonfinalization_v2_mutation
     ON public.research_lab_legacy_allocation_nonfinalizations_v2
     FOR EACH ROW EXECUTE FUNCTION public.prevent_research_lab_attested_v2_mutation();
 
+-- Migration 101 installed the stateful epoch fence on every epoch-bearing
+-- table that existed at that time. This table is newer, so it must attach the
+-- same fail-closed fence when it is created.
+DROP TRIGGER IF EXISTS enforce_research_lab_stateful_epoch_fence_v1
+    ON public.research_lab_legacy_allocation_nonfinalizations_v2;
+CREATE TRIGGER enforce_research_lab_stateful_epoch_fence_v1
+    BEFORE INSERT OR UPDATE
+    ON public.research_lab_legacy_allocation_nonfinalizations_v2
+    FOR EACH ROW EXECUTE FUNCTION public.enforce_research_lab_stateful_epoch_fence_v1();
+
 REVOKE ALL
     ON TABLE public.research_lab_legacy_allocation_nonfinalizations_v2
     FROM PUBLIC, anon, authenticated;

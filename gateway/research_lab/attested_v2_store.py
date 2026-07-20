@@ -11,6 +11,7 @@ from typing import Any, Iterable, Mapping, Optional
 from gateway.research_lab.store import insert_row, select_all, select_one
 from leadpoet_canonical.attested_v2 import (
     build_receipt_graph,
+    merkle_root,
     sha256_json,
     validate_boot_identity,
     validate_host_operation_record,
@@ -21,6 +22,7 @@ from leadpoet_canonical.attested_v2 import (
 )
 from leadpoet_canonical.sourcing_history_v2 import validate_sourcing_epoch_v2
 from leadpoet_canonical.weight_authority_v2 import (
+    WEIGHT_INPUT_PURPOSES,
     validate_weight_finalization_submission_v2,
     validate_published_weight_bundle_v2,
 )
@@ -37,6 +39,7 @@ PUBLICATION_TABLE = "research_lab_attested_publication_events_v2"
 FINALIZATION_TABLE = "research_lab_attested_weight_finalizations_v2"
 ARTIFACT_TABLE = "research_lab_attested_artifact_links_v2"
 BUSINESS_ARTIFACT_TABLE = "research_lab_attested_business_artifact_links_v2"
+EXECUTION_RESULT_TABLE = "research_lab_attested_execution_results_v2"
 TRANSITION_TABLE = "research_lab_signed_transition_commands_v2"
 SOURCING_EPOCH_TABLE = "validator_sourcing_epoch_inputs_v2"
 LEGACY_SETTLEMENT_TABLE = "research_lab_legacy_finalized_allocation_migrations_v2"
@@ -46,10 +49,22 @@ LEGACY_NONFINALIZATION_TABLE = (
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GRAPH_QUERY_CHUNK = 50
 _MAX_GRAPH_ROWS = 10000
+_REPLAYABLE_EXECUTION_PAIRS = frozenset(
+    {("research_lab_allocation", "research_lab.allocation.v2")}
+    | {
+        ("attest_weight_input", purpose)
+        for role, purpose in WEIGHT_INPUT_PURPOSES.values()
+        if role == "gateway_coordinator"
+    }
+)
 
 
 class AttestedV2StoreError(RuntimeError):
     """A V2 append or durable readback failed or conflicted."""
+
+
+def replayable_execution_result_v2(*, operation: str, purpose: str) -> bool:
+    return (str(operation or ""), str(purpose or "")) in _REPLAYABLE_EXECUTION_PAIRS
 
 
 def _is_duplicate_error(exc: BaseException) -> bool:
@@ -613,6 +628,213 @@ async def load_receipt_graph_v2(
         allowed_failed_receipt_hashes=allowed_failed_receipt_hashes,
     )
     return graphs[root_hash]
+
+
+def _execution_result_projection_v2(
+    *,
+    operation: str,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    if str(operation) == "research_lab_allocation":
+        allocation = result.get("allocation")
+        source_state = result.get("source_state")
+        source_state_hash = str(result.get("source_state_hash") or "")
+        if (
+            set(result)
+            != {
+                "allocation",
+                "allocation_inputs",
+                "source_state",
+                "source_state_hash",
+            }
+            or not isinstance(allocation, Mapping)
+            or not isinstance(result.get("allocation_inputs"), Mapping)
+            or not isinstance(source_state, Mapping)
+            or source_state_hash != sha256_json(dict(source_state))
+        ):
+            raise AttestedV2StoreError(
+                "replayable allocation result is invalid"
+            )
+        return {"allocation": dict(allocation)}
+    return dict(result)
+
+
+def _execution_result_storage_row_v2(
+    *,
+    operation: str,
+    result: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    artifact_hashes: Iterable[str],
+    release_hash: str,
+) -> dict[str, Any]:
+    validate_signed_execution_receipt(receipt)
+    normalized_operation = str(operation or "")
+    purpose = str(receipt.get("purpose") or "")
+    if not replayable_execution_result_v2(
+        operation=normalized_operation,
+        purpose=purpose,
+    ):
+        raise AttestedV2StoreError("execution result purpose is not replayable")
+    if receipt.get("role") != "gateway_coordinator" or receipt.get(
+        "status"
+    ) != "succeeded":
+        raise AttestedV2StoreError(
+            "replayable execution receipt is not successful coordinator authority"
+        )
+    normalized_release_hash = str(release_hash or "").lower()
+    if not _HASH_RE.fullmatch(normalized_release_hash):
+        raise AttestedV2StoreError("execution result release hash is invalid")
+    normalized_artifacts = sorted(
+        {str(item or "").lower() for item in artifact_hashes}
+    )
+    if any(not _HASH_RE.fullmatch(item) for item in normalized_artifacts):
+        raise AttestedV2StoreError("execution result artifact hash is invalid")
+    expected_artifact_root = merkle_root(
+        normalized_artifacts,
+        domain="leadpoet-artifact-v2",
+    )
+    if receipt.get("artifact_root") != expected_artifact_root:
+        raise AttestedV2StoreError(
+            "execution result artifacts differ from receipt"
+        )
+    normalized_result = dict(result)
+    from gateway.research_lab.bundles import contains_secret_material
+
+    if contains_secret_material(normalized_result):
+        raise AttestedV2StoreError(
+            "replayable execution result contains secret material"
+        )
+    projection = _execution_result_projection_v2(
+        operation=normalized_operation,
+        result=normalized_result,
+    )
+    if receipt.get("output_root") != sha256_json(projection):
+        raise AttestedV2StoreError(
+            "execution result output differs from receipt"
+        )
+    return {
+        "receipt_hash": str(receipt["receipt_hash"]),
+        "schema_version": "leadpoet.attested_execution_result.v2",
+        "role": str(receipt["role"]),
+        "operation": normalized_operation,
+        "purpose": purpose,
+        "job_id": str(receipt["job_id"]),
+        "epoch_id": int(receipt["epoch_id"]),
+        "sequence": int(receipt["sequence"]),
+        "release_hash": normalized_release_hash,
+        "input_root": str(receipt["input_root"]),
+        "output_root": str(receipt["output_root"]),
+        "artifact_root": str(receipt["artifact_root"]),
+        "result_hash": sha256_json(normalized_result),
+        "artifact_hashes": normalized_artifacts,
+        "result_doc": normalized_result,
+    }
+
+
+async def persist_execution_result_v2(
+    *,
+    operation: str,
+    result: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    artifact_hashes: Iterable[str],
+    release_hash: str,
+) -> dict[str, Any]:
+    """Persist one sanitized result only after its execution receipt is durable."""
+
+    row = _execution_result_storage_row_v2(
+        operation=operation,
+        result=result,
+        receipt=receipt,
+        artifact_hashes=artifact_hashes,
+        release_hash=release_hash,
+    )
+    stored_receipt = await select_one(
+        RECEIPT_TABLE,
+        filters=(("receipt_hash", row["receipt_hash"]),),
+    )
+    receipt_doc = (
+        stored_receipt.get("receipt_doc")
+        if isinstance(stored_receipt, Mapping)
+        else None
+    )
+    if not isinstance(receipt_doc, Mapping) or dict(receipt_doc) != dict(receipt):
+        raise AttestedV2StoreError(
+            "execution result receipt is not durably persisted"
+        )
+    stored = await _insert_exact(
+        EXECUTION_RESULT_TABLE,
+        row,
+        key_filters=(("receipt_hash", row["receipt_hash"]),),
+    )
+    return {key: stored[key] for key in row}
+
+
+async def load_execution_result_v2(
+    *,
+    role: str,
+    operation: str,
+    purpose: str,
+    job_id: str,
+) -> Optional[dict[str, Any]]:
+    """Load and fully validate one exact same-job result replay."""
+
+    normalized_role = str(role or "")
+    normalized_operation = str(operation or "")
+    normalized_purpose = str(purpose or "")
+    normalized_job_id = str(job_id or "")
+    if (
+        normalized_role != "gateway_coordinator"
+        or not replayable_execution_result_v2(
+            operation=normalized_operation,
+            purpose=normalized_purpose,
+        )
+    ):
+        return None
+    stored = await select_one(
+        EXECUTION_RESULT_TABLE,
+        filters=(
+            ("role", normalized_role),
+            ("operation", normalized_operation),
+            ("purpose", normalized_purpose),
+            ("job_id", normalized_job_id),
+        ),
+    )
+    if not isinstance(stored, Mapping):
+        return None
+    receipt_hash = str(stored.get("receipt_hash") or "")
+    graph = await load_receipt_graph_v2(receipt_hash)
+    receipts = {
+        str(item.get("receipt_hash") or ""): item
+        for item in graph.get("receipts") or ()
+        if isinstance(item, Mapping)
+    }
+    receipt = receipts.get(receipt_hash)
+    result = stored.get("result_doc")
+    artifacts = stored.get("artifact_hashes")
+    if (
+        graph.get("root_receipt_hash") != receipt_hash
+        or not isinstance(receipt, Mapping)
+        or not isinstance(result, Mapping)
+        or not isinstance(artifacts, list)
+    ):
+        raise AttestedV2StoreError(
+            "replayable execution result is incomplete"
+        )
+    expected = _execution_result_storage_row_v2(
+        operation=normalized_operation,
+        result=result,
+        receipt=receipt,
+        artifact_hashes=artifacts,
+        release_hash=str(stored.get("release_hash") or ""),
+    )
+    _assert_stored_row(EXECUTION_RESULT_TABLE, stored, expected)
+    return {
+        "row": expected,
+        "result": dict(result),
+        "receipt": dict(receipt),
+        "receipt_graph": dict(graph),
+        "artifact_hashes": list(expected["artifact_hashes"]),
+    }
 
 
 async def persist_sourcing_epoch_v2(

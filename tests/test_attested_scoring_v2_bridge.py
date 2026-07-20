@@ -8,6 +8,10 @@ from gateway.research_lab.attested_scoring_v2 import (
     AttestedScoringV2Error,
     execute_scoring_v2,
 )
+from gateway.research_lab.attested_v2_store import (
+    AttestedV2StoreError,
+    _execution_result_storage_row_v2,
+)
 from gateway.tee.execution_job_manager_v2 import (
     ExecutionJobManagerV2,
     ExecutionResultV2,
@@ -15,6 +19,7 @@ from gateway.tee.execution_job_manager_v2 import (
 from gateway.tee.coordinator_executor_v2 import (
     COORDINATOR_OPERATIONS_V2,
     CoordinatorExecutorV2,
+    coordinator_receipt_output_v2,
 )
 from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
@@ -340,6 +345,100 @@ async def test_v2_bridge_accepts_measured_coordinator_internal_worker_capacity()
     assert result["status"] == "succeeded"
     assert result["physical_role"] == "gateway_coordinator"
     assert client.manager.health()["configured_worker_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_replays_exact_durable_coordinator_result_without_resubmit():
+    release = _release()
+    client = _CoordinatorClient(release)
+    captured = {}
+
+    async def load_missing(**_kwargs):
+        return None
+
+    async def persist(graph):
+        validate_receipt_graph(graph)
+        return {
+            "root_receipt_hash": graph["root_receipt_hash"],
+            "graph_hash": sha256_json(graph),
+        }
+
+    async def persist_result(**kwargs):
+        captured.update(kwargs)
+        return _execution_result_storage_row_v2(**kwargs)
+
+    common = {
+        "operation": "attest_weight_input",
+        "purpose": "research_lab.champion_input.v2",
+        "epoch_id": 12,
+        "sequence": 1,
+        "payload": {"category": "champions"},
+        "worker_index": 0,
+        "provider_profile_loader": lambda *args, **kwargs: {
+            "profile": "default",
+            "credential_ref_hashes": {},
+            "envelopes": [],
+        },
+        "release_manifest": release,
+        "persist_graph": persist,
+        "boot_verifier": lambda identity: identity,
+        "poll_seconds": 0.001,
+        "operation_registry": COORDINATOR_OPERATIONS_V2,
+        "physical_role_override": "gateway_coordinator",
+        "expected_service_role": "gateway_coordinator",
+        "rpc_namespace": "coordinator_v2",
+        "receipt_output_projector": coordinator_receipt_output_v2,
+    }
+    fresh = await execute_scoring_v2(
+        **common,
+        client=client,
+        load_replayable_result=load_missing,
+        persist_replayable_result=persist_result,
+    )
+    assert captured["receipt"] == fresh["receipt"]
+    assert captured["result"] == fresh["result"]
+
+    async def load_replay(**kwargs):
+        assert kwargs == {
+            "role": "gateway_coordinator",
+            "operation": "attest_weight_input",
+            "purpose": "research_lab.champion_input.v2",
+            "job_id": fresh["receipt"]["job_id"],
+        }
+        return {
+            "row": {"release_hash": release["release_hash"]},
+            "result": fresh["result"],
+            "receipt": fresh["receipt"],
+            "receipt_graph": fresh["receipt_graph"],
+            "artifact_hashes": fresh["artifact_hashes"],
+        }
+
+    replay_client = _CoordinatorClient(release)
+
+    async def reject_submit(_manifest):
+        raise AssertionError("durable replay must not submit a second enclave job")
+
+    replay_client.coordinator_v2_submit_job = reject_submit
+    replayed = await execute_scoring_v2(
+        **common,
+        client=replay_client,
+        load_replayable_result=load_replay,
+        persist_replayable_result=persist_result,
+    )
+    assert replayed["replay_status"] == "durable_exact"
+    assert replayed["result"] == fresh["result"]
+    assert replayed["receipt"] == fresh["receipt"]
+
+    tampered = dict(fresh["result"])
+    tampered["operation"] = "tampered"
+    with pytest.raises(AttestedV2StoreError, match="output differs"):
+        _execution_result_storage_row_v2(
+            operation="attest_weight_input",
+            result=tampered,
+            receipt=fresh["receipt"],
+            artifact_hashes=fresh["artifact_hashes"],
+            release_hash=release["release_hash"],
+        )
 
 
 @pytest.mark.asyncio

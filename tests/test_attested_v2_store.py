@@ -162,6 +162,74 @@ def _graph(with_transport=False, with_parent=False):
     )
 
 
+def _replayable_weight_result():
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    ).hex()
+    boot = create_boot_identity(
+        body=build_boot_identity_body(
+            role=COORDINATOR_ROLE,
+            physical_role="gateway_coordinator",
+            commit_sha="d" * 40,
+            pcr0="e" * 96,
+            build_manifest_hash=HASH,
+            dependency_lock_hash=HASH_B,
+            config_hash=HASH_C,
+            boot_nonce="4" * 32,
+            signing_pubkey=public_key,
+            transport_pubkey="5" * 64,
+            transport_certificate_hash=HASH_B,
+            attestation_user_data_hash=HASH,
+            issued_at=NOW,
+        ),
+        attestation_document_b64=base64.b64encode(b"nitro").decode("ascii"),
+    )
+    result = {
+        "category": "champions",
+        "epoch_id": 10,
+        "value": {"rows": []},
+    }
+    artifacts = [HASH_C]
+    receipt = create_signed_execution_receipt(
+        body=build_execution_receipt_body(
+            role=COORDINATOR_ROLE,
+            purpose="research_lab.champion_input.v2",
+            job_id="scoring-v2:attest-weight-input:" + "1" * 32,
+            epoch_id=10,
+            sequence=1,
+            commit_sha="d" * 40,
+            pcr0="e" * 96,
+            build_manifest_hash=HASH,
+            dependency_lock_hash=HASH_B,
+            config_hash=HASH_C,
+            boot_identity_hash=boot["boot_identity_hash"],
+            input_root=HASH,
+            output_root=attested_v2_store.sha256_json(result),
+            transport_root_hash=EMPTY_TRANSPORT_ROOT,
+            host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
+            artifact_root=attested_v2_store.merkle_root(
+                artifacts,
+                domain="leadpoet-artifact-v2",
+            ),
+            parent_receipt_hashes=[],
+            status="succeeded",
+            failure_code=None,
+            issued_at=NOW,
+        ),
+        enclave_pubkey=public_key,
+        sign_digest=private_key.sign,
+    )
+    graph = build_receipt_graph(
+        root_receipt_hash=receipt["receipt_hash"],
+        boot_identities=[boot],
+        receipts=[receipt],
+        transport_attempts=[],
+    )
+    return result, artifacts, receipt, graph
+
+
 def _sourcing_graph():
     private_key = Ed25519PrivateKey.generate()
     public_key = private_key.public_key().public_bytes(
@@ -1179,3 +1247,75 @@ async def test_legacy_nonfinalization_persists_without_payment_credit(
     assert inserted[0][0] == attested_v2_store.LEGACY_NONFINALIZATION_TABLE
     assert inserted[0][2] == (("netuid", 71), ("epoch_id", 100))
     assert result["finding_hash"] == HASH_C
+
+
+@pytest.mark.asyncio
+async def test_replayable_result_requires_durable_receipt_and_exact_readback(
+    monkeypatch,
+):
+    result, artifacts, receipt, graph = _replayable_weight_result()
+    release_hash = "sha256:" + "f" * 64
+    expected = attested_v2_store._execution_result_storage_row_v2(
+        operation="attest_weight_input",
+        result=result,
+        receipt=receipt,
+        artifact_hashes=artifacts,
+        release_hash=release_hash,
+    )
+    events = []
+
+    async def select(table, *, filters):
+        events.append(("select", table, filters))
+        assert table == attested_v2_store.RECEIPT_TABLE
+        return {"receipt_doc": dict(receipt)}
+
+    async def insert(table, row, *, key_filters):
+        events.append(("insert", table, key_filters))
+        assert row == expected
+        return dict(row)
+
+    monkeypatch.setattr(attested_v2_store, "select_one", select)
+    monkeypatch.setattr(attested_v2_store, "_insert_exact", insert)
+    stored = await attested_v2_store.persist_execution_result_v2(
+        operation="attest_weight_input",
+        result=result,
+        receipt=receipt,
+        artifact_hashes=artifacts,
+        release_hash=release_hash,
+    )
+    assert stored == expected
+    assert events[0][0:2] == ("select", attested_v2_store.RECEIPT_TABLE)
+    assert events[1][0:2] == (
+        "insert",
+        attested_v2_store.EXECUTION_RESULT_TABLE,
+    )
+
+    async def load_row(table, *, filters):
+        assert table == attested_v2_store.EXECUTION_RESULT_TABLE
+        assert filters == (
+            ("role", "gateway_coordinator"),
+            ("operation", "attest_weight_input"),
+            ("purpose", "research_lab.champion_input.v2"),
+            ("job_id", receipt["job_id"]),
+        )
+        return dict(expected)
+
+    async def load_graph(root_hash):
+        assert root_hash == receipt["receipt_hash"]
+        return dict(graph)
+
+    monkeypatch.setattr(attested_v2_store, "select_one", load_row)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_receipt_graph_v2",
+        load_graph,
+    )
+    loaded = await attested_v2_store.load_execution_result_v2(
+        role="gateway_coordinator",
+        operation="attest_weight_input",
+        purpose="research_lab.champion_input.v2",
+        job_id=receipt["job_id"],
+    )
+    assert loaded["result"] == result
+    assert loaded["receipt"] == receipt
+    assert loaded["receipt_graph"] == graph

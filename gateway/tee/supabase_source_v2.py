@@ -166,8 +166,8 @@ QUERY_POLICIES = {
         table="research_lab_champion_reward_current",
         select=(
             "champion_reward_id,score_bundle_id,candidate_id,run_id,miner_hotkey,"
-            "miner_uid,island,evaluation_epoch,current_reward_status,reward_status,"
-            "reward_kind,start_epoch,epoch_count,improvement_points,threshold_points,"
+            "miner_uid,island,evaluation_epoch,current_reward_status,start_epoch,"
+            "epoch_count,improvement_points,threshold_points,"
             "desired_alpha_percent,input_hash,anchored_hash"
         ),
         parameter_names=("epoch_id",),

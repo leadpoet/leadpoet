@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
@@ -109,6 +110,34 @@ def test_measured_ban_query_cannot_change_project_table_columns_or_page_size():
         "range-unit": "items",
     }
     assert request["timeout_ms"] == SUPABASE_READ_TIMEOUT_MS
+
+
+def test_champion_allocation_query_matches_live_reward_view_contract():
+    provider = FakeProvider([{"rows": []}])
+    rows, attempts, _artifacts, _sleeps = _read(
+        provider,
+        policy_id="allocation_champion_rewards",
+        parameters={"epoch_id": 23991},
+    )
+
+    assert rows == []
+    assert len(attempts) == 1
+    url = urlsplit(provider.requests[0]["url"])
+    assert url.path.endswith("/rest/v1/research_lab_champion_reward_current")
+    query = parse_qsl(url.query, keep_blank_values=True)
+    assert (
+        "select",
+        (
+            "champion_reward_id,score_bundle_id,candidate_id,run_id,miner_hotkey,"
+            "miner_uid,island,evaluation_epoch,current_reward_status,start_epoch,"
+            "epoch_count,improvement_points,threshold_points,"
+            "desired_alpha_percent,input_hash,anchored_hash"
+        ),
+    ) in query
+    assert ("current_reward_status", "in.(active,queued,partially_paid)") in query
+    assert ("start_epoch", "lte.23991") in query
+    assert "reward_status" not in dict(query)["select"].split(",")
+    assert "reward_kind" not in dict(query)["select"].split(",")
 
 
 def test_transient_failures_are_terminally_recorded_before_existing_retries():

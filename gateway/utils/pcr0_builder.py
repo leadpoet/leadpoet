@@ -801,6 +801,90 @@ async def ensure_base_image_exists(repo_dir: str) -> bool:
     return True
 
 
+async def _stage_validator_v2_artifacts(
+    *,
+    repo_dir: str,
+    artifact_dir: str,
+) -> bool:
+    validator_tee_dir = os.path.join(repo_dir, "validator_tee")
+    artifact_script = os.path.join(
+        validator_tee_dir, "scripts", "stage_runtime_artifacts_v2.py"
+    )
+    artifact_lock = os.path.join(
+        validator_tee_dir, "runtime-artifacts-v2.lock.json"
+    )
+    drand_build_script = os.path.join(
+        validator_tee_dir, "scripts", "build_drand_cabi_v2.sh"
+    )
+    drand_source = os.path.join(
+        artifact_dir, "bittensor_drand-2.0.0.tar.gz"
+    )
+    drand_output = os.path.join(
+        artifact_dir, "libbittensor_drand_v2.so"
+    )
+    drand_hash = os.path.join(
+        validator_tee_dir, "enclave", "libbittensor_drand_v2.sha256"
+    )
+    required_contract = (
+        artifact_script,
+        artifact_lock,
+        drand_build_script,
+        drand_hash,
+    )
+    if any(not os.path.isfile(path) for path in required_contract):
+        logger.error(
+            "[PCR0] Validator Dockerfile requires V2 artifacts but its "
+            "staging contract is incomplete"
+        )
+        return False
+
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        artifact_script,
+        "--lock",
+        artifact_lock,
+        "--output-dir",
+        artifact_dir,
+        "--offline-artifact-root",
+        VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT,
+        cwd=repo_dir,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _artifact_stdout, artifact_stderr = await proc.communicate()
+    if proc.returncode != 0:
+        logger.error(
+            "[PCR0] Failed to stage validator V2 artifacts: %s",
+            artifact_stderr.decode()[-500:],
+        )
+        return False
+    if not os.path.isfile(drand_source):
+        logger.error("[PCR0] Pinned drand source was not staged")
+        return False
+
+    proc = await asyncio.create_subprocess_exec(
+        "bash",
+        drand_build_script,
+        drand_source,
+        drand_output,
+        drand_hash,
+        cwd=repo_dir,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _drand_stdout, drand_stderr = await proc.communicate()
+    if proc.returncode != 0:
+        logger.error(
+            "[PCR0] Failed to build validator drand C ABI: %s",
+            drand_stderr.decode()[-500:],
+        )
+        return False
+    if not os.path.isfile(drand_output):
+        logger.error("[PCR0] Validator drand C ABI output is missing")
+        return False
+    return True
+
+
 async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
     """Build the validator enclave and extract PCR0."""
     docker_image = f"validator-enclave-build-{int(time.time())}"
@@ -840,37 +924,10 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
         # script while an old commit is checked out makes every legacy PCR0
         # rebuild fail before Docker starts.
         if requires_v2_artifacts:
-            artifact_script = os.path.join(
-                repo_dir, "validator_tee", "scripts", "stage_runtime_artifacts_v2.py"
-            )
-            artifact_lock = os.path.join(
-                repo_dir, "validator_tee", "runtime-artifacts-v2.lock.json"
-            )
-            if not os.path.isfile(artifact_script) or not os.path.isfile(artifact_lock):
-                logger.error(
-                    "[PCR0] Validator Dockerfile requires V2 artifacts but its "
-                    "staging contract is incomplete"
-                )
-                return None
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable,
-                artifact_script,
-                "--lock",
-                artifact_lock,
-                "--output-dir",
-                artifact_dir,
-                "--offline-artifact-root",
-                VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT,
-                cwd=repo_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _artifact_stdout, artifact_stderr = await proc.communicate()
-            if proc.returncode != 0:
-                logger.error(
-                    "[PCR0] Failed to stage validator V2 artifacts: %s",
-                    artifact_stderr.decode()[-500:],
-                )
+            if not await _stage_validator_v2_artifacts(
+                repo_dir=repo_dir,
+                artifact_dir=artifact_dir,
+            ):
                 return None
         else:
             shutil.rmtree(artifact_dir, ignore_errors=True)

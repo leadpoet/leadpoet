@@ -1,5 +1,7 @@
 import ast
+import asyncio
 from pathlib import Path
+import sys
 
 from gateway.utils import pcr0_builder
 
@@ -98,3 +100,65 @@ def test_drand_builder_restores_runner_ownership_before_cleanup():
     assert '-e "HOST_UID=$(id -u)"' in source
     assert '-e "HOST_GID=$(id -g)"' in source
     assert 'chown -R "$HOST_UID:$HOST_GID" /work' in source
+
+
+def test_pcr0_builder_compiles_drand_cabi_after_staging(monkeypatch, tmp_path):
+    tee_dir = tmp_path / "validator_tee"
+    scripts_dir = tee_dir / "scripts"
+    enclave_dir = tee_dir / "enclave"
+    artifact_dir = tmp_path / ".validator-tee-artifacts"
+    scripts_dir.mkdir(parents=True)
+    enclave_dir.mkdir()
+    for path in (
+        scripts_dir / "stage_runtime_artifacts_v2.py",
+        tee_dir / "runtime-artifacts-v2.lock.json",
+        scripts_dir / "build_drand_cabi_v2.sh",
+        enclave_dir / "libbittensor_drand_v2.sha256",
+    ):
+        path.write_text("contract\n", encoding="utf-8")
+
+    calls = []
+
+    class _Process:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def _create_subprocess_exec(*args, **kwargs):
+        calls.append((args, kwargs))
+        if args[0] == sys.executable:
+            artifact_dir.mkdir()
+            (artifact_dir / "bittensor_drand-2.0.0.tar.gz").write_bytes(
+                b"pinned source"
+            )
+        elif args[0] == "bash":
+            Path(args[3]).write_bytes(b"compiled C ABI")
+        return _Process()
+
+    monkeypatch.setattr(
+        pcr0_builder.asyncio,
+        "create_subprocess_exec",
+        _create_subprocess_exec,
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT",
+        str(tmp_path / "offline"),
+    )
+
+    result = asyncio.run(
+        pcr0_builder._stage_validator_v2_artifacts(
+            repo_dir=str(tmp_path),
+            artifact_dir=str(artifact_dir),
+        )
+    )
+
+    assert result is True
+    assert [call[0][0] for call in calls] == [sys.executable, "bash"]
+    assert calls[1][0][2] == str(
+        artifact_dir / "bittensor_drand-2.0.0.tar.gz"
+    )
+    assert calls[1][0][3] == str(
+        artifact_dir / "libbittensor_drand_v2.so"
+    )

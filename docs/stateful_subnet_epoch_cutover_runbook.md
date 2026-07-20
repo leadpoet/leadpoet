@@ -44,9 +44,12 @@ Do not start the ceremony until all of these are true:
    pre-cutover release remains responsible for finalizing the last historical
    settlement key until writers are stopped.
 3. The gateway checkout is clean. `gw_restart.sh` rejects a dirty checkout.
-4. SQL migrations 100 and 101 have passed in production.
-5. A real V2 weight bundle, publication, and finalized-chain receipt exist for
-   the intended last legacy epoch and validator hotkey.
+4. SQL migrations 100, 101, and 105 have passed in production.
+5. Historical allocation classification coverage is complete, and at least one
+   finalized historical allocation has a durable coordinator receipt proving
+   the signed validator vector, finalized chain equality, signed audit event,
+   and immutable checkpoint. Its proven epoch may be below the namespace
+   high-water; the two values are deliberately separate.
 6. The independently rebuilt validator release manifest and gateway V2 release
    manifest are available and verified.
 7. Operators can stop every gateway and validator writer before the global
@@ -256,13 +259,17 @@ or hardware fault. This result is point-in-time evidence. Rerun the same
 epoch-key writers quiesced if operationally possible, and record the check time
 and output; writes after a check are not covered by that check.
 
-After the exact catalog validation and physical check pass, apply migration
-101:
+After the exact catalog validation and physical check pass, apply migrations
+101 and 105:
 
 ```bash
 psql "$SUPABASE_DB_URL" \
   -v ON_ERROR_STOP=1 \
   -f scripts/101-stateful-subnet-epoch-authority.sql
+
+psql "$SUPABASE_DB_URL" \
+  -v ON_ERROR_STOP=1 \
+  -f scripts/105-stateful-subnet-epoch-historical-predecessor-v2.sql
 ```
 
 Verify that the lifecycle remains open and that no mapping was accidentally
@@ -333,19 +340,24 @@ first settlement key is rejected.
 
 There is no rollback command after this point.
 
-## 4. Finalize the last legacy weight and stop writers
+## 4. Verify the historical predecessor and stop writers
 
-Allow the last legacy epoch's normal V2 weight flow to complete at block 345 or
-later. Confirm the exact bundle joins to its publication and finalized-chain
-receipt in `research_lab_finalized_allocation_epochs_v2`.
+Run the existing V2 readiness repair and require
+`historical_classification_coverage = 1.0` with an empty
+`missing_historical_classifications` list. The stage command selects the newest
+durable row in
+`research_lab_legacy_finalized_allocation_migrations_v2` at or below
+`LAST_LEGACY_EPOCH_ID`; it does not accept a host assertion or a manual
+on-chain submission as predecessor authority.
 
 Before the legacy global bucket rolls over, stop every writer that can allocate
 an epoch key: gateway API/workers, Research Lab workers, qualification and
 fulfillment workers, primary validator, and auditors. Confirm there are no
 in-flight jobs. Leave them stopped through staging and activation.
 
-If the final V2 chain receipt is absent, stop. A log line, V1 bundle, or
-allocation snapshot is not sufficient proof.
+If classification coverage is incomplete or no attested historical predecessor
+exists, stop. A log line, unclassified bundle, manual submission, or allocation
+snapshot is not sufficient proof.
 
 ## 5. Propose the archive-derived manifest at the reserved boundary
 
@@ -414,12 +426,14 @@ stage it using the exact mapping hash and approved gateway release manifest.
 
 ```bash
 python3 -m gateway.research_lab.stateful_epoch_cutover_cli_v1 \
-  --manifest /secure/operator/stateful-epoch-cutover.json
+  --manifest /secure/operator/stateful-epoch-cutover.json \
+  --use-attested-historical-predecessor
 
 python3 -m gateway.research_lab.stateful_epoch_cutover_cli_v1 \
   --manifest /secure/operator/stateful-epoch-cutover.json \
   --release-manifest /secure/operator/gateway-v2-release-manifest.json \
   --apply \
+  --use-attested-historical-predecessor \
   --confirm-mapping-hash 'sha256:...' \
   --confirm-all-writers-stopped
 ```

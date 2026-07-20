@@ -347,13 +347,26 @@ class CoordinatorExecutorV2:
             )
         if operation == OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2:
             document = attest_subnet_epoch_cutover_v2(payload, context)
+            if "predecessor_authority_hash" in document:
+                predecessor_artifacts = (
+                    str(document["predecessor_allocation_hash"]),
+                    str(document["predecessor_authority_hash"]),
+                )
+            else:
+                predecessor_artifacts = (
+                    str(document["last_legacy_bundle_hash"]),
+                    str(
+                        document[
+                            "last_legacy_weight_finalization_event_hash"
+                        ]
+                    ),
+                )
             return ExecutionResultV2(
                 output=document,
                 artifact_hashes=(
                     str(document["mapping_hash"]),
                     str(document["first_snapshot_hash"]),
-                    str(document["last_legacy_bundle_hash"]),
-                    str(document["last_legacy_weight_finalization_event_hash"]),
+                    *predecessor_artifacts,
                 ),
             )
         if operation == OP_RESEARCH_LAB_ALLOCATION:

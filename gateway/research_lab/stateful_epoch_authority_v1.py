@@ -23,8 +23,11 @@ from gateway.research_lab.attested_v2_store import (
 from gateway.research_lab.store import insert_row, select_one
 from gateway.tee.coordinator_epoch_cutover_v2 import (
     CUTOVER_AUTHORITY_SCHEMA_VERSION,
+    CUTOVER_BOOTSTRAP_AUTHORITY_SCHEMA_VERSION,
     CUTOVER_PURPOSE,
     FINALIZATION_PURPOSE,
+    HISTORICAL_FINALIZATION_PURPOSE,
+    HISTORICAL_PREDECESSOR_KIND,
     SNAPSHOT_PURPOSE,
 )
 from leadpoet_canonical.attested_v2 import (
@@ -87,6 +90,21 @@ _AUTHORITY_FIELDS = frozenset(
         "last_legacy_bundle_hash",
         "last_legacy_weight_finalization_event_hash",
         "last_legacy_finalization_receipt_hash",
+        "manifest",
+    }
+)
+_BOOTSTRAP_AUTHORITY_FIELDS = frozenset(
+    {
+        "schema_version",
+        "mapping_hash",
+        "first_epoch_ref",
+        "first_snapshot_hash",
+        "first_snapshot_receipt_hash",
+        "predecessor_kind",
+        "predecessor_epoch_id",
+        "predecessor_allocation_hash",
+        "predecessor_authority_hash",
+        "predecessor_receipt_hash",
         "manifest",
     }
 )
@@ -755,9 +773,18 @@ def build_cutover_row_v1(
 ) -> Dict[str, Any]:
     """Build the migration-100 cutover row from its coordinator receipt graph."""
 
-    if not isinstance(authority_doc, Mapping) or set(authority_doc) != _AUTHORITY_FIELDS:
+    if not isinstance(authority_doc, Mapping):
         raise StatefulEpochAuthorityStoreError("cutover authority fields are invalid")
-    if authority_doc.get("schema_version") != CUTOVER_AUTHORITY_SCHEMA_VERSION:
+    authority_fields = set(authority_doc)
+    bootstrap = authority_fields == _BOOTSTRAP_AUTHORITY_FIELDS
+    if authority_fields != _AUTHORITY_FIELDS and not bootstrap:
+        raise StatefulEpochAuthorityStoreError("cutover authority fields are invalid")
+    expected_schema = (
+        CUTOVER_BOOTSTRAP_AUTHORITY_SCHEMA_VERSION
+        if bootstrap
+        else CUTOVER_AUTHORITY_SCHEMA_VERSION
+    )
+    if authority_doc.get("schema_version") != expected_schema:
         raise StatefulEpochAuthorityStoreError("cutover authority schema is invalid")
     mapping = _cutover(authority_doc.get("manifest"))
     snapshot, normalized_snapshot = validate_snapshot_document_v1(
@@ -787,12 +814,16 @@ def build_cutover_row_v1(
         authority_doc.get("first_snapshot_receipt_hash"),
         "first snapshot receipt hash",
     )
-    finalization_receipt_hash = _hash(
-        authority_doc.get("last_legacy_finalization_receipt_hash"),
-        "last legacy finalization receipt hash",
+    predecessor_receipt_hash = _hash(
+        authority_doc.get(
+            "predecessor_receipt_hash"
+            if bootstrap
+            else "last_legacy_finalization_receipt_hash"
+        ),
+        "cutover predecessor receipt hash",
     )
     snapshot_receipt = by_hash.get(snapshot_receipt_hash)
-    finalization_receipt = by_hash.get(finalization_receipt_hash)
+    predecessor_receipt = by_hash.get(predecessor_receipt_hash)
     authority_hash = sha256_json(dict(authority_doc))
     if (
         not isinstance(root, Mapping)
@@ -801,7 +832,7 @@ def build_cutover_row_v1(
         or int(root.get("epoch_id", -1)) != mapping.first_settlement_epoch_id
         or root.get("output_root") != authority_hash
         or root.get("parent_receipt_hashes")
-        != sorted([snapshot_receipt_hash, finalization_receipt_hash])
+        != sorted([snapshot_receipt_hash, predecessor_receipt_hash])
     ):
         raise StatefulEpochAuthorityStoreError(
             "cutover coordinator receipt is invalid"
@@ -815,19 +846,68 @@ def build_cutover_row_v1(
         != mapping.first_settlement_epoch_id
     ):
         raise StatefulEpochAuthorityStoreError("cutover snapshot receipt is invalid")
-    if (
-        not isinstance(finalization_receipt, Mapping)
-        or finalization_receipt.get("role") != WEIGHT_ROLE
-        or finalization_receipt.get("purpose") != FINALIZATION_PURPOSE
-        or int(finalization_receipt.get("epoch_id", -1))
+    if bootstrap:
+        predecessor_epoch_id = authority_doc.get("predecessor_epoch_id")
+        if (
+            authority_doc.get("predecessor_kind")
+            != HISTORICAL_PREDECESSOR_KIND
+            or not isinstance(predecessor_epoch_id, int)
+            or isinstance(predecessor_epoch_id, bool)
+            or predecessor_epoch_id < 0
+            or predecessor_epoch_id > mapping.last_legacy_epoch_id
+            or not isinstance(predecessor_receipt, Mapping)
+            or predecessor_receipt.get("role") != COORDINATOR_ROLE
+            or predecessor_receipt.get("purpose")
+            != HISTORICAL_FINALIZATION_PURPOSE
+            or predecessor_receipt.get("output_root")
+            != authority_doc.get("predecessor_authority_hash")
+        ):
+            raise StatefulEpochAuthorityStoreError(
+                "cutover historical predecessor receipt is invalid"
+            )
+        predecessor_columns = {
+            "predecessor_kind": HISTORICAL_PREDECESSOR_KIND,
+            "predecessor_epoch_id": predecessor_epoch_id,
+            "predecessor_allocation_hash": _hash(
+                authority_doc.get("predecessor_allocation_hash"),
+                "cutover predecessor allocation hash",
+            ),
+            "predecessor_authority_hash": _hash(
+                authority_doc.get("predecessor_authority_hash"),
+                "cutover predecessor authority hash",
+            ),
+            "predecessor_receipt_hash": predecessor_receipt_hash,
+            "last_legacy_bundle_hash": None,
+            "last_legacy_weight_finalization_event_hash": None,
+            "last_legacy_finalization_receipt_hash": None,
+        }
+    elif (
+        not isinstance(predecessor_receipt, Mapping)
+        or predecessor_receipt.get("role") != WEIGHT_ROLE
+        or predecessor_receipt.get("purpose") != FINALIZATION_PURPOSE
+        or int(predecessor_receipt.get("epoch_id", -1))
         != mapping.last_legacy_epoch_id
     ):
         raise StatefulEpochAuthorityStoreError(
             "cutover finalization receipt is invalid"
         )
+    else:
+        predecessor_columns = {
+            "last_legacy_bundle_hash": _hash(
+                authority_doc.get("last_legacy_bundle_hash"),
+                "last legacy bundle hash",
+            ),
+            "last_legacy_weight_finalization_event_hash": _hash(
+                authority_doc.get(
+                    "last_legacy_weight_finalization_event_hash"
+                ),
+                "last legacy finalization event hash",
+            ),
+            "last_legacy_finalization_receipt_hash": predecessor_receipt_hash,
+        }
     return {
         "cutover_authority_hash": authority_hash,
-        "schema_version": CUTOVER_AUTHORITY_SCHEMA_VERSION,
+        "schema_version": expected_schema,
         "mapping_hash": mapping.mapping_hash,
         "manifest_schema_version": mapping.schema_version,
         "epoch_scheme": mapping.epoch_scheme,
@@ -847,15 +927,7 @@ def build_cutover_row_v1(
         "first_observed_at": snapshot.observed_at,
         "first_snapshot_hash": snapshot_hash,
         "first_snapshot_receipt_hash": snapshot_receipt_hash,
-        "last_legacy_bundle_hash": _hash(
-            authority_doc.get("last_legacy_bundle_hash"),
-            "last legacy bundle hash",
-        ),
-        "last_legacy_weight_finalization_event_hash": _hash(
-            authority_doc.get("last_legacy_weight_finalization_event_hash"),
-            "last legacy finalization event hash",
-        ),
-        "last_legacy_finalization_receipt_hash": finalization_receipt_hash,
+        **predecessor_columns,
         "cutover_receipt_hash": root_hash,
         "manifest_doc": mapping.to_dict(),
         "first_snapshot_doc": normalized_snapshot,

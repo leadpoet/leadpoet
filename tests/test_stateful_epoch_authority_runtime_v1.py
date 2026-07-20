@@ -33,6 +33,7 @@ from gateway.research_lab.stateful_epoch_cutover_cli_v1 import (
     CUTOVER_STAGE_RPC,
     CUTOVER_STATE_TABLE,
     FINALIZED_ALLOCATION_VIEW,
+    HISTORICAL_FINALIZATION_TABLE,
     RECEIPT_TABLE,
     StatefulEpochCutoverActivationError,
     _mixed_boot_verifier_from_release,
@@ -40,9 +41,12 @@ from gateway.research_lab.stateful_epoch_cutover_cli_v1 import (
 )
 from gateway.tee.coordinator_epoch_cutover_v2 import (
     CUTOVER_AUTHORITY_SCHEMA_VERSION,
+    CUTOVER_BOOTSTRAP_AUTHORITY_SCHEMA_VERSION,
     CUTOVER_PURPOSE,
     CUTOVER_REQUEST_SCHEMA_VERSION,
     FINALIZATION_PURPOSE,
+    HISTORICAL_FINALIZATION_PURPOSE,
+    HISTORICAL_PREDECESSOR_KIND,
     OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2,
     SNAPSHOT_PURPOSE,
 )
@@ -657,6 +661,98 @@ async def test_measured_cutover_rejects_wrong_legacy_epoch_and_snapshot_root():
             payload,
             context,
         )
+
+
+@pytest.mark.asyncio
+async def test_measured_cutover_accepts_attested_historical_predecessor(
+    monkeypatch,
+):
+    from gateway.tee import coordinator_epoch_cutover_v2 as cutover_authority
+
+    cutover = _cutover()
+    snapshot_doc = _snapshot(cutover=cutover)
+    snapshot_graph, snapshot_receipt, *_ = _snapshot_graph(snapshot_doc)
+    settlement = {
+        "schema_version": "leadpoet.legacy_finalized_allocation.v2",
+        "netuid": 71,
+        "epoch_id": 92,
+        "allocation_hash": HASH_B,
+        "settlement_hash": HASH_C,
+        "chain_target_block": 900,
+    }
+    monkeypatch.setattr(
+        cutover_authority,
+        "validate_legacy_settlement_document_v2",
+        lambda value: dict(value),
+    )
+    private_key, public_key = _keypair()
+    boot = _boot(COORDINATOR_ROLE, private_key, public_key)
+    predecessor_receipt = _receipt(
+        private_key=private_key,
+        public_key=public_key,
+        boot=boot,
+        role=COORDINATOR_ROLE,
+        purpose=HISTORICAL_FINALIZATION_PURPOSE,
+        job_id="legacy-settlement:92",
+        epoch_id=101,
+        output_root=sha256_json(settlement),
+    )
+    predecessor_graph = build_receipt_graph(
+        root_receipt_hash=predecessor_receipt["receipt_hash"],
+        boot_identities=[boot],
+        receipts=[predecessor_receipt],
+        transport_attempts=[],
+    )
+    payload = {
+        "schema_version": CUTOVER_REQUEST_SCHEMA_VERSION,
+        "manifest": cutover.to_dict(),
+        "first_snapshot": snapshot_doc,
+        "predecessor_kind": HISTORICAL_PREDECESSOR_KIND,
+        "predecessor_finalization": settlement,
+    }
+    context = ExecutionContextV2(
+        job_id="subnet-epoch-cutover:101",
+        purpose=CUTOVER_PURPOSE,
+        epoch_id=101,
+        parent_receipt_hashes=tuple(
+            sorted(
+                (
+                    snapshot_receipt["receipt_hash"],
+                    predecessor_receipt["receipt_hash"],
+                )
+            )
+        ),
+        external_receipt_graphs=[snapshot_graph, predecessor_graph],
+    )
+
+    measured = await CoordinatorExecutorV2()(
+        OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2,
+        payload,
+        context,
+    )
+
+    assert (
+        measured.output["schema_version"]
+        == CUTOVER_BOOTSTRAP_AUTHORITY_SCHEMA_VERSION
+    )
+    assert measured.output["predecessor_epoch_id"] == 92
+    assert measured.output["predecessor_kind"] == HISTORICAL_PREDECESSOR_KIND
+    assert measured.output["predecessor_receipt_hash"] == predecessor_receipt[
+        "receipt_hash"
+    ]
+    coordinator_graph = _cutover_receipt_graph(
+        measured.output,
+        snapshot_graph,
+        predecessor_graph,
+    )
+    row = build_cutover_row_v1(
+        authority_doc=measured.output,
+        first_snapshot_doc=snapshot_doc,
+        receipt_graph=coordinator_graph,
+    )
+    assert row["last_legacy_epoch_id"] == 100
+    assert row["predecessor_epoch_id"] == 92
+    assert row["last_legacy_finalization_receipt_hash"] is None
 
     payload, context = _coordinator_request()
     bad_graph, bad_receipt, *_ = _snapshot_graph(
@@ -1458,6 +1554,133 @@ async def test_cutover_operator_dry_run_is_read_only_and_checks_high_water():
             "p_cutover_receipt_hash": None,
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_cutover_operator_selects_latest_attested_historical_predecessor(
+    monkeypatch,
+):
+    from gateway.tee import coordinator_epoch_cutover_v2 as cutover_authority
+
+    payload, context, cutover, candidate, _executor = (
+        _cutover_activation_dependencies()
+    )
+    settlement = {
+        "schema_version": "leadpoet.legacy_finalized_allocation.v2",
+        "netuid": 71,
+        "epoch_id": 92,
+        "allocation_hash": HASH_B,
+        "settlement_hash": HASH_C,
+        "chain_target_block": 900,
+    }
+    monkeypatch.setattr(
+        cutover_authority,
+        "validate_legacy_settlement_document_v2",
+        lambda value: dict(value),
+    )
+    private_key, public_key = _keypair()
+    boot = _boot(COORDINATOR_ROLE, private_key, public_key)
+    predecessor_receipt = _receipt(
+        private_key=private_key,
+        public_key=public_key,
+        boot=boot,
+        role=COORDINATOR_ROLE,
+        purpose=HISTORICAL_FINALIZATION_PURPOSE,
+        job_id="legacy-settlement:92",
+        epoch_id=101,
+        output_root=sha256_json(settlement),
+    )
+    predecessor_graph = build_receipt_graph(
+        root_receipt_hash=predecessor_receipt["receipt_hash"],
+        boot_identities=[boot],
+        receipts=[predecessor_receipt],
+        transport_attempts=[],
+    )
+    snapshot_graph = context.external_receipt_graphs[0]
+    selected = []
+
+    async def select_rows(table, **kwargs):
+        selected.append((table, kwargs))
+        if table == CUTOVER_TABLE:
+            return []
+        if table == CUTOVER_STATE_TABLE:
+            return [_fenced_cutover_state(cutover)]
+        if table == CANDIDATE_TABLE:
+            return [copy.deepcopy(candidate)]
+        if table == HISTORICAL_FINALIZATION_TABLE:
+            return [{
+                "netuid": 71,
+                "epoch_id": 92,
+                "allocation_hash": HASH_B,
+                "settlement_hash": HASH_C,
+                "settlement_receipt_hash": predecessor_receipt[
+                    "receipt_hash"
+                ],
+                "settlement_doc": settlement,
+            }]
+        if table == RECEIPT_TABLE:
+            return []
+        raise AssertionError(table)
+
+    graphs = {
+        snapshot_graph["root_receipt_hash"]: snapshot_graph,
+        predecessor_graph["root_receipt_hash"]: predecessor_graph,
+    }
+
+    async def preflight(_name, _params):
+        return {
+            "candidate_snapshot_hash": candidate["snapshot_hash"],
+            "candidate_receipt_hash": candidate["chain_state_receipt_hash"],
+            "first_settlement_epoch_id": 101,
+            "expected_last_legacy_epoch_id": 100,
+            "legacy_high_water": 100,
+            "first_settlement_occupied": False,
+            "eligible": True,
+        }
+
+    async def readiness(**_kwargs):
+        return {
+            "ready": True,
+            "historical_classification_coverage": 1.0,
+            "missing_historical_classifications": [],
+        }
+
+    async def load_graph(root):
+        return copy.deepcopy(graphs[root])
+
+    async def no_initialization(_epoch):
+        return None
+
+    async def live_snapshot(_cutover):
+        return SubnetEpochSnapshot.from_mapping(payload["first_snapshot"])
+
+    report = await activate_subnet_epoch_cutover_v1(
+        cutover=cutover,
+        apply=False,
+        predecessor_kind=HISTORICAL_PREDECESSOR_KIND,
+        select_rows=select_rows,
+        load_graph=load_graph,
+        preflight_rpc=preflight,
+        load_cutover_readiness=readiness,
+        load_initialization=no_initialization,
+        load_live_snapshot=live_snapshot,
+        validate_anchor=lambda _cutover: _async_none(),
+    )
+
+    assert report["status"] == "eligible"
+    assert report["predecessor_kind"] == HISTORICAL_PREDECESSOR_KIND
+    assert report["predecessor_epoch_id"] == 92
+    historical_call = next(
+        kwargs
+        for table, kwargs in selected
+        if table == HISTORICAL_FINALIZATION_TABLE
+    )
+    assert historical_call["filters"] == (
+        ("netuid", 71),
+        ("epoch_id", "lte", 100),
+    )
+    assert historical_call["order_by"] == (("epoch_id", True),)
+    assert all(table != FINALIZED_ALLOCATION_VIEW for table, _ in selected)
 
 
 @pytest.mark.asyncio

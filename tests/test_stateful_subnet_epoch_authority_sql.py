@@ -23,6 +23,11 @@ INDEX_SQL = (
     / "scripts"
     / "100-stateful-subnet-epoch-high-water-indexes.concurrent.sql"
 ).read_text(encoding="utf-8")
+HISTORICAL_PREDECESSOR_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "105-stateful-subnet-epoch-historical-predecessor-v2.sql"
+).read_text(encoding="utf-8")
 INDEX_VALIDATION_MATCH = re.search(
     r"(DO \$\$.*?\n\$\$;)\n\n-- The DO block above",
     INDEX_SQL,
@@ -237,6 +242,24 @@ def test_cutover_and_snapshots_are_bound_to_successful_v2_receipts():
     assert "pg_catalog.jsonb_build_array(" in SQL
     assert "NEW.first_snapshot_receipt_hash" in SQL
     assert "NEW.last_legacy_finalization_receipt_hash" in SQL
+
+
+def test_historical_predecessor_migration_separates_proof_from_high_water():
+    migration = HISTORICAL_PREDECESSOR_SQL
+    assert "predecessor_epoch_id BETWEEN 0 AND last_legacy_epoch_id" in migration
+    assert "legacy_finalized_chain_migration_v2" in migration
+    assert "research_lab_legacy_finalized_allocation_migrations_v2" in migration
+    assert "research_lab.legacy_finalized_allocation.v2" in migration
+    assert "predecessor_row.epoch_id > NEW.last_legacy_epoch_id" in migration
+    assert "predecessor_row.output_root IS DISTINCT FROM" in migration
+    assert "NEW.predecessor_authority_hash" in migration
+    assert "predecessor_row.receipt_status IS DISTINCT FROM 'succeeded'" in migration
+    assert "jsonb_array_length(" in migration
+    assert "IS DISTINCT FROM 2" in migration
+    assert "research_lab_stateful_subnet_epoch_cutover_bind_v2" in migration
+    assert "research_lab_stateful_subnet_epoch_stage_v2" in migration
+    assert "UPDATE public.research_lab_legacy_finalized" not in migration
+    assert "DELETE FROM public.research_lab_legacy_finalized" not in migration
 
 
 def test_json_documents_are_exact_shape_and_secret_scrubbed():
@@ -1674,6 +1697,8 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
             "RESET ROLE;"
         )
         assert f"stateful_active|{mapping_hash}" in rerun_public_active.stdout
+        psql(HISTORICAL_PREDECESSOR_SQL)
+        psql(HISTORICAL_PREDECESSOR_SQL)
         result = psql(
             """
             SELECT

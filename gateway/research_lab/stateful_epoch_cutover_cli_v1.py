@@ -36,15 +36,24 @@ from gateway.research_lab.stateful_epoch_authority_v1 import (
     build_cutover_row_v1,
     validate_stored_pre_cutover_candidate_row_v1,
 )
+from gateway.research_lab.champion_settlement_v2 import (
+    champion_v2_cutover_readiness,
+)
 from gateway.research_lab.store import call_rpc, select_all
 from gateway.tee.coordinator_epoch_cutover_v2 import (
     CUTOVER_PURPOSE,
     CUTOVER_REQUEST_SCHEMA_VERSION,
+    HISTORICAL_PREDECESSOR_KIND,
+    NATIVE_PREDECESSOR_KIND,
     OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2,
     attest_subnet_epoch_cutover_v2,
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.release_manifest_v2 import validate_release_manifest
+from gateway.tee.release_lineage_v2 import (
+    build_release_lineage_boot_verifier_v2,
+    load_approved_release_lineage_v2,
+)
 from gateway.utils.subnet_epoch_archive import (
     read_exact_subnet_epoch_snapshot_from_archive,
     read_finalized_subnet_epoch_snapshot_from_archive,
@@ -60,6 +69,9 @@ from leadpoet_canonical.attested_v2 import (
 
 
 FINALIZED_ALLOCATION_VIEW = "research_lab_finalized_allocation_epochs_v2"
+HISTORICAL_FINALIZATION_TABLE = (
+    "research_lab_legacy_finalized_allocation_migrations_v2"
+)
 RECEIPT_TABLE = "research_lab_attested_execution_receipts_v2"
 CUTOVER_PREFLIGHT_RPC = (
     "research_lab_stateful_subnet_epoch_cutover_preflight_v1"
@@ -67,6 +79,10 @@ CUTOVER_PREFLIGHT_RPC = (
 CUTOVER_FENCE_RPC = "research_lab_stateful_subnet_epoch_cutover_fence_v1"
 CUTOVER_BIND_RPC = "research_lab_stateful_subnet_epoch_cutover_bind_v1"
 CUTOVER_STAGE_RPC = "research_lab_stateful_subnet_epoch_stage_v1"
+CUTOVER_BOOTSTRAP_BIND_RPC = (
+    "research_lab_stateful_subnet_epoch_cutover_bind_v2"
+)
+CUTOVER_BOOTSTRAP_STAGE_RPC = "research_lab_stateful_subnet_epoch_stage_v2"
 CUTOVER_ACTIVATE_RPC = "research_lab_stateful_subnet_epoch_activate_v1"
 CUTOVER_STATE_TABLE = "research_lab_stateful_subnet_epoch_cutover_state_v1"
 ACTIVATION_REPORT_SCHEMA_VERSION = (
@@ -313,8 +329,25 @@ def _mixed_boot_verifier_from_release(
 
 def build_cutover_mixed_boot_verifier_v1(
     release: Mapping[str, Any],
+    *,
+    parent_graphs: Sequence[Mapping[str, Any]] = (),
 ) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
-    return _mixed_boot_verifier_from_release(validate_release_manifest(release))
+    current = validate_release_manifest(release)
+    current_verifier = _mixed_boot_verifier_from_release(current)
+    if not parent_graphs:
+        return current_verifier
+    lineage = load_approved_release_lineage_v2(
+        current_release=current,
+        parent_graphs=parent_graphs,
+    )
+    lineage_verifier = build_release_lineage_boot_verifier_v2(lineage)
+
+    def verify(identity: Mapping[str, Any]) -> Mapping[str, Any]:
+        if str(identity.get("physical_role") or "") == "gateway_coordinator":
+            return lineage_verifier(identity)
+        return current_verifier(identity)
+
+    return verify
 
 
 def _load_gateway_release(path: Optional[Path]) -> Dict[str, Any]:
@@ -937,6 +970,10 @@ async def activate_subnet_epoch_cutover_v1(
     validate_anchor: Callable[[SubnetEpochCutover], Awaitable[None]] = (
         _validate_official_archive_anchor
     ),
+    predecessor_kind: str = NATIVE_PREDECESSOR_KIND,
+    load_cutover_readiness: Callable[..., Awaitable[Mapping[str, Any]]] = (
+        champion_v2_cutover_readiness
+    ),
 ) -> Dict[str, Any]:
     """Validate, and only when requested activate, one canonical cutover."""
 
@@ -1053,41 +1090,113 @@ async def activate_subnet_epoch_cutover_v1(
         receipt_graph=snapshot_graph,
     )
 
-    finalization = await _select_exactly_one(
-        select_rows,
-        FINALIZED_ALLOCATION_VIEW,
-        filters=(
-            ("netuid", cutover.netuid),
-            ("epoch_id", cutover.last_legacy_epoch_id),
-            ("validator_hotkey", candidate["validator_hotkey"]),
-        ),
-        label="last legacy finalized allocation",
-    )
-    finalization_doc = finalization.get("finalization_doc")
-    if (
-        not isinstance(finalization_doc, Mapping)
-        or finalization.get("bundle_hash") is None
-        or finalization.get("weight_finalization_event_hash") is None
-        or finalization.get("finalization_receipt_hash") is None
-        or int(finalization.get("netuid", -1)) != cutover.netuid
-        or int(finalization.get("epoch_id", -1)) != cutover.last_legacy_epoch_id
-        or finalization.get("validator_hotkey") != candidate["validator_hotkey"]
-        or int(finalization.get("finalized_block", -1)) >= cutover.cutover_block
-    ):
-        raise StatefulEpochCutoverActivationError(
-            "last legacy finalized allocation differs from the manifest"
+    if predecessor_kind == HISTORICAL_PREDECESSOR_KIND:
+        readiness = dict(
+            await load_cutover_readiness(
+                epoch=cutover.first_settlement_epoch_id,
+                netuid=cutover.netuid,
+            )
         )
-    finalization_graph = await load_graph(
-        str(finalization["finalization_receipt_hash"])
-    )
-
-    payload = {
-        "schema_version": CUTOVER_REQUEST_SCHEMA_VERSION,
-        "manifest": manifest,
-        "first_snapshot": candidate["snapshot_doc"],
-        "last_legacy_bundle_hash": str(finalization["bundle_hash"]),
-        "last_legacy_finalization": dict(finalization_doc),
-    }
+        if (
+            readiness.get("ready") is not True
+            or readiness.get("historical_classification_coverage") != 1.0
+            or readiness.get("missing_historical_classifications")
+        ):
+            raise StatefulEpochCutoverActivationError(
+                "historical cutover classification coverage is incomplete"
+            )
+        rows = await select_rows(
+            HISTORICAL_FINALIZATION_TABLE,
+            filters=(
+                ("netuid", cutover.netuid),
+                ("epoch_id", "lte", cutover.last_legacy_epoch_id),
+            ),
+            order_by=(("epoch_id", True),),
+            batch_size=1,
+            max_rows=1,
+        )
+        if (
+            not isinstance(rows, list)
+            or len(rows) != 1
+            or not isinstance(rows[0], Mapping)
+        ):
+            raise StatefulEpochCutoverActivationError(
+                "attested historical cutover predecessor is unavailable"
+            )
+        finalization = dict(rows[0])
+        finalization_doc = finalization.get("settlement_doc")
+        if (
+            not isinstance(finalization_doc, Mapping)
+            or finalization.get("settlement_receipt_hash") is None
+            or int(finalization.get("netuid", -1)) != cutover.netuid
+            or int(finalization.get("epoch_id", -1))
+            > cutover.last_legacy_epoch_id
+        ):
+            raise StatefulEpochCutoverActivationError(
+                "attested historical cutover predecessor differs"
+            )
+        predecessor_receipt_hash = str(
+            finalization["settlement_receipt_hash"]
+        )
+        finalization_graph = await load_graph(predecessor_receipt_hash)
+        payload = {
+            "schema_version": CUTOVER_REQUEST_SCHEMA_VERSION,
+            "manifest": manifest,
+            "first_snapshot": candidate["snapshot_doc"],
+            "predecessor_kind": HISTORICAL_PREDECESSOR_KIND,
+            "predecessor_finalization": dict(finalization_doc),
+        }
+        predecessor_artifacts = (
+            str(finalization["allocation_hash"]),
+            str(finalization["settlement_hash"]),
+        )
+    elif predecessor_kind == NATIVE_PREDECESSOR_KIND:
+        finalization = await _select_exactly_one(
+            select_rows,
+            FINALIZED_ALLOCATION_VIEW,
+            filters=(
+                ("netuid", cutover.netuid),
+                ("epoch_id", cutover.last_legacy_epoch_id),
+                ("validator_hotkey", candidate["validator_hotkey"]),
+            ),
+            label="last legacy finalized allocation",
+        )
+        finalization_doc = finalization.get("finalization_doc")
+        if (
+            not isinstance(finalization_doc, Mapping)
+            or finalization.get("bundle_hash") is None
+            or finalization.get("weight_finalization_event_hash") is None
+            or finalization.get("finalization_receipt_hash") is None
+            or int(finalization.get("netuid", -1)) != cutover.netuid
+            or int(finalization.get("epoch_id", -1))
+            != cutover.last_legacy_epoch_id
+            or finalization.get("validator_hotkey")
+            != candidate["validator_hotkey"]
+            or int(finalization.get("finalized_block", -1))
+            >= cutover.cutover_block
+        ):
+            raise StatefulEpochCutoverActivationError(
+                "last legacy finalized allocation differs from the manifest"
+            )
+        predecessor_receipt_hash = str(
+            finalization["finalization_receipt_hash"]
+        )
+        finalization_graph = await load_graph(predecessor_receipt_hash)
+        payload = {
+            "schema_version": CUTOVER_REQUEST_SCHEMA_VERSION,
+            "manifest": manifest,
+            "first_snapshot": candidate["snapshot_doc"],
+            "last_legacy_bundle_hash": str(finalization["bundle_hash"]),
+            "last_legacy_finalization": dict(finalization_doc),
+        }
+        predecessor_artifacts = (
+            str(finalization["bundle_hash"]),
+            str(finalization["weight_finalization_event_hash"]),
+        )
+    else:
+        raise StatefulEpochCutoverActivationError(
+            "cutover predecessor kind is invalid"
+        )
     parent_graphs = (snapshot_graph, finalization_graph)
     parent_roots = tuple(
         sorted(str(graph["root_receipt_hash"]) for graph in parent_graphs)
@@ -1103,7 +1212,10 @@ async def activate_subnet_epoch_cutover_v1(
         ),
     )
     if (
-        predicted_authority["last_legacy_weight_finalization_event_hash"]
+        predecessor_kind == NATIVE_PREDECESSOR_KIND
+        and predicted_authority[
+            "last_legacy_weight_finalization_event_hash"
+        ]
         != finalization["weight_finalization_event_hash"]
     ):
         raise StatefulEpochCutoverActivationError(
@@ -1140,7 +1252,8 @@ async def activate_subnet_epoch_cutover_v1(
         resumed_boot_verifier = boot_verifier
         if resumed_boot_verifier is None:
             resumed_boot_verifier = build_cutover_mixed_boot_verifier_v1(
-                _load_gateway_release(release_manifest_path)
+                _load_gateway_release(release_manifest_path),
+                parent_graphs=parent_graphs,
             )
         validate_receipt_graph(
             resumed_graph,
@@ -1183,10 +1296,9 @@ async def activate_subnet_epoch_cutover_v1(
             "status": "eligible",
             "mapping_hash": cutover.mapping_hash,
             "candidate_snapshot_hash": candidate["snapshot_hash"],
-            "last_legacy_bundle_hash": finalization["bundle_hash"],
-            "last_legacy_weight_finalization_event_hash": finalization[
-                "weight_finalization_event_hash"
-            ],
+            "predecessor_kind": predecessor_kind,
+            "predecessor_epoch_id": int(finalization["epoch_id"]),
+            "predecessor_receipt_hash": predecessor_receipt_hash,
             "predicted_cutover_authority_hash": authority_hash,
             "coordinator_receipt_exists": resumed_graph is not None,
             "would_write": False,
@@ -1212,14 +1324,19 @@ async def activate_subnet_epoch_cutover_v1(
             },
         )
 
+    binding_rpc_name = (
+        CUTOVER_BOOTSTRAP_BIND_RPC
+        if predecessor_kind == HISTORICAL_PREDECESSOR_KIND
+        else CUTOVER_BIND_RPC
+    )
     binding_value = await bind_rpc(
-        CUTOVER_BIND_RPC,
+        binding_rpc_name,
         {
             "p_mapping_hash": cutover.mapping_hash,
             "p_cutover_authority_hash": authority_hash,
-            "p_last_legacy_finalization_receipt_hash": finalization[
-                "finalization_receipt_hash"
-            ],
+            "p_last_legacy_finalization_receipt_hash": (
+                predecessor_receipt_hash
+            ),
             "p_cutover_receipt_hash": resumed_receipt_hash,
         },
     )
@@ -1240,7 +1357,8 @@ async def activate_subnet_epoch_cutover_v1(
         if resolved_boot_verifier is None:
             release = _load_gateway_release(release_manifest_path)
             resolved_boot_verifier = build_cutover_mixed_boot_verifier_v1(
-                release
+                release,
+                parent_graphs=parent_graphs,
             )
         execute_kwargs: Dict[str, Any] = {
             "operation": OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2,
@@ -1252,8 +1370,7 @@ async def activate_subnet_epoch_cutover_v1(
             "input_artifact_hashes": (
                 cutover.mapping_hash,
                 candidate["snapshot_hash"],
-                str(finalization["bundle_hash"]),
-                str(finalization["weight_finalization_event_hash"]),
+                *predecessor_artifacts,
             ),
             "persist_graph": persist_graph,
             "boot_verifier": resolved_boot_verifier,
@@ -1330,8 +1447,13 @@ async def activate_subnet_epoch_cutover_v1(
             cutover=cutover,
             snapshot_doc=candidate["snapshot_doc"],
         )
+        stage_rpc_name = (
+            CUTOVER_BOOTSTRAP_STAGE_RPC
+            if predecessor_kind == HISTORICAL_PREDECESSOR_KIND
+            else CUTOVER_STAGE_RPC
+        )
         stage_value = await stage_rpc(
-            CUTOVER_STAGE_RPC,
+            stage_rpc_name,
             {
                 "p_cutover_row": cutover_row,
                 "p_initialization_event": initialization_event,
@@ -1464,7 +1586,8 @@ async def activate_staged_subnet_epoch_cutover_v1(
     resolved_boot_verifier = boot_verifier
     if resolved_boot_verifier is None:
         resolved_boot_verifier = build_cutover_mixed_boot_verifier_v1(
-            _load_gateway_release(release_manifest_path)
+            _load_gateway_release(release_manifest_path),
+            parent_graphs=(graph,),
         )
     validate_receipt_graph(
         graph,
@@ -1590,6 +1713,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("--confirm-all-writers-stopped", action="store_true")
     parser.add_argument("--confirm-stateful-release-prepared", action="store_true")
+    parser.add_argument(
+        "--use-attested-historical-predecessor",
+        action="store_true",
+        help=(
+            "bind the latest receipt-backed finalized historical allocation "
+            "at or below the fenced namespace high-water"
+        ),
+    )
     args = parser.parse_args(argv)
 
     if (args.apply or args.activate_staged) and args.release_manifest is None:
@@ -1680,6 +1811,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 cutover=cutover,
                 apply=bool(args.apply),
                 release_manifest_path=args.release_manifest,
+                predecessor_kind=(
+                    HISTORICAL_PREDECESSOR_KIND
+                    if args.use_attested_historical_predecessor
+                    else NATIVE_PREDECESSOR_KIND
+                ),
             )
         )
     except StatefulEpochCutoverActivationError as exc:

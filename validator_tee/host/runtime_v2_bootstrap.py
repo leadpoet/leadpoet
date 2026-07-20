@@ -9,15 +9,12 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 from gateway.tee.release_manifest_v2 import validate_release_manifest
 from Leadpoet.utils.subnet_epoch import (
-    STATEFUL_EPOCH_MODE,
-    get_epoch_mode,
     load_subnet_epoch_cutover,
 )
 from leadpoet_canonical.attested_v2 import sha256_json, verify_boot_identity_nitro
 from validator_tee.host.release_v2 import validator_release_authority
 from validator_tee.host.vsock_client import ValidatorEnclaveClient
 from validator_tee.enclave.runtime_v2 import (
-    VALIDATOR_RUNTIME_CONFIG_SCHEMA_VERSION,
     VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION,
 )
 from validator_tee.enclave.hotkey_authority_v2 import (
@@ -52,8 +49,9 @@ def build_runtime_configuration(
             "pcr0": summary["pcr0"],
             "build_manifest_hash": summary["execution_manifest_hash"],
         }
+    cutover = load_subnet_epoch_cutover()
     configuration = {
-        "schema_version": VALIDATOR_RUNTIME_CONFIG_SCHEMA_VERSION,
+        "schema_version": VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION,
         "commit_sha": validator["commit_sha"],
         "build_manifest_hash": validator["app_manifest_hash"],
         "dependency_lock_hash": validator["dependency_lock_hash"],
@@ -62,18 +60,11 @@ def build_runtime_configuration(
             hotkey_config
         ),
         "gateway_role_expectations": expectations,
+        "epoch_authority": {
+            "mode": "stateful_v1",
+            "cutover_manifest": cutover.to_dict(),
+        },
     }
-    if get_epoch_mode() == STATEFUL_EPOCH_MODE:
-        cutover = load_subnet_epoch_cutover()
-        configuration.update(
-            {
-                "schema_version": VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION,
-                "epoch_authority": {
-                    "mode": STATEFUL_EPOCH_MODE,
-                    "cutover_manifest": cutover.to_dict(),
-                },
-            }
-        )
     return configuration
 
 

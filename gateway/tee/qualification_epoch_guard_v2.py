@@ -6,8 +6,6 @@ import base64
 from typing import Any, Mapping
 
 from Leadpoet.utils.subnet_epoch import (
-    LEGACY_EPOCH_MODE,
-    STATEFUL_EPOCH_MODE,
     SubnetEpochCutover,
     SubnetEpochError,
 )
@@ -16,7 +14,6 @@ from leadpoet_canonical.chain_source_v2 import (
     CHAIN_ARCHIVE_ENDPOINT_HOST,
     CHAIN_ENDPOINT_HOST,
     CHAIN_ENDPOINT_PATH,
-    CHAIN_FINALIZATION_EPOCH_BLOCKS,
     CHAIN_RPC_TIMEOUT_MS,
     decode_subnet_epoch_storage,
     json_rpc_request,
@@ -32,7 +29,7 @@ class QualificationEpochGuardV2Error(RuntimeError):
 
 
 class QualificationEpochGuardV2:
-    """Match the legacy ``file_epoch > current_epoch`` decision using TLS RPC."""
+    """Detect an official SN71 epoch change using authenticated TLS RPC."""
 
     def __init__(
         self,
@@ -42,42 +39,39 @@ class QualificationEpochGuardV2:
         netuid: int = 71,
     ) -> None:
         self._transport = transport
-        authority = dict(
-            epoch_authority
-            if epoch_authority is not None
-            else {"mode": LEGACY_EPOCH_MODE, "cutover": None}
-        )
+        if epoch_authority is None:
+            raise QualificationEpochGuardV2Error(
+                "qualification epoch authority is unavailable"
+            )
+        authority = dict(epoch_authority)
         if set(authority) != {"mode", "cutover"}:
             raise QualificationEpochGuardV2Error(
                 "qualification epoch authority fields are invalid"
             )
-        self._epoch_mode = str(authority.get("mode") or "").strip().lower()
+        if str(authority.get("mode") or "").strip().lower() != "stateful_v1":
+            raise QualificationEpochGuardV2Error(
+                "qualification epoch authority is invalid"
+            )
         self._netuid = int(netuid)
         if not 0 < self._netuid <= 0xFFFF:
             raise QualificationEpochGuardV2Error(
                 "qualification epoch netuid is invalid"
             )
-        self._cutover = None
-        if self._epoch_mode == STATEFUL_EPOCH_MODE:
-            try:
-                self._cutover = SubnetEpochCutover.from_mapping(
-                    authority.get("cutover")
-                )
-            except (SubnetEpochError, TypeError) as exc:
-                raise QualificationEpochGuardV2Error(
-                    "qualification epoch cutover is invalid"
-                ) from exc
-            if self._cutover.netuid != self._netuid:
-                raise QualificationEpochGuardV2Error(
-                    "qualification epoch cutover netuid differs"
-                )
-            if self._cutover.cutover_block <= 0:
-                raise QualificationEpochGuardV2Error(
-                    "qualification epoch cutover requires a predecessor"
-                )
-        elif self._epoch_mode != LEGACY_EPOCH_MODE or authority.get("cutover") is not None:
+        try:
+            self._cutover = SubnetEpochCutover.from_mapping(
+                authority.get("cutover")
+            )
+        except (SubnetEpochError, TypeError) as exc:
             raise QualificationEpochGuardV2Error(
-                "qualification epoch authority is invalid"
+                "qualification epoch cutover is invalid"
+            ) from exc
+        if self._cutover.netuid != self._netuid:
+            raise QualificationEpochGuardV2Error(
+                "qualification epoch cutover netuid differs"
+            )
+        if self._cutover.cutover_block <= 0:
+            raise QualificationEpochGuardV2Error(
+                "qualification epoch cutover requires a predecessor"
             )
 
     def _rpc(
@@ -264,11 +258,7 @@ class QualificationEpochGuardV2:
             or container_id < 0
         ):
             raise QualificationEpochGuardV2Error("qualification epoch scope is invalid")
-        if self._epoch_mode == STATEFUL_EPOCH_MODE:
-            observed_epoch = self._stateful_epoch()
-        else:
-            header = parse_finalized_header(self._rpc("chain_getHeader", (), 1))
-            observed_epoch = int(header["block"]) // CHAIN_FINALIZATION_EPOCH_BLOCKS
+        observed_epoch = self._stateful_epoch()
         if observed_epoch > current_epoch:
             print(
                 "   WARNING: Container %s: authenticated epoch changed %s -> %s "

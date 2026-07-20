@@ -15,7 +15,6 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from Leadpoet.utils.subnet_epoch import STATEFUL_EPOCH_MODE, get_epoch_mode
 from gateway.research_lab.bundles import contains_secret_material, sha256_json
 from gateway.research_lab.attested_scoring import (
     compare_promotion_gate_decision,
@@ -2585,20 +2584,11 @@ class ResearchLabPromotionController:
         # 2026-07-02 incident paid ~2.5h of a ~24h window). The bundle epoch is
         # kept for provenance; start_epoch comes from the live chain epoch.
         evaluation_epoch = int(score_bundle.get("evaluation_epoch") or self.config.evaluation_epoch or 0)
-        try:
-            current_epoch, _block, _epoch_source = await resolve_research_lab_evaluation_epoch(
+        current_epoch, _block, _epoch_source = (
+            await resolve_research_lab_evaluation_epoch(
                 self.config.evaluation_epoch
             )
-        except Exception as exc:
-            if get_epoch_mode() == STATEFUL_EPOCH_MODE:
-                raise
-            logger.warning(
-                "research_lab_champion_reward_epoch_resolution_failed_using_bundle_epoch "
-                "candidate=%s error=%s",
-                _short_ref(candidate["candidate_id"]),
-                str(exc)[:200],
-            )
-            current_epoch = evaluation_epoch
+        )
         obligation_input = {
             "uid": uid,
             "miner_uid": uid,
@@ -2772,20 +2762,11 @@ class ResearchLabPromotionController:
                 limit=20,
             )
             evaluation_epoch = int(score_bundle.get("evaluation_epoch") or getattr(self.config, "evaluation_epoch", 0) or 0)
-            try:
-                current_epoch, _block, _epoch_source = await resolve_research_lab_evaluation_epoch(
+            current_epoch, _block, _epoch_source = (
+                await resolve_research_lab_evaluation_epoch(
                     getattr(self.config, "evaluation_epoch", 0)
                 )
-            except Exception as exc:
-                if get_epoch_mode() == STATEFUL_EPOCH_MODE:
-                    raise
-                logger.warning(
-                    "research_lab_source_add_reward_epoch_resolution_failed_using_bundle_epoch "
-                    "candidate=%s error=%s",
-                    _short_ref(candidate_id),
-                    str(exc)[:200],
-                )
-                current_epoch = evaluation_epoch
+            )
             start_epoch = max(int(current_epoch), int(evaluation_epoch)) + 1
             from research_lab.source_add_rewards import create_leg2_reward
 

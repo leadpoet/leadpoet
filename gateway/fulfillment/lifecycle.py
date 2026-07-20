@@ -2079,36 +2079,22 @@ async def _get_current_epoch() -> int:
     instead of ``current_epoch + L_EPOCHS`` (e.g. 22264) — making every
     winner expired-at-birth and silently zeroing out fulfillment emission.
 
-    Using the async helper lets the lifecycle tick call ``await`` on a
-    helper that reads the cached block without going through the
-    sync-wrapper guard.  Stateful mode must fail closed on a chain-authority
-    outage: assigning a reward against epoch zero would immediately corrupt
-    its expiry key.  The zero fallback is retained only for the staged legacy
-    compatibility mode, where callers already treat it as unavailable.
+    Assigning a reward without the official mapped epoch would corrupt its
+    expiry key, so an authority outage fails closed.
     """
-    from gateway.utils.epoch import (
-        STATEFUL_EPOCH_MODE,
-        get_current_epoch_id_async,
-        get_epoch_mode,
-    )
+    from gateway.utils.epoch import get_current_epoch_id_async
 
     try:
         return int(await get_current_epoch_id_async())
     except Exception as e:
-        if get_epoch_mode() == STATEFUL_EPOCH_MODE:
-            logger.error(
-                "stateful_fulfillment_epoch_authority_unavailable type=%s error=%s",
-                type(e).__name__,
-                str(e)[:200],
-            )
-            raise RuntimeError(
-                "stateful fulfillment reward epoch authority is unavailable"
-            ) from e
-        logger.warning(
-            f"_get_current_epoch() fell back to 0 (genuine subtensor failure): "
-            f"{type(e).__name__}: {e}"
+        logger.error(
+            "fulfillment_epoch_authority_unavailable type=%s error=%s",
+            type(e).__name__,
+            str(e)[:200],
         )
-        return 0
+        raise RuntimeError(
+            "fulfillment reward epoch authority is unavailable"
+        ) from e
 
 
 async def _expire_rewards(supabase) -> None:

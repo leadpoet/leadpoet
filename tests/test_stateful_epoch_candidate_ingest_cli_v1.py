@@ -8,7 +8,6 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from Leadpoet.utils.subnet_epoch import (
-    LEGACY_EPOCH_MODE,
     SubnetEpochCutover,
     SubnetEpochSnapshot,
 )
@@ -256,7 +255,6 @@ async def test_dry_run_reuses_route_checks_with_zero_persistence_calls(monkeypat
 
     monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {HOTKEY})
     monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
-    monkeypatch.setattr(weights_api, "get_epoch_mode", lambda: LEGACY_EPOCH_MODE)
     monkeypatch.setattr(weights_api, "get_subtensor", lambda: object())
     monkeypatch.setattr(
         weights_api,
@@ -414,7 +412,6 @@ async def test_fresh_process_uses_explicit_release_not_empty_dynamic_cache(
     monkeypatch.setattr(pcr0_builder, "verify_pcr0", forbidden_dynamic_cache)
     monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {HOTKEY})
     monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
-    monkeypatch.setattr(weights_api, "get_epoch_mode", lambda: LEGACY_EPOCH_MODE)
     monkeypatch.setattr(weights_api, "get_subtensor", lambda: object())
     monkeypatch.setattr(
         weights_api,
@@ -460,7 +457,6 @@ async def test_valid_but_mismatched_release_fails_before_preview_persistence(
     document = _real_candidate_document()
     monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {HOTKEY})
     monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
-    monkeypatch.setattr(weights_api, "get_epoch_mode", lambda: LEGACY_EPOCH_MODE)
     monkeypatch.setattr(weights_api, "verify_wallet_signature", lambda *_args: True)
 
     async def forbidden_preview(*_args, **_kwargs):

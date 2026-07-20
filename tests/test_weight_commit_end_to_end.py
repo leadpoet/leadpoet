@@ -24,7 +24,7 @@ def test_retired_v1_weight_write_is_unconditionally_gone():
     assert "/weights/submit/v2" in str(exc_info.value.detail)
 
 
-def test_primary_has_no_v1_fallback_and_auditor_v1_path_stays_verified():
+def test_primary_and_auditor_have_no_v1_weight_fallback():
     root = Path(__file__).resolve().parents[1]
     primary = (root / "neurons" / "validator.py").read_text(encoding="utf-8")
     auditor = (root / "neurons" / "auditor_validator.py").read_text(
@@ -34,9 +34,7 @@ def test_primary_has_no_v1_fallback_and_auditor_v1_path_stays_verified():
     assert "build_legacy_v1_submission" not in primary
     assert "_publish_legacy_v1_bundle" not in primary
     assert "_set_legacy_weights_until_epoch_end" not in primary
-    # The auditor's V1 path is intentionally present, selected by the
-    # auditor-only AUDITOR_WEIGHT_PROTOCOL variable, and every mode keeps the
-    # strict verification chain — there is no unverified fallback vector.
     assert "AUDITOR_WEIGHT_PROTOCOL" in auditor
-    assert "verify_attested_weights_v1" in auditor
+    assert "verify_attested_weights_v1" not in auditor
+    assert "fetch_attested_weights_v1" not in auditor
     assert "no fallback vector will be submitted" in auditor

@@ -138,24 +138,25 @@ def _weight_inputs_authorization():
     )
 
 
-def _patch_legacy_namespace_open(monkeypatch):
-    async def _legacy_namespace_open(*_args, **_kwargs):
+def _patch_epoch_authority(monkeypatch):
+    async def _official_epoch_authority(**_kwargs):
         return {
-            "lifecycle_state": "legacy_open",
-            "mapping_hash": None,
-            "last_legacy_epoch_id": None,
-            "first_settlement_epoch_id": None,
+            "schema_version": "leadpoet.weight_epoch_authority.v1",
+            "epoch_scheme": "bittensor.subnet_epoch_index.v1",
+            "settlement_epoch_id": 300,
+            "subnet_epoch_index": 235,
+            "epoch_block": 350,
         }
 
     monkeypatch.setattr(
         weights_api,
-        "assert_legacy_epoch_namespace_open_async",
-        _legacy_namespace_open,
+        "_verify_epoch_block_authority",
+        _official_epoch_authority,
     )
 
 
 def _patch_common(monkeypatch):
-    _patch_legacy_namespace_open(monkeypatch)
+    _patch_epoch_authority(monkeypatch)
     monkeypatch.setattr(
         weights_api,
         "_validate_authoritative_v2_submission",
@@ -308,7 +309,7 @@ async def test_weight_inputs_v2_authenticates_and_returns_complete_measured_set(
         },
     }
     calls = []
-    _patch_legacy_namespace_open(monkeypatch)
+    _patch_epoch_authority(monkeypatch)
 
     async def load_graph(**kwargs):
         calls.append(("load", kwargs))
@@ -363,7 +364,7 @@ async def test_weight_inputs_v2_fails_closed_on_missing_allocation_lineage(monke
     from gateway.research_lab import attested_v2_store
 
     authorization = _weight_inputs_authorization()
-    _patch_legacy_namespace_open(monkeypatch)
+    _patch_epoch_authority(monkeypatch)
 
     async def missing(**_kwargs):
         raise RuntimeError("lineage missing")

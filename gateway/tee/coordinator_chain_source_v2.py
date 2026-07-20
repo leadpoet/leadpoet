@@ -9,8 +9,6 @@ import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from Leadpoet.utils.subnet_epoch import (
-    LEGACY_EPOCH_MODE,
-    STATEFUL_EPOCH_MODE,
     SubnetEpochCutover,
     SubnetEpochError,
 )
@@ -78,42 +76,33 @@ class CoordinatorChainSourceV2:
         }
         self._sleep = sleep
         self._clock = clock
-        authority = dict(
-            epoch_authority
-            if epoch_authority is not None
-            else {"mode": LEGACY_EPOCH_MODE, "cutover": None}
-        )
+        if epoch_authority is None:
+            raise CoordinatorChainSourceV2Error(
+                "coordinator epoch authority is unavailable"
+            )
+        authority = dict(epoch_authority)
         if set(authority) != {"mode", "cutover"}:
             raise CoordinatorChainSourceV2Error(
                 "coordinator epoch authority fields are invalid"
             )
-        self._epoch_mode = str(authority.get("mode") or "").strip().lower()
-        self._epoch_cutover = None
-        if self._epoch_mode == STATEFUL_EPOCH_MODE:
-            try:
-                self._epoch_cutover = SubnetEpochCutover.from_mapping(
-                    authority.get("cutover")
-                )
-            except (SubnetEpochError, TypeError) as exc:
-                raise CoordinatorChainSourceV2Error(
-                    "coordinator stateful epoch cutover is invalid"
-                ) from exc
-        elif (
-            self._epoch_mode != LEGACY_EPOCH_MODE
-            or authority.get("cutover") is not None
-        ):
+        if str(authority.get("mode") or "").strip().lower() != "stateful_v1":
             raise CoordinatorChainSourceV2Error(
                 "coordinator epoch authority is invalid"
             )
+        try:
+            self._epoch_cutover = SubnetEpochCutover.from_mapping(
+                authority.get("cutover")
+            )
+        except (SubnetEpochError, TypeError) as exc:
+            raise CoordinatorChainSourceV2Error(
+                "coordinator stateful epoch cutover is invalid"
+            ) from exc
         for provider_id in ("bittensor_chain", "coingecko"):
             if not self._retry_policy_hashes.get(provider_id):
                 raise CoordinatorChainSourceV2Error(
                     "%s retry policy is unavailable" % provider_id
                 )
-        if (
-            self._epoch_mode == STATEFUL_EPOCH_MODE
-            and not self._retry_policy_hashes.get("bittensor_archive")
-        ):
+        if not self._retry_policy_hashes.get("bittensor_archive"):
             raise CoordinatorChainSourceV2Error(
                 "bittensor_archive retry policy is unavailable"
             )
@@ -129,16 +118,6 @@ class CoordinatorChainSourceV2:
     ) -> Dict[str, Any]:
         """Bind a finalized header to the configured workflow epoch scheme."""
 
-        if self._epoch_mode == LEGACY_EPOCH_MODE:
-            return {
-                "mode": LEGACY_EPOCH_MODE,
-                "workflow_epoch_id": (
-                    int(header["block"]) // CHAIN_FINALIZATION_EPOCH_BLOCKS
-                ),
-                "official_subnet_epoch_id": None,
-                "cutover_mapping_hash": None,
-                "state": None,
-            }
         cutover = self._epoch_cutover
         if cutover is None or cutover.netuid != int(netuid):
             raise CoordinatorChainSourceV2Error(
@@ -321,7 +300,7 @@ class CoordinatorChainSourceV2:
                 "coordinator finalized subnet epoch predates the cutover"
             ) from exc
         return {
-            "mode": STATEFUL_EPOCH_MODE,
+            "mode": "stateful_v1",
             "workflow_epoch_id": workflow_epoch,
             "official_subnet_epoch_id": state["SubnetEpochIndex"],
             "cutover_mapping_hash": cutover.mapping_hash,

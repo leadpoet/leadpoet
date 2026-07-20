@@ -9,14 +9,10 @@ from Leadpoet.utils.subnet_epoch import (
     CUTOVER_JSON_ENV,
     CUTOVER_PATH_ENV,
     EPOCH_SCHEME,
-    EPOCH_MODE_ENV,
-    LEGACY_EPOCH_MODE,
     OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT,
-    STATEFUL_EPOCH_MODE,
     SubnetEpochCutover,
     SubnetEpochError,
     SubnetEpochSnapshot,
-    get_epoch_mode,
     load_subnet_epoch_cutover,
     read_subnet_epoch_snapshot,
     validate_subnet_epoch_cutover_anchor,
@@ -68,8 +64,6 @@ def test_historical_sn71_vector_uses_stateful_epoch() -> None:
     assert state.epoch_block == 4
     assert state.next_epoch_block == 8_637_516
     assert state.blocks_remaining == 356
-    assert state.current_block % 360 == 40
-    assert state.subnet_epoch_index != state.current_block // 360
 
 
 def test_pending_epoch_moves_boundary_earlier_and_due_state_stays_on_same_index() -> None:
@@ -165,13 +159,6 @@ def test_cutover_rejects_hash_tampering_and_wrong_lineage() -> None:
         ).settlement_epoch_id(cutover)
     with pytest.raises(SubnetEpochError, match="predates"):
         cutover.settlement_epoch_id(23_926)
-
-
-def test_mode_defaults_legacy_and_rejects_unknown_values() -> None:
-    assert get_epoch_mode({}) == LEGACY_EPOCH_MODE
-    assert get_epoch_mode({EPOCH_MODE_ENV: " STATEFUL_V1 "}) == STATEFUL_EPOCH_MODE
-    with pytest.raises(SubnetEpochError, match="unsupported"):
-        get_epoch_mode({EPOCH_MODE_ENV: "estimated"})
 
 
 def test_cutover_loader_requires_one_valid_manifest(tmp_path) -> None:

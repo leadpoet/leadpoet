@@ -101,7 +101,7 @@ async def test_manifest_proposal_is_archive_first_and_candidate_independent():
 
 
 @pytest.mark.asyncio
-async def test_manifest_proposal_rejects_boundary_outside_reserved_bucket():
+async def test_manifest_proposal_uses_official_boundary_not_global_bucket():
     async def select_rows(_table, **_kwargs):
         return [
             {
@@ -113,18 +113,18 @@ async def test_manifest_proposal_rejects_boundary_outside_reserved_bucket():
             }
         ]
 
-    with pytest.raises(
-        cutover_cli.StatefulEpochCutoverActivationError,
-        match="reserved cutover transition",
-    ):
-        await cutover_cli.propose_subnet_epoch_cutover_manifest_v1(
-            network_genesis_hash=GENESIS,
-            netuid=71,
-            last_legacy_epoch_id=100,
-            select_rows=select_rows,
-            load_boundary=lambda _netuid: _async_value(_boundary(block=36_000)),
-            validate_anchor=lambda _cutover: _async_value(None),
-        )
+    report = await cutover_cli.propose_subnet_epoch_cutover_manifest_v1(
+        network_genesis_hash=GENESIS,
+        netuid=71,
+        last_legacy_epoch_id=100,
+        select_rows=select_rows,
+        load_boundary=lambda _netuid: _async_value(_boundary(block=36_000)),
+        validate_anchor=lambda _cutover: _async_value(None),
+    )
+
+    manifest = SubnetEpochCutover.from_mapping(report["manifest"])
+    assert manifest.cutover_block == 36_000
+    assert manifest.first_settlement_epoch_id == 101
 
 
 @pytest.mark.asyncio

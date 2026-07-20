@@ -48,25 +48,12 @@ router = APIRouter(prefix="/validate", tags=["Validation"])
 
 async def _load_epoch_initialization_payload(
     epoch_id: int,
-    *,
-    stateful_epoch_mode: bool,
 ) -> Mapping[str, Any]:
-    """Load the immutable assignment with stateful split-brain protection."""
+    """Load the immutable assignment from the mapped-epoch ledger."""
 
-    if stateful_epoch_mode:
-        from gateway.tasks.epoch_lifecycle import get_durable_epoch_event
+    from gateway.tasks.epoch_lifecycle import get_durable_epoch_event
 
-        row = await get_durable_epoch_event("EPOCH_INITIALIZATION", epoch_id)
-    else:
-        result = await asyncio.to_thread(
-            lambda: supabase.table("transparency_log")
-                .select("payload")
-                .eq("event_type", "EPOCH_INITIALIZATION")
-                .eq("payload->>epoch_id", str(epoch_id))
-                .single()
-                .execute()
-        )
-        row = result.data
+    row = await get_durable_epoch_event("EPOCH_INITIALIZATION", epoch_id)
     if not isinstance(row, Mapping):
         raise HTTPException(
             status_code=404,
@@ -257,11 +244,9 @@ async def submit_validation(event: ValidationEvent):
     # CRITICAL SECURITY: Prevent validators from submitting old/stale validations
     # or pre-computing validations for future epochs
     from gateway.utils.epoch import (
-        STATEFUL_EPOCH_MODE,
         get_current_epoch_admission_context_async,
         get_epoch_blocks_remaining,
         get_epoch_elapsed,
-        get_epoch_mode,
     )
     from Leadpoet.utils.subnet_epoch import SubnetEpochError
 
@@ -286,22 +271,11 @@ async def submit_validation(event: ValidationEvent):
     # ========================================
     # Step 5.2: Verify within the coherent validation submission window.
     # ========================================
-    # The block ranges below are the staged legacy policy:
-    # - Blocks 0-350: Fetch leads from gateway
-    # - Blocks 351-355: Complete validation and submit results
-    # - Blocks 356-359: Buffer period (no new submissions)
-    # - Block 360+: Epoch closed (next epoch begins, reveal phase starts)
-    # Stateful mode closes at 30 remaining because consensus begins at 30 and
-    # runs through 16 remaining. Accepting later evidence would omit it from
-    # the already-started consensus computation.
+    # Submission closes 30 official SN71 blocks before the boundary because
+    # consensus begins then. Later evidence would miss that computation.
     block_within_epoch = get_epoch_elapsed(epoch_timing)
     blocks_remaining = get_epoch_blocks_remaining(epoch_timing)
-    stateful_epoch_mode = get_epoch_mode() == STATEFUL_EPOCH_MODE
-    window_closed = (
-        blocks_remaining <= 30
-        if stateful_epoch_mode
-        else block_within_epoch > 355
-    )
+    window_closed = blocks_remaining <= 30
     if window_closed:
         raise HTTPException(
             status_code=400,
@@ -324,13 +298,10 @@ async def submit_validation(event: ValidationEvent):
     try:
         from gateway.config import MAX_LEADS_PER_EPOCH
         
-        # Fetch the frozen canonical assignment for this epoch. Stateful mode
-        # requires the exact durable settlement-ordinal event and rejects any
-        # missing/duplicate/conflicting ledger state; it never falls through a
-        # raw numeric JSON lookup that could collide with a legacy event.
+        # Fetch the frozen canonical assignment for this mapped settlement
+        # epoch. Missing, duplicate, or conflicting durable state fails closed.
         epoch_payload = await _load_epoch_initialization_payload(
-            event.payload.epoch_id,
-            stateful_epoch_mode=stateful_epoch_mode,
+            event.payload.epoch_id
         )
         assigned_lead_ids = epoch_payload.get("assignment", {}).get("assigned_lead_ids", [])
         
@@ -366,18 +337,13 @@ async def submit_validation(event: ValidationEvent):
         # Re-raise HTTPException (validation errors)
         raise
     except Exception as e:
-        if stateful_epoch_mode:
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Stateful epoch assignment authority is unavailable; "
-                    "validation failed closed"
-                ),
-            ) from e
-        # Preserve the legacy rollout behavior until coordinated activation.
-        print(f"⚠️  Warning: Failed to verify lead assignment (continuing anyway): {e}")
-        import traceback
-        traceback.print_exc()
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Mapped epoch assignment authority is unavailable; "
+                "validation failed closed"
+            ),
+        ) from e
     
     # ========================================
     # Step 5.4: Verify no duplicate submission for this epoch

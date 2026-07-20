@@ -36,10 +36,7 @@ def test_direct_epoch_probe_runs_in_killable_proxy_free_subprocess(monkeypatch):
     assert "subtensor," in probe
     assert "finalized=True" in probe
     assert "validate_cutover_anchor_from_archive(cutover)" in probe
-    assert (
-        "assert_legacy_epoch_namespace_open(epoch, force_refresh=True)"
-        in probe
-    )
+    assert "assert_legacy_epoch_namespace_open" not in probe
     assert "validate_subnet_epoch_cutover_anchor" not in probe
     assert "HTTPS_PROXY" not in captured["env"]
     assert captured["timeout"] == 19.0

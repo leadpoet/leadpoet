@@ -26,8 +26,6 @@ from datetime import datetime, timezone
 import bittensor as bt
 
 from Leadpoet.utils.subnet_epoch import (
-    STATEFUL_EPOCH_MODE,
-    get_epoch_mode,
     load_subnet_epoch_cutover,
     read_subnet_epoch_snapshot,
 )
@@ -115,57 +113,41 @@ class EpochMonitor:
         # Polling loop (like validator)
         while True:
             try:
-                if get_epoch_mode() == STATEFUL_EPOCH_MODE:
-                    cutover = load_subnet_epoch_cutover()
-                    if self._validated_cutover_hash != cutover.mapping_hash:
-                        from gateway.utils.epoch import (
-                            validate_stateful_cutover_authority_async,
-                        )
-
-                        await validate_stateful_cutover_authority_async(cutover)
-                        await asyncio.to_thread(
-                            validate_cutover_anchor_from_archive,
-                            cutover,
-                        )
-                        self._validated_cutover_hash = cutover.mapping_hash
-                    snapshot = await asyncio.to_thread(
-                        read_subnet_epoch_snapshot,
-                        self.subtensor,
-                        netuid=self.netuid,
-                        finalized=True,
+                cutover = load_subnet_epoch_cutover()
+                if self._validated_cutover_hash != cutover.mapping_hash:
+                    from gateway.utils.epoch import (
+                        validate_stateful_cutover_authority_async,
                     )
-                    block_number = snapshot.current_block
-                else:
-                    snapshot = None
-                    # Legacy compatibility path during staged rollout.
-                    block_number = self.subtensor.get_current_block()
+
+                    await validate_stateful_cutover_authority_async(cutover)
+                    await asyncio.to_thread(
+                        validate_cutover_anchor_from_archive,
+                        cutover,
+                    )
+                    self._validated_cutover_hash = cutover.mapping_hash
+                snapshot = await asyncio.to_thread(
+                    read_subnet_epoch_snapshot,
+                    self.subtensor,
+                    netuid=self.netuid,
+                    finalized=True,
+                )
+                block_number = snapshot.current_block
                 
                 # Log block occasionally (not every block - too spammy)
                 if last_logged_block is None or block_number - last_logged_block >= 10:
-                    if snapshot is not None:
-                        settlement_epoch = snapshot.settlement_epoch_id(
-                            load_subnet_epoch_cutover()
-                        )
-                        print(
-                            f"📦 Block {block_number}: official subnet epoch "
-                            f"{snapshot.subnet_epoch_index}, settlement epoch "
-                            f"{settlement_epoch}, elapsed {snapshot.epoch_block}, "
-                            f"remaining {snapshot.blocks_remaining}/{snapshot.tempo}"
-                        )
-                    else:
-                        current_epoch = block_number // 360
-                        block_within_epoch = block_number % 360
-                        print(f"📦 Block {block_number}: Epoch {current_epoch}, Block {block_within_epoch}/360")
+                    settlement_epoch = snapshot.settlement_epoch_id(cutover)
+                    print(
+                        f"📦 Block {block_number}: official subnet epoch "
+                        f"{snapshot.subnet_epoch_index}, settlement epoch "
+                        f"{settlement_epoch}, elapsed {snapshot.epoch_block}, "
+                        f"remaining {snapshot.blocks_remaining}/{snapshot.tempo}"
+                    )
                     last_logged_block = block_number
                 
-                # Process block
-                if snapshot is not None:
-                    if not self._stateful_hydrated:
-                        await self._hydrate_stateful_state(snapshot)
-                        self._stateful_hydrated = True
-                    await self._process_stateful_snapshot(snapshot)
-                else:
-                    await self._process_block(block_number)
+                if not self._stateful_hydrated:
+                    await self._hydrate_stateful_state(snapshot)
+                    self._stateful_hydrated = True
+                await self._process_stateful_snapshot(snapshot)
                 
                 # Wait before next poll (12 seconds = approx block time)
                 await asyncio.sleep(12)
@@ -566,148 +548,7 @@ class EpochMonitor:
                     )
                 )
     
-    async def _process_block(self, block_number: int):
-        """
-        Process a block and trigger epoch lifecycle events.
-        
-        Args:
-            block_number: Current block number from chain
-        
-        This method:
-        1. Checks if epoch has changed (new epoch start)
-        2. Checks if validation phase ended (block 0 of next epoch)
-        3. Checks if epoch is closed and needs reveals/consensus
-        
-        All checks are non-blocking and independent.
-        """
-        try:
-            current_epoch = block_number // 360
-            block_within_epoch = block_number % 360
-            from gateway.utils.epoch import (
-                assert_legacy_epoch_namespace_open_async,
-            )
-
-            await assert_legacy_epoch_namespace_open_async(
-                current_epoch,
-                force_refresh=True,
-            )
-            
-            # Count blocks since startup (for grace period)
-            self.startup_block_count += 1
-            
-            # ════════════════════════════════════════════════════════════════
-            # Check 1: New epoch started (block 0, or first time seeing this epoch)
-            # ════════════════════════════════════════════════════════════════
-            if self.last_epoch is None or current_epoch > self.last_epoch:
-                print(f"\n{'='*80}")
-                print(f"🚀 EPOCH TRANSITION DETECTED: {self.last_epoch} → {current_epoch}")
-                print(f"{'='*80}")
-                
-                self.last_epoch = current_epoch
-            
-            # ════════════════════════════════════════════════════════════════
-            # Check 1b: Epoch needs initialization (not yet successfully initialized)
-            # This is SEPARATE from transition detection - allows retry on failure
-            # ════════════════════════════════════════════════════════════════
-            if current_epoch not in self.initialized_epochs:
-                if current_epoch not in self.initializing_epochs:
-                    # Mark as initializing BEFORE creating task (prevents duplicate tasks)
-                    self.initializing_epochs.add(current_epoch)
-                    print(f"🔄 Starting initialization for epoch {current_epoch}...")
-                    
-                    # Trigger epoch start (non-blocking)
-                    asyncio.create_task(self._on_epoch_start(current_epoch))
-            
-            # ════════════════════════════════════════════════════════════════
-            # Check 2: Validation phase ended (block 0 of NEXT epoch = block 360 of PREVIOUS)
-            # ════════════════════════════════════════════════════════════════
-            if block_within_epoch == 0 and current_epoch > 0:
-                previous_epoch = current_epoch - 1
-                
-                if (
-                    previous_epoch not in self.validation_ended_epochs
-                    and previous_epoch not in self.validation_ending_epochs
-                ):
-                    print(f"\n{'='*80}")
-                    print(f"⏰ VALIDATION PHASE ENDED: Epoch {previous_epoch}")
-                    print(f"{'='*80}")
-                    
-                    # Trigger validation end (non-blocking)
-                    self.validation_ending_epochs.add(previous_epoch)
-                    asyncio.create_task(self._on_validation_end(previous_epoch))
-            
-            # ════════════════════════════════════════════════════════════════
-            # Check 3: Epoch closed and needs reveal/consensus (check previous epochs)
-            # ════════════════════════════════════════════════════════════════
-            # STARTUP GRACE PERIOD: Skip consensus for first 10 blocks
-            # This allows metagraph cache to warm up before triggering heavy operations
-            if self.startup_block_count <= 10:
-                if self.startup_block_count == 10:
-                    print("✅ Startup grace period complete - consensus checks now active")
-                # Skip consensus checks during startup
-                return
-            
-            # ════════════════════════════════════════════════════════════════
-            # Check 4: Deregistered miner cleanup at block 357 (before next epoch)
-            # ════════════════════════════════════════════════════════════════
-            # Clean up leads from miners who left the subnet
-            # Runs at block 357 to clean DB BEFORE next epoch's initialization at block 360
-            # This ensures validators never receive leads from deregistered miners
-            if block_within_epoch == 357 and current_epoch > 0:
-                if not hasattr(self, '_cleanup_epochs'):
-                    self._cleanup_epochs = set()
-                
-                if current_epoch not in self._cleanup_epochs:
-                    print(f"\n{'='*80}")
-                    print(f"🧹 MINER CLEANUP TRIGGER: Block 357 of epoch {current_epoch}")
-                    print(f"   Cleaning DB before epoch {current_epoch + 1} initialization...")
-                    print(f"{'='*80}")
-                    
-                    # Trigger cleanup (non-blocking - runs in background)
-                    asyncio.create_task(self._run_miner_cleanup(current_epoch))
-                    
-                    self._cleanup_epochs.add(current_epoch)
-            
-            # ════════════════════════════════════════════════════════════════
-            # Check 5: IMMEDIATE REVEAL MODE - Consensus for CURRENT epoch at block 330+
-            # ════════════════════════════════════════════════════════════════
-            # With immediate reveal, validators submit hash+values together during epoch.
-            # Consensus can run at block 330+ (same epoch) instead of waiting for next epoch.
-            # This eliminates the reveal phase entirely and reduces latency.
-            print(f"   🔍 Check 5: block_within_epoch={block_within_epoch}, current_epoch={current_epoch}")
-            if 330 <= block_within_epoch <= 358 and current_epoch > 0:
-                # IMMEDIATE REVEAL: Compute consensus for CURRENT epoch (data already submitted)
-                consensus_epoch = current_epoch
-                print(f"   ✅ BLOCK {block_within_epoch} DETECTED! IMMEDIATE REVEAL - checking current epoch {consensus_epoch}")
-                
-                # Check if epoch is already being processed OR already completed
-                # This prevents the race condition where polling loop triggers
-                # consensus multiple times (once per block in 328-330 window)
-                if consensus_epoch in self.processing_epochs:
-                    print(f"   ⚠️  Epoch {consensus_epoch} already being processed (task running)")
-                elif consensus_epoch in self.closed_epochs:
-                    print(f"   ⚠️  Epoch {consensus_epoch} already completed (in closed_epochs)")
-                else:
-                    # Mark as processing BEFORE creating task (prevents duplicate tasks)
-                    self.processing_epochs.add(consensus_epoch)
-                    
-                    print(f"\n{'='*80}")
-                    print(f"📊 IMMEDIATE REVEAL CONSENSUS: Block {block_within_epoch} of epoch {current_epoch}")
-                    print(f"   Computing consensus for CURRENT epoch {consensus_epoch} (data already submitted with hashes)")
-                    print(f"{'='*80}")
-                    
-                    # Trigger consensus (non-blocking)
-                    # IMPORTANT: skip_closed_check=True because we're running consensus for the
-                    # CURRENT epoch at block 330+, which is not "closed" yet (closes at block 360)
-                    asyncio.create_task(self._check_for_reveals(consensus_epoch, skip_closed_check=True))
-        
-        except Exception as e:
-            print(f"❌ Error in EpochMonitor._process_block: {e}")
-            import traceback
-            traceback.print_exc()
-            # Don't crash - log error and continue
-    
-    async def _on_epoch_start(self, epoch_id: int, epoch_snapshot=None):
+    async def _on_epoch_start(self, epoch_id: int, epoch_snapshot):
         """
         Handle new epoch start.
         
@@ -726,20 +567,12 @@ class EpochMonitor:
             
             # Import lifecycle functions (reuse existing code)
             from gateway.tasks.epoch_lifecycle import compute_and_log_epoch_initialization
-            from gateway.utils.epoch import get_epoch_start_time_async, get_epoch_end_time_async, get_epoch_close_time_async
+            from gateway.utils.epoch import get_current_epoch_times
             from gateway.utils.leads_cache import cleanup_old_epochs
-            
-            if epoch_snapshot is not None:
-                from gateway.utils.epoch import get_current_epoch_times
 
-                epoch_start, epoch_end, epoch_close = get_current_epoch_times(
-                    epoch_snapshot
-                )
-            else:
-                # Calculate legacy epoch boundaries using async versions.
-                epoch_start = await get_epoch_start_time_async(epoch_id)
-                epoch_end = await get_epoch_end_time_async(epoch_id)
-                epoch_close = await get_epoch_close_time_async(epoch_id)
+            epoch_start, epoch_end, epoch_close = get_current_epoch_times(
+                epoch_snapshot
+            )
             
             print(f"   Start: {epoch_start.isoformat()}")
             print(f"   End (validation): {epoch_end.isoformat()}")
@@ -835,21 +668,16 @@ class EpochMonitor:
             print(f"   Ended at: {epoch_end.isoformat()}")
             print(f"   Epoch closed at: {epoch_close.isoformat()}")
             
-            # Log EPOCH_END event. Stateful lifecycle rows carry an explicit
-            # key discriminator used by the database uniqueness authority;
-            # legacy payloads remain byte-for-byte compatible.
             end_payload = {
                 "epoch_id": epoch_id,
                 "end_time": epoch_end.isoformat(),
                 "phase": "epoch_ended",
             }
-            epoch_authority = None
-            if get_epoch_mode() == STATEFUL_EPOCH_MODE:
-                epoch_authority = (
-                    await load_stateful_epoch_initialization_authority(epoch_id)
-                )
-                end_payload["epoch_key_semantics"] = "settlement_ordinal"
-                end_payload["epoch_authority"] = epoch_authority
+            epoch_authority = (
+                await load_stateful_epoch_initialization_authority(epoch_id)
+            )
+            end_payload["epoch_key_semantics"] = "settlement_ordinal"
+            end_payload["epoch_authority"] = epoch_authority
             await log_epoch_event("EPOCH_END", epoch_id, end_payload)
             
             # Compute and log EPOCH_INPUTS (hash of all events during epoch)
@@ -908,20 +736,19 @@ class EpochMonitor:
                 )
                 import asyncio
 
-                if get_epoch_mode() == STATEFUL_EPOCH_MODE:
-                    current_snapshot, workflow_epoch = (
-                        await get_current_epoch_context_async(finalized=True)
+                current_snapshot, workflow_epoch = (
+                    await get_current_epoch_context_async(finalized=True)
+                )
+                if workflow_epoch != epoch_id or not (
+                    16 <= current_snapshot.blocks_remaining <= 30
+                ):
+                    print(
+                        f"   ⚠️  Consensus for epoch {epoch_id} is "
+                        "outside the finalized 30..16 remaining-block "
+                        "window; refusing a late computation"
                     )
-                    if workflow_epoch != epoch_id or not (
-                        16 <= current_snapshot.blocks_remaining <= 30
-                    ):
-                        print(
-                            f"   ⚠️  Consensus for epoch {epoch_id} is "
-                            "outside the finalized 30..16 remaining-block "
-                            "window; refusing a late computation"
-                        )
-                        self.processing_epochs.discard(epoch_id)
-                        return
+                    self.processing_epochs.discard(epoch_id)
+                    return
                 
                 # Check if epoch is actually closed (skip for IMMEDIATE REVEAL MODE on current epoch)
                 if not skip_closed_check and not await is_epoch_closed_async(epoch_id):

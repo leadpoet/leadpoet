@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from Leadpoet.utils.subnet_epoch import STATEFUL_EPOCH_MODE, SubnetEpochCutover
+from Leadpoet.utils.subnet_epoch import SubnetEpochCutover
 from gateway.tee.qualification_epoch_guard_v2 import (
     QualificationEpochGuardV2,
     QualificationEpochGuardV2Error,
@@ -138,24 +138,15 @@ def _stateful_authority():
         first_settlement_epoch_id=101,
         last_legacy_epoch_id=100,
     )
-    return {"mode": STATEFUL_EPOCH_MODE, "cutover": cutover.to_dict()}
+    return {"mode": "stateful_v1", "cutover": cutover.to_dict()}
 
 
-def test_guard_matches_legacy_epoch_greater_than_semantics():
-    same = Transport(block=100 * 360 + 359)
-    guard = QualificationEpochGuardV2(same)
-    assert guard(100, 2) is False
-    request = json.loads(same.calls[0]["body"])
-    assert request == {
-        "id": 1,
-        "jsonrpc": "2.0",
-        "method": "chain_getHeader",
-        "params": [],
-    }
-    assert same.calls[0]["url"] == "https://entrypoint-finney.opentensor.ai/"
-
-    advanced = QualificationEpochGuardV2(Transport(block=101 * 360))
-    assert advanced(100, 2) is True
+def test_guard_rejects_missing_official_epoch_authority():
+    with pytest.raises(
+        QualificationEpochGuardV2Error,
+        match="epoch authority is unavailable",
+    ):
+        QualificationEpochGuardV2(Transport())
 
 
 @pytest.mark.parametrize(
@@ -167,7 +158,10 @@ def test_guard_matches_legacy_epoch_greater_than_semantics():
 )
 def test_guard_fails_closed_without_authenticated_chain_header(transport, match):
     with pytest.raises(QualificationEpochGuardV2Error, match=match):
-        QualificationEpochGuardV2(transport)(100, 0)
+        QualificationEpochGuardV2(
+            transport,
+            epoch_authority=_stateful_authority(),
+        )(100, 0)
 
 
 def test_stateful_guard_maps_exact_finalized_official_epoch():

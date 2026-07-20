@@ -18,8 +18,6 @@ from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Sequence
 from Leadpoet.utils.subnet_epoch import (
     CUTOVER_JSON_ENV,
     CUTOVER_PATH_ENV,
-    EPOCH_MODE_ENV,
-    STATEFUL_EPOCH_MODE,
     SubnetEpochCutover,
     SubnetEpochError,
     SubnetEpochSnapshot,
@@ -135,13 +133,12 @@ class StatefulEpochCutoverActivationError(RuntimeError):
 
 @contextmanager
 def _stateful_epoch_environment(cutover: SubnetEpochCutover):
-    """Temporarily select stateful semantics inside this operator process."""
+    """Temporarily install the cutover manifest inside this process."""
 
     previous = {
         name: os.environ.get(name)
-        for name in (EPOCH_MODE_ENV, CUTOVER_JSON_ENV, CUTOVER_PATH_ENV)
+        for name in (CUTOVER_JSON_ENV, CUTOVER_PATH_ENV)
     }
-    os.environ[EPOCH_MODE_ENV] = STATEFUL_EPOCH_MODE
     os.environ[CUTOVER_JSON_ENV] = json.dumps(
         cutover.to_dict(),
         sort_keys=True,
@@ -661,7 +658,6 @@ async def propose_subnet_epoch_cutover_manifest_v1(
         or snapshot.netuid != cutover.netuid
         or snapshot.current_block != snapshot.last_epoch_block
         or snapshot.epoch_block != 0
-        or snapshot.current_block // 360 != first_settlement_epoch_id
     ):
         raise StatefulEpochCutoverActivationError(
             "archive boundary is not the exact reserved cutover transition"

@@ -9,9 +9,7 @@ import pytest
 from fastapi import HTTPException, Response
 
 from Leadpoet.utils.subnet_epoch import (
-    EPOCH_MODE_ENV,
     CUTOVER_JSON_ENV,
-    STATEFUL_EPOCH_MODE,
     SubnetEpochCutover,
     SubnetEpochError,
     SubnetEpochSnapshot,
@@ -172,7 +170,6 @@ class _Subtensor:
 @pytest.fixture
 def stateful(monkeypatch):
     cutover = _cutover()
-    monkeypatch.setenv(EPOCH_MODE_ENV, STATEFUL_EPOCH_MODE)
     monkeypatch.setenv(CUTOVER_JSON_ENV, json.dumps(cutover.to_dict()))
     monkeypatch.setenv("BITTENSOR_NETUID", "71")
     from gateway.utils import epoch as epoch_utils
@@ -224,7 +221,6 @@ async def test_gateway_status_separates_official_and_settlement_ids(
     assert status["settlement_epoch_id"] == 23_993
     assert status["epoch_block"] == 4
     assert status["blocks_remaining"] == 356
-    assert status["mode"] == STATEFUL_EPOCH_MODE
 
 
 def test_live_state_stays_on_finney_while_cutover_anchor_uses_archive(
@@ -399,9 +395,7 @@ async def test_validation_assignment_uses_durable_stateful_authority(monkeypatch
         }
 
     monkeypatch.setattr(epoch_lifecycle, "get_durable_epoch_event", durable)
-    payload = await validate_api._load_epoch_initialization_payload(
-        23_993, stateful_epoch_mode=True
-    )
+    payload = await validate_api._load_epoch_initialization_payload(23_993)
     assert payload["assignment"]["assigned_lead_ids"] == ["lead-1"]
 
     async def unavailable(*_args, **_kwargs):
@@ -411,9 +405,7 @@ async def test_validation_assignment_uses_durable_stateful_authority(monkeypatch
         epoch_lifecycle, "get_durable_epoch_event", unavailable
     )
     with pytest.raises(RuntimeError, match="database unavailable"):
-        await validate_api._load_epoch_initialization_payload(
-            23_993, stateful_epoch_mode=True
-        )
+        await validate_api._load_epoch_initialization_payload(23_993)
 
 
 async def _async_value(value):
@@ -437,7 +429,7 @@ async def test_fulfillment_reward_epoch_fails_closed_in_stateful_mode(
     )
     with pytest.raises(
         RuntimeError,
-        match="stateful fulfillment reward epoch authority is unavailable",
+        match="fulfillment reward epoch authority is unavailable",
     ):
         await lifecycle._get_current_epoch()
 

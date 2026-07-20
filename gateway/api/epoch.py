@@ -23,7 +23,7 @@ from gateway.utils.assignment import get_validator_set  # deterministic_lead_ass
 from gateway.utils.signature import verify_wallet_signature
 from gateway.utils.registry import is_registered_hotkey_async  # Use async version
 from gateway.utils.leads_cache import get_cached_leads  # Import cache for instant lead distribution
-from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BITTENSOR_NETWORK
+from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 from supabase import create_client
 
 # Supabase client
@@ -188,11 +188,9 @@ async def get_epoch_leads(
     # Finalized state owns the workflow key. Best state is a separate liveness
     # veto and timing observation so finality lag cannot serve stale work.
     from gateway.utils.epoch import (
-        STATEFUL_EPOCH_MODE,
         get_current_epoch_admission_context_async,
         get_epoch_blocks_remaining,
         get_epoch_elapsed,
-        get_epoch_mode,
     )
     from Leadpoet.utils.subnet_epoch import SubnetEpochError
 
@@ -212,11 +210,7 @@ async def get_epoch_leads(
         )
     block_within_epoch = get_epoch_elapsed(epoch_timing)
     blocks_remaining = get_epoch_blocks_remaining(epoch_timing)
-    window_closed = (
-        blocks_remaining <= 30
-        if get_epoch_mode() == STATEFUL_EPOCH_MODE
-        else block_within_epoch > 350
-    )
+    window_closed = blocks_remaining <= 30
     if window_closed:
         raise HTTPException(
             status_code=400,
@@ -291,8 +285,7 @@ async def get_epoch_leads(
             "timestamp": datetime.utcnow().isoformat()
         }
     
-    # Cache miss - try EPOCH_INITIALIZATION first, fall back to direct queue query
-    print(f"⚠️  [CACHE MISS] Epoch {epoch_id} not cached, trying fallback approaches...")
+    print(f"⚠️  [CACHE MISS] Epoch {epoch_id} not cached")
     
     # Step 4: Try to fetch assigned leads from EPOCH_INITIALIZATION event
     import asyncio
@@ -301,54 +294,23 @@ async def get_epoch_leads(
     assigned_lead_ids = None
     queue_root = "unknown"
     validator_count = 0
-    use_direct_query = False
-    
     try:
         print(f"🔍 Step 4: Checking EPOCH_INITIALIZATION for epoch {epoch_id}...")
-        
-        # Query EPOCH_INITIALIZATION from transparency_log
-        # NOTE: epoch_id is stored INSIDE payload JSON, not as a column
+        from gateway.tasks.epoch_lifecycle import get_durable_epoch_event
+
         try:
-            from gateway.utils.epoch import STATEFUL_EPOCH_MODE, get_epoch_mode
-
-            stateful_epoch_mode = get_epoch_mode() == STATEFUL_EPOCH_MODE
-            if stateful_epoch_mode:
-                from gateway.tasks.epoch_lifecycle import (
-                    get_durable_epoch_event,
-                )
-
-                durable_init = await asyncio.wait_for(
-                    get_durable_epoch_event(
-                        "EPOCH_INITIALIZATION", epoch_id
-                    ),
-                    timeout=30.0,
-                )
-
-                class DurableInitializationResult:
-                    def __init__(self, row):
-                        self.data = [] if row is None else [row]
-
-                init_result = DurableInitializationResult(durable_init)
-            else:
-                init_result = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        lambda: supabase.table("transparency_log")
-                            .select("payload")
-                            .eq("event_type", "EPOCH_INITIALIZATION")
-                            .eq("payload->>epoch_id", str(epoch_id))
-                            .limit(1)
-                            .execute()
-                    ),
-                    timeout=30.0
-                )
+            durable_init = await asyncio.wait_for(
+                get_durable_epoch_event("EPOCH_INITIALIZATION", epoch_id),
+                timeout=30.0,
+            )
         except asyncio.TimeoutError:
-            print(f"⚠️  EPOCH_INITIALIZATION query timed out, falling back to direct query...")
-            use_direct_query = True
-            init_result = None
-        
-        if init_result and init_result.data:
-            # Extract assigned_lead_ids from EPOCH_INITIALIZATION payload
-            epoch_payload = init_result.data[0].get("payload", {})
+            raise HTTPException(
+                status_code=504,
+                detail="Durable epoch initialization query timed out",
+            )
+
+        if durable_init is not None:
+            epoch_payload = durable_init.get("payload", {})
             assigned_lead_ids = epoch_payload.get("assignment", {}).get("assigned_lead_ids", [])
             queue_document = epoch_payload.get("queue_state") or epoch_payload.get("queue") or {}
             queue_root = queue_document.get(
@@ -361,226 +323,24 @@ async def get_epoch_leads(
             print(f"   📊 Queue Root: {queue_root[:16] if queue_root != 'unknown' else 'unknown'}...")
             print(f"   📊 Validators: {validator_count}")
         else:
-            print(f"   ⚠️  No EPOCH_INITIALIZATION for epoch {epoch_id}, using direct queue query...")
-            use_direct_query = True
-    
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Durable EPOCH_INITIALIZATION for epoch {epoch_id} is not "
+                    "available yet"
+                ),
+            )
     except Exception as e:
-        print(f"⚠️  Error checking EPOCH_INITIALIZATION: {e}, falling back to direct query...")
-        use_direct_query = True
-    
-    # Fallback: Query leads directly AND create EPOCH_INITIALIZATION to ensure consistency
-    # CRITICAL: We must create EPOCH_INITIALIZATION so /validate uses the same snapshot
-    leads_result = None  # Will be set by fallback or Step 5
-
-    # In stateful mode only the finalized-boundary monitor may originate the
-    # immutable queue assignment.  A request-time fallback would race the
-    # monitor, use a different queue snapshot, and create duplicate
-    # EPOCH_INITIALIZATION rows that make validation fail closed.
-    if (
-        get_epoch_mode() == STATEFUL_EPOCH_MODE
-        and (use_direct_query or assigned_lead_ids is None)
-    ):
+        if isinstance(e, HTTPException):
+            raise
         raise HTTPException(
             status_code=503,
-            detail=(
-                f"Durable EPOCH_INITIALIZATION for epoch {epoch_id} is not "
-                "available yet"
-            ),
-        )
+            detail=f"Durable epoch initialization is unavailable: {str(e)}",
+        ) from e
+
+    leads_result = None
     
-    if use_direct_query or assigned_lead_ids is None:
-        try:
-            print(f"🔍 Step 4b: Querying leads directly from leads_private (fallback)...")
-            
-            # Query first MAX_LEADS_PER_EPOCH leads from queue that haven't been validated
-            # CRITICAL: Supabase has a 1000-row limit per request, must use pagination
-            batch_size = 500
-            offset = 0
-            rows_needed = MAX_LEADS_PER_EPOCH
-            all_leads_data = []
-            
-            while len(all_leads_data) < rows_needed:
-                start = offset
-                end = min(offset + batch_size - 1, rows_needed - 1)
-                
-                batch_result = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        lambda s=start, e=end: supabase.table("leads_private")
-                            .select(_LEADS_SELECT)
-                            .eq("status", "pending_validation")
-                            .order("created_ts", desc=False)
-                            .range(s, e)
-                            .execute()
-                    ),
-                    timeout=30.0
-                )
-                
-                if not batch_result.data:
-                    break
-                
-                all_leads_data.extend(batch_result.data)
-                
-                if len(batch_result.data) < (end - start + 1):
-                    break
-                
-                offset += batch_size
-            
-            # Create a result-like object for backward compatibility
-            class FallbackResult:
-                def __init__(self, data):
-                    self.data = data
-            
-            leads_result = FallbackResult(all_leads_data[:MAX_LEADS_PER_EPOCH])
-            
-            if leads_result.data:
-                assigned_lead_ids = [lead["lead_id"] for lead in leads_result.data]
-                print(f"   ✅ Direct query found {len(assigned_lead_ids)} pending leads")
-                
-                # CRITICAL: Create EPOCH_INITIALIZATION event so /validate uses same snapshot
-                # This prevents the mismatch issue where new leads submitted during epoch
-                # would be included in subsequent /leads calls but rejected by /validate
-                import hashlib
-                import json
-                
-                # Compute queue_root (hash of lead IDs for verification)
-                queue_root = hashlib.sha256(json.dumps(assigned_lead_ids, sort_keys=True).encode()).hexdigest()
-                
-                # Create EPOCH_INITIALIZATION payload (MUST match epoch_lifecycle format)
-                # CRITICAL: epoch_id must be INSIDE payload because validate.py queries:
-                #   .eq("payload->>epoch_id", str(event.payload.epoch_id))
-                init_payload = {
-                    "epoch_id": epoch_id,  # CRITICAL: Must be inside payload for validate.py query
-                    "queue": {
-                        "queue_root": queue_root,
-                        "lead_count": len(assigned_lead_ids)
-                    },
-                    "assignment": {
-                        "assigned_lead_ids": assigned_lead_ids,
-                        "validator_count": 0,  # Unknown at this point
-                        "leads_per_validator": len(assigned_lead_ids)
-                    },
-                    "created_by": "epoch_leads_fallback",  # Mark as fallback-created
-                    "created_at": datetime.utcnow().isoformat()
-                }
-                
-                print(f"   📝 Creating EPOCH_INITIALIZATION for epoch {epoch_id} (fallback mode)...")
-                print(f"   📊 Queue Root: {queue_root[:16]}...")
-                
-                # ════════════════════════════════════════════════════════════════════════
-                # TESTNET GUARD: Prevent testnet from writing to production transparency_log
-                # TODO: REMOVE THIS BLOCK BEFORE PRODUCTION DEPLOYMENT
-                # This is safe on mainnet - it only blocks writes when BITTENSOR_NETWORK="test"
-                # ════════════════════════════════════════════════════════════════════════
-                if BITTENSOR_NETWORK == "test":
-                    print(f"   ⚠️  TESTNET MODE: Skipping EPOCH_INITIALIZATION insert to protect production DB")
-                    print(f"   ℹ️  Would have created epoch {epoch_id} with {len(assigned_lead_ids)} leads")
-                else:
-                    # MAINNET: Normal operation - insert to transparency_log
-                    try:
-                        # Insert EPOCH_INITIALIZATION event (idempotent - will fail if exists)
-                        # CRITICAL: Must match epoch_lifecycle.py format with all required fields
-                        import json
-                        from uuid import uuid4
-                        
-                        payload_json = json.dumps(init_payload, sort_keys=True)
-                        payload_hash = hashlib.sha256(payload_json.encode('utf-8')).hexdigest()
-                        
-                        await asyncio.wait_for(
-                            asyncio.to_thread(
-                                lambda: supabase.table("transparency_log")
-                                    .insert({
-                                        "event_type": "EPOCH_INITIALIZATION",
-                                        "actor_hotkey": "system",
-                                        "nonce": str(uuid4()),  # Required NOT NULL
-                                        "ts": datetime.utcnow().isoformat(),
-                                        "payload_hash": payload_hash,
-                                        "build_id": "epoch_leads_fallback",
-                                        "signature": "system",
-                                        "payload": init_payload
-                                    })
-                                    .execute()
-                            ),
-                            timeout=30.0
-                        )
-                        print(f"   ✅ EPOCH_INITIALIZATION created successfully")
-                    except Exception as init_err:
-                        # If it already exists (race condition), that's fine - use existing one
-                        if "duplicate" in str(init_err).lower() or "unique" in str(init_err).lower():
-                            print(f"   ℹ️  EPOCH_INITIALIZATION already exists (created by another request)")
-                        elif "null value" in str(init_err).lower() or "actor_hotkey" in str(init_err).lower():
-                            # This means epoch_lifecycle already created it, but we hit a race condition
-                            # where our query didn't find it yet. RETRY the query instead of proceeding
-                            # with potentially stale leads from the wrong epoch!
-                            print(f"   ⚠️  Failed to create EPOCH_INITIALIZATION (actor_hotkey constraint)")
-                            print(f"   🔄 Retrying query for existing EPOCH_INITIALIZATION (may have been created by epoch_lifecycle)...")
-                            
-                            try:
-                                retry_result = await asyncio.wait_for(
-                                    asyncio.to_thread(
-                                        lambda: supabase.table("transparency_log")
-                                            .select("payload")
-                                            .eq("event_type", "EPOCH_INITIALIZATION")
-                                            .eq("payload->>epoch_id", str(epoch_id))
-                                            .limit(1)
-                                            .execute()
-                                    ),
-                                    timeout=30.0
-                                )
-                                
-                                if retry_result and retry_result.data:
-                                    # Found it! Use the correct EPOCH_INITIALIZATION data
-                                    epoch_payload = retry_result.data[0].get("payload", {})
-                                    assigned_lead_ids = epoch_payload.get("assignment", {}).get("assigned_lead_ids", [])
-                                    queue_root = epoch_payload.get("queue", {}).get("queue_root", "unknown")
-                                    validator_count = epoch_payload.get("assignment", {}).get("validator_count", 0)
-                                    
-                                    print(f"   ✅ RETRY SUCCESS: Found EPOCH_INITIALIZATION with {len(assigned_lead_ids)} leads")
-                                    print(f"   🔄 Discarding fallback query results, using official EPOCH_INITIALIZATION")
-                                    
-                                    # Set leads_result to None to force re-query in Step 5 with correct lead IDs
-                                    leads_result = None
-                                else:
-                                    # Still can't find it - this is a critical error
-                                    print(f"   ❌ RETRY FAILED: EPOCH_INITIALIZATION still not found after retry")
-                                    print(f"   ❌ Cannot proceed - serving wrong epoch leads would cause validation failures")
-                                    raise HTTPException(
-                                        status_code=503,
-                                        detail=f"EPOCH_INITIALIZATION not found for epoch {epoch_id} - gateway may be initializing"
-                                    )
-                            except asyncio.TimeoutError:
-                                print(f"   ❌ RETRY TIMEOUT: Cannot verify EPOCH_INITIALIZATION exists")
-                                raise HTTPException(
-                                    status_code=504,
-                                    detail="Gateway timeout while verifying epoch initialization"
-                                )
-                        else:
-                            # Unknown error - don't risk serving wrong leads
-                            print(f"   ❌ Failed to create EPOCH_INITIALIZATION: {init_err}")
-                            print(f"   ❌ Cannot proceed - serving wrong epoch leads would cause validation failures")
-                            raise HTTPException(
-                                status_code=500,
-                                detail=f"Failed to initialize epoch {epoch_id}: {str(init_err)}"
-                            )
-            else:
-                assigned_lead_ids = []
-                print(f"   ℹ️  No pending leads in queue")
-                
-        except asyncio.TimeoutError:
-            print(f"❌ ERROR: Direct query timed out after 90 seconds")
-            raise HTTPException(
-                status_code=504,
-                detail="Database query timeout - gateway may be experiencing high load"
-            )
-        except Exception as e:
-            print(f"❌ ERROR in direct query: {e}")
-            import traceback
-            traceback.print_exc()
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to fetch leads: {str(e)}"
-            )
-    
-    # Step 5: Fetch full lead data from leads_private (skip if already fetched in fallback)
+    # Step 5: Fetch full lead data from the immutable epoch assignment.
     if not assigned_lead_ids:
         # No leads assigned for this epoch
         return {
@@ -591,7 +351,7 @@ async def get_epoch_leads(
             "max_leads_per_epoch": MAX_LEADS_PER_EPOCH  # Dynamic config for validators
         }
     
-    # Only query leads_private if we used EPOCH_INITIALIZATION (not fallback)
+    # Resolve the rows committed by EPOCH_INITIALIZATION.
     if leads_result is None:
         try:
             total_leads = len(assigned_lead_ids)
@@ -661,9 +421,6 @@ async def get_epoch_leads(
                 status_code=500,
                 detail=f"Failed to fetch lead data: {str(e)}"
             )
-    else:
-        print(f"✅ Step 5: Skipped (already have {len(leads_result.data)} leads from fallback)")
-    
     # Step 6: Build full_leads with miner_hotkey extracted from lead_blob
     try:
         print(f"🔍 Step 6: Building full lead data for {len(leads_result.data)} leads...")

@@ -12,7 +12,6 @@ import re
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Tuple
 
 from Leadpoet.utils.subnet_epoch import (
-    LEGACY_EPOCH_MODE,
     SubnetEpochCutover,
     SubnetEpochError,
     SubnetEpochSnapshot,
@@ -832,7 +831,7 @@ def build_cutover_row_v1(
         "mapping_hash": mapping.mapping_hash,
         "manifest_schema_version": mapping.schema_version,
         "epoch_scheme": mapping.epoch_scheme,
-        "previous_epoch_scheme": LEGACY_EPOCH_MODE,
+        "previous_epoch_scheme": "legacy_global_360_v1",
         "network_genesis_hash": mapping.network_genesis_hash,
         "netuid": mapping.netuid,
         "cutover_block": mapping.cutover_block,

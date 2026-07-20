@@ -17,11 +17,8 @@ import re
 from typing import Any, Dict, Mapping, Optional
 
 from Leadpoet.utils.subnet_epoch import (
-    LEGACY_EPOCH_MODE,
-    STATEFUL_EPOCH_MODE,
     SubnetEpochCutover,
     SubnetEpochError,
-    get_epoch_mode,
     load_subnet_epoch_cutover,
 )
 from gateway.research_lab.config import (
@@ -262,13 +259,7 @@ def _normalized_epoch_authority(value: Mapping[str, Any]) -> Dict[str, Any]:
         )
     mode = str(value.get("mode") or "").strip().lower()
     cutover_value = value.get("cutover")
-    if mode == LEGACY_EPOCH_MODE:
-        if cutover_value is not None:
-            raise ResearchLabRuntimeConfigV2Error(
-                "legacy Research Lab epoch authority cannot include a cutover"
-            )
-        return {"mode": LEGACY_EPOCH_MODE, "cutover": None}
-    if mode != STATEFUL_EPOCH_MODE or not isinstance(cutover_value, Mapping):
+    if mode != "stateful_v1" or not isinstance(cutover_value, Mapping):
         raise ResearchLabRuntimeConfigV2Error(
             "stateful Research Lab epoch authority requires a cutover"
         )
@@ -278,7 +269,7 @@ def _normalized_epoch_authority(value: Mapping[str, Any]) -> Dict[str, Any]:
         raise ResearchLabRuntimeConfigV2Error(
             "Research Lab epoch cutover is invalid"
         ) from exc
-    return {"mode": STATEFUL_EPOCH_MODE, "cutover": cutover.to_dict()}
+    return {"mode": "stateful_v1", "cutover": cutover.to_dict()}
 
 
 def build_research_lab_execution_config(
@@ -322,12 +313,9 @@ def build_research_lab_execution_config(
     if resolved_netuid < 0:
         raise ResearchLabRuntimeConfigV2Error("Research Lab netuid is invalid")
     try:
-        epoch_mode = get_epoch_mode(source_environment)
-        epoch_cutover = (
-            load_subnet_epoch_cutover(source_environment).to_dict()
-            if epoch_mode == STATEFUL_EPOCH_MODE
-            else None
-        )
+        epoch_cutover = load_subnet_epoch_cutover(
+            source_environment
+        ).to_dict()
     except SubnetEpochError as exc:
         raise ResearchLabRuntimeConfigV2Error(
             "Research Lab epoch authority is invalid"
@@ -344,7 +332,7 @@ def build_research_lab_execution_config(
             name for name in MODEL_CREDENTIAL_ENV_NAMES if name in source_environment
         ),
         "epoch_authority": _normalized_epoch_authority(
-            {"mode": epoch_mode, "cutover": epoch_cutover}
+            {"mode": "stateful_v1", "cutover": epoch_cutover}
         ),
         "behavior_environment": _normalized_environment(
             {

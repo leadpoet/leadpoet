@@ -4,8 +4,6 @@ import pytest
 from fastapi import HTTPException
 
 from Leadpoet.utils.subnet_epoch import (
-    LEGACY_EPOCH_MODE,
-    STATEFUL_EPOCH_MODE,
     SubnetEpochCutover,
     SubnetEpochSnapshot,
 )
@@ -116,7 +114,6 @@ async def test_candidate_route_verifies_hotkey_dynamic_boot_and_chain_before_ack
 
     monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {HOTKEY})
     monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
-    monkeypatch.setattr(weights_api, "get_epoch_mode", lambda: LEGACY_EPOCH_MODE)
     monkeypatch.setattr(weights_api, "get_subtensor", lambda: object())
     monkeypatch.setattr(
         weights_api,
@@ -185,7 +182,6 @@ async def test_candidate_route_rejects_unauthorized_hotkey_before_attestation(
     from gateway.research_lab import stateful_epoch_authority_v1 as authority
 
     monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {HOTKEY})
-    monkeypatch.setattr(weights_api, "get_epoch_mode", lambda: LEGACY_EPOCH_MODE)
     request = weights_api.SubnetEpochCandidateSubmissionV1(
         schema_version=authority.CANDIDATE_SUBMISSION_SCHEMA_VERSION,
         validator_hotkey="5" + "A" * 47,
@@ -227,7 +223,6 @@ async def test_candidate_route_reports_archive_outage_without_persisting(
 
     monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {HOTKEY})
     monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
-    monkeypatch.setattr(weights_api, "get_epoch_mode", lambda: LEGACY_EPOCH_MODE)
     monkeypatch.setattr(weights_api, "verify_wallet_signature", lambda *_a: True)
     monkeypatch.setattr(attested_v2, "validate_receipt_graph", lambda *_a, **_k: None)
     monkeypatch.setattr(
@@ -306,7 +301,6 @@ async def test_normal_epoch_route_binds_published_bundle_and_acks_both_snapshots
 
     monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {HOTKEY})
     monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
-    monkeypatch.setattr(weights_api, "get_epoch_mode", lambda: STATEFUL_EPOCH_MODE)
     monkeypatch.setattr(weights_api, "load_subnet_epoch_cutover", lambda: cutover)
     monkeypatch.setattr(weights_api, "get_subtensor", lambda: object())
     monkeypatch.setattr(
@@ -429,7 +423,6 @@ async def test_normal_epoch_route_fails_closed_without_publication(monkeypatch):
 
     monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {HOTKEY})
     monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
-    monkeypatch.setattr(weights_api, "get_epoch_mode", lambda: STATEFUL_EPOCH_MODE)
     monkeypatch.setattr(weights_api, "load_subnet_epoch_cutover", lambda: cutover)
     monkeypatch.setattr(weights_api, "get_subtensor", lambda: object())
     monkeypatch.setattr(weights_api, "validate_cutover_anchor_from_archive", lambda *_a: None)
@@ -522,7 +515,6 @@ async def test_normal_epoch_route_reports_bundle_store_outage_as_unavailable(
 
     monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {HOTKEY})
     monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
-    monkeypatch.setattr(weights_api, "get_epoch_mode", lambda: STATEFUL_EPOCH_MODE)
     monkeypatch.setattr(weights_api, "load_subnet_epoch_cutover", lambda: cutover)
     monkeypatch.setattr(weights_api, "validate_cutover_anchor_from_archive", lambda *_a: None)
     monkeypatch.setattr(

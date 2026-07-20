@@ -119,7 +119,10 @@ async def test_durable_event_lookup_paginates_and_rejects_duplicates(monkeypatch
         {
             "id": index,
             "event_type": "EPOCH_END",
-            "payload": {"epoch_id": 77},
+            "payload": {
+                "epoch_id": 77,
+                "epoch_key_semantics": "settlement_ordinal",
+            },
         }
         for index in range(1001)
     ]
@@ -154,11 +157,6 @@ async def test_stateful_durable_lookup_ignores_legacy_numeric_collision(monkeypa
     ]
     table = _FilteredTable(rows)
     monkeypatch.setattr(epoch_lifecycle, "supabase", _Client(table))
-    monkeypatch.setattr(
-        epoch_lifecycle,
-        "get_epoch_mode",
-        lambda: epoch_lifecycle.STATEFUL_EPOCH_MODE,
-    )
 
     result = await epoch_lifecycle.get_durable_epoch_event(
         "EPOCH_INITIALIZATION", 77
@@ -181,12 +179,23 @@ async def test_log_epoch_event_propagates_failed_durable_write(monkeypatch):
 
     monkeypatch.setattr(epoch_lifecycle, "get_durable_epoch_event", missing)
     monkeypatch.setattr(logger, "log_event", failed_write)
+    _cutover, authority = _stateful_authority(88)
+    monkeypatch.setattr(
+        epoch_lifecycle,
+        "load_subnet_epoch_cutover",
+        lambda: _cutover,
+    )
 
     with pytest.raises(RuntimeError, match="database unavailable"):
         await epoch_lifecycle.log_epoch_event(
             "EPOCH_END",
             88,
-            {"epoch_id": 88, "phase": "epoch_ended"},
+            {
+                "epoch_id": 88,
+                "epoch_key_semantics": "settlement_ordinal",
+                "epoch_authority": authority,
+                "phase": "epoch_ended",
+            },
         )
 
 
@@ -356,6 +365,18 @@ async def test_epoch_inputs_hashes_every_paginated_event_and_propagates(monkeypa
 
     monkeypatch.setattr(epoch_lifecycle, "get_durable_epoch_event", missing)
     monkeypatch.setattr(epoch_lifecycle, "log_epoch_event", capture)
+    _cutover, authority = _stateful_authority(99)
+
+    async def initialization_authority(epoch_id):
+        if epoch_id not in {99, 100}:
+            raise AssertionError(epoch_id)
+        return authority
+
+    monkeypatch.setattr(
+        epoch_lifecycle,
+        "load_stateful_epoch_initialization_authority",
+        initialization_authority,
+    )
     start = datetime(2026, 7, 16, 12, 0, 0)
     end = start + timedelta(minutes=72)
 

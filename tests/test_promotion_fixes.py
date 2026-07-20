@@ -1316,7 +1316,10 @@ async def test_legacy_champion_reward_is_rejected_before_persistence(
     assert store.reward_obligation_writes == []
 
 
-async def test_reward_start_epoch_falls_back_to_bundle_epoch_when_chain_unreachable(store, monkeypatch):
+async def test_reward_start_epoch_fails_closed_when_chain_unreachable(
+    store,
+    monkeypatch,
+):
     captured = _capture_obligation(monkeypatch)
 
     async def _resolve(hotkey: str) -> int | None:
@@ -1328,21 +1331,23 @@ async def test_reward_start_epoch_falls_back_to_bundle_epoch_when_chain_unreacha
     monkeypatch.setattr(promotion, "_resolve_miner_uid", _resolve)
     monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _broken_epoch)
     controller = ResearchLabPromotionController(_epoch_config(), worker_ref="test-worker")
-    result = await controller._maybe_create_champion_reward(
-        candidate={
-            "candidate_id": "cand-1",
-            "miner_hotkey": "hk-1",
-            "ticket_id": "ticket-1",
-            "run_id": "run-1",
-        },
-        score_bundle_row={"score_bundle_id": "sb-1"},
-        score_bundle={"evaluation_epoch": 100, "aggregates": {"per_icp_results": []}},
-        improvement_points=2.5,
-        threshold=1.0,
-    )
-    # Degraded but never blocked: the legacy bundle-epoch derivation applies.
-    assert result["champion_reward_status"] == "created"
-    assert captured[0]["start_epoch"] == 101
+    with pytest.raises(RuntimeError, match="subtensor unreachable"):
+        await controller._maybe_create_champion_reward(
+            candidate={
+                "candidate_id": "cand-1",
+                "miner_hotkey": "hk-1",
+                "ticket_id": "ticket-1",
+                "run_id": "run-1",
+            },
+            score_bundle_row={"score_bundle_id": "sb-1"},
+            score_bundle={
+                "evaluation_epoch": 100,
+                "aggregates": {"per_icp_results": []},
+            },
+            improvement_points=2.5,
+            threshold=1.0,
+        )
+    assert captured == []
 
 
 async def test_stateful_champion_reward_fails_closed_when_epoch_authority_is_unavailable(
@@ -1359,11 +1364,6 @@ async def test_stateful_champion_reward_fails_closed_when_epoch_authority_is_una
 
     monkeypatch.setattr(promotion, "_resolve_miner_uid", _resolve)
     monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _broken_epoch)
-    monkeypatch.setattr(
-        promotion,
-        "get_epoch_mode",
-        lambda: promotion.STATEFUL_EPOCH_MODE,
-    )
     controller = ResearchLabPromotionController(_epoch_config(), worker_ref="test-worker")
 
     with pytest.raises(RuntimeError, match="subtensor unreachable"):
@@ -1539,11 +1539,6 @@ async def test_stateful_source_add_leg2_fails_closed_when_epoch_authority_is_una
         )
 
     monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _broken_epoch)
-    monkeypatch.setattr(
-        promotion,
-        "get_epoch_mode",
-        lambda: promotion.STATEFUL_EPOCH_MODE,
-    )
     _install_source_add_v2_judge(monkeypatch, _judge)
     controller = ResearchLabPromotionController(
         _source_add_reward_config(),
@@ -2077,7 +2072,15 @@ async def test_reward_reconciler_happy_path_creates_reward(store, monkeypatch):
     async def _resolve(hotkey: str) -> int | None:
         return 5
 
+    async def _live_epoch(_configured: Any = None) -> tuple[int, int | None, str]:
+        return 150, 23_928, "official_subnet_epoch"
+
     monkeypatch.setattr(promotion, "_resolve_miner_uid", _resolve)
+    monkeypatch.setattr(
+        promotion,
+        "resolve_research_lab_evaluation_epoch",
+        _live_epoch,
+    )
     monkeypatch.setattr(
         promotion,
         "build_champion_reward_obligation",

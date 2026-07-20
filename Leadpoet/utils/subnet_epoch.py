@@ -1,16 +1,15 @@
 """Authoritative Bittensor subnet epoch identity and cutover helpers.
 
-The Subtensor runtime no longer derives a subnet epoch from ``block // tempo``.
-An epoch is identified by ``SubnetEpochIndex`` and is anchored by
-``LastEpochBlock``.  All storage fields in this module are read at one exact
+An epoch is identified by ``SubnetEpochIndex`` and anchored by
+``LastEpochBlock``. All storage fields in this module are read at one exact
 block hash so callers never combine state from different chain heads.
 
-Existing LeadPoet reward schedules use a monotonic integer epoch ordinal.  A
-signed/attested cutover maps the official subnet index onto that ordinal so
-historical rows are not reused when the official counter is numerically behind
-the legacy ``block // 360`` counter.  The official identity remains available
-as ``epoch_ref`` and ``subnet_epoch_index``; the compatibility ordinal must not
-be presented as the Bittensor epoch ID.
+Existing LeadPoet reward schedules use a monotonic integer epoch ordinal. A
+signed and attested mapping projects the official subnet index onto that
+ordinal so historical rows are never reused when the counters differ. The
+official identity remains available as ``epoch_ref`` and
+``subnet_epoch_index``; the compatibility ordinal must not be presented as the
+Bittensor epoch ID.
 """
 
 from __future__ import annotations
@@ -27,9 +26,6 @@ from typing import Any, Mapping, Optional
 EPOCH_SCHEME = "bittensor.subnet_epoch_index.v1"
 CUTOVER_SCHEMA_VERSION = "leadpoet.subnet_epoch_cutover.v1"
 SNAPSHOT_SCHEMA_VERSION = "leadpoet.subnet_epoch_snapshot.v1"
-LEGACY_EPOCH_MODE = "legacy_global_360_v1"
-STATEFUL_EPOCH_MODE = "stateful_v1"
-EPOCH_MODE_ENV = "LEADPOET_EPOCH_MODE"
 CUTOVER_JSON_ENV = "LEADPOET_SUBNET_EPOCH_CUTOVER_JSON"
 CUTOVER_PATH_ENV = "LEADPOET_SUBNET_EPOCH_CUTOVER_PATH"
 OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT = (
@@ -69,24 +65,14 @@ def assert_official_archive_subtensor(subtensor: Any) -> None:
         )
 
 
-def get_epoch_mode(environ: Optional[Mapping[str, str]] = None) -> str:
-    """Return the configured epoch mode, defaulting to legacy behavior."""
-
-    source = os.environ if environ is None else environ
-    mode = str(source.get(EPOCH_MODE_ENV, LEGACY_EPOCH_MODE)).strip().lower()
-    if mode not in {LEGACY_EPOCH_MODE, STATEFUL_EPOCH_MODE}:
-        raise SubnetEpochError(f"unsupported {EPOCH_MODE_ENV}: {mode}")
-    return mode
-
-
 def load_subnet_epoch_cutover(
     environ: Optional[Mapping[str, str]] = None,
 ) -> "SubnetEpochCutover":
-    """Load and validate the one configured stateful cutover manifest.
+    """Load and validate the configured settlement mapping.
 
-    Stateful mode is intentionally unusable without this mapping.  Supplying
-    both environment forms is rejected so two processes cannot silently choose
-    different authorities.
+    Runtime epoch authority is intentionally unusable without this mapping.
+    Supplying both environment forms is rejected so two processes cannot
+    silently choose different authorities.
     """
 
     source = os.environ if environ is None else environ
@@ -104,7 +90,7 @@ def load_subnet_epoch_cutover(
                 "failed to read subnet epoch cutover manifest"
             ) from exc
     if not raw:
-        raise SubnetEpochError("stateful epoch mode requires a cutover manifest")
+        raise SubnetEpochError("official epoch authority requires a cutover manifest")
     try:
         document = json.loads(raw)
     except json.JSONDecodeError as exc:

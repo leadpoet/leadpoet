@@ -175,11 +175,8 @@ import aiohttp
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from Leadpoet.utils.bittensor_sdk import ExtrinsicOutcome
 from Leadpoet.utils.subnet_epoch import (
-    LEGACY_EPOCH_MODE,
     OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT,
-    STATEFUL_EPOCH_MODE,
     SubnetEpochError,
-    get_epoch_mode,
     load_subnet_epoch_cutover,
     read_subnet_epoch_snapshot,
     validate_subnet_epoch_cutover_anchor,
@@ -200,7 +197,7 @@ from leadpoet_canonical.auditor_v2 import (
 )
 
 # Constants from canonical module
-from leadpoet_canonical.constants import EPOCH_LENGTH, WEIGHT_SUBMISSION_BLOCK
+from leadpoet_canonical.constants import WEIGHT_SUBMISSION_BLOCK
 
 # Configure logging
 logging.basicConfig(
@@ -224,7 +221,6 @@ DEFAULT_GATEWAY_URL = _default_gateway_url()
 
 @dataclass(frozen=True)
 class _AuditorEpochState:
-    mode: str
     current_block: int
     workflow_epoch_id: int
     epoch_block: int
@@ -233,16 +229,12 @@ class _AuditorEpochState:
 
     @property
     def identity(self) -> int:
-        return (
-            self.subnet_epoch_index
-            if self.mode == STATEFUL_EPOCH_MODE
-            else self.workflow_epoch_id
-        )
+        if self.subnet_epoch_index is None:
+            raise SubnetEpochError("official subnet epoch identity is unavailable")
+        return self.subnet_epoch_index
 
-    def deadline_reached(self, legacy_elapsed_block: int) -> bool:
-        if self.mode == STATEFUL_EPOCH_MODE:
-            return self.blocks_remaining <= EPOCH_LENGTH - int(legacy_elapsed_block)
-        return self.epoch_block >= int(legacy_elapsed_block)
+    def deadline_reached(self, elapsed_block: int) -> bool:
+        return self.epoch_block >= int(elapsed_block)
 
 
 def _normalize_gateway_url(value: str) -> str:
@@ -283,12 +275,7 @@ class AuditorValidator:
         self.gateway_url = _normalize_gateway_url(gateway_url)
         self.wallet = bt.Wallet(config=config)
         self.subtensor = bt.Subtensor(config=config)
-        self.epoch_mode = get_epoch_mode()
-        self.epoch_cutover = (
-            load_subnet_epoch_cutover()
-            if self.epoch_mode == STATEFUL_EPOCH_MODE
-            else None
-        )
+        self.epoch_cutover = load_subnet_epoch_cutover()
         if (
             self.epoch_cutover is not None
             and int(self.epoch_cutover.netuid) != int(config.netuid)
@@ -296,16 +283,13 @@ class AuditorValidator:
             raise SubnetEpochError(
                 "auditor netuid differs from subnet epoch cutover manifest"
             )
-        if self.epoch_cutover is not None:
-            self.epoch_archive_subtensor = bt.Subtensor(
-                network=OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
-            )
-            validate_subnet_epoch_cutover_anchor(
-                self.epoch_archive_subtensor,
-                self.epoch_cutover,
-            )
-        else:
-            self.epoch_archive_subtensor = None
+        self.epoch_archive_subtensor = bt.Subtensor(
+            network=OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
+        )
+        validate_subnet_epoch_cutover_anchor(
+            self.epoch_archive_subtensor,
+            self.epoch_cutover,
+        )
         self._validate_durable_epoch_runtime_startup()
         self.metagraph = self.subtensor.metagraph(config.netuid)
         
@@ -344,13 +328,14 @@ class AuditorValidator:
 
     def _validate_durable_epoch_runtime_lifecycle(
         self,
-        epoch_id: int,
         *,
         force_refresh: bool,
     ) -> dict:
         """Read the fixed-project, RLS-protected durable cutover singleton."""
 
-        mode = getattr(self, "epoch_mode", LEGACY_EPOCH_MODE)
+        cutover = getattr(self, "epoch_cutover", None)
+        if cutover is None:
+            raise SubnetEpochError("auditor subnet epoch cutover is unavailable")
         subtensor_config = getattr(self.config, "subtensor", None)
         network = str(
             getattr(subtensor_config, "network", "") or ""
@@ -359,85 +344,46 @@ class AuditorValidator:
             int(self.config.netuid) == 71 and network == "finney"
         )
         if not uses_production_authority:
-            if mode == STATEFUL_EPOCH_MODE:
-                cutover = getattr(self, "epoch_cutover", None)
-                if cutover is None:
-                    raise SubnetEpochError("auditor stateful cutover is unavailable")
-                return {
-                    "lifecycle_state": "stateful_manifest_only",
-                    "mapping_hash": cutover.mapping_hash,
-                }
-            return {"lifecycle_state": "legacy_open", "mapping_hash": None}
+            return {
+                "lifecycle_state": "stateful_manifest_only",
+                "mapping_hash": cutover.mapping_hash,
+            }
 
         from gateway.utils.epoch import validate_epoch_runtime_lifecycle
 
         return validate_epoch_runtime_lifecycle(
-            mode=mode,
-            epoch_id=int(epoch_id) if mode == LEGACY_EPOCH_MODE else None,
-            cutover=(
-                getattr(self, "epoch_cutover", None)
-                if mode == STATEFUL_EPOCH_MODE
-                else None
-            ),
+            cutover=cutover,
             force_refresh=force_refresh,
             network=network,
             netuid=int(self.config.netuid),
         )
 
     def _validate_durable_epoch_runtime_startup(self) -> None:
-        """Reject a stale legacy process or an inactive stateful mapping."""
+        """Reject an inactive or mismatched settlement mapping."""
 
-        mode = getattr(self, "epoch_mode", LEGACY_EPOCH_MODE)
-        if mode == STATEFUL_EPOCH_MODE:
-            cutover = getattr(self, "epoch_cutover", None)
-            if cutover is None:
-                raise SubnetEpochError("auditor stateful cutover is unavailable")
-            subtensor_config = getattr(self.config, "subtensor", None)
-            network = str(
-                getattr(subtensor_config, "network", "") or ""
-            ).strip().lower()
-            if int(self.config.netuid) == 71 and network == "finney":
-                from gateway.utils.epoch import validate_stateful_cutover_authority
+        cutover = getattr(self, "epoch_cutover", None)
+        if cutover is None:
+            raise SubnetEpochError("auditor subnet epoch cutover is unavailable")
+        subtensor_config = getattr(self.config, "subtensor", None)
+        network = str(
+            getattr(subtensor_config, "network", "") or ""
+        ).strip().lower()
+        if int(self.config.netuid) == 71 and network == "finney":
+            from gateway.utils.epoch import validate_stateful_cutover_authority
 
-                validate_stateful_cutover_authority(
-                    cutover,
-                    network=network,
-                    netuid=int(self.config.netuid),
-                )
-            self._validate_durable_epoch_runtime_lifecycle(
-                cutover.first_settlement_epoch_id,
-                force_refresh=True,
+            validate_stateful_cutover_authority(
+                cutover,
+                network=network,
+                netuid=int(self.config.netuid),
             )
-            return
-
-        block = int(self.subtensor.get_current_block())
-        epoch_id, _epoch_block = divmod(block, EPOCH_LENGTH)
         self._validate_durable_epoch_runtime_lifecycle(
-            epoch_id,
             force_refresh=True,
         )
 
     def _read_epoch_state(self) -> _AuditorEpochState:
-        epoch_mode = getattr(self, "epoch_mode", LEGACY_EPOCH_MODE)
-        if epoch_mode == LEGACY_EPOCH_MODE:
-            block = int(self.subtensor.get_current_block())
-            epoch_id, epoch_block = divmod(block, EPOCH_LENGTH)
-            self._validate_durable_epoch_runtime_lifecycle(
-                epoch_id,
-                force_refresh=False,
-            )
-            return _AuditorEpochState(
-                mode=epoch_mode,
-                current_block=block,
-                workflow_epoch_id=epoch_id,
-                epoch_block=epoch_block,
-                blocks_remaining=EPOCH_LENGTH - epoch_block,
-                subnet_epoch_index=None,
-            )
         if self.epoch_cutover is None:
-            raise SubnetEpochError("auditor stateful cutover is unavailable")
+            raise SubnetEpochError("auditor subnet epoch cutover is unavailable")
         self._validate_durable_epoch_runtime_lifecycle(
-            self.epoch_cutover.first_settlement_epoch_id,
             force_refresh=False,
         )
         snapshot = read_subnet_epoch_snapshot(
@@ -446,7 +392,6 @@ class AuditorValidator:
             finalized=True,
         )
         return _AuditorEpochState(
-            mode=epoch_mode,
             current_block=snapshot.current_block,
             workflow_epoch_id=snapshot.settlement_epoch_id(self.epoch_cutover),
             epoch_block=snapshot.epoch_block,
@@ -455,20 +400,16 @@ class AuditorValidator:
         )
 
     def _read_best_epoch_state(self) -> _AuditorEpochState:
-        """Read best-head state only as a stateful submission liveness veto."""
+        """Read best-head state only as an official submission liveness veto."""
 
-        epoch_mode = getattr(self, "epoch_mode", LEGACY_EPOCH_MODE)
-        if epoch_mode == LEGACY_EPOCH_MODE:
-            return self._read_epoch_state()
         if self.epoch_cutover is None:
-            raise SubnetEpochError("auditor stateful cutover is unavailable")
+            raise SubnetEpochError("auditor subnet epoch cutover is unavailable")
         snapshot = read_subnet_epoch_snapshot(
             self.subtensor,
             netuid=int(self.config.netuid),
             finalized=False,
         )
         return _AuditorEpochState(
-            mode=epoch_mode,
             current_block=snapshot.current_block,
             workflow_epoch_id=snapshot.settlement_epoch_id(self.epoch_cutover),
             epoch_block=snapshot.epoch_block,
@@ -477,8 +418,6 @@ class AuditorValidator:
         )
 
     def _subnet_index_for_workflow_epoch(self, epoch_id: int) -> Optional[int]:
-        if getattr(self, "epoch_mode", LEGACY_EPOCH_MODE) == LEGACY_EPOCH_MODE:
-            return None
         cutover = self.epoch_cutover
         if cutover is None or int(epoch_id) < cutover.first_settlement_epoch_id:
             raise SubnetEpochError("auditor workflow epoch predates cutover")
@@ -487,10 +426,8 @@ class AuditorValidator:
         )
 
     def _verify_stateful_bundle_epoch(self, bundle: Dict) -> None:
-        if getattr(self, "epoch_mode", LEGACY_EPOCH_MODE) != STATEFUL_EPOCH_MODE:
-            return
         if self.epoch_cutover is None:
-            raise SubnetEpochError("auditor stateful cutover is unavailable")
+            raise SubnetEpochError("auditor subnet epoch cutover is unavailable")
         snapshot = read_subnet_epoch_snapshot(
             self.epoch_archive_subtensor,
             netuid=int(self.config.netuid),
@@ -920,242 +857,32 @@ class AuditorValidator:
             )
             return None
 
-    async def fetch_attested_weights_v1(self, epoch_id: int) -> Optional[Dict]:
-        """Fetch the temporary V1 compatibility bundle."""
-
-        try:
-            async with aiohttp.ClientSession(trust_env=False) as session:
-                url = (
-                    f"{self.gateway_url}/weights/latest/"
-                    f"{self.config.netuid}/{int(epoch_id)}"
-                )
-                async with session.get(
-                    url,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 404:
-                        return None
-                    if response.status != 200:
-                        logger.warning(
-                            "auditor_v1_fallback_fetch_failed epoch=%s status=%s",
-                            epoch_id,
-                            response.status,
-                        )
-                        return None
-                    value = await response.json()
-                    return value if isinstance(value, dict) else None
-        except Exception as exc:
-            logger.warning(
-                "auditor_v1_fallback_fetch_failed epoch=%s error_type=%s error=%s",
-                epoch_id,
-                type(exc).__name__,
-                str(exc)[:200],
-            )
-            return None
-
-    @staticmethod
-    def _v1_pcr0_commit_is_allowed(pcr0: str, commit_hash: str) -> bool:
-        try:
-            allowlist = json.loads(
-                (Path(_REPO_ROOT) / "pcr0_allowlist.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-        except Exception:
-            return False
-        return any(
-            isinstance(item, dict)
-            and str(item.get("pcr0") or "").lower() == pcr0
-            and str(item.get("commit_hash") or "").lower() == commit_hash
-            for item in allowlist.get("validator_pcr0", [])
-        )
-
-    @staticmethod
-    def _verify_v1_nitro_attestation(
-        bundle: Dict,
-        *,
-        pcr0: str,
-        pubkey: str,
-        epoch_id: int,
-    ) -> bool:
-        from leadpoet_canonical.nitro import verify_nitro_attestation_full
-
-        valid, _details = verify_nitro_attestation_full(
-            bundle["validator_attestation_b64"],
-            expected_pcr0=pcr0,
-            expected_pubkey=pubkey,
-            expected_purpose="validator_weights",
-            expected_epoch_id=epoch_id,
-            role="validator",
-            skip_pcr0_verification=False,
-        )
-        return bool(valid)
-
-    def verify_attested_weights_v1(
-        self,
-        bundle: Dict,
-        *,
-        expected_epoch_id: int,
-    ) -> Optional[Dict]:
-        """Verify V1 without allowing invalid V2 authority to downgrade."""
-
-        try:
-            if getattr(self, "epoch_mode", LEGACY_EPOCH_MODE) == STATEFUL_EPOCH_MODE:
-                raise ValueError("V1 modulo bundles are disabled in stateful mode")
-            if not isinstance(bundle, dict):
-                raise ValueError("bundle is not an object")
-            netuid = bundle.get("netuid")
-            epoch_id = bundle.get("epoch_id")
-            block = bundle.get("block")
-            if (
-                isinstance(netuid, bool)
-                or not isinstance(netuid, int)
-                or netuid != int(self.config.netuid)
-                or isinstance(epoch_id, bool)
-                or not isinstance(epoch_id, int)
-                or epoch_id != int(expected_epoch_id)
-                or isinstance(block, bool)
-                or not isinstance(block, int)
-                or block < 0
-                or block // EPOCH_LENGTH != epoch_id
-            ):
-                raise ValueError("bundle chain identity is invalid")
-
-            uids = bundle.get("uids")
-            weights_u16 = bundle.get("weights_u16")
-            if (
-                not isinstance(uids, list)
-                or not isinstance(weights_u16, list)
-                or not uids
-                or len(uids) != len(weights_u16)
-                or len(set(uids)) != len(uids)
-                or any(
-                    isinstance(uid, bool)
-                    or not isinstance(uid, int)
-                    or uid < 0
-                    or uid > 65535
-                    for uid in uids
-                )
-                or any(
-                    isinstance(weight, bool)
-                    or not isinstance(weight, int)
-                    or weight < 0
-                    or weight > 65535
-                    for weight in weights_u16
-                )
-            ):
-                raise ValueError("bundle weight vector is invalid")
-
-            claimed_hash = str(bundle.get("weights_hash") or "").lower()
-            signature = str(bundle.get("validator_signature") or "").lower()
-            pubkey = str(bundle.get("validator_enclave_pubkey") or "").lower()
-            pcr0 = str(bundle.get("validator_pcr0") or "").lower()
-            commit_hash = str(bundle.get("pcr0_commit_hash") or "").lower()
-            attestation = str(bundle.get("validator_attestation_b64") or "")
-            if (
-                not re.fullmatch(r"[0-9a-f]{64}", claimed_hash)
-                or not re.fullmatch(r"[0-9a-f]{128}", signature)
-                or not re.fullmatch(r"[0-9a-f]{64}", pubkey)
-                or not re.fullmatch(r"[0-9a-f]{96}", pcr0)
-                or not re.fullmatch(r"[0-9a-f]{40}", commit_hash)
-                or not attestation
-            ):
-                raise ValueError("bundle attestation fields are invalid")
-
-            recomputed_hash = bundle_weights_hash(
-                netuid,
-                epoch_id,
-                block,
-                list(zip(uids, weights_u16)),
-            )
-            if recomputed_hash != claimed_hash:
-                raise ValueError("bundle weights hash mismatch")
-            Ed25519PublicKey.from_public_bytes(bytes.fromhex(pubkey)).verify(
-                bytes.fromhex(signature),
-                bytes.fromhex(claimed_hash),
-            )
-            if not self._v1_pcr0_commit_is_allowed(pcr0, commit_hash):
-                raise ValueError("bundle PCR0 and commit are not an allowed pair")
-            if not self._verify_v1_nitro_attestation(
-                bundle,
-                pcr0=pcr0,
-                pubkey=pubkey,
-                epoch_id=epoch_id,
-            ):
-                raise ValueError("bundle Nitro attestation verification failed")
-            return dict(bundle)
-        except Exception as exc:
-            logger.warning(
-                "auditor_v1_fallback_verification_failed epoch=%s "
-                "error_type=%s error=%s",
-                expected_epoch_id,
-                type(exc).__name__,
-                str(exc)[:200],
-            )
-            return None
-
     @staticmethod
     def auditor_weight_protocol() -> str:
-        """Auditor-only weight-source selector (AUDITOR_WEIGHT_PROTOCOL).
+        """Require the authoritative V2 auditor protocol."""
 
-        Supported modes:
-          auto              - V2-first; verified V1 only when the gateway
-                              reports that no V2 authority exists (default)
-          legacy_v1_compat  - force V1; never request the V2 endpoint
-          authoritative_v2  - force V2; never fall back to V1
-
-        Deliberately separate from VALIDATOR_WEIGHT_PROTOCOL: that variable
-        controls the primary validator and is ignored here. Every mode keeps
-        the strict verification chain (weights hash, signature, PCR0+commit
-        allowlist pair, Nitro attestation); an unrecognized value warns and
-        runs as auto rather than taking an auditor offline over a typo.
-        """
         raw = str(
-            os.environ.get("AUDITOR_WEIGHT_PROTOCOL", "auto") or "auto"
+            os.environ.get("AUDITOR_WEIGHT_PROTOCOL", "authoritative_v2")
+            or "authoritative_v2"
         ).strip().lower()
-        if raw in {"auto", "legacy_v1_compat", "authoritative_v2"}:
-            return raw
-        logger.warning(
-            "auditor_weight_protocol_invalid value=%s using=auto", raw[:40]
-        )
-        return "auto"
-
-    async def _fetch_verified_v1(
-        self,
-        epoch_id: int,
-    ) -> Tuple[Optional[Dict], str]:
-        if getattr(self, "epoch_mode", LEGACY_EPOCH_MODE) == STATEFUL_EPOCH_MODE:
-            return None, "v1_unsupported_stateful"
-        v1_bundle = await self.fetch_attested_weights_v1(epoch_id)
-        if not isinstance(v1_bundle, dict):
-            return None, "v1_unavailable"
-        verified = self.verify_attested_weights_v1(
-            v1_bundle,
-            expected_epoch_id=epoch_id,
-        )
-        return verified, "v1_verified" if verified else "v1_invalid"
+        if raw != "authoritative_v2":
+            raise RuntimeError(
+                "AUDITOR_WEIGHT_PROTOCOL must be authoritative_v2"
+            )
+        return raw
 
     async def fetch_verified_weight_authority(
         self,
         epoch_id: int,
     ) -> Tuple[Optional[Dict], str]:
-        """Fetch the weight authority for the selected auditor protocol."""
+        """Fetch the authoritative V2 weight bundle."""
 
-        protocol = self.auditor_weight_protocol()
-        if protocol == "legacy_v1_compat":
-            # Forced V1: the V2 endpoint is never requested in this mode.
-            return await self._fetch_verified_v1(epoch_id)
-
+        self.auditor_weight_protocol()
         v2_bundle = await self.fetch_attested_weights_v2(epoch_id)
         if isinstance(v2_bundle, dict):
             verified = self.verify_attested_weights_v2(v2_bundle)
             return verified, "v2_verified" if verified else "v2_invalid"
-        if protocol == "authoritative_v2":
-            return None, "v2_unavailable"
-        if not getattr(self, "_last_v2_authority_was_absent", False):
-            return None, "v2_unavailable"
-
-        return await self._fetch_verified_v1(epoch_id)
+        return None, "v2_unavailable"
 
     def verify_attested_weights_v2(self, authority: Dict) -> Optional[Dict]:
         """Verify finalized V2 authority against independent PCR0 builds."""
@@ -1541,26 +1268,20 @@ class AuditorValidator:
         def epoch_is_current() -> bool:
             try:
                 self._validate_durable_epoch_runtime_lifecycle(
-                    int(epoch_id),
                     force_refresh=True,
                 )
                 finalized_state = self._read_epoch_state()
                 if finalized_state.workflow_epoch_id != int(epoch_id):
                     return False
-                if (
-                    getattr(self, "epoch_mode", LEGACY_EPOCH_MODE)
-                    == STATEFUL_EPOCH_MODE
-                ):
-                    if finalized_state.subnet_epoch_index != subnet_epoch_index:
-                        return False
-                    best_state = self._read_best_epoch_state()
-                    return (
-                        best_state.workflow_epoch_id == int(epoch_id)
-                        and best_state.subnet_epoch_index == subnet_epoch_index
-                        and best_state.current_block >= finalized_state.current_block
-                        and best_state.blocks_remaining > 0
-                    )
-                return True
+                if finalized_state.subnet_epoch_index != subnet_epoch_index:
+                    return False
+                best_state = self._read_best_epoch_state()
+                return (
+                    best_state.workflow_epoch_id == int(epoch_id)
+                    and best_state.subnet_epoch_index == subnet_epoch_index
+                    and best_state.current_block >= finalized_state.current_block
+                    and best_state.blocks_remaining > 0
+                )
             except Exception as exc:
                 logger.error(
                     "auditor_weight_epoch_authority_unavailable "
@@ -1574,7 +1295,6 @@ class AuditorValidator:
         def lifecycle_is_open() -> bool:
             try:
                 self._validate_durable_epoch_runtime_lifecycle(
-                    int(epoch_id),
                     force_refresh=True,
                 )
                 return True
@@ -1767,10 +1487,7 @@ class AuditorValidator:
                         )
                         if weights_data is None:
                             # Verification is fail-closed: no fallback vector will be submitted.
-                            if authority_status in {
-                                "v2_unavailable",
-                                "v1_unavailable",
-                            }:
+                            if authority_status == "v2_unavailable":
                                 print("   ⏳ Weights not yet published. Waiting 30s...")
                             else:
                                 print("❌ Auditor verification failed")

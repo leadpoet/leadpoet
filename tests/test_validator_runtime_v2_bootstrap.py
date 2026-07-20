@@ -8,9 +8,8 @@ import pytest
 from Leadpoet.utils.subnet_epoch import (
     CUTOVER_JSON_ENV,
     CUTOVER_PATH_ENV,
-    EPOCH_MODE_ENV,
-    STATEFUL_EPOCH_MODE,
     SubnetEpochCutover,
+    SubnetEpochError,
 )
 
 from gateway.tee.release_manifest_v2 import (
@@ -34,7 +33,6 @@ from validator_tee.enclave.hotkey_authority_v2 import (
     MEASURED_DRAND_LIBRARY_PATH,
 )
 from validator_tee.enclave.runtime_v2 import (
-    VALIDATOR_RUNTIME_CONFIG_SCHEMA_VERSION,
     VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION,
 )
 
@@ -113,23 +111,30 @@ def _hotkey_config():
     }
 
 
-def test_runtime_configuration_binds_six_build_gateway_release(monkeypatch):
-    monkeypatch.delenv(EPOCH_MODE_ENV, raising=False)
+@pytest.fixture(autouse=True)
+def _official_epoch_authority(monkeypatch):
+    cutover = SubnetEpochCutover(
+        network_genesis_hash="0x" + "1" * 64,
+        netuid=71,
+        cutover_block=8_637_156,
+        cutover_block_hash="0x" + "2" * 64,
+        first_subnet_epoch_index=23_927,
+        first_settlement_epoch_id=23_992,
+        last_legacy_epoch_id=23_991,
+    )
+    monkeypatch.setenv(CUTOVER_JSON_ENV, json.dumps(cutover.to_dict()))
+    monkeypatch.delenv(CUTOVER_PATH_ENV, raising=False)
+
+
+def test_runtime_configuration_requires_cutover_authority(monkeypatch):
     monkeypatch.delenv(CUTOVER_JSON_ENV, raising=False)
     monkeypatch.delenv(CUTOVER_PATH_ENV, raising=False)
-    gateway = _gateway_release()
-    config = build_runtime_configuration(
-        validator_release=_validator_release(),
-        gateway_release=gateway,
-        hotkey_authority_config=_hotkey_config(),
-    )
-    assert config["gateway_release_hash"] == gateway["release_hash"]
-    assert config["schema_version"] == VALIDATOR_RUNTIME_CONFIG_SCHEMA_VERSION
-    assert "epoch_authority" not in config
-    assert set(config["gateway_role_expectations"]) == set(ROLE_SPECS)
-    assert config["gateway_role_expectations"]["gateway_scoring"]["pcr0"] == (
-        "4" * 96
-    )
+    with pytest.raises(SubnetEpochError, match="requires a cutover manifest"):
+        build_runtime_configuration(
+            validator_release=_validator_release(),
+            gateway_release=_gateway_release(),
+            hotkey_authority_config=_hotkey_config(),
+        )
 
 
 def test_stateful_runtime_configuration_measures_cutover(monkeypatch):
@@ -142,7 +147,6 @@ def test_stateful_runtime_configuration_measures_cutover(monkeypatch):
         first_settlement_epoch_id=23_992,
         last_legacy_epoch_id=23_991,
     )
-    monkeypatch.setenv(EPOCH_MODE_ENV, STATEFUL_EPOCH_MODE)
     monkeypatch.setenv(CUTOVER_JSON_ENV, json.dumps(cutover.to_dict()))
     monkeypatch.delenv(CUTOVER_PATH_ENV, raising=False)
 
@@ -157,9 +161,10 @@ def test_stateful_runtime_configuration_measures_cutover(monkeypatch):
         == VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION
     )
     assert config["epoch_authority"] == {
-        "mode": STATEFUL_EPOCH_MODE,
+        "mode": "stateful_v1",
         "cutover_manifest": cutover.to_dict(),
     }
+    assert set(config["gateway_role_expectations"]) == set(ROLE_SPECS)
 
 
 def test_runtime_configuration_rejects_asymmetric_commits():

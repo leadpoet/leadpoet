@@ -24,7 +24,6 @@ from leadpoet_canonical.chain_source_v2 import (
     CHAIN_ENDPOINT_HOST,
     CHAIN_ENDPOINT_PATH,
     CHAIN_ENDPOINT_PORT,
-    CHAIN_FINALIZATION_EPOCH_BLOCKS,
     CHAIN_MAX_FINALIZATION_SCAN_BLOCKS,
     CHAIN_MAX_RPC_RESPONSE_BYTES,
     CHAIN_RPC_METHOD,
@@ -370,7 +369,11 @@ class ValidatorChainSourceV2:
             ).call
         else:
             self._archive_rpc_call = None
-        self._epoch_authority_supplier = epoch_authority_supplier or (lambda: None)
+        if epoch_authority_supplier is None:
+            raise ValidatorChainSourceV2Error(
+                "official SN71 epoch authority supplier is unavailable"
+            )
+        self._epoch_authority_supplier = epoch_authority_supplier
 
     def _read_stateful_epoch_authority(
         self,
@@ -1072,27 +1075,25 @@ class ValidatorChainSourceV2:
         epoch_boundary_job = None
         next_request_id = 3
         if epoch_configuration is None:
-            if int(header["block"]) // CHAIN_FINALIZATION_EPOCH_BLOCKS != int(epoch_id):
-                raise ValidatorChainSourceV2Error(
-                    "finalized chain block differs from requested epoch"
-                )
-        else:
-            stateful = self._read_stateful_epoch_authority(
-                configuration=epoch_configuration,
-                finalized_hash=finalized_hash,
-                header=header,
-                netuid=int(netuid),
-                settlement_epoch_id=int(epoch_id),
-                chain_job=chain_job,
-                request_id_start=next_request_id,
+            raise ValidatorChainSourceV2Error(
+                "official SN71 epoch authority is unavailable"
             )
-            epoch_authority = stateful["authority"]
-            epoch_boundary = stateful["boundary_snapshot"]
-            epoch_snapshot_job = stateful["snapshot_job"]
-            epoch_boundary_job = stateful["boundary_job"]
-            all_attempts.extend(stateful["attempts"])
-            all_artifacts.extend(stateful["artifacts"])
-            next_request_id = int(stateful["next_request_id"])
+        stateful = self._read_stateful_epoch_authority(
+            configuration=epoch_configuration,
+            finalized_hash=finalized_hash,
+            header=header,
+            netuid=int(netuid),
+            settlement_epoch_id=int(epoch_id),
+            chain_job=chain_job,
+            request_id_start=next_request_id,
+        )
+        epoch_authority = stateful["authority"]
+        epoch_boundary = stateful["boundary_snapshot"]
+        epoch_snapshot_job = stateful["snapshot_job"]
+        epoch_boundary_job = stateful["boundary_job"]
+        all_attempts.extend(stateful["attempts"])
+        all_artifacts.extend(stateful["artifacts"])
+        next_request_id = int(stateful["next_request_id"])
 
         metagraph_result = self._call(
             method="state_call",

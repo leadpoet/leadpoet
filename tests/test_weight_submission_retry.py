@@ -7,7 +7,6 @@ import pytest
 
 import neurons.auditor_validator as auditor_module
 import neurons.validator as validator_module
-from Leadpoet.utils.subnet_epoch import STATEFUL_EPOCH_MODE
 
 
 class _FakeSubtensor:
@@ -42,7 +41,7 @@ def _primary(results, *, blocks=()):
 
     validator.get_current_block_async = get_current_block_async
     validator._validate_durable_epoch_runtime_lifecycle = (
-        lambda _epoch_id, *, force_refresh: {"lifecycle_state": "legacy_open"}
+        lambda *, force_refresh: {"lifecycle_state": "stateful_active"}
     )
     validator._last_weight_submission_epoch = None
     return validator
@@ -54,7 +53,7 @@ def _auditor(results, *, blocks=()):
     auditor.wallet = object()
     auditor.subtensor = _FakeSubtensor(results, blocks=blocks)
     auditor._validate_durable_epoch_runtime_lifecycle = (
-        lambda _epoch_id, *, force_refresh: {"lifecycle_state": "legacy_open"}
+        lambda *, force_refresh: {"lifecycle_state": "stateful_active"}
     )
     auditor.last_submitted_epoch = None
     return auditor
@@ -121,6 +120,11 @@ def test_primary_retries_false_tuples_until_true(monkeypatch, capsys):
     monkeypatch.setattr(
         validator_module, "AuthoritativeSetWeightsContextV2", _AuthoritativeContext
     )
+
+    async def current(**_kwargs):
+        return True
+
+    validator._weight_submission_epoch_is_current = current
     result = asyncio.run(
         validator._set_weights_until_epoch_end(
             epoch_id=0,
@@ -156,6 +160,12 @@ def test_primary_stops_before_retry_after_epoch_rollover(monkeypatch):
     monkeypatch.setattr(
         validator_module, "AuthoritativeSetWeightsContextV2", _AuthoritativeContext
     )
+    states = iter([True, False])
+
+    async def current(**_kwargs):
+        return next(states)
+
+    validator._weight_submission_epoch_is_current = current
     result = asyncio.run(
         validator._set_weights_until_epoch_end(
             epoch_id=0,
@@ -174,7 +184,6 @@ def test_primary_best_head_rollover_vetoes_stale_finalized_epoch_before_signing(
     monkeypatch,
 ):
     validator = _primary([(True, "must-not-submit")])
-    validator._epoch_mode = STATEFUL_EPOCH_MODE
     finalized_state = SimpleNamespace(
         workflow_epoch_id=100,
         subnet_epoch_index=10,
@@ -222,7 +231,6 @@ def test_primary_best_head_rollover_vetoes_stale_finalized_epoch_before_signing(
 
 def test_primary_due_best_head_vetoes_signature_before_index_advances(monkeypatch):
     validator = _primary([(True, "must-not-submit")])
-    validator._epoch_mode = STATEFUL_EPOCH_MODE
     finalized_state = SimpleNamespace(
         workflow_epoch_id=100,
         subnet_epoch_index=10,
@@ -272,7 +280,6 @@ def test_primary_best_head_rollover_stops_retry_while_finalized_remains_old(
     monkeypatch,
 ):
     validator = _primary([(False, "rejected")])
-    validator._epoch_mode = STATEFUL_EPOCH_MODE
     finalized_state = SimpleNamespace(
         workflow_epoch_id=100,
         subnet_epoch_index=10,
@@ -336,6 +343,11 @@ def test_primary_accepts_v10_extrinsic_response(monkeypatch):
     monkeypatch.setattr(
         validator_module, "AuthoritativeSetWeightsContextV2", _AuthoritativeContext
     )
+
+    async def current(**_kwargs):
+        return True
+
+    validator._weight_submission_epoch_is_current = current
     result = asyncio.run(
         validator._set_weights_until_epoch_end(
             epoch_id=3,
@@ -381,36 +393,20 @@ def test_primary_database_outage_fails_before_signing_or_sdk(monkeypatch):
     assert validator.subtensor.calls == []
 
 
-def test_primary_legacy_startup_checks_computed_epoch_against_durable_fence():
-    validator = validator_module.Validator.__new__(validator_module.Validator)
-    validator._epoch_mode = validator_module.LEGACY_EPOCH_MODE
-    validator.subtensor = SimpleNamespace(block=36_360)
-    observed = []
-
-    def fenced(epoch_id, *, force_refresh):
-        observed.append((epoch_id, force_refresh))
-        raise RuntimeError("reserved settlement ordinal")
-
-    validator._validate_durable_epoch_runtime_lifecycle = fenced
-
-    with pytest.raises(RuntimeError, match="reserved settlement ordinal"):
-        validator._validate_durable_epoch_runtime_startup()
-
-    assert observed == [(101, True)]
-
-
 def test_primary_stateful_startup_requires_receipt_backed_active_mapping(
     monkeypatch,
 ):
     from gateway.utils import epoch as epoch_utils
 
-    cutover = SimpleNamespace(first_settlement_epoch_id=101)
+    cutover = SimpleNamespace(
+        first_settlement_epoch_id=101,
+        mapping_hash="sha256:" + "1" * 64,
+    )
     validator = validator_module.Validator.__new__(validator_module.Validator)
     validator.config = SimpleNamespace(
         netuid=71,
         subtensor=SimpleNamespace(network="finney"),
     )
-    validator._epoch_mode = STATEFUL_EPOCH_MODE
     validator._epoch_cutover = cutover
     observed = []
     validator._uses_production_epoch_cutover_authority = lambda: True
@@ -421,8 +417,8 @@ def test_primary_stateful_startup_requires_receipt_backed_active_mapping(
         lambda value, **_kwargs: observed.append(("authority", value)),
     )
     validator._validate_durable_epoch_runtime_lifecycle = (
-        lambda epoch_id, *, force_refresh: observed.append(
-            ("lifecycle", epoch_id, force_refresh)
+        lambda *, force_refresh: observed.append(
+            ("lifecycle", force_refresh)
         )
     )
 
@@ -430,7 +426,7 @@ def test_primary_stateful_startup_requires_receipt_backed_active_mapping(
 
     assert observed == [
         ("authority", cutover),
-        ("lifecycle", 101, True),
+        ("lifecycle", True),
     ]
 
 
@@ -450,7 +446,7 @@ def test_primary_non_production_runtime_does_not_bind_sn71_cutover_singleton(
         netuid=netuid,
         subtensor=SimpleNamespace(network=network),
     )
-    validator._epoch_mode = validator_module.LEGACY_EPOCH_MODE
+    validator._epoch_cutover = SimpleNamespace(mapping_hash="sha256:" + "1" * 64)
     monkeypatch.setattr(
         epoch_utils,
         "validate_epoch_runtime_lifecycle",
@@ -460,9 +456,8 @@ def test_primary_non_production_runtime_does_not_bind_sn71_cutover_singleton(
     )
 
     assert validator._validate_durable_epoch_runtime_lifecycle(
-        101,
         force_refresh=True,
-    )["lifecycle_state"] == "legacy_open"
+    )["lifecycle_state"] == "stateful_manifest_only"
 
 
 def test_primary_finney_sn71_always_checks_durable_cutover_singleton(monkeypatch):
@@ -473,22 +468,21 @@ def test_primary_finney_sn71_always_checks_durable_cutover_singleton(monkeypatch
         netuid=71,
         subtensor=SimpleNamespace(network="finney"),
     )
-    validator._epoch_mode = validator_module.LEGACY_EPOCH_MODE
+    cutover = SimpleNamespace(mapping_hash="sha256:" + "1" * 64)
+    validator._epoch_cutover = cutover
     observed = []
 
     def validate(**kwargs):
         observed.append(kwargs)
-        return {"lifecycle_state": "legacy_open"}
+        return {"lifecycle_state": "stateful_active"}
 
     monkeypatch.setattr(epoch_utils, "validate_epoch_runtime_lifecycle", validate)
 
-    validator._validate_durable_epoch_runtime_lifecycle(101, force_refresh=True)
+    validator._validate_durable_epoch_runtime_lifecycle(force_refresh=True)
 
     assert observed == [
         {
-            "mode": validator_module.LEGACY_EPOCH_MODE,
-            "epoch_id": 101,
-            "cutover": None,
+            "cutover": cutover,
             "force_refresh": True,
             "network": "finney",
             "netuid": 71,
@@ -501,18 +495,19 @@ def test_primary_lifecycle_transition_after_signing_blocks_sdk(monkeypatch):
     authority_checks = []
     finalized_state = SimpleNamespace(workflow_epoch_id=0)
 
-    def lifecycle(_epoch_id, *, force_refresh):
+    def lifecycle(*, force_refresh):
         assert force_refresh is True
         authority_checks.append("checked")
         if len(authority_checks) == 2:
             raise RuntimeError("stateful_active")
-        return {"lifecycle_state": "legacy_open"}
+        return {"lifecycle_state": "stateful_active"}
 
-    async def read_finalized():
-        return finalized_state
+    async def current(**_kwargs):
+        lifecycle(force_refresh=True)
+        return True
 
     validator._validate_durable_epoch_runtime_lifecycle = lifecycle
-    validator._get_epoch_state_async = read_finalized
+    validator._weight_submission_epoch_is_current = current
     monkeypatch.setattr(
         validator_module,
         "AuthoritativeSetWeightsContextV2",
@@ -540,6 +535,14 @@ def test_auditor_retries_false_tuples_until_true(monkeypatch, capsys):
     )
     sleeps = []
     monkeypatch.setattr(auditor_module.time, "sleep", sleeps.append)
+    state = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1065,
+        blocks_remaining=1,
+    )
+    auditor._read_epoch_state = lambda: state
+    auditor._read_best_epoch_state = lambda: state
 
     result = auditor._set_weights_until_epoch_end(
         epoch_id=2,
@@ -567,6 +570,14 @@ def test_auditor_accepts_v10_extrinsic_response(monkeypatch):
         raise AssertionError("successful submission must not sleep")
 
     monkeypatch.setattr(auditor_module.time, "sleep", unexpected_sleep)
+    state = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1065,
+        blocks_remaining=1,
+    )
+    auditor._read_epoch_state = lambda: state
+    auditor._read_best_epoch_state = lambda: state
 
     result = auditor._set_weights_until_epoch_end(
         epoch_id=2,
@@ -590,17 +601,23 @@ def test_auditor_accepts_v10_extrinsic_response(monkeypatch):
 def test_auditor_lifecycle_transition_before_sdk_fails_closed(monkeypatch):
     auditor = _auditor([(True, "must-not-submit")])
     authority_checks = []
-    state = SimpleNamespace(workflow_epoch_id=2)
+    state = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1065,
+        blocks_remaining=1,
+    )
 
-    def lifecycle(_epoch_id, *, force_refresh):
+    def lifecycle(*, force_refresh):
         assert force_refresh is True
         authority_checks.append("checked")
         if len(authority_checks) == 2:
             raise RuntimeError("stateful_active")
-        return {"lifecycle_state": "legacy_open"}
+        return {"lifecycle_state": "stateful_active"}
 
     auditor._validate_durable_epoch_runtime_lifecycle = lifecycle
     auditor._read_epoch_state = lambda: state
+    auditor._read_best_epoch_state = lambda: state
     monkeypatch.setattr(auditor_module.time, "sleep", lambda _seconds: None)
 
     result = auditor._set_weights_until_epoch_end(
@@ -612,26 +629,6 @@ def test_auditor_lifecycle_transition_before_sdk_fails_closed(monkeypatch):
     assert result is False
     assert authority_checks == ["checked", "checked"]
     assert auditor.subtensor.calls == []
-
-
-def test_auditor_legacy_startup_checks_computed_epoch_against_durable_fence():
-    auditor = auditor_module.AuditorValidator.__new__(
-        auditor_module.AuditorValidator
-    )
-    auditor.epoch_mode = auditor_module.LEGACY_EPOCH_MODE
-    auditor.subtensor = SimpleNamespace(get_current_block=lambda: 36_360)
-    observed = []
-
-    def fenced(epoch_id, *, force_refresh):
-        observed.append((epoch_id, force_refresh))
-        raise RuntimeError("reserved settlement ordinal")
-
-    auditor._validate_durable_epoch_runtime_lifecycle = fenced
-
-    with pytest.raises(RuntimeError, match="reserved settlement ordinal"):
-        auditor._validate_durable_epoch_runtime_startup()
-
-    assert observed == [(101, True)]
 
 
 @pytest.mark.parametrize(
@@ -653,27 +650,54 @@ def test_auditor_cutover_singleton_is_scoped_to_finney_sn71(
         netuid=netuid,
         subtensor=SimpleNamespace(network=network),
     )
-    auditor.epoch_mode = auditor_module.LEGACY_EPOCH_MODE
+    cutover = SimpleNamespace(mapping_hash="sha256:" + "1" * 64)
+    auditor.epoch_cutover = cutover
     observed = []
 
     def validate(**kwargs):
         observed.append(kwargs)
-        return {"lifecycle_state": "legacy_open"}
+        return {"lifecycle_state": "stateful_active"}
 
     monkeypatch.setattr(epoch_utils, "validate_epoch_runtime_lifecycle", validate)
 
     state = auditor._validate_durable_epoch_runtime_lifecycle(
-        101,
         force_refresh=True,
     )
 
-    assert state["lifecycle_state"] == "legacy_open"
+    assert state["lifecycle_state"] in {
+        "stateful_active",
+        "stateful_manifest_only",
+    }
     assert bool(observed) is expects_check
 
 
 def test_auditor_stops_before_retry_after_epoch_rollover(monkeypatch):
     auditor = _auditor([(False, "rejected")], blocks=[1079, 1080])
     monkeypatch.setattr(auditor_module.time, "sleep", lambda _seconds: None)
+    best_states = iter(
+        [
+            SimpleNamespace(
+                workflow_epoch_id=2,
+                subnet_epoch_index=None,
+                current_block=1079,
+                blocks_remaining=1,
+            ),
+            SimpleNamespace(
+                workflow_epoch_id=3,
+                subnet_epoch_index=None,
+                current_block=1080,
+                blocks_remaining=360,
+            ),
+        ]
+    )
+    finalized = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1079,
+        blocks_remaining=1,
+    )
+    auditor._read_epoch_state = lambda: finalized
+    auditor._read_best_epoch_state = lambda: next(best_states)
 
     result = auditor._set_weights_until_epoch_end(
         epoch_id=2,
@@ -690,7 +714,6 @@ def test_auditor_best_head_rollover_stops_retry_while_finalized_remains_old(
     monkeypatch,
 ):
     auditor = _auditor([(False, "rejected")])
-    auditor.epoch_mode = STATEFUL_EPOCH_MODE
     finalized_state = SimpleNamespace(
         workflow_epoch_id=100,
         subnet_epoch_index=10,

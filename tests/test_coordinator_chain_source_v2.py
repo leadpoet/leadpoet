@@ -6,10 +6,7 @@ import json
 
 import pytest
 
-from Leadpoet.utils.subnet_epoch import (
-    STATEFUL_EPOCH_MODE,
-    SubnetEpochCutover,
-)
+from Leadpoet.utils.subnet_epoch import SubnetEpochCutover
 from gateway.tee.coordinator_chain_source_v2 import (
     CoordinatorChainSourceV2,
     CoordinatorChainSourceV2Error,
@@ -199,7 +196,8 @@ class FakeBroker:
 
 
 def test_finalized_metagraph_and_prices_are_bound_to_terminal_records():
-    broker = FakeBroker(100 * 360 + 10)
+    cutover = _stateful_cutover()
+    broker = FakeBroker(1_310, cutover=cutover)
     source = CoordinatorChainSourceV2(
         execute_provider=broker.execute,
         retry_policy_hashes={
@@ -207,24 +205,31 @@ def test_finalized_metagraph_and_prices_are_bound_to_terminal_records():
             "bittensor_archive": "sha256:" + "2" * 64,
             "coingecko": "sha256:" + "3" * 64,
         },
+        epoch_authority={
+            "mode": "stateful_v1",
+            "cutover": cutover.to_dict(),
+        },
         sleep=lambda _seconds: None,
         clock=lambda: datetime(2026, 7, 10, 20, 0, tzinfo=timezone.utc),
     )
     context = ExecutionContextV2(
         job_id="allocation-v2:test",
         purpose="research_lab.allocation.v2",
-        epoch_id=100,
+        epoch_id=101,
     )
 
     result = source.resolve_live_prices(netuid=71, context=context)
 
-    assert result["header"]["block"] == 100 * 360 + 10
+    assert result["header"]["block"] == 1_310
+    assert result["workflow_epoch_id"] == 101
+    assert result["official_subnet_epoch_id"] == 10
     assert len(result["metagraph"]["hotkeys"]) == 2
     assert result["tao_per_alpha"] == 0.005181338
     assert result["tao_usd"] == 201.25
-    assert len(context.transport_attempts) == 5
-    assert len(broker.calls) == 5
+    assert len(context.transport_attempts) == 17
+    assert len(broker.calls) == 17
     assert {call["provider_id"] for call in broker.calls} == {
+        "bittensor_archive",
         "bittensor_chain",
         "coingecko",
     }
@@ -251,7 +256,7 @@ def _stateful_source(broker, cutover):
             "coingecko": "sha256:" + "3" * 64,
         },
         epoch_authority={
-            "mode": STATEFUL_EPOCH_MODE,
+            "mode": "stateful_v1",
             "cutover": cutover.to_dict(),
         },
         sleep=lambda _seconds: None,
@@ -273,7 +278,7 @@ def test_stateful_finalized_metagraph_uses_exact_scheduler_and_cutover_proof():
     assert result["workflow_epoch_id"] == 101
     assert result["official_subnet_epoch_id"] == 10
     assert result["epoch_authority"] == {
-        "mode": STATEFUL_EPOCH_MODE,
+        "mode": "stateful_v1",
         "workflow_epoch_id": 101,
         "official_subnet_epoch_id": 10,
         "cutover_mapping_hash": cutover.mapping_hash,
@@ -431,6 +436,10 @@ def test_historical_weights_use_archive_epoch_end_and_exact_validator_uid():
             "bittensor_archive": "sha256:" + "2" * 64,
             "coingecko": "sha256:" + "3" * 64,
         },
+        epoch_authority={
+            "mode": "stateful_v1",
+            "cutover": _stateful_cutover().to_dict(),
+        },
         sleep=sleeps.append,
     )
     context = ExecutionContextV2(
@@ -461,6 +470,10 @@ def test_historical_archive_retries_are_recorded_and_bounded():
             "bittensor_chain": "sha256:" + "1" * 64,
             "bittensor_archive": "sha256:" + "2" * 64,
             "coingecko": "sha256:" + "3" * 64,
+        },
+        epoch_authority={
+            "mode": "stateful_v1",
+            "cutover": _stateful_cutover().to_dict(),
         },
         sleep=sleeps.append,
     )

@@ -43,13 +43,11 @@ from Leadpoet.validator import reward as reward_module
 from Leadpoet.utils import cloud_db as cloud_db_module
 from Leadpoet.utils.bittensor_sdk import ExtrinsicOutcome
 from Leadpoet.utils.subnet_epoch import (
-    LEGACY_EPOCH_MODE,
+    EPOCH_SCHEME,
     OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT,
-    STATEFUL_EPOCH_MODE,
     SubnetEpochCutover,
     SubnetEpochError,
     SubnetEpochSnapshot,
-    get_epoch_mode,
     load_subnet_epoch_cutover,
     read_subnet_epoch_snapshot,
     validate_subnet_epoch_cutover_anchor,
@@ -332,15 +330,13 @@ QUALIFICATION_PROXY_ENV_RE = re.compile(r"^QUALIFICATION_WEBSHARE_PROXY_(\d+)$")
 QUALIFICATION_WORK_FILE_RE = re.compile(r"^qual_worker_(\d+)_work_(\d+)$")
 
 _TRUTHY_ENV_VALUES = {"true", "1", "yes", "y", "on"}
-_SHARED_EPOCH_SCHEMA_VERSION = "leadpoet.validator_shared_epoch.v2"
-_LEGACY_EPOCH_BLOCKS = 360
+_SHARED_EPOCH_SCHEMA_VERSION = "leadpoet.validator_shared_epoch.v3"
 
 
 @dataclass(frozen=True)
 class _ValidatorEpochState:
     """One coherent epoch decision used by validator and worker code."""
 
-    mode: str
     current_block: int
     workflow_epoch_id: int
     epoch_block: int
@@ -353,29 +349,12 @@ class _ValidatorEpochState:
     snapshot: Optional[SubnetEpochSnapshot] = None
 
     @classmethod
-    def legacy(cls, block: int) -> "_ValidatorEpochState":
-        normalized_block = int(block)
-        epoch_id, epoch_block = divmod(normalized_block, _LEGACY_EPOCH_BLOCKS)
-        next_block = (epoch_id + 1) * _LEGACY_EPOCH_BLOCKS
-        return cls(
-            mode=LEGACY_EPOCH_MODE,
-            current_block=normalized_block,
-            workflow_epoch_id=epoch_id,
-            epoch_block=epoch_block,
-            blocks_remaining=next_block - normalized_block,
-            epoch_start_block=epoch_id * _LEGACY_EPOCH_BLOCKS,
-            next_epoch_block=next_block,
-            tempo=_LEGACY_EPOCH_BLOCKS,
-        )
-
-    @classmethod
-    def stateful(
+    def from_snapshot(
         cls,
         snapshot: SubnetEpochSnapshot,
         cutover: SubnetEpochCutover,
     ) -> "_ValidatorEpochState":
         return cls(
-            mode=STATEFUL_EPOCH_MODE,
             current_block=snapshot.current_block,
             workflow_epoch_id=snapshot.settlement_epoch_id(cutover),
             epoch_block=snapshot.epoch_block,
@@ -390,39 +369,30 @@ class _ValidatorEpochState:
 
     @property
     def identity(self) -> int:
-        if self.mode == STATEFUL_EPOCH_MODE:
-            if self.subnet_epoch_index is None:
-                raise SubnetEpochError("stateful epoch identity is unavailable")
-            return self.subnet_epoch_index
-        return self.workflow_epoch_id
+        if self.subnet_epoch_index is None:
+            raise SubnetEpochError("official subnet epoch identity is unavailable")
+        return self.subnet_epoch_index
 
     def same_epoch(self, other: "_ValidatorEpochState") -> bool:
-        return self.mode == other.mode and self.identity == other.identity
+        return self.identity == other.identity
 
-    def deadline_reached(self, legacy_elapsed_block: int) -> bool:
-        """Preserve one legacy deadline as blocks remaining in stateful mode."""
+    def deadline_reached(self, elapsed_block: int) -> bool:
+        """Return whether the official LastEpochBlock position reached a deadline."""
 
-        threshold = int(legacy_elapsed_block)
-        if not 0 <= threshold <= _LEGACY_EPOCH_BLOCKS:
-            raise ValueError("legacy epoch deadline is outside 0..360")
-        if self.mode == STATEFUL_EPOCH_MODE:
-            return self.blocks_remaining <= (_LEGACY_EPOCH_BLOCKS - threshold)
+        threshold = int(elapsed_block)
+        if threshold < 0:
+            raise ValueError("epoch deadline cannot be negative")
         return self.epoch_block >= threshold
 
     def to_shared_document(self) -> Dict[str, Any]:
-        cutover = (
-            load_subnet_epoch_cutover()
-            if self.mode == STATEFUL_EPOCH_MODE
-            else None
-        )
+        cutover = load_subnet_epoch_cutover()
         authority = (
             self.snapshot.to_dict(cutover=cutover)
-            if self.snapshot is not None and cutover is not None
+            if self.snapshot is not None
             else None
         )
         return {
             "schema_version": _SHARED_EPOCH_SCHEMA_VERSION,
-            "mode": self.mode,
             "block": self.current_block,
             "epoch": self.workflow_epoch_id,
             "blocks_into_epoch": self.epoch_block,
@@ -447,7 +417,6 @@ def _read_shared_epoch_state_file(*, max_age_seconds: int) -> _ValidatorEpochSta
         raise SubnetEpochError("shared epoch file is unreadable") from exc
     expected_fields = {
         "schema_version",
-        "mode",
         "block",
         "epoch",
         "blocks_into_epoch",
@@ -464,9 +433,6 @@ def _read_shared_epoch_state_file(*, max_age_seconds: int) -> _ValidatorEpochSta
         raise SubnetEpochError("shared epoch file fields are invalid")
     if document.get("schema_version") != _SHARED_EPOCH_SCHEMA_VERSION:
         raise SubnetEpochError("shared epoch file schema is unsupported")
-    configured_mode = get_epoch_mode()
-    if document.get("mode") != configured_mode:
-        raise SubnetEpochError("shared epoch file mode differs from this worker")
     try:
         age = int(time.time()) - int(document["timestamp"])
     except (TypeError, ValueError) as exc:
@@ -474,22 +440,19 @@ def _read_shared_epoch_state_file(*, max_age_seconds: int) -> _ValidatorEpochSta
     if age < -30 or age > int(max_age_seconds):
         raise SubnetEpochError(f"shared epoch file is stale ({age}s old)")
 
-    if configured_mode == STATEFUL_EPOCH_MODE:
-        authority = document.get("authority")
-        if not isinstance(authority, dict):
-            raise SubnetEpochError("shared stateful epoch authority is missing")
-        snapshot = SubnetEpochSnapshot.from_mapping(authority)
-        cutover = load_subnet_epoch_cutover()
-        if authority != snapshot.to_dict(cutover=cutover):
-            raise SubnetEpochError(
-                "shared stateful epoch authority is not canonical"
-            )
-        state = _ValidatorEpochState.stateful(
-            snapshot,
-            cutover,
+    authority = document.get("authority")
+    if not isinstance(authority, dict):
+        raise SubnetEpochError("shared official epoch authority is missing")
+    snapshot = SubnetEpochSnapshot.from_mapping(authority)
+    cutover = load_subnet_epoch_cutover()
+    if authority != snapshot.to_dict(cutover=cutover):
+        raise SubnetEpochError(
+            "shared official epoch authority is not canonical"
         )
-    else:
-        state = _ValidatorEpochState.legacy(int(document["block"]))
+    state = _ValidatorEpochState.from_snapshot(
+        snapshot,
+        cutover,
+    )
 
     observed = {
         "block": state.current_block,
@@ -1013,72 +976,44 @@ class Validator(BaseValidatorNeuron):
 
     def _validate_durable_epoch_runtime_lifecycle(
         self,
-        epoch_id: int,
         *,
         force_refresh: bool,
     ) -> dict:
-        """Bind this process mode to the durable Supabase cutover singleton."""
+        """Bind this process to the durable Supabase cutover singleton."""
 
-        mode = getattr(self, "_epoch_mode", LEGACY_EPOCH_MODE)
+        cutover = getattr(self, "_epoch_cutover", None)
+        if cutover is None:
+            raise SubnetEpochError("subnet epoch cutover is unavailable")
         if not self._uses_production_epoch_cutover_authority():
-            if mode == STATEFUL_EPOCH_MODE:
-                cutover = getattr(self, "_epoch_cutover", None)
-                if cutover is None:
-                    raise SubnetEpochError("stateful epoch cutover is unavailable")
-                return {
-                    "lifecycle_state": "stateful_manifest_only",
-                    "mapping_hash": cutover.mapping_hash,
-                }
-            return {"lifecycle_state": "legacy_open", "mapping_hash": None}
+            return {
+                "lifecycle_state": "stateful_manifest_only",
+                "mapping_hash": cutover.mapping_hash,
+            }
 
         from gateway.utils.epoch import validate_epoch_runtime_lifecycle
 
         return validate_epoch_runtime_lifecycle(
-            mode=mode,
-            epoch_id=int(epoch_id) if mode == LEGACY_EPOCH_MODE else None,
-            cutover=(
-                getattr(self, "_epoch_cutover", None)
-                if mode == STATEFUL_EPOCH_MODE
-                else None
-            ),
+            cutover=cutover,
             force_refresh=force_refresh,
             network=str(self.config.subtensor.network),
             netuid=int(self.config.netuid),
         )
 
     def _validate_durable_epoch_runtime_startup(self) -> None:
-        """Fail startup unless the configured mode matches durable authority."""
+        """Fail startup unless the configured mapping matches durable authority."""
 
-        mode = getattr(self, "_epoch_mode", LEGACY_EPOCH_MODE)
-        if mode == STATEFUL_EPOCH_MODE:
-            cutover = getattr(self, "_epoch_cutover", None)
-            if cutover is None:
-                raise SubnetEpochError("stateful epoch cutover is unavailable")
-            if self._uses_production_epoch_cutover_authority():
-                from gateway.utils.epoch import validate_stateful_cutover_authority
+        cutover = getattr(self, "_epoch_cutover", None)
+        if cutover is None:
+            raise SubnetEpochError("subnet epoch cutover is unavailable")
+        if self._uses_production_epoch_cutover_authority():
+            from gateway.utils.epoch import validate_stateful_cutover_authority
 
-                # The full startup check proves the immutable receipt-backed
-                # manifest. Non-production stateful runtimes already performed
-                # their manifest/archive validation during construction.
-                validate_stateful_cutover_authority(
-                    cutover,
-                    network=str(self.config.subtensor.network),
-                    netuid=int(self.config.netuid),
-                )
-            self._validate_durable_epoch_runtime_lifecycle(
-                cutover.first_settlement_epoch_id,
-                force_refresh=True,
+            validate_stateful_cutover_authority(
+                cutover,
+                network=str(self.config.subtensor.network),
+                netuid=int(self.config.netuid),
             )
-            return
-
-        block = (
-            self.subtensor.block
-            if hasattr(self.subtensor, "block")
-            else self.subtensor.get_current_block()
-        )
-        state = _ValidatorEpochState.legacy(block)
         self._validate_durable_epoch_runtime_lifecycle(
-            state.workflow_epoch_id,
             force_refresh=True,
         )
 
@@ -1105,12 +1040,7 @@ class Validator(BaseValidatorNeuron):
             client=self._validator_v2_client,
         )
         super().__init__(config=config, wallet=enclave_wallet)
-        self._epoch_mode = get_epoch_mode()
-        self._epoch_cutover = (
-            load_subnet_epoch_cutover()
-            if self._epoch_mode == STATEFUL_EPOCH_MODE
-            else None
-        )
+        self._epoch_cutover = load_subnet_epoch_cutover()
         if (
             self._epoch_cutover is not None
             and int(self._epoch_cutover.netuid) != int(self.config.netuid)
@@ -1118,16 +1048,13 @@ class Validator(BaseValidatorNeuron):
             raise SubnetEpochError(
                 "validator netuid differs from subnet epoch cutover manifest"
             )
-        if self._epoch_cutover is not None:
-            self._epoch_archive_subtensor = bt.Subtensor(
-                network=OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
-            )
-            validate_subnet_epoch_cutover_anchor(
-                self._epoch_archive_subtensor,
-                self._epoch_cutover,
-            )
-        else:
-            self._epoch_archive_subtensor = None
+        self._epoch_archive_subtensor = bt.Subtensor(
+            network=OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
+        )
+        validate_subnet_epoch_cutover_anchor(
+            self._epoch_archive_subtensor,
+            self._epoch_cutover,
+        )
         self._epoch_snapshot_lock = threading.Lock()
         self._validate_durable_epoch_runtime_startup()
         journal_path = Path(
@@ -1279,22 +1206,9 @@ class Validator(BaseValidatorNeuron):
         """Read one coherent epoch state from one Subtensor connection."""
 
         source = subtensor or self.subtensor
-        if getattr(self, "_epoch_mode", LEGACY_EPOCH_MODE) == LEGACY_EPOCH_MODE:
-            block = (
-                source.block
-                if hasattr(source, "block")
-                else source.get_current_block()
-            )
-            state = _ValidatorEpochState.legacy(block)
-            self._validate_durable_epoch_runtime_lifecycle(
-                state.workflow_epoch_id,
-                force_refresh=False,
-            )
-            return state
         if self._epoch_cutover is None:
-            raise SubnetEpochError("stateful epoch cutover is unavailable")
+            raise SubnetEpochError("subnet epoch cutover is unavailable")
         self._validate_durable_epoch_runtime_lifecycle(
-            self._epoch_cutover.first_settlement_epoch_id,
             force_refresh=False,
         )
         with self._epoch_snapshot_lock:
@@ -1303,7 +1217,7 @@ class Validator(BaseValidatorNeuron):
                 netuid=int(self.config.netuid),
                 finalized=True,
             )
-        return _ValidatorEpochState.stateful(snapshot, self._epoch_cutover)
+        return _ValidatorEpochState.from_snapshot(snapshot, self._epoch_cutover)
 
     async def _get_epoch_state_async(self) -> _ValidatorEpochState:
         state = await asyncio.to_thread(self._read_epoch_state_sync)
@@ -1311,7 +1225,7 @@ class Validator(BaseValidatorNeuron):
         return state
 
     def _read_best_epoch_state_sync(self, subtensor=None) -> _ValidatorEpochState:
-        """Read best-head state only as a stateful epoch liveness veto.
+        """Read best-head state only as an official epoch liveness veto.
 
         Finalized state remains the authority for epoch identity and settlement.
         The best head is read separately so an old finalized snapshot cannot
@@ -1319,17 +1233,15 @@ class Validator(BaseValidatorNeuron):
         """
 
         source = subtensor or self.subtensor
-        if getattr(self, "_epoch_mode", LEGACY_EPOCH_MODE) == LEGACY_EPOCH_MODE:
-            return self._read_epoch_state_sync(source)
         if self._epoch_cutover is None:
-            raise SubnetEpochError("stateful epoch cutover is unavailable")
+            raise SubnetEpochError("subnet epoch cutover is unavailable")
         with self._epoch_snapshot_lock:
             snapshot = read_subnet_epoch_snapshot(
                 source,
                 netuid=int(self.config.netuid),
                 finalized=False,
             )
-        return _ValidatorEpochState.stateful(snapshot, self._epoch_cutover)
+        return _ValidatorEpochState.from_snapshot(snapshot, self._epoch_cutover)
 
     async def _get_best_epoch_state_async(self) -> _ValidatorEpochState:
         return await asyncio.to_thread(self._read_best_epoch_state_sync)
@@ -1345,14 +1257,11 @@ class Validator(BaseValidatorNeuron):
         try:
             await asyncio.to_thread(
                 self._validate_durable_epoch_runtime_lifecycle,
-                int(epoch_id),
                 force_refresh=True,
             )
             finalized_state = await self._get_epoch_state_async()
             if finalized_state.workflow_epoch_id != int(epoch_id):
                 return False
-            if getattr(self, "_epoch_mode", LEGACY_EPOCH_MODE) != STATEFUL_EPOCH_MODE:
-                return True
             if finalized_state.subnet_epoch_index != subnet_epoch_index:
                 return False
             best_state = await self._get_best_epoch_state_async()
@@ -1380,7 +1289,6 @@ class Validator(BaseValidatorNeuron):
         try:
             await asyncio.to_thread(
                 self._validate_durable_epoch_runtime_lifecycle,
-                int(epoch_id),
                 force_refresh=True,
             )
             return True
@@ -1393,14 +1301,12 @@ class Validator(BaseValidatorNeuron):
             return False
 
     def _subnet_index_for_workflow_epoch(self, epoch_id: int) -> Optional[int]:
-        if getattr(self, "_epoch_mode", LEGACY_EPOCH_MODE) == LEGACY_EPOCH_MODE:
-            return None
         cutover = self._epoch_cutover
         if cutover is None:
-            raise SubnetEpochError("stateful epoch cutover is unavailable")
+            raise SubnetEpochError("subnet epoch cutover is unavailable")
         normalized_epoch = int(epoch_id)
         if normalized_epoch < cutover.first_settlement_epoch_id:
-            raise SubnetEpochError("workflow epoch predates stateful cutover")
+            raise SubnetEpochError("workflow epoch predates subnet epoch cutover")
         return cutover.first_subnet_epoch_index + (
             normalized_epoch - cutover.first_settlement_epoch_id
         )
@@ -2410,7 +2316,7 @@ class Validator(BaseValidatorNeuron):
                                 try:
                                     await asyncio.wait_for(
                                         self.process_fulfillment_workflow(
-                                            current_block_override=current_epoch_state,
+                                            current_epoch_state=current_epoch_state,
                                         ),
                                         timeout=300,
                                     )
@@ -3718,7 +3624,7 @@ class Validator(BaseValidatorNeuron):
                     "epoch": current_epoch,
                     "start_block": epoch_state.epoch_start_block,
                     "end_block": epoch_state.next_epoch_block,
-                    "epoch_scheme": epoch_state.mode,
+                    "epoch_scheme": EPOCH_SCHEME,
                     "subnet_epoch_index": epoch_state.subnet_epoch_index,
                     "epoch_ref": epoch_state.epoch_ref,
                     "miner_scores": {},
@@ -3783,7 +3689,7 @@ class Validator(BaseValidatorNeuron):
                 "epoch": current_epoch,
                 "start_block": epoch_state.epoch_start_block,
                 "end_block": epoch_state.next_epoch_block,
-                "epoch_scheme": epoch_state.mode,
+                "epoch_scheme": EPOCH_SCHEME,
                 "subnet_epoch_index": epoch_state.subnet_epoch_index,
                 "epoch_ref": epoch_state.epoch_ref,
                 "miner_scores": epoch_data["miner_scores"].copy(),  # Deep copy of scores
@@ -5493,7 +5399,10 @@ class Validator(BaseValidatorNeuron):
     # LEAD FULFILLMENT SCORING WORKFLOW
     # ═══════════════════════════════════════════════════════════════════════════
 
-    async def process_fulfillment_workflow(self, current_block_override: int = None):
+    async def process_fulfillment_workflow(
+        self,
+        current_epoch_state: Optional[_ValidatorEpochState] = None,
+    ):
         """Unified fulfillment workflow — distribute work AND collect results.
 
         Runs on a dedicated OS thread (see fulfillment_polling_thread
@@ -5514,13 +5423,8 @@ class Validator(BaseValidatorNeuron):
             and submit scores to the gateway.
 
         Args:
-            current_block_override: If provided, use this block number
-                instead of awaiting ``self.get_current_block_async()``.
-                The polling thread supplies a block from its own sync
-                subtensor because ``self.async_subtensor`` is bound to
-                the main event loop and can't be awaited from a
-                different loop.  Pass ``None`` when called from the
-                main loop itself (backwards-compatible).
+            current_epoch_state: Exact-hash scheduler state supplied by the
+                polling thread. Pass ``None`` when called from the main loop.
 
         Falls back to inline scoring if no fulfillment proxies are
         configured (development / single-container mode).
@@ -5529,16 +5433,15 @@ class Validator(BaseValidatorNeuron):
             return
 
         try:
-            if isinstance(current_block_override, _ValidatorEpochState):
-                epoch_state = current_block_override
-            elif current_block_override is not None:
-                if self._epoch_mode == STATEFUL_EPOCH_MODE:
-                    raise SubnetEpochError(
-                        "stateful fulfillment requires a coherent epoch snapshot"
-                    )
-                epoch_state = _ValidatorEpochState.legacy(current_block_override)
-            else:
-                epoch_state = await self._get_epoch_state_async()
+            epoch_state = (
+                current_epoch_state
+                if current_epoch_state is not None
+                else await self._get_epoch_state_async()
+            )
+            if not isinstance(epoch_state, _ValidatorEpochState):
+                raise TypeError(
+                    "fulfillment requires a coherent official epoch snapshot"
+                )
             current_block = epoch_state.current_block
             current_epoch = epoch_state.workflow_epoch_id
             weights_dir = Path("validator_weights")

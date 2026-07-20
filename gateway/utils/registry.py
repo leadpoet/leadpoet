@@ -26,9 +26,6 @@ _cache_epoch_timestamp = None  # Track when we last calculated the epoch
 _cache_lock = threading.Lock()  # For quick cache read/write ONLY (no await inside!)
 _fetch_in_progress = False  # Flag to prevent concurrent fetches (async-safe)
 
-# Epoch duration in seconds (360 blocks × 12 seconds/block = 4320 seconds = 72 minutes)
-EPOCH_DURATION_SECONDS = 360 * 12
-
 # Async subtensor instance (injected at gateway startup)
 _async_subtensor = None
 
@@ -109,9 +106,6 @@ async def get_metagraph_async() -> bt.Metagraph:
     global _metagraph_cache, _cache_epoch, _cache_epoch_timestamp, _fetch_in_progress
     import time
     import asyncio
-    from Leadpoet.utils.subnet_epoch import STATEFUL_EPOCH_MODE, get_epoch_mode
-
-    stateful_epoch_mode = get_epoch_mode() == STATEFUL_EPOCH_MODE
     
     if _async_subtensor is None:
         raise Exception(
@@ -123,27 +117,6 @@ async def get_metagraph_async() -> bt.Metagraph:
     # STEP 1: Quick cache check (lock held only for read)
     # ═══════════════════════════════════════════════════════════════════════════
     with _cache_lock:
-        # Fast path: Check if cache is still valid based on time
-        if (
-            not stateful_epoch_mode
-            and _metagraph_cache is not None
-            and _cache_epoch_timestamp is not None
-        ):
-            time_since_cache = time.time() - _cache_epoch_timestamp
-            
-            # If less than 72 minutes (one epoch) have passed, cache is definitely still valid
-            if time_since_cache < EPOCH_DURATION_SECONDS:
-                print(f"✅ Using cached metagraph for epoch {_cache_epoch} ({len(_metagraph_cache.hotkeys)} neurons) - {int(time_since_cache)}s old")
-                return _metagraph_cache
-        
-        # Check if another task is already fetching
-        if _fetch_in_progress:
-            # Another task is fetching - use cache if available, otherwise wait
-            if not stateful_epoch_mode and _metagraph_cache is not None:
-                print(f"⏳ Metagraph fetch in progress - using existing cache for epoch {_cache_epoch}")
-                return _metagraph_cache
-            # No cache and fetch in progress - we'll proceed (rare race condition)
-        
         # Mark that we're starting a fetch
         _fetch_in_progress = True
     
@@ -282,15 +255,8 @@ async def get_metagraph_async() -> bt.Metagraph:
         print(f"❌ Error fetching metagraph after {max_retries} attempts: {last_error}")
         print(f"   Async attempts: {switch_to_sync_after}, Sync fallback attempts: {max_retries - switch_to_sync_after}")
         
-        # Use fallback cache
         with _cache_lock:
             _fetch_in_progress = False
-            if not stateful_epoch_mode and _metagraph_cache is not None:
-                print(f"⚠️  Using metagraph from previous epoch {_cache_epoch} as fallback")
-                print(f"⚠️  This may not include validators who registered in epoch {current_epoch}")
-                _cache_epoch_timestamp = time.time()
-                print(f"⚠️  Fallback cache will be used for next 72 minutes (prevents retry spam)")
-                return _metagraph_cache
         
         raise Exception(f"Failed to fetch metagraph and no cache available: {last_error}")
     

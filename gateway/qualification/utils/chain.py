@@ -586,13 +586,6 @@ async def get_coldkey_for_hotkey(hotkey: str) -> Optional[str]:
         return None
 
 
-# =============================================================================
-# Epoch Calculation
-# =============================================================================
-
-TEMPO = 360  # Blocks per epoch (12 seconds per block = 72 minutes per epoch)
-
-
 async def get_current_block() -> int:
     """
     Get the current block number.
@@ -724,7 +717,6 @@ def get_chain_info() -> Dict[str, Any]:
         "netuid": BITTENSOR_NETUID,
         "payment_wallet": get_payment_wallet(),
         "is_testnet": BITTENSOR_NETWORK == "test",
-        "tempo": TEMPO
     }
 
 

@@ -3,9 +3,9 @@ Epoch Lifecycle Management Task
 
 Background task that manages epoch lifecycle events:
 - EPOCH_INITIALIZATION: Combined event with epoch boundaries, queue root, and lead assignment
-- EPOCH_END: Logged when validation phase ends (block 360)
+- EPOCH_END: Logged at the authenticated SN71 boundary
 - EPOCH_INPUTS: Hash of all events during epoch
-- Reveal Phase: Triggered after epoch closes (block 360+)
+- Reveal Phase: Triggered after the authenticated boundary
 - Consensus: Computed after reveals collected
 
 Runs every 30 seconds to check for epoch transitions.
@@ -26,16 +26,10 @@ from Leadpoet.utils.subnet_epoch import (
 )
 
 from gateway.utils.epoch import (
-    STATEFUL_EPOCH_MODE,
     get_current_epoch_context_async,
     get_current_epoch_times,
-    get_current_epoch_id_async,
     get_epoch_blocks_remaining,
     get_epoch_elapsed,
-    get_epoch_mode,
-    get_epoch_start_time_async,
-    get_epoch_end_time_async,
-    get_epoch_close_time_async,
     is_epoch_active,
     is_epoch_closed,
 )
@@ -148,8 +142,6 @@ async def get_durable_epoch_event(
     if isinstance(epoch_id, bool) or not isinstance(epoch_id, int) or epoch_id < 0:
         raise ValueError("epoch_id must be a non-negative integer")
 
-    stateful_epoch_mode = get_epoch_mode() == STATEFUL_EPOCH_MODE
-
     def _fetch_page(start: int):
         query = (
             supabase.table("transparency_log")
@@ -160,10 +152,9 @@ async def get_durable_epoch_event(
             .eq("event_type", event_type)
             .eq("payload->>epoch_id", str(epoch_id))
         )
-        if stateful_epoch_mode:
-            query = query.eq(
-                "payload->>epoch_key_semantics", "settlement_ordinal"
-            )
+        query = query.eq(
+            "payload->>epoch_key_semantics", "settlement_ordinal"
+        )
         return (
             query.order("id")
             .range(start, start + _TRANSPARENCY_PAGE_SIZE - 1)
@@ -199,9 +190,7 @@ async def get_durable_epoch_event(
                 f"{event_type} has a conflicting payload epoch_id for epoch "
                 f"{epoch_id}"
             )
-        if stateful_epoch_mode and payload.get(
-            "epoch_key_semantics"
-        ) != "settlement_ordinal":
+        if payload.get("epoch_key_semantics") != "settlement_ordinal":
             raise RuntimeError(
                 f"{event_type} for epoch {epoch_id} is not a settlement-ordinal event"
             )
@@ -377,7 +366,6 @@ async def epoch_lifecycle_task():
     print("="*80)
     
     last_epoch_id = None
-    validation_ended_epochs = set()  # Track which epochs we've logged EPOCH_END for
     closed_epochs = set()  # Track which epochs we've processed consensus for
     prefetch_triggered_epochs = set()  # Track which epochs we've triggered prefetch for
     consensus_computed_epochs = set()  # Track which epochs we've computed consensus for (IMMEDIATE REVEAL MODE)
@@ -389,19 +377,13 @@ async def epoch_lifecycle_task():
     
     while True:
         try:
-            stateful = get_epoch_mode() == STATEFUL_EPOCH_MODE
             epoch_snapshot, current_epoch = await get_current_epoch_context_async(
-                finalized=True if stateful else None
+                finalized=True
             )
             now = datetime.utcnow()
-            if stateful:
-                epoch_start, epoch_end, epoch_close = get_current_epoch_times(
-                    epoch_snapshot
-                )
-            else:
-                epoch_start = await get_epoch_start_time_async(current_epoch)
-                epoch_end = await get_epoch_end_time_async(current_epoch)
-                epoch_close = await get_epoch_close_time_async(current_epoch)
+            epoch_start, epoch_end, epoch_close = get_current_epoch_times(
+                epoch_snapshot
+            )
             block_within_epoch = get_epoch_elapsed(epoch_snapshot)
             blocks_remaining = get_epoch_blocks_remaining(epoch_snapshot)
             
@@ -433,7 +415,7 @@ async def epoch_lifecycle_task():
                         epoch_start,
                         epoch_end,
                         epoch_close,
-                        epoch_snapshot=epoch_snapshot if stateful else None,
+                        epoch_snapshot=epoch_snapshot,
                     )
                 except Exception as init_error:
                     print(f"   ❌ EPOCH_INITIALIZATION failed: {init_error}")
@@ -454,11 +436,7 @@ async def epoch_lifecycle_task():
             # ========================================================================
             try:
                 # Trigger prefetch once when we reach block 351
-                prefetch_window = (
-                    0 < blocks_remaining <= 9
-                    if stateful
-                    else 351 <= block_within_epoch <= 360
-                )
+                prefetch_window = 0 < blocks_remaining <= 9
                 if (prefetch_window and
                     current_epoch not in prefetch_triggered_epochs and 
                     not is_prefetch_in_progress()):
@@ -502,11 +480,7 @@ async def epoch_lifecycle_task():
             try:
                 # Run consensus once when we reach block 330+ (but before epoch ends)
                 # This gives validators until block ~300-320 to submit their validations
-                consensus_window = (
-                    16 <= blocks_remaining <= 30
-                    if stateful
-                    else 330 <= block_within_epoch <= 358
-                )
+                consensus_window = 16 <= blocks_remaining <= 30
                 if (consensus_window and
                     current_epoch not in consensus_computed_epochs):
                     
@@ -548,34 +522,6 @@ async def epoch_lifecycle_task():
                 # Not critical - will retry next 30s cycle
             
             # ========================================================================
-            # Check if validation phase just ended (t=67)
-            # ========================================================================
-            time_since_end = (now - epoch_end).total_seconds()
-            if (
-                not stateful
-                and 0 <= time_since_end < 60
-                and current_epoch not in validation_ended_epochs
-            ):
-                print(f"\n{'='*80}")
-                print(f"⏰ EPOCH {current_epoch} VALIDATION PHASE ENDED")
-                print(f"{'='*80}")
-                print(f"   Ended at: {epoch_end.isoformat()}")
-                print(f"   Epoch closed at: {epoch_close.isoformat()}")
-                
-                # Log EPOCH_END
-                await log_epoch_event("EPOCH_END", current_epoch, {
-                    "epoch_id": current_epoch,
-                    "end_time": epoch_end.isoformat(),
-                    "phase": "epoch_ended"
-                })
-                
-                # Compute and log EPOCH_INPUTS hash
-                await compute_and_log_epoch_inputs(current_epoch)
-                
-                validation_ended_epochs.add(current_epoch)
-                print(f"   ✅ Epoch {current_epoch} validation phase complete\n")
-            
-            # ========================================================================
             # Check if ANY previous epochs need consensus (check up to 10 epochs back)
             # ========================================================================
             print(f"   🔍 Checking for closed epochs needing consensus...")
@@ -588,11 +534,10 @@ async def epoch_lifecycle_task():
                     continue  # Already processed
                 
                 # Calculate close time for THIS epoch
-                if stateful and check_epoch < current_epoch:
+                if check_epoch < current_epoch:
                     time_since_close = 0.0
                 else:
-                    check_epoch_close = await get_epoch_close_time_async(check_epoch)
-                    time_since_close = (now - check_epoch_close).total_seconds()
+                    time_since_close = (now - epoch_close).total_seconds()
                 
                 if time_since_close >= 0:  # This epoch has closed
                     print(f"   ⚠️  EPOCH {check_epoch} IS CLOSED - Checking for evidence...")
@@ -657,11 +602,6 @@ async def epoch_lifecycle_task():
                         print(f"   ⏳ No evidence yet for epoch {check_epoch}, but only {time_since_close:.0f}s since close - will check again")
             
             # Clean up old tracking sets to prevent memory growth
-            if len(validation_ended_epochs) > 100:
-                # Keep only recent 50 epochs
-                recent = sorted(list(validation_ended_epochs))[-50:]
-                validation_ended_epochs = set(recent)
-            
             if len(closed_epochs) > 100:
                 recent = sorted(list(closed_epochs))[-50:]
                 closed_epochs = set(recent)
@@ -716,10 +656,7 @@ async def log_epoch_event(event_type: str, epoch_id: int, payload: dict):
     ):
         raise ValueError("epoch event payload must contain the exact epoch_id")
 
-    protected = (
-        event_type in _DURABLE_EPOCH_EVENT_TYPES
-        and get_epoch_mode() == STATEFUL_EPOCH_MODE
-    )
+    protected = event_type in _DURABLE_EPOCH_EVENT_TYPES
     if protected and payload.get("epoch_key_semantics") != "settlement_ordinal":
         raise ValueError(
             "stateful lifecycle event must use settlement_ordinal key semantics"
@@ -818,7 +755,7 @@ async def compute_and_log_epoch_initialization(
     epoch_start: datetime,
     epoch_end: datetime,
     epoch_close: datetime,
-    epoch_snapshot=None,
+    epoch_snapshot: SubnetEpochSnapshot,
     *,
     event_writer: Optional[
         Callable[[str, int, dict], Awaitable[Any]]
@@ -843,43 +780,38 @@ async def compute_and_log_epoch_initialization(
     try:
         from gateway.utils.assignment import get_validator_set
 
-        existing = (
-            await get_durable_epoch_event(
-                "EPOCH_INITIALIZATION",
-                epoch_id,
-            )
-            if epoch_snapshot is not None
-            else None
+        existing = await get_durable_epoch_event(
+            "EPOCH_INITIALIZATION",
+            epoch_id,
         )
         if existing is not None:
             existing_payload = existing["payload"]
-            if epoch_snapshot is not None:
-                authority = existing_payload.get("epoch_authority")
-                if not isinstance(authority, dict):
-                    raise RuntimeError(
-                        "stateful EPOCH_INITIALIZATION is missing epoch authority"
-                    )
-                expected_authority = epoch_snapshot.to_dict(
-                    cutover=load_subnet_epoch_cutover()
+            authority = existing_payload.get("epoch_authority")
+            if not isinstance(authority, dict):
+                raise RuntimeError(
+                    "EPOCH_INITIALIZATION is missing epoch authority"
                 )
-                for field in (
-                    "settlement_epoch_id",
-                    "subnet_epoch_index",
-                    "epoch_ref",
-                    "cutover_mapping_hash",
-                ):
-                    if authority.get(field) != expected_authority.get(field):
-                        raise RuntimeError(
-                            "stateful EPOCH_INITIALIZATION conflicts with the "
-                            f"observed {field}"
-                        )
-                if (
-                    existing_payload.get("epoch_key_semantics")
-                    != "settlement_ordinal"
-                ):
+            expected_authority = epoch_snapshot.to_dict(
+                cutover=load_subnet_epoch_cutover()
+            )
+            for field in (
+                "settlement_epoch_id",
+                "subnet_epoch_index",
+                "epoch_ref",
+                "cutover_mapping_hash",
+            ):
+                if authority.get(field) != expected_authority.get(field):
                     raise RuntimeError(
-                        "stateful EPOCH_INITIALIZATION has legacy key semantics"
+                        "EPOCH_INITIALIZATION conflicts with the "
+                        f"observed {field}"
                     )
+            if (
+                existing_payload.get("epoch_key_semantics")
+                != "settlement_ordinal"
+            ):
+                raise RuntimeError(
+                    "EPOCH_INITIALIZATION has invalid key semantics"
+                )
             print(
                 f"   ℙ️  Epoch {epoch_id} already has one durable "
                 "EPOCH_INITIALIZATION"
@@ -952,9 +884,7 @@ async def compute_and_log_epoch_initialization(
         # ========================================================================
         # 3. Compute deterministic lead assignment (first N leads, FIFO)
         # ========================================================================
-        # Bind assignment to the exact queue list collected above. Calling the
-        # legacy helper here would query the queue a second time and could
-        # silently assign a different set than the committed Merkle root.
+        # Bind assignment to the exact queue list collected above.
         assigned_lead_ids = (
             lead_ids[:MAX_LEADS_PER_EPOCH]
             if validator_set
@@ -966,28 +896,18 @@ async def compute_and_log_epoch_initialization(
         # ========================================================================
         # 4. Create single atomic EPOCH_INITIALIZATION event
         # ========================================================================
-        if epoch_snapshot is not None:
-            epoch_authority = epoch_snapshot.to_dict(
-                cutover=load_subnet_epoch_cutover()
-            )
-            boundary_document = {
-                "start_block": epoch_snapshot.last_epoch_block,
-                "end_block": epoch_snapshot.next_epoch_block,
-                "expected_end_block": epoch_snapshot.next_epoch_block,
-                "pending_epoch_at": epoch_snapshot.pending_epoch_at,
-                "tempo": epoch_snapshot.tempo,
-                "start_timestamp": epoch_start.isoformat(),
-                "estimated_end_timestamp": epoch_end.isoformat(),
-            }
-        else:
-            epoch_authority = None
-            boundary_document = {
-                "start_block": epoch_id * 360,
-                "end_block": (epoch_id * 360) + 360,
-                "expected_end_block": (epoch_id * 360) + 360,
-                "start_timestamp": epoch_start.isoformat(),
-                "estimated_end_timestamp": epoch_end.isoformat(),
-            }
+        epoch_authority = epoch_snapshot.to_dict(
+            cutover=load_subnet_epoch_cutover()
+        )
+        boundary_document = {
+            "start_block": epoch_snapshot.last_epoch_block,
+            "end_block": epoch_snapshot.next_epoch_block,
+            "expected_end_block": epoch_snapshot.next_epoch_block,
+            "pending_epoch_at": epoch_snapshot.pending_epoch_at,
+            "tempo": epoch_snapshot.tempo,
+            "start_timestamp": epoch_start.isoformat(),
+            "estimated_end_timestamp": epoch_end.isoformat(),
+        }
 
         initialization_timestamp = payload_timestamp or datetime.utcnow()
         initialization_timestamp_value = (
@@ -997,11 +917,7 @@ async def compute_and_log_epoch_initialization(
         )
         payload = {
             "epoch_id": epoch_id,
-            "epoch_key_semantics": (
-                "settlement_ordinal"
-                if epoch_authority is not None
-                else "legacy_global_360"
-            ),
+            "epoch_key_semantics": "settlement_ordinal",
             "epoch_authority": epoch_authority,
             "epoch_boundaries": boundary_document,
             "queue_state": {
@@ -1047,12 +963,7 @@ async def compute_and_log_epoch_inputs(
         epoch_id: Epoch ID
     """
     try:
-        stateful = get_epoch_mode() == STATEFUL_EPOCH_MODE
-        existing = (
-            await get_durable_epoch_event("EPOCH_INPUTS", epoch_id)
-            if stateful
-            else None
-        )
+        existing = await get_durable_epoch_event("EPOCH_INPUTS", epoch_id)
         if existing is not None:
             print(
                 f"   ℙ️  Epoch {epoch_id} already has one durable "
@@ -1060,10 +971,10 @@ async def compute_and_log_epoch_inputs(
             )
             return existing
 
-        if epoch_start is None:
-            epoch_start = await get_epoch_start_time_async(epoch_id)
-        if epoch_end is None:
-            epoch_end = await get_epoch_end_time_async(epoch_id)
+        if epoch_start is None or epoch_end is None:
+            raise RuntimeError(
+                "EPOCH_INPUTS requires authenticated epoch boundary times"
+            )
 
         # Query every event in bounded pages. PostgREST's configured row cap
         # must not silently change the committed epoch input hash.
@@ -1100,20 +1011,19 @@ async def compute_and_log_epoch_inputs(
             "start_time": epoch_start.isoformat(),
             "end_time": epoch_end.isoformat(),
         }
-        if stateful:
-            durable_authority = (
-                await load_stateful_epoch_initialization_authority(epoch_id)
+        durable_authority = (
+            await load_stateful_epoch_initialization_authority(epoch_id)
+        )
+        if (
+            epoch_authority is not None
+            and epoch_authority != durable_authority
+        ):
+            raise RuntimeError(
+                "EPOCH_INPUTS epoch authority differs from "
+                "durable EPOCH_INITIALIZATION"
             )
-            if (
-                epoch_authority is not None
-                and epoch_authority != durable_authority
-            ):
-                raise RuntimeError(
-                    "EPOCH_INPUTS epoch authority differs from "
-                    "durable EPOCH_INITIALIZATION"
-                )
-            payload["epoch_key_semantics"] = "settlement_ordinal"
-            payload["epoch_authority"] = durable_authority
+        payload["epoch_key_semantics"] = "settlement_ordinal"
+        payload["epoch_authority"] = durable_authority
         durable_identifier = await log_epoch_event(
             "EPOCH_INPUTS",
             epoch_id,

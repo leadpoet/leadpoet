@@ -10,7 +10,6 @@ import time
 import pytest
 
 from Leadpoet.utils.subnet_epoch import (
-    STATEFUL_EPOCH_MODE,
     SubnetEpochCutover,
     SubnetEpochError,
     SubnetEpochSnapshot,
@@ -151,7 +150,6 @@ def test_reward_transition_waits_for_finalized_subnet_epoch(monkeypatch):
         assert netuid == 71
         return observed["finalized"] if finalized else best_after_boundary
 
-    monkeypatch.setattr(reward_module, "get_epoch_mode", lambda: STATEFUL_EPOCH_MODE)
     monkeypatch.setattr(reward_module, "load_subnet_epoch_cutover", lambda: cutover)
     monkeypatch.setattr(
         reward_module,
@@ -192,10 +190,6 @@ def test_reward_transition_waits_for_finalized_subnet_epoch(monkeypatch):
 
 
 def test_reward_stateful_current_block_never_uses_cached_estimation(monkeypatch):
-    monkeypatch.setattr(reward_module, "get_epoch_mode", lambda: STATEFUL_EPOCH_MODE)
-    monkeypatch.setattr(reward_module, "_last_known_block", 123)
-    monkeypatch.setattr(reward_module, "_last_known_block_time", 1.0)
-
     def unavailable():
         raise SubnetEpochError("finalized state unavailable")
 
@@ -214,7 +208,6 @@ def test_reward_stateful_restart_initializes_without_synthetic_transition(
         index=12,
         head="finalized",
     )
-    monkeypatch.setattr(reward_module, "get_epoch_mode", lambda: STATEFUL_EPOCH_MODE)
     monkeypatch.setattr(reward_module, "load_subnet_epoch_cutover", lambda: cutover)
     monkeypatch.setattr(reward_module, "_current_epoch", None)
     monkeypatch.setattr(reward_module, "_current_subnet_epoch_index", None)
@@ -242,7 +235,6 @@ def test_reward_stateful_epoch_jump_emits_exactly_one_transition(monkeypatch):
         index=12,
         head="finalized",
     )
-    monkeypatch.setattr(reward_module, "get_epoch_mode", lambda: STATEFUL_EPOCH_MODE)
     monkeypatch.setattr(reward_module, "load_subnet_epoch_cutover", lambda: cutover)
     monkeypatch.setattr(reward_module, "_current_epoch", None)
     monkeypatch.setattr(reward_module, "_current_subnet_epoch_index", None)
@@ -269,7 +261,6 @@ def test_reward_epoch_decision_rejects_mixed_chain_blocks(monkeypatch):
         index=10,
         head="finalized",
     )
-    monkeypatch.setattr(reward_module, "get_epoch_mode", lambda: STATEFUL_EPOCH_MODE)
     monkeypatch.setattr(reward_module, "load_subnet_epoch_cutover", _cutover)
     with pytest.raises(RuntimeError, match="different chain blocks"):
         reward_module._is_epoch_ended(
@@ -289,7 +280,6 @@ def test_reward_cutover_uses_archive_but_live_snapshot_uses_finney(monkeypatch):
     live_source = object()
     archive_source = object()
     observed = {}
-    monkeypatch.setattr(reward_module, "get_epoch_mode", lambda: STATEFUL_EPOCH_MODE)
     monkeypatch.setattr(reward_module, "load_subnet_epoch_cutover", lambda: cutover)
     monkeypatch.setattr(reward_module, "_stateful_archive_subtensor", archive_source)
     monkeypatch.setattr(reward_module, "_validated_stateful_anchor_sources", set())
@@ -338,7 +328,6 @@ def test_reward_archive_validation_cache_is_scoped_to_mapping_hash(monkeypatch):
         index=10,
         head="finalized",
     )
-    monkeypatch.setattr(reward_module, "get_epoch_mode", lambda: STATEFUL_EPOCH_MODE)
     monkeypatch.setattr(
         reward_module,
         "load_subnet_epoch_cutover",
@@ -389,13 +378,12 @@ def test_validator_irreversible_epoch_state_uses_finalized_head(monkeypatch):
     validator = validator_module.Validator.__new__(validator_module.Validator)
     validator.config = SimpleNamespace(netuid=71)
     validator.subtensor = object()
-    validator._epoch_mode = STATEFUL_EPOCH_MODE
     validator._epoch_cutover = cutover
     validator._epoch_snapshot_lock = threading.Lock()
     monkeypatch.setattr(
         validator,
         "_validate_durable_epoch_runtime_lifecycle",
-        lambda _epoch_id, *, force_refresh: {
+        lambda *, force_refresh: {
             "lifecycle_state": "active",
             "mapping_hash": cutover.mapping_hash,
         },
@@ -431,7 +419,6 @@ def test_validator_submission_liveness_reads_best_head_without_replacing_authori
     validator = validator_module.Validator.__new__(validator_module.Validator)
     validator.config = SimpleNamespace(netuid=71)
     validator.subtensor = object()
-    validator._epoch_mode = STATEFUL_EPOCH_MODE
     validator._epoch_cutover = cutover
     validator._epoch_snapshot_lock = threading.Lock()
 
@@ -453,8 +440,10 @@ def test_shared_stateful_epoch_file_rejects_tampered_derived_authority(
         index=10,
         head="finalized",
     )
-    state = validator_module._ValidatorEpochState.stateful(snapshot, cutover)
-    monkeypatch.setattr(validator_module, "get_epoch_mode", lambda: STATEFUL_EPOCH_MODE)
+    state = validator_module._ValidatorEpochState.from_snapshot(
+        snapshot,
+        cutover,
+    )
     monkeypatch.setattr(
         validator_module,
         "load_subnet_epoch_cutover",

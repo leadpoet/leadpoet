@@ -56,7 +56,20 @@ def _auditor_for_one_verification(verified_result):
         auditor_module.AuditorValidator
     )
     auditor.should_exit = False
-    auditor.subtensor = SimpleNamespace(get_current_block=lambda: 345)
+    epoch_state = SimpleNamespace(
+        current_block=345,
+        workflow_epoch_id=101,
+        epoch_block=345,
+        blocks_remaining=15,
+        identity=23_928,
+        deadline_reached=lambda threshold: 345 >= threshold,
+    )
+    auditor._read_epoch_state = lambda: epoch_state
+    auditor.epoch_cutover = object()
+    auditor.subtensor = SimpleNamespace(
+        get_current_block=lambda: 345,
+        metagraph=lambda _netuid: object(),
+    )
     auditor.config = SimpleNamespace(netuid=71)
     auditor.last_submitted_epoch = None
     auditor.consecutive_errors = 0
@@ -200,7 +213,6 @@ def test_stateful_bundle_epoch_verification_uses_archive_subtensor(monkeypatch):
     auditor = auditor_module.AuditorValidator.__new__(
         auditor_module.AuditorValidator
     )
-    auditor.epoch_mode = auditor_module.STATEFUL_EPOCH_MODE
     auditor.epoch_cutover = object()
     auditor.subtensor = object()
     auditor.epoch_archive_subtensor = object()
@@ -283,78 +295,13 @@ def test_auditor_source_has_no_verification_burn_or_trust_banner():
     assert "submit_burn_weights_to_uid0" not in source
     assert "AUDITOR VERIFICATION MODE" not in source
     assert "Trust level:" not in source
-    # The verified V1 path is intentionally present (selected via
-    # AUDITOR_WEIGHT_PROTOCOL) so auditors keep submitting while the gateway
-    # serves the legacy weight path; it must stay fully verified.
     assert "AUDITOR_WEIGHT_PROTOCOL" in source
-    assert "verify_attested_weights_v1" in source
+    assert "verify_attested_weights_v1" not in source
+    assert "fetch_attested_weights_v1" not in source
 
 
-def _protocol_probe_auditor(monkeypatch, protocol):
-    if protocol is None:
-        monkeypatch.delenv("AUDITOR_WEIGHT_PROTOCOL", raising=False)
-    else:
-        monkeypatch.setenv("AUDITOR_WEIGHT_PROTOCOL", protocol)
-    auditor = auditor_module.AuditorValidator.__new__(
-        auditor_module.AuditorValidator
-    )
-    auditor.calls = []
-
-    async def v2_absent(_epoch):
-        auditor.calls.append("v2")
-        auditor._last_v2_authority_was_absent = True
-        return None
-
-    async def v1_bundle(_epoch):
-        auditor.calls.append("v1")
-        return {"bundle": "v1"}
-
-    auditor.fetch_attested_weights_v2 = v2_absent
-    auditor.fetch_attested_weights_v1 = v1_bundle
-    auditor.verify_attested_weights_v1 = (
-        lambda bundle, *, expected_epoch_id: dict(bundle)
-    )
-    return auditor
-
-
-def test_forced_v1_mode_never_requests_the_v2_endpoint(monkeypatch):
-    auditor = _protocol_probe_auditor(monkeypatch, "legacy_v1_compat")
-
-    result, status = asyncio.run(auditor.fetch_verified_weight_authority(23973))
-
-    assert auditor.calls == ["v1"]
-    assert status == "v1_verified"
-    assert result == {"bundle": "v1"}
-
-
-def test_forced_v2_mode_never_falls_back_to_v1(monkeypatch):
-    auditor = _protocol_probe_auditor(monkeypatch, "authoritative_v2")
-
-    result, status = asyncio.run(auditor.fetch_verified_weight_authority(23973))
-
-    assert auditor.calls == ["v2"]
-    assert result is None
-    assert status == "v2_unavailable"
-
-
-def test_auto_mode_uses_verified_v1_only_when_v2_authority_absent(monkeypatch):
-    auditor = _protocol_probe_auditor(monkeypatch, None)
-
-    result, status = asyncio.run(auditor.fetch_verified_weight_authority(23973))
-
-    assert auditor.calls == ["v2", "v1"]
-    assert status == "v1_verified"
-    assert result == {"bundle": "v1"}
-
-
-def test_unknown_protocol_value_warns_and_runs_auto(monkeypatch, caplog):
-    auditor = _protocol_probe_auditor(monkeypatch, "banana")
-
-    with caplog.at_level("WARNING"):
-        result, status = asyncio.run(
-            auditor.fetch_verified_weight_authority(23973)
-        )
-
-    assert "auditor_weight_protocol_invalid" in caplog.text
-    assert auditor.calls == ["v2", "v1"]
-    assert status == "v1_verified"
+@pytest.mark.parametrize("protocol", ["legacy_v1_compat", "auto", "banana"])
+def test_non_v2_protocol_is_rejected(monkeypatch, protocol):
+    monkeypatch.setenv("AUDITOR_WEIGHT_PROTOCOL", protocol)
+    with pytest.raises(RuntimeError, match="must be authoritative_v2"):
+        auditor_module.AuditorValidator.auditor_weight_protocol()

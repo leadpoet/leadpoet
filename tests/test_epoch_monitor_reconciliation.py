@@ -60,11 +60,6 @@ async def test_stateful_monitor_uses_finalized_scheduler_snapshot(monkeypatch):
         pass
 
     monkeypatch.setattr(epoch_monitor.bt, "Subtensor", lambda **_kwargs: _Subtensor())
-    monkeypatch.setattr(
-        epoch_monitor,
-        "get_epoch_mode",
-        lambda: epoch_monitor.STATEFUL_EPOCH_MODE,
-    )
     monkeypatch.setattr(epoch_monitor, "load_subnet_epoch_cutover", lambda: cutover)
     monkeypatch.setattr(
         epoch_monitor,
@@ -406,8 +401,19 @@ async def test_validation_end_marks_memory_only_after_both_durable_events(
     async def failed_inputs(*_args, **_kwargs):
         raise RuntimeError("inputs unavailable")
 
+    authority = {"cutover_mapping_hash": "sha256:" + "a" * 64}
+
+    async def initialization_authority(epoch_id):
+        assert epoch_id == 101
+        return authority
+
     monkeypatch.setattr(epoch_lifecycle, "log_epoch_event", log)
     monkeypatch.setattr(epoch_lifecycle, "compute_and_log_epoch_inputs", failed_inputs)
+    monkeypatch.setattr(
+        epoch_lifecycle,
+        "load_stateful_epoch_initialization_authority",
+        initialization_authority,
+    )
     assert not await monitor._on_validation_end(
         101,
         epoch_start=now,
@@ -415,13 +421,8 @@ async def test_validation_end_marks_memory_only_after_both_durable_events(
         epoch_close=now,
     )
     assert 101 not in monitor.validation_ended_epochs
-    assert "epoch_key_semantics" not in end_payloads[-1]
-
-    authority = {"cutover_mapping_hash": "sha256:" + "a" * 64}
-
-    async def initialization_authority(epoch_id):
-        assert epoch_id == 101
-        return authority
+    assert end_payloads[-1]["epoch_key_semantics"] == "settlement_ordinal"
+    assert end_payloads[-1]["epoch_authority"] == authority
 
     inputs_kwargs = {}
 
@@ -429,12 +430,6 @@ async def test_validation_end_marks_memory_only_after_both_durable_events(
         inputs_kwargs.update(kwargs)
         return 2
 
-    monkeypatch.setenv("LEADPOET_EPOCH_MODE", "stateful_v1")
-    monkeypatch.setattr(
-        epoch_lifecycle,
-        "load_stateful_epoch_initialization_authority",
-        initialization_authority,
-    )
     monkeypatch.setattr(epoch_lifecycle, "compute_and_log_epoch_inputs", inputs)
     assert await monitor._on_validation_end(
         101,

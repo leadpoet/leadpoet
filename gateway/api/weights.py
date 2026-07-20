@@ -44,7 +44,7 @@ from leadpoet_canonical.weights import bundle_weights_hash, compare_weights_hash
 from leadpoet_canonical.chain import normalize_chain_weights
 from leadpoet_canonical.binding import parse_binding_message, verify_binding_message
 from leadpoet_canonical.timestamps import canonical_timestamp
-from leadpoet_canonical.constants import EPOCH_LENGTH, WEIGHT_SUBMISSION_BLOCK
+from leadpoet_canonical.constants import WEIGHT_SUBMISSION_BLOCK
 from leadpoet_canonical.attested_receipts import SCORING_PURPOSES, WEIGHT_PURPOSE
 from leadpoet_canonical.weight_bundle_v2 import (
     WEIGHT_BUNDLE_V2_SCHEMA_VERSION,
@@ -67,15 +67,8 @@ from gateway.utils.subnet_epoch_archive import (
     validate_cutover_anchor_from_archive,
 )
 from gateway.utils.signature import verify_wallet_signature
-from gateway.utils.epoch import (
-    LegacyEpochNamespaceFencedError,
-    assert_legacy_epoch_namespace_open_async,
-)
 from Leadpoet.utils.subnet_epoch import (
-    LEGACY_EPOCH_MODE,
-    STATEFUL_EPOCH_MODE,
     SubnetEpochCutover,
-    get_epoch_mode,
     load_subnet_epoch_cutover,
     read_subnet_epoch_snapshot,
 )
@@ -147,55 +140,6 @@ async def _verify_epoch_block_authority(
     """
 
     subtensor = await asyncio.to_thread(get_subtensor)
-    mode = get_epoch_mode()
-    if mode != STATEFUL_EPOCH_MODE:
-        gateway_block = int(await asyncio.to_thread(subtensor.get_current_block))
-        gateway_epoch = gateway_block // EPOCH_LENGTH
-        try:
-            await assert_legacy_epoch_namespace_open_async(
-                gateway_epoch,
-                force_refresh=True,
-            )
-        except LegacyEpochNamespaceFencedError as exc:
-            raise HTTPException(
-                status_code=409,
-                detail="legacy epoch namespace is fenced for stateful cutover",
-            ) from exc
-        except Exception as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="durable epoch namespace state is unavailable",
-            ) from exc
-        if abs(gateway_block - int(submitted_block)) > MAX_BLOCK_DRIFT:
-            raise HTTPException(status_code=400, detail="block drift is too large")
-        valid_epochs = (
-            {gateway_epoch, gateway_epoch - 1}
-            if gateway_block % EPOCH_LENGTH < 30
-            else {gateway_epoch}
-        )
-        if int(epoch_id) not in valid_epochs:
-            raise HTTPException(
-                status_code=400,
-                detail=f"epoch_id {epoch_id} not in valid range {valid_epochs}",
-            )
-        if int(epoch_id) != int(submitted_block) // EPOCH_LENGTH:
-            raise HTTPException(status_code=400, detail="epoch does not match block")
-        if (
-            require_submission_window
-            and int(submitted_block) % EPOCH_LENGTH
-            < WEIGHT_SUBMISSION_BLOCK - 15
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="weight submission is too early",
-            )
-        return {
-            "mode": mode,
-            "gateway_block": gateway_block,
-            "workflow_epoch_id": int(epoch_id),
-            "legacy_epoch_block": int(submitted_block) % EPOCH_LENGTH,
-        }
-
     cutover = load_subnet_epoch_cutover()
     try:
         from gateway.utils.epoch import validate_stateful_cutover_authority_async
@@ -240,7 +184,12 @@ async def _verify_epoch_block_authority(
             ),
         )
     if require_submission_window:
-        live_window = EPOCH_LENGTH - WEIGHT_SUBMISSION_BLOCK
+        live_window = current.tempo - WEIGHT_SUBMISSION_BLOCK
+        if live_window <= 0:
+            raise HTTPException(
+                status_code=503,
+                detail="official subnet tempo is incompatible with weight submission",
+            )
         if current_epoch != expected_epoch:
             raise HTTPException(
                 status_code=400,
@@ -274,7 +223,7 @@ async def _verify_epoch_block_authority(
                 ),
             )
     return {
-        "mode": mode,
+        "mode": "stateful_v1",
         "gateway_block": current.current_block,
         "workflow_epoch_id": expected_epoch,
         "official_subnet_epoch_id": submitted.subnet_epoch_index,
@@ -768,18 +717,6 @@ async def _stage_subnet_epoch_candidate_v1(
             status_code=400,
             detail="Subnet epoch cutover manifest is not canonical",
         )
-    try:
-        mode = get_epoch_mode()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Gateway epoch mode is invalid",
-        ) from exc
-    if mode != LEGACY_EPOCH_MODE:
-        raise HTTPException(
-            status_code=409,
-            detail="A pre-cutover boundary candidate requires legacy epoch mode",
-        )
     if not PRIMARY_VALIDATOR_HOTKEYS:
         raise HTTPException(
             status_code=503,
@@ -957,11 +894,6 @@ async def persist_subnet_epoch_evidence_v1(
     if submission.validator_hotkey not in PRIMARY_VALIDATOR_HOTKEYS:
         raise HTTPException(status_code=403, detail="Unauthorized validator hotkey")
     try:
-        if get_epoch_mode() != STATEFUL_EPOCH_MODE:
-            raise HTTPException(
-                status_code=409,
-                detail="Stateful subnet epoch mode is not active",
-            )
         cutover = load_subnet_epoch_cutover()
         from gateway.utils.epoch import validate_stateful_cutover_authority_async
 
@@ -1518,251 +1450,11 @@ async def get_attested_weights_v2(netuid: int, epoch_id: int) -> Dict[str, Any]:
 
 @router.post("/submit")
 async def submit_weights(submission: WeightSubmission) -> WeightSubmissionResponse:
-    """Reject retired V1 writes while preserving historical read endpoints."""
+    """Reject retired V1 writes."""
 
     raise HTTPException(
         status_code=410,
         detail="V1 weight submission is retired; use /weights/submit/v2",
-    )
-
-    # Retained temporarily as unreachable historical decoding code so existing
-    # V1 rows remain explainable during the V2 migration audit. No runtime
-    # configuration can enter this block.
-    from gateway.db.client import get_read_client, get_write_client
-    from gateway.utils.logger import log_event
-
-    if len(submission.uids) != len(submission.weights_u16):
-        raise HTTPException(status_code=400, detail="uids/weights_u16 length mismatch")
-    if not submission.uids:
-        raise HTTPException(status_code=400, detail="weight submission is empty")
-    if submission.uids != sorted(submission.uids):
-        raise HTTPException(status_code=400, detail="uids must be sorted ascending")
-    if len(submission.uids) != len(set(submission.uids)):
-        raise HTTPException(status_code=400, detail="duplicate uids detected")
-    if any(not 1 <= int(weight) <= 65535 for weight in submission.weights_u16):
-        raise HTTPException(
-            status_code=400,
-            detail="sparse weights must all be in [1, 65535]",
-        )
-    if ALLOWED_NETUIDS and submission.netuid not in ALLOWED_NETUIDS:
-        raise HTTPException(status_code=400, detail="invalid netuid")
-    if (
-        PRIMARY_VALIDATOR_HOTKEYS
-        and submission.validator_hotkey not in PRIMARY_VALIDATOR_HOTKEYS
-    ):
-        raise HTTPException(status_code=403, detail="unauthorized validator hotkey")
-
-    def _existing_bundle() -> bool:
-        result = (
-            get_read_client()
-            .table("published_weight_bundles")
-            .select("id")
-            .eq("netuid", submission.netuid)
-            .eq("epoch_id", submission.epoch_id)
-            .eq("validator_hotkey", submission.validator_hotkey)
-            .limit(1)
-            .execute()
-        )
-        return bool(result.data)
-
-    if await asyncio.to_thread(_existing_bundle):
-        raise HTTPException(status_code=409, detail="duplicate submission for this epoch")
-
-    await _verify_epoch_block_authority(
-        netuid=submission.netuid,
-        epoch_id=submission.epoch_id,
-        submitted_block=submission.block,
-        require_submission_window=True,
-    )
-
-    attestation_valid, attestation_data = await asyncio.to_thread(
-        verify_validator_attestation,
-        submission.validator_attestation_b64,
-        submission.validator_enclave_pubkey,
-        submission.epoch_id,
-    )
-    if not attestation_valid:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "invalid validator attestation: "
-                + str(attestation_data.get("error") or "unknown")[:240]
-            ),
-        )
-    verified_pcr0 = str(attestation_data.get("pcr0") or "")
-    pcr0_commit_hash = str(attestation_data.get("pcr0_commit") or "").strip()
-    if not pcr0_commit_hash:
-        pcr0_commit_hash = str(
-            await asyncio.to_thread(
-                _lookup_pcr0_commit_hash_from_allowlist,
-                verified_pcr0,
-            )
-            or ""
-        )
-    if not pcr0_commit_hash:
-        raise HTTPException(
-            status_code=500,
-            detail="verified validator PCR0 has no auditable commit",
-        )
-
-    binding_valid = await asyncio.to_thread(
-        verify_binding_message,
-        submission.binding_message,
-        submission.validator_hotkey_signature,
-        submission.validator_hotkey,
-        expected_netuid=submission.netuid,
-        expected_chain=EXPECTED_CHAIN,
-        expected_enclave_pubkey=submission.validator_enclave_pubkey,
-        expected_code_hash=submission.validator_code_hash,
-    )
-    if not binding_valid:
-        raise HTTPException(status_code=403, detail="invalid hotkey binding")
-    try:
-        digest_bytes = bytes.fromhex(submission.weights_hash)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="weights_hash is not hex") from exc
-    signature_valid = await asyncio.to_thread(
-        verify_ed25519_signature,
-        digest_bytes,
-        submission.validator_signature,
-        submission.validator_enclave_pubkey,
-    )
-    if not signature_valid:
-        raise HTTPException(status_code=401, detail="invalid validator signature")
-    recomputed_hash = bundle_weights_hash(
-        submission.netuid,
-        submission.epoch_id,
-        submission.block,
-        list(zip(submission.uids, submission.weights_u16)),
-    )
-    if recomputed_hash != submission.weights_hash:
-        raise HTTPException(status_code=400, detail="weights_hash does not match payload")
-
-    # Annotation must stay 3.9-compatible: nested-def annotations are
-    # evaluated on every call, and `int | None` needs Python 3.10.
-    def _chain_snapshot() -> tuple[Optional[int], Optional[str]]:
-        try:
-            metagraph = subtensor.metagraph(netuid=submission.netuid)
-            primary_uid = next(
-                (
-                    uid
-                    for uid, hotkey in enumerate(metagraph.hotkeys)
-                    if hotkey == submission.validator_hotkey
-                ),
-                None,
-            )
-            if primary_uid is None:
-                return None, None
-            snapshot_block = int(subtensor.get_current_block())
-            primary_weights = next(
-                (
-                    weights
-                    for uid, weights in subtensor.weights(netuid=submission.netuid)
-                    if uid == primary_uid
-                ),
-                None,
-            )
-            if not primary_weights:
-                return snapshot_block, None
-            compare_hash = compare_weights_hash(
-                submission.netuid,
-                submission.epoch_id,
-                normalize_chain_weights(primary_weights),
-            )
-            return snapshot_block, compare_hash
-        except Exception as exc:  # snapshot is audit enrichment, not authority
-            logger.warning("legacy_v1_chain_snapshot_failed error=%s", str(exc)[:240])
-            return None, None
-
-    chain_snapshot_block, chain_snapshot_compare_hash = await asyncio.to_thread(
-        _chain_snapshot
-    )
-    submission_payload = {
-        "actor_hotkey": submission.validator_hotkey,
-        "validator_signature": submission.validator_signature,
-        "epoch_id": submission.epoch_id,
-        "netuid": submission.netuid,
-        "block": submission.block,
-        "weights_hash": submission.weights_hash,
-        "weights_count": len(submission.uids),
-        "chain_snapshot_block": chain_snapshot_block,
-        "chain_snapshot_compare_hash": chain_snapshot_compare_hash,
-    }
-    if BITTENSOR_NETWORK == "test":
-        weight_submission_event_hash = (
-            f"TESTNET_MOCK_{submission.epoch_id}_{submission.netuid}"
-        )
-    else:
-        log_entry = await log_event("WEIGHT_SUBMISSION", submission_payload)
-        weight_submission_event_hash = str(log_entry.get("event_hash") or "")
-        if not weight_submission_event_hash:
-            raise HTTPException(
-                status_code=500,
-                detail="weight submission transparency event was not persisted",
-            )
-
-    bundle_data = {
-        "netuid": submission.netuid,
-        "epoch_id": submission.epoch_id,
-        "block": submission.block,
-        "uids": submission.uids,
-        "weights_u16": submission.weights_u16,
-        "weights_hash": submission.weights_hash,
-        "validator_hotkey": submission.validator_hotkey,
-        "validator_enclave_pubkey": submission.validator_enclave_pubkey,
-        "validator_signature": submission.validator_signature,
-        "validator_attestation_b64": submission.validator_attestation_b64,
-        "validator_code_hash": submission.validator_code_hash,
-        "validator_pcr0": verified_pcr0,
-        "pcr0_commit_hash": pcr0_commit_hash,
-        "chain_snapshot_block": chain_snapshot_block,
-        "chain_snapshot_compare_hash": chain_snapshot_compare_hash,
-        "weight_submission_event_hash": weight_submission_event_hash,
-    }
-
-    def _insert_bundle() -> None:
-        get_write_client().table("published_weight_bundles").insert(
-            bundle_data
-        ).execute()
-
-    if BITTENSOR_NETWORK != "test":
-        try:
-            await asyncio.to_thread(_insert_bundle)
-        except Exception as exc:
-            if "duplicate" in str(exc).lower() or "unique" in str(exc).lower():
-                raise HTTPException(
-                    status_code=409,
-                    detail="duplicate submission (concurrent race)",
-                ) from exc
-            raise
-
-    research_lab_config = ResearchLabGatewayConfig.from_env()
-    audit_enabled = (
-        research_lab_config.arweave_audit_shadow_enabled
-        if BITTENSOR_NETWORK == "test"
-        else research_lab_config.arweave_audit_enabled
-    )
-    if audit_enabled:
-        try:
-            await publish_research_lab_epoch_audit(
-                epoch=submission.epoch_id,
-                netuid=submission.netuid,
-                audit_kind=("shadow" if BITTENSOR_NETWORK == "test" else "active"),
-                actor_hotkey=submission.validator_hotkey,
-                weight_bundle=bundle_data,
-                config=research_lab_config,
-            )
-        except Exception as exc:
-            logger.warning(
-                "legacy_v1_research_lab_arweave_publish_failed error=%s",
-                str(exc)[:240],
-            )
-    return WeightSubmissionResponse(
-        success=True,
-        epoch_id=submission.epoch_id,
-        weights_count=len(submission.uids),
-        message="Weights accepted and logged",
-        weight_submission_event_hash=weight_submission_event_hash,
     )
 
 

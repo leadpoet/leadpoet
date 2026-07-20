@@ -496,9 +496,9 @@ def _live_initialization_window_status(
         and live.settlement_epoch_id(cutover)
         == cutover.first_settlement_epoch_id
         and live.last_epoch_block == cutover.cutover_block
-        and 0 <= live.epoch_block < 300
+        and 0 <= live.epoch_block <= 300
         and live.blocks_remaining > 0
-        and live.blocks_remaining > restart_reserve
+        and live.blocks_remaining >= restart_reserve
     )
     return {
         "exists": False,
@@ -511,7 +511,7 @@ def _live_initialization_window_status(
         "live_block": live.current_block,
         "live_block_hash": live.block_hash,
         "authority_hash": sha256_json(snapshot_doc),
-        "latest_safe_epoch_block": 299,
+        "latest_safe_epoch_block": 300,
         "restart_reserve_blocks": restart_reserve,
     }
 

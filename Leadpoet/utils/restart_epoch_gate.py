@@ -9,7 +9,7 @@ from typing import Any, Optional, Sequence
 from Leadpoet.utils.subnet_epoch import read_subnet_epoch_snapshot
 
 
-MAXIMUM_RESTART_EPOCH_BLOCK = 310
+MAXIMUM_RESTART_EPOCH_BLOCK = 300
 
 
 class RestartEpochGateError(RuntimeError):
@@ -21,7 +21,7 @@ def verify_restart_epoch_window(
     *,
     netuid: int = 71,
 ) -> dict[str, Any]:
-    """Read the official scheduler and reject restart starts after block 310."""
+    """Read the official scheduler and reject restart starts after block 300."""
 
     snapshot = read_subnet_epoch_snapshot(subtensor, netuid=netuid)
     result = {

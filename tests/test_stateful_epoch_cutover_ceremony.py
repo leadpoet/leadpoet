@@ -167,11 +167,12 @@ async def test_archive_boundary_discovery_rereads_exact_anchor(monkeypatch):
     ("live", "eligible"),
     (
         (_live(elapsed=299), True),
-        (_live(elapsed=300), False),
+        (_live(elapsed=300), True),
+        (_live(elapsed=301), False),
         (_live(elapsed=0, next_epoch=True), False),
     ),
 )
-def test_first_epoch_restart_window_is_wide_but_still_pre_block_300(
+def test_first_epoch_restart_window_uses_the_block_300_deadline(
     live,
     eligible,
 ):
@@ -183,7 +184,7 @@ def test_first_epoch_restart_window_is_wide_but_still_pre_block_300(
     )
 
     assert status["eligible"] is eligible
-    assert status["latest_safe_epoch_block"] == 299
+    assert status["latest_safe_epoch_block"] == 300
     assert status["restart_reserve_blocks"] == 60
 
 

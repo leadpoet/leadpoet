@@ -55,7 +55,7 @@ Do not start the ceremony until all of these are true:
 7. Operators can stop every gateway and validator writer before the global
    legacy bucket rolls over.
 8. There is enough time to activate at or before block 300 and start each
-   restart at or before block 310 of the first official stateful epoch. Weight
+   restart at or before block 300 of the first official stateful epoch. Weight
    submission begins at block 345.
 
 If any prerequisite is false, keep the current pre-cutover runtimes unchanged.
@@ -471,8 +471,8 @@ LEADPOET_SUBNET_EPOCH_CUTOVER_PATH=/home/ec2-user/.config/leadpoet/stateful-epoc
 
 Do not also set `LEADPOET_SUBNET_EPOCH_CUTOVER_JSON`.
 
-Start the gateway and validator restarts at or before official epoch block 310.
-The restarts may complete after block 310. Start ancillary workers only after
+Start the gateway and validator restarts at or before official epoch block 300.
+The restarts may complete after block 300. Start ancillary workers only after
 the primary authority is healthy. Validate that every
 process reports the same network genesis hash, netuid, mapping hash, official
 `SubnetEpochIndex`, `epoch_ref`, and compatibility settlement ordinal.

@@ -146,6 +146,7 @@ def build_release_lineage_boot_verifier_v2(
         return verify_boot_identity_nitro(
             identity,
             expected_pcr0=expectation["pcr0"],
+            certificate_validity_at_attestation_time=True,
         )
 
     return verify

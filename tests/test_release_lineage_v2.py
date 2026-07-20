@@ -129,8 +129,13 @@ def test_lineage_verifier_accepts_historical_release_and_rejects_drift(
     monkeypatch.setattr(
         release_lineage_v2,
         "verify_boot_identity_nitro",
-        lambda identity, *, expected_pcr0: observed.append(
-            (identity["commit_sha"], expected_pcr0)
+        lambda identity, *, expected_pcr0,
+        certificate_validity_at_attestation_time: observed.append(
+            (
+                identity["commit_sha"],
+                expected_pcr0,
+                certificate_validity_at_attestation_time,
+            )
         )
         or identity,
     )
@@ -142,7 +147,9 @@ def test_lineage_verifier_accepts_historical_release_and_rejects_drift(
     )
     identity = _identity(historical)
     assert verifier(identity) == identity
-    assert observed == [(historical["commit_sha"], identity["pcr0"])]
+    assert observed == [
+        (historical["commit_sha"], identity["pcr0"], True)
+    ]
 
     with pytest.raises(ReleaseLineageV2Error, match="dependency_lock_hash"):
         verifier({**identity, "dependency_lock_hash": _hash("9")})

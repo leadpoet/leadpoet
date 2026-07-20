@@ -447,6 +447,7 @@ def verify_boot_identity_nitro(
     identity: Mapping[str, Any],
     *,
     expected_pcr0: Optional[str] = None,
+    certificate_validity_at_attestation_time: bool = False,
 ) -> Dict[str, Any]:
     """Verify AWS Nitro authenticity and the exact V2 boot claim.
 
@@ -465,6 +466,9 @@ def verify_boot_identity_nitro(
         expected_pubkey=str(identity["signing_pubkey"]),
         expected_purpose=BOOT_ATTESTATION_PURPOSE,
         role="gateway" if str(identity["role"]).startswith("gateway_") else "validator",
+        certificate_validity_at_attestation_time=(
+            certificate_validity_at_attestation_time
+        ),
     )
     _require(bool(valid), "Nitro boot attestation failed: %s" % extracted.get("error", "unknown"))
     expected_user_data = build_boot_attestation_user_data(identity)

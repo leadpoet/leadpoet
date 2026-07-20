@@ -65,6 +65,31 @@ def _get_cert_not_valid_after(cert) -> datetime:
         return nva
 
 
+def _attestation_certificate_validation_time(att_doc: Dict[str, Any]) -> datetime:
+    """Return the signed Nitro document timestamp as an aware UTC datetime."""
+    timestamp_ms = att_doc.get("timestamp")
+    if isinstance(timestamp_ms, bool) or not isinstance(timestamp_ms, int):
+        raise AttestationError("Attestation timestamp is missing or invalid")
+    if timestamp_ms <= 0:
+        raise AttestationError("Attestation timestamp is missing or invalid")
+    try:
+        return datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise AttestationError("Attestation timestamp is outside the supported range") from exc
+
+
+def _verify_leaf_certificate_validity(cert, validation_time: datetime) -> None:
+    """Require a leaf certificate to be valid at one explicit UTC instant."""
+    if validation_time.tzinfo is None:
+        raise AttestationError("Certificate validation time must be timezone-aware")
+    cert_not_before = _get_cert_not_valid_before(cert)
+    cert_not_after = _get_cert_not_valid_after(cert)
+    if validation_time < cert_not_before:
+        raise AttestationError(f"Certificate not yet valid (starts {cert_not_before})")
+    if validation_time > cert_not_after:
+        raise AttestationError(f"Certificate expired ({cert_not_after})")
+
+
 # =============================================================================
 # PINNED VALUES - PRODUCTION CONFIGURATION
 # =============================================================================
@@ -249,6 +274,7 @@ def verify_nitro_attestation_full(
     expected_epoch_id: Optional[int] = None,
     role: str = "gateway",  # "gateway" or "validator"
     skip_pcr0_verification: bool = False,  # For auditors without nitro-cli
+    certificate_validity_at_attestation_time: bool = False,
 ) -> Tuple[bool, Dict[str, Any]]:
     """
     Full AWS Nitro attestation verification.
@@ -272,6 +298,11 @@ def verify_nitro_attestation_full(
                                Nitro enclave), but doesn't verify the specific CODE.
                                Use for auditors without nitro-cli who cannot independently
                                verify PCR0. Trust level will be "aws_verified".
+        certificate_validity_at_attestation_time: Validate the leaf certificate at
+                               the signed Nitro document timestamp. This is only for
+                               replaying immutable historical receipt graphs; live
+                               boot verification must retain the default current-time
+                               check.
                           
     Returns:
         Tuple of (success, extracted_data)
@@ -362,16 +393,22 @@ def verify_nitro_attestation_full(
             result["leaf_cert_subject"] = str(leaf_cert.subject)
             result["leaf_cert_issuer"] = str(leaf_cert.issuer)
             
-            # Verify certificate is currently valid
-            now = datetime.now(timezone.utc)
-            cert_not_before = _get_cert_not_valid_before(leaf_cert)
-            cert_not_after = _get_cert_not_valid_after(leaf_cert)
-            if now < cert_not_before:
-                raise AttestationError(f"Certificate not yet valid (starts {cert_not_before})")
-            if now > cert_not_after:
-                raise AttestationError(f"Certificate expired ({cert_not_after})")
+            validation_time = (
+                _attestation_certificate_validation_time(att_doc)
+                if certificate_validity_at_attestation_time
+                else datetime.now(timezone.utc)
+            )
+            _verify_leaf_certificate_validity(leaf_cert, validation_time)
+            result["certificate_validity_mode"] = (
+                "attestation_time"
+                if certificate_validity_at_attestation_time
+                else "current_time"
+            )
+            result["certificate_validation_time"] = validation_time.isoformat()
             
-            result["verification_steps"].append("✓ Leaf certificate valid and not expired")
+            result["verification_steps"].append(
+                "✓ Leaf certificate valid at verification time"
+            )
             
             # Build and verify certificate chain
             chain_verified = _verify_certificate_chain(leaf_cert, cabundle, NITRO_ROOT_CERT_DER)

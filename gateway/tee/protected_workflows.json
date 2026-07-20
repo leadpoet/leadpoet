@@ -542,7 +542,7 @@
       "symbol": "ProviderSemanticsAuthorityV2"
     },
     {
-      "ast_sha256": "sha256:facc82d92feed785119a0f1dd58c72311d0e98cbaceac2bc050a5746655ec722",
+      "ast_sha256": "sha256:593dc0abb3879bf347c5d1d93835d78056f377ea05364659c074b9f1ce02ad04",
       "path": "gateway/tee/release_lineage_v2.py",
       "symbol": "build_release_lineage_boot_verifier_v2"
     },
@@ -1082,7 +1082,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:e6c17344531cfe8e91e3c8af3fc240cd33542ac3615a75da810af4b62f728b74",
+  "manifest_hash": "sha256:6b6b6b526891b290214bf4123b6fce85a12a4aaef3301b4609ded439a3fb6c05",
   "protected_source_commit": "e61b12080a2e44bb5606e0e3d97beace2453aad4",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

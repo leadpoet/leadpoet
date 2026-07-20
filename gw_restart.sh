@@ -19,6 +19,7 @@ EXPECTED_AWS_ACCOUNT="493765492819"
 ENV_BACKUP_DIR="/home/ec2-user/.config/leadpoet/env-backups"
 GATEWAY_GIT_HELPER="${GATEWAY_GIT_HELPER:-$LEADPOET_REPO_ROOT/scripts/gateway_git_deploy.py}"
 GATEWAY_RESTART_PHASE="${GATEWAY_RESTART_PHASE:-prepare}"
+GATEWAY_STATEFUL_CUTOVER_CEREMONY="${GATEWAY_STATEFUL_CUTOVER_CEREMONY:-0}"
 GATEWAY_RESTART_LOCK_FILE="${GATEWAY_RESTART_LOCK_FILE:-/home/ec2-user/.config/leadpoet/gateway-restart.lock}"
 GATEWAY_RESTART_RECOVERY_LOCK_FILE="${GATEWAY_RESTART_RECOVERY_LOCK_FILE:-${GATEWAY_RESTART_LOCK_FILE}.recovery}"
 GATEWAY_DEPLOY_PLAN_FILE="${GATEWAY_DEPLOY_PLAN_FILE:-/tmp/gateway_git_deploy.$$.json}"
@@ -222,6 +223,7 @@ enforce_deployment_environment() {
   unset BUILD_ID BUILD_TIME_UTC BUILD_TIMESTAMP GITHUB_TAG GIT_TAG
   export LEADPOET_REPO_ROOT GATEWAY_ROOT GATEWAY_LOG_ROOT GATEWAY_LOG_FILE
   export GATEWAY_TEE_EIF_ROOT
+  export GATEWAY_STATEFUL_CUTOVER_CEREMONY
   export RESEARCH_LAB_TEE_PROTOCOL
   export GATEWAY_V2_CONFIG_DIR GATEWAY_V2_RELEASE_MANIFEST GATEWAY_V2_ARTIFACT_POLICY
   export GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT
@@ -539,6 +541,7 @@ skip_keys = {
     "GATEWAY_TEE_FALLBACK_LOG_DIR",
     "GATEWAY_GIT_HELPER",
     "GATEWAY_RESTART_PHASE",
+    "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
     "GATEWAY_RESTART_LOCK_HELD",
     "GATEWAY_RESTART_LOCK_FILE",
     "GATEWAY_DEPLOY_PLAN_FILE",
@@ -617,6 +620,7 @@ skip_keys = {
     "GATEWAY_TEE_FALLBACK_LOG_DIR",
     "GATEWAY_GIT_HELPER",
     "GATEWAY_RESTART_PHASE",
+    "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
     "GATEWAY_RESTART_LOCK_HELD",
     "GATEWAY_RESTART_LOCK_FILE",
     "GATEWAY_DEPLOY_PLAN_FILE",
@@ -685,6 +689,13 @@ RESEARCH_LAB_TEE_PROTOCOL="$(
   set +a
   printf '%s' "${RESEARCH_LAB_TEE_PROTOCOL:-v2}"
 )"
+case "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" in
+  0|1) ;;
+  *)
+    echo "ERROR: GATEWAY_STATEFUL_CUTOVER_CEREMONY must be 0 or 1" >&2
+    exit 1
+    ;;
+esac
 RESEARCH_LAB_TEE_PROTOCOL="$(
   printf '%s' "$RESEARCH_LAB_TEE_PROTOCOL" | tr '[:upper:]' '[:lower:]'
 )"
@@ -878,6 +889,44 @@ echo "Validating the prepared V2 release before production shutdown"
     exit 1
   fi
 
+if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
+  echo "Validating the one-time receipt-backed cutover before production shutdown"
+  GATEWAY_DEPLOY_STAGE="stateful_epoch_cutover_preflight"
+  export GATEWAY_DEPLOY_STAGE
+  CUTOVER_PREFLIGHT_REPORT="$(
+    run_prepared_gateway_module \
+      gateway.research_lab.stateful_epoch_cutover_cli_v1 \
+      --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+      --use-attested-historical-predecessor
+  )"
+  printf '%s\n' "$CUTOVER_PREFLIGHT_REPORT"
+  CUTOVER_PREFLIGHT_REPORT="$CUTOVER_PREFLIGHT_REPORT" \
+    "$GATEWAY_PYTHON_BIN" - <<'PY'
+import json
+import os
+
+report = json.loads(os.environ["CUTOVER_PREFLIGHT_REPORT"])
+status = str(report.get("status") or "")
+if status not in {
+    "eligible",
+    "already_stateful_staged",
+    "already_stateful_active",
+}:
+    raise SystemExit(
+        "stateful epoch cutover is not eligible before production shutdown"
+    )
+if status == "eligible":
+    if report.get("predecessor_kind") != "attested_historical_finalization_v2":
+        raise SystemExit("stateful epoch cutover selected an unexpected predecessor")
+    if report.get("would_write") is not False:
+        raise SystemExit("stateful epoch cutover preflight was not read-only")
+else:
+    authority = str(report.get("cutover_authority_hash") or "")
+    if not authority.startswith("sha256:") or len(authority) != 71:
+        raise SystemExit("durable stateful epoch authority hash is invalid")
+PY
+fi
+
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
 
@@ -932,6 +981,7 @@ export GATEWAY_DEPLOY_STAGE
 unset GATEWAY_DEPLOY_COMMIT
 exec env \
   GATEWAY_RESTART_PHASE=post_activate \
+  GATEWAY_STATEFUL_CUTOVER_CEREMONY="$GATEWAY_STATEFUL_CUTOVER_CEREMONY" \
   GATEWAY_RESTART_LOCK_HELD=1 \
   LEADPOET_REPO_ROOT="$LEADPOET_REPO_ROOT" \
   GATEWAY_ROOT="$GATEWAY_ROOT" \
@@ -1206,6 +1256,74 @@ echo "Verifying V2 provider and execution-manager readiness"
 GATEWAY_DEPLOY_STAGE="v2_runtime_readiness"
 export GATEWAY_DEPLOY_STAGE
 PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready
+
+if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
+  echo "Executing the one-time receipt-backed stateful epoch cutover"
+  GATEWAY_DEPLOY_STAGE="stateful_epoch_cutover"
+  export GATEWAY_DEPLOY_STAGE
+  CUTOVER_MAPPING_HASH="$(
+    PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" - <<'PY'
+from Leadpoet.utils.subnet_epoch import load_subnet_epoch_cutover
+
+print(load_subnet_epoch_cutover().mapping_hash)
+PY
+  )"
+  CUTOVER_STAGE_REPORT="$(
+    cd "$LEADPOET_REPO_ROOT"
+    PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+      -m gateway.research_lab.stateful_epoch_cutover_cli_v1 \
+      --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+      --apply \
+      --use-attested-historical-predecessor \
+      --confirm-mapping-hash "$CUTOVER_MAPPING_HASH" \
+      --confirm-all-writers-stopped
+  )"
+  printf '%s\n' "$CUTOVER_STAGE_REPORT"
+  read -r CUTOVER_STAGE_STATUS CUTOVER_AUTHORITY_HASH < <(
+    CUTOVER_STAGE_REPORT="$CUTOVER_STAGE_REPORT" \
+      "$GATEWAY_PYTHON_BIN" - <<'PY'
+import json
+import os
+
+report = json.loads(os.environ["CUTOVER_STAGE_REPORT"])
+status = str(report.get("status") or "")
+authority = str(report.get("cutover_authority_hash") or "")
+if status not in {
+    "stateful_staged",
+    "already_stateful_staged",
+    "already_stateful_active",
+}:
+    raise SystemExit("stateful epoch cutover staging did not reach a durable state")
+if not authority.startswith("sha256:") or len(authority) != 71:
+    raise SystemExit("stateful epoch cutover authority hash is invalid")
+print(status, authority)
+PY
+  )
+  if [ "$CUTOVER_STAGE_STATUS" != "already_stateful_active" ]; then
+    CUTOVER_ACTIVATION_REPORT="$(
+      cd "$LEADPOET_REPO_ROOT"
+      PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+        -m gateway.research_lab.stateful_epoch_cutover_cli_v1 \
+        --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+        --activate-staged \
+        --confirm-mapping-hash "$CUTOVER_MAPPING_HASH" \
+        --confirm-cutover-authority-hash "$CUTOVER_AUTHORITY_HASH" \
+        --confirm-all-writers-stopped \
+        --confirm-stateful-release-prepared
+    )"
+    printf '%s\n' "$CUTOVER_ACTIVATION_REPORT"
+    CUTOVER_ACTIVATION_REPORT="$CUTOVER_ACTIVATION_REPORT" \
+      "$GATEWAY_PYTHON_BIN" - <<'PY'
+import json
+import os
+
+report = json.loads(os.environ["CUTOVER_ACTIVATION_REPORT"])
+if report.get("status") != "stateful_active":
+    raise SystemExit("stateful epoch cutover activation did not become active")
+PY
+  fi
+  echo "Stateful epoch cutover is active; continuing the normal V2 restart"
+fi
 
 echo "Installing Python dependencies"
 GATEWAY_DEPLOY_STAGE="dependency_install"

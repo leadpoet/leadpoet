@@ -29,6 +29,8 @@ from gateway.research_lab.stateful_epoch_authority_v1 import (
 from gateway.research_lab.stateful_epoch_cutover_cli_v1 import (
     ACTIVATION_REPORT_SCHEMA_VERSION,
     CUTOVER_BIND_RPC,
+    CUTOVER_BOOTSTRAP_BIND_RPC,
+    CUTOVER_BOOTSTRAP_STAGE_RPC,
     CUTOVER_PREFLIGHT_RPC,
     CUTOVER_STAGE_RPC,
     CUTOVER_STATE_TABLE,
@@ -1562,7 +1564,7 @@ async def test_cutover_operator_selects_latest_attested_historical_predecessor(
 ):
     from gateway.tee import coordinator_epoch_cutover_v2 as cutover_authority
 
-    payload, context, cutover, candidate, _executor = (
+    payload, context, cutover, candidate, executor = (
         _cutover_activation_dependencies()
     )
     settlement = {
@@ -1598,13 +1600,20 @@ async def test_cutover_operator_selects_latest_attested_historical_predecessor(
     )
     snapshot_graph = context.external_receipt_graphs[0]
     selected = []
+    durable_cutover = None
+    durable_initialization = None
+    cutover_state = _fenced_cutover_state(cutover)
 
     async def select_rows(table, **kwargs):
         selected.append((table, kwargs))
         if table == CUTOVER_TABLE:
-            return []
+            return (
+                []
+                if durable_cutover is None
+                else [copy.deepcopy(durable_cutover)]
+            )
         if table == CUTOVER_STATE_TABLE:
-            return [_fenced_cutover_state(cutover)]
+            return [copy.deepcopy(cutover_state)]
         if table == CANDIDATE_TABLE:
             return [copy.deepcopy(candidate)]
         if table == HISTORICAL_FINALIZATION_TABLE:
@@ -1681,6 +1690,119 @@ async def test_cutover_operator_selects_latest_attested_historical_predecessor(
     )
     assert historical_call["order_by"] == (("epoch_id", True),)
     assert all(table != FINALIZED_ALLOCATION_VIEW for table, _ in selected)
+
+    observed = {}
+
+    async def execute(**kwargs):
+        execution_context = ExecutionContextV2(
+            job_id=f"subnet-epoch-cutover:{kwargs['epoch_id']}",
+            purpose=kwargs["purpose"],
+            epoch_id=kwargs["epoch_id"],
+            parent_receipt_hashes=tuple(
+                sorted(
+                    graph["root_receipt_hash"]
+                    for graph in kwargs["parent_graphs"]
+                )
+            ),
+            external_receipt_graphs=list(kwargs["parent_graphs"]),
+        )
+        measured = await executor(
+            kwargs["operation"],
+            kwargs["payload"],
+            execution_context,
+        )
+        graph = _cutover_receipt_graph(
+            measured.output,
+            snapshot_graph,
+            predecessor_graph,
+        )
+        observed["authority"] = measured.output
+        return {
+            "status": "succeeded",
+            "result": measured.output,
+            "receipt_graph": graph,
+        }
+
+    async def persist_graph(graph):
+        return {
+            "root_receipt_hash": graph["root_receipt_hash"],
+            "graph_hash": sha256_json(graph),
+        }
+
+    async def bind(name, params):
+        assert name == CUTOVER_BOOTSTRAP_BIND_RPC
+        return _cutover_binding_response(
+            cutover,
+            candidate,
+            params["p_cutover_authority_hash"],
+            receipt_hash=params["p_cutover_receipt_hash"],
+        )
+
+    async def stage(name, params):
+        nonlocal durable_cutover, durable_initialization, cutover_state
+        assert name == CUTOVER_BOOTSTRAP_STAGE_RPC
+        durable_cutover = copy.deepcopy(params["p_cutover_row"])
+        durable_cutover["created_at"] = NOW
+        durable_initialization = copy.deepcopy(params["p_initialization_event"])
+        cutover_state = {
+            **cutover_state,
+            "lifecycle_state": "stateful_staged",
+            "mapping_hash": cutover.mapping_hash,
+            "cutover_authority_hash": durable_cutover[
+                "cutover_authority_hash"
+            ],
+            "cutover_receipt_hash": durable_cutover["cutover_receipt_hash"],
+            "initialization_nonce": durable_initialization["nonce"],
+            "initialization_payload_hash": durable_initialization[
+                "payload_hash"
+            ],
+        }
+        return {
+            key: cutover_state[key]
+            for key in (
+                "lifecycle_state",
+                "mapping_hash",
+                "cutover_authority_hash",
+                "cutover_receipt_hash",
+                "initialization_nonce",
+                "initialization_payload_hash",
+            )
+        }
+
+    async def load_initialization(_epoch):
+        return copy.deepcopy(durable_initialization)
+
+    async def prepare_initialization(**_kwargs):
+        return _prepared_initialization(cutover, payload["first_snapshot"])
+
+    apply_report = await activate_subnet_epoch_cutover_v1(
+        cutover=cutover,
+        apply=True,
+        predecessor_kind=HISTORICAL_PREDECESSOR_KIND,
+        select_rows=select_rows,
+        load_graph=load_graph,
+        preflight_rpc=preflight,
+        bind_rpc=bind,
+        stage_rpc=stage,
+        execute=execute,
+        persist_graph=persist_graph,
+        load_cutover_readiness=readiness,
+        load_initialization=load_initialization,
+        load_live_snapshot=live_snapshot,
+        prepare_initialization=prepare_initialization,
+        boot_verifier=lambda _identity: {"verified": True},
+        validate_anchor=lambda _cutover: _async_none(),
+    )
+
+    assert apply_report["status"] == "stateful_staged"
+    assert apply_report["predecessor_kind"] == HISTORICAL_PREDECESSOR_KIND
+    assert apply_report["predecessor_epoch_id"] == 92
+    assert apply_report["predecessor_receipt_hash"] == predecessor_receipt[
+        "receipt_hash"
+    ]
+    assert apply_report["cutover_authority_hash"] == sha256_json(
+        observed["authority"]
+    )
 
 
 @pytest.mark.asyncio

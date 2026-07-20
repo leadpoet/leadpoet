@@ -419,38 +419,36 @@ python3 -m gateway.research_lab.stateful_epoch_candidate_ingest_cli_v1 \
 The apply result must say `durably_staged` and its mapping, boundary, receipt,
 and durable readback hashes must match the dry run.
 
-## 7. Stage, then activate, the cutover
+## 7. Stage and activate inside the measured gateway restart
 
-Run the cutover CLI once without `--apply`; inspect every reported hash. Then
-stage it using the exact mapping hash and approved gateway release manifest.
+Persist exactly one canonical manifest source in the gateway and validator
+Secrets Manager environments before restarting. Use either
+`LEADPOET_SUBNET_EPOCH_CUTOVER_PATH` or
+`LEADPOET_SUBNET_EPOCH_CUTOVER_JSON`, never both. Future restarts hydrate the
+same immutable value automatically.
 
-```bash
-python3 -m gateway.research_lab.stateful_epoch_cutover_cli_v1 \
-  --manifest /secure/operator/stateful-epoch-cutover.json \
-  --use-attested-historical-predecessor
-
-python3 -m gateway.research_lab.stateful_epoch_cutover_cli_v1 \
-  --manifest /secure/operator/stateful-epoch-cutover.json \
-  --release-manifest /secure/operator/gateway-v2-release-manifest.json \
-  --apply \
-  --use-attested-historical-predecessor \
-  --confirm-mapping-hash 'sha256:...' \
-  --confirm-all-writers-stopped
-```
-
-The durable lifecycle must now be `stateful_staged`. Record the returned
-`cutover_authority_hash`. Activation is a separate explicit operation:
+Stop the primary validator and every auditor before starting the gateway
+ceremony. Then invoke the canonical gateway restart exactly once with the
+explicit ceremony flag:
 
 ```bash
-python3 -m gateway.research_lab.stateful_epoch_cutover_cli_v1 \
-  --manifest /secure/operator/stateful-epoch-cutover.json \
-  --release-manifest /secure/operator/gateway-v2-release-manifest.json \
-  --activate-staged \
-  --confirm-mapping-hash 'sha256:...' \
-  --confirm-cutover-authority-hash 'sha256:...' \
-  --confirm-all-writers-stopped \
-  --confirm-stateful-release-prepared
+cd /home/ec2-user
+GATEWAY_STATEFUL_CUTOVER_CEREMONY=1 \
+  bash /home/ec2-user/gw_restart.sh
 ```
+
+The restart performs a read-only eligibility pass before stopping the gateway.
+After the exact independently built coordinator enclave is running, it stages
+the cutover with the attested historical predecessor, verifies the durable
+`stateful_staged` readback, performs the separately authorized activation, and
+requires `stateful_active` before continuing to weight-input repair or gateway
+launch. The command does not bypass the release manifest, PCR0, Nitro,
+credential, receipt-graph, mapping-hash, stopped-writer, initialization, or
+Supabase lifecycle checks.
+
+The ceremony flag is deliberately not persisted. Never supply it on a normal
+restart. A replay after activation is accepted only when the exact same mapping
+and authority are already `stateful_active`; a different mapping fails closed.
 
 Activation is allowed only while the finalized chain is still in the exact
 first official cutover epoch and `epoch_block <= 300`. After block 300 or in a
@@ -458,8 +456,9 @@ later official epoch it fails closed.
 
 ## 8. Start all runtimes on the same authority
 
-Configure every gateway, validator, and auditor process with exactly one copy
-of the immutable manifest. The runtime has no epoch-mode switch:
+Every gateway, validator, and auditor process must load the same immutable
+manifest from its persisted Secrets Manager environment. The runtime has no
+epoch-mode switch:
 
 ```text
 LEADPOET_SUBNET_EPOCH_CUTOVER_PATH=/secure/operator/stateful-epoch-cutover.json
@@ -500,7 +499,8 @@ declaring the migration complete, verify all of the following:
 
 ## Failure handling
 
-- Before fencing: remain in legacy mode and correct the prerequisite.
+- Before fencing: leave the current pre-cutover runtimes unchanged and correct
+  the prerequisite; do not deploy an alternate epoch mode.
 - After fencing but before activation: keep all writers stopped and preserve
   every manifest, candidate, receipt, and report. Do not write the reserved
   ordinal through another path.

@@ -66,6 +66,9 @@ def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
     runtime_ready = script.index(
         '"$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready'
     )
+    cutover = script.index(
+        'echo "Executing the one-time receipt-backed stateful epoch cutover"'
+    )
     repair = script.index(
         "-m gateway.tee.verify_weight_submission_ready_v2 --repair"
     )
@@ -82,11 +85,44 @@ def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
         'GATEWAY_DEPLOY_STAGE="host_restart_script_install"'
     )
 
-    assert runtime_ready < repair < launch < base_health < http_handoff < install
+    assert (
+        runtime_ready
+        < cutover
+        < repair
+        < launch
+        < base_health
+        < http_handoff
+        < install
+    )
     assert 'GATEWAY_DEPLOY_STAGE="validator_weight_input_repair"' in script
     assert (
         'GATEWAY_DEPLOY_STAGE="validator_weight_input_http_check"' in script
     )
+
+
+def test_gateway_restart_cutover_hook_is_explicit_and_fail_closed() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    assert 'GATEWAY_STATEFUL_CUTOVER_CEREMONY="${' in script
+    assert 'GATEWAY_STATEFUL_CUTOVER_CEREMONY must be 0 or 1' in script
+    preflight = script.index(
+        'echo "Validating the one-time receipt-backed cutover before production shutdown"'
+    )
+    shutdown = script.index(
+        'echo "Stopping existing gateway and Research Lab worker processes"'
+    )
+    execution = script.index(
+        'echo "Executing the one-time receipt-backed stateful epoch cutover"'
+    )
+    launch = script.index('setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main')
+    assert preflight < shutdown < execution < launch
+    assert '"already_stateful_staged"' in script
+    assert '"already_stateful_active"' in script
+    assert 'report.get("would_write") is not False' in script
+    assert '--use-attested-historical-predecessor' in script
+    assert '--confirm-all-writers-stopped' in script
+    assert '--confirm-stateful-release-prepared' in script
+    assert 'report.get("status") != "stateful_active"' in script
 
 
 def test_gateway_restart_exports_attested_artifact_bucket_to_runtime() -> None:

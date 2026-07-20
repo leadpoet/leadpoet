@@ -374,10 +374,15 @@ def _fixture(*, category_output_override=None, stateful=False):
         },
     }
     expectations = {
-        "gateway_coordinator": {
-            "commit_sha": GATEWAY_COMMIT,
-            "pcr0": GATEWAY_PCR0,
-            "build_manifest_hash": GATEWAY_MANIFEST,
+        GATEWAY_COMMIT: {
+            "roles": {
+                "gateway_coordinator": {
+                    "commit_sha": GATEWAY_COMMIT,
+                    "pcr0": GATEWAY_PCR0,
+                    "build_manifest_hash": GATEWAY_MANIFEST,
+                    "dependency_lock_hash": GATEWAY_LOCK,
+                }
+            }
         }
     }
     verified_boots = []
@@ -584,7 +589,7 @@ def _fixture(*, category_output_override=None, stateful=False):
     chain_source = FakeChainSource()
     authority = ValidatorWeightAuthorityV2(
         boot_identity_supplier=lambda: validator_boot,
-        gateway_expectations_supplier=lambda: expectations,
+        gateway_release_lineage_supplier=lambda: expectations,
         sign_digest=validator_key.sign,
         chain_source=chain_source,
         boot_verifier=verify_boot,
@@ -1107,12 +1112,14 @@ def test_validator_authority_rejects_forged_upstream_receipt():
 def test_validator_authority_rejects_gateway_release_mismatch():
     fixture = _fixture()
     bad_expectations = copy.deepcopy(fixture["expectations"])
-    bad_expectations["gateway_coordinator"]["build_manifest_hash"] = (
+    bad_expectations[GATEWAY_COMMIT]["roles"]["gateway_coordinator"][
+        "build_manifest_hash"
+    ] = (
         "sha256:" + "9" * 64
     )
     authority = ValidatorWeightAuthorityV2(
         boot_identity_supplier=lambda: fixture["validator_boot"],
-        gateway_expectations_supplier=lambda: bad_expectations,
+        gateway_release_lineage_supplier=lambda: bad_expectations,
         sign_digest=fixture["validator_key"].sign,
         chain_source=fixture["chain_source"],
         boot_verifier=lambda identity, expected_pcr0=None: {"verified": True},
@@ -1120,6 +1127,66 @@ def test_validator_authority_rejects_gateway_release_mismatch():
     )
     with pytest.raises(ValidatorWeightAuthorityV2Error, match="gateway boot"):
         authority.compute(fixture["request"])
+
+
+def test_validator_authority_accepts_only_exact_historical_release_lineage_boot():
+    fixture = _fixture()
+    historical_commit = "f" * 40
+    historical_key = Ed25519PrivateKey.generate()
+    historical_pub = historical_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    ).hex()
+    historical_boot = _boot(
+        role=COORDINATOR_ROLE,
+        physical_role="gateway_coordinator",
+        commit=historical_commit,
+        pcr0="a" * 96,
+        manifest="sha256:" + "b" * 64,
+        dependency_lock="sha256:" + "c" * 64,
+        config_hash="sha256:" + "d" * 64,
+        private_key=historical_key,
+        public_key=historical_pub,
+        nonce="9",
+    )
+    fixture["expectations"][historical_commit] = {
+        "roles": {
+            "gateway_coordinator": {
+                "commit_sha": historical_commit,
+                "pcr0": historical_boot["pcr0"],
+                "build_manifest_hash": historical_boot["build_manifest_hash"],
+                "dependency_lock_hash": historical_boot["dependency_lock_hash"],
+            }
+        }
+    }
+
+    verified = fixture["authority"]._verify_one_boot(
+        historical_boot,
+        fixture["validator_boot"],
+    )
+    assert verified == {"verified": True}
+
+    changed = copy.deepcopy(historical_boot)
+    changed["dependency_lock_hash"] = "sha256:" + "0" * 64
+    with pytest.raises(
+        ValidatorWeightAuthorityV2Error,
+        match="approved release lineage",
+    ):
+        fixture["authority"]._verify_one_boot(
+            changed,
+            fixture["validator_boot"],
+        )
+
+    unknown = copy.deepcopy(historical_boot)
+    unknown["commit_sha"] = "0" * 40
+    with pytest.raises(
+        ValidatorWeightAuthorityV2Error,
+        match="commit is not in approved release lineage",
+    ):
+        fixture["authority"]._verify_one_boot(
+            unknown,
+            fixture["validator_boot"],
+        )
 
 
 def test_validator_authority_fails_when_nitro_verifier_rejects_boot():
@@ -1131,7 +1198,7 @@ def test_validator_authority_fails_when_nitro_verifier_rejects_boot():
 
     authority = ValidatorWeightAuthorityV2(
         boot_identity_supplier=lambda: fixture["validator_boot"],
-        gateway_expectations_supplier=lambda: fixture["expectations"],
+        gateway_release_lineage_supplier=lambda: fixture["expectations"],
         sign_digest=fixture["validator_key"].sign,
         chain_source=fixture["chain_source"],
         boot_verifier=reject_boot,

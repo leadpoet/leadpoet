@@ -10,6 +10,7 @@ EXPECTED_AWS_ACCOUNT="${EXPECTED_AWS_ACCOUNT:-493765492819}"
 # can select the existing production venv without changing restart behavior.
 VALIDATOR_PYTHON_BIN="${VALIDATOR_PYTHON_BIN:-python3}"
 VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST="${VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/gateway-v2-release-manifest.json}"
+VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE="${VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE:-/home/ec2-user/.config/leadpoet/gateway-v2-release-lineage.json}"
 VALIDATOR_V2_RELEASE_MANIFEST="${VALIDATOR_V2_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
 VALIDATOR_V2_RELEASE_ARCHIVE_ROOT="${VALIDATOR_V2_RELEASE_ARCHIVE_ROOT:-/home/ec2-user/.config/leadpoet/validator-releases-v2}"
 VALIDATOR_V2_HOTKEY_CONFIG="${VALIDATOR_V2_HOTKEY_CONFIG:-/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json}"
@@ -20,6 +21,9 @@ export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:
 VALIDATOR_WALLET_ROOT="${VALIDATOR_WALLET_ROOT:-$HOME/.bittensor/wallets}"
 VALIDATOR_WALLET_NAME="${VALIDATOR_WALLET_NAME:-validator_72}"
 VALIDATOR_WALLET_HOTKEY="${VALIDATOR_WALLET_HOTKEY:-default}"
+REQUESTED_VALIDATOR_DEPLOY_COMMIT="${VALIDATOR_DEPLOY_COMMIT:-}"
+REQUESTED_CUTOVER_EPOCH_MODE="${LEADPOET_EPOCH_MODE:-}"
+unset VALIDATOR_DEPLOY_COMMIT
 VALIDATOR_ENV_EXPORT="$(mktemp /tmp/validator_env_export.XXXXXX)"
 SECRET_TMP="$(mktemp /tmp/validator_secret_env.XXXXXX)"
 
@@ -40,10 +44,25 @@ fi
 echo "Pulling latest GitHub main before stopping validator"
 before_head="$(git rev-parse HEAD)"
 git fetch origin
-git checkout main
-git pull --ff-only origin main
+if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
+  if ! [[ "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "ERROR: VALIDATOR_DEPLOY_COMMIT must be a full 40-character SHA" >&2
+    exit 1
+  fi
+  if ! git merge-base --is-ancestor "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" origin/main; then
+    echo "ERROR: VALIDATOR_DEPLOY_COMMIT is not reachable from origin/main" >&2
+    exit 1
+  fi
+  git checkout --detach "$REQUESTED_VALIDATOR_DEPLOY_COMMIT"
+  echo "Selected operator-requested validator commit: $REQUESTED_VALIDATOR_DEPLOY_COMMIT"
+else
+  git checkout main
+  git pull --ff-only origin main
+fi
 after_head="$(git rev-parse HEAD)"
-if [ "$before_head" != "$after_head" ] && [ "${VALIDATOR_RESTART_REEXECED:-0}" != "1" ]; then
+if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
+   && [ "$before_head" != "$after_head" ] \
+   && [ "${VALIDATOR_RESTART_REEXECED:-0}" != "1" ]; then
   echo "Restart wrapper updated from GitHub; re-executing latest validator_restart.sh"
   exec env VALIDATOR_RESTART_REEXECED=1 bash "$VALIDATOR_ROOT/validator_restart.sh" "$@"
 fi
@@ -101,6 +120,8 @@ skip_keys = {
     "AWS_SESSION_TOKEN",
     "AWS_SECURITY_TOKEN",
     "AWS_PROFILE",
+    "VALIDATOR_DEPLOY_COMMIT",
+    "LEADPOET_EPOCH_MODE",
 }
 exports = []
 for raw_line in raw.replace("\x00", "\n").splitlines():
@@ -134,6 +155,12 @@ chmod 600 "$VALIDATOR_ENV_FILE"
 set -a
 . "$VALIDATOR_ENV_EXPORT"
 set +a
+
+if [ "$REQUESTED_CUTOVER_EPOCH_MODE" != "legacy_global_360_v1" ]; then
+  echo "ERROR: the one-time cutover release requires explicit legacy epoch authority" >&2
+  exit 1
+fi
+export LEADPOET_EPOCH_MODE="$REQUESTED_CUTOVER_EPOCH_MODE"
 
 VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-authoritative_v2}"
 case "$VALIDATOR_WEIGHT_PROTOCOL" in
@@ -224,7 +251,9 @@ if ! python3 -m gateway.tee.release_channel_v2 \
     --bucket "$VALIDATOR_V2_RELEASE_BUCKET" \
     --prefix "$VALIDATOR_V2_RELEASE_PREFIX" \
     --gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
-    --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"; then
+    --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST" \
+    --lineage-output "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
+    --lineage-repository "$VALIDATOR_ROOT"; then
   echo "ERROR: independently approved V2 release is not published for $VALIDATOR_DEPLOY_SHA" >&2
   echo "Validator remains running; production shutdown has not started." >&2
   exit 75
@@ -232,6 +261,7 @@ fi
 VALIDATOR_V2_MISSING_INPUTS=()
 for required_file in \
   "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
   "$VALIDATOR_V2_RELEASE_MANIFEST" \
   "$VALIDATOR_V2_HOTKEY_CONFIG" \
   "$VALIDATOR_V2_HOTKEY_ENVELOPE"; do
@@ -286,6 +316,7 @@ python3 -m validator_tee.host.restart_preflight_v2 \
   --deploy-commit "$VALIDATOR_DEPLOY_SHA" \
   --validator-release "$VALIDATOR_V2_RELEASE_MANIFEST" \
   --gateway-release "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+  --gateway-release-lineage "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
   --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG" \
   --hotkey-envelope "$VALIDATOR_V2_HOTKEY_ENVELOPE" \
   --runtime-artifact-lock "$VALIDATOR_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
@@ -410,6 +441,7 @@ echo "Terminating existing validator Nitro enclaves"
   python3 -m validator_tee.host.runtime_v2_bootstrap \
     --validator-release "$VALIDATOR_V2_RELEASE_MANIFEST" \
     --gateway-release "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+    --gateway-release-lineage "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
     --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG"
 
   echo "Provisioning the validator hotkey directly into Nitro with KMS"

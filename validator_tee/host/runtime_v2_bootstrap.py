@@ -19,6 +19,7 @@ from validator_tee.host.vsock_client import ValidatorEnclaveClient
 from validator_tee.enclave.runtime_v2 import (
     VALIDATOR_RUNTIME_CONFIG_SCHEMA_VERSION,
     VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION,
+    validate_gateway_release_lineage,
 )
 from validator_tee.enclave.hotkey_authority_v2 import (
     hotkey_authority_configuration_hash,
@@ -34,6 +35,7 @@ def build_runtime_configuration(
     *,
     validator_release: Mapping[str, Any],
     gateway_release: Mapping[str, Any],
+    gateway_release_lineage: Mapping[str, Any],
     hotkey_authority_config: Mapping[str, Any],
 ) -> Dict[str, Any]:
     validator = validator_release_authority(validator_release)
@@ -45,13 +47,14 @@ def build_runtime_configuration(
         raise ValidatorRuntimeBootstrapV2Error(
             "validator and gateway V2 releases use different commits"
         )
-    expectations = {}
-    for role, summary in sorted(gateway["roles"].items()):
-        expectations[role] = {
-            "commit_sha": summary["commit_sha"],
-            "pcr0": summary["pcr0"],
-            "build_manifest_hash": summary["execution_manifest_hash"],
-        }
+    lineage = validate_gateway_release_lineage(gateway_release_lineage)
+    if (
+        lineage["current_commit_sha"] != gateway["commit_sha"]
+        or lineage["current_gateway_release_hash"] != gateway["release_hash"]
+    ):
+        raise ValidatorRuntimeBootstrapV2Error(
+            "current gateway release differs from approved release lineage"
+        )
     configuration = {
         "schema_version": VALIDATOR_RUNTIME_CONFIG_SCHEMA_VERSION,
         "commit_sha": validator["commit_sha"],
@@ -61,7 +64,7 @@ def build_runtime_configuration(
         "hotkey_authority_config_hash": hotkey_authority_configuration_hash(
             hotkey_config
         ),
-        "gateway_role_expectations": expectations,
+        "gateway_release_lineage": lineage,
     }
     if get_epoch_mode() == STATEFUL_EPOCH_MODE:
         cutover = load_subnet_epoch_cutover()
@@ -81,6 +84,7 @@ def configure_validator_runtime_v2(
     *,
     validator_release: Mapping[str, Any],
     gateway_release: Mapping[str, Any],
+    gateway_release_lineage: Mapping[str, Any],
     hotkey_authority_config: Mapping[str, Any],
     client: Optional[ValidatorEnclaveClient] = None,
     boot_verifier=verify_boot_identity_nitro,
@@ -88,6 +92,7 @@ def configure_validator_runtime_v2(
     configuration = build_runtime_configuration(
         validator_release=validator_release,
         gateway_release=gateway_release,
+        gateway_release_lineage=gateway_release_lineage,
         hotkey_authority_config=hotkey_authority_config,
     )
     validator = validator_release_authority(validator_release)
@@ -140,11 +145,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--validator-release", type=Path, required=True)
     parser.add_argument("--gateway-release", type=Path, required=True)
+    parser.add_argument("--gateway-release-lineage", type=Path, required=True)
     parser.add_argument("--hotkey-config", type=Path, required=True)
     args = parser.parse_args(argv)
     result = configure_validator_runtime_v2(
         validator_release=_load(args.validator_release),
         gateway_release=_load(args.gateway_release),
+        gateway_release_lineage=_load(args.gateway_release_lineage),
         hotkey_authority_config=_load(args.hotkey_config),
     )
     boot = result["boot_identity"]

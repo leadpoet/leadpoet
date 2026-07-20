@@ -17,6 +17,10 @@ from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
     build_release_manifest,
 )
+from gateway.tee.release_channel_v2 import (
+    build_release_channel_v2,
+    build_release_lineage_v2,
+)
 from gateway.tee.topology import ROLE_SPECS, topology_hash
 from leadpoet_canonical.attested_v2 import sha256_json
 from validator_tee.host.release_v2 import (
@@ -102,6 +106,18 @@ def _validator_release(commit="1" * 40):
     )
 
 
+def _gateway_lineage(commit="1" * 40):
+    return build_release_lineage_v2(
+        [
+            build_release_channel_v2(
+                gateway_release_manifest=_gateway_release(commit),
+                validator_release_manifest=_validator_release(commit),
+            )
+        ],
+        current_commit=commit,
+    )
+
+
 def _hotkey_config():
     return {
         "schema_version": HOTKEY_AUTHORITY_CONFIG_SCHEMA_VERSION,
@@ -121,13 +137,15 @@ def test_runtime_configuration_binds_six_build_gateway_release(monkeypatch):
     config = build_runtime_configuration(
         validator_release=_validator_release(),
         gateway_release=gateway,
+        gateway_release_lineage=_gateway_lineage(),
         hotkey_authority_config=_hotkey_config(),
     )
     assert config["gateway_release_hash"] == gateway["release_hash"]
     assert config["schema_version"] == VALIDATOR_RUNTIME_CONFIG_SCHEMA_VERSION
     assert "epoch_authority" not in config
-    assert set(config["gateway_role_expectations"]) == set(ROLE_SPECS)
-    assert config["gateway_role_expectations"]["gateway_scoring"]["pcr0"] == (
+    roles = config["gateway_release_lineage"]["releases"]["1" * 40]["roles"]
+    assert set(roles) == set(ROLE_SPECS)
+    assert roles["gateway_scoring"]["pcr0"] == (
         "4" * 96
     )
 
@@ -149,6 +167,7 @@ def test_stateful_runtime_configuration_measures_cutover(monkeypatch):
     config = build_runtime_configuration(
         validator_release=_validator_release(),
         gateway_release=_gateway_release(),
+        gateway_release_lineage=_gateway_lineage(),
         hotkey_authority_config=_hotkey_config(),
     )
 
@@ -160,6 +179,9 @@ def test_stateful_runtime_configuration_measures_cutover(monkeypatch):
         "mode": STATEFUL_EPOCH_MODE,
         "cutover_manifest": cutover.to_dict(),
     }
+    assert set(
+        config["gateway_release_lineage"]["releases"]["1" * 40]["roles"]
+    ) == set(ROLE_SPECS)
 
 
 def test_runtime_configuration_rejects_asymmetric_commits():
@@ -167,6 +189,7 @@ def test_runtime_configuration_rejects_asymmetric_commits():
         build_runtime_configuration(
             validator_release=_validator_release("1" * 40),
             gateway_release=_gateway_release("2" * 40),
+            gateway_release_lineage=_gateway_lineage("2" * 40),
             hotkey_authority_config=_hotkey_config(),
         )
 
@@ -178,6 +201,7 @@ def test_bootstrap_verifies_nitro_and_exact_readback():
     configuration = build_runtime_configuration(
         validator_release=validator_release,
         gateway_release=gateway_release,
+        gateway_release_lineage=_gateway_lineage(),
         hotkey_authority_config=_hotkey_config(),
     )
     boot = {
@@ -211,6 +235,7 @@ def test_bootstrap_verifies_nitro_and_exact_readback():
     result = configure_validator_runtime_v2(
         validator_release=validator_release,
         gateway_release=gateway_release,
+        gateway_release_lineage=_gateway_lineage(),
         hotkey_authority_config=_hotkey_config(),
         client=Client(),
         boot_verifier=verify,
@@ -226,6 +251,7 @@ def test_bootstrap_rejects_readback_substitution():
     configuration = build_runtime_configuration(
         validator_release=validator_release,
         gateway_release=gateway_release,
+        gateway_release_lineage=_gateway_lineage(),
         hotkey_authority_config=_hotkey_config(),
     )
     boot = {
@@ -252,6 +278,7 @@ def test_bootstrap_rejects_readback_substitution():
         configure_validator_runtime_v2(
             validator_release=validator_release,
             gateway_release=gateway_release,
+            gateway_release_lineage=_gateway_lineage(),
             hotkey_authority_config=_hotkey_config(),
             client=Client(),
             boot_verifier=lambda *_args, **_kwargs: {"verified": True},

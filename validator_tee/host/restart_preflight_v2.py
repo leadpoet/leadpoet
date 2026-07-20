@@ -69,6 +69,7 @@ def verify_validator_restart_preflight_v2(
     deploy_commit: str,
     validator_release_manifest: Mapping[str, Any],
     gateway_release_manifest: Mapping[str, Any],
+    gateway_release_lineage: Mapping[str, Any],
     hotkey_configuration: Mapping[str, Any],
     hotkey_envelope: Mapping[str, Any],
     runtime_artifact_lock: Mapping[str, Any],
@@ -101,6 +102,7 @@ def verify_validator_restart_preflight_v2(
     build_runtime_configuration(
         validator_release=validator_manifest,
         gateway_release=gateway,
+        gateway_release_lineage=gateway_release_lineage,
         hotkey_authority_config=configuration,
     )
     if (
@@ -119,6 +121,7 @@ def verify_validator_restart_preflight_v2(
             "release_manifest_hash"
         ],
         "gateway_release_hash": gateway["release_hash"],
+        "gateway_release_lineage_hash": gateway_release_lineage["lineage_hash"],
         "validator_hotkey": configuration["validator_hotkey"],
         "host_hotkey_directory": checked_hotkey_directory,
         "runtime_artifact_count": len(lock["artifacts"]),
@@ -145,6 +148,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--deploy-commit", required=True)
     parser.add_argument("--validator-release", type=Path, required=True)
     parser.add_argument("--gateway-release", type=Path, required=True)
+    parser.add_argument("--gateway-release-lineage", type=Path, required=True)
     parser.add_argument("--hotkey-config", type=Path, required=True)
     parser.add_argument("--hotkey-envelope", type=Path, required=True)
     parser.add_argument("--runtime-artifact-lock", type=Path, required=True)
@@ -157,6 +161,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
         gateway_release_manifest=_load(
             args.gateway_release, "gateway V2 release manifest"
+        ),
+        gateway_release_lineage=_load(
+            args.gateway_release_lineage, "gateway V2 release lineage"
         ),
         hotkey_configuration=_load(args.hotkey_config, "validator hotkey config"),
         hotkey_envelope=_load(args.hotkey_envelope, "validator hotkey envelope"),

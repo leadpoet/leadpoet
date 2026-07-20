@@ -20,8 +20,12 @@ def test_validator_rpc_configures_authority_once_and_disables_legacy(monkeypatch
         def boot_identity(self):
             return dict(self._boot)
 
-        def gateway_expectations(self):
-            return {"gateway_coordinator": {"pcr0": "2" * 96}}
+        def gateway_release_lineage(self):
+            return {
+                "1" * 40: {
+                    "roles": {"gateway_coordinator": {"pcr0": "2" * 96}}
+                }
+            }
 
     class FakeAuthority:
         def __init__(self, **kwargs):

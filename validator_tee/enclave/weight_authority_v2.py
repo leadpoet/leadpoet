@@ -49,14 +49,14 @@ class ValidatorWeightAuthorityV2:
         self,
         *,
         boot_identity_supplier: Callable[[], Mapping[str, Any]],
-        gateway_expectations_supplier: Callable[[], Mapping[str, Any]],
+        gateway_release_lineage_supplier: Callable[[], Mapping[str, Any]],
         sign_digest: Callable[[bytes], Any],
         chain_source: Any,
         boot_verifier: Callable[..., Mapping[str, Any]] = verify_boot_identity_nitro,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._boot_identity_supplier = boot_identity_supplier
-        self._gateway_expectations_supplier = gateway_expectations_supplier
+        self._gateway_release_lineage_supplier = gateway_release_lineage_supplier
         self._sign_digest = sign_digest
         self._chain_source = chain_source
         self._boot_verifier = boot_verifier
@@ -788,16 +788,32 @@ class ValidatorWeightAuthorityV2:
             if dict(identity) != dict(validator_boot):
                 raise ValidatorWeightAuthorityV2Error("another validator boot is not trusted")
             return self._boot_verifier(identity, expected_pcr0=validator_boot["pcr0"])
-        expectations = self._gateway_expectations_supplier()
-        expectation = expectations.get(physical_role)
+        commit = str(identity.get("commit_sha") or "").lower()
+        lineage = self._gateway_release_lineage_supplier()
+        release = lineage.get(commit)
+        if not isinstance(release, Mapping):
+            raise ValidatorWeightAuthorityV2Error(
+                "gateway boot commit is not in approved release lineage"
+            )
+        roles = release.get("roles")
+        expectation = (
+            roles.get(physical_role) if isinstance(roles, Mapping) else None
+        )
         if not isinstance(expectation, Mapping):
-            raise ValidatorWeightAuthorityV2Error("gateway boot role is not in release")
+            raise ValidatorWeightAuthorityV2Error(
+                "gateway boot role is not in approved release lineage"
+            )
         if (
             identity.get("commit_sha") != expectation.get("commit_sha")
             or identity.get("build_manifest_hash")
             != expectation.get("build_manifest_hash")
+            or identity.get("dependency_lock_hash")
+            != expectation.get("dependency_lock_hash")
+            or identity.get("pcr0") != expectation.get("pcr0")
         ):
-            raise ValidatorWeightAuthorityV2Error("gateway boot differs from release")
+            raise ValidatorWeightAuthorityV2Error(
+                "gateway boot differs from approved release lineage"
+            )
         return self._boot_verifier(
             identity,
             expected_pcr0=str(expectation["pcr0"]),

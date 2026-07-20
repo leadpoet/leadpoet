@@ -20,10 +20,10 @@ therefore always follow the fetched head of `GITHUB_BRANCH`.
 
 ## One-Time Cutover
 
-Invoke the cutover operator at or before official SN71 block 300. The operator
+Invoke the cutover operator at or before official SN71 block 310. The operator
 must capture that start as its first operational action. The same captured
 start remains valid while GitHub attestation, release acquisition, gateway
-restart, and validator restart continue after block 300; later stages must not
+restart, and validator restart continue after block 310; later stages must not
 reapply the deadline. The intended migration commit must already be on the
 configured GitHub branch.
 

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,7 +15,7 @@ from Leadpoet.utils.restart_epoch_gate import (
     verify_restart_epoch_window,
     write_restart_epoch_start,
 )
-from Leadpoet.utils.subnet_epoch import SubnetEpochSnapshot
+from Leadpoet.utils.subnet_epoch import SubnetEpochError, SubnetEpochSnapshot
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,8 +37,8 @@ def _snapshot(epoch_block: int) -> SubnetEpochSnapshot:
     )
 
 
-@pytest.mark.parametrize("epoch_block", [0, 299, 300])
-def test_restart_gate_accepts_official_epoch_block_at_or_before_300(
+@pytest.mark.parametrize("epoch_block", [0, 300, 310])
+def test_restart_gate_accepts_official_epoch_block_at_or_before_310(
     monkeypatch: pytest.MonkeyPatch,
     epoch_block: int,
 ) -> None:
@@ -47,25 +50,25 @@ def test_restart_gate_accepts_official_epoch_block_at_or_before_300(
 
     result = verify_restart_epoch_window(object(), netuid=71)
 
-    assert MAXIMUM_RESTART_EPOCH_BLOCK == 300
+    assert MAXIMUM_RESTART_EPOCH_BLOCK == 310
     assert result["epoch_block"] == epoch_block
     assert result["restart_allowed"] is True
 
 
-def test_restart_gate_rejects_official_epoch_block_after_300(
+def test_restart_gate_rejects_official_epoch_block_after_310(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         restart_epoch_gate,
         "read_subnet_epoch_snapshot",
-        lambda subtensor, *, netuid: _snapshot(301),
+        lambda subtensor, *, netuid: _snapshot(311),
     )
 
-    with pytest.raises(RestartEpochGateError, match="observed 301"):
+    with pytest.raises(RestartEpochGateError, match="observed 311"):
         verify_restart_epoch_window(object(), netuid=71)
 
 
-def test_captured_restart_start_is_not_rechecked_after_block_300(
+def test_captured_restart_start_is_not_rechecked_after_block_310(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -73,7 +76,7 @@ def test_captured_restart_start_is_not_rechecked_after_block_300(
     current = _snapshot(330)
     report = {
         "schema_version": "leadpoet.restart_epoch_start.v1",
-        "maximum_restart_epoch_block": 300,
+        "maximum_restart_epoch_block": 310,
         "restart_allowed": True,
         "snapshot": captured.to_dict(),
     }
@@ -97,6 +100,72 @@ def test_captured_restart_start_is_not_rechecked_after_block_300(
     assert result["deadline_reapplied"] is False
 
 
+def test_captured_restart_start_survives_epoch_transition_and_pruned_primary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured = _snapshot(300)
+    current = replace(
+        _snapshot(40),
+        current_block=10_400,
+        last_epoch_block=10_360,
+        subnet_epoch_index=124,
+    )
+    report = {
+        "schema_version": "leadpoet.restart_epoch_start.v1",
+        "maximum_restart_epoch_block": 300,
+        "restart_allowed": True,
+        "snapshot": captured.to_dict(),
+    }
+    path = tmp_path / "restart-start.json"
+    write_restart_epoch_start(path, report)
+
+    primary = object()
+
+    class Archive:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    archive = Archive()
+
+    def read_snapshot(subtensor, *, netuid, block_hash=None):
+        assert netuid == 71
+        if block_hash is not None:
+            if subtensor is primary:
+                raise SubnetEpochError("primary state was pruned")
+            assert subtensor is archive
+            return captured
+        assert subtensor is primary
+        return current
+
+    monkeypatch.setattr(restart_epoch_gate, "read_subnet_epoch_snapshot", read_snapshot)
+    monkeypatch.setitem(
+        sys.modules,
+        "bittensor",
+        SimpleNamespace(
+            Subtensor=lambda *, network: (
+                archive
+                if network
+                == restart_epoch_gate.OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
+                else None
+            )
+        ),
+    )
+
+    result = verify_captured_restart_epoch_start(
+        primary,
+        path=path,
+        netuid=71,
+    )
+
+    assert result["captured_epoch_block"] == 300
+    assert result["current_snapshot"]["subnet_epoch_index"] == 124
+    assert result["deadline_reapplied"] is False
+    assert archive.closed is True
+
+
 def test_gateway_captures_start_gate_and_validator_gates_before_shutdown() -> None:
     gateway = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     validator = (ROOT / "validator_restart.sh").read_text(encoding="utf-8")
@@ -115,7 +184,7 @@ def test_gateway_captures_start_gate_and_validator_gates_before_shutdown() -> No
     assert validator_gate < validator_shutdown
     assert '--captured-report "$GATEWAY_RESTART_START_PATH"' in gateway
     assert '--captured-report "$VALIDATOR_RESTART_START_PATH"' in validator
-    assert "MAXIMUM_RESTART_EPOCH_BLOCK = 300" in (
+    assert "MAXIMUM_RESTART_EPOCH_BLOCK = 310" in (
         ROOT / "Leadpoet" / "utils" / "restart_epoch_gate.py"
     ).read_text(encoding="utf-8")
     assert "--maximum" not in gateway

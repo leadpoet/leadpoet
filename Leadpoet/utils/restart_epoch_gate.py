@@ -8,10 +8,15 @@ import os
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-from Leadpoet.utils.subnet_epoch import SubnetEpochSnapshot, read_subnet_epoch_snapshot
+from Leadpoet.utils.subnet_epoch import (
+    OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT,
+    SubnetEpochError,
+    SubnetEpochSnapshot,
+    read_subnet_epoch_snapshot,
+)
 
 
-MAXIMUM_RESTART_EPOCH_BLOCK = 300
+MAXIMUM_RESTART_EPOCH_BLOCK = 310
 RESTART_START_SCHEMA_VERSION = "leadpoet.restart_epoch_start.v1"
 
 
@@ -24,7 +29,7 @@ def verify_restart_epoch_window(
     *,
     netuid: int = 71,
 ) -> dict[str, Any]:
-    """Read the official scheduler and reject restart starts after block 300."""
+    """Read the official scheduler and reject restart starts after block 310."""
 
     snapshot = read_subnet_epoch_snapshot(subtensor, netuid=netuid)
     result = {
@@ -91,7 +96,12 @@ def load_restart_epoch_start(path: Path, *, netuid: int = 71) -> SubnetEpochSnap
         raise RestartEpochGateError("captured restart start must be one object")
     if report.get("schema_version") != RESTART_START_SCHEMA_VERSION:
         raise RestartEpochGateError("captured restart start schema is unsupported")
-    if report.get("maximum_restart_epoch_block") != MAXIMUM_RESTART_EPOCH_BLOCK:
+    captured_deadline = report.get("maximum_restart_epoch_block")
+    if (
+        not isinstance(captured_deadline, int)
+        or isinstance(captured_deadline, bool)
+        or not 0 <= captured_deadline <= MAXIMUM_RESTART_EPOCH_BLOCK
+    ):
         raise RestartEpochGateError("captured restart start uses another deadline")
     if report.get("restart_allowed") is not True:
         raise RestartEpochGateError("captured restart start was not approved")
@@ -104,9 +114,42 @@ def load_restart_epoch_start(path: Path, *, netuid: int = 71) -> SubnetEpochSnap
         raise RestartEpochGateError("captured restart snapshot is invalid") from exc
     if snapshot.netuid != int(netuid):
         raise RestartEpochGateError("captured restart snapshot uses another netuid")
-    if not 0 <= snapshot.epoch_block <= MAXIMUM_RESTART_EPOCH_BLOCK:
-        raise RestartEpochGateError("captured restart start is outside block 300")
+    if not 0 <= snapshot.epoch_block <= captured_deadline:
+        raise RestartEpochGateError("captured restart start is outside its deadline")
     return snapshot
+
+
+def _read_captured_snapshot(
+    subtensor: Any,
+    *,
+    captured: SubnetEpochSnapshot,
+) -> SubnetEpochSnapshot:
+    try:
+        return read_subnet_epoch_snapshot(
+            subtensor,
+            netuid=captured.netuid,
+            block_hash=captured.block_hash,
+        )
+    except SubnetEpochError:
+        pass
+
+    import bittensor as bt
+
+    archive = bt.Subtensor(network=OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT)
+    try:
+        return read_subnet_epoch_snapshot(
+            archive,
+            netuid=captured.netuid,
+            block_hash=captured.block_hash,
+        )
+    except Exception as exc:
+        raise RestartEpochGateError(
+            "captured restart snapshot is unavailable from the official archive"
+        ) from exc
+    finally:
+        close = getattr(archive, "close", None)
+        if callable(close):
+            close()
 
 
 def verify_captured_restart_epoch_start(
@@ -118,11 +161,7 @@ def verify_captured_restart_epoch_start(
     """Verify one earlier valid start without reapplying the position deadline."""
 
     captured = load_restart_epoch_start(path, netuid=netuid)
-    exact = read_subnet_epoch_snapshot(
-        subtensor,
-        netuid=netuid,
-        block_hash=captured.block_hash,
-    )
+    exact = _read_captured_snapshot(subtensor, captured=captured)
     authority_fields = (
         "network_genesis_hash",
         "netuid",
@@ -144,12 +183,10 @@ def verify_captured_restart_epoch_start(
     if (
         current.network_genesis_hash != captured.network_genesis_hash
         or current.netuid != captured.netuid
-        or current.subnet_epoch_index != captured.subnet_epoch_index
-        or current.last_epoch_block != captured.last_epoch_block
         or current.current_block < captured.current_block
     ):
         raise RestartEpochGateError(
-            "captured restart start is not in the current official subnet epoch"
+            "captured restart start is not in the current official chain history"
         )
     return {
         "schema_version": RESTART_START_SCHEMA_VERSION,

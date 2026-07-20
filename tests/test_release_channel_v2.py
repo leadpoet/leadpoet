@@ -6,8 +6,10 @@ import pytest
 from gateway.tee.release_channel_v2 import (
     ReleaseChannelV2Error,
     build_release_channel_v2,
+    build_release_lineage_v2,
     cli,
     fetch_release_channel_v2,
+    fetch_release_lineage_v2,
     install_release_channel_v2,
     publish_release_channel_v2,
     release_channel_key,
@@ -32,12 +34,12 @@ def _hash(character):
     return "sha256:" + character * 64
 
 
-def _gateway_manifest():
+def _gateway_manifest(commit=COMMIT):
     rows = []
     for index, (role, spec) in enumerate(sorted(ROLE_SPECS.items())):
         character = "abcdef0123456789"[index]
         deterministic = {
-            "commit_sha": COMMIT,
+            "commit_sha": commit,
             "pcr0": character * 96,
             "normalized_image_hash": _hash(character),
             "eif_hash": _hash(character),
@@ -64,9 +66,9 @@ def _gateway_manifest():
     return build_release_manifest(rows, acceptance_signer_pubkey_hash=_hash("f"))
 
 
-def _validator_manifest():
+def _validator_manifest(commit=COMMIT):
     release = build_validator_release(
-        commit_sha=COMMIT,
+        commit_sha=commit,
         pcr0="2" * 96,
         app_manifest_hash=_hash("3"),
         dependency_lock_hash=_hash("4"),
@@ -112,6 +114,18 @@ class _S3:
             raise RuntimeError("precondition failed")
         self.objects[key] = kwargs["Body"]
         self.puts.append(kwargs)
+
+    def list_objects_v2(self, *, Bucket, Prefix, MaxKeys, **kwargs):
+        del MaxKeys, kwargs
+        keys = sorted(
+            key
+            for bucket, key in self.objects
+            if bucket == Bucket and key.startswith(Prefix)
+        )
+        return {
+            "Contents": [{"Key": key} for key in keys],
+            "IsTruncated": False,
+        }
 
 
 def test_channel_binds_both_independent_release_manifests():
@@ -172,6 +186,65 @@ def test_release_channel_key_is_content_addressed_by_commit():
     assert release_channel_key(COMMIT).endswith(
         f"/{COMMIT}/release-channel-v2.json"
     )
+
+
+def test_release_lineage_binds_historical_exact_role_measurements():
+    historical_commit = "2" * 40
+    current = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(),
+        validator_release_manifest=_validator_manifest(),
+    )
+    historical = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(historical_commit),
+        validator_release_manifest=_validator_manifest(historical_commit),
+    )
+    unrelated_commit = "3" * 40
+    unrelated = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(unrelated_commit),
+        validator_release_manifest=_validator_manifest(unrelated_commit),
+    )
+    lineage = build_release_lineage_v2(
+        [historical, current],
+        current_commit=COMMIT,
+    )
+    assert lineage["current_gateway_release_hash"] == (
+        current["gateway_release_manifest"]["release_hash"]
+    )
+    expected = lineage["releases"][historical_commit]["roles"][
+        "gateway_coordinator"
+    ]
+    summary = historical["gateway_release_manifest"]["roles"][
+        "gateway_coordinator"
+    ]
+    assert expected == {
+        "commit_sha": historical_commit,
+        "pcr0": summary["pcr0"],
+        "build_manifest_hash": summary["execution_manifest_hash"],
+        "dependency_lock_hash": summary["dependency_lock_hash"],
+    }
+
+    s3 = _S3()
+    for channel in (historical, current, unrelated):
+        key = release_channel_key(channel["commit_sha"])
+        s3.objects[("release-bucket", key)] = (
+            json.dumps(channel, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+    assert fetch_release_lineage_v2(
+        bucket="release-bucket",
+        current_commit=COMMIT,
+        s3_client=s3,
+        allowed_commits=(historical_commit, COMMIT),
+    ) == lineage
+
+
+def test_release_lineage_rejects_missing_current_channel():
+    historical_commit = "2" * 40
+    historical = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(historical_commit),
+        validator_release_manifest=_validator_manifest(historical_commit),
+    )
+    with pytest.raises(ReleaseChannelV2Error, match="current release"):
+        build_release_lineage_v2([historical], current_commit=COMMIT)
 
 
 def test_cli_reports_unpublished_channel_without_traceback(monkeypatch, capsys):

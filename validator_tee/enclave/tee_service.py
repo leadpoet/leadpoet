@@ -206,7 +206,9 @@ def configure_authoritative_v2(
     if validator_weight_authority_v2 is None:
         validator_weight_authority_v2 = ValidatorWeightAuthorityV2(
             boot_identity_supplier=validator_runtime_v2.boot_identity,
-            gateway_expectations_supplier=validator_runtime_v2.gateway_expectations,
+            gateway_release_lineage_supplier=(
+                validator_runtime_v2.gateway_release_lineage
+            ),
             sign_digest=lambda digest: private_key.sign(digest),
             chain_source=validator_chain_source_v2,
         )

@@ -10,6 +10,7 @@ EXPECTED_AWS_ACCOUNT="${EXPECTED_AWS_ACCOUNT:-493765492819}"
 # can select the existing production venv without changing restart behavior.
 VALIDATOR_PYTHON_BIN="${VALIDATOR_PYTHON_BIN:-python3}"
 VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST="${VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/gateway-v2-release-manifest.json}"
+VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE="${VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE:-/home/ec2-user/.config/leadpoet/gateway-v2-release-lineage.json}"
 VALIDATOR_V2_RELEASE_MANIFEST="${VALIDATOR_V2_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
 VALIDATOR_V2_RELEASE_ARCHIVE_ROOT="${VALIDATOR_V2_RELEASE_ARCHIVE_ROOT:-/home/ec2-user/.config/leadpoet/validator-releases-v2}"
 VALIDATOR_V2_HOTKEY_CONFIG="${VALIDATOR_V2_HOTKEY_CONFIG:-/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json}"
@@ -242,7 +243,9 @@ if ! python3 -m gateway.tee.release_channel_v2 \
     --bucket "$VALIDATOR_V2_RELEASE_BUCKET" \
     --prefix "$VALIDATOR_V2_RELEASE_PREFIX" \
     --gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
-    --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"; then
+    --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST" \
+    --lineage-output "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
+    --lineage-repository "$VALIDATOR_ROOT"; then
   echo "ERROR: independently approved V2 release is not published for $VALIDATOR_DEPLOY_SHA" >&2
   echo "Validator remains running; production shutdown has not started." >&2
   exit 75
@@ -250,6 +253,7 @@ fi
 VALIDATOR_V2_MISSING_INPUTS=()
 for required_file in \
   "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
   "$VALIDATOR_V2_RELEASE_MANIFEST" \
   "$VALIDATOR_V2_HOTKEY_CONFIG" \
   "$VALIDATOR_V2_HOTKEY_ENVELOPE"; do
@@ -304,6 +308,7 @@ python3 -m validator_tee.host.restart_preflight_v2 \
   --deploy-commit "$VALIDATOR_DEPLOY_SHA" \
   --validator-release "$VALIDATOR_V2_RELEASE_MANIFEST" \
   --gateway-release "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+  --gateway-release-lineage "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
   --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG" \
   --hotkey-envelope "$VALIDATOR_V2_HOTKEY_ENVELOPE" \
   --runtime-artifact-lock "$VALIDATOR_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
@@ -428,6 +433,7 @@ echo "Terminating existing validator Nitro enclaves"
   python3 -m validator_tee.host.runtime_v2_bootstrap \
     --validator-release "$VALIDATOR_V2_RELEASE_MANIFEST" \
     --gateway-release "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+    --gateway-release-lineage "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
     --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG"
 
   echo "Provisioning the validator hotkey directly into Nitro with KMS"

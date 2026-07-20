@@ -2,9 +2,19 @@ from __future__ import annotations
 
 import base64
 import copy
+import json
 
 import pytest
 
+from Leadpoet.utils.subnet_epoch import (
+    CUTOVER_JSON_ENV,
+    CUTOVER_PATH_ENV,
+    SubnetEpochCutover,
+)
+from gateway.tee.release_channel_v2 import (
+    build_release_channel_v2,
+    build_release_lineage_v2,
+)
 from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
     build_release_manifest,
@@ -38,6 +48,21 @@ PUBLIC_KEY = "a6bfe69c29bf9e4db65c63ac6f6d1e23c252ca871744afb6edc5623d9bc39004"
 
 def _hash(character):
     return "sha256:" + character * 64
+
+
+@pytest.fixture(autouse=True)
+def _official_epoch_authority(monkeypatch):
+    cutover = SubnetEpochCutover(
+        network_genesis_hash="0x" + "1" * 64,
+        netuid=71,
+        cutover_block=8_637_156,
+        cutover_block_hash="0x" + "2" * 64,
+        first_subnet_epoch_index=23_927,
+        first_settlement_epoch_id=23_992,
+        last_legacy_epoch_id=23_991,
+    )
+    monkeypatch.setenv(CUTOVER_JSON_ENV, json.dumps(cutover.to_dict()))
+    monkeypatch.delenv(CUTOVER_PATH_ENV, raising=False)
 
 
 def _gateway_release(commit=COMMIT):
@@ -99,6 +124,18 @@ def _validator_release(commit=COMMIT):
     )
 
 
+def _gateway_lineage(commit=COMMIT):
+    return build_release_lineage_v2(
+        [
+            build_release_channel_v2(
+                gateway_release_manifest=_gateway_release(commit),
+                validator_release_manifest=_validator_release(commit),
+            )
+        ],
+        current_commit=commit,
+    )
+
+
 def _hotkey_config():
     return {
         "schema_version": HOTKEY_AUTHORITY_CONFIG_SCHEMA_VERSION,
@@ -143,6 +180,7 @@ def _verify(**overrides):
         "deploy_commit": COMMIT,
         "validator_release_manifest": _validator_release(),
         "gateway_release_manifest": _gateway_release(),
+        "gateway_release_lineage": _gateway_lineage(),
         "hotkey_configuration": _hotkey_config(),
         "hotkey_envelope": _hotkey_envelope(),
         "runtime_artifact_lock": _runtime_lock(),

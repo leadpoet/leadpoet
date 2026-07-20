@@ -21,10 +21,10 @@ from leadpoet_canonical.attested_v2 import (
 )
 
 
-VALIDATOR_RUNTIME_CONFIG_SCHEMA_VERSION = "leadpoet.validator_runtime_config.v2"
 VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION = (
-    "leadpoet.validator_runtime_config.v3"
+    "leadpoet.validator_runtime_config.v4"
 )
+GATEWAY_RELEASE_LINEAGE_SCHEMA_VERSION = "leadpoet.attested_release_lineage.v1"
 VALIDATOR_PHYSICAL_ROLE = "validator_weights"
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
@@ -176,33 +176,22 @@ def dependency_lock_hash(
 
 
 def _validate_configuration(value: Mapping[str, Any]) -> Dict[str, Any]:
-    legacy_fields = {
+    fields = {
         "schema_version",
         "commit_sha",
         "build_manifest_hash",
         "dependency_lock_hash",
         "gateway_release_hash",
-        "gateway_role_expectations",
+        "gateway_release_lineage",
         "hotkey_authority_config_hash",
+        "epoch_authority",
     }
-    stateful_fields = legacy_fields | {"epoch_authority"}
-    if not isinstance(value, Mapping):
-        raise ValidatorRuntimeV2Error("validator V2 runtime fields are invalid")
-    observed_fields = frozenset(value)
-    if observed_fields not in {
-        frozenset(legacy_fields),
-        frozenset(stateful_fields),
-    }:
+    if not isinstance(value, Mapping) or set(value) != fields:
         raise ValidatorRuntimeV2Error("validator V2 runtime fields are invalid")
     schema_version = value.get("schema_version")
-    if observed_fields == frozenset(legacy_fields):
-        if schema_version != VALIDATOR_RUNTIME_CONFIG_SCHEMA_VERSION:
-            raise ValidatorRuntimeV2Error("validator V2 runtime schema is invalid")
-        epoch_authority = None
-    elif schema_version == VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION:
-        epoch_authority = _validate_epoch_authority(value["epoch_authority"])
-    else:
+    if schema_version != VALIDATOR_RUNTIME_STATEFUL_CONFIG_SCHEMA_VERSION:
         raise ValidatorRuntimeV2Error("validator V2 runtime schema is invalid")
+    epoch_authority = _validate_epoch_authority(value["epoch_authority"])
     commit = str(value.get("commit_sha") or "").lower()
     if not _COMMIT_RE.fullmatch(commit):
         raise ValidatorRuntimeV2Error("validator V2 commit is invalid")
@@ -214,32 +203,17 @@ def _validate_configuration(value: Mapping[str, Any]) -> Dict[str, Any]:
     ):
         if not _HASH_RE.fullmatch(str(value.get(field) or "")):
             raise ValidatorRuntimeV2Error("validator V2 %s is invalid" % field)
-    expectations = value.get("gateway_role_expectations")
-    if not isinstance(expectations, Mapping) or set(expectations) != _GATEWAY_ROLES:
-        raise ValidatorRuntimeV2Error("validator V2 gateway role set is incomplete")
-    normalized_expectations = {}
-    for role, expectation in expectations.items():
-        if not isinstance(expectation, Mapping) or set(expectation) != {
-            "commit_sha",
-            "pcr0",
-            "build_manifest_hash",
-        }:
-            raise ValidatorRuntimeV2Error("validator V2 gateway expectation is invalid")
-        expected_commit = str(expectation.get("commit_sha") or "").lower()
-        expected_pcr0 = str(expectation.get("pcr0") or "").lower()
-        expected_manifest = str(expectation.get("build_manifest_hash") or "").lower()
-        if (
-            not _COMMIT_RE.fullmatch(expected_commit)
-            or not _PCR0_RE.fullmatch(expected_pcr0)
-            or expected_pcr0 == "0" * 96
-            or not _HASH_RE.fullmatch(expected_manifest)
-        ):
-            raise ValidatorRuntimeV2Error("validator V2 gateway expectation is invalid")
-        normalized_expectations[str(role)] = {
-            "commit_sha": expected_commit,
-            "pcr0": expected_pcr0,
-            "build_manifest_hash": expected_manifest,
-        }
+    lineage = validate_gateway_release_lineage(value["gateway_release_lineage"])
+    if lineage["current_commit_sha"] != commit:
+        raise ValidatorRuntimeV2Error(
+            "validator current gateway lineage commit differs"
+        )
+    if lineage["current_gateway_release_hash"] != str(
+        value["gateway_release_hash"]
+    ).lower():
+        raise ValidatorRuntimeV2Error(
+            "validator current gateway lineage release differs"
+        )
     normalized = {
         "schema_version": schema_version,
         "commit_sha": commit,
@@ -249,14 +223,129 @@ def _validate_configuration(value: Mapping[str, Any]) -> Dict[str, Any]:
         "hotkey_authority_config_hash": str(
             value["hotkey_authority_config_hash"]
         ).lower(),
-        "gateway_role_expectations": {
-            role: normalized_expectations[role]
-            for role in sorted(normalized_expectations)
+        "gateway_release_lineage": lineage,
+        "epoch_authority": epoch_authority,
+    }
+    return normalized
+
+
+def validate_gateway_release_lineage(value: Mapping[str, Any]) -> Dict[str, Any]:
+    fields = {
+        "schema_version",
+        "current_commit_sha",
+        "current_gateway_release_hash",
+        "releases",
+        "lineage_hash",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ValidatorRuntimeV2Error("validator gateway release lineage is invalid")
+    if value.get("schema_version") != GATEWAY_RELEASE_LINEAGE_SCHEMA_VERSION:
+        raise ValidatorRuntimeV2Error(
+            "validator gateway release lineage schema is invalid"
+        )
+    current_commit = str(value.get("current_commit_sha") or "").lower()
+    current_release_hash = str(
+        value.get("current_gateway_release_hash") or ""
+    ).lower()
+    releases = value.get("releases")
+    if (
+        not _COMMIT_RE.fullmatch(current_commit)
+        or not _HASH_RE.fullmatch(current_release_hash)
+        or not isinstance(releases, Mapping)
+        or not 1 <= len(releases) <= 512
+    ):
+        raise ValidatorRuntimeV2Error("validator gateway release lineage is invalid")
+    normalized_releases = {}
+    for release_commit, release in releases.items():
+        commit = str(release_commit or "").lower()
+        release_fields = {"channel_hash", "gateway_release_hash", "roles"}
+        if (
+            not _COMMIT_RE.fullmatch(commit)
+            or not isinstance(release, Mapping)
+            or set(release) != release_fields
+            or not _HASH_RE.fullmatch(str(release.get("channel_hash") or ""))
+            or not _HASH_RE.fullmatch(
+                str(release.get("gateway_release_hash") or "")
+            )
+        ):
+            raise ValidatorRuntimeV2Error(
+                "validator gateway release lineage entry is invalid"
+            )
+        roles = release.get("roles")
+        if not isinstance(roles, Mapping) or set(roles) != _GATEWAY_ROLES:
+            raise ValidatorRuntimeV2Error(
+                "validator gateway release lineage roles are incomplete"
+            )
+        normalized_roles = {}
+        for role, expectation in roles.items():
+            expectation_fields = {
+                "commit_sha",
+                "pcr0",
+                "build_manifest_hash",
+                "dependency_lock_hash",
+            }
+            if (
+                not isinstance(expectation, Mapping)
+                or set(expectation) != expectation_fields
+            ):
+                raise ValidatorRuntimeV2Error(
+                    "validator gateway release expectation is invalid"
+                )
+            expected_commit = str(expectation.get("commit_sha") or "").lower()
+            expected_pcr0 = str(expectation.get("pcr0") or "").lower()
+            expected_manifest = str(
+                expectation.get("build_manifest_hash") or ""
+            ).lower()
+            expected_lock = str(
+                expectation.get("dependency_lock_hash") or ""
+            ).lower()
+            if (
+                expected_commit != commit
+                or not _PCR0_RE.fullmatch(expected_pcr0)
+                or expected_pcr0 == "0" * 96
+                or not _HASH_RE.fullmatch(expected_manifest)
+                or not _HASH_RE.fullmatch(expected_lock)
+            ):
+                raise ValidatorRuntimeV2Error(
+                    "validator gateway release expectation is invalid"
+                )
+            normalized_roles[str(role)] = {
+                "commit_sha": expected_commit,
+                "pcr0": expected_pcr0,
+                "build_manifest_hash": expected_manifest,
+                "dependency_lock_hash": expected_lock,
+            }
+        normalized_releases[commit] = {
+            "channel_hash": str(release["channel_hash"]).lower(),
+            "gateway_release_hash": str(
+                release["gateway_release_hash"]
+            ).lower(),
+            "roles": {
+                role: normalized_roles[role] for role in sorted(normalized_roles)
+            },
+        }
+    current = normalized_releases.get(current_commit)
+    if (
+        current is None
+        or current["gateway_release_hash"] != current_release_hash
+    ):
+        raise ValidatorRuntimeV2Error(
+            "validator current gateway release is absent from lineage"
+        )
+    body = {
+        "schema_version": GATEWAY_RELEASE_LINEAGE_SCHEMA_VERSION,
+        "current_commit_sha": current_commit,
+        "current_gateway_release_hash": current_release_hash,
+        "releases": {
+            release_commit: normalized_releases[release_commit]
+            for release_commit in sorted(normalized_releases)
         },
     }
-    if epoch_authority is not None:
-        normalized["epoch_authority"] = epoch_authority
-    return normalized
+    if value.get("lineage_hash") != sha256_json(body):
+        raise ValidatorRuntimeV2Error(
+            "validator gateway release lineage hash mismatch"
+        )
+    return {**body, "lineage_hash": value["lineage_hash"]}
 
 
 def _nsm_attest(*, user_data: bytes, public_key: bytes) -> bytes:
@@ -378,15 +467,21 @@ class ValidatorRuntimeIdentityV2:
                 raise ValidatorRuntimeV2Error("validator V2 runtime is not configured")
             return dict(self._boot_identity)
 
-    def gateway_expectations(self) -> Dict[str, Any]:
+    def gateway_release_lineage(self) -> Dict[str, Any]:
         with self._lock:
             if self._configuration is None:
                 raise ValidatorRuntimeV2Error("validator V2 runtime is not configured")
             return {
-                role: dict(value)
-                for role, value in self._configuration[
-                    "gateway_role_expectations"
-                ].items()
+                commit: {
+                    **release,
+                    "roles": {
+                        role: dict(expectation)
+                        for role, expectation in release["roles"].items()
+                    },
+                }
+                for commit, release in self._configuration[
+                    "gateway_release_lineage"
+                ]["releases"].items()
             }
 
     def epoch_authority(self) -> Optional[Dict[str, Any]]:

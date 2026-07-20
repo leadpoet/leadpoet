@@ -23,3 +23,17 @@ def test_restart_allows_only_one_invocation_pinned_ancestor_commit():
     )
     assert 'git checkout --detach "$REQUESTED_VALIDATOR_DEPLOY_COMMIT"' in script
     assert '"VALIDATOR_DEPLOY_COMMIT",' in script
+
+
+def test_restart_loads_one_canonical_cutover_manifest():
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+
+    assert (
+        'VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/'
+        'leadpoet/stateful-epoch-cutover.json"'
+    ) in script
+    assert 'unset LEADPOET_SUBNET_EPOCH_CUTOVER_JSON' in script
+    assert (
+        'export LEADPOET_SUBNET_EPOCH_CUTOVER_PATH="$VALIDATOR_STATEFUL_CUTOVER_MANIFEST"'
+        in script
+    )

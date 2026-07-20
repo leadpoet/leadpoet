@@ -125,6 +125,20 @@ def test_gateway_restart_cutover_hook_is_explicit_and_fail_closed() -> None:
     assert 'report.get("status") != "stateful_active"' in script
 
 
+def test_gateway_restart_loads_one_canonical_cutover_manifest() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    assert (
+        'GATEWAY_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/'
+        'leadpoet/stateful-epoch-cutover.json"'
+    ) in script
+    assert 'unset LEADPOET_SUBNET_EPOCH_CUTOVER_JSON' in script
+    assert (
+        'export LEADPOET_SUBNET_EPOCH_CUTOVER_PATH="$GATEWAY_STATEFUL_CUTOVER_MANIFEST"'
+        in script
+    )
+
+
 def test_gateway_restart_exports_attested_artifact_bucket_to_runtime() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 

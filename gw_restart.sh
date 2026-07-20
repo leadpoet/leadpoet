@@ -20,6 +20,7 @@ ENV_BACKUP_DIR="/home/ec2-user/.config/leadpoet/env-backups"
 GATEWAY_GIT_HELPER="${GATEWAY_GIT_HELPER:-$LEADPOET_REPO_ROOT/scripts/gateway_git_deploy.py}"
 GATEWAY_RESTART_PHASE="${GATEWAY_RESTART_PHASE:-prepare}"
 GATEWAY_STATEFUL_CUTOVER_CEREMONY="${GATEWAY_STATEFUL_CUTOVER_CEREMONY:-0}"
+GATEWAY_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
 GATEWAY_RESTART_LOCK_FILE="${GATEWAY_RESTART_LOCK_FILE:-/home/ec2-user/.config/leadpoet/gateway-restart.lock}"
 GATEWAY_RESTART_RECOVERY_LOCK_FILE="${GATEWAY_RESTART_RECOVERY_LOCK_FILE:-${GATEWAY_RESTART_LOCK_FILE}.recovery}"
 GATEWAY_DEPLOY_PLAN_FILE="${GATEWAY_DEPLOY_PLAN_FILE:-/tmp/gateway_git_deploy.$$.json}"
@@ -669,6 +670,35 @@ else
 fi
 
 cat "$ENV_SECRET" >> "$ENV_CLONE"
+
+if [ -f "$GATEWAY_STATEFUL_CUTOVER_MANIFEST" ]; then
+  echo "Loading the canonical stateful epoch cutover manifest"
+  export LEADPOET_SUBNET_EPOCH_CUTOVER_PATH="$GATEWAY_STATEFUL_CUTOVER_MANIFEST"
+  unset LEADPOET_SUBNET_EPOCH_CUTOVER_JSON
+  python3 - "$ENV_CLONE" "$GATEWAY_STATEFUL_CUTOVER_MANIFEST" <<'PY'
+import shlex
+import sys
+from pathlib import Path
+
+env_path = Path(sys.argv[1])
+manifest_path = sys.argv[2]
+cutover_keys = {
+    "LEADPOET_SUBNET_EPOCH_CUTOVER_JSON",
+    "LEADPOET_SUBNET_EPOCH_CUTOVER_PATH",
+}
+kept = []
+for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    candidate = line[7:].strip() if line.startswith("export ") else line
+    key = candidate.split("=", 1)[0].strip() if "=" in candidate else ""
+    if key not in cutover_keys:
+        kept.append(raw_line)
+kept.append(
+    "export LEADPOET_SUBNET_EPOCH_CUTOVER_PATH=" + shlex.quote(manifest_path)
+)
+env_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+PY
+fi
 
 grep -q "SUPABASE_SERVICE_ROLE_KEY" "$ENV_CLONE" || {
   echo "ERROR: hydrated/cloned env missing SUPABASE_SERVICE_ROLE_KEY"

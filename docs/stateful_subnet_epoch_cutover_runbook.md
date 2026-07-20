@@ -421,11 +421,17 @@ and durable readback hashes must match the dry run.
 
 ## 7. Stage and activate inside the measured gateway restart
 
-Persist exactly one canonical manifest source in the gateway and validator
-Secrets Manager environments before restarting. Use either
-`LEADPOET_SUBNET_EPOCH_CUTOVER_PATH` or
-`LEADPOET_SUBNET_EPOCH_CUTOVER_JSON`, never both. Future restarts hydrate the
-same immutable value automatically.
+Install the exact same manifest with mode `0600` at the canonical path on the
+gateway and validator hosts before restarting:
+
+```text
+/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json
+```
+
+The canonical restart scripts load that path automatically, remove any
+competing inline manifest setting, and let the runtime verify the manifest
+against the durable receipt-backed authority. Future restarts therefore do not
+require a Secrets Manager mutation or another cutover command.
 
 Stop the primary validator and every auditor before starting the gateway
 ceremony. Then invoke the canonical gateway restart exactly once with the
@@ -457,11 +463,10 @@ later official epoch it fails closed.
 ## 8. Start all runtimes on the same authority
 
 Every gateway, validator, and auditor process must load the same immutable
-manifest from its persisted Secrets Manager environment. The runtime has no
-epoch-mode switch:
+manifest from its canonical host path. The runtime has no epoch-mode switch:
 
 ```text
-LEADPOET_SUBNET_EPOCH_CUTOVER_PATH=/secure/operator/stateful-epoch-cutover.json
+LEADPOET_SUBNET_EPOCH_CUTOVER_PATH=/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json
 ```
 
 Do not also set `LEADPOET_SUBNET_EPOCH_CUTOVER_JSON`.

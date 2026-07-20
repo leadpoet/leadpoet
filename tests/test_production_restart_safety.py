@@ -100,6 +100,8 @@ def test_validator_restart_is_fail_closed_and_postflight_verified() -> None:
     assert "Authoritative validator coordinator runtime verified" in deploy
     assert "VALIDATOR_V2_DEPLOY_COMMIT" in deploy
     assert "VALIDATOR_WEIGHT_PROTOCOL" in deploy
+    assert "LEADPOET_SUBNET_EPOCH_CUTOVER_JSON" in deploy
+    assert "LEADPOET_EPOCH_MODE" not in deploy
     assert "get_hotkey_state_v2" in deploy
     assert "/health/v2-authority" in deploy
     assert "read_subnet_epoch_snapshot" in deploy

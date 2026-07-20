@@ -20,6 +20,8 @@ export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:
 VALIDATOR_WALLET_ROOT="${VALIDATOR_WALLET_ROOT:-$HOME/.bittensor/wallets}"
 VALIDATOR_WALLET_NAME="${VALIDATOR_WALLET_NAME:-validator_72}"
 VALIDATOR_WALLET_HOTKEY="${VALIDATOR_WALLET_HOTKEY:-default}"
+REQUESTED_VALIDATOR_DEPLOY_COMMIT="${VALIDATOR_DEPLOY_COMMIT:-}"
+unset VALIDATOR_DEPLOY_COMMIT
 VALIDATOR_ENV_EXPORT="$(mktemp /tmp/validator_env_export.XXXXXX)"
 SECRET_TMP="$(mktemp /tmp/validator_secret_env.XXXXXX)"
 
@@ -40,10 +42,25 @@ fi
 echo "Pulling latest GitHub main before stopping validator"
 before_head="$(git rev-parse HEAD)"
 git fetch origin
-git checkout main
-git pull --ff-only origin main
+if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
+  if ! [[ "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "ERROR: VALIDATOR_DEPLOY_COMMIT must be a full 40-character SHA" >&2
+    exit 1
+  fi
+  if ! git merge-base --is-ancestor "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" origin/main; then
+    echo "ERROR: VALIDATOR_DEPLOY_COMMIT is not reachable from origin/main" >&2
+    exit 1
+  fi
+  git checkout --detach "$REQUESTED_VALIDATOR_DEPLOY_COMMIT"
+  echo "Selected operator-requested validator commit: $REQUESTED_VALIDATOR_DEPLOY_COMMIT"
+else
+  git checkout main
+  git pull --ff-only origin main
+fi
 after_head="$(git rev-parse HEAD)"
-if [ "$before_head" != "$after_head" ] && [ "${VALIDATOR_RESTART_REEXECED:-0}" != "1" ]; then
+if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
+   && [ "$before_head" != "$after_head" ] \
+   && [ "${VALIDATOR_RESTART_REEXECED:-0}" != "1" ]; then
   echo "Restart wrapper updated from GitHub; re-executing latest validator_restart.sh"
   exec env VALIDATOR_RESTART_REEXECED=1 bash "$VALIDATOR_ROOT/validator_restart.sh" "$@"
 fi
@@ -101,6 +118,7 @@ skip_keys = {
     "AWS_SESSION_TOKEN",
     "AWS_SECURITY_TOKEN",
     "AWS_PROFILE",
+    "VALIDATOR_DEPLOY_COMMIT",
 }
 exports = []
 for raw_line in raw.replace("\x00", "\n").splitlines():

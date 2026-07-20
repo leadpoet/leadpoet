@@ -167,32 +167,11 @@ def test_cutover_rejects_hash_tampering_and_wrong_lineage() -> None:
         cutover.settlement_epoch_id(23_926)
 
 
-def test_mode_defaults_legacy_outside_production_and_rejects_unknown_values() -> None:
+def test_mode_defaults_legacy_and_rejects_unknown_values() -> None:
     assert get_epoch_mode({}) == LEGACY_EPOCH_MODE
     assert get_epoch_mode({EPOCH_MODE_ENV: " STATEFUL_V1 "}) == STATEFUL_EPOCH_MODE
     with pytest.raises(SubnetEpochError, match="unsupported"):
         get_epoch_mode({EPOCH_MODE_ENV: "estimated"})
-
-
-def test_production_finney_sn71_rejects_missing_epoch_mode() -> None:
-    with pytest.raises(SubnetEpochError, match="required for production"):
-        get_epoch_mode(
-            {
-                "BITTENSOR_NETWORK": "finney",
-                "BITTENSOR_NETUID": "71",
-            }
-        )
-
-    assert (
-        get_epoch_mode(
-            {
-                "BITTENSOR_NETWORK": "finney",
-                "BITTENSOR_NETUID": "71",
-                EPOCH_MODE_ENV: LEGACY_EPOCH_MODE,
-            }
-        )
-        == LEGACY_EPOCH_MODE
-    )
 
 
 def test_cutover_loader_requires_one_valid_manifest(tmp_path) -> None:

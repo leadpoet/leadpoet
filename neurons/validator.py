@@ -4222,6 +4222,21 @@ class Validator(BaseValidatorNeuron):
                     return False
 
     async def submit_weights_at_epoch_end(self):
+        """Run at most one automatic weight publication attempt at a time."""
+
+        lock = getattr(self, "_weight_submission_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._weight_submission_lock = lock
+        if lock.locked():
+            bt.logging.info(
+                "weight_submission_already_inflight; skipping duplicate trigger"
+            )
+            return False
+        async with lock:
+            return await self._submit_weights_at_epoch_end_locked()
+
+    async def _submit_weights_at_epoch_end_locked(self):
         """
         Submit accumulated weights to Bittensor chain at end of epoch (block 345+).
         
@@ -4425,15 +4440,25 @@ class Validator(BaseValidatorNeuron):
             # This ensures banned miners cannot receive sourcing emissions even if
             # new leads continue to trickle in with positive scores.
             # ═══════════════════════════════════════════════════════════════════
-            banned_hotkeys = set()
-            banned_lookup_ok = False
             try:
-                banned_hotkeys = self._get_all_banned_hotkeys()
-                banned_lookup_ok = True
+                from Leadpoet.utils.cloud_db import (
+                    gateway_get_banned_hotkeys_snapshot,
+                )
+
+                banned_snapshot = await asyncio.to_thread(
+                    gateway_get_banned_hotkeys_snapshot,
+                    self.wallet,
+                )
+                banned_hotkeys = set(banned_snapshot["banned_hotkeys"])
+                banned_lookup_ok = banned_snapshot["banned_lookup_ok"] is True
                 if banned_hotkeys:
                     self._apply_banned_hotkey_sourcing_penalties(banned_hotkeys)
-            except Exception as e:
-                print(f"   ⚠️  Banned hotkey check failed (non-fatal): {e}")
+            except Exception as exc:
+                print(
+                    "   Authoritative banned hotkey snapshot failed; "
+                    f"refusing weight publication: {exc}"
+                )
+                return False
 
             # ═══════════════════════════════════════════════════════════════════
             # Get rolling 30 epoch scores BEFORE checking if we should proceed
@@ -7268,32 +7293,6 @@ class Validator(BaseValidatorNeuron):
             bt.logging.warning(f"Failed to check banned hotkeys: {e}")
             return False  # On error, don't clear champion
     
-    def _get_all_banned_hotkeys(self) -> set:
-        """Fetch all hotkeys from Supabase banned_hotkeys table.
-
-        Used before weight submission to apply sourcing penalties to banned miners.
-        Returns empty set on error (fail-open so weight submission isn't blocked).
-        """
-        try:
-            from supabase import create_client
-
-            SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
-            SUPABASE_ANON_KEY = "sb_publishable_YU7GBMSX-fwEsSH7MnhSBQ_l5ACuFVf"
-
-            supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-
-            result = supabase.table("banned_hotkeys")\
-                .select("hotkey")\
-                .execute()
-
-            banned = {r["hotkey"] for r in (result.data or [])}
-            if banned:
-                bt.logging.info(f"🚨 Found {len(banned)} banned hotkeys in Supabase")
-            return banned
-        except Exception as e:
-            bt.logging.warning(f"Failed to fetch banned hotkeys: {e}")
-            return set()
-
     def _apply_banned_hotkey_sourcing_penalties(self, banned_hotkeys: set):
         """Set sourcing scores to -100,000 for banned hotkeys in weight files.
 

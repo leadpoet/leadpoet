@@ -2706,6 +2706,49 @@ def gateway_get_fulfillment_leaderboard_snapshot(
     )
 
 
+def gateway_get_banned_hotkeys_snapshot(wallet: bt.Wallet) -> Dict[str, Any]:
+    """Fetch the complete gateway-owned ban snapshot for weight calculation."""
+
+    last_err: Optional[Exception] = None
+    backoffs = [1, 3]
+    for attempt in range(len(backoffs) + 1):
+        try:
+            response = requests.get(
+                f"{GATEWAY_URL}/fulfillment/banned-hotkeys",
+                timeout=45,
+            )
+            response.raise_for_status()
+            data = response.json()
+            hotkeys = data.get("banned_hotkeys") if isinstance(data, dict) else None
+            if (
+                not isinstance(hotkeys, list)
+                or data.get("banned_lookup_ok") is not True
+                or any(not isinstance(hotkey, str) or not hotkey for hotkey in hotkeys)
+                or hotkeys != sorted(set(hotkeys))
+            ):
+                raise RuntimeError(
+                    "gateway banned hotkey snapshot is incomplete or non-canonical"
+                )
+            return {
+                "banned_hotkeys": list(hotkeys),
+                "banned_lookup_ok": True,
+            }
+        except Exception as exc:
+            last_err = exc
+            if attempt < len(backoffs):
+                delay = backoffs[attempt]
+                bt.logging.warning(
+                    "gateway_get_banned_hotkeys_snapshot attempt "
+                    f"{attempt + 1} failed ({type(exc).__name__}: {exc}); "
+                    f"retrying in {delay}s"
+                )
+                time.sleep(delay)
+    raise RuntimeError(
+        "gateway_get_banned_hotkeys_snapshot failed after "
+        f"{len(backoffs) + 1} attempts: {last_err}"
+    )
+
+
 def gateway_get_fulfillment_leaderboard(wallet: bt.Wallet, limit: int = 3) -> List[Dict]:
     """Fetch the top-N fulfillment miners ranked by wins in the last 140 epochs.
 

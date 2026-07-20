@@ -79,6 +79,34 @@ def _authoritative_args():
     }
 
 
+def test_primary_serializes_concurrent_weight_submission_triggers():
+    validator = validator_module.Validator.__new__(validator_module.Validator)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def submit_locked():
+        calls.append("started")
+        started.set()
+        await release.wait()
+        return True
+
+    validator._submit_weights_at_epoch_end_locked = submit_locked
+
+    async def run():
+        first = asyncio.create_task(validator.submit_weights_at_epoch_end())
+        await started.wait()
+        duplicate = await validator.submit_weights_at_epoch_end()
+        release.set()
+        return await first, duplicate
+
+    first, duplicate = asyncio.run(run())
+
+    assert first is True
+    assert duplicate is False
+    assert calls == ["started"]
+
+
 def test_primary_retries_false_tuples_until_true(monkeypatch, capsys):
     validator = _primary(
         [(False, "rejected-one"), (False, "rejected-two"), (True, "accepted")],

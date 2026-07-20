@@ -1898,6 +1898,55 @@ def _collect_active_rewards_sync(current_epoch: int) -> dict:
     return {"rewards": per_miner, "total_active_rows": len(all_rows)}
 
 
+def _collect_banned_hotkeys_sync() -> dict:
+    """Return the complete canonical ban set or fail the request."""
+
+    supabase = _get_supabase()
+    rows: List[dict] = []
+    offset = 0
+    for page_index in range(20):
+        page = (
+            supabase.table("banned_hotkeys")
+            .select("hotkey")
+            .order("hotkey")
+            .range(offset, offset + 999)
+            .execute()
+        )
+        page_rows = list(page.data or [])
+        rows.extend(page_rows)
+        if len(page_rows) < 1000:
+            break
+        if page_index == 19:
+            raise RuntimeError("banned hotkey result exceeds the pagination limit")
+        offset += 1000
+
+    hotkeys = [str(row.get("hotkey") or "") for row in rows]
+    if any(not hotkey for hotkey in hotkeys) or len(hotkeys) != len(set(hotkeys)):
+        raise RuntimeError("banned hotkey rows are invalid")
+    return {
+        "banned_hotkeys": sorted(hotkeys),
+        "banned_lookup_ok": True,
+    }
+
+
+@fulfillment_router.get("/banned-hotkeys")
+async def get_banned_hotkeys():
+    """Return the gateway source snapshot used for validator weight calculation."""
+
+    try:
+        return await run_db(_collect_banned_hotkeys_sync)
+    except Exception as exc:
+        logger.error(
+            "fulfillment_banned_hotkeys_read_failed type=%s error=%s",
+            type(exc).__name__,
+            str(exc)[:300],
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Authoritative banned hotkey snapshot is unavailable",
+        ) from exc
+
+
 # ---------------------------------------------------------------
 # GET /fulfillment/leaderboard  — top fulfillment miners (rolling window)
 # ---------------------------------------------------------------
@@ -1983,22 +2032,20 @@ def get_fulfillment_leaderboard(limit: int = 3):
             break
         offset += 1000
 
-    banned_set: set = set()
     try:
-        offset = 0
-        for _ in range(20):
-            page = supabase.table("banned_hotkeys") \
-                .select("hotkey") \
-                .range(offset, offset + 999) \
-                .execute()
-            if not page.data:
-                break
-            banned_set.update(r["hotkey"] for r in page.data)
-            if len(page.data) < 1000:
-                break
-            offset += 1000
-    except Exception:
-        banned_set = set()
+        banned_snapshot = _collect_banned_hotkeys_sync()
+    except Exception as exc:
+        logger.error(
+            "fulfillment_leaderboard_banned_hotkeys_read_failed "
+            "type=%s error=%s",
+            type(exc).__name__,
+            str(exc)[:300],
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Authoritative leaderboard ban snapshot is unavailable",
+        ) from exc
+    banned_set = set(banned_snapshot["banned_hotkeys"])
 
     per_miner: dict = {}
     for row in winner_rows:

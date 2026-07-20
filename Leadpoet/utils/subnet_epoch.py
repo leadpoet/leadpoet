@@ -70,32 +70,10 @@ def assert_official_archive_subtensor(subtensor: Any) -> None:
 
 
 def get_epoch_mode(environ: Optional[Mapping[str, str]] = None) -> str:
-    """Return the configured epoch mode.
-
-    Production Finney SN71 processes must choose a mode explicitly. This keeps
-    a missing deployment variable from silently restoring the obsolete global
-    block clock while retaining legacy-mode tooling for the controlled cutover.
-    """
+    """Return the configured epoch mode, defaulting to legacy behavior."""
 
     source = os.environ if environ is None else environ
-    configured = str(source.get(EPOCH_MODE_ENV, "") or "").strip().lower()
-    network = str(
-        source.get("BITTENSOR_NETWORK")
-        or source.get("SUBTENSOR_NETWORK")
-        or ""
-    ).strip().lower()
-    netuid = str(
-        source.get("BITTENSOR_NETUID")
-        or source.get("NETUID")
-        or ""
-    ).strip()
-    if not configured:
-        if network == "finney" and netuid == "71":
-            raise SubnetEpochError(
-                f"{EPOCH_MODE_ENV} is required for production Finney SN71"
-            )
-        configured = LEGACY_EPOCH_MODE
-    mode = configured
+    mode = str(source.get(EPOCH_MODE_ENV, LEGACY_EPOCH_MODE)).strip().lower()
     if mode not in {LEGACY_EPOCH_MODE, STATEFUL_EPOCH_MODE}:
         raise SubnetEpochError(f"unsupported {EPOCH_MODE_ENV}: {mode}")
     return mode

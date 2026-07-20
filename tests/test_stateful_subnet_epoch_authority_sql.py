@@ -33,6 +33,11 @@ CUTOVER_TIMEOUT_SQL = (
     / "scripts"
     / "107-stateful-epoch-cutover-rpc-timeouts.sql"
 ).read_text(encoding="utf-8")
+TRANSPARENCY_SCOPE_REPAIR_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "109-scope-stateful-epoch-transparency-high-water.sql"
+).read_text(encoding="utf-8")
 INDEX_VALIDATION_MATCH = re.search(
     r"(DO \$\$.*?\n\$\$;)\n\n-- The DO block above",
     INDEX_SQL,
@@ -161,8 +166,9 @@ def test_cutover_is_single_per_chain_lineage_and_collision_safe():
     assert "a.atttypid IN (20, 21, 23)" in SQL
     assert "a.attname IN ('epoch', 'epoch_id', 'evaluation_epoch')" in SQL
     assert "reward_expires_epoch must not raise the high-water mark" in SQL
-    assert "transparency_log.payload.epoch_id are included" in SQL
+    assert "Explicitly typed legacy-global transparency identities" in SQL
     assert "payload ? 'epoch_id'" in SQL
+    assert "payload->>'epoch_key_semantics' = 'legacy_global_360'" in SQL
     assert "stateful epoch pre-boundary fence expected high-water %" in SQL
     assert "prerequisite btree index is missing for %.%" in SQL
     assert "ORDER BY %1$I DESC LIMIT 1" in SQL
@@ -195,6 +201,23 @@ def test_cutover_rpc_family_has_scoped_database_timeout_budget():
     )
     assert "ALTER ROLE" not in CUTOVER_TIMEOUT_SQL
     assert "ALTER DATABASE" not in CUTOVER_TIMEOUT_SQL
+
+
+def test_transparency_high_water_repair_is_scoped_and_keeps_rpc_timeout():
+    assert (
+        "CREATE OR REPLACE FUNCTION public."
+        "research_lab_stateful_subnet_epoch_cutover_fence_v1"
+        in TRANSPARENCY_SCOPE_REPAIR_SQL
+    )
+    assert TRANSPARENCY_SCOPE_REPAIR_SQL.count(
+        "payload->>'epoch_key_semantics' = 'legacy_global_360'"
+    ) == 3
+    assert (
+        "research_lab_stateful_subnet_epoch_legacy_high_water_v1"
+        in TRANSPARENCY_SCOPE_REPAIR_SQL
+    )
+    assert "SET statement_timeout = '120s'" in TRANSPARENCY_SCOPE_REPAIR_SQL
+    assert "NOTIFY pgrst, 'reload schema'" in TRANSPARENCY_SCOPE_REPAIR_SQL
 
 
 def test_boundary_mapping_is_bijective_affine_and_strictly_forward():
@@ -727,6 +750,7 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
         )
         psql(INDEX_VALIDATION_SQL)
         psql(SQL)
+        psql(TRANSPARENCY_SCOPE_REPAIR_SQL)
 
         # The public runtime contract is an exact, sanitized singleton RPC.
         # Anon can read it before, during, and after cutover, but cannot read
@@ -904,6 +928,13 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
         VALUES (40, 39, 38, 999999, 999999, 999999);
         RESET ROLE;
 
+        -- Append-only evidence from another historical chain is not a typed
+        -- identity in the Finney SN71 legacy namespace.
+        INSERT INTO public.transparency_log(event_type,payload) VALUES (
+            'EPOCH_INITIALIZATION',
+            '{{"epoch_id":408177,"epoch_boundaries":{{"start_block":146943720}}}}'::JSONB
+        );
+
         INSERT INTO public.research_lab_attested_boot_identities_v2 (
             boot_identity_hash, schema_version, role, physical_role, commit_sha,
             pcr0, build_manifest_hash, dependency_lock_hash, config_hash,
@@ -969,6 +1000,30 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
             );
         END;
         $fn$;
+
+        INSERT INTO public.transparency_log(event_type,payload) VALUES (
+            'TYPED_HIGH_WATER_PROBE',
+            '{{"epoch_id":42,"epoch_key_semantics":"legacy_global_360"}}'::JSONB
+        );
+        DO $test$
+        BEGIN
+            BEGIN
+                PERFORM *
+                FROM public.research_lab_stateful_subnet_epoch_cutover_fence_v1(
+                    '{genesis_hash}', 71, 40, 41
+                );
+                RAISE EXCEPTION 'typed high-water probe was accepted';
+            EXCEPTION WHEN OTHERS THEN
+                IF SQLERRM NOT LIKE
+                   'stateful epoch pre-boundary fence expected high-water 40, observed 42%'
+                THEN
+                    RAISE;
+                END IF;
+            END;
+        END;
+        $test$;
+        DELETE FROM public.transparency_log
+        WHERE event_type = 'TYPED_HIGH_WATER_PROBE';
 
         SET statement_timeout = '1000ms';
         SELECT lifecycle_state
@@ -1139,6 +1194,20 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
         $fn$;
         """
         psql(fixture)
+
+        measured_high_water = psql(
+            "SET ROLE service_role; "
+            "SELECT public.research_lab_stateful_subnet_epoch_legacy_high_water_v1(); "
+            "RESET ROLE;"
+        )
+        measured_lines = [
+            line
+            for line in measured_high_water.stdout.splitlines()
+            if line not in {"SET", "RESET"}
+        ]
+        # The foreign 408177 row remains ignored; the boundary receipt inserted
+        # after the successful fence is now the physical high-water.
+        assert measured_lines == ["41"]
 
         preflight = psql(
             f"SET ROLE service_role; "
@@ -1715,6 +1784,7 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
         # Rerunning after authority data exists must preserve rows and validate
         # the widened receipt purpose constraint successfully.
         psql(SQL)
+        psql(TRANSPARENCY_SCOPE_REPAIR_SQL)
         rerun_public_active = psql(
             "SET ROLE anon; SELECT lifecycle_state, mapping_hash "
             "FROM public.research_lab_stateful_subnet_epoch_cutover_public_state_v1(); "

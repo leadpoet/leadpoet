@@ -1189,6 +1189,83 @@ GRANT EXECUTE ON FUNCTION public.research_lab_stateful_subnet_epoch_cutover_pref
 COMMENT ON FUNCTION public.research_lab_stateful_subnet_epoch_cutover_preflight_v1(TEXT, TEXT) IS
     'Read-only durable-fence preflight for the explicit receipt-backed stateful subnet epoch cutover. Insert-time triggers remain authoritative.';
 
+-- Measure the exact pre-cutover namespace with the same identity scope used by
+-- the durable fence. This is service-role-only and read-only; the fence still
+-- repeats the measurement while holding relation locks before it writes state.
+CREATE OR REPLACE FUNCTION public.research_lab_stateful_subnet_epoch_legacy_high_water_v1()
+RETURNS BIGINT
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+SET statement_timeout = '120s'
+AS $$
+DECLARE
+    epoch_column RECORD;
+    column_max BIGINT;
+    measured_high_water BIGINT;
+BEGIN
+    FOR epoch_column IN
+        SELECT c.oid AS relation_oid, n.nspname, c.relname,
+               a.attname, a.attnum, a.atttypid
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+        WHERE n.nspname = 'public'
+          AND c.relkind IN ('r', 'p')
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND a.atttypid IN (20, 21, 23)
+          AND a.attname IN ('epoch', 'epoch_id', 'evaluation_epoch')
+          AND c.relname NOT IN (
+              'research_lab_stateful_subnet_epoch_cutover_state_v1',
+              'research_lab_stateful_subnet_epoch_cutovers_v1',
+              'research_lab_stateful_subnet_epoch_boundaries_v1',
+              'research_lab_stateful_subnet_epoch_snapshots_v1'
+          )
+        ORDER BY c.oid, a.attnum
+    LOOP
+        EXECUTE pg_catalog.format(
+            'SELECT %1$I::BIGINT FROM %2$I.%3$I '
+            'WHERE %1$I IS NOT NULL ORDER BY %1$I DESC LIMIT 1',
+            epoch_column.attname,
+            epoch_column.nspname,
+            epoch_column.relname
+        )
+        INTO column_max;
+        IF column_max IS NOT NULL
+           AND (measured_high_water IS NULL OR column_max > measured_high_water) THEN
+            measured_high_water := column_max;
+        END IF;
+    END LOOP;
+
+    SELECT (payload->>'epoch_id')::BIGINT
+    INTO column_max
+    FROM public.transparency_log
+    WHERE pg_catalog.jsonb_typeof(payload) = 'object'
+      AND payload ? 'epoch_id'
+      AND payload->>'epoch_id' ~ '^[0-9]+$'
+      AND payload->>'epoch_key_semantics' = 'legacy_global_360'
+    ORDER BY (payload->>'epoch_id')::BIGINT DESC
+    LIMIT 1;
+    IF column_max IS NOT NULL
+       AND (measured_high_water IS NULL OR column_max > measured_high_water) THEN
+        measured_high_water := column_max;
+    END IF;
+
+    IF measured_high_water IS NULL THEN
+        RAISE EXCEPTION 'stateful epoch legacy high-water is unavailable';
+    END IF;
+    RETURN measured_high_water;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.research_lab_stateful_subnet_epoch_legacy_high_water_v1()
+    FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.research_lab_stateful_subnet_epoch_legacy_high_water_v1()
+    TO service_role;
+
+
 -- Reserve the next physical integer ordinal well before the legacy-global
 -- boundary and before the official subnet boundary/candidate exist. Legacy
 -- writers may continue writing the measured last legacy ordinal; the installed
@@ -1394,7 +1471,9 @@ BEGIN
 
     FOR epoch_column IN
         -- Only physical identity columns participate here; the separate
-        -- transparency_log.payload.epoch_id are included below. In particular,
+        -- Explicitly typed legacy-global transparency identities are included
+        -- below. Unscoped historical payloads can belong to another network
+        -- and must not define this Finney SN71 namespace. In particular,
         -- reward_expires_epoch must not raise the high-water mark because it
         -- is a future schedule/reference, not an allocated epoch identity.
         SELECT c.oid AS relation_oid, n.nspname, c.relname,
@@ -1474,6 +1553,7 @@ BEGIN
     WHERE pg_catalog.jsonb_typeof(payload) = 'object'
       AND payload ? 'epoch_id'
       AND payload->>'epoch_id' ~ '^[0-9]+$'
+      AND payload->>'epoch_key_semantics' = 'legacy_global_360'
     ORDER BY (payload->>'epoch_id')::BIGINT DESC
     LIMIT 1;
     SELECT EXISTS (
@@ -1482,6 +1562,7 @@ BEGIN
         WHERE pg_catalog.jsonb_typeof(payload) = 'object'
           AND payload ? 'epoch_id'
           AND payload->>'epoch_id' ~ '^[0-9]+$'
+          AND payload->>'epoch_key_semantics' = 'legacy_global_360'
           AND (payload->>'epoch_id')::BIGINT = p_first_settlement_epoch_id
     )
     INTO column_occupied;

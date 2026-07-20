@@ -39,8 +39,10 @@ Do not start the ceremony until all of these are true:
 
 1. The migration release is committed and pushed in both the main repository
    and `subnet_dashboard`.
-2. The gateway and validator have first been restarted on that release in
-   `legacy_global_360_v1` mode.
+2. The exact official-only gateway and validator release has been independently
+   built and published, but has not been restarted yet. The currently running
+   pre-cutover release remains responsible for finalizing the last historical
+   settlement key until writers are stopped.
 3. The gateway checkout is clean. `gw_restart.sh` rejects a dirty checkout.
 4. SQL migrations 100 and 101 have passed in production.
 5. A real V2 weight bundle, publication, and finalized-chain receipt exist for
@@ -53,8 +55,8 @@ Do not start the ceremony until all of these are true:
    restart at or before block 310 of the first official stateful epoch. Weight
    submission begins at block 345.
 
-If any prerequisite is false, remain in legacy mode. Deploying the schema and
-code does not itself activate stateful epochs.
+If any prerequisite is false, keep the current pre-cutover runtimes unchanged.
+Deploying the schema and pushing code does not itself activate stateful epochs.
 
 ## 1. Apply the additive Supabase migrations
 
@@ -276,34 +278,33 @@ SELECT public.research_lab_stateful_subnet_epoch_cutover_public_state_v1();
 
 Expected before the ceremony: `legacy_open`, with no active mapping.
 
-## 2. Deploy the release in legacy mode first
+## 2. Build the official-only release without restarting it
 
-All gateway, validator, auditor, qualification, fulfillment, scoring, and
-Research Lab processes must initially use:
+The attested V2 release workflow builds and publishes the exact commit on every
+push to `main`. Confirm that the exact-commit release channel exists before
+fencing or stopping any writer. Do not restart the gateway, validator, or
+auditors onto the official-only release before activation because that release
+fails closed without the activated cutover manifest.
 
-```text
-LEADPOET_EPOCH_MODE=legacy_global_360_v1
-```
-
-Do not set either cutover-manifest variable yet:
+Do not set either cutover-manifest variable on a running pre-cutover process:
 
 ```text
 LEADPOET_SUBNET_EPOCH_CUTOVER_JSON
 LEADPOET_SUBNET_EPOCH_CUTOVER_PATH
 ```
 
-Restart only in a safe epoch window, at or before block 310. Use the repository's
-normal gateway and validator restart procedures; do not substitute an rsync
-deployment. After restart, verify loaded commits, process start times, resolved
-module paths, PCR0s, and new V2 receipts produced by the running release.
+The cutover manifest is configured only after staging and immediately before
+activation. The normal restart scripts consume the same persisted environment
+on every later restart.
 
 ## 3. Select and fence the final legacy key
 
-Choose the current legacy `block // 360` key as `LAST_LEGACY_EPOCH_ID`. Its
-immediate successor is reserved as `FIRST_SETTLEMENT_EPOCH_ID`. Run the fence
-early enough that no process can create the reserved key before the ceremony.
-The RPC measures every physical Supabase epoch-key column under locks and fails
-if the proposed high-water or vacancy is wrong.
+Choose the final historical settlement key as `LAST_LEGACY_EPOCH_ID`. Its
+immediate successor is reserved as `FIRST_SETTLEMENT_EPOCH_ID`. This is a
+one-time historical namespace bridge, not a runtime epoch calculation or
+fallback. Run the fence early enough that no process can create the reserved
+key before the ceremony. The RPC measures every physical Supabase epoch-key
+column under locks and fails if the proposed high-water or vacancy is wrong.
 
 Immediately before invoking the fence, rerun the migration-100 exact catalog
 validator and the full `amcheck` block from step 1. Quiesce epoch-key writers
@@ -444,10 +445,9 @@ later official epoch it fails closed.
 ## 8. Start all runtimes on the same authority
 
 Configure every gateway, validator, and auditor process with exactly one copy
-of the immutable manifest:
+of the immutable manifest. The runtime has no epoch-mode switch:
 
 ```text
-LEADPOET_EPOCH_MODE=stateful_v1
 LEADPOET_SUBNET_EPOCH_CUTOVER_PATH=/secure/operator/stateful-epoch-cutover.json
 ```
 

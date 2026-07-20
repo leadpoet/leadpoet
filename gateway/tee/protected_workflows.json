@@ -17,7 +17,7 @@
       "symbol": "get_weight_inputs_v2"
     },
     {
-      "ast_sha256": "sha256:a45b1371bee122cfe1479ee53ecf024fa9b10ec37c08e2db333ab807fa68ea9e",
+      "ast_sha256": "sha256:5d3cf1db386bf1cb3eeb42798743b7a19ec3865a3faba752e689a021a78e6834",
       "path": "gateway/api/weights.py",
       "symbol": "submit_weights"
     },
@@ -467,7 +467,7 @@
       "symbol": "CoordinatorAllocationSourceV2"
     },
     {
-      "ast_sha256": "sha256:10b56c547ef238a2ac01f554b951f04111e050a23767ae3124e57e3f33a37858",
+      "ast_sha256": "sha256:53d235c4b23062813fcacf38e5388faf870466366c8d8e563aeebc85f3d72797",
       "path": "gateway/tee/coordinator_chain_source_v2.py",
       "symbol": "CoordinatorChainSourceV2"
     },
@@ -1082,7 +1082,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:0de0f4e404c0c88a86ec9b30ee01e72d2c152c252731af2da4d8e759acc3c6ff",
-  "protected_source_commit": "e61b12080a2e44bb5606e0e3d97beace2453aad4",
+  "manifest_hash": "sha256:83a6d14bcb0ad194ff2a31c995b4fd7c03a4848ebe689b425b11afca7b4e4dae",
+  "protected_source_commit": "410d42b89903ae7d3e3cdc99efdc7221dc4a621b",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

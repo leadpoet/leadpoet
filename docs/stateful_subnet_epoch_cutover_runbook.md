@@ -49,8 +49,9 @@ Do not start the ceremony until all of these are true:
    manifest are available and verified.
 7. Operators can stop every gateway and validator writer before the global
    legacy bucket rolls over.
-8. There is enough time to start activation and restart at or before block 300 of the first
-   official stateful epoch. Weight submission begins at block 345.
+8. There is enough time to activate at or before block 300 and start each
+   restart at or before block 310 of the first official stateful epoch. Weight
+   submission begins at block 345.
 
 If any prerequisite is false, remain in legacy mode. Deploying the schema and
 code does not itself activate stateful epochs.
@@ -291,7 +292,7 @@ LEADPOET_SUBNET_EPOCH_CUTOVER_JSON
 LEADPOET_SUBNET_EPOCH_CUTOVER_PATH
 ```
 
-Restart only in a safe epoch window, at or before block 300. Use the repository's
+Restart only in a safe epoch window, at or before block 310. Use the repository's
 normal gateway and validator restart procedures; do not substitute an rsync
 deployment. After restart, verify loaded commits, process start times, resolved
 module paths, PCR0s, and new V2 receipts produced by the running release.
@@ -452,8 +453,9 @@ LEADPOET_SUBNET_EPOCH_CUTOVER_PATH=/secure/operator/stateful-epoch-cutover.json
 
 Do not also set `LEADPOET_SUBNET_EPOCH_CUTOVER_JSON`.
 
-Start the gateway and validator restarts at or before official epoch block 300. The restarts may complete after block 300. Start ancillary
-workers only after the primary authority is healthy. Validate that every
+Start the gateway and validator restarts at or before official epoch block 310.
+The restarts may complete after block 310. Start ancillary workers only after
+the primary authority is healthy. Validate that every
 process reports the same network genesis hash, netuid, mapping hash, official
 `SubnetEpochIndex`, `epoch_ref`, and compatibility settlement ordinal.
 

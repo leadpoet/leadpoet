@@ -1019,6 +1019,14 @@ async def test_v2_bridge_persists_every_authenticated_provider_artifact_first():
     assert result["artifact_persistence"][0]["status"] == "persisted"
     assert result["receipt"]["purpose"] == "leadpoet.artifact_persistence.v2"
     assert result["execution_receipt"]["purpose"] == "research_lab.benchmark.v2"
+    assert (
+        result["execution_receipt_graph"]["root_receipt_hash"]
+        == result["execution_receipt"]["receipt_hash"]
+    )
+    assert (
+        result["receipt_graph"]["root_receipt_hash"]
+        == result["receipt"]["receipt_hash"]
+    )
     assert len(persisted_graphs) == 1
     assert persisted_sidecars[0]["artifact_receipt_hash"] == result["receipt"][
         "receipt_hash"

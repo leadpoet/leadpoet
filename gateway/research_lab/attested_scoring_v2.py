@@ -1256,6 +1256,7 @@ async def execute_scoring_v2(
             "result": result,
             "receipt": dict(lineage_receipt),
             "execution_receipt": dict(receipt),
+            "execution_receipt_graph": dict(graph),
             "receipt_graph": dict(lineage_graph),
             "transitions": list(transitions),
             "transport_attempts": list(transport_attempts),

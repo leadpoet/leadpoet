@@ -140,7 +140,8 @@ async def build_gateway_weight_inputs_v2(
                     "anomaly sources were not executed first"
                 )
             parents = tuple(
-                executions[source]["receipt_graph"]
+                executions[source].get("execution_receipt_graph")
+                or executions[source]["receipt_graph"]
                 for source in _ANOMALY_SOURCE_CATEGORIES
             )
         else:

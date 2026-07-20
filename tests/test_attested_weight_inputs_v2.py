@@ -158,9 +158,14 @@ async def test_gateway_weight_input_builder_uses_artifact_backed_execution_recei
         calculation_snapshot=snapshot,
         gateway_authority_event_hash=event_hash,
     )
+    execution_graphs = {}
+    observed_anomaly_parents = None
 
     async def execute(**kwargs):
+        nonlocal observed_anomaly_parents
         category = kwargs["payload"]["category"]
+        if category == "anomaly_adjustments":
+            observed_anomaly_parents = kwargs["parent_graphs"]
         execution_hash = sha256_json({"execution": category})
         persistence_hash = sha256_json({"persistence": category})
         execution_receipt = {
@@ -176,11 +181,20 @@ async def test_gateway_weight_input_builder_uses_artifact_backed_execution_recei
             "purpose": "leadpoet.artifact_persistence.v2",
             "parent_receipt_hashes": [execution_hash],
         }
+        execution_graph = {
+            "root_receipt_hash": execution_hash,
+            "boot_identities": [],
+            "receipts": [execution_receipt],
+            "transport_attempts": [],
+            "host_operations": [],
+        }
+        execution_graphs[category] = execution_graph
         return {
             "status": "succeeded",
             "result": expected[category],
             "receipt": persistence_receipt,
             "execution_receipt": execution_receipt,
+            "execution_receipt_graph": execution_graph,
             "receipt_graph": {
                 "root_receipt_hash": persistence_hash,
                 "boot_identities": [],
@@ -211,6 +225,10 @@ async def test_gateway_weight_input_builder_uses_artifact_backed_execution_recei
         sha256_json({"persistence": category})
         for category in GATEWAY_WEIGHT_INPUT_CATEGORIES
     }.issubset(receipt_hashes)
+    assert observed_anomaly_parents == tuple(
+        execution_graphs[category]
+        for category in attested_weight_inputs_v2._ANOMALY_SOURCE_CATEGORIES
+    )
 
 
 @pytest.mark.asyncio

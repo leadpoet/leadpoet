@@ -122,12 +122,12 @@
       "symbol": "AuditorValidator.fetch_attested_weights_v2"
     },
     {
-      "ast_sha256": "sha256:a590f23606988dd661228e2140377726a9f3c30b333ef019ef6dfd6df1b6a6b4",
+      "ast_sha256": "sha256:3ff710814b872260a194ba1dd1c3316d85339971be3dd8990cddf800e5352ae7",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.fetch_verified_weight_authority"
     },
     {
-      "ast_sha256": "sha256:d1b73a65bc7bd4912575e25f5afc4bcafb978c5f5fa7ac5ecf1e763574d29fbd",
+      "ast_sha256": "sha256:cdb7852bd999ad1a13c087055545d56d14705b29afefaa0abb4438664058d2e9",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.run"
     },
@@ -142,7 +142,7 @@
       "symbol": "AuditorValidator.verify_attested_weights_v2"
     },
     {
-      "ast_sha256": "sha256:88499d0534d46818498ee33aca1b1c269752b6236d7ef8a21ccc1d92d4edfdf8",
+      "ast_sha256": "sha256:5ff7a5fdd6a940d354ffc05c911b1d034ee89e4bb69bf0d5b196384ce7dc5a6e",
       "path": "neurons/validator.py",
       "symbol": "Validator.__init__"
     },
@@ -177,7 +177,7 @@
       "symbol": "Validator.set_weights"
     },
     {
-      "ast_sha256": "sha256:a01ef0afb1bd542808200560dacf9627db9755a50ec6b5812d120a4787a20305",
+      "ast_sha256": "sha256:a5933124c590e47bc180d89ecf4c58241e45c7033b546ff9192dee303ba6727b",
       "path": "neurons/validator.py",
       "symbol": "Validator.submit_weights_at_epoch_end"
     },
@@ -197,7 +197,7 @@
       "symbol": "ValidatorChainSourceV2.find_finalized_extrinsic_inclusion"
     },
     {
-      "ast_sha256": "sha256:027adfe9c181f4a32a20a009a1fde9453768fe103ecbe22f96f215b5ef819c82",
+      "ast_sha256": "sha256:05149e52204963e771a61e4c3f1bca6a85e636526c5b8cd99f57d4a9dfa56a7c",
       "path": "validator_tee/enclave/chain_source_v2.py",
       "symbol": "ValidatorChainSourceV2.read_finalized_snapshot"
     },
@@ -272,7 +272,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:1d000968189985ad638181d8a25a51dd4f23fed783589af0ee1eeaf3b7b03066",
-  "protected_source_commit": "4374b7b42dd351a8d296b7620eb7aafbaad51dab",
+  "manifest_hash": "sha256:3db42ff9750aacd399e682a80f55342f097174417a7222623b1a8b9227a231b9",
+  "protected_source_commit": "410d42b89903ae7d3e3cdc99efdc7221dc4a621b",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

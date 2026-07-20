@@ -8,7 +8,9 @@ from Leadpoet.utils import restart_epoch_gate
 from Leadpoet.utils.restart_epoch_gate import (
     MAXIMUM_RESTART_EPOCH_BLOCK,
     RestartEpochGateError,
+    verify_captured_restart_epoch_start,
     verify_restart_epoch_window,
+    write_restart_epoch_start,
 )
 from Leadpoet.utils.subnet_epoch import SubnetEpochSnapshot
 
@@ -63,6 +65,38 @@ def test_restart_gate_rejects_official_epoch_block_after_300(
         verify_restart_epoch_window(object(), netuid=71)
 
 
+def test_captured_restart_start_is_not_rechecked_after_block_300(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured = _snapshot(250)
+    current = _snapshot(330)
+    report = {
+        "schema_version": "leadpoet.restart_epoch_start.v1",
+        "maximum_restart_epoch_block": 300,
+        "restart_allowed": True,
+        "snapshot": captured.to_dict(),
+    }
+    path = tmp_path / "restart-start.json"
+    write_restart_epoch_start(path, report)
+
+    def read_snapshot(_subtensor, *, netuid, block_hash=None):
+        assert netuid == 71
+        return captured if block_hash is not None else current
+
+    monkeypatch.setattr(restart_epoch_gate, "read_subnet_epoch_snapshot", read_snapshot)
+
+    result = verify_captured_restart_epoch_start(
+        object(),
+        path=path,
+        netuid=71,
+    )
+
+    assert result["captured_epoch_block"] == 250
+    assert result["current_epoch_block"] == 330
+    assert result["deadline_reapplied"] is False
+
+
 def test_gateway_captures_start_gate_and_validator_gates_before_shutdown() -> None:
     gateway = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     validator = (ROOT / "validator_restart.sh").read_text(encoding="utf-8")
@@ -79,6 +113,8 @@ def test_gateway_captures_start_gate_and_validator_gates_before_shutdown() -> No
 
     assert gateway_gate < gateway_release < gateway_shutdown
     assert validator_gate < validator_shutdown
+    assert '--captured-report "$GATEWAY_RESTART_START_PATH"' in gateway
+    assert '--captured-report "$VALIDATOR_RESTART_START_PATH"' in validator
     assert "MAXIMUM_RESTART_EPOCH_BLOCK = 300" in (
         ROOT / "Leadpoet" / "utils" / "restart_epoch_gate.py"
     ).read_text(encoding="utf-8")

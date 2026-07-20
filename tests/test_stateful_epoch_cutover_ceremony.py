@@ -185,7 +185,35 @@ def test_first_epoch_restart_window_uses_the_block_300_deadline(
 
     assert status["eligible"] is eligible
     assert status["latest_safe_epoch_block"] == 300
-    assert status["restart_reserve_blocks"] == 60
+    assert status["restart_start_epoch_block"] == live.epoch_block
+    assert status["restart_start_captured"] is False
+
+
+def test_captured_start_before_300_remains_valid_after_300() -> None:
+    cutover = _cutover()
+    status = cutover_cli._live_initialization_window_status(
+        cutover=cutover,
+        snapshot_doc=_boundary().to_dict(cutover=cutover),
+        restart_start=_live(elapsed=250),
+        live=_live(elapsed=330),
+    )
+
+    assert status["eligible"] is True
+    assert status["restart_start_epoch_block"] == 250
+    assert status["live_epoch_block"] == 330
+    assert status["deadline_reapplied"] is False
+
+
+def test_captured_start_does_not_authorize_the_next_epoch() -> None:
+    cutover = _cutover()
+    status = cutover_cli._live_initialization_window_status(
+        cutover=cutover,
+        snapshot_doc=_boundary().to_dict(cutover=cutover),
+        restart_start=_live(elapsed=250),
+        live=_live(elapsed=0, next_epoch=True),
+    )
+
+    assert status["eligible"] is False
 
 
 @pytest.mark.asyncio

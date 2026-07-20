@@ -20,8 +20,12 @@ therefore always follow the fetched head of `GITHUB_BRANCH`.
 
 ## One-Time Cutover
 
-Only perform the cutover after the intended migration commit is on the
-configured GitHub branch and at or before block 300 of the current epoch.
+Invoke the cutover operator at or before official SN71 block 300. The operator
+must capture that start as its first operational action. The same captured
+start remains valid while GitHub attestation, release acquisition, gateway
+restart, and validator restart continue after block 300; later stages must not
+reapply the deadline. The intended migration commit must already be on the
+configured GitHub branch.
 
 ```bash
 /home/ec2-user/bin/research-lab-admin pause-scoring \

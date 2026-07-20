@@ -21,6 +21,7 @@ GATEWAY_GIT_HELPER="${GATEWAY_GIT_HELPER:-$LEADPOET_REPO_ROOT/scripts/gateway_gi
 GATEWAY_RESTART_PHASE="${GATEWAY_RESTART_PHASE:-prepare}"
 GATEWAY_STATEFUL_CUTOVER_CEREMONY="${GATEWAY_STATEFUL_CUTOVER_CEREMONY:-0}"
 GATEWAY_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
+GATEWAY_RESTART_START_PATH="/home/ec2-user/.config/leadpoet/restart-start-v1.json"
 GATEWAY_RESTART_LOCK_FILE="${GATEWAY_RESTART_LOCK_FILE:-/home/ec2-user/.config/leadpoet/gateway-restart.lock}"
 GATEWAY_RESTART_RECOVERY_LOCK_FILE="${GATEWAY_RESTART_RECOVERY_LOCK_FILE:-${GATEWAY_RESTART_LOCK_FILE}.recovery}"
 GATEWAY_DEPLOY_PLAN_FILE="${GATEWAY_DEPLOY_PLAN_FILE:-/tmp/gateway_git_deploy.$$.json}"
@@ -543,6 +544,7 @@ skip_keys = {
     "GATEWAY_GIT_HELPER",
     "GATEWAY_RESTART_PHASE",
     "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
+    "LEADPOET_RESTART_START_PATH",
     "GATEWAY_RESTART_LOCK_HELD",
     "GATEWAY_RESTART_LOCK_FILE",
     "GATEWAY_DEPLOY_PLAN_FILE",
@@ -622,6 +624,7 @@ skip_keys = {
     "GATEWAY_GIT_HELPER",
     "GATEWAY_RESTART_PHASE",
     "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
+    "LEADPOET_RESTART_START_PATH",
     "GATEWAY_RESTART_LOCK_HELD",
     "GATEWAY_RESTART_LOCK_FILE",
     "GATEWAY_DEPLOY_PLAN_FILE",
@@ -698,6 +701,15 @@ kept.append(
 )
 env_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
 PY
+fi
+if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
+  test -s "$GATEWAY_RESTART_START_PATH" || {
+    echo "ERROR: one-time cutover restart-start capture is missing" >&2
+    exit 1
+  }
+  export LEADPOET_RESTART_START_PATH="$GATEWAY_RESTART_START_PATH"
+  printf 'export LEADPOET_RESTART_START_PATH=%q\n' \
+    "$GATEWAY_RESTART_START_PATH" >> "$ENV_CLONE"
 fi
 
 grep -q "SUPABASE_SERVICE_ROLE_KEY" "$ENV_CLONE" || {
@@ -778,10 +790,18 @@ if ! git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA" \
   exit 1
 fi
 
-echo "Capturing the official subnet restart window before release acquisition"
+RESTART_GATE_ARGS=(
+  --network "${BITTENSOR_NETWORK:-finney}"
+  --netuid "${BITTENSOR_NETUID:-71}"
+)
+if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
+  echo "Validating the official restart start captured at operator invocation"
+  RESTART_GATE_ARGS+=(--captured-report "$GATEWAY_RESTART_START_PATH")
+else
+  echo "Capturing the official subnet restart window before release acquisition"
+fi
 if ! run_prepared_gateway_module Leadpoet.utils.restart_epoch_gate \
-    --network "${BITTENSOR_NETWORK:-finney}" \
-    --netuid "${BITTENSOR_NETUID:-71}"; then
+    "${RESTART_GATE_ARGS[@]}"; then
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 75
 fi
@@ -1353,6 +1373,9 @@ if report.get("status") != "stateful_active":
 PY
   fi
   echo "Stateful epoch cutover is active; continuing the normal V2 restart"
+  unset LEADPOET_RESTART_START_PATH
+  sed -i '/^export LEADPOET_RESTART_START_PATH=/d' "$ENV_CLONE"
+  rm -f "$GATEWAY_RESTART_START_PATH"
 fi
 
 echo "Installing Python dependencies"

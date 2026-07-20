@@ -18,6 +18,8 @@ VALIDATOR_V2_HOTKEY_ENVELOPE="${VALIDATOR_V2_HOTKEY_ENVELOPE:-/home/ec2-user/.co
 VALIDATOR_V2_RELEASE_BUCKET="${VALIDATOR_V2_RELEASE_BUCKET:-leadpoet-attested-v2-artifacts-493765492819}"
 VALIDATOR_V2_RELEASE_PREFIX="${VALIDATOR_V2_RELEASE_PREFIX:-attested-v2/releases}"
 VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
+VALIDATOR_RESTART_START_PATH="/home/ec2-user/.config/leadpoet/restart-start-v1.json"
+VALIDATOR_USE_CAPTURED_RESTART_START="${LEADPOET_USE_CAPTURED_RESTART_START:-0}"
 export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts/validator-runtime}"
 VALIDATOR_WALLET_ROOT="${VALIDATOR_WALLET_ROOT:-$HOME/.bittensor/wallets}"
 VALIDATOR_WALLET_NAME="${VALIDATOR_WALLET_NAME:-validator_72}"
@@ -327,12 +329,37 @@ if [ "$actual_aws_account" != "$EXPECTED_AWS_ACCOUNT" ]; then
   exit 1
 fi
 
-echo "Verifying official subnet restart window immediately before shutdown"
+VALIDATOR_RESTART_GATE_ARGS=(
+  --network "${VALIDATOR_SUBTENSOR_NETWORK:-finney}"
+  --netuid "${VALIDATOR_NETUID:-71}"
+)
+case "$VALIDATOR_USE_CAPTURED_RESTART_START" in
+  0|1) ;;
+  *)
+    echo "ERROR: LEADPOET_USE_CAPTURED_RESTART_START must be 0 or 1" >&2
+    exit 1
+    ;;
+esac
+if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ]; then
+  test -s "$VALIDATOR_RESTART_START_PATH" || {
+    echo "ERROR: captured validator restart start is missing" >&2
+    exit 1
+  }
+  echo "Validating the official restart start captured at operator invocation"
+  VALIDATOR_RESTART_GATE_ARGS+=(
+    --captured-report "$VALIDATOR_RESTART_START_PATH"
+  )
+else
+  echo "Verifying official subnet restart window immediately before shutdown"
+fi
 if ! "$VALIDATOR_PYTHON_BIN" -m Leadpoet.utils.restart_epoch_gate \
-    --network "${VALIDATOR_SUBTENSOR_NETWORK:-finney}" \
-    --netuid "${VALIDATOR_NETUID:-71}"; then
+    "${VALIDATOR_RESTART_GATE_ARGS[@]}"; then
   echo "Validator remains running; production shutdown has not started." >&2
   exit 75
+fi
+if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ]; then
+  rm -f "$VALIDATOR_RESTART_START_PATH"
+  unset LEADPOET_USE_CAPTURED_RESTART_START
 fi
 
 echo "Stopping validator processes and containers"

@@ -15,6 +15,10 @@ import os
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Sequence
 
+from Leadpoet.utils.restart_epoch_gate import (
+    MAXIMUM_RESTART_EPOCH_BLOCK,
+    load_restart_epoch_start,
+)
 from Leadpoet.utils.subnet_epoch import (
     CUTOVER_JSON_ENV,
     CUTOVER_PATH_ENV,
@@ -457,11 +461,27 @@ async def _initialization_status(
             }
 
         live = await load_live_snapshot(cutover)
+        restart_start = _configured_restart_start(cutover)
         return _live_initialization_window_status(
             cutover=cutover,
             snapshot_doc=snapshot_doc,
             live=live,
+            restart_start=restart_start,
         )
+
+
+def _configured_restart_start(
+    cutover: SubnetEpochCutover,
+) -> Optional[SubnetEpochSnapshot]:
+    path = os.environ.get("LEADPOET_RESTART_START_PATH")
+    if not path:
+        return None
+    try:
+        return load_restart_epoch_start(Path(path), netuid=cutover.netuid)
+    except Exception as exc:
+        raise StatefulEpochCutoverActivationError(
+            "captured restart start is unavailable or invalid"
+        ) from exc
 
 
 def _live_initialization_window_status(
@@ -469,8 +489,9 @@ def _live_initialization_window_status(
     cutover: SubnetEpochCutover,
     snapshot_doc: Mapping[str, Any],
     live: SubnetEpochSnapshot,
+    restart_start: Optional[SubnetEpochSnapshot] = None,
 ) -> Dict[str, Any]:
-    """Require the captured first official epoch and the pre-restart cutoff."""
+    """Require the captured first epoch and one valid operator start."""
 
     try:
         boundary = SubnetEpochSnapshot.from_mapping(snapshot_doc)
@@ -479,7 +500,7 @@ def _live_initialization_window_status(
         raise StatefulEpochCutoverActivationError(
             "live finalized subnet epoch snapshot is invalid"
         ) from exc
-    restart_reserve = max(0, live.tempo - 300)
+    start = restart_start or live
     eligible = (
         boundary.network_genesis_hash == cutover.network_genesis_hash
         and boundary.netuid == cutover.netuid
@@ -490,15 +511,19 @@ def _live_initialization_window_status(
         and boundary.settlement_epoch_id(cutover)
         == cutover.first_settlement_epoch_id
         and boundary.epoch_ref == live.epoch_ref
+        and start.network_genesis_hash == cutover.network_genesis_hash
+        and start.netuid == cutover.netuid
+        and start.subnet_epoch_index == cutover.first_subnet_epoch_index
+        and start.last_epoch_block == cutover.cutover_block
+        and 0 <= start.epoch_block <= MAXIMUM_RESTART_EPOCH_BLOCK
         and live.network_genesis_hash == cutover.network_genesis_hash
         and live.netuid == cutover.netuid
         and live.subnet_epoch_index == cutover.first_subnet_epoch_index
         and live.settlement_epoch_id(cutover)
         == cutover.first_settlement_epoch_id
         and live.last_epoch_block == cutover.cutover_block
-        and 0 <= live.epoch_block <= 300
+        and live.current_block >= start.current_block
         and live.blocks_remaining > 0
-        and live.blocks_remaining >= restart_reserve
     )
     return {
         "exists": False,
@@ -511,8 +536,10 @@ def _live_initialization_window_status(
         "live_block": live.current_block,
         "live_block_hash": live.block_hash,
         "authority_hash": sha256_json(snapshot_doc),
-        "latest_safe_epoch_block": 300,
-        "restart_reserve_blocks": restart_reserve,
+        "latest_safe_epoch_block": MAXIMUM_RESTART_EPOCH_BLOCK,
+        "restart_start_epoch_block": start.epoch_block,
+        "restart_start_captured": restart_start is not None,
+        "deadline_reapplied": restart_start is None,
     }
 
 

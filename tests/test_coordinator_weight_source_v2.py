@@ -403,6 +403,63 @@ def test_anomaly_hash_is_derived_only_from_signed_upstream_documents():
     )
     assert result == documents["anomaly_adjustments"]
 
+    persistence_graphs = []
+    persistence_parent_hashes = []
+    for index, graph in enumerate(graphs, start=10):
+        source_receipt = graph["receipts"][0]
+        persistence_hash = "sha256:" + ("%x" % index) * 64
+        persistence_graphs.append(
+            {
+                "root_receipt_hash": persistence_hash,
+                "receipts": [
+                    source_receipt,
+                    {
+                        "receipt_hash": persistence_hash,
+                        "role": "gateway_coordinator",
+                        "purpose": "leadpoet.artifact_persistence.v2",
+                        "parent_receipt_hashes": [
+                            source_receipt["receipt_hash"]
+                        ],
+                        "output_root": HASH,
+                    },
+                ],
+            }
+        )
+        persistence_parent_hashes.append(persistence_hash)
+    persistence_context = _context(
+        "research_lab.anomaly_adjustment_input.v2",
+        parents=persistence_parent_hashes,
+    )
+    persistence_context.external_receipt_graphs = persistence_graphs
+    assert source.resolve(
+        payload=_payload(
+            "anomaly_adjustments",
+            snapshot=snapshot,
+            upstream_documents=upstream,
+        ),
+        context=persistence_context,
+    ) == documents["anomaly_adjustments"]
+
+    detached = copy.deepcopy(persistence_graphs)
+    detached[0]["receipts"][1]["parent_receipt_hashes"] = []
+    detached_context = _context(
+        "research_lab.anomaly_adjustment_input.v2",
+        parents=persistence_parent_hashes,
+    )
+    detached_context.external_receipt_graphs = detached
+    with pytest.raises(
+        CoordinatorWeightSourceV2Error,
+        match="source receipt set is incomplete",
+    ):
+        source.resolve(
+            payload=_payload(
+                "anomaly_adjustments",
+                snapshot=snapshot,
+                upstream_documents=upstream,
+            ),
+            context=detached_context,
+        )
+
     tampered = copy.deepcopy(upstream)
     tampered["bans"]["value"]["banned_hotkeys"] = ["forged"]
     with pytest.raises(CoordinatorWeightSourceV2Error, match="differs from its receipt"):

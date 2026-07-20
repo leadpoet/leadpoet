@@ -178,6 +178,7 @@ class CoordinatorWeightSourceV2:
                 "anomaly upstream documents are incomplete"
             )
         roots = {}
+        graph_roots = {}
         for graph in context.external_receipt_graphs:
             root_hash = str(graph.get("root_receipt_hash") or "")
             receipts = {
@@ -190,19 +191,43 @@ class CoordinatorWeightSourceV2:
                 continue
             for category in categories:
                 role, purpose = WEIGHT_INPUT_PURPOSES[category]
+                source_receipt = None
                 if root.get("role") == role and root.get("purpose") == purpose:
+                    source_receipt = root
+                elif (
+                    root.get("role") == "gateway_coordinator"
+                    and root.get("purpose")
+                    == "leadpoet.artifact_persistence.v2"
+                ):
+                    direct_parents = {
+                        str(value)
+                        for value in root.get("parent_receipt_hashes") or ()
+                    }
+                    matches = [
+                        receipts[parent_hash]
+                        for parent_hash in direct_parents
+                        if parent_hash in receipts
+                        and receipts[parent_hash].get("role") == role
+                        and receipts[parent_hash].get("purpose") == purpose
+                    ]
+                    if len(matches) > 1:
+                        raise CoordinatorWeightSourceV2Error(
+                            "anomaly source receipt is duplicated"
+                        )
+                    if matches:
+                        source_receipt = matches[0]
+                if source_receipt is not None:
                     if category in roots:
                         raise CoordinatorWeightSourceV2Error(
                             "anomaly source receipt is duplicated"
                         )
-                    roots[category] = root
+                    roots[category] = source_receipt
+                    graph_roots[category] = root_hash
         if set(roots) != set(categories):
             raise CoordinatorWeightSourceV2Error(
                 "anomaly source receipt set is incomplete"
             )
-        observed_parent_hashes = {
-            str(receipt["receipt_hash"]) for receipt in roots.values()
-        }
+        observed_parent_hashes = set(graph_roots.values())
         if observed_parent_hashes != set(context.parent_receipt_hashes):
             raise CoordinatorWeightSourceV2Error(
                 "anomaly direct parents differ from measured sources"

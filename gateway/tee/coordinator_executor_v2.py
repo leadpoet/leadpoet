@@ -571,7 +571,10 @@ class CoordinatorExecutorV2:
         artifact_hashes.append(str(authority["source_state_hash"]))
         return ExecutionResultV2(
             output=authority,
-            receipt_output=coordinator_receipt_output_v2(operation, authority),
+            receipt_output=coordinator_receipt_output_v2(
+                OP_RESEARCH_LAB_ALLOCATION,
+                authority,
+            ),
             artifact_hashes=tuple(artifact_hashes),
         )
 

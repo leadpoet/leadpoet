@@ -6,10 +6,12 @@ from gateway.tee.coordinator_executor_v2 import (
     OP_ATTEST_WEIGHT_INPUT,
     OP_ATTEST_WEIGHT_PUBLICATION,
     OP_PROVIDER_OUTCOME_SNAPSHOT_V2,
+    OP_RESEARCH_LAB_ALLOCATION,
     CoordinatorExecutorV2,
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.provider_outcome_v2 import ProviderOutcomeLedgerV2
+from gateway.tee.scoring_executor import ScoringExecutionResult
 from leadpoet_canonical.weight_computation import (
     WEIGHT_SNAPSHOT_SCHEMA_VERSION,
     weight_config_hash,
@@ -96,6 +98,50 @@ async def test_coordinator_rejects_operation_outside_measured_authority():
                 epoch_id=1,
             ),
         )
+
+
+@pytest.mark.asyncio
+async def test_coordinator_allocation_binds_projected_receipt_output(monkeypatch):
+    allocation = {"epoch_id": 100, "champion_allocations": []}
+    source_state_hash = "sha256:" + "1" * 64
+    kernel_evidence_hash = "sha256:" + "2" * 64
+    authority = {
+        "allocation": allocation,
+        "allocation_inputs": {"epoch_id": 100},
+        "source_state": {"epoch_id": 100},
+        "source_state_hash": source_state_hash,
+    }
+
+    async def execute_allocation(operation, payload):
+        assert operation == OP_RESEARCH_LAB_ALLOCATION
+        assert payload == authority["allocation_inputs"]
+        return ScoringExecutionResult(
+            {"allocation": allocation},
+            {"allocation_kernel": kernel_evidence_hash},
+        )
+
+    monkeypatch.setattr(
+        "gateway.tee.coordinator_executor_v2.execute_scoring_operation",
+        execute_allocation,
+    )
+    result = await CoordinatorExecutorV2(
+        allocation_source_resolver=lambda _payload, _context: authority
+    )(
+        OP_RESEARCH_LAB_ALLOCATION,
+        {"epoch_id": 100},
+        ExecutionContextV2(
+            job_id="allocation:test",
+            purpose="research_lab.allocation.v2",
+            epoch_id=100,
+        ),
+    )
+
+    assert result.output == authority
+    assert result.receipt_output == {"allocation": allocation}
+    assert set(result.artifact_hashes) == {
+        source_state_hash,
+        kernel_evidence_hash,
+    }
 
 
 @pytest.mark.asyncio

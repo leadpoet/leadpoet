@@ -645,7 +645,7 @@ def test_validator_authority_computes_and_signs_exact_canonical_weights():
         fixture["gateway_boot"]["boot_identity_hash"],
     }
     assert fixture["boot_verification_modes"] == {
-        fixture["validator_boot"]["boot_identity_hash"]: False,
+        fixture["validator_boot"]["boot_identity_hash"]: True,
         fixture["gateway_boot"]["boot_identity_hash"]: True,
     }
 
@@ -858,8 +858,16 @@ async def test_explicit_boundary_capture_deduplicates_identical_snapshot_receipt
 
     observed_boot_verification = {}
 
-    def verify_capture_boot(_identity, *, expected_pcr0):
+    def verify_capture_boot(
+        _identity,
+        *,
+        expected_pcr0,
+        certificate_validity_at_attestation_time=False,
+    ):
         observed_boot_verification["expected_pcr0"] = expected_pcr0
+        observed_boot_verification["certificate_validity_at_attestation_time"] = (
+            certificate_validity_at_attestation_time
+        )
         return {"verified": True}
 
     host_result = capture_subnet_epoch_boundary_v2(
@@ -869,7 +877,10 @@ async def test_explicit_boundary_capture_deduplicates_identical_snapshot_receipt
         boot_verifier=verify_capture_boot,
     )
     assert host_result == result
-    assert observed_boot_verification == {"expected_pcr0": VALIDATOR_PCR0}
+    assert observed_boot_verification == {
+        "expected_pcr0": VALIDATOR_PCR0,
+        "certificate_validity_at_attestation_time": True,
+    }
 
     with pytest.raises(
         SubnetEpochBoundaryCaptureV2Error,

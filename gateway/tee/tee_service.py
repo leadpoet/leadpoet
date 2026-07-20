@@ -1596,6 +1596,7 @@ def _verify_v2_provider_cache_source_boot(identity):
     return verify_boot_identity_nitro(
         identity,
         expected_pcr0=str(identity.get("pcr0") or ""),
+        certificate_validity_at_attestation_time=True,
     )
 
 
@@ -2143,6 +2144,7 @@ def get_v2_autoresearch_job_manager():
             return verify_boot_identity_nitro(
                 identity,
                 expected_pcr0=expectation["pcr0"],
+                certificate_validity_at_attestation_time=True,
             )
 
         def verify_coordinator_boot(identity: Dict[str, Any]):
@@ -2164,6 +2166,7 @@ def get_v2_autoresearch_job_manager():
             return verify_boot_identity_nitro(
                 identity,
                 expected_pcr0=expectation["pcr0"],
+                certificate_validity_at_attestation_time=True,
             )
 
         v2_autoresearch_job_manager = ExecutionJobManagerV2(

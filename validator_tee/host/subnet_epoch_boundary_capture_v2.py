@@ -167,6 +167,7 @@ def capture_subnet_epoch_boundary_v2(
             boot_attestation_verifier=lambda identity: boot_verifier(
                 identity,
                 expected_pcr0=approved_pcr0,
+                certificate_validity_at_attestation_time=True,
             ),
             require_boot_attestation_verification=True,
         )

@@ -787,7 +787,11 @@ class ValidatorWeightAuthorityV2:
         if physical_role == "validator_weights":
             if dict(identity) != dict(validator_boot):
                 raise ValidatorWeightAuthorityV2Error("another validator boot is not trusted")
-            return self._boot_verifier(identity, expected_pcr0=validator_boot["pcr0"])
+            return self._boot_verifier(
+                identity,
+                expected_pcr0=validator_boot["pcr0"],
+                certificate_validity_at_attestation_time=True,
+            )
         commit = str(identity.get("commit_sha") or "").lower()
         lineage = self._gateway_release_lineage_supplier()
         release = lineage.get(commit)

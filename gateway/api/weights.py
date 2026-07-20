@@ -509,6 +509,7 @@ def _verify_authoritative_v2_boot(identity: Dict[str, Any]) -> Dict[str, Any]:
     return verify_boot_identity_nitro(
         identity,
         expected_pcr0=str(identity.get("pcr0") or ""),
+        certificate_validity_at_attestation_time=True,
     )
 
 

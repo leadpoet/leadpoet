@@ -459,7 +459,11 @@ class ValidatorHotkeyAuthorityV2:
                     "recovery validator release differs at %s" % field
                 )
         try:
-            verify_boot_identity_nitro(old_boot, expected_pcr0=old_boot["pcr0"])
+            verify_boot_identity_nitro(
+                old_boot,
+                expected_pcr0=old_boot["pcr0"],
+                certificate_validity_at_attestation_time=True,
+            )
         except Exception as exc:
             raise ValidatorHotkeyAuthorityV2Error(
                 "recovery validator boot attestation is invalid"

@@ -18,7 +18,7 @@ from urllib.parse import urlencode
 from uuid import UUID
 
 from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
-from leadpoet_canonical.attested_v2 import sha256_bytes
+from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
 
 
 SUPABASE_WEIGHT_SOURCE_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
@@ -869,9 +869,17 @@ class SupabaseSourceReaderV2:
         )
         start = page_index * SUPABASE_PAGE_SIZE
         end = start + SUPABASE_PAGE_SIZE - 1
-        logical_operation_id = "%s:%s:page-%d" % (
+        query_scope_hash = sha256_json(
+            {
+                "schema_version": "leadpoet.supabase_query_scope.v2",
+                "policy_id": policy.policy_id,
+                "filters": [list(item) for item in filters],
+            }
+        )
+        logical_operation_id = "%s:%s:%s:page-%d" % (
             job_id,
             policy.policy_id,
+            query_scope_hash,
             page_index,
         )
         last_error = "unavailable"

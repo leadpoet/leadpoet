@@ -161,6 +161,41 @@ def test_transient_failures_are_terminally_recorded_before_existing_retries():
     assert len({request["logical_operation_id"] for request in provider.requests}) == 1
 
 
+def test_repeated_policy_reads_scope_operations_by_typed_filters():
+    first_receipt = "sha256:" + "1" * 64
+    second_receipt = "sha256:" + "2" * 64
+    provider = FakeProvider(
+        [
+            {"rows": [{"receipt_hash": first_receipt}]},
+            {"rows": [{"receipt_hash": second_receipt}]},
+            {"rows": [{"receipt_hash": first_receipt}]},
+        ]
+    )
+
+    _read(
+        provider,
+        policy_id="attested_receipt_by_hash",
+        parameters={"receipt_hash": first_receipt},
+    )
+    _read(
+        provider,
+        policy_id="attested_receipt_by_hash",
+        parameters={"receipt_hash": second_receipt},
+    )
+    _read(
+        provider,
+        policy_id="attested_receipt_by_hash",
+        parameters={"receipt_hash": first_receipt},
+    )
+
+    operation_ids = [
+        request["logical_operation_id"] for request in provider.requests
+    ]
+    assert operation_ids[0] != operation_ids[1]
+    assert operation_ids[0] == operation_ids[2]
+    assert all(request["attempt_number"] == 0 for request in provider.requests)
+
+
 def test_typed_query_parameters_cannot_inject_postgrest_syntax():
     provider = FakeProvider([{"rows": []}])
     with pytest.raises(SupabaseSourceV2Error, match="integer"):

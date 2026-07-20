@@ -20,6 +20,7 @@ ENV_BACKUP_DIR="/home/ec2-user/.config/leadpoet/env-backups"
 GATEWAY_GIT_HELPER="${GATEWAY_GIT_HELPER:-$LEADPOET_REPO_ROOT/scripts/gateway_git_deploy.py}"
 GATEWAY_RESTART_PHASE="${GATEWAY_RESTART_PHASE:-prepare}"
 GATEWAY_STATEFUL_CUTOVER_CEREMONY="${GATEWAY_STATEFUL_CUTOVER_CEREMONY:-0}"
+GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS=120
 GATEWAY_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
 GATEWAY_RESTART_START_PATH="/home/ec2-user/.config/leadpoet/restart-start-v1.json"
 GATEWAY_RESTART_LOCK_FILE="${GATEWAY_RESTART_LOCK_FILE:-/home/ec2-user/.config/leadpoet/gateway-restart.lock}"
@@ -944,6 +945,7 @@ if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
   GATEWAY_DEPLOY_STAGE="stateful_epoch_cutover_preflight"
   export GATEWAY_DEPLOY_STAGE
   CUTOVER_PREFLIGHT_REPORT="$(
+    export SUPABASE_TIMEOUT_SECONDS="$GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS"
     run_prepared_gateway_module \
       gateway.research_lab.stateful_epoch_cutover_cli_v1 \
       --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
@@ -1320,6 +1322,7 @@ PY
   )"
   CUTOVER_STAGE_REPORT="$(
     cd "$LEADPOET_REPO_ROOT"
+    export SUPABASE_TIMEOUT_SECONDS="$GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS"
     PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
       -m gateway.research_lab.stateful_epoch_cutover_cli_v1 \
       --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
@@ -1352,6 +1355,7 @@ PY
   if [ "$CUTOVER_STAGE_STATUS" != "already_stateful_active" ]; then
     CUTOVER_ACTIVATION_REPORT="$(
       cd "$LEADPOET_REPO_ROOT"
+      export SUPABASE_TIMEOUT_SECONDS="$GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS"
       PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
         -m gateway.research_lab.stateful_epoch_cutover_cli_v1 \
         --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \

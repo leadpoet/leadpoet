@@ -123,6 +123,11 @@ def test_gateway_restart_cutover_hook_is_explicit_and_fail_closed() -> None:
     assert '--confirm-all-writers-stopped' in script
     assert '--confirm-stateful-release-prepared' in script
     assert 'report.get("status") != "stateful_active"' in script
+    assert "GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS=120" in script
+    assert script.count(
+        'export SUPABASE_TIMEOUT_SECONDS="'
+        '$GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS"'
+    ) == 3
 
 
 def test_gateway_restart_loads_one_canonical_cutover_manifest() -> None:

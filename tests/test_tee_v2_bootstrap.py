@@ -24,6 +24,7 @@ from leadpoet_canonical.attested_v2 import (
     create_boot_identity,
     sha256_json,
 )
+from tests.v2_epoch_test_utils import epoch_test_environment
 
 
 def _hash(character):
@@ -134,7 +135,7 @@ def _documents(release):
         },
         artifact_master_key_ref_hash=_hash("6"),
         research_lab_execution_config=build_research_lab_execution_config(
-            environment={}
+            environment=epoch_test_environment()
         ),
         configured_worker_counts={
             "gateway_scoring": 25,

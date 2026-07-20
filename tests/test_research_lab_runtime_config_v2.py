@@ -18,6 +18,7 @@ from gateway.tee.research_lab_runtime_config_v2 import (
     research_lab_config_from_document,
     validate_research_lab_execution_config,
 )
+from tests.v2_epoch_test_utils import epoch_test_environment
 
 
 def test_execution_config_round_trips_every_non_secret_behavior_field():
@@ -35,10 +36,10 @@ def test_execution_config_round_trips_every_non_secret_behavior_field():
     )
     document = build_research_lab_execution_config(
         config=source,
-        environment={
-            "RESEARCH_LAB_TREE_MODE": "active",
-            "RESEARCH_LAB_TREE_MAX_NODES": "6",
-        },
+        environment=epoch_test_environment(
+            RESEARCH_LAB_TREE_MODE="active",
+            RESEARCH_LAB_TREE_MAX_NODES="6",
+        ),
         network="finney",
         netuid=71,
     )
@@ -57,7 +58,9 @@ def test_execution_config_round_trips_every_non_secret_behavior_field():
 
 
 def test_execution_config_rejects_tampering_and_secret_material():
-    document = build_research_lab_execution_config(environment={})
+    document = build_research_lab_execution_config(
+        environment=epoch_test_environment()
+    )
     missing = {**document, "fields": dict(document["fields"])}
     missing["fields"].pop("improvement_threshold_points")
     with pytest.raises(ResearchLabRuntimeConfigV2Error, match="reviewed schema"):
@@ -71,7 +74,7 @@ def test_execution_config_rejects_tampering_and_secret_material():
 
 def test_execution_config_commits_production_defaults_when_env_omits_them():
     document = build_research_lab_execution_config(
-        environment={}, network="finney", netuid=71
+        environment=epoch_test_environment(), network="finney", netuid=71
     )
 
     behavior = document["behavior_environment"]
@@ -89,7 +92,9 @@ def test_dev_eval_runner_is_enabled_when_override_is_absent(monkeypatch):
 
 
 def test_behavior_environment_is_exact_and_applied(monkeypatch):
-    values = {name: None for name in BEHAVIOR_ENV_NAMES}
+    values = epoch_test_environment(
+        **{name: None for name in BEHAVIOR_ENV_NAMES}
+    )
     values["RESEARCH_LAB_TREE_MAX_NODES"] = "5"
     document = build_research_lab_execution_config(environment=values)
     monkeypatch.setenv("RESEARCH_LAB_TREE_MAX_NODES", "2")
@@ -106,6 +111,8 @@ def test_behavior_environment_is_exact_and_applied(monkeypatch):
 
 def test_measured_tree_icp_count_uses_the_committed_override():
     document = build_research_lab_execution_config(
-        environment={"RESEARCH_LAB_TREE_LIVE_MAX_ICPS_PER_NODE": "7"}
+        environment=epoch_test_environment(
+            RESEARCH_LAB_TREE_LIVE_MAX_ICPS_PER_NODE="7"
+        )
     )
     assert measured_git_tree_config(document).live_max_icps_per_node == 7

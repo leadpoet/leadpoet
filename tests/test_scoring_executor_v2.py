@@ -42,9 +42,16 @@ from research_lab.eval.provider_evidence_cache import (
     icp_evidence_cache_key,
 )
 from research_lab.eval.snapshot_store import MODE_RECORD, MODE_REPLAY, ProviderSnapshotStore
+from tests.v2_epoch_test_utils import epoch_test_environment
 
 
 HASH = "sha256:" + "a" * 64
+
+
+@pytest.fixture(autouse=True)
+def _official_epoch_authority(monkeypatch):
+    for name, value in epoch_test_environment().items():
+        monkeypatch.setenv(name, value)
 
 
 def _model_catalog_evidence():
@@ -680,10 +687,10 @@ async def test_v2_dev_replay_preserves_score_and_adds_tree_commitments(tmp_path)
         retry_policy_hashes={"openrouter": HASH},
         model_sandbox=sandbox,
         execution_config=build_research_lab_execution_config(
-            environment={
-                "RESEARCH_LAB_LOOP_DEV_EVAL_ICP_TIMEOUT_SECONDS": "30",
-                "RESEARCH_LAB_LOOP_DEV_EVAL_TIMEOUT_SECONDS": "60",
-            }
+            environment=epoch_test_environment(
+                RESEARCH_LAB_LOOP_DEV_EVAL_ICP_TIMEOUT_SECONDS="30",
+                RESEARCH_LAB_LOOP_DEV_EVAL_TIMEOUT_SECONDS="60",
+            )
         ),
     )
     cohort_hash = "sha256:" + "d" * 64

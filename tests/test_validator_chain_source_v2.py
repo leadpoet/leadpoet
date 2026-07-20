@@ -30,7 +30,6 @@ SECOND = bytes.fromhex(
     "74adb27b7edd7126a81f5bac79e9bda1a4c8ec94d2c4f2ce795e0c56932a5383"
 )
 BLOCK = 8_597_161
-EPOCH = BLOCK // 360
 STATEFUL_BLOCK = 8_637_160
 STATEFUL_LAST_EPOCH_BLOCK = 8_637_156
 STATEFUL_SUBNET_EPOCH_INDEX = 23_927
@@ -234,52 +233,22 @@ def _archive_adapter(rpc_call):
 
 
 def test_finalized_source_uses_one_block_for_header_and_metagraph():
-    calls = []
-
-    def rpc_call(**kwargs):
-        calls.append(kwargs)
-        request_id = kwargs["request_id"]
-        if request_id == 1:
-            result = "0x" + "ab" * 32
-        elif request_id == 2:
-            result = {
-                "number": hex(BLOCK),
-                "stateRoot": "0x" + "12" * 32,
-                "parentHash": "0x" + "34" * 32,
-                "extrinsicsRoot": "0x" + "56" * 32,
-            }
-        else:
-            result = _selective_result()
-        attempt = _attempt(
-            job_id=kwargs["job_id"],
-            purpose=kwargs["purpose"],
-            operation=str(request_id),
-            request_id=("%032x" % request_id),
-        )
-        return {
-            "result": result,
-            "attempts": [attempt],
-            "artifacts": [
-                {
-                    "artifact_hash": attempt["response_artifact_hash"],
-                    "kind": "chain_rpc_response",
-                    "body_b64": "e30=",
-                }
-            ],
-        }
-
-    result = ValidatorChainSourceV2(rpc_call=rpc_call).read_finalized_snapshot(
-        netuid=71, epoch_id=EPOCH
+    calls, rpc_call = _stateful_rpc()
+    result = ValidatorChainSourceV2(
+        rpc_call=rpc_call,
+        archive_rpc_call=_archive_adapter(rpc_call),
+        epoch_authority_supplier=lambda: {
+            "mode": "stateful_v1",
+            "cutover_manifest": _stateful_cutover(),
+        },
+    ).read_finalized_snapshot(
+        netuid=71, epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID
     )
-    assert result["header"]["block"] == BLOCK
-    assert result["metagraph"]["block"] == BLOCK
+    assert result["header"]["block"] == STATEFUL_BLOCK
+    assert result["metagraph"]["block"] == STATEFUL_BLOCK
     assert len(result["metagraph"]["hotkeys"]) == 2
-    assert calls[2]["params"][2] == "0x" + "ab" * 32
-    assert [attempt["purpose"] for attempt in result["attempts"]] == [
-        "validator.chain_state.v2",
-        "validator.chain_state.v2",
-        "validator.metagraph_state.v2",
-    ]
+    metagraph_call = next(item for item in calls if item["method"] == "state_call")
+    assert metagraph_call["params"][2] == FINALIZED_HASH
 
 
 def test_stateful_storage_keys_and_fixed_width_decoding_match_sn71_vector():
@@ -425,12 +394,16 @@ def test_stateful_source_rejects_live_endpoint_evidence_for_archive_reads():
         )
 
 
-def test_explicit_boundary_capture_proves_historical_cutover_while_active_mode_is_legacy():
+def test_explicit_boundary_capture_proves_historical_cutover():
     calls, rpc_call = _stateful_rpc()
     cutover = _stateful_cutover()
     source = ValidatorChainSourceV2(
         rpc_call=rpc_call,
         archive_rpc_call=_archive_adapter(rpc_call),
+        epoch_authority_supplier=lambda: {
+            "mode": "stateful_v1",
+            "cutover_manifest": cutover,
+        },
     )
     result = source.capture_stateful_epoch_boundary(
         cutover_manifest=cutover,
@@ -475,6 +448,10 @@ def test_explicit_boundary_capture_rejects_manifest_block_hash_mismatch():
         ValidatorChainSourceV2(
             rpc_call=rpc_call,
             archive_rpc_call=_archive_adapter(rpc_call),
+            epoch_authority_supplier=lambda: {
+                "mode": "stateful_v1",
+                "cutover_manifest": cutover,
+            },
         ).capture_stateful_epoch_boundary(
             cutover_manifest=cutover,
             settlement_epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
@@ -490,6 +467,10 @@ def test_explicit_boundary_capture_rejects_an_unfinalized_boundary():
         ValidatorChainSourceV2(
             rpc_call=rpc_call,
             archive_rpc_call=_archive_adapter(rpc_call),
+            epoch_authority_supplier=lambda: {
+                "mode": "stateful_v1",
+                "cutover_manifest": _stateful_cutover(),
+            },
         ).capture_stateful_epoch_boundary(
             cutover_manifest=_stateful_cutover(),
             settlement_epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
@@ -839,36 +820,21 @@ def test_stateful_boundary_search_rejects_a_skipped_epoch_index_transition():
 
 
 def test_finalized_source_rejects_cross_epoch_or_metagraph_block_mismatch():
-    def rpc_call(**kwargs):
-        request_id = kwargs["request_id"]
-        result = (
-            "0x" + "ab" * 32
-            if request_id == 1
-            else {
-                "number": hex(BLOCK),
-                "stateRoot": "0x" + "12" * 32,
-                "parentHash": "0x" + "34" * 32,
-                "extrinsicsRoot": "0x" + "56" * 32,
-            }
-            if request_id == 2
-            else _selective_result()
-        )
-        return {
-            "result": result,
-            "attempts": [
-                _attempt(
-                    job_id=kwargs["job_id"],
-                    purpose=kwargs["purpose"],
-                    operation=str(request_id),
-                    request_id=("%032x" % request_id),
-                )
-            ],
-            "artifacts": [],
-        }
+    _calls, rpc_call = _stateful_rpc()
 
-    with pytest.raises(ValidatorChainSourceV2Error, match="requested epoch"):
-        ValidatorChainSourceV2(rpc_call=rpc_call).read_finalized_snapshot(
-            netuid=71, epoch_id=EPOCH + 1
+    with pytest.raises(
+        ValidatorChainSourceV2Error,
+        match="requested settlement epoch",
+    ):
+        ValidatorChainSourceV2(
+            rpc_call=rpc_call,
+            archive_rpc_call=_archive_adapter(rpc_call),
+            epoch_authority_supplier=lambda: {
+                "mode": "stateful_v1",
+                "cutover_manifest": _stateful_cutover(),
+            },
+        ).read_finalized_snapshot(
+            netuid=71, epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID + 1
         )
 
 
@@ -993,7 +959,11 @@ def test_finalized_extrinsic_requires_exact_bytes_and_committed_chain_state():
         return {"result": result, "attempts": [attempt], "artifacts": []}
 
     result = ValidatorChainSourceV2(
-        rpc_call=rpc_call
+        rpc_call=rpc_call,
+        epoch_authority_supplier=lambda: {
+            "mode": "stateful_v1",
+            "cutover_manifest": _stateful_cutover(),
+        },
     ).find_finalized_extrinsic_inclusion(
         expected_extrinsics={extrinsic_hash: extrinsic.hex()},
         expected_commitments={
@@ -1007,7 +977,7 @@ def test_finalized_extrinsic_requires_exact_bytes_and_committed_chain_state():
         },
         minimum_block=BLOCK,
         maximum_block=BLOCK,
-        epoch_id=EPOCH,
+        epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
     )
     assert result["extrinsic_hash"] == extrinsic_hash
     assert result["finalized_block"] == BLOCK
@@ -1049,7 +1019,11 @@ def test_finalized_extrinsic_rejects_inclusion_without_expected_state_change():
         ValidatorChainSourceV2Error, match="expected chain state"
     ):
         ValidatorChainSourceV2(
-            rpc_call=rpc_call
+            rpc_call=rpc_call,
+            epoch_authority_supplier=lambda: {
+                "mode": "stateful_v1",
+                "cutover_manifest": _stateful_cutover(),
+            },
         ).find_finalized_extrinsic_inclusion(
             expected_extrinsics={extrinsic_hash: extrinsic.hex()},
             expected_commitments={
@@ -1063,5 +1037,5 @@ def test_finalized_extrinsic_rejects_inclusion_without_expected_state_change():
             },
             minimum_block=BLOCK,
             maximum_block=BLOCK,
-            epoch_id=EPOCH,
+            epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
         )

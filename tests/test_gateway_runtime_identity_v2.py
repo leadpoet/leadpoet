@@ -24,6 +24,7 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
     validate_boot_identity,
 )
+from tests.v2_epoch_test_utils import epoch_test_environment
 
 
 HASH = "sha256:" + "a" * 64
@@ -94,7 +95,9 @@ def _configuration():
             "gateway_autoresearch",
         )
     }
-    research_lab_config = build_research_lab_execution_config(environment={})
+    research_lab_config = build_research_lab_execution_config(
+        environment=epoch_test_environment()
+    )
     return {
         "bootstrap_schema_version": "leadpoet.gateway_v2_bootstrap.v2",
         "release_hash": HASH,

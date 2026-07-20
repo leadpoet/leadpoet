@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from Leadpoet.utils.subnet_epoch import SubnetEpochCutover
 import neurons.validator as validator_module
 
 
@@ -82,6 +83,15 @@ def _validator(journal, client):
     validator = validator_module.Validator.__new__(validator_module.Validator)
     validator._weight_publication_journal_v2 = journal
     validator._validator_v2_client = client
+    validator._epoch_cutover = SubnetEpochCutover(
+        network_genesis_hash="0x" + "1" * 64,
+        netuid=71,
+        cutover_block=99,
+        cutover_block_hash="0x" + "2" * 64,
+        first_subnet_epoch_index=50,
+        first_settlement_epoch_id=100,
+        last_legacy_epoch_id=99,
+    )
     validator.wallet = SimpleNamespace(
         hotkey=SimpleNamespace(ss58_address=HOTKEY)
     )

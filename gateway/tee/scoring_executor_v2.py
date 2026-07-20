@@ -167,7 +167,6 @@ class ScoringExecutorV2:
             if execution_config is not None
             else build_research_lab_execution_config(
                 config=self._config,
-                environment={},
             )
         )
         self._transport.install()

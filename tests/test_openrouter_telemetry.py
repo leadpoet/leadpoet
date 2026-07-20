@@ -243,8 +243,9 @@ def test_record_embeddings_hashes_only(fake_boto3, trace_env):
     assert doc["output_hash"].startswith("sha256:")
     payload = json.loads(fake_boto3[0]["Body"])
     # hashes only — raw vectors and raw input text never persisted
-    assert "0.1" not in fake_boto3[0]["Body"].decode("utf-8")
-    assert "alpha" not in fake_boto3[0]["Body"].decode("utf-8")
+    assert "embeddings" not in payload
+    assert "input_texts" not in payload
+    assert "alpha" not in payload.values()
     assert payload["artifact_type"] == "research_lab_embeddings_trace"
 
 

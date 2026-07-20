@@ -105,7 +105,9 @@ async def test_gateway_weight_input_builder_attests_every_category_without_host_
         receipt_hash = sha256_json({"category": category})
         receipt = {
             "receipt_hash": receipt_hash,
+            "role": WEIGHT_INPUT_PURPOSES[category][0],
             "purpose": WEIGHT_INPUT_PURPOSES[category][1],
+            "output_root": sha256_json(expected[category]),
         }
         graph = {
             "root_receipt_hash": receipt_hash,
@@ -141,6 +143,77 @@ async def test_gateway_weight_input_builder_attests_every_category_without_host_
 
 
 @pytest.mark.asyncio
+async def test_gateway_weight_input_builder_uses_artifact_backed_execution_receipt(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: (),
+    )
+    snapshot = _snapshot()
+    allocation = _allocation_graph()
+    event_hash = allocation["root_receipt_hash"]
+    expected = gateway_weight_input_value_documents_v2(
+        calculation_snapshot=snapshot,
+        gateway_authority_event_hash=event_hash,
+    )
+
+    async def execute(**kwargs):
+        category = kwargs["payload"]["category"]
+        execution_hash = sha256_json({"execution": category})
+        persistence_hash = sha256_json({"persistence": category})
+        execution_receipt = {
+            "receipt_hash": execution_hash,
+            "role": WEIGHT_INPUT_PURPOSES[category][0],
+            "purpose": WEIGHT_INPUT_PURPOSES[category][1],
+            "output_root": sha256_json(expected[category]),
+            "parent_receipt_hashes": [],
+        }
+        persistence_receipt = {
+            "receipt_hash": persistence_hash,
+            "role": "gateway_coordinator",
+            "purpose": "leadpoet.artifact_persistence.v2",
+            "parent_receipt_hashes": [execution_hash],
+        }
+        return {
+            "status": "succeeded",
+            "result": expected[category],
+            "receipt": persistence_receipt,
+            "execution_receipt": execution_receipt,
+            "receipt_graph": {
+                "root_receipt_hash": persistence_hash,
+                "boot_identities": [],
+                "receipts": [execution_receipt, persistence_receipt],
+                "transport_attempts": [],
+                "host_operations": [],
+            },
+        }
+
+    result = await build_gateway_weight_inputs_v2(
+        calculation_snapshot=snapshot,
+        allocation_graph=allocation,
+        leaderboard_window_start="2026-07-03T00:00:00Z",
+        leaderboard_window_end="2026-07-10T00:00:00Z",
+        execute=execute,
+        load_sourcing_graphs=lambda **_kwargs: _async_value([]),
+    )
+
+    assert result["input_receipt_hashes"] == {
+        category: sha256_json({"execution": category})
+        for category in sorted(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+    }
+    receipt_hashes = {
+        receipt["receipt_hash"]
+        for receipt in result["upstream_receipt_set"]["receipts"]
+    }
+    assert {
+        sha256_json({"persistence": category})
+        for category in GATEWAY_WEIGHT_INPUT_CATEGORIES
+    }.issubset(receipt_hashes)
+
+
+@pytest.mark.asyncio
 async def test_gateway_weight_input_builder_rejects_measured_value_mismatch(
     monkeypatch,
 ):
@@ -155,7 +228,9 @@ async def test_gateway_weight_input_builder_rejects_measured_value_mismatch(
         receipt_hash = sha256_json({"category": category})
         receipt = {
             "receipt_hash": receipt_hash,
+            "role": WEIGHT_INPUT_PURPOSES[category][0],
             "purpose": WEIGHT_INPUT_PURPOSES[category][1],
+            "output_root": sha256_json({"forged": True}),
         }
         return {
             "status": "succeeded",

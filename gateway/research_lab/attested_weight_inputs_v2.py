@@ -9,7 +9,11 @@ from gateway.research_lab.attested_v2_store import (
     load_sourcing_epoch_graphs_v2,
 )
 from gateway.tee.coordinator_executor_v2 import OP_ATTEST_WEIGHT_INPUT
-from leadpoet_canonical.attested_v2 import canonical_json, validate_receipt_graph
+from leadpoet_canonical.attested_v2 import (
+    canonical_json,
+    sha256_json,
+    validate_receipt_graph,
+)
 from leadpoet_canonical.weight_authority_v2 import (
     GATEWAY_WEIGHT_INPUT_CATEGORIES,
     WEIGHT_INPUT_PURPOSES,
@@ -168,10 +172,12 @@ async def build_gateway_weight_inputs_v2(
                 "%s measured input failed" % category
             )
         graph = value.get("receipt_graph")
-        receipt = value.get("receipt")
+        root_receipt = value.get("receipt")
+        receipt = value.get("execution_receipt") or root_receipt
         document = value.get("result")
         if (
             not isinstance(graph, Mapping)
+            or not isinstance(root_receipt, Mapping)
             or not isinstance(receipt, Mapping)
             or not isinstance(document, Mapping)
         ):
@@ -179,15 +185,38 @@ async def build_gateway_weight_inputs_v2(
                 "%s measured input is incomplete" % category
             )
         validate_receipt_graph(graph, required_purposes={purpose})
+        receipts_by_hash = {
+            str(item.get("receipt_hash") or ""): item
+            for item in graph.get("receipts") or ()
+            if isinstance(item, Mapping)
+        }
+        root_hash = str(graph.get("root_receipt_hash") or "")
+        receipt_hash = str(receipt.get("receipt_hash") or "")
+        expected_role, _expected_purpose = WEIGHT_INPUT_PURPOSES[category]
         if (
-            graph.get("root_receipt_hash") != receipt.get("receipt_hash")
+            root_receipt.get("receipt_hash") != root_hash
+            or receipts_by_hash.get(receipt_hash) != receipt
+            or receipt.get("role") != expected_role
             or receipt.get("purpose") != purpose
+            or receipt.get("output_root") != sha256_json(document)
             or canonical_json(document)
             != canonical_json(expected_documents[category])
         ):
             raise AttestedWeightInputsV2Error(
                 "%s measured input differs from calculation" % category
             )
+        if root_hash != receipt_hash:
+            if (
+                root_receipt.get("role") != "gateway_coordinator"
+                or root_receipt.get("purpose")
+                != "leadpoet.artifact_persistence.v2"
+                or receipt_hash
+                not in (root_receipt.get("parent_receipt_hashes") or ())
+            ):
+                raise AttestedWeightInputsV2Error(
+                    "%s persistence lineage differs from measured input"
+                    % category
+                )
         executions[category] = dict(value)
 
     all_graphs = [
@@ -196,7 +225,12 @@ async def build_gateway_weight_inputs_v2(
     ]
     receipt_set = _union_receipt_sets(all_graphs)
     input_hashes = {
-        category: str(executions[category]["receipt"]["receipt_hash"])
+        category: str(
+            (
+                executions[category].get("execution_receipt")
+                or executions[category]["receipt"]
+            )["receipt_hash"]
+        )
         for category in sorted(executions)
     }
     if set(input_hashes) != set(GATEWAY_WEIGHT_INPUT_CATEGORIES):

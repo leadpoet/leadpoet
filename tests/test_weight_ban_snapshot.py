@@ -114,3 +114,45 @@ def test_validator_rejects_noncanonical_gateway_ban_snapshot(monkeypatch):
 
     with pytest.raises(RuntimeError, match="failed after 3 attempts"):
         cloud_db.gateway_get_banned_hotkeys_snapshot(object())
+
+
+def test_champion_ban_check_uses_canonical_gateway_snapshot(monkeypatch):
+    from neurons.validator import Validator
+
+    wallet = object()
+    validator = object.__new__(Validator)
+    validator.wallet = wallet
+    calls = []
+
+    def snapshot(requested_wallet):
+        calls.append(requested_wallet)
+        return {
+            "banned_hotkeys": ["5A", "5B"],
+            "banned_lookup_ok": True,
+        }
+
+    monkeypatch.setattr(cloud_db, "gateway_get_banned_hotkeys_snapshot", snapshot)
+
+    assert validator._is_champion_hotkey_banned("5B") is True
+    assert validator._is_champion_hotkey_banned("5C") is False
+    assert calls == [wallet, wallet]
+
+
+def test_champion_ban_check_fails_closed_when_snapshot_is_unavailable(
+    monkeypatch,
+):
+    from neurons.validator import Validator
+
+    validator = object.__new__(Validator)
+    validator.wallet = object()
+    monkeypatch.setattr(
+        cloud_db,
+        "gateway_get_banned_hotkeys_snapshot",
+        lambda _wallet: (_ for _ in ()).throw(RuntimeError("gateway unavailable")),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="canonical champion ban snapshot is unavailable",
+    ):
+        validator._is_champion_hotkey_banned("5A")

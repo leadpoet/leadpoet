@@ -7167,34 +7167,25 @@ class Validator(BaseValidatorNeuron):
             return None
     
     def _is_champion_hotkey_banned(self, hotkey: str) -> bool:
-        """Check if hotkey is in Supabase banned_hotkeys table.
-        
-        Uses public ANON key for read-only access to banned_hotkeys table
-        (RLS policy allows public SELECT on this table).
-        """
+        """Check the champion against the canonical gateway-owned ban snapshot."""
         try:
-            from supabase import create_client
-            
-            # Public Supabase credentials (same as in cloud_db.py)
-            SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
-            SUPABASE_ANON_KEY = "sb_publishable_YU7GBMSX-fwEsSH7MnhSBQ_l5ACuFVf"
-            
-            # Create client with ANON key for public read access
-            supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-            
-            result = supabase.table("banned_hotkeys")\
-                .select("hotkey")\
-                .eq("hotkey", hotkey)\
-                .limit(1)\
-                .execute()
-            
-            is_banned = bool(result.data and len(result.data) > 0)
+            from Leadpoet.utils.cloud_db import (
+                gateway_get_banned_hotkeys_snapshot,
+            )
+
+            snapshot = gateway_get_banned_hotkeys_snapshot(self.wallet)
+            is_banned = hotkey in set(snapshot["banned_hotkeys"])
             if is_banned:
                 bt.logging.info(f"🚨 Hotkey {hotkey[:20]}... found in banned_hotkeys table")
             return is_banned
-        except Exception as e:
-            bt.logging.warning(f"Failed to check banned hotkeys: {e}")
-            return False  # On error, don't clear champion
+        except Exception as exc:
+            bt.logging.error(
+                "champion_ban_snapshot_unavailable; refusing champion allocation: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            raise RuntimeError(
+                "canonical champion ban snapshot is unavailable"
+            ) from exc
     
     def _apply_banned_hotkey_sourcing_penalties(self, banned_hotkeys: set):
         """Set sourcing scores to -100,000 for banned hotkeys in weight files.

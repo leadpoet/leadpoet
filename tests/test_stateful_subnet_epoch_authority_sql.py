@@ -28,6 +28,11 @@ HISTORICAL_PREDECESSOR_SQL = (
     / "scripts"
     / "105-stateful-subnet-epoch-historical-predecessor-v2.sql"
 ).read_text(encoding="utf-8")
+CUTOVER_TIMEOUT_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "107-stateful-epoch-cutover-rpc-timeouts.sql"
+).read_text(encoding="utf-8")
 INDEX_VALIDATION_MATCH = re.search(
     r"(DO \$\$.*?\n\$\$;)\n\n-- The DO block above",
     INDEX_SQL,
@@ -171,6 +176,25 @@ def test_cutover_is_single_per_chain_lineage_and_collision_safe():
         "candidate_authorization_hash",
     ):
         assert field in SQL
+
+
+def test_cutover_rpc_family_has_scoped_database_timeout_budget():
+    functions = (
+        "research_lab_stateful_subnet_epoch_cutover_preflight_v1",
+        "research_lab_stateful_subnet_epoch_cutover_fence_v1",
+        "research_lab_stateful_subnet_epoch_cutover_bind_v1",
+        "research_lab_stateful_subnet_epoch_cutover_bind_v2",
+        "research_lab_stateful_subnet_epoch_stage_v1",
+        "research_lab_stateful_subnet_epoch_stage_v2",
+        "research_lab_stateful_subnet_epoch_activate_v1",
+    )
+    for function in functions:
+        assert f"ALTER FUNCTION public.{function}(" in CUTOVER_TIMEOUT_SQL
+    assert CUTOVER_TIMEOUT_SQL.count("SET statement_timeout = '120s'") == len(
+        functions
+    )
+    assert "ALTER ROLE" not in CUTOVER_TIMEOUT_SQL
+    assert "ALTER DATABASE" not in CUTOVER_TIMEOUT_SQL
 
 
 def test_boundary_mapping_is_bijective_affine_and_strictly_forward():

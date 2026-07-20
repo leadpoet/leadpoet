@@ -419,6 +419,7 @@ start_container() {
       -e GIT_COMMIT_HASH="$VALIDATOR_DEPLOY_SHA" \
       -e EXPECTED_CHAIN="$EXPECTED_CHAIN" \
       -e VALIDATOR_WEIGHT_PROTOCOL=authoritative_v2 \
+      -e LEADPOET_EPOCH_MODE="${LEADPOET_EPOCH_MODE:-}" \
       -e ENABLE_QUALIFICATION_EVALUATION="${ENABLE_QUALIFICATION_EVALUATION:-false}" \
       -e ENABLE_QUALIFICATION_WORKERS="${ENABLE_QUALIFICATION_WORKERS:-false}" \
       -e ENABLE_FULFILLMENT="${ENABLE_FULFILLMENT:-false}" \
@@ -741,6 +742,13 @@ if [ "$(
         | sed -n 's/^VALIDATOR_WEIGHT_PROTOCOL=//p'
 )" != "authoritative_v2" ]; then
     echo "❌ ERROR: validator coordinator is not using authoritative V2" >&2
+    exit 1
+fi
+if [ "$(
+    printf '%s\n' "$MAIN_RUNTIME_ENV" \
+        | sed -n 's/^LEADPOET_EPOCH_MODE=//p'
+)" != "${LEADPOET_EPOCH_MODE:-}" ]; then
+    echo "❌ ERROR: validator coordinator epoch mode differs from restart selection" >&2
     exit 1
 fi
 if ! docker exec leadpoet-validator-main sh -c \

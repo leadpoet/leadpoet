@@ -386,11 +386,20 @@ def _fixture(*, category_output_override=None, stateful=False):
         }
     }
     verified_boots = []
+    boot_verification_modes = {}
 
-    def verify_boot(identity, *, expected_pcr0=None):
+    def verify_boot(
+        identity,
+        *,
+        expected_pcr0=None,
+        certificate_validity_at_attestation_time=False,
+    ):
         if identity["pcr0"] != expected_pcr0:
             raise ValueError("PCR0 mismatch")
         verified_boots.append(identity["boot_identity_hash"])
+        boot_verification_modes[identity["boot_identity_hash"]] = (
+            certificate_validity_at_attestation_time
+        )
         return {"verified": True}
 
     chain_artifacts = []
@@ -603,6 +612,7 @@ def _fixture(*, category_output_override=None, stateful=False):
         "gateway_boot": gateway_boot,
         "expectations": expectations,
         "verified_boots": verified_boots,
+        "boot_verification_modes": boot_verification_modes,
         "finalized_chain_state_root": finalized_chain_state_root,
         "chain_source": chain_source,
     }
@@ -633,6 +643,10 @@ def test_validator_authority_computes_and_signs_exact_canonical_weights():
     assert set(fixture["verified_boots"]) == {
         fixture["validator_boot"]["boot_identity_hash"],
         fixture["gateway_boot"]["boot_identity_hash"],
+    }
+    assert fixture["boot_verification_modes"] == {
+        fixture["validator_boot"]["boot_identity_hash"]: False,
+        fixture["gateway_boot"]["boot_identity_hash"]: True,
     }
 
 
@@ -1122,7 +1136,7 @@ def test_validator_authority_rejects_gateway_release_mismatch():
         gateway_release_lineage_supplier=lambda: bad_expectations,
         sign_digest=fixture["validator_key"].sign,
         chain_source=fixture["chain_source"],
-        boot_verifier=lambda identity, expected_pcr0=None: {"verified": True},
+        boot_verifier=lambda identity, **_kwargs: {"verified": True},
         clock=lambda: NOW,
     )
     with pytest.raises(ValidatorWeightAuthorityV2Error, match="gateway boot"):
@@ -1165,6 +1179,9 @@ def test_validator_authority_accepts_only_exact_historical_release_lineage_boot(
         fixture["validator_boot"],
     )
     assert verified == {"verified": True}
+    assert fixture["boot_verification_modes"][
+        historical_boot["boot_identity_hash"]
+    ] is True
 
     changed = copy.deepcopy(historical_boot)
     changed["dependency_lock_hash"] = "sha256:" + "0" * 64
@@ -1192,8 +1209,8 @@ def test_validator_authority_accepts_only_exact_historical_release_lineage_boot(
 def test_validator_authority_fails_when_nitro_verifier_rejects_boot():
     fixture = _fixture()
 
-    def reject_boot(identity, *, expected_pcr0=None):
-        del identity, expected_pcr0
+    def reject_boot(identity, **kwargs):
+        del identity, kwargs
         raise ValueError("Nitro signature invalid")
 
     authority = ValidatorWeightAuthorityV2(

@@ -817,4 +817,5 @@ class ValidatorWeightAuthorityV2:
         return self._boot_verifier(
             identity,
             expected_pcr0=str(expectation["pcr0"]),
+            certificate_validity_at_attestation_time=True,
         )

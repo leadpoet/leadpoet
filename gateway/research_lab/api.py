@@ -3010,7 +3010,7 @@ async def get_research_lab_attested_allocation(
             status_code=503,
             detail=f"Research Lab attested allocation is not ready: {attestation.get('status', 'unknown')}",
         )
-    receipt = attestation.get("receipt")
+    receipt = attestation.get("execution_receipt") or attestation.get("receipt")
     receipt_graph = attestation.get("receipt_graph")
     lineage_bindings = attestation.get("lineage_bindings")
     lineage_complete = attestation.get("lineage_complete")
@@ -3023,16 +3023,32 @@ async def get_research_lab_attested_allocation(
         or not isinstance(persistence, Mapping)
     ):
         raise HTTPException(status_code=503, detail="Research Lab attested allocation receipt is incomplete")
-    if receipt_graph.get("root_receipt_hash") != receipt.get("receipt_hash"):
-        raise HTTPException(
-            status_code=503,
-            detail="Research Lab allocation receipt graph root differs",
-        )
     from leadpoet_canonical.allocation_handoff_v2 import (
         build_allocation_handoff_v2,
     )
 
     try:
+        if receipt_graph.get("root_receipt_hash") != receipt.get("receipt_hash"):
+            from gateway.research_lab.attested_v2_store import (
+                load_receipt_graph_v2,
+            )
+            from leadpoet_canonical.attested_v2 import sha256_json
+
+            receipt_graph = await load_receipt_graph_v2(
+                str(receipt["receipt_hash"])
+            )
+            persistence = {
+                "graph_hash": sha256_json(dict(receipt_graph)),
+                "root_receipt_hash": str(receipt_graph["root_receipt_hash"]),
+                "boot_count": len(receipt_graph["boot_identities"]),
+                "receipt_count": len(receipt_graph["receipts"]),
+                "transport_attempt_count": len(
+                    receipt_graph["transport_attempts"]
+                ),
+                "host_operation_count": len(
+                    receipt_graph["host_operations"]
+                ),
+            }
         return build_allocation_handoff_v2(
             bundle=bundle,
             receipt_graph=receipt_graph,

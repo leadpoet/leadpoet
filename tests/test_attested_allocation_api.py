@@ -62,6 +62,75 @@ async def test_attested_allocation_wraps_unchanged_bundle(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_attested_allocation_uses_execution_root_when_artifact_receipt_wraps_it(
+    monkeypatch,
+):
+    expected_bundle = {
+        "bundle_type": "research_lab_live_allocation_bundle",
+        "epoch": 7,
+    }
+    execution_receipt = {"receipt_hash": "sha256:" + "1" * 64}
+    artifact_receipt = {"receipt_hash": "sha256:" + "2" * 64}
+    artifact_graph = {
+        "root_receipt_hash": artifact_receipt["receipt_hash"],
+        "receipts": [execution_receipt, artifact_receipt],
+    }
+    execution_graph = {
+        "root_receipt_hash": execution_receipt["receipt_hash"],
+        "boot_identities": [{"boot_identity_hash": "sha256:" + "3" * 64}],
+        "receipts": [execution_receipt],
+        "transport_attempts": [],
+        "host_operations": [],
+    }
+
+    async def _build(**kwargs):
+        kwargs["attestation_out"].update(
+            {
+                "status": "matched",
+                "receipt": artifact_receipt,
+                "execution_receipt": execution_receipt,
+                "receipt_graph": artifact_graph,
+                "lineage_bindings": [],
+                "lineage_complete": True,
+                "persistence": {
+                    "root_receipt_hash": artifact_receipt["receipt_hash"]
+                },
+            }
+        )
+        return expected_bundle
+
+    async def _load_graph(root_receipt_hash):
+        assert root_receipt_hash == execution_receipt["receipt_hash"]
+        return execution_graph
+
+    def _handoff(**kwargs):
+        assert kwargs["bundle"] == expected_bundle
+        assert kwargs["receipt_graph"] == execution_graph
+        assert kwargs["persistence"]["root_receipt_hash"] == execution_receipt[
+            "receipt_hash"
+        ]
+        assert kwargs["persistence"]["receipt_count"] == 1
+        return {"schema_version": "leadpoet.attested_allocation_handoff.v2"}
+
+    monkeypatch.setattr(api.ResearchLabGatewayConfig, "from_env", _config)
+    monkeypatch.setattr(api, "build_research_lab_allocation_bundle", _build)
+    monkeypatch.setattr(
+        "gateway.research_lab.attested_v2_store.load_receipt_graph_v2",
+        _load_graph,
+    )
+    monkeypatch.setattr(
+        "leadpoet_canonical.allocation_handoff_v2.build_allocation_handoff_v2",
+        _handoff,
+    )
+
+    result = await api.get_research_lab_attested_allocation(7)
+
+    assert result == {
+        "schema_version": "leadpoet.attested_allocation_handoff.v2"
+    }
+
+
+@pytest.mark.asyncio
 async def test_attested_allocation_is_unavailable_when_v2_authority_did_not_match(monkeypatch):
     async def _build(**kwargs):
         kwargs["attestation_out"].update({"status": "shadow_mismatch"})

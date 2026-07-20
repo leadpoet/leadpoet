@@ -6,6 +6,7 @@ import pytest
 from gateway.tee.release_channel_v2 import (
     ReleaseChannelV2Error,
     build_release_channel_v2,
+    cli,
     fetch_release_channel_v2,
     install_release_channel_v2,
     publish_release_channel_v2,
@@ -171,3 +172,24 @@ def test_release_channel_key_is_content_addressed_by_commit():
     assert release_channel_key(COMMIT).endswith(
         f"/{COMMIT}/release-channel-v2.json"
     )
+
+
+def test_cli_reports_unpublished_channel_without_traceback(monkeypatch, capsys):
+    def _unavailable(**_kwargs):
+        raise ReleaseChannelV2Error("approved release channel is unavailable")
+
+    monkeypatch.setattr(
+        "gateway.tee.release_channel_v2.fetch_release_channel_v2",
+        _unavailable,
+    )
+
+    result = cli(["--ensure", "--expected-commit", COMMIT])
+
+    captured = capsys.readouterr()
+    assert result == 75
+    assert captured.out == ""
+    assert captured.err == (
+        "Release channel unavailable: "
+        "approved release channel is unavailable\n"
+    )
+    assert "Traceback" not in captured.err

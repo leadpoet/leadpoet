@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -297,5 +298,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 
+def cli(argv: Optional[Sequence[str]] = None) -> int:
+    """Run the operator CLI without exposing expected retry tracebacks."""
+
+    try:
+        return main(argv)
+    except ReleaseChannelV2Error as exc:
+        print(f"Release channel unavailable: {exc}", file=sys.stderr)
+        return 75
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())

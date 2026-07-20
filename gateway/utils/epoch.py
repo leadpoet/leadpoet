@@ -5,10 +5,10 @@ Subtensor uses a stateful per-subnet scheduler.  Stateful mode reads the entire
 scheduler at one exact block hash and maps its official ``SubnetEpochIndex`` to
 the monotonic settlement ordinal established by the cutover manifest.
 
-``LEADPOET_EPOCH_MODE`` defaults to ``legacy_global_360_v1`` so schema/code can
-be deployed and shadow-verified before an operator performs the coordinated
-cutover.  ``stateful_v1`` fails closed unless a valid cutover manifest is
-provided; there is deliberately no time-estimated official epoch fallback.
+Production Finney SN71 requires an explicit ``LEADPOET_EPOCH_MODE``. This
+prevents a missing deployment variable from silently restoring the global
+clock. ``stateful_v1`` fails closed unless a valid cutover manifest is provided;
+there is deliberately no time-estimated official epoch fallback.
 """
 
 from __future__ import annotations

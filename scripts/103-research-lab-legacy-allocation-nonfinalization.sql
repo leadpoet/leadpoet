@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS public.research_lab_legacy_allocation_nonfinalization
 CREATE INDEX IF NOT EXISTS idx_research_lab_legacy_nonfinalization_receipt_v2
     ON public.research_lab_legacy_allocation_nonfinalizations_v2(finding_receipt_hash);
 
+-- The stateful cutover fence discovers every physical epoch identity and
+-- requires a B-tree whose first key is that identity. The composite primary
+-- key starts with netuid, so it cannot serve epoch_id high-water queries.
+CREATE INDEX IF NOT EXISTS idx_research_lab_legacy_nonfinalization_epoch_v2
+    ON public.research_lab_legacy_allocation_nonfinalizations_v2(epoch_id DESC);
+
 DROP TRIGGER IF EXISTS prevent_research_lab_legacy_nonfinalization_v2_mutation
     ON public.research_lab_legacy_allocation_nonfinalizations_v2;
 CREATE TRIGGER prevent_research_lab_legacy_nonfinalization_v2_mutation

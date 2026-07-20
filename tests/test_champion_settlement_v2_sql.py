@@ -24,6 +24,11 @@ FENCE_REPAIR_SQL = (
     / "scripts"
     / "106-repair-stateful-epoch-fence-trigger-coverage.sql"
 ).read_text(encoding="utf-8")
+EPOCH_INDEX_REPAIR_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "108-repair-legacy-nonfinalization-epoch-index.concurrent.sql"
+).read_text(encoding="utf-8")
 
 
 def test_finalized_allocation_view_requires_bundle_publication_and_finalization():
@@ -93,6 +98,33 @@ def test_legacy_nonfinalization_installs_and_repairs_stateful_epoch_fence():
     assert "a.attname IN ('epoch', 'epoch_id', 'evaluation_epoch')" in (
         FENCE_REPAIR_SQL
     )
+
+
+def test_legacy_nonfinalization_epoch_identity_is_indexed_for_cutover():
+    index_name = "idx_research_lab_legacy_nonfinalization_epoch_v2"
+    index_target = (
+        "public.research_lab_legacy_allocation_nonfinalizations_v2"
+        "(epoch_id DESC)"
+    )
+    assert index_name in NONFINALIZATION_SQL
+    assert index_target in NONFINALIZATION_SQL
+    assert "CREATE INDEX CONCURRENTLY IF NOT EXISTS" in EPOCH_INDEX_REPAIR_SQL
+    assert index_name in EPOCH_INDEX_REPAIR_SQL
+    assert index_target in EPOCH_INDEX_REPAIR_SQL
+    assert "CREATE TABLE" not in EPOCH_INDEX_REPAIR_SQL
+    assert "ALTER TABLE" not in EPOCH_INDEX_REPAIR_SQL
+    for contract_fragment in (
+        "access_method.amname = 'btree'",
+        "index_meta.indisvalid",
+        "index_meta.indisready",
+        "index_meta.indislive",
+        "index_meta.indpred IS NULL",
+        "index_meta.indexprs IS NULL",
+        "index_meta.indkey[0] = epoch_column.attnum",
+        "index_meta.indoption[0] = 3",
+        "operator_class.opcdefault",
+    ):
+        assert contract_fragment in EPOCH_INDEX_REPAIR_SQL
 
 
 def test_deployed_receipt_allowlist_accepts_measured_legacy_settlement():

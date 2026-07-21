@@ -221,6 +221,30 @@ def _default_gateway_url(environ=None) -> str:
 DEFAULT_GATEWAY_URL = _default_gateway_url()
 
 
+def _connect_official_epoch_archive_subtensor(
+    *, attempts: int = 3, retry_delay_seconds: float = 2.0
+):
+    """Connect to the fixed archive authority before opening the live RPC."""
+
+    last_error = None
+    for attempt in range(1, int(attempts) + 1):
+        try:
+            return bt.Subtensor(network=OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT)
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "auditor_archive_connect_failed attempt=%d/%d type=%s",
+                attempt,
+                attempts,
+                type(exc).__name__,
+            )
+            if attempt < int(attempts):
+                time.sleep(float(retry_delay_seconds))
+    raise SubnetEpochError(
+        "auditor could not connect to the official epoch archive"
+    ) from last_error
+
+
 @dataclass(frozen=True)
 class _AuditorEpochState:
     current_block: int
@@ -276,7 +300,6 @@ class AuditorValidator:
         self.config = config
         self.gateway_url = _normalize_gateway_url(gateway_url)
         self.wallet = bt.Wallet(config=config)
-        self.subtensor = bt.Subtensor(config=config)
         # Auditors run from a plain repository checkout with no provisioning
         # step, so fall back to the repo's public SN71 cutover manifest when
         # the operator has not configured one explicitly.
@@ -289,14 +312,18 @@ class AuditorValidator:
             raise SubnetEpochError(
                 "auditor netuid differs from subnet epoch cutover manifest"
             )
-        self.epoch_archive_subtensor = bt.Subtensor(
-            network=OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
+        # Open and authenticate the archive before the live RPC. The installed
+        # SDK can strand a second websocket during TLS cleanup when live is
+        # opened first, preventing otherwise valid auditors from starting.
+        self.epoch_archive_subtensor = (
+            _connect_official_epoch_archive_subtensor()
         )
         validate_subnet_epoch_cutover_anchor(
             self.epoch_archive_subtensor,
             self.epoch_cutover,
         )
         self._validate_durable_epoch_runtime_startup()
+        self.subtensor = bt.Subtensor(config=config)
         self.metagraph = self.subtensor.metagraph(config.netuid)
         
         # Verify we're registered as a validator

@@ -360,6 +360,28 @@ async def test_flow_rejects_any_host_enclave_vector_difference(
         )
 
 
+def test_host_vector_accepts_unsorted_full_vector_with_canonical_sparse_order():
+    host_uids = [7, 0, 3]
+    host_weights = [0.2, 0.7, 0.1]
+    sparse_uids, sparse_weights = flow_module.normalize_to_u16_with_uids_pure(
+        [0, 3, 7],
+        [0.7, 0.1, 0.2],
+    )
+
+    flow_module._verify_host_vector(
+        host_uids=host_uids,
+        host_weights=host_weights,
+        enclave_result={
+            "uids": host_uids,
+            "weight_float_bits": [
+                struct.pack("!d", value).hex() for value in host_weights
+            ],
+            "sparse_uids": sparse_uids,
+            "sparse_weights_u16": sparse_weights,
+        },
+    )
+
+
 @pytest.mark.asyncio
 async def test_finalization_requires_exact_enclave_and_gateway_ack(monkeypatch):
     monkeypatch.setattr(

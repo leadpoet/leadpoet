@@ -14,6 +14,10 @@ from gateway.tee.prepare_gateway_envelopes_v2 import (
     prepare_gateway_envelopes_v2,
     scrub_parent_environment_file_v2,
 )
+from gateway.tee.provider_broker_v2 import (
+    credential_reference_hash,
+    credential_value_hash,
+)
 from gateway.utils.tee_kms_provision_v2 import validate_provider_envelope
 
 
@@ -75,6 +79,18 @@ def test_prepares_complete_dynamic_gateway_envelope_set(tmp_path):
     ]
     assert len(documents) == 7 + 5 + 5
     assert all(validate_provider_envelope(document) for document in documents)
+    assert json.loads((output / "openrouter.json").read_text())[
+        "credential_ref_hash"
+    ] == credential_reference_hash("openrouter-secret")
+    assert json.loads((output / "benchmark_openrouter.json").read_text())[
+        "credential_ref_hash"
+    ] == credential_value_hash("openrouter-secret")
+    assert json.loads((output / "autoresearch_proxy_00.json").read_text())[
+        "credential_ref_hash"
+    ] == credential_value_hash("https://hosted-1")
+    assert credential_reference_hash("openrouter-secret") != (
+        credential_value_hash("openrouter-secret")
+    )
     assert not any(
         secret in json.dumps(documents)
         for secret in (

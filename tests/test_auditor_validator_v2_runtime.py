@@ -51,6 +51,40 @@ def test_auditor_rejects_non_origin_gateway_urls(value):
         auditor_module._normalize_gateway_url(value)
 
 
+def test_official_archive_connection_retries_only_the_fixed_endpoint(monkeypatch):
+    calls = []
+    sleeps = []
+
+    def connect(*, network):
+        calls.append(network)
+        if len(calls) < 3:
+            raise TimeoutError("fixture TLS timeout")
+        return "archive-subtensor"
+
+    monkeypatch.setattr(auditor_module.bt, "Subtensor", connect)
+    monkeypatch.setattr(auditor_module.time, "sleep", sleeps.append)
+
+    assert auditor_module._connect_official_epoch_archive_subtensor(
+        retry_delay_seconds=0.25
+    ) == "archive-subtensor"
+    assert calls == [auditor_module.OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT] * 3
+    assert sleeps == [0.25, 0.25]
+
+
+def test_official_archive_connection_fails_closed(monkeypatch):
+    def fail(**_kwargs):
+        raise TimeoutError("fixture TLS timeout")
+
+    monkeypatch.setattr(auditor_module.bt, "Subtensor", fail)
+    monkeypatch.setattr(auditor_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(
+        auditor_module.SubnetEpochError,
+        match="official epoch archive",
+    ):
+        auditor_module._connect_official_epoch_archive_subtensor(attempts=2)
+
+
 def _auditor_for_one_verification(verified_result):
     auditor = auditor_module.AuditorValidator.__new__(
         auditor_module.AuditorValidator

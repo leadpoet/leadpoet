@@ -25,7 +25,10 @@ from gateway.research_lab.worker_autostart import (
     build_research_lab_worker_autostart_plan,
 )
 from gateway.tee.artifact_vault_v2 import artifact_master_key_reference_hash
-from gateway.tee.provider_broker_v2 import credential_reference_hash
+from gateway.tee.provider_broker_v2 import (
+    credential_reference_hash,
+    credential_value_hash,
+)
 from gateway.tee.supabase_schema_preflight_v2 import (
     verify_required_supabase_v2_schema,
 )
@@ -372,7 +375,7 @@ def prepare_gateway_envelopes_v2(
                 build_provider_envelope_v2(
                     credential_slot=slot,
                     plaintext=value.encode("utf-8"),
-                    credential_ref_hash=credential_reference_hash(value),
+                    credential_ref_hash=credential_value_hash(value),
                     kms_key_id=kms_key_id,
                     encryption_context={
                         "leadpoet:commit": commit,
@@ -414,7 +417,7 @@ def prepare_gateway_envelopes_v2(
                     build_provider_envelope_v2(
                         credential_slot="egress_proxy",
                         plaintext=value.encode("utf-8"),
-                        credential_ref_hash=credential_reference_hash(value),
+                        credential_ref_hash=credential_value_hash(value),
                         kms_key_id=kms_key_id,
                         encryption_context={
                             "leadpoet:commit": commit,

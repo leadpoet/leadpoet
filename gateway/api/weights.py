@@ -483,6 +483,24 @@ def _verify_authoritative_v2_boot(identity: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError("validator PCR0 commit differs from boot identity")
     else:
         release = _gateway_v2_release_manifest()
+        boot_commit = str(identity.get("commit_sha") or "").lower()
+        release_commit = str(release.get("commit_sha") or "").lower()
+        if boot_commit and boot_commit != release_commit:
+            # Receipt ancestry legitimately spans earlier deployments: weight
+            # bundles embed upstream receipts whose gateway enclaves booted
+            # from previously approved releases. Verify those boots against
+            # the immutable approved release lineage instead of rejecting
+            # every commit that is not the currently deployed one.
+            from gateway.tee.release_lineage_v2 import (
+                build_release_lineage_boot_verifier_v2,
+                load_approved_release_lineage_v2,
+            )
+
+            lineage = load_approved_release_lineage_v2(
+                current_release=release,
+                parent_graphs=({"boot_identities": (dict(identity),)},),
+            )
+            return build_release_lineage_boot_verifier_v2(lineage)(identity)
         expected = release["roles"].get(physical_role)
         if not isinstance(expected, dict):
             raise ValueError("gateway boot role is absent from the approved release")

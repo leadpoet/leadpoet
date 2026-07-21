@@ -93,6 +93,28 @@ ACTIVATION_REPORT_SCHEMA_VERSION = (
     "leadpoet.subnet_epoch_cutover_activation_report.v1"
 )
 
+
+async def _run_with_gateway_chain_dependencies(
+    operation: Callable[..., Awaitable[Dict[str, Any]]],
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Run an offline cutover operation with gateway-equivalent chain clients."""
+
+    import bittensor as bt
+
+    from gateway.config import BITTENSOR_NETWORK
+    from gateway.utils import epoch as epoch_utils
+    from gateway.utils import registry as registry_utils
+
+    async_subtensor_context = bt.AsyncSubtensor(network=BITTENSOR_NETWORK)
+    async_subtensor = await async_subtensor_context.__aenter__()
+    try:
+        epoch_utils.inject_async_subtensor(async_subtensor)
+        registry_utils.inject_async_subtensor(async_subtensor)
+        return await operation(**kwargs)
+    finally:
+        await async_subtensor_context.__aexit__(None, None, None)
+
 _PREFLIGHT_FIELDS = frozenset(
     {
         "eligible",
@@ -1896,19 +1918,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(json.dumps(report, sort_keys=True, separators=(",", ":")))
         return 0
     try:
-        report = asyncio.run(
-            activate_subnet_epoch_cutover_v1(
-                cutover=cutover,
-                apply=bool(args.apply),
-                release_manifest_path=args.release_manifest,
-                validator_release_manifest_path=args.validator_release_manifest,
-                predecessor_kind=(
-                    HISTORICAL_PREDECESSOR_KIND
-                    if args.use_attested_historical_predecessor
-                    else NATIVE_PREDECESSOR_KIND
-                ),
+        activation_kwargs = {
+            "cutover": cutover,
+            "apply": bool(args.apply),
+            "release_manifest_path": args.release_manifest,
+            "validator_release_manifest_path": args.validator_release_manifest,
+            "predecessor_kind": (
+                HISTORICAL_PREDECESSOR_KIND
+                if args.use_attested_historical_predecessor
+                else NATIVE_PREDECESSOR_KIND
+            ),
+        }
+        if args.apply:
+            report = asyncio.run(
+                _run_with_gateway_chain_dependencies(
+                    activate_subnet_epoch_cutover_v1,
+                    **activation_kwargs,
+                )
             )
-        )
+        else:
+            report = asyncio.run(
+                activate_subnet_epoch_cutover_v1(**activation_kwargs)
+            )
     except StatefulEpochCutoverActivationError as exc:
         if exc.report is None:
             raise

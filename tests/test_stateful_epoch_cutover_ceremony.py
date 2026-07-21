@@ -335,3 +335,49 @@ async def test_activation_validates_archive_before_database_reads(operation):
 
 async def _async_value(value):
     return value
+
+
+@pytest.mark.asyncio
+async def test_offline_cutover_injects_gateway_chain_dependencies(monkeypatch):
+    events = []
+    chain_client = object()
+
+    class FakeAsyncSubtensor:
+        def __init__(self, *, network):
+            events.append(("created", network))
+
+        async def __aenter__(self):
+            events.append(("entered", chain_client))
+            return chain_client
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            events.append(("exited", exc_type))
+
+    monkeypatch.setattr("bittensor.AsyncSubtensor", FakeAsyncSubtensor)
+    monkeypatch.setattr(
+        "gateway.utils.epoch.inject_async_subtensor",
+        lambda value: events.append(("epoch", value)),
+    )
+    monkeypatch.setattr(
+        "gateway.utils.registry.inject_async_subtensor",
+        lambda value: events.append(("registry", value)),
+    )
+
+    async def operation(*, expected):
+        events.append(("operation", expected))
+        return {"status": "ok"}
+
+    result = await cutover_cli._run_with_gateway_chain_dependencies(
+        operation,
+        expected="value",
+    )
+
+    assert result == {"status": "ok"}
+    assert events == [
+        ("created", "finney"),
+        ("entered", chain_client),
+        ("epoch", chain_client),
+        ("registry", chain_client),
+        ("operation", "value"),
+        ("exited", None),
+    ]

@@ -21,6 +21,11 @@ def _run_recovery(
     layerdb_images: int = 0,
     layerdb_mounts: int = 0,
     overlay_directories: int = 0,
+    containerd_containers: int = 0,
+    containerd_tasks: int = 0,
+    containerd_running_tasks: int = 0,
+    non_moby_namespaces: int = 0,
+    moby_shims: int = 0,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -95,13 +100,56 @@ case "$command" in
       *) exit 2 ;;
     esac
     ;;
-  systemctl|rm|install)
+  ctr)
+    if [ -f "$FAKE_CONTAINERD_RESET_MARKER" ]; then
+      exit 0
+    fi
+    if [ "${1:-}" = "namespaces" ]; then
+      emit_rows "$FAKE_NON_MOBY_NAMESPACES"
+      exit 0
+    fi
+    case "${3:-}:${4:-}" in
+      containers:list)
+        emit_rows "$FAKE_CONTAINERD_CONTAINERS"
+        ;;
+      tasks:list)
+        if [ "${5:-}" = "-q" ]; then
+          emit_rows "$FAKE_CONTAINERD_TASKS"
+        else
+          printf 'TASK PID STATUS\\n'
+          index=0
+          while [ "$index" -lt "$FAKE_CONTAINERD_RUNNING_TASKS" ]; do
+            printf 'task-%s 100 RUNNING\\n' "$index"
+            index=$((index + 1))
+          done
+        fi
+        ;;
+      *) exit 2 ;;
+    esac
+    ;;
+  rm)
+    printf '%s %s\\n' "$command" "$*" >> "$FAKE_SUDO_LOG"
+    if [ "$*" = "-rf --one-file-system /var/lib/containerd" ]; then
+      touch "$FAKE_CONTAINERD_RESET_MARKER"
+    fi
+    ;;
+  systemctl|install|pkill)
     printf '%s %s\\n' "$command" "$*" >> "$FAKE_SUDO_LOG"
     ;;
   *)
     exit 2
     ;;
 esac
+""",
+    )
+    _write_executable(
+        bin_dir / "pgrep",
+        """#!/bin/bash
+if [ -f "$FAKE_CONTAINERD_RESET_MARKER" ]; then
+  printf '0\\n'
+else
+  printf '%s\\n' "$FAKE_MOBY_SHIMS"
+fi
 """,
     )
 
@@ -117,6 +165,12 @@ esac
         "FAKE_LAYERDB_IMAGES": str(layerdb_images),
         "FAKE_LAYERDB_MOUNTS": str(layerdb_mounts),
         "FAKE_OVERLAY_DIRECTORIES": str(overlay_directories),
+        "FAKE_CONTAINERD_CONTAINERS": str(containerd_containers),
+        "FAKE_CONTAINERD_TASKS": str(containerd_tasks),
+        "FAKE_CONTAINERD_RUNNING_TASKS": str(containerd_running_tasks),
+        "FAKE_NON_MOBY_NAMESPACES": str(non_moby_namespaces),
+        "FAKE_MOBY_SHIMS": str(moby_shims),
+        "FAKE_CONTAINERD_RESET_MARKER": str(tmp_path / "containerd-reset"),
         "FAKE_DOCKER_ROOT_BYTES": "229720371200",
         "FAKE_SUDO_LOG": str(sudo_log),
     }
@@ -146,8 +200,9 @@ def test_validator_docker_recovery_is_guarded_and_runs_after_shutdown():
     assert 'if [ "$DOCKER_ROOT" != "/var/lib/docker" ]' in recovery
     assert "ORPHANED_DOCKER_STATE=1" in recovery
     assert 'OVERLAY_DIRECTORY_COUNT="$(\n' in recovery
-    assert "systemctl stop docker.service docker.socket" in recovery
+    assert "systemctl stop docker.service docker.socket containerd.service" in recovery
     assert 'rm -rf --one-file-system "$DOCKER_ROOT"' in recovery
+    assert 'rm -rf --one-file-system "$CONTAINERD_ROOT"' in recovery
     assert "docker system prune --all --force --volumes" not in recovery
 
     remove_containers = restart.index("| xargs -r docker rm")
@@ -201,8 +256,44 @@ def test_validator_docker_recovery_resets_orphaned_empty_root_above_floor(
 
     assert result.returncode == 0, result.stderr
     assert "orphaned=1" in result.stdout
-    assert "systemctl stop docker.service docker.socket" in sudo_log
+    assert "systemctl stop docker.service docker.socket containerd.service" in sudo_log
     assert "rm -rf --one-file-system /var/lib/docker" in sudo_log
+    assert "rm -rf --one-file-system /var/lib/containerd" in sudo_log
+
+
+def test_validator_docker_recovery_resets_stale_containerd_state(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        containerd_containers=22,
+        containerd_tasks=7,
+        moby_shims=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "containerd_containers=22" in result.stdout
+    assert "containerd_tasks=7" in result.stdout
+    assert "moby_shims=20" in result.stdout
+    assert "orphaned=1" in result.stdout
+    assert "systemctl stop docker.service docker.socket containerd.service" in sudo_log
+
+
+def test_validator_docker_recovery_refuses_running_containerd_task(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        containerd_containers=1,
+        containerd_tasks=1,
+        containerd_running_tasks=1,
+    )
+
+    assert result.returncode == 1
+    assert "refusing containerd reset while 1 moby task(s) are running" in result.stderr
+    assert "systemctl stop" not in sudo_log
 
 
 def test_validator_docker_recovery_leaves_clean_root_above_floor_untouched(

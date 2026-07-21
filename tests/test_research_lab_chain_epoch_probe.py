@@ -42,18 +42,49 @@ def test_direct_epoch_probe_runs_in_killable_proxy_free_subprocess(monkeypatch):
     assert "assert_legacy_epoch_namespace_open" not in probe
     assert "validate_subnet_epoch_cutover_anchor" not in probe
     assert "HTTPS_PROXY" not in captured["env"]
-    assert captured["timeout"] == 19.0
+    assert captured["timeout"] == 59.0
     assert captured["capture_output"] is True
 
 
 def test_direct_epoch_probe_timeout_is_visible(monkeypatch):
+    calls = []
+
     def fake_run(command, **kwargs):
+        calls.append(command)
         raise subprocess.TimeoutExpired(command, kwargs["timeout"])
 
     monkeypatch.setattr(chain.subprocess, "run", fake_run)
 
-    with pytest.raises(RuntimeError, match="timed out after 19.0s"):
+    with pytest.raises(RuntimeError, match="exhausted exact-hash attempts") as exc:
         chain._fetch_current_chain_epoch_direct()
+
+    assert len(calls) == 3
+    assert str(exc.value).count("timed out after 59.0s") == 3
+
+
+def test_direct_epoch_probe_retries_transient_failure(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(
+                "LEADPOET_EPOCH_RESULT={\"epoch\":23978,\"block\":8632213,"
+                "\"network\":\"finney\",\"official_subnet_epoch_id\":23913,"
+                "\"epoch_ref\":\"sha256:fixture\"}\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setenv("BITTENSOR_NETWORK", "finney")
+    monkeypatch.setattr(chain.subprocess, "run", fake_run)
+
+    assert chain._fetch_current_chain_epoch_direct() == (23978, 8632213, "finney")
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize(

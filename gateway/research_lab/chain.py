@@ -12,7 +12,9 @@ from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 _DIRECT_EPOCH_TIMEOUT_SECONDS_ENV = "RESEARCH_LAB_DIRECT_EPOCH_TIMEOUT_SECONDS"
-_DEFAULT_DIRECT_EPOCH_TIMEOUT_SECONDS = 20.0
+_DIRECT_EPOCH_ATTEMPTS_ENV = "RESEARCH_LAB_DIRECT_EPOCH_ATTEMPTS"
+_DEFAULT_DIRECT_EPOCH_TIMEOUT_SECONDS = 60.0
+_DEFAULT_DIRECT_EPOCH_ATTEMPTS = 3
 _DIRECT_EPOCH_RESULT_PREFIX = "LEADPOET_EPOCH_RESULT="
 
 
@@ -45,9 +47,11 @@ async def resolve_research_lab_evaluation_epoch(configured_epoch: int | str | No
             str(exc)[:200],
         )
         try:
-            epoch, block, network = await asyncio.wait_for(
-                asyncio.to_thread(_fetch_current_chain_epoch_direct),
-                timeout=_direct_epoch_timeout_seconds(),
+            # The subprocess has its own hard timeout and is safe to retry.
+            # Avoid a competing asyncio deadline that can cancel the thread
+            # immediately before a valid exact-hash result is returned.
+            epoch, block, network = await asyncio.to_thread(
+                _fetch_current_chain_epoch_direct
             )
             source = f"direct_subtensor_official:{network}"
         except Exception as direct_exc:
@@ -66,6 +70,16 @@ def _direct_epoch_timeout_seconds() -> float:
         return max(1.0, float(os.getenv(_DIRECT_EPOCH_TIMEOUT_SECONDS_ENV, _DEFAULT_DIRECT_EPOCH_TIMEOUT_SECONDS)))
     except (TypeError, ValueError):
         return float(_DEFAULT_DIRECT_EPOCH_TIMEOUT_SECONDS)
+
+
+def _direct_epoch_attempts() -> int:
+    try:
+        return max(
+            1,
+            int(os.getenv(_DIRECT_EPOCH_ATTEMPTS_ENV, _DEFAULT_DIRECT_EPOCH_ATTEMPTS)),
+        )
+    except (TypeError, ValueError):
+        return int(_DEFAULT_DIRECT_EPOCH_ATTEMPTS)
 
 
 async def resolve_hotkey_uids(hotkeys: Iterable[str]) -> dict[str, int]:
@@ -140,24 +154,44 @@ sys.stdout.flush()
 os._exit(0)
 """ % _DIRECT_EPOCH_RESULT_PREFIX
     timeout_seconds = max(1.0, _direct_epoch_timeout_seconds() - 1.0)
-    try:
-        completed = subprocess.run(
-            [sys.executable, "-c", probe],
-            capture_output=True,
-            check=False,
-            env=child_env,
-            text=True,
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as exc:
+    completed = None
+    failures: list[str] = []
+    attempts = _direct_epoch_attempts()
+    for attempt in range(1, attempts + 1):
+        try:
+            candidate = subprocess.run(
+                [sys.executable, "-c", probe],
+                capture_output=True,
+                check=False,
+                env=child_env,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            failures.append(f"attempt {attempt} timed out after {timeout_seconds:.1f}s")
+        else:
+            if candidate.returncode == 0:
+                completed = candidate
+                break
+            detail = (candidate.stderr or candidate.stdout or "").strip().splitlines()
+            failures.append(
+                "attempt %d failed: %s"
+                % (
+                    attempt,
+                    detail[-1][:200] if detail else f"exit {candidate.returncode}",
+                )
+            )
+        if attempt < attempts:
+            logger.warning(
+                "research_lab_direct_epoch_probe_retry attempt=%d/%d error=%s",
+                attempt,
+                attempts,
+                failures[-1],
+            )
+    if completed is None:
         raise RuntimeError(
-            f"direct subtensor epoch probe timed out after {timeout_seconds:.1f}s"
-        ) from exc
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-        raise RuntimeError(
-            "direct subtensor epoch probe failed: "
-            + (detail[-1][:200] if detail else f"exit {completed.returncode}")
+            "direct subtensor epoch probe exhausted exact-hash attempts: "
+            + "; ".join(failures)
         )
     result_line = next(
         (

@@ -157,11 +157,25 @@ set -a
 . "$VALIDATOR_ENV_EXPORT"
 set +a
 
-if [ -f "$VALIDATOR_STATEFUL_CUTOVER_MANIFEST" ]; then
-  echo "Loading the canonical stateful epoch cutover manifest"
-  export LEADPOET_SUBNET_EPOCH_CUTOVER_PATH="$VALIDATOR_STATEFUL_CUTOVER_MANIFEST"
-  unset LEADPOET_SUBNET_EPOCH_CUTOVER_JSON
+if [ ! -s "$VALIDATOR_STATEFUL_CUTOVER_MANIFEST" ]; then
+  echo "ERROR: canonical stateful epoch cutover manifest is missing" >&2
+  exit 1
 fi
+echo "Loading the canonical stateful epoch cutover manifest"
+LEADPOET_SUBNET_EPOCH_CUTOVER_JSON="$(
+  python3 - "$VALIDATOR_STATEFUL_CUTOVER_MANIFEST" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+document = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if not isinstance(document, dict):
+    raise SystemExit("stateful epoch cutover manifest must be a JSON object")
+print(json.dumps(document, sort_keys=True, separators=(",", ":")))
+PY
+)"
+export LEADPOET_SUBNET_EPOCH_CUTOVER_JSON
+unset LEADPOET_SUBNET_EPOCH_CUTOVER_PATH
 
 VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-authoritative_v2}"
 case "$VALIDATOR_WEIGHT_PROTOCOL" in

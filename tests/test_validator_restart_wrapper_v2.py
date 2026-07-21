@@ -32,8 +32,20 @@ def test_restart_loads_one_canonical_cutover_manifest():
         'VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/'
         'leadpoet/stateful-epoch-cutover.json"'
     ) in script
-    assert 'unset LEADPOET_SUBNET_EPOCH_CUTOVER_JSON' in script
+    assert 'if [ ! -s "$VALIDATOR_STATEFUL_CUTOVER_MANIFEST" ]; then' in script
+    assert 'json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))' in script
+    assert 'export LEADPOET_SUBNET_EPOCH_CUTOVER_JSON' in script
+    assert 'unset LEADPOET_SUBNET_EPOCH_CUTOVER_PATH' in script
+
+
+def test_restart_passes_the_canonical_cutover_manifest_into_validator_container():
+    restart = Path("validator_restart.sh").read_text(encoding="utf-8")
+    deploy = Path(
+        "validator_models/containerizing/deploy_dynamic.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'export LEADPOET_SUBNET_EPOCH_CUTOVER_JSON' in restart
     assert (
-        'export LEADPOET_SUBNET_EPOCH_CUTOVER_PATH="$VALIDATOR_STATEFUL_CUTOVER_MANIFEST"'
-        in script
-    )
+        '-e LEADPOET_SUBNET_EPOCH_CUTOVER_JSON='
+        '"${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}"'
+    ) in deploy

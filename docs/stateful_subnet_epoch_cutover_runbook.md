@@ -260,7 +260,7 @@ epoch-key writers quiesced if operationally possible, and record the check time
 and output; writes after a check are not covered by that check.
 
 After the exact catalog validation and physical check pass, apply migrations
-101 and 105:
+101, 105, and 112:
 
 ```bash
 psql "$SUPABASE_DB_URL" \
@@ -270,6 +270,27 @@ psql "$SUPABASE_DB_URL" \
 psql "$SUPABASE_DB_URL" \
   -v ON_ERROR_STOP=1 \
   -f scripts/105-stateful-subnet-epoch-historical-predecessor-v2.sql
+
+psql "$SUPABASE_DB_URL" \
+  -v ON_ERROR_STOP=1 \
+  -f scripts/112-canonicalize-cutover-observed-at.sql
+```
+
+Migration 112 must land before any `--apply` ceremony run: the staging RPCs
+verify the cutover row with an exact JSONB round-trip, and without 112 the
+canonical `...Z` `first_observed_at` string is re-serialized as `+00:00` and
+every staging attempt fails closed with 'stateful epoch V2 cutover row shape
+is invalid' after the coordinator attestation has already succeeded. 112
+refuses to run once a cutover row exists, so apply it while the ledger is
+still empty.
+
+Before burning a live boundary window, rehearse the staging RPC offline
+against the exact migration set (expects `stateful_staged`, and the known
+row-shape rejection when rerun with `--skip-112`):
+
+```bash
+python3 scripts/rehearse_stateful_epoch_stage_v2.py
+python3 scripts/rehearse_stateful_epoch_stage_v2.py --skip-112
 ```
 
 Verify that the lifecycle remains open and that no mapping was accidentally

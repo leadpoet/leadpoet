@@ -17,8 +17,10 @@ HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
 def _record(*, published, signatures):
     result = {
         "epoch_id": 100,
-        "uids": [0, 1],
-        "weights": [0.8, 0.2],
+        "uids": [1, 0],
+        "weights": [0.2, 0.8],
+        "sparse_uids": [0, 1],
+        "sparse_weights_u16": [65535, 16384],
     }
     return {
         "weight_authorization_id": OLD_AUTHORIZATION,
@@ -148,6 +150,9 @@ async def test_prepared_crash_replays_gateway_then_uses_epoch_bounded_chain_call
     )
     assert epoch == 100
     assert [item[0] for item in calls] == ["resume", "set", "finalize"]
+    set_call = next(value for name, value in calls if name == "set")
+    assert set_call["uids"] == [0, 1]
+    assert set_call["weights"] == [0.8, 0.2]
     assert journal.calls[-1] == ("clear", EVENT)
     assert validator.substrate_calls == []
 

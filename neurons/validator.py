@@ -101,10 +101,37 @@ from urllib.parse import urlparse
 from leadpoet_canonical.weight_computation import (
     WEIGHT_SNAPSHOT_SCHEMA_VERSION,
     compute_final_weights as compute_canonical_final_weights,
+    normalize_to_u16_with_uids_pure,
     research_lab_uid_weights_from_allocation as canonical_research_lab_uid_weights_from_allocation,
     weight_config_hash as canonical_weight_config_hash,
 )
 from leadpoet_verifier.economics import DEFAULT_RESEARCH_LAB_EMISSION_PERCENT
+
+
+def _canonical_sdk_weight_vector(weight_result: Mapping[str, Any]):
+    """Return the exact UID-sorted float vector authorized by the enclave."""
+
+    full_uids = [int(uid) for uid in weight_result.get("uids") or []]
+    full_weights = [float(weight) for weight in weight_result.get("weights") or []]
+    if len(full_uids) != len(full_weights):
+        raise RuntimeError("authoritative weight vector lengths differ")
+    pairs = sorted(
+        (
+            (uid, weight)
+            for uid, weight in zip(full_uids, full_weights)
+            if weight > 0
+        ),
+        key=lambda pair: pair[0],
+    )
+    uids = [uid for uid, _weight in pairs]
+    weights = [weight for _uid, weight in pairs]
+    emitted_uids, emitted_u16 = normalize_to_u16_with_uids_pure(uids, weights)
+    if emitted_uids != list(weight_result.get("sparse_uids") or []) \
+        or emitted_u16 != list(weight_result.get("sparse_weights_u16") or []):
+        raise RuntimeError(
+            "canonical SDK vector differs from enclave authorization"
+        )
+    return uids, weights
 
 # ════════════════════════════════════════════════════════════════════════════
 # TEE SIGNING IMPORTS (Phase 2.3 - Validator TEE Weight Submission)
@@ -3916,11 +3943,14 @@ class Validator(BaseValidatorNeuron):
             "   ✅ Authoritative V2 gateway bundle persisted: "
             f"{publication['weight_submission_event_hash'][:20]}..."
         )
+        sdk_uids, sdk_weights = _canonical_sdk_weight_vector(
+            publication["enclave_response"]["weight_result"]
+        )
         submitted = await self._set_weights_until_epoch_end(
             epoch_id=int(snapshot["epoch_id"]),
             subnet_epoch_index=epoch_state.subnet_epoch_index,
-            uids=list(publication["uids"]),
-            weights=list(publication["weights"]),
+            uids=sdk_uids,
+            weights=sdk_weights,
             weight_authorization_id=publication["weight_authorization_id"],
             weight_submission_event_hash=publication[
                 "weight_submission_event_hash"
@@ -3977,11 +4007,12 @@ class Validator(BaseValidatorNeuron):
         epoch_id = int(weight_result["epoch_id"])
         signed_extrinsics = list(recovery["signed_extrinsics"])
         if not signed_extrinsics:
+            sdk_uids, sdk_weights = _canonical_sdk_weight_vector(weight_result)
             submitted = await self._set_weights_until_epoch_end(
                 epoch_id=epoch_id,
                 subnet_epoch_index=self._subnet_index_for_workflow_epoch(epoch_id),
-                uids=list(weight_result["uids"]),
-                weights=list(weight_result["weights"]),
+                uids=sdk_uids,
+                weights=sdk_weights,
                 weight_authorization_id=authorization_id,
                 weight_submission_event_hash=event_hash,
                 on_signed_extrinsic=journal.record_signed,

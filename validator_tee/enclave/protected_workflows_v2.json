@@ -87,7 +87,7 @@
       "symbol": "validate_weight_finalization_submission_v2"
     },
     {
-      "ast_sha256": "sha256:88669b55f28a1d15a5111b759b26c80751ca33a169e090d3839de9c07567db26",
+      "ast_sha256": "sha256:a6a17da7bbf7a4207934cca0b775b0f387f8a00aba9d3b9bd9b5d8cad5951319",
       "path": "leadpoet_canonical/weight_authority_v2.py",
       "symbol": "validate_weight_input_source_evidence_v2"
     },
@@ -272,7 +272,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:8fb6eba8c243ef067168ebb93fe44a15315391c2b02025d8f66c39e5e4a0a416",
+  "manifest_hash": "sha256:6b5840482ebd1895e1f45bc5fec835185525692b0e6aa5db27a877f4e4368acc",
   "protected_source_commit": "8b8e9dc77e8b0c987aebe38689678e67cf9df0eb",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

@@ -26,6 +26,10 @@ from leadpoet_canonical.hotkey_authority_v2 import (
     build_application_signature_request_v2,
     validate_weight_extrinsic_authorization_v2,
 )
+from leadpoet_canonical.chain_source_v2 import (
+    CHAIN_ARCHIVE_ENDPOINT_HOST,
+    CHAIN_ENDPOINT_HOST,
+)
 from leadpoet_canonical.weight_computation import compute_final_weights
 
 
@@ -485,7 +489,15 @@ def validate_weight_input_source_evidence_v2(
         _require(scoped_attempts, "%s input has no authenticated chain read" % normalized_category)
         for attempt in scoped_attempts:
             _require(
-                attempt.get("provider_id") == "bittensor_chain",
+                (
+                    attempt.get("provider_id") == "bittensor_chain"
+                    and attempt.get("destination_host") == CHAIN_ENDPOINT_HOST
+                )
+                or (
+                    attempt.get("provider_id") == "bittensor_archive"
+                    and attempt.get("destination_host")
+                    == CHAIN_ARCHIVE_ENDPOINT_HOST
+                ),
                 "%s input used an unauthorized chain source" % normalized_category,
             )
             _require(

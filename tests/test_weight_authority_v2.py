@@ -680,6 +680,103 @@ def test_v2_weight_input_rejects_wrong_supabase_project():
         )
 
 
+def _replace_source_attempt(receipt, document, source, **updates):
+    values = dict(source)
+    values.update(updates)
+    replacement = build_transport_attempt(
+        request_id=values["request_id"],
+        logical_operation_id=values["logical_operation_id"],
+        job_id=values["job_id"],
+        purpose=values["purpose"],
+        provider_id=values["provider_id"],
+        attempt_number=values["attempt_number"],
+        method=values["method"],
+        destination_host=values["destination_host"],
+        destination_port=values["destination_port"],
+        path_hash=values["path_hash"],
+        nonsecret_headers_hash=values["nonsecret_headers_hash"],
+        body_hash=values["body_hash"],
+        credential_ref_hash=values["credential_ref_hash"],
+        retry_policy_hash=values["retry_policy_hash"],
+        timeout_ms=values["timeout_ms"],
+        started_at=values["started_at"],
+        terminal_status=values["terminal_status"],
+        http_status=values["http_status"],
+        response_hash=values["response_hash"],
+        request_artifact_hash=values["request_artifact_hash"],
+        response_artifact_hash=values["response_artifact_hash"],
+        tls_peer_chain_hash=values["tls_peer_chain_hash"],
+        tls_protocol=values["tls_protocol"],
+        failure_code=values["failure_code"],
+        completed_at=values["completed_at"],
+    )
+    changed_receipt = dict(receipt)
+    changed_receipt["transport_root"] = merkle_root(
+        [replacement["attempt_hash"]],
+        domain="leadpoet-transport-v2",
+    )
+    changed_receipt["artifact_root"] = merkle_root(
+        [
+            sha256_json(document["value"]),
+            replacement["request_artifact_hash"],
+            replacement["response_artifact_hash"],
+        ],
+        domain="leadpoet-artifact-v2",
+    )
+    return changed_receipt, replacement
+
+
+def test_v2_weight_input_accepts_authenticated_archive_metagraph_read():
+    receipt, document, attempts = _source_evidence_fixture("metagraph_state")
+    source = next(
+        item
+        for item in attempts
+        if item["job_id"] == receipt["job_id"]
+        and item["purpose"] == receipt["purpose"]
+    )
+    archive_receipt, archive_attempt = _replace_source_attempt(
+        receipt,
+        document,
+        source,
+        provider_id="bittensor_archive",
+        destination_host="archive.chain.opentensor.ai",
+        method="POST",
+    )
+
+    validate_weight_input_source_evidence_v2(
+        category="metagraph_state",
+        receipt=archive_receipt,
+        document=document,
+        transport_attempts=[archive_attempt],
+    )
+
+
+def test_v2_weight_input_rejects_archive_metagraph_read_from_wrong_host():
+    receipt, document, attempts = _source_evidence_fixture("metagraph_state")
+    source = next(
+        item
+        for item in attempts
+        if item["job_id"] == receipt["job_id"]
+        and item["purpose"] == receipt["purpose"]
+    )
+    archive_receipt, archive_attempt = _replace_source_attempt(
+        receipt,
+        document,
+        source,
+        provider_id="bittensor_archive",
+        destination_host="attacker.example.com",
+        method="POST",
+    )
+
+    with pytest.raises(WeightAuthorityV2Error, match="unauthorized chain source"):
+        validate_weight_input_source_evidence_v2(
+            category="metagraph_state",
+            receipt=archive_receipt,
+            document=document,
+            transport_attempts=[archive_attempt],
+        )
+
+
 def test_v2_weight_input_rejects_transport_failure_as_provider_response():
     receipt, document, attempts = _source_evidence_fixture("bans")
     source = next(

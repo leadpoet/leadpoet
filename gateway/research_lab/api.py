@@ -75,6 +75,7 @@ from .models import (
     ResearchLabOpenRouterKeyRegisterResponse,
     ResearchLabOpenRouterCredentialRecipientRequest,
     ResearchLabOpenRouterCredentialRecipientV2,
+    ResearchLabOpenRouterCredentialReleaseEvidenceV2,
     ResearchLabOpenRouterCredentialRecipientsResponse,
     ResearchLabLoopDiagnosticsRequest,
     ResearchLabProbeRequest,
@@ -285,6 +286,79 @@ async def _openrouter_credential_recipient_v2(
         raise HTTPException(
             status_code=503,
             detail="attested OpenRouter credential recipient is unavailable",
+        ) from exc
+
+
+async def _openrouter_credential_release_evidence_v2() -> dict[str, Any]:
+    """Expose direct, immutable release evidence for miner-side verification."""
+
+    import boto3
+    from botocore.config import Config
+
+    from gateway.tee.release_channel_v2 import (
+        DEFAULT_BUCKET,
+        DEFAULT_PREFIX,
+        release_channel_key,
+    )
+    from gateway.utils.tee_client import coordinator_tee_client
+
+    try:
+        boot = dict(await coordinator_tee_client.v2_get_boot_identity())
+        commit = str(boot.get("commit_sha") or "").lower()
+        key = release_channel_key(commit, prefix=DEFAULT_PREFIX)
+        client = boto3.client(
+            "s3",
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "virtual"},
+            ),
+        )
+        head = await asyncio.to_thread(
+            client.head_object,
+            Bucket=DEFAULT_BUCKET,
+            Key=key,
+        )
+        if str(head.get("ObjectLockMode") or "").upper() != "COMPLIANCE":
+            raise RuntimeError("release channel is not Object-Locked in COMPLIANCE mode")
+        version_id = str(head.get("VersionId") or "")
+        if not version_id:
+            raise RuntimeError("release channel version is unavailable")
+        params = {
+            "Bucket": DEFAULT_BUCKET,
+            "Key": key,
+            "VersionId": version_id,
+        }
+        get_url, head_url = await asyncio.gather(
+            asyncio.to_thread(
+                client.generate_presigned_url,
+                "get_object",
+                Params=params,
+                ExpiresIn=300,
+                HttpMethod="GET",
+            ),
+            asyncio.to_thread(
+                client.generate_presigned_url,
+                "head_object",
+                Params=params,
+                ExpiresIn=300,
+                HttpMethod="HEAD",
+            ),
+        )
+        return {
+            "schema_version": "leadpoet.openrouter_release_evidence.v2",
+            "coordinator_boot_identity": boot,
+            "release_channel_version_id": version_id,
+            "release_channel_get_url": str(get_url),
+            "release_channel_head_url": str(head_url),
+        }
+    except Exception as exc:
+        logger.warning(
+            "OPENROUTER_V2_RELEASE_EVIDENCE_UNAVAILABLE type=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="independently built OpenRouter recipient release evidence is unavailable",
         ) from exc
 
 
@@ -1572,7 +1646,7 @@ async def create_openrouter_credential_recipients(
         "Research Lab miner submissions are disabled",
     )
     await _verify_signed_miner(payload)
-    runtime, management = await asyncio.gather(
+    runtime, management, release_evidence = await asyncio.gather(
         _openrouter_credential_recipient_v2(
             miner_hotkey=payload.miner_hotkey,
             credential_kind="runtime",
@@ -1581,10 +1655,14 @@ async def create_openrouter_credential_recipients(
             miner_hotkey=payload.miner_hotkey,
             credential_kind="management",
         ),
+        _openrouter_credential_release_evidence_v2(),
     )
     return ResearchLabOpenRouterCredentialRecipientsResponse(
         runtime=ResearchLabOpenRouterCredentialRecipientV2(**runtime),
         management=ResearchLabOpenRouterCredentialRecipientV2(**management),
+        release_evidence=ResearchLabOpenRouterCredentialReleaseEvidenceV2(
+            **release_evidence
+        ),
     )
 
 

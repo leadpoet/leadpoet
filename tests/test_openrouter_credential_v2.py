@@ -341,6 +341,19 @@ async def test_openrouter_recipient_route_returns_two_scoped_attestations(monkey
         }
 
     monkeypatch.setattr(api, "_openrouter_credential_recipient_v2", recipient)
+    monkeypatch.setattr(
+        api,
+        "_openrouter_credential_release_evidence_v2",
+        lambda: _async_value(
+            {
+                "schema_version": "leadpoet.openrouter_release_evidence.v2",
+                "coordinator_boot_identity": {"boot_identity_hash": BOOT_HASH},
+                "release_channel_version_id": "version-1",
+                "release_channel_get_url": "https://example.com/get",
+                "release_channel_head_url": "https://example.com/head",
+            }
+        ),
+    )
     payload = ResearchLabOpenRouterCredentialRecipientRequest(
         miner_hotkey=MINER,
         signature="s" * 64,
@@ -350,6 +363,48 @@ async def test_openrouter_recipient_route_returns_two_scoped_attestations(monkey
     response = await api.create_openrouter_credential_recipients(payload)
     assert response.runtime.credential_slot == "openrouter"
     assert response.management.credential_slot == "openrouter_management"
+    assert response.release_evidence.release_channel_version_id == "version-1"
+
+
+@pytest.mark.asyncio
+async def test_openrouter_release_evidence_uses_exact_sigv4_object_version(monkeypatch):
+    import boto3
+    from gateway.utils import tee_client
+
+    commit = "a" * 40
+    observed = {}
+
+    class Coordinator:
+        async def v2_get_boot_identity(self):
+            return {"commit_sha": commit, "boot_identity_hash": BOOT_HASH}
+
+    class S3:
+        def head_object(self, **kwargs):
+            observed["head"] = kwargs
+            return {"ObjectLockMode": "COMPLIANCE", "VersionId": "version-1"}
+
+        def generate_presigned_url(self, operation, **kwargs):
+            observed.setdefault("presigns", []).append((operation, kwargs))
+            return f"https://example.com/{operation}"
+
+    def client(service, *, config):
+        assert service == "s3"
+        assert config.signature_version == "s3v4"
+        assert config.s3 == {"addressing_style": "virtual"}
+        return S3()
+
+    monkeypatch.setattr(tee_client, "coordinator_tee_client", Coordinator())
+    monkeypatch.setattr(boto3, "client", client)
+
+    result = await api._openrouter_credential_release_evidence_v2()
+
+    expected_key = f"attested-v2/releases/{commit}/release-channel-v2.json"
+    assert observed["head"]["Key"] == expected_key
+    assert result["release_channel_version_id"] == "version-1"
+    assert all(
+        call[1]["Params"]["VersionId"] == "version-1"
+        for call in observed["presigns"]
+    )
 
 
 @pytest.mark.asyncio

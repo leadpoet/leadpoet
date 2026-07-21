@@ -578,9 +578,18 @@ class ResearchLabOpenRouterCredentialRecipientV2(BaseModel):
     key_encryption_algorithm: str
 
 
+class ResearchLabOpenRouterCredentialReleaseEvidenceV2(BaseModel):
+    schema_version: str
+    coordinator_boot_identity: dict[str, Any]
+    release_channel_version_id: str
+    release_channel_get_url: str
+    release_channel_head_url: str
+
+
 class ResearchLabOpenRouterCredentialRecipientsResponse(BaseModel):
     runtime: ResearchLabOpenRouterCredentialRecipientV2
     management: ResearchLabOpenRouterCredentialRecipientV2
+    release_evidence: ResearchLabOpenRouterCredentialReleaseEvidenceV2
 
 
 class ResearchLabResumeCreditBlockedRequest(SignedResearchLabRequest):

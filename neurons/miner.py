@@ -54,6 +54,7 @@ from research_lab.source_add_miner import (
 from leadpoet_canonical.credential_recipient_v2 import (
     CredentialRecipientV2Error,
     verify_and_encrypt_openrouter_credential_v2,
+    verify_openrouter_credential_release_v2,
 )
 
 
@@ -2464,17 +2465,22 @@ def _register_research_lab_openrouter_key(wallet, status: dict) -> Optional[Tupl
             print(f"   {recipients['error']}")
             return None
         try:
+            verified_coordinator_boot = verify_openrouter_credential_release_v2(
+                recipients["release_evidence"]
+            )
             encrypted_runtime = verify_and_encrypt_openrouter_credential_v2(
                 recipients["runtime"],
                 raw_key,
                 miner_hotkey=wallet.hotkey.ss58_address,
                 credential_kind="runtime",
+                verified_coordinator_boot_identity=verified_coordinator_boot,
             )
             encrypted_management = verify_and_encrypt_openrouter_credential_v2(
                 recipients["management"],
                 raw_management_key,
                 miner_hotkey=wallet.hotkey.ss58_address,
                 credential_kind="management",
+                verified_coordinator_boot_identity=verified_coordinator_boot,
             )
         except (CredentialRecipientV2Error, KeyError, TypeError) as exc:
             print(f"❌ OpenRouter credential recipient verification failed: {exc}")

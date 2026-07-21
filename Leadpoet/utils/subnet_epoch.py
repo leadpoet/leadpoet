@@ -17,10 +17,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
 from typing import Any, Mapping, Optional
+from urllib.parse import urlparse
 
 
 EPOCH_SCHEME = "bittensor.subnet_epoch_index.v1"
@@ -54,23 +56,70 @@ class SubnetEpochError(RuntimeError):
     """The chain epoch state or cutover mapping is missing or inconsistent."""
 
 
-def assert_official_archive_subtensor(subtensor: Any) -> None:
-    """Require a client pinned to Bittensor's official archive endpoint.
+def normalize_trusted_archive_endpoint(value: Any) -> str:
+    """Validate an operator-owned archive endpoint without allowing plaintext WAN RPC."""
 
-    Stateful cutover proof reads immutable storage older than lite-node
-    retention.  Accepting a normal Finney client here would work briefly and
-    then fail permanently once that state is pruned, so the historical
-    authority is explicit and fail closed.
+    normalized = str(value or "").strip().rstrip("/")
+    parsed = urlparse(normalized)
+    if (
+        parsed.scheme not in {"ws", "wss"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise SubnetEpochError("archive endpoint must be a WebSocket origin")
+    if parsed.scheme == "ws":
+        try:
+            address = ipaddress.ip_address(parsed.hostname)
+            private_transport = address.is_private or address.is_loopback
+        except ValueError:
+            private_transport = parsed.hostname.lower() == "localhost"
+        if not private_transport:
+            raise SubnetEpochError(
+                "plaintext archive endpoint is allowed only on a private network"
+            )
+    return normalized
+
+
+def assert_trusted_archive_subtensor(
+    subtensor: Any,
+    *,
+    expected_endpoint: str,
+) -> None:
+    """Require the connected archive to be the exact selected trust input.
+
+    Historical reads need an archive node after lite-node pruning. The primary
+    validator and gateway retain the official default; independent auditors may
+    explicitly select infrastructure they operate and trust themselves.
     """
 
+    expected = normalize_trusted_archive_endpoint(expected_endpoint).lower()
     endpoint = getattr(subtensor, "chain_endpoint", None)
     if endpoint is None:
         endpoint = getattr(getattr(subtensor, "substrate", None), "url", None)
     normalized = str(endpoint or "").strip().lower().rstrip("/")
-    if normalized != OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT:
+    if normalized != expected:
         raise SubnetEpochError(
-            "historical epoch authority must use the official Bittensor archive"
+            "historical epoch authority uses an unexpected archive endpoint"
         )
+
+
+def assert_official_archive_subtensor(subtensor: Any) -> None:
+    """Require a client pinned to Bittensor's official archive endpoint.
+
+    Stateful cutover proof reads immutable storage older than lite-node
+    retention. Accepting a normal Finney client here would work briefly and
+    then fail permanently once that state is pruned.
+    """
+
+    assert_trusted_archive_subtensor(
+        subtensor,
+        expected_endpoint=OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT,
+    )
 
 
 def ensure_cutover_manifest_configured(
@@ -486,10 +535,15 @@ def read_subnet_epoch_snapshot(
 def validate_subnet_epoch_cutover_anchor(
     subtensor: Any,
     cutover: SubnetEpochCutover,
+    *,
+    expected_archive_endpoint: str = OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT,
 ) -> None:
-    """Prove a cutover exclusively against Bittensor's official archive."""
+    """Prove a cutover against the caller's exact trusted archive endpoint."""
 
-    assert_official_archive_subtensor(subtensor)
+    assert_trusted_archive_subtensor(
+        subtensor,
+        expected_endpoint=expected_archive_endpoint,
+    )
     substrate = getattr(subtensor, "substrate", None)
     if substrate is None:
         raise SubnetEpochError("subtensor substrate client is unavailable")

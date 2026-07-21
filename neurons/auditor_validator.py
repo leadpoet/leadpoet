@@ -180,6 +180,7 @@ from Leadpoet.utils.subnet_epoch import (
     SubnetEpochError,
     ensure_cutover_manifest_configured,
     load_subnet_epoch_cutover,
+    normalize_trusted_archive_endpoint,
     read_subnet_epoch_snapshot,
     validate_subnet_epoch_cutover_anchor,
 )
@@ -219,17 +220,36 @@ def _default_gateway_url(environ=None) -> str:
 
 
 DEFAULT_GATEWAY_URL = _default_gateway_url()
+AUDITOR_ARCHIVE_ENDPOINT_ENV = "AUDITOR_BITTENSOR_ARCHIVE_ENDPOINT"
+BITTENSOR_ARCHIVE_ENDPOINT_ENV = "BITTENSOR_ARCHIVE_ENDPOINT"
 
 
-def _connect_official_epoch_archive_subtensor(
-    *, attempts: int = 3, retry_delay_seconds: float = 2.0
+def _auditor_archive_endpoint(environ=None) -> str:
+    source = os.environ if environ is None else environ
+    explicit = str(source.get(AUDITOR_ARCHIVE_ENDPOINT_ENV, "") or "").strip()
+    compatible = str(source.get(BITTENSOR_ARCHIVE_ENDPOINT_ENV, "") or "").strip()
+    if explicit and compatible and explicit.rstrip("/") != compatible.rstrip("/"):
+        raise SubnetEpochError("conflicting auditor archive endpoints are configured")
+    return normalize_trusted_archive_endpoint(
+        explicit or compatible or OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT
+    )
+
+
+def _connect_epoch_archive_subtensor(
+    *,
+    endpoint: Optional[str] = None,
+    attempts: int = 3,
+    retry_delay_seconds: float = 2.0,
 ):
-    """Connect to the fixed archive authority before opening the live RPC."""
+    """Connect to the selected archive authority before opening the live RPC."""
 
+    selected_endpoint = _auditor_archive_endpoint() if endpoint is None else (
+        normalize_trusted_archive_endpoint(endpoint)
+    )
     last_error = None
     for attempt in range(1, int(attempts) + 1):
         try:
-            return bt.Subtensor(network=OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT)
+            return bt.Subtensor(network=selected_endpoint)
         except Exception as exc:
             last_error = exc
             logger.warning(
@@ -241,7 +261,7 @@ def _connect_official_epoch_archive_subtensor(
             if attempt < int(attempts):
                 time.sleep(float(retry_delay_seconds))
     raise SubnetEpochError(
-        "auditor could not connect to the official epoch archive"
+        "auditor could not connect to its selected trusted epoch archive"
     ) from last_error
 
 
@@ -315,12 +335,14 @@ class AuditorValidator:
         # Open and authenticate the archive before the live RPC. The installed
         # SDK can strand a second websocket during TLS cleanup when live is
         # opened first, preventing otherwise valid auditors from starting.
-        self.epoch_archive_subtensor = (
-            _connect_official_epoch_archive_subtensor()
+        self.epoch_archive_endpoint = _auditor_archive_endpoint()
+        self.epoch_archive_subtensor = _connect_epoch_archive_subtensor(
+            endpoint=self.epoch_archive_endpoint
         )
         validate_subnet_epoch_cutover_anchor(
             self.epoch_archive_subtensor,
             self.epoch_cutover,
+            expected_archive_endpoint=self.epoch_archive_endpoint,
         )
         self._validate_durable_epoch_runtime_startup()
         self.subtensor = bt.Subtensor(config=config)

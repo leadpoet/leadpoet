@@ -51,7 +51,52 @@ def test_auditor_rejects_non_origin_gateway_urls(value):
         auditor_module._normalize_gateway_url(value)
 
 
-def test_official_archive_connection_retries_only_the_fixed_endpoint(monkeypatch):
+@pytest.mark.parametrize(
+    ("environ", "expected"),
+    (
+        ({}, auditor_module.OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT),
+        (
+            {"AUDITOR_BITTENSOR_ARCHIVE_ENDPOINT": "wss://archive.example:443/"},
+            "wss://archive.example:443",
+        ),
+        (
+            {"BITTENSOR_ARCHIVE_ENDPOINT": "ws://192.168.69.55:9944"},
+            "ws://192.168.69.55:9944",
+        ),
+    ),
+)
+def test_auditor_archive_endpoint_policy(environ, expected):
+    assert auditor_module._auditor_archive_endpoint(environ) == expected
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    (
+        "ws://8.8.8.8:9944",
+        "https://archive.example",
+        "wss://user:password@archive.example",
+        "wss://archive.example/path",
+        "wss://archive.example?redirect=attacker",
+    ),
+)
+def test_auditor_archive_endpoint_rejects_unsafe_origins(endpoint):
+    with pytest.raises(auditor_module.SubnetEpochError):
+        auditor_module._auditor_archive_endpoint(
+            {"AUDITOR_BITTENSOR_ARCHIVE_ENDPOINT": endpoint}
+        )
+
+
+def test_auditor_archive_endpoint_rejects_conflicting_aliases():
+    with pytest.raises(auditor_module.SubnetEpochError, match="conflicting"):
+        auditor_module._auditor_archive_endpoint(
+            {
+                "AUDITOR_BITTENSOR_ARCHIVE_ENDPOINT": "wss://one.example",
+                "BITTENSOR_ARCHIVE_ENDPOINT": "wss://two.example",
+            }
+        )
+
+
+def test_archive_connection_retries_only_the_selected_endpoint(monkeypatch):
     calls = []
     sleeps = []
 
@@ -64,14 +109,15 @@ def test_official_archive_connection_retries_only_the_fixed_endpoint(monkeypatch
     monkeypatch.setattr(auditor_module.bt, "Subtensor", connect)
     monkeypatch.setattr(auditor_module.time, "sleep", sleeps.append)
 
-    assert auditor_module._connect_official_epoch_archive_subtensor(
+    assert auditor_module._connect_epoch_archive_subtensor(
+        endpoint=auditor_module.OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT,
         retry_delay_seconds=0.25
     ) == "archive-subtensor"
     assert calls == [auditor_module.OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT] * 3
     assert sleeps == [0.25, 0.25]
 
 
-def test_official_archive_connection_fails_closed(monkeypatch):
+def test_archive_connection_fails_closed(monkeypatch):
     def fail(**_kwargs):
         raise TimeoutError("fixture TLS timeout")
 
@@ -80,9 +126,9 @@ def test_official_archive_connection_fails_closed(monkeypatch):
 
     with pytest.raises(
         auditor_module.SubnetEpochError,
-        match="official epoch archive",
+        match="selected trusted epoch archive",
     ):
-        auditor_module._connect_official_epoch_archive_subtensor(attempts=2)
+        auditor_module._connect_epoch_archive_subtensor(attempts=2)
 
 
 def _auditor_for_one_verification(verified_result):

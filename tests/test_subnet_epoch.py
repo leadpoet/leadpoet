@@ -15,6 +15,7 @@ from Leadpoet.utils.subnet_epoch import (
     SubnetEpochSnapshot,
     load_subnet_epoch_cutover,
     read_subnet_epoch_snapshot,
+    normalize_trusted_archive_endpoint,
     validate_subnet_epoch_cutover_anchor,
 )
 
@@ -298,11 +299,30 @@ def test_cutover_anchor_is_proven_against_chain_hashes() -> None:
             _cutover(cutover_block_hash="0x" + "77" * 32),
         )
 
-    with pytest.raises(SubnetEpochError, match="official Bittensor archive"):
+    with pytest.raises(SubnetEpochError, match="unexpected archive endpoint"):
         validate_subnet_epoch_cutover_anchor(
             _Subtensor(chain_endpoint="wss://entrypoint-finney.opentensor.ai:443"),
             _cutover(),
         )
+
+    independent = "wss://auditor-archive.example:443"
+    validate_subnet_epoch_cutover_anchor(
+        _Subtensor(chain_endpoint=independent),
+        _cutover(),
+        expected_archive_endpoint=independent,
+    )
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    (
+        ("wss://archive.example:443/", "wss://archive.example:443"),
+        ("ws://127.0.0.1:9944", "ws://127.0.0.1:9944"),
+        ("ws://10.0.0.4:9944", "ws://10.0.0.4:9944"),
+    ),
+)
+def test_trusted_archive_endpoint_normalization(endpoint, expected):
+    assert normalize_trusted_archive_endpoint(endpoint) == expected
 
 
 def test_reader_supports_exact_block_number_and_hash() -> None:

@@ -319,17 +319,105 @@ reset_orphaned_docker_storage_if_needed() {
     echo "Detected ${reason} with no tracked Docker objects; resetting full Docker data root"
     echo "docker root usage: ${DOCKER_ROOT_KB:-0} KiB; overlay usage: ${OVERLAY_KB:-0} KiB across ${OVERLAY_DIRS:-0} dirs"
     sudo systemctl stop docker.socket docker 2>/dev/null || true
+    mapfile -t docker_mounts < <(
+      findmnt -rn -R /var/lib/docker -o TARGET 2>/dev/null | tac || true
+    )
+    for mount_path in "${docker_mounts[@]}"; do
+      sudo umount "$mount_path"
+    done
     sudo rm -rf /var/lib/docker
     sudo mkdir -p /var/lib/docker
-    sudo systemctl start docker
-    for _ in $(seq 1 20); do
-      if sudo docker info >/dev/null 2>&1; then
-        break
-      fi
-      sleep 1
-    done
+    ensure_docker_ready
     sudo docker system df 2>/dev/null || true
   fi
+}
+
+ensure_docker_ready() {
+  if sudo docker info >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "Starting Docker and waiting for the daemon"
+  sudo systemctl start docker
+  for _ in $(seq 1 30); do
+    if sudo docker info >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "ERROR: Docker did not become ready" >&2
+  return 1
+}
+
+foreign_docker_build_processes() {
+  python3 - "$LEADPOET_REPO_ROOT" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1]).resolve()
+for entry in Path("/proc").iterdir():
+    if not entry.name.isdigit():
+        continue
+    try:
+        argv = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode()
+        cwd = (entry / "cwd").resolve()
+    except (OSError, UnicodeDecodeError):
+        continue
+    is_build = (
+        "docker build" in argv
+        or "docker-buildx" in argv
+        or "pip install --no-cache-dir -r requirements.txt" in argv
+    )
+    if is_build and cwd != repo_root and repo_root not in cwd.parents:
+        print(f"{entry.name}\t{cwd}\t{argv}")
+PY
+}
+
+wait_for_foreign_docker_builds() {
+  local active
+  for attempt in $(seq 1 300); do
+    active="$(foreign_docker_build_processes)"
+    if [ -z "$active" ]; then
+      return 0
+    fi
+    if [ "$attempt" -eq 1 ]; then
+      echo "Waiting for co-located foreign Docker builds before production shutdown"
+      printf '%s\n' "$active"
+    fi
+    sleep 6
+  done
+  echo "ERROR: foreign Docker builds remained active for 30 minutes" >&2
+  return 1
+}
+
+stop_local_stale_build_processes() {
+  local signal="$1"
+  python3 - "$LEADPOET_REPO_ROOT" "$signal" <<'PY'
+import os
+import signal
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1]).resolve()
+requested_signal = getattr(signal, "SIG" + sys.argv[2])
+for entry in Path("/proc").iterdir():
+    if not entry.name.isdigit():
+        continue
+    try:
+        argv = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode()
+        cwd = (entry / "cwd").resolve()
+    except (OSError, UnicodeDecodeError):
+        continue
+    is_stale_build = (
+        "docker build -f " in argv
+        and "/validator_models/containerizing/Dockerfile" in argv
+    ) or "pip install --no-cache-dir -r requirements.txt" in argv
+    if is_stale_build and (cwd == repo_root or repo_root in cwd.parents):
+        try:
+            os.kill(int(entry.name), requested_signal)
+        except (ProcessLookupError, PermissionError):
+            pass
+PY
 }
 
 emergency_disk_preflight() {
@@ -1021,6 +1109,8 @@ else:
 PY
 fi
 
+wait_for_foreign_docker_builds
+
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
 
@@ -1041,11 +1131,9 @@ pkill -9 -f "gateway.utils.tee_egress_forwarder" 2>/dev/null || true
 stop_research_lab_private_model_containers
 
 echo "Stopping stuck private-model Docker builds or pip installs"
-sudo pkill -TERM -f "docker build -f .*/validator_models/containerizing/Dockerfile" 2>/dev/null || true
-sudo pkill -TERM -f "pip install --no-cache-dir -r requirements.txt" 2>/dev/null || true
+stop_local_stale_build_processes TERM
 sleep 3
-sudo pkill -KILL -f "docker build -f .*/validator_models/containerizing/Dockerfile" 2>/dev/null || true
-sudo pkill -KILL -f "pip install --no-cache-dir -r requirements.txt" 2>/dev/null || true
+stop_local_stale_build_processes KILL
 sleep 2
 
 echo "Waiting for :8000 to free"
@@ -1132,6 +1220,7 @@ find ~/.local/lib/python3.9/site-packages -type d -name "__pycache__" -exec rm -
 echo "Preflight disk cleanup for Docker/PCR0/Research Lab builds"
 GATEWAY_DEPLOY_STAGE="docker_disk_cleanup"
 export GATEWAY_DEPLOY_STAGE
+ensure_docker_ready
 df -h / /var/lib/docker 2>/dev/null || df -h /
 sudo journalctl --vacuum-size=200M 2>/dev/null || true
 sudo rm -rf /tmp/research-lab-* /tmp/pcr0_builder /tmp/docker-build-* /tmp/buildkit-* 2>/dev/null || true

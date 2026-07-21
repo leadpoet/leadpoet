@@ -157,6 +157,18 @@ def test_gateway_restart_cutover_hook_is_explicit_and_fail_closed() -> None:
         '"$GATEWAY_PYTHON_BIN" - "$CUTOVER_ACTIVATION_REPORT"'
         in script[execution:launch]
     )
+
+
+def test_gateway_restart_does_not_kill_colocated_runner_builds() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    assert "wait_for_foreign_docker_builds" in script
+    assert "stop_local_stale_build_processes TERM" in script
+    assert "stop_local_stale_build_processes KILL" in script
+    assert 'pkill -TERM -f "docker build' not in script
+    assert 'pkill -KILL -f "docker build' not in script
+    assert "ensure_docker_ready" in script
+    assert 'findmnt -rn -R /var/lib/docker -o TARGET' in script
     assert "GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS=120" in script
     assert script.count(
         'export SUPABASE_TIMEOUT_SECONDS="'

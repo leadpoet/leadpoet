@@ -142,8 +142,13 @@ def test_gateway_restart_cutover_hook_is_explicit_and_fail_closed() -> None:
     )
     assert 'report.get("status") != "stateful_active"' in script
     assert 'json.loads(sys.argv[1])' in script[execution:launch]
+    assert 'json.loads(os.environ["CUTOVER_PREFLIGHT_REPORT"])' not in script
     assert 'json.loads(os.environ["CUTOVER_STAGE_REPORT"])' not in script
     assert 'json.loads(os.environ["CUTOVER_ACTIVATION_REPORT"])' not in script
+    assert (
+        '"$GATEWAY_PYTHON_BIN" - "$CUTOVER_PREFLIGHT_REPORT"'
+        in script[preflight:shutdown]
+    )
     assert (
         '"$GATEWAY_PYTHON_BIN" - "$CUTOVER_STAGE_REPORT"'
         in script[execution:launch]

@@ -995,12 +995,11 @@ PY
       --use-attested-historical-predecessor
   )"
   printf '%s\n' "$CUTOVER_PREFLIGHT_REPORT"
-  CUTOVER_PREFLIGHT_REPORT="$CUTOVER_PREFLIGHT_REPORT" \
-    "$GATEWAY_PYTHON_BIN" - <<'PY'
+  "$GATEWAY_PYTHON_BIN" - "$CUTOVER_PREFLIGHT_REPORT" <<'PY'
 import json
-import os
+import sys
 
-report = json.loads(os.environ["CUTOVER_PREFLIGHT_REPORT"])
+report = json.loads(sys.argv[1])
 status = str(report.get("status") or "")
 if status not in {
     "eligible",

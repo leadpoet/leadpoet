@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import inspect
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -39,6 +40,7 @@ from gateway.research_lab.stateful_epoch_cutover_cli_v1 import (
     RECEIPT_TABLE,
     StatefulEpochCutoverActivationError,
     _mixed_boot_verifier_from_release,
+    activate_staged_subnet_epoch_cutover_v1,
     activate_subnet_epoch_cutover_v1,
 )
 from gateway.tee.coordinator_epoch_cutover_v2 import (
@@ -88,6 +90,14 @@ HASH_C = "sha256:" + "c" * 64
 COMMIT = "d" * 40
 PCR0 = "e" * 96
 VALIDATOR_HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
+
+
+def test_existing_and_activation_cutover_paths_verify_historical_parent_lineage():
+    existing_source = inspect.getsource(activate_subnet_epoch_cutover_v1)
+    activation_source = inspect.getsource(activate_staged_subnet_epoch_cutover_v1)
+
+    assert existing_source.count("parent_graphs=(graph,)") == 1
+    assert activation_source.count("parent_graphs=(graph,)") == 1
 
 
 def _cutover(**updates):

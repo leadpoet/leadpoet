@@ -1094,6 +1094,7 @@ async def activate_subnet_epoch_cutover_v1(
                 validator_release_manifest=_load_validator_release(
                     validator_release_manifest_path
                 ),
+                parent_graphs=(graph,),
             )
         validate_receipt_graph(
             graph,

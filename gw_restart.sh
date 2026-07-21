@@ -1377,12 +1377,11 @@ PY
   )"
   printf '%s\n' "$CUTOVER_STAGE_REPORT"
   read -r CUTOVER_STAGE_STATUS CUTOVER_AUTHORITY_HASH < <(
-    CUTOVER_STAGE_REPORT="$CUTOVER_STAGE_REPORT" \
-      "$GATEWAY_PYTHON_BIN" - <<'PY'
+    "$GATEWAY_PYTHON_BIN" - "$CUTOVER_STAGE_REPORT" <<'PY'
 import json
-import os
+import sys
 
-report = json.loads(os.environ["CUTOVER_STAGE_REPORT"])
+report = json.loads(sys.argv[1])
 status = str(report.get("status") or "")
 authority = str(report.get("cutover_authority_hash") or "")
 if status not in {
@@ -1411,12 +1410,11 @@ PY
         --confirm-stateful-release-prepared
     )"
     printf '%s\n' "$CUTOVER_ACTIVATION_REPORT"
-    CUTOVER_ACTIVATION_REPORT="$CUTOVER_ACTIVATION_REPORT" \
-      "$GATEWAY_PYTHON_BIN" - <<'PY'
+    "$GATEWAY_PYTHON_BIN" - "$CUTOVER_ACTIVATION_REPORT" <<'PY'
 import json
-import os
+import sys
 
-report = json.loads(os.environ["CUTOVER_ACTIVATION_REPORT"])
+report = json.loads(sys.argv[1])
 if report.get("status") != "stateful_active":
     raise SystemExit("stateful epoch cutover activation did not become active")
 PY

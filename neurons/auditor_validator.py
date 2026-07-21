@@ -86,9 +86,10 @@ while true; do
     
     # Run auditor with environment flag to prevent wrapper re-execution
     export LEADPOET_AUDITOR_WRAPPER_ACTIVE=1
-    python3 neurons/auditor_validator.py "$@"
-    
-    EXIT_CODE=$?
+    # set -e must not kill this wrapper on a nonzero exit: the whole point
+    # of the loop below is to classify the exit code and restart.
+    EXIT_CODE=0
+    python3 neurons/auditor_validator.py "$@" || EXIT_CODE=$?
     
     echo ""
     echo "────────────────────────────────────────────────────────────────"
@@ -881,7 +882,31 @@ class AuditorValidator:
         v2_bundle = await self.fetch_attested_weights_v2(epoch_id)
         if isinstance(v2_bundle, dict):
             verified = self.verify_attested_weights_v2(v2_bundle)
-            return verified, "v2_verified" if verified else "v2_invalid"
+            if verified is None:
+                return None, "v2_invalid"
+            # A stale-but-genuine authority replays every check; bind the
+            # verified document to the epoch and netuid this auditor asked
+            # for so an old finalization can never be submitted as current.
+            try:
+                verified_epoch = int(verified.get("epoch_id"))
+                verified_netuid = int(verified.get("netuid"))
+            except (TypeError, ValueError):
+                verified_epoch = -1
+                verified_netuid = -1
+            if verified_epoch != int(epoch_id) or verified_netuid != int(
+                self.config.netuid
+            ):
+                logger.warning(
+                    "auditor_v2_authority_epoch_mismatch requested=%s "
+                    "verified_epoch=%s verified_netuid=%s",
+                    epoch_id,
+                    verified_epoch,
+                    verified_netuid,
+                )
+                return None, "v2_invalid"
+            return verified, "v2_verified"
+        if getattr(self, "_last_v2_authority_was_absent", False):
+            return None, "v2_absent"
         return None, "v2_unavailable"
 
     def verify_attested_weights_v2(self, authority: Dict) -> Optional[Dict]:
@@ -889,6 +914,12 @@ class AuditorValidator:
 
         cache_file = str(os.environ.get("AUDITOR_INDEPENDENT_PCR0_CACHE_FILE", "") or "").strip()
         if not cache_file:
+            logger.error(
+                "auditor_v2_pcr0_cache_missing: set "
+                "AUDITOR_INDEPENDENT_PCR0_CACHE_FILE to the independently "
+                "rebuilt PCR0 identity cache; authoritative V2 verification "
+                "cannot run without it"
+            )
             return None
         try:
             cache = load_identity_cache(Path(cache_file).expanduser())
@@ -1487,8 +1518,10 @@ class AuditorValidator:
                         )
                         if weights_data is None:
                             # Verification is fail-closed: no fallback vector will be submitted.
-                            if authority_status == "v2_unavailable":
+                            if authority_status == "v2_absent":
                                 print("   ⏳ Weights not yet published. Waiting 30s...")
+                            elif authority_status == "v2_unavailable":
+                                print("   ⚠️ Gateway weight authority unavailable (fetch error). Waiting 30s...")
                             else:
                                 print("❌ Auditor verification failed")
                             await asyncio.sleep(30)

@@ -110,6 +110,7 @@ def test_v2_404_fails_closed_without_submission(monkeypatch, capsys):
     auditor = _auditor_for_one_verification(None)
 
     async def missing_v2(_epoch):
+        auditor._last_v2_authority_was_absent = True
         return None
 
     auditor.fetch_attested_weights_v2 = missing_v2
@@ -255,11 +256,22 @@ def test_verifier_failure_emits_no_diagnostic_rows(monkeypatch, caplog):
     with caplog.at_level("DEBUG"):
         assert auditor.verify_attested_weights_v2({"authority": "fixture"}) is None
 
-    assert caplog.text == ""
+    # A missing PCR0 cache is an operator misconfiguration and must be loud;
+    # verification failures still emit no per-receipt diagnostic rows.
+    assert any(
+        "auditor_v2_pcr0_cache_missing" in record.message
+        for record in caplog.records
+    )
+    assert all(
+        "auditor_v2_pcr0_cache_missing" in record.message
+        for record in caplog.records
+    )
 
 
 def test_successful_auditor_verification_has_one_status_line(monkeypatch, capsys):
     verified = {
+        "epoch_id": 101,
+        "netuid": 71,
         "uids": [1],
         "weights_u16": [65535],
         "validator_hotkey": "5" * 48,

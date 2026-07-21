@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 from pathlib import Path
 import re
@@ -104,7 +105,15 @@ def verify_attested_weight_bundle_v2(
     # requires every semantic input category, including allocation ancestry.
     if not require_allocation_ancestry:
         raise AuditorV2Error("authoritative V2 allocation ancestry is mandatory")
-    verifier = boot_verifier or verify_boot_identity_nitro
+    # Boot identities are issued once at enclave boot and verified for days
+    # afterwards; the Nitro leaf certificate is only valid for hours, so the
+    # real verifier must check certificate validity at attestation time, the
+    # same setting every internal verifier uses. Injected test verifiers keep
+    # their own signature.
+    verifier = boot_verifier or functools.partial(
+        verify_boot_identity_nitro,
+        certificate_validity_at_attestation_time=True,
+    )
     observed = []
 
     def verify_one(boot: Mapping[str, Any]) -> Any:
@@ -167,7 +176,15 @@ def verify_attested_weight_authority_v2(
         boot_verifier=boot_verifier,
     )
 
-    verifier = boot_verifier or verify_boot_identity_nitro
+    # Boot identities are issued once at enclave boot and verified for days
+    # afterwards; the Nitro leaf certificate is only valid for hours, so the
+    # real verifier must check certificate validity at attestation time, the
+    # same setting every internal verifier uses. Injected test verifiers keep
+    # their own signature.
+    verifier = boot_verifier or functools.partial(
+        verify_boot_identity_nitro,
+        certificate_validity_at_attestation_time=True,
+    )
     observed = []
 
     def verify_one(boot: Mapping[str, Any]) -> Any:

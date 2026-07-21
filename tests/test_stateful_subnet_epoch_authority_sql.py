@@ -33,6 +33,11 @@ CUTOVER_TIMEOUT_SQL = (
     / "scripts"
     / "107-stateful-epoch-cutover-rpc-timeouts.sql"
 ).read_text(encoding="utf-8")
+BINDING_REPAIR_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "110-qualify-stateful-epoch-v2-binding.sql"
+).read_text(encoding="utf-8")
 TRANSPARENCY_SCOPE_REPAIR_SQL = (
     Path(__file__).resolve().parents[1]
     / "scripts"
@@ -307,6 +312,18 @@ def test_historical_predecessor_migration_separates_proof_from_high_water():
     assert "research_lab_stateful_subnet_epoch_stage_v2" in migration
     assert "UPDATE public.research_lab_legacy_finalized" not in migration
     assert "DELETE FROM public.research_lab_legacy_finalized" not in migration
+
+
+def test_v2_binding_repair_qualifies_output_parameter_collisions():
+    repair = BINDING_REPAIR_SQL
+
+    assert "CREATE OR REPLACE FUNCTION" in repair
+    assert "research_lab_stateful_subnet_epoch_cutover_bind_v2" in repair
+    assert "WHERE candidate.mapping_hash = p_mapping_hash" in repair
+    assert "WHERE state.singleton" in repair
+    assert "WHERE mapping_hash = p_mapping_hash" not in repair
+    assert "CREATE TABLE" not in repair
+    assert "ALTER TABLE" not in repair
 
 
 def test_json_documents_are_exact_shape_and_secret_scrubbed():

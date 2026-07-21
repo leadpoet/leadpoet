@@ -212,9 +212,13 @@ async def test_restart_hydration_closes_previous_epoch_from_durable_init(
 
 
 @pytest.mark.asyncio
-async def test_restart_refuses_to_recreate_missing_initialization_after_boundary(
+async def test_restart_skips_missing_initialization_after_boundary(
     monkeypatch,
 ):
+    # A boundary that passed while no lifecycle process observed it can
+    # never be initialized. The monitor must record the epoch as skipped
+    # (it settles nonfinalized) instead of wedging the polling loop; the
+    # invariant that initializations are never originated late holds.
     from gateway.tasks import epoch_lifecycle, epoch_monitor
 
     cutover = _cutover()
@@ -231,8 +235,89 @@ async def test_restart_refuses_to_recreate_missing_initialization_after_boundary
     monitor = epoch_monitor.EpochMonitor()
     monkeypatch.setattr(monitor, "_find_stateful_transition_snapshot", boundary)
 
-    with pytest.raises(RuntimeError, match="after its official boundary"):
-        await monitor._hydrate_stateful_state(late)
+    await monitor._hydrate_stateful_state(late)
+
+    assert 101 in monitor.skipped_epochs
+    assert 101 not in monitor.initialized_epochs
+    assert 101 not in monitor.initializing_epochs
+
+
+@pytest.mark.asyncio
+async def test_restart_skips_uninitialized_previous_epoch(monkeypatch):
+    # Restarting inside epoch N+1 after epoch N was fully missed (down
+    # across both boundaries) must skip N and keep the loop alive.
+    from gateway.tasks import epoch_lifecycle, epoch_monitor
+
+    cutover = _cutover()
+    late = _snapshot(block=470, official_epoch=8, last_epoch_block=460)
+
+    async def missing(*_args, **_kwargs):
+        return None
+
+    async def boundary(*_args, **_kwargs):
+        return _snapshot(block=460, official_epoch=8, last_epoch_block=460)
+
+    monkeypatch.setattr(epoch_monitor, "load_subnet_epoch_cutover", lambda: cutover)
+    monkeypatch.setattr(epoch_lifecycle, "get_durable_epoch_event", missing)
+    monitor = epoch_monitor.EpochMonitor()
+    monkeypatch.setattr(monitor, "_find_stateful_transition_snapshot", boundary)
+
+    await monitor._hydrate_stateful_state(late)
+
+    assert {101, 102} <= monitor.skipped_epochs
+
+
+@pytest.mark.asyncio
+async def test_transition_after_skipped_epoch_initializes_next_epoch(
+    monkeypatch,
+):
+    # The first boundary observed after a skipped epoch must initialize
+    # the new epoch normally and must not schedule a close for the epoch
+    # that was never initialized.
+    from gateway.tasks import epoch_lifecycle, epoch_monitor
+
+    cutover = _cutover()
+    monitor = epoch_monitor.EpochMonitor()
+    monitor.subtensor = object()
+    monitor.last_official_epoch = 7
+    monitor.last_epoch = 101
+    monitor.last_epoch_snapshot = _snapshot(block=450)
+    observed = _snapshot(
+        block=462,
+        official_epoch=8,
+        last_epoch_block=460,
+        observed_at="2026-07-16T13:11:36Z",
+    )
+    boundary = _snapshot(
+        block=460,
+        official_epoch=8,
+        last_epoch_block=460,
+        observed_at="2026-07-16T13:11:12Z",
+    )
+    calls = []
+
+    async def find(*_args, **_kwargs):
+        return boundary
+
+    async def durable(*_args, **_kwargs):
+        return None
+
+    async def initialize(epoch_id, epoch_snapshot=None):
+        calls.append(("initialize", epoch_id, epoch_snapshot.current_block))
+        monitor.initialized_epochs.add(epoch_id)
+        monitor.initializing_epochs.discard(epoch_id)
+
+    monkeypatch.setattr(epoch_monitor, "load_subnet_epoch_cutover", lambda: cutover)
+    monkeypatch.setattr(epoch_lifecycle, "get_durable_epoch_event", durable)
+    monkeypatch.setattr(monitor, "_find_stateful_transition_snapshot", find)
+    monkeypatch.setattr(monitor, "_on_epoch_start", initialize)
+
+    await monitor._process_stateful_snapshot(observed)
+    await asyncio.sleep(0)
+
+    assert ("initialize", 102, 460) in calls
+    assert 101 in monitor.skipped_epochs
+    assert 101 not in monitor.pending_validation_ends
 
 
 @pytest.mark.asyncio
@@ -270,7 +355,11 @@ async def test_multi_epoch_gap_reconciles_sequentially_when_inits_exist(
 
     await monitor._reconcile_stateful_gap(current)
 
-    assert closed == [(101, 8), (102, 9)]
+    # Epoch 101 has no durable initialization, so there is nothing to
+    # close: it is skipped (nonfinalized) and only epoch 102 — whose
+    # initialization is durable — is closed at its observed boundary.
+    assert closed == [(102, 9)]
+    assert 101 in monitor.skipped_epochs
     assert 102 in monitor.initialized_epochs
 
 

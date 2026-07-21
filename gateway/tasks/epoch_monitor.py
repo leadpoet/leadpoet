@@ -76,6 +76,11 @@ class EpochMonitor:
         self.initialized_epochs = set()  # Epochs that SUCCESSFULLY completed initialization
         self.initializing_epochs = set()  # Epochs currently being initialized (prevents duplicate tasks)
         self.validation_ended_epochs = set()
+        # Epochs whose official boundary passed with no durable
+        # initialization (process was down or hung across the boundary).
+        # They receive no lifecycle events and settle nonfinalized; the
+        # monitor resumes at the first boundary it fully observes.
+        self.skipped_epochs = set()
         self.validation_ending_epochs = set()
         self.pending_validation_ends = {}
         self.closed_epochs = set()  # Epochs that completed consensus successfully
@@ -310,10 +315,16 @@ class EpochMonitor:
                 snapshot,
             )
             if current_boundary.current_block != snapshot.current_block:
-                raise RuntimeError(
-                    f"cannot initialize epoch {current_epoch} after its "
-                    "official boundary; durable initialization is missing"
+                # The boundary passed while no lifecycle process was
+                # observing it, so this epoch can never be initialized.
+                # Skip it (it settles nonfinalized) instead of wedging the
+                # monitor; the next observed transition resumes normally.
+                print(
+                    f"⏭️  Epoch {current_epoch} passed its official boundary "
+                    "without a durable initialization; skipping it and "
+                    "arming for the next boundary"
                 )
+                self.skipped_epochs.add(current_epoch)
 
         if snapshot.subnet_epoch_index == cutover.first_subnet_epoch_index:
             return
@@ -337,10 +348,15 @@ class EpochMonitor:
             self.validation_ended_epochs.add(previous_epoch)
             return
         if previous_initialization is None:
-            raise RuntimeError(
-                f"cannot recover epoch {previous_epoch}: no durable "
-                "EPOCH_INITIALIZATION exists"
+            # The previous epoch was never initialized (down across its
+            # boundary): there is nothing durable to close. Record it as
+            # skipped so no lifecycle action is ever attempted for it.
+            print(
+                f"⏭️  Epoch {previous_epoch} has no durable initialization "
+                "to recover; recording it as skipped (nonfinalized)"
             )
+            self.skipped_epochs.add(previous_epoch)
+            return
 
         boundary = current_boundary or await self._find_stateful_transition_snapshot(
             snapshot.subnet_epoch_index,
@@ -366,10 +382,24 @@ class EpochMonitor:
                 low_snapshot=cursor,
             )
             ended_epoch = cutover.settlement_epoch_id(target_official) - 1
-            await self._close_stateful_epoch_at_boundary(ended_epoch, boundary)
+            ended_initialization = await get_durable_epoch_event(
+                "EPOCH_INITIALIZATION",
+                ended_epoch,
+            )
+            if ended_initialization is None:
+                # Never initialized: there is no durable lifecycle to close.
+                print(
+                    f"⏭️  Epoch {ended_epoch} has no durable initialization "
+                    "to close; recording it as skipped (nonfinalized)"
+                )
+                self.skipped_epochs.add(ended_epoch)
+            else:
+                await self._close_stateful_epoch_at_boundary(
+                    ended_epoch, boundary
+                )
 
             # A historical initialization cannot be reconstructed from the
-            # current queue. Require its durable snapshot before advancing.
+            # current queue. Skip epochs without one instead of wedging.
             target_epoch = cutover.settlement_epoch_id(target_official)
             if target_official < snapshot.subnet_epoch_index:
                 initialization = await get_durable_epoch_event(
@@ -377,11 +407,13 @@ class EpochMonitor:
                     target_epoch,
                 )
                 if initialization is None:
-                    raise RuntimeError(
-                        f"cannot reconcile skipped epoch {target_epoch}: "
-                        "durable initialization is missing"
+                    print(
+                        f"⏭️  Skipped epoch {target_epoch} was never "
+                        "initialized; it settles nonfinalized"
                     )
-                self.initialized_epochs.add(target_epoch)
+                    self.skipped_epochs.add(target_epoch)
+                else:
+                    self.initialized_epochs.add(target_epoch)
             else:
                 initialization = await get_durable_epoch_event(
                     "EPOCH_INITIALIZATION",
@@ -391,10 +423,12 @@ class EpochMonitor:
                     initialization is None
                     and boundary.current_block != snapshot.current_block
                 ):
-                    raise RuntimeError(
-                        f"cannot initialize epoch {target_epoch} after its "
-                        "official boundary; durable initialization is missing"
+                    print(
+                        f"⏭️  Epoch {target_epoch} passed its official "
+                        "boundary without a durable initialization; "
+                        "skipping it and arming for the next boundary"
                     )
+                    self.skipped_epochs.add(target_epoch)
             cursor = boundary
         return cursor
 
@@ -446,20 +480,29 @@ class EpochMonitor:
                     previous_epoch,
                 )
                 if initialization is None:
-                    raise RuntimeError(
-                        f"cannot close epoch {previous_epoch}: durable "
-                        "initialization is missing"
+                    # The ended epoch was never initialized (skipped while
+                    # no lifecycle process observed its boundary). There is
+                    # nothing durable to close; initialize the new epoch
+                    # from the observed transition and move on.
+                    print(
+                        f"⏭️  Epoch {previous_epoch} was never initialized; "
+                        "skipping its close and continuing at the observed "
+                        "boundary"
                     )
-                boundaries = initialization["payload"].get("epoch_boundaries")
-                if not isinstance(boundaries, dict):
-                    raise RuntimeError(
-                        f"cannot close epoch {previous_epoch}: durable "
-                        "initialization boundaries are missing"
+                    self.skipped_epochs.add(previous_epoch)
+                else:
+                    boundaries = initialization["payload"].get(
+                        "epoch_boundaries"
                     )
-                previous_start = self._payload_datetime(
-                    boundaries.get("start_timestamp"),
-                    "epoch_boundaries.start_timestamp",
-                )
+                    if not isinstance(boundaries, dict):
+                        raise RuntimeError(
+                            f"cannot close epoch {previous_epoch}: durable "
+                            "initialization boundaries are missing"
+                        )
+                    previous_start = self._payload_datetime(
+                        boundaries.get("start_timestamp"),
+                        "epoch_boundaries.start_timestamp",
+                    )
             transition_time, _end, _close = get_current_epoch_times(
                 boundary_snapshot
             )
@@ -477,10 +520,11 @@ class EpochMonitor:
                 f"(settlement {previous_epoch} → {current_epoch})"
             )
             print("=" * 80)
-            self.pending_validation_ends.setdefault(
-                previous_epoch,
-                {"start": previous_start, "end": transition_time},
-            )
+            if previous_epoch not in self.skipped_epochs:
+                self.pending_validation_ends.setdefault(
+                    previous_epoch,
+                    {"start": previous_start, "end": transition_time},
+                )
 
         self.last_official_epoch = official_epoch
         self.last_epoch = current_epoch
@@ -504,6 +548,7 @@ class EpochMonitor:
         if (
             current_epoch not in self.initialized_epochs
             and current_epoch not in self.initializing_epochs
+            and current_epoch not in self.skipped_epochs
         ):
             self.initializing_epochs.add(current_epoch)
             asyncio.create_task(

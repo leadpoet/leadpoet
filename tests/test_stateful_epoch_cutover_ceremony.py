@@ -166,13 +166,13 @@ async def test_archive_boundary_discovery_rereads_exact_anchor(monkeypatch):
 @pytest.mark.parametrize(
     ("live", "eligible"),
     (
-        (_live(elapsed=299), True),
         (_live(elapsed=300), True),
-        (_live(elapsed=301), False),
+        (_live(elapsed=310), True),
+        (_live(elapsed=311), False),
         (_live(elapsed=0, next_epoch=True), False),
     ),
 )
-def test_first_epoch_restart_window_uses_the_block_300_deadline(
+def test_first_epoch_restart_window_uses_the_block_310_deadline(
     live,
     eligible,
 ):
@@ -184,12 +184,12 @@ def test_first_epoch_restart_window_uses_the_block_300_deadline(
     )
 
     assert status["eligible"] is eligible
-    assert status["latest_safe_epoch_block"] == 300
+    assert status["latest_safe_epoch_block"] == 310
     assert status["restart_start_epoch_block"] == live.epoch_block
     assert status["restart_start_captured"] is False
 
 
-def test_captured_start_before_300_remains_valid_after_300() -> None:
+def test_captured_start_before_310_remains_valid_after_310() -> None:
     cutover = _cutover()
     status = cutover_cli._live_initialization_window_status(
         cutover=cutover,

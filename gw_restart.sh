@@ -991,6 +991,7 @@ PY
     run_prepared_gateway_module \
       gateway.research_lab.stateful_epoch_cutover_cli_v1 \
       --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+      --validator-release-manifest "$GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST" \
       --use-attested-historical-predecessor
   )"
   printf '%s\n' "$CUTOVER_PREFLIGHT_REPORT"

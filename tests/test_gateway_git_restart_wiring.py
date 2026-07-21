@@ -130,7 +130,12 @@ def test_gateway_restart_cutover_hook_is_explicit_and_fail_closed() -> None:
     assert script.count(
         '--validator-release-manifest '
         '"$GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST"'
-    ) == 2
+    ) == 3
+    assert (
+        '--validator-release-manifest '
+        '"$GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST"'
+        in script[preflight:shutdown]
+    )
     assert (
         'load_validator_release_manifest_v2(sys.argv[1])'
         in script[preflight:shutdown]

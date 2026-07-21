@@ -22,6 +22,7 @@ GATEWAY_RESTART_PHASE="${GATEWAY_RESTART_PHASE:-prepare}"
 GATEWAY_STATEFUL_CUTOVER_CEREMONY="${GATEWAY_STATEFUL_CUTOVER_CEREMONY:-0}"
 GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS=120
 GATEWAY_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
+GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST="${GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
 GATEWAY_RESTART_START_PATH="/home/ec2-user/.config/leadpoet/restart-start-v1.json"
 GATEWAY_RESTART_LOCK_FILE="${GATEWAY_RESTART_LOCK_FILE:-/home/ec2-user/.config/leadpoet/gateway-restart.lock}"
 GATEWAY_RESTART_RECOVERY_LOCK_FILE="${GATEWAY_RESTART_RECOVERY_LOCK_FILE:-${GATEWAY_RESTART_LOCK_FILE}.recovery}"
@@ -970,6 +971,21 @@ if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
   echo "Validating the one-time receipt-backed cutover before production shutdown"
   GATEWAY_DEPLOY_STAGE="stateful_epoch_cutover_preflight"
   export GATEWAY_DEPLOY_STAGE
+  if [ ! -s "$GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST" ]; then
+    echo "ERROR: cutover validator V2 release manifest is unavailable" >&2
+    exit 1
+  fi
+  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" - \
+    "$GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST" <<'PY'
+import sys
+
+from gateway.research_lab.stateful_epoch_candidate_ingest_cli_v1 import (
+    load_validator_release_manifest_v2,
+)
+
+load_validator_release_manifest_v2(sys.argv[1])
+print("Cutover validator V2 release manifest is valid")
+PY
   CUTOVER_PREFLIGHT_REPORT="$(
     export SUPABASE_TIMEOUT_SECONDS="$GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS"
     run_prepared_gateway_module \
@@ -1352,6 +1368,7 @@ PY
     PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
       -m gateway.research_lab.stateful_epoch_cutover_cli_v1 \
       --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+      --validator-release-manifest "$GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST" \
       --apply \
       --use-attested-historical-predecessor \
       --confirm-mapping-hash "$CUTOVER_MAPPING_HASH" \
@@ -1385,6 +1402,7 @@ PY
       PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
         -m gateway.research_lab.stateful_epoch_cutover_cli_v1 \
         --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+        --validator-release-manifest "$GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST" \
         --activate-staged \
         --confirm-mapping-hash "$CUTOVER_MAPPING_HASH" \
         --confirm-cutover-authority-hash "$CUTOVER_AUTHORITY_HASH" \

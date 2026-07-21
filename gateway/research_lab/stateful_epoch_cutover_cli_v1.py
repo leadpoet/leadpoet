@@ -265,6 +265,9 @@ def _mixed_boot_verifier_from_release(
     *,
     nitro_verifier: Callable[..., Mapping[str, Any]] = verify_boot_identity_nitro,
     validator_pcr0_verifier: Optional[Callable[[str], Mapping[str, Any]]] = None,
+    validator_boot_verifier: Optional[
+        Callable[[Mapping[str, Any]], Mapping[str, Any]]
+    ] = None,
 ) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
     """Verify coordinator release boots and independently rebuilt validator boots."""
 
@@ -279,6 +282,8 @@ def _mixed_boot_verifier_from_release(
         if physical_role == "validator_weights":
             if service_role != WEIGHT_ROLE:
                 raise ValueError("cutover validator boot role is invalid")
+            if validator_boot_verifier is not None:
+                return validator_boot_verifier(identity)
             rebuilt = validator_pcr0_verifier(str(identity.get("pcr0") or ""))
             if not isinstance(rebuilt, Mapping) or not rebuilt.get("valid"):
                 raise ValueError(
@@ -334,10 +339,23 @@ def _mixed_boot_verifier_from_release(
 def build_cutover_mixed_boot_verifier_v1(
     release: Mapping[str, Any],
     *,
+    validator_release_manifest: Optional[Mapping[str, Any]] = None,
     parent_graphs: Sequence[Mapping[str, Any]] = (),
 ) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
     current = validate_release_manifest(release)
-    current_verifier = _mixed_boot_verifier_from_release(current)
+    validator_boot_verifier = None
+    if validator_release_manifest is not None:
+        from gateway.research_lab.stateful_epoch_candidate_ingest_cli_v1 import (
+            build_validator_release_boot_verifier_v1,
+        )
+
+        validator_boot_verifier = build_validator_release_boot_verifier_v1(
+            validator_release_manifest
+        )
+    current_verifier = _mixed_boot_verifier_from_release(
+        current,
+        validator_boot_verifier=validator_boot_verifier,
+    )
     if not parent_graphs:
         return current_verifier
     lineage = load_approved_release_lineage_v2(
@@ -371,6 +389,23 @@ def _load_gateway_release(path: Optional[Path]) -> Dict[str, Any]:
     except Exception as exc:
         raise StatefulEpochCutoverActivationError(
             "approved gateway V2 release manifest is invalid"
+        ) from exc
+
+
+def _load_validator_release(path: Optional[Path]) -> Dict[str, Any]:
+    if path is None:
+        raise StatefulEpochCutoverActivationError(
+            "approved validator V2 release manifest is unavailable"
+        )
+    try:
+        from gateway.research_lab.stateful_epoch_candidate_ingest_cli_v1 import (
+            load_validator_release_manifest_v2,
+        )
+
+        return load_validator_release_manifest_v2(Path(path))
+    except Exception as exc:
+        raise StatefulEpochCutoverActivationError(
+            "approved validator V2 release manifest is invalid"
         ) from exc
 
 
@@ -994,6 +1029,7 @@ async def activate_subnet_epoch_cutover_v1(
         Callable[[Mapping[str, Any]], Mapping[str, Any]]
     ] = None,
     release_manifest_path: Optional[Path] = None,
+    validator_release_manifest_path: Optional[Path] = None,
     validate_anchor: Callable[[SubnetEpochCutover], Awaitable[None]] = (
         _validate_official_archive_anchor
     ),
@@ -1032,7 +1068,10 @@ async def activate_subnet_epoch_cutover_v1(
         resolved_boot_verifier = boot_verifier
         if resolved_boot_verifier is None:
             resolved_boot_verifier = build_cutover_mixed_boot_verifier_v1(
-                _load_gateway_release(release_manifest_path)
+                _load_gateway_release(release_manifest_path),
+                validator_release_manifest=_load_validator_release(
+                    validator_release_manifest_path
+                ),
             )
         validate_receipt_graph(
             graph,
@@ -1281,6 +1320,9 @@ async def activate_subnet_epoch_cutover_v1(
         if resumed_boot_verifier is None:
             resumed_boot_verifier = build_cutover_mixed_boot_verifier_v1(
                 _load_gateway_release(release_manifest_path),
+                validator_release_manifest=_load_validator_release(
+                    validator_release_manifest_path
+                ),
                 parent_graphs=parent_graphs,
             )
         validate_receipt_graph(
@@ -1386,6 +1428,9 @@ async def activate_subnet_epoch_cutover_v1(
             release = _load_gateway_release(release_manifest_path)
             resolved_boot_verifier = build_cutover_mixed_boot_verifier_v1(
                 release,
+                validator_release_manifest=_load_validator_release(
+                    validator_release_manifest_path
+                ),
                 parent_graphs=parent_graphs,
             )
         execute_kwargs: Dict[str, Any] = {
@@ -1585,6 +1630,7 @@ async def activate_staged_subnet_epoch_cutover_v1(
         Callable[[Mapping[str, Any]], Mapping[str, Any]]
     ] = None,
     release_manifest_path: Optional[Path] = None,
+    validator_release_manifest_path: Optional[Path] = None,
     validate_anchor: Callable[[SubnetEpochCutover], Awaitable[None]] = (
         _validate_official_archive_anchor
     ),
@@ -1617,6 +1663,9 @@ async def activate_staged_subnet_epoch_cutover_v1(
     if resolved_boot_verifier is None:
         resolved_boot_verifier = build_cutover_mixed_boot_verifier_v1(
             _load_gateway_release(release_manifest_path),
+            validator_release_manifest=_load_validator_release(
+                validator_release_manifest_path
+            ),
             parent_graphs=(graph,),
         )
     validate_receipt_graph(
@@ -1725,6 +1774,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--release-manifest", type=Path)
+    parser.add_argument("--validator-release-manifest", type=Path)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true")
     mode.add_argument("--fence-before-boundary", action="store_true")
@@ -1756,6 +1806,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if (args.apply or args.activate_staged) and args.release_manifest is None:
         parser.error(
             "mutating cutover modes require an explicit --release-manifest"
+        )
+    if (
+        args.apply or args.activate_staged
+    ) and args.validator_release_manifest is None:
+        parser.error(
+            "mutating cutover modes require an explicit "
+            "--validator-release-manifest"
         )
     if (args.apply or args.activate_staged) and not args.confirm_all_writers_stopped:
         parser.error(
@@ -1831,6 +1888,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 cutover=cutover,
                 confirmed_cutover_authority_hash=args.confirm_cutover_authority_hash,
                 release_manifest_path=args.release_manifest,
+                validator_release_manifest_path=args.validator_release_manifest,
             )
         )
         print(json.dumps(report, sort_keys=True, separators=(",", ":")))
@@ -1841,6 +1899,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 cutover=cutover,
                 apply=bool(args.apply),
                 release_manifest_path=args.release_manifest,
+                validator_release_manifest_path=args.validator_release_manifest,
                 predecessor_kind=(
                     HISTORICAL_PREDECESSOR_KIND
                     if args.use_attested_historical_predecessor

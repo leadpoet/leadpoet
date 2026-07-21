@@ -1474,6 +1474,38 @@ async def test_cutover_mixed_boot_verifier_accepts_real_validator_coordinator_an
         verifier({**validator_boot, "commit_sha": "0" * 40})
 
 
+def test_cutover_mixed_boot_verifier_prefers_explicit_validator_release():
+    observed = []
+
+    def validator_boot_verifier(identity):
+        observed.append(dict(identity))
+        return {"verified": True, "authority": "six-independent-builds"}
+
+    def dynamic_cache_must_not_run(_pcr0):
+        raise AssertionError("cutover must not depend on the post-launch cache")
+
+    verifier = _mixed_boot_verifier_from_release(
+        {"roles": {}},
+        nitro_verifier=lambda identity, *, expected_pcr0: {
+            "verified": True,
+        },
+        validator_pcr0_verifier=dynamic_cache_must_not_run,
+        validator_boot_verifier=validator_boot_verifier,
+    )
+    identity = {
+        "role": WEIGHT_ROLE,
+        "physical_role": "validator_weights",
+        "commit_sha": COMMIT,
+        "pcr0": PCR0,
+    }
+
+    assert verifier(identity) == {
+        "verified": True,
+        "authority": "six-independent-builds",
+    }
+    assert observed == [identity]
+
+
 @pytest.mark.asyncio
 async def test_cutover_operator_dry_run_is_read_only_and_checks_high_water():
     payload, context, cutover, candidate, executor = (

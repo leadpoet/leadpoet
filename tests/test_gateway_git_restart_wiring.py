@@ -127,6 +127,14 @@ def test_gateway_restart_cutover_hook_is_explicit_and_fail_closed() -> None:
     assert '"attested_historical_finalization_v2"' not in script
     assert '--confirm-all-writers-stopped' in script
     assert '--confirm-stateful-release-prepared' in script
+    assert script.count(
+        '--validator-release-manifest '
+        '"$GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST"'
+    ) == 2
+    assert (
+        'load_validator_release_manifest_v2(sys.argv[1])'
+        in script[preflight:shutdown]
+    )
     assert 'report.get("status") != "stateful_active"' in script
     assert "GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS=120" in script
     assert script.count(

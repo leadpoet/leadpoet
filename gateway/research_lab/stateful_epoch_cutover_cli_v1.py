@@ -1141,6 +1141,7 @@ async def activate_subnet_epoch_cutover_v1(
             order_by=(("epoch_id", True),),
             batch_size=1,
             max_rows=1,
+            allow_partial=True,
         )
         if (
             not isinstance(rows, list)

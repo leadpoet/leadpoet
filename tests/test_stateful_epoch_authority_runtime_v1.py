@@ -1717,6 +1717,9 @@ async def test_cutover_operator_selects_latest_attested_historical_predecessor(
         ("epoch_id", "lte", 100),
     )
     assert historical_call["order_by"] == (("epoch_id", True),)
+    assert historical_call["batch_size"] == 1
+    assert historical_call["max_rows"] == 1
+    assert historical_call["allow_partial"] is True
     assert all(table != FINALIZED_ALLOCATION_VIEW for table, _ in selected)
 
     observed = {}

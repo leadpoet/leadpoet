@@ -194,7 +194,7 @@ from leadpoet_canonical.weights import (
 from leadpoet_canonical.chain import normalize_chain_weights
 from leadpoet_canonical.events import verify_log_entry
 from leadpoet_canonical.auditor_v2 import (
-    load_identity_cache,
+    fetch_locked_release_identity_cache,
     verify_attested_weight_authority_v2,
 )
 
@@ -886,7 +886,19 @@ class AuditorValidator:
         self.auditor_weight_protocol()
         v2_bundle = await self.fetch_attested_weights_v2(epoch_id)
         if isinstance(v2_bundle, dict):
-            verified = self.verify_attested_weights_v2(v2_bundle)
+            try:
+                identity_cache = await self._fetch_release_identity_cache(v2_bundle)
+            except Exception as exc:
+                logger.error(
+                    "auditor_v2_release_evidence_failed error_type=%s error=%s",
+                    type(exc).__name__,
+                    str(exc)[:200],
+                )
+                return None, "v2_invalid"
+            verified = self.verify_attested_weights_v2(
+                v2_bundle,
+                identity_cache=identity_cache,
+            )
             if verified is None:
                 return None, "v2_invalid"
             # A stale-but-genuine authority replays every check; bind the
@@ -914,20 +926,74 @@ class AuditorValidator:
             return None, "v2_absent"
         return None, "v2_unavailable"
 
-    def verify_attested_weights_v2(self, authority: Dict) -> Optional[Dict]:
-        """Verify finalized V2 authority against independent PCR0 builds."""
+    @staticmethod
+    def _authority_commits(authority: Dict) -> List[str]:
+        commits = set()
 
-        cache_file = str(os.environ.get("AUDITOR_INDEPENDENT_PCR0_CACHE_FILE", "") or "").strip()
-        if not cache_file:
+        def walk(value):
+            if isinstance(value, dict):
+                commit = str(value.get("commit_sha") or "").lower()
+                if (
+                    value.get("physical_role")
+                    and value.get("role")
+                    and re.fullmatch(r"[0-9a-f]{40}", commit)
+                ):
+                    commits.add(commit)
+                for child in value.values():
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+
+        walk(authority)
+        if not commits:
+            raise ValueError("V2 authority has no boot release commits")
+        return sorted(commits)
+
+    async def _fetch_release_identity_cache(self, authority: Dict) -> Dict:
+        entries = []
+        async with aiohttp.ClientSession(trust_env=False) as session:
+            for commit in self._authority_commits(authority):
+                url = f"{self.gateway_url}/weights/v2/release-evidence/{commit}"
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status != 200:
+                        raise RuntimeError(
+                            f"release evidence request failed with HTTP {response.status}"
+                        )
+                    evidence = await response.json()
+                cache = await asyncio.to_thread(
+                    fetch_locked_release_identity_cache,
+                    evidence,
+                )
+                entries.extend(cache["entries"])
+        unique = {}
+        for entry in entries:
+            key = (entry["physical_role"], entry["role"], entry["commit_sha"])
+            if key in unique and unique[key] != entry:
+                raise ValueError("independent release identities conflict")
+            unique[key] = entry
+        return {
+            "schema_version": "leadpoet.independent_pcr0_identities.v2",
+            "entries": list(unique.values()),
+        }
+
+    def verify_attested_weights_v2(
+        self,
+        authority: Dict,
+        *,
+        identity_cache: Optional[Dict] = None,
+    ) -> Optional[Dict]:
+        """Verify finalized V2 authority against independent PCR0 builds."""
+        if identity_cache is None:
             logger.error(
-                "auditor_v2_pcr0_cache_missing: set "
-                "AUDITOR_INDEPENDENT_PCR0_CACHE_FILE to the independently "
-                "rebuilt PCR0 identity cache; authoritative V2 verification "
-                "cannot run without it"
+                "auditor_v2_pcr0_cache_missing: automatic immutable release "
+                "evidence was not supplied"
             )
             return None
         try:
-            cache = load_identity_cache(Path(cache_file).expanduser())
             profile_file = Path(
                 os.environ.get(
                     "AUDITOR_CHAIN_SIGNING_PROFILE_FILE",
@@ -942,7 +1008,7 @@ class AuditorValidator:
             profile = json.loads(profile_file.read_text(encoding="utf-8"))
             verified = verify_attested_weight_authority_v2(
                 authority,
-                identity_cache=cache,
+                identity_cache=identity_cache,
                 chain_signing_profile=profile,
             )
             self._verify_stateful_bundle_epoch(verified)

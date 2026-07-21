@@ -82,9 +82,10 @@ def _fixed_public_cutover_authority_enabled(
 def _configured_cutover_service_authority_enabled() -> bool:
     """Return whether this process has an explicitly configured DB authority."""
 
-    from gateway.config import SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
-
-    return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+    return bool(
+        str(os.getenv("SUPABASE_URL") or "").strip()
+        and str(os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+    )
 
 
 def _cutover_authority_cache_scope(
@@ -95,9 +96,7 @@ def _cutover_authority_cache_scope(
     """Return a non-secret key preventing cache reuse across authorities."""
 
     if _configured_cutover_service_authority_enabled():
-        from gateway.config import SUPABASE_URL
-
-        return ("configured_service", str(SUPABASE_URL))
+        return ("configured_service", str(os.getenv("SUPABASE_URL") or ""))
     if _fixed_public_cutover_authority_enabled(
         network=network,
         netuid=netuid,
@@ -119,10 +118,11 @@ def _read_cutover_state_from_db_sync(
     netuid: int | str | None = None,
 ) -> dict:
     """Read and strictly normalize the singleton epoch namespace lifecycle."""
-    from gateway.config import SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
+    supabase_url = str(os.getenv("SUPABASE_URL") or "").strip()
+    service_role_key = str(os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
 
     try:
-        if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+        if supabase_url and service_role_key:
             from gateway.db.client import get_write_client
 
             client = get_write_client()
@@ -154,7 +154,7 @@ def _read_cutover_state_from_db_sync(
                 "durable epoch authority is not configured"
             )
 
-        if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+        if supabase_url and service_role_key:
             result = (
                 client
                 .table(_CUTOVER_STATE_TABLE)
@@ -347,9 +347,9 @@ def _validate_cutover_authority_sync(
             "configured cutover has not been explicitly activated after runtime verification"
         )
 
-    from gateway.config import SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
-
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    supabase_url = str(os.getenv("SUPABASE_URL") or "").strip()
+    service_role_key = str(os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+    if not supabase_url or not service_role_key:
         # The mapping hash is the canonical hash of the locally validated
         # manifest. SQL permits stateful_active only after the receipt-backed
         # cutover row and exact first initialization were staged atomically, so
@@ -362,7 +362,7 @@ def _validate_cutover_authority_sync(
 
     from supabase import create_client
 
-    client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    client = create_client(supabase_url, service_role_key)
     result = (
         client.table("research_lab_stateful_subnet_epoch_cutovers_v1")
         .select("mapping_hash,manifest_doc")

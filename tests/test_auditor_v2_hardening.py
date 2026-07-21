@@ -45,10 +45,16 @@ def test_verified_authority_must_match_requested_epoch_and_netuid(monkeypatch):
     async def fake_fetch(_epoch):
         return {"bundle": "raw"}
 
+    async def fake_identity_cache(_authority):
+        return {"schema_version": "leadpoet.independent_pcr0_identities.v2", "entries": []}
+
     stale = {"epoch_id": 24060, "netuid": 71, "uids": [], "weights_u16": []}
     monkeypatch.setattr(auditor, "fetch_attested_weights_v2", fake_fetch)
+    monkeypatch.setattr(auditor, "_fetch_release_identity_cache", fake_identity_cache)
     monkeypatch.setattr(
-        auditor, "verify_attested_weights_v2", lambda _b: dict(stale)
+        auditor,
+        "verify_attested_weights_v2",
+        lambda _b, **_kwargs: dict(stale),
     )
     verified, status = asyncio.run(
         auditor.fetch_verified_weight_authority(24065)
@@ -58,7 +64,9 @@ def test_verified_authority_must_match_requested_epoch_and_netuid(monkeypatch):
 
     fresh = {"epoch_id": 24065, "netuid": 71, "uids": [1], "weights_u16": [65535]}
     monkeypatch.setattr(
-        auditor, "verify_attested_weights_v2", lambda _b: dict(fresh)
+        auditor,
+        "verify_attested_weights_v2",
+        lambda _b, **_kwargs: dict(fresh),
     )
     verified, status = asyncio.run(
         auditor.fetch_verified_weight_authority(24065)
@@ -68,7 +76,9 @@ def test_verified_authority_must_match_requested_epoch_and_netuid(monkeypatch):
 
     wrong_net = {"epoch_id": 24065, "netuid": 72, "uids": [], "weights_u16": []}
     monkeypatch.setattr(
-        auditor, "verify_attested_weights_v2", lambda _b: dict(wrong_net)
+        auditor,
+        "verify_attested_weights_v2",
+        lambda _b, **_kwargs: dict(wrong_net),
     )
     verified, status = asyncio.run(
         auditor.fetch_verified_weight_authority(24065)

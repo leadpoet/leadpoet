@@ -32,7 +32,7 @@ import re
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -1448,6 +1448,85 @@ async def get_attested_weights_v2(netuid: int, epoch_id: int) -> Dict[str, Any]:
             detail="finalized v2 weight authority not found",
         )
     return authority
+
+
+@router.get("/v2/release-evidence/{commit_sha}")
+async def get_auditor_release_evidence_v2(commit_sha: str) -> Dict[str, Any]:
+    """Return short-lived links to one immutable six-build release channel."""
+
+    import boto3
+    from botocore.config import Config
+    from gateway.tee.release_channel_v2 import (
+        DEFAULT_BUCKET,
+        DEFAULT_PREFIX,
+        release_channel_key,
+    )
+
+    commit = str(commit_sha or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise HTTPException(status_code=422, detail="release commit is invalid")
+    try:
+        key = release_channel_key(commit, prefix=DEFAULT_PREFIX)
+        client = boto3.client(
+            "s3",
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "virtual"},
+            ),
+        )
+        head = await asyncio.to_thread(
+            client.head_object,
+            Bucket=DEFAULT_BUCKET,
+            Key=key,
+        )
+        retain_until = head.get("ObjectLockRetainUntilDate")
+        if (
+            str(head.get("ObjectLockMode") or "").upper() != "COMPLIANCE"
+            or not isinstance(retain_until, datetime)
+            or retain_until.astimezone(timezone.utc) <= datetime.now(timezone.utc)
+        ):
+            raise RuntimeError("release channel has no active COMPLIANCE lock")
+        version_id = str(head.get("VersionId") or "")
+        if not version_id:
+            raise RuntimeError("release channel version is unavailable")
+        params = {
+            "Bucket": DEFAULT_BUCKET,
+            "Key": key,
+            "VersionId": version_id,
+        }
+        get_url, head_url = await asyncio.gather(
+            asyncio.to_thread(
+                client.generate_presigned_url,
+                "get_object",
+                Params=params,
+                ExpiresIn=300,
+                HttpMethod="GET",
+            ),
+            asyncio.to_thread(
+                client.generate_presigned_url,
+                "head_object",
+                Params=params,
+                ExpiresIn=300,
+                HttpMethod="HEAD",
+            ),
+        )
+    except Exception as exc:
+        logger.warning(
+            "AUDITOR_V2_RELEASE_EVIDENCE_UNAVAILABLE commit=%s type=%s",
+            commit,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail="immutable V2 release evidence is unavailable",
+        ) from exc
+    return {
+        "schema_version": "leadpoet.auditor_release_evidence.v2",
+        "commit_sha": commit,
+        "release_channel_version_id": version_id,
+        "release_channel_get_url": str(get_url),
+        "release_channel_head_url": str(head_url),
+    }
 
 @router.post("/submit")
 async def submit_weights(submission: WeightSubmission) -> WeightSubmissionResponse:

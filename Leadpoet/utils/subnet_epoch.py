@@ -437,7 +437,7 @@ def read_subnet_epoch_snapshot(
             chain_millis = _scale_value(chain_moment, "Timestamp.Now")
             observed_at = datetime.fromtimestamp(
                 chain_millis / 1000, tz=timezone.utc
-            ).isoformat().replace("+00:00", "Z")
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
         except Exception as exc:
             raise SubnetEpochError(
                 "failed to read Timestamp.Now at the reference block"

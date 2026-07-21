@@ -228,7 +228,7 @@ class _Substrate:
         if module == "Timestamp":
             assert storage_function == "Now"
             assert params == []
-            return _Scale(1_752_707_100_000)
+            return _Scale(1_752_707_100_123)
         assert module == "SubtensorModule"
         assert params == [71]
         value = self.values[storage_function]

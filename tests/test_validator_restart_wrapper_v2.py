@@ -70,5 +70,16 @@ def test_cutover_preparation_stops_before_full_validator_and_preserves_start():
     )
     exit_prepare = script.index("exit 0", prepared)
     start_validator = script.index('echo "Starting validator"')
+    final_check = script.index(
+        'docker inspect -f \'{{.State.Running}}\' leadpoet-validator-main'
+    )
 
-    assert preserve < delete_start < hotkey < prepared < exit_prepare < start_validator
+    assert (
+        preserve
+        < hotkey
+        < prepared
+        < exit_prepare
+        < start_validator
+        < final_check
+        < delete_start
+    )

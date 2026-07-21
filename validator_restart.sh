@@ -387,7 +387,6 @@ if ! "$VALIDATOR_PYTHON_BIN" -m Leadpoet.utils.restart_epoch_gate \
 fi
 if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ] \
     && [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" != "1" ]; then
-  rm -f "$VALIDATOR_RESTART_START_PATH"
   unset LEADPOET_USE_CAPTURED_RESTART_START
 fi
 
@@ -526,5 +525,8 @@ if [ "$(docker inspect -f '{{.State.Running}}' leadpoet-validator-main)" != "tru
   echo "ERROR: validator coordinator failed its final restart-wrapper check" >&2
   docker logs --tail 160 leadpoet-validator-main >&2 || true
   exit 1
+fi
+if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ]; then
+  rm -f "$VALIDATOR_RESTART_START_PATH"
 fi
 echo "SUCCESS: authoritative V2 validator restart completed and verified"

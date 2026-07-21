@@ -326,8 +326,8 @@ reset_orphaned_docker_storage_if_needed() {
     for mount_path in "${docker_mounts[@]}"; do
       sudo nsenter -t 1 -m -- umount "$mount_path"
     done
-    sudo rm -rf /var/lib/docker
-    sudo mkdir -p /var/lib/docker
+    sudo nsenter -t 1 -m -- rm -rf /var/lib/docker
+    sudo nsenter -t 1 -m -- mkdir -p /var/lib/docker
     ensure_docker_ready
     sudo docker system df 2>/dev/null || true
   fi

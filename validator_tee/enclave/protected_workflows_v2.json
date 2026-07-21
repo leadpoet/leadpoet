@@ -122,7 +122,7 @@
       "symbol": "AuditorValidator.fetch_attested_weights_v2"
     },
     {
-      "ast_sha256": "sha256:0d6313373db0d366d17b497d8e4121dec51dc1c01d7721de660b62f12d7a9bb2",
+      "ast_sha256": "sha256:9ee674ca0c68b7fea13d61906d0bf6529bb0d93b757d0debb0074744bb7b9657",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.fetch_verified_weight_authority"
     },
@@ -137,7 +137,7 @@
       "symbol": "AuditorValidator.submit_weights_to_chain"
     },
     {
-      "ast_sha256": "sha256:ddec18e7525332d4e418b1aa71f108384b715a18f83e7c6bd33e09a0fc340b5b",
+      "ast_sha256": "sha256:888035344f1bbe5f4357534d80721d69048da37cfe61a06ae323abb165a9cb96",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.verify_attested_weights_v2"
     },
@@ -272,7 +272,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:1b3cc7601885065dc4ab2c92fcb113e8486ba663aeb7c417708d9840586e1445",
-  "protected_source_commit": "86d8549bd4aae7e300f981c44a6f6d08d5000d1c",
+  "manifest_hash": "sha256:8210e043e73cd67d5cbc18990a533b2def961cb7f22416d23197064f0bef647e",
+  "protected_source_commit": "8f757bd29cf654223ddea00fd6505a933fd84fb4",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

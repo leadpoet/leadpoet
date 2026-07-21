@@ -1700,10 +1700,12 @@ async def activate_staged_subnet_epoch_cutover_v1(
             "cutover is not staged for activation"
         )
     if state["lifecycle_state"] == "stateful_staged":
+        restart_start = _configured_restart_start(cutover)
         live_status = _live_initialization_window_status(
             cutover=cutover,
             snapshot_doc=cutover_row["first_snapshot_doc"],
             live=await load_live_snapshot(cutover),
+            restart_start=restart_start,
         )
         if not live_status["eligible"]:
             raise StatefulEpochCutoverActivationError(

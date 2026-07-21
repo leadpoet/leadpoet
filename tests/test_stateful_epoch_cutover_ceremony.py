@@ -217,6 +217,90 @@ def test_captured_start_does_not_authorize_the_next_epoch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_staged_activation_reuses_the_captured_restart_start(monkeypatch):
+    cutover = _cutover()
+    authority_hash = "sha256:" + "a" * 64
+    receipt_hash = "sha256:" + "b" * 64
+    captured = _live(elapsed=250)
+    observed = {}
+    state_reads = iter(("stateful_staged", "stateful_active"))
+    cutover_row = {
+        "cutover_authority_hash": authority_hash,
+        "cutover_receipt_hash": receipt_hash,
+        "first_snapshot_doc": _boundary().to_dict(cutover=cutover),
+    }
+    initialization = {"nonce": "nonce", "payload_hash": "sha256:" + "c" * 64}
+
+    async def select_exactly_one(*_args, **_kwargs):
+        return dict(cutover_row)
+
+    def window_status(*, restart_start, **_kwargs):
+        observed["restart_start"] = restart_start
+        return {"eligible": True}
+
+    def assert_state(*_args, **_kwargs):
+        return {"lifecycle_state": next(state_reads)}
+
+    async def select_rows(*_args, **_kwargs):
+        return [{}]
+
+    async def activate_rpc(_name, _params):
+        return [
+            {
+                "lifecycle_state": "stateful_active",
+                "mapping_hash": cutover.mapping_hash,
+                "cutover_authority_hash": authority_hash,
+                "cutover_receipt_hash": receipt_hash,
+                "initialization_nonce": initialization["nonce"],
+                "initialization_payload_hash": initialization["payload_hash"],
+            }
+        ]
+
+    monkeypatch.setattr(cutover_cli, "_select_exactly_one", select_exactly_one)
+    monkeypatch.setattr(
+        cutover_cli,
+        "_assert_existing_cutover",
+        lambda value, **_kwargs: value,
+    )
+    monkeypatch.setattr(
+        cutover_cli,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        cutover_cli,
+        "_validate_initialization",
+        lambda *_args, **_kwargs: dict(initialization),
+    )
+    monkeypatch.setattr(cutover_cli, "_assert_cutover_state", assert_state)
+    monkeypatch.setattr(
+        cutover_cli,
+        "_configured_restart_start",
+        lambda _cutover: captured,
+    )
+    monkeypatch.setattr(
+        cutover_cli,
+        "_live_initialization_window_status",
+        window_status,
+    )
+
+    report = await cutover_cli.activate_staged_subnet_epoch_cutover_v1(
+        cutover=cutover,
+        confirmed_cutover_authority_hash=authority_hash,
+        select_rows=select_rows,
+        load_graph=lambda _root: _async_value({}),
+        load_initialization=lambda _epoch: _async_value(initialization),
+        load_live_snapshot=lambda _cutover: _async_value(_live(elapsed=330)),
+        activate_rpc=activate_rpc,
+        boot_verifier=lambda _identity: {"verified": True},
+        validate_anchor=lambda _cutover: _async_value(None),
+    )
+
+    assert report["status"] == "stateful_active"
+    assert observed["restart_start"] == captured
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ("prepare", "activate"))
 async def test_activation_validates_archive_before_database_reads(operation):
     selected = False

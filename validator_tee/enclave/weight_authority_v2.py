@@ -113,7 +113,8 @@ class ValidatorWeightAuthorityV2:
             )
         except Exception as exc:
             raise ValidatorWeightAuthorityV2Error(
-                "finalized chain source is unavailable"
+                "finalized chain source is unavailable: %s: %s"
+                % (type(exc).__name__, str(exc))
             ) from exc
         calculation = dict(proposed_calculation)
         calculation["block"] = int(chain_snapshot["header"]["block"])

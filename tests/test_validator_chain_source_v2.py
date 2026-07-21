@@ -848,6 +848,119 @@ def test_finalized_source_rejects_cross_epoch_or_metagraph_block_mismatch():
         )
 
 
+def test_finalized_source_selects_just_finished_official_epoch():
+    current_block = STATEFUL_BLOCK + 360
+    current_last_epoch_block = STATEFUL_LAST_EPOCH_BLOCK + 360
+    target_block = current_last_epoch_block - 1
+    current_hash = "0x" + "cc" * 32
+    target_hash = "0x" + "dd" * 32
+    calls = []
+    storage_names = {
+        subnet_epoch_storage_key(storage_name=name, netuid=71): name
+        for name in ("SubnetEpochIndex", "LastEpochBlock")
+    }
+
+    def rpc_call(**kwargs):
+        calls.append(kwargs)
+        method = kwargs["method"]
+        params = kwargs["params"]
+        if method == "chain_getFinalizedHead":
+            result = current_hash
+        elif method == "chain_getHeader":
+            block = target_block if params == [target_hash] else current_block
+            result = {
+                "number": hex(block),
+                "stateRoot": "0x" + "12" * 32,
+                "parentHash": "0x" + "34" * 32,
+                "extrinsicsRoot": "0x" + "56" * 32,
+            }
+        elif method == "chain_getBlockHash":
+            assert params == [target_block]
+            result = target_hash
+        elif method == "state_getStorage":
+            name = storage_names[params[0]]
+            value = {
+                "SubnetEpochIndex": STATEFUL_SUBNET_EPOCH_INDEX + 1,
+                "LastEpochBlock": current_last_epoch_block,
+            }[name]
+            result = "0x" + int(value).to_bytes(8, "little").hex()
+        elif method == "state_call":
+            assert params[-1] == target_hash
+            result = _selective_result(target_block)
+        else:
+            raise AssertionError(method)
+        attempt = _attempt(
+            job_id=kwargs["job_id"],
+            purpose=kwargs["purpose"],
+            operation=kwargs["logical_operation_id"].removeprefix(
+                kwargs["job_id"] + ":"
+            ),
+            request_id=("%032x" % kwargs["request_id"]),
+        )
+        return {"result": result, "attempts": [attempt], "artifacts": []}
+
+    source = ValidatorChainSourceV2(
+        rpc_call=rpc_call,
+        archive_rpc_call=_archive_adapter(rpc_call),
+        epoch_authority_supplier=lambda: {
+            "mode": "stateful_v1",
+            "cutover_manifest": _stateful_cutover(),
+        },
+    )
+    observed = {}
+
+    def read_stateful(**kwargs):
+        observed.update(kwargs)
+        return {
+            "authority": {"settlement_epoch_id": STATEFUL_SETTLEMENT_EPOCH_ID},
+            "boundary_snapshot": {"settlement_epoch_id": STATEFUL_SETTLEMENT_EPOCH_ID},
+            "snapshot_job": "snapshot",
+            "boundary_job": "boundary",
+            "attempts": [],
+            "artifacts": [],
+            "next_request_id": 20,
+        }
+
+    source._read_stateful_epoch_authority = read_stateful
+    result = source.read_finalized_snapshot(
+        netuid=71,
+        epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
+    )
+
+    assert result["header"]["block"] == target_block
+    assert result["metagraph"]["block"] == target_block
+    assert observed["finalized_hash"] == target_hash.removeprefix("0x")
+    assert observed["historical_snapshot"] is True
+    metagraph_attempt = result["attempts"][-1]
+    assert metagraph_attempt["provider_id"] == "bittensor_archive"
+    assert metagraph_attempt["destination_host"] == CHAIN_ARCHIVE_ENDPOINT_HOST
+
+
+def test_finalized_source_rejects_more_than_one_epoch_of_drift():
+    calls, rpc_call = _stateful_rpc(
+        storage_updates={
+            "SubnetEpochIndex": STATEFUL_SUBNET_EPOCH_INDEX + 2,
+            "LastEpochBlock": STATEFUL_LAST_EPOCH_BLOCK + 720,
+        },
+        finalized_block=STATEFUL_BLOCK + 720,
+    )
+    with pytest.raises(
+        ValidatorChainSourceV2Error,
+        match="not current or just finalized",
+    ):
+        ValidatorChainSourceV2(
+            rpc_call=rpc_call,
+            archive_rpc_call=_archive_adapter(rpc_call),
+            epoch_authority_supplier=lambda: {
+                "mode": "stateful_v1",
+                "cutover_manifest": _stateful_cutover(),
+            },
+        ).read_finalized_snapshot(
+            netuid=71,
+            epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
+        )
+
+
 def test_transport_retries_malformed_authenticated_reply_without_duplicate_terminal_record():
     now = datetime(2026, 7, 10, tzinfo=timezone.utc)
     transport = EnclaveChainRpcTransportV2(

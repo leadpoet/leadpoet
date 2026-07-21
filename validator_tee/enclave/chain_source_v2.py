@@ -1085,10 +1085,134 @@ class ValidatorChainSourceV2:
         epoch_snapshot_job = None
         epoch_boundary_job = None
         next_request_id = 3
+        historical_snapshot = False
+        metagraph_call = self._call
         if epoch_configuration is None:
             raise ValidatorChainSourceV2Error(
                 "official SN71 epoch authority is unavailable"
             )
+
+        # Weight publication starts near the end of an epoch. The finalized
+        # head can move into the next official epoch while gateway evidence is
+        # being assembled. Select the just-finished epoch's final block from
+        # authenticated state instead of binding the old settlement to a new
+        # epoch head.
+        cutover = epoch_configuration.get("cutover_manifest")
+        if (
+            isinstance(epoch_configuration, Mapping)
+            and epoch_configuration.get("mode") == "stateful_v1"
+            and isinstance(cutover, Mapping)
+        ):
+            cutover_body_fields = (
+                "schema_version",
+                "epoch_scheme",
+                "network_genesis_hash",
+                "netuid",
+                "cutover_block",
+                "cutover_block_hash",
+                "first_subnet_epoch_index",
+                "first_settlement_epoch_id",
+                "last_legacy_epoch_id",
+            )
+            try:
+                cutover_body = {
+                    field: cutover[field] for field in cutover_body_fields
+                }
+                mapping_valid = (
+                    set(cutover) == set(cutover_body_fields) | {"mapping_hash"}
+                    and cutover.get("schema_version")
+                    == "leadpoet.subnet_epoch_cutover.v1"
+                    and cutover.get("epoch_scheme")
+                    == "bittensor.subnet_epoch_index.v1"
+                    and int(cutover["netuid"]) == int(netuid)
+                    and str(cutover.get("mapping_hash") or "").lower()
+                    == sha256_json(cutover_body)
+                )
+            except (KeyError, TypeError, ValueError):
+                mapping_valid = False
+            if mapping_valid:
+                if self._archive_rpc_call is None:
+                    raise ValidatorChainSourceV2Error(
+                        "archive RPC adapter is required for historical epoch state"
+                    )
+                selector_job = "subnet-epoch-selector:%d" % int(epoch_id)
+
+                def selector_call(
+                    storage_name: str,
+                    request_id: int,
+                ) -> int:
+                    result = self._call(
+                        method="state_getStorage",
+                        params=[
+                            subnet_epoch_storage_key(
+                                storage_name=storage_name,
+                                netuid=int(netuid),
+                            ),
+                            "0x" + finalized_hash,
+                        ],
+                        request_id=request_id,
+                        job_id=selector_job,
+                        purpose="validator.subnet_epoch_snapshot.v2",
+                        logical_operation_id=(
+                            selector_job + ":" + storage_name.lower()
+                        ),
+                    )
+                    all_attempts.extend(result["attempts"])
+                    all_artifacts.extend(result["artifacts"])
+                    return decode_subnet_epoch_storage(
+                        result["result"], storage_name=storage_name
+                    )
+
+                finalized_index = selector_call("SubnetEpochIndex", 3)
+                finalized_last_epoch_block = selector_call("LastEpochBlock", 4)
+                finalized_settlement_epoch = int(
+                    cutover["first_settlement_epoch_id"]
+                ) + (
+                    finalized_index - int(cutover["first_subnet_epoch_index"])
+                )
+                next_request_id = 5
+                if finalized_settlement_epoch == int(epoch_id) + 1:
+                    target_block = int(finalized_last_epoch_block) - 1
+                    if target_block < int(cutover["cutover_block"]):
+                        raise ValidatorChainSourceV2Error(
+                            "requested settlement epoch has no finalized predecessor"
+                        )
+                    target_hash_result = self._archive_call(
+                        method="chain_getBlockHash",
+                        params=[target_block],
+                        request_id=5,
+                        job_id=selector_job,
+                        purpose="validator.subnet_epoch_snapshot.v2",
+                        logical_operation_id=selector_job + ":predecessor-hash",
+                    )
+                    all_attempts.extend(target_hash_result["attempts"])
+                    all_artifacts.extend(target_hash_result["artifacts"])
+                    finalized_hash = normalize_raw_hash(
+                        target_hash_result["result"],
+                        "settlement predecessor block hash",
+                    )
+                    target_header_result = self._archive_call(
+                        method="chain_getHeader",
+                        params=["0x" + finalized_hash],
+                        request_id=6,
+                        job_id=selector_job,
+                        purpose="validator.subnet_epoch_snapshot.v2",
+                        logical_operation_id=selector_job + ":predecessor-header",
+                    )
+                    all_attempts.extend(target_header_result["attempts"])
+                    all_artifacts.extend(target_header_result["artifacts"])
+                    header = parse_finalized_header(target_header_result["result"])
+                    if int(header["block"]) != target_block:
+                        raise ValidatorChainSourceV2Error(
+                            "settlement predecessor header differs"
+                        )
+                    historical_snapshot = True
+                    metagraph_call = self._archive_call
+                    next_request_id = 7
+                elif finalized_settlement_epoch != int(epoch_id):
+                    raise ValidatorChainSourceV2Error(
+                        "requested settlement epoch is not current or just finalized"
+                    )
         stateful = self._read_stateful_epoch_authority(
             configuration=epoch_configuration,
             finalized_hash=finalized_hash,
@@ -1097,6 +1221,7 @@ class ValidatorChainSourceV2:
             settlement_epoch_id=int(epoch_id),
             chain_job=chain_job,
             request_id_start=next_request_id,
+            historical_snapshot=historical_snapshot,
         )
         epoch_authority = stateful["authority"]
         epoch_boundary = stateful["boundary_snapshot"]
@@ -1106,7 +1231,7 @@ class ValidatorChainSourceV2:
         all_artifacts.extend(stateful["artifacts"])
         next_request_id = int(stateful["next_request_id"])
 
-        metagraph_result = self._call(
+        metagraph_result = metagraph_call(
             method="state_call",
             params=[
                 CHAIN_RPC_METHOD,

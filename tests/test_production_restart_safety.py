@@ -37,8 +37,8 @@ def _snapshot(epoch_block: int) -> SubnetEpochSnapshot:
     )
 
 
-@pytest.mark.parametrize("epoch_block", [0, 300, 310])
-def test_restart_gate_accepts_official_epoch_block_at_or_before_310(
+@pytest.mark.parametrize("epoch_block", [0, 300, 315])
+def test_restart_gate_accepts_official_epoch_block_at_or_before_315(
     monkeypatch: pytest.MonkeyPatch,
     epoch_block: int,
 ) -> None:
@@ -50,25 +50,25 @@ def test_restart_gate_accepts_official_epoch_block_at_or_before_310(
 
     result = verify_restart_epoch_window(object(), netuid=71)
 
-    assert MAXIMUM_RESTART_EPOCH_BLOCK == 310
+    assert MAXIMUM_RESTART_EPOCH_BLOCK == 315
     assert result["epoch_block"] == epoch_block
     assert result["restart_allowed"] is True
 
 
-def test_restart_gate_rejects_official_epoch_block_after_310(
+def test_restart_gate_rejects_official_epoch_block_after_315(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         restart_epoch_gate,
         "read_subnet_epoch_snapshot",
-        lambda subtensor, *, netuid: _snapshot(311),
+        lambda subtensor, *, netuid: _snapshot(316),
     )
 
-    with pytest.raises(RestartEpochGateError, match="observed 311"):
+    with pytest.raises(RestartEpochGateError, match="observed 316"):
         verify_restart_epoch_window(object(), netuid=71)
 
 
-def test_captured_restart_start_is_not_rechecked_after_block_310(
+def test_captured_restart_start_is_not_rechecked_after_block_315(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -76,7 +76,7 @@ def test_captured_restart_start_is_not_rechecked_after_block_310(
     current = _snapshot(330)
     report = {
         "schema_version": "leadpoet.restart_epoch_start.v1",
-        "maximum_restart_epoch_block": 310,
+        "maximum_restart_epoch_block": 315,
         "restart_allowed": True,
         "snapshot": captured.to_dict(),
     }
@@ -184,7 +184,7 @@ def test_gateway_captures_start_gate_and_validator_gates_before_shutdown() -> No
     assert validator_gate < validator_shutdown
     assert '--captured-report "$GATEWAY_RESTART_START_PATH"' in gateway
     assert '--captured-report "$VALIDATOR_RESTART_START_PATH"' in validator
-    assert "MAXIMUM_RESTART_EPOCH_BLOCK = 310" in (
+    assert "MAXIMUM_RESTART_EPOCH_BLOCK = 315" in (
         ROOT / "Leadpoet" / "utils" / "restart_epoch_gate.py"
     ).read_text(encoding="utf-8")
     assert "--maximum" not in gateway

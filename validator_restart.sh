@@ -261,16 +261,60 @@ export VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_DEPLOY_SHA"
 export GITHUB_SHA="$VALIDATOR_DEPLOY_SHA"
 export GIT_COMMIT="$VALIDATOR_DEPLOY_SHA"
 export LEADPOET_WRAPPER_ACTIVE=1
+
+case "$VALIDATOR_USE_CAPTURED_RESTART_START" in
+  0|1) ;;
+  *)
+    echo "ERROR: LEADPOET_USE_CAPTURED_RESTART_START must be 0 or 1" >&2
+    exit 1
+    ;;
+esac
+case "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" in
+  0|1) ;;
+  *)
+    echo "ERROR: VALIDATOR_STATEFUL_CUTOVER_PREPARE_ONLY must be 0 or 1" >&2
+    exit 1
+    ;;
+esac
+if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" = "1" ] \
+    && [ "$VALIDATOR_USE_CAPTURED_RESTART_START" != "1" ]; then
+  echo "ERROR: stateful cutover enclave preparation requires a captured restart start" >&2
+  exit 1
+fi
+if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ]; then
+  test -s "$VALIDATOR_RESTART_START_PATH" || {
+    echo "ERROR: captured validator restart start is missing" >&2
+    exit 1
+  }
+  echo "Resuming the official restart start captured at operator invocation"
+else
+  echo "Capturing the official subnet restart start before release acquisition"
+  "$VALIDATOR_PYTHON_BIN" -m Leadpoet.utils.restart_epoch_gate \
+    --network "${VALIDATOR_SUBTENSOR_NETWORK:-finney}" \
+    --netuid "${VALIDATOR_NETUID:-71}" \
+    --capture-output "$VALIDATOR_RESTART_START_PATH"
+  VALIDATOR_USE_CAPTURED_RESTART_START=1
+fi
+
 echo "Acquiring the independently built V2 release channel"
-if ! python3 -m gateway.tee.release_channel_v2 \
-    --ensure \
-    --expected-commit "$VALIDATOR_DEPLOY_SHA" \
-    --bucket "$VALIDATOR_V2_RELEASE_BUCKET" \
-    --prefix "$VALIDATOR_V2_RELEASE_PREFIX" \
-    --gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
-    --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST" \
-    --lineage-output "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
-    --lineage-repository "$VALIDATOR_ROOT"; then
+VALIDATOR_V2_RELEASE_READY=0
+for attempt in $(seq 1 300); do
+  if python3 -m gateway.tee.release_channel_v2 \
+      --ensure \
+      --expected-commit "$VALIDATOR_DEPLOY_SHA" \
+      --bucket "$VALIDATOR_V2_RELEASE_BUCKET" \
+      --prefix "$VALIDATOR_V2_RELEASE_PREFIX" \
+      --gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+      --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST" \
+      --lineage-output "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
+      --lineage-repository "$VALIDATOR_ROOT"; then
+    VALIDATOR_V2_RELEASE_READY=1
+    break
+  fi
+  echo "Approved V2 release is not published yet; waiting inside the valid validator restart invocation (${attempt}/300)"
+  sleep 12
+done
+if [ "$VALIDATOR_V2_RELEASE_READY" != "1" ]; then
   echo "ERROR: independently approved V2 release is not published for $VALIDATOR_DEPLOY_SHA" >&2
   echo "Validator remains running; production shutdown has not started." >&2
   exit 75
@@ -348,45 +392,15 @@ fi
 VALIDATOR_RESTART_GATE_ARGS=(
   --network "${VALIDATOR_SUBTENSOR_NETWORK:-finney}"
   --netuid "${VALIDATOR_NETUID:-71}"
+  --captured-report "$VALIDATOR_RESTART_START_PATH"
 )
-case "$VALIDATOR_USE_CAPTURED_RESTART_START" in
-  0|1) ;;
-  *)
-    echo "ERROR: LEADPOET_USE_CAPTURED_RESTART_START must be 0 or 1" >&2
-    exit 1
-    ;;
-esac
-case "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" in
-  0|1) ;;
-  *)
-    echo "ERROR: VALIDATOR_STATEFUL_CUTOVER_PREPARE_ONLY must be 0 or 1" >&2
-    exit 1
-    ;;
-esac
-if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" = "1" ] \
-    && [ "$VALIDATOR_USE_CAPTURED_RESTART_START" != "1" ]; then
-  echo "ERROR: stateful cutover enclave preparation requires a captured restart start" >&2
-  exit 1
-fi
-if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ]; then
-  test -s "$VALIDATOR_RESTART_START_PATH" || {
-    echo "ERROR: captured validator restart start is missing" >&2
-    exit 1
-  }
-  echo "Validating the official restart start captured at operator invocation"
-  VALIDATOR_RESTART_GATE_ARGS+=(
-    --captured-report "$VALIDATOR_RESTART_START_PATH"
-  )
-else
-  echo "Verifying official subnet restart window immediately before shutdown"
-fi
+echo "Validating the official restart start captured at operator invocation"
 if ! "$VALIDATOR_PYTHON_BIN" -m Leadpoet.utils.restart_epoch_gate \
     "${VALIDATOR_RESTART_GATE_ARGS[@]}"; then
   echo "Validator remains running; production shutdown has not started." >&2
   exit 75
 fi
-if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ] \
-    && [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" != "1" ]; then
+if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" != "1" ]; then
   unset LEADPOET_USE_CAPTURED_RESTART_START
 fi
 

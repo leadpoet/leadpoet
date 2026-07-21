@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import http.client
 import json
 import os
+import re
 import socket
 import ssl
 import time
@@ -901,6 +902,7 @@ class ValidatorChainSourceV2:
         *,
         cutover_manifest: Mapping[str, Any],
         settlement_epoch_id: int,
+        capture_scope: str,
     ) -> Dict[str, Any]:
         """Capture a proposed stateful cutover without activating stateful mode.
 
@@ -922,6 +924,12 @@ class ValidatorChainSourceV2:
             raise ValidatorChainSourceV2Error(
                 "candidate settlement epoch is invalid"
             )
+        if not isinstance(capture_scope, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", capture_scope
+        ):
+            raise ValidatorChainSourceV2Error(
+                "candidate capture scope is invalid"
+            )
         configuration = {
             "mode": "stateful_v1",
             "cutover_manifest": dict(cutover_manifest),
@@ -935,7 +943,10 @@ class ValidatorChainSourceV2:
             raise ValidatorChainSourceV2Error(
                 "candidate cutover block is invalid"
             )
-        current_job = "subnet-epoch-capture-current:%d" % settlement_epoch_id
+        current_job = "subnet-epoch-capture-current:%d:%s" % (
+            settlement_epoch_id,
+            capture_scope.removeprefix("sha256:"),
+        )
         attempts = []
         artifacts = []
 

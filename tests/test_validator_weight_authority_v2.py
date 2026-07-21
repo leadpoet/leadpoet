@@ -555,11 +555,12 @@ def _fixture(*, category_output_override=None, stateful=False):
             return value
 
         def capture_stateful_epoch_boundary(
-            self, *, cutover_manifest, settlement_epoch_id
+            self, *, cutover_manifest, settlement_epoch_id, capture_scope
         ):
             assert stateful is True
             assert settlement_epoch_id == 100
             assert cutover_manifest["first_settlement_epoch_id"] == 100
+            assert capture_scope == validator_boot["boot_identity_hash"]
             value = self.read_finalized_snapshot(netuid=71, epoch_id=100)
             capture_attempts = [
                 item

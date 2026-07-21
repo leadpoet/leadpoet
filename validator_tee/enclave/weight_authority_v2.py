@@ -356,6 +356,7 @@ class ValidatorWeightAuthorityV2:
             capture = self._chain_source.capture_stateful_epoch_boundary(
                 cutover_manifest=dict(manifest),
                 settlement_epoch_id=settlement_epoch_id,
+                capture_scope=str(boot["boot_identity_hash"]),
             )
         except Exception as exc:
             raise ValidatorWeightAuthorityV2Error(

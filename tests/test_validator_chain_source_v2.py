@@ -408,6 +408,7 @@ def test_explicit_boundary_capture_proves_historical_cutover():
     result = source.capture_stateful_epoch_boundary(
         cutover_manifest=cutover,
         settlement_epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
+        capture_scope="sha256:" + "9" * 64,
     )
 
     assert result["epoch_boundary"]["current_block"] == STATEFUL_LAST_EPOCH_BLOCK
@@ -420,6 +421,13 @@ def test_explicit_boundary_capture_proves_historical_cutover():
     assert result["header"]["block"] == STATEFUL_BLOCK
     assert result["jobs"]["subnet_epoch_snapshot"].startswith(
         "subnet-epoch-capture-current:"
+    )
+    assert result["jobs"]["subnet_epoch_snapshot"].endswith("9" * 64)
+    assert all(
+        attempt["logical_operation_id"].startswith(
+            result["jobs"]["subnet_epoch_snapshot"] + ":"
+        )
+        for attempt in result["attempts"]
     )
     assert result["jobs"]["subnet_epoch_boundary"] == result["jobs"][
         "subnet_epoch_snapshot"
@@ -455,6 +463,7 @@ def test_explicit_boundary_capture_rejects_manifest_block_hash_mismatch():
         ).capture_stateful_epoch_boundary(
             cutover_manifest=cutover,
             settlement_epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
+            capture_scope="sha256:" + "9" * 64,
         )
 
 
@@ -474,6 +483,7 @@ def test_explicit_boundary_capture_rejects_an_unfinalized_boundary():
         ).capture_stateful_epoch_boundary(
             cutover_manifest=_stateful_cutover(),
             settlement_epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
+            capture_scope="sha256:" + "9" * 64,
         )
 
 

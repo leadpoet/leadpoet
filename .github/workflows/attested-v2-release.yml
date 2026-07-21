@@ -65,7 +65,7 @@ jobs:
           python3 gateway/tee/host_memory_guard_v2.py \
             --cleanup-disposable-tests \
             --minimum-available-mib 4096 \
-            --watch-parent "$BASHPID" \
+            --watch-parent "$$" \
             --interval-seconds 5 &
           HOST_MEMORY_GUARD_PID="$!"
           trap 'kill "$HOST_MEMORY_GUARD_PID" >/dev/null 2>&1 || true' EXIT

@@ -124,4 +124,5 @@ def test_gateway_restart_and_attestation_wire_the_memory_guard() -> None:
     assert "--minimum-available-mib 16384" in restart
     assert "--minimum-available-mib 4096" in restart
     assert "Guard gateway builder host memory" in workflow
-    assert "--watch-parent \"$BASHPID\"" in workflow
+    assert "--watch-parent \"$$\"" in workflow
+    assert "$BASHPID" not in workflow

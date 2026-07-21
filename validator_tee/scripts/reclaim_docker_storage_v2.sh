@@ -121,6 +121,30 @@ sudo systemctl stop docker.service docker.socket containerd.service
 sudo pkill -TERM -f '^/usr/bin/containerd-shim-runc-v2 -namespace moby ' 2>/dev/null || true
 sleep 2
 sudo pkill -KILL -f '^/usr/bin/containerd-shim-runc-v2 -namespace moby ' 2>/dev/null || true
+
+# Stale overlay mounts can survive daemon shutdown even though every guarded
+# runtime inventory above is empty. Unmount only descendants of the two exact
+# validated data roots, deepest paths first, and refuse a lazy/forced unmount.
+mapfile -t STALE_MOUNTS < <(
+  findmnt -rn -o TARGET \
+    | awk -v docker_root="$DOCKER_ROOT/" -v containerd_root="$CONTAINERD_ROOT/" \
+        'index($0, docker_root) == 1 || index($0, containerd_root) == 1' \
+    | awk '{ print length($0), $0 }' \
+    | sort -rn \
+    | cut -d' ' -f2-
+)
+for mount_target in "${STALE_MOUNTS[@]}"; do
+  echo "Unmounting stale empty-runtime mount: $mount_target"
+  sudo umount "$mount_target"
+done
+if findmnt -rn -o TARGET \
+    | awk -v docker_root="$DOCKER_ROOT/" -v containerd_root="$CONTAINERD_ROOT/" \
+        'index($0, docker_root) == 1 || index($0, containerd_root) == 1' \
+    | grep -q .; then
+  echo "ERROR: stale Docker/containerd mounts remain after guarded unmount" >&2
+  exit 1
+fi
+
 sudo rm -rf --one-file-system "$DOCKER_ROOT"
 sudo rm -rf --one-file-system "$CONTAINERD_ROOT"
 sudo install -d -m 0711 -o root -g root "$DOCKER_ROOT"

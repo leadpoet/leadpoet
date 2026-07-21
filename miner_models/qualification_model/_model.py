@@ -784,6 +784,15 @@ async def search_urls_for_event(
 # VERIFY + SCORE — production 3-stage verifier + production scorer.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _icp_employee_bucket(icp: dict) -> str:
+    """ICPs may carry one employee bucket or a list of acceptable buckets;
+    the submission schema takes exactly one."""
+    ec = icp.get("employee_count") or "1-50"
+    if isinstance(ec, (list, tuple)):
+        ec = str(ec[0]) if ec else "1-50"
+    return str(ec)
+
+
 async def verify_and_score_lead(
     client: httpx.AsyncClient,
     event: dict,
@@ -832,7 +841,7 @@ async def verify_and_score_lead(
         "company_linkedin": linkedin,
         "industry": icp.get("industry") or "Other",
         "sub_industry": icp.get("sub_industry") or "",
-        "employee_count": icp.get("employee_count") or "1-50",
+        "employee_count": _icp_employee_bucket(icp),
         "company_stage": icp.get("company_stage") or "",
         "country": icp.get("country") or "United States",
         "state": "",
@@ -858,7 +867,7 @@ async def verify_and_score_lead(
         sub_industry=icp.get("sub_industry") or "",
         target_roles=[],
         target_seniority="",
-        employee_count=icp.get("employee_count") or "1-50",
+        employee_count=_icp_employee_bucket(icp),
         company_stage=icp.get("company_stage") or "",
         geography=icp.get("geography") or "United States",
         country=icp.get("country") or "United States",

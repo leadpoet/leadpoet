@@ -9,6 +9,7 @@ Environment variables should be set in .env file in project root.
 
 import os
 import re
+import sys
 from pathlib import Path
 
 # Load environment variables from .env file (if dotenv available)
@@ -53,7 +54,11 @@ def _load_gateway_env_file(path: Path) -> None:
         loaded += 1
 
     if loaded:
-        print(f"Loaded {loaded} fallback env var(s) from {path}", flush=True)
+        print(
+            f"Loaded {loaded} fallback env var(s) from {path}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 _gateway_env_file = os.getenv("GATEWAY_ENV_FILE", "/home/ec2-user/.config/leadpoet/gateway.env")

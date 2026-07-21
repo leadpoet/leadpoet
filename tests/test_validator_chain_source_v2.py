@@ -713,6 +713,19 @@ def test_stateful_boundary_search_uses_index_transition_not_reset_anchor():
     assert result["epoch_boundary"]["current_block"] == boundary_block
     assert result["epoch_boundary"]["last_epoch_block"] == boundary_block
     assert result["epoch_boundary"]["subnet_epoch_index"] == current_index
+    selector_job = "subnet-epoch-selector:%d" % (first_settlement + 1)
+    assert result["jobs"]["subnet_epoch_snapshot"] == selector_job
+    epoch_jobs = {
+        result["jobs"]["subnet_epoch_snapshot"],
+        result["jobs"]["subnet_epoch_boundary"],
+    }
+    epoch_attempts = [
+        attempt
+        for attempt in result["attempts"]
+        if attempt["purpose"] == "validator.subnet_epoch_snapshot.v2"
+    ]
+    assert epoch_attempts
+    assert {attempt["job_id"] for attempt in epoch_attempts} <= epoch_jobs
     probed_blocks = {
         int(item["params"][1], 16)
         for item in calls
@@ -931,6 +944,18 @@ def test_finalized_source_selects_just_finished_official_epoch():
     assert result["metagraph"]["block"] == target_block
     assert observed["finalized_hash"] == target_hash.removeprefix("0x")
     assert observed["historical_snapshot"] is True
+    assert observed["snapshot_job_override"] == (
+        "subnet-epoch-selector:%d" % STATEFUL_SETTLEMENT_EPOCH_ID
+    )
+    selector_attempts = [
+        attempt
+        for attempt in result["attempts"]
+        if attempt["purpose"] == "validator.subnet_epoch_snapshot.v2"
+    ]
+    assert selector_attempts
+    assert {
+        attempt["job_id"] for attempt in selector_attempts
+    } == {observed["snapshot_job_override"]}
     metagraph_attempt = result["attempts"][-1]
     assert metagraph_attempt["provider_id"] == "bittensor_archive"
     assert metagraph_attempt["destination_host"] == CHAIN_ARCHIVE_ENDPOINT_HOST

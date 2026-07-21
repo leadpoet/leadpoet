@@ -1084,6 +1084,7 @@ class ValidatorChainSourceV2:
         epoch_boundary = None
         epoch_snapshot_job = None
         epoch_boundary_job = None
+        selector_job = None
         next_request_id = 3
         historical_snapshot = False
         metagraph_call = self._call
@@ -1135,6 +1136,11 @@ class ValidatorChainSourceV2:
                     raise ValidatorChainSourceV2Error(
                         "archive RPC adapter is required for historical epoch state"
                     )
+                # Selection and the resulting exact state reads are one
+                # measured operation. Keeping them in one receipt scope makes
+                # every authenticated selector attempt part of the snapshot
+                # receipt instead of leaving valid transport evidence
+                # unclaimed in the final authority graph.
                 selector_job = "subnet-epoch-selector:%d" % int(epoch_id)
 
                 def selector_call(
@@ -1222,6 +1228,7 @@ class ValidatorChainSourceV2:
             chain_job=chain_job,
             request_id_start=next_request_id,
             historical_snapshot=historical_snapshot,
+            snapshot_job_override=selector_job,
         )
         epoch_authority = stateful["authority"]
         epoch_boundary = stateful["boundary_snapshot"]

@@ -952,10 +952,52 @@ async def _assert_graph_durable(
             "receipt graph persistence acknowledgment differs"
         )
     reloaded = await load_graph(str(graph["root_receipt_hash"]))
+    canonical_expected = {
+        **dict(graph),
+        "boot_identities": sorted(
+            graph["boot_identities"],
+            key=lambda item: item["boot_identity_hash"],
+        ),
+        "receipts": sorted(
+            graph["receipts"],
+            key=lambda item: item["receipt_hash"],
+        ),
+        "transport_attempts": sorted(
+            graph["transport_attempts"],
+            key=lambda item: item["attempt_hash"],
+        ),
+        "host_operations": sorted(
+            graph["host_operations"],
+            key=lambda item: item["request"]["request_hash"],
+        ),
+    }
+    canonical_reloaded = (
+        {
+            **dict(reloaded),
+            "boot_identities": sorted(
+                reloaded["boot_identities"],
+                key=lambda item: item["boot_identity_hash"],
+            ),
+            "receipts": sorted(
+                reloaded["receipts"],
+                key=lambda item: item["receipt_hash"],
+            ),
+            "transport_attempts": sorted(
+                reloaded["transport_attempts"],
+                key=lambda item: item["attempt_hash"],
+            ),
+            "host_operations": sorted(
+                reloaded["host_operations"],
+                key=lambda item: item["request"]["request_hash"],
+            ),
+        }
+        if isinstance(reloaded, Mapping)
+        else None
+    )
     if (
         not isinstance(reloaded, Mapping)
         or reloaded.get("root_receipt_hash") != graph.get("root_receipt_hash")
-        or sha256_json(dict(reloaded)) != expected_hash
+        or sha256_json(canonical_reloaded) != sha256_json(canonical_expected)
     ):
         raise StatefulEpochAuthorityStoreError("receipt graph readback differs")
     return expected_hash

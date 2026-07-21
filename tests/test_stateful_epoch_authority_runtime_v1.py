@@ -1009,6 +1009,34 @@ async def test_candidate_duplicate_conflict_and_graph_readback_tamper_fail_close
 
 
 @pytest.mark.asyncio
+async def test_candidate_graph_readback_accepts_equivalent_member_order():
+    cutover = _cutover()
+    snapshot_doc = _snapshot(cutover=cutover)
+    envelope, *_ = _capture_evidence(snapshot_doc)
+    auth = _candidate_auth(envelope, cutover)
+    store = _MemoryStore()
+
+    async def reordered_load(root):
+        loaded = await store.load_graph(root)
+        loaded["transport_attempts"] = list(
+            reversed(loaded["transport_attempts"])
+        )
+        return loaded
+
+    stored = await persist_pre_cutover_candidate_v1(
+        envelope,
+        cutover=cutover.to_dict(),
+        **auth,
+        persist_graph=store.persist_graph,
+        load_graph=reordered_load,
+        insert=store.insert,
+        select=store.select,
+    )
+
+    assert stored["snapshot_hash"]
+
+
+@pytest.mark.asyncio
 async def test_candidate_readback_accepts_equivalent_postgres_timestamptz_format():
     cutover = _cutover()
     snapshot_doc = _snapshot(cutover=cutover)

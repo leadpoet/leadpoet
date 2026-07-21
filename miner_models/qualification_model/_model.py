@@ -12,7 +12,7 @@ Pipeline (identical for every ICP):
      Descriptions are framed in the ICP's industry language to reduce the production
      scorer's semantic-mapping work.
 
-  3. URL SEARCH — Exa keyword search biased to two paths:
+  3. URL SEARCH — SERP keyword search biased to two paths:
        site:<company-domain> {headline}            (the company's own newsroom)
        {company} {headline} site:businesswire.com OR site:prnewswire.com OR ...
 
@@ -285,27 +285,48 @@ def parse_sonar_json(text: str) -> dict:
 # Exa primitives.
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def exa_keyword_search(
+# SERP provider allows ~100 concurrent requests account-wide, shared with the
+# verifier's scrape traffic — throttle URL discovery so an ICP with many events
+# cannot monopolize the account budget. The semaphore is created per event
+# loop: a harness may drive each ICP through its own asyncio.run(), and an
+# asyncio primitive bound to a finished loop raises on reuse.
+SERP_SEARCH_CONCURRENCY = 12
+_SERP_SEMS: dict[int, asyncio.Semaphore] = {}
+
+
+def _serp_search_sem() -> asyncio.Semaphore:
+    loop_key = id(asyncio.get_running_loop())
+    sem = _SERP_SEMS.get(loop_key)
+    if sem is None:
+        sem = asyncio.Semaphore(SERP_SEARCH_CONCURRENCY)
+        _SERP_SEMS[loop_key] = sem
+    return sem
+
+
+async def serp_keyword_search(
     client: httpx.AsyncClient,
     query: str,
     n: int = 3,
 ) -> list[str]:
-    """Exa keyword search → list of URLs. Used for per-event URL discovery."""
-    body = {"query": query, "numResults": n, "type": "keyword"}
+    """SERP keyword search → list of URLs. Used for per-event URL discovery.
+
+    These are literal keyword queries (``site:`` operators), so they belong on
+    a SERP provider; the semantic news search stays on the neural provider.
+    """
+    key = os.environ.get("SCRAPINGDOG_API_KEY", "")
+    if not key:
+        return []
     try:
-        resp = await client.post(
-            "https://api.exa.ai/search",
-            headers={"x-api-key": os.environ.get("EXA_API_KEY", "")},
-            json=body,
+        resp = await client.get(
+            "https://api.scrapingdog.com/google",
+            params={"api_key": key, "query": query, "results": n},
             timeout=20,
         )
         if resp.status_code != 200:
             return []
-        return [
-            r.get("url", "")
-            for r in resp.json().get("results", [])
-            if r.get("url")
-        ]
+        data = resp.json()
+        results = data.get("organic_results", data.get("organic_data", [])) or []
+        return [r.get("link", "") for r in results if r.get("link")][:n]
     except Exception:
         return []
 
@@ -495,6 +516,10 @@ Output JSON only, nothing else."""
         "company": normalize_company_name(parsed.get("company") or ""),
         "date": parsed.get("date") or article.get("date") or "",
         "headline": parsed.get("headline") or article.get("title") or "",
+        # The article that produced this event is itself a verification
+        # candidate — carrying it forward saves a search that would often
+        # just re-find it.
+        "source_url": article.get("url") or "",
     }
 
 
@@ -751,7 +776,7 @@ async def search_urls_for_event(
     company_website: str,
     n_per_query: int = 3,
 ) -> list[str]:
-    """Two parallel Exa queries (merged unique):
+    """Two parallel SERP keyword queries (merged unique):
         1. site:<company-domain> {headline}  →  company's own newsroom
         2. {company} {headline} site:(BW|PRN|GN)  →  press wires
     """
@@ -767,16 +792,36 @@ async def search_urls_for_event(
         f"site:businesswire.com OR site:prnewswire.com OR site:globenewswire.com"
     )
 
-    results = await asyncio.gather(*[
-        exa_keyword_search(client, q, n=n_per_query) for q in queries
-    ])
+    async def _throttled(q: str) -> list[str]:
+        async with _serp_search_sem():
+            return await serp_keyword_search(client, q, n=n_per_query)
+
+    results = await asyncio.gather(*[_throttled(q) for q in queries])
+
+    def _dedup_key(u: str) -> str:
+        # Scheme/trailing-slash/fragment variants of one page must not become
+        # two verification pairs — verification is the expensive stage.
+        try:
+            p = urlparse(u)
+            host = p.netloc.lower().removeprefix("www.")
+            return f"{host}{p.path.rstrip('/')}?{p.query}"
+        except Exception:
+            return u
+
     seen: set[str] = set()
     merged: list[str] = []
     for urls in results:
         for u in urls:
-            if u and u not in seen:
-                seen.add(u)
+            if u and _dedup_key(u) not in seen:
+                seen.add(_dedup_key(u))
                 merged.append(u)
+    # Free candidate: the discovery article's own URL (news-branch events).
+    # Searched URLs stay first — newsroom/press-wire pages verify better than
+    # aggregators — but a story we already hold a link for should never be
+    # dropped just because the re-search missed it.
+    known = (event.get("source_url") or "").strip()
+    if known.startswith(("http://", "https://")) and _dedup_key(known) not in seen:
+        merged.append(known)
     return merged
 
 

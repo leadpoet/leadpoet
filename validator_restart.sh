@@ -20,6 +20,8 @@ VALIDATOR_V2_RELEASE_PREFIX="${VALIDATOR_V2_RELEASE_PREFIX:-attested-v2/releases
 VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
 VALIDATOR_RESTART_START_PATH="/home/ec2-user/.config/leadpoet/restart-start-v1.json"
 VALIDATOR_USE_CAPTURED_RESTART_START="${LEADPOET_USE_CAPTURED_RESTART_START:-0}"
+REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY="${VALIDATOR_STATEFUL_CUTOVER_PREPARE_ONLY:-0}"
+unset VALIDATOR_STATEFUL_CUTOVER_PREPARE_ONLY
 export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts/validator-runtime}"
 VALIDATOR_WALLET_ROOT="${VALIDATOR_WALLET_ROOT:-$HOME/.bittensor/wallets}"
 VALIDATOR_WALLET_NAME="${VALIDATOR_WALLET_NAME:-validator_72}"
@@ -354,6 +356,18 @@ case "$VALIDATOR_USE_CAPTURED_RESTART_START" in
     exit 1
     ;;
 esac
+case "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" in
+  0|1) ;;
+  *)
+    echo "ERROR: VALIDATOR_STATEFUL_CUTOVER_PREPARE_ONLY must be 0 or 1" >&2
+    exit 1
+    ;;
+esac
+if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" = "1" ] \
+    && [ "$VALIDATOR_USE_CAPTURED_RESTART_START" != "1" ]; then
+  echo "ERROR: stateful cutover enclave preparation requires a captured restart start" >&2
+  exit 1
+fi
 if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ]; then
   test -s "$VALIDATOR_RESTART_START_PATH" || {
     echo "ERROR: captured validator restart start is missing" >&2
@@ -371,7 +385,8 @@ if ! "$VALIDATOR_PYTHON_BIN" -m Leadpoet.utils.restart_epoch_gate \
   echo "Validator remains running; production shutdown has not started." >&2
   exit 75
 fi
-if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ]; then
+if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ] \
+    && [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" != "1" ]; then
   rm -f "$VALIDATOR_RESTART_START_PATH"
   unset LEADPOET_USE_CAPTURED_RESTART_START
 fi
@@ -488,6 +503,11 @@ echo "Terminating existing validator Nitro enclaves"
 python3 -m validator_tee.host.hotkey_bootstrap_v2 \
   --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG" \
   --hotkey-envelope "$VALIDATOR_V2_HOTKEY_ENVELOPE"
+
+if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" = "1" ]; then
+  echo "SUCCESS: exact attested validator enclave is prepared for stateful cutover boundary capture"
+  exit 0
+fi
 
 echo "Starting validator"
 export PATH="$HOME/.local/bin:$PATH"

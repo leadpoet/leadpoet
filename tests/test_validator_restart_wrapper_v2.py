@@ -49,3 +49,26 @@ def test_restart_passes_the_canonical_cutover_manifest_into_validator_container(
         '-e LEADPOET_SUBNET_EPOCH_CUTOVER_JSON='
         '"${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}"'
     ) in deploy
+
+
+def test_cutover_preparation_stops_before_full_validator_and_preserves_start():
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+
+    assert (
+        'REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY="${VALIDATOR_STATEFUL_'
+        'CUTOVER_PREPARE_ONLY:-0}"'
+    ) in script
+    assert "stateful cutover enclave preparation requires a captured restart start" in script
+    preserve = script.index(
+        '&& [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" != "1" ]; then'
+    )
+    delete_start = script.index('rm -f "$VALIDATOR_RESTART_START_PATH"', preserve)
+    hotkey = script.index("python3 -m validator_tee.host.hotkey_bootstrap_v2")
+    prepared = script.index(
+        "SUCCESS: exact attested validator enclave is prepared for stateful cutover "
+        "boundary capture"
+    )
+    exit_prepare = script.index("exit 0", prepared)
+    start_validator = script.index('echo "Starting validator"')
+
+    assert preserve < delete_start < hotkey < prepared < exit_prepare < start_validator

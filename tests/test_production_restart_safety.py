@@ -213,6 +213,23 @@ def test_validator_restart_is_fail_closed_and_postflight_verified() -> None:
     assert "RestartCount" in deploy
 
 
+def test_validator_cutover_preparation_keeps_normal_activation_guard() -> None:
+    restart = (ROOT / "validator_restart.sh").read_text(encoding="utf-8")
+    epoch_runtime = (ROOT / "gateway" / "utils" / "epoch.py").read_text(
+        encoding="utf-8"
+    )
+
+    prepare = restart.index(
+        'if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" = "1" ]; then'
+    )
+    bootstrap = restart.index("python3 -m validator_tee.host.runtime_v2_bootstrap")
+    hotkey = restart.index("python3 -m validator_tee.host.hotkey_bootstrap_v2")
+    start_validator = restart.index('echo "Starting validator"')
+
+    assert bootstrap < hotkey < prepare < start_validator
+    assert "configured cutover has not been explicitly activated" in epoch_runtime
+
+
 def test_validator_restart_does_not_require_a_live_gateway() -> None:
     deploy = (
         ROOT / "validator_models" / "containerizing" / "deploy_dynamic.sh"

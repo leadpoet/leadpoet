@@ -120,6 +120,11 @@ def test_gateway_restart_cutover_hook_is_explicit_and_fail_closed() -> None:
     assert '"already_stateful_active"' in script
     assert 'report.get("would_write") is not False' in script
     assert '--use-attested-historical-predecessor' in script
+    assert (
+        'report.get("predecessor_kind") != '
+        '"legacy_finalized_chain_migration_v2"'
+    ) in script
+    assert '"attested_historical_finalization_v2"' not in script
     assert '--confirm-all-writers-stopped' in script
     assert '--confirm-stateful-release-prepared' in script
     assert 'report.get("status") != "stateful_active"' in script

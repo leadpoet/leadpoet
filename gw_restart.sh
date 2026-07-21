@@ -994,7 +994,7 @@ if status not in {
         "stateful epoch cutover is not eligible before production shutdown"
     )
 if status == "eligible":
-    if report.get("predecessor_kind") != "attested_historical_finalization_v2":
+    if report.get("predecessor_kind") != "legacy_finalized_chain_migration_v2":
         raise SystemExit("stateful epoch cutover selected an unexpected predecessor")
     if report.get("would_write") is not False:
         raise SystemExit("stateful epoch cutover preflight was not read-only")

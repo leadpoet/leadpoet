@@ -47,6 +47,7 @@ GATEWAY_DEPLOY_STAGE="${GATEWAY_DEPLOY_STAGE:-bootstrap}"
 GATEWAY_DEPLOY_COMPLETED=0
 GATEWAY_PREFLIGHT_TREE=""
 GATEWAY_HOST_MEMORY_GUARD_PID=""
+GATEWAY_HOST_MEMORY_GUARD_PATH="${GATEWAY_HOST_MEMORY_GUARD_PATH:-$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py}"
 V2_CREDENTIAL_ENVELOPES=(
   "$GATEWAY_V2_CONFIG_DIR/artifact_master_key.json"
   "$GATEWAY_V2_CONFIG_DIR/openrouter.json"
@@ -198,7 +199,7 @@ on_gateway_restart_exit() {
 }
 
 start_gateway_host_memory_guard() {
-  local guard="$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py"
+  local guard="$GATEWAY_HOST_MEMORY_GUARD_PATH"
   if [ ! -r "$guard" ]; then
     echo "ERROR: gateway host memory guard is unavailable: $guard" >&2
     return 1

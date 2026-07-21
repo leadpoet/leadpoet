@@ -120,6 +120,8 @@ def test_gateway_restart_and_attestation_wire_the_memory_guard() -> None:
     )
 
     assert "start_gateway_host_memory_guard" in restart
+    assert 'GATEWAY_HOST_MEMORY_GUARD_PATH="${GATEWAY_HOST_MEMORY_GUARD_PATH:-' in restart
+    assert 'local guard="$GATEWAY_HOST_MEMORY_GUARD_PATH"' in restart
     assert "--watch-parent \"$$\"" in restart
     assert "--minimum-available-mib 16384" in restart
     assert "--minimum-available-mib 4096" in restart

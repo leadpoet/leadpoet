@@ -871,6 +871,9 @@ async def compute_and_log_epoch_initialization(
         validator_set = await get_validator_set(
             epoch_id,
             fail_closed=epoch_snapshot is not None,
+            metagraph_cache_epoch_id=(
+                epoch_id if epoch_snapshot is not None else None
+            ),
         )
         validator_hotkeys = validator_set  # Already a list of hotkey strings
         validator_count = len(validator_hotkeys)

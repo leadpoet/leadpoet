@@ -18,7 +18,7 @@ This ensures:
 
 import hashlib
 import random
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from uuid import UUID
 
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BITTENSOR_NETWORK, BITTENSOR_NETUID
@@ -149,6 +149,7 @@ async def get_validator_set(
     epoch_id: int,
     *,
     fail_closed: bool = False,
+    metagraph_cache_epoch_id: Optional[int] = None,
 ) -> List[str]:
     """
     Get list of eligible validators for given epoch (ASYNC VERSION).
@@ -175,7 +176,9 @@ async def get_validator_set(
         # Use the registry utility's cached metagraph (async version)
         from gateway.utils.registry import get_metagraph_async
         
-        metagraph = await get_metagraph_async()
+        metagraph = await get_metagraph_async(
+            cache_epoch_id=metagraph_cache_epoch_id,
+        )
         
         # Filter validators (active + validator_permit OR stake > 500K + permit)
         STAKE_THRESHOLD = 500000  # 500K TAO minimum

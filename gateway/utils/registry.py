@@ -80,7 +80,10 @@ def inject_async_subtensor(async_subtensor):
     print(f"✅ AsyncSubtensor injected into registry utils (network: {_async_subtensor.network})")
 
 
-async def get_metagraph_async() -> bt.Metagraph:
+async def get_metagraph_async(
+    *,
+    cache_epoch_id: Optional[int] = None,
+) -> bt.Metagraph:
     """
     Get Bittensor metagraph using injected async subtensor (ASYNC VERSION).
     
@@ -88,7 +91,9 @@ async def get_metagraph_async() -> bt.Metagraph:
     For sync contexts, use get_metagraph() wrapper.
     
     The metagraph is cached for the duration of the current epoch and refreshed
-    when a new epoch begins. This ensures:
+    when a new epoch begins. An authoritative lifecycle caller may supply its
+    already-validated settlement epoch as the cache key while preparing the
+    first initialization before cutover activation. This ensures:
     1. Multiple validators requesting leads in the same epoch use the same metagraph
     2. New registrations are picked up at epoch boundaries
     3. Thread-safe access prevents simultaneous fetches
@@ -112,6 +117,12 @@ async def get_metagraph_async() -> bt.Metagraph:
             "AsyncSubtensor not injected - call inject_async_subtensor() first. "
             "This should be done in main.py lifespan."
         )
+    if cache_epoch_id is not None and (
+        isinstance(cache_epoch_id, bool)
+        or not isinstance(cache_epoch_id, int)
+        or cache_epoch_id < 0
+    ):
+        raise ValueError("metagraph cache epoch must be a non-negative integer")
     
     # ═══════════════════════════════════════════════════════════════════════════
     # STEP 1: Quick cache check (lock held only for read)
@@ -124,8 +135,12 @@ async def get_metagraph_async() -> bt.Metagraph:
     # STEP 2: Get current epoch (OUTSIDE the lock - this is async!)
     # ═══════════════════════════════════════════════════════════════════════════
     try:
-        from gateway.utils.epoch import get_current_epoch_id_async
-        current_epoch = await get_current_epoch_id_async()
+        if cache_epoch_id is None:
+            from gateway.utils.epoch import get_current_epoch_id_async
+
+            current_epoch = await get_current_epoch_id_async()
+        else:
+            current_epoch = cache_epoch_id
         
         # Quick check: maybe cache is still valid for this epoch
         with _cache_lock:

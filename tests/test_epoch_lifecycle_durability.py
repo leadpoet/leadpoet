@@ -442,8 +442,14 @@ async def test_initialization_keeps_legacy_end_block_and_stateful_expected_end(
     async def missing(*_args, **_kwargs):
         return None
 
-    async def validators(_epoch_id, *, fail_closed=False):
+    async def validators(
+        _epoch_id,
+        *,
+        fail_closed=False,
+        metagraph_cache_epoch_id=None,
+    ):
         assert fail_closed is True
+        assert metagraph_cache_epoch_id == 101
         return ["validator"]
 
     async def capture(_event_type, _epoch_id, payload):

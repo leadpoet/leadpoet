@@ -566,6 +566,44 @@ async def test_stateful_metagraph_cache_checks_epoch_before_reuse(
 
 
 @pytest.mark.asyncio
+async def test_pre_activation_metagraph_uses_authoritative_cache_epoch(
+    monkeypatch, stateful
+):
+    from gateway.utils import epoch as epoch_utils
+    from gateway.utils import registry
+
+    fresh = type("Metagraph", (), {"hotkeys": ["fresh"]})()
+
+    class AsyncSubtensor:
+        network = "finney"
+
+        async def metagraph(self, *, netuid):
+            assert netuid == 71
+            return fresh
+
+    async def post_activation_authority_is_unavailable():
+        raise AssertionError("pre-activation cache must not load active authority")
+
+    monkeypatch.setattr(
+        epoch_utils,
+        "get_current_epoch_id_async",
+        post_activation_authority_is_unavailable,
+    )
+    monkeypatch.setattr(registry, "_async_subtensor", AsyncSubtensor())
+    monkeypatch.setattr(registry, "_metagraph_cache", None)
+    monkeypatch.setattr(registry, "_cache_epoch", None)
+    monkeypatch.setattr(registry, "_cache_epoch_timestamp", None)
+    monkeypatch.setattr(registry, "_fetch_in_progress", False)
+
+    epoch_id = stateful.first_settlement_epoch_id
+    assert (
+        await registry.get_metagraph_async(cache_epoch_id=epoch_id)
+        is fresh
+    )
+    assert registry._cache_epoch == epoch_id
+
+
+@pytest.mark.asyncio
 async def test_stateful_metagraph_refresh_never_returns_prior_epoch(
     monkeypatch, stateful
 ):

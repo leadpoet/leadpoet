@@ -10,6 +10,24 @@ available_bytes() {
   df --output=avail -B1 / | tail -1 | tr -d '[:space:]'
 }
 
+if ! docker info >/dev/null 2>&1; then
+  echo "Docker is unavailable; recovering builder daemons before inventory"
+  sudo systemctl start containerd.service docker.service
+  DAEMON_READY=0
+  for _attempt in $(seq 1 30); do
+    if docker info >/dev/null 2>&1 \
+        && sudo ctr -n moby containers list -q >/dev/null 2>&1; then
+      DAEMON_READY=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$DAEMON_READY" -ne 1 ]; then
+    echo "ERROR: Docker/containerd did not recover before storage inventory" >&2
+    exit 1
+  fi
+fi
+
 docker image prune --all --force >/dev/null
 docker builder prune --all --force >/dev/null
 docker system prune --all --force >/dev/null

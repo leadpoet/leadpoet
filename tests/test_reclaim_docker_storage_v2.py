@@ -4,6 +4,15 @@ from pathlib import Path
 SCRIPT = Path("validator_tee/scripts/reclaim_docker_storage_v2.sh").read_text()
 
 
+def test_builder_daemons_recover_before_any_docker_inventory():
+    recovery = SCRIPT.index("if ! docker info >/dev/null 2>&1; then")
+    start = SCRIPT.index("sudo systemctl start containerd.service docker.service")
+    inventory = SCRIPT.index("docker image prune --all --force")
+
+    assert recovery < start < inventory
+    assert "Docker/containerd did not recover before storage inventory" in SCRIPT
+
+
 def test_data_root_reset_unmounts_only_after_empty_runtime_guards():
     guard = SCRIPT.index('if [ "$NON_MOBY_NAMESPACE_COUNT" -ne 0 ]')
     stop = SCRIPT.index("sudo systemctl stop docker.service")

@@ -1952,6 +1952,133 @@ async def reconcile_champion_reward_statuses(
     }
 
 
+async def reconcile_source_add_reward_statuses(
+    *,
+    epoch: int | None = None,
+    netuid: int | None = None,
+    limit: int = 50,
+    reason: str = "source_add_reward_fully_delivered",
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Stop forward payments on SOURCE_ADD rewards whose obligation is delivered.
+
+    Paid-to-date is reconstructed from the per-epoch allocation snapshots —
+    the same first-class SOURCE_ADD rows the allocator itself settles from.
+    A reward whose snapshots already sum to its full promised alpha
+    (``alpha_percent`` x ``reward_epochs``) gets a ``stopped_forward`` event
+    appended, which removes it from the active-status set the allocator
+    reads. This is the guard against the allocator's epoch counter freezing
+    (as during the 2026-07-20 stateful-epoch switch) while weight setting
+    keeps reusing the last computed payout pattern: without the stop event,
+    a finished reward keeps collecting every epoch with nothing counting
+    it down.
+    """
+
+    from gateway.config import BITTENSOR_NETUID
+    from gateway.research_lab.allocations import (
+        ACTIVE_CHAMPION_STATUSES,
+        _decimal,
+        _rate_float,
+        _source_add_paid_alpha_to_date,
+    )
+    from .store import insert_row
+
+    effective_epoch = await _resolve_maintenance_epoch(epoch)
+    effective_netuid = int(netuid) if netuid is not None else int(BITTENSOR_NETUID)
+    reward_rows: list[dict[str, Any]] = []
+    for status in sorted(ACTIVE_CHAMPION_STATUSES):
+        reward_rows.extend(
+            await select_all(
+                "research_lab_source_add_reward_current",
+                filters=(("current_reward_status", status),),
+                max_rows=max(1, int(limit or 50) * 5),
+            )
+        )
+    paid_by_reward = await _source_add_paid_alpha_to_date(
+        epoch=effective_epoch,
+        netuid=effective_netuid,
+        source_rows=reward_rows,
+    )
+    planned: list[dict[str, Any]] = []
+    planned_refs: set[str] = set()
+    for row in reward_rows:
+        reward_ref = str(row.get("reward_ref") or "")
+        if not reward_ref or reward_ref in planned_refs:
+            continue
+        desired = _decimal(
+            row.get("desired_alpha_percent") or row.get("alpha_percent") or 0
+        )
+        epoch_count = int(row.get("epoch_count") or row.get("reward_epochs") or 0)
+        total_due = desired * epoch_count
+        paid = _decimal(paid_by_reward.get(reward_ref, 0))
+        if desired <= 0 or epoch_count <= 0 or paid < total_due:
+            continue
+        planned_refs.add(reward_ref)
+        planned.append(
+            {
+                "reward_ref": reward_ref,
+                "miner_hotkey": str(row.get("miner_hotkey") or ""),
+                "current_reward_status": str(row.get("current_reward_status") or ""),
+                "reward_status_target": "stopped_forward",
+                "total_due_alpha_percent": _rate_float(total_due),
+                "paid_alpha_percent_to_date": _rate_float(paid),
+                "next_seq": int(row.get("current_event_seq") or 0) + 1,
+            }
+        )
+        if len(planned) >= max(1, int(limit or 50)):
+            break
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "action": "reconcile-source-add-reward-statuses",
+            "epoch": effective_epoch,
+            "planned": planned,
+        }
+
+    stopped: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for plan in planned:
+        try:
+            await insert_row(
+                "research_lab_source_add_reward_events",
+                {
+                    "reward_ref": plan["reward_ref"],
+                    "seq": plan["next_seq"],
+                    "reward_status": "stopped_forward",
+                    "reason": "%s paid=%.4f due=%.4f epoch=%s"
+                    % (
+                        reason,
+                        plan["paid_alpha_percent_to_date"],
+                        plan["total_due_alpha_percent"],
+                        effective_epoch,
+                    ),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - continue the idempotent sweep
+            logger.warning(
+                "research_lab_source_add_status_reconcile_write_failed "
+                "reward_ref=%s error=%s",
+                plan["reward_ref"],
+                str(exc)[:240],
+            )
+            failed.append(
+                {"reward_ref": plan["reward_ref"], "error": str(exc)[:240]}
+            )
+            continue
+        stopped.append(plan)
+    return {
+        "ok": not failed,
+        "dry_run": False,
+        "action": "reconcile-source-add-reward-statuses",
+        "epoch": effective_epoch,
+        "planned_count": len(planned),
+        "stopped_count": len(stopped),
+        "stopped": stopped,
+        "failed": failed,
+    }
+
+
 async def backfill_source_add_reward_v2_authority(
     *,
     epoch: int | None = None,

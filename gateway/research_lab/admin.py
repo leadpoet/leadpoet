@@ -309,6 +309,21 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_champion.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
     reconcile_champion.add_argument("--write", dest="dry_run", action="store_false")
 
+    reconcile_source_add = sub.add_parser(
+        "reconcile-source-add-reward-statuses",
+        help="Stop forward payments on SOURCE_ADD rewards whose obligation is fully delivered",
+    )
+    reconcile_source_add.add_argument("--epoch", type=int, default=None)
+    reconcile_source_add.add_argument("--netuid", type=int, default=None)
+    reconcile_source_add.add_argument("--limit", type=int, default=50)
+    reconcile_source_add.add_argument(
+        "--reason", default="source_add_reward_fully_delivered"
+    )
+    reconcile_source_add.add_argument(
+        "--dry-run", dest="dry_run", action="store_true", default=True
+    )
+    reconcile_source_add.add_argument("--write", dest="dry_run", action="store_false")
+
     champion_v2_backfill = sub.add_parser(
         "backfill-champion-v2-authority",
         help="Attest immutable pre-V2 champion obligations into V2 receipt authority",
@@ -1812,6 +1827,18 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             limit=args.limit,
             reason=args.reason,
             actor_ref=args.actor_ref,
+            dry_run=args.dry_run,
+        )
+    if args.command == "reconcile-source-add-reward-statuses":
+        from gateway.research_lab.maintenance import (
+            reconcile_source_add_reward_statuses,
+        )
+
+        return await reconcile_source_add_reward_statuses(
+            epoch=args.epoch,
+            netuid=args.netuid,
+            limit=args.limit,
+            reason=args.reason,
             dry_run=args.dry_run,
         )
     if args.command == "backfill-champion-v2-authority":

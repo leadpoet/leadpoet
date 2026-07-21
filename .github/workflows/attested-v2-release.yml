@@ -36,8 +36,17 @@ jobs:
 
       - name: Reclaim unreferenced gateway build space
         run: |
-          docker image prune --all --force
-          docker builder prune --all --force
+          sudo rm -rf -- \
+            "$RUNNER_TEMP/offline-artifacts" \
+            "$RUNNER_TEMP/gateway-evidence" \
+            "$RUNNER_TEMP/gateway-build-work" \
+            "$RUNNER_TEMP/gateway-pcr0-cache.json" \
+            "$RUNNER_TEMP/validator-evidence" \
+            "$RUNNER_TEMP/release-evidence" \
+            "$RUNNER_TEMP/evidence" \
+            "$RUNNER_TEMP/release"
+          VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
+            bash validator_tee/scripts/reclaim_docker_storage_v2.sh
           df -h /
 
       - name: Prepare immutable build inputs
@@ -97,6 +106,15 @@ jobs:
 
       - name: Reclaim unreferenced validator build space
         run: |
+          sudo rm -rf -- \
+            "$RUNNER_TEMP/offline-artifacts" \
+            "$RUNNER_TEMP/gateway-evidence" \
+            "$RUNNER_TEMP/gateway-build-work" \
+            "$RUNNER_TEMP/gateway-pcr0-cache.json" \
+            "$RUNNER_TEMP/validator-evidence" \
+            "$RUNNER_TEMP/release-evidence" \
+            "$RUNNER_TEMP/evidence" \
+            "$RUNNER_TEMP/release"
           VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
             bash validator_tee/scripts/reclaim_docker_storage_v2.sh
           df -h /

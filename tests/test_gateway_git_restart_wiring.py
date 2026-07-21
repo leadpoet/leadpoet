@@ -61,6 +61,25 @@ def test_gateway_restart_fails_closed_on_all_authoritative_readiness_routes() ->
     assert "http://localhost:8000/attest || true" not in script
 
 
+def test_gateway_restart_forces_instance_role_for_runtime_aws_calls() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    runtime_launch = script.index('echo "Relaunching gateway with cloned runtime env"')
+    unset_credentials = script.index(
+        "unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE "
+        "AWS_SESSION_TOKEN AWS_SECURITY_TOKEN",
+        runtime_launch,
+    )
+    instance_role = script.index(
+        "export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true",
+        unset_credentials,
+    )
+    gateway_launch = script.index(
+        'setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main',
+        instance_role,
+    )
+    assert runtime_launch < unset_credentials < instance_role < gateway_launch
+
+
 def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     runtime_ready = script.index(

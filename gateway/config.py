@@ -22,6 +22,17 @@ except ImportError:
 
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_AWS_STATIC_CREDENTIAL_KEYS = {
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_PROFILE",
+}
+
+
+def _instance_role_only() -> bool:
+    return os.getenv("LEADPOET_AWS_INSTANCE_ROLE_ONLY", "false").lower() == "true"
 
 
 def _load_gateway_env_file(path: Path) -> None:
@@ -45,6 +56,8 @@ def _load_gateway_env_file(path: Path) -> None:
         key = key_raw.decode("utf-8", errors="ignore").strip()
         if not _ENV_KEY_RE.fullmatch(key):
             continue
+        if _instance_role_only() and key in _AWS_STATIC_CREDENTIAL_KEYS:
+            continue
         if key in os.environ:
             continue
         value = value_raw.decode("utf-8", errors="ignore").strip()
@@ -63,6 +76,10 @@ def _load_gateway_env_file(path: Path) -> None:
 
 _gateway_env_file = os.getenv("GATEWAY_ENV_FILE", "/home/ec2-user/.config/leadpoet/gateway.env")
 _load_gateway_env_file(Path(_gateway_env_file).expanduser())
+
+if _instance_role_only():
+    for _aws_env_key in _AWS_STATIC_CREDENTIAL_KEYS:
+        os.environ.pop(_aws_env_key, None)
 
 if os.getenv("AWS_PROFILE") and os.getenv("LEADPOET_AWS_PROFILE_OVERRIDES_ENV_KEYS", "true").lower() == "true":
     # Local/testnet operators often use a named AWS profile while .env still
@@ -110,10 +127,10 @@ AWS_PROFILE = os.getenv("AWS_PROFILE")
 AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET", "leadpoet-leads-primary")
 AWS_S3_REGION = os.getenv("AWS_S3_REGION", "us-east-2")
 
-if not AWS_ACCESS_KEY_ID and not AWS_PROFILE:
+if not AWS_ACCESS_KEY_ID and not AWS_PROFILE and not _instance_role_only():
     import warnings
     warnings.warn("AWS_ACCESS_KEY_ID environment variable not set - S3 storage will fail")
-if not AWS_SECRET_ACCESS_KEY and not AWS_PROFILE:
+if not AWS_SECRET_ACCESS_KEY and not AWS_PROFILE and not _instance_role_only():
     import warnings
     warnings.warn("AWS_SECRET_ACCESS_KEY environment variable not set - S3 storage will fail")
 
@@ -194,9 +211,9 @@ def validate_config():
         errors.append("SUPABASE_SERVICE_ROLE_KEY is not set")
     
     # Check AWS S3
-    if not AWS_ACCESS_KEY_ID and not AWS_PROFILE:
+    if not AWS_ACCESS_KEY_ID and not AWS_PROFILE and not _instance_role_only():
         errors.append("AWS_ACCESS_KEY_ID is not set")
-    if not AWS_SECRET_ACCESS_KEY and not AWS_PROFILE:
+    if not AWS_SECRET_ACCESS_KEY and not AWS_PROFILE and not _instance_role_only():
         errors.append("AWS_SECRET_ACCESS_KEY is not set")
     
     if errors:
@@ -219,6 +236,10 @@ def print_config_summary():
     print(f"Build Info File: {BUILD_INFO.get('build_info_path') or 'not found'}")
     print(f"Supabase URL: {SUPABASE_URL}")
     print(f"AWS S3 Bucket: {AWS_S3_BUCKET} ({AWS_S3_REGION})")
+    print(
+        "AWS Credential Source: "
+        + ("EC2 instance role" if _instance_role_only() else "configured credentials")
+    )
     print(f"Arweave Gateway: {ARWEAVE_GATEWAY_URL}")
     print(f"Arweave Keyfile: {ARWEAVE_KEYFILE_PATH}")
     print(f"Bittensor Network: {BITTENSOR_NETWORK} (netuid={BITTENSOR_NETUID})")

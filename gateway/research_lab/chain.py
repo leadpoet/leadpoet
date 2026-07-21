@@ -98,6 +98,7 @@ def _fetch_current_chain_epoch_direct() -> tuple[int, int, str]:
     probe = """
 import json
 import os
+import sys
 import bittensor as bt
 from Leadpoet.utils.subnet_epoch import (
     load_subnet_epoch_cutover,
@@ -111,32 +112,32 @@ from gateway.utils.subnet_epoch_archive import (
 network = os.getenv("BITTENSOR_NETWORK", "finney")
 netuid = int(os.getenv("BITTENSOR_NETUID", "71"))
 subtensor = bt.Subtensor(network=network)
-try:
-    snapshot = read_subnet_epoch_snapshot(
-        subtensor,
-        netuid=netuid,
-        finalized=True,
-    )
-    cutover = load_subnet_epoch_cutover()
-    epoch = snapshot.settlement_epoch_id(cutover)
-    block = snapshot.current_block
-    validate_stateful_cutover_authority(cutover)
-    validate_cutover_anchor_from_archive(cutover)
-    official = {
-        "official_subnet_epoch_id": snapshot.subnet_epoch_index,
-        "epoch_ref": snapshot.epoch_ref,
-    }
-finally:
-    close = getattr(subtensor, "close", None)
-    if callable(close):
-        close()
+snapshot = read_subnet_epoch_snapshot(
+    subtensor,
+    netuid=netuid,
+    finalized=True,
+)
+cutover = load_subnet_epoch_cutover()
+epoch = snapshot.settlement_epoch_id(cutover)
+block = snapshot.current_block
+validate_stateful_cutover_authority(cutover)
+validate_cutover_anchor_from_archive(cutover)
+official = {
+    "official_subnet_epoch_id": snapshot.subnet_epoch_index,
+    "epoch_ref": snapshot.epoch_ref,
+}
 result = {
     "epoch": epoch,
     "block": block,
     "network": network,
 }
 result.update(official)
-print(%r + json.dumps(result, separators=(",", ":")))
+sys.stdout.write(%r + json.dumps(result, separators=(",", ":")) + "\\n")
+sys.stdout.flush()
+# This process exists only to make the SDK call killable. Some SDK versions
+# hang while closing their synchronous WebSocket, so let process teardown close
+# its private descriptors after the verified result has been flushed.
+os._exit(0)
 """ % _DIRECT_EPOCH_RESULT_PREFIX
     timeout_seconds = max(1.0, _direct_epoch_timeout_seconds() - 1.0)
     try:

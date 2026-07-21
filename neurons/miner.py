@@ -51,6 +51,10 @@ from research_lab.source_add_miner import (
     SOURCE_ADD_SOURCE_KINDS,
     build_source_add_submission_docs,
 )
+from leadpoet_canonical.credential_recipient_v2 import (
+    CredentialRecipientV2Error,
+    verify_and_encrypt_openrouter_credential_v2,
+)
 
 
 class _SilenceInvalidRequest(logging.Filter):
@@ -2354,13 +2358,10 @@ _RESEARCH_LAB_OPENROUTER_RAW_KEY_FIELDS = (
 
 
 def _research_lab_openrouter_key_signed_payload(wallet, payload: dict) -> dict:
-    """Sign OpenRouter key registration without binding the raw credential pair.
+    """Sign OpenRouter key registration and its encrypted credential pair.
 
-    The gateway excludes the raw ``openrouter_api_key`` and
-    ``openrouter_management_key`` from signature verification so the keys can be
-    submitted for KMS encryption without binding raw secret material into the
-    signed/audited payload. The signed message must therefore omit those fields
-    for the signature to match the gateway's reconstruction.
+    Deprecated plaintext fields remain excluded for schema compatibility. The
+    V2 ciphertext and one-use recipient IDs are included in the signed payload.
     """
 
     excluded = {"signature", *_RESEARCH_LAB_OPENROUTER_RAW_KEY_FIELDS}
@@ -2384,12 +2385,6 @@ def _research_lab_insecure_gateway_allowed(url: str) -> bool:
     if host in {"localhost", "127.0.0.1", "::1"}:
         return True
     return os.getenv("RESEARCH_LAB_ALLOW_INSECURE_GATEWAY", "").strip().lower() in {"1", "true", "yes"}
-
-
-def _research_lab_raw_key_gateway_allowed(url: str) -> bool:
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower()
-    return parsed.scheme == "https" or host in {"localhost", "127.0.0.1", "::1"}
 
 
 def _post_research_lab_json(path: str, payload: dict, *, timeout: int = 60) -> dict:
@@ -2427,18 +2422,14 @@ def _get_research_lab_status(gateway_url: str) -> Optional[dict]:
 
 def _register_research_lab_openrouter_key(wallet, status: dict) -> Optional[Tuple[str, str]]:
     if status.get("openrouter_key_registration_enabled"):
-        if not _research_lab_raw_key_gateway_allowed(QUALIFICATION_GATEWAY_URL):
-            print("❌ Refusing to send raw OpenRouter API key over an insecure gateway URL.")
-            print("   Set GATEWAY_URL to an https:// gateway. Localhost HTTP is allowed for local/dev testing only.")
-            return None
-        raw_key = getpass.getpass("   OpenRouter API key (hidden; encrypted by gateway): ").strip()
+        raw_key = getpass.getpass("   OpenRouter API key (hidden; encrypted locally): ").strip()
         if not raw_key:
             print("❌ OpenRouter API key is required for paid auto-research loops.")
             return None
         if not raw_key.lower().startswith("sk-or-v1-"):
             print("❌ OpenRouter API key must start with sk-or-v1-.")
             return None
-        raw_management_key = getpass.getpass("   OpenRouter management key (hidden; encrypted by gateway): ").strip()
+        raw_management_key = getpass.getpass("   OpenRouter management key (hidden; encrypted locally): ").strip()
         if not raw_management_key:
             print("❌ OpenRouter management key is required for paid auto-research loops.")
             return None
@@ -2449,6 +2440,45 @@ def _register_research_lab_openrouter_key(wallet, status: dict) -> Optional[Tupl
         key_fingerprint = hashlib.sha256(
             f"{raw_key}:{raw_management_key}".encode("utf-8")
         ).hexdigest()[:24]
+        recipient_payload = _research_lab_signed_payload(
+            wallet,
+            {
+                "miner_hotkey": wallet.hotkey.ss58_address,
+                "timestamp": int(time.time()),
+                "idempotency_key": (
+                    "research-openrouter-recipient:"
+                    f"{wallet.hotkey.ss58_address}:{key_fingerprint}"
+                ),
+            },
+        )
+        recipients = _post_research_lab_json(
+            "/research-lab/openrouter-keys/credential-recipient",
+            recipient_payload,
+            timeout=120,
+        )
+        if "error" in recipients:
+            print(
+                "❌ OpenRouter credential recipient failed: "
+                f"HTTP {recipients.get('status_code')}"
+            )
+            print(f"   {recipients['error']}")
+            return None
+        try:
+            encrypted_runtime = verify_and_encrypt_openrouter_credential_v2(
+                recipients["runtime"],
+                raw_key,
+                miner_hotkey=wallet.hotkey.ss58_address,
+                credential_kind="runtime",
+            )
+            encrypted_management = verify_and_encrypt_openrouter_credential_v2(
+                recipients["management"],
+                raw_management_key,
+                miner_hotkey=wallet.hotkey.ss58_address,
+                credential_kind="management",
+            )
+        except (CredentialRecipientV2Error, KeyError, TypeError) as exc:
+            print(f"❌ OpenRouter credential recipient verification failed: {exc}")
+            return None
         payload = _research_lab_openrouter_key_signed_payload(
             wallet,
             {
@@ -2459,8 +2489,8 @@ def _register_research_lab_openrouter_key(wallet, status: dict) -> Optional[Tupl
                     f"{wallet.hotkey.ss58_address}:"
                     f"{key_fingerprint}"
                 ),
-                "openrouter_api_key": raw_key,
-                "openrouter_management_key": raw_management_key,
+                "openrouter_api_key_v2": encrypted_runtime,
+                "openrouter_management_key_v2": encrypted_management,
                 "key_label": "research-lab-miner-key",
             },
         )
@@ -2469,7 +2499,7 @@ def _register_research_lab_openrouter_key(wallet, status: dict) -> Optional[Tupl
             print(f"❌ OpenRouter key verification failed: HTTP {result.get('status_code')}")
             print(f"   {result['error']}")
             return None
-        print("✅ OpenRouter key verified and encrypted by gateway")
+        print("✅ OpenRouter keys encrypted locally and verified by gateway")
         return str(result["key_ref"]), "encrypted_ref"
 
     print("❌ This gateway does not have encrypted OpenRouter key registration enabled.")

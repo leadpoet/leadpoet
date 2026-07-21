@@ -197,7 +197,7 @@
       "symbol": "ValidatorChainSourceV2.find_finalized_extrinsic_inclusion"
     },
     {
-      "ast_sha256": "sha256:05149e52204963e771a61e4c3f1bca6a85e636526c5b8cd99f57d4a9dfa56a7c",
+      "ast_sha256": "sha256:7e6a4acc7c36793dba05b41d0d1f0518ca3fd023642f61df2748764dc74d98ef",
       "path": "validator_tee/enclave/chain_source_v2.py",
       "symbol": "ValidatorChainSourceV2.read_finalized_snapshot"
     },
@@ -242,7 +242,7 @@
       "symbol": "ValidatorHotkeyAuthorityV2.sign_weight_extrinsic"
     },
     {
-      "ast_sha256": "sha256:b22ba5a627c0dfae4e343041a8abd2ecae1f8aaad10f997534714c92fed0f7e0",
+      "ast_sha256": "sha256:25b2bbb69fbab6278e53357ecb99ff9b21dcf1a631899089945ac5a19ef7a104",
       "path": "validator_tee/enclave/weight_authority_v2.py",
       "symbol": "ValidatorWeightAuthorityV2.compute"
     },
@@ -272,7 +272,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:36c989bd1b9fc8a9feb82e4cefe8cd89c9da67a62466680ba0fa64e7f31c0875",
-  "protected_source_commit": "d82e092668d0cf62c2ae8ed5153660bb00bf0293",
+  "manifest_hash": "sha256:8fb6eba8c243ef067168ebb93fe44a15315391c2b02025d8f66c39e5e4a0a416",
+  "protected_source_commit": "8b8e9dc77e8b0c987aebe38689678e67cf9df0eb",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

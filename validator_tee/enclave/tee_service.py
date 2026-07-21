@@ -272,8 +272,20 @@ def compute_authoritative_weights_v2(request: Dict[str, Any]) -> Dict[str, Any]:
     if validator_hotkey_authority_v2 is None:
         raise RuntimeError("validator V2 hotkey authority is not configured")
     result = validator_weight_authority_v2.compute(request)
+    authorization_input = {
+        field: result[field]
+        for field in (
+            "weight_snapshot",
+            "weight_result",
+            "weights_signature",
+            "receipt_graph",
+            "boot_identity",
+        )
+    }
     result["weight_authorization_id"] = (
-        validator_hotkey_authority_v2.register_weight_result(result)
+        validator_hotkey_authority_v2.register_weight_result(
+            authorization_input
+        )
     )
     return result
 

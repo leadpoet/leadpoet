@@ -39,6 +39,9 @@ def test_validator_rpc_configures_authority_once_and_disables_legacy(monkeypatch
                 "weights_signature": "4" * 128,
                 "receipt_graph": {"root_receipt_hash": "sha256:" + "5" * 64},
                 "boot_identity": {"boot_identity_hash": "sha256:" + "1" * 64},
+                "source_artifacts": [{"artifact_hash": "sha256:" + "7" * 64}],
+                "epoch_authority": {"epoch_id": 7},
+                "epoch_boundary": None,
             }
 
     class FakeHotkeyAuthority:
@@ -83,6 +86,16 @@ def test_validator_rpc_configures_authority_once_and_disables_legacy(monkeypatch
     assert computed["status"] == "ok"
     assert computed["weight_result"]["weights_hash"] == "3" * 64
     assert computed["weight_authorization_id"] == "sha256:" + "9" * 64
+    assert computed["source_artifacts"] == [
+        {"artifact_hash": "sha256:" + "7" * 64}
+    ]
+    assert set(calls["registered_weight_result"]) == {
+        "weight_snapshot",
+        "weight_result",
+        "weights_signature",
+        "receipt_graph",
+        "boot_identity",
+    }
 
     for command, extra in (
         ("sign_weights", {"weights_hash": "8" * 64}),

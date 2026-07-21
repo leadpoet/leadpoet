@@ -945,7 +945,7 @@ class ValidatorChainSourceV2:
             )
         current_job = "subnet-epoch-capture-current:%d:%s" % (
             settlement_epoch_id,
-            capture_scope.removeprefix("sha256:"),
+            capture_scope[len("sha256:") :],
         )
         attempts = []
         artifacts = []

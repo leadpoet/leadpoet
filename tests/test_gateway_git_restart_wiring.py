@@ -169,7 +169,8 @@ def test_gateway_restart_does_not_kill_colocated_runner_builds() -> None:
     assert 'pkill -KILL -f "docker build' not in script
     assert "ensure_docker_ready" in script
     assert "sudo nsenter -t 1 -m --" in script
-    assert 'findmnt -rn -R /var/lib/docker -o TARGET' in script
+    assert 'findmnt -rn -o TARGET' in script
+    assert 'index($0, "/var/lib/docker/") == 1' in script
     assert 'nsenter -t 1 -m -- umount "$mount_path"' in script
     assert "nsenter -t 1 -m -- rm -rf /var/lib/docker" in script
     assert "nsenter -t 1 -m -- mkdir -p /var/lib/docker" in script

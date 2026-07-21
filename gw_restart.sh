@@ -321,7 +321,12 @@ reset_orphaned_docker_storage_if_needed() {
     sudo systemctl stop docker.socket docker 2>/dev/null || true
     mapfile -t docker_mounts < <(
       sudo nsenter -t 1 -m -- \
-        findmnt -rn -R /var/lib/docker -o TARGET 2>/dev/null | tac || true
+        findmnt -rn -o TARGET 2>/dev/null |
+        awk '$0 == "/var/lib/docker" || index($0, "/var/lib/docker/") == 1 {
+          print length($0), $0
+        }' |
+        sort -rn |
+        cut -d' ' -f2- || true
     )
     for mount_path in "${docker_mounts[@]}"; do
       sudo nsenter -t 1 -m -- umount "$mount_path"

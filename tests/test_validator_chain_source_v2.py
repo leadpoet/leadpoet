@@ -315,7 +315,7 @@ def test_stateful_finalized_source_binds_official_epoch_and_chain_anchors():
         CUTOVER_HASH,
         PREDECESSOR_HASH,
     }
-    assert authority["observed_at"] == "2025-07-17T00:00:00.123000Z"
+    assert authority["observed_at"] == "2025-07-17T00:00:00Z"
     assert result["epoch_boundary"]["observed_at"] == authority["observed_at"]
     archive_attempts = [
         attempt

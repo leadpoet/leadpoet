@@ -69,7 +69,7 @@ def _timestamp(clock: Callable[[], datetime]) -> str:
 
 def _chain_timestamp(timestamp_ms: int) -> str:
     value = datetime.fromtimestamp(int(timestamp_ms) / 1000.0, tz=timezone.utc)
-    return value.isoformat().replace("+00:00", "Z")
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _recv_exact(connection: Any, size: int) -> bytes:

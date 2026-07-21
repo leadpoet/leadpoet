@@ -77,7 +77,7 @@
       "symbol": "gateway_weight_input_value_documents_v2"
     },
     {
-      "ast_sha256": "sha256:6d9aebab6d91cd373c569ddd4c0aa8c821b7ee656454605abbe1a90933fa5d07",
+      "ast_sha256": "sha256:7a8ed377a6a7da1b18de75f1133a5f4c56de13ee022ec2e52999a79fb8291c36",
       "path": "leadpoet_canonical/weight_authority_v2.py",
       "symbol": "validate_published_weight_bundle_v2"
     },
@@ -242,7 +242,7 @@
       "symbol": "ValidatorHotkeyAuthorityV2.sign_weight_extrinsic"
     },
     {
-      "ast_sha256": "sha256:25b2bbb69fbab6278e53357ecb99ff9b21dcf1a631899089945ac5a19ef7a104",
+      "ast_sha256": "sha256:4ea32369822ad70525b2ca3e8caac5197bc31436d26e0d0e202bfac1ca2580d0",
       "path": "validator_tee/enclave/weight_authority_v2.py",
       "symbol": "ValidatorWeightAuthorityV2.compute"
     },
@@ -272,7 +272,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:a2bc5114673d8271e014b5039e1be7487edcef5c63e92222b3269c784cd425ba",
-  "protected_source_commit": "a87f3fe430b617f41f35d9649cdf03604ede865d",
+  "manifest_hash": "sha256:1b3cc7601885065dc4ab2c92fcb113e8486ba663aeb7c417708d9840586e1445",
+  "protected_source_commit": "86d8549bd4aae7e300f981c44a6f6d08d5000d1c",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

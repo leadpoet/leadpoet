@@ -46,6 +46,7 @@ export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:
 GATEWAY_DEPLOY_STAGE="${GATEWAY_DEPLOY_STAGE:-bootstrap}"
 GATEWAY_DEPLOY_COMPLETED=0
 GATEWAY_PREFLIGHT_TREE=""
+GATEWAY_HOST_MEMORY_GUARD_PID=""
 V2_CREDENTIAL_ENVELOPES=(
   "$GATEWAY_V2_CONFIG_DIR/artifact_master_key.json"
   "$GATEWAY_V2_CONFIG_DIR/openrouter.json"
@@ -181,6 +182,10 @@ finalize_deployment_record() {
 
 on_gateway_restart_exit() {
   local status="$?"
+  if [ -n "${GATEWAY_HOST_MEMORY_GUARD_PID:-}" ]; then
+    kill "$GATEWAY_HOST_MEMORY_GUARD_PID" >/dev/null 2>&1 || true
+    wait "$GATEWAY_HOST_MEMORY_GUARD_PID" >/dev/null 2>&1 || true
+  fi
   if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ]; then
     rm -rf "$GATEWAY_PREFLIGHT_TREE"
   fi
@@ -190,6 +195,24 @@ on_gateway_restart_exit() {
       && [ -f "$GATEWAY_GIT_HELPER" ]; then
     finalize_deployment_record failed "$GATEWAY_DEPLOY_STAGE" >/dev/null 2>&1 || true
   fi
+}
+
+start_gateway_host_memory_guard() {
+  local guard="$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py"
+  if [ ! -r "$guard" ]; then
+    echo "ERROR: gateway host memory guard is unavailable: $guard" >&2
+    return 1
+  fi
+  echo "Clearing only disposable /tmp/prtest pytest processes and checking host memory"
+  python3 "$guard" \
+    --cleanup-disposable-tests \
+    --minimum-available-mib 16384
+  python3 "$guard" \
+    --cleanup-disposable-tests \
+    --minimum-available-mib 4096 \
+    --watch-parent "$$" \
+    --interval-seconds 5 &
+  GATEWAY_HOST_MEMORY_GUARD_PID="$!"
 }
 
 run_prepared_gateway_module() {
@@ -435,6 +458,8 @@ fi
 
 if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then
 cd "$GATEWAY_ROOT"
+
+start_gateway_host_memory_guard
 
 PID="$(pgrep -f "python3 -u main.py|python3 -u -m gateway.main" | head -1 || true)"
 echo "main pid before: ${PID:-none}"

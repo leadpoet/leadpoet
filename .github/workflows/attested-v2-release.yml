@@ -34,6 +34,12 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
+      - name: Guard gateway builder host memory
+        run: |
+          python3 gateway/tee/host_memory_guard_v2.py \
+            --cleanup-disposable-tests \
+            --minimum-available-mib 16384
+
       - name: Reclaim unreferenced gateway build space
         run: |
           sudo rm -rf -- \
@@ -56,6 +62,14 @@ jobs:
 
       - name: Build gateway and validator evidence
         run: |
+          python3 gateway/tee/host_memory_guard_v2.py \
+            --cleanup-disposable-tests \
+            --minimum-available-mib 4096 \
+            --watch-parent "$BASHPID" \
+            --interval-seconds 5 &
+          HOST_MEMORY_GUARD_PID="$!"
+          trap 'kill "$HOST_MEMORY_GUARD_PID" >/dev/null 2>&1 || true' EXIT
+
           export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"
           export GATEWAY_V2_BUILDER_DOMAIN=gateway
           export GATEWAY_V2_BUILDER_ID="gateway-parent-${RUNNER_NAME}"

@@ -168,7 +168,9 @@ def test_gateway_restart_does_not_kill_colocated_runner_builds() -> None:
     assert 'pkill -TERM -f "docker build' not in script
     assert 'pkill -KILL -f "docker build' not in script
     assert "ensure_docker_ready" in script
+    assert "sudo nsenter -t 1 -m --" in script
     assert 'findmnt -rn -R /var/lib/docker -o TARGET' in script
+    assert 'nsenter -t 1 -m -- umount "$mount_path"' in script
     assert "GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS=120" in script
     assert script.count(
         'export SUPABASE_TIMEOUT_SECONDS="'

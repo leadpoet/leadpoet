@@ -320,10 +320,11 @@ reset_orphaned_docker_storage_if_needed() {
     echo "docker root usage: ${DOCKER_ROOT_KB:-0} KiB; overlay usage: ${OVERLAY_KB:-0} KiB across ${OVERLAY_DIRS:-0} dirs"
     sudo systemctl stop docker.socket docker 2>/dev/null || true
     mapfile -t docker_mounts < <(
-      findmnt -rn -R /var/lib/docker -o TARGET 2>/dev/null | tac || true
+      sudo nsenter -t 1 -m -- \
+        findmnt -rn -R /var/lib/docker -o TARGET 2>/dev/null | tac || true
     )
     for mount_path in "${docker_mounts[@]}"; do
-      sudo umount "$mount_path"
+      sudo nsenter -t 1 -m -- umount "$mount_path"
     done
     sudo rm -rf /var/lib/docker
     sudo mkdir -p /var/lib/docker

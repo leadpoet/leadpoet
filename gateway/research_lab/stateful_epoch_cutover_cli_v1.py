@@ -80,7 +80,7 @@ RECEIPT_TABLE = "research_lab_attested_execution_receipts_v2"
 CUTOVER_PREFLIGHT_RPC = (
     "research_lab_stateful_subnet_epoch_cutover_preflight_v1"
 )
-CUTOVER_FENCE_RPC = "research_lab_stateful_subnet_epoch_cutover_fence_v1"
+CUTOVER_FENCE_RPC = "research_lab_stateful_subnet_epoch_refresh_fence_v1"
 CUTOVER_BIND_RPC = "research_lab_stateful_subnet_epoch_cutover_bind_v1"
 CUTOVER_STAGE_RPC = "research_lab_stateful_subnet_epoch_stage_v1"
 CUTOVER_BOOTSTRAP_BIND_RPC = (

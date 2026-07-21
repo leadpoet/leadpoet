@@ -38,6 +38,11 @@ BINDING_REPAIR_SQL = (
     / "scripts"
     / "110-qualify-stateful-epoch-v2-binding.sql"
 ).read_text(encoding="utf-8")
+FENCE_REFRESH_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "111-refresh-unactivated-stateful-epoch-fence.sql"
+).read_text(encoding="utf-8")
 TRANSPARENCY_SCOPE_REPAIR_SQL = (
     Path(__file__).resolve().parents[1]
     / "scripts"
@@ -416,6 +421,22 @@ def test_mapping_view_is_security_invoker_and_has_collision_proof_query():
     assert "p_cutover_receipt_hash TEXT DEFAULT NULL" in SQL
 
 
+def test_refresh_fence_preserves_plan_and_refuses_staged_state():
+    migration = FENCE_REFRESH_SQL
+    assert "research_lab_stateful_subnet_epoch_refresh_fence_v1" in migration
+    assert "research_lab_stateful_subnet_epoch_cutover_fence_v1" in migration
+    assert "state_row.lifecycle_state IS DISTINCT FROM 'cutover_fenced'" in migration
+    assert "state_row.last_legacy_epoch_id IS DISTINCT FROM" in migration
+    assert "state_row.first_settlement_epoch_id IS DISTINCT FROM" in migration
+    assert "state_row.initialization_nonce IS NOT NULL" in migration
+    assert "state_row.staged_at IS NOT NULL" in migration
+    assert "research_lab_stateful_subnet_epoch_cutovers_v1" in migration
+    assert "event.event_type = 'EPOCH_INITIALIZATION'" in migration
+    assert "SET mapping_hash = NULL" in migration
+    assert "DELETE FROM" not in migration
+    assert "lifecycle_state = 'legacy_open'" not in migration
+
+
 def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
     """Exercise the migration against PostgreSQL 15 when explicitly enabled.
 
@@ -768,6 +789,7 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
         psql(INDEX_VALIDATION_SQL)
         psql(SQL)
         psql(TRANSPARENCY_SCOPE_REPAIR_SQL)
+        psql(FENCE_REFRESH_SQL)
 
         # The public runtime contract is an exact, sanitized singleton RPC.
         # Anon can read it before, during, and after cutover, but cannot read
@@ -1337,6 +1359,18 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
             f"'{legacy_final_receipt}', NULL);"
         )
         assert f"cutover_fenced|{mapping_hash}|40" in binding.stdout
+        refreshed = psql(
+            "BEGIN; "
+            "SELECT lifecycle_state, last_legacy_epoch_id, "
+            "first_settlement_epoch_id "
+            "FROM public.research_lab_stateful_subnet_epoch_refresh_fence_v1("
+            f"'{genesis_hash}', 71, 40, 41); "
+            "SELECT COALESCE(mapping_hash, 'cleared') "
+            "FROM public.research_lab_stateful_subnet_epoch_cutover_state_v1; "
+            "ROLLBACK;"
+        )
+        assert "cutover_fenced|40|41" in refreshed.stdout
+        assert "cleared" in refreshed.stdout
 
         # A coordinator receipt is the only post-binding first-ID exception,
         # and its two exact parents are enforced by the generic fence.
@@ -1802,6 +1836,7 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
         # the widened receipt purpose constraint successfully.
         psql(SQL)
         psql(TRANSPARENCY_SCOPE_REPAIR_SQL)
+        psql(FENCE_REFRESH_SQL)
         rerun_public_active = psql(
             "SET ROLE anon; SELECT lifecycle_state, mapping_hash "
             "FROM public.research_lab_stateful_subnet_epoch_cutover_public_state_v1(); "

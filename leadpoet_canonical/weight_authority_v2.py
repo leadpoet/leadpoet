@@ -131,6 +131,17 @@ def _require(condition: bool, message: str) -> None:
         raise WeightAuthorityV2Error(message)
 
 
+def _terminal_receipt_hashes(
+    receipts: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    parent_hashes = {
+        str(parent_hash)
+        for receipt in receipts.values()
+        for parent_hash in receipt.get("parent_receipt_hashes") or ()
+    }
+    return sorted(set(receipts) - parent_hashes)
+
+
 def _hash(value: Any, field: str) -> str:
     normalized = str(value or "").strip().lower()
     _require(bool(_HASH_RE.fullmatch(normalized)), "%s must be sha256:<64 lowercase hex>" % field)
@@ -769,9 +780,23 @@ def validate_published_weight_bundle_v2(
     ]
     _require(len(snapshot_receipts) == 1, "weight graph needs one snapshot receipt")
     snapshot_receipt = snapshot_receipts[0]
+    pre_snapshot_receipts = {
+        receipt_hash: receipt
+        for receipt_hash, receipt in receipts.items()
+        if receipt.get("purpose")
+        not in {
+            "validator.weight_snapshot.v2",
+            "validator.weights.computed.v2",
+            "validator.hotkey_signature.v2",
+        }
+    }
     _require(
-        snapshot_receipt.get("parent_receipt_hashes") == sorted(inputs.values()),
-        "snapshot receipt parents differ from complete weight inputs",
+        snapshot_receipt.get("parent_receipt_hashes")
+        == sorted(
+            set(inputs.values())
+            | set(_terminal_receipt_hashes(pre_snapshot_receipts))
+        ),
+        "snapshot receipt parents differ from the complete input proof frontier",
     )
     _require(
         snapshot_receipt.get("input_root") == snapshot["source_input_root"],

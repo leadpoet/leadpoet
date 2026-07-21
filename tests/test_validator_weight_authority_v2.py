@@ -141,6 +141,7 @@ def _receipt(
     transport_root=EMPTY_TRANSPORT_ROOT,
     artifact_root=EMPTY_ARTIFACT_ROOT,
     artifact_domain="leadpoet-artifact-v2",
+    parent_receipt_hashes=(),
 ):
     body = build_execution_receipt_body(
         role=boot["role"],
@@ -159,7 +160,7 @@ def _receipt(
         transport_root_hash=transport_root,
         host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
         artifact_root=artifact_root,
-        parent_receipt_hashes=(),
+        parent_receipt_hashes=parent_receipt_hashes,
         status="succeeded",
         failure_code=None,
         issued_at="2026-07-10T20:00:00Z",
@@ -611,6 +612,7 @@ def _fixture(*, category_output_override=None, stateful=False):
         "validator_key": validator_key,
         "validator_boot": validator_boot,
         "gateway_boot": gateway_boot,
+        "gateway_key": gateway_key,
         "expectations": expectations,
         "verified_boots": verified_boots,
         "boot_verification_modes": boot_verification_modes,
@@ -649,6 +651,35 @@ def test_validator_authority_computes_and_signs_exact_canonical_weights():
         fixture["validator_boot"]["boot_identity_hash"]: True,
         fixture["gateway_boot"]["boot_identity_hash"]: True,
     }
+
+
+def test_validator_authority_connects_gateway_persistence_receipts():
+    fixture = _fixture()
+    upstream = fixture["request"]["upstream_receipt_set"]
+    persistence_hashes = set()
+    for sequence, input_receipt in enumerate(list(upstream["receipts"])):
+        persistence_receipt = _receipt(
+            boot=fixture["gateway_boot"],
+            private_key=fixture["gateway_key"],
+            purpose="leadpoet.artifact_persistence.v2",
+            job_id="weight-input-persistence-%d" % sequence,
+            sequence=sequence,
+            output_root=sha256_json(
+                {"persisted_receipt_hash": input_receipt["receipt_hash"]}
+            ),
+            parent_receipt_hashes=(input_receipt["receipt_hash"],),
+        )
+        upstream["receipts"].append(persistence_receipt)
+        persistence_hashes.add(persistence_receipt["receipt_hash"])
+
+    value = fixture["authority"].compute(fixture["request"])
+    snapshot_receipt = next(
+        receipt
+        for receipt in value["receipt_graph"]["receipts"]
+        if receipt["purpose"] == "validator.weight_snapshot.v2"
+    )
+
+    assert persistence_hashes.issubset(snapshot_receipt["parent_receipt_hashes"])
 
 
 def test_stateful_authority_emits_dedicated_current_and_boundary_receipts():

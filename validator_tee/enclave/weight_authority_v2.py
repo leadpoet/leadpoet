@@ -44,6 +44,18 @@ def _issued_at(clock: Callable[[], datetime]) -> str:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _terminal_receipt_hashes(receipts: list[Mapping[str, Any]]) -> list[str]:
+    """Return every receipt not already consumed by another receipt."""
+
+    receipt_hashes = {str(receipt["receipt_hash"]) for receipt in receipts}
+    parent_hashes = {
+        str(parent_hash)
+        for receipt in receipts
+        for parent_hash in receipt["parent_receipt_hashes"]
+    }
+    return sorted(receipt_hashes - parent_hashes)
+
+
 class ValidatorWeightAuthorityV2:
     def __init__(
         self,
@@ -240,7 +252,14 @@ class ValidatorWeightAuthorityV2:
             sequence=0,
             input_root=snapshot["source_input_root"],
             output_root=snapshot["snapshot_hash"],
-            parent_receipt_hashes=sorted(input_hashes.values()),
+            # Some measured gateway inputs have a mandatory Object-Lock
+            # persistence receipt after the execution receipt named in
+            # input_hashes. Link the snapshot to every terminal receipt so
+            # those persistence proofs remain on the path to the final root.
+            parent_receipt_hashes=sorted(
+                set(input_hashes.values())
+                | set(_terminal_receipt_hashes(receipts + local_receipts))
+            ),
             artifact_hashes=(snapshot["calculation_snapshot_hash"],),
             issued_at=issued_at,
         )

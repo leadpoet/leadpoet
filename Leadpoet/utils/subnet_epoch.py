@@ -28,6 +28,14 @@ CUTOVER_SCHEMA_VERSION = "leadpoet.subnet_epoch_cutover.v1"
 SNAPSHOT_SCHEMA_VERSION = "leadpoet.subnet_epoch_snapshot.v1"
 CUTOVER_JSON_ENV = "LEADPOET_SUBNET_EPOCH_CUTOVER_JSON"
 CUTOVER_PATH_ENV = "LEADPOET_SUBNET_EPOCH_CUTOVER_PATH"
+# The activated SN71 settlement mapping is public, immutable chain data.
+# The repo ships it so auditors that only pull the repository can construct
+# the official epoch authority without operator-side provisioning.
+DEFAULT_SN71_CUTOVER_MANIFEST_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "config"
+    / "stateful-epoch-cutover-sn71.json"
+)
 OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT = (
     "wss://archive.chain.opentensor.ai:443"
 )
@@ -63,6 +71,27 @@ def assert_official_archive_subtensor(subtensor: Any) -> None:
         raise SubnetEpochError(
             "historical epoch authority must use the official Bittensor archive"
         )
+
+
+def ensure_cutover_manifest_configured(
+    environ: Optional[Any] = None,
+) -> None:
+    """Default the loader to the repo's public SN71 manifest when unset.
+
+    Explicit operator configuration always wins: when either environment
+    form is already present this changes nothing. Intended for auditor
+    entrypoints, which run straight from a repository checkout; gateway and
+    validator deployments keep provisioning the manifest explicitly. The
+    loaded manifest is still fully validated, and callers reject a netuid
+    mismatch, so the SN71 default fails closed everywhere else.
+    """
+
+    target = os.environ if environ is None else environ
+    if str(target.get(CUTOVER_JSON_ENV, "") or "").strip():
+        return
+    if str(target.get(CUTOVER_PATH_ENV, "") or "").strip():
+        return
+    target[CUTOVER_PATH_ENV] = str(DEFAULT_SN71_CUTOVER_MANIFEST_PATH)
 
 
 def load_subnet_epoch_cutover(

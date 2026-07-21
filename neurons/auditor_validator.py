@@ -178,6 +178,7 @@ from Leadpoet.utils.bittensor_sdk import ExtrinsicOutcome
 from Leadpoet.utils.subnet_epoch import (
     OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT,
     SubnetEpochError,
+    ensure_cutover_manifest_configured,
     load_subnet_epoch_cutover,
     read_subnet_epoch_snapshot,
     validate_subnet_epoch_cutover_anchor,
@@ -276,6 +277,10 @@ class AuditorValidator:
         self.gateway_url = _normalize_gateway_url(gateway_url)
         self.wallet = bt.Wallet(config=config)
         self.subtensor = bt.Subtensor(config=config)
+        # Auditors run from a plain repository checkout with no provisioning
+        # step, so fall back to the repo's public SN71 cutover manifest when
+        # the operator has not configured one explicitly.
+        ensure_cutover_manifest_configured()
         self.epoch_cutover = load_subnet_epoch_cutover()
         if (
             self.epoch_cutover is not None

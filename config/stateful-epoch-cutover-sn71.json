@@ -1,0 +1,12 @@
+{
+  "cutover_block": 8670636,
+  "cutover_block_hash": "0x25c2109c70fb3502a9c20fd3b04c1db3f0a18d968e73b42da9f1a47770a5e106",
+  "epoch_scheme": "bittensor.subnet_epoch_index.v1",
+  "first_settlement_epoch_id": 24073,
+  "first_subnet_epoch_index": 24020,
+  "last_legacy_epoch_id": 24072,
+  "mapping_hash": "sha256:58d9048c3c96c8f82ccd6e2c2445ed497539022f5e539b2b4af6ddb0f5dd50c2",
+  "netuid": 71,
+  "network_genesis_hash": "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
+  "schema_version": "leadpoet.subnet_epoch_cutover.v1"
+}

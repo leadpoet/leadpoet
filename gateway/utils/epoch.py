@@ -37,6 +37,11 @@ _sync_subtensor = None
 _epoch_snapshot_lock = threading.Lock()
 _validated_cutover_anchor_key = None
 _validated_cutover_authority_hash = None
+_validated_cutover_authority_at = 0.0
+# A verified activation is re-checked on this cadence so an operator
+# re-fencing or rolling the lifecycle back is honored by long-running
+# processes instead of being masked by a never-expiring success cache.
+_CUTOVER_AUTHORITY_REVALIDATE_SECONDS = 300.0
 _cutover_state_cache = None
 _cutover_state_cache_lock = threading.Lock()
 
@@ -306,13 +311,17 @@ def _validate_cutover_authority_sync(
 ) -> None:
     """Require the configured mapping to exist in the receipt-backed ledger."""
 
-    global _validated_cutover_authority_hash
+    global _validated_cutover_authority_hash, _validated_cutover_authority_at
     authority_scope = _cutover_authority_cache_scope(
         network=network,
         netuid=netuid,
     )
     authority_key = (authority_scope, cutover.mapping_hash)
-    if _validated_cutover_authority_hash == authority_key:
+    if (
+        _validated_cutover_authority_hash == authority_key
+        and time.monotonic() - _validated_cutover_authority_at
+        <= _CUTOVER_AUTHORITY_REVALIDATE_SECONDS
+    ):
         return
     if not (
         _configured_cutover_service_authority_enabled()
@@ -348,6 +357,7 @@ def _validate_cutover_authority_sync(
         # startup binding. Gateway processes with service authority additionally
         # prove the exact immutable ledger row below.
         _validated_cutover_authority_hash = authority_key
+        _validated_cutover_authority_at = time.monotonic()
         return
 
     from supabase import create_client
@@ -366,6 +376,7 @@ def _validate_cutover_authority_sync(
             "configured cutover is absent from the receipt-backed authority ledger"
         )
     _validated_cutover_authority_hash = authority_key
+    _validated_cutover_authority_at = time.monotonic()
 
 
 def validate_stateful_cutover_authority(

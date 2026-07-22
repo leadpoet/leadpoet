@@ -358,6 +358,7 @@ class AuditorValidator:
         
         self.should_exit = False
         self.last_submitted_epoch = None
+        self.last_authority_epoch = None
         self.consecutive_errors = 0
         self.max_consecutive_errors = 5  # Reconnect subtensor after this many errors
         
@@ -864,6 +865,21 @@ class AuditorValidator:
     # Gateway Communication
     # ═══════════════════════════════════════════════════════════════════════════
     
+    def _authority_candidate_epochs(self, current_epoch: int) -> List[int]:
+        """Return unmirrored authority epochs, newest first."""
+
+        candidates = []
+        for candidate_epoch in (current_epoch, current_epoch - 1):
+            if candidate_epoch <= 0:
+                continue
+            if (
+                self.last_authority_epoch is not None
+                and candidate_epoch <= self.last_authority_epoch
+            ):
+                break
+            candidates.append(candidate_epoch)
+        return candidates
+
     async def fetch_attested_weights_v2(self, epoch_id: int) -> Optional[Dict]:
         """Fetch the sole authoritative V2 bundle."""
 
@@ -1500,7 +1516,13 @@ class AuditorValidator:
                 )
                 return False
 
-    def submit_weights_to_chain(self, epoch_id: int, bundle: Dict) -> bool:
+    def submit_weights_to_chain(
+        self,
+        epoch_id: int,
+        bundle: Dict,
+        *,
+        submission_epoch_id: Optional[int] = None,
+    ) -> bool:
         """
         Submit verified weights to the Bittensor chain.
         
@@ -1537,16 +1559,22 @@ class AuditorValidator:
                 print(f"      UID {uid} {label}: {pct:.2f}%")
             print(f"   Total: {sum(weights_floats) / total_weight * 100:.2f}%")
             
+            live_epoch_id = int(
+                epoch_id if submission_epoch_id is None else submission_epoch_id
+            )
             success = self._set_weights_until_epoch_end(
-                epoch_id=epoch_id,
-                subnet_epoch_index=self._subnet_index_for_workflow_epoch(epoch_id),
+                epoch_id=live_epoch_id,
+                subnet_epoch_index=self._subnet_index_for_workflow_epoch(
+                    live_epoch_id
+                ),
                 uids=uids,
                 weights=weights_floats,
             )
             
             if success:
                 print(f"✅ Weights submitted for epoch {epoch_id}")
-                self.last_submitted_epoch = epoch_id
+                self.last_submitted_epoch = live_epoch_id
+                self.last_authority_epoch = epoch_id
                 
                 # Verify submission landed on chain
                 print(f"   🔍 Verifying submission landed on chain...")
@@ -1627,15 +1655,28 @@ class AuditorValidator:
                         print(f"📊 WEIGHT SUBMISSION TIME (Block {block_within_epoch})")
                         print(f"{'='*60}")
                         
-                        # Fetch weights for CURRENT epoch (not previous)
-                        # At block 345 of epoch N, primary validator submits epoch N weights
-                        # Auditor should copy epoch N, not N-1
+                        # Delayed finalization can make epoch N-1 the newest
+                        # complete authority during epoch N's submission window.
+                        weights_data = None
+                        authority_status = "v2_absent"
                         target_epoch = current_epoch
-                        print(f"   Fetching weights for epoch {target_epoch}...")
-                        
-                        weights_data, authority_status = (
-                            await self.fetch_verified_weight_authority(target_epoch)
-                        )
+                        for candidate_epoch in self._authority_candidate_epochs(
+                            current_epoch
+                        ):
+                            print(f"   Fetching weights for epoch {candidate_epoch}...")
+                            candidate_data, candidate_status = (
+                                await self.fetch_verified_weight_authority(
+                                    candidate_epoch
+                                )
+                            )
+                            if candidate_data is not None:
+                                weights_data = candidate_data
+                                authority_status = candidate_status
+                                target_epoch = candidate_epoch
+                                break
+                            if candidate_status != "v2_absent":
+                                authority_status = candidate_status
+                                break
                         if weights_data is None:
                             # Verification is fail-closed: no fallback vector will be submitted.
                             if authority_status == "v2_absent":
@@ -1658,7 +1699,11 @@ class AuditorValidator:
                                 weights_data.get("validator_hotkey", "")
                             )
                         
-                        if self.submit_weights_to_chain(target_epoch, weights_data):
+                        if self.submit_weights_to_chain(
+                            target_epoch,
+                            weights_data,
+                            submission_epoch_id=current_epoch,
+                        ):
                             logger.info(f"Weights submitted for epoch {target_epoch}")
                         else:
                             logger.error(f"Weight submission failed for epoch {target_epoch}")

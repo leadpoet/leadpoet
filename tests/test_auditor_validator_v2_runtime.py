@@ -180,6 +180,7 @@ def _auditor_for_one_verification(verified_result):
     )
     auditor.config = SimpleNamespace(netuid=71)
     auditor.last_submitted_epoch = None
+    auditor.last_authority_epoch = None
     auditor.consecutive_errors = 0
     auditor.max_consecutive_errors = 5
     auditor.metagraph = object()
@@ -430,3 +431,20 @@ def test_non_v2_protocol_is_rejected(monkeypatch, protocol):
     monkeypatch.setenv("AUDITOR_WEIGHT_PROTOCOL", protocol)
     with pytest.raises(RuntimeError, match="must be authoritative_v2"):
         auditor_module.AuditorValidator.auditor_weight_protocol()
+
+
+def test_authority_candidates_cover_delayed_finalization_without_replay():
+    auditor = SimpleNamespace(last_authority_epoch=None)
+    assert auditor_module.AuditorValidator._authority_candidate_epochs(
+        auditor, 24083
+    ) == [24083, 24082]
+
+    auditor.last_authority_epoch = 24082
+    assert auditor_module.AuditorValidator._authority_candidate_epochs(
+        auditor, 24083
+    ) == [24083]
+
+    auditor.last_authority_epoch = 24083
+    assert auditor_module.AuditorValidator._authority_candidate_epochs(
+        auditor, 24083
+    ) == []

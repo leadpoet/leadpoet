@@ -440,10 +440,12 @@ class ValidatorHotkeyAuthorityV2:
             dict(identity)
             for identity in graph["boot_identities"]
             if identity.get("physical_role") == "validator_weights"
+            and identity.get("boot_identity_hash")
+            == verified["validator_boot_identity_hash"]
         ]
         if len(validator_boots) != 1:
             raise ValidatorHotkeyAuthorityV2Error(
-                "recovery bundle needs exactly one validator boot"
+                "recovery bundle needs exactly one computing validator boot"
             )
         old_boot = validator_boots[0]
         current_boot = dict(self._boot_identity_supplier())
@@ -488,12 +490,13 @@ class ValidatorHotkeyAuthorityV2:
         computed_receipts = [
             receipt
             for receipt in graph["receipts"]
-            if receipt.get("role") == "validator_weights"
+            if receipt.get("receipt_hash") == verified["weight_receipt_hash"]
+            and receipt.get("role") == "validator_weights"
             and receipt.get("purpose") == "validator.weights.computed.v2"
         ]
         if len(computed_receipts) != 1:
             raise ValidatorHotkeyAuthorityV2Error(
-                "recovery computed-weight receipt is ambiguous"
+                "recovery computing receipt is missing or ambiguous"
             )
         computed_receipt = dict(computed_receipts[0])
         weight_result = dict(published_bundle["weight_result"])

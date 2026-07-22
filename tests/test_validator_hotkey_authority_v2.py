@@ -432,7 +432,14 @@ def test_restart_recovery_revalidates_bundle_binding_and_signed_extrinsic(
         "weights_signature": response["weights_signature"],
         "receipt_graph": {
             "root_receipt_hash": binding["receipt"]["receipt_hash"],
-            "boot_identities": [old_boot],
+            "boot_identities": [
+                {
+                    **old_boot,
+                    "boot_identity_hash": "sha256:" + "f" * 64,
+                    "commit_sha": "f" * 40,
+                },
+                old_boot,
+            ],
             "receipts": [
                 response["receipt_graph"]["receipts"][0],
                 binding["receipt"],
@@ -447,6 +454,10 @@ def test_restart_recovery_revalidates_bundle_binding_and_signed_extrinsic(
         lambda _bundle: {
             "bundle_hash": "sha256:" + "d" * 64,
             "validator_hotkey": HOTKEY,
+            "validator_boot_identity_hash": old_boot["boot_identity_hash"],
+            "weight_receipt_hash": response["receipt_graph"][
+                "root_receipt_hash"
+            ],
         },
     )
     monkeypatch.setattr(module, "verify_boot_identity_nitro", lambda *_a, **_k: {})

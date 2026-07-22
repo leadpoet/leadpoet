@@ -18,6 +18,7 @@ BUNDLE_HASH = "sha256:" + "d" * 64
 DURABLE_HASH = "sha256:" + "e" * 64
 EVENT_HASH = "sha256:" + "f" * 64
 VALIDATOR_HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
+VALIDATOR_BOOT_HASH = "sha256:" + "0" * 64
 
 
 def _legacy_submission():
@@ -76,6 +77,7 @@ def _submission():
                     "physical_role": "validator_weights",
                     "commit_sha": COMMIT,
                     "build_manifest_hash": BUILD_MANIFEST,
+                    "boot_identity_hash": VALIDATOR_BOOT_HASH,
                 }
             ]
         },
@@ -96,6 +98,7 @@ def _verified():
         "uids": [0],
         "weights_u16": [65535],
         "weights_hash": "5" * 64,
+        "validator_boot_identity_hash": VALIDATOR_BOOT_HASH,
     }
 
 
@@ -104,7 +107,33 @@ def _validator_boot():
         "physical_role": "validator_weights",
         "commit_sha": COMMIT,
         "build_manifest_hash": BUILD_MANIFEST,
+        "boot_identity_hash": VALIDATOR_BOOT_HASH,
     }
+
+
+def test_submission_selects_computing_boot_from_historical_validator_ancestry(
+    monkeypatch,
+):
+    submission = _submission()
+    historical_boot = {
+        "physical_role": "validator_weights",
+        "commit_sha": "9" * 40,
+        "build_manifest_hash": "sha256:" + "8" * 64,
+        "boot_identity_hash": "sha256:" + "7" * 64,
+    }
+    submission.receipt_graph["boot_identities"].insert(0, historical_boot)
+    monkeypatch.setattr(
+        weights_api,
+        "validate_published_weight_bundle_v2",
+        lambda *_args, **_kwargs: _verified(),
+    )
+
+    verified, selected = weights_api._validate_authoritative_v2_submission(
+        submission
+    )
+
+    assert verified["validator_boot_identity_hash"] == VALIDATOR_BOOT_HASH
+    assert selected == _validator_boot()
 
 
 class _Subtensor:

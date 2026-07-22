@@ -772,23 +772,47 @@ def validate_published_weight_bundle_v2(
             "%s receipt cannot inherit host-provided ancestry" % category,
         )
 
-    snapshot_receipts = [
-        receipt
-        for receipt in receipts.values()
-        if receipt.get("role") == WEIGHT_ROLE
-        and receipt.get("purpose") == "validator.weight_snapshot.v2"
-    ]
-    _require(len(snapshot_receipts) == 1, "weight graph needs one snapshot receipt")
-    snapshot_receipt = snapshot_receipts[0]
+    root_parents = list(root_receipt.get("parent_receipt_hashes") or [])
+    _require(
+        len(root_parents) == 1,
+        "hotkey binding receipt must have one computed-weight parent",
+    )
+    computed_receipt = receipts.get(root_parents[0])
+    _require(
+        isinstance(computed_receipt, Mapping)
+        and computed_receipt.get("role") == WEIGHT_ROLE
+        and computed_receipt.get("purpose") == "validator.weights.computed.v2",
+        "hotkey binding receipt parent is not computed weights",
+    )
+    computed_parents = list(
+        computed_receipt.get("parent_receipt_hashes") or []
+    )
+    _require(
+        len(computed_parents) == 1,
+        "computed weight receipt must have one snapshot parent",
+    )
+    snapshot_receipt = receipts.get(computed_parents[0])
+    _require(
+        isinstance(snapshot_receipt, Mapping)
+        and snapshot_receipt.get("role") == WEIGHT_ROLE
+        and snapshot_receipt.get("purpose") == "validator.weight_snapshot.v2",
+        "computed weight receipt parent is not a weight snapshot",
+    )
+    _require(
+        snapshot_receipt.get("boot_identity_hash")
+        == computed_receipt.get("boot_identity_hash")
+        == root_receipt.get("boot_identity_hash"),
+        "current weight receipts use different validator boots",
+    )
+    current_receipt_hashes = {
+        str(root_receipt["receipt_hash"]),
+        str(computed_receipt["receipt_hash"]),
+        str(snapshot_receipt["receipt_hash"]),
+    }
     pre_snapshot_receipts = {
         receipt_hash: receipt
         for receipt_hash, receipt in receipts.items()
-        if receipt.get("purpose")
-        not in {
-            "validator.weight_snapshot.v2",
-            "validator.weights.computed.v2",
-            "validator.hotkey_signature.v2",
-        }
+        if receipt_hash not in current_receipt_hashes
     }
     _require(
         snapshot_receipt.get("parent_receipt_hashes")
@@ -810,14 +834,6 @@ def validate_published_weight_bundle_v2(
         int(snapshot_receipt.get("epoch_id", -1)) == int(snapshot["epoch_id"]),
         "snapshot receipt epoch mismatch",
     )
-    computed_receipts = [
-        receipt
-        for receipt in receipts.values()
-        if receipt.get("role") == WEIGHT_ROLE
-        and receipt.get("purpose") == "validator.weights.computed.v2"
-    ]
-    _require(len(computed_receipts) == 1, "weight graph needs one computed receipt")
-    computed_receipt = computed_receipts[0]
     _require(
         computed_receipt.get("parent_receipt_hashes")
         == [snapshot_receipt["receipt_hash"]],
@@ -839,16 +855,6 @@ def validate_published_weight_bundle_v2(
         computed_receipt.get("commit_sha")
         == snapshot["calculation_snapshot"].get("commit_sha"),
         "computed weight receipt commit mismatch",
-    )
-    _require(
-        root_receipt.get("parent_receipt_hashes")
-        == [computed_receipt["receipt_hash"]],
-        "hotkey binding receipt must directly bind computed weights",
-    )
-    _require(
-        root_receipt.get("boot_identity_hash")
-        == computed_receipt.get("boot_identity_hash"),
-        "hotkey binding receipt uses another validator boot",
     )
     try:
         application_request = build_application_signature_request_v2(
@@ -904,6 +910,9 @@ def validate_published_weight_bundle_v2(
         "weights_u16": list(computed_result["sparse_weights_u16"]),
         "weights_hash": str(computed_result["weights_hash"]),
         "validator_enclave_pubkey": str(computed_receipt["enclave_pubkey"]),
+        "validator_boot_identity_hash": str(
+            computed_receipt["boot_identity_hash"]
+        ),
     }
 
 

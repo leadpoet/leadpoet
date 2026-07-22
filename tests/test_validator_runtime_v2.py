@@ -34,6 +34,7 @@ def _configuration():
                     "gateway_autoresearch",
                     "gateway_coordinator",
                     "gateway_scoring",
+                    "validator_weights",
                 ),
                 characters,
             )
@@ -43,12 +44,12 @@ def _configuration():
         commit: {
             "channel_hash": _hash("1"),
             "gateway_release_hash": _hash("d"),
-            "roles": roles(commit, "124"),
+            "roles": roles(commit, "1243"),
         },
         historical_commit: {
             "channel_hash": _hash("2"),
             "gateway_release_hash": _hash("e"),
-            "roles": roles(historical_commit, "567"),
+            "roles": roles(historical_commit, "5678"),
         },
     }
     lineage_body = {
@@ -133,6 +134,7 @@ def test_validator_boot_binds_hardware_release_and_gateway_lineage():
     lineage = runtime.gateway_release_lineage()
     assert lineage["a" * 40]["roles"]["gateway_coordinator"]["pcr0"] == "2" * 96
     assert lineage["e" * 40]["roles"]["gateway_scoring"]["pcr0"] == "7" * 96
+    assert lineage["e" * 40]["roles"]["validator_weights"]["pcr0"] == "8" * 96
 
 
 def test_validator_runtime_rejects_zero_pcr_and_manifest_drift():

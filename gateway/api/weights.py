@@ -549,9 +549,13 @@ def _validate_authoritative_v2_submission(
         for boot in bundle["receipt_graph"].get("boot_identities", [])
         if isinstance(boot, dict)
         and boot.get("physical_role") == "validator_weights"
+        and boot.get("boot_identity_hash")
+        == verified["validator_boot_identity_hash"]
     ]
     if len(validator_boots) != 1:
-        raise ValueError("V2 bundle needs exactly one validator boot identity")
+        raise ValueError(
+            "V2 bundle needs exactly one computing validator boot identity"
+        )
     return verified, dict(validator_boots[0])
 
 

@@ -116,6 +116,10 @@ def _ack(**overrides):
     return value
 
 
+def _verified_bundle(_bundle):
+    return {"weight_receipt_hash": COMPUTED_RECEIPT}
+
+
 def _epoch_evidence():
     graph = {"root_receipt_hash": "sha256:" + "5" * 64, "receipts": []}
     boundary = {
@@ -160,6 +164,11 @@ def _epoch_ack(evidence):
 @pytest.mark.asyncio
 async def test_flow_orders_inputs_compute_parent_binding_and_durable_publication(monkeypatch):
     monkeypatch.setattr(flow_module, "build_authoritative_weight_bundle_v2", _bundle)
+    monkeypatch.setattr(
+        flow_module,
+        "validate_published_weight_bundle_v2",
+        _verified_bundle,
+    )
     observed = {}
 
     order = []
@@ -202,7 +211,14 @@ async def test_flow_orders_inputs_compute_parent_binding_and_durable_publication
 
 
 @pytest.mark.asyncio
-async def test_prepared_publication_replays_exact_bundle_and_validates_ack():
+async def test_prepared_publication_replays_exact_bundle_and_validates_ack(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        flow_module,
+        "validate_published_weight_bundle_v2",
+        _verified_bundle,
+    )
     bundle = _bundle(
         enclave_response=Client().compute_authoritative_weights_v2({}),
         validator_hotkey=HOTKEY,
@@ -225,7 +241,14 @@ async def test_prepared_publication_replays_exact_bundle_and_validates_ack():
 
 
 @pytest.mark.asyncio
-async def test_stateful_recovery_replays_bundle_then_epoch_evidence_before_return():
+async def test_stateful_recovery_replays_bundle_then_epoch_evidence_before_return(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        flow_module,
+        "validate_published_weight_bundle_v2",
+        _verified_bundle,
+    )
     bundle = _bundle(
         enclave_response=Client().compute_authoritative_weights_v2({}),
         validator_hotkey=HOTKEY,
@@ -285,6 +308,11 @@ async def test_stateful_epoch_evidence_ack_mismatch_fails_closed(changed_field):
 @pytest.mark.asyncio
 async def test_flow_rejects_acknowledgment_for_another_vector(monkeypatch):
     monkeypatch.setattr(flow_module, "build_authoritative_weight_bundle_v2", _bundle)
+    monkeypatch.setattr(
+        flow_module,
+        "validate_published_weight_bundle_v2",
+        _verified_bundle,
+    )
 
     async def post(*_args):
         return _ack(weights_hash="f" * 64)

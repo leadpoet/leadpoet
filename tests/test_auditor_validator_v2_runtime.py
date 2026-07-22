@@ -436,7 +436,7 @@ def test_authority_candidates_cover_delayed_finalization():
     """During epoch N's window the newest complete authority is usually
     N-1's (delayed finalization), so the auditor must consider both."""
 
-    auditor = SimpleNamespace(last_submitted_epoch=None)
+    auditor = SimpleNamespace(last_mirrored_authority_epoch=None)
     candidates = auditor_module.AuditorValidator._authority_candidate_epochs(
         auditor, 24083
     )
@@ -444,13 +444,13 @@ def test_authority_candidates_cover_delayed_finalization():
 
 
 def test_authority_candidates_never_resubmit_older_epochs():
-    auditor = SimpleNamespace(last_submitted_epoch=24082)
+    auditor = SimpleNamespace(last_mirrored_authority_epoch=24082)
     candidates = auditor_module.AuditorValidator._authority_candidate_epochs(
         auditor, 24083
     )
     assert candidates == [24083]
 
-    caught_up = SimpleNamespace(last_submitted_epoch=24083)
+    caught_up = SimpleNamespace(last_mirrored_authority_epoch=24083)
     assert (
         auditor_module.AuditorValidator._authority_candidate_epochs(
             caught_up, 24083
@@ -460,7 +460,33 @@ def test_authority_candidates_never_resubmit_older_epochs():
 
 
 def test_authority_candidates_skip_nonpositive_epochs():
-    auditor = SimpleNamespace(last_submitted_epoch=None)
+    auditor = SimpleNamespace(last_mirrored_authority_epoch=None)
     assert auditor_module.AuditorValidator._authority_candidate_epochs(
         auditor, 1
     ) == [1]
+
+
+def test_chain_submission_uses_live_epoch_while_mirroring_older_evidence():
+    """The staleness guard must receive the LIVE epoch; the mirrored
+    authority may be one epoch older under delayed finalization."""
+
+    recorded = {}
+
+    def fake_set_weights_until_epoch_end(**kwargs):
+        recorded.update(kwargs)
+        return False  # stop before the on-chain verification tail
+
+    auditor = SimpleNamespace(
+        _set_weights_until_epoch_end=fake_set_weights_until_epoch_end,
+        _subnet_index_for_workflow_epoch=lambda epoch: 99_000 + epoch,
+        last_submitted_epoch=None,
+    )
+    bundle = {"uids": [7], "weights_u16": [65535]}
+
+    result = auditor_module.AuditorValidator.submit_weights_to_chain(
+        auditor, 24084, bundle, evidence_epoch=24083
+    )
+
+    assert result is False
+    assert recorded["epoch_id"] == 24084
+    assert recorded["subnet_epoch_index"] == 99_000 + 24084

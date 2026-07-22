@@ -358,6 +358,11 @@ class AuditorValidator:
         
         self.should_exit = False
         self.last_submitted_epoch = None
+        # Newest evidence epoch whose authority this auditor has mirrored.
+        # Distinct from last_submitted_epoch: submissions always happen in
+        # the live epoch, while the mirrored authority may be one epoch
+        # older under delayed finalization.
+        self.last_mirrored_authority_epoch = None
         self.consecutive_errors = 0
         self.max_consecutive_errors = 5  # Reconnect subtensor after this many errors
         
@@ -878,8 +883,8 @@ class AuditorValidator:
             if candidate_epoch <= 0:
                 continue
             if (
-                self.last_submitted_epoch is not None
-                and candidate_epoch <= self.last_submitted_epoch
+                self.last_mirrored_authority_epoch is not None
+                and candidate_epoch <= self.last_mirrored_authority_epoch
             ):
                 break
             candidates.append(candidate_epoch)
@@ -1521,20 +1526,32 @@ class AuditorValidator:
                 )
                 return False
 
-    def submit_weights_to_chain(self, epoch_id: int, bundle: Dict) -> bool:
+    def submit_weights_to_chain(
+        self,
+        epoch_id: int,
+        bundle: Dict,
+        evidence_epoch: Optional[int] = None,
+    ) -> bool:
         """
         Submit verified weights to the Bittensor chain.
-        
+
         Uses u16_to_emit_floats() for proper float conversion that
         guarantees ±1 u16 round-trip tolerance.
-        
+
         Args:
-            epoch_id: Epoch being submitted
+            epoch_id: LIVE epoch the extrinsic is submitted in. The
+                fail-closed staleness guard requires this to be the
+                current chain epoch.
             bundle: Verified weight bundle
-            
+            evidence_epoch: Epoch of the mirrored authority when it is
+                older than the live epoch (delayed finalization).
+
         Returns:
             True if submission succeeded
         """
+        mirrored_from = (
+            int(evidence_epoch) if evidence_epoch is not None else int(epoch_id)
+        )
         try:
             uids = bundle.get("uids", [])
             weights_u16 = bundle.get("weights_u16", [])
@@ -1550,6 +1567,11 @@ class AuditorValidator:
             
             # Print weight breakdown (same format as primary validator)
             print(f"\n📤 Submitting weights for {len(uids)} UIDs...")
+            if mirrored_from != int(epoch_id):
+                print(
+                    f"   Mirroring finalized authority from epoch "
+                    f"{mirrored_from} during live epoch {epoch_id}"
+                )
             print(f"   Weight breakdown (copying from primary validator):")
             total_weight = sum(weights_floats)
             for uid, weight in zip(uids, weights_floats):
@@ -1697,10 +1719,28 @@ class AuditorValidator:
                                 weights_data.get("validator_hotkey", "")
                             )
                         
-                        if self.submit_weights_to_chain(target_epoch, weights_data):
-                            logger.info(f"Weights submitted for epoch {target_epoch}")
+                        # Chain submission always happens in the LIVE epoch
+                        # (the staleness guard requires it); the mirrored
+                        # evidence may legitimately be one epoch older.
+                        if self.submit_weights_to_chain(
+                            current_epoch,
+                            weights_data,
+                            evidence_epoch=target_epoch,
+                        ):
+                            self.last_mirrored_authority_epoch = target_epoch
+                            logger.info(
+                                "Weights submitted in epoch %s mirroring "
+                                "authority from epoch %s",
+                                current_epoch,
+                                target_epoch,
+                            )
                         else:
-                            logger.error(f"Weight submission failed for epoch {target_epoch}")
+                            logger.error(
+                                "Weight submission failed in epoch %s "
+                                "(authority epoch %s)",
+                                current_epoch,
+                                target_epoch,
+                            )
                 
                 # Soft anti-equivocation check at block 50-100 of each epoch
                 # Check 2 epochs back to ensure weights have definitely propagated

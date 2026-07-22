@@ -94,6 +94,22 @@ class _Substrate:
                 "SubnetEpochIndex": 23_928,
                 "BlocksSinceLastStep": 4,
             },
+            8_637_811: {
+                "hash": "0x" + "88" * 32,
+                "Tempo": 360,
+                "LastEpochBlock": 8_637_516,
+                "PendingEpochAt": 0,
+                "SubnetEpochIndex": 23_928,
+                "BlocksSinceLastStep": 295,
+            },
+            8_637_816: {
+                "hash": "0x" + "99" * 32,
+                "Tempo": 360,
+                "LastEpochBlock": 8_637_516,
+                "PendingEpochAt": 0,
+                "SubnetEpochIndex": 23_928,
+                "BlocksSinceLastStep": 300,
+            },
             8_637_850: {
                 "hash": WINDOW_HASH,
                 "Tempo": 360,
@@ -441,10 +457,9 @@ async def test_weight_authority_uses_exact_submitted_block_mapping(
     from gateway.api import weights
 
     subtensor = _Subtensor()
-    # Best head is in the strict final-15 submission window while the
-    # enclave-bound finalized snapshot trails it by 15 blocks.  The exact
-    # snapshot may use the 30-block lag buffer, but both remain in one
-    # official subnet epoch.
+    # Best head is in the submission window while the enclave-bound finalized
+    # snapshot trails it by 15 blocks. The exact snapshot may use the 30-block
+    # lag buffer, but both remain in one official subnet epoch.
     subtensor.substrate.current_block = 8_637_865
     monkeypatch.setattr(weights, "get_subtensor", lambda: subtensor)
     archive_anchors = []
@@ -482,6 +497,32 @@ async def test_weight_authority_uses_exact_submitted_block_mapping(
             submitted_block=8_637_865,
             require_submission_window=True,
         )
+
+
+@pytest.mark.asyncio
+async def test_weight_authority_accepts_block_300_window_with_finality_lag(
+    monkeypatch, stateful
+):
+    from gateway.api import weights
+
+    subtensor = _Subtensor()
+    subtensor.substrate.current_block = 8_637_816
+    monkeypatch.setattr(weights, "get_subtensor", lambda: subtensor)
+    monkeypatch.setattr(
+        weights,
+        "validate_cutover_anchor_from_archive",
+        lambda cutover: None,
+    )
+
+    authority = await weights._verify_epoch_block_authority(
+        netuid=71,
+        epoch_id=23_993,
+        submitted_block=8_637_811,
+        require_submission_window=True,
+    )
+
+    assert authority["official_subnet_epoch_id"] == 23_928
+    assert authority["blocks_remaining"] == 65
 
 
 @pytest.mark.asyncio

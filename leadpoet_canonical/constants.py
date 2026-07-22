@@ -19,9 +19,11 @@ model and must be coordinated across all deployments.
 # This matches Bittensor's tempo setting for the subnet
 EPOCH_LENGTH = 360
 
-# Block within epoch when weight submission occurs
-# Primary validator should submit weights at this block
-WEIGHT_SUBMISSION_BLOCK = 345
+# Block within the official subnet epoch when current-epoch weight authority
+# preparation and submission begin. Starting at block 300 leaves 60 blocks for
+# measured input reconstruction, bounded retries, chain finalization, and
+# current-epoch auditor mirroring.
+WEIGHT_SUBMISSION_BLOCK = 300
 
 # Maximum allowed drift between gateway-observed block and submission block
 # Submissions with larger drift are rejected to prevent replay attacks
@@ -114,4 +116,3 @@ TRUST_LEVEL_FULL_NITRO = "full_nitro"
 
 # Only Ed25519 signatures verified (weaker trust model)
 TRUST_LEVEL_SIGNATURE_ONLY = "signature_only"
-

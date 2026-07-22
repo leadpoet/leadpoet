@@ -105,6 +105,7 @@ from leadpoet_canonical.weight_computation import (
     research_lab_uid_weights_from_allocation as canonical_research_lab_uid_weights_from_allocation,
     weight_config_hash as canonical_weight_config_hash,
 )
+from leadpoet_canonical.constants import WEIGHT_SUBMISSION_BLOCK
 from leadpoet_verifier.economics import DEFAULT_RESEARCH_LAB_EMISSION_PERCENT
 
 
@@ -2417,7 +2418,7 @@ class Validator(BaseValidatorNeuron):
                         bt.logging.warning(f"Error in gateway validation workflow: {e}")
                         await asyncio.sleep(5)  # Wait before retrying
                     
-                    # Check if we should submit accumulated weights (block 345+)
+                    # Check if the current-epoch weight window has opened.
                     try:
                         await self.submit_weights_at_epoch_end()
                     except Exception as e:
@@ -3076,9 +3077,9 @@ class Validator(BaseValidatorNeuron):
                         blocks_into_epoch_bg = epoch_state_bg.epoch_block
                         self._write_shared_block_file(epoch_state_bg)
                         
-                        # CRITICAL: Check for weight submission at block 345+
+                        # Check for weight submission once the canonical window opens.
                         # This ensures weights are submitted even if Stage 4-5 is still running
-                        if epoch_state_bg.deadline_reached(345):
+                        if epoch_state_bg.deadline_reached(WEIGHT_SUBMISSION_BLOCK):
                             try:
                                 await self.submit_weights_at_epoch_end()
                             except Exception as weight_err:
@@ -3261,7 +3262,7 @@ class Validator(BaseValidatorNeuron):
                     
                     # Check block/epoch status every 20 leads (no delay - this is just hash preparation)
                     if idx < len(leads) and idx % 20 == 0:
-                        # Check if we should submit weights mid-processing (block 345+)
+                        # Check if the canonical weight window opened mid-processing.
                         await self.submit_weights_at_epoch_end()
                         
                         # Check if epoch changed - if so, stop processing old epoch's leads
@@ -3283,12 +3284,14 @@ class Validator(BaseValidatorNeuron):
                             print(f"{'='*80}\n")
                             break  # Exit the lead processing loop
                         
-                        # FORCE STOP at block 345 for WORKERS (weight submission time)
+                        # Force-stop workers when the canonical weight window opens.
                         # Coordinator needs to submit weights, workers must finish before that
                         container_mode = getattr(self.config.neuron, 'mode', None)
                         if (
                             container_mode == "worker"
-                            and new_epoch_state.deadline_reached(345)
+                            and new_epoch_state.deadline_reached(
+                                WEIGHT_SUBMISSION_BLOCK
+                            )
                         ):
                             print(f"\n{'='*80}")
                             print(
@@ -3560,11 +3563,14 @@ class Validator(BaseValidatorNeuron):
                 print(f"⚠️  No validation results to submit (all leads failed validation)")
             
             # Weights already accumulated (coordinator mode) or accumulation skipped (container mode)
-            # Weight submission to blockchain happens at block 345+ via submit_weights_at_epoch_end()
+            # Weight submission happens in the canonical current-epoch window.
             if container_mode is None:
                 print(f"\n{'='*80}")
                 print(f"⚖️  Weights accumulated for this epoch")
-                print(f"   (Will submit at block 345+ via submit_weights_at_epoch_end())")
+                print(
+                    "   (Will submit at block "
+                    f"{WEIGHT_SUBMISSION_BLOCK}+ via submit_weights_at_epoch_end())"
+                )
                 print(f"{'='*80}")
             
             # Mark epoch as processed
@@ -3577,7 +3583,7 @@ class Validator(BaseValidatorNeuron):
             # With immediate reveal, validators submit both hashes AND values in one request
             # No separate reveal phase is needed - consensus runs at block 330 of CURRENT epoch
             
-            # Check if we should submit weights (block 345+)
+            # Check if the canonical current-epoch weight window has opened.
             await self.submit_weights_at_epoch_end()
             
             # MEMORY CLEANUP: Force garbage collection after each epoch
@@ -3984,6 +3990,31 @@ class Validator(BaseValidatorNeuron):
         record = journal.load()
         if record is None:
             return None
+        epoch_id = int(record["published_bundle"]["weight_result"]["epoch_id"])
+        epoch_closed = False
+        try:
+            finalized_state = await self._get_epoch_state_async()
+            best_state = await self._get_best_epoch_state_async()
+            epoch_closed = (
+                finalized_state.workflow_epoch_id > epoch_id
+                and best_state.workflow_epoch_id > epoch_id
+            )
+        except Exception as exc:
+            bt.logging.error(
+                "weight_publication_journal_epoch_check_failed "
+                f"epoch={epoch_id} type={type(exc).__name__} "
+                f"error={str(exc)[:200]}"
+            )
+        if epoch_closed and not record["extrinsic_signature_results"]:
+            quarantined = journal.quarantine(
+                expected_epoch=epoch_id,
+                reason="unsigned_epoch_closed",
+            )
+            bt.logging.critical(
+                "weight_publication_journal_quarantined "
+                f"epoch={epoch_id} signed=false path={quarantined}"
+            )
+            return epoch_id
         if record["publication"] is None:
             acknowledgment = await resume_prepared_weight_publication_v2(
                 journal_record=record,
@@ -3993,18 +4024,31 @@ class Validator(BaseValidatorNeuron):
         event_hash = str(
             record["publication"]["weight_submission_event_hash"]
         )
-        recovery = await asyncio.to_thread(
-            self._validator_v2_client.recover_weight_publication_v2,
-            published_bundle=record["published_bundle"],
-            weight_submission_event_hash=event_hash,
-            extrinsic_signature_results=record[
-                "extrinsic_signature_results"
-            ],
-        )
+        try:
+            recovery = await asyncio.to_thread(
+                self._validator_v2_client.recover_weight_publication_v2,
+                published_bundle=record["published_bundle"],
+                weight_submission_event_hash=event_hash,
+                extrinsic_signature_results=record[
+                    "extrinsic_signature_results"
+                ],
+            )
+        except Exception as exc:
+            if not epoch_closed:
+                raise
+            quarantined = journal.quarantine(
+                expected_epoch=epoch_id,
+                reason="signed_recovery_unresolved",
+            )
+            bt.logging.critical(
+                "weight_publication_journal_quarantined "
+                f"epoch={epoch_id} signed=true path={quarantined} "
+                f"recovery_type={type(exc).__name__} error={str(exc)[:200]}"
+            )
+            return epoch_id
         authorization_id = str(recovery["weight_authorization_id"])
         record = journal.replace_authorization(authorization_id)
         weight_result = record["published_bundle"]["weight_result"]
-        epoch_id = int(weight_result["epoch_id"])
         signed_extrinsics = list(recovery["signed_extrinsics"])
         if not signed_extrinsics:
             sdk_uids, sdk_weights = _canonical_sdk_weight_vector(weight_result)
@@ -4033,28 +4077,35 @@ class Validator(BaseValidatorNeuron):
                 # before the original SDK call. The enclave independently
                 # proves finalized inclusion; this host response is not trusted.
                 latest = signed_extrinsics[-1]
-                if not await self._weight_submission_epoch_is_current(
-                    epoch_id=epoch_id,
-                    subnet_epoch_index=self._subnet_index_for_workflow_epoch(
-                        epoch_id
-                    ),
-                ):
-                    raise RuntimeError(
-                        "journaled authoritative weight publication is no longer "
-                        "authorized by the durable epoch lifecycle"
+                if epoch_closed:
+                    bt.logging.critical(
+                        "weight_publication_journal_stale_signed_unresolved "
+                        f"epoch={epoch_id} extrinsic_hash="
+                        f"{latest['extrinsic_hash']}"
                     )
-                try:
-                    await asyncio.to_thread(
-                        self.subtensor.substrate.rpc_request,
-                        "author_submitExtrinsic",
-                        ["0x" + str(latest["extrinsic_hex"])],
-                    )
-                except Exception as exc:
-                    bt.logging.warning(
-                        "Exact V2 recovery rebroadcast returned %s; awaiting "
-                        "enclave-authenticated finalization",
-                        type(exc).__name__,
-                    )
+                else:
+                    if not await self._weight_submission_epoch_is_current(
+                        epoch_id=epoch_id,
+                        subnet_epoch_index=self._subnet_index_for_workflow_epoch(
+                            epoch_id
+                        ),
+                    ):
+                        raise RuntimeError(
+                            "journaled authoritative weight publication is no longer "
+                            "authorized by the durable epoch lifecycle"
+                        )
+                    try:
+                        await asyncio.to_thread(
+                            self.subtensor.substrate.rpc_request,
+                            "author_submitExtrinsic",
+                            ["0x" + str(latest["extrinsic_hex"])],
+                        )
+                    except Exception as exc:
+                        bt.logging.warning(
+                            "Exact V2 recovery rebroadcast returned %s; awaiting "
+                            "enclave-authenticated finalization",
+                            type(exc).__name__,
+                        )
         last_error = None
         for attempt in range(10):
             try:
@@ -4074,6 +4125,17 @@ class Validator(BaseValidatorNeuron):
                 last_error = exc
                 if attempt < 9:
                     await asyncio.sleep(12)
+        if epoch_closed:
+            quarantined = journal.quarantine(
+                expected_epoch=epoch_id,
+                reason="signed_finalization_unresolved",
+            )
+            bt.logging.critical(
+                "weight_publication_journal_quarantined "
+                f"epoch={epoch_id} signed=true path={quarantined} "
+                "finalized_chain_proof=false"
+            )
+            return epoch_id
         raise RuntimeError(
             "journaled authoritative V2 publication lacks finalized-chain proof"
         ) from last_error
@@ -4175,7 +4237,7 @@ class Validator(BaseValidatorNeuron):
 
     async def _submit_weights_at_epoch_end_locked(self):
         """
-        Submit accumulated weights to Bittensor chain at end of epoch (block 345+).
+        Submit accumulated weights in the canonical current-epoch window.
         
         ASYNC VERSION: Uses async subtensor for block queries.
         
@@ -4192,8 +4254,7 @@ class Validator(BaseValidatorNeuron):
             current_epoch = epoch_state.workflow_epoch_id
             blocks_into_epoch = epoch_state.epoch_block
             
-            # Only submit after block 345 (near end of epoch)
-            if not epoch_state.deadline_reached(345):
+            if not epoch_state.deadline_reached(WEIGHT_SUBMISSION_BLOCK):
                 return False
             
             # ═══════════════════════════════════════════════════════════════════
@@ -5234,7 +5295,7 @@ class Validator(BaseValidatorNeuron):
         
         This function is now replaced by:
         - accumulate_miner_weights() - called after each lead validation
-        - submit_weights_at_epoch_end() - called at block 345+ to submit accumulated weights
+        - submit_weights_at_epoch_end() - called in the canonical submission window
         
         Keeping for backwards compatibility, but new code should use the accumulation system.
         """

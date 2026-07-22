@@ -388,6 +388,53 @@ class AuthoritativeWeightPublicationJournalV2:
                     "publication journal could not be cleared"
                 ) from exc
 
+    def quarantine(self, *, expected_epoch: int, reason: str) -> Path:
+        """Atomically remove a closed-epoch journal from the active slot.
+
+        The exact validated journal remains on disk for reconciliation and
+        audit. Quarantine never claims that a signed extrinsic was absent.
+        """
+
+        normalized_reason = str(reason or "").strip().lower()
+        if not re.fullmatch(r"[a-z0-9_]{1,64}", normalized_reason):
+            raise WeightPublicationJournalV2Error(
+                "publication journal quarantine reason is invalid"
+            )
+        with self._lock:
+            current = self.load()
+            if current is None:
+                raise WeightPublicationJournalV2Error(
+                    "cannot quarantine a missing publication journal"
+                )
+            epoch_id = int(current["published_bundle"]["weight_result"]["epoch_id"])
+            if epoch_id != int(expected_epoch):
+                raise WeightPublicationJournalV2Error(
+                    "refusing to quarantine another publication epoch"
+                )
+            suffix = str(current["journal_hash"]).removeprefix("sha256:")[:16]
+            target = self.path.with_name(
+                "%s.quarantined.%d.%s.%s"
+                % (self.path.name, epoch_id, normalized_reason, suffix)
+            )
+            try:
+                if target.exists():
+                    if target.read_bytes() != self.path.read_bytes():
+                        raise WeightPublicationJournalV2Error(
+                            "publication journal quarantine target conflicts"
+                        )
+                    self.path.unlink()
+                else:
+                    os.replace(str(self.path), str(target))
+                os.chmod(target, 0o600)
+                self._fsync_directory()
+            except WeightPublicationJournalV2Error:
+                raise
+            except OSError as exc:
+                raise WeightPublicationJournalV2Error(
+                    "publication journal could not be quarantined"
+                ) from exc
+            return target
+
     def _replace(self, current: Mapping[str, Any], **changes: Any) -> Dict[str, Any]:
         body = {
             key: current[key]

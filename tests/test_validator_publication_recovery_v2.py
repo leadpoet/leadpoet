@@ -60,6 +60,12 @@ class _Journal:
     def clear(self, *, expected_event_hash):
         self.calls.append(("clear", expected_event_hash))
 
+    def quarantine(self, *, expected_epoch, reason):
+        path = f"journal.quarantined.{expected_epoch}.{reason}"
+        self.calls.append(("quarantine", (expected_epoch, reason, path)))
+        self.record = None
+        return path
+
 
 class _Client:
     def __init__(self, *, signed_extrinsics, confirm_error=False):
@@ -112,6 +118,15 @@ def _validator(journal, client):
         return True
 
     validator._weight_submission_epoch_is_current = epoch_is_current
+
+    async def finalized_state():
+        return SimpleNamespace(workflow_epoch_id=100)
+
+    async def best_state():
+        return SimpleNamespace(workflow_epoch_id=100)
+
+    validator._get_epoch_state_async = finalized_state
+    validator._get_best_epoch_state_async = best_state
     return validator
 
 
@@ -287,3 +302,62 @@ async def test_finalization_failure_keeps_durable_journal(monkeypatch):
             gateway_url="https://gateway.example"
         )
     assert not any(name == "clear" for name, _value in journal.calls)
+
+
+@pytest.mark.asyncio
+async def test_closed_unsigned_journal_is_quarantined_without_publication_or_signing(
+    monkeypatch,
+):
+    journal = _Journal(_record(published=False, signatures=[]))
+    client = _Client(signed_extrinsics=[])
+    validator = _validator(journal, client)
+
+    async def closed_state():
+        return SimpleNamespace(workflow_epoch_id=101)
+
+    validator._get_epoch_state_async = closed_state
+    validator._get_best_epoch_state_async = closed_state
+
+    async def never_resume(**_kwargs):
+        pytest.fail("closed unsigned authority must not be republished")
+
+    monkeypatch.setattr(
+        validator_module,
+        "resume_prepared_weight_publication_v2",
+        never_resume,
+    )
+
+    epoch = await validator._recover_weight_publication_journal_v2(
+        gateway_url="https://gateway.example"
+    )
+
+    assert epoch == 100
+    assert client.calls == []
+    assert journal.calls[-1][0] == "quarantine"
+    assert journal.calls[-1][1][:2] == (100, "unsigned_epoch_closed")
+
+
+@pytest.mark.asyncio
+async def test_closed_signed_journal_preserves_evidence_when_release_recovery_fails():
+    journal = _Journal(_record(published=True, signatures=[{"receipt": True}]))
+    client = _Client(signed_extrinsics=[])
+    validator = _validator(journal, client)
+
+    async def closed_state():
+        return SimpleNamespace(workflow_epoch_id=101)
+
+    validator._get_epoch_state_async = closed_state
+    validator._get_best_epoch_state_async = closed_state
+
+    def fail_recovery(**_kwargs):
+        raise RuntimeError("recovery validator release differs")
+
+    client.recover_weight_publication_v2 = fail_recovery
+
+    epoch = await validator._recover_weight_publication_journal_v2(
+        gateway_url="https://gateway.example"
+    )
+
+    assert epoch == 100
+    assert journal.calls[-1][0] == "quarantine"
+    assert journal.calls[-1][1][:2] == (100, "signed_recovery_unresolved")

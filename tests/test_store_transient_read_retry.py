@@ -139,3 +139,40 @@ def test_select_one_retries_through_helper(monkeypatch):
     row = asyncio.run(store.select_one("t", filters=(("id", 7),)))
     assert row == {"id": 7}
     assert attempts["n"] == 2
+
+
+def test_select_one_rebuilds_retry_with_generator_filters(monkeypatch):
+    attempts = {"n": 0}
+    observed_filters = []
+
+    class _Resp:
+        data = [{"id": 7}]
+
+    class _Query:
+        def select(self, *_args, **_kwargs):
+            return self
+
+        def eq(self, field, value):
+            observed_filters.append((attempts["n"], field, value))
+            return self
+
+        def limit(self, *_args, **_kwargs):
+            return self
+
+        def execute(self):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise _CloudflareEdgeError()
+            return _Resp()
+
+    class _Client:
+        def table(self, *_args, **_kwargs):
+            return _Query()
+
+    monkeypatch.setattr(store, "get_write_client", lambda: _Client())
+
+    filters = ((field, value) for field, value in (("id", 7),))
+    row = asyncio.run(store.select_one("t", filters=filters))
+
+    assert row == {"id": 7}
+    assert observed_filters == [(0, "id", 7), (1, "id", 7)]

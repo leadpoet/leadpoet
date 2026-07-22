@@ -44,7 +44,11 @@ from leadpoet_canonical.weights import bundle_weights_hash, compare_weights_hash
 from leadpoet_canonical.chain import normalize_chain_weights
 from leadpoet_canonical.binding import parse_binding_message, verify_binding_message
 from leadpoet_canonical.timestamps import canonical_timestamp
-from leadpoet_canonical.constants import WEIGHT_SUBMISSION_BLOCK
+from leadpoet_canonical.constants import (
+    EPOCH_LENGTH,
+    MAX_BLOCK_DRIFT,
+    WEIGHT_SUBMISSION_BLOCK,
+)
 from leadpoet_canonical.attested_receipts import SCORING_PURPOSES, WEIGHT_PURPOSE
 from leadpoet_canonical.weight_bundle_v2 import (
     WEIGHT_BUNDLE_V2_SCHEMA_VERSION,
@@ -84,8 +88,9 @@ router = APIRouter(prefix="/weights", tags=["weights"])
 # Import network config for testnet guard
 from gateway.config import BITTENSOR_NETWORK
 
-MAX_BLOCK_DRIFT = 30  # Max allowed drift from gateway-observed block
-STATEFUL_FINALIZED_SUBMISSION_MAX_REMAINING = 30
+STATEFUL_FINALIZED_SUBMISSION_MAX_REMAINING = (
+    EPOCH_LENGTH - WEIGHT_SUBMISSION_BLOCK + MAX_BLOCK_DRIFT
+)
 
 # Build identifier for transparency log
 BUILD_ID = os.environ.get("BUILD_ID", "production-gateway-tee")
@@ -204,11 +209,10 @@ async def _verify_epoch_block_authority(
                 ),
             )
         # The enclave computes from one finalized exact-hash snapshot while
-        # the host starts the submission window from best head.  Finality can
-        # lag by a few blocks, so accepting the submitted authority up to 30
-        # blocks before the boundary preserves the existing lag buffer.  The
-        # live best head above must still be in the strict final 15 blocks and
-        # both snapshots must resolve to the same official epoch.
+        # the host starts the submission window from best head. Finality can
+        # lag behind it, so the submitted snapshot may trail the window start
+        # by at most MAX_BLOCK_DRIFT. Both snapshots must still resolve to the
+        # same official epoch.
         if not (
             0
             < submitted.blocks_remaining

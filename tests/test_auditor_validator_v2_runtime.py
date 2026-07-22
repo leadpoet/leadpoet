@@ -433,11 +433,11 @@ def test_non_v2_protocol_is_rejected(monkeypatch, protocol):
         auditor_module.AuditorValidator.auditor_weight_protocol()
 
 
-def test_authority_candidates_cover_delayed_finalization_without_replay():
+def test_authority_candidates_are_current_epoch_only():
     auditor = SimpleNamespace(last_authority_epoch=None)
     assert auditor_module.AuditorValidator._authority_candidate_epochs(
         auditor, 24083
-    ) == [24083, 24082]
+    ) == [24083]
 
     auditor.last_authority_epoch = 24082
     assert auditor_module.AuditorValidator._authority_candidate_epochs(

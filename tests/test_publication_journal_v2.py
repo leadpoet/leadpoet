@@ -182,3 +182,45 @@ def test_journal_reads_an_unfinished_legacy_v2_record(tmp_path):
     assert loaded["schema_version"] == LEGACY_JOURNAL_SCHEMA_VERSION
     assert "epoch_evidence" not in loaded
     assert loaded["published_bundle"] == bundle
+
+
+def test_journal_quarantine_preserves_exact_validated_record(tmp_path):
+    bundle = _bundle()
+    path = tmp_path / "weight-publication.json"
+    journal = AuthoritativeWeightPublicationJournalV2(
+        path, chain_profile=_profile()
+    )
+    prepared = journal.record_prepared(
+        {
+            "weight_authorization_id": AUTHORIZATION,
+            "published_bundle": bundle,
+        }
+    )
+    original = path.read_bytes()
+
+    quarantined = journal.quarantine(
+        expected_epoch=100,
+        reason="unsigned_epoch_closed",
+    )
+
+    assert not path.exists()
+    assert quarantined.exists()
+    assert quarantined.read_bytes() == original
+    assert os.stat(quarantined).st_mode & 0o777 == 0o600
+    assert journal.load() is None
+    assert json.loads(quarantined.read_text(encoding="utf-8")) == prepared
+
+
+def test_journal_quarantine_rejects_wrong_epoch(tmp_path):
+    journal = AuthoritativeWeightPublicationJournalV2(
+        tmp_path / "weight-publication.json", chain_profile=_profile()
+    )
+    journal.record_prepared(
+        {
+            "weight_authorization_id": AUTHORIZATION,
+            "published_bundle": _bundle(),
+        }
+    )
+
+    with pytest.raises(WeightPublicationJournalV2Error, match="another"):
+        journal.quarantine(expected_epoch=101, reason="unsigned_epoch_closed")

@@ -565,7 +565,7 @@ class AuditorValidator:
         """
         Save bundle compare hash for retroactive equivocation check.
         
-        Called after successful weight verification at block 345.
+        Called after successful current-epoch weight verification.
         APPENDS to existing data (stores last 2 epochs for N-2 checking).
         
         File structure:
@@ -867,19 +867,17 @@ class AuditorValidator:
     # ═══════════════════════════════════════════════════════════════════════════
     
     def _authority_candidate_epochs(self, current_epoch: int) -> List[int]:
-        """Return unmirrored authority epochs, newest first."""
+        """Return only the unmirrored authority for the live epoch."""
 
-        candidates = []
-        for candidate_epoch in (current_epoch, current_epoch - 1):
-            if candidate_epoch <= 0:
-                continue
-            if (
-                self.last_authority_epoch is not None
-                and candidate_epoch <= self.last_authority_epoch
-            ):
-                break
-            candidates.append(candidate_epoch)
-        return candidates
+        epoch = int(current_epoch)
+        if epoch <= 0:
+            return []
+        if (
+            self.last_authority_epoch is not None
+            and epoch <= self.last_authority_epoch
+        ):
+            return []
+        return [epoch]
 
     async def fetch_attested_weights_v2(self, epoch_id: int) -> Optional[Dict]:
         """Fetch the strongest authoritative V2 authority for one epoch.
@@ -1696,8 +1694,8 @@ class AuditorValidator:
                         print(f"📊 WEIGHT SUBMISSION TIME (Block {block_within_epoch})")
                         print(f"{'='*60}")
                         
-                        # Delayed finalization can make epoch N-1 the newest
-                        # complete authority during epoch N's submission window.
+                        # Auditors mirror only the primary's current-epoch
+                        # authority. A missing live bundle remains fail-closed.
                         weights_data = None
                         authority_status = "v2_absent"
                         target_epoch = current_epoch

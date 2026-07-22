@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 from urllib.parse import urlparse
 
@@ -24,8 +25,26 @@ from leadpoet_canonical.weight_authority_v2 import (
 from validator_tee.host.vsock_client import ValidatorEnclaveClient
 
 
+logger = logging.getLogger(__name__)
+
+_RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 502, 503, 504})
+
+
 class GatewayWeightInputsV2Error(RuntimeError):
     """The gateway input request or returned ancestry is not authoritative."""
+
+    def __init__(self, message: str, *, status_code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _is_retryable_gateway_error(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return True
+    return (
+        isinstance(exc, GatewayWeightInputsV2Error)
+        and exc.status_code in _RETRYABLE_HTTP_STATUSES
+    )
 
 
 def _gateway_endpoint(value: str) -> str:
@@ -54,7 +73,8 @@ async def _post_json(
             if response.status != 200:
                 raise GatewayWeightInputsV2Error(
                     "gateway V2 weight input request failed with HTTP %d: %s"
-                    % (response.status, body[:300])
+                    % (response.status, body[:300]),
+                    status_code=int(response.status),
                 )
             try:
                 value = await response.json()
@@ -134,7 +154,9 @@ async def fetch_gateway_weight_inputs_v2(
     post_json: Callable[
         [str, Mapping[str, Any], float], Awaitable[Mapping[str, Any]]
     ] = _post_json,
-    timeout_seconds: float = 1800.0,
+    timeout_seconds: float = 90.0,
+    max_attempts: int = 4,
+    retry_delay_seconds: float = 2.0,
 ) -> Dict[str, Any]:
     """Request one exact, enclave-signed gateway input set and verify its shape."""
 
@@ -171,15 +193,44 @@ async def fetch_gateway_weight_inputs_v2(
         raise GatewayWeightInputsV2Error(
             "validator enclave did not authorize the gateway input request"
         )
-    response = await post_json(
-        endpoint,
-        {
-            "request": request,
-            "calculation_snapshot": calculation,
-            "validator_hotkey_signature": str(signature_result["signature"]),
-        },
-        float(timeout_seconds),
-    )
+    if max_attempts <= 0:
+        raise GatewayWeightInputsV2Error(
+            "gateway V2 weight input attempts must be positive"
+        )
+    payload = {
+        "request": request,
+        "calculation_snapshot": calculation,
+        "validator_hotkey_signature": str(signature_result["signature"]),
+    }
+    response = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = await post_json(
+                endpoint,
+                payload,
+                float(timeout_seconds),
+            )
+            break
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if attempt >= max_attempts or not _is_retryable_gateway_error(exc):
+                raise
+            delay = float(retry_delay_seconds) * (2 ** (attempt - 1))
+            logger.warning(
+                "gateway_weight_inputs_v2_retry attempt=%d/%d "
+                "delay_seconds=%.1f type=%s error=%s",
+                attempt,
+                max_attempts,
+                delay,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            await asyncio.sleep(delay)
+    if response is None:
+        raise GatewayWeightInputsV2Error(
+            "gateway V2 weight input request exhausted without a response"
+        )
     expected_fields = {
         "request_hash",
         "calculation_snapshot_hash",

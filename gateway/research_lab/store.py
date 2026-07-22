@@ -248,9 +248,11 @@ async def select_one(
     columns: str = "*",
     filters: Iterable[tuple[str, Any]],
 ) -> dict[str, Any] | None:
+    normalized_filters = tuple(filters)
+
     def _call() -> Any:
         query = get_write_client().table(table).select(columns)
-        query = _apply_filters(query, filters)
+        query = _apply_filters(query, normalized_filters)
         return query.limit(1).execute()
 
     response = await _execute_read_with_retry(
@@ -268,10 +270,13 @@ async def select_many(
     order_by: Iterable[tuple[str, bool]] = (),
     limit: int = 100,
 ) -> list[dict[str, Any]]:
+    normalized_filters = tuple(filters)
+    normalized_order = tuple(order_by)
+
     def _call() -> Any:
         query = get_write_client().table(table).select(columns)
-        query = _apply_filters(query, filters)
-        for field, desc in order_by:
+        query = _apply_filters(query, normalized_filters)
+        for field, desc in normalized_order:
             query = query.order(field, desc=desc)
         return query.limit(limit).execute()
 
@@ -296,6 +301,8 @@ async def select_all(
         raise ValueError("batch_size must be positive")
     if max_rows <= 0:
         raise ValueError("max_rows must be positive")
+    normalized_filters = tuple(filters)
+    normalized_order = tuple(order_by)
     rows: list[dict[str, Any]] = []
     offset = 0
     while offset < max_rows:
@@ -303,8 +310,8 @@ async def select_all(
 
         def _call() -> Any:
             query = get_write_client().table(table).select(columns)
-            query = _apply_filters(query, filters)
-            for field, desc in order_by:
+            query = _apply_filters(query, normalized_filters)
+            for field, desc in normalized_order:
                 query = query.order(field, desc=desc)
             return query.range(offset, end).execute()
 

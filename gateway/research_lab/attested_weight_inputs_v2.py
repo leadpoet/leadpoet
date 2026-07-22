@@ -245,7 +245,7 @@ async def build_gateway_weight_inputs_v2(
 
     # Every category except anomaly_adjustments has independent measured
     # inputs. Run those jobs together so their mandatory encrypted artifact
-    # persistence does not consume the block-345 submission window serially.
+    # persistence does not consume the submission window serially.
     # The anomaly job remains ordered after all of its receipt parents exist.
     await asyncio.gather(
         *(

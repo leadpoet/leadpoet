@@ -522,7 +522,7 @@
       "symbol": "HTTPXProviderTransport"
     },
     {
-      "ast_sha256": "sha256:1063b9dc41b411544035cb75fb1a51bf473ed4f1beb92ab79f8a0bff5e1d2f45",
+      "ast_sha256": "sha256:d1cee666bc6e4f7d4981006c6407d0d163084e01dc6cd01898a623fa5d134140",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "ProviderBrokerV2"
     },
@@ -1082,7 +1082,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:444b2514c581ce43a037d73595c627ce250813f3976b5b46e866ecb2a41509b6",
-  "protected_source_commit": "8b2e64c4d04b4da696b4589f4126cb39e613287e",
+  "manifest_hash": "sha256:cc77817bf89d15fe9a2be5dd46ca77535f5a7e92995c2a6323bb89df90838a74",
+  "protected_source_commit": "6fb0f8fa0bd8481f6846fead5fa17527428bd8e2",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -197,6 +197,7 @@ from leadpoet_canonical.events import verify_log_entry
 from leadpoet_canonical.auditor_v2 import (
     fetch_locked_release_identity_cache,
     verify_attested_weight_authority_v2,
+    verify_published_weight_authority_stage_v2,
 )
 
 # Constants from canonical module
@@ -881,44 +882,69 @@ class AuditorValidator:
         return candidates
 
     async def fetch_attested_weights_v2(self, epoch_id: int) -> Optional[Dict]:
-        """Fetch the sole authoritative V2 bundle."""
+        """Fetch the strongest authoritative V2 authority for one epoch.
+
+        Prefers the staged view (published or finalized), which exists as
+        soon as the primary's durable gateway publication lands, so the
+        live epoch can be mirrored in-window. Falls back to the
+        finalized-only legacy route when the gateway predates the staged
+        view.
+        """
 
         self._last_v2_authority_was_absent = False
+        netuid = int(self.config.netuid)
+        staged_url = (
+            f"{self.gateway_url}/weights/v2/published/{netuid}/{int(epoch_id)}"
+        )
+        legacy_url = (
+            f"{self.gateway_url}/weights/v2/latest/{netuid}/{int(epoch_id)}"
+        )
+        absent_details = {
+            "v2 weight bundle not found",
+            "finalized v2 weight authority not found",
+            "published v2 weight authority not found",
+        }
         try:
             async with aiohttp.ClientSession(trust_env=False) as session:
-                url = f"{self.gateway_url}/weights/v2/latest/{self.config.netuid}/{int(epoch_id)}"
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                    if response.status == 404:
-                        try:
-                            not_found = await response.json()
-                        except Exception:
-                            not_found = None
-                        detail = (
-                            str(not_found.get("detail") or "").strip()
-                            if isinstance(not_found, dict)
-                            else ""
-                        )
-                        self._last_v2_authority_was_absent = detail in {
-                            "Not Found",
-                            "v2 weight bundle not found",
-                            "finalized v2 weight authority not found",
-                        }
-                        if not self._last_v2_authority_was_absent:
-                            logger.warning(
-                                "auditor_v2_fetch_failed epoch=%s status=404 detail=%s",
-                                epoch_id,
-                                detail[:160],
+                for url in (staged_url, legacy_url):
+                    async with session.get(
+                        url, timeout=aiohttp.ClientTimeout(total=30)
+                    ) as response:
+                        if response.status == 404:
+                            try:
+                                not_found = await response.json()
+                            except Exception:
+                                not_found = None
+                            detail = (
+                                str(not_found.get("detail") or "").strip()
+                                if isinstance(not_found, dict)
+                                else ""
                             )
-                        return None
-                    if response.status != 200:
-                        logger.warning(
-                            "auditor_v2_fetch_failed epoch=%s status=%s",
-                            epoch_id,
-                            response.status,
-                        )
-                        return None
-                    value = await response.json()
-                    return value if isinstance(value, dict) else None
+                            if url is staged_url and detail == "Not Found":
+                                # The gateway predates the staged route;
+                                # fall through to the legacy view.
+                                continue
+                            self._last_v2_authority_was_absent = detail in (
+                                absent_details | {"Not Found"}
+                            )
+                            if not self._last_v2_authority_was_absent:
+                                logger.warning(
+                                    "auditor_v2_fetch_failed epoch=%s "
+                                    "status=404 detail=%s",
+                                    epoch_id,
+                                    detail[:160],
+                                )
+                            return None
+                        if response.status != 200:
+                            logger.warning(
+                                "auditor_v2_fetch_failed epoch=%s status=%s",
+                                epoch_id,
+                                response.status,
+                            )
+                            return None
+                        value = await response.json()
+                        return value if isinstance(value, dict) else None
+            return None
         except Exception as exc:
             logger.warning(
                 "auditor_v2_fetch_failed epoch=%s error_type=%s error=%s",
@@ -1071,11 +1097,26 @@ class AuditorValidator:
                 )
             ).expanduser()
             profile = json.loads(profile_file.read_text(encoding="utf-8"))
-            verified = verify_attested_weight_authority_v2(
-                authority,
-                identity_cache=identity_cache,
-                chain_signing_profile=profile,
-            )
+            if (
+                isinstance(authority, dict)
+                and "authority_stage" in authority
+            ):
+                # Staged view: publication-stage authority is fully
+                # enclave-signed and release-evidence verified; the
+                # finalized-chain proof is verified whenever present. The
+                # soft equivocation check covers chain divergence
+                # retrospectively.
+                verified = verify_published_weight_authority_stage_v2(
+                    authority,
+                    identity_cache=identity_cache,
+                    chain_signing_profile=profile,
+                )
+            else:
+                verified = verify_attested_weight_authority_v2(
+                    authority,
+                    identity_cache=identity_cache,
+                    chain_signing_profile=profile,
+                )
             self._verify_stateful_bundle_epoch(verified)
             return verified
         except Exception as exc:

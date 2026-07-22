@@ -1830,9 +1830,23 @@ async def persist_weight_finalization_v2(
 
 
 async def load_weight_authority_v2(
-    *, netuid: int, epoch_id: int, validator_hotkey: str
+    *,
+    netuid: int,
+    epoch_id: int,
+    validator_hotkey: str,
+    require_finalization: bool = True,
 ) -> dict[str, Any] | None:
-    """Load the bundle, gateway publication, and finalized-chain proof."""
+    """Load the bundle, gateway publication, and finalized-chain proof.
+
+    With ``require_finalization=True`` (the default) the historical payload
+    shape is returned unchanged and only fully finalized authority exists.
+    With ``require_finalization=False`` a staged payload is returned as soon
+    as the durable gateway publication exists: ``authority_stage`` is
+    ``"published"`` until the finalized-chain proof lands, after which the
+    same request returns ``"finalized"`` with the full proof attached. The
+    staged shape lets auditors mirror the enclave-signed publication within
+    the live epoch instead of one epoch behind.
+    """
 
     bundle = await load_weight_bundle_v2(
         netuid=int(netuid),
@@ -1853,7 +1867,29 @@ async def load_weight_authority_v2(
         filters=(("bundle_hash", bundle_verified["bundle_hash"]),),
     )
     if not isinstance(finalization, Mapping):
-        return None
+        if require_finalization:
+            return None
+        staged_publication_graph = await load_receipt_graph_v2(
+            str(publication.get("publication_receipt_hash") or "")
+        )
+        return {
+            "schema_version": (
+                "leadpoet.published_weight_authority_stage.v2"
+            ),
+            "authority_stage": "published",
+            "bundle": bundle,
+            "publication": {
+                "weight_submission_event_hash": publication[
+                    "weight_submission_event_hash"
+                ],
+                "publication_receipt_hash": publication[
+                    "publication_receipt_hash"
+                ],
+                "publication_doc": dict(publication["publication_doc"]),
+                "receipt_graph": staged_publication_graph,
+            },
+            "finalization": None,
+        }
     publication_graph = await load_receipt_graph_v2(
         str(publication.get("publication_receipt_hash") or "")
     )
@@ -1869,23 +1905,35 @@ async def load_weight_authority_v2(
         "finalization": dict(finalization.get("finalization_doc") or {}),
         "receipt_graph": finalization_graph,
     }
+    publication_section = {
+        "weight_submission_event_hash": publication[
+            "weight_submission_event_hash"
+        ],
+        "publication_receipt_hash": publication[
+            "publication_receipt_hash"
+        ],
+        "publication_doc": dict(publication["publication_doc"]),
+        "receipt_graph": publication_graph,
+    }
+    finalization_section = {
+        "weight_finalization_event_hash": finalization[
+            "weight_finalization_event_hash"
+        ],
+        "submission": finalization_submission,
+    }
+    if not require_finalization:
+        return {
+            "schema_version": (
+                "leadpoet.published_weight_authority_stage.v2"
+            ),
+            "authority_stage": "finalized",
+            "bundle": bundle,
+            "publication": publication_section,
+            "finalization": finalization_section,
+        }
     return {
         "schema_version": "leadpoet.published_weight_authority.v2",
         "bundle": bundle,
-        "publication": {
-            "weight_submission_event_hash": publication[
-                "weight_submission_event_hash"
-            ],
-            "publication_receipt_hash": publication[
-                "publication_receipt_hash"
-            ],
-            "publication_doc": dict(publication["publication_doc"]),
-            "receipt_graph": publication_graph,
-        },
-        "finalization": {
-            "weight_finalization_event_hash": finalization[
-                "weight_finalization_event_hash"
-            ],
-            "submission": finalization_submission,
-        },
+        "publication": publication_section,
+        "finalization": finalization_section,
     }

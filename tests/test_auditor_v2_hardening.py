@@ -28,15 +28,23 @@ def _auditor(netuid=71):
 
 
 def test_default_boot_verifier_checks_certificates_at_attestation_time():
-    # Both verify entrypoints must bind the real Nitro verifier with
+    # Every verify path must bind the real Nitro verifier with
     # attestation-time certificate validity; an injected test verifier keeps
-    # its own signature untouched.
+    # its own signature untouched. The publication/finalization checks are
+    # shared, so both authority entrypoints must provably route through the
+    # helper that binds the verifier.
     for fn in (
         auditor_v2.verify_attested_weight_bundle_v2,
-        auditor_v2.verify_attested_weight_authority_v2,
+        auditor_v2._verify_publication_and_finalization,
     ):
         source = inspect.getsource(fn)
         assert "certificate_validity_at_attestation_time=True" in source, fn.__name__
+    for fn in (
+        auditor_v2.verify_attested_weight_authority_v2,
+        auditor_v2.verify_published_weight_authority_stage_v2,
+    ):
+        source = inspect.getsource(fn)
+        assert "_verify_publication_and_finalization" in source, fn.__name__
 
 
 def test_verified_authority_must_match_requested_epoch_and_netuid(monkeypatch):

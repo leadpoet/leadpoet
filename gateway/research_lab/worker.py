@@ -12,6 +12,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import json
 import logging
 import os
+import random
 import re
 import socket
 import threading
@@ -166,6 +167,31 @@ def _error_backoff_seconds() -> float:
         return max(5.0, float(os.getenv("RESEARCH_LAB_WORKER_ERROR_BACKOFF_SECONDS", "60")))
     except ValueError:
         return 60.0
+
+
+def _idle_backoff_max_seconds(base_poll: float) -> float:
+    """Cap for idle exponential backoff of job polling (default 60s).
+
+    Idle workers should not poll the queue every ``base_poll`` seconds; the
+    interval grows base -> 2x -> ... up to this cap and resets the instant work
+    appears. Recovery and reward maintenance stay bounded because a pass still
+    happens at least this often. Never below the base poll interval.
+    """
+    try:
+        configured = float(os.getenv("RESEARCH_LAB_WORKER_IDLE_BACKOFF_MAX_SECONDS", "60"))
+    except ValueError:
+        configured = 60.0
+    return max(float(base_poll), configured)
+
+
+def _idle_backoff_next(current: float, base_poll: float, cap: float) -> float:
+    """Double the current idle interval, clamped to the cap."""
+    return min(max(float(base_poll), current * 2.0), float(cap))
+
+
+def _idle_backoff_sleep_seconds(interval: float) -> float:
+    """Add up to +25% jitter so decoupled workers do not poll in lockstep."""
+    return float(interval) * (1.0 + 0.25 * random.random())
 
 
 def _openrouter_generation_attempts() -> int:
@@ -1413,6 +1439,9 @@ class ResearchLabHostedWorker:
         last_error_log = 0.0
         idle_log_seconds = _idle_log_seconds()
         error_backoff_seconds = _error_backoff_seconds()
+        base_poll = max(1, self.config.hosted_worker_poll_seconds)
+        idle_backoff_max = _idle_backoff_max_seconds(base_poll)
+        idle_interval = float(base_poll)
         while True:
             try:
                 outcome = await self.run_once()
@@ -1456,7 +1485,15 @@ class ResearchLabHostedWorker:
                 processed += 1
             if self.config.hosted_worker_max_runs and processed >= self.config.hosted_worker_max_runs:
                 return
-            await asyncio.sleep(max(1, self.config.hosted_worker_poll_seconds))
+            # Idle exponential backoff: reset the instant work appears, grow
+            # base -> 2x -> ... up to the cap while the queue is empty.
+            if outcome.processed or outcome.status != "idle":
+                idle_interval = float(base_poll)
+            else:
+                idle_interval = _idle_backoff_next(
+                    idle_interval, base_poll, idle_backoff_max
+                )
+            await asyncio.sleep(_idle_backoff_sleep_seconds(idle_interval))
 
     async def run_once(self) -> HostedWorkerOutcome:
         self._require_enabled()

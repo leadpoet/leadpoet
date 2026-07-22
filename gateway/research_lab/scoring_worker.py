@@ -15,6 +15,7 @@ import inspect
 import json
 import logging
 import os
+import random
 from pathlib import Path
 import re
 import threading
@@ -900,6 +901,26 @@ def _error_backoff_seconds() -> float:
         return max(5.0, float(os.getenv("RESEARCH_LAB_WORKER_ERROR_BACKOFF_SECONDS", "60")))
     except ValueError:
         return 60.0
+
+
+def _idle_backoff_max_seconds(base_poll: float) -> float:
+    """Cap for idle exponential backoff of candidate polling (default 60s)."""
+    try:
+        configured = float(
+            os.getenv("RESEARCH_LAB_WORKER_IDLE_BACKOFF_MAX_SECONDS", "60")
+        )
+    except ValueError:
+        configured = 60.0
+    return max(float(base_poll), configured)
+
+
+def _idle_backoff_next(current: float, base_poll: float, cap: float) -> float:
+    return min(max(float(base_poll), current * 2.0), float(cap))
+
+
+def _idle_backoff_sleep_seconds(interval: float) -> float:
+    """Add up to +25% jitter so decoupled workers do not poll in lockstep."""
+    return float(interval) * (1.0 + 0.25 * random.random())
 
 
 def _short_error(exc: BaseException) -> str:
@@ -3415,6 +3436,9 @@ class ResearchLabGatewayScoringWorker:
         processed_jobs = 0
         recycle_rss_mb = _worker_recycle_rss_mb()
         recycle_max_jobs = _worker_recycle_max_jobs()
+        base_poll = max(1, self.config.scoring_worker_poll_seconds)
+        idle_backoff_max = _idle_backoff_max_seconds(base_poll)
+        idle_interval = float(base_poll)
         while True:
             try:
                 outcome = await self.run_once()
@@ -3480,7 +3504,15 @@ class ResearchLabGatewayScoringWorker:
                     processed_jobs,
                 )
                 return
-            await asyncio.sleep(max(1, self.config.scoring_worker_poll_seconds))
+            # Idle exponential backoff: reset the instant a candidate is
+            # claimed, grow base -> 2x -> ... up to the cap while idle.
+            if outcome.get("processed") or outcome.get("status") != "idle":
+                idle_interval = float(base_poll)
+            else:
+                idle_interval = _idle_backoff_next(
+                    idle_interval, base_poll, idle_backoff_max
+                )
+            await asyncio.sleep(_idle_backoff_sleep_seconds(idle_interval))
 
     async def run_once(self) -> dict[str, Any]:
         if not self.config.scoring_worker_enabled:

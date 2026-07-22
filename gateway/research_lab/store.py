@@ -17,6 +17,96 @@ from research_lab.canonical import sha256_json
 
 logger = logging.getLogger(__name__)
 
+# A read on the weight-critical path (allocation graph, publication,
+# finalization) that hits a transient edge/proxy failure — a Cloudflare or
+# gateway 5xx/timeout in front of Supabase, or a dropped connection — must
+# not burn a whole 72-minute epoch. These are idempotent reads, so a bounded
+# retry is safe. The classifier is an allowlist: anything that is not a
+# recognized transient propagates immediately, exactly as before, so genuine
+# query-logic errors still fail closed.
+_TRANSIENT_READ_ATTEMPTS = 4
+_TRANSIENT_READ_BACKOFF_SECONDS = (0.25, 0.75, 1.5)
+_TRANSIENT_ERROR_SIGNATURES = (
+    "cloudflare",
+    "<html",
+    "json could not be generated",
+    "bad gateway",
+    "gateway time-out",
+    "gateway timeout",
+    "service temporarily unavailable",
+    "temporarily unavailable",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "server disconnected",
+    "timed out",
+    "timeout",
+)
+_TRANSIENT_ERROR_TYPE_SIGNATURES = (
+    "timeout",
+    "connection",
+    "connecterror",
+    "readerror",
+    "remoteprotocol",
+    "serverdisconnected",
+)
+
+
+def _is_transient_read_error(exc: BaseException) -> bool:
+    """Return whether a read failure is a retryable edge/network transient.
+
+    Fail-safe: only a recognized transient returns True. An unknown error —
+    including a genuine PostgREST/Postgres query error — returns False and
+    propagates unchanged.
+    """
+
+    type_name = type(exc).__name__.lower()
+    if any(token in type_name for token in _TRANSIENT_ERROR_TYPE_SIGNATURES):
+        return True
+    message = str(getattr(exc, "message", "") or "").lower()
+    detail = str(exc).lower()
+    haystack = message + "\n" + detail
+    # A genuine PostgREST logic error carries a SQLSTATE or PGRST code; never
+    # retry those even if some transient token also appears in the payload.
+    code = str(getattr(exc, "code", "") or "").strip().lower()
+    edge_codes = {"408", "429", "500", "502", "503", "504", "520", "521", "522", "523", "524"}
+    if code in edge_codes:
+        return True
+    if code and code not in edge_codes and (code.startswith("pgrst") or len(code) == 5):
+        return False
+    return any(token in haystack for token in _TRANSIENT_ERROR_SIGNATURES)
+
+
+async def _execute_read_with_retry(call, *, label: str):
+    """Run an idempotent PostgREST read, retrying only transient failures."""
+
+    last_exc: BaseException | None = None
+    for attempt in range(_TRANSIENT_READ_ATTEMPTS):
+        try:
+            return await asyncio.to_thread(call)
+        except Exception as exc:  # noqa: BLE001 - reclassified below
+            if not _is_transient_read_error(exc) or attempt == (
+                _TRANSIENT_READ_ATTEMPTS - 1
+            ):
+                raise
+            last_exc = exc
+            backoff = _TRANSIENT_READ_BACKOFF_SECONDS[
+                min(attempt, len(_TRANSIENT_READ_BACKOFF_SECONDS) - 1)
+            ]
+            logger.warning(
+                "transient_read_retry label=%s attempt=%s/%s type=%s error=%s",
+                label,
+                attempt + 1,
+                _TRANSIENT_READ_ATTEMPTS,
+                type(exc).__name__,
+                str(exc)[:160],
+            )
+            await asyncio.sleep(backoff)
+    # Unreachable: the loop either returns or raises, but keep mypy honest.
+    assert last_exc is not None
+    raise last_exc
+
+
 
 RESEARCH_LAB_UUID_NAMESPACE = uuid5(NAMESPACE_URL, "leadpoet:research_lab:gateway")
 
@@ -163,7 +253,9 @@ async def select_one(
         query = _apply_filters(query, filters)
         return query.limit(1).execute()
 
-    response = await asyncio.to_thread(_call)
+    response = await _execute_read_with_retry(
+        _call, label="select_one:%s" % table
+    )
     data = getattr(response, "data", None) or []
     return dict(data[0]) if data else None
 
@@ -183,7 +275,9 @@ async def select_many(
             query = query.order(field, desc=desc)
         return query.limit(limit).execute()
 
-    response = await asyncio.to_thread(_call)
+    response = await _execute_read_with_retry(
+        _call, label="select_many:%s" % table
+    )
     return [dict(row) for row in (getattr(response, "data", None) or [])]
 
 
@@ -214,7 +308,9 @@ async def select_all(
                 query = query.order(field, desc=desc)
             return query.range(offset, end).execute()
 
-        response = await asyncio.to_thread(_call)
+        response = await _execute_read_with_retry(
+            _call, label="select_all:%s" % table
+        )
         batch = [dict(row) for row in (getattr(response, "data", None) or [])]
         rows.extend(batch)
         if len(batch) < batch_size:

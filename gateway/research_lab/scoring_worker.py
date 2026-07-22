@@ -907,6 +907,18 @@ def _error_backoff_seconds() -> float:
         return 60.0
 
 
+# The only candidate columns any scoring/enqueue consumer reads off a candidate
+# current row (audited end to end); used to trim per-poll/per-candidate scans off
+# SELECT *. current_candidate_status / current_status_at are filter/order-only.
+_CANDIDATE_SCORING_COLUMNS = (
+    "candidate_id,run_id,ticket_id,private_model_manifest_doc,"
+    "candidate_patch_manifest,miner_hotkey,candidate_kind,"
+    "candidate_model_manifest_doc,candidate_build_doc,candidate_source_diff_hash,"
+    "candidate_patch_hash,parent_artifact_hash,receipt_id,island,hypothesis_doc,"
+    "redacted_public_summary"
+)
+
+
 def _candidate_claim_ttl_seconds() -> int:
     """TTL for a candidate claim reservation (default 120s).
 
@@ -4284,6 +4296,7 @@ class ResearchLabGatewayScoringWorker:
                 )
             row = await select_one(
                 "research_lab_candidate_evaluation_current",
+                columns=_CANDIDATE_SCORING_COLUMNS,
                 filters=(("candidate_id", candidate_id),),
             )
             if row is None:
@@ -4307,7 +4320,7 @@ class ResearchLabGatewayScoringWorker:
         # 1. Enqueue queued candidates not already in the job queue.
         queued = await select_many(
             "research_lab_candidate_evaluation_current",
-            columns="*",
+            columns=_CANDIDATE_SCORING_COLUMNS,
             filters=(("current_candidate_status", "queued"),),
             order_by=(("current_status_at", False),),
             limit=50,
@@ -7015,7 +7028,7 @@ class ResearchLabGatewayScoringWorker:
         try:
             rows = await select_many(
                 "research_evaluation_score_bundle_current",
-                columns="*",
+                columns="score_bundle_id,score_bundle_doc,signature_ref,icp_set_hash",
                 filters=(
                     ("run_id", run_id),
                     ("candidate_artifact_hash", candidate_artifact_hash),
@@ -11948,6 +11961,7 @@ class ResearchLabGatewayScoringWorker:
             return False
         candidates = await select_many(
             "research_lab_candidate_evaluation_current",
+            columns="current_candidate_status,current_score_bundle_id",
             filters=(("run_id", str(candidate["run_id"])),),
             limit=1000,
         )
@@ -11966,6 +11980,7 @@ class ResearchLabGatewayScoringWorker:
                 score_bundle_ids.append(str(score_bundle_id))
         receipt = await select_one(
             "research_loop_receipt_current",
+            columns="current_receipt_status",
             filters=(("receipt_id", str(receipt_id)),),
         )
         if not receipt or receipt.get("current_receipt_status") != "queued":

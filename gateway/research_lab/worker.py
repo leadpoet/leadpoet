@@ -186,6 +186,21 @@ def _run_claim_ttl_seconds() -> int:
         return 120
 
 
+def _lease_maintenance_interval_seconds() -> int:
+    """Wall-clock cadence for the lease-held maintenance sweeps (default 150s).
+
+    The recovery + reward-reconcile sweeps run on this fixed schedule rather than
+    once per poll, so their cadence stays independent of the idle poll backoff
+    (which stretches the loop to 60s when there is no work). Floored to at least
+    the idle-backoff cap so a backed-off poll never widens the maintenance gap.
+    """
+    try:
+        configured = int(os.getenv("RESEARCH_LAB_WORKER_MAINTENANCE_INTERVAL_SECONDS", "150"))
+    except ValueError:
+        configured = 150
+    return max(int(_idle_backoff_max_seconds(15.0)), configured)
+
+
 def _maintenance_lease_ttl_seconds() -> int:
     """TTL for the single-owner maintenance lease (default 180s).
 
@@ -1457,8 +1472,13 @@ class ResearchLabHostedWorker:
         self._last_ticket_lifecycle_reconcile_at = 0.0
         self._last_unpaid_ticket_expiry_at = 0.0
         self._last_allocator_priors_refresh_at = 0.0
+        # Wall-clock timestamp of the last lease-held maintenance sweep, so the
+        # sweep cadence is independent of the idle poll backoff.
+        self._last_lease_maintenance_at = 0.0
         # True only for the worker holding the maintenance lease this pass.
         self._holds_maintenance_lease = False
+        # True when this pass's lease-held maintenance window is due to run.
+        self._lease_maintenance_due = False
         # Globally-unique lease token for THIS process (worker_ref is a stable
         # name shared across replicas/restarts and must not be the holder id).
         self._lease_holder_ref = make_lease_holder_ref(self.worker_ref)
@@ -1545,8 +1565,17 @@ class ResearchLabHostedWorker:
                 ttl_seconds=_maintenance_lease_ttl_seconds(),
             )
         )
+        # The lease-held sweeps run on a wall-clock cadence, not once per poll, so
+        # recovery + reward reconciliation stay independent of the idle backoff.
+        maintenance_due = self._holds_maintenance_lease and (
+            time.monotonic() - self._last_lease_maintenance_at
+            >= _lease_maintenance_interval_seconds()
+        )
+        if maintenance_due:
+            self._last_lease_maintenance_at = time.monotonic()
+        self._lease_maintenance_due = maintenance_due
         if not self.config.hosted_worker_dry_run:
-            if self._holds_maintenance_lease:
+            if maintenance_due:
                 await self._recover_stale_started_runs()
                 await self._reconcile_stale_loop_projections()
             await self._maybe_reconcile_terminal_tickets()
@@ -1565,7 +1594,7 @@ class ResearchLabHostedWorker:
             )
         if not self.config.hosted_worker_dry_run:
             await self._maybe_expire_unpaid_tickets()
-            if self._holds_maintenance_lease:
+            if self._lease_maintenance_due:
                 await self._recover_stale_paused_runs()
                 await self._run_periodic_reconciles()
         if self.tree_policy.mode == "off":
@@ -1835,19 +1864,14 @@ class ResearchLabHostedWorker:
         return rows[0]
 
     async def _run_periodic_reconciles(self) -> None:
-        """Every-Nth-pass maintenance reconciles (bugs 3, 24, 34).
+        """Lease-held maintenance reconciles (bugs 3, 24, 34).
 
-        Each is idempotent, self-limiting (acts only on drifted rows), and
-        best-effort — a reconcile failure never blocks run processing.
+        Called only on the wall-clock maintenance cadence (see run_once), so this
+        runs its body every call; the former per-pass counter throttle is gone
+        because the cadence is now independent of the idle poll backoff. Each op
+        is idempotent, self-limiting (acts only on drifted rows), and best-effort
+        — a reconcile failure never blocks run processing.
         """
-        counter = getattr(self, "_periodic_reconcile_pass", 0) + 1
-        self._periodic_reconcile_pass = counter
-        try:
-            every_n = max(1, int(os.getenv("RESEARCH_LAB_WORKER_PERIODIC_RECONCILE_EVERY_N", "10")))
-        except ValueError:
-            every_n = 10
-        if counter % every_n:
-            return
         try:
             await reproject_stale_public_cards(config=self.config)
         except Exception as exc:
@@ -2303,12 +2327,14 @@ class ResearchLabHostedWorker:
             raise HostedResearchLabWorkerError("queued Research Lab run is missing ticket")
         ticket_events = await select_many(
             "research_loop_ticket_events",
+            columns="event_doc",
             filters=(("ticket_id", str(queue_row["ticket_id"])),),
             order_by=(("seq", True),),
             limit=20,
         )
         queue_events = await select_many(
             "research_loop_run_queue_events",
+            columns="event_doc,reason",
             filters=(("run_id", str(queue_row["run_id"])),),
             order_by=(("seq", True),),
             limit=_RUN_CONTEXT_QUEUE_EVENT_LIMIT,
@@ -4227,6 +4253,7 @@ class ResearchLabHostedWorker:
         lookback_start = lookback_end - timedelta(days=7)
         ticket_rows = await select_all(
             "research_loop_ticket_current",
+            columns="ticket_id,created_at,current_status_at,miner_hotkey,brief_sanitized_ref",
             filters=(("island", island),),
             order_by=(("created_at", True),),
         )
@@ -4243,6 +4270,7 @@ class ResearchLabHostedWorker:
             queue_rows.extend(
                 await select_all(
                     "research_loop_run_queue_current",
+                    columns="ticket_id,current_queue_status,current_status_at",
                     filters=(("ticket_id", ticket_id),),
                     order_by=(("current_status_at", True),),
                     max_rows=100,
@@ -4288,6 +4316,7 @@ class ResearchLabHostedWorker:
     async def _reimbursement_cap_usage(self, context: HostedRunContext, *, run_day: str) -> dict[str, float]:
         rows = await select_all(
             "research_reimbursement_award_current",
+            columns="run_day,current_award_status,award_status,miner_hotkey,island,target_reimbursement_microusd",
             filters=(
                 ("current_award_status", "awarded"),
                 ("run_day", run_day),

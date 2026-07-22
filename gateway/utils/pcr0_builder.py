@@ -1096,9 +1096,25 @@ def compute_files_content_hash(repo_dir: str) -> Optional[str]:
     Only rebuilds when the content of monitored files changes.
     """
     hasher = hashlib.sha256()
-    
+
+    # The cache key must cover every byte that Dockerfile.enclave copies into
+    # the validator image. Hashing a hand-maintained subset let two builds
+    # with different enclave code (for example a protected workflow manifest
+    # change) collide on one cache key, so the gateway kept serving a stale
+    # PCR0 as HEAD's and rejected the actually deployed validator. Derive the
+    # key from the exact build inputs, with no filename-suffix filter.
+    file_inputs: Set[str] = set()
+    dir_inputs: Set[str] = set()
+    for entry in set(MONITORED_FILES) | {
+        d.rstrip("/") for d in MONITORED_DIRS
+    } | {p.rstrip("/") for p in PCR0_COPY_PATHS}:
+        if os.path.isdir(os.path.join(repo_dir, entry)):
+            dir_inputs.add(entry)
+        else:
+            file_inputs.add(entry)
+
     files_found = 0
-    for filepath in sorted(MONITORED_FILES):
+    for filepath in sorted(file_inputs):
         full_path = os.path.join(repo_dir, filepath)
         if os.path.exists(full_path):
             try:
@@ -1108,24 +1124,24 @@ def compute_files_content_hash(repo_dir: str) -> Optional[str]:
                 files_found += 1
             except Exception as e:
                 logger.warning(f"[PCR0] Could not read {filepath}: {e}")
-    
-    # Also hash files in monitored directories
-    for dirpath in sorted(MONITORED_DIRS):
+
+    for dirpath in sorted(dir_inputs):
         full_dir = os.path.join(repo_dir, dirpath)
-        if os.path.isdir(full_dir):
-            for root, dirs, files in os.walk(full_dir):
-                for filename in sorted(files):
-                    if any(filename.endswith(suffix) for suffix in MONITORED_DIR_SUFFIXES):
-                        filepath = os.path.join(root, filename)
-                        rel_path = os.path.relpath(filepath, repo_dir)
-                        try:
-                            with open(filepath, 'rb') as f:
-                                hasher.update(f.read())
-                            hasher.update(rel_path.encode())
-                            files_found += 1
-                        except Exception as e:
-                            logger.warning(f"[PCR0] Could not read {rel_path}: {e}")
-    
+        for root, dirs, files in os.walk(full_dir):
+            dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+            for filename in sorted(files):
+                if filename.endswith(".pyc"):
+                    continue
+                filepath = os.path.join(root, filename)
+                rel_path = os.path.relpath(filepath, repo_dir)
+                try:
+                    with open(filepath, 'rb') as f:
+                        hasher.update(f.read())
+                    hasher.update(rel_path.encode())
+                    files_found += 1
+                except Exception as e:
+                    logger.warning(f"[PCR0] Could not read {rel_path}: {e}")
+
     if files_found == 0:
         logger.error("[PCR0] No monitored files found!")
         return None

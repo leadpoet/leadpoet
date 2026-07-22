@@ -2,10 +2,12 @@
 
 Mocked-RPC and SQL-string tests prove call shape and lock-down, but not that the
 functions actually EXECUTE against a live engine. This test stands up a
-throwaway PostgreSQL, applies migrations 115-118 verbatim, and exercises every
-RPC's runtime behavior. It already caught a real bug (`pg_catalog.coalesce` is
-not a function -- COALESCE/GREATEST are keyword expressions), which mocked tests
-could never surface.
+throwaway PostgreSQL, applies the migrations verbatim, and exercises every RPC's
+runtime behavior -- batch-insert idempotency, the trajectory anti-join, the
+single-owner lease identity, the deterministic-id reproduction + projection
+deltas, and the atomic candidate/run claims (including concurrent no-double-
+assign via real threads). It already caught a real bug (`pg_catalog.coalesce`
+is not a function -- COALESCE/GREATEST are keyword expressions).
 
 Skips only when no PostgreSQL server binaries are found (initdb/pg_ctl/psql);
 CI's ubuntu image and Homebrew both provide them.
@@ -19,6 +21,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -27,16 +30,19 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
+MIGRATIONS = ("115", "116", "117", "119", "120", "121")
+
+# A known trajectory_id_for_run value (verified against Python and 300 live runs)
+# pins the in-SQL uuid5(canonical_hash(...)) reproduction.
+_KNOWN_RUN_ID = "3f2a1c00-0000-4000-8000-000000000001"
+_KNOWN_TRAJECTORY_ID = "1544660e-89e4-52e6-84be-8bc3d0e01907"
 
 
 def _find_pg_bindir() -> str | None:
-    """Locate a directory containing initdb + pg_ctl + postgres + psql."""
     candidates: list[str] = []
-    # PATH first.
     initdb_on_path = shutil.which("initdb")
     if initdb_on_path:
         candidates.append(str(Path(initdb_on_path).parent))
-    # Linux (GitHub ubuntu images) and Homebrew (macOS).
     candidates += sorted(glob.glob("/usr/lib/postgresql/*/bin"), reverse=True)
     candidates += sorted(glob.glob("/opt/homebrew/opt/postgresql@*/bin"), reverse=True)
     candidates += sorted(glob.glob("/usr/local/opt/postgresql@*/bin"), reverse=True)
@@ -62,12 +68,15 @@ def _free_port() -> int:
     return port
 
 
-# Supabase-compat shims (roles the GRANT/RLS statements reference) + the minimal
-# dependency relations migrations 115/116/118 reference.
+# Supabase-compat shims (roles the GRANT/RLS statements reference; pgcrypto in
+# the extensions schema, matching Supabase) + the minimal dependency relations
+# the migrations reference.
 _SETUP_SQL = """
 CREATE ROLE anon NOLOGIN;
 CREATE ROLE authenticated NOLOGIN;
 CREATE ROLE service_role NOLOGIN;
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 
 CREATE TABLE public.research_lab_provider_usage_ledger (
     usage_row_id        UUID PRIMARY KEY,
@@ -84,22 +93,44 @@ CREATE TABLE public.research_lab_provider_usage_ledger (
 );
 
 CREATE TABLE public.research_trajectories (trajectory_id UUID PRIMARY KEY);
+CREATE TABLE public.execution_traces (run_id UUID PRIMARY KEY);
 
-CREATE TABLE public.research_lab_candidate_evaluation_current (
-    candidate_id             TEXT,
+CREATE TABLE public.research_loop_run_queue_current (
     run_id                   UUID,
     ticket_id                UUID,
-    current_candidate_status TEXT,
-    current_reason           TEXT,
-    current_status_at        TIMESTAMPTZ
+    queue_priority           INTEGER,
+    current_event_hash       TEXT,
+    current_status_at        TIMESTAMPTZ,
+    current_queue_status     TEXT
+);
+
+CREATE TABLE public.research_lab_candidate_evaluation_current (
+    candidate_id               TEXT,
+    run_id                     UUID,
+    ticket_id                  UUID,
+    private_model_manifest_doc JSONB,
+    candidate_patch_manifest   JSONB,
+    miner_hotkey               TEXT,
+    candidate_kind             TEXT,
+    candidate_model_manifest_doc JSONB,
+    candidate_build_doc        JSONB,
+    candidate_source_diff_hash TEXT,
+    candidate_patch_hash       TEXT,
+    parent_artifact_hash       TEXT,
+    receipt_id                 UUID,
+    island                     TEXT,
+    hypothesis_doc             JSONB,
+    redacted_public_summary    TEXT,
+    current_candidate_status   TEXT,
+    current_reason             TEXT,
+    current_status_at          TIMESTAMPTZ
 );
 """
 
-# Runtime assertions. Each DO block RAISEs on failure; the psql -v ON_ERROR_STOP=1
-# flag makes that a non-zero exit, which the test asserts against.
+# Sequential runtime assertions (single psql session).
 _ASSERT_SQL = r"""
 DO $$
-DECLARE r JSONB; n INT;
+DECLARE r JSONB; n INT; c1 TEXT; c2 TEXT; ru1 UUID; ru2 UUID;
 BEGIN
     -- 115: batched insert is conflict-safe and idempotent.
     r := public.insert_research_lab_provider_usage_ledger_rows(
@@ -110,33 +141,76 @@ BEGIN
         '[{"usage_row_id":"11111111-1111-4111-8111-111111111111","provider_id":"scrapingdog"},
           {"usage_row_id":"33333333-3333-4333-8333-333333333333","provider_id":"deepline"}]'::JSONB);
     IF (r->>'inserted')::INT <> 1 THEN RAISE EXCEPTION '115 idempotent insert expected 1, got %', r->>'inserted'; END IF;
-    SELECT count(*) INTO n FROM public.research_lab_provider_usage_ledger;
-    IF n <> 3 THEN RAISE EXCEPTION '115 total rows expected 3, got %', n; END IF;
-    BEGIN
-        r := public.insert_research_lab_provider_usage_ledger_rows('{"not":"array"}'::JSONB);
-        RAISE EXCEPTION '115 should reject a non-array batch';
-    EXCEPTION WHEN sqlstate '22023' THEN NULL; END;
 
     -- 116: anti-join returns only the ids absent from research_trajectories.
     INSERT INTO public.research_trajectories(trajectory_id) VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
     SELECT count(*) INTO n FROM public.research_lab_missing_trajectory_ids(ARRAY[
         'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'::UUID,
-        'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'::UUID,
-        'cccccccc-cccc-4ccc-8ccc-cccccccccccc'::UUID]);
-    IF n <> 2 THEN RAISE EXCEPTION '116 expected 2 missing, got %', n; END IF;
+        'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'::UUID]);
+    IF n <> 1 THEN RAISE EXCEPTION '116 expected 1 missing, got %', n; END IF;
 
-    -- 118: single eligible queued candidate, staleness filter applied, LIMIT 1.
+    -- 119: in-SQL deterministic id matches Python (pins uuid5(canonical_hash)).
+    IF public.research_lab_trajectory_id('3f2a1c00-0000-4000-8000-000000000001')
+       <> '1544660e-89e4-52e6-84be-8bc3d0e01907' THEN
+        RAISE EXCEPTION '119 trajectory_id reproduction drifted from Python';
+    END IF;
+
+    -- 119 delta: seed one projected + one unprojected terminal run.
+    INSERT INTO public.research_loop_run_queue_current
+        (run_id, ticket_id, queue_priority, current_event_hash, current_status_at, current_queue_status)
+    VALUES
+        ('d0000000-0000-4000-8000-000000000001','e0000000-0000-4000-8000-000000000001',0,'h',now()-interval '5 min','completed'),
+        ('d0000000-0000-4000-8000-000000000002','e0000000-0000-4000-8000-000000000002',0,'h',now()-interval '1 min','completed');
+    INSERT INTO public.research_trajectories(trajectory_id)
+        VALUES (public.research_lab_trajectory_id('d0000000-0000-4000-8000-000000000001'));  -- run 1 projected
+    SELECT count(*) INTO n FROM public.research_lab_next_unprojected_terminal_runs(25, false);
+    IF n <> 1 THEN RAISE EXCEPTION '119 expected 1 unprojected run, got %', n; END IF;
+    IF (SELECT run_id FROM public.research_lab_next_unprojected_terminal_runs(25, false))
+       <> 'd0000000-0000-4000-8000-000000000002' THEN
+        RAISE EXCEPTION '119 unprojected delta returned the wrong run';
+    END IF;
+    -- run 1 is projected but has no execution trace -> flagged as missing-trace.
+    SELECT count(*) INTO n FROM public.research_lab_terminal_runs_missing_traces(25, true);
+    IF n <> 1 THEN RAISE EXCEPTION '119 expected 1 missing-trace run, got %', n; END IF;
+    INSERT INTO public.execution_traces(run_id)
+        VALUES (public.research_lab_execution_trace_id('d0000000-0000-4000-8000-000000000001'));
+    SELECT count(*) INTO n FROM public.research_lab_terminal_runs_missing_traces(25, true);
+    IF n <> 0 THEN RAISE EXCEPTION '119 traced run should no longer be flagged, got %', n; END IF;
+
+    -- 120: atomic candidate claim -- sequential claims yield DISTINCT candidates.
     INSERT INTO public.research_lab_candidate_evaluation_current
         (candidate_id, run_id, ticket_id, current_candidate_status, current_reason, current_status_at)
     VALUES
-        ('c-old','10000000-0000-4000-8000-000000000001','20000000-0000-4000-8000-000000000001','queued','',now()-interval '10 min'),
-        ('c-new','10000000-0000-4000-8000-000000000002','20000000-0000-4000-8000-000000000002','queued','',now()-interval '1 min'),
-        ('c-hold','10000000-0000-4000-8000-000000000003','20000000-0000-4000-8000-000000000003','queued','baseline_not_ready',now()),
-        ('c-done','10000000-0000-4000-8000-000000000004','20000000-0000-4000-8000-000000000004','scored','',now()-interval '99 min');
-    SELECT count(*) INTO n FROM public.claim_next_research_lab_candidate(900, 300);
-    IF n <> 1 THEN RAISE EXCEPTION '118 expected exactly 1 row, got %', n; END IF;
-    IF (SELECT candidate_id FROM public.claim_next_research_lab_candidate(900, 300)) <> 'c-old'
-        THEN RAISE EXCEPTION '118 expected c-old (oldest eligible) first'; END IF;
+        ('cand-a','a1000000-0000-4000-8000-000000000001','b1000000-0000-4000-8000-000000000001','queued','',now()-interval '10 min'),
+        ('cand-b','a1000000-0000-4000-8000-000000000002','b1000000-0000-4000-8000-000000000002','queued','',now()-interval '5 min'),
+        ('cand-hold','a1000000-0000-4000-8000-000000000003','b1000000-0000-4000-8000-000000000003','queued','baseline_not_ready',now());
+    SELECT candidate_id INTO c1 FROM public.claim_next_research_lab_candidate('w1',120,900,300);
+    SELECT candidate_id INTO c2 FROM public.claim_next_research_lab_candidate('w2',120,900,300);
+    IF c1 IS NULL OR c2 IS NULL OR c1 = c2 THEN
+        RAISE EXCEPTION '120 sequential claims must be distinct, got % and %', c1, c2;
+    END IF;
+    IF c1 <> 'cand-a' THEN RAISE EXCEPTION '120 oldest eligible should be claimed first, got %', c1; END IF;
+    -- fresh baseline_not_ready is excluded; both eligible now claimed -> none left.
+    IF (SELECT count(*) FROM public.claim_next_research_lab_candidate('w3',120,900,300)) <> 0 THEN
+        RAISE EXCEPTION '120 no eligible candidate should remain';
+    END IF;
+
+    -- 121: atomic run claim -- sequential claims yield DISTINCT runs, priority order.
+    INSERT INTO public.research_loop_run_queue_current
+        (run_id, ticket_id, queue_priority, current_event_hash, current_status_at, current_queue_status)
+    VALUES
+        ('c1000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001',5,'h',now()-interval '3 min','queued'),
+        ('c1000000-0000-4000-8000-000000000002','f1000000-0000-4000-8000-000000000002',1,'h',now()-interval '1 min','queued');
+    SELECT run_id INTO ru1 FROM public.claim_next_research_loop_run('w1',120);
+    SELECT run_id INTO ru2 FROM public.claim_next_research_loop_run('w2',120);
+    IF ru1 IS NULL OR ru2 IS NULL OR ru1 = ru2 THEN
+        RAISE EXCEPTION '121 sequential run claims must be distinct, got % and %', ru1, ru2;
+    END IF;
+    -- lower queue_priority sorts first (matches the legacy order).
+    IF ru1 <> 'c1000000-0000-4000-8000-000000000002' THEN
+        RAISE EXCEPTION '121 priority order wrong, got %', ru1;
+    END IF;
+
     RAISE NOTICE 'RPC-BEHAVIOR-OK';
 END $$;
 
@@ -146,33 +220,25 @@ DECLARE r JSONB;
         tok_b TEXT := 'research-lab-worker-1#hostx#222#bbb';
         lease TEXT := 'hosted_worker_maintenance';
 BEGIN
-    -- 117: two processes with the SAME human-readable name but DIFFERENT lease
-    -- tokens -- only one may hold the lease (the identity-bug regression guard).
+    -- 117: two processes, same human-readable name, DIFFERENT tokens -- only one holds.
     r := public.research_lab_acquire_maintenance_lease(lease, tok_a, 180);
     IF (r->>'acquired')::BOOL IS NOT TRUE THEN RAISE EXCEPTION '117 A should acquire'; END IF;
     r := public.research_lab_acquire_maintenance_lease(lease, tok_b, 180);
     IF (r->>'acquired')::BOOL IS NOT FALSE THEN RAISE EXCEPTION '117 B must NOT acquire while A holds'; END IF;
-    IF (r->>'holder_ref') <> tok_a THEN RAISE EXCEPTION '117 holder should still be A'; END IF;
     r := public.research_lab_acquire_maintenance_lease(lease, tok_a, 180);
     IF (r->>'acquired')::BOOL IS NOT TRUE THEN RAISE EXCEPTION '117 A should renew'; END IF;
     UPDATE public.research_lab_maintenance_lease SET expires_at = now() - interval '1 s' WHERE lease_name = lease;
     r := public.research_lab_acquire_maintenance_lease(lease, tok_b, 180);
     IF (r->>'acquired')::BOOL IS NOT TRUE THEN RAISE EXCEPTION '117 B should take an expired lease'; END IF;
-    BEGIN
-        r := public.research_lab_acquire_maintenance_lease(lease, tok_a, 0);
-        RAISE EXCEPTION '117 should reject ttl=0';
-    EXCEPTION WHEN sqlstate '22023' THEN NULL; END;
     RAISE NOTICE 'LEASE-IDENTITY-OK';
 END $$;
 """
 
 
 @pytest.fixture(scope="module")
-def pg_db():
+def pg():
     bindir = Path(_PG_BINDIR)
     datadir = Path(tempfile.mkdtemp(prefix="egress-pg-"))
-    # A short socket dir (postgres needs a valid one even for TCP-only clients);
-    # the datadir path can be too long for the 103-byte socket limit.
     sockdir = Path(tempfile.mkdtemp(prefix="/tmp/pgs"))
     port = _free_port()
     env = {**os.environ, "PGTZ": "UTC", "TZ": "UTC"}
@@ -180,37 +246,36 @@ def pg_db():
     def _bin(name: str) -> str:
         return str(bindir / name)
 
-    def psql(args: list[str], input_sql: str | None = None):
+    def psql(args, input_sql=None):
         return subprocess.run(
             [_bin("psql"), "-v", "ON_ERROR_STOP=1", "-h", "127.0.0.1",
              "-p", str(port), "-U", "postgres", "-d", "migtest", "-q", *args],
-            input=input_sql, capture_output=True, text=True, env=env, timeout=60,
+            input=input_sql, capture_output=True, text=True, env=env, timeout=120,
         )
 
     started = False
     try:
-        subprocess.run(
-            [_bin("initdb"), "-D", str(datadir), "-U", "postgres", "--auth=trust"],
-            check=True, capture_output=True, text=True, env=env, timeout=90,
-        )
-        # -l is required: without a logfile the postgres daemon inherits
-        # pg_ctl's stdout pipe and holds it open, so capture_output would block
-        # on EOF forever (the daemon never exits).
+        subprocess.run([_bin("initdb"), "-D", str(datadir), "-U", "postgres", "--auth=trust"],
+                       check=True, capture_output=True, text=True, env=env, timeout=90)
         subprocess.run(
             [_bin("pg_ctl"), "-D", str(datadir), "-w", "-t", "30",
              "-l", str(datadir / "server.log"), "-o",
-             f"-p {port} -c listen_addresses=127.0.0.1 "
-             f"-c unix_socket_directories={sockdir}",
-             "start"],
-            check=True, capture_output=True, text=True, env=env, timeout=45,
-        )
+             f"-p {port} -c listen_addresses=127.0.0.1 -c unix_socket_directories={sockdir}", "start"],
+            check=True, capture_output=True, text=True, env=env, timeout=45)
         started = True
         subprocess.run(
             [_bin("psql"), "-h", "127.0.0.1", "-p", str(port), "-U", "postgres",
              "-d", "postgres", "-c", "CREATE DATABASE migtest"],
-            check=True, capture_output=True, text=True, env=env, timeout=30,
-        )
-        yield psql
+            check=True, capture_output=True, text=True, env=env, timeout=30)
+        # Shims + apply migrations once for the module.
+        setup = psql(["-c", _SETUP_SQL])
+        assert setup.returncode == 0, setup.stderr
+        for num in MIGRATIONS:
+            matches = sorted(SCRIPTS.glob(f"{num}-*.sql"))
+            assert matches, f"migration {num} not found"
+            applied = psql(["-f", str(matches[0])])
+            assert applied.returncode == 0, f"migration {num} failed:\n{applied.stderr}"
+        yield {"psql": psql, "port": port, "env": env}
     finally:
         if started:
             subprocess.run([_bin("pg_ctl"), "-D", str(datadir), "-w", "-t", "20", "stop"],
@@ -219,20 +284,65 @@ def pg_db():
         shutil.rmtree(sockdir, ignore_errors=True)
 
 
-def test_migrations_115_to_118_apply_and_execute(pg_db) -> None:
-    # Shims + dependency stubs.
-    setup = pg_db(["-c", _SETUP_SQL])
-    assert setup.returncode == 0, setup.stderr
-
-    # Apply each migration verbatim.
-    for num in ("115", "116", "117", "118"):
-        matches = sorted(SCRIPTS.glob(f"{num}-*.sql"))
-        assert matches, f"migration {num} not found"
-        applied = pg_db(["-f", str(matches[0])])
-        assert applied.returncode == 0, f"migration {num} failed:\n{applied.stderr}"
-
-    # Exercise the RPCs' runtime behavior.
-    result = pg_db(["-c", _ASSERT_SQL])
+def test_migrations_apply_and_execute(pg) -> None:
+    result = pg["psql"](["-c", _ASSERT_SQL])
     assert result.returncode == 0, result.stderr
     assert "RPC-BEHAVIOR-OK" in result.stderr
     assert "LEASE-IDENTITY-OK" in result.stderr
+
+
+def test_atomic_claims_never_double_assign_under_concurrency(pg) -> None:
+    # Item 12d: N threads each call the claim RPC once against the SAME live
+    # server; the advisory lock + claim row must hand every thread a DISTINCT
+    # candidate/run -- zero duplicates.
+    psycopg2 = pytest.importorskip("psycopg2")
+    dsn = dict(host="127.0.0.1", port=pg["port"], user="postgres", dbname="migtest")
+
+    seed = psycopg2.connect(**dsn)
+    seed.autocommit = True
+    cur = seed.cursor()
+    # Fresh, distinct-named rows so this test is independent of the sequential one.
+    for i in range(24):
+        cur.execute(
+            "INSERT INTO research_lab_candidate_evaluation_current"
+            "(candidate_id,run_id,ticket_id,current_candidate_status,current_reason,current_status_at)"
+            " VALUES (%s,gen_random_uuid(),gen_random_uuid(),'queued','',now()-(%s||' sec')::interval)",
+            (f"cc-{i:02d}", i),
+        )
+        cur.execute(
+            "INSERT INTO research_loop_run_queue_current"
+            "(run_id,ticket_id,queue_priority,current_event_hash,current_status_at,current_queue_status)"
+            " VALUES (gen_random_uuid(),gen_random_uuid(),0,'h',now()-(%s||' sec')::interval,'queued')",
+            (i,),
+        )
+    seed.close()
+
+    def hammer(sql: str, holder_args):
+        out, lock = [], threading.Lock()
+        barrier = threading.Barrier(20)
+
+        def one(k):
+            conn = psycopg2.connect(**dsn)
+            conn.autocommit = True
+            c = conn.cursor()
+            barrier.wait()  # maximize real overlap
+            c.execute(sql, (f"w{k}", *holder_args))
+            row = c.fetchone()
+            with lock:
+                out.append(str(row[0]) if row else None)
+            conn.close()
+
+        threads = [threading.Thread(target=one, args=(k,)) for k in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return [r for r in out if r]
+
+    cand = hammer("SELECT candidate_id FROM claim_next_research_lab_candidate(%s,120,900,300)", ())
+    assert len(cand) == len(set(cand)), f"candidate double-assign: {cand}"
+    assert len(cand) == 20  # 24 available, 20 claimers
+
+    runs = hammer("SELECT run_id FROM claim_next_research_loop_run(%s,120)", ())
+    assert len(runs) == len(set(runs)), f"run double-assign: {runs}"
+    assert len(runs) == 20

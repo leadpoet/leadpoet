@@ -114,6 +114,7 @@ from gateway.research_lab.reimbursement_awards import (
     normalize_cost_evidence,
 )
 from gateway.research_lab.store import (
+    call_rpc,
     canonical_hash,
     create_auto_research_loop_event,
     create_candidate_artifact,
@@ -170,6 +171,19 @@ def _error_backoff_seconds() -> float:
         return max(5.0, float(os.getenv("RESEARCH_LAB_WORKER_ERROR_BACKOFF_SECONDS", "60")))
     except ValueError:
         return 60.0
+
+
+def _run_claim_ttl_seconds() -> int:
+    """TTL for a hosted-run claim reservation (default 120s).
+
+    Covers the window between the claim RPC and the started-event append; once
+    started, the run leaves 'queued' and the claim is moot. A dead worker's
+    claim expires within this window and the still-queued run is re-claimable.
+    """
+    try:
+        return max(30, int(os.getenv("RESEARCH_LAB_RUN_CLAIM_TTL_SECONDS", "120")))
+    except ValueError:
+        return 120
 
 
 def _maintenance_lease_ttl_seconds() -> int:
@@ -1775,11 +1789,28 @@ class ResearchLabHostedWorker:
             ) from exc
 
     async def _next_queued_run(self) -> Mapping[str, Any] | None:
-        # Only the columns the claim path consumes downstream (partition key,
-        # ids, priority, and the event-hash/status used by the claim verify),
-        # instead of SELECT * over up to queue_fetch_limit full queue rows every
-        # poll on every worker. Atomicity of the actual claim is enforced DB-side
-        # by the guard_research_lab_run_claim trigger, not by this read.
+        # Atomic claim: Postgres picks the next queued run by priority
+        # (oldest-first within a priority), reserves it for THIS worker under an
+        # advisory lock, and returns only the columns the claim path consumes.
+        # Concurrent hosted workers each get a DIFFERENT run in one call, so the
+        # client hash partition and the duplicated full-window scan are gone. The
+        # started-event append stays backstopped by guard_research_lab_run_claim.
+        try:
+            rows = await call_rpc(
+                "claim_next_research_loop_run",
+                {"p_holder_ref": self.worker_ref, "p_ttl_seconds": _run_claim_ttl_seconds()},
+            )
+            if isinstance(rows, list):
+                return dict(rows[0]) if rows else None
+        except Exception as exc:
+            # Fallback keeps the worker running if migration 121 is not yet
+            # applied: legacy trimmed-column scan + client hash partition. The
+            # guard trigger still prevents double-starts.
+            logger.warning(
+                "research_lab_run_claim_rpc_failed worker_ref=%s error=%s",
+                self.worker_ref,
+                str(exc)[:200],
+            )
         rows = await select_many(
             "research_loop_run_queue_current",
             columns="run_id,ticket_id,queue_priority,current_event_hash,current_status_at",

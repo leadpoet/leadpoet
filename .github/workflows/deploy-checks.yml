@@ -95,6 +95,8 @@ jobs:
           pgbin="$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -r | head -1)"
           [ -n "$pgbin" ] && echo "$pgbin" >> "$GITHUB_PATH" || true
           "${pgbin:+$pgbin/}initdb" --version || true
+          # Driver for the concurrent claim no-double-assign integration test.
+          python -m pip install psycopg2-binary
 
       - name: Run pytest suite
         run: |

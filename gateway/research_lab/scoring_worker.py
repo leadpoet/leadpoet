@@ -907,6 +907,20 @@ def _error_backoff_seconds() -> float:
         return 60.0
 
 
+def _candidate_claim_ttl_seconds() -> int:
+    """TTL for a candidate claim reservation (default 120s).
+
+    Only needs to cover the brief window between the claim RPC and the assigned
+    event append; once assigned, the candidate leaves 'queued' and the claim is
+    moot. A dead worker's claim expires within this window and the still-queued
+    candidate becomes re-claimable.
+    """
+    try:
+        return max(30, int(os.getenv("RESEARCH_LAB_CANDIDATE_CLAIM_TTL_SECONDS", "120")))
+    except ValueError:
+        return 120
+
+
 def _scoring_maintenance_lease_ttl_seconds() -> int:
     """TTL for the single-owner scoring-recovery lease (default 180s).
 
@@ -4997,28 +5011,9 @@ class ResearchLabGatewayScoringWorker:
         return assembled
 
     async def _claim_next_candidate(self) -> dict[str, Any] | None:
-        # Server-side selection: the reason/staleness eligibility filter runs in
-        # the database and only the single next claimable candidate row comes
-        # back, instead of pulling up to 50 full patch-artifact rows per poll and
-        # filtering them client-side. The assigned-event append below stays in
-        # Python (anchored_hash parity), guarded against double-claims by the
-        # guard_research_lab_candidate_claim trigger (script 42).
-        claim_rows = await call_rpc(
-            "claim_next_research_lab_candidate",
-            {
-                "p_baseline_not_ready_retry_seconds": int(
-                    self.config.scoring_worker_baseline_not_ready_retry_seconds
-                ),
-                "p_retryable_failure_retry_seconds": int(
-                    self.config.scoring_worker_retryable_failure_retry_seconds
-                ),
-            },
-        )
-        candidate: dict[str, Any] | None = (
-            dict(claim_rows[0]) if isinstance(claim_rows, list) and claim_rows else None
-        )
-        if not candidate:
-            return None
+        # Global scoring start-gate first (it does not depend on any candidate);
+        # only reserve a candidate once the gate is open, so a held gate leaves
+        # nothing claimed.
         start_gate = await self._candidate_scoring_start_gate()
         self._last_candidate_start_gate = start_gate
         if not start_gate.get("available"):
@@ -5032,7 +5027,6 @@ class ResearchLabGatewayScoringWorker:
                         "RESEARCH LAB CANDIDATE SCORING START HELD",
                         (
                             ("Worker", self.worker_ref),
-                            ("Next candidate", compact_ref(candidate.get("candidate_id"))),
                             ("Reason", start_gate.get("reason")),
                             ("UTC now", start_gate.get("now_utc")),
                             ("Target baseline date", start_gate.get("target_benchmark_date")),
@@ -5045,6 +5039,30 @@ class ResearchLabGatewayScoringWorker:
                 self._candidate_start_hold_logged_key = hold_key
             return None
         self._candidate_start_hold_logged_key = None
+        # Atomic claim: the reason/staleness filter runs in the database, an
+        # advisory lock + short-TTL claim row reserve the single next candidate
+        # for THIS worker (concurrent workers get different candidates), and only
+        # the columns scoring needs are returned. The assigned-event append below
+        # stays in Python (anchored_hash parity) and is still backstopped by the
+        # guard_research_lab_candidate_claim trigger (script 42).
+        claim_rows = await call_rpc(
+            "claim_next_research_lab_candidate",
+            {
+                "p_holder_ref": self.worker_ref,
+                "p_ttl_seconds": _candidate_claim_ttl_seconds(),
+                "p_baseline_not_ready_retry_seconds": int(
+                    self.config.scoring_worker_baseline_not_ready_retry_seconds
+                ),
+                "p_retryable_failure_retry_seconds": int(
+                    self.config.scoring_worker_retryable_failure_retry_seconds
+                ),
+            },
+        )
+        candidate: dict[str, Any] | None = (
+            dict(claim_rows[0]) if isinstance(claim_rows, list) and claim_rows else None
+        )
+        if not candidate:
+            return None
         candidate_id = str(candidate.get("candidate_id") or "")
         # No pre-write re-read: the selection RPC already returned a currently
         # queued candidate, and the guard_research_lab_candidate_claim trigger

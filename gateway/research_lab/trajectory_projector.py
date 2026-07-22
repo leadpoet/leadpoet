@@ -4485,6 +4485,45 @@ async def _unprojected_run_ids(
     return [run_id for tid, run_id in tid_to_run.items() if tid in missing_tids]
 
 
+async def _terminal_run_delta(
+    store: Any,
+    *,
+    rpc_name: str,
+    limit: int,
+    newest_first: bool,
+    max_candidates: int,
+) -> list[str]:
+    """Return the next ``limit`` terminal run ids for a projection-delta RPC.
+
+    The RPC reproduces the deterministic trajectory / execution-trace ids in SQL
+    and returns only the runs that still need work — no bulk download and no
+    per-run existence round-trips. Falls back to the legacy scan-then-filter for
+    injected stores without ``call_rpc`` (test fakes), preserving behavior.
+    """
+    if hasattr(store, "call_rpc"):
+        try:
+            rows = await store.call_rpc(
+                rpc_name,
+                {"p_limit": int(max(1, limit)), "p_newest_first": bool(newest_first)},
+            )
+            return _rpc_uuid_list(rows)
+        except Exception as exc:
+            logger.warning(
+                "research_lab_trajectory_delta_rpc_failed rpc=%s error=%s",
+                rpc_name,
+                str(exc)[:300],
+            )
+    # Fallback: scan terminal run ids (run_id only) newest/oldest-first.
+    queue_rows = await store.select_all(
+        RUN_QUEUE_TABLE,
+        columns="run_id",
+        filters=(("current_queue_status", "in", list(_QUEUE_TERMINAL_STATUSES)),),
+        order_by=(("current_status_at", bool(newest_first)),),
+        max_rows=max_candidates,
+    )
+    return [str(row.get("run_id") or "") for row in queue_rows if row.get("run_id")]
+
+
 async def project_completed_runs(
     *,
     batch_size: int = 25,
@@ -4494,28 +4533,19 @@ async def project_completed_runs(
 ) -> list[ProjectionResult]:
     """Project up to ``batch_size`` not-yet-projected completed/failed runs.
 
-    Suitable for a worker periodic pass or cron (wiring is a follow-up).
-    Best-effort: a projection failure logs and skips that run; the batch never
-    raises.
+    Discovery is one server-side delta RPC that returns only unprojected
+    terminal runs (no bulk download, no per-run existence read). Best-effort: a
+    projection failure logs and skips that run; the batch never raises.
     """
     store = store or GatewayProjectorStore()
     results: list[ProjectionResult] = []
     try:
-        # Only run_id is consumed below (ordering is applied server-side, so the
-        # sort column need not be returned); fetch just that instead of four
-        # columns per terminal run. A full DB-side delta that returns only the
-        # next unprojected runs is a scoped follow-up: research_trajectories is
-        # keyed solely on the double-hashed uuid5 trajectory_id with no run_id
-        # column, so a server-side anti-join would require reproducing
-        # uuid5(canonical_hash(...)) in SQL (parity risk) or adding a run_id
-        # linkage column + backfill. The client-computed anti-join (RPC 116)
-        # already removed the per-run existence N+1.
-        queue_rows = await store.select_all(
-            RUN_QUEUE_TABLE,
-            columns="run_id",
-            filters=(("current_queue_status", "in", list(_QUEUE_TERMINAL_STATUSES)),),
-            order_by=(("current_status_at", False),),
-            max_rows=max_candidates,
+        unprojected = await _terminal_run_delta(
+            store,
+            rpc_name="research_lab_next_unprojected_terminal_runs",
+            limit=batch_size,
+            newest_first=False,
+            max_candidates=max_candidates,
         )
     except Exception as exc:
         logger.warning(
@@ -4523,9 +4553,10 @@ async def project_completed_runs(
             str(exc)[:500],
         )
         return results
-    # One server-side anti-join replaces the former existence SELECT per run.
-    candidate_run_ids = [str(row.get("run_id") or "") for row in queue_rows]
-    unprojected = await _unprojected_run_ids(store, candidate_run_ids)
+    # The RPC already anti-joins server-side; the fallback path returns all
+    # terminal runs, so keep the client anti-join for that case only.
+    if not hasattr(store, "call_rpc"):
+        unprojected = await _unprojected_run_ids(store, unprojected)
     projected = 0
     for run_id in unprojected:
         if projected >= max(1, int(batch_size)):
@@ -4739,15 +4770,17 @@ async def backfill_corpus_trace_rows(
         )
         return results
     try:
-        queue_rows = await store.select_all(
-            RUN_QUEUE_TABLE,
-            columns="run_id,ticket_id,current_queue_status,current_status_at",
-            filters=(("current_queue_status", "in", list(_QUEUE_TERMINAL_STATUSES)),),
-            # Late scorer/in-container traces usually arrive after run
-            # completion, so the maintenance pass should prioritize recent
-            # terminal runs. Historical deep repairs remain the CLI's job.
-            order_by=(("current_status_at", True),),
-            max_rows=max_candidates,
+        # Server-side delta: only PROJECTED terminal runs still missing their
+        # engine execution_trace (the dominant "needs corpus backfill" signal),
+        # newest-first, instead of downloading every terminal run and inspecting
+        # each. Fully-traced runs are no longer re-inspected every pass. The
+        # per-run inspection below stays authoritative for what to repair.
+        run_ids = await _terminal_run_delta(
+            store,
+            rpc_name="research_lab_terminal_runs_missing_traces",
+            limit=max(int(max_attempts if max_attempts is not None else max_candidates), int(batch_size)),
+            newest_first=True,
+            max_candidates=max_candidates,
         )
     except Exception as exc:
         logger.warning(
@@ -4758,12 +4791,12 @@ async def backfill_corpus_trace_rows(
     processed = 0
     attempted = 0
     attempt_limit = max(1, int(max_attempts if max_attempts is not None else max_candidates))
-    for row in queue_rows:
+    for run_id in run_ids:
         if processed >= max(1, int(batch_size)):
             break
         if attempted >= attempt_limit:
             break
-        run_id = str(row.get("run_id") or "")
+        run_id = str(run_id or "")
         if not run_id:
             continue
         attempted += 1

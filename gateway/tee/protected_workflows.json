@@ -412,7 +412,7 @@
       "symbol": "normalize_tee_protocol"
     },
     {
-      "ast_sha256": "sha256:93b089454ec32f79a49e5544c0c3088f0da4ca01a2c43f6b0219509ee16df716",
+      "ast_sha256": "sha256:abec904ee76eb9b05aa83bc7c26869c101f91ac8d916becc59e17815c5ae1443",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "_load_allocation_parent_graphs_v2"
     },
@@ -1082,7 +1082,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:9b0af264d7d902d837e1e1554a5be0f8e5bedc6488be0e09ace29097609bbc6b",
+  "manifest_hash": "sha256:7b12a0e33012ff8d8f1ee1bc3a41813844248d949af90f2883e81863054f3884",
   "protected_source_commit": "691ae345faad920031f0e9ea2c6d37520259f412",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

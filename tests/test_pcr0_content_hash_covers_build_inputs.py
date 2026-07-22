@@ -93,6 +93,40 @@ def test_content_hash_fails_closed_when_required_input_is_unreadable(
     assert compute_files_content_hash(str(repo_copy)) is None
 
 
+def test_historical_cache_warming_always_includes_current_deploy_head():
+    head = {
+        "hash": "f" * 40,
+        "timestamp": "3",
+        "message": "gateway-only release",
+        "date": "",
+    }
+    measured_history = [
+        {
+            "hash": "a" * 40,
+            "timestamp": "2",
+            "message": "validator change",
+            "date": "",
+        },
+        {
+            "hash": "b" * 40,
+            "timestamp": "1",
+            "message": "older validator change",
+            "date": "",
+        },
+    ]
+
+    selected = pcr0_builder._include_current_head_commit(
+        measured_history,
+        [head],
+        2,
+    )
+
+    assert [commit["hash"] for commit in selected] == [
+        head["hash"],
+        measured_history[0]["hash"],
+    ]
+
+
 @pytest.mark.asyncio
 async def test_unreadable_input_aborts_builder_without_docker_or_cache_relabel(
     repo_copy,
@@ -130,3 +164,78 @@ async def test_unreadable_input_aborts_builder_without_docker_or_cache_relabel(
     assert pcr0_builder._pcr0_cache == existing_cache
     assert pcr0_builder._last_content_hash == "old-content"
     assert pcr0_builder._build_in_progress is False
+
+
+@pytest.mark.asyncio
+async def test_identical_measured_inputs_register_current_commit_without_rebuild(
+    repo_copy,
+    monkeypatch,
+):
+    original_commit = "a" * 40
+    current_commit = "f" * 40
+    cache_key = "same-content:same-base"
+    existing_cache = {
+        cache_key: {
+            "pcr0": "9" * 96,
+            "content_hash": "same-content",
+            "commit_hash": original_commit,
+            "commit_hashes": [original_commit],
+            "commit_timestamp": "1",
+        }
+    }
+    monkeypatch.setattr(pcr0_builder, "BUILD_DIR", str(repo_copy))
+    monkeypatch.setattr(
+        pcr0_builder,
+        "clone_or_update_repo",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "compute_files_content_hash",
+        lambda _repo: "same-content",
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "ensure_base_image_exists",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "build_pcr0_cache_key",
+        lambda _content_hash, _repo: cache_key,
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "get_latest_commits",
+        AsyncMock(
+            return_value=[
+                {
+                    "hash": current_commit,
+                    "timestamp": "2",
+                    "message": "current",
+                    "date": "",
+                }
+            ]
+        ),
+    )
+    build_enclave = AsyncMock(return_value="unexpected")
+    monkeypatch.setattr(
+        pcr0_builder,
+        "build_enclave_and_extract_pcr0",
+        build_enclave,
+    )
+    monkeypatch.setattr(pcr0_builder, "_pcr0_cache", existing_cache)
+    monkeypatch.setattr(pcr0_builder, "_last_content_hash", None)
+    monkeypatch.setattr(pcr0_builder, "_build_in_progress", False)
+
+    await pcr0_builder.check_and_build_pcr0()
+
+    build_enclave.assert_not_awaited()
+    assert pcr0_builder._pcr0_cache[cache_key]["commit_hashes"] == [
+        original_commit,
+        current_commit,
+    ]
+    assert pcr0_builder.verify_pcr0(
+        "9" * 96,
+        expected_commit=current_commit,
+    )["valid"] is True

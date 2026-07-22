@@ -229,3 +229,42 @@ def test_validator_boot_rejects_shared_pcr0_without_exact_commit(
                 "pcr0": "9" * 96,
             }
         )
+
+
+def test_validator_boot_accepts_exact_commit_alias_for_identical_inputs(
+    weights_module, monkeypatch
+):
+    from gateway.utils import pcr0_builder
+
+    shared_pcr0 = "9" * 96
+    original_commit = "a" * 40
+    aliased_commit = "f" * 40
+    entry = {
+        "pcr0": shared_pcr0,
+        "commit_hash": original_commit,
+        "commit_hashes": [original_commit],
+        "commit_timestamp": "1",
+    }
+    assert pcr0_builder._register_commit_alias(entry, aliased_commit, "2") is True
+    monkeypatch.setattr(pcr0_builder, "_pcr0_cache", {"shared": entry})
+    monkeypatch.setattr(
+        weights_module,
+        "verify_boot_identity_nitro",
+        _stub_nitro([]),
+    )
+
+    result = weights_module._verify_authoritative_v2_boot(
+        {
+            "physical_role": "validator_weights",
+            "commit_sha": aliased_commit,
+            "pcr0": shared_pcr0,
+        }
+    )
+
+    assert result["verified"] is True
+    verification = pcr0_builder.verify_pcr0(
+        shared_pcr0,
+        expected_commit=aliased_commit,
+    )
+    assert verification["commit_hash"] == aliased_commit
+    assert verification["commit_hashes"] == [original_commit, aliased_commit]

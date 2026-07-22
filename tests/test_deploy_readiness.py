@@ -51,7 +51,12 @@ def test_deploy_readiness_blocks_pcr0_commit_drift(monkeypatch) -> None:
     monkeypatch.setattr(
         deploy_readiness,
         "_dynamic_validator_status",
-        lambda pcr0: {"available": True, "valid": False, "verification": {}, "cache_status": {}},
+        lambda pcr0, expected_commit=None: {
+            "available": True,
+            "valid": False,
+            "verification": {},
+            "cache_status": {},
+        },
     )
 
     result = deploy_readiness.build_deploy_readiness(
@@ -91,7 +96,12 @@ def test_deploy_readiness_accepts_matching_commits(monkeypatch) -> None:
     monkeypatch.setattr(
         deploy_readiness,
         "_dynamic_validator_status",
-        lambda pcr0: {"available": True, "valid": False, "verification": {}, "cache_status": {}},
+        lambda pcr0, expected_commit=None: {
+            "available": True,
+            "valid": False,
+            "verification": {},
+            "cache_status": {},
+        },
     )
 
     result = deploy_readiness.build_deploy_readiness(
@@ -107,6 +117,67 @@ def test_deploy_readiness_accepts_matching_commits(monkeypatch) -> None:
 
     assert result["ok"] is True
     assert all(check["ok"] for check in result["checks"])
+
+
+def test_deploy_readiness_accepts_exact_dynamic_validator_commit(monkeypatch) -> None:
+    commit = "a" * 40
+    stale_commit = "b" * 40
+    validator_pcr0 = "2" * 96
+    observed = []
+
+    monkeypatch.setattr(
+        deploy_readiness,
+        "get_build_info",
+        lambda: {"git_commit": commit, "build_time_utc": "2026-07-06T12:00:00Z"},
+    )
+    monkeypatch.setattr(
+        deploy_readiness,
+        "read_source_commit",
+        lambda: (commit, "test-source"),
+    )
+    monkeypatch.setattr(
+        deploy_readiness,
+        "_static_allowlist_status",
+        lambda pcr0, *, role: _status(
+            role,
+            pcr0,
+            allowed=True,
+            commits=[stale_commit],
+        ),
+    )
+
+    def dynamic_status(pcr0, expected_commit=None):
+        observed.append((pcr0, expected_commit))
+        return {
+            "available": True,
+            "valid": True,
+            "verification": {"commit_hash": expected_commit},
+            "cache_status": {},
+        }
+
+    monkeypatch.setattr(
+        deploy_readiness,
+        "_dynamic_validator_status",
+        dynamic_status,
+    )
+
+    result = deploy_readiness.build_deploy_readiness(
+        validator_commit=commit,
+        validator_pcr0=validator_pcr0,
+        require_pcr0_commit_match=True,
+    )
+
+    assert result["ok"] is True
+    assert observed == [(validator_pcr0, commit)]
+    check = next(
+        row
+        for row in result["checks"]
+        if row["name"] == "validator_pcr0_commit_matches_validator_commit"
+    )
+    assert check["actual"] == {
+        "dynamic": commit,
+        "static": [stale_commit],
+    }
 
 
 def test_resume_guard_blocks_failed_manifest(tmp_path: Path) -> None:
@@ -162,7 +233,12 @@ def test_optional_docker_health_is_warning_only(monkeypatch) -> None:
     monkeypatch.setattr(
         deploy_readiness,
         "_dynamic_validator_status",
-        lambda pcr0: {"available": True, "valid": False, "verification": {}, "cache_status": {}},
+        lambda pcr0, expected_commit=None: {
+            "available": True,
+            "valid": False,
+            "verification": {},
+            "cache_status": {},
+        },
     )
     monkeypatch.setattr(
         deploy_readiness,
@@ -217,7 +293,12 @@ def test_required_docker_build_health_blocks_readiness(monkeypatch) -> None:
     monkeypatch.setattr(
         deploy_readiness,
         "_dynamic_validator_status",
-        lambda pcr0: {"available": True, "valid": False, "verification": {}, "cache_status": {}},
+        lambda pcr0, expected_commit=None: {
+            "available": True,
+            "valid": False,
+            "verification": {},
+            "cache_status": {},
+        },
     )
     monkeypatch.setattr(
         deploy_readiness,

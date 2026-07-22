@@ -182,7 +182,7 @@ def validator_v2_artifacts_required(repo_dir: str) -> bool:
 # =============================================================================
 
 # Cache structure (keyed by source content plus base-image identity, not commit hash):
-# {cache_key: {"pcr0": "...", "content_hash": "...", "base_image_stamp": "...", "commit_hash": "...", "commit_timestamp": "...", "built_at": timestamp}}
+# {cache_key: {"pcr0": "...", "content_hash": "...", "base_image_stamp": "...", "commit_hash": "...", "commit_hashes": ["..."], "commit_timestamp": "...", "built_at": timestamp}}
 # This means: same code content + same base image = same cache key, regardless of commits
 _pcr0_cache: Dict[str, Dict] = {}
 _cache_lock = asyncio.Lock()
@@ -201,6 +201,50 @@ def is_pcr0_valid(pcr0: str) -> bool:
     return pcr0 in get_cached_pcr0_values()
 
 
+def _entry_commit_hashes(entry: Dict) -> List[str]:
+    """Return every commit proven to have the entry's exact measured inputs."""
+    values = []
+    aliases = entry.get("commit_hashes")
+    if isinstance(aliases, (list, tuple, set)):
+        values.extend(aliases)
+    values.append(entry.get("commit_hash"))
+
+    commits: List[str] = []
+    for value in values:
+        commit = str(value or "").strip().lower()
+        if not commit or commit == "unknown" or commit in commits:
+            continue
+        commits.append(commit)
+    return commits
+
+
+def _register_commit_alias(
+    entry: Dict,
+    commit_hash: str,
+    commit_timestamp: str = "",
+) -> bool:
+    """Bind a commit only after it produced the entry's identical cache key."""
+    commit = str(commit_hash or "").strip().lower()
+    if not commit or commit == "unknown":
+        return False
+
+    commits = _entry_commit_hashes(entry)
+    added = commit not in commits
+    if added:
+        commits.append(commit)
+    entry["commit_hashes"] = commits
+
+    try:
+        observed_timestamp = int(commit_timestamp)
+    except (TypeError, ValueError):
+        observed_timestamp = -1
+    if observed_timestamp >= _cache_commit_timestamp(entry):
+        entry["commit_hash"] = commit
+        if observed_timestamp >= 0:
+            entry["commit_timestamp"] = str(observed_timestamp)
+    return added
+
+
 def get_cache_status() -> Dict:
     """Get current cache status for debugging."""
     return {
@@ -213,6 +257,7 @@ def get_cache_status() -> Dict:
                 "content_hash": v.get("content_hash", "?"),
                 "base_image_stamp": v.get("base_image_stamp", "?"),
                 "commit_hash": v.get("commit_hash", "?")[:8],
+                "commit_hashes": _entry_commit_hashes(v),
                 "commit_timestamp": v.get("commit_timestamp"),
                 "pcr0": v["pcr0"][:32] + "...",
                 "built_at": v.get("built_at"),
@@ -287,6 +332,31 @@ async def get_latest_commits(repo_dir: str, count: int = 3) -> List[Dict]:
             })
     
     return commits
+
+
+def _include_current_head_commit(
+    commits: List[Dict],
+    head_commits: List[Dict],
+    limit: int,
+) -> List[Dict]:
+    """Include the deploy HEAD even when it did not change measured EIF files."""
+    if limit <= 0:
+        return []
+
+    selected = list(commits)
+    if head_commits:
+        head = head_commits[0]
+        head_hash = str(head.get("hash") or "").strip().lower()
+        if head_hash:
+            selected = [
+                head,
+                *[
+                    commit
+                    for commit in selected
+                    if str(commit.get("hash") or "").strip().lower() != head_hash
+                ],
+            ]
+    return selected[:limit]
 
 
 async def clone_or_update_repo(repo_dir: str) -> bool:
@@ -1219,12 +1289,29 @@ async def check_and_build_pcr0():
             return
 
         cache_key = build_pcr0_cache_key(content_hash, repo_dir)
+
+        commits = await get_latest_commits(repo_dir, 1)
+        commit_hash = commits[0]["hash"] if commits else "unknown"
+        commit_timestamp = commits[0].get("timestamp", "") if commits else ""
         
-        # Check if we already have this content hash cached
-        # With pinned Dockerfile, same content = same PCR0, so no need to rebuild
+        # An identical cache key proves that this commit has the same complete
+        # measured inputs. Record the commit alias without rebuilding so exact
+        # commit verification cannot depend on which equivalent commit was seen
+        # first.
         if cache_key in _pcr0_cache:
+            alias_added = _register_commit_alias(
+                _pcr0_cache[cache_key],
+                commit_hash,
+                commit_timestamp,
+            )
             logger.info(f"[PCR0] Cache key {cache_key} already cached, skipping build")
             print(f"[PCR0] Cache key {cache_key} already cached, skipping build")
+            if alias_added:
+                logger.info(
+                    "[PCR0] Registered equivalent measured-input commit %s for cache key %s",
+                    commit_hash[:8],
+                    cache_key,
+                )
             _last_content_hash = content_hash
             return
         
@@ -1232,11 +1319,6 @@ async def check_and_build_pcr0():
         print(f"[PCR0] New content detected! Hash: {content_hash} (previous: {_last_content_hash})")
         logger.info(f"[PCR0] New content detected - building PCR0...")
         print(f"[PCR0] Building PCR0 for content hash {content_hash}...")
-        
-        # Get commit hash for reference (optional, just for logging)
-        commits = await get_latest_commits(repo_dir, 1)
-        commit_hash = commits[0]["hash"] if commits else "unknown"
-        commit_timestamp = commits[0].get("timestamp", "") if commits else ""
         
         # Build PCR0 for current content
         async with _cache_lock:
@@ -1255,6 +1337,7 @@ async def check_and_build_pcr0():
                     "cache_key": cache_key,
                     "base_image_stamp": format_base_image_stamp(repo_dir),
                     "commit_hash": commit_hash,
+                    "commit_hashes": [commit_hash] if commit_hash != "unknown" else [],
                     "commit_timestamp": commit_timestamp,
                     "built_at": datetime.utcnow().isoformat(),
                 }
@@ -1282,7 +1365,7 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
     slightly older code versions are still accepted.
     
     LOGIC:
-    1. Get the last N commits that touched monitored files
+    1. Get the current deploy commit and recent commits that touched monitored files
     2. For each commit (newest to oldest):
        - Checkout that version
        - Compute content hash
@@ -1352,6 +1435,12 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
                         "date": parts[3] if len(parts) > 3 else "",
                     })
             commits = commits[:num_commits]  # Limit to requested count
+
+        commits = _include_current_head_commit(
+            commits,
+            await get_latest_commits(repo_dir, 1),
+            num_commits,
+        )
         
         if not commits:
             logger.warning("[PCR0] No commits found for historical build")
@@ -1405,7 +1494,18 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
             
             # Check if already cached
             if cache_key in _pcr0_cache:
+                alias_added = _register_commit_alias(
+                    _pcr0_cache[cache_key],
+                    commit_hash,
+                    commit.get("timestamp", ""),
+                )
                 logger.info(f"[PCR0] Cache key {cache_key} already cached, skipping")
+                if alias_added:
+                    logger.info(
+                        "[PCR0] Registered equivalent measured-input commit %s for cache key %s",
+                        commit_hash[:8],
+                        cache_key,
+                    )
                 continue
             
             # Build PCR0 for this version
@@ -1422,6 +1522,7 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
                         "cache_key": cache_key,
                         "base_image_stamp": format_base_image_stamp(repo_dir),
                         "commit_hash": commit_hash,
+                        "commit_hashes": [commit_hash],
                         "commit_timestamp": commit.get("timestamp", ""),
                         "built_at": datetime.utcnow().isoformat(),
                     }
@@ -1598,15 +1699,14 @@ def verify_pcr0(pcr0: str, *, expected_commit: str = "") -> Dict:
         if entry["pcr0"] == pcr0
     ]
     for cache_key, entry in pcr0_matches:
-        if (
-            normalized_commit
-            and str(entry.get("commit_hash") or "").lower()
-            != normalized_commit
-        ):
+        commit_hashes = _entry_commit_hashes(entry)
+        if normalized_commit and normalized_commit not in commit_hashes:
             continue
+        matched_commit = normalized_commit or str(entry.get("commit_hash") or "unknown")
         return {
             "valid": True,
-            "commit_hash": entry.get("commit_hash", "unknown"),
+            "commit_hash": matched_commit,
+            "commit_hashes": commit_hashes,
             "content_hash": entry.get("content_hash", cache_key),
             "base_image_stamp": entry.get("base_image_stamp"),
             "built_at": entry.get("built_at"),
@@ -1621,8 +1721,9 @@ def verify_pcr0(pcr0: str, *, expected_commit: str = "") -> Dict:
             "commit_hash": None,
             "content_hash": None,
             "matching_commit_hashes": [
-                str(entry.get("commit_hash") or "")
+                commit_hash
                 for _, entry in pcr0_matches
+                for commit_hash in _entry_commit_hashes(entry)
             ],
             "message": "PCR0 is cached, but not for the expected commit",
             "cache_size": len(_pcr0_cache),

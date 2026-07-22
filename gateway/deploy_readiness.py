@@ -191,7 +191,10 @@ def _static_allowlist_status(pcr0: str | None, *, role: str) -> dict[str, Any]:
     }
 
 
-def _dynamic_validator_status(pcr0: str | None) -> dict[str, Any]:
+def _dynamic_validator_status(
+    pcr0: str | None,
+    expected_commit: str | None = None,
+) -> dict[str, Any]:
     normalized = normalize_pcr0(pcr0)
     try:
         from gateway.utils.pcr0_builder import get_cache_status, verify_pcr0
@@ -202,7 +205,10 @@ def _dynamic_validator_status(pcr0: str | None) -> dict[str, Any]:
             "error": str(exc)[:500],
             "cache_status": None,
         }
-    verification = verify_pcr0(normalized or "")
+    verification = verify_pcr0(
+        normalized or "",
+        expected_commit=normalize_commit(expected_commit) or "",
+    )
     return {
         "available": True,
         "valid": bool(verification.get("valid")),
@@ -467,7 +473,10 @@ def build_deploy_readiness(
 
     gateway_static = _static_allowlist_status(resolved_gateway_pcr0, role="gateway")
     validator_static = _static_allowlist_status(resolved_validator_pcr0, role="validator")
-    validator_dynamic = _dynamic_validator_status(resolved_validator_pcr0)
+    validator_dynamic = _dynamic_validator_status(
+        resolved_validator_pcr0,
+        resolved_validator_commit,
+    )
     validator_pcr0_accepted = bool(validator_static.get("allowed") or validator_dynamic.get("valid"))
     docker_health = (
         docker_build_health(smoke_build=require_docker_build_health)
@@ -571,12 +580,24 @@ def build_deploy_readiness(
             actual=gateway_static.get("matched_entry_commits"),
         )
     if require_pcr0_commit_match and resolved_validator_pcr0:
+        dynamic_commit_matches = bool(
+            resolved_validator_commit and validator_dynamic.get("valid")
+        )
+        static_commit_matches = _allowlist_commit_matches_runtime(
+            validator_static,
+            resolved_validator_commit,
+        )
         _add_check(
             checks,
             "validator_pcr0_commit_matches_validator_commit",
-            _allowlist_commit_matches_runtime(validator_static, resolved_validator_commit),
+            dynamic_commit_matches or static_commit_matches,
             expected=resolved_validator_commit,
-            actual=validator_static.get("matched_entry_commits"),
+            actual={
+                "dynamic": (validator_dynamic.get("verification") or {}).get(
+                    "commit_hash"
+                ),
+                "static": validator_static.get("matched_entry_commits"),
+            },
         )
     if docker_health is not None:
         _add_check(

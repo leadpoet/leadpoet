@@ -323,10 +323,20 @@ def verify_gateway_restart_preflight_v2(
             "gateway_autoresearch": int(worker_plan.hosted.worker_count),
             "gateway_scoring": int(worker_plan.scoring.worker_count),
         }
-        if dict(profile_result.get("worker_counts") or {}) != expected_worker_counts:
-            raise GatewayRestartPreflightV2Error(
-                "encrypted worker profiles differ from configured proxy counts"
-            )
+        # Worker count is decoupled from proxy count: a fleet may run fewer
+        # workers than it has encrypted proxy profiles (each worker index still
+        # maps to its own profile). Require a profile for every worker index in
+        # range, not strict equality, so reducing the process count does not
+        # fail the preflight. Running more workers than profiles is still
+        # rejected (there would be no TLS envelope for the extra indices).
+        available_profile_counts = dict(profile_result.get("worker_counts") or {})
+        for role, required in expected_worker_counts.items():
+            available = int(available_profile_counts.get(role, 0))
+            if required < 1 or required > available:
+                raise GatewayRestartPreflightV2Error(
+                    "%s worker count %d has no encrypted proxy profile coverage "
+                    "(%d profiles available)" % (role, required, available)
+                )
     else:
         expected_worker_counts = {}
     return {

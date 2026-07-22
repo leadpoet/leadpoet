@@ -37,6 +37,23 @@ def _truthy_env(env: Mapping[str, str], name: str, default: str = "false") -> bo
     return str(env.get(name, default)).strip().lower() in TRUTHY
 
 
+# Hard maximum on spawned worker processes per fleet, mirroring the proxy
+# profile bound in provider_profiles_v2 (_MAX_CONFIGURED_WORKERS). It guards
+# against a misconfigured *_PROCESS_COUNT spawning an unbounded fleet.
+_MAX_WORKER_PROCESSES = 500
+
+
+def _resolve_worker_count(explicit_count: int, proxy_count: int) -> int:
+    """Decouple process count from proxy count.
+
+    ``*_PROCESS_COUNT`` (``explicit_count``) is authoritative when set; adding
+    proxies must not create processes. When unset (0), default to one worker
+    per configured proxy (the historical behavior). Clamped to the hard max.
+    """
+    resolved = explicit_count if explicit_count > 0 else proxy_count
+    return max(0, min(int(resolved), _MAX_WORKER_PROCESSES))
+
+
 def _vmrss_mb(status_path: str) -> int | None:
     """Parse VmRSS from a /proc status file in MB (None off-Linux/on failure)."""
     try:
@@ -180,8 +197,8 @@ def build_research_lab_worker_autostart_plan(
     elif scoring_legacy_count <= 0 and not scoring_proxies:
         scoring_reason = "no_qualification_proxies"
 
-    hosted_count = len(hosted_proxies) if hosted_proxies else max(0, hosted_legacy_count)
-    scoring_count = len(scoring_proxies) if scoring_proxies else max(0, scoring_legacy_count)
+    hosted_count = _resolve_worker_count(hosted_legacy_count, len(hosted_proxies))
+    scoring_count = _resolve_worker_count(scoring_legacy_count, len(scoring_proxies))
     return ResearchLabWorkerAutoStartPlan(
         auto_start_enabled=auto_start_enabled,
         hosted=ResearchLabWorkerFleetPlan(
@@ -282,14 +299,23 @@ class ResearchLabWorkerSupervisor:
         env.setdefault("PYTHONUNBUFFERED", "1")
         read_fd, write_fd = os.pipe()
         env[WORKER_READY_FD_ENV] = str(write_fd)
+        # Round-robin proxy assignment: identical to positional when the fleet
+        # has at least as many proxies as workers (index < len), and reuses
+        # proxies deterministically when workers are decoupled to exceed the
+        # proxy count.
+        proxy_value = (
+            fleet.proxy_values[index % len(fleet.proxy_values)]
+            if fleet.proxy_values
+            else ""
+        )
         if fleet.kind == "hosted":
             env.setdefault("RESEARCH_LAB_HOSTED_WORKER_ENABLED", "true")
-            if index < len(fleet.proxy_values):
-                env["RESEARCH_LAB_HOSTED_WORKER_PROXY"] = fleet.proxy_values[index]
+            if proxy_value:
+                env["RESEARCH_LAB_HOSTED_WORKER_PROXY"] = proxy_value
         else:
             env.setdefault("RESEARCH_LAB_SCORING_WORKER_ENABLED", "true")
-            if index < len(fleet.proxy_values):
-                env["RESEARCH_LAB_SCORING_WORKER_PROXY"] = fleet.proxy_values[index]
+            if proxy_value:
+                env["RESEARCH_LAB_SCORING_WORKER_PROXY"] = proxy_value
         command = [
             sys.executable,
             str(self._worker_script),

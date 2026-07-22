@@ -388,8 +388,18 @@ def _worker_total_from_proxy_count(
     *,
     prefixes: tuple[str, ...],
     legacy_total_env: str,
+    process_count_env: str = "",
     default: int = 1,
 ) -> int:
+    # The explicit *_PROCESS_COUNT is authoritative so this matches the
+    # supervisor's decoupled worker count (worker_autostart._resolve_worker_count);
+    # otherwise fall back to one-per-proxy, then the legacy total env. Keeping
+    # this equal to the spawned process count keeps the hash-shard partitioning
+    # (which divides work by total_workers) consistent.
+    if process_count_env:
+        explicit = _int(process_count_env, 0)
+        if explicit > 0:
+            return max(1, explicit)
     proxy_count = _count_configured_proxy_values(prefixes)
     if proxy_count > 0:
         return proxy_count
@@ -743,6 +753,7 @@ class ResearchLabGatewayConfig:
                 "RESEARCH_LAB_WORKER_HTTPS_PROXY",
             ),
             legacy_total_env="RESEARCH_LAB_HOSTED_WORKER_TOTAL_WORKERS",
+            process_count_env="RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT",
         )
         worker_index = _int("RESEARCH_LAB_HOSTED_WORKER_INDEX", 0)
         if worker_index < 0:
@@ -756,6 +767,7 @@ class ResearchLabGatewayConfig:
                 "RESEARCH_LAB_SCORING_WORKER_PROXY",
             ),
             legacy_total_env="RESEARCH_LAB_SCORING_WORKER_TOTAL_WORKERS",
+            process_count_env="RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT",
         )
         scoring_worker_index = _int("RESEARCH_LAB_SCORING_WORKER_INDEX", 0)
         if scoring_worker_index < 0:

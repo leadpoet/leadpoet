@@ -4501,9 +4501,18 @@ async def project_completed_runs(
     store = store or GatewayProjectorStore()
     results: list[ProjectionResult] = []
     try:
+        # Only run_id is consumed below (ordering is applied server-side, so the
+        # sort column need not be returned); fetch just that instead of four
+        # columns per terminal run. A full DB-side delta that returns only the
+        # next unprojected runs is a scoped follow-up: research_trajectories is
+        # keyed solely on the double-hashed uuid5 trajectory_id with no run_id
+        # column, so a server-side anti-join would require reproducing
+        # uuid5(canonical_hash(...)) in SQL (parity risk) or adding a run_id
+        # linkage column + backfill. The client-computed anti-join (RPC 116)
+        # already removed the per-run existence N+1.
         queue_rows = await store.select_all(
             RUN_QUEUE_TABLE,
-            columns="run_id,ticket_id,current_queue_status,current_status_at",
+            columns="run_id",
             filters=(("current_queue_status", "in", list(_QUEUE_TERMINAL_STATUSES)),),
             order_by=(("current_status_at", False),),
             max_rows=max_candidates,

@@ -1394,7 +1394,7 @@ class ValidatorChainSourceV2:
                         expected_commitment
                     ) != {
                         "netuid",
-                        "mechid",
+                        "subnet_epoch_index",
                         "hotkey_public_key",
                         "commitment_hex",
                         "reveal_round",
@@ -1407,7 +1407,11 @@ class ValidatorChainSourceV2:
                         params=[
                             timelocked_weight_commits_storage_key(
                                 netuid=int(expected_commitment["netuid"]),
-                                mechid=int(expected_commitment["mechid"]),
+                                subnet_epoch_index=int(
+                                    expected_commitment[
+                                        "subnet_epoch_index"
+                                    ]
+                                ),
                             ),
                             "0x" + block_hash,
                         ],

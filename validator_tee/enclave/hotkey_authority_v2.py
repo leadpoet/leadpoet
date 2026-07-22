@@ -923,6 +923,9 @@ class ValidatorHotkeyAuthorityV2:
             hotkey_public_key_hex=self.hotkey_public_key.hex(),
             epoch_id=int(result["epoch_id"]),
             netuid=int(result["netuid"]),
+            subnet_epoch_index=int(
+                commit["epoch_schedule"]["subnet_epoch_index"]
+            ),
             weight_receipt_hash=weight["root_receipt_hash"],
             weight_submission_event_hash=commit["weight_submission_event_hash"],
             weights_hash=str(result["weights_hash"]),
@@ -1035,7 +1038,9 @@ class ValidatorHotkeyAuthorityV2:
         expected_commitments = {
             str(item["output"]["extrinsic_hash"]): {
                 "netuid": int(item["authorization"]["netuid"]),
-                "mechid": int(self.chain_profile["mechid"]),
+                "subnet_epoch_index": int(
+                    item["authorization"]["subnet_epoch_index"]
+                ),
                 "hotkey_public_key": self.hotkey_public_key.hex(),
                 "commitment_hex": str(item["authorization"]["commitment_hex"]),
                 "reveal_round": int(item["authorization"]["reveal_round"]),

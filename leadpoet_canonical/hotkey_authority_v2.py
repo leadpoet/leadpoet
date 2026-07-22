@@ -26,7 +26,7 @@ from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_
 
 CHAIN_SIGNING_PROFILE_SCHEMA_VERSION = "leadpoet.chain_signing_profile.v2"
 WEIGHT_EXTRINSIC_AUTHORIZATION_SCHEMA_VERSION = (
-    "leadpoet.weight_extrinsic_authorization.v2"
+    "leadpoet.weight_extrinsic_authorization.v3"
 )
 SERVE_AXON_EXTRINSIC_AUTHORIZATION_SCHEMA_VERSION = (
     "leadpoet.serve_axon_extrinsic_authorization.v2"
@@ -394,6 +394,7 @@ def build_weight_extrinsic_authorization_v2(
     hotkey_public_key_hex: str,
     epoch_id: int,
     netuid: int,
+    subnet_epoch_index: int,
     weight_receipt_hash: str,
     weight_submission_event_hash: str,
     weights_hash: str,
@@ -439,6 +440,11 @@ def build_weight_extrinsic_authorization_v2(
         "hotkey_public_key": hotkey_public_key.hex(),
         "epoch_id": _integer(epoch_id, "epoch_id", maximum=(1 << 64) - 1),
         "netuid": _integer(netuid, "netuid", maximum=(1 << 16) - 1),
+        "subnet_epoch_index": _integer(
+            subnet_epoch_index,
+            "subnet_epoch_index",
+            maximum=(1 << 64) - 1,
+        ),
         "weight_receipt_hash": _hash(
             weight_receipt_hash, "weight_receipt_hash"
         ),
@@ -479,6 +485,7 @@ def validate_weight_extrinsic_authorization_v2(
         "hotkey_public_key",
         "epoch_id",
         "netuid",
+        "subnet_epoch_index",
         "weight_receipt_hash",
         "weight_submission_event_hash",
         "weights_hash",
@@ -506,6 +513,7 @@ def validate_weight_extrinsic_authorization_v2(
         hotkey_public_key_hex=value["hotkey_public_key"],
         epoch_id=value["epoch_id"],
         netuid=value["netuid"],
+        subnet_epoch_index=value["subnet_epoch_index"],
         weight_receipt_hash=value["weight_receipt_hash"],
         weight_submission_event_hash=value["weight_submission_event_hash"],
         weights_hash=value["weights_hash"],

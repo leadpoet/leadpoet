@@ -14,6 +14,7 @@ from leadpoet_canonical.chain_source_v2 import (
     decode_timestamp_now_storage,
     timestamp_now_storage_key,
     subnet_epoch_storage_key,
+    timelocked_weight_commits_storage_key,
 )
 from leadpoet_canonical.hotkey_authority_v2 import signed_extrinsic_hash_v2
 from validator_tee.enclave.chain_source_v2 import (
@@ -1095,6 +1096,10 @@ def test_finalized_extrinsic_requires_exact_bytes_and_committed_chain_state():
                 "justifications": None,
             }
         elif method == "state_getStorage":
+            assert kwargs["params"][0] == timelocked_weight_commits_storage_key(
+                netuid=71,
+                subnet_epoch_index=STATEFUL_SUBNET_EPOCH_INDEX,
+            )
             result = "0x" + storage.hex()
         else:
             raise AssertionError(method)
@@ -1117,7 +1122,7 @@ def test_finalized_extrinsic_requires_exact_bytes_and_committed_chain_state():
         expected_commitments={
             extrinsic_hash: {
                 "netuid": 71,
-                "mechid": 0,
+                "subnet_epoch_index": STATEFUL_SUBNET_EPOCH_INDEX,
                 "hotkey_public_key": OWNER.hex(),
                 "commitment_hex": commitment.hex(),
                 "reveal_round": reveal_round,
@@ -1177,7 +1182,7 @@ def test_finalized_extrinsic_rejects_inclusion_without_expected_state_change():
             expected_commitments={
                 extrinsic_hash: {
                     "netuid": 71,
-                    "mechid": 0,
+                    "subnet_epoch_index": STATEFUL_SUBNET_EPOCH_INDEX,
                     "hotkey_public_key": OWNER.hex(),
                     "commitment_hex": "aa",
                     "reveal_round": 1,

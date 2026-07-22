@@ -1064,6 +1064,7 @@ def test_auditor_v2_requires_publication_and_finalized_state_transition():
         hotkey_public_key_hex="aa" * 32,
         epoch_id=bundle_verified["epoch_id"],
         netuid=bundle_verified["netuid"],
+        subnet_epoch_index=35,
         weight_receipt_hash=bundle_verified["weight_receipt_hash"],
         weight_submission_event_hash=submission_event_hash,
         weights_hash=bundle_verified["weights_hash"],

@@ -232,7 +232,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_attested_execution_receipts_v2 (
             'validator.weights.finalized.v2'
         ))
     ),
-    UNIQUE (role, purpose, job_id, input_root, config_hash)
+    CONSTRAINT research_lab_attested_receipts_v2_epoch_idempotency_key
+        UNIQUE (role, purpose, job_id, epoch_id, input_root, config_hash)
 );
 ALTER TABLE public.research_lab_attested_execution_receipts_v2
     ENABLE ROW LEVEL SECURITY;

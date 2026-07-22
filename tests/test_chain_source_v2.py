@@ -121,11 +121,13 @@ def test_chain_policy_hash_is_stable_and_typed():
 
 
 def test_timelocked_commit_storage_key_matches_live_finney_metadata():
-    assert timelocked_weight_commits_storage_key(netuid=71, mechid=0) == (
+    assert timelocked_weight_commits_storage_key(
+        netuid=71, subnet_epoch_index=24035
+    ) == (
         "0x658faa385070e074c85bf6b568cf0555"
         "119e1c428ff5c7c6dac4c888a10d1443"
         "8510facd6ced86974700"
-        "bb1bdbcacd6ac9340000000000000000"
+        "31d39a791359255ce35d000000000000"
     )
 
 

@@ -265,17 +265,22 @@ def decode_timestamp_now_storage(value: Any) -> int:
     return int.from_bytes(raw, "little")
 
 
-def timelocked_weight_commits_storage_key(*, netuid: int, mechid: int = 0) -> str:
+def timelocked_weight_commits_storage_key(
+    *, netuid: int, subnet_epoch_index: int
+) -> str:
     normalized_netuid = int(netuid)
-    normalized_mechid = int(mechid)
-    if not 0 <= normalized_netuid <= 0xFFFF or not 0 <= normalized_mechid < 1 << 64:
+    normalized_subnet_epoch_index = int(subnet_epoch_index)
+    if (
+        not 0 <= normalized_netuid <= 0xFFFF
+        or not 0 <= normalized_subnet_epoch_index < 1 << 64
+    ):
         raise ChainSourceV2Error("timelocked weight storage key input is invalid")
     key = b"".join(
         (
             _twox128(b"SubtensorModule"),
             _twox128(b"TimelockedWeightCommits"),
             _twox64_concat(normalized_netuid.to_bytes(2, "little")),
-            _twox64_concat(normalized_mechid.to_bytes(8, "little")),
+            _twox64_concat(normalized_subnet_epoch_index.to_bytes(8, "little")),
         )
     )
     return "0x" + key.hex()

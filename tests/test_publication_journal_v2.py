@@ -50,6 +50,7 @@ def _signature_result(bundle):
         hotkey_public_key_hex="11" * 32,
         epoch_id=verified["epoch_id"],
         netuid=verified["netuid"],
+        subnet_epoch_index=23807,
         weight_receipt_hash=verified["weight_receipt_hash"],
         weight_submission_event_hash=EVENT,
         weights_hash=verified["weights_hash"],

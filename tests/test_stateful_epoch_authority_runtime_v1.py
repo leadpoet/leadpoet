@@ -451,6 +451,7 @@ def _finalization_graph(*, epoch_id=100, finalized_block=999):
         hotkey_public_key_hex="8" * 64,
         epoch_id=epoch_id,
         netuid=71,
+        subnet_epoch_index=epoch_id,
         weight_receipt_hash=computed["receipt_hash"],
         weight_submission_event_hash=submission_event_hash,
         weights_hash="9" * 64,

@@ -171,6 +171,7 @@ def _authorization():
         hotkey_public_key_hex="2" * 64,
         epoch_id=23860,
         netuid=71,
+        subnet_epoch_index=23807,
         weight_receipt_hash="sha256:" + "3" * 64,
         weight_submission_event_hash="sha256:" + "4" * 64,
         weights_hash="5" * 64,
@@ -186,7 +187,7 @@ def _authorization():
 
 def test_weight_extrinsic_authorization_binds_exact_call_and_payload():
     value = _authorization()
-    assert value["schema_version"] == "leadpoet.weight_extrinsic_authorization.v2"
+    assert value["schema_version"] == "leadpoet.weight_extrinsic_authorization.v3"
     assert validate_weight_extrinsic_authorization_v2(
         value, profile=_profile()
     ) == value
@@ -198,6 +199,7 @@ def test_weight_extrinsic_authorization_binds_exact_call_and_payload():
     "field,replacement,error",
     [
         ("netuid", 72, "not canonical"),
+        ("subnet_epoch_index", 23808, "not canonical"),
         ("reveal_round", 987655, "not canonical"),
         ("nonce", 13, "not canonical"),
         ("signed_message_hex", "00" * 32, "not canonical"),

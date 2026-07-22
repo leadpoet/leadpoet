@@ -5,6 +5,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SQL = (ROOT / "scripts" / "86-research-lab-attested-v2-authority.sql").read_text(
     encoding="utf-8"
 )
+IDEMPOTENCY_SQL = (
+    ROOT / "scripts" / "114-scope-attested-v2-receipt-idempotency-by-epoch.sql"
+).read_text(encoding="utf-8")
 
 
 def test_v2_schema_is_separate_from_applied_v1_history():
@@ -76,3 +79,25 @@ def test_v2_schema_accepts_signed_storage_receipts_and_requires_compliance_lock(
     assert "'leadpoet.artifact_persistence.v2'" in SQL
     assert "object_lock_mode = 'COMPLIANCE'" in SQL
     assert "'GOVERNANCE'" not in SQL
+
+
+def test_v2_receipt_idempotency_is_scoped_to_one_epoch():
+    epoch_key = "role, purpose, job_id, epoch_id, input_root, config_hash"
+    global_key = "role, purpose, job_id, input_root, config_hash"
+
+    assert f"UNIQUE ({epoch_key})" in SQL
+    assert "CONSTRAINT research_lab_attested_receipts_v2_epoch_idempotency_key" in SQL
+    assert f"UNIQUE ({global_key})" not in SQL
+    assert "ADD CONSTRAINT research_lab_attested_receipts_v2_epoch_idempotency_key" in (
+        IDEMPOTENCY_SQL
+    )
+    assert "DROP CONSTRAINT %I" in IDEMPOTENCY_SQL
+    assert IDEMPOTENCY_SQL.index("ADD CONSTRAINT") < IDEMPOTENCY_SQL.index(
+        "DROP CONSTRAINT %I"
+    )
+    assert "UPDATE public.research_lab_attested_execution_receipts_v2" not in (
+        IDEMPOTENCY_SQL
+    )
+    assert "DELETE FROM public.research_lab_attested_execution_receipts_v2" not in (
+        IDEMPOTENCY_SQL
+    )

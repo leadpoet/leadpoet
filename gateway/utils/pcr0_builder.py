@@ -1096,36 +1096,73 @@ def compute_files_content_hash(repo_dir: str) -> Optional[str]:
     Only rebuilds when the content of monitored files changes.
     """
     hasher = hashlib.sha256()
-    
+
+    # Derive the cache key from every source path that can affect the exact
+    # validator EIF build. A hand-maintained suffix-filtered subset allowed
+    # different enclave inputs to collide on one cached PCR0.
+    entries = sorted(
+        set(MONITORED_FILES)
+        | {path.rstrip("/") for path in MONITORED_DIRS}
+        | {path.rstrip("/") for path in PCR0_COPY_PATHS}
+    )
+    file_inputs: Set[str] = set()
+    dir_inputs: Set[str] = set()
+    for entry in entries:
+        full_path = os.path.join(repo_dir, entry)
+        if os.path.isdir(full_path):
+            dir_inputs.add(entry)
+        elif os.path.isfile(full_path):
+            file_inputs.add(entry)
+        else:
+            logger.error("[PCR0] Required build input is missing: %s", entry)
+            return None
+
     files_found = 0
-    for filepath in sorted(MONITORED_FILES):
+    for filepath in sorted(file_inputs):
         full_path = os.path.join(repo_dir, filepath)
-        if os.path.exists(full_path):
-            try:
-                with open(full_path, 'rb') as f:
-                    hasher.update(f.read())
-                hasher.update(filepath.encode())  # Include path in hash
-                files_found += 1
-            except Exception as e:
-                logger.warning(f"[PCR0] Could not read {filepath}: {e}")
-    
-    # Also hash files in monitored directories
-    for dirpath in sorted(MONITORED_DIRS):
+        try:
+            with open(full_path, "rb") as handle:
+                hasher.update(handle.read())
+            hasher.update(filepath.encode())
+            files_found += 1
+        except Exception as exc:
+            logger.error(
+                "[PCR0] Required build input is unreadable: %s: %s",
+                filepath,
+                exc,
+            )
+            return None
+
+    for dirpath in sorted(dir_inputs):
         full_dir = os.path.join(repo_dir, dirpath)
-        if os.path.isdir(full_dir):
-            for root, dirs, files in os.walk(full_dir):
-                for filename in sorted(files):
-                    if any(filename.endswith(suffix) for suffix in MONITORED_DIR_SUFFIXES):
-                        filepath = os.path.join(root, filename)
-                        rel_path = os.path.relpath(filepath, repo_dir)
-                        try:
-                            with open(filepath, 'rb') as f:
-                                hasher.update(f.read())
-                            hasher.update(rel_path.encode())
-                            files_found += 1
-                        except Exception as e:
-                            logger.warning(f"[PCR0] Could not read {rel_path}: {e}")
-    
+        walk_errors = []
+        for root, dirs, files in os.walk(full_dir, onerror=walk_errors.append):
+            dirs[:] = sorted(name for name in dirs if name != "__pycache__")
+            for filename in sorted(files):
+                if filename.endswith((".pyc", ".pyo")):
+                    continue
+                filepath = os.path.join(root, filename)
+                rel_path = os.path.relpath(filepath, repo_dir)
+                try:
+                    with open(filepath, "rb") as handle:
+                        hasher.update(handle.read())
+                    hasher.update(rel_path.encode())
+                    files_found += 1
+                except Exception as exc:
+                    logger.error(
+                        "[PCR0] Required build input is unreadable: %s: %s",
+                        rel_path,
+                        exc,
+                    )
+                    return None
+        if walk_errors:
+            logger.error(
+                "[PCR0] Required build directory is unreadable: %s: %s",
+                dirpath,
+                walk_errors[0],
+            )
+            return None
+
     if files_found == 0:
         logger.error("[PCR0] No monitored files found!")
         return None

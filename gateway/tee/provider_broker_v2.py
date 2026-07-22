@@ -439,6 +439,10 @@ class HTTPXProviderTransport:
                 headers=dict(headers),
                 content=body,
             ) as response:
+                # TLS is authenticated before response headers are available.
+                # Capture its evidence now because a peer may close the stream
+                # immediately after sending a complete bounded response body.
+                tls_peer_chain_hash, tls_protocol = _extract_tls_metadata(response)
                 chunks = []
                 byte_count = 0
                 for chunk in response.iter_bytes():
@@ -449,7 +453,6 @@ class HTTPXProviderTransport:
                         )
                     chunks.append(chunk)
                 response_body = b"".join(chunks)
-                tls_peer_chain_hash, tls_protocol = _extract_tls_metadata(response)
                 return {
                     "http_status": int(response.status_code),
                     "headers": _nonsecret_headers(response.headers),

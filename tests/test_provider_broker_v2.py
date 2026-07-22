@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import base64
+import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from gateway.tee.provider_broker_v2 import (
     BUILTIN_PROVIDER_ROUTES,
+    HTTPXProviderTransport,
     PROVIDER_BROKER_SCHEMA_VERSION,
     ProviderBrokerV2,
     ProviderBrokerV2Error,
@@ -49,6 +52,85 @@ def test_tls_metadata_supports_python39_positional_only_peer_certificate():
         sha256_bytes(b"peer-certificate"),
         "TLSv1.3",
     )
+
+
+def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch):
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class Stream:
+        def __init__(self):
+            self.ssl_object = TLS()
+
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return self.ssl_object
+
+    class Response:
+        def __init__(self):
+            self.status_code = 200
+            self.headers = {"content-type": "application/json"}
+            self.stream = Stream()
+            self.extensions = {"network_stream": self.stream}
+
+        def iter_bytes(self):
+            yield b'{"ok":true}'
+            # S3 can close immediately after delivering the complete body.
+            self.stream.ssl_object = None
+
+    response = Response()
+
+    class ResponseContext:
+        def __enter__(self):
+            return response
+
+        def __exit__(self, *_args):
+            return False
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            return ResponseContext()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        SimpleNamespace(Client=Client, Proxy=lambda *_args, **_kwargs: object()),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "certifi",
+        SimpleNamespace(where=lambda: "/tmp/test-ca.pem"),
+    )
+
+    result = HTTPXProviderTransport()(
+        method="GET",
+        url="https://example.com/artifact",
+        headers={},
+        body=b"",
+        timeout_ms=1000,
+    )
+
+    assert result == {
+        "http_status": 200,
+        "headers": {"content-type": "application/json"},
+        "body": b'{"ok":true}',
+        "tls_peer_chain_hash": sha256_bytes(b"peer-certificate"),
+        "tls_protocol": "TLSv1.3",
+    }
 
 
 def test_provider_registry_hash_binds_measured_https_routes():

@@ -1517,6 +1517,56 @@ def test_cutover_mixed_boot_verifier_prefers_explicit_validator_release():
     assert observed == [identity]
 
 
+def test_cutover_mixed_boot_verifier_selects_exact_shared_pcr0_commit(
+    monkeypatch,
+):
+    from gateway.utils import pcr0_builder
+
+    shared_pcr0 = "9" * 96
+    expected_commit = "f" * 40
+    monkeypatch.setattr(
+        pcr0_builder,
+        "_pcr0_cache",
+        {
+            "newer": {
+                "pcr0": shared_pcr0,
+                "commit_hash": "a" * 40,
+            },
+            "expected": {
+                "pcr0": shared_pcr0,
+                "commit_hash": expected_commit,
+            },
+        },
+    )
+    verifier = _mixed_boot_verifier_from_release(
+        {"roles": {}},
+        nitro_verifier=lambda identity, *, expected_pcr0: {
+            "verified": True,
+        },
+    )
+
+    result = verifier(
+        {
+            "role": WEIGHT_ROLE,
+            "physical_role": "validator_weights",
+            "commit_sha": expected_commit,
+            "pcr0": shared_pcr0,
+        }
+    )
+
+    assert result["verified"] is True
+
+    with pytest.raises(ValueError, match="commit differs"):
+        verifier(
+            {
+                "role": WEIGHT_ROLE,
+                "physical_role": "validator_weights",
+                "commit_sha": "0" * 40,
+                "pcr0": shared_pcr0,
+            }
+        )
+
+
 @pytest.mark.asyncio
 async def test_cutover_operator_dry_run_is_read_only_and_checks_high_water():
     payload, context, cutover, candidate, executor = (

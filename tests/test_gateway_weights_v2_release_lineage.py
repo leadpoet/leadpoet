@@ -138,14 +138,20 @@ def test_validator_boot_keeps_dynamic_build_verification(
 ):
     from gateway.utils import pcr0_builder
 
-    calls = []
+    pcr0_calls = []
+    nitro_calls = []
+
+    def verify_pcr0(pcr0, *, expected_commit):
+        pcr0_calls.append((pcr0, expected_commit))
+        return {"valid": True, "commit_hash": expected_commit}
+
     monkeypatch.setattr(
         pcr0_builder,
         "verify_pcr0",
-        lambda pcr0: {"valid": True, "commit_hash": "f" * 40},
+        verify_pcr0,
     )
     monkeypatch.setattr(
-        weights_module, "verify_boot_identity_nitro", _stub_nitro(calls)
+        weights_module, "verify_boot_identity_nitro", _stub_nitro(nitro_calls)
     )
 
     identity = {
@@ -156,4 +162,70 @@ def test_validator_boot_keeps_dynamic_build_verification(
     result = weights_module._verify_authoritative_v2_boot(dict(identity))
 
     assert result["verified"] is True
-    assert calls[0]["commit"] == "f" * 40
+    assert nitro_calls[0]["commit"] == "f" * 40
+    assert pcr0_calls == [("9" * 96, "f" * 40)]
+
+
+def test_validator_boot_selects_exact_commit_when_pcr0_is_shared(
+    weights_module, monkeypatch
+):
+    from gateway.utils import pcr0_builder
+
+    shared_pcr0 = "9" * 96
+    current_commit = "a" * 40
+    historical_commit = "f" * 40
+    monkeypatch.setattr(
+        pcr0_builder,
+        "_pcr0_cache",
+        {
+            "current": {
+                "pcr0": shared_pcr0,
+                "commit_hash": current_commit,
+            },
+            "historical": {
+                "pcr0": shared_pcr0,
+                "commit_hash": historical_commit,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        weights_module,
+        "verify_boot_identity_nitro",
+        _stub_nitro([]),
+    )
+
+    result = weights_module._verify_authoritative_v2_boot(
+        {
+            "physical_role": "validator_weights",
+            "commit_sha": historical_commit,
+            "pcr0": shared_pcr0,
+        }
+    )
+
+    assert result["verified"] is True
+
+
+def test_validator_boot_rejects_shared_pcr0_without_exact_commit(
+    weights_module, monkeypatch
+):
+    from gateway.utils import pcr0_builder
+
+    monkeypatch.setattr(
+        pcr0_builder,
+        "_pcr0_cache",
+        {
+            "other": {
+                "pcr0": "9" * 96,
+                "commit_hash": "a" * 40,
+            }
+        },
+    )
+
+    with pytest.raises(ValueError, match="commit differs"):
+        weights_module._verify_authoritative_v2_boot(
+            {
+                "physical_role": "validator_weights",
+                "commit_sha": "f" * 40,
+                "pcr0": "9" * 96,
+            }
+        )

@@ -478,13 +478,14 @@ def _verify_authoritative_v2_boot(identity: Dict[str, Any]) -> Dict[str, Any]:
     if physical_role == "validator_weights":
         from gateway.utils.pcr0_builder import verify_pcr0
 
-        rebuilt = verify_pcr0(str(identity.get("pcr0") or ""))
+        rebuilt = verify_pcr0(
+            str(identity.get("pcr0") or ""),
+            expected_commit=str(identity.get("commit_sha") or ""),
+        )
         if not rebuilt.get("valid"):
+            if rebuilt.get("pcr0_present"):
+                raise ValueError("validator PCR0 commit differs from boot identity")
             raise ValueError("validator PCR0 is absent from the dynamic Git build cache")
-        if str(rebuilt.get("commit_hash") or "").lower() != str(
-            identity.get("commit_sha") or ""
-        ).lower():
-            raise ValueError("validator PCR0 commit differs from boot identity")
     else:
         release = _gateway_v2_release_manifest()
         boot_commit = str(identity.get("commit_sha") or "").lower()

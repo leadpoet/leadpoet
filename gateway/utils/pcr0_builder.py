@@ -1572,7 +1572,7 @@ def start_pcr0_builder():
 # API for verification
 # =============================================================================
 
-def verify_pcr0(pcr0: str) -> Dict:
+def verify_pcr0(pcr0: str, *, expected_commit: str = "") -> Dict:
     """
     Verify a PCR0 value against our computed cache.
     
@@ -1591,20 +1591,46 @@ def verify_pcr0(pcr0: str) -> Dict:
             "cache_size": int,
         }
     """
-    for cache_key, entry in _pcr0_cache.items():
-        if entry["pcr0"] == pcr0:
-            return {
-                "valid": True,
-                "commit_hash": entry.get("commit_hash", "unknown"),
-                "content_hash": entry.get("content_hash", cache_key),
-                "base_image_stamp": entry.get("base_image_stamp"),
-                "built_at": entry.get("built_at"),
-                "message": f"PCR0 matches cache key {cache_key} (commit {entry.get('commit_hash', 'unknown')[:8]})",
-                "cache_size": len(_pcr0_cache),
-            }
+    normalized_commit = str(expected_commit or "").strip().lower()
+    pcr0_matches = [
+        (cache_key, entry)
+        for cache_key, entry in _pcr0_cache.items()
+        if entry["pcr0"] == pcr0
+    ]
+    for cache_key, entry in pcr0_matches:
+        if (
+            normalized_commit
+            and str(entry.get("commit_hash") or "").lower()
+            != normalized_commit
+        ):
+            continue
+        return {
+            "valid": True,
+            "commit_hash": entry.get("commit_hash", "unknown"),
+            "content_hash": entry.get("content_hash", cache_key),
+            "base_image_stamp": entry.get("base_image_stamp"),
+            "built_at": entry.get("built_at"),
+            "message": f"PCR0 matches cache key {cache_key} (commit {entry.get('commit_hash', 'unknown')[:8]})",
+            "cache_size": len(_pcr0_cache),
+        }
+
+    if pcr0_matches:
+        return {
+            "valid": False,
+            "pcr0_present": True,
+            "commit_hash": None,
+            "content_hash": None,
+            "matching_commit_hashes": [
+                str(entry.get("commit_hash") or "")
+                for _, entry in pcr0_matches
+            ],
+            "message": "PCR0 is cached, but not for the expected commit",
+            "cache_size": len(_pcr0_cache),
+        }
     
     return {
         "valid": False,
+        "pcr0_present": False,
         "commit_hash": None,
         "content_hash": None,
         "message": f"PCR0 not in cache. Valid PCR0s: {len(_pcr0_cache)}",

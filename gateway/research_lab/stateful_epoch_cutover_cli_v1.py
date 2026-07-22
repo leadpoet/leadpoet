@@ -293,6 +293,7 @@ def _mixed_boot_verifier_from_release(
 ) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
     """Verify coordinator release boots and independently rebuilt validator boots."""
 
+    use_default_validator_pcr0_verifier = validator_pcr0_verifier is None
     if validator_pcr0_verifier is None:
         from gateway.utils.pcr0_builder import verify_pcr0
 
@@ -306,8 +307,20 @@ def _mixed_boot_verifier_from_release(
                 raise ValueError("cutover validator boot role is invalid")
             if validator_boot_verifier is not None:
                 return validator_boot_verifier(identity)
-            rebuilt = validator_pcr0_verifier(str(identity.get("pcr0") or ""))
+            verifier_kwargs = (
+                {"expected_commit": str(identity.get("commit_sha") or "")}
+                if use_default_validator_pcr0_verifier
+                else {}
+            )
+            rebuilt = validator_pcr0_verifier(
+                str(identity.get("pcr0") or ""),
+                **verifier_kwargs,
+            )
             if not isinstance(rebuilt, Mapping) or not rebuilt.get("valid"):
+                if isinstance(rebuilt, Mapping) and rebuilt.get("pcr0_present"):
+                    raise ValueError(
+                        "validator PCR0 commit differs from boot identity"
+                    )
                 raise ValueError(
                     "validator PCR0 is absent from the dynamic Git build cache"
                 )

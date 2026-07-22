@@ -36,7 +36,7 @@ def _selective_fixture(block):
     encoded.extend(b"\x01" + ((int(block) << 2) | 2).to_bytes(4, "little"))
     encoded.extend(b"\x00" * 44)
     encoded.extend(b"\x01\x08" + OWNER + MINER)
-    encoded.extend(b"\x00" * 21)
+    encoded.extend(b"\x00" * 24)
     return "0x" + bytes(encoded).hex()
 
 

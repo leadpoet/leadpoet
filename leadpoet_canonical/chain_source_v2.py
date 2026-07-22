@@ -584,7 +584,7 @@ def decode_selective_metagraph_result(encoded: Any) -> Dict[str, Any]:
         for index in range(offset, end, 32)
     ]
     offset = end
-    offset = _require_unselected(data, offset, 53, 73)
+    offset = _require_unselected(data, offset, 53, 76)
     if offset != len(data):
         raise ChainSourceV2Error("selective metagraph result has trailing bytes")
     return {

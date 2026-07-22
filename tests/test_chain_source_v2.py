@@ -42,7 +42,7 @@ def _selective_fixture() -> bytes:
     encoded.extend(b"\x01" + ((8_597_161 << 2) | 2).to_bytes(4, "little"))
     encoded.extend(b"\x00" * 44)  # fields 8..51 omitted
     encoded.extend(b"\x01\x08" + OWNER_ACCOUNT + SECOND_ACCOUNT)
-    encoded.extend(b"\x00" * 21)  # fields 53..73 omitted
+    encoded.extend(b"\x00" * 24)  # fields 53..76 omitted
     return bytes(encoded)
 
 
@@ -67,6 +67,11 @@ def test_selective_metagraph_codec_rejects_unrequested_or_trailing_fields():
     fixture[3] = 1
     with pytest.raises(ChainSourceV2Error, match="unexpected selective"):
         decode_selective_metagraph_result(bytes(fixture))
+    for offset in (-3, -2, -1):
+        fixture = bytearray(_selective_fixture())
+        fixture[offset] = 1
+        with pytest.raises(ChainSourceV2Error, match="unexpected selective"):
+            decode_selective_metagraph_result(bytes(fixture))
     with pytest.raises(ChainSourceV2Error, match="trailing"):
         decode_selective_metagraph_result(_selective_fixture() + b"\x00")
 

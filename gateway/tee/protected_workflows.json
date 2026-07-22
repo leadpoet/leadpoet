@@ -542,12 +542,12 @@
       "symbol": "ProviderSemanticsAuthorityV2"
     },
     {
-      "ast_sha256": "sha256:593dc0abb3879bf347c5d1d93835d78056f377ea05364659c074b9f1ce02ad04",
+      "ast_sha256": "sha256:ddd86fd7a2444cac90547957c324929ddda42ad974d22a6801efc35f6cc466da",
       "path": "gateway/tee/release_lineage_v2.py",
       "symbol": "build_release_lineage_boot_verifier_v2"
     },
     {
-      "ast_sha256": "sha256:f75ecc226ff79eae4cd890ec1ad570ac97bded35a1a8c427d5157c3fd695b471",
+      "ast_sha256": "sha256:bddb7fd580c65dbe598383d498a879cbb12a841d8e0103ed4e16262f7f259f5a",
       "path": "gateway/tee/release_lineage_v2.py",
       "symbol": "load_approved_release_lineage_v2"
     },
@@ -1082,7 +1082,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:7b12a0e33012ff8d8f1ee1bc3a41813844248d949af90f2883e81863054f3884",
+  "manifest_hash": "sha256:2d23cb4fe6035cd2baab5c38a566fc03a544b9e7e02aae0dc34f8e66ebdf4904",
   "protected_source_commit": "691ae345faad920031f0e9ea2c6d37520259f412",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

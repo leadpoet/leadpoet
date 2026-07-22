@@ -62,7 +62,10 @@ def _legacy_current_host_formula(snapshot):
     champion_share = snapshot["champion_share"]
     leaderboard_share = snapshot["leaderboard_bonus_share"]
     fulfillment_pool = max(0.0, 1.0 - lab_share - champion_share - leaderboard_share)
-    max_sourcing = 1.0 - lab_share - champion_share - fulfillment_pool - leaderboard_share
+    max_sourcing = max(
+        0.0,
+        1.0 - lab_share - champion_share - fulfillment_pool - leaderboard_share,
+    )
 
     rolling_scores = {row["hotkey"]: float(row["score"]) for row in snapshot["rolling_scores"]}
     registered = {hotkey: score for hotkey, score in rolling_scores.items() if hotkey in hotkeys}

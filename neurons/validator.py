@@ -4591,12 +4591,13 @@ class Validator(BaseValidatorNeuron):
             #  no-sourcing-data gates above can honor it; do not re-read here.)
             # MAX_SOURCING_SHARE is normally 0% under the Research Lab split:
             # Research Lab + fulfillment + fulfillment leaderboard = 100%.
-            MAX_SOURCING_SHARE = (
+            MAX_SOURCING_SHARE = max(
+                0.0,
                 1.0
                 - RESEARCH_LAB_SHARE
                 - CHAMPION_SHARE
                 - FULFILLMENT_POOL_SHARE
-                - LEADERBOARD_BONUS_SHARE
+                - LEADERBOARD_BONUS_SHARE,
             )
             effective_fulfillment_pool = FULFILLMENT_POOL_SHARE
             effective_leaderboard_share = LEADERBOARD_BONUS_SHARE if ff_enabled else 0.0

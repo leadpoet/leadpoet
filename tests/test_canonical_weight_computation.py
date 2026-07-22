@@ -1,3 +1,4 @@
+import math
 import random
 
 import numpy as np
@@ -143,6 +144,31 @@ def test_sourcing_threshold_and_rep_distribution_are_derived_inside_core():
     assert result["uids"] == [0, 3]
     assert result["weights"] == [1.0, 0.0]
     assert result["sparse_uids"] == [0]
+
+
+def test_zero_sourcing_residual_is_canonical_positive_zero():
+    allocation = {
+        **_snapshot()["research_lab_allocation_doc"],
+        "lab_cap_percent": 30.0,
+        "unallocated_percent": 25.0,
+    }
+    result = compute_final_weights(
+        _snapshot(
+            research_lab_allocation_doc=allocation,
+            research_lab_fallback_share=0.3,
+            leaderboard_bonus_share=0.1,
+            leaderboard_rank_shares=[0.05, 0.03, 0.02],
+            fulfillment_share=0.6,
+            fulfillment_rows=[
+                {"hotkey": "fulfillment-hotkey", "share": 0.6}
+            ],
+        )
+    )
+
+    for field in ("max_sourcing_share", "effective_sourcing_share"):
+        value = result["components"][field]
+        assert value == 0.0
+        assert math.copysign(1.0, value) == 1.0
 
 
 def test_burn_owner_and_banned_score_checks_fail_closed():

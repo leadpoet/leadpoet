@@ -295,12 +295,13 @@ def compute_final_weights(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
     champion_uid = None if champion_uid_value is None else _int(champion_uid_value, "champion_uid")
     leaderboard_share = _non_negative_float(snapshot["leaderboard_bonus_share"], "leaderboard_bonus_share")
     fulfillment_pool_share = max(0.0, 1.0 - research_lab_share - champion_share - leaderboard_share)
-    max_sourcing_share = (
+    max_sourcing_share = max(
+        0.0,
         1.0
         - research_lab_share
         - champion_share
         - fulfillment_pool_share
-        - leaderboard_share
+        - leaderboard_share,
     )
 
     rolling_scores_value = snapshot["rolling_scores"]

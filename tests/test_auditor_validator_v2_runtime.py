@@ -430,3 +430,37 @@ def test_non_v2_protocol_is_rejected(monkeypatch, protocol):
     monkeypatch.setenv("AUDITOR_WEIGHT_PROTOCOL", protocol)
     with pytest.raises(RuntimeError, match="must be authoritative_v2"):
         auditor_module.AuditorValidator.auditor_weight_protocol()
+
+
+def test_authority_candidates_cover_delayed_finalization():
+    """During epoch N's window the newest complete authority is usually
+    N-1's (delayed finalization), so the auditor must consider both."""
+
+    auditor = SimpleNamespace(last_submitted_epoch=None)
+    candidates = auditor_module.AuditorValidator._authority_candidate_epochs(
+        auditor, 24083
+    )
+    assert candidates == [24083, 24082]
+
+
+def test_authority_candidates_never_resubmit_older_epochs():
+    auditor = SimpleNamespace(last_submitted_epoch=24082)
+    candidates = auditor_module.AuditorValidator._authority_candidate_epochs(
+        auditor, 24083
+    )
+    assert candidates == [24083]
+
+    caught_up = SimpleNamespace(last_submitted_epoch=24083)
+    assert (
+        auditor_module.AuditorValidator._authority_candidate_epochs(
+            caught_up, 24083
+        )
+        == []
+    )
+
+
+def test_authority_candidates_skip_nonpositive_epochs():
+    auditor = SimpleNamespace(last_submitted_epoch=None)
+    assert auditor_module.AuditorValidator._authority_candidate_epochs(
+        auditor, 1
+    ) == [1]

@@ -864,6 +864,27 @@ class AuditorValidator:
     # Gateway Communication
     # ═══════════════════════════════════════════════════════════════════════════
     
+    def _authority_candidate_epochs(self, current_epoch: int) -> List[int]:
+        """Epochs worth fetching during the submission window, newest first.
+
+        Delayed finalization publishes epoch N's complete authority shortly
+        after N's boundary, so during N's window the newest complete
+        authority is usually N-1's. Never re-fetch an epoch at or below the
+        last submitted one.
+        """
+
+        candidates = []
+        for candidate_epoch in (current_epoch, current_epoch - 1):
+            if candidate_epoch <= 0:
+                continue
+            if (
+                self.last_submitted_epoch is not None
+                and candidate_epoch <= self.last_submitted_epoch
+            ):
+                break
+            candidates.append(candidate_epoch)
+        return candidates
+
     async def fetch_attested_weights_v2(self, epoch_id: int) -> Optional[Dict]:
         """Fetch the sole authoritative V2 bundle."""
 
@@ -1626,16 +1647,34 @@ class AuditorValidator:
                         print(f"\n\n{'='*60}")
                         print(f"📊 WEIGHT SUBMISSION TIME (Block {block_within_epoch})")
                         print(f"{'='*60}")
-                        
-                        # Fetch weights for CURRENT epoch (not previous)
-                        # At block 345 of epoch N, primary validator submits epoch N weights
-                        # Auditor should copy epoch N, not N-1
+
+                        # The authoritative pipeline finalizes epoch N's
+                        # authority only after N's boundary (delayed
+                        # finalization), so during N's window the newest
+                        # complete authority is usually N-1's. Try the
+                        # current epoch first, then mirror the previous
+                        # epoch's finalized authority; every candidate goes
+                        # through the same fail-closed verification.
+                        weights_data = None
+                        authority_status = "v2_absent"
                         target_epoch = current_epoch
-                        print(f"   Fetching weights for epoch {target_epoch}...")
-                        
-                        weights_data, authority_status = (
-                            await self.fetch_verified_weight_authority(target_epoch)
-                        )
+                        for candidate_epoch in self._authority_candidate_epochs(
+                            current_epoch
+                        ):
+                            print(f"   Fetching weights for epoch {candidate_epoch}...")
+                            candidate_data, candidate_status = (
+                                await self.fetch_verified_weight_authority(
+                                    candidate_epoch
+                                )
+                            )
+                            if candidate_data is not None:
+                                weights_data = candidate_data
+                                authority_status = candidate_status
+                                target_epoch = candidate_epoch
+                                break
+                            if candidate_status != "v2_absent":
+                                authority_status = candidate_status
+                                break
                         if weights_data is None:
                             # Verification is fail-closed: no fallback vector will be submitted.
                             if authority_status == "v2_absent":

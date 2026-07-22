@@ -302,8 +302,9 @@ def test_extra_parent_receipt_is_rejected_even_with_no_rewards():
 def test_finalized_champion_history_requires_declared_chain_roots(monkeypatch):
     finalization_root = "sha256:" + "1" * 64
     allocation_receipt = "sha256:" + "2" * 64
+    allocation_input_receipt = "sha256:" + "3" * 64
     allocation = {
-        "allocation_hash": "sha256:" + "3" * 64,
+        "allocation_hash": "sha256:" + "4" * 64,
         "champion_allocations": [],
         "queued_champion_allocations": [],
     }
@@ -329,7 +330,8 @@ def test_finalized_champion_history_requires_declared_chain_roots(monkeypatch):
                     "netuid": 71,
                     "allocation_hash": allocation["allocation_hash"],
                 "allocation_doc": allocation,
-                "allocation_receipt_hash": allocation_receipt,
+                "allocation_receipt_hash": allocation_input_receipt,
+                "allocation_authority_receipt_hash": allocation_receipt,
             }
         ],
     )
@@ -373,6 +375,28 @@ def test_finalized_champion_history_requires_declared_chain_roots(monkeypatch):
         ),
     ]
 
+    monkeypatch.setattr(
+        resolver,
+        "_require_allocation_receipt",
+        lambda **_kwargs: allocation_input_receipt,
+    )
+    with pytest.raises(
+        CoordinatorAllocationSourceV2Error,
+        match="used another allocation receipt",
+    ):
+        resolver._finalized_champion_history(
+            epoch=100,
+            netuid=71,
+            champion_rows=[{"start_epoch": 99}],
+            context=context,
+            required_parents=set(),
+        )
+
+    monkeypatch.setattr(
+        resolver,
+        "_require_allocation_receipt",
+        lambda **_kwargs: allocation_receipt,
+    )
     context.external_receipt_graphs = []
     with pytest.raises(
         CoordinatorAllocationSourceV2Error,

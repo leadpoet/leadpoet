@@ -466,7 +466,9 @@ class CoordinatorAllocationSourceV2:
                     context=context,
                     required_parents=required_parents,
                 )
-                if receipt_hash != str(row.get("allocation_receipt_hash") or ""):
+                if receipt_hash != str(
+                    row.get("allocation_authority_receipt_hash") or ""
+                ):
                     raise CoordinatorAllocationSourceV2Error(
                         "finalized weight bundle used another allocation receipt"
                     )

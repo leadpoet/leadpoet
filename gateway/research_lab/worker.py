@@ -69,6 +69,7 @@ from gateway.research_lab.autoresearch_runtime import (
 )
 from gateway.research_lab.maintenance import (
     MAINTENANCE_LEASE_HOSTED,
+    make_lease_holder_ref,
     autoresearch_queue_capacity_doc,
     expire_unpaid_tickets,
     get_autoresearch_maintenance_state,
@@ -1444,6 +1445,9 @@ class ResearchLabHostedWorker:
         self._last_allocator_priors_refresh_at = 0.0
         # True only for the worker holding the maintenance lease this pass.
         self._holds_maintenance_lease = False
+        # Globally-unique lease token for THIS process (worker_ref is a stable
+        # name shared across replicas/restarts and must not be the holder id).
+        self._lease_holder_ref = make_lease_holder_ref(self.worker_ref)
 
     async def run_forever(self) -> None:
         # trajectoryimprovements.md P5: one structured capture health block at
@@ -1502,9 +1506,11 @@ class ResearchLabHostedWorker:
                 processed += 1
             if self.config.hosted_worker_max_runs and processed >= self.config.hosted_worker_max_runs:
                 return
-            # Idle exponential backoff: reset the instant work appears, grow
-            # base -> 2x -> ... up to the cap while the queue is empty.
-            if outcome.processed or outcome.status != "idle":
+            # Exponential backoff on ALL no-work passes, reset the instant real
+            # work happens. Every non-processed status (idle, maintenance-paused,
+            # provider-preflight-unhealthy, baseline/quiet holds, disabled) is a
+            # no-work pass and must back off; only actual work resets to base.
+            if outcome.processed:
                 idle_interval = float(base_poll)
             else:
                 idle_interval = _idle_backoff_next(
@@ -1521,7 +1527,7 @@ class ResearchLabHostedWorker:
             not self.config.hosted_worker_dry_run
             and await try_acquire_maintenance_lease(
                 lease_name=MAINTENANCE_LEASE_HOSTED,
-                holder_ref=self.worker_ref,
+                holder_ref=self._lease_holder_ref,
                 ttl_seconds=_maintenance_lease_ttl_seconds(),
             )
         )

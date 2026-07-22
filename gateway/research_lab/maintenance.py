@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
@@ -58,6 +59,25 @@ UNPAID_TICKET_EXPIRY_CANDIDATE_VIEW = "research_lab_unpaid_ticket_expiry_candida
 # sweeps for that scope; other workers skip them this pass.
 MAINTENANCE_LEASE_HOSTED = "hosted_worker_maintenance"
 MAINTENANCE_LEASE_SCORING = "scoring_worker_recovery"
+
+
+def make_lease_holder_ref(worker_ref: str) -> str:
+    """Globally-unique lease-holder token for one worker process/boot.
+
+    ``worker_ref`` (e.g. ``research-lab-worker-1``) is a *stable* name reused by
+    every replica and every restart, so it must never be the lease holder id:
+    two overlapping gateway processes would present the same holder_ref and the
+    acquire RPC would treat the second as the incumbent renewing (both would
+    hold the lease and both would run the global sweeps). This appends host,
+    PID, and a per-boot UUID so each live process owns a distinct token, while
+    the human-readable ``worker_ref`` stays available for logs and event
+    attribution. Kept stable for the process lifetime so lease renewal matches.
+    """
+    try:
+        node = os.uname().nodename
+    except Exception:
+        node = "unknown-host"
+    return f"{worker_ref}#{node}#{os.getpid()}#{uuid.uuid4().hex}"
 
 
 async def try_acquire_maintenance_lease(

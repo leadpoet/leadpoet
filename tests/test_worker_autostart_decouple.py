@@ -9,7 +9,11 @@ guards against a misconfiguration spawning an unbounded fleet.
 from __future__ import annotations
 
 import gateway.research_lab.worker_autostart as wa
-from gateway.research_lab.config import _worker_total_from_proxy_count
+from gateway.research_lab.config import (
+    MAX_WORKER_PROCESSES,
+    _worker_total_from_proxy_count,
+    resolve_worker_process_count,
+)
 
 
 def _hosted_env(**extra: str) -> dict[str, str]:
@@ -30,7 +34,26 @@ def test_resolve_worker_count_process_count_is_authoritative() -> None:
     # No proxies and no explicit count -> zero.
     assert wa._resolve_worker_count(0, 0) == 0
     # Clamped to the hard max.
-    assert wa._resolve_worker_count(10_000, 3) == wa._MAX_WORKER_PROCESSES
+    assert wa._resolve_worker_count(10_000, 3) == MAX_WORKER_PROCESSES
+
+
+def test_supervisor_and_config_share_one_clamped_resolver() -> None:
+    # Finding #3: an oversized *_PROCESS_COUNT must not make the spawned process
+    # count (supervisor) disagree with the in-process partition total (config).
+    # Both clamp to MAX_WORKER_PROCESSES via the shared resolver.
+    spawned = wa._resolve_worker_count(10_000, 4)
+    partition_total = _worker_total_from_proxy_count(
+        prefixes=("RESEARCH_LAB_NONEXISTENT_PROXY",),
+        legacy_total_env="RESEARCH_LAB_NONEXISTENT_TOTAL",
+        process_count_env="RESEARCH_LAB_TEST_PROCESS_COUNT",
+    )  # no such env set -> falls back, but the clamp path is shared
+    assert spawned == MAX_WORKER_PROCESSES
+    # Direct resolver parity: same explicit count -> same clamped result.
+    assert resolve_worker_process_count(10_000, 4, minimum=0) == MAX_WORKER_PROCESSES
+    assert resolve_worker_process_count(10_000, 4, minimum=1) == MAX_WORKER_PROCESSES
+    # config's minimum is 1 (a fleet total is never 0); supervisor's is 0.
+    assert resolve_worker_process_count(0, 0, minimum=1) == 1
+    assert resolve_worker_process_count(0, 0, minimum=0) == 0
 
 
 def test_twenty_proxies_do_not_produce_twenty_processes() -> None:

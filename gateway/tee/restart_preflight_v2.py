@@ -314,6 +314,25 @@ def verify_gateway_restart_preflight_v2(
         }
     )
     if mode == "full":
+        # Worker/proxy decoupling must be explicit in production: require both
+        # *_PROCESS_COUNT variables to be set to a positive integer. Without this
+        # gate a restart silently falls back to one-worker-per-proxy, preserving
+        # the oversized fleet the decoupling is meant to shrink. Failing the
+        # preflight forces the operator to size the fleet on purpose.
+        for count_env in (
+            "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT",
+            "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT",
+        ):
+            raw = str(parent_environment.get(count_env, "")).strip()
+            try:
+                parsed = int(raw)
+            except ValueError:
+                parsed = 0
+            if parsed < 1:
+                raise GatewayRestartPreflightV2Error(
+                    "full V2 deployment requires %s to be set to a positive "
+                    "worker process count (got %r)" % (count_env, raw)
+                )
         worker_plan = build_research_lab_worker_autostart_plan(parent_environment)
         if not worker_plan.hosted.enabled or not worker_plan.scoring.enabled:
             raise GatewayRestartPreflightV2Error(

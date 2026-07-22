@@ -384,6 +384,28 @@ def _count_configured_proxy_values(prefixes: tuple[str, ...]) -> int:
     return count
 
 
+# Hard maximum on worker processes per fleet. Bounds both the supervisor's
+# spawned process count and the in-process partition total so a misconfigured
+# *_PROCESS_COUNT can never make the two diverge (which would strand work shards
+# whose index exceeds the number of processes actually spawned).
+MAX_WORKER_PROCESSES = 500
+
+
+def resolve_worker_process_count(
+    explicit_count: int, fallback_count: int, *, minimum: int = 0
+) -> int:
+    """Single source of truth for fleet size, shared by the supervisor
+    (spawned process count) and the config (in-process partition total).
+
+    ``explicit_count`` (``*_PROCESS_COUNT``) is authoritative when > 0; otherwise
+    fall back to ``fallback_count`` (one-per-proxy / legacy). Always clamped to
+    ``[minimum, MAX_WORKER_PROCESSES]`` so the spawned process count and the
+    partition total agree exactly.
+    """
+    chosen = explicit_count if explicit_count > 0 else fallback_count
+    return max(minimum, min(int(chosen), MAX_WORKER_PROCESSES))
+
+
 def _worker_total_from_proxy_count(
     *,
     prefixes: tuple[str, ...],
@@ -391,19 +413,14 @@ def _worker_total_from_proxy_count(
     process_count_env: str = "",
     default: int = 1,
 ) -> int:
-    # The explicit *_PROCESS_COUNT is authoritative so this matches the
-    # supervisor's decoupled worker count (worker_autostart._resolve_worker_count);
-    # otherwise fall back to one-per-proxy, then the legacy total env. Keeping
-    # this equal to the spawned process count keeps the hash-shard partitioning
-    # (which divides work by total_workers) consistent.
-    if process_count_env:
-        explicit = _int(process_count_env, 0)
-        if explicit > 0:
-            return max(1, explicit)
+    # Routes through resolve_worker_process_count so the in-process partition
+    # total matches the supervisor's spawned count exactly, including the
+    # MAX_WORKER_PROCESSES clamp. Explicit *_PROCESS_COUNT wins; otherwise fall
+    # back to one-per-proxy, then the legacy total env.
+    explicit = _int(process_count_env, 0) if process_count_env else 0
     proxy_count = _count_configured_proxy_values(prefixes)
-    if proxy_count > 0:
-        return proxy_count
-    return max(1, _int(legacy_total_env, default))
+    fallback = proxy_count if proxy_count > 0 else max(1, _int(legacy_total_env, default))
+    return resolve_worker_process_count(explicit, fallback, minimum=1)
 
 
 def _optional_int(name: str) -> Optional[int]:

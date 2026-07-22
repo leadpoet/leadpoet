@@ -50,3 +50,39 @@ def test_reset_returns_to_base(mod) -> None:
     # Work appears -> caller resets to base (the loop assigns base_poll directly);
     # a subsequent idle step grows from the base again, not from the cap.
     assert mod._idle_backoff_next(base, base, cap) == 30.0
+
+
+def _next_interval(processed: bool, status: str, current: float, base: float, cap: float) -> float:
+    # Mirrors the run_forever backoff decision: reset ONLY when real work
+    # happened; every non-processed status backs off. This encodes the fix for
+    # the finding that non-idle no-work statuses reset to the base interval.
+    if processed:
+        return base
+    return hosted._idle_backoff_next(current, base, cap)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "idle",
+        "maintenance_paused",
+        "provider_preflight_unhealthy",
+        "candidate_scoring_daily_baseline_hold",
+        "candidate_claim_capacity_limited",
+        "writes_or_eval_disabled",
+    ],
+)
+def test_all_no_work_statuses_back_off(status) -> None:
+    base, cap = 15.0, 60.0
+    # A no-work pass (processed=False) with ANY status must grow the interval,
+    # not reset it -- previously only the exact "idle" status backed off.
+    assert _next_interval(False, status, base, base, cap) == 30.0
+    assert _next_interval(False, status, 30.0, base, cap) == 60.0
+    assert _next_interval(False, status, 60.0, base, cap) == 60.0  # capped
+
+
+def test_processed_pass_resets_regardless_of_status() -> None:
+    base, cap = 15.0, 60.0
+    # Real work resets to base even if the status string is non-"idle".
+    assert _next_interval(True, "processed", 60.0, base, cap) == base
+    assert _next_interval(True, "baseline_completed", 60.0, base, cap) == base

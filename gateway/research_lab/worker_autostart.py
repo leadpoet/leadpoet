@@ -13,6 +13,8 @@ import threading
 import time
 from typing import Mapping
 
+from gateway.research_lab.config import resolve_worker_process_count
+
 
 TRUTHY = {"1", "true", "yes", "on"}
 WORKER_READY_FD_ENV = "RESEARCH_LAB_WORKER_READY_FD"
@@ -37,21 +39,16 @@ def _truthy_env(env: Mapping[str, str], name: str, default: str = "false") -> bo
     return str(env.get(name, default)).strip().lower() in TRUTHY
 
 
-# Hard maximum on spawned worker processes per fleet, mirroring the proxy
-# profile bound in provider_profiles_v2 (_MAX_CONFIGURED_WORKERS). It guards
-# against a misconfigured *_PROCESS_COUNT spawning an unbounded fleet.
-_MAX_WORKER_PROCESSES = 500
-
-
 def _resolve_worker_count(explicit_count: int, proxy_count: int) -> int:
     """Decouple process count from proxy count.
 
     ``*_PROCESS_COUNT`` (``explicit_count``) is authoritative when set; adding
-    proxies must not create processes. When unset (0), default to one worker
-    per configured proxy (the historical behavior). Clamped to the hard max.
+    proxies must not create processes. When unset (0), default to one worker per
+    configured proxy (historical behavior). Delegates to the shared resolver so
+    the spawned process count and the in-process partition total apply the same
+    clamp and never diverge.
     """
-    resolved = explicit_count if explicit_count > 0 else proxy_count
-    return max(0, min(int(resolved), _MAX_WORKER_PROCESSES))
+    return resolve_worker_process_count(explicit_count, proxy_count, minimum=0)
 
 
 def _vmrss_mb(status_path: str) -> int | None:

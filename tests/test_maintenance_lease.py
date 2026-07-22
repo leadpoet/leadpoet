@@ -13,6 +13,7 @@ helpers, and that the migration is a locked-down, atomically-acquired lease.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +94,60 @@ async def test_acquire_false_on_unexpected_shape(monkeypatch) -> None:
 
 def test_lease_names_are_distinct_scopes() -> None:
     assert maint.MAINTENANCE_LEASE_HOSTED != maint.MAINTENANCE_LEASE_SCORING
+
+
+def test_lease_holder_ref_is_unique_per_process_for_same_worker_name() -> None:
+    # Finding: worker_ref (e.g. research-lab-worker-1) is a stable name reused by
+    # every replica/restart. The lease holder token must be unique per process so
+    # two overlapping processes with the same name do not both hold the lease.
+    name = "research-lab-worker-1"
+    a = maint.make_lease_holder_ref(name)
+    b = maint.make_lease_holder_ref(name)
+    assert a != b
+    assert a.startswith(name + "#") and b.startswith(name + "#")
+    assert str(os.getpid()) in a  # instance identity present
+
+
+class _LeaseModel:
+    """In-process model of migration 117's acquire semantics, keyed by token.
+
+    Grants the lease iff it is unheld, expired, or already held by the SAME
+    token (renewal). Mirrors the ON CONFLICT ... WHERE expires_at < now OR
+    holder_ref = EXCLUDED.holder_ref clause so we can prove the identity rule
+    without a live database (the real SQL is exercised by the Postgres
+    integration test).
+    """
+
+    def __init__(self) -> None:
+        self._rows: dict[str, tuple[str, float]] = {}  # lease -> (holder, expires)
+        self._now = 1000.0
+
+    def acquire(self, lease: str, holder: str, ttl: float) -> bool:
+        held = self._rows.get(lease)
+        if held is None or held[1] < self._now or held[0] == holder:
+            self._rows[lease] = (holder, self._now + ttl)
+            return True
+        return False
+
+
+def test_two_processes_same_name_different_tokens_only_one_acquires() -> None:
+    model = _LeaseModel()
+    lease = maint.MAINTENANCE_LEASE_HOSTED
+    # Two live processes, identical human-readable name, distinct lease tokens.
+    tok_a = maint.make_lease_holder_ref("research-lab-worker-1")
+    tok_b = maint.make_lease_holder_ref("research-lab-worker-1")
+
+    assert model.acquire(lease, tok_a, ttl=180) is True   # first wins
+    assert model.acquire(lease, tok_b, ttl=180) is False  # second is locked out
+    assert model.acquire(lease, tok_a, ttl=180) is True   # holder renews freely
+
+    # Regression guard: if both processes had (incorrectly) used the bare
+    # worker_ref as the holder, the model would grant BOTH — proving the bug the
+    # unique token fixes.
+    bare = "research-lab-worker-1"
+    model2 = _LeaseModel()
+    assert model2.acquire(lease, bare, ttl=180) is True
+    assert model2.acquire(lease, bare, ttl=180) is True  # both "acquire" -> the bug
 
 
 def test_ttl_helpers_default_and_floor(monkeypatch) -> None:

@@ -167,6 +167,51 @@ def test_full_restart_preflight_accepts_only_complete_approved_release(
     assert result["acceptance_corpus_manifest_hash"] == "sha256:" + "e" * 64
 
 
+def test_full_restart_preflight_requires_explicit_worker_process_counts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # Worker/proxy decoupling must be explicit: a full restart without the
+    # *_PROCESS_COUNT variables silently falls back to one-worker-per-proxy and
+    # preserves the oversized fleet, so the preflight must reject it.
+    base_env = {
+        "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
+        "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
+        "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "10",
+        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "25",
+    }
+
+    # Missing entirely.
+    missing = {k: v for k, v in base_env.items() if "PROCESS_COUNT" not in k}
+    with pytest.raises(preflight.GatewayRestartPreflightV2Error) as exc:
+        _verify(tmp_path, monkeypatch, parent_environment=missing)
+    assert "PROCESS_COUNT" in str(exc.value)
+
+    # Present but non-positive / non-integer are also rejected.
+    for bad in ("0", "-1", "", "auto"):
+        env = dict(base_env)
+        env["RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT"] = bad
+        with pytest.raises(preflight.GatewayRestartPreflightV2Error):
+            _verify(tmp_path, monkeypatch, parent_environment=env)
+
+
+def test_component_restart_preflight_does_not_require_process_counts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # The mandatory-count gate only applies to full (worker-spawning) restarts.
+    result = _verify(
+        tmp_path,
+        monkeypatch,
+        topology_mode="component",
+        parent_environment={
+            "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
+            "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
+        },
+    )
+    assert result["status"] == "ready"
+
+
 def test_capacity_detection_counts_cpus_reserved_by_nitro(monkeypatch) -> None:
     monkeypatch.setattr(os, "sysconf", lambda name: 16)
     monkeypatch.setattr(os, "cpu_count", lambda: 14)

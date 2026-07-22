@@ -54,6 +54,48 @@ ACTIVE_QUEUE_STATUSES = frozenset({"queued", "started", "paused"})
 TICKET_LIFECYCLE_QUEUE_BATCH_SIZE = 100
 UNPAID_TICKET_EXPIRY_CANDIDATE_VIEW = "research_lab_unpaid_ticket_expiry_candidates"
 
+# Named single-owner maintenance leases. Only the lease holder runs the global
+# sweeps for that scope; other workers skip them this pass.
+MAINTENANCE_LEASE_HOSTED = "hosted_worker_maintenance"
+MAINTENANCE_LEASE_SCORING = "scoring_worker_recovery"
+
+
+async def try_acquire_maintenance_lease(
+    *,
+    lease_name: str,
+    holder_ref: str,
+    ttl_seconds: int,
+) -> bool:
+    """Acquire or renew a single-owner maintenance lease; True iff held.
+
+    Fail-closed: any error (contention or Supabase failure) returns False so
+    the caller skips the global sweep this pass. The current holder — or the
+    next taker after the lease expires — performs it, so work is never
+    duplicated across workers or replicas, at worst briefly delayed.
+    """
+    from gateway.research_lab.store import call_rpc
+
+    try:
+        result = await call_rpc(
+            "research_lab_acquire_maintenance_lease",
+            {
+                "p_lease_name": str(lease_name),
+                "p_holder_ref": str(holder_ref),
+                "p_ttl_seconds": int(ttl_seconds),
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "research_lab_maintenance_lease_acquire_failed name=%s error=%s",
+            lease_name,
+            str(exc)[:200],
+        )
+        return False
+    payload = result[0] if isinstance(result, list) and result else result
+    if isinstance(payload, Mapping):
+        return bool(payload.get("acquired"))
+    return False
+
 
 async def get_autoresearch_maintenance_state() -> dict[str, Any]:
     try:

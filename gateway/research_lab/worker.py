@@ -68,6 +68,7 @@ from gateway.research_lab.autoresearch_runtime import (
     budget_limit_microusd,
 )
 from gateway.research_lab.maintenance import (
+    MAINTENANCE_LEASE_HOSTED,
     autoresearch_queue_capacity_doc,
     expire_unpaid_tickets,
     get_autoresearch_maintenance_state,
@@ -75,6 +76,7 @@ from gateway.research_lab.maintenance import (
     reconcile_champion_reward_statuses,
     reconcile_terminal_ticket_statuses,
     set_autoresearch_maintenance_paused,
+    try_acquire_maintenance_lease,
 )
 from gateway.research_lab.provider_preflight import (
     PREFLIGHT_REASON_PREFIX,
@@ -167,6 +169,19 @@ def _error_backoff_seconds() -> float:
         return max(5.0, float(os.getenv("RESEARCH_LAB_WORKER_ERROR_BACKOFF_SECONDS", "60")))
     except ValueError:
         return 60.0
+
+
+def _maintenance_lease_ttl_seconds() -> int:
+    """TTL for the single-owner maintenance lease (default 180s).
+
+    Long enough that the holder renewing each pass keeps ownership across the
+    idle-backoff interval, short enough that a dead holder is taken over
+    promptly. Kept above the idle-backoff cap so a live holder never lapses.
+    """
+    try:
+        return max(60, int(os.getenv("RESEARCH_LAB_MAINTENANCE_LEASE_TTL_SECONDS", "180")))
+    except ValueError:
+        return 180
 
 
 def _idle_backoff_max_seconds(base_poll: float) -> float:
@@ -1427,6 +1442,8 @@ class ResearchLabHostedWorker:
         self._last_ticket_lifecycle_reconcile_at = 0.0
         self._last_unpaid_ticket_expiry_at = 0.0
         self._last_allocator_priors_refresh_at = 0.0
+        # True only for the worker holding the maintenance lease this pass.
+        self._holds_maintenance_lease = False
 
     async def run_forever(self) -> None:
         # trajectoryimprovements.md P5: one structured capture health block at
@@ -1497,9 +1514,21 @@ class ResearchLabHostedWorker:
 
     async def run_once(self) -> HostedWorkerOutcome:
         self._require_enabled()
+        # Single-owner maintenance lease: only the holder runs the global
+        # sweeps this pass; others skip them (fail-closed, no duplication). The
+        # lease replaces per-op worker_index==0 gating and survives holder death.
+        self._holds_maintenance_lease = (
+            not self.config.hosted_worker_dry_run
+            and await try_acquire_maintenance_lease(
+                lease_name=MAINTENANCE_LEASE_HOSTED,
+                holder_ref=self.worker_ref,
+                ttl_seconds=_maintenance_lease_ttl_seconds(),
+            )
+        )
         if not self.config.hosted_worker_dry_run:
-            await self._recover_stale_started_runs()
-            await self._reconcile_stale_loop_projections()
+            if self._holds_maintenance_lease:
+                await self._recover_stale_started_runs()
+                await self._reconcile_stale_loop_projections()
             await self._maybe_reconcile_terminal_tickets()
             await self._maybe_refresh_allocator_priors()
         autoresearch_state = await get_autoresearch_maintenance_state()
@@ -1516,8 +1545,9 @@ class ResearchLabHostedWorker:
             )
         if not self.config.hosted_worker_dry_run:
             await self._maybe_expire_unpaid_tickets()
-            await self._recover_stale_paused_runs()
-            await self._run_periodic_reconciles()
+            if self._holds_maintenance_lease:
+                await self._recover_stale_paused_runs()
+                await self._run_periodic_reconciles()
         if self.tree_policy.mode == "off":
             return HostedWorkerOutcome(
                 processed=False,
@@ -1739,8 +1769,14 @@ class ResearchLabHostedWorker:
             ) from exc
 
     async def _next_queued_run(self) -> Mapping[str, Any] | None:
+        # Only the columns the claim path consumes downstream (partition key,
+        # ids, priority, and the event-hash/status used by the claim verify),
+        # instead of SELECT * over up to queue_fetch_limit full queue rows every
+        # poll on every worker. Atomicity of the actual claim is enforced DB-side
+        # by the guard_research_lab_run_claim trigger, not by this read.
         rows = await select_many(
             "research_loop_run_queue_current",
+            columns="run_id,ticket_id,queue_priority,current_event_hash,current_status_at",
             filters=(("current_queue_status", "queued"),),
             order_by=(("queue_priority", False), ("current_status_at", False)),
             limit=self.config.hosted_worker_queue_fetch_limit,
@@ -1816,7 +1852,10 @@ class ResearchLabHostedWorker:
                 self.worker_ref,
                 str(exc)[:200],
             )
-        if int(self.config.hosted_worker_index or 0) == 0:
+        # Single-owner via the maintenance lease (the caller only reaches
+        # _run_periodic_reconciles when it holds the lease), replacing the
+        # former worker_index==0 gate so a dead worker 0 no longer starves this.
+        if self._holds_maintenance_lease:
             try:
                 status_interval = max(
                     60,
@@ -1884,9 +1923,10 @@ class ResearchLabHostedWorker:
     async def _maybe_export_trajectory_corpus(self, projector_store: Any) -> None:
         if not self.config.corpus_export_enabled:
             return
-        total_workers = max(1, int(self.config.hosted_worker_total_workers or 1))
-        worker_index = int(self.config.hosted_worker_index or 0) % total_workers
-        if worker_index != 0:
+        # Single-owner via the maintenance lease (only the lease holder reaches
+        # this through _run_periodic_reconciles); the former worker_index==0 gate
+        # would strand the export whenever the holder was not worker 0.
+        if not self._holds_maintenance_lease:
             return
         now = time.monotonic()
         last = float(getattr(self, "_last_corpus_export_at", 0.0) or 0.0)

@@ -1469,8 +1469,8 @@ async def test_candidate_claim_quiet_hold_writes_no_assignment(monkeypatch):
     worker = sw.ResearchLabGatewayScoringWorker(sw.ResearchLabGatewayConfig(), worker_ref="test-worker")
     events = []
 
-    async def fake_select_many(table, *, columns, filters, order_by, limit):
-        assert table == "research_lab_candidate_evaluation_current"
+    async def fake_call_rpc(function_name, params):
+        assert function_name == "claim_next_research_lab_candidate"
         return [candidate]
 
     async def fake_start_gate(self):
@@ -1487,7 +1487,7 @@ async def test_candidate_claim_quiet_hold_writes_no_assignment(monkeypatch):
         events.append(kwargs)
         raise AssertionError("quiet hold must not write candidate assignment")
 
-    monkeypatch.setattr(sw, "select_many", fake_select_many)
+    monkeypatch.setattr(sw, "call_rpc", fake_call_rpc)
     monkeypatch.setattr(
         sw.ResearchLabGatewayScoringWorker,
         "_candidate_scoring_start_gate",
@@ -1817,6 +1817,9 @@ async def test_stale_parent_alert_ignores_rebase_and_regeneration_recovery(monke
 @pytest.mark.asyncio
 async def test_stale_parent_alert_still_warns_once_for_unrecovered_candidate(monkeypatch, caplog):
     worker = sw.ResearchLabGatewayScoringWorker(sw.ResearchLabGatewayConfig())
+    # This alert now runs for the single-owner maintenance-lease holder rather
+    # than for worker_index==0; mark this worker as the holder.
+    worker._holds_maintenance_lease = True
     candidate_id = "candidate:" + "3" * 64
 
     async def fake_select_many(table, *, columns, filters, order_by=(), limit=100):

@@ -65,8 +65,10 @@ from gateway.research_lab.logging_utils import (
     safe_event_error_text as _safe_event_error_text,
 )
 from gateway.research_lab.maintenance import (
+    MAINTENANCE_LEASE_SCORING,
     get_scoring_maintenance_state,
     set_scoring_maintenance_paused,
+    try_acquire_maintenance_lease,
 )
 from gateway.research_lab.model_authority_v2 import (
     AttestedPrivateModelRunnerV2,
@@ -140,6 +142,7 @@ from gateway.research_lab.store import (
     create_scoring_dispatch_event,
     create_signed_audit_bundle,
     create_ticket_event,
+    call_rpc,
     deterministic_uuid,
     insert_row,
     select_all,
@@ -901,6 +904,18 @@ def _error_backoff_seconds() -> float:
         return max(5.0, float(os.getenv("RESEARCH_LAB_WORKER_ERROR_BACKOFF_SECONDS", "60")))
     except ValueError:
         return 60.0
+
+
+def _scoring_maintenance_lease_ttl_seconds() -> int:
+    """TTL for the single-owner scoring-recovery lease (default 180s).
+
+    Renewed each pass by the holder, so it stays owned across the idle-backoff
+    interval; a dead holder is taken over within one TTL.
+    """
+    try:
+        return max(60, int(os.getenv("RESEARCH_LAB_MAINTENANCE_LEASE_TTL_SECONDS", "180")))
+    except ValueError:
+        return 180
 
 
 def _idle_backoff_max_seconds(base_poll: float) -> float:
@@ -3422,6 +3437,8 @@ class ResearchLabGatewayScoringWorker:
         self._active_baseline_context: dict[str, Any] | None = None
         self._baseline_publication_failure_logged_key: str | None = None
         self._baseline_publication_failures_in_process: set[str] = set()
+        # True only for the worker holding the scoring-recovery lease this pass.
+        self._holds_maintenance_lease = False
 
     async def run_forever(self) -> None:
         # trajectoryimprovements.md P5: one structured capture health block at
@@ -3546,8 +3563,18 @@ class ResearchLabGatewayScoringWorker:
             # below, which auto-resumes once providers recover.
             return {"processed": False, "status": "maintenance_paused"}
 
-        await self._recover_stale_candidate_claims()
-        await self._alert_stuck_candidates()
+        # Single-owner recovery: only the scoring lease holder runs the global
+        # stale-claim recovery, stuck-candidate alerting, and quarantine requeue.
+        # Others skip them this pass (fail-closed, no duplicate scans/writes);
+        # the holder — or the next taker after the lease TTL expires — runs them.
+        self._holds_maintenance_lease = await try_acquire_maintenance_lease(
+            lease_name=MAINTENANCE_LEASE_SCORING,
+            holder_ref=self.worker_ref,
+            ttl_seconds=_scoring_maintenance_lease_ttl_seconds(),
+        )
+        if self._holds_maintenance_lease:
+            await self._recover_stale_candidate_claims()
+            await self._alert_stuck_candidates()
 
         # Provider preflight: never start a baseline or claim candidates when
         # ScrapingDog/Exa are out of credits or persistently unreachable —
@@ -3568,8 +3595,10 @@ class ResearchLabGatewayScoringWorker:
                 "preflight": preflight.get("verdicts"),
             }
         # Providers are healthy at this moment: requeue any candidates whose
-        # scores were quarantined during an outage for a clean rescore.
-        await self._requeue_quarantined_candidates()
+        # scores were quarantined during an outage for a clean rescore. Only the
+        # scoring lease holder performs this global sweep.
+        if self._holds_maintenance_lease:
+            await self._requeue_quarantined_candidates()
 
         baseline_result = None
         if self.config.private_baseline_rebenchmark_enabled and self._is_private_baseline_owner():
@@ -4962,39 +4991,27 @@ class ResearchLabGatewayScoringWorker:
         return assembled
 
     async def _claim_next_candidate(self) -> dict[str, Any] | None:
-        rows = await select_many(
-            "research_lab_candidate_evaluation_current",
-            columns="*",
-            filters=(("current_candidate_status", "queued"),),
-            order_by=(("current_status_at", False),),
-            limit=50,
+        # Server-side selection: the reason/staleness eligibility filter runs in
+        # the database and only the single next claimable candidate row comes
+        # back, instead of pulling up to 50 full patch-artifact rows per poll and
+        # filtering them client-side. The assigned-event append below stays in
+        # Python (anchored_hash parity), guarded against double-claims by the
+        # guard_research_lab_candidate_claim trigger (script 42).
+        claim_rows = await call_rpc(
+            "claim_next_research_lab_candidate",
+            {
+                "p_baseline_not_ready_retry_seconds": int(
+                    self.config.scoring_worker_baseline_not_ready_retry_seconds
+                ),
+                "p_retryable_failure_retry_seconds": int(
+                    self.config.scoring_worker_retryable_failure_retry_seconds
+                ),
+            },
         )
-        candidate: dict[str, Any] | None = None
-        for row in rows:
-            reason = str(row.get("current_reason") or "")
-            status_at = row.get("current_status_at")
-            if reason == "baseline_not_ready" and not _status_is_stale(
-                status_at,
-                self.config.scoring_worker_baseline_not_ready_retry_seconds,
-            ):
-                continue
-            if reason in {
-                "candidate_scoring_retryable_failure",
-                "conditional_validation_retryable_failure",
-            } and not _status_is_stale(
-                status_at,
-                self.config.scoring_worker_retryable_failure_retry_seconds,
-            ):
-                continue
-            candidate = dict(row)
-            break
+        candidate: dict[str, Any] | None = (
+            dict(claim_rows[0]) if isinstance(claim_rows, list) and claim_rows else None
+        )
         if not candidate:
-            if rows:
-                logger.info(
-                    "research_lab_candidate_claim_deferred worker_ref=%s queued_candidates=%s",
-                    self.worker_ref,
-                    len(rows),
-                )
             return None
         start_gate = await self._candidate_scoring_start_gate()
         self._last_candidate_start_gate = start_gate
@@ -5009,7 +5026,7 @@ class ResearchLabGatewayScoringWorker:
                         "RESEARCH LAB CANDIDATE SCORING START HELD",
                         (
                             ("Worker", self.worker_ref),
-                            ("Queued candidates", len(rows)),
+                            ("Next candidate", compact_ref(candidate.get("candidate_id"))),
                             ("Reason", start_gate.get("reason")),
                             ("UTC now", start_gate.get("now_utc")),
                             ("Target baseline date", start_gate.get("target_benchmark_date")),
@@ -5023,13 +5040,10 @@ class ResearchLabGatewayScoringWorker:
             return None
         self._candidate_start_hold_logged_key = None
         candidate_id = str(candidate.get("candidate_id") or "")
-        fresh = await select_one(
-            "research_lab_candidate_evaluation_current",
-            columns="candidate_id,current_candidate_status",
-            filters=(("candidate_id", candidate_id),),
-        )
-        if not fresh or fresh.get("current_candidate_status") != "queued":
-            return None
+        # No pre-write re-read: the selection RPC already returned a currently
+        # queued candidate, and the guard_research_lab_candidate_claim trigger
+        # rejects the append (SQLSTATE 23505, handled below) if another worker
+        # claimed it first. The post-write verify confirms ownership.
         try:
             assigned_event = await create_candidate_evaluation_event(
                 candidate_id=candidate_id,
@@ -5097,7 +5111,10 @@ class ResearchLabGatewayScoringWorker:
         """Observability alerts (structured logs) for candidates stuck beyond their
         expected windows. Read-only; never mutates. Best-effort (swallows query errors).
         """
-        if self.config.scoring_worker_index != 0:
+        # Single-owner via the scoring lease (only the holder reaches this),
+        # replacing the former worker_index==0 gate so a dead worker 0 no longer
+        # silences these alerts.
+        if not self._holds_maintenance_lease:
             return
         try:
             try:

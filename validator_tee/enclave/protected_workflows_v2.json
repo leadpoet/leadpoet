@@ -107,7 +107,7 @@
       "symbol": "weight_input_value_documents_v2"
     },
     {
-      "ast_sha256": "sha256:12cc34131364f734cc3d0de3c2eb13fab212a2ac21852c7fc996f362a6f66a08",
+      "ast_sha256": "sha256:dcbd8abc04da048153a68454db7ceea7e5ff35e867b85fbb4c007f020e244e4c",
       "path": "leadpoet_canonical/weight_computation.py",
       "symbol": "compute_final_weights"
     },
@@ -167,7 +167,7 @@
       "symbol": "Validator._publish_and_set_weights"
     },
     {
-      "ast_sha256": "sha256:9fa8b8a379f0b5d24a9d0c059048d58596ad348639f12f630095f7e5c79f1c8a",
+      "ast_sha256": "sha256:2413f60d36e077c359b0b666dd0f117ff58ab06805b8da43c7fc0cd21ba6964d",
       "path": "neurons/validator.py",
       "symbol": "Validator._recover_weight_publication_journal_v2"
     },
@@ -282,7 +282,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:7e47ca3daa9e84d7155fe135832893ff939bfa4bfbfcde5d3e8061d6d641b6f0",
-  "protected_source_commit": "cd3edcb504fba140b0159155f77df882d583ee96",
+  "manifest_hash": "sha256:6ae45784eda1a7ce4070ca7c30db7494ec246f8c6047f6e5ae7d1a3789d05808",
+  "protected_source_commit": "691ae345faad920031f0e9ea2c6d37520259f412",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

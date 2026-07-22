@@ -462,7 +462,7 @@
       "symbol": "CoordinatorActiveModelSourceV2"
     },
     {
-      "ast_sha256": "sha256:bbb1607f6e460337ba27be726873f3b8cf5791c6b2bcdbeeff9a059a385506ef",
+      "ast_sha256": "sha256:b7331a01508a4172cc6f3fc5ed4db08f51aa49456037a9cd2fee7be70a63334c",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
@@ -1082,7 +1082,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:2d23cb4fe6035cd2baab5c38a566fc03a544b9e7e02aae0dc34f8e66ebdf4904",
-  "protected_source_commit": "691ae345faad920031f0e9ea2c6d37520259f412",
+  "manifest_hash": "sha256:6161b208e09527dfc7c66dbfadc5f4f91e6dd1c73b00e31124f53d7cf4976f99",
+  "protected_source_commit": "4b09b7022f14aa17e7e427654fa01e9ee408d60b",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

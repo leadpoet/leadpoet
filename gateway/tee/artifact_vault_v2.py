@@ -76,6 +76,7 @@ class EncryptedArtifactVaultV2:
         self._retention_days = max(1, int(retention_days))
         self._clock = clock
         self._artifacts = {}  # type: Dict[str, Dict[str, Any]]
+        self._persisted_artifacts = {}  # type: Dict[str, Dict[str, Any]]
         self._lock = threading.RLock()
 
     def seal(
@@ -140,6 +141,8 @@ class EncryptedArtifactVaultV2:
     def descriptor(self, artifact_id: str) -> Dict[str, Any]:
         with self._lock:
             record = self._artifacts.get(str(artifact_id or ""))
+            if record is None:
+                record = self._persisted_artifacts.get(str(artifact_id or ""))
             if record is None:
                 raise ArtifactVaultV2Error("encrypted artifact is unavailable")
             return {
@@ -292,6 +295,30 @@ class EncryptedArtifactVaultV2:
             )
         with self._lock:
             record = self._artifacts.get(str(artifact_id or ""))
+            persisted_record = self._persisted_artifacts.get(str(artifact_id or ""))
+            if record is None and persisted_record is not None:
+                persistence = persisted_record["persistence"]
+                if sha256_json(dict(observed_storage_document)) != persistence.get(
+                    "storage_document_hash"
+                ):
+                    raise ArtifactVaultV2Error("persisted artifact ciphertext differs")
+                immutable_fields = {
+                    "artifact_ref": str(artifact_ref),
+                    "ciphertext_hash": str(
+                        observed_storage_document.get("ciphertext_hash") or ""
+                    ),
+                    "object_lock_mode": object_lock_mode,
+                    "retain_until": _timestamp(observed_retain_until),
+                }
+                if any(
+                    persistence.get(field) != value
+                    for field, value in immutable_fields.items()
+                ):
+                    raise ArtifactVaultV2Error("artifact persistence is immutable")
+                return {
+                    **self.descriptor(artifact_id),
+                    "artifact_ref": persistence["artifact_ref"],
+                }
             if record is None:
                 raise ArtifactVaultV2Error("encrypted artifact is unavailable")
             expected_document = self.export_ciphertext(artifact_id)["storage_document"]
@@ -329,6 +356,22 @@ class EncryptedArtifactVaultV2:
                     "artifact_ref": existing["artifact_ref"],
                 }
             record["persistence"] = persistence
+            self._persisted_artifacts[str(artifact_id)] = {
+                field: record[field]
+                for field in (
+                    "artifact_id",
+                    "plaintext_hash",
+                    "ciphertext_hash",
+                    "artifact_kind",
+                    "job_id",
+                    "purpose",
+                    "object_lock_mode",
+                    "retain_until",
+                    "encryption_context_hash",
+                    "persistence",
+                )
+            }
+            del self._artifacts[str(artifact_id)]
             return {
                 **self.descriptor(artifact_id),
                 "artifact_ref": persistence["artifact_ref"],
@@ -337,6 +380,8 @@ class EncryptedArtifactVaultV2:
     def persistence_evidence(self, artifact_id: str) -> Dict[str, Any]:
         with self._lock:
             record = self._artifacts.get(str(artifact_id or ""))
+            if record is None:
+                record = self._persisted_artifacts.get(str(artifact_id or ""))
             if record is None or record["persistence"] is None:
                 raise ArtifactVaultV2Error("encrypted artifact is not persisted")
             persistence = record["persistence"]
@@ -354,7 +399,10 @@ class EncryptedArtifactVaultV2:
         with self._lock:
             ids = sorted(
                 artifact_id
-                for artifact_id, record in self._artifacts.items()
+                for artifact_id, record in {
+                    **self._persisted_artifacts,
+                    **self._artifacts,
+                }.items()
                 if record["job_id"] == str(job_id)
                 and record["purpose"] == str(purpose)
             )

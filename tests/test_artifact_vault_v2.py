@@ -209,6 +209,40 @@ def test_confirm_persistence_requires_exact_ciphertext_and_compliance_lock() -> 
         )
 
 
+def test_confirmed_artifact_stops_consuming_active_vault_capacity(
+    monkeypatch,
+) -> None:
+    from gateway.tee import artifact_vault_v2
+
+    monkeypatch.setattr(artifact_vault_v2, "MAX_IN_MEMORY_ARTIFACTS", 1)
+    vault = _vault()
+    first = _sealed(vault)
+    first_id = first["artifact_id"]
+    document = vault.export_ciphertext(first_id)["storage_document"]
+
+    vault.confirm_persistence(
+        artifact_id=first_id,
+        artifact_ref="s3://immutable-bucket/artifacts/job-1.json",
+        observed_storage_document=document,
+        response_headers=_headers(),
+        transport_attempts=_attempts(first_id),
+    )
+
+    second = vault.seal(
+        b"second hidden provider response",
+        job_id="job-2",
+        purpose="research_lab.company_scoring.v2",
+        artifact_kind="provider_response",
+    )
+    assert second["persisted"] is False
+    assert vault.descriptor(first_id)["persisted"] is True
+    assert vault.persistence_evidence(first_id)["artifact_ref"].startswith(
+        "s3://immutable-bucket/"
+    )
+    with pytest.raises(ArtifactVaultV2Error, match="unavailable"):
+        vault.export_ciphertext(first_id)
+
+
 def test_confirm_persistence_rejects_short_or_unzoned_retention() -> None:
     vault = _vault()
     artifact_id = _sealed(vault)["artifact_id"]

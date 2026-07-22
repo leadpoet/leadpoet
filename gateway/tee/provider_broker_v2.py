@@ -535,6 +535,18 @@ class ProviderBrokerV2:
             ),
         }
 
+    def _abandon_inflight(
+        self,
+        deduplication_key: Tuple[str, int],
+        request_fingerprint: str,
+    ) -> None:
+        with self._lock:
+            inflight = self._inflight.get(deduplication_key)
+            if inflight is None or inflight[0] != request_fingerprint:
+                return
+            self._inflight.pop(deduplication_key, None)
+            inflight[1].set()
+
     def provision_credentials(self, credentials: Mapping[str, str]) -> Dict[str, Any]:
         expected_slots = set(expected_provider_credential_slots())
         if set(credentials) != expected_slots:
@@ -1016,25 +1028,29 @@ class ProviderBrokerV2:
                 else ""
             ),
         }
-        request_artifact_bytes = canonical_json(request_artifact_doc).encode("utf-8")
-        request_artifact = dict(
-            self._artifact_sink(
-                request_artifact_bytes,
-                job_id=str(request["job_id"] or ""),
-                purpose=str(request["purpose"] or ""),
-                artifact_kind="provider_request",
+        try:
+            request_artifact_bytes = canonical_json(request_artifact_doc).encode("utf-8")
+            request_artifact = dict(
+                self._artifact_sink(
+                    request_artifact_bytes,
+                    job_id=str(request["job_id"] or ""),
+                    purpose=str(request["purpose"] or ""),
+                    artifact_kind="provider_request",
+                )
             )
-        )
-        request_artifact_hash = sha256_bytes(request_artifact_bytes)
-        if request_artifact.get("plaintext_hash") != request_artifact_hash:
-            raise ProviderBrokerV2Error(
-                "encrypted provider request artifact plaintext hash mismatch"
-            )
-        request_artifact_id = str(request_artifact.get("artifact_id") or "")
-        if not _HASH_RE.fullmatch(request_artifact_id):
-            raise ProviderBrokerV2Error(
-                "encrypted provider request artifact ID is invalid"
-            )
+            request_artifact_hash = sha256_bytes(request_artifact_bytes)
+            if request_artifact.get("plaintext_hash") != request_artifact_hash:
+                raise ProviderBrokerV2Error(
+                    "encrypted provider request artifact plaintext hash mismatch"
+                )
+            request_artifact_id = str(request_artifact.get("artifact_id") or "")
+            if not _HASH_RE.fullmatch(request_artifact_id):
+                raise ProviderBrokerV2Error(
+                    "encrypted provider request artifact ID is invalid"
+                )
+        except Exception:
+            self._abandon_inflight(deduplication_key, request_fingerprint)
+            raise
         evidence_artifact_hashes = {
             str(request_artifact[field])
             for field in (

@@ -294,6 +294,30 @@ def test_parent_or_network_error_cannot_masquerade_as_provider_status():
     assert attempt["failure_code"] == "proxy_failure"
 
 
+def test_request_artifact_failure_does_not_poison_logical_attempt_retry():
+    transport = FakeTransport()
+    broker = _broker(transport)
+    artifact_sink = broker._artifact_sink
+    calls = 0
+
+    def fail_once(body, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("artifact vault capacity is full")
+        return artifact_sink(body, **kwargs)
+
+    broker._artifact_sink = fail_once
+
+    with pytest.raises(RuntimeError, match="capacity is full"):
+        broker.execute(_request())
+    assert broker.health()["inflight_count"] == 0
+
+    result = broker.execute(_request())
+    assert result["terminal_status"] == "authenticated_response"
+    assert len(transport.calls) == 1
+
+
 def test_one_logical_attempt_is_executed_and_charged_once_under_concurrency():
     transport = FakeTransport(delay=0.05)
     broker = _broker(transport)

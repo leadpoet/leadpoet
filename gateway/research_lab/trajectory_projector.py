@@ -284,6 +284,11 @@ class GatewayProjectorStore:
 
         return await store.update_row(table, values, filters=filters)
 
+    async def call_rpc(self, function_name: str, params: Mapping[str, Any]):
+        from gateway.research_lab import store
+
+        return await store.call_rpc(function_name, params)
+
 
 def _deterministic_uuid(*parts: Any) -> str:
     from gateway.research_lab.store import deterministic_uuid
@@ -4031,6 +4036,89 @@ async def _insert_provider_usage_ledger_row(
         return False
 
 
+_PROVIDER_USAGE_LEDGER_COLUMNS = (
+    "usage_row_id",
+    "schema_version",
+    "utc_day",
+    "recorded_at",
+    "provider_id",
+    "endpoint_class",
+    "request_fingerprint",
+    "evidence",
+    "status",
+    "est_cost_microusd",
+    "caller_doc",
+)
+
+
+def _json_safe_ledger_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a ledger row to its known JSON-serializable columns.
+
+    ``recorded_at`` is already an ISO string and ``caller_doc`` a dict in the
+    projector's build path; datetimes are coerced defensively so the RPC's
+    JSON payload never fails to serialize.
+    """
+    safe: dict[str, Any] = {}
+    for column in _PROVIDER_USAGE_LEDGER_COLUMNS:
+        value = row.get(column)
+        if hasattr(value, "isoformat"):
+            value = value.isoformat()
+        safe[column] = value
+    return safe
+
+
+def _batch_inserted_count(result: Any) -> int:
+    """Extract the inserted-row count from the batch-insert RPC response."""
+    payload = result
+    if isinstance(payload, list):
+        payload = payload[0] if payload else {}
+    if isinstance(payload, Mapping):
+        try:
+            return int(payload.get("inserted") or 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+async def _insert_provider_usage_ledger_rows_batch(
+    store: Any, rows: Sequence[Mapping[str, Any]]
+) -> int:
+    """Conflict-safe batched insert of provider-usage ledger rows.
+
+    Replaces the per-row existence-check + insert (~13.28M weekly PostgREST
+    requests) with one server-side ``INSERT ... ON CONFLICT (usage_row_id)
+    DO NOTHING``. The rows carry deterministic PKs, so the removed existence
+    checks changed no outcome — only request volume. Returns the number of
+    newly-inserted rows.
+
+    Falls back to the per-row path for injected stores that do not expose
+    ``call_rpc`` (test fakes), preserving existing behavior exactly.
+    """
+    candidate_rows = [dict(row) for row in rows if row.get("usage_row_id")]
+    if not candidate_rows:
+        return 0
+    if not hasattr(store, "call_rpc"):
+        written = 0
+        for row in candidate_rows:
+            if await _insert_provider_usage_ledger_row(store, row):
+                written += 1
+        return written
+    payload = [_json_safe_ledger_row(row) for row in candidate_rows]
+    try:
+        result = await store.call_rpc(
+            "insert_research_lab_provider_usage_ledger_rows",
+            {"rows": payload},
+        )
+    except Exception as exc:
+        logger.warning(
+            "research_lab_provider_usage_ledger_batch_insert_failed count=%s error=%s",
+            len(candidate_rows),
+            str(exc)[:300],
+        )
+        return 0
+    return _batch_inserted_count(result)
+
+
 async def _write_missing_corpus_trace_rows(
     store: Any, projection: TrajectoryProjection
 ) -> tuple[int, int, int]:
@@ -4045,10 +4133,9 @@ async def _write_missing_corpus_trace_rows(
         evidence_status = await _upsert_evidence_bundle_row(store, row)
         if evidence_status in {"inserted", "updated"}:
             evidence_written += 1
-    provider_usage_written = 0
-    for row in projection.provider_usage_ledger_rows:
-        if await _insert_provider_usage_ledger_row(store, row):
-            provider_usage_written += 1
+    provider_usage_written = await _insert_provider_usage_ledger_rows_batch(
+        store, projection.provider_usage_ledger_rows
+    )
     return trace_changed, evidence_written, provider_usage_written
 
 
@@ -4457,17 +4544,30 @@ async def backfill_run_corpus_trace_rows(
             for row in projection.evidence_bundle_rows
             if await _evidence_bundle_row_needs_write(store, row)
         ]
-        missing_provider_usage = [
-            row
-            for row in projection.provider_usage_ledger_rows
-            if await _provider_usage_ledger_row_needs_write(store, row)
-        ]
+        # Provider-usage rows: the write path uses one conflict-safe batched
+        # insert (the dominant weekly egress source), replacing per-row
+        # existence-check + insert. Dry-run must not write, so it counts the
+        # missing rows read-only (dry-run is a rare, manual path).
+        if dry_run:
+            missing_provider_usage = [
+                row
+                for row in projection.provider_usage_ledger_rows
+                if await _provider_usage_ledger_row_needs_write(store, row)
+            ]
+            provider_usage_written = 0
+            provider_usage_pending = bool(missing_provider_usage)
+        else:
+            missing_provider_usage = []
+            provider_usage_written = await _insert_provider_usage_ledger_rows_batch(
+                store, projection.provider_usage_ledger_rows
+            )
+            provider_usage_pending = provider_usage_written > 0
         if not (
             missing_events
             or missing_ledger
             or missing_traces
             or missing_evidence
-            or missing_provider_usage
+            or provider_usage_pending
         ):
             return ProjectionResult(
                 run_id=run_id, status="skipped_traces_existing", trajectory_id=tid
@@ -4506,10 +4606,7 @@ async def backfill_run_corpus_trace_rows(
             evidence_status = await _upsert_evidence_bundle_row(store, row)
             if evidence_status in {"inserted", "updated"}:
                 evidence_written += 1
-        provider_usage_written = 0
-        for row in missing_provider_usage:
-            if await _insert_provider_usage_ledger_row(store, row):
-                provider_usage_written += 1
+        # provider_usage_written was computed above via the batched insert.
         logger.info(
             "research_lab_projection_backfilled run_id=%s trajectory_id=%s "
             "events=%s ledger_rows=%s execution_traces=%s evidence_bundles=%s "

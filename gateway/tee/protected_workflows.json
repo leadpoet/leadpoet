@@ -517,7 +517,7 @@
       "symbol": "RunscModelSandboxV2"
     },
     {
-      "ast_sha256": "sha256:821b243826625691ec79ac495baf470707b82e895d68a18739855f1e4bae084d",
+      "ast_sha256": "sha256:3b0accdee0e10637a2c8e199678c94b2104b02802ab72e1fa90c01f81819cf09",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "HTTPXProviderTransport"
     },
@@ -1082,7 +1082,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:6ed54f7d51f264389e0bdcf209810ff6d318a6310fd3ea4e6f1c55238749106a",
-  "protected_source_commit": "86d8549bd4aae7e300f981c44a6f6d08d5000d1c",
+  "manifest_hash": "sha256:444b2514c581ce43a037d73595c627ce250813f3976b5b46e866ecb2a41509b6",
+  "protected_source_commit": "8b2e64c4d04b4da696b4589f4126cb39e613287e",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

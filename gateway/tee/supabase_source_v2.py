@@ -443,10 +443,10 @@ QUERY_POLICIES = {
         policy_id="attested_business_artifact_by_ref",
         table="research_lab_attested_business_artifact_links_v2",
         select="receipt_hash,artifact_kind,artifact_ref,artifact_hash",
-        parameter_names=("artifact_kind", "artifact_ref"),
+        parameter_names=("artifact_kind", "artifact_ref", "artifact_hash"),
         max_pages=1,
         order="created_at.desc",
-        limit=2,
+        limit=1,
     ),
     "attested_receipt_by_hash": SupabaseQueryV2(
         policy_id="attested_receipt_by_hash",
@@ -774,6 +774,9 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
             raise SupabaseSourceV2Error("event_hash is invalid")
         return (("event_hash", "eq.%s" % event_hash),)
     if policy.policy_id == "attested_business_artifact_by_ref":
+        artifact_hash = str(parameters["artifact_hash"] or "").strip().lower()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_hash):
+            raise SupabaseSourceV2Error("artifact_hash is invalid")
         return (
             (
                 "artifact_kind",
@@ -783,6 +786,7 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
                 "artifact_ref",
                 "eq.%s" % _identifier(parameters["artifact_ref"], "artifact_ref"),
             ),
+            ("artifact_hash", "eq.%s" % artifact_hash),
         )
     if policy.policy_id == "attested_receipt_by_hash":
         return (("receipt_hash", "eq.%s" % _identifier(parameters["receipt_hash"], "receipt_hash")),)

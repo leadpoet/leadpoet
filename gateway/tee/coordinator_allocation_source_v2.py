@@ -637,6 +637,7 @@ class CoordinatorAllocationSourceV2:
         link, receipt = self._business_receipt(
             artifact_kind=artifact_kind,
             artifact_ref=artifact_ref,
+            artifact_hash=expected_output_root,
             context=context,
         )
         if (
@@ -662,6 +663,7 @@ class CoordinatorAllocationSourceV2:
         link, receipt = self._business_receipt(
             artifact_kind="allocation",
             artifact_ref="epoch:%d" % epoch,
+            artifact_hash=allocation_hash,
             context=context,
         )
         if (
@@ -683,11 +685,16 @@ class CoordinatorAllocationSourceV2:
         *,
         artifact_kind: str,
         artifact_ref: str,
+        artifact_hash: str,
         context: ExecutionContextV2,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         links = self._read(
             "attested_business_artifact_by_ref",
-            {"artifact_kind": artifact_kind, "artifact_ref": artifact_ref},
+            {
+                "artifact_kind": artifact_kind,
+                "artifact_ref": artifact_ref,
+                "artifact_hash": artifact_hash,
+            },
             context,
         )
         if len(links) != 1:
@@ -708,7 +715,8 @@ class CoordinatorAllocationSourceV2:
         receipt = dict(rows[0]["receipt_doc"])
         validate_signed_execution_receipt(receipt)
         if (
-            receipt.get("receipt_hash") != receipt_hash
+            link.get("artifact_hash") != artifact_hash
+            or receipt.get("receipt_hash") != receipt_hash
             or not _same(
                 {
                     key: rows[0].get(key)

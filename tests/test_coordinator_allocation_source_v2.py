@@ -170,6 +170,118 @@ def test_unreceipted_source_add_reward_fails_closed():
         )
 
 
+def test_business_receipt_lookup_binds_the_expected_artifact_hash(monkeypatch):
+    artifact_hash = "sha256:" + "3" * 64
+    receipt_hash = "sha256:" + "4" * 64
+    receipt = {
+        "receipt_hash": receipt_hash,
+        "role": "gateway_coordinator",
+        "purpose": "research_lab.allocation.v2",
+        "epoch_id": 99,
+        "output_root": "sha256:" + "5" * 64,
+        "boot_identity_hash": "sha256:" + "6" * 64,
+    }
+    reader = FakeReader(
+        {
+            "attested_business_artifact_by_ref": [
+                {
+                    "receipt_hash": receipt_hash,
+                    "artifact_kind": "allocation",
+                    "artifact_ref": "epoch:99",
+                    "artifact_hash": artifact_hash,
+                }
+            ],
+            "attested_receipt_by_hash": [
+                {
+                    **receipt,
+                    "receipt_doc": receipt,
+                }
+            ],
+        }
+    )
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=FakeChainSource(),
+        config_supplier=_config,
+        network_supplier=lambda: "finney",
+    )
+    context = _context((receipt_hash,))
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_signed_execution_receipt",
+        lambda _value: None,
+    )
+
+    link, observed = resolver._business_receipt(
+        artifact_kind="allocation",
+        artifact_ref="epoch:99",
+        artifact_hash=artifact_hash,
+        context=context,
+    )
+
+    assert link["artifact_hash"] == artifact_hash
+    assert observed == receipt
+    assert reader.calls == [
+        (
+            "attested_business_artifact_by_ref",
+            {
+                "artifact_kind": "allocation",
+                "artifact_ref": "epoch:99",
+                "artifact_hash": artifact_hash,
+            },
+        ),
+        ("attested_receipt_by_hash", {"receipt_hash": receipt_hash}),
+    ]
+
+
+def test_business_receipt_rejects_a_different_artifact_hash(monkeypatch):
+    artifact_hash = "sha256:" + "3" * 64
+    receipt_hash = "sha256:" + "4" * 64
+    receipt = {
+        "receipt_hash": receipt_hash,
+        "role": "gateway_coordinator",
+        "purpose": "research_lab.allocation.v2",
+        "epoch_id": 99,
+        "output_root": "sha256:" + "5" * 64,
+        "boot_identity_hash": "sha256:" + "6" * 64,
+    }
+    reader = FakeReader(
+        {
+            "attested_business_artifact_by_ref": [
+                {
+                    "receipt_hash": receipt_hash,
+                    "artifact_kind": "allocation",
+                    "artifact_ref": "epoch:99",
+                    "artifact_hash": "sha256:" + "7" * 64,
+                }
+            ],
+            "attested_receipt_by_hash": [{**receipt, "receipt_doc": receipt}],
+        }
+    )
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=FakeChainSource(),
+        config_supplier=_config,
+        network_supplier=lambda: "finney",
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_signed_execution_receipt",
+        lambda _value: None,
+    )
+
+    with pytest.raises(
+        CoordinatorAllocationSourceV2Error,
+        match="not a declared source",
+    ):
+        resolver._business_receipt(
+            artifact_kind="allocation",
+            artifact_ref="epoch:99",
+            artifact_hash=artifact_hash,
+            context=_context((receipt_hash,)),
+        )
+
+
 def test_extra_parent_receipt_is_rejected_even_with_no_rewards():
     resolver = CoordinatorAllocationSourceV2(
         reader=FakeReader(),

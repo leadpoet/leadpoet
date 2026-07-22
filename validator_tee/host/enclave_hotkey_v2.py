@@ -383,6 +383,7 @@ class AuthoritativeSetWeightsContextV2(AbstractContextManager):
         on_signed_extrinsic: Optional[
             Callable[[Mapping[str, Any]], None]
         ] = None,
+        expected_era_period: Optional[int] = None,
     ) -> None:
         if not isinstance(wallet, EnclaveBackedWalletV2):
             raise EnclaveHotkeyV2Error("set_weights requires a public-only V2 wallet")
@@ -391,6 +392,9 @@ class AuthoritativeSetWeightsContextV2(AbstractContextManager):
         self.weight_authorization_id = str(weight_authorization_id)
         self.weight_submission_event_hash = str(weight_submission_event_hash)
         self._on_signed_extrinsic = on_signed_extrinsic
+        self._expected_era_period = (
+            None if expected_era_period is None else int(expected_era_period)
+        )
         self.client = wallet.hotkey.enclave_client_v2
         self._weight_module = None
         self._original_get_encrypted_commit_v2 = None
@@ -523,6 +527,18 @@ class AuthoritativeSetWeightsContextV2(AbstractContextManager):
         actual_era = dict(era)
         if "phase" in actual_era:
             raise EnclaveHotkeyV2Error("phase-only weight eras are not authorized")
+        if self._expected_era_period is not None:
+            # The enclave rebuilds the signature payload with the measured
+            # profile's extrinsic_period; an era with any other period can
+            # never byte-match it. Fail here with both values instead of at
+            # the enclave's opaque payload comparison.
+            observed_period = actual_era.get("period")
+            if int(observed_period or 0) != self._expected_era_period:
+                raise EnclaveHotkeyV2Error(
+                    "weight extrinsic era period %s differs from the measured "
+                    "profile extrinsic_period %s"
+                    % (observed_period, self._expected_era_period)
+                )
         if "current" not in actual_era:
             finalised_head = self.substrate.get_chain_finalised_head()
             actual_era["current"] = self.substrate.get_block_number(

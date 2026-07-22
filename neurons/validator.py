@@ -4162,6 +4162,23 @@ class Validator(BaseValidatorNeuron):
             print(f"   ⏹️ Refusing stale weight submission for epoch {epoch_id}")
             return False
 
+        # The enclave authorizes the extrinsic payload with the measured
+        # profile's extrinsic_period; the SDK must build its era with the
+        # same period or the enclave refuses to sign every attempt.
+        from validator_tee.enclave.hotkey_authority_v2 import (
+            load_chain_signing_profile,
+        )
+
+        profile_path = (
+            Path(__file__).resolve().parents[1]
+            / "validator_tee"
+            / "enclave"
+            / "chain_signing_profile_v2.json"
+        )
+        extrinsic_period = int(
+            load_chain_signing_profile(profile_path)["extrinsic_period"]
+        )
+
         attempt = 0
         with AuthoritativeSetWeightsContextV2(
             substrate=self.subtensor.substrate,
@@ -4169,6 +4186,7 @@ class Validator(BaseValidatorNeuron):
             weight_authorization_id=weight_authorization_id,
             weight_submission_event_hash=weight_submission_event_hash,
             on_signed_extrinsic=on_signed_extrinsic,
+            expected_era_period=extrinsic_period,
         ) as signing_context:
             while True:
                 # Re-read Supabase after entering the signing context and again
@@ -4194,6 +4212,7 @@ class Validator(BaseValidatorNeuron):
                         weights=weights,
                         wait_for_finalization=True,
                         mechid=0,
+                        period=extrinsic_period,
                     )
                 )
                 if outcome.success:

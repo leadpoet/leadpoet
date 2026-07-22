@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "7c9766b71d4c08b0059f6e3230dbe742b1d58e79",
+  "baseline_commit": "c245ec38524aa85e38e0998503c32e398310d260",
   "entries": [
     {
       "ast_sha256": "sha256:4ba5a9fc7a26c836cd045bdce11281cbaeb71d142fe4f0f4ac9f42848c1e4c81",
@@ -257,7 +257,7 @@
       "symbol": "finalize_authoritative_weight_publication_v2"
     },
     {
-      "ast_sha256": "sha256:905e821cfc8b349c9eb080d94649dfe1d3a48966402fdee014f151a848c4a78e",
+      "ast_sha256": "sha256:3509acb28cae29b7878649860c86e3843db9d37dc6f386e5e006906e6702b932",
       "path": "validator_tee/host/authoritative_weight_flow_v2.py",
       "symbol": "prepare_authoritative_weight_publication_v2"
     },
@@ -272,7 +272,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:e03842cf2618664980c654c22babc22d6a25406d566025ad0edba40ebbc2b809",
-  "protected_source_commit": "8f757bd29cf654223ddea00fd6505a933fd84fb4",
+  "manifest_hash": "sha256:7f77d9e402aa5133c26d506b2bc310f49a9b30bf5d5564ae5c2ca8633ecf6289",
+  "protected_source_commit": "c245ec38524aa85e38e0998503c32e398310d260",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

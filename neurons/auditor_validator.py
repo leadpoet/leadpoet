@@ -1728,6 +1728,24 @@ class AuditorValidator:
                 await asyncio.sleep(backoff)
 
 
+def _build_bittensor_cli_config(parser, argv=None):
+    """Parse auditor CLI flags even when the SDK disables parsing by default."""
+
+    variable = "BT_NO_PARSE_CLI_ARGS"
+    previous = os.environ.get(variable)
+    os.environ[variable] = "false"
+    try:
+        return bt.Config(
+            parser,
+            args=list(sys.argv[1:] if argv is None else argv),
+        )
+    finally:
+        if previous is None:
+            os.environ.pop(variable, None)
+        else:
+            os.environ[variable] = previous
+
+
 def main():
     """Entry point for auditor validator."""
     
@@ -1770,7 +1788,7 @@ EXAMPLES:
     )
     
     args = parser.parse_args()
-    config = bt.Config(parser)
+    config = _build_bittensor_cli_config(parser)
     
     # Configure logging level
     logging.getLogger().setLevel(getattr(logging, args.log_level))

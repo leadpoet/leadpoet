@@ -1,12 +1,40 @@
 from __future__ import annotations
 
 import asyncio
+import argparse
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import neurons.auditor_validator as auditor_module
+
+
+def test_auditor_cli_config_enables_sdk_argument_parsing(monkeypatch):
+    observed = {}
+
+    def fake_config(parser, *, args):
+        observed["parser"] = parser
+        observed["args"] = args
+        observed["parse_flag"] = os.environ.get("BT_NO_PARSE_CLI_ARGS")
+        return SimpleNamespace()
+
+    monkeypatch.delenv("BT_NO_PARSE_CLI_ARGS", raising=False)
+    monkeypatch.setattr(auditor_module.bt, "Config", fake_config)
+    parser = argparse.ArgumentParser()
+
+    auditor_module._build_bittensor_cli_config(
+        parser,
+        ["--wallet.name", "auditor_wallet"],
+    )
+
+    assert observed == {
+        "parser": parser,
+        "args": ["--wallet.name", "auditor_wallet"],
+        "parse_flag": "false",
+    }
+    assert "BT_NO_PARSE_CLI_ARGS" not in os.environ
 
 
 @pytest.mark.parametrize(

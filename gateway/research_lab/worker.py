@@ -1553,6 +1553,9 @@ class ResearchLabHostedWorker:
                 is_paused=get_autoresearch_maintenance_state,
                 set_paused=set_autoresearch_maintenance_paused,
                 worker_index=int(self.config.hosted_worker_index or 0),
+                # Reuse the maintenance state already read at the start of this
+                # pass instead of re-reading research_lab_gateway_control_current.
+                prefetched_state=autoresearch_state,
             )
             if not preflight.get("proceed"):
                 return HostedWorkerOutcome(

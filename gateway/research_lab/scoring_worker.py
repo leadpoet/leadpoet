@@ -3558,6 +3558,9 @@ class ResearchLabGatewayScoringWorker:
             is_paused=get_scoring_maintenance_state,
             set_paused=set_scoring_maintenance_paused,
             worker_index=self.config.scoring_worker_index,
+            # Reuse the maintenance state already read at the start of this pass
+            # instead of re-reading research_lab_gateway_control_current.
+            prefetched_state=maintenance_state,
         )
         if not preflight.get("proceed"):
             return {

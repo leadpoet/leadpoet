@@ -326,8 +326,16 @@ async def test_v2_graph_persists_identity_transport_receipt_then_links(monkeypat
     async def _select(table, *, filters):
         return rows.get((table, filters[0][1]))
 
+    async def _select_all(_table, *, filters, **_kwargs):
+        field, operator, values = filters[0]
+        assert field
+        assert operator == "in"
+        assert isinstance(values, list)
+        return []
+
     monkeypatch.setattr(attested_v2_store, "insert_row", _insert)
     monkeypatch.setattr(attested_v2_store, "select_one", _select)
+    monkeypatch.setattr(attested_v2_store, "select_all", _select_all)
 
     stored = await attested_v2_store.persist_receipt_graph_v2(graph)
 
@@ -383,6 +391,99 @@ def _persisted_rows(graph):
                 }
             )
     return rows
+
+
+@pytest.mark.asyncio
+async def test_v2_graph_persistence_batch_verifies_existing_ancestry(monkeypatch):
+    graph = _graph(with_transport=True, with_parent=True)
+    rows = _persisted_rows(graph)
+
+    async def _select_all(table, *, filters, **_kwargs):
+        field, operator, values = filters[0]
+        assert operator == "in"
+        return [
+            dict(row)
+            for row in rows.get(table, [])
+            if row.get(field) in set(values)
+        ]
+
+    async def _unexpected_insert(*_args, **_kwargs):
+        raise AssertionError("exact existing ancestry must not be reinserted")
+
+    monkeypatch.setattr(attested_v2_store, "select_all", _select_all)
+    monkeypatch.setattr(attested_v2_store, "_insert_exact", _unexpected_insert)
+
+    stored = await attested_v2_store.persist_receipt_graph_v2(graph)
+
+    assert stored["root_receipt_hash"] == graph["root_receipt_hash"]
+    assert stored["receipt_count"] == 2
+    assert stored["transport_attempt_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_v2_graph_persistence_inserts_only_missing_descendants(monkeypatch):
+    graph = _graph(with_transport=True, with_parent=True)
+    rows = _persisted_rows(graph)
+    parent_hash = graph["receipts"][0]["receipt_hash"]
+    rows[attested_v2_store.RECEIPT_TABLE] = [
+        row
+        for row in rows[attested_v2_store.RECEIPT_TABLE]
+        if row["receipt_hash"] == parent_hash
+    ]
+    rows[attested_v2_store.EDGE_TABLE] = []
+    rows[attested_v2_store.RECEIPT_TRANSPORT_TABLE] = []
+    inserted = []
+
+    async def _select_all(table, *, filters, **_kwargs):
+        field, operator, values = filters[0]
+        assert operator == "in"
+        return [
+            dict(row)
+            for row in rows.get(table, [])
+            if row.get(field) in set(values)
+        ]
+
+    async def _insert(table, row, *, key_filters):
+        inserted.append((table, dict(row), tuple(key_filters)))
+        return dict(row)
+
+    monkeypatch.setattr(attested_v2_store, "select_all", _select_all)
+    monkeypatch.setattr(attested_v2_store, "_insert_exact", _insert)
+
+    await attested_v2_store.persist_receipt_graph_v2(graph)
+
+    assert [table for table, _row, _filters in inserted] == [
+        attested_v2_store.RECEIPT_TABLE,
+        attested_v2_store.EDGE_TABLE,
+        attested_v2_store.RECEIPT_TRANSPORT_TABLE,
+    ]
+    assert inserted[0][1]["receipt_hash"] == graph["root_receipt_hash"]
+
+
+@pytest.mark.asyncio
+async def test_v2_graph_persistence_rejects_conflicting_existing_ancestry(
+    monkeypatch,
+):
+    graph = _graph(with_transport=True)
+    rows = _persisted_rows(graph)
+    rows[attested_v2_store.TRANSPORT_TABLE][0]["response_hash"] = HASH_B
+
+    async def _select_all(table, *, filters, **_kwargs):
+        field, operator, values = filters[0]
+        assert operator == "in"
+        return [
+            dict(row)
+            for row in rows.get(table, [])
+            if row.get(field) in set(values)
+        ]
+
+    monkeypatch.setattr(attested_v2_store, "select_all", _select_all)
+
+    with pytest.raises(
+        attested_v2_store.AttestedV2StoreError,
+        match="stored row conflicts at response_hash",
+    ):
+        await attested_v2_store.persist_receipt_graph_v2(graph)
 
 
 @pytest.mark.asyncio

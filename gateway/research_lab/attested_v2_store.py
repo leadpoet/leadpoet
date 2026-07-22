@@ -287,6 +287,93 @@ async def _select_by_values(
     return rows
 
 
+async def _existing_exact_rows(
+    table: str,
+    *,
+    key_field: str,
+    expected_rows: Iterable[Mapping[str, Any]],
+) -> set[str]:
+    """Return existing keys only after exact durable-row verification."""
+
+    expected_by_key: dict[str, dict[str, Any]] = {}
+    for value in expected_rows:
+        row = dict(value)
+        key = str(row.get(key_field) or "")
+        if not key or key in expected_by_key:
+            raise AttestedV2StoreError(
+                "%s expected row key is missing or duplicated" % table
+            )
+        expected_by_key[key] = row
+    if not expected_by_key:
+        return set()
+
+    stored_rows = await _select_by_values(
+        table,
+        field=key_field,
+        values=expected_by_key,
+    )
+    existing: set[str] = set()
+    for stored in stored_rows:
+        key = str(stored.get(key_field) or "")
+        expected = expected_by_key.get(key)
+        if expected is None or key in existing:
+            raise AttestedV2StoreError(
+                "%s durable row key is unexpected or duplicated" % table
+            )
+        _assert_stored_row(table, stored, expected)
+        existing.add(key)
+    return existing
+
+
+async def _existing_exact_relations(
+    table: str,
+    *,
+    owner_field: str,
+    owner_values: Iterable[str],
+    key_fields: tuple[str, ...],
+    expected_rows: Iterable[Mapping[str, Any]],
+) -> set[tuple[str, ...]]:
+    """Verify all durable relations for each graph-owned parent key."""
+
+    owners = {str(value) for value in owner_values}
+    expected_by_key: dict[tuple[str, ...], dict[str, Any]] = {}
+    for value in expected_rows:
+        row = dict(value)
+        key = tuple(str(row.get(field) or "") for field in key_fields)
+        if (
+            not all(key)
+            or str(row.get(owner_field) or "") not in owners
+            or key in expected_by_key
+        ):
+            raise AttestedV2StoreError(
+                "%s expected relation is invalid or duplicated" % table
+            )
+        expected_by_key[key] = row
+    if not owners:
+        if expected_by_key:
+            raise AttestedV2StoreError(
+                "%s expected relation has no graph owner" % table
+            )
+        return set()
+
+    stored_rows = await _select_by_values(
+        table,
+        field=owner_field,
+        values=owners,
+    )
+    existing: set[tuple[str, ...]] = set()
+    for stored in stored_rows:
+        key = tuple(str(stored.get(field) or "") for field in key_fields)
+        expected = expected_by_key.get(key)
+        if expected is None or key in existing:
+            raise AttestedV2StoreError(
+                "%s durable relation is unexpected or duplicated" % table
+            )
+        _assert_stored_row(table, stored, expected)
+        existing.add(key)
+    return existing
+
+
 async def persist_receipt_graph_v2(
     graph: Mapping[str, Any],
     *,
@@ -309,78 +396,158 @@ async def persist_receipt_graph_v2(
     host_operations_by_scope: dict[
         tuple[str, str], list[Mapping[str, Any]]
     ] = {}
+    for attempt in graph["transport_attempts"]:
+        scope = (str(attempt["job_id"]), str(attempt["purpose"]))
+        attempts_by_scope.setdefault(scope, []).append(attempt)
+    for record in graph["host_operations"]:
+        validate_host_operation_record(record)
+        request = record["request"]
+        scope = (str(request["job_id"]), str(request["purpose"]))
+        host_operations_by_scope.setdefault(scope, []).append(record)
+    for receipt in graph["receipts"]:
+        if str(receipt["boot_identity_hash"]) not in boot_by_hash:
+            raise AttestedV2StoreError("receipt boot identity is absent")
 
-    for identity in graph["boot_identities"]:
-        row = boot_storage_row(identity)
+    boot_rows = [
+        boot_storage_row(identity) for identity in graph["boot_identities"]
+    ]
+    transport_rows = [
+        transport_storage_row(attempt)
+        for attempt in graph["transport_attempts"]
+    ]
+    receipt_rows = [
+        receipt_storage_row(receipt_by_hash[receipt_hash])
+        for receipt_hash in ordered_receipts
+    ]
+    edge_rows = [
+        {
+            "child_receipt_hash": receipt_hash,
+            "parent_receipt_hash": parent_hash,
+        }
+        for receipt_hash in ordered_receipts
+        for parent_hash in receipt_by_hash[receipt_hash]["parent_receipt_hashes"]
+    ]
+    receipt_transport_rows = [
+        {
+            "receipt_hash": receipt_hash,
+            "attempt_hash": attempt["attempt_hash"],
+        }
+        for receipt_hash in ordered_receipts
+        for attempt in attempts_by_scope.get(
+            (
+                str(receipt_by_hash[receipt_hash]["job_id"]),
+                str(receipt_by_hash[receipt_hash]["purpose"]),
+            ),
+            [],
+        )
+    ]
+    host_operation_rows = []
+    for receipt_hash in ordered_receipts:
+        receipt = receipt_by_hash[receipt_hash]
+        scope = (str(receipt["job_id"]), str(receipt["purpose"]))
+        for record in host_operations_by_scope.pop(scope, []):
+            host_operation_rows.append(
+                host_operation_storage_row(record, receipt_hash=receipt_hash)
+            )
+    if host_operations_by_scope:
+        raise AttestedV2StoreError(
+            "V2 graph contains host operations without a receipt"
+        )
+
+    existing_boots = await _existing_exact_rows(
+        BOOT_TABLE,
+        key_field="boot_identity_hash",
+        expected_rows=boot_rows,
+    )
+    existing_attempts = await _existing_exact_rows(
+        TRANSPORT_TABLE,
+        key_field="attempt_hash",
+        expected_rows=transport_rows,
+    )
+    existing_receipts = await _existing_exact_rows(
+        RECEIPT_TABLE,
+        key_field="receipt_hash",
+        expected_rows=receipt_rows,
+    )
+    receipt_hashes = tuple(receipt_by_hash)
+    existing_edges = await _existing_exact_relations(
+        EDGE_TABLE,
+        owner_field="child_receipt_hash",
+        owner_values=receipt_hashes,
+        key_fields=("child_receipt_hash", "parent_receipt_hash"),
+        expected_rows=edge_rows,
+    )
+    existing_receipt_transports = await _existing_exact_relations(
+        RECEIPT_TRANSPORT_TABLE,
+        owner_field="receipt_hash",
+        owner_values=receipt_hashes,
+        key_fields=("receipt_hash", "attempt_hash"),
+        expected_rows=receipt_transport_rows,
+    )
+    existing_host_operations = await _existing_exact_relations(
+        HOST_OPERATION_TABLE,
+        owner_field="receipt_hash",
+        owner_values=receipt_hashes,
+        key_fields=("request_hash",),
+        expected_rows=host_operation_rows,
+    )
+
+    for row in boot_rows:
+        if row["boot_identity_hash"] in existing_boots:
+            continue
         await _insert_exact(
             BOOT_TABLE,
             row,
             key_filters=(("boot_identity_hash", row["boot_identity_hash"]),),
         )
-    for attempt in graph["transport_attempts"]:
-        row = transport_storage_row(attempt)
+    for row in transport_rows:
+        if row["attempt_hash"] in existing_attempts:
+            continue
         await _insert_exact(
             TRANSPORT_TABLE,
             row,
             key_filters=(("attempt_hash", row["attempt_hash"]),),
         )
-        scope = (str(attempt["job_id"]), str(attempt["purpose"]))
-        attempts_by_scope.setdefault(scope, []).append(attempt)
-    for receipt_hash in ordered_receipts:
-        receipt = receipt_by_hash[receipt_hash]
-        if str(receipt["boot_identity_hash"]) not in boot_by_hash:
-            raise AttestedV2StoreError("receipt boot identity is absent")
-        row = receipt_storage_row(receipt)
+    for row in receipt_rows:
+        if row["receipt_hash"] in existing_receipts:
+            continue
         await _insert_exact(
             RECEIPT_TABLE,
             row,
             key_filters=(("receipt_hash", row["receipt_hash"]),),
         )
-    for record in graph["host_operations"]:
-        validate_host_operation_record(record)
-        request = record["request"]
-        terminal = record["terminal"]
-        scope = (str(request["job_id"]), str(request["purpose"]))
-        host_operations_by_scope.setdefault(scope, []).append(record)
-    for receipt_hash in ordered_receipts:
-        receipt = receipt_by_hash[receipt_hash]
-        for parent_hash in receipt["parent_receipt_hashes"]:
-            row = {
-                "child_receipt_hash": receipt_hash,
-                "parent_receipt_hash": parent_hash,
-            }
-            await _insert_exact(
-                EDGE_TABLE,
-                row,
-                key_filters=(
-                    ("child_receipt_hash", receipt_hash),
-                    ("parent_receipt_hash", parent_hash),
-                ),
-            )
-        scope = (str(receipt["job_id"]), str(receipt["purpose"]))
-        for attempt in attempts_by_scope.get(scope, []):
-            row = {
-                "receipt_hash": receipt_hash,
-                "attempt_hash": attempt["attempt_hash"],
-            }
-            await _insert_exact(
-                RECEIPT_TRANSPORT_TABLE,
-                row,
-                key_filters=(
-                    ("receipt_hash", receipt_hash),
-                    ("attempt_hash", attempt["attempt_hash"]),
-                ),
-            )
-        for record in host_operations_by_scope.pop(scope, []):
-            row = host_operation_storage_row(record, receipt_hash=receipt_hash)
-            await _insert_exact(
-                HOST_OPERATION_TABLE,
-                row,
-                key_filters=(("request_hash", row["request_hash"]),),
-            )
-    if host_operations_by_scope:
-        raise AttestedV2StoreError(
-            "V2 graph contains host operations without a receipt"
+    for row in edge_rows:
+        key = (row["child_receipt_hash"], row["parent_receipt_hash"])
+        if key in existing_edges:
+            continue
+        await _insert_exact(
+            EDGE_TABLE,
+            row,
+            key_filters=(
+                ("child_receipt_hash", row["child_receipt_hash"]),
+                ("parent_receipt_hash", row["parent_receipt_hash"]),
+            ),
+        )
+    for row in receipt_transport_rows:
+        key = (row["receipt_hash"], row["attempt_hash"])
+        if key in existing_receipt_transports:
+            continue
+        await _insert_exact(
+            RECEIPT_TRANSPORT_TABLE,
+            row,
+            key_filters=(
+                ("receipt_hash", row["receipt_hash"]),
+                ("attempt_hash", row["attempt_hash"]),
+            ),
+        )
+    for row in host_operation_rows:
+        key = (row["request_hash"],)
+        if key in existing_host_operations:
+            continue
+        await _insert_exact(
+            HOST_OPERATION_TABLE,
+            row,
+            key_filters=(("request_hash", row["request_hash"]),),
         )
     return {
         "graph_hash": sha256_json(dict(graph)),

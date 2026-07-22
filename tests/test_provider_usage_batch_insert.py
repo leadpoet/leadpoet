@@ -143,6 +143,55 @@ async def test_batch_insert_returns_zero_and_does_not_raise_on_rpc_error() -> No
     assert written == 0
 
 
+class _LedgerRpcStore:
+    """Store modeling the real RPC: dedup by usage_row_id (ON CONFLICT DO
+    NOTHING), with a one-shot transient failure to prove recovery."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, dict[str, Any]] = {}  # usage_row_id -> row
+        self.fail_next = False
+        self.rpc_calls = 0
+
+    async def call_rpc(self, function_name: str, params: dict[str, Any]) -> Any:
+        self.rpc_calls += 1
+        if self.fail_next:
+            self.fail_next = False
+            raise RuntimeError("transient supabase 503")
+        inserted = 0
+        for row in params["rows"]:
+            rid = row["usage_row_id"]
+            if rid not in self.rows:            # ON CONFLICT DO NOTHING
+                self.rows[rid] = row
+                inserted += 1
+        return {"requested": len(params["rows"]), "inserted": inserted}
+
+
+@pytest.mark.asyncio
+async def test_transient_batch_failure_is_repaired_by_backfill() -> None:
+    # CEO-required regression: a transient batch-insert failure must not lose
+    # rows. The failed pass writes nothing (returns 0), and a later backfill
+    # pass restores EVERY provider-usage row exactly once (idempotent).
+    store = _LedgerRpcStore()
+    rows = [_row(f"{i:032d}") for i in range(5)]
+
+    # 1) Projection pass hits a transient outage: 0 written, nothing raised.
+    store.fail_next = True
+    written = await tp._insert_provider_usage_ledger_rows_batch(store, rows)
+    assert written == 0
+    assert store.rows == {}  # no rows persisted during the outage
+
+    # 2) Backfill pass (provider healthy): every row is restored.
+    restored = await tp._insert_provider_usage_ledger_rows_batch(store, rows)
+    assert restored == 5
+    assert set(store.rows) == {r["usage_row_id"] for r in rows}
+
+    # 3) A second backfill is idempotent — DO NOTHING inserts nothing new, and
+    #    no row is duplicated or lost.
+    again = await tp._insert_provider_usage_ledger_rows_batch(store, rows)
+    assert again == 0
+    assert len(store.rows) == 5
+
+
 def test_json_safe_row_projects_columns_and_coerces_datetime() -> None:
     row = _row(
         "d" * 32,

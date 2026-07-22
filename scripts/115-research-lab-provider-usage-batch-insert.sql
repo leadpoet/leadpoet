@@ -68,16 +68,16 @@ BEGIN
         )
         SELECT
             i.usage_row_id,
-            pg_catalog.coalesce(i.schema_version, '1.0'),
+            COALESCE(i.schema_version, '1.0'),
             i.utc_day,
-            pg_catalog.coalesce(i.recorded_at, pg_catalog.now()),
+            COALESCE(i.recorded_at, pg_catalog.now()),
             i.provider_id,
-            pg_catalog.coalesce(i.endpoint_class, ''),
-            pg_catalog.coalesce(i.request_fingerprint, ''),
+            COALESCE(i.endpoint_class, ''),
+            COALESCE(i.request_fingerprint, ''),
             i.evidence,
-            pg_catalog.coalesce(i.status, 0),
-            pg_catalog.coalesce(i.est_cost_microusd, 0),
-            pg_catalog.coalesce(i.caller_doc, '{}'::JSONB)
+            COALESCE(i.status, 0),
+            COALESCE(i.est_cost_microusd, 0),
+            COALESCE(i.caller_doc, '{}'::JSONB)
         FROM incoming i
         WHERE i.usage_row_id IS NOT NULL
         ON CONFLICT (usage_row_id) DO NOTHING
@@ -87,8 +87,8 @@ BEGIN
 
     RETURN pg_catalog.jsonb_build_object(
         'requested', requested_count,
-        'inserted', pg_catalog.coalesce(pg_catalog.array_length(inserted_ids, 1), 0),
-        'inserted_ids', pg_catalog.to_jsonb(pg_catalog.coalesce(inserted_ids, ARRAY[]::UUID[]))
+        'inserted', COALESCE(pg_catalog.array_length(inserted_ids, 1), 0),
+        'inserted_ids', pg_catalog.to_jsonb(COALESCE(inserted_ids, ARRAY[]::UUID[]))
     );
 END;
 $$;

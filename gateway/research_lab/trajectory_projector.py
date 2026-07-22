@@ -4404,6 +4404,87 @@ async def project_run(
         )
 
 
+def _rpc_uuid_list(result: Any) -> list[str]:
+    """Normalize an RPC's SETOF UUID response to a list of id strings."""
+    rows = result if isinstance(result, list) else []
+    ids: list[str] = []
+    for item in rows:
+        if isinstance(item, Mapping):
+            # SETOF scalar comes back as {"<function_name>": "<uuid>"}.
+            for value in item.values():
+                if value:
+                    ids.append(str(value))
+                    break
+        elif item:
+            ids.append(str(item))
+    return ids
+
+
+async def _unprojected_run_ids(
+    store: Any, run_ids: Sequence[str]
+) -> list[str]:
+    """Return the subset of ``run_ids`` with no projected trajectory yet.
+
+    Replaces the former one-existence-SELECT-per-run (the N+1 that multiplied
+    across workers and passes) with a single server-side anti-join. The client
+    computes the deterministic ``trajectory_id`` for each run (a cheap local
+    hash), and the RPC returns only the ids absent from research_trajectories.
+    Order (newest-first) is preserved.
+
+    Falls back to the per-run existence checks for injected stores without
+    ``call_rpc``, preserving existing behavior exactly.
+    """
+    ordered: list[str] = []
+    tid_to_run: dict[str, str] = {}
+    for run_id in run_ids:
+        run_id = str(run_id or "")
+        if not run_id:
+            continue
+        tid = trajectory_id_for_run(run_id)
+        if tid not in tid_to_run:
+            tid_to_run[tid] = run_id
+            ordered.append(run_id)
+    if not ordered:
+        return []
+
+    async def _per_run_fallback() -> list[str]:
+        missing: list[str] = []
+        for run_id in ordered:
+            try:
+                existing = await store.select_one(
+                    TRAJECTORIES_TABLE,
+                    filters=(("trajectory_id", trajectory_id_for_run(run_id)),),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_trajectory_projector_existence_check_failed "
+                    "run_id=%s error=%s",
+                    run_id,
+                    str(exc)[:200],
+                )
+                continue
+            if not existing:
+                missing.append(run_id)
+        return missing
+
+    if not hasattr(store, "call_rpc"):
+        return await _per_run_fallback()
+    try:
+        result = await store.call_rpc(
+            "research_lab_missing_trajectory_ids",
+            {"candidate_ids": list(tid_to_run.keys())},
+        )
+    except Exception as exc:
+        logger.warning(
+            "research_lab_trajectory_antijoin_failed count=%s error=%s",
+            len(ordered),
+            str(exc)[:300],
+        )
+        return await _per_run_fallback()
+    missing_tids = set(_rpc_uuid_list(result))
+    return [run_id for tid, run_id in tid_to_run.items() if tid in missing_tids]
+
+
 async def project_completed_runs(
     *,
     batch_size: int = 25,
@@ -4433,27 +4514,13 @@ async def project_completed_runs(
             str(exc)[:500],
         )
         return results
+    # One server-side anti-join replaces the former existence SELECT per run.
+    candidate_run_ids = [str(row.get("run_id") or "") for row in queue_rows]
+    unprojected = await _unprojected_run_ids(store, candidate_run_ids)
     projected = 0
-    for row in queue_rows:
+    for run_id in unprojected:
         if projected >= max(1, int(batch_size)):
             break
-        run_id = str(row.get("run_id") or "")
-        if not run_id:
-            continue
-        try:
-            existing = await store.select_one(
-                TRAJECTORIES_TABLE,
-                filters=(("trajectory_id", trajectory_id_for_run(run_id)),),
-            )
-        except Exception as exc:
-            logger.warning(
-                "research_lab_trajectory_projector_existence_check_failed run_id=%s error=%s",
-                run_id,
-                str(exc)[:200],
-            )
-            continue
-        if existing:
-            continue
         result = await project_run(run_id, store=store, dry_run=dry_run)
         results.append(result)
         if result.status in ("projected", "dry_run"):

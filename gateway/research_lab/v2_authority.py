@@ -1537,6 +1537,7 @@ async def _load_allocation_parent_graphs_v2(
     """Load candidate parent graphs; the enclave independently checks completeness."""
 
     from gateway.research_lab.attested_v2_store import (
+        load_business_artifact_graph_v2,
         load_business_artifact_graphs_by_ref_v2,
         load_receipt_graphs_v2,
     )
@@ -1554,17 +1555,35 @@ async def _load_allocation_parent_graphs_v2(
 
     graphs: dict[str, dict[str, Any]] = {}
     artifact_refs: set[tuple[str, str]] = set()
+    exact_artifact_refs: dict[tuple[str, str], str] = {}
     receipt_roots: set[str] = set()
     preloaded = dict(preloaded_business_graphs or {})
 
     def add(kind: str, ref: str) -> None:
         key = (str(kind or ""), str(ref or ""))
+        if key in exact_artifact_refs:
+            return
         graph = preloaded.get(key)
         if isinstance(graph, Mapping):
             normalized = dict(graph)
             graphs[str(normalized.get("root_receipt_hash") or "")] = normalized
             return
         artifact_refs.add(key)
+
+    def add_exact(kind: str, ref: str, artifact_hash: str) -> None:
+        key = (str(kind or ""), str(ref or ""))
+        digest = str(artifact_hash or "").lower()
+        if not key[0] or not key[1] or not _HASH_RE.fullmatch(digest):
+            raise ResearchLabV2AuthorityError(
+                "allocation finalized artifact identity is invalid"
+            )
+        existing = exact_artifact_refs.get(key)
+        if existing is not None and existing != digest:
+            raise ResearchLabV2AuthorityError(
+                "allocation finalized artifact identities conflict"
+            )
+        exact_artifact_refs[key] = digest
+        artifact_refs.discard(key)
 
     def add_receipt_root(receipt_hash: str) -> None:
         receipt_roots.add(str(receipt_hash or ""))
@@ -1692,7 +1711,11 @@ async def _load_allocation_parent_graphs_v2(
     for row in normalized_finalized_history:
         authority_types = set(row.get("authority_types") or ())
         if "native_v2_finalization" in authority_types:
-            add("allocation", "epoch:%d" % int(row.get("epoch") or 0))
+            add_exact(
+                "allocation",
+                "epoch:%d" % int(row.get("epoch") or 0),
+                str(row.get("allocation_hash") or ""),
+            )
             for receipt_hash in row.get("finalization_receipt_hashes") or ():
                 add_receipt_root(str(receipt_hash))
         if "legacy_finalized_chain_migration_v2" in authority_types:
@@ -1722,6 +1745,23 @@ async def _load_allocation_parent_graphs_v2(
         ) is None:
             continue
         add("source_add_reward_decision", reward_ref)
+
+    exact_items = sorted(
+        (kind, ref, digest)
+        for (kind, ref), digest in exact_artifact_refs.items()
+    )
+    loaded_exact_graphs = await asyncio.gather(
+        *(
+            load_business_artifact_graph_v2(
+                artifact_kind=kind,
+                artifact_ref=ref,
+                artifact_hash=digest,
+            )
+            for kind, ref, digest in exact_items
+        )
+    )
+    for graph in loaded_exact_graphs:
+        graphs[str(graph["root_receipt_hash"])] = graph
 
     loaded_business_graphs = await load_business_artifact_graphs_by_ref_v2(
         artifact_refs

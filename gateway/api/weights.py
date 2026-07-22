@@ -1468,6 +1468,49 @@ async def get_attested_weights_v2(netuid: int, epoch_id: int) -> Dict[str, Any]:
     return authority
 
 
+@router.get("/v2/published/{netuid}/{epoch_id}")
+async def get_published_weights_v2(netuid: int, epoch_id: int) -> Dict[str, Any]:
+    """Return the strongest staged V2 authority: published or finalized.
+
+    The primary's chain finalization completes shortly after the epoch
+    boundary, so during the live epoch the strongest existing authority is
+    the enclave-signed bundle plus the durable gateway publication. Auditors
+    mirror from this staged view within the same epoch; the finalized-chain
+    proof is attached as soon as it exists, and the finalized-only
+    /v2/latest contract is unchanged for existing consumers.
+    """
+
+    try:
+        from gateway.research_lab.attested_v2_store import load_weight_authority_v2
+
+        if len(PRIMARY_VALIDATOR_HOTKEYS) != 1:
+            raise RuntimeError("authoritative primary validator hotkey is ambiguous")
+        authority = await load_weight_authority_v2(
+            netuid=int(netuid),
+            epoch_id=int(epoch_id),
+            validator_hotkey=next(iter(PRIMARY_VALIDATOR_HOTKEYS)),
+            require_finalization=False,
+        )
+    except Exception as exc:
+        logger.error(
+            "weight_published_v2_load_failed netuid=%s epoch=%s "
+            "error_type=%s error=%s",
+            netuid,
+            epoch_id,
+            type(exc).__name__,
+            str(exc)[:240],
+        )
+        raise HTTPException(
+            status_code=500, detail="v2 staged weight authority load failed"
+        ) from exc
+    if authority is None:
+        raise HTTPException(
+            status_code=404,
+            detail="published v2 weight authority not found",
+        )
+    return authority
+
+
 @router.get("/v2/release-evidence/{commit_sha}")
 async def get_auditor_release_evidence_v2(commit_sha: str) -> Dict[str, Any]:
     """Return short-lived links to one immutable six-build release channel."""

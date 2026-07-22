@@ -343,6 +343,89 @@ def verify_attested_weight_authority_v2(
         identity_cache=identity_cache,
         boot_verifier=boot_verifier,
     )
+    return _verify_publication_and_finalization(
+        verified_bundle=verified_bundle,
+        publication=publication,
+        finalization=finalization,
+        identity_cache=identity_cache,
+        chain_signing_profile=chain_signing_profile,
+        boot_verifier=boot_verifier,
+    )
+
+
+def verify_published_weight_authority_stage_v2(
+    authority: Mapping[str, Any],
+    *,
+    identity_cache: Mapping[str, Any],
+    chain_signing_profile: Mapping[str, Any],
+    boot_verifier: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    """Verify a staged authority: publication always, finalization if present.
+
+    The primary's chain finalization completes shortly after the epoch
+    boundary, so during the live epoch the strongest existing authority is
+    often bundle + durable gateway publication. Every cryptographic check on
+    the bundle and publication (enclave signatures, boot identities against
+    independent release evidence, receipt graphs, event hashes) is identical
+    to the finalized path; only the finalized-chain proof is stage-dependent.
+    Mirroring before chain inclusion is covered retrospectively by the
+    auditors' soft equivocation check against on-chain weights.
+    """
+
+    if not isinstance(authority, Mapping) or set(authority) != {
+        "schema_version",
+        "authority_stage",
+        "bundle",
+        "publication",
+        "finalization",
+    }:
+        raise AuditorV2Error("staged V2 weight authority fields are invalid")
+    if (
+        authority.get("schema_version")
+        != "leadpoet.published_weight_authority_stage.v2"
+    ):
+        raise AuditorV2Error("staged V2 weight authority schema is invalid")
+    stage = authority.get("authority_stage")
+    bundle = authority.get("bundle")
+    publication = authority.get("publication")
+    finalization = authority.get("finalization")
+    if not isinstance(bundle, Mapping) or not isinstance(publication, Mapping):
+        raise AuditorV2Error("staged V2 weight authority components are invalid")
+    if stage == "finalized":
+        if not isinstance(finalization, Mapping):
+            raise AuditorV2Error("finalized V2 authority is missing its proof")
+    elif stage == "published":
+        if finalization is not None:
+            raise AuditorV2Error(
+                "published-stage V2 authority must not carry a finalization"
+            )
+    else:
+        raise AuditorV2Error("staged V2 weight authority stage is invalid")
+    verified_bundle = verify_attested_weight_bundle_v2(
+        bundle,
+        identity_cache=identity_cache,
+        boot_verifier=boot_verifier,
+    )
+    verified = _verify_publication_and_finalization(
+        verified_bundle=verified_bundle,
+        publication=publication,
+        finalization=finalization if stage == "finalized" else None,
+        identity_cache=identity_cache,
+        chain_signing_profile=chain_signing_profile,
+        boot_verifier=boot_verifier,
+    )
+    return {**verified, "authority_stage": stage}
+
+
+def _verify_publication_and_finalization(
+    *,
+    verified_bundle: Mapping[str, Any],
+    publication: Mapping[str, Any],
+    finalization: Optional[Mapping[str, Any]],
+    identity_cache: Mapping[str, Any],
+    chain_signing_profile: Mapping[str, Any],
+    boot_verifier: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
 
     # Boot identities are issued once at enclave boot and verified for days
     # afterwards; the Nitro leaf certificate is only valid for hours, so the
@@ -418,6 +501,13 @@ def verify_attested_weight_authority_v2(
     )
     if publication.get("weight_submission_event_hash") != expected_submission_event:
         raise AuditorV2Error("V2 publication event hash differs")
+
+    if finalization is None:
+        return {
+            **verified_bundle,
+            "weight_submission_event_hash": expected_submission_event,
+            "additional_verified_boots": sorted(set(observed)),
+        }
 
     if set(finalization) != {
         "weight_finalization_event_hash",

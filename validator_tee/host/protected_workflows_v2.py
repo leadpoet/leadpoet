@@ -62,6 +62,8 @@ PROTECTED_SYMBOLS = {
     "leadpoet_canonical/auditor_v2.py": (
         "verify_attested_weight_bundle_v2",
         "verify_attested_weight_authority_v2",
+        "verify_published_weight_authority_stage_v2",
+        "_verify_publication_and_finalization",
     ),
     "validator_tee/enclave/weight_authority_v2.py": (
         "ValidatorWeightAuthorityV2.compute",

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import time
 from typing import Any, Iterable, Mapping, Sequence
 
 from gateway.research_lab.attested_coordinator_v2 import execute_coordinator_v2
@@ -1008,7 +1007,9 @@ async def execute_provider_preflight_v2(
         operation=OP_PROVIDER_PREFLIGHT_V2,
         purpose="research_lab.provider_preflight.v2",
         epoch_id=0,
-        sequence=time.time_ns(),
+        # The payload already commits scope, force, and settings, so sequence
+        # zero gives deterministic idempotency and fits the V2 INTEGER schema.
+        sequence=0,
         payload={
             "schema_version": PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION,
             "scope_key": str(scope_key),

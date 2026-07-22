@@ -1279,7 +1279,14 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
         
         # Get commits that touched monitored files
         # Use git log with path filter for monitored files
-        monitored_paths = list(MONITORED_FILES) + [d.rstrip('/') for d in MONITORED_DIRS]
+        # The history selector must cover every byte copied into the validator
+        # EIF. A hand-maintained subset previously skipped protected workflow
+        # manifests, so the gateway never rebuilt the deployed validator PCR0.
+        monitored_paths = sorted(
+            set(MONITORED_FILES)
+            | {d.rstrip('/') for d in MONITORED_DIRS}
+            | {path.rstrip('/') for path in PCR0_COPY_PATHS}
+        )
         path_args = ["--"] + monitored_paths
         
         proc = await asyncio.create_subprocess_exec(

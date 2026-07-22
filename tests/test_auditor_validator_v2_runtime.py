@@ -360,6 +360,11 @@ def test_successful_auditor_verification_has_one_status_line(monkeypatch, capsys
     auditor = _auditor_for_one_verification(verified)
     auditor.save_pending_equivocation_check = lambda *_args: None
 
+    async def fetch_verified(_epoch):
+        return verified, "v2_verified"
+
+    auditor.fetch_verified_weight_authority = fetch_verified
+
     def submit(*_args, **_kwargs):
         auditor.should_exit = True
         return True

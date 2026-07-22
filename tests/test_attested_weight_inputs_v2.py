@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import pytest
 
 from gateway.research_lab import attested_weight_inputs_v2
@@ -140,6 +141,129 @@ async def test_gateway_weight_input_builder_attests_every_category_without_host_
         "finalized_chain_state_root" not in call["payload"] for call in calls
     )
     assert result["gateway_authority_event_hash"] == event_hash
+
+
+@pytest.mark.asyncio
+async def test_gateway_weight_input_builder_runs_only_independent_categories_concurrently(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: (),
+    )
+    snapshot = _snapshot()
+    allocation = _allocation_graph()
+    expected = gateway_weight_input_value_documents_v2(
+        calculation_snapshot=snapshot,
+        gateway_authority_event_hash=allocation["root_receipt_hash"],
+    )
+    independent = set(GATEWAY_WEIGHT_INPUT_CATEGORIES) - {"anomaly_adjustments"}
+    started = set()
+    all_independent_started = asyncio.Event()
+
+    async def execute(**kwargs):
+        category = kwargs["payload"]["category"]
+        if category == "anomaly_adjustments":
+            assert started == independent
+        else:
+            started.add(category)
+            if started == independent:
+                all_independent_started.set()
+            await asyncio.wait_for(all_independent_started.wait(), timeout=1)
+        receipt_hash = sha256_json({"category": category})
+        receipt = {
+            "receipt_hash": receipt_hash,
+            "role": WEIGHT_INPUT_PURPOSES[category][0],
+            "purpose": WEIGHT_INPUT_PURPOSES[category][1],
+            "output_root": sha256_json(expected[category]),
+        }
+        return {
+            "status": "succeeded",
+            "result": expected[category],
+            "receipt": receipt,
+            "receipt_graph": {
+                "root_receipt_hash": receipt_hash,
+                "boot_identities": [],
+                "receipts": [receipt],
+                "transport_attempts": [],
+                "host_operations": [],
+            },
+        }
+
+    await build_gateway_weight_inputs_v2(
+        calculation_snapshot=snapshot,
+        allocation_graph=allocation,
+        leaderboard_window_start="2026-07-03T00:00:00Z",
+        leaderboard_window_end="2026-07-10T00:00:00Z",
+        execute=execute,
+        load_sourcing_graphs=lambda **_kwargs: _async_value([]),
+    )
+
+
+@pytest.mark.asyncio
+async def test_gateway_weight_input_builder_gives_each_live_job_one_client(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: (),
+    )
+    snapshot = _snapshot()
+    allocation = _allocation_graph()
+    expected = gateway_weight_input_value_documents_v2(
+        calculation_snapshot=snapshot,
+        gateway_authority_event_hash=allocation["root_receipt_hash"],
+    )
+    clients = []
+    observed = []
+
+    def client_factory():
+        client = object()
+        clients.append(client)
+        return client
+
+    async def execute(**kwargs):
+        category = kwargs["payload"]["category"]
+        client = kwargs["client"]
+        assert kwargs["credential_coordinator_client"] is client
+        assert kwargs["artifact_coordinator_client"] is client
+        observed.append(client)
+        receipt_hash = sha256_json({"category": category})
+        receipt = {
+            "receipt_hash": receipt_hash,
+            "role": WEIGHT_INPUT_PURPOSES[category][0],
+            "purpose": WEIGHT_INPUT_PURPOSES[category][1],
+            "output_root": sha256_json(expected[category]),
+        }
+        return {
+            "status": "succeeded",
+            "result": expected[category],
+            "receipt": receipt,
+            "receipt_graph": {
+                "root_receipt_hash": receipt_hash,
+                "boot_identities": [],
+                "receipts": [receipt],
+                "transport_attempts": [],
+                "host_operations": [],
+            },
+        }
+
+    await build_gateway_weight_inputs_v2(
+        calculation_snapshot=snapshot,
+        allocation_graph=allocation,
+        leaderboard_window_start="2026-07-03T00:00:00Z",
+        leaderboard_window_end="2026-07-10T00:00:00Z",
+        execute=execute,
+        load_sourcing_graphs=lambda **_kwargs: _async_value([]),
+        coordinator_client_factory=client_factory,
+    )
+
+    assert {id(client) for client in observed} == {id(client) for client in clients}
+    assert len({id(client) for client in clients}) == len(
+        GATEWAY_WEIGHT_INPUT_CATEGORIES
+    )
 
 
 @pytest.mark.asyncio

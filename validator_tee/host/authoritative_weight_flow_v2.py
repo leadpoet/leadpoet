@@ -201,7 +201,7 @@ async def prepare_authoritative_weight_publication_v2(
         [str, Mapping[str, Any], float], Awaitable[Mapping[str, Any]]
     ] = _post_json,
     before_publish: Optional[Callable[[Mapping[str, Any]], Any]] = None,
-    input_timeout_seconds: float = 1800.0,
+    input_timeout_seconds: float = 90.0,
     publication_timeout_seconds: float = 300.0,
 ) -> Dict[str, Any]:
     """Build, publish, and return the only vector authorized for chain use."""

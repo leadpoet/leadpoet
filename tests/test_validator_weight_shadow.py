@@ -40,6 +40,16 @@ def test_primary_weight_path_uses_only_v2_allocation_handoff():
 
 def test_weight_input_fetch_budget_leaves_time_for_chain_submission():
     assert validator_integration.WEIGHT_INPUT_FETCH_TIMEOUT_SECONDS == 90
+    from validator_tee.host.authoritative_weight_flow_v2 import (
+        prepare_authoritative_weight_publication_v2,
+    )
+
+    assert (
+        inspect.signature(prepare_authoritative_weight_publication_v2)
+        .parameters["input_timeout_seconds"]
+        .default
+        == 90.0
+    )
     for fetcher in (
         validator_integration.fetch_research_lab_allocation_bundle,
         validator_integration.fetch_research_lab_attested_allocation_bundle,

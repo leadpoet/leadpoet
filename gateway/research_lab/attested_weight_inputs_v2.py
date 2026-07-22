@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, Mapping, Sequence
 
 from gateway.research_lab.attested_coordinator_v2 import execute_coordinator_v2
@@ -9,6 +10,7 @@ from gateway.research_lab.attested_v2_store import (
     load_sourcing_epoch_graphs_v2,
 )
 from gateway.tee.coordinator_executor_v2 import OP_ATTEST_WEIGHT_INPUT
+from gateway.utils.tee_client import TEEClient, coordinator_tee_client
 from leadpoet_canonical.attested_v2 import (
     canonical_json,
     sha256_json,
@@ -40,6 +42,15 @@ _ANOMALY_SOURCE_CATEGORIES = (
 
 class AttestedWeightInputsV2Error(RuntimeError):
     """Gateway weight inputs are incomplete, conflicting, or unverifiable."""
+
+
+def _coordinator_client() -> TEEClient:
+    """Return one connection owner for one concurrent coordinator job."""
+
+    return TEEClient(
+        cid=coordinator_tee_client.cid,
+        port=coordinator_tee_client.port,
+    )
 
 
 def _union_receipt_sets(
@@ -81,6 +92,7 @@ async def build_gateway_weight_inputs_v2(
     execute: Any = execute_coordinator_v2,
     load_sourcing_graphs: Any = load_sourcing_epoch_graphs_v2,
     execution_options: Mapping[str, Any] | None = None,
+    coordinator_client_factory: Any = _coordinator_client,
 ) -> dict[str, Any]:
     """Produce every coordinator input receipt from measured source reads."""
 
@@ -113,13 +125,15 @@ async def build_gateway_weight_inputs_v2(
     )
     sourcing_graphs = await load_sourcing_graphs(current_epoch=epoch_id)
     options = dict(execution_options or {})
-    executions = {}
-    ordered_categories = sorted(
+    executions: dict[str, dict[str, Any]] = {}
+    independent_categories = sorted(
         category
         for category in GATEWAY_WEIGHT_INPUT_CATEGORIES
         if category != "anomaly_adjustments"
-    ) + ["anomaly_adjustments"]
-    for sequence, category in enumerate(ordered_categories):
+    )
+    ordered_categories = independent_categories + ["anomaly_adjustments"]
+
+    async def execute_category(category: str, sequence: int) -> None:
         role, purpose = WEIGHT_INPUT_PURPOSES[category]
         if role != "gateway_coordinator":
             raise AttestedWeightInputsV2Error(
@@ -159,6 +173,15 @@ async def build_gateway_weight_inputs_v2(
                 source: dict(executions[source]["result"])
                 for source in _ANOMALY_SOURCE_CATEGORIES
             }
+        category_options = dict(options)
+        category_client = coordinator_client_factory()
+        category_options.update(
+            {
+                "client": category_client,
+                "credential_coordinator_client": category_client,
+                "artifact_coordinator_client": category_client,
+            }
+        )
         value = await execute(
             operation=OP_ATTEST_WEIGHT_INPUT,
             purpose=purpose,
@@ -166,7 +189,7 @@ async def build_gateway_weight_inputs_v2(
             sequence=sequence,
             payload=payload,
             parent_graphs=parents,
-            **options,
+            **category_options,
         )
         if not isinstance(value, Mapping) or value.get("status") != "succeeded":
             raise AttestedWeightInputsV2Error(
@@ -219,6 +242,18 @@ async def build_gateway_weight_inputs_v2(
                     % category
                 )
         executions[category] = dict(value)
+
+    # Every category except anomaly_adjustments has independent measured
+    # inputs. Run those jobs together so their mandatory encrypted artifact
+    # persistence does not consume the block-345 submission window serially.
+    # The anomaly job remains ordered after all of its receipt parents exist.
+    await asyncio.gather(
+        *(
+            execute_category(category, sequence)
+            for sequence, category in enumerate(independent_categories)
+        )
+    )
+    await execute_category("anomaly_adjustments", len(independent_categories))
 
     all_graphs = [
         executions[category]["receipt_graph"]

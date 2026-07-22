@@ -40,8 +40,8 @@ def test_auditor_cli_config_enables_sdk_argument_parsing(monkeypatch):
 @pytest.mark.parametrize(
     ("environ", "expected"),
     (
-        ({}, "http://52.91.135.79:8000"),
-        ({"GATEWAY_URL": ""}, "http://52.91.135.79:8000"),
+        ({}, "https://gateway.subnet71.com"),
+        ({"GATEWAY_URL": ""}, "https://gateway.subnet71.com"),
         (
             {"GATEWAY_URL": " https://gateway.example.com/ "},
             "https://gateway.example.com/",

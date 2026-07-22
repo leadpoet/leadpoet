@@ -212,7 +212,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Public gateway used when operators do not provide an override.
-PUBLIC_GATEWAY_URL = "http://52.91.135.79:8000"
+PUBLIC_GATEWAY_URL = "https://gateway.subnet71.com"
 
 
 def _default_gateway_url(environ=None) -> str:

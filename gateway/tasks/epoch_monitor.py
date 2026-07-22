@@ -29,6 +29,7 @@ from Leadpoet.utils.subnet_epoch import (
     load_subnet_epoch_cutover,
     read_subnet_epoch_snapshot,
 )
+from leadpoet_canonical.constants import WEIGHT_SUBMISSION_BLOCK
 from gateway.utils.subnet_epoch_archive import (
     read_exact_subnet_epoch_snapshot_from_archive,
     validate_cutover_anchor_from_archive,
@@ -81,6 +82,10 @@ class EpochMonitor:
         # They receive no lifecycle events and settle nonfinalized; the
         # monitor resumes at the first boundary it fully observes.
         self.skipped_epochs = set()
+        # Exact boundary snapshots for epochs being originated after their
+        # boundary but before the weight-submission block. The initialization
+        # must anchor the true boundary authority, not the live poll state.
+        self._late_origination_snapshots = {}
         self.validation_ending_epochs = set()
         self.pending_validation_ends = {}
         self.closed_epochs = set()  # Epochs that completed consensus successfully
@@ -307,24 +312,40 @@ class EpochMonitor:
                 f"{current_epoch}; validating it before reuse"
             )
         else:
-            # A restart cannot recreate the queue/assignment snapshot after
-            # the transition has passed. Only a process observing the exact
-            # official boundary may originate a missing initialization.
+            # The epoch authority is the exact boundary snapshot, which the
+            # archive can reproduce byte-for-byte at any later block. A
+            # missing initialization may therefore be originated after the
+            # boundary, as long as it lands before the weight-submission
+            # window opens; the initialization stays anchored to the true
+            # boundary snapshot, never to mid-epoch chain state.
             current_boundary = await self._find_stateful_transition_snapshot(
                 snapshot.subnet_epoch_index,
                 snapshot,
             )
             if current_boundary.current_block != snapshot.current_block:
-                # The boundary passed while no lifecycle process was
-                # observing it, so this epoch can never be initialized.
-                # Skip it (it settles nonfinalized) instead of wedging the
-                # monitor; the next observed transition resumes normally.
-                print(
-                    f"⏭️  Epoch {current_epoch} passed its official boundary "
-                    "without a durable initialization; skipping it and "
-                    "arming for the next boundary"
-                )
-                self.skipped_epochs.add(current_epoch)
+                if snapshot.epoch_block < WEIGHT_SUBMISSION_BLOCK:
+                    print(
+                        f"⏪ Epoch {current_epoch} boundary passed at block "
+                        f"{current_boundary.current_block}; originating its "
+                        f"initialization late at epoch block "
+                        f"{snapshot.epoch_block} (before the submission "
+                        f"window at {WEIGHT_SUBMISSION_BLOCK})"
+                    )
+                    self._late_origination_snapshots[current_epoch] = (
+                        current_boundary
+                    )
+                else:
+                    # Too late: weights were already due for this epoch, so
+                    # a fresh initialization could never lead to a valid
+                    # submission. Skip it (it settles nonfinalized) instead
+                    # of wedging the monitor.
+                    print(
+                        f"⏭️  Epoch {current_epoch} passed its official "
+                        "boundary without a durable initialization and its "
+                        "submission window already opened; skipping it and "
+                        "arming for the next boundary"
+                    )
+                    self.skipped_epochs.add(current_epoch)
 
         if snapshot.subnet_epoch_index == cutover.first_subnet_epoch_index:
             return
@@ -423,12 +444,25 @@ class EpochMonitor:
                     initialization is None
                     and boundary.current_block != snapshot.current_block
                 ):
-                    print(
-                        f"⏭️  Epoch {target_epoch} passed its official "
-                        "boundary without a durable initialization; "
-                        "skipping it and arming for the next boundary"
-                    )
-                    self.skipped_epochs.add(target_epoch)
+                    if snapshot.epoch_block < WEIGHT_SUBMISSION_BLOCK:
+                        print(
+                            f"⏪ Epoch {target_epoch} boundary passed at "
+                            f"block {boundary.current_block}; originating "
+                            f"its initialization late at epoch block "
+                            f"{snapshot.epoch_block} (before the submission "
+                            f"window at {WEIGHT_SUBMISSION_BLOCK})"
+                        )
+                        self._late_origination_snapshots[target_epoch] = (
+                            boundary
+                        )
+                    else:
+                        print(
+                            f"⏭️  Epoch {target_epoch} passed its official "
+                            "boundary without a durable initialization and "
+                            "its submission window already opened; skipping "
+                            "it and arming for the next boundary"
+                        )
+                        self.skipped_epochs.add(target_epoch)
             cursor = boundary
         return cursor
 
@@ -554,7 +588,12 @@ class EpochMonitor:
             asyncio.create_task(
                 self._on_epoch_start(
                     current_epoch,
-                    epoch_snapshot=initialization_snapshot,
+                    # A late origination must anchor the exact boundary
+                    # snapshot, never the mid-epoch poll state.
+                    epoch_snapshot=self._late_origination_snapshots.pop(
+                        current_epoch,
+                        initialization_snapshot,
+                    ),
                 )
             )
 

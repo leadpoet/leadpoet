@@ -24,14 +24,56 @@ class ReleaseLineageV2Error(RuntimeError):
     """A receipt ancestor is not bound to an approved V2 release."""
 
 
+# Validator enclaves are built dynamically from Git and verified against the
+# gateway's reproducible PCR0 build cache, not against a six-build gateway
+# release channel. Receipt ancestry legitimately mixes gateway and validator
+# boots (an allocation graph now embeds the finalized weight receipt ancestry,
+# which carries the validator boot), so validator boots must be routed to
+# dynamic PCR0 verification instead of a gateway release-role expectation.
+_VALIDATOR_PHYSICAL_ROLE = "validator_weights"
+
+
+def _is_gateway_release_boot(identity: Mapping[str, Any]) -> bool:
+    return str(identity.get("physical_role") or "") != _VALIDATOR_PHYSICAL_ROLE
+
+
+def _verify_validator_dynamic_boot(identity: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Verify a validator boot via the gateway's dynamic PCR0 build cache.
+
+    Mirrors the authoritative weight-submission boot check so scoring and
+    submission apply identical trust to the same validator boot identity.
+    """
+
+    from gateway.utils.pcr0_builder import verify_pcr0
+
+    rebuilt = verify_pcr0(str(identity.get("pcr0") or ""))
+    if not rebuilt.get("valid"):
+        raise ReleaseLineageV2Error(
+            "validator PCR0 is absent from the dynamic Git build cache"
+        )
+    if str(rebuilt.get("commit_hash") or "").lower() != str(
+        identity.get("commit_sha") or ""
+    ).lower():
+        raise ReleaseLineageV2Error(
+            "validator PCR0 commit differs from boot identity"
+        )
+    return verify_boot_identity_nitro(
+        identity,
+        expected_pcr0=str(identity.get("pcr0") or ""),
+        certificate_validity_at_attestation_time=True,
+    )
+
+
 def _required_commits(
     parent_graphs: Sequence[Mapping[str, Any]],
 ) -> set[str]:
+    # Only gateway boots require an approved gateway release channel; validator
+    # boots are verified out of band via dynamic PCR0.
     commits = {
         str(identity.get("commit_sha") or "").lower()
         for graph in parent_graphs
         for identity in graph.get("boot_identities") or ()
-        if isinstance(identity, Mapping)
+        if isinstance(identity, Mapping) and _is_gateway_release_boot(identity)
     }
     if "" in commits:
         raise ReleaseLineageV2Error(
@@ -125,6 +167,10 @@ def build_release_lineage_boot_verifier_v2(
     }
 
     def verify(identity: Mapping[str, Any]) -> Mapping[str, Any]:
+        if not _is_gateway_release_boot(identity):
+            # Validator boots in mixed receipt ancestry verify via the
+            # gateway's dynamic PCR0 build cache, not a gateway release role.
+            return _verify_validator_dynamic_boot(identity)
         commit = str(identity.get("commit_sha") or "").lower()
         release = approved.get(commit)
         if release is None:

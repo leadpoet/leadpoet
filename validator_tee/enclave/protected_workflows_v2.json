@@ -42,7 +42,7 @@
       "symbol": "build_serve_axon_extrinsic_authorization_v2"
     },
     {
-      "ast_sha256": "sha256:19defdfc0f94bb8ec7a369e04e5e6f603cdacae112cc8e4fc0ddc4bbf9863cb1",
+      "ast_sha256": "sha256:8ec32b54af230a1b7da4749b04bf0e99f22f0c0c82a7df8f5db08f7122764c0c",
       "path": "leadpoet_canonical/hotkey_authority_v2.py",
       "symbol": "build_weight_extrinsic_authorization_v2"
     },
@@ -67,7 +67,7 @@
       "symbol": "validate_serve_axon_extrinsic_authorization_v2"
     },
     {
-      "ast_sha256": "sha256:1f14ad84f44765cfca8690ecf065b7f45c15844da8034d09f86a9505288c9e48",
+      "ast_sha256": "sha256:ec9d578980936f90854e108d1dbc2d529916a32906f0161cb96b7be02033c960",
       "path": "leadpoet_canonical/hotkey_authority_v2.py",
       "symbol": "validate_weight_extrinsic_authorization_v2"
     },
@@ -202,7 +202,7 @@
       "symbol": "EnclaveChainRpcTransportV2.call"
     },
     {
-      "ast_sha256": "sha256:8a8ba9fb1e35e23a8e33e68c797fd117e9d2527d399956b486a6c5b20a381f52",
+      "ast_sha256": "sha256:e8fff23aec4b32f85ea96e8e4785db82aac7ec6874669dd9d2d2f57ccd386e1c",
       "path": "validator_tee/enclave/chain_source_v2.py",
       "symbol": "ValidatorChainSourceV2.find_finalized_extrinsic_inclusion"
     },
@@ -212,7 +212,7 @@
       "symbol": "ValidatorChainSourceV2.read_finalized_snapshot"
     },
     {
-      "ast_sha256": "sha256:0ac77ad4dceaeefe18874c6dee6cc16d38b0e667634a91057b38ac18eb840293",
+      "ast_sha256": "sha256:f52503f491096702217a2ae38a7b22fd828b452c8ea441038c5312d1c7220ac1",
       "path": "validator_tee/enclave/hotkey_authority_v2.py",
       "symbol": "ValidatorHotkeyAuthorityV2.confirm_weight_publication"
     },
@@ -247,7 +247,7 @@
       "symbol": "ValidatorHotkeyAuthorityV2.sign_serve_axon_extrinsic"
     },
     {
-      "ast_sha256": "sha256:0f2e33353f65537eb143b74b7884ad9c339d29f7ab5de65fa65a96333daad190",
+      "ast_sha256": "sha256:259b94200bda03fb0288bca26fadae287b16e3be7f352cef35f7efc6a9af89f1",
       "path": "validator_tee/enclave/hotkey_authority_v2.py",
       "symbol": "ValidatorHotkeyAuthorityV2.sign_weight_extrinsic"
     },
@@ -282,7 +282,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:53753378ff34aa309e3e44e7cdfed1b0a5a9702abc8c8ce03b8c55e7dc31358b",
-  "protected_source_commit": "d6132212d1844c95b1f0af7060225d30df597e66",
+  "manifest_hash": "sha256:2135220238ce50565a1ba4fb5a4e80f5f6c52d18b257d8b94dd0e313f91c0307",
+  "protected_source_commit": "c08f83d32866895b943a38910a60e40b4ca83943",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

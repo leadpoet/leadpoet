@@ -212,17 +212,50 @@ async def test_restart_hydration_closes_previous_epoch_from_durable_init(
 
 
 @pytest.mark.asyncio
-async def test_restart_skips_missing_initialization_after_boundary(
+async def test_restart_originates_late_before_submission_window(
     monkeypatch,
 ):
-    # A boundary that passed while no lifecycle process observed it can
-    # never be initialized. The monitor must record the epoch as skipped
-    # (it settles nonfinalized) instead of wedging the polling loop; the
-    # invariant that initializations are never originated late holds.
+    # The epoch authority is the exact boundary snapshot, reproducible from
+    # the archive at any later block. A restart that lands before the
+    # weight-submission window must originate the missing initialization,
+    # anchored to the boundary snapshot rather than mid-epoch chain state.
     from gateway.tasks import epoch_lifecycle, epoch_monitor
 
     cutover = _cutover()
     late = _snapshot(block=110)
+    boundary_snapshot = _snapshot(block=100)
+
+    async def missing(*_args, **_kwargs):
+        return None
+
+    async def boundary(*_args, **_kwargs):
+        return boundary_snapshot
+
+    monkeypatch.setattr(epoch_monitor, "load_subnet_epoch_cutover", lambda: cutover)
+    monkeypatch.setattr(epoch_lifecycle, "get_durable_epoch_event", missing)
+    monitor = epoch_monitor.EpochMonitor()
+    monkeypatch.setattr(monitor, "_find_stateful_transition_snapshot", boundary)
+
+    await monitor._hydrate_stateful_state(late)
+
+    assert 101 not in monitor.skipped_epochs
+    assert monitor._late_origination_snapshots[101] is boundary_snapshot
+    assert 101 not in monitor.initialized_epochs
+    assert 101 not in monitor.initializing_epochs
+
+
+@pytest.mark.asyncio
+async def test_restart_skips_missing_initialization_after_submission_window(
+    monkeypatch,
+):
+    # Once the submission window has opened, a fresh initialization could
+    # never lead to a valid weight submission for the epoch. The monitor
+    # must record it as skipped (it settles nonfinalized) instead of
+    # wedging the polling loop.
+    from gateway.tasks import epoch_lifecycle, epoch_monitor
+
+    cutover = _cutover()
+    late = _snapshot(block=100 + 350)
 
     async def missing(*_args, **_kwargs):
         return None
@@ -238,6 +271,7 @@ async def test_restart_skips_missing_initialization_after_boundary(
     await monitor._hydrate_stateful_state(late)
 
     assert 101 in monitor.skipped_epochs
+    assert 101 not in monitor._late_origination_snapshots
     assert 101 not in monitor.initialized_epochs
     assert 101 not in monitor.initializing_epochs
 
@@ -264,7 +298,11 @@ async def test_restart_skips_uninitialized_previous_epoch(monkeypatch):
 
     await monitor._hydrate_stateful_state(late)
 
-    assert {101, 102} <= monitor.skipped_epochs
+    # The fully missed previous epoch stays skipped; the current epoch is
+    # still before its submission window, so it is originated late instead.
+    assert 101 in monitor.skipped_epochs
+    assert 102 not in monitor.skipped_epochs
+    assert 102 in monitor._late_origination_snapshots
 
 
 @pytest.mark.asyncio
@@ -530,3 +568,36 @@ async def test_validation_end_marks_memory_only_after_both_durable_events(
     assert end_payloads[-1]["epoch_key_semantics"] == "settlement_ordinal"
     assert end_payloads[-1]["epoch_authority"] == authority
     assert inputs_kwargs["epoch_authority"] == authority
+
+
+@pytest.mark.asyncio
+async def test_dispatch_anchors_late_origination_to_boundary_snapshot(
+    monkeypatch,
+):
+    # When an epoch is originated after its boundary, the initialization
+    # dispatch must receive the exact boundary snapshot, not the live
+    # mid-epoch poll snapshot the loop happened to observe.
+    from gateway.tasks import epoch_monitor
+
+    cutover = _cutover()
+    monkeypatch.setattr(epoch_monitor, "load_subnet_epoch_cutover", lambda: cutover)
+    monitor = epoch_monitor.EpochMonitor()
+    boundary_snapshot = _snapshot(block=100)
+    live = _snapshot(block=130)
+    monitor._late_origination_snapshots[101] = boundary_snapshot
+    captured = {}
+
+    async def capture(epoch_id, epoch_snapshot):
+        captured["epoch_id"] = epoch_id
+        captured["snapshot"] = epoch_snapshot
+
+    monkeypatch.setattr(monitor, "_on_epoch_start", capture)
+    await monitor._process_stateful_snapshot(live)
+    for _ in range(10):
+        if captured:
+            break
+        await asyncio.sleep(0)
+
+    assert captured["epoch_id"] == 101
+    assert captured["snapshot"] is boundary_snapshot
+    assert 101 not in monitor._late_origination_snapshots

@@ -524,6 +524,22 @@ async def score_company_autoresearch_intent_v2(
             signal_results,
         ) = await score_company_autoresearch_intent_signal(company, icp)
         if all_fabricated:
+            # A real company whose submitted evidence URL was weak dies here
+            # as a false negative. Before finalizing the zero, ask for
+            # replacement evidence sources for the same claim and re-verify
+            # them through this same scorer — repair supplies candidates,
+            # never verdicts.
+            repaired = await _attempt_autoresearch_evidence_repair(company, icp)
+            if repaired is not None:
+                (
+                    intent_raw,
+                    intent_final,
+                    decay_multiplier,
+                    _max_confidence,
+                    all_fabricated,
+                    signal_results,
+                ) = repaired
+        if all_fabricated:
             logger.warning(
                 f"❌ ALL AUTORESEARCH INTENT SIGNALS FABRICATED for company "
                 f"{company.company_name!r} — zeroing entire score"
@@ -554,6 +570,73 @@ async def score_company_autoresearch_intent_v2(
         failure_reason=None,
         intent_signals_detail=signal_results,
     )
+
+
+async def _attempt_autoresearch_evidence_repair(
+    company: CompanyOutput, icp: ICPPrompt
+) -> Optional[Tuple[float, float, float, int, bool, List[dict]]]:
+    """Try to rescue an all-zero intent verdict with repaired evidence URLs.
+
+    Returns the re-scored tuple when a repaired source verifies, else None so
+    the original zero stands. Never raises; bounded to one repair run and at
+    most two re-verified sources per company.
+    """
+    try:
+        from qualification.scoring import deepline_evidence_repair as _repair
+
+        if not _repair.enabled():
+            return None
+        signals = list(company.intent_signals or [])
+        if not signals:
+            return None
+        primary = signals[0]
+        criterion = ""
+        icp_signals = getattr(icp, "intent_signals", None) or []
+        if icp_signals:
+            criterion = str(icp_signals[0])
+        if not criterion:
+            return None
+        sources = await _repair.repair_sources(
+            company_name=company.company_name or "",
+            company_domain=company.company_website or "",
+            requested_criterion=criterion,
+            evidence_kind="intent",
+            existing_url=getattr(primary, "url", None),
+        )
+        if not sources:
+            return None
+        replacement_signals = []
+        for source in sources[: _repair.MAX_SOURCES]:
+            url = str(source.get("url") or "").strip()
+            if not url.startswith(("http://", "https://")):
+                continue
+            update: dict = {"url": url}
+            excerpt = str(source.get("excerpt") or "").strip()
+            if excerpt:
+                update["snippet"] = excerpt[:600]
+            published = str(source.get("published_date") or "").strip()
+            if published:
+                update["date"] = published
+            replacement_signals.append(primary.model_copy(update=update))
+        if not replacement_signals:
+            return None
+        candidate = company.model_copy(update={"intent_signals": replacement_signals})
+        result = await score_company_autoresearch_intent_signal(candidate, icp)
+        if result[4]:  # still all fabricated — repair found nothing verifiable
+            return None
+        logger.info(
+            "✅ deepline_evidence_repair_rescued company=%r repaired_sources=%d",
+            company.company_name,
+            len(replacement_signals),
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001 — repair must never break scoring
+        logger.warning(
+            "deepline_evidence_repair_hook_error company=%r error=%s",
+            getattr(company, "company_name", ""),
+            str(exc)[:160],
+        )
+        return None
 
 
 def _zero_company_breakdown(reason: Optional[str]) -> LeadScoreBreakdown:

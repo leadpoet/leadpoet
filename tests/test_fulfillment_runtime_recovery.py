@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -75,8 +76,60 @@ def test_fulfillment_worker_detection_uses_all_configured_numeric_ids(
     monkeypatch.setenv("FULFILLMENT_WEBSHARE_PROXY_0", "ignored")
     monkeypatch.setenv("FULFILLMENT_WEBSHARE_PROXY_7", "")
     monkeypatch.setenv("FULFILLMENT_WEBSHARE_PROXY_BAD", "ignored")
+    monkeypatch.setenv("FULFILLMENT_WEBSHARE_PROXY_11", "ignored")
 
     assert detect_fulfillment_worker_ids() == [1, 3, 10]
+
+
+@pytest.mark.asyncio
+async def test_sparse_worker_ids_receive_work_without_renumbering(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ENABLE_FULFILLMENT", "true")
+    _clear_fulfillment_proxies(monkeypatch)
+    for worker_id in (1, 3, 10):
+        monkeypatch.setenv(
+            f"FULFILLMENT_WEBSHARE_PROXY_{worker_id}",
+            f"http://proxy-{worker_id}",
+        )
+    request_id = "43c6bc55-80f9-49e3-af0c-7a6ae6e39358"
+    submissions = [
+        {
+            "submission_id": f"submission-{index}",
+            "miner_hotkey": f"miner-{index}",
+            "lead_ids": [f"lead-{index}"],
+            "leads": [{"lead": index}],
+        }
+        for index in range(4)
+    ]
+    monkeypatch.setattr(
+        cloud_db,
+        "gateway_get_fulfillment_reveals",
+        lambda _wallet: {
+            "requests": [{
+                "request_id": request_id,
+                "status": "scoring",
+                "icp": {},
+                "submissions": submissions,
+            }]
+        },
+    )
+
+    await Validator.process_fulfillment_workflow(
+        _validator_stub(last_processed_epoch=-1),
+        _epoch_state(),
+    )
+
+    files = list((tmp_path / "validator_weights").glob("*_work_*.json"))
+    assert {int(path.name.split("_")[2]) for path in files} == {1, 3, 10}
+    assigned = [
+        row["submission_id"]
+        for path in files
+        for row in json.loads(path.read_text(encoding="utf-8"))["submissions"]
+    ]
+    assert sorted(assigned) == sorted(row["submission_id"] for row in submissions)
 
 
 @pytest.mark.asyncio
@@ -267,6 +320,111 @@ async def test_worker_infrastructure_error_retries_without_scoring_miners_zero(
     assert not results.exists()
 
 
+@pytest.mark.asyncio
+async def test_empty_worker_error_message_is_still_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ENABLE_FULFILLMENT", "true")
+    _clear_fulfillment_proxies(monkeypatch)
+    monkeypatch.setenv("FULFILLMENT_WEBSHARE_PROXY_1", "http://proxy-1")
+    monkeypatch.setattr(
+        cloud_db,
+        "gateway_get_fulfillment_reveals",
+        lambda _wallet: {"requests": []},
+    )
+    epoch = 24_105
+    work, results = _work_paths(tmp_path, epoch=epoch)
+    work.write_text(json.dumps({"epoch": epoch, "submissions": [{}]}))
+    results.write_text(json.dumps({
+        "epoch": epoch,
+        "request_id": "43c6bc55-80f9-49e3-af0c-7a6ae6e39358",
+        "error_type": "TimeoutError",
+        "error": "",
+        "submission_results": [],
+    }))
+
+    await Validator.process_fulfillment_workflow(
+        _validator_stub(last_processed_epoch=epoch),
+        _epoch_state(epoch),
+    )
+
+    assert work.exists()
+    assert not results.exists()
+
+
+@pytest.mark.asyncio
+async def test_pending_delivery_blocks_redispatch_after_scoring_lease_expires(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ENABLE_FULFILLMENT", "true")
+    _clear_fulfillment_proxies(monkeypatch)
+    monkeypatch.setenv("FULFILLMENT_WEBSHARE_PROXY_1", "http://proxy-1")
+    request_id = "43c6bc55-80f9-49e3-af0c-7a6ae6e39358"
+    submission = {
+        "submission_id": "submission-1",
+        "miner_hotkey": "miner-1",
+        "lead_ids": ["lead-1"],
+        "leads": [{"lead": 1}],
+    }
+    monkeypatch.setattr(
+        cloud_db,
+        "gateway_get_fulfillment_reveals",
+        lambda _wallet: {"requests": [{
+            "request_id": request_id,
+            "status": "scoring",
+            "icp": {},
+            "submissions": [submission],
+        }]},
+    )
+    monkeypatch.setattr(
+        cloud_db,
+        "gateway_submit_fulfillment_scores",
+        lambda *_args, **_kwargs: False,
+    )
+    old_epoch = 24_104
+    work, results = _work_paths(
+        tmp_path,
+        epoch=old_epoch,
+        request_id=request_id,
+    )
+    work.write_text(json.dumps({
+        "epoch": old_epoch,
+        "request_id": request_id,
+        "submissions": [submission],
+    }))
+    results.write_text(json.dumps({
+        "epoch": old_epoch,
+        "request_id": request_id,
+        "submission_results": [{
+            "miner_hotkey": "miner-1",
+            "submission_id": "submission-1",
+            "lead_ids": ["lead-1"],
+            "results": [FulfillmentScoreResult(
+                lead_id="lead-1",
+                failure_reason="test",
+            ).model_dump()],
+        }],
+    }))
+    stale = time.time() - 81 * 60
+    os.utime(work, (stale, stale))
+
+    await Validator.process_fulfillment_workflow(
+        _validator_stub(last_processed_epoch=24_105),
+        _epoch_state(24_105),
+    )
+
+    matching = list(
+        (tmp_path / "validator_weights").glob(f"*_work_*_{request_id}.json")
+    )
+    assert matching == [work]
+    assert results.exists()
+    assert work.stat().st_mtime > stale
+
+
 def test_score_formatter_rejects_cardinality_mismatch() -> None:
     with pytest.raises(ValueError, match="cardinality mismatch"):
         format_scores_for_gateway(
@@ -354,6 +512,16 @@ def test_every_validator_and_research_worker_launch_has_epoch_guard() -> None:
     )
 
     assert deploy.count(env_arg) == 3
+    assert deploy.count(
+        '-e VALIDATOR_RUNTIME_GENERATION="$VALIDATOR_RUNTIME_GENERATION"'
+    ) == 3
+    fulfillment_section = deploy[
+        deploy.index("# Auto-detect FULFILLMENT proxies"):
+        deploy.index("# Wait for containers to start")
+    ]
+    assert 'FF_WORKER_IDS+=("$i")' in fulfillment_section
+    assert 'for i in "${FF_WORKER_IDS[@]}"' in fulfillment_section
+    assert "break" not in fulfillment_section
     assert "validate_worker_epoch_authority" in deploy
     assert "validate_validator_shared_epoch_file(" in deploy
     assert "from neurons.validator" not in deploy

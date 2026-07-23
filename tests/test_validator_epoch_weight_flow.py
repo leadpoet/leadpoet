@@ -13,6 +13,7 @@ from Leadpoet.utils.subnet_epoch import (
     SubnetEpochCutover,
     SubnetEpochError,
     SubnetEpochSnapshot,
+    validate_validator_shared_epoch_file,
 )
 from Leadpoet.validator import reward as reward_module
 import neurons.validator as validator_module
@@ -459,3 +460,41 @@ def test_shared_stateful_epoch_file_rejects_tampered_derived_authority(
 
     with pytest.raises(SubnetEpochError, match="authority is not canonical"):
         validator_module._read_shared_epoch_state_file(max_age_seconds=30)
+
+
+def test_shared_epoch_file_is_bound_to_runtime_generation(
+    monkeypatch,
+    tmp_path,
+):
+    cutover = _cutover()
+    snapshot = _snapshot(
+        block=719,
+        last_epoch_block=360,
+        index=10,
+        head="finalized",
+    )
+    state = validator_module._ValidatorEpochState.from_snapshot(snapshot, cutover)
+    monkeypatch.setattr(
+        validator_module,
+        "load_subnet_epoch_cutover",
+        lambda: cutover,
+    )
+    monkeypatch.setenv("VALIDATOR_RUNTIME_GENERATION", "generation-current")
+    document = state.to_shared_document()
+    document["timestamp"] = int(time.time())
+    path = tmp_path / "current_block.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(SubnetEpochError, match="runtime generation"):
+        validate_validator_shared_epoch_file(
+            path,
+            max_age_seconds=30,
+            cutover=cutover,
+            expected_runtime_generation="generation-old",
+        )
+    assert validate_validator_shared_epoch_file(
+        path,
+        max_age_seconds=30,
+        cutover=cutover,
+        expected_runtime_generation="generation-current",
+    ) == snapshot

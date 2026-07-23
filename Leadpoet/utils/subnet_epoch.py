@@ -29,7 +29,7 @@ from urllib.parse import urlparse
 EPOCH_SCHEME = "bittensor.subnet_epoch_index.v1"
 CUTOVER_SCHEMA_VERSION = "leadpoet.subnet_epoch_cutover.v1"
 SNAPSHOT_SCHEMA_VERSION = "leadpoet.subnet_epoch_snapshot.v1"
-VALIDATOR_SHARED_EPOCH_SCHEMA_VERSION = "leadpoet.validator_shared_epoch.v3"
+VALIDATOR_SHARED_EPOCH_SCHEMA_VERSION = "leadpoet.validator_shared_epoch.v4"
 CUTOVER_JSON_ENV = "LEADPOET_SUBNET_EPOCH_CUTOVER_JSON"
 CUTOVER_PATH_ENV = "LEADPOET_SUBNET_EPOCH_CUTOVER_PATH"
 # The activated SN71 settlement mapping is public, immutable chain data.
@@ -442,6 +442,7 @@ def validate_validator_shared_epoch_file(
     max_age_seconds: int,
     environ: Optional[Mapping[str, str]] = None,
     cutover: Optional[SubnetEpochCutover] = None,
+    expected_runtime_generation: Optional[str] = None,
 ) -> SubnetEpochSnapshot:
     """Validate a coordinator-written worker epoch document without runtime imports."""
 
@@ -466,12 +467,19 @@ def validate_validator_shared_epoch_file(
         "subnet_epoch_index",
         "epoch_ref",
         "authority",
+        "runtime_generation",
         "timestamp",
     }
     if not isinstance(document, dict) or set(document) != expected_fields:
         raise SubnetEpochError("shared epoch file fields are invalid")
     if document.get("schema_version") != VALIDATOR_SHARED_EPOCH_SCHEMA_VERSION:
         raise SubnetEpochError("shared epoch file schema is unsupported")
+    runtime_generation = str(document.get("runtime_generation") or "").strip()
+    if not runtime_generation:
+        raise SubnetEpochError("shared epoch runtime generation is missing")
+    expected_generation = str(expected_runtime_generation or "").strip()
+    if expected_generation and runtime_generation != expected_generation:
+        raise SubnetEpochError("shared epoch runtime generation is inconsistent")
     try:
         age = int(time.time()) - int(document["timestamp"])
     except (TypeError, ValueError) as exc:

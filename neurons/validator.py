@@ -433,6 +433,10 @@ class _ValidatorEpochState:
             "subnet_epoch_index": self.subnet_epoch_index,
             "epoch_ref": self.epoch_ref,
             "authority": authority,
+            "runtime_generation": (
+                os.environ.get("VALIDATOR_RUNTIME_GENERATION", "").strip()
+                or "unconfigured"
+            ),
             "timestamp": int(time.time()),
         }
 
@@ -446,6 +450,9 @@ def _read_shared_epoch_state_file(*, max_age_seconds: int) -> _ValidatorEpochSta
         path,
         max_age_seconds=max_age_seconds,
         cutover=cutover,
+        expected_runtime_generation=(
+            os.environ.get("VALIDATOR_RUNTIME_GENERATION", "").strip() or None
+        ),
     )
     return _ValidatorEpochState.from_snapshot(
         snapshot,
@@ -611,6 +618,7 @@ def _verify_burn_target_owner(metagraph: Any, uid: int, expected_hotkey: Optiona
 # ════════════════════════════════════════════════════════════════════════════
 
 FULFILLMENT_PROXY_ENV_RE = re.compile(r"^FULFILLMENT_WEBSHARE_PROXY_(\d+)$")
+FULFILLMENT_MAX_WORKER_ID = 10
 
 
 def detect_fulfillment_worker_ids() -> List[int]:
@@ -622,7 +630,7 @@ def detect_fulfillment_worker_ids() -> List[int]:
         if not match or not str(proxy_value or "").strip():
             continue
         worker_id = int(match.group(1))
-        if worker_id > 0:
+        if 0 < worker_id <= FULFILLMENT_MAX_WORKER_ID:
             worker_ids.append(worker_id)
     return sorted(set(worker_ids))
 
@@ -5609,18 +5617,29 @@ class Validator(BaseValidatorNeuron):
                     # this — workers that died mid-scoring on epoch N, got
                     # re-dispatched on N+1, but the N file was never GC'd.
                     #
-                    # Files older than _FF_WORK_FILE_TTL_SEC are treated as
-                    # dead workers and ignored — Phase 1 may safely
-                    # re-dispatch through them, and Phase 2 below skips them
-                    # too. 80 min covers one epoch + a 10% buffer.
+                    # Scoring leases expire after 80 minutes, but a matching
+                    # result means scoring finished and delivery is pending.
+                    # Keep that request locked for the full delivery window so
+                    # a gateway outage cannot trigger duplicate provider work.
                     _FF_WORK_FILE_TTL_SEC = 80 * 60
+                    _FF_DELIVERY_FILE_TTL_SEC = 6 * 3600
                     _now_ts = time.time()
                     def _has_work_file(rid: str) -> bool:
                         for wf in weights_dir.glob(
                             f"fulfillment_worker_*_work_*_{rid}.json"
                         ):
                             try:
-                                if (_now_ts - wf.stat().st_mtime) < _FF_WORK_FILE_TTL_SEC:
+                                age = _now_ts - wf.stat().st_mtime
+                                results_file = wf.parent / wf.name.replace(
+                                    "_work_", "_results_", 1
+                                )
+                                if (
+                                    age < _FF_WORK_FILE_TTL_SEC
+                                    or (
+                                        results_file.exists()
+                                        and age < _FF_DELIVERY_FILE_TTL_SEC
+                                    )
+                                ):
                                     return True
                             except FileNotFoundError:
                                 continue
@@ -5841,11 +5860,15 @@ class Validator(BaseValidatorNeuron):
                 request_id = worker_data.get("request_id", "")
                 submission_results = worker_data.get("submission_results", [])
 
-                if worker_data.get("error"):
+                if worker_data.get("error_type") or "error" in worker_data:
+                    worker_error = (
+                        str(worker_data.get("error") or "").strip()
+                        or str(worker_data.get("error_type") or "worker_error")
+                    )
                     print(
                         f"   ⚠️ fulfillment_worker_retryable_error worker "
                         f"{wid_token} (req {request_id[:8]}): "
-                        f"{worker_data['error']}"
+                        f"{worker_error}"
                     )
                     # A worker-level exception is validator infrastructure
                     # failure, not evidence that a miner's leads are invalid.
@@ -5920,6 +5943,15 @@ class Validator(BaseValidatorNeuron):
                         pass
                 else:
                     any_submit_failed = True
+                    try:
+                        work_file.touch()
+                    except FileNotFoundError:
+                        pass
+                    except Exception as lease_exc:
+                        print(
+                            "   ❌ fulfillment_delivery_lease_refresh_failed "
+                            f"worker {wid_token}: {lease_exc}"
+                        )
                     print(f"   ⏸  Kept {work_file.name} for retry")
 
             # File-system state is now the source of truth for per-request
@@ -10333,7 +10365,7 @@ def run_dedicated_qualification_worker(config):
             
         def _read_shared_block_file(self):
             """Read current block from shared file (written by coordinator)"""
-            state = _read_shared_epoch_state_file(max_age_seconds=1800)
+            state = _read_shared_epoch_state_file(max_age_seconds=60)
             self._shared_epoch_state = state
             return (
                 state.current_block,
@@ -11055,7 +11087,7 @@ def run_dedicated_fulfillment_worker(config):
 
         def _read_shared_block_file(self):
             """Read current block from shared file (written by coordinator)."""
-            state = _read_shared_epoch_state_file(max_age_seconds=1800)
+            state = _read_shared_epoch_state_file(max_age_seconds=60)
             self._shared_epoch_state = state
             return (
                 state.current_block,

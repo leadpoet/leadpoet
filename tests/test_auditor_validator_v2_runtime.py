@@ -356,6 +356,108 @@ def test_stateful_bundle_epoch_verification_uses_archive_subtensor(monkeypatch):
     ]
 
 
+def test_stateful_bundle_epoch_reconnects_same_archive_after_read_failure(
+    monkeypatch,
+):
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.epoch_cutover = object()
+    auditor.epoch_archive_endpoint = "ws://192.168.69.55:9944"
+    stale = object()
+    refreshed = object()
+    auditor.epoch_archive_subtensor = stale
+    auditor.config = SimpleNamespace(netuid=71)
+    observed = []
+
+    class Snapshot:
+        def settlement_epoch_id(self, cutover):
+            assert cutover is auditor.epoch_cutover
+            return 101
+
+    def read_snapshot(subtensor, **kwargs):
+        observed.append(("read", subtensor, kwargs))
+        if subtensor is stale:
+            raise TimeoutError("stale archive socket")
+        return Snapshot()
+
+    monkeypatch.setattr(
+        auditor_module,
+        "read_subnet_epoch_snapshot",
+        read_snapshot,
+    )
+    monkeypatch.setattr(
+        auditor_module,
+        "_connect_epoch_archive_subtensor",
+        lambda *, endpoint: observed.append(("connect", endpoint)) or refreshed,
+    )
+    monkeypatch.setattr(
+        auditor_module,
+        "validate_subnet_epoch_cutover_anchor",
+        lambda source, cutover, *, expected_archive_endpoint: observed.append(
+            ("anchor", source, cutover, expected_archive_endpoint)
+        ),
+    )
+
+    auditor._verify_stateful_bundle_epoch(
+        {"block": 8_637_160, "epoch_id": 101}
+    )
+
+    assert auditor.epoch_archive_subtensor is refreshed
+    assert observed == [
+        (
+            "read",
+            stale,
+            {"netuid": 71, "block_number": 8_637_160},
+        ),
+        ("connect", "ws://192.168.69.55:9944"),
+        (
+            "anchor",
+            refreshed,
+            auditor.epoch_cutover,
+            "ws://192.168.69.55:9944",
+        ),
+        (
+            "read",
+            refreshed,
+            {"netuid": 71, "block_number": 8_637_160},
+        ),
+    ]
+
+
+def test_stateful_bundle_epoch_mismatch_does_not_reconnect(monkeypatch):
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.epoch_cutover = object()
+    auditor.epoch_archive_endpoint = "wss://archive.example:443"
+    auditor.epoch_archive_subtensor = object()
+    auditor.config = SimpleNamespace(netuid=71)
+
+    class Snapshot:
+        def settlement_epoch_id(self, _cutover):
+            return 100
+
+    monkeypatch.setattr(
+        auditor_module,
+        "read_subnet_epoch_snapshot",
+        lambda *_args, **_kwargs: Snapshot(),
+    )
+    monkeypatch.setattr(
+        auditor_module,
+        "_connect_epoch_archive_subtensor",
+        lambda **_kwargs: pytest.fail("semantic mismatch must not reconnect"),
+    )
+
+    with pytest.raises(
+        auditor_module.SubnetEpochError,
+        match="differs from official chain state",
+    ):
+        auditor._verify_stateful_bundle_epoch(
+            {"block": 8_637_160, "epoch_id": 101}
+        )
+
+
 def test_verifier_failure_emits_no_diagnostic_rows(monkeypatch, caplog):
     auditor = auditor_module.AuditorValidator.__new__(
         auditor_module.AuditorValidator

@@ -174,7 +174,10 @@ from typing import Dict, List, Optional, Tuple
 import bittensor as bt
 import aiohttp
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from Leadpoet.utils.bittensor_sdk import ExtrinsicOutcome
+from Leadpoet.utils.bittensor_sdk import (
+    ExtrinsicOutcome,
+    weight_hyperparameters_compat,
+)
 from Leadpoet.utils.subnet_epoch import (
     OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT,
     SubnetEpochError,
@@ -485,11 +488,37 @@ class AuditorValidator:
     def _verify_stateful_bundle_epoch(self, bundle: Dict) -> None:
         if self.epoch_cutover is None:
             raise SubnetEpochError("auditor subnet epoch cutover is unavailable")
-        snapshot = read_subnet_epoch_snapshot(
-            self.epoch_archive_subtensor,
-            netuid=int(self.config.netuid),
-            block_number=int(bundle["block"]),
-        )
+        try:
+            snapshot = read_subnet_epoch_snapshot(
+                self.epoch_archive_subtensor,
+                netuid=int(self.config.netuid),
+                block_number=int(bundle["block"]),
+            )
+        except Exception as first_error:
+            logger.warning(
+                "auditor_archive_snapshot_reconnect endpoint=%s type=%s",
+                self.epoch_archive_endpoint,
+                type(first_error).__name__,
+            )
+            refreshed = _connect_epoch_archive_subtensor(
+                endpoint=self.epoch_archive_endpoint
+            )
+            validate_subnet_epoch_cutover_anchor(
+                refreshed,
+                self.epoch_cutover,
+                expected_archive_endpoint=self.epoch_archive_endpoint,
+            )
+            self.epoch_archive_subtensor = refreshed
+            try:
+                snapshot = read_subnet_epoch_snapshot(
+                    refreshed,
+                    netuid=int(self.config.netuid),
+                    block_number=int(bundle["block"]),
+                )
+            except Exception as retry_error:
+                raise SubnetEpochError(
+                    "auditor selected archive could not verify the bundle block"
+                ) from retry_error
         if snapshot.settlement_epoch_id(self.epoch_cutover) != int(
             bundle["epoch_id"]
         ):
@@ -1530,16 +1559,21 @@ class AuditorValidator:
                 )
                 return False
             attempt += 1
-            outcome = ExtrinsicOutcome.from_sdk(
-                self.subtensor.set_weights(
-                    netuid=self.config.netuid,
-                    wallet=self.wallet,
-                    uids=uids,
-                    weights=weights,
-                    wait_for_finalization=True,
-                    mechid=0,
+            with weight_hyperparameters_compat(
+                self.subtensor,
+                netuid=int(self.config.netuid),
+                sdk_version=str(bt.__version__),
+            ):
+                outcome = ExtrinsicOutcome.from_sdk(
+                    self.subtensor.set_weights(
+                        netuid=self.config.netuid,
+                        wallet=self.wallet,
+                        uids=uids,
+                        weights=weights,
+                        wait_for_finalization=True,
+                        mechid=0,
+                    )
                 )
-            )
             if outcome.success:
                 return True
 

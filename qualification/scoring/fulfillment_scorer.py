@@ -162,6 +162,11 @@ def format_scores_for_gateway(
     Each entry is a dict with ``lead_id``, ``request_id``, ``submission_id``
     plus the score breakdown fields expected by the RPC function.
     """
+    if len(lead_ids) != len(results):
+        raise ValueError(
+            "fulfillment score cardinality mismatch: "
+            f"{len(lead_ids)} lead IDs but {len(results)} results"
+        )
     out: List[dict] = []
     for lid, result in zip(lead_ids, results):
         d = result.model_dump()

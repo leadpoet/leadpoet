@@ -26,6 +26,9 @@ from gateway.research_lab.git_tree_models import TreePolicy  # noqa: E402
 from gateway.research_lab.logging_utils import format_worker_block  # noqa: E402
 from gateway.research_lab.scoring_worker import ResearchLabGatewayScoringWorker  # noqa: E402
 from gateway.research_lab.worker import ResearchLabHostedWorker  # noqa: E402
+from gateway.research_lab.worker_autostart import (  # noqa: E402
+    build_research_lab_worker_environment,
+)
 
 
 HOSTED_PROXY_PREFIXES = (
@@ -166,6 +169,7 @@ def main() -> int:
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
+    build_research_lab_worker_environment()
     _configure_logging(args.log_level)
 
     if args.kind == "hosted":

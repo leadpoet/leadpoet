@@ -552,6 +552,7 @@ if [ $QUAL_PROXY_COUNT -gt 0 ]; then
           -e PYTHONUNBUFFERED=1 \
           -e LEADPOET_CONTAINER_MODE=1 \
           -e LEADPOET_WRAPPER_ACTIVE=1 \
+          -e LEADPOET_SUBNET_EPOCH_CUTOVER_JSON="${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}" \
           -e GATEWAY_URL="${GATEWAY_URL:-https://gateway.subnet71.com}" \
       -e LEADPOET_INTERNAL_SECRET="${LEADPOET_INTERNAL_SECRET:-}" \
           -e RESEARCH_LAB_INTERNAL_API_KEY="${RESEARCH_LAB_INTERNAL_API_KEY:-}" \
@@ -649,6 +650,7 @@ if [ $FF_PROXY_COUNT -gt 0 ]; then
           -e PYTHONUNBUFFERED=1 \
           -e LEADPOET_CONTAINER_MODE=1 \
           -e LEADPOET_WRAPPER_ACTIVE=1 \
+          -e LEADPOET_SUBNET_EPOCH_CUTOVER_JSON="${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}" \
           -e ENABLE_FULFILLMENT=true \
           -e GATEWAY_URL="${GATEWAY_URL:-https://gateway.subnet71.com}" \
       -e LEADPOET_INTERNAL_SECRET="${LEADPOET_INTERNAL_SECRET:-}" \
@@ -827,6 +829,74 @@ print(
 )
 PY
 echo "✅ Authoritative validator coordinator runtime verified"
+echo ""
+
+validate_worker_epoch_authority() {
+    local container_name="$1"
+    local shared_epoch_ready=0
+
+    if [ "$(docker inspect -f '{{.State.Running}}' "$container_name")" != "true" ]; then
+        echo "❌ ERROR: $container_name is not running" >&2
+        return 1
+    fi
+    if [ "$(docker inspect -f '{{.RestartCount}}' "$container_name")" != "0" ]; then
+        echo "❌ ERROR: $container_name restarted during startup" >&2
+        return 1
+    fi
+    if ! docker exec "$container_name" sh -c \
+        'test -n "${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}"'; then
+        echo "❌ ERROR: $container_name is missing the official epoch cutover manifest" >&2
+        return 1
+    fi
+
+    for _attempt in $(seq 1 30); do
+        if docker exec "$container_name" \
+            sh -c 'test -s /app/validator_weights/current_block.json'; then
+            shared_epoch_ready=1
+            break
+        fi
+        sleep 2
+    done
+    if [ "$shared_epoch_ready" != "1" ]; then
+        echo "❌ ERROR: $container_name cannot see the shared epoch document" >&2
+        return 1
+    fi
+
+    docker exec -i "$container_name" sh -c 'cd /app && python3 -' <<'PY'
+import json
+
+from Leadpoet.utils.subnet_epoch import validate_validator_shared_epoch_file
+
+snapshot = validate_validator_shared_epoch_file(
+    "validator_weights/current_block.json",
+    max_age_seconds=1800,
+)
+print(
+    json.dumps(
+        {
+            "schema_version": "leadpoet.validator_worker_epoch_preflight.v1",
+            "status": "ready",
+            "subnet_epoch_index": snapshot.subnet_epoch_index,
+            "epoch_block": snapshot.epoch_block,
+        },
+        sort_keys=True,
+    )
+)
+PY
+    echo "✅ $container_name official epoch authority verified"
+}
+
+echo "🔐 Verifying official epoch authority in every validator worker..."
+for i in $(seq 1 "$PROXY_COUNT"); do
+    validate_worker_epoch_authority "leadpoet-validator-worker-$i"
+done
+for i in $(seq 1 "$QUAL_PROXY_COUNT"); do
+    validate_worker_epoch_authority "leadpoet-qual-worker-$i"
+done
+for i in $(seq 1 "$FF_PROXY_COUNT"); do
+    validate_worker_epoch_authority "leadpoet-ff-worker-$i"
+done
+echo "✅ All validator worker epoch authorities verified"
 echo ""
 
 ALL_IPS=()

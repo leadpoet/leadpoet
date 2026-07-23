@@ -2632,9 +2632,10 @@ def gateway_submit_fulfillment_scores(
     scores: List[Dict],
     validator_hotkey: str = "",
 ) -> bool:
-    """Submit fulfillment scores for a request (validator)."""
+    """Submit fulfillment scores or raise after all delivery attempts fail."""
     import uuid
     vhk = validator_hotkey or wallet.hotkey.ss58_address
+    last_err: Optional[Exception] = None
 
     for attempt in range(1, 4):
         try:
@@ -2659,13 +2660,21 @@ def gateway_submit_fulfillment_scores(
             bt.logging.info(f"Fulfillment scores submitted for {request_id[:8]}...")
             return True
         except Exception as e:
+            last_err = e
             if attempt < 3:
-                bt.logging.warning(f"Score submit attempt {attempt}/3 failed: {e}")
+                bt.logging.warning(
+                    "fulfillment_score_submit_retry "
+                    f"attempt={attempt}/3 error_type={type(e).__name__} error={e}"
+                )
                 time.sleep(2)
             else:
-                bt.logging.error(f"All 3 score submit attempts failed: {e}")
-                return False
-    return False
+                bt.logging.error(
+                    "fulfillment_score_submit_exhausted "
+                    f"attempts=3 error_type={type(e).__name__} error={e}"
+                )
+    raise RuntimeError(
+        f"Failed to submit fulfillment scores after 3 attempts: {last_err}"
+    ) from last_err
 
 
 def gateway_get_fulfillment_leaderboard_snapshot(

@@ -97,6 +97,43 @@ async def test_antijoin_rpc_error_falls_back_to_per_run() -> None:
     assert missing == ["run-a", "run-b"]
 
 
+@pytest.mark.asyncio
+async def test_delta_rpc_failure_still_applies_antijoin_not_per_run(monkeypatch) -> None:
+    # Regression: when the discovery RPC fails but the store HAS call_rpc, the
+    # fallback returns RAW terminal runs and must still be anti-joined -- a bug
+    # here would hand every terminal run to project_run and restore the per-run
+    # existence reads the RPC exists to remove.
+    projected_run = "run-projected"
+    unprojected_run = "run-new"
+
+    class _Store:
+        async def call_rpc(self, fn: str, params: dict[str, Any]) -> Any:
+            if fn == "research_lab_next_unprojected_terminal_runs":
+                raise RuntimeError("delta rpc unavailable")  # force fallback
+            if fn == "research_lab_missing_trajectory_ids":
+                # Only the new run's trajectory id is missing.
+                return [{"f": tp.trajectory_id_for_run(unprojected_run)}]
+            raise AssertionError(f"unexpected rpc {fn}")
+
+        async def select_all(self, table: str, **kwargs: Any) -> Any:
+            # The raw terminal-run scan returns BOTH runs.
+            return [{"run_id": projected_run}, {"run_id": unprojected_run}]
+
+    projected_calls: list[str] = []
+
+    async def fake_project_run(run_id, *, store, dry_run):
+        projected_calls.append(run_id)
+        return tp.ProjectionResult(run_id=run_id, status="projected", trajectory_id="t")
+
+    monkeypatch.setattr(tp, "project_run", fake_project_run)
+
+    await tp.project_completed_runs(store=_Store(), dry_run=False, batch_size=25)
+
+    # Only the genuinely-unprojected run reaches project_run; the projected run
+    # was filtered out by the anti-join (NOT handed through unfiltered).
+    assert projected_calls == [unprojected_run]
+
+
 def test_rpc_uuid_list_parses_dict_and_scalar_rows() -> None:
     assert tp._rpc_uuid_list([{"f": "u1"}, {"f": "u2"}]) == ["u1", "u2"]
     assert tp._rpc_uuid_list(["u1", "u2"]) == ["u1", "u2"]

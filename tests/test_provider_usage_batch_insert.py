@@ -132,7 +132,9 @@ async def test_batch_insert_falls_back_to_per_row_without_call_rpc() -> None:
 
 
 @pytest.mark.asyncio
-async def test_batch_insert_returns_zero_and_does_not_raise_on_rpc_error() -> None:
+async def test_batch_insert_returns_none_on_rpc_error_not_zero() -> None:
+    # A failed insert must be distinguishable from "0 rows already present", so
+    # a transient provider-ledger failure is never mistaken for completeness.
     class _Boom:
         async def call_rpc(self, *args: Any, **kwargs: Any) -> Any:
             raise RuntimeError("edge blip")
@@ -140,7 +142,14 @@ async def test_batch_insert_returns_zero_and_does_not_raise_on_rpc_error() -> No
     written = await tp._insert_provider_usage_ledger_rows_batch(
         _Boom(), [_row("f" * 32)]
     )
-    assert written == 0
+    assert written is None  # failure, NOT 0
+
+    # All-already-present is a real success and returns 0 (not None).
+    class _AllPresent:
+        async def call_rpc(self, *args: Any, **kwargs: Any) -> Any:
+            return {"requested": 1, "inserted": 0}
+
+    assert await tp._insert_provider_usage_ledger_rows_batch(_AllPresent(), [_row("a" * 32)]) == 0
 
 
 class _LedgerRpcStore:
@@ -167,28 +176,22 @@ class _LedgerRpcStore:
 
 
 @pytest.mark.asyncio
-async def test_transient_batch_failure_is_repaired_by_backfill() -> None:
-    # CEO-required regression: a transient batch-insert failure must not lose
-    # rows. The failed pass writes nothing (returns 0), and a later backfill
-    # pass restores EVERY provider-usage row exactly once (idempotent).
+async def test_batch_insert_helper_is_idempotent_and_signals_failure() -> None:
+    # Helper-level contract (the end-to-end recovery through the real backfill
+    # dispatcher is proven in test_trajectory_backfill_recovery.py):
+    # a transient failure returns None and persists nothing; a later pass
+    # restores every row exactly once; re-running is a no-op.
     store = _LedgerRpcStore()
     rows = [_row(f"{i:032d}") for i in range(5)]
 
-    # 1) Projection pass hits a transient outage: 0 written, nothing raised.
     store.fail_next = True
-    written = await tp._insert_provider_usage_ledger_rows_batch(store, rows)
-    assert written == 0
-    assert store.rows == {}  # no rows persisted during the outage
+    assert await tp._insert_provider_usage_ledger_rows_batch(store, rows) is None
+    assert store.rows == {}  # nothing persisted during the outage
 
-    # 2) Backfill pass (provider healthy): every row is restored.
-    restored = await tp._insert_provider_usage_ledger_rows_batch(store, rows)
-    assert restored == 5
+    assert await tp._insert_provider_usage_ledger_rows_batch(store, rows) == 5
     assert set(store.rows) == {r["usage_row_id"] for r in rows}
 
-    # 3) A second backfill is idempotent — DO NOTHING inserts nothing new, and
-    #    no row is duplicated or lost.
-    again = await tp._insert_provider_usage_ledger_rows_batch(store, rows)
-    assert again == 0
+    assert await tp._insert_provider_usage_ledger_rows_batch(store, rows) == 0
     assert len(store.rows) == 5
 
 

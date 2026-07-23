@@ -131,6 +131,7 @@ RESULTS_LEDGER_TABLE = "research_lab_results_ledger"
 EXECUTION_TRACES_TABLE = "execution_traces"
 EVIDENCE_BUNDLES_TABLE = "evidence_bundles"
 PROVIDER_USAGE_LEDGER_TABLE = "research_lab_provider_usage_ledger"
+CORPUS_COMPLETE_TABLE = "research_lab_corpus_complete"
 
 # scripts/27 CHECK-enforced enums (mirrored verbatim; tests re-parse the SQL).
 EXECUTION_TRACE_ROLES: tuple[str, ...] = (
@@ -4082,17 +4083,20 @@ def _batch_inserted_count(result: Any) -> int:
 
 async def _insert_provider_usage_ledger_rows_batch(
     store: Any, rows: Sequence[Mapping[str, Any]]
-) -> int:
+) -> int | None:
     """Conflict-safe batched insert of provider-usage ledger rows.
 
     Replaces the per-row existence-check + insert (~13.28M weekly PostgREST
     requests) with one server-side ``INSERT ... ON CONFLICT (usage_row_id)
     DO NOTHING``. The rows carry deterministic PKs, so the removed existence
-    checks changed no outcome — only request volume. Returns the number of
-    newly-inserted rows.
+    checks changed no outcome — only request volume.
 
-    Falls back to the per-row path for injected stores that do not expose
-    ``call_rpc`` (test fakes), preserving existing behavior exactly.
+    Returns the number of newly-inserted rows on success (0 means every row was
+    already present), or ``None`` when the insert itself FAILED. Callers must not
+    treat a failure as "complete": returning 0 on error is exactly how a
+    transient provider-ledger failure was silently swallowed while the run was
+    marked done. Falls back to the per-row path for injected stores without
+    ``call_rpc`` (test fakes).
     """
     candidate_rows = [dict(row) for row in rows if row.get("usage_row_id")]
     if not candidate_rows:
@@ -4115,8 +4119,36 @@ async def _insert_provider_usage_ledger_rows_batch(
             len(candidate_rows),
             str(exc)[:300],
         )
-        return 0
+        return None
     return _batch_inserted_count(result)
+
+
+async def _mark_corpus_complete(store: Any, trajectory_id: str, run_id: str) -> None:
+    """Record that a run's full corpus is present (idempotent, best-effort).
+
+    Once marked, research_lab_terminal_runs_needing_corpus stops returning the
+    run, so complete runs are never re-inspected. Best-effort: a marker-write
+    failure just means the run is re-inspected next pass (no data risk).
+    """
+    try:
+        if hasattr(store, "call_rpc"):
+            await store.call_rpc(
+                "research_lab_mark_corpus_complete",
+                {"p_trajectory_id": str(trajectory_id), "p_run_id": str(run_id)},
+            )
+            return
+        await store.insert_row(
+            CORPUS_COMPLETE_TABLE,
+            {"trajectory_id": str(trajectory_id), "run_id": str(run_id)},
+        )
+    except Exception as exc:
+        # A duplicate marker (already complete) or a transient write error is
+        # harmless — the run is simply eligible for one more inspection.
+        logger.debug(
+            "research_lab_corpus_complete_mark_skipped run_id=%s error=%s",
+            run_id,
+            str(exc)[:200],
+        )
 
 
 async def _write_missing_corpus_trace_rows(
@@ -4372,9 +4404,16 @@ async def project_run(
         trace_written, evidence_written, provider_usage_written = await _write_missing_corpus_trace_rows(
             store, projection
         )
+        # A None provider-usage result means the batched insert FAILED; the run
+        # is intentionally NOT marked corpus-complete here (the completeness
+        # marker is owned by the backfill inspection), so it stays discoverable
+        # and is repaired. Coerce the count for the result/log only.
+        provider_usage_failed = provider_usage_written is None
+        provider_usage_written = provider_usage_written or 0
         logger.info(
             "research_lab_trajectory_projected run_id=%s trajectory_id=%s events=%s "
-            "ledger_rows=%s execution_traces=%s evidence_bundles=%s provider_usage_rows=%s",
+            "ledger_rows=%s execution_traces=%s evidence_bundles=%s provider_usage_rows=%s "
+            "provider_usage_failed=%s",
             run_id,
             tid,
             len(projection.event_rows),
@@ -4382,6 +4421,7 @@ async def project_run(
             trace_written,
             evidence_written,
             provider_usage_written,
+            provider_usage_failed,
         )
         return ProjectionResult(
             run_id=run_id,
@@ -4492,13 +4532,15 @@ async def _terminal_run_delta(
     limit: int,
     newest_first: bool,
     max_candidates: int,
-) -> list[str]:
-    """Return the next ``limit`` terminal run ids for a projection-delta RPC.
+) -> tuple[list[str], bool]:
+    """Return ``(run_ids, filtered_by_rpc)`` for a projection-delta RPC.
 
-    The RPC reproduces the deterministic trajectory / execution-trace ids in SQL
-    and returns only the runs that still need work — no bulk download and no
-    per-run existence round-trips. Falls back to the legacy scan-then-filter for
-    injected stores without ``call_rpc`` (test fakes), preserving behavior.
+    The RPC reproduces the deterministic ids in SQL and returns only the runs
+    that still need work — no bulk download and no per-run existence round-trips.
+    When the RPC is unavailable OR errors, this falls back to a raw terminal-run
+    scan and returns ``filtered_by_rpc=False`` so the caller knows the ids are
+    UNFILTERED and must still be narrowed (otherwise a failed RPC would restore
+    the per-run existence reads the RPC exists to remove).
     """
     if hasattr(store, "call_rpc"):
         try:
@@ -4506,14 +4548,15 @@ async def _terminal_run_delta(
                 rpc_name,
                 {"p_limit": int(max(1, limit)), "p_newest_first": bool(newest_first)},
             )
-            return _rpc_uuid_list(rows)
+            return _rpc_uuid_list(rows), True
         except Exception as exc:
             logger.warning(
                 "research_lab_trajectory_delta_rpc_failed rpc=%s error=%s",
                 rpc_name,
                 str(exc)[:300],
             )
-    # Fallback: scan terminal run ids (run_id only) newest/oldest-first.
+    # Fallback: scan terminal run ids (run_id only) newest/oldest-first. These
+    # are UNFILTERED terminal runs — the caller must apply the anti-join itself.
     queue_rows = await store.select_all(
         RUN_QUEUE_TABLE,
         columns="run_id",
@@ -4521,7 +4564,7 @@ async def _terminal_run_delta(
         order_by=(("current_status_at", bool(newest_first)),),
         max_rows=max_candidates,
     )
-    return [str(row.get("run_id") or "") for row in queue_rows if row.get("run_id")]
+    return [str(row.get("run_id") or "") for row in queue_rows if row.get("run_id")], False
 
 
 async def project_completed_runs(
@@ -4540,7 +4583,7 @@ async def project_completed_runs(
     store = store or GatewayProjectorStore()
     results: list[ProjectionResult] = []
     try:
-        unprojected = await _terminal_run_delta(
+        unprojected, filtered_by_rpc = await _terminal_run_delta(
             store,
             rpc_name="research_lab_next_unprojected_terminal_runs",
             limit=batch_size,
@@ -4553,9 +4596,11 @@ async def project_completed_runs(
             str(exc)[:500],
         )
         return results
-    # The RPC already anti-joins server-side; the fallback path returns all
-    # terminal runs, so keep the client anti-join for that case only.
-    if not hasattr(store, "call_rpc"):
+    # Only the RPC path returns already-anti-joined ids. Whenever it did NOT run
+    # (no call_rpc, or the RPC errored), the ids are raw terminal runs, so the
+    # client anti-join MUST be applied — otherwise a failed RPC would hand every
+    # terminal run to project_run and restore the per-run existence reads.
+    if not filtered_by_rpc:
         unprojected = await _unprojected_run_ids(store, unprojected)
     projected = 0
     for run_id in unprojected:
@@ -4662,20 +4707,32 @@ async def backfill_run_corpus_trace_rows(
                 if await _provider_usage_ledger_row_needs_write(store, row)
             ]
             provider_usage_written = 0
-            provider_usage_pending = bool(missing_provider_usage)
+            # Read-only: "incomplete" iff any expected row is still absent.
+            provider_usage_incomplete = bool(missing_provider_usage)
         else:
             missing_provider_usage = []
             provider_usage_written = await _insert_provider_usage_ledger_rows_batch(
                 store, projection.provider_usage_ledger_rows
             )
-            provider_usage_pending = provider_usage_written > 0
-        if not (
+            # None => the batched insert FAILED, so provider-usage is NOT
+            # complete and this run must stay discoverable (the transient-failure
+            # recovery hole). A numeric result (0 or N) means every expected row
+            # is now present.
+            provider_usage_incomplete = provider_usage_written is None
+            if provider_usage_written is None:
+                provider_usage_written = 0
+        corpus_incomplete = bool(
             missing_events
             or missing_ledger
             or missing_traces
             or missing_evidence
-            or provider_usage_pending
-        ):
+            or provider_usage_incomplete
+        )
+        if not corpus_incomplete:
+            # Fully present across EVERY corpus type — record the completeness
+            # marker so this run is not re-inspected, then stop.
+            if not dry_run:
+                await _mark_corpus_complete(store, tid, run_id)
             return ProjectionResult(
                 run_id=run_id, status="skipped_traces_existing", trajectory_id=tid
             )
@@ -4770,14 +4827,15 @@ async def backfill_corpus_trace_rows(
         )
         return results
     try:
-        # Server-side delta: only PROJECTED terminal runs still missing their
-        # engine execution_trace (the dominant "needs corpus backfill" signal),
-        # newest-first, instead of downloading every terminal run and inspecting
-        # each. Fully-traced runs are no longer re-inspected every pass. The
-        # per-run inspection below stays authoritative for what to repair.
-        run_ids = await _terminal_run_delta(
+        # Server-side delta: PROJECTED terminal runs whose corpus is not yet
+        # confirmed complete (ANY missing/failed row type keeps them here), not
+        # just runs missing a trace. Fully-complete runs carry a completeness
+        # marker and are never re-inspected. On RPC failure the fallback returns
+        # raw terminal runs; the per-run inspection below is authoritative and
+        # simply re-checks each, so an unfiltered fallback is degraded-but-safe.
+        run_ids, _filtered_by_rpc = await _terminal_run_delta(
             store,
-            rpc_name="research_lab_terminal_runs_missing_traces",
+            rpc_name="research_lab_terminal_runs_needing_corpus",
             limit=max(int(max_attempts if max_attempts is not None else max_candidates), int(batch_size)),
             newest_first=True,
             max_candidates=max_candidates,

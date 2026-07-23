@@ -30,7 +30,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-MIGRATIONS = ("115", "116", "117", "119", "120", "121")
+MIGRATIONS = ("115", "116", "117", "119", "120", "121", "122")
 
 # A known trajectory_id_for_run value (verified against Python and 300 live runs)
 # pins the in-SQL uuid5(canonical_hash(...)) reproduction.
@@ -176,6 +176,24 @@ BEGIN
         VALUES (public.research_lab_execution_trace_id('d0000000-0000-4000-8000-000000000001'));
     SELECT count(*) INTO n FROM public.research_lab_terminal_runs_missing_traces(25, true);
     IF n <> 0 THEN RAISE EXCEPTION '119 traced run should no longer be flagged, got %', n; END IF;
+
+    -- 122 corpus-completeness discovery. Project run 2 now (119's unprojected
+    -- assertions already ran) so both terminal runs are projected; BOTH need
+    -- corpus until a completeness marker exists (captures ANY missing corpus,
+    -- not just a missing trace).
+    INSERT INTO public.research_trajectories(trajectory_id)
+        VALUES (public.research_lab_trajectory_id('d0000000-0000-4000-8000-000000000002'));
+    SELECT count(*) INTO n FROM public.research_lab_terminal_runs_needing_corpus(25, true);
+    IF n <> 2 THEN RAISE EXCEPTION '122 expected 2 runs needing corpus, got %', n; END IF;
+    PERFORM public.research_lab_mark_corpus_complete(
+        public.research_lab_trajectory_id('d0000000-0000-4000-8000-000000000001'),
+        'd0000000-0000-4000-8000-000000000001');
+    SELECT count(*) INTO n FROM public.research_lab_terminal_runs_needing_corpus(25, true);
+    IF n <> 1 THEN RAISE EXCEPTION '122 marked run must drop from discovery, got %', n; END IF;
+    IF (SELECT run_id FROM public.research_lab_terminal_runs_needing_corpus(25, true))
+       <> 'd0000000-0000-4000-8000-000000000002' THEN
+        RAISE EXCEPTION '122 wrong run left needing corpus';
+    END IF;
 
     -- 120: atomic candidate claim -- sequential claims yield DISTINCT candidates.
     INSERT INTO public.research_lab_candidate_evaluation_current

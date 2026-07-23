@@ -536,13 +536,58 @@ def _verify_authoritative_v2_boot(identity: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _build_authoritative_v2_receipt_boot_verifier(
+    receipt_graph: Dict[str, Any],
+):
+    """Verify complete ancestry against immutable approved V2 releases."""
+
+    from gateway.tee.release_lineage_v2 import (
+        build_release_lineage_boot_verifier_v2,
+        load_approved_release_lineage_v2,
+    )
+
+    release = _gateway_v2_release_manifest()
+    lineage = load_approved_release_lineage_v2(
+        current_release=release,
+        parent_graphs=(receipt_graph,),
+    )
+    return build_release_lineage_boot_verifier_v2(lineage)
+
+
+def _receipt_root_boot_identity(
+    receipt_graph: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Return the boot that signed the graph's already-validated root."""
+
+    root_hash = receipt_graph.get("root_receipt_hash")
+    roots = [
+        receipt
+        for receipt in receipt_graph.get("receipts", [])
+        if isinstance(receipt, dict) and receipt.get("receipt_hash") == root_hash
+    ]
+    if len(roots) != 1:
+        raise ValueError("V2 receipt graph needs exactly one root receipt")
+    boot_hash = roots[0].get("boot_identity_hash")
+    boots = [
+        boot
+        for boot in receipt_graph.get("boot_identities", [])
+        if isinstance(boot, dict) and boot.get("boot_identity_hash") == boot_hash
+    ]
+    if len(boots) != 1:
+        raise ValueError("V2 receipt graph root boot identity is invalid")
+    return dict(boots[0])
+
+
 def _validate_authoritative_v2_submission(
     submission: WeightSubmissionV2,
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
     bundle = submission.model_dump(mode="python")
+    lineage_boot_verifier = _build_authoritative_v2_receipt_boot_verifier(
+        bundle["receipt_graph"]
+    )
     verified = validate_published_weight_bundle_v2(
         bundle,
-        boot_attestation_verifier=_verify_authoritative_v2_boot,
+        boot_attestation_verifier=lineage_boot_verifier,
         require_boot_attestation_verification=True,
     )
     validator_boots = [
@@ -557,7 +602,12 @@ def _validate_authoritative_v2_submission(
         raise ValueError(
             "V2 bundle needs exactly one computing validator boot identity"
         )
-    return verified, dict(validator_boots[0])
+    validator_boot = dict(validator_boots[0])
+    # Approved release lineage proves historical ancestry. The validator that
+    # computed this bundle must additionally match the independent live Git
+    # rebuild cache; release evidence alone is not sufficient for that boot.
+    _verify_authoritative_v2_boot(validator_boot)
+    return verified, validator_boot
 
 
 # ============================================================================
@@ -951,12 +1001,21 @@ async def persist_subnet_epoch_evidence_v1(
     )
 
     try:
+        lineage_boot_verifier = (
+            _build_authoritative_v2_receipt_boot_verifier(
+                submission.receipt_graph
+            )
+        )
         await asyncio.to_thread(
             validate_receipt_graph,
             submission.receipt_graph,
             required_purposes={"validator.subnet_epoch_snapshot.v2"},
-            boot_attestation_verifier=_verify_authoritative_v2_boot,
+            boot_attestation_verifier=lineage_boot_verifier,
             require_boot_attestation_verification=True,
+        )
+        await asyncio.to_thread(
+            _verify_authoritative_v2_boot,
+            _receipt_root_boot_identity(submission.receipt_graph),
         )
         normalized = await asyncio.to_thread(
             validate_epoch_evidence_envelope_v1,
@@ -1331,7 +1390,9 @@ async def submit_weights_v2(submission: WeightSubmissionV2) -> WeightSubmissionV
                 transparency_hash,
             ),
             persist_graph=persist_receipt_graph_v2,
-            boot_verifier=_verify_authoritative_v2_boot,
+            boot_verifier=_build_authoritative_v2_receipt_boot_verifier(
+                submission.receipt_graph
+            ),
         )
         publication_result = await persist_weight_publication_v2(
             bundle_result=bundle_result,
@@ -1386,6 +1447,11 @@ async def finalize_weights_v2(
         )
         from leadpoet_canonical.attested_v2 import validate_receipt_graph
 
+        lineage_boot_verifier = (
+            _build_authoritative_v2_receipt_boot_verifier(
+                payload["receipt_graph"]
+            )
+        )
         await asyncio.to_thread(
             validate_receipt_graph,
             payload["receipt_graph"],
@@ -1394,8 +1460,12 @@ async def finalize_weights_v2(
                 "validator.set_weights_extrinsic.v2",
                 "validator.weights.finalized.v2",
             },
-            boot_attestation_verifier=_verify_authoritative_v2_boot,
+            boot_attestation_verifier=lineage_boot_verifier,
             require_boot_attestation_verification=True,
+        )
+        await asyncio.to_thread(
+            _verify_authoritative_v2_boot,
+            _receipt_root_boot_identity(payload["receipt_graph"]),
         )
     except Exception as exc:
         raise HTTPException(

@@ -982,7 +982,7 @@
       "symbol": "benchmark_icp_score_from_company_scores"
     },
     {
-      "ast_sha256": "sha256:d81609dced8f91216b7593a0f77c11ef66bf9f012bb41c9ed44b1b6d3dcf44ed",
+      "ast_sha256": "sha256:c769fd46954ce732607031b6447c5efcec937a2bc40a8216ac58ac1a1066479a",
       "path": "research_lab/eval/evaluator.py",
       "symbol": "build_holdout_gate_result"
     },
@@ -1012,12 +1012,17 @@
       "symbol": "score_private_model_pair_items"
     },
     {
+      "ast_sha256": "sha256:0c4b4b82fd3d9ce38d145133a881860f3f1841aaa1251ea43d754cc7196db6ca",
+      "path": "research_lab/eval/promotion_metric.py",
+      "symbol": "_paired_lcb_promotion_metric"
+    },
+    {
       "ast_sha256": "sha256:b5d4acbc586cbfefe5952aff229d0e0c23e5649bca00c48f90944017aa280891",
       "path": "research_lab/eval/promotion_metric.py",
       "symbol": "promotion_gate_decision"
     },
     {
-      "ast_sha256": "sha256:b35f57d35e61e28b57d9fd1b625225e56737cd96e26d20adf5e7f61064f9c130",
+      "ast_sha256": "sha256:170428e83bd8ce5e15e6c2f64b4d28b54acf48c74badb03d61d28ad745436dbc",
       "path": "research_lab/eval/promotion_metric.py",
       "symbol": "promotion_improvement_metric"
     },
@@ -1102,7 +1107,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:2778588f5d2237d57f2e648a092dd245cc03b59e4d833ebca4504102caa0d607",
-  "protected_source_commit": "5fa9817f6366bd5bd106829505be7aaafdc466f1",
+  "manifest_hash": "sha256:0e6afe6718c2d4a17f955714cea39da4dcc752fe64720f5a360e1dc89afa3f03",
+  "protected_source_commit": "7fb7e6aa587330cf8fca1aa798c6a3a7b7ffab7f",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

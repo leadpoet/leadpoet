@@ -35,6 +35,9 @@ from gateway.fulfillment.models import (
     FulfillmentScoreResult,
     scrub_company_name,
 )
+from gateway.fulfillment.score_coverage import (
+    missing_lead_data_for_validator,
+)
 from gateway.models.events import EventType
 from gateway.utils.bans import is_hotkey_banned_sync, ban_hotkey
 from gateway.utils.db_executor import run_db
@@ -1507,14 +1510,12 @@ def _collect_scoring_requests_sync(validator_hotkey: str) -> dict:
     supabase = _get_supabase()
 
     # 1. All requests currently in scoring status (paged), PLUS recent
-    #    partially_fulfilled ones.  Consensus can finalize a request while
-    #    some revealed submissions are still un-scored (forced-consensus
-    #    timeout after an interruption); the lifecycle's stale-rescue pass
-    #    re-aggregates whenever late scores land — but that only works if
-    #    the validator is still OFFERED the leftover submissions.  The
-    #    per-submission filter below returns only the un-scored remainder,
-    #    so fully-scored requests in either status drop out of the payload.
-    #    The window matches the stale-rescue score-freshness window.
+    #    partially_fulfilled ones. Historical rows may have finalized under
+    #    the old submission-level coverage gate, and an additional validator
+    #    can also add quorum after the first pass. The lifecycle stale-rescue
+    #    pass re-aggregates those late scores, but only if the validator is
+    #    still offered the exact missing leads. Fully covered requests in
+    #    either status drop out of the payload below.
     rescore_cutoff = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
     scoring_requests: List[dict] = []
     offset = 0
@@ -1537,24 +1538,20 @@ def _collect_scoring_requests_sync(validator_hotkey: str) -> dict:
     print(f"📋 /fulfillment/scoring: {len(scoring_requests)} request(s) in scoring status")
     scoring_ids = [r["request_id"] for r in scoring_requests]
 
-    # 2. Which SUBMISSIONS of these requests has this validator already
-    #    scored?  Tracked per-submission, NOT per-request: excluding a whole
-    #    request the moment one of its submissions has a score strands the
-    #    rest.  When scoring is interrupted mid-request (validator restart,
-    #    gateway outage), the request sits with partial scores, never
-    #    reappears in this feed, and at forced consensus every un-scored
-    #    miner's revealed work is discarded.  Offering only the un-scored
-    #    remainder lets the validator finish the request; re-scores are safe
-    #    regardless (fulfillment_upsert_scores upserts on the same natural
-    #    key).
-    scored_subs_by_req: dict = {}
+    # 2. Which LEADS of these requests has this validator already scored?
+    #    A submission is not complete merely because one score row exists:
+    #    workers can be interrupted after persisting only a prefix of a
+    #    multi-lead submission.  Track exact (request, submission, lead)
+    #    coverage and re-offer only the missing lead subset.  The score RPC
+    #    upserts on this natural key, so a conservative re-offer is safe.
+    scored_leads_by_req_sub: dict = {}
     if validator_hotkey:
         for i in range(0, len(scoring_ids), 100):
             chunk = scoring_ids[i:i + 100]
             offset = 0
-            for _ in range(20):
+            while True:
                 page = supabase.table("fulfillment_scores") \
-                    .select("request_id, submission_id") \
+                    .select("request_id, submission_id, lead_id") \
                     .eq("validator_hotkey", validator_hotkey) \
                     .in_("request_id", chunk) \
                     .range(offset, offset + 999) \
@@ -1562,19 +1559,24 @@ def _collect_scoring_requests_sync(validator_hotkey: str) -> dict:
                 if not page.data:
                     break
                 for row in page.data:
-                    # Rows predating submission_id stamping can't identify
-                    # their submission; leaving them out re-offers the whole
-                    # request, and the upsert makes the re-score harmless.
-                    if row.get("submission_id"):
-                        scored_subs_by_req.setdefault(row["request_id"], set()) \
-                            .add(row["submission_id"])
+                    submission_id = row.get("submission_id")
+                    lead_id = row.get("lead_id")
+                    # Legacy rows missing either identifier cannot prove
+                    # coverage. Leaving them out re-offers the affected lead
+                    # and the idempotent upsert absorbs the retry.
+                    if submission_id and lead_id:
+                        scored_leads_by_req_sub.setdefault(
+                            row["request_id"], {}
+                        ).setdefault(
+                            str(submission_id), set()
+                        ).add(str(lead_id))
                 if len(page.data) < 1000:
                     break
                 offset += 1000
-        if scored_subs_by_req:
+        if scored_leads_by_req_sub:
             print(f"   Validator {validator_hotkey[:8]}... has scores on "
-                  f"{len(scored_subs_by_req)} of {len(scoring_ids)} request(s); "
-                  f"offering un-scored submissions only")
+                  f"{len(scored_leads_by_req_sub)} of {len(scoring_ids)} request(s); "
+                  f"offering missing leads only")
 
     needed_ids = scoring_ids
 
@@ -1606,20 +1608,20 @@ def _collect_scoring_requests_sync(validator_hotkey: str) -> dict:
     out = []
     for rid in needed_ids:
         r = req_by_id[rid]
-        already_scored = scored_subs_by_req.get(rid, set())
+        already_scored = scored_leads_by_req_sub.get(rid, {})
         submissions = []
         for s in subs_by_req.get(rid, []):
-            # Skip submissions this validator already scored — only the
-            # un-scored remainder needs work (see the per-submission
-            # tracking rationale above).
-            if s["submission_id"] in already_scored:
-                continue
             # SAFETY: `leads` and `lead_ids` MUST come from the same
             # `lead_data` list so they stay index-aligned — the validator
             # zips them onto scores, and mismatched lengths silently corrupt
             # consensus / winner selection.  lead_data entries are
             # {"lead_id": ..., "data": ...} so both projections are safe.
-            lead_data = s.get("lead_data") or []
+            lead_data = missing_lead_data_for_validator(
+                s,
+                already_scored.get(str(s["submission_id"]), set()),
+            )
+            if not lead_data:
+                continue
             submissions.append({
                 "submission_id": s["submission_id"],
                 "miner_hotkey": s["miner_hotkey"],
@@ -1711,6 +1713,35 @@ def _submit_scores_impl(request_id: str, validator_hotkey: str, scores: List[dic
     for s in scores:
         if not s.get("request_id"):
             s["request_id"] = request_id
+        elif str(s["request_id"]) != str(request_id):
+            raise HTTPException(
+                422,
+                detail=(
+                    "Every score request_id must match the request_id "
+                    "being submitted"
+                ),
+            )
+
+    # Fast, readable rejection for stale validator work. Migration 117 repeats
+    # this check while holding the request-row lock, which is the actual
+    # finalization race fence; this preflight avoids an opaque RPC error in
+    # the common case where the request is already terminal.
+    request_resp = supabase.table("fulfillment_requests") \
+        .select("status") \
+        .eq("request_id", request_id) \
+        .limit(1) \
+        .execute()
+    if not request_resp.data:
+        raise HTTPException(404, detail="Fulfillment request not found")
+    request_status = request_resp.data[0].get("status")
+    if request_status not in {"scoring", "partially_fulfilled"}:
+        raise HTTPException(
+            409,
+            detail=(
+                "Fulfillment score window is closed "
+                f"(request status: {request_status})"
+            ),
+        )
 
     try:
         supabase.rpc("fulfillment_upsert_scores", {
@@ -1718,6 +1749,11 @@ def _submit_scores_impl(request_id: str, validator_hotkey: str, scores: List[dic
             "p_validator_hotkey": validator_hotkey,
         }).execute()
     except Exception as e:
+        if "FULFILLMENT_SCORE_WINDOW_CLOSED" in str(e):
+            raise HTTPException(
+                409,
+                detail="Fulfillment score window closed during submission",
+            ) from e
         raise HTTPException(500, detail=f"Score submission failed: {e}")
 
     # The fulfillment_upsert_scores RPC was defined before the

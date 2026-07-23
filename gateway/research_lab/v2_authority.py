@@ -1349,6 +1349,31 @@ async def compare_promotion_decision_v2(
     return {**dict(outcome), "status": "matched", "artifact_link_status": link}
 
 
+def _prune_ancestry_transport_detail(
+    graph: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Drop per-attempt transport/host detail from a historical ancestry graph.
+
+    The coordinator enclave consumes allocation parent graphs by their root
+    receipt authority only (root hash, purpose, role); it does not
+    re-validate a parent graph's transport_root against its terminal
+    transport attempts. Those attempt records are the unbounded-growth
+    component of a champion graph — ~2,600 per epoch, ~5MB — so shipping the
+    full reimbursement-window history every epoch pushed the scoring job
+    payload past the enclave's 64MB MAX_INPUT_BYTES limit (observed at epoch
+    24116). Prune the transport and host-operation detail while preserving
+    the receipts, boot identities, root, and schema the enclave actually
+    verifies. Each full graph is still validated by the gateway (including
+    transport reconstruction) before this prune, so integrity is unchanged;
+    only the redundant historical detail is withheld from the enclave.
+    """
+
+    pruned = dict(graph)
+    pruned["transport_attempts"] = []
+    pruned["host_operations"] = []
+    return pruned
+
+
 async def build_allocation_v2(
     *,
     epoch_id: int,
@@ -1430,13 +1455,16 @@ async def build_allocation_v2(
                 "receipt_role": str(root.get("role") or ""),
             }
         )
+    # The full graphs were validated and bound above; the enclave only needs
+    # each parent graph's root authority, so ship them without the per-attempt
+    # transport/host history that would otherwise exceed the 64MB input limit.
     outcome = await execute(
         operation=OP_RESEARCH_LAB_ALLOCATION,
         purpose="research_lab.allocation.v2",
         epoch_id=int(epoch_id),
         sequence=0,
         payload={"epoch": int(epoch_id), "netuid": int(netuid)},
-        parent_graphs=graphs,
+        parent_graphs=[_prune_ancestry_transport_detail(g) for g in graphs],
     )
     authority_result = outcome.get("result")
     if not isinstance(authority_result, Mapping):

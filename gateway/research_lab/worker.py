@@ -12,6 +12,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import json
 import logging
 import os
+import random
 import re
 import socket
 import threading
@@ -69,6 +70,9 @@ from gateway.research_lab.autoresearch_runtime import (
     budget_limit_microusd,
 )
 from gateway.research_lab.maintenance import (
+    MAINTENANCE_LEASE_HOSTED,
+    MaintenanceLeaseHeartbeat,
+    make_lease_holder_ref,
     autoresearch_queue_capacity_doc,
     expire_unpaid_tickets,
     get_autoresearch_maintenance_state,
@@ -76,6 +80,7 @@ from gateway.research_lab.maintenance import (
     reconcile_champion_reward_statuses,
     reconcile_terminal_ticket_statuses,
     set_autoresearch_maintenance_paused,
+    try_acquire_maintenance_lease,
 )
 from gateway.research_lab.provider_preflight import (
     PREFLIGHT_REASON_PREFIX,
@@ -169,6 +174,72 @@ def _error_backoff_seconds() -> float:
         return max(5.0, float(os.getenv("RESEARCH_LAB_WORKER_ERROR_BACKOFF_SECONDS", "60")))
     except ValueError:
         return 60.0
+
+
+def _run_claim_ttl_seconds() -> int:
+    """TTL for a hosted-run claim reservation (default 120s).
+
+    Covers the window between the claim RPC and the started-event append; once
+    started, the run leaves 'queued' and the claim is moot. A dead worker's
+    claim expires within this window and the still-queued run is re-claimable.
+    """
+    try:
+        return max(30, int(os.getenv("RESEARCH_LAB_RUN_CLAIM_TTL_SECONDS", "120")))
+    except ValueError:
+        return 120
+
+
+def _lease_maintenance_interval_seconds() -> int:
+    """Wall-clock cadence for the lease-held maintenance sweeps (default 150s).
+
+    The recovery + reward-reconcile sweeps run on this fixed schedule rather than
+    once per poll, so their cadence stays independent of the idle poll backoff
+    (which stretches the loop to 60s when there is no work). Floored to at least
+    the idle-backoff cap so a backed-off poll never widens the maintenance gap.
+    """
+    try:
+        configured = int(os.getenv("RESEARCH_LAB_WORKER_MAINTENANCE_INTERVAL_SECONDS", "150"))
+    except ValueError:
+        configured = 150
+    return max(int(_idle_backoff_max_seconds(15.0)), configured)
+
+
+def _maintenance_lease_ttl_seconds() -> int:
+    """TTL for the single-owner maintenance lease (default 180s).
+
+    Long enough that the holder renewing each pass keeps ownership across the
+    idle-backoff interval, short enough that a dead holder is taken over
+    promptly. Kept above the idle-backoff cap so a live holder never lapses.
+    """
+    try:
+        return max(60, int(os.getenv("RESEARCH_LAB_MAINTENANCE_LEASE_TTL_SECONDS", "180")))
+    except ValueError:
+        return 180
+
+
+def _idle_backoff_max_seconds(base_poll: float) -> float:
+    """Cap for idle exponential backoff of job polling (default 60s).
+
+    Idle workers should not poll the queue every ``base_poll`` seconds; the
+    interval grows base -> 2x -> ... up to this cap and resets the instant work
+    appears. Recovery and reward maintenance stay bounded because a pass still
+    happens at least this often. Never below the base poll interval.
+    """
+    try:
+        configured = float(os.getenv("RESEARCH_LAB_WORKER_IDLE_BACKOFF_MAX_SECONDS", "60"))
+    except ValueError:
+        configured = 60.0
+    return max(float(base_poll), configured)
+
+
+def _idle_backoff_next(current: float, base_poll: float, cap: float) -> float:
+    """Double the current idle interval, clamped to the cap."""
+    return min(max(float(base_poll), current * 2.0), float(cap))
+
+
+def _idle_backoff_sleep_seconds(interval: float) -> float:
+    """Add up to +25% jitter so decoupled workers do not poll in lockstep."""
+    return float(interval) * (1.0 + 0.25 * random.random())
 
 
 def _openrouter_generation_attempts() -> int:
@@ -1518,6 +1589,16 @@ class ResearchLabHostedWorker:
         self._last_ticket_lifecycle_reconcile_at = 0.0
         self._last_unpaid_ticket_expiry_at = 0.0
         self._last_allocator_priors_refresh_at = 0.0
+        # Wall-clock timestamp of the last lease-held maintenance sweep, so the
+        # sweep cadence is independent of the idle poll backoff.
+        self._last_lease_maintenance_at = 0.0
+        # True only for the worker holding the maintenance lease this pass.
+        self._holds_maintenance_lease = False
+        # True when this pass's lease-held maintenance window is due to run.
+        self._lease_maintenance_due = False
+        # Globally-unique lease token for THIS process (worker_ref is a stable
+        # name shared across replicas/restarts and must not be the holder id).
+        self._lease_holder_ref = make_lease_holder_ref(self.worker_ref)
 
     async def run_forever(self) -> None:
         # trajectoryimprovements.md P5: one structured capture health block at
@@ -1530,6 +1611,9 @@ class ResearchLabHostedWorker:
         last_error_log = 0.0
         idle_log_seconds = _idle_log_seconds()
         error_backoff_seconds = _error_backoff_seconds()
+        base_poll = max(1, self.config.hosted_worker_poll_seconds)
+        idle_backoff_max = _idle_backoff_max_seconds(base_poll)
+        idle_interval = float(base_poll)
         while True:
             try:
                 outcome = await self.run_once()
@@ -1573,31 +1657,25 @@ class ResearchLabHostedWorker:
                 processed += 1
             if self.config.hosted_worker_max_runs and processed >= self.config.hosted_worker_max_runs:
                 return
-            await asyncio.sleep(max(1, self.config.hosted_worker_poll_seconds))
+            # Exponential backoff on ALL no-work passes, reset the instant real
+            # work happens. Every non-processed status (idle, maintenance-paused,
+            # provider-preflight-unhealthy, baseline/quiet holds, disabled) is a
+            # no-work pass and must back off; only actual work resets to base.
+            if outcome.processed:
+                idle_interval = float(base_poll)
+            else:
+                idle_interval = _idle_backoff_next(
+                    idle_interval, base_poll, idle_backoff_max
+                )
+            await asyncio.sleep(_idle_backoff_sleep_seconds(idle_interval))
 
     async def run_once(self) -> HostedWorkerOutcome:
         self._require_enabled()
-        if not self.config.hosted_worker_dry_run:
-            await self._recover_stale_started_runs()
-            await self._reconcile_stale_loop_projections()
-            await self._maybe_reconcile_terminal_tickets()
-            await self._maybe_refresh_allocator_priors()
-        autoresearch_state = await get_autoresearch_maintenance_state()
-        if bool(autoresearch_state.get("paused")) and not str(
-            autoresearch_state.get("reason") or ""
-        ).startswith(PREFLIGHT_REASON_PREFIX):
-            # Operator/manual pauses stop the pass outright. A pause carrying
-            # the preflight marker falls through to the preflight gate below,
-            # which auto-resumes once providers recover.
-            return HostedWorkerOutcome(
-                processed=False,
-                dry_run=self.config.hosted_worker_dry_run,
-                status="maintenance_paused",
-            )
-        if not self.config.hosted_worker_dry_run:
-            await self._maybe_expire_unpaid_tickets()
-            await self._recover_stale_paused_runs()
-            await self._run_periodic_reconciles()
+        maintenance_outcome, autoresearch_state = (
+            await self._run_preclaim_maintenance()
+        )
+        if maintenance_outcome is not None:
+            return maintenance_outcome
         if self.tree_policy.mode == "off":
             return HostedWorkerOutcome(
                 processed=False,
@@ -1617,31 +1695,31 @@ class ResearchLabHostedWorker:
                 status="code_edit_builder_not_ready",
                 error=builder_unavailable[:500],
             )
-        queued = await self._next_queued_run()
-        if not queued:
-            return HostedWorkerOutcome(processed=False, dry_run=self.config.hosted_worker_dry_run)
-        run_id = str(queued["run_id"])
-        ticket_id = str(queued["ticket_id"])
         if not self.config.hosted_worker_dry_run:
-            # Provider preflight: leave the run queued (no started/running
-            # events, miner keeps their budget) while ScrapingDog/Exa are out
-            # of credits or persistently unreachable — the loop's sourcing
-            # would fail wholesale and burn the paid budget on zeros.
+            # Check provider readiness before reserving a queued run. Otherwise
+            # every unhealthy pass leaves an unstarted claim behind for the full
+            # claim TTL and can temporarily strand all queued work.
             preflight = await preflight_gate(
                 scope="autoresearch",
                 actor_ref=self.worker_ref,
                 is_paused=get_autoresearch_maintenance_state,
                 set_paused=set_autoresearch_maintenance_paused,
                 worker_index=int(self.config.hosted_worker_index or 0),
+                # Reuse the maintenance state already read at the start of this
+                # pass instead of re-reading research_lab_gateway_control_current.
+                prefetched_state=autoresearch_state,
             )
             if not preflight.get("proceed"):
                 return HostedWorkerOutcome(
                     processed=False,
                     dry_run=False,
-                    run_id=run_id,
-                    ticket_id=ticket_id,
                     status="provider_preflight_deferred",
                 )
+        queued = await self._next_queued_run()
+        if not queued:
+            return HostedWorkerOutcome(processed=False, dry_run=self.config.hosted_worker_dry_run)
+        run_id = str(queued["run_id"])
+        ticket_id = str(queued["ticket_id"])
         if self.config.hosted_worker_dry_run:
             return HostedWorkerOutcome(
                 processed=False,
@@ -1764,6 +1842,75 @@ class ResearchLabHostedWorker:
             )
             return await self._mark_failed(context, str(exc), failure_exception=exc)
 
+    async def _run_preclaim_maintenance(
+        self,
+    ) -> tuple[HostedWorkerOutcome | None, Mapping[str, Any]]:
+        """Preserve the pre-claim flow while renewing long maintenance work."""
+
+        lease_ttl = _maintenance_lease_ttl_seconds()
+        self._holds_maintenance_lease = (
+            not self.config.hosted_worker_dry_run
+            and await try_acquire_maintenance_lease(
+                lease_name=MAINTENANCE_LEASE_HOSTED,
+                holder_ref=self._lease_holder_ref,
+                ttl_seconds=lease_ttl,
+            )
+        )
+        maintenance_due = self._holds_maintenance_lease and (
+            time.monotonic() - self._last_lease_maintenance_at
+            >= _lease_maintenance_interval_seconds()
+        )
+        if maintenance_due:
+            self._last_lease_maintenance_at = time.monotonic()
+        self._lease_maintenance_due = maintenance_due
+
+        heartbeat = (
+            MaintenanceLeaseHeartbeat(
+                lease_name=MAINTENANCE_LEASE_HOSTED,
+                holder_ref=self._lease_holder_ref,
+                ttl_seconds=lease_ttl,
+            )
+            if self._holds_maintenance_lease
+            else None
+        )
+        if heartbeat is not None:
+            await heartbeat.start()
+        try:
+            if not self.config.hosted_worker_dry_run:
+                if maintenance_due:
+                    await self._recover_stale_started_runs()
+                    heartbeat.ensure_held()
+                    await self._reconcile_stale_loop_projections()
+                    heartbeat.ensure_held()
+                await self._maybe_reconcile_terminal_tickets()
+                await self._maybe_refresh_allocator_priors()
+
+            autoresearch_state = await get_autoresearch_maintenance_state()
+            if bool(autoresearch_state.get("paused")) and not str(
+                autoresearch_state.get("reason") or ""
+            ).startswith(PREFLIGHT_REASON_PREFIX):
+                return (
+                    HostedWorkerOutcome(
+                        processed=False,
+                        dry_run=self.config.hosted_worker_dry_run,
+                        status="maintenance_paused",
+                    ),
+                    autoresearch_state,
+                )
+
+            if not self.config.hosted_worker_dry_run:
+                await self._maybe_expire_unpaid_tickets()
+                if self._lease_maintenance_due:
+                    heartbeat.ensure_held()
+                    await self._recover_stale_paused_runs()
+                    heartbeat.ensure_held()
+                    await self._run_periodic_reconciles(lease_guard=heartbeat)
+                    heartbeat.ensure_held()
+            return None, autoresearch_state
+        finally:
+            if heartbeat is not None:
+                await heartbeat.stop()
+
     def _require_enabled(self) -> None:
         if not self.config.hosted_worker_enabled:
             raise HostedResearchLabWorkerError("Research Lab hosted worker is disabled")
@@ -1816,8 +1963,31 @@ class ResearchLabHostedWorker:
             ) from exc
 
     async def _next_queued_run(self) -> Mapping[str, Any] | None:
+        # Atomic claim: Postgres picks the next queued run by priority
+        # (oldest-first within a priority), reserves it for THIS worker under an
+        # advisory lock, and returns only the columns the claim path consumes.
+        # Concurrent hosted workers each get a DIFFERENT run in one call, so the
+        # client hash partition and the duplicated full-window scan are gone. The
+        # started-event append stays backstopped by guard_research_lab_run_claim.
+        try:
+            rows = await call_rpc(
+                "claim_next_research_loop_run",
+                {"p_holder_ref": self.worker_ref, "p_ttl_seconds": _run_claim_ttl_seconds()},
+            )
+            if isinstance(rows, list):
+                return dict(rows[0]) if rows else None
+        except Exception as exc:
+            # Fallback keeps the worker running if migration 122 is not yet
+            # applied: legacy trimmed-column scan + client hash partition. The
+            # guard trigger still prevents double-starts.
+            logger.warning(
+                "research_lab_run_claim_rpc_failed worker_ref=%s error=%s",
+                self.worker_ref,
+                str(exc)[:200],
+            )
         rows = await select_many(
             "research_loop_run_queue_current",
+            columns="run_id,ticket_id,queue_priority,current_event_hash,current_status_at",
             filters=(("current_queue_status", "queued"),),
             order_by=(("queue_priority", False), ("current_status_at", False)),
             limit=self.config.hosted_worker_queue_fetch_limit,
@@ -1838,20 +2008,21 @@ class ResearchLabHostedWorker:
         # Claim conflicts are handled as no-ops, not failures.
         return rows[0]
 
-    async def _run_periodic_reconciles(self) -> None:
-        """Every-Nth-pass maintenance reconciles (bugs 3, 24, 34).
+    async def _run_periodic_reconciles(
+        self, *, lease_guard: MaintenanceLeaseHeartbeat | None = None
+    ) -> None:
+        """Lease-held maintenance reconciles (bugs 3, 24, 34).
 
-        Each is idempotent, self-limiting (acts only on drifted rows), and
-        best-effort — a reconcile failure never blocks run processing.
+        Called only on the wall-clock maintenance cadence (see run_once), so this
+        runs its body every call; the former per-pass counter throttle is gone
+        because the cadence is now independent of the idle poll backoff. Each op
+        is idempotent, self-limiting (acts only on drifted rows), and best-effort
+        — a reconcile failure never blocks run processing.
         """
-        counter = getattr(self, "_periodic_reconcile_pass", 0) + 1
-        self._periodic_reconcile_pass = counter
-        try:
-            every_n = max(1, int(os.getenv("RESEARCH_LAB_WORKER_PERIODIC_RECONCILE_EVERY_N", "10")))
-        except ValueError:
-            every_n = 10
-        if counter % every_n:
+        if not self._holds_maintenance_lease:
             return
+        if lease_guard is not None:
+            lease_guard.ensure_held()
         try:
             await reproject_stale_public_cards(config=self.config)
         except Exception as exc:
@@ -1860,6 +2031,8 @@ class ResearchLabHostedWorker:
                 self.worker_ref,
                 str(exc)[:200],
             )
+        if lease_guard is not None:
+            lease_guard.ensure_held()
         try:
             await reconcile_active_private_model_lineage(
                 actor_ref=self.worker_ref, dry_run=False
@@ -1870,10 +2043,15 @@ class ResearchLabHostedWorker:
                 self.worker_ref,
                 str(exc)[:200],
             )
+        if lease_guard is not None:
+            lease_guard.ensure_held()
         try:
             await maybe_refresh_dev_snapshot(
                 self.config,
-                worker_index=int(self.config.hosted_worker_index or 0),
+                # The distributed lease is now the singleton authority. Pass the
+                # legacy refresh-owner index so an arbitrary nonzero lease
+                # holder is not rejected by snapshot_refresh's local guard.
+                worker_index=0,
                 tree_policy=self.tree_policy,
             )
         except Exception as exc:
@@ -1883,6 +2061,8 @@ class ResearchLabHostedWorker:
                 self.worker_ref,
                 str(exc)[:200],
             )
+        if lease_guard is not None:
+            lease_guard.ensure_held()
         try:
             await reconcile_pending_champion_rewards(
                 self.config, worker_ref=self.worker_ref, dry_run=False
@@ -1893,7 +2073,12 @@ class ResearchLabHostedWorker:
                 self.worker_ref,
                 str(exc)[:200],
             )
-        if int(self.config.hosted_worker_index or 0) == 0:
+        if lease_guard is not None:
+            lease_guard.ensure_held()
+        # Single-owner via the maintenance lease (the caller only reaches
+        # _run_periodic_reconciles when it holds the lease), replacing the
+        # former worker_index==0 gate so a dead worker 0 no longer starves this.
+        if self._holds_maintenance_lease:
             try:
                 status_interval = max(
                     60,
@@ -1926,6 +2111,8 @@ class ResearchLabHostedWorker:
                         self.worker_ref,
                         str(exc)[:200],
                     )
+        if lease_guard is not None:
+            lease_guard.ensure_held()
         try:
             from gateway.research_lab.trajectory_projector import (
                 GatewayProjectorStore,
@@ -1957,13 +2144,16 @@ class ResearchLabHostedWorker:
                 self.worker_ref,
                 str(exc)[:200],
             )
+        if lease_guard is not None:
+            lease_guard.ensure_held()
 
     async def _maybe_export_trajectory_corpus(self, projector_store: Any) -> None:
         if not self.config.corpus_export_enabled:
             return
-        total_workers = max(1, int(self.config.hosted_worker_total_workers or 1))
-        worker_index = int(self.config.hosted_worker_index or 0) % total_workers
-        if worker_index != 0:
+        # Single-owner via the maintenance lease (only the lease holder reaches
+        # this through _run_periodic_reconciles); the former worker_index==0 gate
+        # would strand the export whenever the holder was not worker 0.
+        if not self._holds_maintenance_lease:
             return
         now = time.monotonic()
         last = float(getattr(self, "_last_corpus_export_at", 0.0) or 0.0)
@@ -2303,12 +2493,14 @@ class ResearchLabHostedWorker:
             raise HostedResearchLabWorkerError("queued Research Lab run is missing ticket")
         ticket_events = await select_many(
             "research_loop_ticket_events",
+            columns="event_doc",
             filters=(("ticket_id", str(queue_row["ticket_id"])),),
             order_by=(("seq", True),),
             limit=20,
         )
         queue_events = await select_many(
             "research_loop_run_queue_events",
+            columns="event_doc,reason",
             filters=(("run_id", str(queue_row["run_id"])),),
             order_by=(("seq", True),),
             limit=_RUN_CONTEXT_QUEUE_EVENT_LIMIT,
@@ -4852,6 +5044,7 @@ class ResearchLabHostedWorker:
         lookback_start = lookback_end - timedelta(days=7)
         ticket_rows = await select_all(
             "research_loop_ticket_current",
+            columns="ticket_id,created_at,current_status_at,miner_hotkey,brief_sanitized_ref",
             filters=(("island", island),),
             order_by=(("created_at", True),),
         )
@@ -4868,6 +5061,7 @@ class ResearchLabHostedWorker:
             queue_rows.extend(
                 await select_all(
                     "research_loop_run_queue_current",
+                    columns="ticket_id,current_queue_status,current_status_at",
                     filters=(("ticket_id", ticket_id),),
                     order_by=(("current_status_at", True),),
                     max_rows=100,
@@ -4913,6 +5107,7 @@ class ResearchLabHostedWorker:
     async def _reimbursement_cap_usage(self, context: HostedRunContext, *, run_day: str) -> dict[str, float]:
         rows = await select_all(
             "research_reimbursement_award_current",
+            columns="run_day,current_award_status,award_status,miner_hotkey,island,target_reimbursement_microusd",
             filters=(
                 ("current_award_status", "awarded"),
                 ("run_day", run_day),

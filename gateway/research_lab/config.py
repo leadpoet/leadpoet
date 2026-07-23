@@ -383,16 +383,43 @@ def _count_configured_proxy_values(prefixes: tuple[str, ...]) -> int:
     return count
 
 
+# Hard maximum on worker processes per fleet. Bounds both the supervisor's
+# spawned process count and the in-process partition total so a misconfigured
+# *_PROCESS_COUNT can never make the two diverge (which would strand work shards
+# whose index exceeds the number of processes actually spawned).
+MAX_WORKER_PROCESSES = 500
+
+
+def resolve_worker_process_count(
+    explicit_count: int, fallback_count: int, *, minimum: int = 0
+) -> int:
+    """Single source of truth for fleet size, shared by the supervisor
+    (spawned process count) and the config (in-process partition total).
+
+    ``explicit_count`` (``*_PROCESS_COUNT``) is authoritative when > 0; otherwise
+    fall back to ``fallback_count`` (one-per-proxy / legacy). Always clamped to
+    ``[minimum, MAX_WORKER_PROCESSES]`` so the spawned process count and the
+    partition total agree exactly.
+    """
+    chosen = explicit_count if explicit_count > 0 else fallback_count
+    return max(minimum, min(int(chosen), MAX_WORKER_PROCESSES))
+
+
 def _worker_total_from_proxy_count(
     *,
     prefixes: tuple[str, ...],
     legacy_total_env: str,
+    process_count_env: str = "",
     default: int = 1,
 ) -> int:
+    # Routes through resolve_worker_process_count so the in-process partition
+    # total matches the supervisor's spawned count exactly, including the
+    # MAX_WORKER_PROCESSES clamp. Explicit *_PROCESS_COUNT wins; otherwise fall
+    # back to one-per-proxy, then the legacy total env.
+    explicit = _int(process_count_env, 0) if process_count_env else 0
     proxy_count = _count_configured_proxy_values(prefixes)
-    if proxy_count > 0:
-        return proxy_count
-    return max(1, _int(legacy_total_env, default))
+    fallback = proxy_count if proxy_count > 0 else max(1, _int(legacy_total_env, default))
+    return resolve_worker_process_count(explicit, fallback, minimum=1)
 
 
 def _optional_int(name: str) -> Optional[int]:
@@ -742,6 +769,7 @@ class ResearchLabGatewayConfig:
                 "RESEARCH_LAB_WORKER_HTTPS_PROXY",
             ),
             legacy_total_env="RESEARCH_LAB_HOSTED_WORKER_TOTAL_WORKERS",
+            process_count_env="RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT",
         )
         worker_index = _int("RESEARCH_LAB_HOSTED_WORKER_INDEX", 0)
         if worker_index < 0:
@@ -755,6 +783,7 @@ class ResearchLabGatewayConfig:
                 "RESEARCH_LAB_SCORING_WORKER_PROXY",
             ),
             legacy_total_env="RESEARCH_LAB_SCORING_WORKER_TOTAL_WORKERS",
+            process_count_env="RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT",
         )
         scoring_worker_index = _int("RESEARCH_LAB_SCORING_WORKER_INDEX", 0)
         if scoring_worker_index < 0:

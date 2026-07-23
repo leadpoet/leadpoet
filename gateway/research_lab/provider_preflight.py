@@ -314,6 +314,7 @@ async def preflight_gate(
     set_paused: Callable[..., Any],
     worker_index: int = 0,
     authority_check: Callable[..., Any] | None = None,
+    prefetched_state: Any = None,
 ) -> dict[str, Any]:
     """Async preflight gate for one maintenance scope (scoring/autoresearch).
 
@@ -353,7 +354,14 @@ async def preflight_gate(
     if result.get("healthy"):
         if preflight_auto_resume_enabled():
             try:
-                state = await is_paused()
+                # Reuse the control state the caller already read this pass to
+                # avoid a duplicate research_lab_gateway_control_current read;
+                # fall back to a fresh read only when none was supplied.
+                state = (
+                    prefetched_state
+                    if prefetched_state is not None
+                    else await is_paused()
+                )
                 if isinstance(state, dict):
                     paused = bool(state.get("paused"))
                     reason = str(state.get("reason") or "")

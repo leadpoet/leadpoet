@@ -86,6 +86,18 @@ jobs:
             research_lab \
             validator_models
 
+      - name: Ensure PostgreSQL server binaries (migration integration test)
+        run: |
+          if ! ls /usr/lib/postgresql/*/bin/initdb >/dev/null 2>&1 \
+             && ! command -v initdb >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y postgresql
+          fi
+          pgbin="$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -r | head -1)"
+          [ -n "$pgbin" ] && echo "$pgbin" >> "$GITHUB_PATH" || true
+          "${pgbin:+$pgbin/}initdb" --version || true
+          # Driver for the concurrent claim no-double-assign integration test.
+          python -m pip install psycopg2-binary
+
       - name: Run pytest suite
         run: |
           python -m pytest -q \

@@ -8,8 +8,9 @@ import logging
 import os
 import re
 import time
+import uuid
 from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
 from .key_vault import (
@@ -53,6 +54,152 @@ TERMINAL_QUEUE_STATUSES = frozenset({"completed", "failed", "cancelled", "tombst
 ACTIVE_QUEUE_STATUSES = frozenset({"queued", "started", "paused"})
 TICKET_LIFECYCLE_QUEUE_BATCH_SIZE = 100
 UNPAID_TICKET_EXPIRY_CANDIDATE_VIEW = "research_lab_unpaid_ticket_expiry_candidates"
+
+# Named single-owner maintenance leases. Only the lease holder runs the global
+# sweeps for that scope; other workers skip them this pass.
+MAINTENANCE_LEASE_HOSTED = "hosted_worker_maintenance"
+MAINTENANCE_LEASE_SCORING = "scoring_worker_recovery"
+
+
+def make_lease_holder_ref(worker_ref: str) -> str:
+    """Globally-unique lease-holder token for one worker process/boot.
+
+    ``worker_ref`` (e.g. ``research-lab-worker-1``) is a *stable* name reused by
+    every replica and every restart, so it must never be the lease holder id:
+    two overlapping gateway processes would present the same holder_ref and the
+    acquire RPC would treat the second as the incumbent renewing (both would
+    hold the lease and both would run the global sweeps). This appends host,
+    PID, and a per-boot UUID so each live process owns a distinct token, while
+    the human-readable ``worker_ref`` stays available for logs and event
+    attribution. Kept stable for the process lifetime so lease renewal matches.
+    """
+    try:
+        node = os.uname().nodename
+    except Exception:
+        node = "unknown-host"
+    return f"{worker_ref}#{node}#{os.getpid()}#{uuid.uuid4().hex}"
+
+
+async def try_acquire_maintenance_lease(
+    *,
+    lease_name: str,
+    holder_ref: str,
+    ttl_seconds: int,
+) -> bool:
+    """Acquire or renew a single-owner maintenance lease; True iff held.
+
+    Fail-closed: any error (contention or Supabase failure) returns False so
+    the caller skips the global sweep this pass. The current holder — or the
+    next taker after the lease expires — performs it, so work is never
+    duplicated across workers or replicas, at worst briefly delayed.
+    """
+    from gateway.research_lab.store import call_rpc
+
+    try:
+        result = await call_rpc(
+            "research_lab_acquire_maintenance_lease",
+            {
+                "p_lease_name": str(lease_name),
+                "p_holder_ref": str(holder_ref),
+                "p_ttl_seconds": int(ttl_seconds),
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "research_lab_maintenance_lease_acquire_failed name=%s error=%s",
+            lease_name,
+            str(exc)[:200],
+        )
+        return False
+    payload = result[0] if isinstance(result, list) and result else result
+    if isinstance(payload, Mapping):
+        return bool(payload.get("acquired"))
+    return False
+
+
+class MaintenanceLeaseLostError(RuntimeError):
+    """Raised when a worker can no longer prove it owns a maintenance lease."""
+
+
+def maintenance_lease_heartbeat_interval_seconds(ttl_seconds: int) -> float:
+    """Renew at least three times per TTL without creating a hot DB loop."""
+
+    return max(1.0, min(float(max(1, int(ttl_seconds))) / 3.0, 60.0))
+
+
+class MaintenanceLeaseHeartbeat:
+    """Keep a previously-acquired maintenance lease alive during long sweeps.
+
+    Maintenance includes external snapshot commands whose runtime can exceed the
+    normal worker poll interval by hours. The old acquire-once-per-pass behavior
+    allowed the 180-second lease to expire while the holder was still active.
+    This heartbeat renews under the same unique holder token. A failed renewal
+    marks ownership lost, and callers check ``ensure_held`` between global
+    operations so no later sweep starts without a proven lease.
+    """
+
+    def __init__(
+        self,
+        *,
+        lease_name: str,
+        holder_ref: str,
+        ttl_seconds: int,
+        acquire_lease: Callable[..., Awaitable[bool]] = try_acquire_maintenance_lease,
+        interval_seconds: float | None = None,
+    ) -> None:
+        self.lease_name = str(lease_name)
+        self.holder_ref = str(holder_ref)
+        self.ttl_seconds = max(1, int(ttl_seconds))
+        self._acquire_lease = acquire_lease
+        self.interval_seconds = (
+            max(0.001, float(interval_seconds))
+            if interval_seconds is not None
+            else maintenance_lease_heartbeat_interval_seconds(self.ttl_seconds)
+        )
+        self._lost = False
+        self._task: asyncio.Task[Any] | None = None
+
+    async def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(
+                self._run(),
+                name=f"research-lab-maintenance-lease:{self.lease_name}",
+            )
+
+    async def stop(self) -> None:
+        task = self._task
+        self._task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    def ensure_held(self) -> None:
+        if self._lost:
+            raise MaintenanceLeaseLostError(
+                f"maintenance lease ownership lost: {self.lease_name}"
+            )
+
+    async def _run(self) -> None:
+        while True:
+            await asyncio.sleep(self.interval_seconds)
+            held = await self._acquire_lease(
+                lease_name=self.lease_name,
+                holder_ref=self.holder_ref,
+                ttl_seconds=self.ttl_seconds,
+            )
+            if held:
+                continue
+            self._lost = True
+            logger.error(
+                "research_lab_maintenance_lease_heartbeat_lost name=%s holder_ref=%s",
+                self.lease_name,
+                self.holder_ref,
+            )
+            return
 
 
 async def get_autoresearch_maintenance_state() -> dict[str, Any]:

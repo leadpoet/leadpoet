@@ -361,3 +361,61 @@ def test_legacy_gate_is_rejected_before_host_preflight(monkeypatch):
             )
         )
     assert calls == []
+
+
+def _healthy_authority(**_kwargs):
+    return {"healthy": True, "pause_worthy": False, "verdicts": []}
+
+
+def test_prefetched_state_dedups_the_control_read(monkeypatch):
+    # Egress: preflight_gate must not re-read the maintenance control state when
+    # the caller already read it this pass; the auto-resume path uses the
+    # prefetched state instead.
+    monkeypatch.setattr(pp, "preflight_auto_resume_enabled", lambda: True)
+    is_paused_calls = []
+
+    async def is_paused():
+        is_paused_calls.append(1)
+        return {"paused": True, "reason": "provider_preflight:x"}
+
+    resumed = []
+
+    async def set_paused(**kwargs):
+        resumed.append(kwargs)
+
+    out = asyncio.run(
+        pp.preflight_gate(
+            scope="scoring",
+            actor_ref="w1",
+            is_paused=is_paused,
+            set_paused=set_paused,
+            authority_check=_healthy_authority,
+            prefetched_state={"paused": True, "reason": "provider_preflight:x"},
+        )
+    )
+    assert out["proceed"] is True
+    assert is_paused_calls == []  # deduped: no second control read
+    assert resumed  # auto-resumed using the prefetched marker state
+
+
+def test_without_prefetched_state_still_reads_control(monkeypatch):
+    monkeypatch.setattr(pp, "preflight_auto_resume_enabled", lambda: True)
+    is_paused_calls = []
+
+    async def is_paused():
+        is_paused_calls.append(1)
+        return {"paused": False, "reason": ""}
+
+    async def set_paused(**_kwargs):
+        pass
+
+    asyncio.run(
+        pp.preflight_gate(
+            scope="scoring",
+            actor_ref="w1",
+            is_paused=is_paused,
+            set_paused=set_paused,
+            authority_check=_healthy_authority,
+        )
+    )
+    assert is_paused_calls == [1]  # falls back to one read when none supplied

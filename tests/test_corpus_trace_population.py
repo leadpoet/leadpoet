@@ -153,6 +153,7 @@ class FakeStore:
             EVIDENCE_BUNDLES_TABLE: "bundle_id",
             RESULTS_LEDGER_TABLE: "ledger_row_id",
             projector_mod.PROVIDER_USAGE_LEDGER_TABLE: "usage_row_id",
+            projector_mod.CORPUS_COMPLETE_TABLE: "trajectory_id",
         }.get(table)
         if pk and any(r.get(pk) == row.get(pk) for r in stored):
             raise RuntimeError("duplicate key value violates unique constraint")
@@ -1004,11 +1005,17 @@ async def test_reprojection_and_backfill_write_nothing_new(tables, enabled):
 
     third = await backfill_run_corpus_trace_rows(RUN_ID, store=store, dry_run=False)
     assert third.status == "skipped_traces_existing"
-    assert store.write_count() == writes
+    # No new CORPUS rows are written; the only new write is the one-time
+    # completeness marker (so the run is not re-inspected forever).
+    assert store.write_count(projector_mod.CORPUS_COMPLETE_TABLE) == 1
+    assert store.write_count() == writes + 1
 
     batch = await backfill_corpus_trace_rows(batch_size=10, dry_run=False, store=store)
     assert [r.status for r in batch] == ["skipped_traces_existing"]
-    assert store.write_count() == writes
+    # Marker stays idempotent — never duplicated on re-inspection; still only the
+    # single completeness-marker write beyond the original projection.
+    assert store.write_count(projector_mod.CORPUS_COMPLETE_TABLE) == 1
+    assert store.write_count() == writes + 1
 
 
 # ---------------------------------------------------------------------------

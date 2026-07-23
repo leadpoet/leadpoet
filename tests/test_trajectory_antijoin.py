@@ -1,0 +1,151 @@
+"""Regression tests for the server-side trajectory anti-join (egress reduction).
+
+project_completed_runs() previously issued one existence SELECT per terminal
+run (the N+1 that multiplied across workers/passes). These tests pin that the
+discovery now does a single anti-join RPC, preserves newest-first order, and
+falls back to the per-run path only for injected fakes without call_rpc.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+import gateway.research_lab.trajectory_projector as tp
+
+
+ROOT = Path(__file__).resolve().parents[1]
+MIGRATION = (
+    ROOT / "scripts" / "117-research-lab-trajectory-antijoin.sql"
+).read_text(encoding="utf-8")
+
+
+class _RpcStore:
+    def __init__(self, missing_tids: list[str]) -> None:
+        self._missing = missing_tids
+        self.rpc_calls: list[tuple[str, dict[str, Any]]] = []
+        self.select_one_calls = 0
+
+    async def call_rpc(self, function_name: str, params: dict[str, Any]) -> Any:
+        self.rpc_calls.append((function_name, params))
+        # SETOF UUID comes back as [{"<fn>": uuid}, ...].
+        return [{"research_lab_missing_trajectory_ids": t} for t in self._missing]
+
+    async def select_one(self, *args: Any, **kwargs: Any) -> Any:
+        self.select_one_calls += 1
+        return None
+
+
+class _PerRunStore:
+    def __init__(self, existing_tids: set[str]) -> None:
+        self._existing = existing_tids
+        self.select_one_calls = 0
+
+    async def select_one(self, table: str, *, filters: Any = (), **kwargs: Any) -> Any:
+        self.select_one_calls += 1
+        tid = dict(filters).get("trajectory_id")
+        return {"trajectory_id": tid} if tid in self._existing else None
+
+
+@pytest.mark.asyncio
+async def test_antijoin_uses_one_rpc_and_preserves_order() -> None:
+    run_ids = ["run-a", "run-b", "run-c"]
+    tids = {r: tp.trajectory_id_for_run(r) for r in run_ids}
+    # Only run-a and run-c are unprojected (run-b already has a trajectory).
+    store = _RpcStore(missing_tids=[tids["run-a"], tids["run-c"]])
+
+    missing = await tp._unprojected_run_ids(store, run_ids)
+
+    assert missing == ["run-a", "run-c"]  # newest-first order preserved
+    assert len(store.rpc_calls) == 1  # single anti-join, not one-per-run
+    assert store.rpc_calls[0][0] == "research_lab_missing_trajectory_ids"
+    assert set(store.rpc_calls[0][1]["candidate_ids"]) == set(tids.values())
+    assert store.select_one_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_antijoin_dedupes_and_ignores_blank_run_ids() -> None:
+    store = _RpcStore(missing_tids=[tp.trajectory_id_for_run("run-a")])
+    missing = await tp._unprojected_run_ids(store, ["run-a", "run-a", "", None])
+    assert missing == ["run-a"]
+    assert len(store.rpc_calls[0][1]["candidate_ids"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_antijoin_falls_back_to_per_run_without_call_rpc() -> None:
+    tids = {r: tp.trajectory_id_for_run(r) for r in ("run-a", "run-b")}
+    store = _PerRunStore(existing_tids={tids["run-a"]})  # run-a projected already
+    missing = await tp._unprojected_run_ids(store, ["run-a", "run-b"])
+    assert missing == ["run-b"]
+    assert store.select_one_calls == 2  # per-run path
+
+
+@pytest.mark.asyncio
+async def test_antijoin_rpc_error_falls_back_to_per_run() -> None:
+    class _Boom:
+        async def call_rpc(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("edge blip")
+
+        async def select_one(self, *args: Any, **kwargs: Any) -> Any:
+            return None  # nothing projected → all missing
+
+        pass
+
+    missing = await tp._unprojected_run_ids(_Boom(), ["run-a", "run-b"])
+    assert missing == ["run-a", "run-b"]
+
+
+@pytest.mark.asyncio
+async def test_delta_rpc_failure_still_applies_antijoin_not_per_run(monkeypatch) -> None:
+    # Regression: when the discovery RPC fails but the store HAS call_rpc, the
+    # fallback returns RAW terminal runs and must still be anti-joined -- a bug
+    # here would hand every terminal run to project_run and restore the per-run
+    # existence reads the RPC exists to remove.
+    projected_run = "run-projected"
+    unprojected_run = "run-new"
+
+    class _Store:
+        async def call_rpc(self, fn: str, params: dict[str, Any]) -> Any:
+            if fn == "research_lab_next_unprojected_terminal_runs":
+                raise RuntimeError("delta rpc unavailable")  # force fallback
+            if fn == "research_lab_missing_trajectory_ids":
+                # Only the new run's trajectory id is missing.
+                return [{"f": tp.trajectory_id_for_run(unprojected_run)}]
+            raise AssertionError(f"unexpected rpc {fn}")
+
+        async def select_all(self, table: str, **kwargs: Any) -> Any:
+            # The raw terminal-run scan returns BOTH runs.
+            return [{"run_id": projected_run}, {"run_id": unprojected_run}]
+
+    projected_calls: list[str] = []
+
+    async def fake_project_run(run_id, *, store, dry_run):
+        projected_calls.append(run_id)
+        return tp.ProjectionResult(run_id=run_id, status="projected", trajectory_id="t")
+
+    monkeypatch.setattr(tp, "project_run", fake_project_run)
+
+    await tp.project_completed_runs(store=_Store(), dry_run=False, batch_size=25)
+
+    # Only the genuinely-unprojected run reaches project_run; the projected run
+    # was filtered out by the anti-join (NOT handed through unfiltered).
+    assert projected_calls == [unprojected_run]
+
+
+def test_rpc_uuid_list_parses_dict_and_scalar_rows() -> None:
+    assert tp._rpc_uuid_list([{"f": "u1"}, {"f": "u2"}]) == ["u1", "u2"]
+    assert tp._rpc_uuid_list(["u1", "u2"]) == ["u1", "u2"]
+    assert tp._rpc_uuid_list([]) == []
+    assert tp._rpc_uuid_list(None) == []
+
+
+def test_migration_is_a_locked_down_antijoin() -> None:
+    assert "research_lab_missing_trajectory_ids" in MIGRATION
+    assert "NOT EXISTS" in MIGRATION
+    assert "public.research_trajectories" in MIGRATION
+    assert "SECURITY DEFINER" in MIGRATION
+    assert "SET search_path = ''" in MIGRATION
+    assert "TO service_role;" in MIGRATION
+    assert "FROM PUBLIC, anon, authenticated;" in MIGRATION

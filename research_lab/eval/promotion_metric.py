@@ -236,6 +236,42 @@ def promotion_improvement_metric(
     )
 
 
+def benchmark_relative_score_deltas(
+    score_bundle: Mapping[str, Any],
+) -> tuple[float | None, float | None]:
+    """Return planner-safe realized deltas against the applicable benchmark.
+
+    Historical stored-daily-baseline bundles keep candidate-vs-zero arithmetic
+    in ``aggregates`` for hash compatibility, so those fields are not valid
+    improvement feedback. Truly paired legacy bundles have no holdout gate and
+    retain their aggregate semantics. New stamped bundles expose the verifier-
+    recomputed paired mean and lower confidence bound through the promotion
+    metric.
+    """
+
+    aggregates = (
+        score_bundle.get("aggregates")
+        if isinstance(score_bundle.get("aggregates"), Mapping)
+        else {}
+    )
+    if not isinstance(score_bundle.get("private_holdout_gate"), Mapping):
+        return (
+            _finite_optional_float(aggregates.get("mean_delta")),
+            _finite_optional_float(aggregates.get("delta_lcb")),
+        )
+
+    metric = promotion_improvement_metric(score_bundle)
+    mean_delta = (
+        metric.paired_mean_delta
+        if metric.paired_mean_delta is not None
+        else metric.improvement_points
+    )
+    return (
+        _finite_optional_float(mean_delta),
+        _finite_optional_float(metric.paired_delta_lcb),
+    )
+
+
 def _paired_lcb_promotion_metric(
     score_bundle: Mapping[str, Any],
     *,

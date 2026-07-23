@@ -97,6 +97,10 @@ from typing import Any, Mapping, Sequence
 
 from research_lab.axis_provenance import axis_rollup, provenance_for_stage
 from research_lab.canonical import coerce_iso_z, sha256_json, utc_now_iso
+from research_lab.eval.promotion_metric import (
+    benchmark_relative_score_deltas,
+    promotion_improvement_metric,
+)
 from research_lab.schema_validation import validate_schema_record
 from research_lab.trajectory_corpus import (
     PROTECTED_CORPUS_KEYS,
@@ -1556,12 +1560,20 @@ def _aggregates_summary(bundle_row: Mapping[str, Any] | None) -> dict[str, Any]:
     for key in (
         "base_score",
         "candidate_score",
-        "mean_delta",
-        "delta_lcb",
         "total_cost_usd",
     ):
         if aggregates.get(key) is not None:
             summary[key] = _f(aggregates.get(key))
+    mean_delta, delta_lcb = benchmark_relative_score_deltas(doc)
+    metric = promotion_improvement_metric(doc)
+    if metric.baseline_aggregate_score is not None:
+        summary["base_score"] = _f(metric.baseline_aggregate_score)
+    if metric.candidate_total_score is not None:
+        summary["candidate_score"] = _f(metric.candidate_total_score)
+    if mean_delta is not None:
+        summary["mean_delta"] = _f(mean_delta)
+    if delta_lcb is not None:
+        summary["delta_lcb"] = _f(delta_lcb)
     return summary
 
 

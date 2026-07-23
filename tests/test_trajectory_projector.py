@@ -61,6 +61,32 @@ def test_projector_and_trace_join_keys_default_on(monkeypatch):
     assert trajectory_projector_mod._execution_trace_trajectory_id_enabled() is True
 
 
+def test_trajectory_aggregate_summary_uses_daily_benchmark_delta():
+    summary = trajectory_projector_mod._aggregates_summary(
+        {
+            "score_bundle_doc": {
+                "aggregates": {
+                    "base_score": 0.0,
+                    "candidate_score": 40.0,
+                    "mean_delta": 40.0,
+                    "delta_lcb": 35.0,
+                },
+                "private_holdout_gate": {
+                    "decision": "private_holdout_approved",
+                    "private_holdout_evaluated": True,
+                    "baseline_aggregate_score": 20.0,
+                    "candidate_total_score": 18.5,
+                    "candidate_delta_vs_daily_baseline": -1.5,
+                },
+            }
+        }
+    )
+    assert summary["base_score"] == 20.0
+    assert summary["candidate_score"] == 18.5
+    assert summary["mean_delta"] == -1.5
+    assert "delta_lcb" not in summary
+
+
 # ---------------------------------------------------------------------------
 # Fake store
 # ---------------------------------------------------------------------------

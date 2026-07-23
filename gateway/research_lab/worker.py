@@ -149,7 +149,7 @@ from research_lab.eval import (
     DockerPrivateModelSpec,
     private_model_env_passthrough,
 )
-from research_lab.eval.promotion_metric import promotion_improvement_metric
+from research_lab.eval.promotion_metric import benchmark_relative_score_deltas
 
 
 logger = logging.getLogger(__name__)
@@ -6791,29 +6791,10 @@ def _realized_score_delta_for_memory(
     aggregate semantics.
     """
 
-    aggregates = (
-        score_bundle.get("aggregates")
-        if isinstance(score_bundle.get("aggregates"), Mapping)
-        else {}
-    )
-    holdout_gate = score_bundle.get("private_holdout_gate")
-    if not isinstance(holdout_gate, Mapping):
-        return {
-            "score_delta": _safe_float_for_memory(aggregates.get("mean_delta")),
-            "score_delta_lcb": _safe_float_for_memory(
-                aggregates.get("delta_lcb")
-            ),
-        }
-
-    metric = promotion_improvement_metric(score_bundle)
-    mean_delta = (
-        metric.paired_mean_delta
-        if metric.paired_mean_delta is not None
-        else metric.improvement_points
-    )
+    mean_delta, delta_lcb = benchmark_relative_score_deltas(score_bundle)
     return {
         "score_delta": _safe_float_for_memory(mean_delta),
-        "score_delta_lcb": _safe_float_for_memory(metric.paired_delta_lcb),
+        "score_delta_lcb": _safe_float_for_memory(delta_lcb),
     }
 
 

@@ -21,6 +21,7 @@ import pytest
 from gateway.research_lab import lesson_store, score_backfill
 from gateway.research_lab.score_backfill import (
     SCORE_BACKFILL_ENABLED_ENV,
+    SCORE_BUNDLE_CURRENT,
     SCORE_CALIBRATION_TABLE,
     build_calibration_row,
     fetch_score_enrichments_by_node,
@@ -96,6 +97,24 @@ def _score_bundle() -> dict[str, Any]:
     }
 
 
+def _daily_baseline_bundle(
+    *,
+    score_bundle_id: str = "bundle-daily",
+    daily_delta: float = -1.5,
+) -> dict[str, Any]:
+    return {
+        "score_bundle_id": score_bundle_id,
+        "aggregates": {"mean_delta": 40.0, "delta_lcb": 35.0},
+        "private_holdout_gate": {
+            "decision": "private_holdout_approved",
+            "private_holdout_evaluated": True,
+            "baseline_aggregate_score": 20.0,
+            "candidate_total_score": 20.0 + daily_delta,
+            "candidate_delta_vs_daily_baseline": daily_delta,
+        },
+    }
+
+
 def test_build_calibration_row_projects_all_three_score_sources():
     row = build_calibration_row(
         candidate=_scored_candidate(),
@@ -115,6 +134,16 @@ def test_build_calibration_row_projects_all_three_score_sources():
     assert row["realized_delta_lcb"] == -0.11
     assert row["outcome"] == "promotion_rejected"
     assert row["score_bundle_id"] == "bundle-1"
+
+
+def test_build_calibration_row_uses_daily_benchmark_not_candidate_vs_zero():
+    row = build_calibration_row(
+        candidate=_scored_candidate(),
+        score_bundle=_daily_baseline_bundle(),
+        score_bundle_id="bundle-daily",
+    )
+    assert row["realized_mean_delta"] == -1.5
+    assert row["realized_delta_lcb"] is None
 
 
 def test_calibration_prefers_live_patch_shape_and_rejects_non_finite_scores():
@@ -223,6 +252,7 @@ def test_fetch_score_enrichments_returns_newest_row_per_node(monkeypatch):
             SCORE_CALIBRATION_TABLE: [
                 {
                     "node_id": "node-1",
+                    "score_bundle_id": "bundle-old",
                     "realized_mean_delta": -0.5,
                     "realized_delta_lcb": -0.9,
                     "predicted_delta": 1.0,
@@ -232,6 +262,7 @@ def test_fetch_score_enrichments_returns_newest_row_per_node(monkeypatch):
                 },
                 {
                     "node_id": "node-1",
+                    "score_bundle_id": "bundle-daily",
                     "realized_mean_delta": 0.25,
                     "realized_delta_lcb": 0.05,
                     "predicted_delta": 1.0,
@@ -239,30 +270,51 @@ def test_fetch_score_enrichments_returns_newest_row_per_node(monkeypatch):
                     "outcome": "promotion_approved",
                     "created_at": "2026-07-06T00:00:00Z",
                 },
-            ]
+            ],
+            SCORE_BUNDLE_CURRENT: [
+                {
+                    "score_bundle_id": "bundle-daily",
+                    "score_bundle_doc": _daily_baseline_bundle(),
+                }
+            ],
         }
     )
     enrichments = asyncio.run(
         fetch_score_enrichments_by_node(["node-1", "node-missing"], store=store)
     )
     assert set(enrichments) == {"node-1"}
-    assert enrichments["node-1"]["realized_delta"] == 0.25
+    assert enrichments["node-1"]["realized_delta"] == -1.5
+    assert enrichments["node-1"]["realized_delta_lcb"] is None
     assert enrichments["node-1"]["scored_outcome"] == "promotion_approved"
 
 
-def test_fetch_score_enrichments_bulk_loads_all_nodes_in_one_query():
+def test_fetch_score_enrichments_bulk_loads_nodes_and_bundles():
     class _BulkStore:
         def __init__(self):
             self.calls = []
 
         async def select_all(self, table, **kwargs):
             self.calls.append((table, kwargs))
+            if table == SCORE_CALIBRATION_TABLE:
+                return [
+                    {
+                        "node_id": f"node-{index}",
+                        "score_bundle_id": f"bundle-{index}",
+                        "realized_mean_delta": index / 100,
+                        "realized_delta_lcb": 0.0,
+                        "created_at": "2026-07-06T00:00:00Z",
+                    }
+                    for index in range(40)
+                ]
             return [
                 {
-                    "node_id": f"node-{index}",
-                    "realized_mean_delta": index / 100,
-                    "realized_delta_lcb": 0.0,
-                    "created_at": "2026-07-06T00:00:00Z",
+                    "score_bundle_id": f"bundle-{index}",
+                    "score_bundle_doc": {
+                        "aggregates": {
+                            "mean_delta": index / 100,
+                            "delta_lcb": 0.0,
+                        }
+                    },
                 }
                 for index in range(40)
             ]
@@ -273,10 +325,40 @@ def test_fetch_score_enrichments_bulk_loads_all_nodes_in_one_query():
         fetch_score_enrichments_by_node(node_ids, store=store, limit=50)
     )
     assert len(enrichments) == 40
-    assert len(store.calls) == 1
+    assert len(store.calls) == 2
     table, kwargs = store.calls[0]
     assert table == SCORE_CALIBRATION_TABLE
     assert kwargs["filters"] == [("node_id", "in", node_ids)]
+    bundle_table, bundle_kwargs = store.calls[1]
+    assert bundle_table == SCORE_BUNDLE_CURRENT
+    assert bundle_kwargs["filters"] == [
+        ("score_bundle_id", "in", [f"bundle-{index}" for index in range(40)])
+    ]
+
+
+def test_fetch_score_enrichments_stays_score_blind_when_bundle_is_missing():
+    store = _FakeStore(
+        {
+            SCORE_CALIBRATION_TABLE: [
+                {
+                    "node_id": "node-1",
+                    "score_bundle_id": "bundle-missing",
+                    "realized_mean_delta": 99.0,
+                    "realized_delta_lcb": 98.0,
+                    "predicted_delta": 1.0,
+                    "dev_score": 66.0,
+                    "outcome": "promotion_approved",
+                    "created_at": "2026-07-06T00:00:00Z",
+                }
+            ]
+        }
+    )
+    enrichment = asyncio.run(
+        fetch_score_enrichments_by_node(["node-1"], store=store)
+    )["node-1"]
+    assert enrichment["realized_delta"] is None
+    assert enrichment["realized_delta_lcb"] is None
+    assert enrichment["predicted_delta"] == 1.0
 
 
 def _reflection_event_row(*, node_id: str, created_at: str) -> dict[str, Any]:
@@ -315,6 +397,7 @@ def _lesson_fixture_store() -> _FakeStore:
             SCORE_CALIBRATION_TABLE: [
                 {
                     "node_id": "node-1",
+                    "score_bundle_id": "bundle-1",
                     "realized_mean_delta": -0.02,
                     "realized_delta_lcb": -0.11,
                     "predicted_delta": 1.0,
@@ -322,6 +405,12 @@ def _lesson_fixture_store() -> _FakeStore:
                     "outcome": "promotion_rejected",
                     "created_at": "2026-07-06T00:00:00Z",
                 },
+            ],
+            SCORE_BUNDLE_CURRENT: [
+                {
+                    "score_bundle_id": "bundle-1",
+                    "score_bundle_doc": _score_bundle(),
+                }
             ],
         }
     )

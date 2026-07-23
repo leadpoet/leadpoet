@@ -30,6 +30,13 @@ def _bundle():
         "aggregates": {
             "candidate_score": 5.4, "base_score": 0.0,
             "mean_delta": 5.4, "delta_lcb": -1.83, "icp_count": 5,
+            "baseline_per_icp_scores": {
+                PUBLIC_REF: 0.0,
+                "icp_pub_infra": 0.0,
+                PRIVATE_REF: 0.0,
+                "icp_priv_flat": 0.0,
+                "icp_INFRA_dead": 0.0,
+            },
             "per_icp_results": [
                 # public, helped
                 {"icp_ref": PUBLIC_REF, "status": "completed", "delta_vs_base": 32.4,
@@ -156,6 +163,7 @@ def test_private_pool_counts():
         "flat": 1,
         "infra_excluded": 1,
         "cost_budget_exceeded": 0,
+        "comparison_unavailable": 0,
     }
 
 
@@ -163,6 +171,53 @@ def test_public_icp_values_and_infra_label():
     pub = {r["icp_ref"]: r for r in _build()["public_icps"]}
     assert pub[PUBLIC_REF]["delta"] == 32.4 and pub[PUBLIC_REF]["candidate_score"] == 32.4
     assert pub["icp_pub_infra"]["status"] == "infra_excluded"
+
+
+def test_daily_baseline_diagnostics_recompute_public_and_private_deltas():
+    bundle = _clone_bundle()
+    bundle["private_holdout_gate"].update(
+        {
+            "decision": "private_holdout_approved",
+            "private_holdout_evaluated": True,
+            "baseline_aggregate_score": 20.0,
+            "candidate_total_score": 18.5,
+            "candidate_delta_vs_daily_baseline": -1.5,
+        }
+    )
+    bundle["aggregates"]["mean_delta"] = 40.0
+    bundle["aggregates"]["delta_lcb"] = 35.0
+    bundle["aggregates"]["baseline_per_icp_scores"][PUBLIC_REF] = 40.0
+    bundle["aggregates"]["baseline_per_icp_scores"][PRIVATE_REF] = 30.0
+    doc = md.build_candidate_diagnostics(
+        candidate_id="candidate:abc",
+        bundle_doc=bundle,
+        patch_manifest=_patch_manifest(),
+        visibility_by_ref=_vis(),
+    )
+    public = {row["icp_ref"]: row for row in doc["public_icps"]}
+    assert public[PUBLIC_REF]["base_score"] == 40.0
+    assert public[PUBLIC_REF]["delta"] == -7.6
+    assert doc["private_pool"]["helped"] == 0
+    assert doc["private_pool"]["hurt"] == 1
+    assert doc["aggregate"]["mean_delta"] == -1.5
+    assert doc["aggregate"]["delta_lcb"] == 0.0
+
+
+def test_daily_baseline_diagnostics_fail_score_blind_without_per_icp_baseline():
+    bundle = _clone_bundle()
+    bundle["aggregates"].pop("baseline_per_icp_scores")
+    doc = md.build_candidate_diagnostics(
+        candidate_id="candidate:abc",
+        bundle_doc=bundle,
+        patch_manifest=_patch_manifest(),
+        visibility_by_ref=_vis(),
+    )
+    public = {row["icp_ref"]: row for row in doc["public_icps"]}
+    assert "delta" not in public[PUBLIC_REF]
+    assert public[PUBLIC_REF]["comparison_status"] == (
+        "benchmark_per_icp_score_unavailable"
+    )
+    assert doc["private_pool"]["comparison_unavailable"] == 2
 
 
 def test_public_cost_budget_exceeded_reason_is_sanitized():

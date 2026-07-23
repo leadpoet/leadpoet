@@ -48,8 +48,10 @@ from Leadpoet.utils.subnet_epoch import (
     SubnetEpochCutover,
     SubnetEpochError,
     SubnetEpochSnapshot,
+    VALIDATOR_SHARED_EPOCH_SCHEMA_VERSION,
     load_subnet_epoch_cutover,
     read_subnet_epoch_snapshot,
+    validate_validator_shared_epoch_file,
     validate_subnet_epoch_cutover_anchor,
 )
 from Leadpoet.validator.reward import start_epoch_monitor, stop_epoch_monitor
@@ -358,7 +360,7 @@ QUALIFICATION_PROXY_ENV_RE = re.compile(r"^QUALIFICATION_WEBSHARE_PROXY_(\d+)$")
 QUALIFICATION_WORK_FILE_RE = re.compile(r"^qual_worker_(\d+)_work_(\d+)$")
 
 _TRUTHY_ENV_VALUES = {"true", "1", "yes", "y", "on"}
-_SHARED_EPOCH_SCHEMA_VERSION = "leadpoet.validator_shared_epoch.v3"
+_SHARED_EPOCH_SCHEMA_VERSION = VALIDATOR_SHARED_EPOCH_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -439,63 +441,16 @@ def _read_shared_epoch_state_file(*, max_age_seconds: int) -> _ValidatorEpochSta
     path = Path("validator_weights") / "current_block.json"
     if not path.exists():
         raise FileNotFoundError("Coordinator hasn't written block file yet")
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SubnetEpochError("shared epoch file is unreadable") from exc
-    expected_fields = {
-        "schema_version",
-        "block",
-        "epoch",
-        "blocks_into_epoch",
-        "blocks_remaining",
-        "epoch_start_block",
-        "next_epoch_block",
-        "tempo",
-        "subnet_epoch_index",
-        "epoch_ref",
-        "authority",
-        "timestamp",
-    }
-    if not isinstance(document, dict) or set(document) != expected_fields:
-        raise SubnetEpochError("shared epoch file fields are invalid")
-    if document.get("schema_version") != _SHARED_EPOCH_SCHEMA_VERSION:
-        raise SubnetEpochError("shared epoch file schema is unsupported")
-    try:
-        age = int(time.time()) - int(document["timestamp"])
-    except (TypeError, ValueError) as exc:
-        raise SubnetEpochError("shared epoch file timestamp is invalid") from exc
-    if age < -30 or age > int(max_age_seconds):
-        raise SubnetEpochError(f"shared epoch file is stale ({age}s old)")
-
-    authority = document.get("authority")
-    if not isinstance(authority, dict):
-        raise SubnetEpochError("shared official epoch authority is missing")
-    snapshot = SubnetEpochSnapshot.from_mapping(authority)
     cutover = load_subnet_epoch_cutover()
-    if authority != snapshot.to_dict(cutover=cutover):
-        raise SubnetEpochError(
-            "shared official epoch authority is not canonical"
-        )
-    state = _ValidatorEpochState.from_snapshot(
+    snapshot = validate_validator_shared_epoch_file(
+        path,
+        max_age_seconds=max_age_seconds,
+        cutover=cutover,
+    )
+    return _ValidatorEpochState.from_snapshot(
         snapshot,
         cutover,
     )
-
-    observed = {
-        "block": state.current_block,
-        "epoch": state.workflow_epoch_id,
-        "blocks_into_epoch": state.epoch_block,
-        "blocks_remaining": state.blocks_remaining,
-        "epoch_start_block": state.epoch_start_block,
-        "next_epoch_block": state.next_epoch_block,
-        "tempo": state.tempo,
-        "subnet_epoch_index": state.subnet_epoch_index,
-        "epoch_ref": state.epoch_ref,
-    }
-    if any(document[key] != value for key, value in observed.items()):
-        raise SubnetEpochError("shared epoch file derived fields are inconsistent")
-    return state
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -647,22 +602,35 @@ def _verify_burn_target_owner(metagraph: Any, uid: int, expected_hotkey: Optiona
 # ════════════════════════════════════════════════════════════════════════════
 # DEDICATED FULFILLMENT CONTAINERS CONFIGURATION
 # ════════════════════════════════════════════════════════════════════════════
-# 5 containers dedicated ONLY to scoring fulfillment leads.
+# Containers dedicated ONLY to scoring fulfillment leads.
 # These run PARALLEL to sourcing (similar to qualification workers).
-# Set via FULFILLMENT_WEBSHARE_PROXY_1 through FULFILLMENT_WEBSHARE_PROXY_5
+# Worker IDs are discovered from every configured
+# FULFILLMENT_WEBSHARE_PROXY_N variable. Do not hard-code a count here:
+# production currently deploys 10 workers and a fixed count silently left
+# workers 6-10 idle.
 # ════════════════════════════════════════════════════════════════════════════
 
-FULFILLMENT_CONTAINERS_COUNT = 5
+FULFILLMENT_PROXY_ENV_RE = re.compile(r"^FULFILLMENT_WEBSHARE_PROXY_(\d+)$")
+
+
+def detect_fulfillment_worker_ids() -> List[int]:
+    """Return every configured fulfillment worker ID in numeric order."""
+
+    worker_ids = []
+    for proxy_var, proxy_value in os.environ.items():
+        match = FULFILLMENT_PROXY_ENV_RE.match(proxy_var)
+        if not match or not str(proxy_value or "").strip():
+            continue
+        worker_id = int(match.group(1))
+        if worker_id > 0:
+            worker_ids.append(worker_id)
+    return sorted(set(worker_ids))
+
 
 def detect_fulfillment_proxies():
-    """Detect FULFILLMENT_WEBSHARE_PROXY_* environment variables."""
-    proxies_found = []
-    for i in range(1, FULFILLMENT_CONTAINERS_COUNT + 1):
-        proxy_var = f"FULFILLMENT_WEBSHARE_PROXY_{i}"
-        proxy_value = os.getenv(proxy_var)
-        if proxy_value:
-            proxies_found.append(i)
-    return proxies_found
+    """Backward-compatible alias returning configured fulfillment worker IDs."""
+
+    return detect_fulfillment_worker_ids()
 
 def detect_qualification_proxies():
     """Detect QUALIFICATION_WEBSHARE_PROXY_* environment variables."""
@@ -5562,8 +5530,8 @@ class Validator(BaseValidatorNeuron):
             bt.logging.warning(f"Fulfillment workflow setup failed: {e}")
             return
 
-        fulfillment_proxies = detect_fulfillment_proxies()
-        num_workers = len(fulfillment_proxies) if fulfillment_proxies else 0
+        fulfillment_worker_ids = detect_fulfillment_worker_ids()
+        num_workers = len(fulfillment_worker_ids)
 
         # ═══════════════════════════════════════════════════════════════════
         # PHASE 1: DISTRIBUTE — fetch scoring-ready reveals, write work files
@@ -5665,7 +5633,7 @@ class Validator(BaseValidatorNeuron):
                 if scoring_requests:
                     # Option A parallelization: 1 request per worker container.
                     # Each container scores ALL submissions for its assigned request
-                    # end-to-end. Up to num_workers (5) requests processed in parallel.
+                    # end-to-end. Up to num_workers requests processed in parallel.
                     requests_to_process = scoring_requests[:num_workers] if num_workers > 0 else scoring_requests[:1]
 
                     print(f"\n🔍 Fulfillment: {len(requests_to_process)} request(s) ready for scoring "
@@ -5697,8 +5665,10 @@ class Validator(BaseValidatorNeuron):
                             # Plenty of requests — keep original 1-per-worker
                             # mapping (avoids unnecessary cross-request work
                             # file proliferation when load is balanced).
-                            for req_idx, req in enumerate(requests_to_process):
-                                worker_id = req_idx + 1
+                            for worker_id, req in zip(
+                                fulfillment_worker_ids,
+                                requests_to_process,
+                            ):
                                 request_id = req.get("request_id", "")
                                 icp_details = req.get("icp", {})
                                 submissions = req.get("submissions", [])
@@ -5721,7 +5691,7 @@ class Validator(BaseValidatorNeuron):
 
                             by_worker = {}
                             for idx, (request_id, icp_details, sub) in enumerate(flat):
-                                worker_id = (idx % num_workers) + 1
+                                worker_id = fulfillment_worker_ids[idx % num_workers]
                                 by_req = by_worker.setdefault(worker_id, {})
                                 if request_id not in by_req:
                                     by_req[request_id] = (icp_details, [])
@@ -5775,9 +5745,13 @@ class Validator(BaseValidatorNeuron):
                                         miner_hk, lead_ids, results,
                                         request_id=request_id, submission_id=sub_id,
                                     )
-                                    gateway_submit_fulfillment_scores(
+                                    if not gateway_submit_fulfillment_scores(
                                         self.wallet, request_id, scores_payload,
-                                    )
+                                    ):
+                                        raise RuntimeError(
+                                            "gateway rejected fulfillment scores "
+                                            "without raising an exception"
+                                        )
                                     print(f"   ✅ Inline: submitted {len(scores_payload)} scores for {miner_hk[:8]}...")
                                 except Exception as e:
                                     print(f"   ❌ Inline scoring failed for {miner_hk[:8]}: {e}")
@@ -5868,15 +5842,29 @@ class Validator(BaseValidatorNeuron):
                 submission_results = worker_data.get("submission_results", [])
 
                 if worker_data.get("error"):
-                    print(f"   ⚠️ Worker {wid_token} (req {request_id[:8]}) error: {worker_data['error']}")
-                    # Worker-level error is terminal (scoring itself failed,
-                    # not gateway submit).  There's nothing to retry, so we
-                    # clean up to avoid perpetual replays.
+                    print(
+                        f"   ⚠️ fulfillment_worker_retryable_error worker "
+                        f"{wid_token} (req {request_id[:8]}): "
+                        f"{worker_data['error']}"
+                    )
+                    # A worker-level exception is validator infrastructure
+                    # failure, not evidence that a miner's leads are invalid.
+                    # Keep the work assignment, renew its dispatch lease, and
+                    # remove only the error result so the worker retries it.
+                    # Submitting synthetic zero scores here would unfairly
+                    # punish miners; deleting both files would silently drop
+                    # the request until a later redispatch.
                     try:
-                        os.remove(work_file)
-                        os.remove(results_file)
-                    except Exception:
+                        results_file.unlink()
+                        work_file.touch()
+                    except FileNotFoundError:
                         pass
+                    except Exception as retry_exc:
+                        print(
+                            "   ❌ fulfillment_worker_retry_prepare_failed "
+                            f"worker {wid_token}: {retry_exc}"
+                        )
+                    any_submit_failed = True
                     continue
 
                 print(f"   Worker {wid_token} → request {request_id[:8]}: "
@@ -5905,9 +5893,13 @@ class Validator(BaseValidatorNeuron):
                             miner_hk, lead_ids, results,
                             request_id=request_id, submission_id=sub_id,
                         )
-                        gateway_submit_fulfillment_scores(
+                        if not gateway_submit_fulfillment_scores(
                             self.wallet, request_id, scores_payload,
-                        )
+                        ):
+                            raise RuntimeError(
+                                "gateway rejected fulfillment scores "
+                                "without raising an exception"
+                            )
                         print(f"   ✅ Submitted {len(scores_payload)} scores for miner {miner_hk[:8]}...")
                     except Exception as e:
                         worker_all_ok = False
@@ -11204,6 +11196,7 @@ def run_dedicated_fulfillment_worker(config):
 
             lease_task = asyncio.create_task(_refresh_lease())
 
+            request_id = ""
             try:
                 with open(work_file, 'r') as f:
                     work_data = json.load(f)
@@ -11366,6 +11359,8 @@ def run_dedicated_fulfillment_worker(config):
                     json.dump({
                         "epoch": current_epoch,
                         "fulfillment_worker_id": fid,
+                        "request_id": request_id,
+                        "error_type": type(e).__name__,
                         "error": str(e),
                         "submission_results": [],
                         "timestamp": time.time(),

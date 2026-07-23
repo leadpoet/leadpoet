@@ -21,6 +21,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import time
 from typing import Any, Mapping, Optional
 from urllib.parse import urlparse
 
@@ -28,6 +29,7 @@ from urllib.parse import urlparse
 EPOCH_SCHEME = "bittensor.subnet_epoch_index.v1"
 CUTOVER_SCHEMA_VERSION = "leadpoet.subnet_epoch_cutover.v1"
 SNAPSHOT_SCHEMA_VERSION = "leadpoet.subnet_epoch_snapshot.v1"
+VALIDATOR_SHARED_EPOCH_SCHEMA_VERSION = "leadpoet.validator_shared_epoch.v3"
 CUTOVER_JSON_ENV = "LEADPOET_SUBNET_EPOCH_CUTOVER_JSON"
 CUTOVER_PATH_ENV = "LEADPOET_SUBNET_EPOCH_CUTOVER_PATH"
 # The activated SN71 settlement mapping is public, immutable chain data.
@@ -432,6 +434,75 @@ class SubnetEpochSnapshot:
             "observed_at",
         }
         return cls(**{key: value[key] for key in allowed if key in value})
+
+
+def validate_validator_shared_epoch_file(
+    path: Any,
+    *,
+    max_age_seconds: int,
+    environ: Optional[Mapping[str, str]] = None,
+    cutover: Optional[SubnetEpochCutover] = None,
+) -> SubnetEpochSnapshot:
+    """Validate a coordinator-written worker epoch document without runtime imports."""
+
+    if environ is not None and cutover is not None:
+        raise ValueError("set only one of environ or cutover")
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SubnetEpochError("shared epoch file is unreadable") from exc
+
+    expected_fields = {
+        "schema_version",
+        "block",
+        "epoch",
+        "blocks_into_epoch",
+        "blocks_remaining",
+        "epoch_start_block",
+        "next_epoch_block",
+        "tempo",
+        "subnet_epoch_index",
+        "epoch_ref",
+        "authority",
+        "timestamp",
+    }
+    if not isinstance(document, dict) or set(document) != expected_fields:
+        raise SubnetEpochError("shared epoch file fields are invalid")
+    if document.get("schema_version") != VALIDATOR_SHARED_EPOCH_SCHEMA_VERSION:
+        raise SubnetEpochError("shared epoch file schema is unsupported")
+    try:
+        age = int(time.time()) - int(document["timestamp"])
+    except (TypeError, ValueError) as exc:
+        raise SubnetEpochError("shared epoch file timestamp is invalid") from exc
+    if age < -30 or age > int(max_age_seconds):
+        raise SubnetEpochError(f"shared epoch file is stale ({age}s old)")
+
+    authority = document.get("authority")
+    if not isinstance(authority, dict):
+        raise SubnetEpochError("shared official epoch authority is missing")
+    snapshot = SubnetEpochSnapshot.from_mapping(authority)
+    effective_cutover = cutover or load_subnet_epoch_cutover(environ)
+    if authority != snapshot.to_dict(cutover=effective_cutover):
+        raise SubnetEpochError(
+            "shared official epoch authority is not canonical"
+        )
+
+    observed = {
+        "block": snapshot.current_block,
+        "epoch": snapshot.settlement_epoch_id(effective_cutover),
+        "blocks_into_epoch": snapshot.epoch_block,
+        "blocks_remaining": snapshot.blocks_remaining,
+        "epoch_start_block": snapshot.last_epoch_block,
+        "next_epoch_block": snapshot.next_epoch_block,
+        "tempo": snapshot.tempo,
+        "subnet_epoch_index": snapshot.subnet_epoch_index,
+        "epoch_ref": snapshot.epoch_ref,
+    }
+    if any(document[key] != value for key, value in observed.items()):
+        raise SubnetEpochError("shared epoch file derived fields are inconsistent")
+    return snapshot
 
 
 def read_subnet_epoch_snapshot(

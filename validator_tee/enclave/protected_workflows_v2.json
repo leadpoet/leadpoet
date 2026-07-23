@@ -222,7 +222,7 @@
       "symbol": "ValidatorChainSourceV2.find_finalized_extrinsic_inclusion"
     },
     {
-      "ast_sha256": "sha256:b8d28b8e613b7a4e4b4319b444e2ee0449eb500cb052f87599c1b8b5d0460692",
+      "ast_sha256": "sha256:649cdb8fec7e75303032714182f124300cf84bf32659d959482af0d9d2ddd150",
       "path": "validator_tee/enclave/chain_source_v2.py",
       "symbol": "ValidatorChainSourceV2.read_chain_signing_runtime"
     },
@@ -302,7 +302,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:6b4876bce5ce0eb3bb51429f5bd3811508d16b409ef7305a550371c52ad610be",
+  "manifest_hash": "sha256:79e3f143c23cfe211f607477b09f91dd04648474e7f1a24d441ac78482d1f9cf",
   "protected_source_commit": "71dbc79c8737828c354e72d901febec1779046e1",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

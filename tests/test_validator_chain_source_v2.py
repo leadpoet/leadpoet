@@ -313,6 +313,7 @@ def test_chain_signing_runtime_is_exact_canonical_and_finalized():
         "state_getRuntimeVersion",
         "chain_getBlockHash",
     ]
+    assert {item["purpose"] for item in calls} == {"validator.chain_state.v2"}
     assert calls[4]["params"] == [requested_hash]
 
 

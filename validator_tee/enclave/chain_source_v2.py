@@ -408,7 +408,7 @@ class ValidatorChainSourceV2:
                 params=params,
                 request_id=request_id,
                 job_id=job_id,
-                purpose="validator.chain_signing_runtime.v2",
+                purpose="validator.chain_state.v2",
                 logical_operation_id=job_id + ":" + operation,
             )
             request_id += 1

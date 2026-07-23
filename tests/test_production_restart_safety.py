@@ -207,6 +207,12 @@ def test_validator_restart_is_fail_closed_and_postflight_verified() -> None:
     assert "VALIDATOR_WEIGHT_PROTOCOL" in deploy
     assert "LEADPOET_SUBNET_EPOCH_CUTOVER_JSON" in deploy
     assert "LEADPOET_EPOCH_MODE" not in deploy
+    assert (
+        'PUBLICATION_JOURNAL_ARG="-e VALIDATOR_V2_PUBLICATION_JOURNAL_PATH='
+        '/app/validator_weights/authoritative_weight_publication_v2.json"'
+        in deploy
+    )
+    assert "$PUBLICATION_JOURNAL_ARG" in deploy
     assert "get_hotkey_state_v2" in deploy
     assert "/health/v2-authority" in deploy
     assert "read_subnet_epoch_snapshot" in deploy

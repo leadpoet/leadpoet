@@ -332,6 +332,37 @@ class ValidatorHotkeyAuthorityV2:
             )
         return keypair
 
+    def _prune_prior_epoch_authorizations_locked(
+        self, *, incoming_epoch_id: int
+    ) -> None:
+        """Release prior-epoch state that cannot require another signature."""
+
+        removable = []
+        for authorization_id, record in self._weights.items():
+            record_epoch_id = int(record["weight_result"]["epoch_id"])
+            if record_epoch_id >= incoming_epoch_id:
+                continue
+            related_commits = [
+                commit
+                for commit in self._commits.values()
+                if commit.get("weight_authorization_id") == authorization_id
+            ]
+            has_signed_extrinsic = any(
+                isinstance(commit.get("signed_result"), Mapping)
+                for commit in related_commits
+            )
+            if record.get("finalization") is not None or not has_signed_extrinsic:
+                removable.append(authorization_id)
+
+        for authorization_id in removable:
+            self._weights.pop(authorization_id, None)
+            for commit_id in [
+                commit_id
+                for commit_id, commit in self._commits.items()
+                if commit.get("weight_authorization_id") == authorization_id
+            ]:
+                self._commits.pop(commit_id, None)
+
     def register_weight_result(self, response: Mapping[str, Any]) -> str:
         expected_fields = {
             "weight_snapshot",
@@ -395,6 +426,9 @@ class ValidatorHotkeyAuthorityV2:
             }
         )
         with self._lock:
+            self._prune_prior_epoch_authorizations_locked(
+                incoming_epoch_id=int(expected_result["epoch_id"])
+            )
             if len(self._weights) >= MAX_PENDING_WEIGHT_AUTHORIZATIONS:
                 raise ValidatorHotkeyAuthorityV2Error(
                     "pending weight authorization capacity is full"
@@ -619,6 +653,9 @@ class ValidatorHotkeyAuthorityV2:
             }
         )
         with self._lock:
+            self._prune_prior_epoch_authorizations_locked(
+                incoming_epoch_id=int(weight_result["epoch_id"])
+            )
             existing = self._weights.get(recovery_id)
             if existing is None:
                 if len(self._weights) >= MAX_PENDING_WEIGHT_AUTHORIZATIONS:

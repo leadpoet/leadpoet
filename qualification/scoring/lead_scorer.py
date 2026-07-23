@@ -545,7 +545,8 @@ async def score_company_autoresearch_intent_v2(
                 f"{company.company_name!r} — zeroing entire score"
             )
             return _zero_company_breakdown(
-                "Intent fabrication detected (hardcoded date or generic claim)"
+                "Intent fabrication detected (hardcoded date or generic claim)",
+                intent_signals_detail=signal_results,
             )
     except Exception as e:
         logger.error(f"Autoresearch intent scoring failed: {e}")
@@ -639,7 +640,11 @@ async def _attempt_autoresearch_evidence_repair(
         return None
 
 
-def _zero_company_breakdown(reason: Optional[str]) -> LeadScoreBreakdown:
+def _zero_company_breakdown(
+    reason: Optional[str],
+    *,
+    intent_signals_detail: Optional[List[dict]] = None,
+) -> LeadScoreBreakdown:
     return LeadScoreBreakdown(
         icp_fit=0,
         decision_maker=0,
@@ -650,6 +655,7 @@ def _zero_company_breakdown(reason: Optional[str]) -> LeadScoreBreakdown:
         time_penalty=0,
         final_score=0,
         failure_reason=reason,
+        intent_signals_detail=intent_signals_detail,
     )
 
 
@@ -657,15 +663,18 @@ def _run_autoresearch_binary_fit_checks(
     company: CompanyOutput, icp: ICPPrompt
 ) -> Tuple[bool, Optional[str]]:
     company_bucket = _normalize_linkedin_employee_bucket(company.employee_count)
-    icp_buckets = _normalize_icp_employee_buckets(icp.employee_count)
-    if icp_buckets:
-        if not company_bucket:
-            return False, "Missing employee_count bucket"
-        if company_bucket not in icp_buckets:
-            return (
-                False,
-                f"Employee count mismatch: '{company.employee_count}' not in {sorted(icp_buckets)}",
-            )
+    icp_buckets, icp_buckets_verified = _normalize_icp_employee_buckets(
+        icp.employee_count
+    )
+    if not icp_buckets_verified:
+        return False, f"ICP employee_count unverified: {icp.employee_count!r}"
+    if not company_bucket:
+        return False, "Missing or unparseable employee_count bucket"
+    if company_bucket not in icp_buckets:
+        return (
+            False,
+            f"Employee count mismatch: '{company.employee_count}' not in {sorted(icp_buckets)}",
+        )
 
     if _matches_exclusion_list(company, getattr(icp, "excluded_companies", None)):
         return False, (
@@ -724,30 +733,52 @@ def _normalize_linkedin_employee_bucket(value) -> str:
         return ""
 
 
-def _normalize_icp_employee_buckets(value) -> set:
-    # The stored ICP carries the allowed bands as a list; the scoring payload
-    # joins it with "|". Accept both directly.
-    if isinstance(value, (list, tuple, set)):
-        buckets = {_normalize_linkedin_employee_bucket(item) for item in value}
-        return {bucket for bucket in buckets if bucket}
-    raw = str(value or "").strip()
-    if not raw or raw.lower() in {"any", "all", "unknown", "n/a", "na"}:
-        return set()
-    # LinkedIn bands use thousands separators ("1,001-5,000"); drop commas
-    # BETWEEN digits before splitting, or the comma delimiter shreds every
-    # large band into garbage, the set comes back empty, and the size gate
-    # silently disables for exactly the ICPs that carry large bands.
-    raw = re.sub(r"(?<=\d),(?=\d)", "", raw)
-    pieces = [
-        item.strip()
-        for item in re.split(r"\s*(?:\||;|,|\bor\b)\s*", raw, flags=re.I)
-        if item.strip()
-    ]
-    buckets = {
-        _normalize_linkedin_employee_bucket(piece)
+def _normalize_icp_employee_buckets(value) -> Tuple[set, bool]:
+    """Return exact structured LinkedIn buckets and whether all were verified.
+
+    Commas are thousands separators inside LinkedIn ranges, never list
+    delimiters.  Splitting ``"501-1,000"`` on a comma silently removed the
+    requested band and made the size gate fail open.  Lists remain structured;
+    legacy strings may use only ``|``, ``;``, or the word ``or`` as separators.
+    Known historical labels are canonicalized to the same exact buckets. Any
+    missing, unknown, or malformed item makes the whole requirement unverified
+    so it cannot match a candidate.
+    """
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        pieces = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        raw = str(value or "").strip()
+        pieces = [
+            item.strip()
+            for item in re.split(r"\s*(?:\||;|\bor\b)\s*", raw, flags=re.I)
+            if item.strip()
+        ]
+    if not pieces or any(
+        piece.lower() in {"any", "all", "unknown", "n/a", "na"}
         for piece in pieces
-    }
-    return {bucket for bucket in buckets if bucket}
+    ):
+        return set(), False
+
+    try:
+        from research_lab.employee_buckets import (
+            LINKEDIN_EMPLOYEE_BUCKETS,
+            normalize_employee_count_bucket,
+        )
+    except Exception as e:
+        logger.warning(
+            "autoresearch ICP employee enum loading failed: %s: %s",
+            type(e).__name__, e,
+        )
+        return set(), False
+    canonical = set(LINKEDIN_EMPLOYEE_BUCKETS)
+    normalized = [
+        normalize_employee_count_bucket(piece, default=None)
+        for piece in pieces
+    ]
+    if any(not bucket or bucket not in canonical for bucket in normalized):
+        return set(), False
+    return set(normalized), True
 
 
 _EXCLUSION_NAME_SUFFIXES = {
@@ -1724,8 +1755,16 @@ async def _score_single_intent_signal(
             signal.url[:60],
             miner_asserted_idx, target_signal_text[:60],
         )
+        provider_unavailable = (
+            pipeline_decision == "unavailable"
+            or s1_status == "llm_error"
+            or s3_status == "llm_error"
+            or str(three_stage_result.get("rejection_reason") or "").startswith(
+                ("stage1_llm_error:", "stage3_llm_error:")
+            )
+        )
         _record_verdict(
-            "rejected_three_stage",
+            "rejected_verifier_error" if provider_unavailable else "rejected_three_stage",
             rejection_reason=str(three_stage_result.get("rejection_reason") or "")[:120] or None,
             pipeline_decision=pipeline_decision,
             stage1_status=s1_status,

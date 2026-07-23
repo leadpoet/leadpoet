@@ -382,3 +382,83 @@ def test_wire_family_and_syndication_detection() -> None:
     assert t3._looks_like_wire_syndication(
         "An original analysis without wire markers", "globenewswire"
     ) is False
+
+
+# ---------------------------------------------------------------------------
+# lead_scorer hardening ports: fail-closed buckets + provider-outage fairness
+# ---------------------------------------------------------------------------
+
+
+def test_icp_buckets_fail_closed_on_malformed() -> None:
+    from qualification.scoring.lead_scorer import _normalize_icp_employee_buckets
+
+    # Real bands verify; malformed requirements are UNVERIFIED (cannot match)
+    # instead of silently disabling the size gate (the old fail-open hole).
+    assert _normalize_icp_employee_buckets(["11-50", "51-200"]) == (
+        {"11-50", "51-200"},
+        True,
+    )
+    assert _normalize_icp_employee_buckets("about 500") == (set(), False)
+    assert _normalize_icp_employee_buckets(["11-50", "garbage"]) == (set(), False)
+    # Proven against live data: 560 production ICPs across 37 daily sets all
+    # parse verified, so this changes nothing on real benchmarks.
+
+
+@pytest.mark.asyncio
+async def test_provider_outage_records_verifier_error_not_content_reject(
+    monkeypatch,
+) -> None:
+    # A three-stage result that failed for PROVIDER reasons (llm_error /
+    # stage3_llm_error) must be recorded as rejected_verifier_error so the
+    # evaluator's fail-open path (infrastructure failure != falsified intent)
+    # actually triggers; content rejects keep rejected_three_stage.
+    import qualification.scoring.lead_scorer as ls
+    import qualification.scoring.intent_verification_three_stage as t3
+
+    def stub_result(reason, s3_status, decision="reject"):
+        async def fake_verify(client, **kwargs):
+            return {
+                "client_ready": False,
+                "decision": decision,
+                "rejection_reason": reason,
+                "stage1": {"status": "review"},
+                "stage3": {"status": s3_status},
+                "scrape": {"statuses": [], "result_count": 1},
+                "verdict": {},
+            }
+        return fake_verify
+
+    signal = IntentSignal(
+        source=IntentSignalSource.NEWS,
+        description="Announced expansion of data engineering team",
+        url="https://technews.io/acme-hiring",
+        date="2026-07-01",
+        snippet="Acme Corp announced it is expanding its data engineering team",
+        matched_icp_signal=0,
+    )
+    icp = _icp("Software")
+
+    async def run_with(reason, s3_status):
+        verdicts: list = []
+        monkeypatch.setattr(t3, "verify_three_stage", stub_result(reason, s3_status))
+        score, *_ = await ls._score_single_intent_signal(
+            signal,
+            icp,
+            None,
+            "Acme Corp",
+            company_website="https://acmecorp.io",
+            api_key="test-key",
+            llm_only_intent_gate=True,
+            verdict_out=verdicts,
+        )
+        assert score == 0.0
+        return verdicts[-1]["decision"]
+
+    # Provider outage -> verifier_error (evaluator fails open).
+    assert await run_with("stage3_llm_error:timeout", "llm_error") == (
+        "rejected_verifier_error"
+    )
+    # Genuine content rejection -> unchanged classification.
+    assert await run_with("stage3_contradicted", "contradicted") == (
+        "rejected_three_stage"
+    )

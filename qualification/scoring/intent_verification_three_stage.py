@@ -356,7 +356,10 @@ def _url_on_lead_domain(source_url: str,
     # (a) Same-website match
     if company_website:
         try:
-            web = _strip_www(urlparse(company_website).hostname or "")
+            normalized_website = company_website.strip()
+            if normalized_website and "://" not in normalized_website:
+                normalized_website = f"https://{normalized_website}"
+            web = _strip_www(urlparse(normalized_website).hostname or "")
             if web and (src == web or src.endswith("." + web)):
                 return True
         except Exception:
@@ -617,20 +620,35 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                 "content": "", "error": "missing key"}
     payload = {"ids": [url], "text": {"maxCharacters": MAX_SCRAPED_CHARS},
                "maxAgeHours": 0}
-    try:
-        async with httpx.AsyncClient() as cli:
-            r = await cli.post(
-                "https://api.exa.ai/contents",
-                headers={"x-api-key": api_key, "Content-Type": "application/json"},
-                json=payload, timeout=SCRAPE_TIMEOUT,
-            )
-            if r.status_code != 200:
-                return {"ok": False, "stage": "exa_http_error",
-                        "content": "", "error": f"HTTP {r.status_code}"}
-            data = r.json()
-    except Exception as e:
-        return {"ok": False, "stage": "exa_failed",
-                "content": "", "error": f"{type(e).__name__}: {str(e)[:80]}"}
+    last_error = "not attempted"
+    async with httpx.AsyncClient() as cli:
+        for attempt in range(2):
+            try:
+                r = await cli.post(
+                    "https://api.exa.ai/contents",
+                    headers={"x-api-key": api_key, "Content-Type": "application/json"},
+                    json=payload, timeout=SCRAPE_TIMEOUT,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    break
+                last_error = f"HTTP {r.status_code}"
+                # Retry only transient transport/rate-limit responses. A 4xx
+                # result remains a deterministic miss and does not consume
+                # more of the verifier budget.
+                if r.status_code != 429 and r.status_code < 500:
+                    return {"ok": False, "stage": "exa_http_error",
+                            "content": "", "error": last_error}
+            except (httpx.TimeoutException, httpx.NetworkError) as e:
+                last_error = f"{type(e).__name__}: {str(e)[:80]}"
+            except Exception as e:
+                return {"ok": False, "stage": "exa_failed",
+                        "content": "", "error": f"{type(e).__name__}: {str(e)[:80]}"}
+            if attempt == 0:
+                await asyncio.sleep(0.25)
+        else:
+            return {"ok": False, "stage": "exa_transient_exhausted",
+                    "content": "", "error": last_error}
 
     results = data.get("results") or []
     if not results:

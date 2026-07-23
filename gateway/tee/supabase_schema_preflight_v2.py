@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Mapping
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -112,6 +113,69 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         "research_lab_legacy_allocation_nonfinalizations_v2",
         ("netuid", "epoch_id", "allocation_hash", "finding_receipt_hash"),
     ),
+    (
+        "scripts/117-research-lab-maintenance-lease.sql",
+        "research_lab_maintenance_lease",
+        ("lease_name", "holder_ref", "expires_at"),
+    ),
+    (
+        "scripts/120-research-lab-atomic-candidate-claim.sql",
+        "research_lab_candidate_claim",
+        ("candidate_id", "holder_ref", "claimed_at", "expires_at"),
+    ),
+    (
+        "scripts/121-research-lab-atomic-run-claim.sql",
+        "research_loop_run_claim",
+        ("run_id", "holder_ref", "claimed_at", "expires_at"),
+    ),
+    (
+        "scripts/122-research-lab-corpus-completeness.sql",
+        "research_lab_corpus_complete",
+        ("trajectory_id", "run_id", "source_watermark", "completed_at"),
+    ),
+)
+
+REQUIRED_SUPABASE_V2_RPCS = (
+    (
+        "scripts/116-research-lab-trajectory-antijoin.sql",
+        "research_lab_missing_trajectory_ids",
+    ),
+    (
+        "scripts/117-research-lab-maintenance-lease.sql",
+        "research_lab_acquire_maintenance_lease",
+    ),
+    (
+        "scripts/118-research-lab-provider-usage-batch-insert.sql",
+        "insert_research_lab_provider_usage_ledger_rows",
+    ),
+    (
+        "scripts/119-research-lab-trajectory-delta.sql",
+        "research_lab_next_unprojected_terminal_runs",
+    ),
+    (
+        "scripts/119-research-lab-trajectory-delta.sql",
+        "research_lab_terminal_runs_missing_traces",
+    ),
+    (
+        "scripts/120-research-lab-atomic-candidate-claim.sql",
+        "claim_next_research_lab_candidate",
+    ),
+    (
+        "scripts/121-research-lab-atomic-run-claim.sql",
+        "claim_next_research_loop_run",
+    ),
+    (
+        "scripts/122-research-lab-corpus-completeness.sql",
+        "research_lab_corpus_source_watermark",
+    ),
+    (
+        "scripts/122-research-lab-corpus-completeness.sql",
+        "research_lab_mark_corpus_complete",
+    ),
+    (
+        "scripts/122-research-lab-corpus-completeness.sql",
+        "research_lab_terminal_runs_needing_corpus",
+    ),
 )
 
 
@@ -131,16 +195,17 @@ def verify_required_supabase_v2_schema(
         raise SupabaseSchemaPreflightV2Error(
             "prepared parent environment lacks Supabase V2 schema credentials"
         )
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {service_role_key}",
+        "apikey": service_role_key,
+    }
     migrations = set()
     for migration, table, columns in REQUIRED_SUPABASE_V2_SCHEMA:
         query = urlencode({"select": ",".join(columns), "limit": "0"})
         request = Request(
             f"{supabase_url}/rest/v1/{table}?{query}",
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {service_role_key}",
-                "apikey": service_role_key,
-            },
+            headers=headers,
         )
         try:
             with opener(request, timeout=timeout_seconds) as response:
@@ -161,8 +226,52 @@ def verify_required_supabase_v2_schema(
                 f"{table}; apply {migration} before restart (HTTP {status})"
             )
         migrations.add(migration)
+    # PostgREST returns 200 to OPTIONS even for a nonexistent /rpc path, so an
+    # OPTIONS probe cannot prove function availability. The service-role OpenAPI
+    # document lists only functions present in the active schema cache and
+    # executable by that role; inspect it once without executing any RPC.
+    schema_request = Request(
+        f"{supabase_url}/rest/v1/",
+        headers={**headers, "Accept": "application/openapi+json"},
+    )
+    try:
+        with opener(schema_request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            encoded_schema = response.read()
+    except HTTPError as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            f"Supabase V2 RPC schema probe failed (HTTP {exc.code})"
+        ) from exc
+    except Exception as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "Supabase V2 RPC schema probe failed"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise SupabaseSchemaPreflightV2Error(
+            f"Supabase V2 RPC schema probe failed (HTTP {status})"
+        )
+    try:
+        schema_document = json.loads(encoded_schema.decode("utf-8"))
+        schema_paths = schema_document["paths"]
+        if not isinstance(schema_paths, Mapping):
+            raise TypeError("OpenAPI paths must be an object")
+    except (KeyError, TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "Supabase V2 RPC schema document is invalid"
+        ) from exc
+    for migration, function_name in REQUIRED_SUPABASE_V2_RPCS:
+        if f"/rpc/{function_name}" not in schema_paths:
+            raise SupabaseSchemaPreflightV2Error(
+                "required Supabase V2 RPC is unavailable for "
+                f"{function_name}; apply {migration} before restart"
+            )
+        migrations.add(migration)
     return {
         "status": "ready",
-        "probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA),
+        "probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA)
+        + len(REQUIRED_SUPABASE_V2_RPCS),
+        "table_probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA),
+        "rpc_probe_count": len(REQUIRED_SUPABASE_V2_RPCS),
+        "schema_document_probe_count": 1,
         "migration_files": sorted(migrations),
     }

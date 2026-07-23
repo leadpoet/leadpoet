@@ -66,6 +66,7 @@ from gateway.research_lab.logging_utils import (
 )
 from gateway.research_lab.maintenance import (
     MAINTENANCE_LEASE_SCORING,
+    MaintenanceLeaseHeartbeat,
     get_scoring_maintenance_state,
     make_lease_holder_ref,
     set_scoring_maintenance_paused,
@@ -3311,10 +3312,13 @@ def _candidate_claim_recovery_reason(
     worker_started_at: datetime,
     stale_after_seconds: int,
     restart_orphan_grace_seconds: int,
+    single_owner: bool = False,
 ) -> str | None:
     if not candidate_id:
         return None
     if _status_is_stale(row.get("current_status_at"), stale_after_seconds):
+        if single_owner:
+            return "stale_claim"
         owner_index = _stale_claim_recovery_owner_index(candidate_id, total_workers)
         return "stale_claim" if int(worker_index) == owner_index else None
     if _claim_predates_worker_boot(
@@ -3595,42 +3599,14 @@ class ResearchLabGatewayScoringWorker:
             # below, which auto-resumes once providers recover.
             return {"processed": False, "status": "maintenance_paused"}
 
-        # Single-owner recovery: only the scoring lease holder runs the global
-        # stale-claim recovery, stuck-candidate alerting, and quarantine requeue.
-        # Others skip them this pass (fail-closed, no duplicate scans/writes);
-        # the holder — or the next taker after the lease TTL expires — runs them.
-        self._holds_maintenance_lease = await try_acquire_maintenance_lease(
-            lease_name=MAINTENANCE_LEASE_SCORING,
-            holder_ref=self._lease_holder_ref,
-            ttl_seconds=_scoring_maintenance_lease_ttl_seconds(),
-        )
-        if self._holds_maintenance_lease:
-            await self._recover_stale_candidate_claims()
-            await self._alert_stuck_candidates()
-
-        # Provider preflight: never start a baseline or claim candidates when
-        # ScrapingDog/Exa are out of credits or persistently unreachable —
-        # every measurement would be a provider-outage zero.
-        preflight = await preflight_gate(
-            scope="scoring",
-            actor_ref=self.worker_ref,
-            is_paused=get_scoring_maintenance_state,
-            set_paused=set_scoring_maintenance_paused,
-            worker_index=self.config.scoring_worker_index,
-            # Reuse the maintenance state already read at the start of this pass
-            # instead of re-reading research_lab_gateway_control_current.
-            prefetched_state=maintenance_state,
+        preflight = await self._run_lease_held_recovery_and_preflight(
+            maintenance_state
         )
         if not preflight.get("proceed"):
             return {
                 "status": "provider_preflight_unhealthy",
                 "preflight": preflight.get("verdicts"),
             }
-        # Providers are healthy at this moment: requeue any candidates whose
-        # scores were quarantined during an outage for a clean rescore. Only the
-        # scoring lease holder performs this global sweep.
-        if self._holds_maintenance_lease:
-            await self._requeue_quarantined_candidates()
 
         baseline_result = None
         if self.config.private_baseline_rebenchmark_enabled and self._is_private_baseline_owner():
@@ -3794,6 +3770,57 @@ class ResearchLabGatewayScoringWorker:
             "candidate_claim_capacity": claim_capacity,
             "candidate_start_gate": self._last_candidate_start_gate,
         }
+
+    async def _run_lease_held_recovery_and_preflight(
+        self, maintenance_state: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        """Run scoring maintenance under a continuously renewed lease."""
+
+        lease_ttl = _scoring_maintenance_lease_ttl_seconds()
+        self._holds_maintenance_lease = await try_acquire_maintenance_lease(
+            lease_name=MAINTENANCE_LEASE_SCORING,
+            holder_ref=self._lease_holder_ref,
+            ttl_seconds=lease_ttl,
+        )
+        heartbeat = (
+            MaintenanceLeaseHeartbeat(
+                lease_name=MAINTENANCE_LEASE_SCORING,
+                holder_ref=self._lease_holder_ref,
+                ttl_seconds=lease_ttl,
+            )
+            if self._holds_maintenance_lease
+            else None
+        )
+        if heartbeat is not None:
+            await heartbeat.start()
+        try:
+            # The DB lease is the single ownership authority for this path, so
+            # its holder recovers every former hash shard. The operator command
+            # keeps the legacy partition through single_owner=False.
+            if self._holds_maintenance_lease:
+                await self._recover_stale_candidate_claims()
+                heartbeat.ensure_held()
+                await self._alert_stuck_candidates()
+                heartbeat.ensure_held()
+
+            # Provider preflight still runs for every scorer. Only the lease
+            # holder performs the global quarantine requeue after it passes.
+            preflight = await preflight_gate(
+                scope="scoring",
+                actor_ref=self.worker_ref,
+                is_paused=get_scoring_maintenance_state,
+                set_paused=set_scoring_maintenance_paused,
+                worker_index=self.config.scoring_worker_index,
+                prefetched_state=maintenance_state,
+            )
+            if preflight.get("proceed") and self._holds_maintenance_lease:
+                heartbeat.ensure_held()
+                await self._requeue_quarantined_candidates()
+                heartbeat.ensure_held()
+            return preflight
+        finally:
+            if heartbeat is not None:
+                await heartbeat.stop()
 
     async def _candidate_claim_capacity(self) -> dict[str, Any]:
         host_pressure = _scoring_host_pressure_capacity(
@@ -5305,6 +5332,7 @@ class ResearchLabGatewayScoringWorker:
                     "RESEARCH_LAB_SCORING_RESTART_ORPHAN_GRACE_SECONDS",
                     5,
                 ),
+                single_owner=self._holds_maintenance_lease,
             )
             if recovery_reason is None:
                 continue

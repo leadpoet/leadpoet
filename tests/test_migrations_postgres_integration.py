@@ -364,6 +364,16 @@ def test_migrations_apply_and_execute(pg) -> None:
     assert result.returncode == 0, result.stderr
     assert "RPC-BEHAVIOR-OK" in result.stderr
     assert "LEASE-IDENTITY-OK" in result.stderr
+    indexed = pg["psql"](
+        [
+            "-tAc",
+            "SELECT COUNT(*) FROM pg_indexes "
+            "WHERE schemaname='public' "
+            "AND indexname='research_lab_candidate_evaluation_events_run_seq_idx'",
+        ]
+    )
+    assert indexed.returncode == 0, indexed.stderr
+    assert indexed.stdout.strip() == "1"
 
 
 def test_atomic_claims_never_double_assign_under_concurrency(pg) -> None:

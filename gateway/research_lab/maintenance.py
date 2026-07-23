@@ -10,7 +10,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
 from .key_vault import (
@@ -115,6 +115,91 @@ async def try_acquire_maintenance_lease(
     if isinstance(payload, Mapping):
         return bool(payload.get("acquired"))
     return False
+
+
+class MaintenanceLeaseLostError(RuntimeError):
+    """Raised when a worker can no longer prove it owns a maintenance lease."""
+
+
+def maintenance_lease_heartbeat_interval_seconds(ttl_seconds: int) -> float:
+    """Renew at least three times per TTL without creating a hot DB loop."""
+
+    return max(1.0, min(float(max(1, int(ttl_seconds))) / 3.0, 60.0))
+
+
+class MaintenanceLeaseHeartbeat:
+    """Keep a previously-acquired maintenance lease alive during long sweeps.
+
+    Maintenance includes external snapshot commands whose runtime can exceed the
+    normal worker poll interval by hours. The old acquire-once-per-pass behavior
+    allowed the 180-second lease to expire while the holder was still active.
+    This heartbeat renews under the same unique holder token. A failed renewal
+    marks ownership lost, and callers check ``ensure_held`` between global
+    operations so no later sweep starts without a proven lease.
+    """
+
+    def __init__(
+        self,
+        *,
+        lease_name: str,
+        holder_ref: str,
+        ttl_seconds: int,
+        acquire_lease: Callable[..., Awaitable[bool]] = try_acquire_maintenance_lease,
+        interval_seconds: float | None = None,
+    ) -> None:
+        self.lease_name = str(lease_name)
+        self.holder_ref = str(holder_ref)
+        self.ttl_seconds = max(1, int(ttl_seconds))
+        self._acquire_lease = acquire_lease
+        self.interval_seconds = (
+            max(0.001, float(interval_seconds))
+            if interval_seconds is not None
+            else maintenance_lease_heartbeat_interval_seconds(self.ttl_seconds)
+        )
+        self._lost = False
+        self._task: asyncio.Task[Any] | None = None
+
+    async def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(
+                self._run(),
+                name=f"research-lab-maintenance-lease:{self.lease_name}",
+            )
+
+    async def stop(self) -> None:
+        task = self._task
+        self._task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    def ensure_held(self) -> None:
+        if self._lost:
+            raise MaintenanceLeaseLostError(
+                f"maintenance lease ownership lost: {self.lease_name}"
+            )
+
+    async def _run(self) -> None:
+        while True:
+            await asyncio.sleep(self.interval_seconds)
+            held = await self._acquire_lease(
+                lease_name=self.lease_name,
+                holder_ref=self.holder_ref,
+                ttl_seconds=self.ttl_seconds,
+            )
+            if held:
+                continue
+            self._lost = True
+            logger.error(
+                "research_lab_maintenance_lease_heartbeat_lost name=%s holder_ref=%s",
+                self.lease_name,
+                self.holder_ref,
+            )
+            return
 
 
 async def get_autoresearch_maintenance_state() -> dict[str, Any]:

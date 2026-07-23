@@ -13,8 +13,11 @@ helpers, and that the migration is a locked-down, atomically-acquired lease.
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timezone
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -168,6 +171,147 @@ def test_ttl_exceeds_idle_backoff_cap(monkeypatch) -> None:
     monkeypatch.delenv("RESEARCH_LAB_MAINTENANCE_LEASE_TTL_SECONDS", raising=False)
     monkeypatch.delenv("RESEARCH_LAB_WORKER_IDLE_BACKOFF_MAX_SECONDS", raising=False)
     assert hosted._maintenance_lease_ttl_seconds() > hosted._idle_backoff_max_seconds(15.0)
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_renews_past_ttl_then_allows_dead_holder_takeover() -> None:
+    model = _LeaseModel()
+    lease = maint.MAINTENANCE_LEASE_HOSTED
+    holder = "holder-a"
+    contender = "holder-b"
+    assert model.acquire(lease, holder, ttl=60) is True
+
+    renewals = 0
+    renewed_three_times = asyncio.Event()
+
+    async def renew(**kwargs: Any) -> bool:
+        nonlocal renewals
+        assert kwargs == {
+            "lease_name": lease,
+            "holder_ref": holder,
+            "ttl_seconds": 60,
+        }
+        # Simulate 25 seconds elapsing before every renewal. After three calls,
+        # the original unrenewed 60-second TTL would already have expired.
+        model._now += 25
+        renewed = model.acquire(lease, holder, ttl=60)
+        renewals += 1
+        if renewals >= 3:
+            renewed_three_times.set()
+        return renewed
+
+    heartbeat = maint.MaintenanceLeaseHeartbeat(
+        lease_name=lease,
+        holder_ref=holder,
+        ttl_seconds=60,
+        acquire_lease=renew,
+        interval_seconds=0.001,
+    )
+    await heartbeat.start()
+    await asyncio.wait_for(renewed_three_times.wait(), timeout=1)
+    heartbeat.ensure_held()
+    assert model.acquire(lease, contender, ttl=60) is False
+    await heartbeat.stop()
+
+    # A dead/stopped holder no longer renews, so takeover still works after the
+    # last renewed TTL. Heartbeating must not turn into an immortal lock.
+    model._now += 61
+    assert model.acquire(lease, contender, ttl=60) is True
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_fails_closed_when_renewal_is_lost() -> None:
+    attempted = asyncio.Event()
+
+    async def lose(**_kwargs: Any) -> bool:
+        attempted.set()
+        return False
+
+    heartbeat = maint.MaintenanceLeaseHeartbeat(
+        lease_name=maint.MAINTENANCE_LEASE_SCORING,
+        holder_ref="holder-a",
+        ttl_seconds=60,
+        acquire_lease=lose,
+        interval_seconds=0.001,
+    )
+    await heartbeat.start()
+    await asyncio.wait_for(attempted.wait(), timeout=1)
+    await asyncio.sleep(0)
+    with pytest.raises(maint.MaintenanceLeaseLostError):
+        heartbeat.ensure_held()
+    await heartbeat.stop()
+
+
+@pytest.mark.asyncio
+async def test_nonzero_hosted_lease_holder_runs_snapshot_refresh(monkeypatch) -> None:
+    worker = object.__new__(hosted.ResearchLabHostedWorker)
+    worker.config = SimpleNamespace(hosted_worker_index=7, netuid=71)
+    worker.tree_policy = SimpleNamespace(mode="active")
+    worker.worker_ref = "hosted-worker-8"
+    worker._holds_maintenance_lease = True
+    observed: dict[str, Any] = {}
+
+    async def noop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def snapshot(_config: Any, *, worker_index: int, tree_policy: Any):
+        observed["worker_index"] = worker_index
+        observed["tree_policy"] = tree_policy
+        return {"status": "healthy"}
+
+    monkeypatch.setattr(hosted, "reproject_stale_public_cards", noop)
+    monkeypatch.setattr(hosted, "reconcile_active_private_model_lineage", noop)
+    monkeypatch.setattr(hosted, "maybe_refresh_dev_snapshot", snapshot)
+    monkeypatch.setattr(hosted, "reconcile_pending_champion_rewards", noop)
+    monkeypatch.setattr(hosted, "reconcile_champion_reward_statuses", noop)
+
+    from gateway.research_lab import trajectory_projector
+
+    monkeypatch.setattr(trajectory_projector, "projector_enabled", lambda: False)
+    await worker._run_periodic_reconciles()
+
+    assert observed == {"worker_index": 0, "tree_policy": worker.tree_policy}
+    observed.clear()
+    worker._holds_maintenance_lease = False
+    await worker._run_periodic_reconciles()
+    assert observed == {}
+
+
+@pytest.mark.asyncio
+async def test_scoring_lease_holder_recovers_across_former_shards(monkeypatch) -> None:
+    worker = object.__new__(scoring.ResearchLabGatewayScoringWorker)
+    worker.config = SimpleNamespace(
+        scoring_worker_model_timeout_seconds=900,
+        scoring_worker_index=7,
+        scoring_worker_total_workers=25,
+    )
+    worker.worker_ref = "scoring-worker-8"
+    worker._worker_started_at = datetime.now(timezone.utc)
+    worker._holds_maintenance_lease = True
+    observed: list[bool] = []
+
+    async def rows(_table: str, **kwargs: Any):
+        status = dict(kwargs["filters"])["current_candidate_status"]
+        if status == "assigned":
+            return [
+                {
+                    "candidate_id": "candidate-from-another-former-shard",
+                    "run_id": "11111111-1111-4111-8111-111111111111",
+                    "ticket_id": "22222222-2222-4222-8222-222222222222",
+                    "current_status_at": "2026-01-01T00:00:00+00:00",
+                }
+            ]
+        return []
+
+    def recovery_reason(*_args: Any, **kwargs: Any):
+        observed.append(bool(kwargs["single_owner"]))
+        return None
+
+    monkeypatch.setattr(scoring, "select_many", rows)
+    monkeypatch.setattr(scoring, "_candidate_claim_recovery_reason", recovery_reason)
+
+    assert await worker._recover_stale_candidate_claims() == 0
+    assert observed == [True]
 
 
 def test_migration_is_a_locked_down_atomic_lease() -> None:

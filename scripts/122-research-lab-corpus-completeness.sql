@@ -36,6 +36,11 @@ DROP POLICY IF EXISTS service_role_all ON public.research_lab_corpus_complete;
 CREATE POLICY service_role_all ON public.research_lab_corpus_complete
     FOR ALL TO service_role USING (true) WITH CHECK (true);
 
+-- The source watermark filters evaluation events by run_id and reads MAX(seq)
+-- for every candidate run. Keep that lookup indexed as the corpus grows.
+CREATE INDEX IF NOT EXISTS research_lab_candidate_evaluation_events_run_seq_idx
+    ON public.research_lab_candidate_evaluation_events (run_id, seq DESC);
+
 -- Fingerprint of every projection source for a run, mirroring
 -- load_projection_inputs: loop events / candidate artifacts / evaluation events
 -- (by run_id), promotion events (by the run's candidate ids), version events

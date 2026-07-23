@@ -71,6 +71,7 @@ from gateway.research_lab.autoresearch_runtime import (
 )
 from gateway.research_lab.maintenance import (
     MAINTENANCE_LEASE_HOSTED,
+    MaintenanceLeaseHeartbeat,
     make_lease_holder_ref,
     autoresearch_queue_capacity_doc,
     expire_unpaid_tickets,
@@ -1670,49 +1671,11 @@ class ResearchLabHostedWorker:
 
     async def run_once(self) -> HostedWorkerOutcome:
         self._require_enabled()
-        # Single-owner maintenance lease: only the holder runs the global
-        # sweeps this pass; others skip them (fail-closed, no duplication). The
-        # lease replaces per-op worker_index==0 gating and survives holder death.
-        self._holds_maintenance_lease = (
-            not self.config.hosted_worker_dry_run
-            and await try_acquire_maintenance_lease(
-                lease_name=MAINTENANCE_LEASE_HOSTED,
-                holder_ref=self._lease_holder_ref,
-                ttl_seconds=_maintenance_lease_ttl_seconds(),
-            )
+        maintenance_outcome, autoresearch_state = (
+            await self._run_preclaim_maintenance()
         )
-        # The lease-held sweeps run on a wall-clock cadence, not once per poll, so
-        # recovery + reward reconciliation stay independent of the idle backoff.
-        maintenance_due = self._holds_maintenance_lease and (
-            time.monotonic() - self._last_lease_maintenance_at
-            >= _lease_maintenance_interval_seconds()
-        )
-        if maintenance_due:
-            self._last_lease_maintenance_at = time.monotonic()
-        self._lease_maintenance_due = maintenance_due
-        if not self.config.hosted_worker_dry_run:
-            if maintenance_due:
-                await self._recover_stale_started_runs()
-                await self._reconcile_stale_loop_projections()
-            await self._maybe_reconcile_terminal_tickets()
-            await self._maybe_refresh_allocator_priors()
-        autoresearch_state = await get_autoresearch_maintenance_state()
-        if bool(autoresearch_state.get("paused")) and not str(
-            autoresearch_state.get("reason") or ""
-        ).startswith(PREFLIGHT_REASON_PREFIX):
-            # Operator/manual pauses stop the pass outright. A pause carrying
-            # the preflight marker falls through to the preflight gate below,
-            # which auto-resumes once providers recover.
-            return HostedWorkerOutcome(
-                processed=False,
-                dry_run=self.config.hosted_worker_dry_run,
-                status="maintenance_paused",
-            )
-        if not self.config.hosted_worker_dry_run:
-            await self._maybe_expire_unpaid_tickets()
-            if self._lease_maintenance_due:
-                await self._recover_stale_paused_runs()
-                await self._run_periodic_reconciles()
+        if maintenance_outcome is not None:
+            return maintenance_outcome
         if self.tree_policy.mode == "off":
             return HostedWorkerOutcome(
                 processed=False,
@@ -1882,6 +1845,75 @@ class ResearchLabHostedWorker:
             )
             return await self._mark_failed(context, str(exc), failure_exception=exc)
 
+    async def _run_preclaim_maintenance(
+        self,
+    ) -> tuple[HostedWorkerOutcome | None, Mapping[str, Any]]:
+        """Preserve the pre-claim flow while renewing long maintenance work."""
+
+        lease_ttl = _maintenance_lease_ttl_seconds()
+        self._holds_maintenance_lease = (
+            not self.config.hosted_worker_dry_run
+            and await try_acquire_maintenance_lease(
+                lease_name=MAINTENANCE_LEASE_HOSTED,
+                holder_ref=self._lease_holder_ref,
+                ttl_seconds=lease_ttl,
+            )
+        )
+        maintenance_due = self._holds_maintenance_lease and (
+            time.monotonic() - self._last_lease_maintenance_at
+            >= _lease_maintenance_interval_seconds()
+        )
+        if maintenance_due:
+            self._last_lease_maintenance_at = time.monotonic()
+        self._lease_maintenance_due = maintenance_due
+
+        heartbeat = (
+            MaintenanceLeaseHeartbeat(
+                lease_name=MAINTENANCE_LEASE_HOSTED,
+                holder_ref=self._lease_holder_ref,
+                ttl_seconds=lease_ttl,
+            )
+            if self._holds_maintenance_lease
+            else None
+        )
+        if heartbeat is not None:
+            await heartbeat.start()
+        try:
+            if not self.config.hosted_worker_dry_run:
+                if maintenance_due:
+                    await self._recover_stale_started_runs()
+                    heartbeat.ensure_held()
+                    await self._reconcile_stale_loop_projections()
+                    heartbeat.ensure_held()
+                await self._maybe_reconcile_terminal_tickets()
+                await self._maybe_refresh_allocator_priors()
+
+            autoresearch_state = await get_autoresearch_maintenance_state()
+            if bool(autoresearch_state.get("paused")) and not str(
+                autoresearch_state.get("reason") or ""
+            ).startswith(PREFLIGHT_REASON_PREFIX):
+                return (
+                    HostedWorkerOutcome(
+                        processed=False,
+                        dry_run=self.config.hosted_worker_dry_run,
+                        status="maintenance_paused",
+                    ),
+                    autoresearch_state,
+                )
+
+            if not self.config.hosted_worker_dry_run:
+                await self._maybe_expire_unpaid_tickets()
+                if self._lease_maintenance_due:
+                    heartbeat.ensure_held()
+                    await self._recover_stale_paused_runs()
+                    heartbeat.ensure_held()
+                    await self._run_periodic_reconciles(lease_guard=heartbeat)
+                    heartbeat.ensure_held()
+            return None, autoresearch_state
+        finally:
+            if heartbeat is not None:
+                await heartbeat.stop()
+
     def _require_enabled(self) -> None:
         if not self.config.hosted_worker_enabled:
             raise HostedResearchLabWorkerError("Research Lab hosted worker is disabled")
@@ -1979,7 +2011,9 @@ class ResearchLabHostedWorker:
         # Claim conflicts are handled as no-ops, not failures.
         return rows[0]
 
-    async def _run_periodic_reconciles(self) -> None:
+    async def _run_periodic_reconciles(
+        self, *, lease_guard: MaintenanceLeaseHeartbeat | None = None
+    ) -> None:
         """Lease-held maintenance reconciles (bugs 3, 24, 34).
 
         Called only on the wall-clock maintenance cadence (see run_once), so this
@@ -1988,6 +2022,10 @@ class ResearchLabHostedWorker:
         is idempotent, self-limiting (acts only on drifted rows), and best-effort
         — a reconcile failure never blocks run processing.
         """
+        if not self._holds_maintenance_lease:
+            return
+        if lease_guard is not None:
+            lease_guard.ensure_held()
         try:
             await reproject_stale_public_cards(config=self.config)
         except Exception as exc:
@@ -1996,6 +2034,8 @@ class ResearchLabHostedWorker:
                 self.worker_ref,
                 str(exc)[:200],
             )
+        if lease_guard is not None:
+            lease_guard.ensure_held()
         try:
             await reconcile_active_private_model_lineage(
                 actor_ref=self.worker_ref, dry_run=False
@@ -2006,10 +2046,15 @@ class ResearchLabHostedWorker:
                 self.worker_ref,
                 str(exc)[:200],
             )
+        if lease_guard is not None:
+            lease_guard.ensure_held()
         try:
             await maybe_refresh_dev_snapshot(
                 self.config,
-                worker_index=int(self.config.hosted_worker_index or 0),
+                # The distributed lease is now the singleton authority. Pass the
+                # legacy refresh-owner index so an arbitrary nonzero lease
+                # holder is not rejected by snapshot_refresh's local guard.
+                worker_index=0,
                 tree_policy=self.tree_policy,
             )
         except Exception as exc:
@@ -2019,6 +2064,8 @@ class ResearchLabHostedWorker:
                 self.worker_ref,
                 str(exc)[:200],
             )
+        if lease_guard is not None:
+            lease_guard.ensure_held()
         try:
             await reconcile_pending_champion_rewards(
                 self.config, worker_ref=self.worker_ref, dry_run=False
@@ -2029,6 +2076,8 @@ class ResearchLabHostedWorker:
                 self.worker_ref,
                 str(exc)[:200],
             )
+        if lease_guard is not None:
+            lease_guard.ensure_held()
         # Single-owner via the maintenance lease (the caller only reaches
         # _run_periodic_reconciles when it holds the lease), replacing the
         # former worker_index==0 gate so a dead worker 0 no longer starves this.
@@ -2065,6 +2114,8 @@ class ResearchLabHostedWorker:
                         self.worker_ref,
                         str(exc)[:200],
                     )
+        if lease_guard is not None:
+            lease_guard.ensure_held()
         try:
             from gateway.research_lab.trajectory_projector import (
                 GatewayProjectorStore,
@@ -2096,6 +2147,8 @@ class ResearchLabHostedWorker:
                 self.worker_ref,
                 str(exc)[:200],
             )
+        if lease_guard is not None:
+            lease_guard.ensure_held()
 
     async def _maybe_export_trajectory_corpus(self, projector_store: Any) -> None:
         if not self.config.corpus_export_enabled:

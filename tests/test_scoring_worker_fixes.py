@@ -462,7 +462,7 @@ def test_restart_orphan_recovery_is_not_blocked_by_stale_owner():
     )
 
 
-def test_stale_claim_recovery_is_limited_to_owner_worker():
+def test_stale_claim_recovery_preserves_operator_shards_but_lease_owner_gets_all():
     candidate_id = "candidate:2eceb2a9574ff577d014ac8a8a285799891dd0470e433af3a88ca6d7e48169e4"
     owner_index = sw._stale_claim_recovery_owner_index(candidate_id, 25)
     non_owner_index = (owner_index + 1) % 25
@@ -485,6 +485,14 @@ def test_stale_claim_recovery_is_limited_to_owner_worker():
         == "stale_claim"
     )
     assert sw._candidate_claim_recovery_reason(**common, worker_index=non_owner_index) is None
+    assert (
+        sw._candidate_claim_recovery_reason(
+            **common,
+            worker_index=non_owner_index,
+            single_owner=True,
+        )
+        == "stale_claim"
+    )
 
 
 # --- bug #37: _baseline_error_is_retryable / _runtime_error_diagnostics ---

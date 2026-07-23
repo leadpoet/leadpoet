@@ -343,8 +343,9 @@ def test_parent_env_parser_does_not_execute_shell(tmp_path: Path) -> None:
 
 
 class _SchemaResponse:
-    def __init__(self, status: int = 200) -> None:
+    def __init__(self, status: int = 200, body: bytes = b"[") -> None:
         self.status = status
+        self.body = body
 
     def __enter__(self):
         return self
@@ -356,7 +357,7 @@ class _SchemaResponse:
         return self.status
 
     def read(self, _size: int = -1) -> bytes:
-        return b"["
+        return self.body if _size < 0 else self.body[:_size]
 
 
 def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
@@ -364,6 +365,12 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
 
     def opener(request, *, timeout):
         requests.append((request, timeout))
+        if request.full_url.endswith("/rest/v1/"):
+            paths = {
+                f"/rpc/{function_name}": {"post": {}}
+                for _migration, function_name in schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+            }
+            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
         return _SchemaResponse()
 
     result = schema_preflight.verify_required_supabase_v2_schema(
@@ -377,10 +384,38 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert result["status"] == "ready"
     assert result["probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
+    ) + len(schema_preflight.REQUIRED_SUPABASE_V2_RPCS)
+    assert result["table_probe_count"] == len(
+        schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
     )
-    assert len(requests) == result["probe_count"]
+    assert result["rpc_probe_count"] == len(
+        schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+    )
+    assert result["schema_document_probe_count"] == 1
+    assert len(requests) == result["table_probe_count"] + 1
     assert all("/rest/v1/" in request.full_url for request, _timeout in requests)
-    assert all("limit=0" in request.full_url for request, _timeout in requests)
+    table_requests = [
+        request
+        for request, _timeout in requests
+        if not request.full_url.endswith("/rest/v1/")
+    ]
+    schema_requests = [
+        request
+        for request, _timeout in requests
+        if request.full_url.endswith("/rest/v1/")
+    ]
+    assert all("limit=0" in request.full_url for request in table_requests)
+    assert len(schema_requests) == 1
+    assert schema_requests[0].headers["Accept"] == "application/openapi+json"
+    assert {
+        "scripts/116-research-lab-trajectory-antijoin.sql",
+        "scripts/117-research-lab-maintenance-lease.sql",
+        "scripts/118-research-lab-provider-usage-batch-insert.sql",
+        "scripts/119-research-lab-trajectory-delta.sql",
+        "scripts/120-research-lab-atomic-candidate-claim.sql",
+        "scripts/121-research-lab-atomic-run-claim.sql",
+        "scripts/122-research-lab-corpus-completeness.sql",
+    }.issubset(set(result["migration_files"]))
     assert "service-role-value" not in str(result)
 
 
@@ -398,6 +433,26 @@ def test_required_supabase_v2_schema_names_missing_migration() -> None:
     with pytest.raises(
         schema_preflight.SupabaseSchemaPreflightV2Error,
         match=r"validator_sourcing_epoch_inputs_v2.*92-validator-sourcing",
+    ):
+        schema_preflight.verify_required_supabase_v2_schema(
+            {
+                "SUPABASE_URL": "https://project.supabase.co",
+                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
+            },
+            opener=opener,
+        )
+
+
+def test_required_supabase_v2_schema_names_missing_rpc_migration() -> None:
+    def opener(request, *, timeout):
+        del timeout
+        if request.full_url.endswith("/rest/v1/"):
+            return _SchemaResponse(body=b'{"paths":{}}')
+        return _SchemaResponse()
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match=r"research_lab_missing_trajectory_ids.*116-research-lab-trajectory",
     ):
         schema_preflight.verify_required_supabase_v2_schema(
             {

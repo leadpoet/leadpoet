@@ -202,15 +202,62 @@ def _taxonomy_industry_gate_mode() -> str:
     return value
 
 
-def _taxonomy_industry_gate(company: Any, icp: Any) -> Tuple[bool, Optional[str]]:
+async def _semantic_industry_rescue(
+    company: Any, icp: Any, detail: Dict[str, Any]
+) -> Optional[bool]:
+    """Optional source-grounded semantic judge for AMBIGUOUS industry labels.
+
+    Site-faithful composition: the semantic judge may only rescue labels the
+    canonical taxonomy is SILENT about — a canonical taxonomy conflict is
+    final and never rescued.  Enabled via VERIFIER_SEMANTIC_GATES_MODE
+    (disabled by default; a real OpenRouter + fetch pipeline when on).
+    Returns True (semantic match), False (semantic no-match), or None when
+    the judge is disabled, ineligible, or unavailable.
+    """
+    from leadpoet_verifier.semantic_gates import (
+        SemanticGateEvaluator,
+        semantic_gate_mode,
+    )
+
+    if semantic_gate_mode() == "disabled":
+        return None
+    taxonomy = detail.get("leadpoet_taxonomy") or {}
+    if taxonomy.get("decision") == "rejected":
+        # Canonical conflict: authoritative, never semantically rescued.
+        return None
+    try:
+        evaluator = SemanticGateEvaluator.from_env()
+        result = await evaluator.evaluate_industry(
+            company_name=str(getattr(company, "company_name", "") or ""),
+            company_website=str(getattr(company, "company_website", "") or ""),
+            requested_industry=str(getattr(icp, "industry", "") or ""),
+            candidate_industry=str(getattr(company, "industry", "") or ""),
+            candidate_subindustry=str(getattr(company, "sub_industry", "") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 — judge unavailability is not a verdict
+        logger.warning(
+            "semantic_industry_gate_unavailable error=%s", str(exc)[:200]
+        )
+        return None
+    outcome = getattr(result, "outcome", None) or (
+        result.get("outcome") if isinstance(result, dict) else None
+    )
+    return outcome == "passed"
+
+
+async def _taxonomy_industry_gate(company: Any, icp: Any) -> Tuple[bool, Optional[str]]:
     """Canonical taxonomy/concept industry fit, ported from the site verifier.
 
-    Pure compute (no network, no LLM).  In ``shadow`` mode mismatches are only
-    logged with a unique tag so telemetry can size the impact before any
-    enforcement; the scoring outcome is unchanged.  ``enforce`` hard-zeros a
-    canonical mismatch and is an explicit operator opt-in.  Any internal
-    failure logs a WARNING and fails open — this gate must never take down
-    scoring availability.
+    Deterministic core is pure compute (no network, no LLM).  In ``shadow``
+    mode mismatches are only logged with a unique tag so telemetry can size
+    the impact before any enforcement; the scoring outcome is unchanged.
+    ``enforce`` hard-zeros a canonical mismatch and is an explicit operator
+    opt-in.  When the separate VERIFIER_SEMANTIC_GATES_MODE is enabled, an
+    AMBIGUOUS deterministic miss (taxonomy silent) may additionally be judged
+    by the source-grounded semantic gate — a semantic match rescues it in
+    enforce mode; canonical taxonomy conflicts are never rescued.  Any
+    internal failure logs a WARNING and fails open — this gate must never
+    take down scoring availability.
     """
     mode = _taxonomy_industry_gate_mode()
     if mode == "disabled":
@@ -231,14 +278,29 @@ def _taxonomy_industry_gate(company: Any, icp: Any) -> Tuple[bool, Optional[str]
         return True, None
     if passed:
         return True, None
+    semantic_verdict: Optional[bool] = None
+    try:
+        semantic_verdict = await _semantic_industry_rescue(company, icp, detail)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "semantic_industry_gate_error error=%s", str(exc)[:200]
+        )
     if mode == "shadow":
         logger.warning(
             "taxonomy_industry_gate_shadow_mismatch company=%r icp_industry=%r "
-            "strategy=%s detail=%s",
+            "strategy=%s semantic_verdict=%s detail=%s",
             getattr(company, "company_name", None),
             getattr(icp, "industry", None),
             detail.get("match_strategy"),
+            semantic_verdict,
             {k: detail.get(k) for k in ("candidate", "requested", "matched_concepts")},
+        )
+        return True, None
+    if semantic_verdict is True:
+        logger.info(
+            "taxonomy_industry_gate_semantic_rescue company=%r icp_industry=%r",
+            getattr(company, "company_name", None),
+            getattr(icp, "industry", None),
         )
         return True, None
     return False, (
@@ -308,7 +370,7 @@ async def run_company_zero_checks(
     #   shadow (default) — compute + log mismatches only, outcome unchanged;
     #   enforce — hard-zero on a canonical mismatch (operator opt-in only,
     #   because it changes benchmark scores).
-    taxonomy_passed, taxonomy_reason = _taxonomy_industry_gate(company, icp)
+    taxonomy_passed, taxonomy_reason = await _taxonomy_industry_gate(company, icp)
     if not taxonomy_passed:
         logger.info(f"Company failed taxonomy industry gate: {taxonomy_reason}")
         return False, taxonomy_reason

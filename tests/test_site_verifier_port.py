@@ -168,7 +168,9 @@ def _icp(industry: str = "Software") -> ICPPrompt:
 
 
 def _run_zero_checks(company: CompanyOutput, icp: ICPPrompt):
-    return asyncio.get_event_loop().run_until_complete(
+    # asyncio.run creates a fresh loop each call, immune to loop teardown by
+    # earlier async tests in the module.
+    return asyncio.run(
         pre_checks.run_company_zero_checks(
             company, icp, run_cost_usd=0.0, run_time_seconds=1.0, seen_companies=set()
         )
@@ -462,3 +464,85 @@ async def test_provider_outage_records_verifier_error_not_content_reject(
     assert await run_with("stage3_contradicted", "contradicted") == (
         "rejected_three_stage"
     )
+
+
+# ---------------------------------------------------------------------------
+# Semantic-gate wiring: rescue ambiguity only, never canonical conflicts
+# ---------------------------------------------------------------------------
+
+
+class _FakeSemanticResult:
+    def __init__(self, outcome: str) -> None:
+        self.outcome = outcome
+
+
+class _FakeEvaluator:
+    def __init__(self, outcome: str, calls: list) -> None:
+        self._outcome = outcome
+        self._calls = calls
+
+    async def evaluate_industry(self, **kwargs):
+        self._calls.append(kwargs)
+        return _FakeSemanticResult(self._outcome)
+
+
+def _install_semantic(monkeypatch, mode: str, outcome: str):
+    import leadpoet_verifier.semantic_gates as sg
+
+    calls: list = []
+    monkeypatch.setattr(sg, "semantic_gate_mode", lambda value=None: mode)
+    monkeypatch.setattr(
+        sg.SemanticGateEvaluator,
+        "from_env",
+        classmethod(lambda cls, **kw: _FakeEvaluator(outcome, calls)),
+    )
+    return calls
+
+
+def test_semantic_disabled_never_constructs_evaluator(monkeypatch) -> None:
+    import leadpoet_verifier.semantic_gates as sg
+
+    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
+    monkeypatch.delenv("VERIFIER_SEMANTIC_GATES_MODE", raising=False)
+
+    def _boom(cls, **kw):
+        raise AssertionError("evaluator must not be constructed when disabled")
+
+    monkeypatch.setattr(sg.SemanticGateEvaluator, "from_env", classmethod(_boom))
+    # Ambiguous mismatch: unknown provider label, no concepts -> enforce zeroes
+    # WITHOUT ever touching the semantic evaluator.
+    passed, reason = _run_zero_checks(
+        _company("Bespoke Provider Label Xyz"), _icp("Software")
+    )
+    assert passed is False and "canonical taxonomy" in (reason or "")
+
+
+def test_semantic_enforce_rescues_ambiguous_label(monkeypatch) -> None:
+    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
+    calls = _install_semantic(monkeypatch, "enforce", "passed")
+    passed, reason = _run_zero_checks(
+        _company("Bespoke Provider Label Xyz"), _icp("Software")
+    )
+    assert passed is True and reason is None  # semantic match rescued it
+    assert len(calls) == 1
+    assert calls[0]["requested_industry"] == "Software"
+
+
+def test_semantic_never_rescues_canonical_conflict(monkeypatch) -> None:
+    # Site-faithful invariant: a canonical taxonomy REJECTION is final — the
+    # semantic judge is not even consulted, whatever it would say.
+    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
+    calls = _install_semantic(monkeypatch, "enforce", "passed")
+    passed, reason = _run_zero_checks(_company("Manufacturing"), _icp("Software"))
+    assert passed is False
+    assert calls == []  # judge never consulted for canonical conflicts
+
+
+def test_semantic_no_match_keeps_enforce_zero(monkeypatch) -> None:
+    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
+    calls = _install_semantic(monkeypatch, "enforce", "failed")
+    passed, reason = _run_zero_checks(
+        _company("Bespoke Provider Label Xyz"), _icp("Software")
+    )
+    assert passed is False
+    assert len(calls) == 1

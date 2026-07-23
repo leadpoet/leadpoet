@@ -51,6 +51,9 @@ PROTECTED_SYMBOLS = {
     ),
     "leadpoet_canonical/hotkey_authority_v2.py": (
         "validate_chain_signing_profile",
+        "chain_signing_profiles",
+        "select_chain_signing_profile",
+        "resolve_chain_signing_profile_hash",
         "build_weight_extrinsic_authorization_v2",
         "validate_weight_extrinsic_authorization_v2",
         "build_serve_axon_extrinsic_authorization_v2",
@@ -80,6 +83,7 @@ PROTECTED_SYMBOLS = {
     ),
     "validator_tee/enclave/chain_source_v2.py": (
         "EnclaveChainRpcTransportV2.call",
+        "ValidatorChainSourceV2.read_chain_signing_runtime",
         "ValidatorChainSourceV2.read_finalized_snapshot",
         "ValidatorChainSourceV2.find_finalized_extrinsic_inclusion",
     ),

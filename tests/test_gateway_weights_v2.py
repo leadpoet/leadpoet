@@ -497,6 +497,34 @@ async def test_v2_latest_returns_only_finalized_authority(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_v2_published_returns_not_found_while_publication_is_pending(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store
+
+    async def _load(**kwargs):
+        assert kwargs == {
+            "netuid": 71,
+            "epoch_id": 300,
+            "validator_hotkey": "validator-hotkey",
+            "require_finalization": False,
+        }
+        return None
+
+    monkeypatch.setattr(
+        weights_api,
+        "PRIMARY_VALIDATOR_HOTKEYS",
+        {"validator-hotkey"},
+    )
+    monkeypatch.setattr(attested_v2_store, "load_weight_authority_v2", _load)
+
+    with pytest.raises(HTTPException) as exc:
+        await weights_api.get_published_weights_v2(71, 300)
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "published v2 weight authority not found"
+
+
+@pytest.mark.asyncio
 async def test_v2_finalization_is_acknowledged_only_after_durable_append(monkeypatch):
     from gateway.research_lab import attested_v2_store
     from leadpoet_canonical import attested_v2

@@ -60,6 +60,7 @@ def chain_source_policy_document() -> Dict[str, Any]:
             "chain_getBlockHash",
             "chain_getBlock",
             "chain_getHeader",
+            "state_getRuntimeVersion",
             "state_getStorage",
             "state_call",
         ],
@@ -263,6 +264,29 @@ def decode_timestamp_now_storage(value: Any) -> int:
     if len(raw) != 8:
         raise ChainSourceV2Error("timestamp storage width is invalid")
     return int.from_bytes(raw, "little")
+
+
+def parse_runtime_version(value: Any) -> Dict[str, int]:
+    """Validate the signing-relevant fields from state_getRuntimeVersion."""
+
+    if not isinstance(value, Mapping):
+        raise ChainSourceV2Error("runtime version response is invalid")
+    result = {}
+    for source, target in (
+        ("specVersion", "spec_version"),
+        ("transactionVersion", "transaction_version"),
+    ):
+        observed = value.get(source)
+        if (
+            not isinstance(observed, int)
+            or isinstance(observed, bool)
+            or not 0 <= observed < (1 << 32)
+        ):
+            raise ChainSourceV2Error(
+                "runtime version %s is invalid" % source
+            )
+        result[target] = int(observed)
+    return result
 
 
 def timelocked_weight_commits_storage_key(

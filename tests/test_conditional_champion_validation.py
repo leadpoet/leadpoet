@@ -1091,12 +1091,24 @@ def test_queue_receipt_retry_is_fail_closed_in_every_v2_phase() -> None:
     )
     for phase in ("public", "private", "conditional"):
         assert scoring_worker._queue_job_error_is_retryable(
-            {"phase": phase},
+            {"phase": phase, "attempt_count": 1},
             missing,
+            max_attempts=3,
         )
-    assert not scoring_worker._queue_job_error_is_retryable(
-        {"phase": "public"},
+    assert scoring_worker._queue_job_error_is_retryable(
+        {"phase": "public", "attempt_count": 1},
         RuntimeError("ordinary candidate failure"),
+        max_attempts=3,
+    )
+    assert not scoring_worker._queue_job_error_is_retryable(
+        {"phase": "public", "attempt_count": 3},
+        RuntimeError("ordinary candidate failure"),
+        max_attempts=3,
+    )
+    assert not scoring_worker._queue_job_error_is_retryable(
+        {"phase": "private", "attempt_count": 1},
+        ValueError("invalid candidate output"),
+        max_attempts=3,
     )
 
 

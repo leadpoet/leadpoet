@@ -114,6 +114,8 @@ PROTECTED_SYMBOLS = {
     "gateway/research_lab/attested_v2_store.py": (
         "load_receipt_graph_v2",
         "load_receipt_graphs_v2",
+        "load_business_artifact_graph_v2",
+        "load_business_artifact_graphs_v2",
         "load_business_artifact_graph_by_ref_v2",
         "load_business_artifact_graphs_by_ref_v2",
         "persist_legacy_finalized_allocation_migration_v2",
@@ -202,6 +204,7 @@ PROTECTED_SYMBOLS = {
         "_parse_verdict",
     ),
     "gateway/research_lab/allocations.py": (
+        "_build_allocation_v2_singleflight",
         "build_research_lab_allocation_bundle",
         "_champion_finalized_paid_alpha_to_date",
         "_champion_obligation_caps",

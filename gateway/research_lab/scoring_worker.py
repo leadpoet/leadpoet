@@ -793,15 +793,16 @@ def _queue_attested_parent_receipts(
 def _queue_job_error_is_retryable(
     job: Mapping[str, Any],
     error: BaseException,
+    *,
+    max_attempts: int = 3,
 ) -> bool:
-    if (
-        isinstance(error, ConditionalValidationRetryableError)
-        and "queue_attested_receipt_missing" in str(error)
-    ):
-        return True
-    if str(job.get("phase") or "") != "conditional":
-        return False
-    return bool(_candidate_scoring_failure_class(error)[1])
+    failure_class, retryable = _candidate_scoring_failure_class(error)
+    return _candidate_scoring_should_requeue(
+        failure_class=failure_class,
+        retryable=retryable,
+        claim_attempts=int(job.get("attempt_count") or 0),
+        max_attempts=max(1, int(max_attempts)),
+    )
 
 
 def _queue_scoring_item(
@@ -4880,6 +4881,90 @@ class ResearchLabGatewayScoringWorker:
                 event_doc={"queue_generation_id": queue_generation_id},
             )
 
+        async def _candidate_failed(generation: Mapping[str, Any]) -> None:
+            candidate_id = str(generation.get("candidate_id") or "")
+            failure_doc = (
+                dict(generation.get("failure_doc") or {})
+                if isinstance(generation.get("failure_doc"), Mapping)
+                else {}
+            )
+            failure_class = str(
+                failure_doc.get("failure_class") or "candidate_scoring_error"
+            )
+            candidate = await select_one(
+                "research_lab_candidate_evaluation_current",
+                filters=(("candidate_id", candidate_id),),
+            )
+            if candidate is None:
+                raise RuntimeError(
+                    "global queue terminal candidate projection is missing"
+                )
+            telemetry_session = await load_scoring_session(
+                str(generation.get("scoring_run_id") or "")
+            )
+            if str(candidate.get("current_candidate_status") or "") != "failed":
+                await create_candidate_evaluation_event(
+                    candidate_id=candidate_id,
+                    run_id=str(candidate.get("run_id") or ""),
+                    ticket_id=str(candidate.get("ticket_id") or ""),
+                    event_type="failed",
+                    candidate_status="failed",
+                    evaluator_ref=self.worker_ref,
+                    reason=f"candidate_scoring_{failure_class}",
+                    event_doc={
+                        **failure_doc,
+                        "scored_via": "global_icp_queue",
+                        "worker_ref": self.worker_ref,
+                    },
+                )
+                await create_scoring_dispatch_event(
+                    dispatch_type="candidate_scoring",
+                    dispatch_status="failed",
+                    worker_ref=self.worker_ref,
+                    proxy_ref_hash=self.proxy_ref_hash,
+                    candidate_id=candidate_id,
+                    run_id=str(candidate.get("run_id") or ""),
+                    ticket_id=str(candidate.get("ticket_id") or ""),
+                    scoring_id=(
+                        telemetry_session.run.scoring_id
+                        if telemetry_session is not None
+                        and telemetry_session.run is not None
+                        else None
+                    ),
+                    scoring_run_id=(
+                        telemetry_session.run.scoring_run_id
+                        if telemetry_session is not None
+                        and telemetry_session.run is not None
+                        else None
+                    ),
+                    event_doc={
+                        **failure_doc,
+                        "scored_via": "global_icp_queue",
+                    },
+                )
+            if telemetry_session is not None:
+                await telemetry_session.cancel_active(
+                    failure_category=failure_class
+                )
+                await emit_run_event(
+                    telemetry_session.run,
+                    "failed",
+                    retryable=False,
+                    failure_category=failure_class,
+                    event_doc={
+                        "queue_generation_id": str(
+                            generation.get("queue_generation_id") or ""
+                        )
+                    },
+                )
+            await self._maybe_finalize_candidate_receipt(candidate)
+            await safe_project_public_loop_activity(
+                str(candidate.get("ticket_id") or ""),
+                source_ref=f"candidate_failed:{candidate_id}",
+                reason=f"candidate_scoring_{failure_class}",
+                config=self.config,
+            )
+
         def compute_public_score(public_docs: Sequence[Mapping[str, Any]]) -> float:
             return float(_queue_benchmark_style_score(public_docs, "candidate_company_scores"))
 
@@ -4915,7 +5000,15 @@ class ResearchLabGatewayScoringWorker:
             gate_decided=_gate_decided,
             preliminary_gate_decided=_preliminary_gate_decided,
             preliminary_gate_error=_preliminary_gate_error,
-            retryable_job_error=_queue_job_error_is_retryable,
+            retryable_job_error=lambda job, error: _queue_job_error_is_retryable(
+                job,
+                error,
+                max_attempts=self.config.scoring_worker_max_claim_requeues,
+            ),
+            job_failure_class=lambda _job, error: (
+                _candidate_scoring_failure_class(error)[0]
+            ),
+            candidate_failed=_candidate_failed,
             candidate_assembled=_candidate_assembled,
         )
         logger.info(

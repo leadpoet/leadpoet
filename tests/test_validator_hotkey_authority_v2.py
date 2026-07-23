@@ -27,6 +27,7 @@ SEED = b"s" * 32
 HOTKEY_PUBLIC = b"p" * 32
 HOTKEY_SECRET = b"k" * 64
 NOW = datetime(2026, 7, 10, 20, 0, tzinfo=timezone.utc)
+RUNTIME_BLOCK_HASH = "0x" + "c" * 64
 
 
 class _Sr25519:
@@ -51,6 +52,19 @@ class _Drand:
     def generate_commit(self, **kwargs):
         self.calls.append(kwargs)
         return b"timelocked-commitment" * 20, 998877
+
+
+class _Chain:
+    def read_chain_signing_runtime(
+        self, *, runtime_block_hash, max_block_drift
+    ):
+        assert runtime_block_hash == RUNTIME_BLOCK_HASH
+        assert max_block_drift == 64
+        return {
+            "spec_version": _profile()["spec_version"],
+            "transaction_version": _profile()["transaction_version"],
+            "genesis_hash": _profile()["genesis_hash"],
+        }
 
 
 def _profile():
@@ -182,6 +196,7 @@ def _authority(monkeypatch):
         sign_receipt_digest=signing_key.sign,
         attestation_supplier=attest,
         drand_backend=drand,
+        chain_source=_Chain(),
         sr25519_backend=_Sr25519(),
         clock=lambda: NOW,
     )
@@ -416,6 +431,7 @@ def test_commit_and_extrinsic_signature_bind_exact_enclave_vector(monkeypatch):
     )
     result = authority.sign_weight_extrinsic(
         commit_authorization_id=prepared["commit_authorization_id"],
+        runtime_block_hash=RUNTIME_BLOCK_HASH,
         era_current=response["weight_result"]["block"] + 1,
         nonce=7,
         block_hash="b" * 64,
@@ -429,6 +445,7 @@ def test_commit_and_extrinsic_signature_bind_exact_enclave_vector(monkeypatch):
     with pytest.raises(ValidatorHotkeyAuthorityV2Error, match="already used"):
         authority.sign_weight_extrinsic(
             commit_authorization_id=prepared["commit_authorization_id"],
+            runtime_block_hash=RUNTIME_BLOCK_HASH,
             era_current=response["weight_result"]["block"] + 1,
             nonce=7,
             block_hash="b" * 64,
@@ -441,6 +458,7 @@ def test_extrinsic_signer_rejects_modified_sdk_payload(monkeypatch):
     with pytest.raises(ValidatorHotkeyAuthorityV2Error, match="differs"):
         authority.sign_weight_extrinsic(
             commit_authorization_id=prepared["commit_authorization_id"],
+            runtime_block_hash=RUNTIME_BLOCK_HASH,
             era_current=response["weight_result"]["block"] + 1,
             nonce=7,
             block_hash="b" * 64,
@@ -477,6 +495,7 @@ def test_restart_recovery_revalidates_bundle_binding_and_signed_extrinsic(
     )
     signed = authority.sign_weight_extrinsic(
         commit_authorization_id=prepared["commit_authorization_id"],
+        runtime_block_hash=RUNTIME_BLOCK_HASH,
         era_current=response["weight_result"]["block"] + 1,
         nonce=7,
         block_hash="b" * 64,
@@ -594,6 +613,7 @@ def test_serve_axon_signer_rebuilds_and_limits_the_exact_call(monkeypatch):
     )
     result = authority.sign_serve_axon_extrinsic(
         **request,
+        runtime_block_hash=RUNTIME_BLOCK_HASH,
         signature_payload_hex=expected["signed_message_hex"],
     )
     assert result["authorization"] == expected
@@ -601,6 +621,7 @@ def test_serve_axon_signer_rebuilds_and_limits_the_exact_call(monkeypatch):
     with pytest.raises(ValidatorHotkeyAuthorityV2Error, match="differs"):
         authority.sign_serve_axon_extrinsic(
             **request,
+            runtime_block_hash=RUNTIME_BLOCK_HASH,
             signature_payload_hex="00" * 32,
         )
 

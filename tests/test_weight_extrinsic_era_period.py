@@ -79,7 +79,11 @@ def test_signing_context_rejects_mismatched_era_period():
     context._commit_queue = [{"commit_authorization_id": "sha256:" + "0" * 64}]
 
     class _Substrate:
-        def init_runtime(self):
+        def get_chain_finalised_head(self):
+            return "0x" + "a" * 64
+
+        def init_runtime(self, block_hash=None):
+            assert block_hash == "0x" + "a" * 64
             return None
 
         def get_account_nonce(self, _address):

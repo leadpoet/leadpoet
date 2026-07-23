@@ -27,6 +27,11 @@
       "symbol": "submit_weights_v2"
     },
     {
+      "ast_sha256": "sha256:58373f480da774187dcd4dbfdf60033cd48acd77d4deead6d5ce6ba1e179ab47",
+      "path": "gateway/research_lab/allocations.py",
+      "symbol": "_build_allocation_v2_singleflight"
+    },
+    {
       "ast_sha256": "sha256:362f25337d34ee9e56a8dc5c2b387cde0d31b50fa03ad1c8fffe6c30f7a2ef6e",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "_champion_finalized_paid_alpha_to_date"
@@ -52,7 +57,7 @@
       "symbol": "_epoch_active"
     },
     {
-      "ast_sha256": "sha256:4d3f9f651061ac09ac0bdda2485c08deea8b1f47169e975c34789feda5e27ec3",
+      "ast_sha256": "sha256:494fda5033b5e3ec6de67cc4a8fa9645d7d428eba85e496392e501c4528f46b5",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "build_research_lab_allocation_bundle"
     },
@@ -82,9 +87,19 @@
       "symbol": "load_business_artifact_graph_by_ref_v2"
     },
     {
+      "ast_sha256": "sha256:908cb45f30e40334c6d5ea88460c7bfcda20d87c4ed85f07ea28634755bf217b",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "load_business_artifact_graph_v2"
+    },
+    {
       "ast_sha256": "sha256:2c527f66167c194960b9d048552d3cfa6aeb2d439368ec22aa063f04f2fc44d3",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "load_business_artifact_graphs_by_ref_v2"
+    },
+    {
+      "ast_sha256": "sha256:041e564331dadabb64ead09538fb31c9bda66ce523116069c58c2ff121934f51",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "load_business_artifact_graphs_v2"
     },
     {
       "ast_sha256": "sha256:d4b4b002a46dc745dd3271f3a1d9ab4bf7efe423ce86d1add7a80a81c84dcdc1",
@@ -417,7 +432,7 @@
       "symbol": "normalize_tee_protocol"
     },
     {
-      "ast_sha256": "sha256:abec904ee76eb9b05aa83bc7c26869c101f91ac8d916becc59e17815c5ae1443",
+      "ast_sha256": "sha256:ef9c0c22d7abd3716bd0db52b83db8236172bae35af259af74373dc240de8e6b",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "_load_allocation_parent_graphs_v2"
     },
@@ -1087,7 +1102,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:790a139fd02ddd3994581b514c93f0b6075e95959864681e4561743094d52bd5",
-  "protected_source_commit": "9f44355fb5e6da3c57402b6c55c6300fe165d04e",
+  "manifest_hash": "sha256:2778588f5d2237d57f2e648a092dd245cc03b59e4d833ebca4504102caa0d607",
+  "protected_source_commit": "5fa9817f6366bd5bd106829505be7aaafdc466f1",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

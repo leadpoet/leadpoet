@@ -1225,6 +1225,99 @@ async def test_business_artifact_batch_lookup_loads_all_roots_once(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_exact_business_artifact_batch_loads_shared_ancestry_once(
+    monkeypatch,
+):
+    first = (
+        "allocation",
+        "epoch:100",
+        "sha256:" + "3" * 64,
+    )
+    second = (
+        "allocation",
+        "epoch:101",
+        "sha256:" + "4" * 64,
+    )
+    first_root = "sha256:" + "1" * 64
+    second_root = "sha256:" + "2" * 64
+    rows = [
+        {
+            "artifact_kind": first[0],
+            "artifact_ref": first[1],
+            "artifact_hash": first[2],
+            "receipt_hash": first_root,
+        },
+        {
+            "artifact_kind": second[0],
+            "artifact_ref": second[1],
+            "artifact_hash": second[2],
+            "receipt_hash": second_root,
+        },
+        {
+            "artifact_kind": first[0],
+            "artifact_ref": first[1],
+            "artifact_hash": "sha256:" + "9" * 64,
+            "receipt_hash": "sha256:" + "8" * 64,
+        },
+    ]
+    loaded_roots = []
+
+    async def select(_table, *, filters, **_kwargs):
+        refs = set(filters[1][2])
+        return [dict(row) for row in rows if row["artifact_ref"] in refs]
+
+    async def load_graphs(roots, **_kwargs):
+        loaded_roots.append(set(roots))
+        return {
+            root: {"root_receipt_hash": root}
+            for root in roots
+        }
+
+    monkeypatch.setattr(attested_v2_store, "select_all", select)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_receipt_graphs_v2",
+        load_graphs,
+    )
+
+    result = await attested_v2_store.load_business_artifact_graphs_v2(
+        (first, second)
+    )
+
+    assert set(result) == {first, second}
+    assert loaded_roots == [{first_root, second_root}]
+
+
+@pytest.mark.asyncio
+async def test_exact_business_artifact_batch_rejects_noncanonical_stored_hash(
+    monkeypatch,
+):
+    requested = (
+        "allocation",
+        "epoch:100",
+        "sha256:" + "3" * 64,
+    )
+
+    async def select(*_args, **_kwargs):
+        return [
+            {
+                "artifact_kind": requested[0],
+                "artifact_ref": requested[1],
+                "artifact_hash": requested[2].upper(),
+                "receipt_hash": "sha256:" + "1" * 64,
+            }
+        ]
+
+    monkeypatch.setattr(attested_v2_store, "select_all", select)
+
+    with pytest.raises(
+        attested_v2_store.AttestedV2StoreError,
+        match="row conflicts",
+    ):
+        await attested_v2_store.load_business_artifact_graphs_v2((requested,))
+
+
+@pytest.mark.asyncio
 async def test_legacy_settlement_concurrent_retries_persist_one_exact_row(
     monkeypatch,
 ):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import hmac
@@ -29,6 +30,44 @@ SETTLEMENT_TRACKED_CHAMPION_STATUSES = ACTIVE_CHAMPION_STATUSES | {"paid"}
 RATE_QUANT = Decimal("0.000001")
 POSTGREST_IN_FILTER_CHUNK = 50
 logger = logging.getLogger(__name__)
+_ALLOCATION_V2_INFLIGHT: dict[
+    tuple[int, int, int, str],
+    asyncio.Task[dict[str, Any]],
+] = {}
+
+
+async def _build_allocation_v2_singleflight(
+    *,
+    epoch_id: int,
+    netuid: int,
+    policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Share only overlapping identical authority builds in this event loop."""
+
+    loop = asyncio.get_running_loop()
+    key = (
+        id(loop),
+        int(epoch_id),
+        int(netuid),
+        sha256_json(dict(policy)),
+    )
+    task = _ALLOCATION_V2_INFLIGHT.get(key)
+    if task is None:
+        task = loop.create_task(
+            build_allocation_v2(
+                epoch_id=int(epoch_id),
+                netuid=int(netuid),
+                policy=dict(policy),
+            )
+        )
+        _ALLOCATION_V2_INFLIGHT[key] = task
+
+        def clear(completed: asyncio.Task[dict[str, Any]]) -> None:
+            if _ALLOCATION_V2_INFLIGHT.get(key) is completed:
+                _ALLOCATION_V2_INFLIGHT.pop(key, None)
+
+        task.add_done_callback(clear)
+    return await asyncio.shield(task)
 
 
 async def build_research_lab_allocation_bundle(
@@ -102,10 +141,11 @@ async def build_research_lab_allocation_bundle(
         source_state_hash = sha256_json(source_state)
         attestation = {"status": "off", "protocol": "legacy_v1"}
     else:
-        attestation = await build_allocation_v2(
+        policy = config.reimbursement_policy_doc(enabled=True)
+        attestation = await _build_allocation_v2_singleflight(
             epoch_id=int(epoch),
             netuid=int(netuid),
-            policy=config.reimbursement_policy_doc(enabled=True),
+            policy=policy,
         )
         authority = attestation.get("result")
         if not isinstance(authority, Mapping):

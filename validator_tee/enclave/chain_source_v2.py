@@ -42,6 +42,7 @@ from leadpoet_canonical.chain_source_v2 import (
     parse_finalized_block_extrinsics,
     parse_finalized_header,
     parse_json_rpc_response,
+    parse_runtime_version,
     decode_subnet_epoch_storage,
     subnet_epoch_storage_key,
     timestamp_now_storage_key,
@@ -378,6 +379,109 @@ class ValidatorChainSourceV2:
                 "official SN71 epoch authority supplier is unavailable"
             )
         self._epoch_authority_supplier = epoch_authority_supplier
+
+    def read_chain_signing_runtime(
+        self,
+        *,
+        runtime_block_hash: str,
+        max_block_drift: int,
+    ) -> Dict[str, Any]:
+        """Read one canonical finalized runtime through enclave-terminated TLS."""
+
+        requested_hash = normalize_raw_hash(
+            runtime_block_hash, "runtime block hash"
+        )
+        normalized_drift = int(max_block_drift)
+        if not 1 <= normalized_drift <= 1024:
+            raise ValidatorChainSourceV2Error(
+                "runtime block drift policy is invalid"
+            )
+        attempts = []
+        artifacts = []
+        request_id = 1
+        job_id = "chain-signing-runtime:" + requested_hash
+
+        def invoke(method: str, params: Sequence[Any], operation: str) -> Any:
+            nonlocal request_id
+            result = self._call(
+                method=method,
+                params=params,
+                request_id=request_id,
+                job_id=job_id,
+                purpose="validator.chain_state.v2",
+                logical_operation_id=job_id + ":" + operation,
+            )
+            request_id += 1
+            attempts.extend(result["attempts"])
+            artifacts.extend(result["artifacts"])
+            return result["result"]
+
+        finalized_hash = normalize_raw_hash(
+            invoke("chain_getFinalizedHead", [], "finalized-head"),
+            "finalized head",
+        )
+        finalized_header = parse_finalized_header(
+            invoke(
+                "chain_getHeader",
+                ["0x" + finalized_hash],
+                "finalized-header",
+            )
+        )
+        requested_header = parse_finalized_header(
+            invoke(
+                "chain_getHeader",
+                ["0x" + requested_hash],
+                "runtime-header",
+            )
+        )
+        finalized_block = int(finalized_header["block"])
+        runtime_block = int(requested_header["block"])
+        if (
+            runtime_block > finalized_block
+            or finalized_block - runtime_block > normalized_drift
+        ):
+            raise ValidatorChainSourceV2Error(
+                "runtime block is not within the finalized signing window"
+            )
+        canonical_hash = normalize_raw_hash(
+            invoke(
+                "chain_getBlockHash",
+                [runtime_block],
+                "runtime-canonical-hash",
+            ),
+            "canonical runtime block hash",
+        )
+        if canonical_hash != requested_hash:
+            raise ValidatorChainSourceV2Error(
+                "runtime block is not canonical at its exact height"
+            )
+        try:
+            version = parse_runtime_version(
+                invoke(
+                    "state_getRuntimeVersion",
+                    ["0x" + requested_hash],
+                    "runtime-version",
+                )
+            )
+        except ChainSourceV2Error as exc:
+            raise ValidatorChainSourceV2Error(
+                "runtime version response is invalid"
+            ) from exc
+        genesis_hash = normalize_raw_hash(
+            invoke("chain_getBlockHash", [0], "genesis-hash"),
+            "genesis block hash",
+        )
+        return {
+            "runtime_block": runtime_block,
+            "runtime_block_hash": requested_hash,
+            "finalized_block": finalized_block,
+            "finalized_block_hash": finalized_hash,
+            "spec_version": version["spec_version"],
+            "transaction_version": version["transaction_version"],
+            "genesis_hash": genesis_hash,
+            "attempts": attempts,
+            "artifacts": artifacts,
+        }
 
     def _read_stateful_epoch_authority(
         self,

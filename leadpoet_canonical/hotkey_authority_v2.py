@@ -69,6 +69,7 @@ _PROFILE_FIELDS = {
     "extrinsic_period",
     "signed_extensions",
 }
+_PROFILE_OPTIONAL_FIELDS = {"supported_spec_versions"}
 
 _EXPECTED_SIGNED_EXTENSIONS = (
     "CheckMortality",
@@ -191,8 +192,13 @@ def mortal_era_bounds(*, period: int, current: int) -> Tuple[int, int]:
 
 
 def validate_chain_signing_profile(value: Mapping[str, Any]) -> Dict[str, Any]:
+    fields = set(value) if isinstance(value, Mapping) else set()
     _require(
-        isinstance(value, Mapping) and set(value) == _PROFILE_FIELDS,
+        isinstance(value, Mapping)
+        and fields in (
+            _PROFILE_FIELDS,
+            _PROFILE_FIELDS | _PROFILE_OPTIONAL_FIELDS,
+        ),
         "chain signing profile fields are invalid",
     )
     _require(
@@ -216,14 +222,15 @@ def validate_chain_signing_profile(value: Mapping[str, Any]) -> Dict[str, Any]:
         and tuple(signed_extensions) == _EXPECTED_SIGNED_EXTENSIONS,
         "signed extension profile differs from the measured SDK contract",
     )
-    return {
+    spec_version = _integer(
+        value.get("spec_version"), "spec_version", maximum=(1 << 32) - 1
+    )
+    normalized = {
         "schema_version": CHAIN_SIGNING_PROFILE_SCHEMA_VERSION,
         "network": network,
         "chain_endpoint": endpoint,
         "genesis_hash": genesis_hash,
-        "spec_version": _integer(
-            value.get("spec_version"), "spec_version", maximum=(1 << 32) - 1
-        ),
+        "spec_version": spec_version,
         "transaction_version": _integer(
             value.get("transaction_version"),
             "transaction_version",
@@ -269,6 +276,110 @@ def validate_chain_signing_profile(value: Mapping[str, Any]) -> Dict[str, Any]:
         ),
         "signed_extensions": list(_EXPECTED_SIGNED_EXTENSIONS),
     }
+    if "supported_spec_versions" in value:
+        supported = value.get("supported_spec_versions")
+        _require(
+            isinstance(supported, list)
+            and 0 < len(supported) <= 16
+            and all(
+                isinstance(item, int)
+                and not isinstance(item, bool)
+                and 0 <= item < (1 << 32)
+                for item in supported
+            ),
+            "supported spec versions are invalid",
+        )
+        normalized_supported = sorted(set(int(item) for item in supported))
+        _require(
+            normalized_supported == supported
+            and spec_version in normalized_supported,
+            "supported spec versions are not canonical",
+        )
+        normalized["supported_spec_versions"] = normalized_supported
+    return normalized
+
+
+def chain_signing_profiles(
+    value: Mapping[str, Any],
+) -> Tuple[Dict[str, Any], ...]:
+    """Expand one measured manifest into exact, hashable runtime profiles."""
+
+    manifest = validate_chain_signing_profile(value)
+    versions = manifest.get(
+        "supported_spec_versions", [manifest["spec_version"]]
+    )
+    base = {
+        key: item
+        for key, item in manifest.items()
+        if key != "supported_spec_versions"
+    }
+    return tuple(
+        {**base, "spec_version": int(spec_version)}
+        for spec_version in versions
+    )
+
+
+def select_chain_signing_profile(
+    value: Mapping[str, Any],
+    *,
+    runtime_version: Mapping[str, Any],
+    genesis_hash: str,
+) -> Dict[str, Any]:
+    """Select one explicitly measured profile for an authenticated runtime."""
+
+    _require(
+        isinstance(runtime_version, Mapping),
+        "chain runtime version is invalid",
+    )
+    spec_version = _integer(
+        runtime_version.get("specVersion"),
+        "runtime specVersion",
+        maximum=(1 << 32) - 1,
+    )
+    transaction_version = _integer(
+        runtime_version.get("transactionVersion"),
+        "runtime transactionVersion",
+        maximum=(1 << 32) - 1,
+    )
+    observed_genesis = str(genesis_hash or "").lower()
+    if observed_genesis.startswith("0x"):
+        observed_genesis = observed_genesis[2:]
+    candidates = {
+        int(profile["spec_version"]): profile
+        for profile in chain_signing_profiles(value)
+    }
+    _require(
+        spec_version in candidates,
+        "runtime specVersion is not explicitly supported",
+    )
+    selected = candidates[spec_version]
+    _require(
+        transaction_version == int(selected["transaction_version"]),
+        "runtime transactionVersion differs from the measured profile",
+    )
+    _require(
+        observed_genesis == str(selected["genesis_hash"]),
+        "runtime genesis differs from the measured profile",
+    )
+    return selected
+
+
+def resolve_chain_signing_profile_hash(
+    value: Mapping[str, Any], profile_hash: Any
+) -> Dict[str, Any]:
+    """Resolve an authorization to one exact member of a measured manifest."""
+
+    expected_hash = _hash(profile_hash, "chain_signing_profile_hash")
+    matches = [
+        profile
+        for profile in chain_signing_profiles(value)
+        if sha256_json(profile) == expected_hash
+    ]
+    _require(
+        len(matches) == 1,
+        "chain signing profile hash is not explicitly supported",
+    )
+    return matches[0]
 
 
 def chain_signing_profile_hash(value: Mapping[str, Any]) -> str:
@@ -507,8 +618,11 @@ def validate_weight_extrinsic_authorization_v2(
         "authorization_hash",
     }
     _require(set(value) == expected_fields, "weight extrinsic authorization fields are invalid")
+    selected_profile = resolve_chain_signing_profile_hash(
+        profile, value["chain_signing_profile_hash"]
+    )
     rebuilt = build_weight_extrinsic_authorization_v2(
-        profile=profile,
+        profile=selected_profile,
         validator_hotkey=value["validator_hotkey"],
         hotkey_public_key_hex=value["hotkey_public_key"],
         epoch_id=value["epoch_id"],
@@ -687,8 +801,11 @@ def validate_serve_axon_extrinsic_authorization_v2(
         "authorization_hash",
     }
     _require(set(value) == expected_fields, "serve axon authorization fields are invalid")
+    selected_profile = resolve_chain_signing_profile_hash(
+        profile, value["chain_signing_profile_hash"]
+    )
     rebuilt = build_serve_axon_extrinsic_authorization_v2(
-        profile=profile,
+        profile=selected_profile,
         validator_hotkey=value["validator_hotkey"],
         hotkey_public_key_hex=value["hotkey_public_key"],
         netuid=value["netuid"],

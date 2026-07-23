@@ -292,7 +292,8 @@ class AuthoritativeServeAxonContextV2(AbstractContextManager):
             or args.get("hotkey") != self.wallet.hotkey.ss58_address
         ):
             raise EnclaveHotkeyV2Error("SDK call is not the authorized serve_axon domain")
-        self.substrate.init_runtime()
+        runtime_block_hash = str(self.substrate.get_chain_finalised_head())
+        self.substrate.init_runtime(block_hash=runtime_block_hash)
         actual_nonce = (
             self.substrate.get_account_nonce(keypair.ss58_address) or 0
             if nonce is None
@@ -304,9 +305,8 @@ class AuthoritativeServeAxonContextV2(AbstractContextManager):
         if "phase" in actual_era:
             raise EnclaveHotkeyV2Error("phase-only serve_axon eras are not authorized")
         if "current" not in actual_era:
-            finalised_head = self.substrate.get_chain_finalised_head()
             actual_era["current"] = self.substrate.get_block_number(
-                finalised_head
+                runtime_block_hash
             )
         era_current = int(actual_era["current"])
         era_object = self.substrate.runtime_config.create_scale_object("Era")
@@ -334,6 +334,7 @@ class AuthoritativeServeAxonContextV2(AbstractContextManager):
                 "protocol": int(args["protocol"]),
                 "placeholder1": int(args["placeholder1"]),
                 "placeholder2": int(args["placeholder2"]),
+                "runtime_block_hash": runtime_block_hash,
                 "era_current": era_current,
                 "nonce": actual_nonce,
                 "block_hash": block_hash,
@@ -516,7 +517,8 @@ class AuthoritativeSetWeightsContextV2(AbstractContextManager):
             raise EnclaveHotkeyV2Error(
                 "weight extrinsic has no enclave commitment authorization"
             )
-        self.substrate.init_runtime()
+        runtime_block_hash = str(self.substrate.get_chain_finalised_head())
+        self.substrate.init_runtime(block_hash=runtime_block_hash)
         actual_nonce = (
             self.substrate.get_account_nonce(keypair.ss58_address) or 0
             if nonce is None
@@ -540,9 +542,8 @@ class AuthoritativeSetWeightsContextV2(AbstractContextManager):
                     % (observed_period, self._expected_era_period)
                 )
         if "current" not in actual_era:
-            finalised_head = self.substrate.get_chain_finalised_head()
             actual_era["current"] = self.substrate.get_block_number(
-                finalised_head
+                runtime_block_hash
             )
         era_current = int(actual_era["current"])
         era_object = self.substrate.runtime_config.create_scale_object("Era")
@@ -566,6 +567,7 @@ class AuthoritativeSetWeightsContextV2(AbstractContextManager):
                 "commit_authorization_id": commit_record[
                     "commit_authorization_id"
                 ],
+                "runtime_block_hash": runtime_block_hash,
                 "era_current": era_current,
                 "nonce": actual_nonce,
                 "block_hash": block_hash,

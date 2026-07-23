@@ -227,7 +227,7 @@
       "symbol": "ValidatorHotkeyAuthorityV2.provision_seed"
     },
     {
-      "ast_sha256": "sha256:7ad7af17fb94df0a52ef9c5b3a5563f3b3e37af7893d01e207bce22e8e952fa3",
+      "ast_sha256": "sha256:9c5d30b924ddf5b98d5d68103fa0d483f7ed7f7c00804550e4fc2a904e865f79",
       "path": "validator_tee/enclave/hotkey_authority_v2.py",
       "symbol": "ValidatorHotkeyAuthorityV2.recover_weight_publication"
     },
@@ -282,7 +282,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:aa1ccba07c8ba59396a3b00ea3336149f77dbc2fcc5925612240f8d1fc0a0ede",
+  "manifest_hash": "sha256:c91302f0badd595299ba0fa82b305634dfc7d94ab4e3d55ea845b609df533d08",
   "protected_source_commit": "71dbc79c8737828c354e72d901febec1779046e1",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

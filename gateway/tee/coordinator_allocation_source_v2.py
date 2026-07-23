@@ -36,6 +36,7 @@ from gateway.tee.reward_executor_v2 import (
 from leadpoet_canonical.attested_v2 import (
     canonical_json,
     sha256_json,
+    validate_receipt_graph,
     validate_signed_execution_receipt,
 )
 from leadpoet_verifier.economics import allocate_research_lab_epoch
@@ -47,6 +48,113 @@ class CoordinatorAllocationSourceV2Error(RuntimeError):
 
 def _same(left: Any, right: Any) -> bool:
     return canonical_json(left) == canonical_json(right)
+
+
+def _receipt_subgraph(
+    graph: Mapping[str, Any],
+    *,
+    root_receipt_hash: str,
+) -> dict[str, Any]:
+    validate_receipt_graph(graph)
+    receipts_by_hash = {
+        str(receipt.get("receipt_hash") or ""): receipt
+        for receipt in graph.get("receipts") or ()
+        if isinstance(receipt, Mapping)
+    }
+    if root_receipt_hash not in receipts_by_hash:
+        raise CoordinatorAllocationSourceV2Error(
+            "declared allocation parent is absent from receipt graphs"
+        )
+    selected_hashes: set[str] = set()
+
+    def select(receipt_hash: str) -> None:
+        if receipt_hash in selected_hashes:
+            return
+        receipt = receipts_by_hash.get(receipt_hash)
+        if not isinstance(receipt, Mapping):
+            raise CoordinatorAllocationSourceV2Error(
+                "declared allocation parent ancestry is incomplete"
+            )
+        selected_hashes.add(receipt_hash)
+        for parent_hash in receipt.get("parent_receipt_hashes") or ():
+            select(str(parent_hash))
+
+    select(root_receipt_hash)
+    selected_receipts = [
+        dict(receipt)
+        for receipt in graph["receipts"]
+        if str(receipt["receipt_hash"]) in selected_hashes
+    ]
+    selected_boot_hashes = {
+        str(receipt["boot_identity_hash"]) for receipt in selected_receipts
+    }
+    selected_scopes = {
+        (str(receipt["job_id"]), str(receipt["purpose"]))
+        for receipt in selected_receipts
+    }
+    subgraph = {
+        "schema_version": graph["schema_version"],
+        "root_receipt_hash": root_receipt_hash,
+        "boot_identities": [
+            dict(identity)
+            for identity in graph["boot_identities"]
+            if str(identity["boot_identity_hash"]) in selected_boot_hashes
+        ],
+        "receipts": selected_receipts,
+        "transport_attempts": [
+            dict(attempt)
+            for attempt in graph["transport_attempts"]
+            if (str(attempt["job_id"]), str(attempt["purpose"]))
+            in selected_scopes
+        ],
+        "host_operations": [
+            dict(record)
+            for record in graph["host_operations"]
+            if (
+                str(record["request"]["job_id"]),
+                str(record["request"]["purpose"]),
+            )
+            in selected_scopes
+        ],
+    }
+    validate_receipt_graph(subgraph)
+    return subgraph
+
+
+def _receipt_graphs_by_declared_root(
+    graphs: Sequence[Mapping[str, Any]],
+    declared_roots: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    by_root: dict[str, dict[str, Any]] = {}
+    for root in declared_roots:
+        matches = [
+            graph
+            for graph in graphs
+            if any(
+                isinstance(receipt, Mapping)
+                and str(receipt.get("receipt_hash") or "") == root
+                for receipt in graph.get("receipts") or ()
+            )
+        ]
+        if not matches:
+            raise CoordinatorAllocationSourceV2Error(
+                "declared allocation parent is absent from receipt graphs"
+            )
+        derived = _receipt_subgraph(
+            matches[0],
+            root_receipt_hash=str(root),
+        )
+        for graph in matches[1:]:
+            candidate = _receipt_subgraph(
+                graph,
+                root_receipt_hash=str(root),
+            )
+            if not _same(derived, candidate):
+                raise CoordinatorAllocationSourceV2Error(
+                    "declared allocation parent graphs conflict"
+                )
+        by_root[str(root)] = derived
+    return by_root
 
 
 class CoordinatorAllocationSourceV2:
@@ -442,11 +550,10 @@ class CoordinatorAllocationSourceV2:
             },
             context,
         )
-        graph_by_root = {
-            str(graph.get("root_receipt_hash") or ""): graph
-            for graph in context.external_receipt_graphs
-            if isinstance(graph, Mapping)
-        }
+        graph_by_root = _receipt_graphs_by_declared_root(
+            context.external_receipt_graphs,
+            context.parent_receipt_hashes,
+        )
         native = validate_finalized_allocation_authorities_v2(
             native_rows,
             finalization_graphs=graph_by_root,

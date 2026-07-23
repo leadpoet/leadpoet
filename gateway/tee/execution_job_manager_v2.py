@@ -723,19 +723,32 @@ class ExecutionJobManagerV2:
             ):
                 raise ExecutionJobV2Error("job parent receipt graphs are invalid")
             parent_roots = []
+            parent_receipt_hashes = set()
             for graph in parent_graphs:
                 allowed_failed = ()
                 if self._failed_parent_graph_policy is not None:
                     allowed_failed = tuple(
                         self._failed_parent_graph_policy(manifest, payload, graph)
                     )
-                parent_roots.append(
-                    context.record_external_receipt_graph(
-                        graph,
-                        allowed_failed_receipt_hashes=allowed_failed,
-                    )
+                parent_root = context.record_external_receipt_graph(
+                    graph,
+                    allowed_failed_receipt_hashes=allowed_failed,
                 )
-            if sorted(parent_roots) != sorted(manifest["parent_receipt_hashes"]):
+                if parent_root in parent_roots:
+                    raise ExecutionJobV2Error(
+                        "job parent receipt graph is duplicated"
+                    )
+                parent_roots.append(parent_root)
+                parent_receipt_hashes.update(
+                    str(receipt.get("receipt_hash") or "")
+                    for receipt in graph.get("receipts") or ()
+                    if isinstance(receipt, Mapping)
+                )
+            declared_parent_hashes = set(manifest["parent_receipt_hashes"])
+            if (
+                not set(parent_roots).issubset(declared_parent_hashes)
+                or not declared_parent_hashes.issubset(parent_receipt_hashes)
+            ):
                 raise ExecutionJobV2Error(
                     "job parent receipt graphs differ from manifest ancestry"
                 )

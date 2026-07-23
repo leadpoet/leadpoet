@@ -299,6 +299,49 @@ def test_extra_parent_receipt_is_rejected_even_with_no_rewards():
         )
 
 
+def test_declared_roots_are_reconstructed_from_one_compact_graph(monkeypatch):
+    parent_hash = "sha256:" + "a" * 64
+    child_hash = "sha256:" + "b" * 64
+    boot_hash = "sha256:" + "c" * 64
+    parent = {
+        "receipt_hash": parent_hash,
+        "parent_receipt_hashes": [],
+        "boot_identity_hash": boot_hash,
+        "job_id": "parent-job",
+        "purpose": "research_lab.allocation.v2",
+    }
+    child = {
+        "receipt_hash": child_hash,
+        "parent_receipt_hashes": [parent_hash],
+        "boot_identity_hash": boot_hash,
+        "job_id": "child-job",
+        "purpose": "validator.weight_finalization.v2",
+    }
+    compact_graph = {
+        "schema_version": "leadpoet.receipt_graph.v2",
+        "root_receipt_hash": child_hash,
+        "boot_identities": [{"boot_identity_hash": boot_hash}],
+        "receipts": [parent, child],
+        "transport_attempts": [],
+        "host_operations": [],
+    }
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_receipt_graph",
+        lambda _value: None,
+    )
+
+    graphs = allocation_source._receipt_graphs_by_declared_root(
+        [compact_graph],
+        [parent_hash, child_hash],
+    )
+
+    assert set(graphs) == {parent_hash, child_hash}
+    assert graphs[parent_hash]["root_receipt_hash"] == parent_hash
+    assert graphs[parent_hash]["receipts"] == [parent]
+    assert graphs[child_hash] == compact_graph
+
+
 def test_finalized_champion_history_requires_declared_chain_roots(monkeypatch):
     finalization_root = "sha256:" + "1" * 64
     allocation_receipt = "sha256:" + "2" * 64
@@ -339,6 +382,19 @@ def test_finalized_champion_history_requires_declared_chain_roots(monkeypatch):
         allocation_source,
         "validate_legacy_settlement_migrations_v2",
         lambda rows, *, receipt_graphs: [],
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "_receipt_graphs_by_declared_root",
+        lambda graphs, declared_roots: {
+            root: {
+                "root_receipt_hash": root,
+                "receipts": [{"receipt_hash": root}],
+            }
+            for root in declared_roots
+        }
+        if graphs
+        else {},
     )
     monkeypatch.setattr(
         resolver,
@@ -455,6 +511,19 @@ def test_legacy_finalized_champion_history_requires_migration_receipt(
                 "finalization_receipt_hashes": [],
             }
         ],
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "_receipt_graphs_by_declared_root",
+        lambda graphs, declared_roots: {
+            root: {
+                "root_receipt_hash": root,
+                "receipts": [{"receipt_hash": root}],
+            }
+            for root in declared_roots
+        }
+        if graphs
+        else {},
     )
     context = _context((settlement_receipt,))
     context.external_receipt_graphs = [

@@ -100,6 +100,60 @@ def _canonical_bytes(value: Any) -> bytes:
     return canonical_json(value).encode("utf-8")
 
 
+def _compact_parent_graphs_for_transport(
+    parent_graphs: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Omit graph roots already authenticated inside another supplied graph."""
+
+    normalized = [dict(graph) for graph in parent_graphs]
+    roots = [str(graph.get("root_receipt_hash") or "") for graph in normalized]
+    if any(not _HASH_RE.fullmatch(root) for root in roots):
+        raise AttestedScoringV2Error("parent graph root is invalid")
+    if len(set(roots)) != len(roots):
+        raise AttestedScoringV2Error("parent receipt graph is duplicated")
+
+    receipt_sets = []
+    for graph in normalized:
+        receipts = graph.get("receipts")
+        if not isinstance(receipts, list):
+            raise AttestedScoringV2Error("parent graph receipts are invalid")
+        receipt_hashes = {
+            str(receipt.get("receipt_hash") or "")
+            for receipt in receipts
+            if isinstance(receipt, Mapping)
+        }
+        if len(receipt_hashes) != len(receipts) or any(
+            not _HASH_RE.fullmatch(receipt_hash)
+            for receipt_hash in receipt_hashes
+        ):
+            raise AttestedScoringV2Error("parent graph receipt hashes are invalid")
+        receipt_sets.append(receipt_hashes)
+
+    retained = [
+        graph
+        for index, graph in enumerate(normalized)
+        if not any(
+            roots[index] in receipt_hashes
+            for other, receipt_hashes in enumerate(receipt_sets)
+            if other != index
+        )
+    ]
+    retained_receipts = {
+        receipt_hash
+        for graph in retained
+        for receipt_hash in {
+            str(receipt.get("receipt_hash") or "")
+            for receipt in graph["receipts"]
+            if isinstance(receipt, Mapping)
+        }
+    }
+    if not set(roots).issubset(retained_receipts):
+        raise AttestedScoringV2Error(
+            "compacted parent graphs do not cover declared ancestry"
+        )
+    return retained
+
+
 def _load_release(path: Path) -> Dict[str, Any]:
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -450,19 +504,6 @@ async def execute_scoring_v2(
         or PARENT_RECEIPT_GRAPHS_FIELD in payload
     ):
         raise AttestedScoringV2Error("payload uses a reserved V2 authority field")
-    payload_document = dict(payload)
-    if parent_graphs:
-        payload_document[PARENT_RECEIPT_GRAPHS_FIELD] = [
-            dict(graph) for graph in parent_graphs
-        ]
-    if normalized_profile != "default":
-        payload_document["_v2_provider_credential_profile"] = normalized_profile
-    if credential_refs:
-        payload_document["_v2_provider_credential_ref_hashes"] = dict(
-            sorted(credential_refs.items())
-        )
-    payload_bytes = _canonical_bytes(payload_document)
-    payload_hash = sha256_bytes(payload_bytes)
     artifact_hashes = sorted(
         {str(item).lower() for item in input_artifact_hashes}
         | set(credential_refs.values())
@@ -487,6 +528,18 @@ async def execute_scoring_v2(
         raise AttestedScoringV2Error(
             "allowed failed receipts must be present in parent graphs"
         )
+    transport_parent_graphs = _compact_parent_graphs_for_transport(parent_graphs)
+    payload_document = dict(payload)
+    if transport_parent_graphs:
+        payload_document[PARENT_RECEIPT_GRAPHS_FIELD] = transport_parent_graphs
+    if normalized_profile != "default":
+        payload_document["_v2_provider_credential_profile"] = normalized_profile
+    if credential_refs:
+        payload_document["_v2_provider_credential_ref_hashes"] = dict(
+            sorted(credential_refs.items())
+        )
+    payload_bytes = _canonical_bytes(payload_document)
+    payload_hash = sha256_bytes(payload_bytes)
     job_id = derive_execution_job_id_v2(
         operation=operation,
         purpose=purpose,

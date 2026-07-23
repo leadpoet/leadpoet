@@ -88,8 +88,8 @@ def test_auditor_rejects_non_origin_gateway_urls(value):
             "wss://archive.example:443",
         ),
         (
-            {"BITTENSOR_ARCHIVE_ENDPOINT": "ws://192.168.69.55:9944"},
-            "ws://192.168.69.55:9944",
+            {"BITTENSOR_ARCHIVE_ENDPOINT": "ws://10.0.0.10:9944"},
+            "ws://10.0.0.10:9944",
         ),
     ),
 )
@@ -363,7 +363,7 @@ def test_stateful_bundle_epoch_reconnects_same_archive_after_read_failure(
         auditor_module.AuditorValidator
     )
     auditor.epoch_cutover = object()
-    auditor.epoch_archive_endpoint = "ws://192.168.69.55:9944"
+    auditor.epoch_archive_endpoint = "wss://operator-archive.example:443"
     stale = object()
     refreshed = object()
     auditor.epoch_archive_subtensor = stale
@@ -410,12 +410,12 @@ def test_stateful_bundle_epoch_reconnects_same_archive_after_read_failure(
             stale,
             {"netuid": 71, "block_number": 8_637_160},
         ),
-        ("connect", "ws://192.168.69.55:9944"),
+        ("connect", "wss://operator-archive.example:443"),
         (
             "anchor",
             refreshed,
             auditor.epoch_cutover,
-            "ws://192.168.69.55:9944",
+            "wss://operator-archive.example:443",
         ),
         (
             "read",

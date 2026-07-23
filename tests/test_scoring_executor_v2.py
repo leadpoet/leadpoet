@@ -139,6 +139,7 @@ async def test_v2_preflight_reuses_existing_cache_and_failure_streak_logic(
         "_v2_provider_credential_profile": "benchmark_model",
         "_v2_provider_credential_ref_hashes": {"exa": HASH},
         "schema_version": PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION,
+        "measurement_id": "1" * 32,
         "scope_key": "scoring:worker-1",
         "force": False,
         "settings": {
@@ -165,6 +166,51 @@ async def test_v2_preflight_reuses_existing_cache_and_failure_streak_logic(
     finally:
         executor.close()
     assert calls == {"exa": 1, "scrapingdog": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("measurement_id", ("", "1" * 31, "g" * 32))
+async def test_v2_preflight_rejects_invalid_measurement_identity(
+    measurement_id,
+):
+    executor = ScoringExecutorV2(
+        provider_execute=lambda _request: pytest.fail(
+            "invalid preflight request must not call a provider"
+        ),
+        retry_policy_hashes={"exa": HASH, "scrapingdog": HASH},
+    )
+    payload = {
+        "_v2_provider_credential_profile": "benchmark_model",
+        "_v2_provider_credential_ref_hashes": {"exa": HASH},
+        "schema_version": PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION,
+        "measurement_id": measurement_id,
+        "scope_key": "scoring:worker-1",
+        "force": False,
+        "settings": {
+            "enabled": True,
+            "ttl_seconds": 600.0,
+            "timeout_seconds": 12.0,
+            "failure_streak_threshold": 3,
+        },
+    }
+    try:
+        with pytest.raises(
+            ValueError,
+            match="measurement identity",
+        ):
+            await executor(
+                OP_PROVIDER_PREFLIGHT_V2,
+                payload,
+                ExecutionContextV2(
+                    job_id="invalid-preflight-job",
+                    purpose="research_lab.provider_preflight.v2",
+                    epoch_id=0,
+                    provider_credential_profile="benchmark_model",
+                    provider_credential_ref_hashes={"exa": HASH},
+                ),
+            )
+    finally:
+        executor.close()
 
 
 @pytest.mark.asyncio

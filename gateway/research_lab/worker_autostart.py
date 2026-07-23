@@ -14,6 +14,10 @@ import time
 from typing import Mapping
 
 from gateway.research_lab.config import resolve_worker_process_count
+from Leadpoet.utils.subnet_epoch import (
+    SubnetEpochError,
+    load_subnet_epoch_cutover,
+)
 
 
 TRUTHY = {"1", "true", "yes", "on"}
@@ -22,6 +26,7 @@ WORKER_READY_FD_ENV = "RESEARCH_LAB_WORKER_READY_FD"
 
 class ResearchLabWorkerStartupError(RuntimeError):
     """An authoritative worker failed before entering its poll loop."""
+
 
 HOSTED_PROXY_PREFIXES = (
     "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY",
@@ -106,6 +111,37 @@ def _int_env(env: Mapping[str, str], name: str, default: int = 0) -> int:
         return int(str(env.get(name, str(default))).strip())
     except (TypeError, ValueError):
         return default
+
+
+def build_research_lab_worker_environment(
+    source: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Copy and validate the exact environment inherited by worker children."""
+
+    env = dict(os.environ if source is None else source)
+    try:
+        cutover = load_subnet_epoch_cutover(env)
+    except SubnetEpochError as exc:
+        raise ResearchLabWorkerStartupError(
+            "Research Lab worker epoch authority is missing or invalid"
+        ) from exc
+
+    raw_netuid = (
+        env.get("BITTENSOR_NETUID")
+        or env.get("NETUID")
+        or str(cutover.netuid)
+    )
+    try:
+        netuid = int(raw_netuid)
+    except (TypeError, ValueError) as exc:
+        raise ResearchLabWorkerStartupError(
+            "Research Lab worker netuid is invalid"
+        ) from exc
+    if netuid != cutover.netuid:
+        raise ResearchLabWorkerStartupError(
+            "Research Lab worker epoch authority targets a different netuid"
+        )
+    return env
 
 
 def _configured_proxies(env: Mapping[str, str], prefixes: tuple[str, ...]) -> tuple[str, ...]:
@@ -292,7 +328,7 @@ class ResearchLabWorkerSupervisor:
             self._ready_children.add(key)
 
     def _start_child(self, fleet: ResearchLabWorkerFleetPlan, index: int) -> subprocess.Popen[bytes]:
-        env = os.environ.copy()
+        env = build_research_lab_worker_environment()
         env.setdefault("PYTHONUNBUFFERED", "1")
         read_fd, write_fd = os.pipe()
         env[WORKER_READY_FD_ENV] = str(write_fd)

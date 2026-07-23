@@ -87,7 +87,7 @@
       "symbol": "gateway_weight_input_value_documents_v2"
     },
     {
-      "ast_sha256": "sha256:7a8ed377a6a7da1b18de75f1133a5f4c56de13ee022ec2e52999a79fb8291c36",
+      "ast_sha256": "sha256:d20544a7f9e324c4edb69c7168a5df059ac835d64e7737896ad524f215fbffd8",
       "path": "leadpoet_canonical/weight_authority_v2.py",
       "symbol": "validate_published_weight_bundle_v2"
     },
@@ -202,7 +202,7 @@
       "symbol": "EnclaveChainRpcTransportV2.call"
     },
     {
-      "ast_sha256": "sha256:e8fff23aec4b32f85ea96e8e4785db82aac7ec6874669dd9d2d2f57ccd386e1c",
+      "ast_sha256": "sha256:63444c1c63cfefa9571e7967fad7a0f7ec25654cd27dc148e8534d3ac2ce5276",
       "path": "validator_tee/enclave/chain_source_v2.py",
       "symbol": "ValidatorChainSourceV2.find_finalized_extrinsic_inclusion"
     },
@@ -227,12 +227,12 @@
       "symbol": "ValidatorHotkeyAuthorityV2.provision_seed"
     },
     {
-      "ast_sha256": "sha256:5207f58b8e1826a78f5426f2446855495ee26390b1717ff4aa4de1fd26cde5a5",
+      "ast_sha256": "sha256:9c5d30b924ddf5b98d5d68103fa0d483f7ed7f7c00804550e4fc2a904e865f79",
       "path": "validator_tee/enclave/hotkey_authority_v2.py",
       "symbol": "ValidatorHotkeyAuthorityV2.recover_weight_publication"
     },
     {
-      "ast_sha256": "sha256:6ae2b6d70d9476fdd8d8acb629e9cf2d856f66f03fd380e370e8266a7597b4d4",
+      "ast_sha256": "sha256:f765660baf6f6d78193baeb622313bbc053539b5cd6f6641817d6f05660f0d1c",
       "path": "validator_tee/enclave/hotkey_authority_v2.py",
       "symbol": "ValidatorHotkeyAuthorityV2.register_weight_result"
     },
@@ -252,7 +252,7 @@
       "symbol": "ValidatorHotkeyAuthorityV2.sign_weight_extrinsic"
     },
     {
-      "ast_sha256": "sha256:4ea32369822ad70525b2ca3e8caac5197bc31436d26e0d0e202bfac1ca2580d0",
+      "ast_sha256": "sha256:6f575711827ba2b4e16161fbdfd6edd52a59cb7154161bc1855c052949b771b2",
       "path": "validator_tee/enclave/weight_authority_v2.py",
       "symbol": "ValidatorWeightAuthorityV2.compute"
     },
@@ -282,7 +282,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:2135220238ce50565a1ba4fb5a4e80f5f6c52d18b257d8b94dd0e313f91c0307",
-  "protected_source_commit": "c08f83d32866895b943a38910a60e40b4ca83943",
+  "manifest_hash": "sha256:c91302f0badd595299ba0fa82b305634dfc7d94ab4e3d55ea845b609df533d08",
+  "protected_source_commit": "71dbc79c8737828c354e72d901febec1779046e1",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

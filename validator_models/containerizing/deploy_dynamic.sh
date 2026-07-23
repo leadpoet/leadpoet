@@ -337,6 +337,14 @@ done
 echo "✅ Old containers removed"
 echo ""
 
+# Bind every coordinator/worker process and shared epoch document to this
+# exact deployment generation. A persisted current_block.json from a previous
+# coordinator can never satisfy the post-start authority checks.
+VALIDATOR_RUNTIME_GENERATION="$(
+    python3 -c 'import secrets; print(secrets.token_hex(16))'
+)"
+export VALIDATOR_RUNTIME_GENERATION
+
 # Function to start a container
 start_container() {
     local CONTAINER_NAME=$1
@@ -364,8 +372,10 @@ start_container() {
     local ENCLAVE_CID_ARG=""
     local PRIVILEGED_ARG=""
     local LOG_DRIVER_ARGS=""
+    local PUBLICATION_JOURNAL_ARG=""
     if [ "$CONTAINER_ID" -eq 0 ]; then
         MODE_ARG="--mode coordinator"
+        PUBLICATION_JOURNAL_ARG="-e VALIDATOR_V2_PUBLICATION_JOURNAL_PATH=/app/validator_weights/authoritative_weight_publication_v2.json"
         # Coordinator needs vsock access for Nitro Enclave TEE signing
         # Requires --privileged for vsock socket creation permissions
         if [ -e /dev/vsock ]; then
@@ -399,10 +409,12 @@ start_container() {
       -e PYTHONUNBUFFERED=1 \
       -e LEADPOET_CONTAINER_MODE=1 \
       -e LEADPOET_WRAPPER_ACTIVE=1 \
+      -e VALIDATOR_RUNTIME_GENERATION="$VALIDATOR_RUNTIME_GENERATION" \
       -e VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT" \
       -e GITHUB_SHA="$VALIDATOR_V2_DEPLOY_COMMIT" \
       -e GIT_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT" \
       -e VALIDATOR_V2_GATEWAY_URL="${VALIDATOR_V2_GATEWAY_URL:-}" \
+      $PUBLICATION_JOURNAL_ARG \
       -e EXPECTED_CHAIN="${EXPECTED_CHAIN:-}" \
       -e MEV_API_KEY="$MEV_API_KEY" \
       -e TRUELIST_API_KEY="$TRUELIST_API_KEY" \
@@ -549,6 +561,8 @@ if [ $QUAL_PROXY_COUNT -gt 0 ]; then
           -e PYTHONUNBUFFERED=1 \
           -e LEADPOET_CONTAINER_MODE=1 \
           -e LEADPOET_WRAPPER_ACTIVE=1 \
+          -e VALIDATOR_RUNTIME_GENERATION="$VALIDATOR_RUNTIME_GENERATION" \
+          -e LEADPOET_SUBNET_EPOCH_CUTOVER_JSON="${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}" \
           -e GATEWAY_URL="${GATEWAY_URL:-https://gateway.subnet71.com}" \
       -e LEADPOET_INTERNAL_SECRET="${LEADPOET_INTERNAL_SECRET:-}" \
           -e RESEARCH_LAB_INTERNAL_API_KEY="${RESEARCH_LAB_INTERNAL_API_KEY:-}" \
@@ -586,7 +600,7 @@ fi
 # ════════════════════════════════════════════════════════════════════════════════
 
 # Auto-detect FULFILLMENT proxies from .env
-FF_PROXIES=()
+FF_WORKER_IDS=()
 FF_PROXY_COUNT=0
 
 if is_truthy "$ENABLE_FULFILLMENT"; then
@@ -595,12 +609,10 @@ if is_truthy "$ENABLE_FULFILLMENT"; then
         PROXY_VALUE="${!PROXY_VAR}"
 
         if [ -n "$PROXY_VALUE" ]; then
-            FF_PROXIES+=("$PROXY_VALUE")
-            FF_PROXY_COUNT=$((FF_PROXY_COUNT + 1))
-        else
-            break
+            FF_WORKER_IDS+=("$i")
         fi
     done
+    FF_PROXY_COUNT=${#FF_WORKER_IDS[@]}
 else
     echo "🚫 Fulfillment worker deployment disabled (ENABLE_FULFILLMENT != true)"
 fi
@@ -614,12 +626,12 @@ if [ $FF_PROXY_COUNT -gt 0 ]; then
     echo "============================================================"
     echo ""
 
-    for i in $(seq 1 $FF_PROXY_COUNT); do
+    for i in "${FF_WORKER_IDS[@]}"; do
         docker rm -f "leadpoet-ff-worker-$i" 2>/dev/null || true
     done
     sleep 1
 
-    for i in $(seq 1 $FF_PROXY_COUNT); do
+    for i in "${FF_WORKER_IDS[@]}"; do
         FF_PROXY_VAR="FULFILLMENT_WEBSHARE_PROXY_$i"
         FF_PROXY_VALUE="${!FF_PROXY_VAR}"
 
@@ -646,6 +658,8 @@ if [ $FF_PROXY_COUNT -gt 0 ]; then
           -e PYTHONUNBUFFERED=1 \
           -e LEADPOET_CONTAINER_MODE=1 \
           -e LEADPOET_WRAPPER_ACTIVE=1 \
+          -e VALIDATOR_RUNTIME_GENERATION="$VALIDATOR_RUNTIME_GENERATION" \
+          -e LEADPOET_SUBNET_EPOCH_CUTOVER_JSON="${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}" \
           -e ENABLE_FULFILLMENT=true \
           -e GATEWAY_URL="${GATEWAY_URL:-https://gateway.subnet71.com}" \
       -e LEADPOET_INTERNAL_SECRET="${LEADPOET_INTERNAL_SECRET:-}" \
@@ -752,11 +766,15 @@ fi
 docker exec -i leadpoet-validator-main python3 - <<'PY'
 import json
 import os
+import time
 import urllib.request
 
 import bittensor as bt
 
-from Leadpoet.utils.subnet_epoch import read_subnet_epoch_snapshot
+from Leadpoet.utils.subnet_epoch import (
+    read_subnet_epoch_snapshot,
+    validate_validator_shared_epoch_file,
+)
 from validator_tee.host.vsock_client import ValidatorEnclaveClient
 
 if str(bt.__version__) != "10.5.0":
@@ -801,7 +819,38 @@ network = os.environ.get("SUBTENSOR_NETWORK", "finney")
 netuid = int(os.environ.get("NETUID", "71"))
 subtensor = bt.Subtensor(network=network)
 try:
-    epoch = read_subnet_epoch_snapshot(subtensor, netuid=netuid)
+    deadline = time.monotonic() + 60
+    last_shared_error = "shared epoch document was not checked"
+    while True:
+        epoch = read_subnet_epoch_snapshot(subtensor, netuid=netuid)
+        try:
+            shared = validate_validator_shared_epoch_file(
+                "validator_weights/current_block.json",
+                max_age_seconds=30,
+                expected_runtime_generation=os.environ[
+                    "VALIDATOR_RUNTIME_GENERATION"
+                ],
+            )
+            stable_fields_match = (
+                shared.network_genesis_hash == epoch.network_genesis_hash
+                and shared.netuid == epoch.netuid
+                and shared.subnet_epoch_index == epoch.subnet_epoch_index
+                and shared.last_epoch_block == epoch.last_epoch_block
+                and shared.pending_epoch_at == epoch.pending_epoch_at
+                and shared.tempo == epoch.tempo
+                and abs(shared.current_block - epoch.current_block) <= 5
+            )
+            if stable_fields_match:
+                break
+            last_shared_error = "shared epoch authority differs from live chain"
+        except Exception as exc:
+            last_shared_error = f"{type(exc).__name__}: {exc}"
+        if time.monotonic() >= deadline:
+            raise SystemExit(
+                "new coordinator did not publish fresh live epoch authority: "
+                + last_shared_error
+            )
+        time.sleep(2)
 finally:
     close = getattr(subtensor, "close", None)
     if callable(close):
@@ -824,6 +873,76 @@ print(
 )
 PY
 echo "✅ Authoritative validator coordinator runtime verified"
+echo ""
+
+validate_worker_epoch_authority() {
+    local container_name="$1"
+    local shared_epoch_ready=0
+
+    if [ "$(docker inspect -f '{{.State.Running}}' "$container_name")" != "true" ]; then
+        echo "❌ ERROR: $container_name is not running" >&2
+        return 1
+    fi
+    if [ "$(docker inspect -f '{{.RestartCount}}' "$container_name")" != "0" ]; then
+        echo "❌ ERROR: $container_name restarted during startup" >&2
+        return 1
+    fi
+    if ! docker exec "$container_name" sh -c \
+        'test -n "${LEADPOET_SUBNET_EPOCH_CUTOVER_JSON:-}"'; then
+        echo "❌ ERROR: $container_name is missing the official epoch cutover manifest" >&2
+        return 1
+    fi
+
+    for _attempt in $(seq 1 30); do
+        if docker exec "$container_name" \
+            sh -c 'test -s /app/validator_weights/current_block.json'; then
+            shared_epoch_ready=1
+            break
+        fi
+        sleep 2
+    done
+    if [ "$shared_epoch_ready" != "1" ]; then
+        echo "❌ ERROR: $container_name cannot see the shared epoch document" >&2
+        return 1
+    fi
+
+    docker exec -i "$container_name" sh -c 'cd /app && python3 -' <<'PY'
+import json
+import os
+
+from Leadpoet.utils.subnet_epoch import validate_validator_shared_epoch_file
+
+snapshot = validate_validator_shared_epoch_file(
+    "validator_weights/current_block.json",
+    max_age_seconds=30,
+    expected_runtime_generation=os.environ["VALIDATOR_RUNTIME_GENERATION"],
+)
+print(
+    json.dumps(
+        {
+            "schema_version": "leadpoet.validator_worker_epoch_preflight.v1",
+            "status": "ready",
+            "subnet_epoch_index": snapshot.subnet_epoch_index,
+            "epoch_block": snapshot.epoch_block,
+        },
+        sort_keys=True,
+    )
+)
+PY
+    echo "✅ $container_name official epoch authority verified"
+}
+
+echo "🔐 Verifying official epoch authority in every validator worker..."
+for i in $(seq 1 "$PROXY_COUNT"); do
+    validate_worker_epoch_authority "leadpoet-validator-worker-$i"
+done
+for i in $(seq 1 "$QUAL_PROXY_COUNT"); do
+    validate_worker_epoch_authority "leadpoet-qual-worker-$i"
+done
+for i in "${FF_WORKER_IDS[@]}"; do
+    validate_worker_epoch_authority "leadpoet-ff-worker-$i"
+done
+echo "✅ All validator worker epoch authorities verified"
 echo ""
 
 ALL_IPS=()

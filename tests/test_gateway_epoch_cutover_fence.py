@@ -54,8 +54,8 @@ def test_missing_service_credentials_use_fixed_public_rpc(monkeypatch):
 
     monkeypatch.setattr(config, "SUPABASE_URL", None)
     monkeypatch.setattr(config, "SUPABASE_SERVICE_ROLE_KEY", None)
-    monkeypatch.setenv("SUPABASE_URL", "")
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     monkeypatch.setenv("BITTENSOR_NETWORK", "finney")
     monkeypatch.setenv("BITTENSOR_NETUID", "71")
     monkeypatch.setattr(supabase, "create_client", create_client)
@@ -81,8 +81,8 @@ def test_public_lifecycle_rpc_outage_fails_closed(monkeypatch):
 
     monkeypatch.setattr(config, "SUPABASE_URL", None)
     monkeypatch.setattr(config, "SUPABASE_SERVICE_ROLE_KEY", None)
-    monkeypatch.setenv("SUPABASE_URL", "")
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     monkeypatch.setenv("BITTENSOR_NETWORK", "finney")
     monkeypatch.setenv("BITTENSOR_NETUID", "71")
     monkeypatch.setattr(supabase, "create_client", lambda _url, _key: Client())
@@ -108,8 +108,8 @@ def test_unconfigured_nonproduction_runtime_has_no_database_fallback(
 
     monkeypatch.setattr(config, "SUPABASE_URL", None)
     monkeypatch.setattr(config, "SUPABASE_SERVICE_ROLE_KEY", None)
-    monkeypatch.setenv("SUPABASE_URL", "")
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     monkeypatch.setenv("BITTENSOR_NETWORK", network)
     monkeypatch.setenv("BITTENSOR_NETUID", netuid)
 

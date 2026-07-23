@@ -34,6 +34,7 @@ from leadpoet_canonical.hotkey_authority_v2 import (
 from leadpoet_canonical.weight_authority_v2 import (
     GATEWAY_WEIGHT_INPUT_CATEGORIES,
     WEIGHT_INPUT_PURPOSES,
+    validate_published_weight_bundle_v2,
     weight_input_output_roots_v2,
     weight_input_value_documents_v2,
 )
@@ -142,12 +143,13 @@ def _receipt(
     artifact_root=EMPTY_ARTIFACT_ROOT,
     artifact_domain="leadpoet-artifact-v2",
     parent_receipt_hashes=(),
+    epoch_id=100,
 ):
     body = build_execution_receipt_body(
         role=boot["role"],
         purpose=purpose,
         job_id=job_id,
-        epoch_id=100,
+        epoch_id=epoch_id,
         sequence=sequence,
         commit_sha=boot["commit_sha"],
         pcr0=boot["pcr0"],
@@ -265,7 +267,12 @@ def _calculation_snapshot(parent_hashes, allocation_hash):
     return snapshot
 
 
-def _fixture(*, category_output_override=None, stateful=False):
+def _fixture(
+    *,
+    category_output_override=None,
+    stateful=False,
+    historical_validator_ancestry=False,
+):
     validator_key, validator_pub = _keypair()
     gateway_key, gateway_pub = _keypair()
     validator_boot = _boot(
@@ -292,6 +299,57 @@ def _fixture(*, category_output_override=None, stateful=False):
         public_key=gateway_pub,
         nonce="8",
     )
+    historical_boot = None
+    historical_receipts = []
+    historical_commit = "f" * 40
+    if historical_validator_ancestry:
+        historical_key, historical_pub = _keypair()
+        historical_boot = _boot(
+            role=WEIGHT_ROLE,
+            physical_role="validator_weights",
+            commit=historical_commit,
+            pcr0="a" * 96,
+            manifest="sha256:" + "b" * 64,
+            dependency_lock="sha256:" + "c" * 64,
+            config_hash="sha256:" + "d" * 64,
+            private_key=historical_key,
+            public_key=historical_pub,
+            nonce="9",
+        )
+        historical_snapshot = _receipt(
+            boot=historical_boot,
+            private_key=historical_key,
+            purpose="validator.weight_snapshot.v2",
+            job_id="historical-weight-snapshot:99",
+            sequence=0,
+            output_root=sha256_json({"epoch_id": 99, "kind": "snapshot"}),
+            epoch_id=99,
+        )
+        historical_computed = _receipt(
+            boot=historical_boot,
+            private_key=historical_key,
+            purpose="validator.weights.computed.v2",
+            job_id="historical-weight-computation:99",
+            sequence=1,
+            output_root=sha256_json({"epoch_id": 99, "kind": "computed"}),
+            parent_receipt_hashes=(historical_snapshot["receipt_hash"],),
+            epoch_id=99,
+        )
+        historical_finalized = _receipt(
+            boot=historical_boot,
+            private_key=historical_key,
+            purpose="validator.weights.finalized.v2",
+            job_id="historical-weight-finalization:99",
+            sequence=2,
+            output_root=sha256_json({"epoch_id": 99, "kind": "finalized"}),
+            parent_receipt_hashes=(historical_computed["receipt_hash"],),
+            epoch_id=99,
+        )
+        historical_receipts = [
+            historical_snapshot,
+            historical_computed,
+            historical_finalized,
+        ]
     preliminary = _calculation_snapshot([], "")
     finalized_chain_state_root = sha256_json({"block": 36099})
     gateway_authority_event_hash = sha256_json({"epoch": 100})
@@ -305,7 +363,7 @@ def _fixture(*, category_output_override=None, stateful=False):
         finalized_chain_state_root=finalized_chain_state_root,
         gateway_authority_event_hash=gateway_authority_event_hash,
     )
-    receipts = []
+    receipts = list(historical_receipts)
     attempts = []
     input_hashes = {}
     for sequence, category in enumerate(sorted(GATEWAY_WEIGHT_INPUT_CATEGORIES)):
@@ -355,6 +413,12 @@ def _fixture(*, category_output_override=None, stateful=False):
                 artifact_hashes,
                 domain="leadpoet-artifact-v2",
             ),
+            parent_receipt_hashes=(
+                (historical_receipts[-1]["receipt_hash"],)
+                if historical_receipts
+                and category == "research_lab_allocation"
+                else ()
+            ),
         )
         receipts.append(receipt)
         input_hashes[category] = receipt["receipt_hash"]
@@ -368,7 +432,8 @@ def _fixture(*, category_output_override=None, stateful=False):
         "input_receipt_hashes": input_hashes,
         "gateway_authority_event_hash": gateway_authority_event_hash,
         "upstream_receipt_set": {
-            "boot_identities": [gateway_boot],
+            "boot_identities": [gateway_boot]
+            + ([historical_boot] if historical_boot is not None else []),
             "receipts": receipts,
             "transport_attempts": attempts,
             "host_operations": [],
@@ -386,6 +451,21 @@ def _fixture(*, category_output_override=None, stateful=False):
             }
         }
     }
+    if historical_boot is not None:
+        expectations[historical_commit] = {
+            "roles": {
+                "validator_weights": {
+                    "commit_sha": historical_commit,
+                    "pcr0": historical_boot["pcr0"],
+                    "build_manifest_hash": historical_boot[
+                        "build_manifest_hash"
+                    ],
+                    "dependency_lock_hash": historical_boot[
+                        "dependency_lock_hash"
+                    ],
+                }
+            }
+        }
     verified_boots = []
     boot_verification_modes = {}
 
@@ -613,6 +693,8 @@ def _fixture(*, category_output_override=None, stateful=False):
         "validator_boot": validator_boot,
         "gateway_boot": gateway_boot,
         "gateway_key": gateway_key,
+        "historical_boot": historical_boot,
+        "historical_receipts": historical_receipts,
         "expectations": expectations,
         "verified_boots": verified_boots,
         "boot_verification_modes": boot_verification_modes,
@@ -651,6 +733,88 @@ def test_validator_authority_computes_and_signs_exact_canonical_weights():
         fixture["validator_boot"]["boot_identity_hash"]: True,
         fixture["gateway_boot"]["boot_identity_hash"]: True,
     }
+
+
+def test_validator_authority_preserves_approved_historical_validator_ancestry():
+    fixture = _fixture(historical_validator_ancestry=True)
+    enclave_response = fixture["authority"].compute(fixture["request"])
+    enclave_response["weight_authorization_id"] = "sha256:" + "a" * 64
+    graph = enclave_response["receipt_graph"]
+    historical_boot = fixture["historical_boot"]
+    historical_hashes = {
+        receipt["receipt_hash"] for receipt in fixture["historical_receipts"]
+    }
+
+    assert historical_boot is not None
+    assert historical_boot["boot_identity_hash"] in {
+        boot["boot_identity_hash"] for boot in graph["boot_identities"]
+    }
+    assert historical_hashes.issubset(
+        {receipt["receipt_hash"] for receipt in graph["receipts"]}
+    )
+    assert fixture["boot_verification_modes"][
+        historical_boot["boot_identity_hash"]
+    ] is True
+
+    boot = fixture["validator_boot"]
+    validator_hotkey = fixture["request"]["validator_hotkey"]
+    binding_message = create_binding_message(
+        netuid=71,
+        chain="wss://entrypoint-finney.opentensor.ai:443",
+        enclave_pubkey=boot["signing_pubkey"],
+        validator_code_hash=boot["build_manifest_hash"],
+        version=boot["commit_sha"],
+    )
+    application_request = build_application_signature_request_v2(
+        message=binding_message.encode("utf-8"),
+        validator_hotkey=validator_hotkey,
+        boot_identity_hash=boot["boot_identity_hash"],
+    )
+    hotkey_signature = "f" * 128
+    output = {
+        "schema_version": "leadpoet.application_signature_result.v2",
+        "request_hash": application_request["request_hash"],
+        "purpose": "validator.gateway_binding.v2",
+        "validator_hotkey": validator_hotkey,
+        "signature": hotkey_signature,
+    }
+    binding_receipt = create_signed_execution_receipt(
+        body=build_execution_receipt_body(
+            role=WEIGHT_ROLE,
+            purpose="validator.hotkey_signature.v2",
+            job_id="application-signature:%s"
+            % application_request["request_hash"].split(":", 1)[1][:32],
+            epoch_id=100,
+            sequence=0,
+            commit_sha=boot["commit_sha"],
+            pcr0=boot["pcr0"],
+            build_manifest_hash=boot["build_manifest_hash"],
+            dependency_lock_hash=boot["dependency_lock_hash"],
+            config_hash=boot["config_hash"],
+            boot_identity_hash=boot["boot_identity_hash"],
+            input_root=application_request["request_hash"],
+            output_root=sha256_json(output),
+            transport_root_hash=EMPTY_TRANSPORT_ROOT,
+            host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
+            artifact_root=EMPTY_ARTIFACT_ROOT,
+            parent_receipt_hashes=(graph["root_receipt_hash"],),
+            status="succeeded",
+            failure_code=None,
+            issued_at="2026-07-10T20:00:00Z",
+        ),
+        enclave_pubkey=boot["signing_pubkey"],
+        sign_digest=fixture["validator_key"].sign,
+    )
+    bundle = build_authoritative_weight_bundle_v2(
+        enclave_response=enclave_response,
+        validator_hotkey=validator_hotkey,
+        binding_message=binding_message,
+        binding_signature_result={**output, "receipt": binding_receipt},
+    )
+    verified = validate_published_weight_bundle_v2(bundle)
+
+    assert verified["validator_boot_identity_hash"] == boot["boot_identity_hash"]
+    assert verified["weight_receipt_hash"] == graph["root_receipt_hash"]
 
 
 def test_validator_authority_connects_gateway_persistence_receipts():
@@ -1182,7 +1346,7 @@ def test_validator_authority_rejects_gateway_release_mismatch():
         boot_verifier=lambda identity, **_kwargs: {"verified": True},
         clock=lambda: NOW,
     )
-    with pytest.raises(ValidatorWeightAuthorityV2Error, match="gateway boot"):
+    with pytest.raises(ValidatorWeightAuthorityV2Error, match="boot differs"):
         authority.compute(fixture["request"])
 
 
@@ -1245,6 +1409,60 @@ def test_validator_authority_accepts_only_exact_historical_release_lineage_boot(
     ):
         fixture["authority"]._verify_one_boot(
             unknown,
+            fixture["validator_boot"],
+        )
+
+
+def test_validator_authority_accepts_exact_historical_validator_boot():
+    fixture = _fixture()
+    historical_commit = "f" * 40
+    historical_key = Ed25519PrivateKey.generate()
+    historical_pub = historical_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    ).hex()
+    historical_boot = _boot(
+        role=WEIGHT_ROLE,
+        physical_role="validator_weights",
+        commit=historical_commit,
+        pcr0="a" * 96,
+        manifest="sha256:" + "b" * 64,
+        dependency_lock="sha256:" + "c" * 64,
+        config_hash="sha256:" + "d" * 64,
+        private_key=historical_key,
+        public_key=historical_pub,
+        nonce="9",
+    )
+    fixture["expectations"][historical_commit] = {
+        "roles": {
+            "validator_weights": {
+                "commit_sha": historical_commit,
+                "pcr0": historical_boot["pcr0"],
+                "build_manifest_hash": historical_boot["build_manifest_hash"],
+                "dependency_lock_hash": historical_boot[
+                    "dependency_lock_hash"
+                ],
+            }
+        }
+    }
+
+    verified = fixture["authority"]._verify_one_boot(
+        historical_boot,
+        fixture["validator_boot"],
+    )
+    assert verified == {"verified": True}
+    assert fixture["boot_verification_modes"][
+        historical_boot["boot_identity_hash"]
+    ] is True
+
+    changed = copy.deepcopy(historical_boot)
+    changed["pcr0"] = "0" * 96
+    with pytest.raises(
+        ValidatorWeightAuthorityV2Error,
+        match="boot differs from approved release lineage",
+    ):
+        fixture["authority"]._verify_one_boot(
+            changed,
             fixture["validator_boot"],
         )
 

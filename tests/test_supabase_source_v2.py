@@ -196,6 +196,38 @@ def test_repeated_policy_reads_scope_operations_by_typed_filters():
     assert all(request["attempt_number"] == 0 for request in provider.requests)
 
 
+def test_business_artifact_lookup_uses_the_exact_authenticated_hash():
+    artifact_hash = "sha256:" + "3" * 64
+    provider = FakeProvider([{"rows": []}])
+
+    _read(
+        provider,
+        policy_id="attested_business_artifact_by_ref",
+        parameters={
+            "artifact_kind": "allocation",
+            "artifact_ref": "epoch:24093",
+            "artifact_hash": artifact_hash,
+        },
+    )
+
+    query = parse_qsl(urlsplit(provider.requests[0]["url"]).query)
+    assert ("artifact_kind", "eq.allocation") in query
+    assert ("artifact_ref", "eq.epoch:24093") in query
+    assert ("artifact_hash", "eq.%s" % artifact_hash) in query
+    assert ("limit", "1") in query
+
+    with pytest.raises(SupabaseSourceV2Error, match="artifact_hash"):
+        _read(
+            FakeProvider([{"rows": []}]),
+            policy_id="attested_business_artifact_by_ref",
+            parameters={
+                "artifact_kind": "allocation",
+                "artifact_ref": "epoch:24093",
+                "artifact_hash": "not-a-hash",
+            },
+        )
+
+
 def test_typed_query_parameters_cannot_inject_postgrest_syntax():
     provider = FakeProvider([{"rows": []}])
     with pytest.raises(SupabaseSourceV2Error, match="integer"):

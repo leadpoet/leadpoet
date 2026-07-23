@@ -217,6 +217,13 @@ def build_release_lineage_v2(
                 "build_manifest_hash": summary["execution_manifest_hash"],
                 "dependency_lock_hash": summary["dependency_lock_hash"],
             }
+        validator = channel["validator_release_manifest"]["release"]
+        roles["validator_weights"] = {
+            "commit_sha": validator["commit_sha"],
+            "pcr0": validator["pcr0"],
+            "build_manifest_hash": validator["app_manifest_hash"],
+            "dependency_lock_hash": validator["dependency_lock_hash"],
+        }
         releases[channel_commit] = {
             "channel_hash": channel["channel_hash"],
             "gateway_release_hash": gateway["release_hash"],

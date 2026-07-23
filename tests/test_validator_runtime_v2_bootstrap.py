@@ -184,7 +184,7 @@ def test_stateful_runtime_configuration_measures_cutover(monkeypatch):
     }
     assert set(
         config["gateway_release_lineage"]["releases"]["1" * 40]["roles"]
-    ) == set(ROLE_SPECS)
+    ) == set(ROLE_SPECS) | {"validator_weights"}
 
 
 def test_runtime_configuration_rejects_asymmetric_commits():

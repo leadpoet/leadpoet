@@ -14,6 +14,12 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKER_SCRIPT = ROOT / "scripts" / "run_research_lab_scoring_worker.py"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from gateway.research_lab.worker_autostart import (  # noqa: E402
+    build_research_lab_worker_environment,
+)
 
 
 def main() -> int:
@@ -26,11 +32,12 @@ def main() -> int:
 
     configured_count = int(os.getenv("RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT", "0") or "0")
     worker_count = max(1, args.workers or configured_count or _configured_proxy_count() or 1)
+    worker_environment = build_research_lab_worker_environment()
     children: dict[int, subprocess.Popen[bytes]] = {}
     stopping = False
 
     def start_worker(index: int) -> subprocess.Popen[bytes]:
-        env = os.environ.copy()
+        env = worker_environment.copy()
         env["RESEARCH_LAB_SCORING_WORKER_TOTAL_WORKERS"] = str(worker_count)
         env["RESEARCH_LAB_SCORING_WORKER_INDEX"] = str(index)
         env["RESEARCH_LAB_SCORING_WORKER_ID"] = f"{args.worker_prefix}-{index + 1}"

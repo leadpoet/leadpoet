@@ -42,6 +42,50 @@ class ChampionSettlementV2Error(RuntimeError):
     """Finalized weight evidence is missing, inconsistent, or tampered."""
 
 
+def _allocation_authority_receipt_hash_v2(
+    *,
+    bundle_doc: Mapping[str, Any],
+    allocation_input_receipt_hash: str,
+    allocation: Mapping[str, Any],
+    epoch_id: int,
+) -> str:
+    graph = bundle_doc.get("receipt_graph")
+    if not isinstance(graph, Mapping):
+        raise ChampionSettlementV2Error(
+            "finalized weight bundle receipt graph is missing"
+        )
+    receipts = {
+        str(receipt.get("receipt_hash") or ""): receipt
+        for receipt in graph.get("receipts") or ()
+        if isinstance(receipt, Mapping)
+    }
+    input_receipt = receipts.get(allocation_input_receipt_hash)
+    if not isinstance(input_receipt, Mapping):
+        raise ChampionSettlementV2Error(
+            "finalized weight bundle allocation input receipt is missing"
+        )
+    parent_hashes = input_receipt.get("parent_receipt_hashes")
+    if not isinstance(parent_hashes, list) or len(parent_hashes) != 1:
+        raise ChampionSettlementV2Error(
+            "finalized weight bundle allocation input ancestry is invalid"
+        )
+    authority_hash = str(parent_hashes[0] or "")
+    authority_receipt = receipts.get(authority_hash)
+    if (
+        not isinstance(authority_receipt, Mapping)
+        or authority_receipt.get("role") != "gateway_coordinator"
+        or authority_receipt.get("purpose") != "research_lab.allocation.v2"
+        or authority_receipt.get("epoch_id") != int(epoch_id)
+        or authority_receipt.get("status") != "succeeded"
+        or authority_receipt.get("output_root")
+        != sha256_json({"allocation": dict(allocation)})
+    ):
+        raise ChampionSettlementV2Error(
+            "finalized weight bundle allocation authority receipt is invalid"
+        )
+    return authority_hash
+
+
 def validate_finalized_allocation_authorities_v2(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -212,6 +256,14 @@ def validate_finalized_allocation_authorities_v2(
                 "finalized Research Lab allocation hash is invalid"
             )
         epoch_id = int(bundle["epoch_id"])
+        allocation_authority_receipt_hash = (
+            _allocation_authority_receipt_hash_v2(
+                bundle_doc=bundle_doc,
+                allocation_input_receipt_hash=allocation_receipt_hash,
+                allocation=allocation,
+                epoch_id=epoch_id,
+            )
+        )
         by_epoch[epoch_id].append(
             {
                 "epoch": epoch_id,
@@ -219,6 +271,9 @@ def validate_finalized_allocation_authorities_v2(
                 "allocation_hash": allocation_hash,
                 "allocation_doc": allocation,
                 "allocation_receipt_hash": allocation_receipt_hash,
+                "allocation_authority_receipt_hash": (
+                    allocation_authority_receipt_hash
+                ),
                 "bundle_hash": bundle_hash,
                 "validator_hotkey": bundle["validator_hotkey"],
                 "finalization_receipt_hash": finalization_receipt_hash,
@@ -232,6 +287,7 @@ def validate_finalized_allocation_authorities_v2(
             (
                 str(item["allocation_hash"]),
                 str(item["allocation_receipt_hash"]),
+                str(item["allocation_authority_receipt_hash"]),
             )
             for item in authorities
         }
@@ -247,6 +303,9 @@ def validate_finalized_allocation_authorities_v2(
                 "allocation_hash": str(first["allocation_hash"]),
                 "allocation_doc": dict(first["allocation_doc"]),
                 "allocation_receipt_hash": str(first["allocation_receipt_hash"]),
+                "allocation_authority_receipt_hash": str(
+                    first["allocation_authority_receipt_hash"]
+                ),
                 "finalized_authority_count": len(authorities),
                 "finalized_bundle_hashes": sorted(
                     str(item["bundle_hash"]) for item in authorities

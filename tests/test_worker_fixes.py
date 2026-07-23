@@ -69,6 +69,17 @@ def test_tree_policy_owns_topology_and_paid_handoff(monkeypatch):
     assert worker.tree_policy.live_max_icps_per_node == 5
 
 
+@pytest.mark.parametrize(
+    "message",
+    (
+        "research_lab_git_tree_create_stale_active_root",
+        "research_lab_git_tree_handoff_stale_active_root",
+    ),
+)
+def test_stale_tree_root_database_fences_are_retryable(message):
+    assert worker_mod._is_retryable_worker_exception(RuntimeError(message))
+
+
 def test_active_tree_rejects_legacy_v1_before_worker_readiness(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_TREE_MODE", "active")
     monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1")
@@ -194,43 +205,137 @@ def test_tree_observation_rejects_inconsistent_summary():
         )
 
 
-async def test_tree_evaluation_usage_restores_terminal_cost_and_blocks_ambiguity(
+async def test_tree_evaluation_usage_restores_terminal_cost_and_recovery_evidence(
     monkeypatch,
 ):
-    async def fake_select_all(*args, **kwargs):
-        assert args == ("research_lab_autoresearch_operation_current",)
-        assert ("operation_kind", "evaluation") in kwargs["filters"]
-        return [
-            {
-                "logical_operation_id": "sha256:" + "1" * 64,
-                "operation_status": "succeeded",
-                "settled_cost_microusd": 123,
-                "provider_call_count": 2,
-            },
-            {
-                "logical_operation_id": "sha256:" + "2" * 64,
-                "operation_status": "failed",
-                "settled_cost_microusd": 7,
-                "provider_call_count": 1,
-            },
-            {
-                "logical_operation_id": "sha256:" + "3" * 64,
-                "operation_status": "indeterminate",
-                "settled_cost_microusd": 0,
-                "provider_call_count": 0,
-            },
-        ]
+    async def fake_call_rpc(name, params):
+        assert name == "research_lab_autoresearch_run_evaluation_usage"
+        assert params == {"requested_run_id": RUN_ID}
+        return {
+            "settled_cost_microusd": 130,
+            "provider_call_count": 3,
+            "terminal_operation_count": 3,
+            "unsettled_operation_ids": ["sha256:" + "3" * 64],
+            "indeterminate_operation_ids": ["sha256:" + "4" * 64],
+        }
 
-    monkeypatch.setattr(worker_mod, "select_all", fake_select_all)
-    usage = await worker_mod._load_tree_evaluation_usage(
-        tree_id="sha256:" + "a" * 64,
-        max_rows=100,
-    )
+    monkeypatch.setattr(worker_mod, "call_rpc", fake_call_rpc)
+    usage = await worker_mod._load_tree_evaluation_usage(run_id=RUN_ID)
 
     assert usage["settled_cost_microusd"] == 130
     assert usage["provider_call_count"] == 3
-    assert usage["terminal_operation_count"] == 2
-    assert usage["ambiguous_operation_ids"] == ("sha256:" + "3" * 64,)
+    assert usage["terminal_operation_count"] == 3
+    assert usage["unsettled_operation_ids"] == ("sha256:" + "3" * 64,)
+    assert usage["indeterminate_operation_ids"] == ("sha256:" + "4" * 64,)
+
+
+def test_tree_evaluator_commitment_requires_immutable_resolved_snapshot(
+    hosted_worker,
+):
+    readiness = {
+        "resolved_snapshot_uri": "s3://private-dev/current.json",
+        "pointer_hash": "sha256:" + "1" * 64,
+    }
+    with pytest.raises(
+        worker_mod.HostedResearchLabWorkerError,
+        match="immutable snapshot URI",
+    ):
+        worker_mod._tree_evaluator_commitment(
+            readiness,
+            policy=hosted_worker.tree_policy,
+        )
+
+    readiness["resolved_snapshot_uri"] = "s3://private-dev/snapshots/" + "2" * 64
+    commitment = worker_mod._tree_evaluator_commitment(
+        readiness,
+        policy=hosted_worker.tree_policy,
+    )
+    assert commitment["schema_version"] == (
+        "research_lab.git_tree_evaluator_commitment.v3"
+    )
+    assert commitment["resolved_snapshot_uri"] == readiness["resolved_snapshot_uri"]
+    assert commitment["snapshot_pointer_hash"] == readiness["pointer_hash"]
+
+
+async def test_existing_tree_restores_exact_pinned_evaluator_commitment(
+    monkeypatch,
+    hosted_worker,
+):
+    artifact = SimpleNamespace(
+        model_artifact_hash="sha256:" + "1" * 64,
+        manifest_hash="sha256:" + "2" * 64,
+    )
+    commitment = {
+        "schema_version": "research_lab.git_tree_evaluator_commitment.v3",
+        "resolved_snapshot_uri": "s3://private-dev/snapshots/" + "3" * 64,
+        "snapshot_pointer_hash": "sha256:" + "4" * 64,
+    }
+
+    async def fake_select_one(table, *, columns="*", filters=()):
+        assert table == "research_lab_autoresearch_run_tree_current"
+        return {
+            "tree_id": "sha256:" + "5" * 64,
+            "run_id": RUN_ID,
+            "tree_generation": 0,
+            "replaces_tree_id": None,
+            "root_artifact_hash": artifact.model_artifact_hash,
+            "root_manifest_hash": artifact.manifest_hash,
+            "policy_hash": hosted_worker.tree_policy.policy_hash,
+            "evaluator_commitment_hash": worker_mod.sha256_json(commitment),
+            "tree_doc": {"evaluator_commitment": commitment},
+            "current_event_type": "checkpoint_committed",
+            "current_event_hash": "sha256:" + "6" * 64,
+        }
+
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+    resolution = await hosted_worker._resolve_tree_authority(
+        context=_make_context(),
+        artifact=artifact,
+        checkpoint_doc=None,
+    )
+
+    assert resolution.evaluator_commitment == commitment
+    assert resolution.requires_evaluator_replacement is False
+
+
+async def test_legacy_tree_requires_one_replacement_for_snapshot_pinning(
+    monkeypatch,
+    hosted_worker,
+):
+    artifact = SimpleNamespace(
+        model_artifact_hash="sha256:" + "1" * 64,
+        manifest_hash="sha256:" + "2" * 64,
+    )
+
+    async def fake_select_one(table, *, columns="*", filters=()):
+        assert table == "research_lab_autoresearch_run_tree_current"
+        return {
+            "tree_id": "sha256:" + "3" * 64,
+            "run_id": RUN_ID,
+            "tree_generation": 0,
+            "replaces_tree_id": None,
+            "root_artifact_hash": artifact.model_artifact_hash,
+            "root_manifest_hash": artifact.manifest_hash,
+            "policy_hash": hosted_worker.tree_policy.policy_hash,
+            "evaluator_commitment_hash": "sha256:" + "4" * 64,
+            "tree_doc": {
+                "evaluator_commitment": {
+                    "schema_version": "research_lab.git_tree_evaluator_commitment.v2"
+                }
+            },
+            "current_event_type": "checkpoint_committed",
+            "current_event_hash": "sha256:" + "5" * 64,
+        }
+
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+    resolution = await hosted_worker._resolve_tree_authority(
+        context=_make_context(),
+        artifact=artifact,
+        checkpoint_doc=None,
+    )
+
+    assert resolution.evaluator_commitment is None
+    assert resolution.requires_evaluator_replacement is True
 
 
 def test_tree_resume_rejects_pre_tree_and_changed_root_checkpoints(hosted_worker):
@@ -256,12 +361,32 @@ def test_tree_resume_rejects_pre_tree_and_changed_root_checkpoints(hosted_worker
     ) == "tree_checkpoint_root_changed"
 
 
-async def test_existing_tree_root_change_is_cancelled_and_never_substituted(
+def test_tree_resume_classifies_malformed_replacement_authority(hosted_worker):
+    artifact = SimpleNamespace(
+        model_artifact_hash="sha256:" + "a" * 64,
+        manifest_hash="sha256:" + "b" * 64,
+    )
+
+    assert hosted_worker._tree_resume_block_reason(
+        {
+            "run_id": RUN_ID,
+            "tree_replacement": {
+                "schema_version": "research_lab.git_tree_replacement.v1",
+                "replacement_hash": "sha256:" + "0" * 64,
+            },
+        },
+        artifact,
+        expected_tree_id="sha256:" + "c" * 64,
+        expected_policy=hosted_worker.tree_policy,
+    ) == "tree_replacement_authority_invalid"
+
+
+async def test_existing_tree_root_change_is_cancelled_and_replaced(
     monkeypatch, hosted_worker
 ):
     old_tree_id = "sha256:" + "1" * 64
-    new_tree_id = "sha256:" + "2" * 64
     old_artifact_hash = "sha256:" + "3" * 64
+    old_manifest_hash = "sha256:" + "6" * 64
     new_artifact = SimpleNamespace(
         model_artifact_hash="sha256:" + "4" * 64,
         manifest_hash="sha256:" + "5" * 64,
@@ -269,14 +394,17 @@ async def test_existing_tree_root_change_is_cancelled_and_never_substituted(
     recorded = []
 
     async def fake_select_one(table, *, columns="*", filters=()):
-        assert table == "research_lab_autoresearch_tree_current"
+        assert table == "research_lab_autoresearch_run_tree_current"
         assert filters == (("run_id", RUN_ID),)
         return {
             "tree_id": old_tree_id,
             "run_id": RUN_ID,
+            "tree_generation": 0,
+            "replaces_tree_id": None,
             "root_artifact_hash": old_artifact_hash,
-            "root_manifest_hash": "sha256:" + "6" * 64,
+            "root_manifest_hash": old_manifest_hash,
             "policy_hash": hosted_worker.tree_policy.policy_hash,
+            "tree_doc": {},
             "current_event_type": "checkpoint_committed",
             "current_event_hash": "sha256:" + "7" * 64,
         }
@@ -284,35 +412,444 @@ async def test_existing_tree_root_change_is_cancelled_and_never_substituted(
     class FakeTreeStore:
         async def append_event_next(self, **kwargs):
             recorded.append(kwargs)
-            return {"event_hash": "sha256:" + "8" * 64}
-
-    async def fake_mark_paused(context, *, loop_result, checkpoint_doc, reason):
-        assert context.run_id == RUN_ID
-        return worker_mod.HostedWorkerOutcome(
-            processed=True,
-            dry_run=False,
-            run_id=context.run_id,
-            status=reason,
-        )
+            return {
+                "event_hash": "sha256:" + "8" * 64,
+                "event_doc": kwargs["event_doc"],
+            }
 
     monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
     monkeypatch.setattr(worker_mod, "GitTreeStore", FakeTreeStore)
-    monkeypatch.setattr(hosted_worker, "_mark_paused", fake_mark_paused)
 
-    outcome = await hosted_worker._guard_existing_tree_authority(
+    resolution = await hosted_worker._resolve_tree_authority(
         context=_make_context(),
         artifact=new_artifact,
-        requested_tree_id=new_tree_id,
-        checkpoint_doc=None,
+        checkpoint_doc={
+            "elapsed_seconds": 12.5,
+            "actual_openrouter_cost_microusd": 123,
+            "built_candidate_count": 4,
+        },
     )
 
-    assert outcome is not None
-    assert outcome.status == "tree_root_or_policy_changed_cancelled"
+    assert resolution.outcome is None
+    assert resolution.tree_id != old_tree_id
+    assert resolution.replacement is not None
+    assert resolution.replacement.generation == 1
+    assert resolution.replacement.replaces_tree_id == old_tree_id
+    assert resolution.replacement.root_artifact_hash == (
+        new_artifact.model_artifact_hash
+    )
+    assert resolution.replacement.root_manifest_hash == new_artifact.manifest_hash
+    assert resolution.resume_state["elapsed_seconds"] == 12.5
+    assert resolution.resume_state["actual_openrouter_cost_microusd"] == 123
+    assert resolution.resume_state["built_candidate_count"] == 0
+    assert "git_tree_checkpoint" not in resolution.resume_state
     assert recorded[0]["tree_id"] == old_tree_id
     assert recorded[0]["event_type"] == "tree_cancelled_root_changed"
     assert recorded[0]["event_doc"]["new_root_artifact_hash"] == (
         new_artifact.model_artifact_hash
     )
+    assert hosted_worker._tree_resume_block_reason(
+        resolution.resume_state,
+        new_artifact,
+        expected_tree_id=resolution.tree_id,
+        expected_policy=hosted_worker.tree_policy,
+    ) == ""
+
+
+async def test_cancelled_tree_replacement_is_deterministic_across_retries(
+    monkeypatch, hosted_worker
+):
+    old_tree_id = "sha256:" + "1" * 64
+    cancellation_hash = "sha256:" + "2" * 64
+    old_artifact_hash = "sha256:" + "3" * 64
+    old_manifest_hash = "sha256:" + "4" * 64
+    artifact = SimpleNamespace(
+        model_artifact_hash="sha256:" + "5" * 64,
+        manifest_hash="sha256:" + "6" * 64,
+    )
+    cancellation_doc = {
+        "new_root_artifact_hash": artifact.model_artifact_hash,
+        "new_root_manifest_hash": artifact.manifest_hash,
+        "new_policy_hash": hosted_worker.tree_policy.policy_hash,
+    }
+
+    async def fake_select_one(table, *, columns="*", filters=()):
+        assert table == "research_lab_autoresearch_run_tree_current"
+        return {
+            "tree_id": old_tree_id,
+            "run_id": RUN_ID,
+            "tree_generation": 0,
+            "replaces_tree_id": None,
+            "root_artifact_hash": old_artifact_hash,
+            "root_manifest_hash": old_manifest_hash,
+            "policy_hash": hosted_worker.tree_policy.policy_hash,
+            "tree_doc": {},
+            "current_event_type": "tree_cancelled_root_changed",
+            "current_event_doc": cancellation_doc,
+            "current_event_hash": cancellation_hash,
+        }
+
+    class ForbiddenTreeStore:
+        async def append_event_next(self, **kwargs):
+            pytest.fail("an existing cancellation must not be appended twice")
+
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+    monkeypatch.setattr(worker_mod, "GitTreeStore", ForbiddenTreeStore)
+
+    first = await hosted_worker._resolve_tree_authority(
+        context=_make_context(),
+        artifact=artifact,
+        checkpoint_doc={"openrouter_call_count": 2},
+    )
+    second = await hosted_worker._resolve_tree_authority(
+        context=_make_context(),
+        artifact=artifact,
+        checkpoint_doc={"openrouter_call_count": 2},
+    )
+
+    assert first.tree_id == second.tree_id
+    assert first.replacement == second.replacement
+    assert first.resume_state["openrouter_call_count"] == 2
+    assert first.resume_state["iterations_completed"] == 0
+
+
+async def test_replacement_tree_discards_predecessor_checkpoint_nodes(
+    monkeypatch, hosted_worker
+):
+    artifact = SimpleNamespace(
+        model_artifact_hash="sha256:" + "4" * 64,
+        manifest_hash="sha256:" + "5" * 64,
+    )
+    replacement = worker_mod.TreeReplacement(
+        generation=1,
+        replaces_tree_id="sha256:" + "1" * 64,
+        cancellation_event_hash="sha256:" + "2" * 64,
+        prior_root_artifact_hash="sha256:" + "3" * 64,
+        prior_root_manifest_hash="sha256:" + "6" * 64,
+        prior_policy_hash=hosted_worker.tree_policy.policy_hash,
+        root_artifact_hash=artifact.model_artifact_hash,
+        root_manifest_hash=artifact.manifest_hash,
+        policy_hash=hosted_worker.tree_policy.policy_hash,
+    )
+    tree_id = worker_mod.derive_tree_id(
+        run_id=RUN_ID,
+        root_artifact_hash=artifact.model_artifact_hash,
+        policy=hosted_worker.tree_policy,
+        replacement=replacement,
+    )
+
+    async def fake_select_one(table, *, columns="*", filters=()):
+        assert table == "research_lab_autoresearch_run_tree_current"
+        return {
+            "tree_id": tree_id,
+            "run_id": RUN_ID,
+            "tree_generation": 1,
+            "replaces_tree_id": replacement.replaces_tree_id,
+            "root_artifact_hash": artifact.model_artifact_hash,
+            "root_manifest_hash": artifact.manifest_hash,
+            "policy_hash": hosted_worker.tree_policy.policy_hash,
+            "tree_doc": {"replacement": replacement.to_dict()},
+            "current_event_type": "tree_created",
+            "current_event_hash": "sha256:" + "7" * 64,
+        }
+
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+    resolution = await hosted_worker._resolve_tree_authority(
+        context=_make_context(),
+        artifact=artifact,
+        checkpoint_doc={
+            "elapsed_seconds": 20,
+            "git_tree_checkpoint": {
+                "tree_id": replacement.replaces_tree_id,
+                "nodes": [{"node_id": "stale"}],
+            },
+        },
+    )
+
+    assert resolution.tree_id == tree_id
+    assert resolution.replacement == replacement
+    assert resolution.resume_state["elapsed_seconds"] == 20
+    assert "git_tree_checkpoint" not in resolution.resume_state
+    assert hosted_worker._tree_resume_block_reason(
+        resolution.resume_state,
+        artifact,
+        expected_tree_id=tree_id,
+        expected_policy=hosted_worker.tree_policy,
+    ) == ""
+
+
+async def test_active_private_model_change_is_detected_from_authoritative_lineage(
+    monkeypatch, hosted_worker
+):
+    old_artifact = SimpleNamespace(
+        model_artifact_hash="sha256:" + "1" * 64,
+        manifest_hash="sha256:" + "2" * 64,
+    )
+    new_artifact = SimpleNamespace(
+        model_artifact_hash="sha256:" + "3" * 64,
+        manifest_hash="sha256:" + "4" * 64,
+    )
+    loaded = SimpleNamespace(artifact=new_artifact)
+
+    async def fake_select_one(table, *, columns="*", filters=()):
+        assert table == "research_lab_private_model_version_current"
+        assert filters == (("current_version_status", "active"),)
+        return {
+            "private_model_version_id": "private_model_version:new",
+            "model_artifact_hash": new_artifact.model_artifact_hash,
+            "private_model_manifest_hash": new_artifact.manifest_hash,
+            "current_version_status": "active",
+        }
+
+    async def fake_load_active_private_model(config, *, register_bootstrap=False):
+        assert config is hosted_worker.config
+        assert register_bootstrap is False
+        return loaded
+
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+    monkeypatch.setattr(
+        worker_mod,
+        "load_active_private_model",
+        fake_load_active_private_model,
+    )
+
+    assert (
+        await hosted_worker._active_private_model_if_changed(old_artifact)
+        is loaded
+    )
+
+
+async def test_current_private_model_root_avoids_manifest_reload(
+    monkeypatch, hosted_worker
+):
+    artifact = SimpleNamespace(
+        model_artifact_hash="sha256:" + "1" * 64,
+        manifest_hash="sha256:" + "2" * 64,
+    )
+
+    async def fake_select_one(table, *, columns="*", filters=()):
+        assert table == "research_lab_private_model_version_current"
+        return {
+            "private_model_version_id": "private_model_version:current",
+            "model_artifact_hash": artifact.model_artifact_hash,
+            "private_model_manifest_hash": artifact.manifest_hash,
+            "current_version_status": "active",
+        }
+
+    async def forbidden_load(*_args, **_kwargs):
+        pytest.fail("an unchanged active root must not reload its manifest")
+
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+    monkeypatch.setattr(worker_mod, "load_active_private_model", forbidden_load)
+
+    assert await hosted_worker._active_private_model_if_changed(artifact) is None
+
+
+async def test_inflight_root_change_requeues_replacement_instead_of_pausing(
+    monkeypatch, hosted_worker
+):
+    context = _make_context(receipt_id="55555555-5555-4555-8555-555555555555")
+    context.ticket = {
+        **dict(context.ticket),
+        "miner_openrouter_key_ref": "test-key-ref",
+    }
+    prior_artifact = SimpleNamespace(
+        model_artifact_hash="sha256:" + "1" * 64,
+        manifest_hash="sha256:" + "2" * 64,
+    )
+    new_artifact = SimpleNamespace(
+        model_artifact_hash="sha256:" + "3" * 64,
+        manifest_hash="sha256:" + "4" * 64,
+    )
+    replacement = worker_mod.TreeReplacement(
+        generation=1,
+        replaces_tree_id="sha256:" + "5" * 64,
+        cancellation_event_hash="sha256:" + "6" * 64,
+        prior_root_artifact_hash=prior_artifact.model_artifact_hash,
+        prior_root_manifest_hash=prior_artifact.manifest_hash,
+        prior_policy_hash=hosted_worker.tree_policy.policy_hash,
+        root_artifact_hash=new_artifact.model_artifact_hash,
+        root_manifest_hash=new_artifact.manifest_hash,
+        policy_hash=hosted_worker.tree_policy.policy_hash,
+    )
+    replacement_tree_id = worker_mod.derive_tree_id(
+        run_id=RUN_ID,
+        root_artifact_hash=new_artifact.model_artifact_hash,
+        policy=hosted_worker.tree_policy,
+        replacement=replacement,
+    )
+    recorded = []
+
+    async def fake_resolve_tree_authority(**kwargs):
+        assert kwargs["artifact"] is new_artifact
+        assert kwargs["change_reason"] == "active_private_model_changed_during_tree"
+        return worker_mod.TreeAuthorityResolution(
+            tree_id=replacement_tree_id,
+            resume_state={},
+            replacement=replacement,
+        )
+
+    async def capture(name, **kwargs):
+        recorded.append((name, kwargs))
+        return {}
+
+    monkeypatch.setattr(
+        hosted_worker,
+        "_resolve_tree_authority",
+        fake_resolve_tree_authority,
+    )
+    monkeypatch.setattr(
+        worker_mod,
+        "create_receipt_event",
+        lambda **kwargs: capture("receipt", **kwargs),
+    )
+    monkeypatch.setattr(
+        worker_mod,
+        "create_queue_event",
+        lambda **kwargs: capture("queue", **kwargs),
+    )
+    monkeypatch.setattr(
+        worker_mod,
+        "create_ticket_event",
+        lambda **kwargs: capture("ticket", **kwargs),
+    )
+    monkeypatch.setattr(
+        worker_mod,
+        "safe_project_public_loop_activity",
+        lambda *args, **kwargs: capture("public", args=args, **kwargs),
+    )
+    loop_result = SimpleNamespace(
+        iterations_completed=2,
+        elapsed_seconds=31.25,
+        stop_reason="maintenance_pause_requested",
+        provider_usage=(),
+        cost_ledger=lambda: {
+            "schema_version": "1.0",
+            "actual_openrouter_cost_microusd": 123,
+        },
+    )
+
+    outcome = await hosted_worker._requeue_tree_root_replacement(
+        context=context,
+        prior_artifact=prior_artifact,
+        active_model=SimpleNamespace(artifact=new_artifact),
+        loop_result=loop_result,
+        checkpoint_doc={"checkpoint_hash": "sha256:" + "7" * 64},
+        change_reason="active_private_model_changed_during_tree",
+    )
+
+    assert outcome.status == "git_tree_root_replaced_requeued"
+    assert [name for name, _kwargs in recorded] == [
+        "receipt",
+        "queue",
+        "ticket",
+        "public",
+    ]
+    queue_event = recorded[1][1]
+    assert queue_event["event_type"] == "queued"
+    assert queue_event["reason"] == "git_tree_root_replaced_requeued"
+    assert queue_event["event_doc"]["replacement_tree_id"] == replacement_tree_id
+    assert queue_event["event_doc"]["replacement"] == replacement.to_dict()
+    assert all(
+        kwargs.get("event_type") != "paused" for _name, kwargs in recorded
+    )
+
+
+async def test_atomic_handoff_root_race_requeues_without_generic_retry_budget(
+    monkeypatch, hosted_worker
+):
+    context = _make_context(receipt_id="55555555-5555-4555-8555-555555555555")
+    prior_artifact = SimpleNamespace(
+        model_artifact_hash="sha256:" + "1" * 64,
+        manifest_hash="sha256:" + "2" * 64,
+    )
+    active_model = SimpleNamespace(
+        artifact=SimpleNamespace(
+            model_artifact_hash="sha256:" + "3" * 64,
+            manifest_hash="sha256:" + "4" * 64,
+        )
+    )
+    expected = worker_mod.HostedWorkerOutcome(
+        processed=True,
+        dry_run=False,
+        run_id=RUN_ID,
+        ticket_id=TICKET_ID,
+        status="git_tree_root_replaced_requeued",
+    )
+    calls = []
+
+    async def fail_atomic_handoff(label, operation, *, attempts=3):
+        calls.append(("store", label, attempts))
+        raise RuntimeError("research_lab_git_tree_handoff_stale_active_root")
+
+    async def changed_root(artifact):
+        calls.append(("active_root", artifact))
+        return active_model
+
+    async def requeue(**kwargs):
+        calls.append(("requeue", kwargs))
+        return expected
+
+    monkeypatch.setattr(
+        hosted_worker,
+        "_store_write_with_retry",
+        fail_atomic_handoff,
+    )
+    monkeypatch.setattr(
+        hosted_worker,
+        "_active_private_model_if_changed",
+        changed_root,
+    )
+    monkeypatch.setattr(
+        hosted_worker,
+        "_requeue_tree_root_replacement",
+        requeue,
+    )
+    loop_result = SimpleNamespace(checkpoint_doc={"checkpoint_hash": "sha256:" + "5" * 64})
+
+    outcome = await hosted_worker._create_candidate_with_root_fence(
+        context=context,
+        request=SimpleNamespace(),
+        final_artifact=prior_artifact,
+        loop_result=loop_result,
+        checkpoint_doc=loop_result.checkpoint_doc,
+    )
+
+    assert outcome is expected
+    assert calls[0] == ("store", "candidate_artifact_create", 3)
+    assert calls[1] == ("active_root", prior_artifact)
+    assert calls[2][0] == "requeue"
+    assert calls[2][1]["prior_artifact"] is prior_artifact
+    assert calls[2][1]["active_model"] is active_model
+    assert calls[2][1]["change_reason"] == (
+        "active_private_model_changed_during_handoff"
+    )
+
+
+async def test_atomic_handoff_non_root_error_is_not_reclassified(
+    monkeypatch, hosted_worker
+):
+    async def fail_store(*_args, **_kwargs):
+        raise RuntimeError("candidate artifact persistence failed")
+
+    async def forbidden_root_check(*_args, **_kwargs):
+        pytest.fail("non-root errors must not enter root replacement")
+
+    monkeypatch.setattr(hosted_worker, "_store_write_with_retry", fail_store)
+    monkeypatch.setattr(
+        hosted_worker,
+        "_active_private_model_if_changed",
+        forbidden_root_check,
+    )
+
+    with pytest.raises(RuntimeError, match="candidate artifact persistence failed"):
+        await hosted_worker._create_candidate_with_root_fence(
+            context=_make_context(),
+            request=SimpleNamespace(),
+            final_artifact=SimpleNamespace(),
+            loop_result=SimpleNamespace(),
+            checkpoint_doc=None,
+        )
 
 
 async def test_existing_no_finalist_tree_becomes_terminal_run_failure(
@@ -325,7 +862,7 @@ async def test_existing_no_finalist_tree_becomes_terminal_run_failure(
     tree_id = "sha256:" + "5" * 64
 
     async def fake_select_one(table, *, columns="*", filters=()):
-        assert table == "research_lab_autoresearch_tree_current"
+        assert table == "research_lab_autoresearch_run_tree_current"
         return {
             "tree_id": tree_id,
             "run_id": RUN_ID,
@@ -350,15 +887,14 @@ async def test_existing_no_finalist_tree_becomes_terminal_run_failure(
     monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
     monkeypatch.setattr(hosted_worker, "_mark_failed", fake_mark_failed)
 
-    outcome = await hosted_worker._guard_existing_tree_authority(
+    resolution = await hosted_worker._resolve_tree_authority(
         context=_make_context(),
         artifact=artifact,
-        requested_tree_id=tree_id,
         checkpoint_doc=None,
     )
 
-    assert outcome is not None
-    assert outcome.status == "git_tree_no_eligible_finalist"
+    assert resolution.outcome is not None
+    assert resolution.outcome.status == "git_tree_no_eligible_finalist"
 
 
 async def test_final_selected_tree_without_candidate_resumes(monkeypatch, hosted_worker):
@@ -369,7 +905,7 @@ async def test_final_selected_tree_without_candidate_resumes(monkeypatch, hosted
     tree_id = "sha256:" + "5" * 64
 
     async def fake_select_one(table, *, columns="*", filters=()):
-        assert table == "research_lab_autoresearch_tree_current"
+        assert table == "research_lab_autoresearch_run_tree_current"
         return {
             "tree_id": tree_id,
             "run_id": RUN_ID,
@@ -382,12 +918,13 @@ async def test_final_selected_tree_without_candidate_resumes(monkeypatch, hosted
 
     monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
 
-    assert await hosted_worker._guard_existing_tree_authority(
+    resolution = await hosted_worker._resolve_tree_authority(
         context=_make_context(),
         artifact=artifact,
-        requested_tree_id=tree_id,
         checkpoint_doc=None,
-    ) is None
+    )
+    assert resolution.outcome is None
+    assert resolution.tree_id == tree_id
 
 
 async def test_candidate_insert_without_handoff_is_completed_on_resume(
@@ -396,6 +933,8 @@ async def test_candidate_insert_without_handoff_is_completed_on_resume(
     tree_id = "sha256:" + "1" * 64
     node_id = "tree-node:" + "2" * 64
     candidate_id = "candidate:" + "3" * 64
+    artifact_hash = "sha256:" + "7" * 64
+    manifest_hash = "sha256:" + "8" * 64
     context = _make_context(receipt_id="receipt-1")
     calls = []
 
@@ -416,6 +955,22 @@ async def test_candidate_insert_without_handoff_is_completed_on_resume(
             }
         ]
 
+    async def fake_select_one(table, **kwargs):
+        if table == "research_lab_autoresearch_run_tree_current":
+            return {
+                "tree_id": tree_id,
+                "root_artifact_hash": artifact_hash,
+                "root_manifest_hash": manifest_hash,
+                "current_event_type": "final_selected",
+            }
+        if table == "research_lab_private_model_version_current":
+            return {
+                "model_artifact_hash": artifact_hash,
+                "private_model_manifest_hash": manifest_hash,
+                "current_version_status": "active",
+            }
+        raise AssertionError(table)
+
     async def fake_handoff(**kwargs):
         calls.append(("handoff", kwargs))
 
@@ -429,6 +984,7 @@ async def test_candidate_insert_without_handoff_is_completed_on_resume(
         calls.append(("projection", kwargs))
 
     monkeypatch.setattr(worker_mod, "select_many", fake_select_many)
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
     monkeypatch.setattr(hosted_worker, "_candidate_rows_for_run", fake_candidate_rows)
     monkeypatch.setattr(worker_mod, "record_candidate_tree_handoff", fake_handoff)
     monkeypatch.setattr(worker_mod, "create_queue_event", fake_queue_event)
@@ -447,6 +1003,113 @@ async def test_candidate_insert_without_handoff_is_completed_on_resume(
     ]
     assert calls[0][1]["tree_id"] == tree_id
     assert calls[0][1]["node_id"] == node_id
+
+
+async def test_stale_generation_candidate_is_ignored_during_replacement_recovery(
+    monkeypatch, hosted_worker
+):
+    stale_tree_id = "sha256:" + "1" * 64
+    replacement_tree_id = "sha256:" + "2" * 64
+    artifact_hash = "sha256:" + "3" * 64
+    manifest_hash = "sha256:" + "4" * 64
+    context = _make_context(receipt_id="receipt-1")
+
+    async def fake_select_many(table, **kwargs):
+        assert table == "research_lab_autoresearch_tree_handoffs"
+        return []
+
+    async def fake_candidate_rows(run_id):
+        assert run_id == RUN_ID
+        return [
+            {
+                "candidate_id": "candidate:" + "5" * 64,
+                "git_tree_id": stale_tree_id,
+                "git_tree_node_id": "tree-node:" + "6" * 64,
+                "git_tree_root_commit": "7" * 64,
+                "git_tree_node_commit": "8" * 64,
+                "git_tree_lineage_hash": "sha256:" + "9" * 64,
+            }
+        ]
+
+    async def fake_select_one(table, **kwargs):
+        if table == "research_lab_autoresearch_run_tree_current":
+            return {
+                "tree_id": replacement_tree_id,
+                "root_artifact_hash": artifact_hash,
+                "root_manifest_hash": manifest_hash,
+                "current_event_type": "tree_created",
+            }
+        if table == "research_lab_private_model_version_current":
+            return {
+                "model_artifact_hash": artifact_hash,
+                "private_model_manifest_hash": manifest_hash,
+                "current_version_status": "active",
+            }
+        raise AssertionError(table)
+
+    async def fail_handoff(**kwargs):
+        raise AssertionError("stale candidate must not be handed off")
+
+    monkeypatch.setattr(worker_mod, "select_many", fake_select_many)
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+    monkeypatch.setattr(hosted_worker, "_candidate_rows_for_run", fake_candidate_rows)
+    monkeypatch.setattr(worker_mod, "record_candidate_tree_handoff", fail_handoff)
+
+    outcome = await hosted_worker._complete_from_existing_candidate_artifacts(context)
+
+    assert outcome is None
+
+
+async def test_candidate_recovery_waits_for_root_replacement_when_model_changed(
+    monkeypatch, hosted_worker
+):
+    tree_id = "sha256:" + "1" * 64
+    context = _make_context(receipt_id="receipt-1")
+
+    async def fake_select_many(table, **kwargs):
+        assert table == "research_lab_autoresearch_tree_handoffs"
+        return []
+
+    async def fake_candidate_rows(run_id):
+        assert run_id == RUN_ID
+        return [
+            {
+                "candidate_id": "candidate:" + "2" * 64,
+                "git_tree_id": tree_id,
+                "git_tree_node_id": "tree-node:" + "3" * 64,
+                "git_tree_root_commit": "4" * 64,
+                "git_tree_node_commit": "5" * 64,
+                "git_tree_lineage_hash": "sha256:" + "6" * 64,
+            }
+        ]
+
+    async def fake_select_one(table, **kwargs):
+        if table == "research_lab_autoresearch_run_tree_current":
+            return {
+                "tree_id": tree_id,
+                "root_artifact_hash": "sha256:" + "7" * 64,
+                "root_manifest_hash": "sha256:" + "8" * 64,
+                "current_event_type": "final_selected",
+            }
+        if table == "research_lab_private_model_version_current":
+            return {
+                "model_artifact_hash": "sha256:" + "9" * 64,
+                "private_model_manifest_hash": "sha256:" + "a" * 64,
+                "current_version_status": "active",
+            }
+        raise AssertionError(table)
+
+    async def fail_handoff(**kwargs):
+        raise AssertionError("candidate from a stale active root must not be handed off")
+
+    monkeypatch.setattr(worker_mod, "select_many", fake_select_many)
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+    monkeypatch.setattr(hosted_worker, "_candidate_rows_for_run", fake_candidate_rows)
+    monkeypatch.setattr(worker_mod, "record_candidate_tree_handoff", fail_handoff)
+
+    outcome = await hosted_worker._complete_from_existing_candidate_artifacts(context)
+
+    assert outcome is None
 
 
 def _make_context(queue_events=(), receipt_id=None):

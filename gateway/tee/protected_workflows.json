@@ -107,7 +107,7 @@
       "symbol": "persist_legacy_finalized_allocation_migration_v2"
     },
     {
-      "ast_sha256": "sha256:28103c6f4cbacb839087a6249fd7fac8f791c3d4a4cef67c49a9a4d6e0fdb6eb",
+      "ast_sha256": "sha256:37345988cb96134a1c1ecc941bfdb2db120309acdfc2e5061b9230ecb93f86d6",
       "path": "gateway/research_lab/autoresearch_authority_v2.py",
       "symbol": "run_authoritative_autoresearch_v2"
     },
@@ -147,7 +147,7 @@
       "symbol": "merge_finalized_allocation_histories_v2"
     },
     {
-      "ast_sha256": "sha256:b943a6520b1c9b4b796554f3664dbb86c8e7ad4e61cd9f6df2432deac5aad962",
+      "ast_sha256": "sha256:b645728c148a242a43390adc7c1608bad47b2caea1450d2001ea99804c1ed897",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "validate_finalized_allocation_authorities_v2"
     },
@@ -162,7 +162,7 @@
       "symbol": "validate_legacy_settlement_migrations_v2"
     },
     {
-      "ast_sha256": "sha256:61d28682599010ff2d3f2da4a090d62f76968122760fc696454dad2249999481",
+      "ast_sha256": "sha256:00bfa7ff965a063cd47fd3f46a80a1934da5b0f047793d344dbd5f75fd1edcd4",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "CodeEditLoopEngine"
     },
@@ -222,6 +222,11 @@
       "symbol": "TreePolicy"
     },
     {
+      "ast_sha256": "sha256:9c5534439500a00741d8470d49bfc2696a91fd317bbd972d1b2745a401b454be",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "TreeReplacement"
+    },
+    {
       "ast_sha256": "sha256:f87f38817be9a2800e493fc69c63624d6c395806463d20f5b3002e16008ba81d",
       "path": "gateway/research_lab/git_tree_models.py",
       "symbol": "TreeResult"
@@ -247,7 +252,7 @@
       "symbol": "derive_frontier_commitment_hash"
     },
     {
-      "ast_sha256": "sha256:71c855d10303d599c526dd7167b979a03692285587d59818c086eb3e2c490fd9",
+      "ast_sha256": "sha256:fff385e5325493028a8baa227d7d28c48ff2f4213afbaff1281b8c1f8e04a3c1",
       "path": "gateway/research_lab/git_tree_models.py",
       "symbol": "derive_tree_id"
     },
@@ -452,7 +457,7 @@
       "symbol": "hourly_batch_task"
     },
     {
-      "ast_sha256": "sha256:35b5b2b8435f2341f261bcf4026031ab9af0f40da4696dd33316e988462606a5",
+      "ast_sha256": "sha256:ea4ac297429d3f970b41335f2e692c5496f4799e0cb79775ed8bc15f1f70ebf5",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "AutoresearchExecutorV2"
     },
@@ -462,7 +467,7 @@
       "symbol": "CoordinatorActiveModelSourceV2"
     },
     {
-      "ast_sha256": "sha256:bbb1607f6e460337ba27be726873f3b8cf5791c6b2bcdbeeff9a059a385506ef",
+      "ast_sha256": "sha256:111489fee6e96dc9c9f6aff870179ab63c44dcdb59f89633db30d3a54a611e06",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
@@ -592,7 +597,7 @@
       "symbol": "rpc_method_allowed"
     },
     {
-      "ast_sha256": "sha256:ef5c2c3e355e465581a19874b381e7fe6184b7786bafcae1d659064dd19d175e",
+      "ast_sha256": "sha256:a88aaa014d07c114351c9eb4a92a3fd546c290a09ee03f6df1c36b6c70093534",
       "path": "gateway/tee/scoring_executor_v2.py",
       "symbol": "ScoringExecutorV2"
     },
@@ -717,7 +722,7 @@
       "symbol": "gateway_weight_input_value_documents_v2"
     },
     {
-      "ast_sha256": "sha256:7a8ed377a6a7da1b18de75f1133a5f4c56de13ee022ec2e52999a79fb8291c36",
+      "ast_sha256": "sha256:d20544a7f9e324c4edb69c7168a5df059ac835d64e7737896ad524f215fbffd8",
       "path": "leadpoet_canonical/weight_authority_v2.py",
       "symbol": "validate_published_weight_bundle_v2"
     },
@@ -1082,7 +1087,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:2d23cb4fe6035cd2baab5c38a566fc03a544b9e7e02aae0dc34f8e66ebdf4904",
-  "protected_source_commit": "691ae345faad920031f0e9ea2c6d37520259f412",
+  "manifest_hash": "sha256:8ba6f766b587cdb4362ddcdca287aaaf97500fc4c54723ceb5a454847e2c8678",
+  "protected_source_commit": "b454e973a06cbb74431a890e739e513abb541362",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

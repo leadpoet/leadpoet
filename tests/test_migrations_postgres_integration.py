@@ -30,7 +30,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-MIGRATIONS = ("115", "116", "117", "119", "120", "121", "122")
+MIGRATIONS = ("116", "117", "118", "119", "120", "121", "122")
 
 # A known trajectory_id_for_run value (verified against Python and 300 live runs)
 # pins the in-SQL uuid5(canonical_hash(...)) reproduction.

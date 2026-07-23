@@ -167,12 +167,11 @@ async def test_archive_boundary_discovery_rereads_exact_anchor(monkeypatch):
     ("live", "eligible"),
     (
         (_live(elapsed=300), True),
-        (_live(elapsed=315), True),
-        (_live(elapsed=316), False),
+        (_live(elapsed=301), False),
         (_live(elapsed=0, next_epoch=True), False),
     ),
 )
-def test_first_epoch_restart_window_uses_the_block_310_deadline(
+def test_first_epoch_restart_window_uses_the_block_300_deadline(
     live,
     eligible,
 ):
@@ -184,12 +183,12 @@ def test_first_epoch_restart_window_uses_the_block_310_deadline(
     )
 
     assert status["eligible"] is eligible
-    assert status["latest_safe_epoch_block"] == 315
+    assert status["latest_safe_epoch_block"] == 300
     assert status["restart_start_epoch_block"] == live.epoch_block
     assert status["restart_start_captured"] is False
 
 
-def test_captured_start_before_310_remains_valid_after_310() -> None:
+def test_captured_start_before_300_remains_valid_after_300() -> None:
     cutover = _cutover()
     status = cutover_cli._live_initialization_window_status(
         cutover=cutover,

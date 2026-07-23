@@ -56,24 +56,48 @@ echo ""
 echo "────────────────────────────────────────────────────────────────"
 echo "🔍 Checking for updates from GitHub..."
 
-# Stash any local changes and pull latest
-if git stash 2>/dev/null; then
-    echo "   💾 Stashed local changes"
+# Consensus code must never start from an unverified or stale checkout.
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "❌ Auditor startup refused: repository checkout is unavailable"
+    exit 1
+fi
+if [ "$(git branch --show-current)" != "main" ]; then
+    echo "❌ Auditor startup refused: checkout is not on main"
+    exit 1
+fi
+if ! git diff --quiet || ! git diff --cached --quiet; then
+    echo "❌ Auditor startup refused: tracked checkout changes are present"
+    exit 1
 fi
 
-if git pull origin main 2>/dev/null; then
-    CURRENT_COMMIT=$(git rev-parse --short HEAD)
-    echo "✅ Repository updated"
-    echo "   Current commit: $CURRENT_COMMIT"
-    
-    # Auto-install new/updated Python packages if requirements.txt changed
-    if git diff HEAD@{1} HEAD --name-only 2>/dev/null | grep -q "requirements.txt"; then
-        echo "📦 requirements.txt changed - updating packages..."
-        pip3 install -r requirements.txt --quiet || echo "   ⚠️  Package install failed (continuing anyway)"
+PREVIOUS_COMMIT="$(git rev-parse HEAD)"
+if ! git fetch origin main; then
+    echo "❌ Auditor startup refused: origin/main could not be fetched"
+    exit 1
+fi
+EXPECTED_COMMIT="$(git rev-parse origin/main)"
+if ! git merge --ff-only origin/main; then
+    echo "❌ Auditor startup refused: main cannot fast-forward to origin/main"
+    exit 1
+fi
+CURRENT_COMMIT="$(git rev-parse HEAD)"
+if [ "$CURRENT_COMMIT" != "$EXPECTED_COMMIT" ]; then
+    echo "❌ Auditor startup refused: HEAD differs from fetched origin/main"
+    exit 1
+fi
+
+echo "✅ Repository updated and verified"
+echo "   Current commit: ${CURRENT_COMMIT:0:12}"
+
+# Auto-install new/updated Python packages if requirements.txt changed.
+if [ "$PREVIOUS_COMMIT" != "$CURRENT_COMMIT" ] && \
+   git diff "$PREVIOUS_COMMIT" "$CURRENT_COMMIT" --name-only -- requirements.txt \
+     | grep -q '^requirements.txt$'; then
+    echo "📦 requirements.txt changed - updating packages..."
+    if ! python3 -m pip install -r requirements.txt --quiet; then
+        echo "❌ Auditor startup refused: package update failed"
+        exit 1
     fi
-else
-    echo "⏭️  Could not update (offline or not a git repo)"
-    echo "   Continuing with current version..."
 fi
 
 RESTART_COUNT=0
@@ -142,8 +166,9 @@ echo "🛑 Auditor stopped. Run command again to pull latest and restart."
         print(f"✅ Created auto-update wrapper: {wrapper_path}")
     except Exception as e:
         print(f"❌ Failed to create wrapper: {e}")
-        print("   Continuing without auto-updates...")
-        # Fall through to normal execution
+        raise SystemExit(
+            "Auditor startup refused: update wrapper could not be created"
+        ) from e
     else:
         # Execute wrapper and replace current process
         print("🚀 Launching auto-update wrapper...\n")
@@ -153,7 +178,9 @@ echo "🛑 Auditor stopped. Run command again to pull latest and restart."
             os.execve(wrapper_path, [wrapper_path] + sys.argv[1:], env)
         except Exception as e:
             print(f"❌ Failed to execute wrapper: {e}")
-            print("   Continuing without auto-updates...")
+            raise SystemExit(
+                "Auditor startup refused: update wrapper could not be executed"
+            ) from e
 
 # ════════════════════════════════════════════════════════════════════════════
 # NORMAL AUDITOR VALIDATOR CODE STARTS BELOW
@@ -174,7 +201,10 @@ from typing import Dict, List, Optional, Tuple
 import bittensor as bt
 import aiohttp
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from Leadpoet.utils.bittensor_sdk import ExtrinsicOutcome
+from Leadpoet.utils.bittensor_sdk import (
+    ExtrinsicOutcome,
+    weight_hyperparameters_compat,
+)
 from Leadpoet.utils.subnet_epoch import (
     OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT,
     SubnetEpochError,
@@ -212,7 +242,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Public gateway used when operators do not provide an override.
-PUBLIC_GATEWAY_URL = "http://52.91.135.79:8000"
+PUBLIC_GATEWAY_URL = "https://gateway.subnet71.com"
 
 
 def _default_gateway_url(environ=None) -> str:
@@ -264,6 +294,22 @@ def _connect_epoch_archive_subtensor(
     raise SubnetEpochError(
         "auditor could not connect to its selected trusted epoch archive"
     ) from last_error
+
+
+def _close_subtensor_connection(subtensor, *, source: str) -> None:
+    """Retire one failed SDK websocket without hiding cleanup failures."""
+
+    close = getattr(subtensor, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception as exc:
+        logger.warning(
+            "auditor_subtensor_close_failed source=%s type=%s",
+            source,
+            type(exc).__name__,
+        )
 
 
 @dataclass(frozen=True)
@@ -485,11 +531,46 @@ class AuditorValidator:
     def _verify_stateful_bundle_epoch(self, bundle: Dict) -> None:
         if self.epoch_cutover is None:
             raise SubnetEpochError("auditor subnet epoch cutover is unavailable")
-        snapshot = read_subnet_epoch_snapshot(
-            self.epoch_archive_subtensor,
-            netuid=int(self.config.netuid),
-            block_number=int(bundle["block"]),
-        )
+        try:
+            snapshot = read_subnet_epoch_snapshot(
+                self.epoch_archive_subtensor,
+                netuid=int(self.config.netuid),
+                block_number=int(bundle["block"]),
+            )
+        except Exception as first_error:
+            logger.warning(
+                "auditor_archive_snapshot_reconnect endpoint=%s type=%s",
+                self.epoch_archive_endpoint,
+                type(first_error).__name__,
+            )
+            stale = self.epoch_archive_subtensor
+            self.epoch_archive_subtensor = None
+            _close_subtensor_connection(stale, source="archive_stale")
+            refreshed = None
+            try:
+                refreshed = _connect_epoch_archive_subtensor(
+                    endpoint=self.epoch_archive_endpoint
+                )
+                validate_subnet_epoch_cutover_anchor(
+                    refreshed,
+                    self.epoch_cutover,
+                    expected_archive_endpoint=self.epoch_archive_endpoint,
+                )
+                snapshot = read_subnet_epoch_snapshot(
+                    refreshed,
+                    netuid=int(self.config.netuid),
+                    block_number=int(bundle["block"]),
+                )
+            except Exception as retry_error:
+                if refreshed is not None:
+                    _close_subtensor_connection(
+                        refreshed,
+                        source="archive_replacement_failed",
+                    )
+                raise SubnetEpochError(
+                    "auditor selected archive could not verify the bundle block"
+                ) from retry_error
+            self.epoch_archive_subtensor = refreshed
         if snapshot.settlement_epoch_id(self.epoch_cutover) != int(
             bundle["epoch_id"]
         ):
@@ -1530,16 +1611,21 @@ class AuditorValidator:
                 )
                 return False
             attempt += 1
-            outcome = ExtrinsicOutcome.from_sdk(
-                self.subtensor.set_weights(
-                    netuid=self.config.netuid,
-                    wallet=self.wallet,
-                    uids=uids,
-                    weights=weights,
-                    wait_for_finalization=True,
-                    mechid=0,
+            with weight_hyperparameters_compat(
+                self.subtensor,
+                netuid=int(self.config.netuid),
+                sdk_version=str(bt.__version__),
+            ):
+                outcome = ExtrinsicOutcome.from_sdk(
+                    self.subtensor.set_weights(
+                        netuid=self.config.netuid,
+                        wallet=self.wallet,
+                        uids=uids,
+                        weights=weights,
+                        wait_for_finalization=True,
+                        mechid=0,
+                    )
                 )
-            )
             if outcome.success:
                 return True
 

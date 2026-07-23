@@ -68,6 +68,7 @@ def _authority_row(
     finalization_root = "sha256:" + chr(ord(marker) + 2) * 64
     publication_root = "sha256:" + chr(ord(marker) + 3) * 64
     allocation_receipt = "sha256:" + "a" * 64
+    allocation_authority_receipt = "sha256:" + "9" * 64
     verified_bundle = {
         "bundle_hash": bundle_hash,
         "netuid": 71,
@@ -89,6 +90,25 @@ def _authority_row(
             "input_receipt_hashes": {
                 "research_lab_allocation": allocation_receipt,
             },
+        },
+        "receipt_graph": {
+            "root_receipt_hash": root_hash,
+            "receipts": [
+                {
+                    "receipt_hash": allocation_receipt,
+                    "parent_receipt_hashes": [
+                        allocation_authority_receipt
+                    ],
+                },
+                {
+                    "receipt_hash": allocation_authority_receipt,
+                    "role": "gateway_coordinator",
+                    "purpose": "research_lab.allocation.v2",
+                    "epoch_id": 100,
+                    "status": "succeeded",
+                    "output_root": sha256_json({"allocation": allocation}),
+                },
+            ],
         },
     }
     expected_bundle_row = {
@@ -221,6 +241,43 @@ def test_finalized_allocation_authority_collapses_validator_duplicates(monkeypat
     assert result[0]["allocation_doc"] == allocation
     assert result[0]["finalized_authority_count"] == 2
     assert result[0]["allocation_receipt_hash"] == "sha256:" + "a" * 64
+    assert result[0]["allocation_authority_receipt_hash"] == (
+        "sha256:" + "9" * 64
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    (
+        (
+            lambda bundle: bundle["receipt_graph"]["receipts"][0].update(
+                {"parent_receipt_hashes": []}
+            ),
+            "allocation input ancestry is invalid",
+        ),
+        (
+            lambda bundle: bundle["receipt_graph"]["receipts"][1].update(
+                {"output_root": "sha256:" + "0" * 64}
+            ),
+            "allocation authority receipt is invalid",
+        ),
+    ),
+)
+def test_finalized_allocation_authority_rejects_invalid_input_ancestry(
+    mutate,
+    message,
+):
+    allocation = _allocation()
+    row, _graph, _verified = _authority_row("1", allocation=allocation)
+    mutate(row["bundle_doc"])
+
+    with pytest.raises(settlement.ChampionSettlementV2Error, match=message):
+        settlement._allocation_authority_receipt_hash_v2(
+            bundle_doc=row["bundle_doc"],
+            allocation_input_receipt_hash="sha256:" + "a" * 64,
+            allocation=allocation,
+            epoch_id=100,
+        )
 
 
 def test_finalized_allocation_authority_fails_on_missing_or_tampered_evidence(

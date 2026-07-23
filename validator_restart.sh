@@ -383,6 +383,12 @@ python3 -m validator_tee.host.restart_preflight_v2 \
   --runtime-artifact-lock "$VALIDATOR_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
   --host-hotkey-directory "$HOST_HOTKEY_DIR"
 
+echo "Validating the measured chain signing profile against the live runtime"
+python3 -m validator_tee.host.verify_chain_signing_profile_v2 \
+  --network "${VALIDATOR_SUBTENSOR_NETWORK:-finney}" \
+  --profile \
+    "$VALIDATOR_ROOT/validator_tee/enclave/chain_signing_profile_v2.json"
+
 actual_aws_account="$(aws sts get-caller-identity --query Account --output text)"
 if [ "$actual_aws_account" != "$EXPECTED_AWS_ACCOUNT" ]; then
   echo "ERROR: validator AWS account is $actual_aws_account, expected $EXPECTED_AWS_ACCOUNT"

@@ -49,6 +49,9 @@ emit_rows() {
   done
 }
 case "${1:-}:${2:-}" in
+  info:)
+    exit 0
+    ;;
   image:prune|builder:prune|system:prune)
     exit 0
     ;;

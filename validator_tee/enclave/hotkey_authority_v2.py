@@ -67,6 +67,82 @@ class ValidatorHotkeyAuthorityV2Error(RuntimeError):
     """The hotkey is unavailable or a requested signature is unauthorized."""
 
 
+def _receipt_ancestor_graph(
+    graph: Mapping[str, Any], *, root_receipt_hash: str
+) -> Dict[str, Any]:
+    """Return the validated ancestor closure rooted at one receipt."""
+
+    receipts_by_hash = {
+        str(receipt["receipt_hash"]): receipt for receipt in graph["receipts"]
+    }
+    root_hash = str(root_receipt_hash)
+    if root_hash not in receipts_by_hash:
+        raise ValidatorHotkeyAuthorityV2Error(
+            "recovery receipt graph root is missing"
+        )
+
+    retained_hashes = set()
+    pending = [root_hash]
+    while pending:
+        receipt_hash = pending.pop()
+        if receipt_hash in retained_hashes:
+            continue
+        receipt = receipts_by_hash.get(receipt_hash)
+        if receipt is None:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "recovery receipt graph parent is missing"
+            )
+        retained_hashes.add(receipt_hash)
+        pending.extend(
+            str(value) for value in receipt.get("parent_receipt_hashes", [])
+        )
+
+    receipts = [
+        dict(receipt)
+        for receipt in graph["receipts"]
+        if str(receipt["receipt_hash"]) in retained_hashes
+    ]
+    scopes = {
+        (str(receipt["job_id"]), str(receipt["purpose"]))
+        for receipt in receipts
+        if "job_id" in receipt and "purpose" in receipt
+    }
+    if len(scopes) != len(receipts) and (
+        graph["transport_attempts"] or graph["host_operations"]
+    ):
+        raise ValidatorHotkeyAuthorityV2Error(
+            "recovery receipt graph scope is incomplete"
+        )
+    boot_hashes = {str(receipt["boot_identity_hash"]) for receipt in receipts}
+    recovery_graph = {
+        "root_receipt_hash": root_hash,
+        "boot_identities": [
+            dict(identity)
+            for identity in graph["boot_identities"]
+            if str(identity["boot_identity_hash"]) in boot_hashes
+        ],
+        "receipts": receipts,
+        "transport_attempts": [
+            dict(attempt)
+            for attempt in graph["transport_attempts"]
+            if (str(attempt["job_id"]), str(attempt["purpose"])) in scopes
+        ],
+        "host_operations": [
+            dict(record)
+            for record in graph["host_operations"]
+            if (
+                str(record["request"]["job_id"]),
+                str(record["request"]["purpose"]),
+            )
+            in scopes
+        ],
+    }
+    if "schema_version" in graph:
+        recovery_graph["schema_version"] = graph["schema_version"]
+        validate_receipt_graph(recovery_graph)
+    return recovery_graph
+
+
 def validate_hotkey_authority_configuration(
     value: Mapping[str, Any]
 ) -> Dict[str, Any]:
@@ -332,6 +408,37 @@ class ValidatorHotkeyAuthorityV2:
             )
         return keypair
 
+    def _prune_prior_epoch_authorizations_locked(
+        self, *, incoming_epoch_id: int
+    ) -> None:
+        """Release prior-epoch state that cannot require another signature."""
+
+        removable = []
+        for authorization_id, record in self._weights.items():
+            record_epoch_id = int(record["weight_result"]["epoch_id"])
+            if record_epoch_id >= incoming_epoch_id:
+                continue
+            related_commits = [
+                commit
+                for commit in self._commits.values()
+                if commit.get("weight_authorization_id") == authorization_id
+            ]
+            has_signed_extrinsic = any(
+                isinstance(commit.get("signed_result"), Mapping)
+                for commit in related_commits
+            )
+            if record.get("finalization") is not None or not has_signed_extrinsic:
+                removable.append(authorization_id)
+
+        for authorization_id in removable:
+            self._weights.pop(authorization_id, None)
+            for commit_id in [
+                commit_id
+                for commit_id, commit in self._commits.items()
+                if commit.get("weight_authorization_id") == authorization_id
+            ]:
+                self._commits.pop(commit_id, None)
+
     def register_weight_result(self, response: Mapping[str, Any]) -> str:
         expected_fields = {
             "weight_snapshot",
@@ -395,6 +502,9 @@ class ValidatorHotkeyAuthorityV2:
             }
         )
         with self._lock:
+            self._prune_prior_epoch_authorizations_locked(
+                incoming_epoch_id=int(expected_result["epoch_id"])
+            )
             if len(self._weights) >= MAX_PENDING_WEIGHT_AUTHORIZATIONS:
                 raise ValidatorHotkeyAuthorityV2Error(
                     "pending weight authorization capacity is full"
@@ -440,10 +550,12 @@ class ValidatorHotkeyAuthorityV2:
             dict(identity)
             for identity in graph["boot_identities"]
             if identity.get("physical_role") == "validator_weights"
+            and identity.get("boot_identity_hash")
+            == verified["validator_boot_identity_hash"]
         ]
         if len(validator_boots) != 1:
             raise ValidatorHotkeyAuthorityV2Error(
-                "recovery bundle needs exactly one validator boot"
+                "recovery bundle needs exactly one computing validator boot"
             )
         old_boot = validator_boots[0]
         current_boot = dict(self._boot_identity_supplier())
@@ -488,14 +600,19 @@ class ValidatorHotkeyAuthorityV2:
         computed_receipts = [
             receipt
             for receipt in graph["receipts"]
-            if receipt.get("role") == "validator_weights"
+            if receipt.get("receipt_hash") == verified["weight_receipt_hash"]
+            and receipt.get("role") == "validator_weights"
             and receipt.get("purpose") == "validator.weights.computed.v2"
         ]
         if len(computed_receipts) != 1:
             raise ValidatorHotkeyAuthorityV2Error(
-                "recovery computed-weight receipt is ambiguous"
+                "recovery computing receipt is missing or ambiguous"
             )
         computed_receipt = dict(computed_receipts[0])
+        recovery_graph = _receipt_ancestor_graph(
+            graph,
+            root_receipt_hash=str(computed_receipt["receipt_hash"]),
+        )
         weight_result = dict(published_bundle["weight_result"])
         normalized_signed = []
         seen_authorizations = set()
@@ -616,6 +733,9 @@ class ValidatorHotkeyAuthorityV2:
             }
         )
         with self._lock:
+            self._prune_prior_epoch_authorizations_locked(
+                incoming_epoch_id=int(weight_result["epoch_id"])
+            )
             existing = self._weights.get(recovery_id)
             if existing is None:
                 if len(self._weights) >= MAX_PENDING_WEIGHT_AUTHORIZATIONS:
@@ -626,7 +746,7 @@ class ValidatorHotkeyAuthorityV2:
                     "weight_snapshot": dict(published_bundle["weight_snapshot"]),
                     "weight_result": weight_result,
                     "root_receipt_hash": computed_receipt["receipt_hash"],
-                    "receipt_graph": graph,
+                    "receipt_graph": recovery_graph,
                     "attempts": len(normalized_signed),
                     "finalization": None,
                 }

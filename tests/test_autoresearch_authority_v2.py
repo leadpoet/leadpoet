@@ -707,5 +707,72 @@ def test_tree_final_selection_requires_artifact_and_lineage_authority():
         )
 
 
+@pytest.mark.asyncio
+async def test_tree_created_event_recovers_row_insert_crash_idempotently():
+    tree_id = "sha256:" + "1" * 64
+
+    class FakeTreeStore:
+        def __init__(self):
+            self.current = {"tree_id": tree_id, "current_event_hash": None}
+            self.events = []
+
+        async def get_tree_current(self, *, tree_id):
+            return dict(self.current)
+
+        async def append_event_next(self, **kwargs):
+            self.events.append(dict(kwargs))
+            self.current["current_event_hash"] = "sha256:" + "2" * 64
+
+    store = FakeTreeStore()
+    event_doc = {
+        "schema_version": "research_lab.git_tree_created.v1",
+        "tree_id": tree_id,
+    }
+
+    await authority._ensure_tree_created_event(
+        tree_store=store,
+        tree_id=tree_id,
+        event_doc=event_doc,
+    )
+    await authority._ensure_tree_created_event(
+        tree_store=store,
+        tree_id=tree_id,
+        event_doc=event_doc,
+    )
+
+    assert store.events == [
+        {
+            "tree_id": tree_id,
+            "event_type": "tree_created",
+            "event_doc": event_doc,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tree_created_event_accepts_concurrent_winner_after_cas_conflict():
+    tree_id = "sha256:" + "1" * 64
+
+    class FakeTreeStore:
+        def __init__(self):
+            self.current = {"tree_id": tree_id, "current_event_hash": None}
+
+        async def get_tree_current(self, *, tree_id):
+            return dict(self.current)
+
+        async def append_event_next(self, **kwargs):
+            self.current["current_event_hash"] = "sha256:" + "2" * 64
+            raise RuntimeError("research_lab_git_tree_event_identity_conflict")
+
+    await authority._ensure_tree_created_event(
+        tree_store=FakeTreeStore(),
+        tree_id=tree_id,
+        event_doc={
+            "schema_version": "research_lab.git_tree_created.v1",
+            "tree_id": tree_id,
+        },
+    )
+
+
 async def _async_value(value):
     return value

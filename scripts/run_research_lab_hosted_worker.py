@@ -19,6 +19,9 @@ if str(ROOT) not in sys.path:
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
 from gateway.research_lab.git_tree_models import TreePolicy  # noqa: E402
 from gateway.research_lab.worker import ResearchLabHostedWorker  # noqa: E402
+from gateway.research_lab.worker_autostart import (  # noqa: E402
+    build_research_lab_worker_environment,
+)
 
 
 def _proxy_ref(proxy_url: str) -> str:
@@ -76,6 +79,7 @@ def main() -> int:
     if args.total_workers is not None:
         os.environ["RESEARCH_LAB_HOSTED_WORKER_TOTAL_WORKERS"] = str(args.total_workers)
 
+    build_research_lab_worker_environment()
     _configure_logging(args.log_level)
     config = ResearchLabGatewayConfig.from_env()
     _print_startup_banner(config, worker_id=args.worker_id, once=args.once)

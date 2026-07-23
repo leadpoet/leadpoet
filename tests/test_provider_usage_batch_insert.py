@@ -23,7 +23,7 @@ import gateway.research_lab.trajectory_projector as tp
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = (
-    ROOT / "scripts" / "115-research-lab-provider-usage-batch-insert.sql"
+    ROOT / "scripts" / "118-research-lab-provider-usage-batch-insert.sql"
 ).read_text(encoding="utf-8")
 
 

@@ -562,13 +562,13 @@ def _champion_schedule_cap_start_epoch() -> int:
     accounting): historical single-champion eras paid far above schedule and
     everyone treated those rewards as settled — recapping them retroactively
     revived long-finished champions, and their reopened shortfalls crowded
-    the current champions out of the epoch pool. The default is the start
-    epoch of the first reward the surplus-as-bonus policy was written for.
+    the current champions out of the epoch pool. The default is the migration
+    boundary after which the surplus-as-bonus accounting applies.
     """
     try:
-        return int(os.getenv("RESEARCH_LAB_CHAMPION_SCHEDULE_CAP_START_EPOCH", "23878"))
+        return int(os.getenv("RESEARCH_LAB_CHAMPION_SCHEDULE_CAP_START_EPOCH", "24100"))
     except ValueError:
-        return 23878
+        return 24100
 
 
 def _champion_obligation_caps(

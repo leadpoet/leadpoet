@@ -19,6 +19,7 @@ from leadpoet_canonical.chain_source_v2 import (
 from leadpoet_canonical.hotkey_authority_v2 import signed_extrinsic_hash_v2
 from validator_tee.enclave.chain_source_v2 import (
     EnclaveChainRpcTransportV2,
+    FINALIZATION_RPC_PACING_SECONDS,
     ValidatorChainSourceV2,
     ValidatorChainSourceV2Error,
 )
@@ -50,7 +51,7 @@ def _selective_result(block: int = BLOCK) -> str:
     encoded.extend(b"\x01" + ((int(block) << 2) | 2).to_bytes(4, "little"))
     encoded.extend(b"\x00" * 44)
     encoded.extend(b"\x01\x08" + OWNER + SECOND)
-    encoded.extend(b"\x00" * 21)
+    encoded.extend(b"\x00" * 24)
     return "0x" + bytes(encoded).hex()
 
 
@@ -1111,8 +1112,10 @@ def test_finalized_extrinsic_requires_exact_bytes_and_committed_chain_state():
         )
         return {"result": result, "attempts": [attempt], "artifacts": []}
 
+    pacing = []
     result = ValidatorChainSourceV2(
         rpc_call=rpc_call,
+        finalization_sleep=pacing.append,
         epoch_authority_supplier=lambda: {
             "mode": "stateful_v1",
             "cutover_manifest": _stateful_cutover(),
@@ -1135,6 +1138,7 @@ def test_finalized_extrinsic_requires_exact_bytes_and_committed_chain_state():
     assert result["extrinsic_hash"] == extrinsic_hash
     assert result["finalized_block"] == BLOCK
     assert result["state_transition_hash"].startswith("sha256:")
+    assert pacing == [FINALIZATION_RPC_PACING_SECONDS] * 4
 
 
 def test_finalized_extrinsic_rejects_inclusion_without_expected_state_change():
@@ -1173,6 +1177,7 @@ def test_finalized_extrinsic_rejects_inclusion_without_expected_state_change():
     ):
         ValidatorChainSourceV2(
             rpc_call=rpc_call,
+            finalization_sleep=lambda _seconds: None,
             epoch_authority_supplier=lambda: {
                 "mode": "stateful_v1",
                 "cutover_manifest": _stateful_cutover(),

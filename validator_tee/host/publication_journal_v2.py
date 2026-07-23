@@ -51,6 +51,7 @@ def _validate_signature_result(
     *,
     bundle: Mapping[str, Any],
     event_hash: str,
+    weight_receipt_hash: str,
     chain_profile: Mapping[str, Any],
 ) -> Dict[str, Any]:
     expected_fields = {
@@ -70,19 +71,13 @@ def _validate_signature_result(
         value["authorization"], profile=chain_profile
     )
     result = bundle["weight_result"]
-    computed = [
-        receipt
-        for receipt in bundle["receipt_graph"]["receipts"]
-        if receipt.get("purpose") == "validator.weights.computed.v2"
-    ]
     if (
-        len(computed) != 1
-        or value.get("schema_version")
+        value.get("schema_version")
         != "leadpoet.weight_extrinsic_signature.v2"
         or value.get("authorization_hash") != authorization["authorization_hash"]
         or value.get("validator_hotkey") != bundle["validator_hotkey"]
         or authorization["validator_hotkey"] != bundle["validator_hotkey"]
-        or authorization["weight_receipt_hash"] != computed[0]["receipt_hash"]
+        or authorization["weight_receipt_hash"] != weight_receipt_hash
         or authorization["weight_submission_event_hash"] != event_hash
         or authorization["weights_hash"] != result["weights_hash"]
         or authorization["sparse_uids"] != result["sparse_uids"]
@@ -181,11 +176,6 @@ def validate_publication_journal_v2(
             "weight_submission_event_hash",
             "message",
         }
-        computed = [
-            receipt
-            for receipt in bundle["receipt_graph"]["receipts"]
-            if receipt.get("purpose") == "validator.weights.computed.v2"
-        ]
         event_hash = str(publication.get("weight_submission_event_hash") or "")
         if (
             set(publication) != expected_publication_fields
@@ -193,9 +183,8 @@ def validate_publication_journal_v2(
             or int(publication.get("epoch_id", -1)) != verified["epoch_id"]
             or int(publication.get("weights_count", -1)) != len(verified["uids"])
             or publication.get("weights_hash") != verified["weights_hash"]
-            or len(computed) != 1
             or publication.get("weight_receipt_hash")
-            != computed[0]["receipt_hash"]
+            != verified["weight_receipt_hash"]
             or not _HASH_RE.fullmatch(event_hash)
         ):
             raise WeightPublicationJournalV2Error(
@@ -215,6 +204,7 @@ def validate_publication_journal_v2(
             item,
             bundle=bundle,
             event_hash=str(event_hash),
+            weight_receipt_hash=verified["weight_receipt_hash"],
             chain_profile=profile,
         )
         authorization_hash = normalized["authorization_hash"]

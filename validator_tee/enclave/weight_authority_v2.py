@@ -103,10 +103,6 @@ class ValidatorWeightAuthorityV2:
         self._verify_boots(boots, boot)
         for receipt in receipts:
             validate_signed_execution_receipt(receipt)
-            if receipt.get("role") == "validator_weights":
-                raise ValidatorWeightAuthorityV2Error(
-                    "validator-role input receipts must be created inside this enclave"
-                )
         for attempt in attempts:
             validate_transport_attempt(attempt)
         receipt_by_hash = {
@@ -116,6 +112,18 @@ class ValidatorWeightAuthorityV2:
         if set(input_hashes) != set(GATEWAY_WEIGHT_INPUT_CATEGORIES):
             raise ValidatorWeightAuthorityV2Error(
                 "gateway weight input categories are incomplete"
+            )
+        direct_input_receipts = [
+            receipt_by_hash.get(str(receipt_hash))
+            for receipt_hash in input_hashes.values()
+        ]
+        if any(
+            isinstance(receipt, Mapping)
+            and receipt.get("role") == "validator_weights"
+            for receipt in direct_input_receipts
+        ):
+            raise ValidatorWeightAuthorityV2Error(
+                "validator-role receipts cannot supply gateway weight inputs"
             )
         proposed_calculation = dict(request["calculation_snapshot"])
         try:
@@ -805,9 +813,9 @@ class ValidatorWeightAuthorityV2:
         validator_boot: Mapping[str, Any],
     ) -> Mapping[str, Any]:
         physical_role = str(identity.get("physical_role") or "")
-        if physical_role == "validator_weights":
-            if dict(identity) != dict(validator_boot):
-                raise ValidatorWeightAuthorityV2Error("another validator boot is not trusted")
+        if physical_role == "validator_weights" and dict(identity) == dict(
+            validator_boot
+        ):
             return self._boot_verifier(
                 identity,
                 expected_pcr0=validator_boot["pcr0"],
@@ -818,7 +826,7 @@ class ValidatorWeightAuthorityV2:
         release = lineage.get(commit)
         if not isinstance(release, Mapping):
             raise ValidatorWeightAuthorityV2Error(
-                "gateway boot commit is not in approved release lineage"
+                "boot commit is not in approved release lineage"
             )
         roles = release.get("roles")
         expectation = (
@@ -826,7 +834,7 @@ class ValidatorWeightAuthorityV2:
         )
         if not isinstance(expectation, Mapping):
             raise ValidatorWeightAuthorityV2Error(
-                "gateway boot role is not in approved release lineage"
+                "boot role is not in approved release lineage"
             )
         if (
             identity.get("commit_sha") != expectation.get("commit_sha")
@@ -837,7 +845,7 @@ class ValidatorWeightAuthorityV2:
             or identity.get("pcr0") != expectation.get("pcr0")
         ):
             raise ValidatorWeightAuthorityV2Error(
-                "gateway boot differs from approved release lineage"
+                "boot differs from approved release lineage"
             )
         return self._boot_verifier(
             identity,

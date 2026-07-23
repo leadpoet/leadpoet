@@ -21,6 +21,7 @@ from validator_tee.host.weight_authority_v2 import (
 from leadpoet_canonical.weight_computation import normalize_to_u16_with_uids_pure
 from leadpoet_canonical.weight_authority_v2 import (
     build_weight_finalization_submission_v2,
+    validate_published_weight_bundle_v2,
 )
 
 
@@ -333,11 +334,7 @@ def _validate_publication_acknowledgment_v2(
         "message",
     }
     result = bundle["weight_result"]
-    computed_receipts = [
-        receipt
-        for receipt in bundle["receipt_graph"]["receipts"]
-        if receipt.get("purpose") == "validator.weights.computed.v2"
-    ]
+    verified = validate_published_weight_bundle_v2(bundle)
     if (
         not isinstance(publication, Mapping)
         or set(publication) != expected_fields
@@ -346,9 +343,8 @@ def _validate_publication_acknowledgment_v2(
         or int(publication.get("weights_count", -1))
         != len(result["sparse_uids"])
         or publication.get("weights_hash") != result["weights_hash"]
-        or len(computed_receipts) != 1
         or publication.get("weight_receipt_hash")
-        != computed_receipts[0]["receipt_hash"]
+        != verified["weight_receipt_hash"]
         or not str(publication.get("weight_submission_event_hash") or "").startswith(
             "sha256:"
         )

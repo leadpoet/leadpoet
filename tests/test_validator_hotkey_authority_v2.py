@@ -1,4 +1,5 @@
 import base64
+import copy
 from datetime import datetime, timezone
 import hashlib
 
@@ -130,6 +131,31 @@ def _weight_response(boot, signing_key):
         },
         "boot_identity": boot,
     }
+
+
+def _weight_response_for_epoch(boot, signing_key, epoch_id):
+    response = copy.deepcopy(_weight_response(boot, signing_key))
+    result = response["weight_result"]
+    result["epoch_id"] = int(epoch_id)
+    result["block"] = 8596805 + int(epoch_id)
+    result["weights_hash"] = hashlib.sha256(
+        f"weights:{epoch_id}".encode("ascii")
+    ).hexdigest()
+    snapshot_hash = "sha256:" + hashlib.sha256(
+        f"snapshot:{epoch_id}".encode("ascii")
+    ).hexdigest()
+    root_hash = "sha256:" + hashlib.sha256(
+        f"receipt:{epoch_id}".encode("ascii")
+    ).hexdigest()
+    response["weight_snapshot"]["snapshot_hash"] = snapshot_hash
+    root = response["receipt_graph"]["receipts"][0]
+    root["receipt_hash"] = root_hash
+    root["output_root"] = sha256_json(result)
+    response["receipt_graph"]["root_receipt_hash"] = root_hash
+    response["weights_signature"] = signing_key.sign(
+        bytes.fromhex(result["weights_hash"])
+    ).hex()
+    return response
 
 
 def _authority(monkeypatch):
@@ -285,6 +311,53 @@ def test_application_signer_authorizes_exact_subnet_epoch_candidate(monkeypatch)
     assert len(bytes.fromhex(result["signature"])) == 64
 
 
+def test_new_epoch_prunes_only_finalized_or_unsigned_prior_authorizations(
+    monkeypatch,
+):
+    authority, boot, signing_key, _drand, _observed = _authority(monkeypatch)
+    _provision(authority)
+    expected_by_snapshot = {}
+
+    def register(epoch_id):
+        response = _weight_response_for_epoch(boot, signing_key, epoch_id)
+        expected_by_snapshot[response["weight_snapshot"]["snapshot_hash"]] = dict(
+            response["weight_result"]
+        )
+        return authority.register_weight_result(response)
+
+    monkeypatch.setattr(
+        module,
+        "validate_weight_snapshot_v2",
+        lambda snapshot: expected_by_snapshot[snapshot["snapshot_hash"]],
+    )
+
+    finalized_id = register(100)
+    authority._weights[finalized_id]["finalization"] = {"status": "finalized"}
+    authority._commits["finalized-commit"] = {
+        "weight_authorization_id": finalized_id,
+        "signed_result": {"status": "signed"},
+    }
+
+    unsigned_id = register(100)
+    authority._commits["unsigned-commit"] = {
+        "weight_authorization_id": unsigned_id,
+        "consumed": False,
+    }
+
+    unresolved_signed_id = register(100)
+    authority._commits["unresolved-signed-commit"] = {
+        "weight_authorization_id": unresolved_signed_id,
+        "signed_result": {"status": "signed"},
+    }
+
+    incoming_id = register(101)
+
+    assert set(authority._weights) == {unresolved_signed_id, incoming_id}
+    assert set(authority._commits) == {"unresolved-signed-commit"}
+    assert authority.public_state()["pending_weight_authorizations"] == 2
+    assert authority.public_state()["pending_extrinsic_authorizations"] == 1
+
+
 def _prepare(monkeypatch):
     authority, boot, signing_key, drand, _observed = _authority(monkeypatch)
     _provision(authority)
@@ -432,7 +505,14 @@ def test_restart_recovery_revalidates_bundle_binding_and_signed_extrinsic(
         "weights_signature": response["weights_signature"],
         "receipt_graph": {
             "root_receipt_hash": binding["receipt"]["receipt_hash"],
-            "boot_identities": [old_boot],
+            "boot_identities": [
+                {
+                    **old_boot,
+                    "boot_identity_hash": "sha256:" + "f" * 64,
+                    "commit_sha": "f" * 40,
+                },
+                old_boot,
+            ],
             "receipts": [
                 response["receipt_graph"]["receipts"][0],
                 binding["receipt"],
@@ -447,6 +527,10 @@ def test_restart_recovery_revalidates_bundle_binding_and_signed_extrinsic(
         lambda _bundle: {
             "bundle_hash": "sha256:" + "d" * 64,
             "validator_hotkey": HOTKEY,
+            "validator_boot_identity_hash": old_boot["boot_identity_hash"],
+            "weight_receipt_hash": response["receipt_graph"][
+                "root_receipt_hash"
+            ],
         },
     )
     monkeypatch.setattr(module, "verify_boot_identity_nitro", lambda *_a, **_k: {})

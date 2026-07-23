@@ -24,7 +24,7 @@ from gateway.research_lab.allocations import (
 )
 
 
-def _snapshot_row(entries, section="champion_allocations", epoch=23890):
+def _snapshot_row(entries, section="champion_allocations", epoch=24110):
     return {"epoch": epoch, "allocation_doc": {section: entries}}
 
 
@@ -91,8 +91,8 @@ class TestChampionPaidToDate:
 
     def test_cutoff_boundary_epoch_is_capped(self):
         rows = [
-            _snapshot_row([_entry("champion_reward:r1", 21.9, scheduled=9.4545)], epoch=23877),
-            _snapshot_row([_entry("champion_reward:r1", 21.9, scheduled=9.4545)], epoch=23878),
+            _snapshot_row([_entry("champion_reward:r1", 21.9, scheduled=9.4545)], epoch=24099),
+            _snapshot_row([_entry("champion_reward:r1", 21.9, scheduled=9.4545)], epoch=24100),
         ]
         paid = _champion_paid_alpha_to_date_from_snapshots(rows)
         assert paid["champion_reward:r1"] == pytest.approx(21.9 + 9.4545)

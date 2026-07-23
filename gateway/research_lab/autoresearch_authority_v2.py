@@ -966,6 +966,37 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
+async def _ensure_tree_created_event(
+    *,
+    tree_store: GitTreeStore,
+    tree_id: str,
+    event_doc: Mapping[str, Any],
+) -> None:
+    """Finish tree creation after a crash between row insert and first event."""
+
+    persisted_current = await tree_store.get_tree_current(tree_id=tree_id)
+    if not isinstance(persisted_current, Mapping):
+        raise AutoresearchAuthorityV2Error(
+            "Git-tree creation has no durable readback"
+        )
+    if str(persisted_current.get("current_event_hash") or ""):
+        return
+    try:
+        await tree_store.append_event_next(
+            tree_id=tree_id,
+            event_type="tree_created",
+            event_doc=dict(event_doc),
+        )
+    except Exception:
+        concurrent = await tree_store.get_tree_current(tree_id=tree_id)
+        if (
+            isinstance(concurrent, Mapping)
+            and str(concurrent.get("current_event_hash") or "")
+        ):
+            return
+        raise
+
+
 async def run_authoritative_autoresearch_v2(
     *,
     run_id: str,
@@ -1460,19 +1491,18 @@ async def run_authoritative_autoresearch_v2(
                 ),
                 tree_doc=tree_doc,
             )
-            if persisted_tree.get("created") is True:
-                await authoritative_tree_store.append_event_next(
-                    tree_id=tree_id,
-                    event_type="tree_created",
-                    event_doc={
-                        "schema_version": "research_lab.git_tree_created.v1",
-                        "tree_id": tree_id,
-                        "run_id": str(run_id),
-                        "root_artifact_hash": artifact.model_artifact_hash,
-                        "root_git_commit": root_git_commit,
-                        "policy_hash": str(command["policy_hash"]),
-                    },
-                )
+            await _ensure_tree_created_event(
+                tree_store=authoritative_tree_store,
+                tree_id=tree_id,
+                event_doc={
+                    "schema_version": "research_lab.git_tree_created.v1",
+                    "tree_id": tree_id,
+                    "run_id": str(run_id),
+                    "root_artifact_hash": artifact.model_artifact_hash,
+                    "root_git_commit": root_git_commit,
+                    "policy_hash": str(command["policy_hash"]),
+                },
+            )
             persisted_operations = await authoritative_tree_store.list_operations(
                 tree_id=tree_id
             )

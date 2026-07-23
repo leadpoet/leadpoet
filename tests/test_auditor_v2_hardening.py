@@ -135,3 +135,16 @@ def test_missing_pcr0_cache_logs_error(monkeypatch, caplog):
 def test_wrapper_restart_loop_survives_nonzero_exit():
     source = inspect.getsource(auditor_module)
     assert 'python3 neurons/auditor_validator.py "$@" || EXIT_CODE=$?' in source
+
+
+def test_wrapper_activation_failures_cannot_start_stale_consensus_code():
+    source = inspect.getsource(auditor_module)
+    assert "Continuing without auto-updates" not in source
+    assert (
+        "Auditor startup refused: update wrapper could not be created"
+        in source
+    )
+    assert (
+        "Auditor startup refused: update wrapper could not be executed"
+        in source
+    )

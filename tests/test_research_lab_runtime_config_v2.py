@@ -78,7 +78,7 @@ def test_execution_config_commits_production_defaults_when_env_omits_them():
     )
 
     behavior = document["behavior_environment"]
-    assert behavior["RESEARCH_LAB_TREE_MODE"] == "active"
+    assert behavior["RESEARCH_LAB_TREE_MODE"] == "off"
     assert behavior["RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED"] == "true"
     assert (
         behavior["RESEARCH_LAB_DEV_SNAPSHOT_URI"]

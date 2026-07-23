@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import uuid
 from typing import Any, Iterable, Mapping, Sequence
 
 from gateway.research_lab.attested_coordinator_v2 import execute_coordinator_v2
@@ -1003,15 +1004,19 @@ async def execute_provider_preflight_v2(
     provider_credential_profile: str = "benchmark_model",
     execute: Any = execute_scoring_v2,
 ) -> dict[str, Any]:
+    measurement_id = uuid.uuid4().hex
     outcome = await execute(
         operation=OP_PROVIDER_PREFLIGHT_V2,
         purpose="research_lab.provider_preflight.v2",
         epoch_id=0,
-        # The payload already commits scope, force, and settings, so sequence
-        # zero gives deterministic idempotency and fits the V2 INTEGER schema.
+        # Keep the receipt sequence inside the V2 INTEGER schema. Freshness is
+        # committed by measurement_id in the payload so every requested probe
+        # derives a new enclave job instead of replaying a terminal job for up
+        # to the execution manager's one-hour retention window.
         sequence=0,
         payload={
             "schema_version": PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION,
+            "measurement_id": measurement_id,
             "scope_key": str(scope_key),
             "force": bool(force),
             "settings": dict(settings),

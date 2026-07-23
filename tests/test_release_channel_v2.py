@@ -222,6 +222,16 @@ def test_release_lineage_binds_historical_exact_role_measurements():
         "build_manifest_hash": summary["execution_manifest_hash"],
         "dependency_lock_hash": summary["dependency_lock_hash"],
     }
+    validator_expected = lineage["releases"][historical_commit]["roles"][
+        "validator_weights"
+    ]
+    validator_summary = historical["validator_release_manifest"]["release"]
+    assert validator_expected == {
+        "commit_sha": historical_commit,
+        "pcr0": validator_summary["pcr0"],
+        "build_manifest_hash": validator_summary["app_manifest_hash"],
+        "dependency_lock_hash": validator_summary["dependency_lock_hash"],
+    }
 
     s3 = _S3()
     for channel in (historical, current, unrelated):

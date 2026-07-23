@@ -40,8 +40,8 @@ def test_auditor_cli_config_enables_sdk_argument_parsing(monkeypatch):
 @pytest.mark.parametrize(
     ("environ", "expected"),
     (
-        ({}, "http://52.91.135.79:8000"),
-        ({"GATEWAY_URL": ""}, "http://52.91.135.79:8000"),
+        ({}, "https://gateway.subnet71.com"),
+        ({"GATEWAY_URL": ""}, "https://gateway.subnet71.com"),
         (
             {"GATEWAY_URL": " https://gateway.example.com/ "},
             "https://gateway.example.com/",
@@ -88,8 +88,8 @@ def test_auditor_rejects_non_origin_gateway_urls(value):
             "wss://archive.example:443",
         ),
         (
-            {"BITTENSOR_ARCHIVE_ENDPOINT": "ws://192.168.69.55:9944"},
-            "ws://192.168.69.55:9944",
+            {"BITTENSOR_ARCHIVE_ENDPOINT": "ws://10.0.0.10:9944"},
+            "ws://10.0.0.10:9944",
         ),
     ),
 )
@@ -354,6 +354,171 @@ def test_stateful_bundle_epoch_verification_uses_archive_subtensor(monkeypatch):
             {"netuid": 71, "block_number": 8_637_160},
         )
     ]
+
+
+def test_stateful_bundle_epoch_reconnects_same_archive_after_read_failure(
+    monkeypatch,
+):
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.epoch_cutover = object()
+    auditor.epoch_archive_endpoint = "wss://operator-archive.example:443"
+    observed = []
+
+    class StaleArchive:
+        def close(self):
+            observed.append(("close", "stale"))
+
+    stale = StaleArchive()
+    refreshed = object()
+    auditor.epoch_archive_subtensor = stale
+    auditor.config = SimpleNamespace(netuid=71)
+
+    class Snapshot:
+        def settlement_epoch_id(self, cutover):
+            assert cutover is auditor.epoch_cutover
+            return 101
+
+    def read_snapshot(subtensor, **kwargs):
+        observed.append(("read", subtensor, kwargs))
+        if subtensor is stale:
+            raise TimeoutError("stale archive socket")
+        return Snapshot()
+
+    monkeypatch.setattr(
+        auditor_module,
+        "read_subnet_epoch_snapshot",
+        read_snapshot,
+    )
+    monkeypatch.setattr(
+        auditor_module,
+        "_connect_epoch_archive_subtensor",
+        lambda *, endpoint: observed.append(("connect", endpoint)) or refreshed,
+    )
+    monkeypatch.setattr(
+        auditor_module,
+        "validate_subnet_epoch_cutover_anchor",
+        lambda source, cutover, *, expected_archive_endpoint: observed.append(
+            ("anchor", source, cutover, expected_archive_endpoint)
+        ),
+    )
+
+    auditor._verify_stateful_bundle_epoch(
+        {"block": 8_637_160, "epoch_id": 101}
+    )
+
+    assert auditor.epoch_archive_subtensor is refreshed
+    assert observed == [
+        (
+            "read",
+            stale,
+            {"netuid": 71, "block_number": 8_637_160},
+        ),
+        ("close", "stale"),
+        ("connect", "wss://operator-archive.example:443"),
+        (
+            "anchor",
+            refreshed,
+            auditor.epoch_cutover,
+            "wss://operator-archive.example:443",
+        ),
+        (
+            "read",
+            refreshed,
+            {"netuid": 71, "block_number": 8_637_160},
+        ),
+    ]
+
+
+def test_stateful_bundle_epoch_discards_failed_archive_replacement(monkeypatch):
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.epoch_cutover = object()
+    auditor.epoch_archive_endpoint = "wss://operator-archive.example:443"
+    observed = []
+
+    class Archive:
+        def __init__(self, name):
+            self.name = name
+
+        def close(self):
+            observed.append(("close", self.name))
+
+    stale = Archive("stale")
+    refreshed = Archive("refreshed")
+    auditor.epoch_archive_subtensor = stale
+    auditor.config = SimpleNamespace(netuid=71)
+
+    def read_snapshot(source, **_kwargs):
+        if source is stale:
+            raise TimeoutError("stale archive socket")
+        raise TimeoutError("replacement archive socket")
+
+    monkeypatch.setattr(
+        auditor_module,
+        "read_subnet_epoch_snapshot",
+        read_snapshot,
+    )
+    monkeypatch.setattr(
+        auditor_module,
+        "_connect_epoch_archive_subtensor",
+        lambda *, endpoint: observed.append(("connect", endpoint)) or refreshed,
+    )
+    monkeypatch.setattr(
+        auditor_module,
+        "validate_subnet_epoch_cutover_anchor",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        auditor_module.SubnetEpochError,
+        match="selected archive could not verify",
+    ):
+        auditor._verify_stateful_bundle_epoch(
+            {"block": 8_637_160, "epoch_id": 101}
+        )
+
+    assert auditor.epoch_archive_subtensor is None
+    assert observed == [
+        ("close", "stale"),
+        ("connect", "wss://operator-archive.example:443"),
+        ("close", "refreshed"),
+    ]
+
+
+def test_stateful_bundle_epoch_mismatch_does_not_reconnect(monkeypatch):
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.epoch_cutover = object()
+    auditor.epoch_archive_endpoint = "wss://archive.example:443"
+    auditor.epoch_archive_subtensor = object()
+    auditor.config = SimpleNamespace(netuid=71)
+
+    class Snapshot:
+        def settlement_epoch_id(self, _cutover):
+            return 100
+
+    monkeypatch.setattr(
+        auditor_module,
+        "read_subnet_epoch_snapshot",
+        lambda *_args, **_kwargs: Snapshot(),
+    )
+    monkeypatch.setattr(
+        auditor_module,
+        "_connect_epoch_archive_subtensor",
+        lambda **_kwargs: pytest.fail("semantic mismatch must not reconnect"),
+    )
+
+    with pytest.raises(
+        auditor_module.SubnetEpochError,
+        match="differs from official chain state",
+    ):
+        auditor._verify_stateful_bundle_epoch(
+            {"block": 8_637_160, "epoch_id": 101}
+        )
 
 
 def test_verifier_failure_emits_no_diagnostic_rows(monkeypatch, caplog):

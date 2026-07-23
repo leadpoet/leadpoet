@@ -33,14 +33,18 @@ class _RecoveryStore:
     - provider-usage insert: ON CONFLICT DO NOTHING, with a one-shot transient
       failure (returns via the real helper as None).
     - needing-corpus discovery: returns the run until a completeness marker
-      exists (mirrors research_lab_terminal_runs_needing_corpus).
-    - mark-complete: records the marker.
+      whose stored watermark MATCHES the current source watermark exists
+      (mirrors research_lab_terminal_runs_needing_corpus).
+    - mark-complete: records the marker with the watermark it was given.
+    - source-watermark: returns `self.watermark`; tests mutate it to simulate a
+      late promotion/version/score-bundle/loop event landing after the mark.
     """
 
     def __init__(self, run_id: str) -> None:
         self.run_id = run_id
         self.ledger: dict[str, dict[str, Any]] = {}
-        self.complete: set[str] = set()  # trajectory_ids marked complete
+        self.complete: dict[str, str] = {}  # trajectory_id -> stored watermark
+        self.watermark = "le:1:0|ca:0|ee:0|pe:0|ve:0|sb:0"
         self.fail_provider_next = False
         self.discovery_calls = 0
 
@@ -59,10 +63,15 @@ class _RecoveryStore:
         if function_name == "research_lab_terminal_runs_needing_corpus":
             self.discovery_calls += 1
             tid = tp.trajectory_id_for_run(self.run_id)
-            rows = [] if tid in self.complete else [self.run_id]
+            marked = self.complete.get(tid)
+            rows = [] if marked == self.watermark else [self.run_id]
             return [{"run_id": r} for r in rows]
+        if function_name == "research_lab_corpus_source_watermark":
+            return self.watermark
         if function_name == "research_lab_mark_corpus_complete":
-            self.complete.add(str(params["p_trajectory_id"]))
+            self.complete[str(params["p_trajectory_id"])] = str(
+                params["p_source_watermark"]
+            )
             return None
         raise AssertionError(f"unexpected rpc {function_name}")
 
@@ -135,3 +144,76 @@ async def test_transient_provider_failure_recovers_through_real_dispatcher(monke
     assert results == []
     assert store.discovery_calls == calls_before + 1  # one discovery call, zero runs
     assert len(store.ledger) == 5  # no duplicates
+
+
+@pytest.mark.asyncio
+async def test_late_event_after_mark_forces_rediscovery_and_reprojection(monkeypatch) -> None:
+    # Review-required regression: mark a run complete, append a late
+    # promotion/version-style source event (watermark changes), then prove the
+    # run is REDISCOVERED and re-projected. A source-blind permanent marker
+    # would hide the late event forever.
+    run_id = "3f2a1c00-0000-4000-8000-000000000abd"
+    tid = tp.trajectory_id_for_run(run_id)
+    usage_rows = [_usage_row(f"{i + 100:032d}") for i in range(3)]
+    store = _RecoveryStore(run_id)
+    _install_projection(monkeypatch, store, usage_rows)
+
+    # Pass 1 — healthy: rows written, run marked complete at watermark W1.
+    results = await tp.backfill_corpus_trace_rows(store=store, dry_run=False, batch_size=5)
+    assert len(results) == 1
+    assert store.complete.get(tid) == store.watermark
+    assert len(store.ledger) == 3
+
+    # Marked at the current watermark -> not discovered.
+    results = await tp.backfill_corpus_trace_rows(store=store, dry_run=False, batch_size=5)
+    assert results == []
+
+    # A late promotion/version event lands: the source watermark changes, and a
+    # new deterministic provider-usage row now belongs to the projection.
+    store.watermark = "le:1:0|ca:1|ee:0|pe:1:1753500000|ve:1:0|sb:0"
+    late_rows = usage_rows + [_usage_row(f"{999:032d}")]
+    _install_projection(monkeypatch, store, late_rows)
+
+    # REDISCOVERED (stored watermark W1 != current W2) and re-projected: the
+    # late row is written and the marker is refreshed to W2.
+    results = await tp.backfill_corpus_trace_rows(store=store, dry_run=False, batch_size=5)
+    assert len(results) == 1
+    assert set(store.ledger) == {r["usage_row_id"] for r in late_rows}
+    assert store.complete.get(tid) == store.watermark  # marker now at W2
+
+    # Stable again at W2 -> no further re-inspection.
+    results = await tp.backfill_corpus_trace_rows(store=store, dry_run=False, batch_size=5)
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_event_landing_mid_inspection_is_not_hidden(monkeypatch) -> None:
+    # Race case: the watermark is snapshotted BEFORE the inspection reads the
+    # inputs. If a source event lands mid-inspection, the marker stores the
+    # STALE pre-inspection watermark, so the run mismatches the current
+    # watermark and is rediscovered on the next pass.
+    run_id = "3f2a1c00-0000-4000-8000-000000000abe"
+    tid = tp.trajectory_id_for_run(run_id)
+    usage_rows = [_usage_row(f"{i + 200:032d}") for i in range(2)]
+    store = _RecoveryStore(run_id)
+    _install_projection(monkeypatch, store, usage_rows)
+
+    real_inputs = tp.load_projection_inputs
+
+    async def inputs_with_midflight_event(run_id_arg, s):
+        # An event arrives AFTER the watermark snapshot, DURING the inspection.
+        store.watermark = "le:2:1|ca:0|ee:0|pe:0|ve:0|sb:0"
+        return await real_inputs(run_id_arg, s)
+
+    monkeypatch.setattr(tp, "load_projection_inputs", inputs_with_midflight_event)
+
+    results = await tp.backfill_corpus_trace_rows(store=store, dry_run=False, batch_size=5)
+    assert len(results) == 1
+    # Marker stored the PRE-inspection watermark, which no longer matches.
+    assert store.complete.get(tid) is not None
+    assert store.complete.get(tid) != store.watermark
+    # Therefore the run is still discoverable next pass.
+    monkeypatch.setattr(tp, "load_projection_inputs", real_inputs)
+    results = await tp.backfill_corpus_trace_rows(store=store, dry_run=False, batch_size=5)
+    assert len(results) == 1  # rediscovered, re-inspected, re-marked at current
+    assert store.complete.get(tid) == store.watermark

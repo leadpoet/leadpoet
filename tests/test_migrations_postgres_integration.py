@@ -95,6 +95,30 @@ CREATE TABLE public.research_lab_provider_usage_ledger (
 CREATE TABLE public.research_trajectories (trajectory_id UUID PRIMARY KEY);
 CREATE TABLE public.execution_traces (run_id UUID PRIMARY KEY);
 
+-- Watermark source tables (minimal stubs matching the columns the
+-- research_lab_corpus_source_watermark function aggregates).
+CREATE TABLE public.research_lab_auto_research_loop_events (
+    run_id UUID, seq INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE public.research_lab_candidate_artifacts (
+    candidate_id TEXT, run_id UUID
+);
+CREATE TABLE public.research_lab_candidate_evaluation_events (
+    candidate_id TEXT, run_id UUID, seq INTEGER
+);
+CREATE TABLE public.research_lab_candidate_promotion_events (
+    candidate_id TEXT, private_model_version_id UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE public.research_lab_private_model_version_events (
+    private_model_version_id UUID, seq INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE public.research_evaluation_score_bundles (
+    score_bundle_id TEXT, run_id UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE public.research_loop_run_queue_current (
     run_id                   UUID,
     ticket_id                UUID,
@@ -185,15 +209,48 @@ BEGIN
         VALUES (public.research_lab_trajectory_id('d0000000-0000-4000-8000-000000000002'));
     SELECT count(*) INTO n FROM public.research_lab_terminal_runs_needing_corpus(25, true);
     IF n <> 2 THEN RAISE EXCEPTION '122 expected 2 runs needing corpus, got %', n; END IF;
+    -- Mark run 1 complete at its CURRENT source watermark.
     PERFORM public.research_lab_mark_corpus_complete(
         public.research_lab_trajectory_id('d0000000-0000-4000-8000-000000000001'),
-        'd0000000-0000-4000-8000-000000000001');
+        'd0000000-0000-4000-8000-000000000001',
+        public.research_lab_corpus_source_watermark('d0000000-0000-4000-8000-000000000001'));
     SELECT count(*) INTO n FROM public.research_lab_terminal_runs_needing_corpus(25, true);
     IF n <> 1 THEN RAISE EXCEPTION '122 marked run must drop from discovery, got %', n; END IF;
     IF (SELECT run_id FROM public.research_lab_terminal_runs_needing_corpus(25, true))
        <> 'd0000000-0000-4000-8000-000000000002' THEN
         RAISE EXCEPTION '122 wrong run left needing corpus';
     END IF;
+
+    -- 122 REQUIRED late-event rediscovery: append a late LOOP event to the
+    -- marked run -> its source watermark changes -> it is DISCOVERED again.
+    INSERT INTO public.research_lab_auto_research_loop_events(run_id, seq)
+        VALUES ('d0000000-0000-4000-8000-000000000001', 7);
+    SELECT count(*) INTO n FROM public.research_lab_terminal_runs_needing_corpus(25, true);
+    IF n <> 2 THEN RAISE EXCEPTION '122 late loop event must force rediscovery, got %', n; END IF;
+    -- Same for a late PROMOTION + VERSION event chain (candidate -> promotion -> version).
+    PERFORM public.research_lab_mark_corpus_complete(
+        public.research_lab_trajectory_id('d0000000-0000-4000-8000-000000000001'),
+        'd0000000-0000-4000-8000-000000000001',
+        public.research_lab_corpus_source_watermark('d0000000-0000-4000-8000-000000000001'));
+    SELECT count(*) INTO n FROM public.research_lab_terminal_runs_needing_corpus(25, true);
+    IF n <> 1 THEN RAISE EXCEPTION '122 re-mark at new watermark must settle, got %', n; END IF;
+    INSERT INTO public.research_lab_candidate_artifacts(candidate_id, run_id)
+        VALUES ('cand-late', 'd0000000-0000-4000-8000-000000000001');
+    INSERT INTO public.research_lab_candidate_promotion_events(candidate_id, private_model_version_id)
+        VALUES ('cand-late', 'ab000000-0000-4000-8000-000000000009');
+    INSERT INTO public.research_lab_private_model_version_events(private_model_version_id, seq)
+        VALUES ('ab000000-0000-4000-8000-000000000009', 0);
+    SELECT count(*) INTO n FROM public.research_lab_terminal_runs_needing_corpus(25, true);
+    IF n <> 2 THEN RAISE EXCEPTION '122 late promotion/version events must force rediscovery, got %', n; END IF;
+    -- And a late SCORE BUNDLE after settling again.
+    PERFORM public.research_lab_mark_corpus_complete(
+        public.research_lab_trajectory_id('d0000000-0000-4000-8000-000000000001'),
+        'd0000000-0000-4000-8000-000000000001',
+        public.research_lab_corpus_source_watermark('d0000000-0000-4000-8000-000000000001'));
+    INSERT INTO public.research_evaluation_score_bundles(score_bundle_id, run_id)
+        VALUES ('sb-late', 'd0000000-0000-4000-8000-000000000001');
+    SELECT count(*) INTO n FROM public.research_lab_terminal_runs_needing_corpus(25, true);
+    IF n <> 2 THEN RAISE EXCEPTION '122 late score bundle must force rediscovery, got %', n; END IF;
 
     -- 120: atomic candidate claim -- sequential claims yield DISTINCT candidates.
     INSERT INTO public.research_lab_candidate_evaluation_current
@@ -313,7 +370,14 @@ def test_atomic_claims_never_double_assign_under_concurrency(pg) -> None:
     # Item 12d: N threads each call the claim RPC once against the SAME live
     # server; the advisory lock + claim row must hand every thread a DISTINCT
     # candidate/run -- zero duplicates.
-    psycopg2 = pytest.importorskip("psycopg2")
+    # In CI the concurrency proof must RUN, not silently skip: deploy-checks
+    # installs psycopg2-binary, so a missing driver there is a hard failure.
+    try:
+        import psycopg2
+    except ImportError:
+        if os.environ.get("CI"):
+            pytest.fail("psycopg2 is required in CI (installed by deploy-checks) — the no-double-assign proof must not skip")
+        pytest.skip("psycopg2 not installed locally")
     dsn = dict(host="127.0.0.1", port=pg["port"], user="postgres", dbname="migtest")
 
     seed = psycopg2.connect(**dsn)

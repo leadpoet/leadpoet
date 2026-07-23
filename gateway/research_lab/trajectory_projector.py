@@ -4123,23 +4123,65 @@ async def _insert_provider_usage_ledger_rows_batch(
     return _batch_inserted_count(result)
 
 
-async def _mark_corpus_complete(store: Any, trajectory_id: str, run_id: str) -> None:
-    """Record that a run's full corpus is present (idempotent, best-effort).
+async def _corpus_source_watermark(store: Any, run_id: str) -> str:
+    """Fingerprint of the run's projection source data (RPC-computed).
 
-    Once marked, research_lab_terminal_runs_needing_corpus stops returning the
-    run, so complete runs are never re-inspected. Best-effort: a marker-write
-    failure just means the run is re-inspected next pass (no data risk).
+    Captured BEFORE the per-run inspection and stored with the completeness
+    marker, so any event landing during or after the inspection changes the
+    current watermark, mismatches the stored one, and forces rediscovery.
+    Best-effort: an empty watermark simply means the marker will not match a
+    non-empty current watermark, keeping the run discoverable (fail-open to
+    re-inspection, never to data loss).
+    """
+    if not hasattr(store, "call_rpc"):
+        return ""
+    try:
+        result = await store.call_rpc(
+            "research_lab_corpus_source_watermark", {"p_run_id": str(run_id)}
+        )
+        if isinstance(result, list):
+            result = result[0] if result else ""
+        if isinstance(result, Mapping):
+            result = next(iter(result.values()), "")
+        return str(result or "")
+    except Exception as exc:
+        logger.debug(
+            "research_lab_corpus_watermark_unavailable run_id=%s error=%s",
+            run_id,
+            str(exc)[:200],
+        )
+        return ""
+
+
+async def _mark_corpus_complete(
+    store: Any, trajectory_id: str, run_id: str, source_watermark: str
+) -> None:
+    """Record that a run's full corpus is present for ``source_watermark``.
+
+    research_lab_terminal_runs_needing_corpus stops returning the run only
+    while the stored watermark matches the CURRENT source watermark; a late
+    promotion/version/score-bundle/loop event changes the current watermark and
+    the run is rediscovered. Best-effort: a marker-write failure just means the
+    run is re-inspected next pass (no data risk).
     """
     try:
         if hasattr(store, "call_rpc"):
             await store.call_rpc(
                 "research_lab_mark_corpus_complete",
-                {"p_trajectory_id": str(trajectory_id), "p_run_id": str(run_id)},
+                {
+                    "p_trajectory_id": str(trajectory_id),
+                    "p_run_id": str(run_id),
+                    "p_source_watermark": str(source_watermark or ""),
+                },
             )
             return
         await store.insert_row(
             CORPUS_COMPLETE_TABLE,
-            {"trajectory_id": str(trajectory_id), "run_id": str(run_id)},
+            {
+                "trajectory_id": str(trajectory_id),
+                "run_id": str(run_id),
+                "source_watermark": str(source_watermark or ""),
+            },
         )
     except Exception as exc:
         # A duplicate marker (already complete) or a transient write error is
@@ -4647,6 +4689,10 @@ async def backfill_run_corpus_trace_rows(
             return ProjectionResult(
                 run_id=run_id, status="skipped_unprojected", trajectory_id=tid
             )
+        # Snapshot the source watermark BEFORE reading the inputs: if any source
+        # event lands mid-inspection, the marker stores this stale watermark,
+        # the current watermark differs next pass, and the run is rediscovered.
+        source_watermark = await _corpus_source_watermark(store, run_id)
         inputs = await load_projection_inputs(run_id, store)
         if not inputs["loop_events"]:
             return ProjectionResult(
@@ -4732,7 +4778,7 @@ async def backfill_run_corpus_trace_rows(
             # Fully present across EVERY corpus type — record the completeness
             # marker so this run is not re-inspected, then stop.
             if not dry_run:
-                await _mark_corpus_complete(store, tid, run_id)
+                await _mark_corpus_complete(store, tid, run_id, source_watermark)
             return ProjectionResult(
                 run_id=run_id, status="skipped_traces_existing", trajectory_id=tid
             )

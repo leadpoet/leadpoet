@@ -55,6 +55,7 @@ PARENT_CID = 3
 CHAIN_RELAY_VSOCK_PORT = 5002
 MAX_CONTROL_BYTES = 16 * 1024
 DEFAULT_CA_BUNDLE = "/etc/pki/tls/certs/ca-bundle.crt"
+FINALIZATION_RPC_PACING_SECONDS = 1.05
 
 
 class ValidatorChainSourceV2Error(RuntimeError):
@@ -357,6 +358,7 @@ class ValidatorChainSourceV2:
         *,
         rpc_call: Optional[Callable[..., Mapping[str, Any]]] = None,
         archive_rpc_call: Optional[Callable[..., Mapping[str, Any]]] = None,
+        finalization_sleep: Callable[[float], None] = time.sleep,
         epoch_authority_supplier: Optional[
             Callable[[], Optional[Mapping[str, Any]]]
         ] = None,
@@ -370,6 +372,7 @@ class ValidatorChainSourceV2:
             ).call
         else:
             self._archive_rpc_call = None
+        self._finalization_sleep = finalization_sleep
         if epoch_authority_supplier is None:
             raise ValidatorChainSourceV2Error(
                 "official SN71 epoch authority supplier is unavailable"
@@ -1321,8 +1324,17 @@ class ValidatorChainSourceV2:
         purpose = "validator.weights.finalized.v2"
         attempts = []
         artifacts = []
+        rpc_started = False
 
-        finalized = self._call(
+        def finalization_call(**kwargs: Any) -> Dict[str, Any]:
+            nonlocal rpc_started
+            if rpc_started:
+                self._finalization_sleep(FINALIZATION_RPC_PACING_SECONDS)
+            result = self._call(**kwargs)
+            rpc_started = True
+            return result
+
+        finalized = finalization_call(
             method="chain_getFinalizedHead",
             params=[],
             request_id=1,
@@ -1333,7 +1345,7 @@ class ValidatorChainSourceV2:
         attempts.extend(finalized["attempts"])
         artifacts.extend(finalized["artifacts"])
         finalized_hash = normalize_raw_hash(finalized["result"], "finalized head")
-        header_result = self._call(
+        header_result = finalization_call(
             method="chain_getHeader",
             params=["0x" + finalized_hash],
             request_id=2,
@@ -1356,7 +1368,7 @@ class ValidatorChainSourceV2:
 
         request_id = 3
         for block_number in range(start, end + 1):
-            block_hash_result = self._call(
+            block_hash_result = finalization_call(
                 method="chain_getBlockHash",
                 params=[block_number],
                 request_id=request_id,
@@ -1370,7 +1382,7 @@ class ValidatorChainSourceV2:
             block_hash = normalize_raw_hash(
                 block_hash_result["result"], "finalized block hash"
             )
-            block_result = self._call(
+            block_result = finalization_call(
                 method="chain_getBlock",
                 params=["0x" + block_hash],
                 request_id=request_id,
@@ -1402,7 +1414,7 @@ class ValidatorChainSourceV2:
                         raise ValidatorChainSourceV2Error(
                             "expected commitment fields are invalid"
                         )
-                    storage_result = self._call(
+                    storage_result = finalization_call(
                         method="state_getStorage",
                         params=[
                             timelocked_weight_commits_storage_key(

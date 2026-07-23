@@ -1289,6 +1289,35 @@ async def test_exact_business_artifact_batch_loads_shared_ancestry_once(
 
 
 @pytest.mark.asyncio
+async def test_exact_business_artifact_batch_rejects_noncanonical_stored_hash(
+    monkeypatch,
+):
+    requested = (
+        "allocation",
+        "epoch:100",
+        "sha256:" + "3" * 64,
+    )
+
+    async def select(*_args, **_kwargs):
+        return [
+            {
+                "artifact_kind": requested[0],
+                "artifact_ref": requested[1],
+                "artifact_hash": requested[2].upper(),
+                "receipt_hash": "sha256:" + "1" * 64,
+            }
+        ]
+
+    monkeypatch.setattr(attested_v2_store, "select_all", select)
+
+    with pytest.raises(
+        attested_v2_store.AttestedV2StoreError,
+        match="row conflicts",
+    ):
+        await attested_v2_store.load_business_artifact_graphs_v2((requested,))
+
+
+@pytest.mark.asyncio
 async def test_legacy_settlement_concurrent_retries_persist_one_exact_row(
     monkeypatch,
 ):

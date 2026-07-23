@@ -1306,7 +1306,13 @@ async def load_business_artifact_graphs_v2(
                         "V2 business artifact lineage is missing or ambiguous"
                     )
                 receipt_hash = str(row.get("receipt_hash") or "").lower()
-                if not _HASH_RE.fullmatch(receipt_hash):
+                if (
+                    row.get("artifact_kind") != key[0]
+                    or row.get("artifact_ref") != key[1]
+                    or row.get("artifact_hash") != key[2]
+                    or row.get("receipt_hash") != receipt_hash
+                    or not _HASH_RE.fullmatch(receipt_hash)
+                ):
                     raise AttestedV2StoreError(
                         "V2 business artifact row conflicts"
                     )

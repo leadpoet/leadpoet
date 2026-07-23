@@ -127,6 +127,19 @@ def test_submission_selects_computing_boot_from_historical_validator_ancestry(
         "validate_published_weight_bundle_v2",
         lambda *_args, **_kwargs: _verified(),
     )
+    lineage_verified = []
+    dynamic_verified = []
+    monkeypatch.setattr(
+        weights_api,
+        "_build_authoritative_v2_receipt_boot_verifier",
+        lambda _graph: lineage_verified.append(_graph)
+        or (lambda identity: identity),
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_verify_authoritative_v2_boot",
+        lambda identity: dynamic_verified.append(identity) or identity,
+    )
 
     verified, selected = weights_api._validate_authoritative_v2_submission(
         submission
@@ -134,6 +147,34 @@ def test_submission_selects_computing_boot_from_historical_validator_ancestry(
 
     assert verified["validator_boot_identity_hash"] == VALIDATOR_BOOT_HASH
     assert selected == _validator_boot()
+    assert lineage_verified == [submission.receipt_graph]
+    assert dynamic_verified == [_validator_boot()]
+
+
+def test_submission_fails_when_computing_boot_is_not_dynamically_rebuilt(
+    monkeypatch,
+):
+    submission = _submission()
+    monkeypatch.setattr(
+        weights_api,
+        "validate_published_weight_bundle_v2",
+        lambda *_args, **_kwargs: _verified(),
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_build_authoritative_v2_receipt_boot_verifier",
+        lambda _graph: lambda identity: identity,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_verify_authoritative_v2_boot",
+        lambda _identity: (_ for _ in ()).throw(
+            ValueError("validator PCR0 is absent from the dynamic Git build cache")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="dynamic Git build cache"):
+        weights_api._validate_authoritative_v2_submission(submission)
 
 
 class _Subtensor:
@@ -227,7 +268,7 @@ async def test_authoritative_v2_persists_and_publishes_before_ack(monkeypatch):
     async def _coordinator(**kwargs):
         calls.append("coordinator")
         assert kwargs["purpose"] == "gateway.weights.publication.v2"
-        assert kwargs["boot_verifier"] is weights_api._verify_authoritative_v2_boot
+        assert kwargs["boot_verifier"]("identity") == "lineage:identity"
         return {
             "result": {
                 "schema_version": "leadpoet.weight_publication.v2",
@@ -250,6 +291,11 @@ async def test_authoritative_v2_persists_and_publishes_before_ack(monkeypatch):
         attested_v2_store,
         "persist_weight_publication_v2",
         _persist_publication,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_build_authoritative_v2_receipt_boot_verifier",
+        lambda _graph: lambda identity: "lineage:" + identity,
     )
     monkeypatch.setattr(gateway_logger, "log_event", _log_event)
     monkeypatch.setattr(attested_coordinator_v2, "execute_coordinator_v2", _coordinator)
@@ -553,6 +599,21 @@ async def test_v2_finalization_is_acknowledged_only_after_durable_append(monkeyp
         lambda _value: dict(verified),
     )
     monkeypatch.setattr(attested_v2, "validate_receipt_graph", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        weights_api,
+        "_build_authoritative_v2_receipt_boot_verifier",
+        lambda _graph: lambda identity: identity,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_receipt_root_boot_identity",
+        lambda _graph: _validator_boot(),
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_verify_authoritative_v2_boot",
+        lambda identity: identity,
+    )
     monkeypatch.setattr(
         weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {"validator-hotkey"}
     )

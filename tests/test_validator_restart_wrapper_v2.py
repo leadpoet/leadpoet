@@ -60,7 +60,7 @@ def test_cutover_preparation_stops_before_full_validator_and_preserves_start():
     ) in script
     assert "stateful cutover enclave preparation requires a captured restart start" in script
     preserve = script.index(
-        '&& [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" != "1" ]; then'
+        'if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" != "1" ]; then'
     )
     delete_start = script.index('rm -f "$VALIDATOR_RESTART_START_PATH"', preserve)
     hotkey = script.index("python3 -m validator_tee.host.hotkey_bootstrap_v2")

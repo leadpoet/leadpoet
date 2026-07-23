@@ -48,12 +48,8 @@ def authority_env(monkeypatch):
     monkeypatch.setattr(epoch_utils, "_validated_cutover_authority_hash", None)
     monkeypatch.setattr(epoch_utils, "_validated_cutover_authority_at", 0.0)
     # No Supabase credentials in tests: the singleton check is the authority.
-    import gateway.config as gateway_config
-
-    monkeypatch.setattr(gateway_config, "SUPABASE_URL", "", raising=False)
-    monkeypatch.setattr(
-        gateway_config, "SUPABASE_SERVICE_ROLE_KEY", "", raising=False
-    )
+    monkeypatch.setenv("SUPABASE_URL", "")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "")
     return cutover
 
 

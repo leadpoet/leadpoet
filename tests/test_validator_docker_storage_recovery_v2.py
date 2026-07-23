@@ -68,8 +68,21 @@ case "${1:-}:${2:-}" in
     printf '/var/lib/docker\\n'
     exit 0
     ;;
+  info:)
+    # Bare `docker info` availability/readiness probes (pre-inventory preamble
+    # and the post-reset readiness loop) — the fake daemon is always healthy.
+    exit 0
+    ;;
 esac
 exit 2
+""",
+    )
+    _write_executable(
+        bin_dir / "findmnt",
+        """#!/bin/bash
+# No stale mounts under the fake docker/containerd roots (hermetic on CI and
+# macOS, which lacks findmnt entirely).
+exit 0
 """,
     )
     _write_executable(

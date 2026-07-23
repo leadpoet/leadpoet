@@ -167,8 +167,8 @@ async def test_archive_boundary_discovery_rereads_exact_anchor(monkeypatch):
     ("live", "eligible"),
     (
         (_live(elapsed=300), True),
-        (_live(elapsed=310), True),
-        (_live(elapsed=311), False),
+        (_live(elapsed=315), True),
+        (_live(elapsed=316), False),
         (_live(elapsed=0, next_epoch=True), False),
     ),
 )
@@ -184,7 +184,7 @@ def test_first_epoch_restart_window_uses_the_block_310_deadline(
     )
 
     assert status["eligible"] is eligible
-    assert status["latest_safe_epoch_block"] == 310
+    assert status["latest_safe_epoch_block"] == 315
     assert status["restart_start_epoch_block"] == live.epoch_block
     assert status["restart_start_captured"] is False
 
@@ -354,6 +354,7 @@ async def test_offline_cutover_injects_gateway_chain_dependencies(monkeypatch):
             events.append(("exited", exc_type))
 
     monkeypatch.setattr("bittensor.AsyncSubtensor", FakeAsyncSubtensor)
+    monkeypatch.setattr("gateway.config.BITTENSOR_NETWORK", "finney")
     monkeypatch.setattr(
         "gateway.utils.epoch.inject_async_subtensor",
         lambda value: events.append(("epoch", value)),

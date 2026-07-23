@@ -31,9 +31,7 @@ def test_malformed_allocation_schedule_fails_closed():
 
 
 @pytest.mark.asyncio
-async def test_provider_preflight_uses_unique_measured_jobs_and_benchmark_profile(
-    monkeypatch,
-):
+async def test_provider_preflight_uses_unique_measured_jobs_and_benchmark_profile():
     calls = []
 
     async def execute(**kwargs):
@@ -42,7 +40,6 @@ async def test_provider_preflight_uses_unique_measured_jobs_and_benchmark_profil
             {"healthy": True, "pause_worthy": False, "verdicts": []}
         )
 
-    monkeypatch.setattr(v2_authority.time, "time_ns", lambda: 123456789)
     result = await v2_authority.execute_provider_preflight_v2(
         scope_key="scoring:worker-4",
         worker_index=4,
@@ -56,7 +53,9 @@ async def test_provider_preflight_uses_unique_measured_jobs_and_benchmark_profil
     )
     assert result["healthy"] is True
     assert calls[0]["purpose"] == "research_lab.provider_preflight.v2"
-    assert calls[0]["sequence"] == 123456789
+    # sequence is deterministic (0): the payload already commits scope, force,
+    # and settings, so zero gives idempotency and fits the V2 INTEGER schema.
+    assert calls[0]["sequence"] == 0
     assert calls[0]["worker_index"] == 4
     assert calls[0]["provider_credential_profile"] == "benchmark_model"
 

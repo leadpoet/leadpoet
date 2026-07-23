@@ -1612,7 +1612,7 @@ async def test_cutover_operator_dry_run_is_read_only_and_checks_high_water():
     ]
     assert report["requires_separate_activation"] is True
     assert report["initialization"]["eligible"] is True
-    assert report["initialization"]["latest_safe_epoch_block"] == 310
+    assert report["initialization"]["latest_safe_epoch_block"] == 315
     assert selected == [
         CUTOVER_TABLE,
         CUTOVER_STATE_TABLE,
@@ -2337,7 +2337,7 @@ async def test_cutover_operator_rejects_nonatomic_missing_initialization():
 @pytest.mark.parametrize(
     "live_index,live_block,last_epoch_block,elapsed",
     [
-        (10, 1_311, 1_000, 311),
+        (10, 1_316, 1_000, 316),
         (11, 1_360, 1_360, 0),
     ],
 )

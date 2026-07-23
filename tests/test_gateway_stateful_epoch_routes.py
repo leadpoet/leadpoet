@@ -60,6 +60,7 @@ def test_gateway_boot_verifier_maps_receipt_manifest_to_release_execution_manife
         weights_api,
         "_gateway_v2_release_manifest",
         lambda: {
+            "commit_sha": identity["commit_sha"],
             "roles": {
                 "gateway_scoring": {
                     "commit_sha": identity["commit_sha"],

@@ -67,6 +67,82 @@ class ValidatorHotkeyAuthorityV2Error(RuntimeError):
     """The hotkey is unavailable or a requested signature is unauthorized."""
 
 
+def _receipt_ancestor_graph(
+    graph: Mapping[str, Any], *, root_receipt_hash: str
+) -> Dict[str, Any]:
+    """Return the validated ancestor closure rooted at one receipt."""
+
+    receipts_by_hash = {
+        str(receipt["receipt_hash"]): receipt for receipt in graph["receipts"]
+    }
+    root_hash = str(root_receipt_hash)
+    if root_hash not in receipts_by_hash:
+        raise ValidatorHotkeyAuthorityV2Error(
+            "recovery receipt graph root is missing"
+        )
+
+    retained_hashes = set()
+    pending = [root_hash]
+    while pending:
+        receipt_hash = pending.pop()
+        if receipt_hash in retained_hashes:
+            continue
+        receipt = receipts_by_hash.get(receipt_hash)
+        if receipt is None:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "recovery receipt graph parent is missing"
+            )
+        retained_hashes.add(receipt_hash)
+        pending.extend(
+            str(value) for value in receipt.get("parent_receipt_hashes", [])
+        )
+
+    receipts = [
+        dict(receipt)
+        for receipt in graph["receipts"]
+        if str(receipt["receipt_hash"]) in retained_hashes
+    ]
+    scopes = {
+        (str(receipt["job_id"]), str(receipt["purpose"]))
+        for receipt in receipts
+        if "job_id" in receipt and "purpose" in receipt
+    }
+    if len(scopes) != len(receipts) and (
+        graph["transport_attempts"] or graph["host_operations"]
+    ):
+        raise ValidatorHotkeyAuthorityV2Error(
+            "recovery receipt graph scope is incomplete"
+        )
+    boot_hashes = {str(receipt["boot_identity_hash"]) for receipt in receipts}
+    recovery_graph = {
+        "root_receipt_hash": root_hash,
+        "boot_identities": [
+            dict(identity)
+            for identity in graph["boot_identities"]
+            if str(identity["boot_identity_hash"]) in boot_hashes
+        ],
+        "receipts": receipts,
+        "transport_attempts": [
+            dict(attempt)
+            for attempt in graph["transport_attempts"]
+            if (str(attempt["job_id"]), str(attempt["purpose"])) in scopes
+        ],
+        "host_operations": [
+            dict(record)
+            for record in graph["host_operations"]
+            if (
+                str(record["request"]["job_id"]),
+                str(record["request"]["purpose"]),
+            )
+            in scopes
+        ],
+    }
+    if "schema_version" in graph:
+        recovery_graph["schema_version"] = graph["schema_version"]
+        validate_receipt_graph(recovery_graph)
+    return recovery_graph
+
+
 def validate_hotkey_authority_configuration(
     value: Mapping[str, Any]
 ) -> Dict[str, Any]:
@@ -533,6 +609,10 @@ class ValidatorHotkeyAuthorityV2:
                 "recovery computing receipt is missing or ambiguous"
             )
         computed_receipt = dict(computed_receipts[0])
+        recovery_graph = _receipt_ancestor_graph(
+            graph,
+            root_receipt_hash=str(computed_receipt["receipt_hash"]),
+        )
         weight_result = dict(published_bundle["weight_result"])
         normalized_signed = []
         seen_authorizations = set()
@@ -666,7 +746,7 @@ class ValidatorHotkeyAuthorityV2:
                     "weight_snapshot": dict(published_bundle["weight_snapshot"]),
                     "weight_result": weight_result,
                     "root_receipt_hash": computed_receipt["receipt_hash"],
-                    "receipt_graph": graph,
+                    "receipt_graph": recovery_graph,
                     "attempts": len(normalized_signed),
                     "finalization": None,
                 }

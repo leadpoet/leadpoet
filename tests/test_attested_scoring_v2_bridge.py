@@ -6,6 +6,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from gateway.research_lab.attested_scoring_v2 import (
     AttestedScoringV2Error,
+    _compact_parent_graphs_for_transport,
     execute_scoring_v2,
 )
 from gateway.research_lab.attested_v2_store import (
@@ -40,6 +41,36 @@ from leadpoet_canonical.attested_v2 import (
 
 def _hash(character):
     return "sha256:" + character * 64
+
+
+def test_parent_graph_transport_compaction_preserves_all_declared_roots():
+    parent = {
+        "root_receipt_hash": _hash("a"),
+        "receipts": [{"receipt_hash": _hash("a")}],
+    }
+    descendant = {
+        "root_receipt_hash": _hash("b"),
+        "receipts": [
+            {"receipt_hash": _hash("a")},
+            {"receipt_hash": _hash("b")},
+        ],
+    }
+    independent = {
+        "root_receipt_hash": _hash("c"),
+        "receipts": [{"receipt_hash": _hash("c")}],
+    }
+
+    compacted = _compact_parent_graphs_for_transport(
+        (parent, descendant, independent)
+    )
+
+    assert compacted == [descendant, independent]
+    covered = {
+        receipt["receipt_hash"]
+        for graph in compacted
+        for receipt in graph["receipts"]
+    }
+    assert {_hash("a"), _hash("b"), _hash("c")} <= covered
 
 
 def _release():

@@ -427,6 +427,114 @@ def test_nested_receipt_graph_is_bound_to_root_and_retained_for_graph_merge():
     assert manager.status("score-job-1")["external_receipt_graph_count"] == 1
 
 
+def test_nested_graph_covers_multiple_declared_parent_receipts():
+    nested_key = Ed25519PrivateKey.generate()
+    nested_pubkey = nested_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    ).hex()
+    nested_boot = create_boot_identity(
+        body=build_boot_identity_body(
+            role="gateway_scoring",
+            physical_role="gateway_scoring",
+            commit_sha="1" * 40,
+            pcr0="2" * 96,
+            build_manifest_hash=HASH,
+            dependency_lock_hash=HASH_B,
+            config_hash=HASH,
+            boot_nonce="3" * 32,
+            signing_pubkey=nested_pubkey,
+            transport_pubkey="4" * 64,
+            transport_certificate_hash=HASH_B,
+            attestation_user_data_hash=HASH,
+            issued_at=NOW,
+        ),
+        attestation_document_b64=base64.b64encode(b"nested-nitro").decode("ascii"),
+    )
+
+    def receipt(*, purpose, job_id, parents):
+        return create_signed_execution_receipt(
+            body=build_execution_receipt_body(
+                role="gateway_scoring",
+                purpose=purpose,
+                job_id=job_id,
+                epoch_id=24000,
+                sequence=0,
+                commit_sha="1" * 40,
+                pcr0="2" * 96,
+                build_manifest_hash=HASH,
+                dependency_lock_hash=HASH_B,
+                config_hash=HASH,
+                boot_identity_hash=nested_boot["boot_identity_hash"],
+                input_root=HASH,
+                output_root=HASH_B,
+                transport_root_hash=merkle_root(
+                    (), domain="leadpoet-transport-v2"
+                ),
+                host_operation_root_hash=merkle_root(
+                    (), domain="leadpoet-host-operation-v2"
+                ),
+                artifact_root=merkle_root((), domain="leadpoet-artifact-v2"),
+                parent_receipt_hashes=parents,
+                status="succeeded",
+                failure_code=None,
+                issued_at=NOW,
+            ),
+            enclave_pubkey=nested_pubkey,
+            sign_digest=nested_key.sign,
+        )
+
+    parent = receipt(
+        purpose="research_lab.candidate_test.v2",
+        job_id="nested-parent",
+        parents=(),
+    )
+    child = receipt(
+        purpose="research_lab.candidate_score.v2",
+        job_id="nested-child",
+        parents=(parent["receipt_hash"],),
+    )
+    nested_graph = build_receipt_graph(
+        root_receipt_hash=child["receipt_hash"],
+        boot_identities=(nested_boot,),
+        receipts=(parent, child),
+        transport_attempts=(),
+        host_operations=(),
+    )
+
+    def _executor(_operation, _payload, context):
+        assert set(context.parent_receipt_hashes) == {
+            parent["receipt_hash"],
+            child["receipt_hash"],
+        }
+        assert context.external_receipt_graphs == [nested_graph]
+        return {"score": 3}
+
+    manager, _ = _manager(_executor)
+    payload = json.dumps(
+        {
+            "input": 3,
+            PARENT_RECEIPT_GRAPHS_FIELD: [nested_graph],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    manifest = _manifest(
+        payload,
+        parent_receipt_hashes=[
+            parent["receipt_hash"],
+            child["receipt_hash"],
+        ],
+    )
+
+    assert _run(manager, payload, manifest)["state"] == "succeeded"
+    root = manager.receipts("score-job-1")[-1]
+    assert set(root["parent_receipt_hashes"]) == {
+        parent["receipt_hash"],
+        child["receipt_hash"],
+    }
+
+
 def test_job_id_and_payload_are_immutable_and_canonical():
     manager, _ = _manager(lambda _op, value, _ctx: value)
     payload = _payload()

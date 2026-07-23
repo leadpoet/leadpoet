@@ -46,6 +46,7 @@ from gateway.research_lab.git_tree_models import (
     TreeChildSlot,
     TreeNode,
     TreePolicy,
+    TreeReplacement,
     derive_tree_id,
     generation_operation_id,
 )
@@ -247,6 +248,37 @@ def _mapping(value: Any, field: str) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         raise AutoresearchExecutorV2Error("%s must be an object" % field)
     return dict(value)
+
+
+def _tree_replacement_authority(
+    budget_context: Mapping[str, Any],
+    *,
+    root_artifact_hash: str,
+    root_manifest_hash: str,
+    policy: TreePolicy,
+) -> TreeReplacement | None:
+    raw = budget_context.get("tree_replacement")
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise AutoresearchExecutorV2Error(
+            "Git-tree replacement authority must be an object"
+        )
+    try:
+        replacement = TreeReplacement.from_mapping(raw)
+    except (GitTreeContractError, TypeError, ValueError) as exc:
+        raise AutoresearchExecutorV2Error(
+            "Git-tree replacement authority is invalid"
+        ) from exc
+    if (
+        replacement.root_artifact_hash != root_artifact_hash
+        or replacement.root_manifest_hash != root_manifest_hash
+        or replacement.policy_hash != policy.policy_hash
+    ):
+        raise AutoresearchExecutorV2Error(
+            "Git-tree replacement authority differs from the measured root"
+        )
+    return replacement
 
 
 def _event_document(event: AutoResearchLoopEvent) -> Dict[str, Any]:
@@ -1619,10 +1651,17 @@ class AutoresearchExecutorV2:
             tree_policy = TreePolicy.from_mapping(
                 _mapping(tree_runtime_policy.get("policy"), "Git-tree policy")
             )
+            tree_replacement = _tree_replacement_authority(
+                request["budget_context"],
+                root_artifact_hash=artifact.model_artifact_hash,
+                root_manifest_hash=artifact.manifest_hash,
+                policy=tree_policy,
+            )
             tree_id = derive_tree_id(
                 run_id=request["run_id"],
                 root_artifact_hash=artifact.model_artifact_hash,
                 policy=tree_policy,
+                replacement=tree_replacement,
             )
             (
                 provider_entries,
@@ -2522,9 +2561,15 @@ class AutoresearchExecutorV2:
             "evaluator_commitment",
             "prior_evaluation_provider_call_count",
             "prior_evaluation_cost_microusd",
+            "evaluation_provider_call_budget_charge",
+            "evaluation_cost_budget_charge_microusd",
+            "unsettled_evaluation_operation_count",
+            "unsettled_evaluation_operations_hash",
+            "indeterminate_evaluation_operation_count",
+            "indeterminate_evaluation_operations_hash",
             "snapshot_age_seconds",
         } or tree_runtime_policy.get("schema_version") != (
-            "research_lab.git_tree_runtime_policy.v1"
+            "research_lab.git_tree_runtime_policy.v2"
         ):
             raise AutoresearchExecutorV2Error(
                 "Git-tree runtime policy fields are invalid"
@@ -2536,12 +2581,27 @@ class AutoresearchExecutorV2:
             raise AutoresearchExecutorV2Error(
                 "measured Git-tree policy is not active"
             )
+        artifact_doc = _mapping(payload.get("artifact"), "artifact")
+        _tree_replacement_authority(
+            budget_context,
+            root_artifact_hash=_hash(
+                artifact_doc.get("model_artifact_hash"),
+                "artifact model hash",
+            ),
+            root_manifest_hash=_hash(
+                artifact_doc.get("manifest_hash"),
+                "artifact manifest hash",
+            ),
+            policy=tree_policy,
+        )
         evaluator_commitment = _mapping(
             tree_runtime_policy.get("evaluator_commitment"),
             "Git-tree evaluator commitment",
         )
         if set(evaluator_commitment) != {
             "schema_version",
+            "resolved_snapshot_uri",
+            "snapshot_pointer_hash",
             "snapshot_manifest_hash",
             "snapshot_ready_hash",
             "dev_set_hash",
@@ -2588,9 +2648,19 @@ class AutoresearchExecutorV2:
         ):
             _hash(evaluator_commitment.get(field), field)
         provider_model_ids = evaluator_commitment.get("provider_model_ids")
+        resolved_snapshot_uri = str(
+            evaluator_commitment.get("resolved_snapshot_uri") or ""
+        )
+        snapshot_pointer_hash = str(
+            evaluator_commitment.get("snapshot_pointer_hash") or ""
+        )
+        if snapshot_pointer_hash:
+            _hash(snapshot_pointer_hash, "snapshot pointer hash")
         if (
             evaluator_commitment.get("schema_version")
-            != "research_lab.git_tree_evaluator_commitment.v2"
+            != "research_lab.git_tree_evaluator_commitment.v3"
+            or not resolved_snapshot_uri
+            or resolved_snapshot_uri.endswith("/current.json")
             or evaluator_commitment.get("miss_policy") != "strict"
             or int(evaluator_commitment.get("dev_set_size") or 0)
             != tree_policy.live_max_icps_per_node
@@ -2652,6 +2722,28 @@ class AutoresearchExecutorV2:
         prior_evaluation_cost_microusd = tree_runtime_policy.get(
             "prior_evaluation_cost_microusd"
         )
+        evaluation_provider_call_budget_charge = tree_runtime_policy.get(
+            "evaluation_provider_call_budget_charge"
+        )
+        evaluation_cost_budget_charge_microusd = tree_runtime_policy.get(
+            "evaluation_cost_budget_charge_microusd"
+        )
+        unsettled_evaluation_operation_count = tree_runtime_policy.get(
+            "unsettled_evaluation_operation_count"
+        )
+        indeterminate_evaluation_operation_count = tree_runtime_policy.get(
+            "indeterminate_evaluation_operation_count"
+        )
+        unsettled_evaluation_operations_hash = _hash(
+            tree_runtime_policy.get("unsettled_evaluation_operations_hash"),
+            "unsettled evaluation operations hash",
+        )
+        indeterminate_evaluation_operations_hash = _hash(
+            tree_runtime_policy.get(
+                "indeterminate_evaluation_operations_hash"
+            ),
+            "indeterminate evaluation operations hash",
+        )
         if (
             isinstance(prior_evaluation_provider_call_count, bool)
             or not isinstance(prior_evaluation_provider_call_count, int)
@@ -2662,9 +2754,68 @@ class AutoresearchExecutorV2:
             or not isinstance(prior_evaluation_cost_microusd, int)
             or prior_evaluation_cost_microusd < 0
             or prior_evaluation_cost_microusd > tree_policy.live_cap_microusd
+            or isinstance(evaluation_provider_call_budget_charge, bool)
+            or not isinstance(evaluation_provider_call_budget_charge, int)
+            or evaluation_provider_call_budget_charge
+            < prior_evaluation_provider_call_count
+            or evaluation_provider_call_budget_charge
+            > tree_policy.live_max_provider_calls
+            or isinstance(evaluation_cost_budget_charge_microusd, bool)
+            or not isinstance(evaluation_cost_budget_charge_microusd, int)
+            or evaluation_cost_budget_charge_microusd
+            < prior_evaluation_cost_microusd
+            or evaluation_cost_budget_charge_microusd
+            > tree_policy.live_cap_microusd
+            or isinstance(unsettled_evaluation_operation_count, bool)
+            or not isinstance(unsettled_evaluation_operation_count, int)
+            or unsettled_evaluation_operation_count < 0
+            or isinstance(indeterminate_evaluation_operation_count, bool)
+            or not isinstance(indeterminate_evaluation_operation_count, int)
+            or indeterminate_evaluation_operation_count < 0
         ):
             raise AutoresearchExecutorV2Error(
                 "Git-tree prior evaluation usage is invalid"
+            )
+        recovery_operation_count = (
+            unsettled_evaluation_operation_count
+            + indeterminate_evaluation_operation_count
+        )
+        empty_operation_set_hash = sha256_json([])
+        if (
+            (unsettled_evaluation_operation_count == 0)
+            != (
+                unsettled_evaluation_operations_hash
+                == empty_operation_set_hash
+            )
+            or (indeterminate_evaluation_operation_count == 0)
+            != (
+                indeterminate_evaluation_operations_hash
+                == empty_operation_set_hash
+            )
+        ):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree evaluation recovery counts differ from commitments"
+            )
+        if recovery_operation_count:
+            if (
+                evaluation_provider_call_budget_charge
+                != tree_policy.live_max_provider_calls
+                or evaluation_cost_budget_charge_microusd
+                != tree_policy.live_cap_microusd
+            ):
+                raise AutoresearchExecutorV2Error(
+                    "Git-tree interrupted evaluation did not exhaust live budget"
+                )
+        elif (
+            evaluation_provider_call_budget_charge
+            != prior_evaluation_provider_call_count
+            or evaluation_cost_budget_charge_microusd
+            != prior_evaluation_cost_microusd
+            or unsettled_evaluation_operations_hash != empty_operation_set_hash
+            or indeterminate_evaluation_operations_hash != empty_operation_set_hash
+        ):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree evaluation recovery evidence is inconsistent"
             )
         try:
             snapshot_age_seconds = float(

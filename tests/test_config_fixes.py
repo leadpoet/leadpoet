@@ -67,7 +67,11 @@ def test_bug_32_reconciled_contradictions(clean_env):
     assert declared.lab_champion_retained_icp_count == from_env.lab_champion_retained_icp_count == 10
     assert declared.public_benchmark_public_total_icps == from_env.public_benchmark_public_total_icps
     assert declared.public_benchmark_public_weak_total == from_env.public_benchmark_public_weak_total
-    assert declared.conditional_validation_mode == from_env.conditional_validation_mode == "enforce"
+    assert (
+        declared.conditional_validation_mode
+        == from_env.conditional_validation_mode
+        == "off"
+    )
 
 
 def test_conditional_validation_retains_explicit_rollback(clean_env):

@@ -16,6 +16,7 @@ from gateway.research_lab.code_loop_engine import (
 from gateway.research_lab.git_tree_models import (
     TreeCheckpoint,
     TreePolicy,
+    TreeReplacement,
     TreeResult,
     derive_tree_id,
 )
@@ -142,10 +143,17 @@ class _FakeEngine:
         policy = TreePolicy.from_mapping(
             kwargs["budget_context"]["tree_policy"]["policy"]
         )
+        replacement_doc = kwargs["budget_context"].get("tree_replacement")
+        replacement = (
+            TreeReplacement.from_mapping(replacement_doc)
+            if isinstance(replacement_doc, dict)
+            else None
+        )
         tree_id = derive_tree_id(
             run_id=kwargs["run_id"],
             root_artifact_hash=kwargs["artifact"].model_artifact_hash,
             policy=policy,
+            replacement=replacement,
         )
         checkpoint = TreeCheckpoint(
             tree_id=tree_id,
@@ -280,11 +288,16 @@ def _payload(tmp_path: Path):
         "budget_context": {
             "requested_compute_budget_usd": 1.0,
             "tree_policy": {
-                "schema_version": "research_lab.git_tree_runtime_policy.v1",
+                "schema_version": "research_lab.git_tree_runtime_policy.v2",
                 "policy": tree_policy.to_dict(),
                 "evaluator_enabled": True,
                 "evaluator_commitment": {
-                    "schema_version": "research_lab.git_tree_evaluator_commitment.v2",
+                    "schema_version": "research_lab.git_tree_evaluator_commitment.v3",
+                    "resolved_snapshot_uri": (
+                        "s3://private-dev-snapshots/"
+                        + "7" * 64
+                    ),
+                    "snapshot_pointer_hash": "sha256:" + "6" * 64,
                     "snapshot_manifest_hash": "sha256:" + "7" * 64,
                     "snapshot_ready_hash": "sha256:" + "8" * 64,
                     "dev_set_hash": "sha256:" + "9" * 64,
@@ -314,6 +327,12 @@ def _payload(tmp_path: Path):
                 },
                 "prior_evaluation_provider_call_count": 0,
                 "prior_evaluation_cost_microusd": 0,
+                "evaluation_provider_call_budget_charge": 0,
+                "evaluation_cost_budget_charge_microusd": 0,
+                "unsettled_evaluation_operation_count": 0,
+                "unsettled_evaluation_operations_hash": sha256_json([]),
+                "indeterminate_evaluation_operation_count": 0,
+                "indeterminate_evaluation_operations_hash": sha256_json([]),
                 "snapshot_age_seconds": 0.0,
             },
         },
@@ -717,6 +736,185 @@ def test_autoresearch_executor_runs_existing_engine_and_commits_events(tmp_path)
     assert _artifact_seal.records[1][0] == canonical_json(result.output).encode(
         "utf-8"
     )
+
+
+def test_autoresearch_executor_accepts_conservative_interrupted_evaluation_recovery(
+    tmp_path,
+):
+    payload = _payload(tmp_path)
+    policy = payload["budget_context"]["tree_policy"]
+    operation_id = "sha256:" + "f" * 64
+    policy.update(
+        {
+            "evaluation_provider_call_budget_charge": 32,
+            "evaluation_cost_budget_charge_microusd": 500_000,
+            "unsettled_evaluation_operation_count": 1,
+            "unsettled_evaluation_operations_hash": sha256_json([operation_id]),
+        }
+    )
+    executor = AutoresearchExecutorV2(
+        provider_execute=lambda _request: {},
+        retry_policy_hashes={"openrouter": "sha256:" + "4" * 64},
+        config_supplier=_config,
+        engine_factory=_FakeEngine,
+        artifact_seal=_artifact_seal,
+    )
+    try:
+        validated = executor._validate_request(payload)
+    finally:
+        executor.close()
+
+    assert validated["budget_context"]["tree_policy"][
+        "evaluation_provider_call_budget_charge"
+    ] == 32
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    (
+        (
+            {
+                "unsettled_evaluation_operation_count": 1,
+                "unsettled_evaluation_operations_hash": sha256_json(
+                    ["sha256:" + "f" * 64]
+                ),
+            },
+            "did not exhaust live budget",
+        ),
+        (
+            {
+                "evaluation_provider_call_budget_charge": 32,
+                "evaluation_cost_budget_charge_microusd": 500_000,
+                "unsettled_evaluation_operation_count": 1,
+                "unsettled_evaluation_operations_hash": sha256_json([]),
+            },
+            "counts differ from commitments",
+        ),
+    ),
+)
+def test_autoresearch_executor_rejects_unsafe_interrupted_evaluation_recovery(
+    tmp_path,
+    updates,
+    message,
+):
+    payload = _payload(tmp_path)
+    payload["budget_context"]["tree_policy"].update(updates)
+    executor = AutoresearchExecutorV2(
+        provider_execute=lambda _request: {},
+        retry_policy_hashes={"openrouter": "sha256:" + "4" * 64},
+        config_supplier=_config,
+        engine_factory=_FakeEngine,
+        artifact_seal=_artifact_seal,
+    )
+    try:
+        with pytest.raises(AutoresearchExecutorV2Error, match=message):
+            executor._validate_request(payload)
+    finally:
+        executor.close()
+
+
+def test_autoresearch_executor_binds_host_bridge_to_replacement_tree(tmp_path):
+    _FakeEngine.instances.clear()
+    _artifact_seal.records.clear()
+    channel = _HostChannel()
+    payload = _payload(tmp_path)
+    policy = TreePolicy.from_mapping(
+        payload["budget_context"]["tree_policy"]["policy"]
+    )
+    replacement = TreeReplacement(
+        generation=1,
+        replaces_tree_id="sha256:" + "1" * 64,
+        cancellation_event_hash="sha256:" + "2" * 64,
+        prior_root_artifact_hash="sha256:" + "3" * 64,
+        prior_root_manifest_hash="sha256:" + "4" * 64,
+        prior_policy_hash=policy.policy_hash,
+        root_artifact_hash=payload["artifact"]["model_artifact_hash"],
+        root_manifest_hash=payload["artifact"]["manifest_hash"],
+        policy_hash=policy.policy_hash,
+    )
+    payload["budget_context"]["tree_replacement"] = replacement.to_dict()
+    expected_tree_id = derive_tree_id(
+        run_id=payload["run_id"],
+        root_artifact_hash=payload["artifact"]["model_artifact_hash"],
+        policy=policy,
+        replacement=replacement,
+    )
+    context = ExecutionContextV2(
+        job_id="autoresearch-v2:replacement",
+        purpose="research_lab.candidate_decision.v2",
+        epoch_id=1,
+        parent_receipt_hashes=_parent_receipt_hashes(payload),
+        provider_credential_ref_hashes={
+            "openrouter": "sha256:" + "5" * 64,
+            "openrouter_management": "sha256:" + "6" * 64,
+        },
+        host_operation_channel=channel,
+        allowed_purposes=frozenset(ROLE_PURPOSES["gateway_autoresearch"]),
+    )
+    executor = AutoresearchExecutorV2(
+        provider_execute=lambda _request: pytest.fail("provider must not be called"),
+        retry_policy_hashes={"openrouter": "sha256:" + "4" * 64},
+        config_supplier=_config,
+        engine_factory=_FakeEngine,
+        artifact_seal=_artifact_seal,
+    )
+    try:
+        result = asyncio.run(executor(OP_RUN_CODE_EDIT_LOOP, payload, context))
+    finally:
+        executor.close()
+
+    engine = _FakeEngine.instances[0]
+    assert engine.kwargs["tree_repository"]._tree_id == expected_tree_id
+    assert result.output["tree_result"]["tree_id"] == expected_tree_id
+    assert (
+        engine.run_kwargs["budget_context"]["tree_replacement"]
+        == replacement.to_dict()
+    )
+
+
+def test_autoresearch_executor_rejects_replacement_for_another_root(tmp_path):
+    payload = _payload(tmp_path)
+    policy = TreePolicy.from_mapping(
+        payload["budget_context"]["tree_policy"]["policy"]
+    )
+    payload["budget_context"]["tree_replacement"] = TreeReplacement(
+        generation=1,
+        replaces_tree_id="sha256:" + "1" * 64,
+        cancellation_event_hash="sha256:" + "2" * 64,
+        prior_root_artifact_hash="sha256:" + "3" * 64,
+        prior_root_manifest_hash="sha256:" + "4" * 64,
+        prior_policy_hash=policy.policy_hash,
+        root_artifact_hash="sha256:" + "5" * 64,
+        root_manifest_hash=payload["artifact"]["manifest_hash"],
+        policy_hash=policy.policy_hash,
+    ).to_dict()
+    context = ExecutionContextV2(
+        job_id="autoresearch-v2:wrong-replacement-root",
+        purpose="research_lab.candidate_decision.v2",
+        epoch_id=1,
+        parent_receipt_hashes=_parent_receipt_hashes(payload),
+        provider_credential_ref_hashes={
+            "openrouter": "sha256:" + "5" * 64,
+            "openrouter_management": "sha256:" + "6" * 64,
+        },
+        host_operation_channel=_HostChannel(),
+        allowed_purposes=frozenset(ROLE_PURPOSES["gateway_autoresearch"]),
+    )
+    executor = AutoresearchExecutorV2(
+        provider_execute=lambda _request: pytest.fail("provider must not be called"),
+        retry_policy_hashes={"openrouter": "sha256:" + "4" * 64},
+        config_supplier=_config,
+        engine_factory=_FakeEngine,
+        artifact_seal=_artifact_seal,
+    )
+    try:
+        with pytest.raises(
+            AutoresearchExecutorV2Error,
+            match="replacement authority differs",
+        ):
+            asyncio.run(executor(OP_RUN_CODE_EDIT_LOOP, payload, context))
+    finally:
+        executor.close()
 
 
 def test_host_git_tree_operation_commitment_is_strictly_validated():

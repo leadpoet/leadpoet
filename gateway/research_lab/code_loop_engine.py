@@ -33,6 +33,7 @@ from gateway.research_lab.git_tree_models import (
     TreeEvaluation,
     TreeNode,
     TreePolicy,
+    TreeReplacement,
     TreeResult,
     build_operation_id,
     cohort_evaluation_operation_id,
@@ -2008,6 +2009,16 @@ class CodeEditLoopEngine:
         tree_policy = TreePolicy.from_mapping(measured_policy)
         if tree_policy.mode != "active":
             raise GitTreeSchedulerError("tree engine cannot run while tree mode is off")
+        raw_tree_replacement = budget_context.get("tree_replacement")
+        if raw_tree_replacement is not None and not isinstance(
+            raw_tree_replacement, Mapping
+        ):
+            raise GitTreeSchedulerError("tree replacement authority is invalid")
+        tree_replacement = (
+            TreeReplacement.from_mapping(raw_tree_replacement)
+            if isinstance(raw_tree_replacement, Mapping)
+            else None
+        )
         evaluator_commitment = dict(
             self._tree_policy_doc.get("evaluator_commitment") or {}
         )
@@ -2034,6 +2045,7 @@ class CodeEditLoopEngine:
             run_id=run_id,
             root_artifact_hash=root_artifact.model_artifact_hash,
             policy=tree_policy,
+            replacement=tree_replacement,
         )
         selected: list[BuiltCodeEditCandidate] = []
         resume = dict(resume_state or {})
@@ -2113,11 +2125,38 @@ class CodeEditLoopEngine:
                 or 0
             ),
         )
-        if tree_evaluation_cost_microusd > budget_limit_microusd:
+        evaluation_cost_budget_charge_microusd = max(
+            0,
+            int(
+                self._tree_policy_doc.get(
+                    "evaluation_cost_budget_charge_microusd", 0
+                )
+                or 0
+            ),
+        )
+        evaluation_provider_call_budget_charge = max(
+            0,
+            int(
+                self._tree_policy_doc.get(
+                    "evaluation_provider_call_budget_charge", 0
+                )
+                or 0
+            ),
+        )
+        if (
+            evaluation_cost_budget_charge_microusd
+            < tree_evaluation_cost_microusd
+            or evaluation_provider_call_budget_charge
+            < tree_evaluation_provider_call_count
+        ):
             raise GitTreeSchedulerError(
-                "settled tree evaluation cost exceeds the funded budget"
+                "tree evaluation recovery charge is below settled usage"
             )
-        budget_limit_microusd -= tree_evaluation_cost_microusd
+        if evaluation_cost_budget_charge_microusd > budget_limit_microusd:
+            raise GitTreeSchedulerError(
+                "tree evaluation recovery charge exceeds the funded budget"
+            )
+        budget_limit_microusd -= evaluation_cost_budget_charge_microusd
         built_candidate_total = max(0, int(resume.get("built_candidate_count") or 0))
         finalization_reserve_reached = False
         provider_capabilities = None
@@ -2366,6 +2405,11 @@ class CodeEditLoopEngine:
             "run_id": str(run_id),
             "policy": tree_policy.to_dict(),
             "evaluator_commitment": evaluator_commitment,
+            **(
+                {"replacement": tree_replacement.to_dict()}
+                if tree_replacement is not None
+                else {}
+            ),
         }
         root_git_commit = await self._tree_repository_call(
             "initialize",
@@ -6451,6 +6495,40 @@ class CodeEditLoopEngine:
             finalist_pool = tuple(
                 _candidate_tree_node(candidate)
                 for candidate in final_evaluations
+            )
+        if should_pause and await should_pause():
+            last_checkpoint = await self._emit_checkpoint(
+                run_id=run_id,
+                settings=settings,
+                artifact=artifact,
+                model_id=model_id,
+                budget_context=budget_context,
+                iterations_completed=iteration,
+                elapsed_seconds=elapsed(),
+                selected=selected,
+                provider_usage=provider_usage,
+                openrouter_calls=openrouter_calls,
+                estimated_cost=estimated_cost,
+                actual_cost_microusd=actual_cost_microusd,
+                stage="pause_before_tree_final_selection",
+                loop_direction_plan=loop_direction_plan_doc,
+                built_candidate_count=built_candidate_total,
+                probe_budget=probe_budget,
+                planner_reference_repair_attempted=reference_repair_attempted,
+                planner_reference_repair_status=reference_repair_status,
+            )
+            _cleanup_source_tmp()
+            return self._result(
+                selected=selected,
+                status="paused",
+                stop_reason="maintenance_pause_requested",
+                iterations_completed=iteration,
+                elapsed_seconds=elapsed(),
+                estimated_cost=estimated_cost,
+                actual_cost_microusd=actual_cost_microusd,
+                openrouter_calls=openrouter_calls,
+                provider_usage=provider_usage,
+                checkpoint=last_checkpoint,
             )
 
         try:

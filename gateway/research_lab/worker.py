@@ -32,7 +32,9 @@ from gateway.research_lab.autoresearch_authority_v2 import (
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.code_build import CodeEditCandidateBuilder, CodeEditInfraFailureError
 from gateway.research_lab.git_tree_models import (
+    GitTreeContractError,
     TreePolicy,
+    TreeReplacement,
     derive_tree_id,
 )
 from gateway.research_lab.git_tree_store import GitTreeStore
@@ -110,6 +112,7 @@ from gateway.research_lab.reimbursement_awards import (
     normalize_cost_evidence,
 )
 from gateway.research_lab.store import (
+    call_rpc,
     canonical_hash,
     create_auto_research_loop_event,
     create_candidate_artifact,
@@ -570,6 +573,8 @@ _RETRYABLE_ERROR_MARKERS = (
     "status 502",
     "status 503",
     "status 504",
+    "research_lab_git_tree_create_stale_active_root",
+    "research_lab_git_tree_handoff_stale_active_root",
 )
 _PERMANENT_ERROR_MARKERS = (
     "duplicate key",
@@ -1172,47 +1177,159 @@ class HostedWorkerOutcome:
         }
 
 
-async def _load_tree_evaluation_usage(
-    *, tree_id: str, max_rows: int
-) -> dict[str, Any]:
-    """Restore tree-wide live-evaluation usage from durable settlements."""
+@dataclass(frozen=True)
+class TreeAuthorityResolution:
+    """Current tree authority and the checkpoint that may safely resume it."""
 
-    rows = await select_all(
-        "research_lab_autoresearch_operation_current",
-        columns=(
-            "logical_operation_id,operation_status,settled_cost_microusd,"
-            "provider_call_count"
-        ),
-        filters=(
-            ("tree_id", str(tree_id)),
-            ("operation_kind", "evaluation"),
-        ),
-        order_by=(("logical_operation_id", False),),
-        batch_size=min(1000, max(1, int(max_rows))),
-        max_rows=max(1, int(max_rows)),
+    tree_id: str
+    resume_state: Mapping[str, Any] | None
+    replacement: TreeReplacement | None = None
+    evaluator_commitment: Mapping[str, Any] | None = None
+    requires_evaluator_replacement: bool = False
+    outcome: HostedWorkerOutcome | None = None
+
+
+def _tree_evaluator_commitment(
+    readiness: Mapping[str, Any],
+    *,
+    policy: TreePolicy,
+    snapshot_pointer_hash: str | None = None,
+) -> dict[str, Any]:
+    resolved_snapshot_uri = str(
+        readiness.get("resolved_snapshot_uri") or ""
+    ).strip()
+    if not resolved_snapshot_uri or resolved_snapshot_uri.endswith(
+        "/current.json"
+    ):
+        raise HostedResearchLabWorkerError(
+            "Git-tree evaluator did not resolve an immutable snapshot URI"
+        )
+    pointer_hash = str(
+        snapshot_pointer_hash
+        if snapshot_pointer_hash is not None
+        else readiness.get("pointer_hash") or ""
     )
-    ambiguous = sorted(
-        str(row.get("logical_operation_id") or "")
-        for row in rows
-        if str(row.get("operation_status") or "")
-        in {"reserved", "indeterminate"}
-    )
-    terminal = [
-        row
-        for row in rows
-        if str(row.get("operation_status") or "") in {"succeeded", "failed"}
-    ]
+    if pointer_hash and not re.fullmatch(r"sha256:[0-9a-f]{64}", pointer_hash):
+        raise HostedResearchLabWorkerError(
+            "Git-tree snapshot pointer hash is invalid"
+        )
     return {
-        "settled_cost_microusd": sum(
-            max(0, int(row.get("settled_cost_microusd") or 0))
-            for row in terminal
+        "schema_version": "research_lab.git_tree_evaluator_commitment.v3",
+        "resolved_snapshot_uri": resolved_snapshot_uri,
+        "snapshot_pointer_hash": pointer_hash,
+        "snapshot_manifest_hash": str(readiness.get("manifest_hash") or ""),
+        "snapshot_ready_hash": str(readiness.get("ready_hash") or ""),
+        "dev_set_hash": str(readiness.get("dev_set_hash") or ""),
+        "dev_set_size": int(readiness.get("dev_set_size") or 0),
+        "snapshot_bank_hash": str(readiness.get("snapshot_bank_hash") or ""),
+        "snapshot_bank_size": int(readiness.get("snapshot_bank_size") or 0),
+        "daily_bank_hash": str(readiness.get("daily_bank_hash") or ""),
+        "selection_manifest_hash": str(
+            readiness.get("selection_manifest_hash") or ""
         ),
-        "provider_call_count": sum(
-            max(0, int(row.get("provider_call_count") or 0))
-            for row in terminal
+        "selection_seed_hash": str(
+            readiness.get("selection_seed_hash") or ""
         ),
-        "ambiguous_operation_ids": tuple(item for item in ambiguous if item),
-        "terminal_operation_count": len(terminal),
+        "miner_direction_hash": str(
+            readiness.get("miner_direction_hash") or ""
+        ),
+        "benchmark_date": str(readiness.get("benchmark_date") or ""),
+        "benchmark_bundle_id": str(
+            readiness.get("benchmark_bundle_id") or ""
+        ),
+        "benchmark_bundle_hash": str(
+            readiness.get("benchmark_bundle_hash") or ""
+        ),
+        "rolling_window_hash": str(
+            readiness.get("rolling_window_hash") or ""
+        ),
+        "private_model_manifest_hash": str(
+            readiness.get("private_model_manifest_hash") or ""
+        ),
+        "champion_image_digest": str(
+            readiness.get("champion_image_digest") or ""
+        ),
+        "source_commit": str(readiness.get("source_commit") or ""),
+        "model_config_hash": str(readiness.get("model_config_hash") or ""),
+        "provider_model_ids": list(readiness.get("provider_model_ids") or ()),
+        "miss_policy": "strict",
+        "score_version": "research_lab.dev_eval.v2",
+        "evaluation_timeout_seconds": dev_eval_total_timeout_seconds(),
+        "live_max_icps_per_node": policy.live_max_icps_per_node,
+        "live_max_provider_calls": policy.live_max_provider_calls,
+        "live_cap_microusd": policy.live_cap_microusd,
+        "minimum_evidence_retention_days": policy.evidence_retention_days,
+    }
+
+
+def _replacement_resume_state(
+    checkpoint_doc: Mapping[str, Any] | None,
+    *,
+    run_id: str,
+    replacement: TreeReplacement,
+) -> dict[str, Any]:
+    """Carry run-wide accounting forward without restoring stale tree nodes."""
+
+    checkpoint = dict(checkpoint_doc or {})
+    carried: dict[str, Any] = {
+        "schema_version": "1.0",
+        "run_id": str(run_id),
+        "stage": "git_tree_root_replaced",
+        "tree_replacement": replacement.to_dict(),
+        "iterations_completed": 0,
+        "built_candidate_count": 0,
+    }
+    for name in (
+        "elapsed_seconds",
+        "estimated_cost_usd",
+        "actual_openrouter_cost_microusd",
+        "openrouter_call_count",
+        "provider_usage",
+        "probe_count",
+        "probe_cost_microusd",
+    ):
+        if name in checkpoint:
+            carried[name] = checkpoint[name]
+    return carried
+
+
+async def _load_tree_evaluation_usage(
+    *, run_id: str
+) -> dict[str, Any]:
+    """Restore run-wide live-evaluation usage across every tree generation."""
+
+    data = await call_rpc(
+        "research_lab_autoresearch_run_evaluation_usage",
+        {"requested_run_id": str(run_id)},
+    )
+    if isinstance(data, list):
+        data = data[0] if data else None
+    if not isinstance(data, Mapping):
+        raise HostedResearchLabWorkerError(
+            "Git-tree run evaluation usage RPC returned no authority"
+        )
+    unsettled_raw = data.get("unsettled_operation_ids")
+    indeterminate_raw = data.get("indeterminate_operation_ids")
+    if not isinstance(unsettled_raw, list) or not isinstance(
+        indeterminate_raw, list
+    ):
+        raise HostedResearchLabWorkerError(
+            "Git-tree run evaluation usage has invalid recovery evidence"
+        )
+    return {
+        "settled_cost_microusd": max(
+            0, int(data.get("settled_cost_microusd") or 0)
+        ),
+        "provider_call_count": max(0, int(data.get("provider_call_count") or 0)),
+        "unsettled_operation_ids": tuple(
+            sorted(str(item) for item in unsettled_raw if str(item))
+        ),
+        "indeterminate_operation_ids": tuple(
+            sorted(str(item) for item in indeterminate_raw if str(item))
+        ),
+        "terminal_operation_count": max(
+            0, int(data.get("terminal_operation_count") or 0)
+        ),
     }
 
 
@@ -2266,49 +2383,15 @@ class ResearchLabHostedWorker:
 
         active_start = await load_active_private_model(self.config, register_bootstrap=True)
         artifact = active_start.artifact
-        tree_id = derive_tree_id(
-            run_id=context.run_id,
-            root_artifact_hash=artifact.model_artifact_hash,
-            policy=self.tree_policy,
-        )
-        authority_pause = await self._guard_existing_tree_authority(
+        tree_authority = await self._resolve_tree_authority(
             context=context,
             artifact=artifact,
-            requested_tree_id=tree_id,
             checkpoint_doc=resume_state,
         )
-        if authority_pause is not None:
-            return authority_pause
-        resume_block_reason = self._tree_resume_block_reason(
-            resume_state,
-            artifact,
-            expected_tree_id=tree_id,
-        )
-        if resume_block_reason:
-            return await self._mark_paused(
-                context,
-                loop_result=None,
-                checkpoint_doc=resume_state,
-                reason=resume_block_reason,
-            )
-        tree_evaluation_usage = await _load_tree_evaluation_usage(
-            tree_id=tree_id,
-            max_rows=max(100, int(self.tree_policy.max_nodes) * 4),
-        )
-        if tree_evaluation_usage["ambiguous_operation_ids"]:
-            logger.warning(
-                "research_lab_git_tree_evaluation_resume_blocked "
-                "run_id=%s tree_id=%s ambiguous_operation_count=%s",
-                compact_ref(context.run_id),
-                tree_id[:24],
-                len(tree_evaluation_usage["ambiguous_operation_ids"]),
-            )
-            return await self._mark_paused(
-                context,
-                loop_result=None,
-                checkpoint_doc=resume_state,
-                reason="tree_evaluation_operation_indeterminate",
-            )
+        if tree_authority.outcome is not None:
+            return tree_authority.outcome
+        tree_id = tree_authority.tree_id
+        resume_state = tree_authority.resume_state
         ticket_doc = (
             context.ticket.get("ticket_doc")
             if isinstance(context.ticket.get("ticket_doc"), Mapping)
@@ -2320,16 +2403,27 @@ class ResearchLabHostedWorker:
             or ""
         )
         dev_selection_seed = str(context.run_id)
+        pinned_evaluator_commitment = (
+            dict(tree_authority.evaluator_commitment)
+            if isinstance(tree_authority.evaluator_commitment, Mapping)
+            else None
+        )
+        snapshot_uri = str(
+            (
+                pinned_evaluator_commitment.get("resolved_snapshot_uri")
+                if pinned_evaluator_commitment is not None
+                else None
+            )
+            or os.getenv("RESEARCH_LAB_DEV_SNAPSHOT_URI")
+            or DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI
+        )
         readiness = await asyncio.to_thread(
             snapshot_readiness,
-            str(
-                os.getenv("RESEARCH_LAB_DEV_SNAPSHOT_URI")
-                or DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI
-            ),
+            snapshot_uri,
             expected_dev_icp_count=self.tree_policy.live_max_icps_per_node,
             selection_seed=dev_selection_seed,
             miner_direction=miner_direction,
-            require_current_day=True,
+            require_current_day=pinned_evaluator_commitment is None,
         )
         tree_preflight_reason = ""
         if not dev_eval_runner_enabled():
@@ -2352,6 +2446,29 @@ class ResearchLabHostedWorker:
             tree_preflight_reason = (
                 "tree_snapshot_benchmark_model_differs_from_active_model"
             )
+        evaluator_commitment: dict[str, Any] = {}
+        if not tree_preflight_reason:
+            evaluator_commitment = _tree_evaluator_commitment(
+                readiness,
+                policy=self.tree_policy,
+                snapshot_pointer_hash=(
+                    str(
+                        pinned_evaluator_commitment.get(
+                            "snapshot_pointer_hash"
+                        )
+                        or ""
+                    )
+                    if pinned_evaluator_commitment is not None
+                    else None
+                ),
+            )
+            if (
+                pinned_evaluator_commitment is not None
+                and evaluator_commitment != pinned_evaluator_commitment
+            ):
+                tree_preflight_reason = (
+                    "tree_snapshot_commitment_does_not_match_pinned_tree"
+                )
         if tree_preflight_reason:
             logger.warning(
                 "research_lab_git_tree_preflight_deferred run_id=%s reason=%s",
@@ -2365,61 +2482,69 @@ class ResearchLabHostedWorker:
                 reason=tree_preflight_reason,
             )
 
-        evaluator_commitment = {
-            "schema_version": "research_lab.git_tree_evaluator_commitment.v2",
-            "snapshot_manifest_hash": str(readiness.get("manifest_hash") or ""),
-            "snapshot_ready_hash": str(readiness.get("ready_hash") or ""),
-            "dev_set_hash": str(readiness.get("dev_set_hash") or ""),
-            "dev_set_size": int(readiness.get("dev_set_size") or 0),
-            "snapshot_bank_hash": str(
-                readiness.get("snapshot_bank_hash") or ""
-            ),
-            "snapshot_bank_size": int(
-                readiness.get("snapshot_bank_size") or 0
-            ),
-            "daily_bank_hash": str(readiness.get("daily_bank_hash") or ""),
-            "selection_manifest_hash": str(
-                readiness.get("selection_manifest_hash") or ""
-            ),
-            "selection_seed_hash": str(
-                readiness.get("selection_seed_hash") or ""
-            ),
-            "miner_direction_hash": str(
-                readiness.get("miner_direction_hash") or ""
-            ),
-            "benchmark_date": str(readiness.get("benchmark_date") or ""),
-            "benchmark_bundle_id": str(
-                readiness.get("benchmark_bundle_id") or ""
-            ),
-            "benchmark_bundle_hash": str(
-                readiness.get("benchmark_bundle_hash") or ""
-            ),
-            "rolling_window_hash": str(
-                readiness.get("rolling_window_hash") or ""
-            ),
-            "private_model_manifest_hash": str(
-                readiness.get("private_model_manifest_hash") or ""
-            ),
-            "champion_image_digest": str(
-                readiness.get("champion_image_digest") or ""
-            ),
-            "source_commit": str(readiness.get("source_commit") or ""),
-            "model_config_hash": str(
-                readiness.get("model_config_hash") or ""
-            ),
-            "provider_model_ids": list(readiness.get("provider_model_ids") or ()),
-            "miss_policy": "strict",
-            "score_version": "research_lab.dev_eval.v2",
-            "evaluation_timeout_seconds": dev_eval_total_timeout_seconds(),
-            "live_max_icps_per_node": self.tree_policy.live_max_icps_per_node,
-            "live_max_provider_calls": self.tree_policy.live_max_provider_calls,
-            "live_cap_microusd": self.tree_policy.live_cap_microusd,
-            "minimum_evidence_retention_days": (
-                self.tree_policy.evidence_retention_days
-            ),
-        }
+        if tree_authority.requires_evaluator_replacement:
+            tree_authority = await self._resolve_tree_authority(
+                context=context,
+                artifact=artifact,
+                checkpoint_doc=resume_state,
+                change_reason="tree_evaluator_commitment_upgraded",
+                force_replacement=True,
+            )
+            if tree_authority.outcome is not None:
+                return tree_authority.outcome
+            tree_id = tree_authority.tree_id
+            resume_state = tree_authority.resume_state
+
+        resume_block_reason = self._tree_resume_block_reason(
+            resume_state,
+            artifact,
+            expected_tree_id=tree_id,
+            expected_policy=self.tree_policy,
+        )
+        if resume_block_reason:
+            return await self._mark_paused(
+                context,
+                loop_result=None,
+                checkpoint_doc=resume_state,
+                reason=resume_block_reason,
+            )
+
+        tree_evaluation_usage = await _load_tree_evaluation_usage(
+            run_id=context.run_id
+        )
+        unsettled_operation_ids = tuple(
+            tree_evaluation_usage["unsettled_operation_ids"]
+        )
+        indeterminate_operation_ids = tuple(
+            tree_evaluation_usage["indeterminate_operation_ids"]
+        )
+        conservative_recovery = bool(
+            unsettled_operation_ids or indeterminate_operation_ids
+        )
+        evaluation_provider_call_budget_charge = int(
+            tree_evaluation_usage["provider_call_count"]
+        )
+        evaluation_cost_budget_charge_microusd = int(
+            tree_evaluation_usage["settled_cost_microusd"]
+        )
+        if conservative_recovery:
+            evaluation_provider_call_budget_charge = (
+                self.tree_policy.live_max_provider_calls
+            )
+            evaluation_cost_budget_charge_microusd = (
+                self.tree_policy.live_cap_microusd
+            )
+            logger.warning(
+                "research_lab_git_tree_evaluation_resume_conservative "
+                "run_id=%s tree_id=%s unsettled_count=%s "
+                "indeterminate_count=%s live_evaluation_disabled=true",
+                compact_ref(context.run_id),
+                tree_id[:24],
+                len(unsettled_operation_ids),
+                len(indeterminate_operation_ids),
+            )
         tree_runtime_policy = {
-            "schema_version": "research_lab.git_tree_runtime_policy.v1",
+            "schema_version": "research_lab.git_tree_runtime_policy.v2",
             "policy": self.tree_policy.to_dict(),
             "evaluator_enabled": True,
             "evaluator_commitment": evaluator_commitment,
@@ -2429,6 +2554,24 @@ class ResearchLabHostedWorker:
             "prior_evaluation_cost_microusd": int(
                 tree_evaluation_usage["settled_cost_microusd"]
             ),
+            "evaluation_provider_call_budget_charge": (
+                evaluation_provider_call_budget_charge
+            ),
+            "evaluation_cost_budget_charge_microusd": (
+                evaluation_cost_budget_charge_microusd
+            ),
+            "unsettled_evaluation_operation_count": len(
+                unsettled_operation_ids
+            ),
+            "unsettled_evaluation_operations_hash": sha256_json(
+                list(unsettled_operation_ids)
+            ),
+            "indeterminate_evaluation_operation_count": len(
+                indeterminate_operation_ids
+            ),
+            "indeterminate_evaluation_operations_hash": sha256_json(
+                list(indeterminate_operation_ids)
+            ),
             "snapshot_age_seconds": float(
                 readiness.get("snapshot_age_seconds") or 0.0
             ),
@@ -2436,6 +2579,10 @@ class ResearchLabHostedWorker:
         max_candidates = self.tree_policy.max_nodes
         paid_finalist_count = 1
         budget_context["tree_policy"] = tree_runtime_policy
+        if tree_authority.replacement is not None:
+            budget_context["tree_replacement"] = (
+                tree_authority.replacement.to_dict()
+            )
         logger.info(
             "research_lab_git_tree_policy run_id=%s mode=%s branch_factor=%s "
             "beam_width=%s max_depth=%s max_nodes=%s dev_icps_per_node=%s "
@@ -2661,6 +2808,9 @@ class ResearchLabHostedWorker:
             dev_evaluator = build_attested_code_edit_dev_evaluator_v2(
                 epoch_id=evaluation_epoch,
                 worker_index=int(self.config.hosted_worker_index or 0),
+                snapshot_uri=str(
+                    evaluator_commitment["resolved_snapshot_uri"]
+                ),
                 provider_environment=docker_provider_env,
                 model_env_passthrough=_private_model_env_passthrough(self.config),
                 parent_graphs=active_model_parent_graphs,
@@ -2670,10 +2820,10 @@ class ResearchLabHostedWorker:
                 live_timeout_seconds=self.tree_policy.live_timeout_seconds,
                 evaluation_concurrency=self.tree_policy.evaluation_concurrency,
                 prior_provider_call_count=int(
-                    tree_evaluation_usage["provider_call_count"]
+                    evaluation_provider_call_budget_charge
                 ),
                 prior_settled_cost_microusd=int(
-                    tree_evaluation_usage["settled_cost_microusd"]
+                    evaluation_cost_budget_charge_microusd
                 ),
                 selection_seed=dev_selection_seed,
                 miner_direction=miner_direction,
@@ -2731,6 +2881,30 @@ class ResearchLabHostedWorker:
                     proof_doc=dict(command.get("proof_doc") or {}),
                 )
 
+            active_root_change: Any | None = None
+
+            async def _should_pause_for_control_or_root_change() -> bool:
+                nonlocal active_root_change
+                if await is_autoresearch_maintenance_paused():
+                    return True
+                if active_root_change is None:
+                    active_root_change = (
+                        await self._active_private_model_if_changed(artifact)
+                    )
+                if active_root_change is not None:
+                    logger.warning(
+                        "research_lab_git_tree_root_change_detected_in_flight "
+                        "run_id=%s tree_id=%s old_root=%s new_root=%s",
+                        compact_ref(context.run_id),
+                        tree_id[:24],
+                        str(artifact.model_artifact_hash)[:24],
+                        str(
+                            active_root_change.artifact.model_artifact_hash
+                        )[:24],
+                    )
+                    return True
+                return False
+
             authoritative_loop = await run_authoritative_autoresearch_v2(
                 run_id=context.run_id,
                 ticket=context.ticket,
@@ -2754,7 +2928,7 @@ class ResearchLabHostedWorker:
                 expected_event_state_hash=expected_event_state_hash,
                 record_loop_event=_record_loop_event,
                 code_builder=code_builder,
-                should_pause=is_autoresearch_maintenance_paused,
+                should_pause=_should_pause_for_control_or_root_change,
                 record_privacy_proof=_record_v2_privacy_proof,
                 dev_evaluator=dev_evaluator,
                 epoch_id=evaluation_epoch,
@@ -2766,11 +2940,35 @@ class ResearchLabHostedWorker:
             loop_result = authoritative_loop.loop_result
             autoresearch_authority = dict(authoritative_loop.authority)
             if loop_result.status == "paused":
+                if active_root_change is not None:
+                    return await self._requeue_tree_root_replacement(
+                        context=context,
+                        prior_artifact=artifact,
+                        active_model=active_root_change,
+                        loop_result=loop_result,
+                        checkpoint_doc=(
+                            loop_result.checkpoint_doc or latest_checkpoint
+                        ),
+                        change_reason="active_private_model_changed_during_tree",
+                    )
                 return await self._mark_paused(
                     context,
                     loop_result=loop_result,
                     checkpoint_doc=loop_result.checkpoint_doc or latest_checkpoint,
                     reason="maintenance_pause_checkpointed",
+                )
+            active_root_change = (
+                active_root_change
+                or await self._active_private_model_if_changed(artifact)
+            )
+            if active_root_change is not None:
+                return await self._requeue_tree_root_replacement(
+                    context=context,
+                    prior_artifact=artifact,
+                    active_model=active_root_change,
+                    loop_result=loop_result,
+                    checkpoint_doc=loop_result.checkpoint_doc or latest_checkpoint,
+                    change_reason="active_private_model_changed_before_handoff",
                 )
             git_tree_selection: dict[str, Any] = {}
             for recorded in reversed(recorded_loop_events):
@@ -3027,10 +3225,16 @@ class ResearchLabHostedWorker:
                 ),
                 git_tree_lineage_hash=sha256_json(git_tree_lineage),
             )
-            candidate_row, _candidate_event = await self._store_write_with_retry(
-                "candidate_artifact_create",
-                lambda request=request: create_candidate_artifact(request),
+            candidate_result = await self._create_candidate_with_root_fence(
+                context=context,
+                request=request,
+                final_artifact=final_artifact,
+                loop_result=loop_result,
+                checkpoint_doc=loop_result.checkpoint_doc or latest_checkpoint,
             )
+            if isinstance(candidate_result, HostedWorkerOutcome):
+                return candidate_result
+            candidate_row, _candidate_event = candidate_result
             authority_receipt = (
                 autoresearch_authority.get("execution_receipt")
                 or autoresearch_authority.get("receipt")
@@ -3293,6 +3497,42 @@ class ResearchLabHostedWorker:
                 await asyncio.sleep(0.25 * attempt)
         raise RuntimeError(f"Research Lab store write failed after retries: {label}") from last_exc
 
+    async def _create_candidate_with_root_fence(
+        self,
+        *,
+        context: HostedRunContext,
+        request: ResearchLabCandidateArtifactCreateRequest,
+        final_artifact: Any,
+        loop_result: Any,
+        checkpoint_doc: Mapping[str, Any] | None,
+    ) -> Any:
+        """Turn the atomic handoff's stale-root fence into a replacement requeue."""
+
+        try:
+            return await self._store_write_with_retry(
+                "candidate_artifact_create",
+                lambda: create_candidate_artifact(request),
+            )
+        except Exception as exc:
+            if (
+                "research_lab_git_tree_handoff_stale_active_root"
+                not in str(exc).lower()
+            ):
+                raise
+            active_model = await self._active_private_model_if_changed(
+                final_artifact
+            )
+            if active_model is None:
+                raise
+            return await self._requeue_tree_root_replacement(
+                context=context,
+                prior_artifact=final_artifact,
+                active_model=active_model,
+                loop_result=loop_result,
+                checkpoint_doc=checkpoint_doc,
+                change_reason="active_private_model_changed_during_handoff",
+            )
+
     async def _reconcile_stale_loop_projections(self, *, limit: int = 200) -> int:
         """Finalize loop projections left ``running`` while their queue row is terminal.
 
@@ -3543,9 +3783,15 @@ class ResearchLabHostedWorker:
             candidate_rows = await self._candidate_rows_for_run(context.run_id)
             if not candidate_rows:
                 return None
+            candidate_rows = await self._recoverable_candidate_rows_for_current_tree(
+                run_id=context.run_id,
+                candidate_rows=candidate_rows,
+            )
+            if not candidate_rows:
+                return None
             if len(candidate_rows) != 1:
                 raise HostedResearchLabWorkerError(
-                    "Git-tree recovery requires exactly one candidate artifact"
+                    "Git-tree recovery requires exactly one current-generation candidate artifact"
                 )
             candidate = candidate_rows[0]
             required_tree_fields = {
@@ -3624,7 +3870,103 @@ class ResearchLabHostedWorker:
             candidate_ids=tuple(candidate_ids),
         )
 
+    async def _recoverable_candidate_rows_for_current_tree(
+        self,
+        *,
+        run_id: str,
+        candidate_rows: Sequence[Mapping[str, Any]],
+    ) -> list[Mapping[str, Any]]:
+        """Exclude partial candidate writes owned by a stale tree generation."""
+
+        latest_tree = await select_one(
+            "research_lab_autoresearch_run_tree_current",
+            columns=(
+                "tree_id,root_artifact_hash,root_manifest_hash,"
+                "current_event_type"
+            ),
+            filters=(("run_id", run_id),),
+        )
+        if not isinstance(latest_tree, Mapping):
+            raise HostedResearchLabWorkerError(
+                "Git-tree recovery cannot resolve the current tree generation"
+            )
+        latest_tree_id = str(latest_tree.get("tree_id") or "")
+        if not latest_tree_id:
+            raise HostedResearchLabWorkerError(
+                "Git-tree recovery current generation has no tree identity"
+            )
+        if str(latest_tree.get("current_event_type") or "") in {
+            "tree_cancelled_root_changed",
+            "tree_failed",
+        }:
+            logger.warning(
+                "research_lab_git_tree_recovery_ignored_stale_candidates "
+                "run_id=%s tree_id=%s reason=latest_tree_terminal",
+                compact_ref(run_id),
+                latest_tree_id[:24],
+            )
+            return []
+
+        active_model = await select_one(
+            "research_lab_private_model_version_current",
+            columns=(
+                "model_artifact_hash,private_model_manifest_hash,"
+                "current_version_status"
+            ),
+            filters=(("current_version_status", "active"),),
+        )
+        if not isinstance(active_model, Mapping):
+            raise HostedResearchLabWorkerError(
+                "Git-tree recovery cannot resolve active private model authority"
+            )
+        if (
+            str(latest_tree.get("root_artifact_hash") or "")
+            != str(active_model.get("model_artifact_hash") or "")
+            or str(latest_tree.get("root_manifest_hash") or "")
+            != str(active_model.get("private_model_manifest_hash") or "")
+        ):
+            logger.warning(
+                "research_lab_git_tree_recovery_ignored_stale_candidates "
+                "run_id=%s tree_id=%s reason=active_root_changed",
+                compact_ref(run_id),
+                latest_tree_id[:24],
+            )
+            return []
+
+        current_rows = [
+            row
+            for row in candidate_rows
+            if str(row.get("git_tree_id") or "") == latest_tree_id
+        ]
+        stale_count = len(candidate_rows) - len(current_rows)
+        if stale_count:
+            logger.warning(
+                "research_lab_git_tree_recovery_filtered_stale_candidates "
+                "run_id=%s tree_id=%s stale_count=%s",
+                compact_ref(run_id),
+                latest_tree_id[:24],
+                stale_count,
+            )
+        return current_rows
+
     async def _candidate_ids_for_run(self, run_id: str) -> list[str]:
+        handoffs = await select_many(
+            "research_lab_autoresearch_tree_handoffs",
+            columns="candidate_id",
+            filters=(("run_id", run_id),),
+            limit=2,
+        )
+        if len(handoffs) > 1:
+            raise HostedResearchLabWorkerError(
+                "Git-tree recovery found multiple official handoffs"
+            )
+        if handoffs:
+            candidate_id = str(handoffs[0].get("candidate_id") or "")
+            if not candidate_id:
+                raise HostedResearchLabWorkerError(
+                    "Git-tree recovery handoff has no candidate identity"
+                )
+            return [candidate_id]
         rows = await self._candidate_rows_for_run(run_id)
         return [str(row["candidate_id"]) for row in rows if row.get("candidate_id")]
 
@@ -3871,98 +4213,466 @@ class ResearchLabHostedWorker:
                 f"OpenRouter key insufficient credits before generation (limit_remaining={remaining})"
             )
 
-    async def _guard_existing_tree_authority(
+    async def _resolve_tree_authority(
         self,
         *,
         context: HostedRunContext,
         artifact: Any,
-        requested_tree_id: str,
         checkpoint_doc: Mapping[str, Any] | None,
-    ) -> HostedWorkerOutcome | None:
+        change_reason: str = "tree_authority_changed_before_resume",
+        force_replacement: bool = False,
+    ) -> TreeAuthorityResolution:
+        initial_tree_id = derive_tree_id(
+            run_id=context.run_id,
+            root_artifact_hash=str(
+                getattr(artifact, "model_artifact_hash", "") or ""
+            ),
+            policy=self.tree_policy,
+        )
         existing = await select_one(
-            "research_lab_autoresearch_tree_current",
+            "research_lab_autoresearch_run_tree_current",
             columns=(
-                "tree_id,run_id,root_artifact_hash,root_manifest_hash,policy_hash,"
-                "current_event_type,current_event_hash"
+                "tree_id,run_id,tree_generation,replaces_tree_id,"
+                "root_artifact_hash,root_manifest_hash,policy_hash,"
+                "evaluator_commitment_hash,tree_doc,"
+                "current_event_type,current_event_doc,current_event_hash"
             ),
             filters=(("run_id", context.run_id),),
         )
         if not existing:
-            return None
+            return TreeAuthorityResolution(
+                tree_id=initial_tree_id,
+                resume_state=checkpoint_doc,
+            )
         existing_tree_id = str(existing.get("tree_id") or "")
         existing_artifact_hash = str(existing.get("root_artifact_hash") or "")
         existing_manifest_hash = str(existing.get("root_manifest_hash") or "")
         existing_policy_hash = str(existing.get("policy_hash") or "")
+        tree_doc = (
+            dict(existing.get("tree_doc") or {})
+            if isinstance(existing.get("tree_doc"), Mapping)
+            else {}
+        )
+        raw_evaluator_commitment = tree_doc.get("evaluator_commitment")
+        evaluator_commitment = (
+            dict(raw_evaluator_commitment)
+            if isinstance(raw_evaluator_commitment, Mapping)
+            and raw_evaluator_commitment.get("schema_version")
+            == "research_lab.git_tree_evaluator_commitment.v3"
+            else None
+        )
+        if evaluator_commitment is not None:
+            if (
+                not str(
+                    evaluator_commitment.get("resolved_snapshot_uri") or ""
+                ).strip()
+                or str(
+                    evaluator_commitment.get("resolved_snapshot_uri") or ""
+                ).endswith("/current.json")
+                or sha256_json(evaluator_commitment)
+                != str(existing.get("evaluator_commitment_hash") or "")
+            ):
+                raise HostedResearchLabWorkerError(
+                    "Git-tree evaluator commitment differs from its authority"
+                )
+        generation = max(0, int(existing.get("tree_generation") or 0))
         current_event_type = str(existing.get("current_event_type") or "")
+        current_event_doc = (
+            dict(existing.get("current_event_doc") or {})
+            if isinstance(existing.get("current_event_doc"), Mapping)
+            else {}
+        )
+        active_artifact_hash = str(
+            getattr(artifact, "model_artifact_hash", "") or ""
+        )
+        active_manifest_hash = str(getattr(artifact, "manifest_hash", "") or "")
         authority_changed = any(
             (
-                existing_tree_id != requested_tree_id,
-                existing_artifact_hash
-                != str(getattr(artifact, "model_artifact_hash", "") or ""),
-                existing_manifest_hash
-                != str(getattr(artifact, "manifest_hash", "") or ""),
+                existing_artifact_hash != active_artifact_hash,
+                existing_manifest_hash != active_manifest_hash,
                 existing_policy_hash != self.tree_policy.policy_hash,
+                force_replacement,
             )
         )
-        terminal_types = {
-            "tree_completed",
-            "tree_failed",
-            "tree_cancelled_root_changed",
-        }
-        if authority_changed and current_event_type not in terminal_types:
-            cancellation_doc = {
-                "schema_version": "research_lab.git_tree_root_change.v1",
-                "run_id": context.run_id,
-                "tree_id": existing_tree_id,
-                "requested_tree_id": requested_tree_id,
-                "old_root_artifact_hash": existing_artifact_hash,
-                "new_root_artifact_hash": str(
-                    getattr(artifact, "model_artifact_hash", "") or ""
-                ),
-                "old_root_manifest_hash": existing_manifest_hash,
-                "new_root_manifest_hash": str(
-                    getattr(artifact, "manifest_hash", "") or ""
-                ),
-                "old_policy_hash": existing_policy_hash,
-                "new_policy_hash": self.tree_policy.policy_hash,
-                "reason": "tree_authority_changed_before_resume",
-            }
-            await GitTreeStore().append_event_next(
-                tree_id=existing_tree_id,
-                event_type="tree_cancelled_root_changed",
-                event_doc=cancellation_doc,
-            )
-            current_event_type = "tree_cancelled_root_changed"
-        if not authority_changed and current_event_type == "tree_failed":
+
+        if current_event_type == "tree_failed":
             logger.warning(
                 "research_lab_git_tree_terminal_failure run_id=%s tree_id=%s",
                 compact_ref(context.run_id),
                 existing_tree_id[:24],
             )
-            return await self._mark_failed(
-                context,
-                "Git-tree autoresearch completed without an eligible finalist",
-                reason="git_tree_no_eligible_finalist",
+            return TreeAuthorityResolution(
+                tree_id=existing_tree_id,
+                resume_state=checkpoint_doc,
+                outcome=await self._mark_failed(
+                    context,
+                    "Git-tree autoresearch completed without an eligible finalist",
+                    reason="git_tree_no_eligible_finalist",
+                ),
             )
-        if authority_changed or current_event_type in terminal_types:
-            reason = (
-                "tree_root_or_policy_changed_cancelled"
-                if authority_changed
-                else f"tree_terminal_without_recoverable_handoff:{current_event_type}"
+        if current_event_type == "tree_completed":
+            return TreeAuthorityResolution(
+                tree_id=existing_tree_id,
+                resume_state=checkpoint_doc,
+                outcome=await self._mark_paused(
+                    context,
+                    loop_result=None,
+                    checkpoint_doc=checkpoint_doc,
+                    reason=(
+                        "tree_terminal_without_recoverable_handoff:"
+                        "tree_completed"
+                    ),
+                ),
             )
+
+        current_replacement: TreeReplacement | None = None
+        if generation > 0:
+            replacement_doc = tree_doc.get("replacement")
+            if not isinstance(replacement_doc, Mapping):
+                raise HostedResearchLabWorkerError(
+                    "replacement tree is missing immutable lineage"
+                )
+            current_replacement = TreeReplacement.from_mapping(replacement_doc)
+            if (
+                current_replacement.generation != generation
+                or current_replacement.replaces_tree_id
+                != str(existing.get("replaces_tree_id") or "")
+                or current_replacement.root_artifact_hash
+                != existing_artifact_hash
+                or current_replacement.root_manifest_hash
+                != existing_manifest_hash
+                or current_replacement.policy_hash != existing_policy_hash
+            ):
+                raise HostedResearchLabWorkerError(
+                    "replacement tree lineage differs from its authority"
+                )
+            if (
+                not authority_changed
+                and derive_tree_id(
+                    run_id=context.run_id,
+                    root_artifact_hash=active_artifact_hash,
+                    policy=self.tree_policy,
+                    replacement=current_replacement,
+                )
+                != existing_tree_id
+            ):
+                raise HostedResearchLabWorkerError(
+                    "replacement tree identity differs from its authority"
+                )
+
+        if not authority_changed and current_event_type != "tree_cancelled_root_changed":
+            safe_resume = checkpoint_doc
+            checkpoint_tree_id = ""
+            if isinstance(checkpoint_doc, Mapping):
+                raw_checkpoint = checkpoint_doc.get("git_tree_checkpoint")
+                if isinstance(raw_checkpoint, Mapping):
+                    checkpoint_tree_id = str(raw_checkpoint.get("tree_id") or "")
+            if (
+                current_replacement is not None
+                and checkpoint_tree_id
+                and checkpoint_tree_id != existing_tree_id
+            ):
+                safe_resume = _replacement_resume_state(
+                    checkpoint_doc,
+                    run_id=context.run_id,
+                    replacement=current_replacement,
+                )
+            return TreeAuthorityResolution(
+                tree_id=existing_tree_id,
+                resume_state=safe_resume,
+                replacement=current_replacement,
+                evaluator_commitment=evaluator_commitment,
+                requires_evaluator_replacement=(
+                    evaluator_commitment is None
+                ),
+            )
+
+        tree_store = GitTreeStore()
+        cancellation_event: Mapping[str, Any]
+        if current_event_type != "tree_cancelled_root_changed":
+            cancellation_doc = {
+                "schema_version": "research_lab.git_tree_root_change.v2",
+                "run_id": context.run_id,
+                "tree_id": existing_tree_id,
+                "next_generation": generation + 1,
+                "old_root_artifact_hash": existing_artifact_hash,
+                "new_root_artifact_hash": active_artifact_hash,
+                "old_root_manifest_hash": existing_manifest_hash,
+                "new_root_manifest_hash": active_manifest_hash,
+                "old_policy_hash": existing_policy_hash,
+                "new_policy_hash": self.tree_policy.policy_hash,
+                "reason": str(change_reason or "tree_authority_changed_before_resume"),
+            }
+            try:
+                cancellation_event = await tree_store.append_event_next(
+                    tree_id=existing_tree_id,
+                    event_type="tree_cancelled_root_changed",
+                    event_doc=cancellation_doc,
+                )
+            except Exception:
+                raced = await tree_store.get_tree_current(tree_id=existing_tree_id)
+                if (
+                    not isinstance(raced, Mapping)
+                    or raced.get("current_event_type")
+                    != "tree_cancelled_root_changed"
+                ):
+                    raise
+                cancellation_event = {
+                    "event_hash": raced.get("current_event_hash"),
+                    "event_doc": raced.get("current_event_doc"),
+                }
+        else:
+            cancellation_event = {
+                "event_hash": existing.get("current_event_hash"),
+                "event_doc": current_event_doc,
+            }
+
+        cancellation_hash = str(cancellation_event.get("event_hash") or "")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", cancellation_hash):
+            raise HostedResearchLabWorkerError(
+                "cancelled Git-tree has no immutable cancellation hash"
+            )
+        cancellation_doc = (
+            dict(cancellation_event.get("event_doc") or {})
+            if isinstance(cancellation_event.get("event_doc"), Mapping)
+            else current_event_doc
+        )
+        target_advanced = any(
+            (
+                str(cancellation_doc.get("new_root_artifact_hash") or "")
+                != active_artifact_hash,
+                str(cancellation_doc.get("new_root_manifest_hash") or "")
+                != active_manifest_hash,
+                str(cancellation_doc.get("new_policy_hash") or "")
+                != self.tree_policy.policy_hash,
+            )
+        )
+        replacement = TreeReplacement(
+            generation=generation + 1,
+            replaces_tree_id=existing_tree_id,
+            cancellation_event_hash=cancellation_hash,
+            prior_root_artifact_hash=existing_artifact_hash,
+            prior_root_manifest_hash=existing_manifest_hash,
+            prior_policy_hash=existing_policy_hash,
+            root_artifact_hash=active_artifact_hash,
+            root_manifest_hash=active_manifest_hash,
+            policy_hash=self.tree_policy.policy_hash,
+            reason=(
+                "replacement_target_advanced"
+                if target_advanced
+                else "active_private_model_or_policy_changed"
+            ),
+        )
+        replacement_tree_id = derive_tree_id(
+            run_id=context.run_id,
+            root_artifact_hash=active_artifact_hash,
+            policy=self.tree_policy,
+            replacement=replacement,
+        )
+        logger.warning(
+            "research_lab_git_tree_root_replaced run_id=%s old_tree_id=%s "
+            "new_tree_id=%s generation=%s old_root=%s new_root=%s",
+            compact_ref(context.run_id),
+            existing_tree_id[:24],
+            replacement_tree_id[:24],
+            replacement.generation,
+            existing_artifact_hash[:24],
+            active_artifact_hash[:24],
+        )
+        return TreeAuthorityResolution(
+            tree_id=replacement_tree_id,
+            resume_state=_replacement_resume_state(
+                checkpoint_doc,
+                run_id=context.run_id,
+                replacement=replacement,
+            ),
+            replacement=replacement,
+        )
+
+    async def _active_private_model_if_changed(self, artifact: Any) -> Any | None:
+        """Return the newly authoritative model, or None while this root is current."""
+
+        row = await select_one(
+            "research_lab_private_model_version_current",
+            columns=(
+                "private_model_version_id,model_artifact_hash,"
+                "private_model_manifest_hash,current_version_status"
+            ),
+            filters=(("current_version_status", "active"),),
+        )
+        if not isinstance(row, Mapping):
+            raise HostedResearchLabWorkerError(
+                "active private model authority is unavailable during Git-tree execution"
+            )
+        expected_artifact_hash = str(
+            getattr(artifact, "model_artifact_hash", "") or ""
+        )
+        expected_manifest_hash = str(getattr(artifact, "manifest_hash", "") or "")
+        if (
+            str(row.get("model_artifact_hash") or "") == expected_artifact_hash
+            and str(row.get("private_model_manifest_hash") or "")
+            == expected_manifest_hash
+        ):
+            return None
+        active_model = await load_active_private_model(
+            self.config,
+            register_bootstrap=False,
+        )
+        if (
+            str(active_model.artifact.model_artifact_hash)
+            == expected_artifact_hash
+            and str(active_model.artifact.manifest_hash)
+            == expected_manifest_hash
+        ):
+            return None
+        return active_model
+
+    async def _requeue_tree_root_replacement(
+        self,
+        *,
+        context: HostedRunContext,
+        prior_artifact: Any,
+        active_model: Any,
+        loop_result: Any,
+        checkpoint_doc: Mapping[str, Any] | None,
+        change_reason: str,
+    ) -> HostedWorkerOutcome:
+        """Cancel the stale tree and requeue the run for its next root generation."""
+
+        resolution = await self._resolve_tree_authority(
+            context=context,
+            artifact=active_model.artifact,
+            checkpoint_doc=checkpoint_doc,
+            change_reason=change_reason,
+        )
+        if resolution.outcome is not None:
+            return resolution.outcome
+        if resolution.replacement is None:
+            raise HostedResearchLabWorkerError(
+                "Git-tree root changed but no replacement authority was created"
+            )
+        receipt_id = context.receipt_id or await self._ensure_queued_receipt(context)
+        context.receipt_id = receipt_id
+        checkpoint_hash = (
+            str(checkpoint_doc.get("checkpoint_hash") or "")
+            if isinstance(checkpoint_doc, Mapping)
+            else ""
+        )
+        event_doc = {
+            **autoresearch_queue_capacity_doc(self.config),
+            "schema_version": "research_lab.git_tree_replacement_requeue.v1",
+            "run_id": context.run_id,
+            "worker_ref": self.worker_ref,
+            "change_reason": str(change_reason),
+            "prior_root_artifact_hash": str(
+                getattr(prior_artifact, "model_artifact_hash", "") or ""
+            ),
+            "prior_root_manifest_hash": str(
+                getattr(prior_artifact, "manifest_hash", "") or ""
+            ),
+            "replacement_tree_id": resolution.tree_id,
+            "replacement": resolution.replacement.to_dict(),
+            "checkpoint_hash": checkpoint_hash,
+            "previous_event_hash": context.queue_row.get("current_event_hash"),
+            "previous_status_at": context.queue_row.get("current_status_at"),
+            "auto_research_loop": {
+                "status": "requeued",
+                "iterations_completed": int(
+                    getattr(loop_result, "iterations_completed", 0) or 0
+                ),
+                "elapsed_seconds": round(
+                    float(getattr(loop_result, "elapsed_seconds", 0.0) or 0.0),
+                    3,
+                ),
+                "stop_reason": str(
+                    getattr(loop_result, "stop_reason", "") or change_reason
+                ),
+            },
+        }
+        cost_ledger = (
+            loop_result.cost_ledger()
+            if loop_result is not None
+            else {
+                "schema_version": "1.0",
+                "status": "queued",
+                "total_usd": 0.0,
+                "stage": change_reason,
+            }
+        )
+        try:
+            await create_receipt_event(
+                receipt_id=receipt_id,
+                ticket_id=context.ticket_id,
+                event_type="queued",
+                receipt_status="queued",
+                event_doc={
+                    **event_doc,
+                    "cost_ledger": cost_ledger,
+                    "provider_usage": list(
+                        getattr(loop_result, "provider_usage", ()) or ()
+                    )
+                    or self._provider_usage(context),
+                },
+            )
+        except Exception as exc:
             logger.warning(
-                "research_lab_git_tree_resume_paused run_id=%s tree_id=%s reason=%s",
+                "research_lab_git_tree_replacement_receipt_projection_failed "
+                "run_id=%s receipt_id=%s error=%s",
                 compact_ref(context.run_id),
-                existing_tree_id[:24],
-                reason,
+                compact_ref(receipt_id),
+                str(exc)[:240],
             )
-            return await self._mark_paused(
-                context,
-                loop_result=None,
-                checkpoint_doc=checkpoint_doc,
-                reason=reason,
+        try:
+            await create_queue_event(
+                run_id=context.run_id,
+                ticket_id=context.ticket_id,
+                event_type="queued",
+                queue_priority=int(context.queue_row.get("queue_priority") or 0),
+                worker_ref=self.worker_ref,
+                reason="git_tree_root_replaced_requeued",
+                event_doc=event_doc,
             )
-        return None
+        except Exception as exc:
+            if _is_queue_capacity_conflict_error(exc):
+                return await self._park_requeue_conflict(
+                    context,
+                    "Git-tree root replacement is waiting for queue capacity",
+                    requeue_reason="git_tree_root_replaced_requeued",
+                    conflict_error=exc,
+                    base_event_doc=event_doc,
+                )
+            raise
+        try:
+            await create_ticket_event(
+                ticket_id=context.ticket_id,
+                event_type="running",
+                actor_hotkey=None,
+                reason="git_tree_root_replaced_requeued",
+                event_doc=event_doc,
+            )
+            await safe_project_public_loop_activity(
+                context.ticket_id,
+                source_ref=(
+                    f"hosted_worker_git_tree_root_replaced:{context.run_id}"
+                ),
+                reason="git_tree_root_replaced_requeued",
+                config=self.config,
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_git_tree_replacement_projection_failed "
+                "run_id=%s error=%s",
+                compact_ref(context.run_id),
+                str(exc)[:240],
+            )
+        return HostedWorkerOutcome(
+            processed=True,
+            dry_run=False,
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            status="git_tree_root_replaced_requeued",
+            receipt_id=receipt_id,
+        )
 
     @staticmethod
     def _tree_resume_block_reason(
@@ -3970,6 +4680,7 @@ class ResearchLabHostedWorker:
         artifact: Any,
         *,
         expected_tree_id: str,
+        expected_policy: TreePolicy | None = None,
     ) -> str:
         """Reject stale or pre-tree checkpoints instead of substituting a root."""
 
@@ -3977,7 +4688,38 @@ class ResearchLabHostedWorker:
             return ""
         tree_checkpoint = resume_state.get("git_tree_checkpoint")
         if not isinstance(tree_checkpoint, Mapping):
-            return "tree_checkpoint_not_authoritative"
+            replacement_doc = resume_state.get("tree_replacement")
+            if not isinstance(replacement_doc, Mapping):
+                return "tree_checkpoint_not_authoritative"
+            try:
+                replacement = TreeReplacement.from_mapping(replacement_doc)
+            except (GitTreeContractError, TypeError, ValueError):
+                return "tree_replacement_authority_invalid"
+            active_artifact = str(
+                getattr(artifact, "model_artifact_hash", "") or ""
+            )
+            active_manifest = str(getattr(artifact, "manifest_hash", "") or "")
+            if (
+                replacement.root_artifact_hash != active_artifact
+                or replacement.root_manifest_hash != active_manifest
+            ):
+                return "tree_replacement_root_changed"
+            if expected_policy is None:
+                return "tree_replacement_policy_missing"
+            if replacement.policy_hash != expected_policy.policy_hash:
+                return "tree_replacement_policy_changed"
+            try:
+                replacement_tree_id = derive_tree_id(
+                    run_id=str(resume_state.get("run_id") or ""),
+                    root_artifact_hash=active_artifact,
+                    policy=expected_policy,
+                    replacement=replacement,
+                )
+            except (GitTreeContractError, TypeError, ValueError):
+                return "tree_replacement_authority_invalid"
+            if replacement_tree_id != expected_tree_id:
+                return "tree_replacement_identity_changed"
+            return ""
         checkpoint_tree_id = str(
             tree_checkpoint.get("tree_id") or resume_state.get("git_tree_id") or ""
         )

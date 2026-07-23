@@ -23,6 +23,7 @@ TREE_NODE_SCHEMA_VERSION = "research_lab.git_tree_node.v1"
 TREE_EVALUATION_SCHEMA_VERSION = "research_lab.git_tree_evaluation.v1"
 TREE_CHECKPOINT_SCHEMA_VERSION = "research_lab.git_tree_checkpoint.v1"
 TREE_RESULT_SCHEMA_VERSION = "research_lab.git_tree_result.v1"
+TREE_REPLACEMENT_SCHEMA_VERSION = "research_lab.git_tree_replacement.v1"
 
 TREE_MODE_ENV = RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD["mode"]
 TREE_MODES = frozenset({"off", "active"})
@@ -80,6 +81,106 @@ def _node_id(value: Any, *, field_name: str, allow_root: bool = False) -> str:
     if not _NODE_ID_RE.fullmatch(normalized):
         raise GitTreeContractError(f"{field_name} is invalid")
     return normalized
+
+
+@dataclass(frozen=True)
+class TreeReplacement:
+    """Immutable authority linking a cancelled tree to its replacement root."""
+
+    generation: int
+    replaces_tree_id: str
+    cancellation_event_hash: str
+    prior_root_artifact_hash: str
+    prior_root_manifest_hash: str
+    prior_policy_hash: str
+    root_artifact_hash: str
+    root_manifest_hash: str
+    policy_hash: str
+    reason: str = "active_private_model_or_policy_changed"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "generation",
+            _bounded_int(
+                self.generation,
+                field_name="generation",
+                minimum=1,
+                maximum=1_000_000,
+            ),
+        )
+        for name in (
+            "replaces_tree_id",
+            "cancellation_event_hash",
+            "prior_root_artifact_hash",
+            "prior_root_manifest_hash",
+            "prior_policy_hash",
+            "root_artifact_hash",
+            "root_manifest_hash",
+            "policy_hash",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _hash(getattr(self, name), field_name=name),
+            )
+        reason = str(self.reason or "").strip().lower()
+        if reason not in {
+            "active_private_model_or_policy_changed",
+            "replacement_target_advanced",
+        }:
+            raise GitTreeContractError("tree replacement reason is invalid")
+        object.__setattr__(self, "reason", reason)
+
+    @property
+    def replacement_hash(self) -> str:
+        return sha256_json(self._commitment_doc())
+
+    def _commitment_doc(self) -> dict[str, Any]:
+        return {
+            "schema_version": TREE_REPLACEMENT_SCHEMA_VERSION,
+            "generation": self.generation,
+            "replaces_tree_id": self.replaces_tree_id,
+            "cancellation_event_hash": self.cancellation_event_hash,
+            "prior_root_artifact_hash": self.prior_root_artifact_hash,
+            "prior_root_manifest_hash": self.prior_root_manifest_hash,
+            "prior_policy_hash": self.prior_policy_hash,
+            "root_artifact_hash": self.root_artifact_hash,
+            "root_manifest_hash": self.root_manifest_hash,
+            "policy_hash": self.policy_hash,
+            "reason": self.reason,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self._commitment_doc(),
+            "replacement_hash": self.replacement_hash,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "TreeReplacement":
+        document = dict(value)
+        replacement_hash = str(document.pop("replacement_hash", "") or "")
+        if document.pop("schema_version", "") != TREE_REPLACEMENT_SCHEMA_VERSION:
+            raise GitTreeContractError("tree replacement schema version is invalid")
+        expected_fields = {
+            "generation",
+            "replaces_tree_id",
+            "cancellation_event_hash",
+            "prior_root_artifact_hash",
+            "prior_root_manifest_hash",
+            "prior_policy_hash",
+            "root_artifact_hash",
+            "root_manifest_hash",
+            "policy_hash",
+            "reason",
+        }
+        if set(document) != expected_fields:
+            raise GitTreeContractError("tree replacement fields are invalid")
+        replacement = cls(**document)
+        if replacement_hash != replacement.replacement_hash:
+            raise GitTreeContractError("tree replacement hash differs")
+        return replacement
 
 
 @dataclass(frozen=True)
@@ -846,15 +947,32 @@ class TreeResult:
         return cls(**document)
 
 
-def derive_tree_id(*, run_id: str, root_artifact_hash: str, policy: TreePolicy) -> str:
+def derive_tree_id(
+    *,
+    run_id: str,
+    root_artifact_hash: str,
+    policy: TreePolicy,
+    replacement: TreeReplacement | None = None,
+) -> str:
+    identity = {
+        "schema_version": "research_lab.git_tree_identity.v1",
+        "run_id": str(run_id),
+        "root_artifact_hash": _hash(
+            root_artifact_hash, field_name="root_artifact_hash"
+        ),
+        "policy_hash": policy.policy_hash,
+    }
+    if replacement is None:
+        return sha256_json(identity)
+    if replacement.root_artifact_hash != identity["root_artifact_hash"]:
+        raise GitTreeContractError("replacement root differs from tree identity")
+    if replacement.policy_hash != policy.policy_hash:
+        raise GitTreeContractError("replacement policy differs from tree identity")
     return sha256_json(
         {
-            "schema_version": "research_lab.git_tree_identity.v1",
-            "run_id": str(run_id),
-            "root_artifact_hash": _hash(
-                root_artifact_hash, field_name="root_artifact_hash"
-            ),
-            "policy_hash": policy.policy_hash,
+            **identity,
+            "schema_version": "research_lab.git_tree_identity.v2",
+            "replacement_hash": replacement.replacement_hash,
         }
     )
 

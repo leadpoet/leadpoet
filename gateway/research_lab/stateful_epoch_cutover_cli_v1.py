@@ -102,11 +102,12 @@ async def _run_with_gateway_chain_dependencies(
 
     import bittensor as bt
 
-    from gateway.config import BITTENSOR_NETWORK
     from gateway.utils import epoch as epoch_utils
     from gateway.utils import registry as registry_utils
 
-    async_subtensor_context = bt.AsyncSubtensor(network=BITTENSOR_NETWORK)
+    # This ceremony is defined only for the production Finney authority. Do not
+    # inherit a CI/test network through the ambient gateway environment.
+    async_subtensor_context = bt.AsyncSubtensor(network="finney")
     async_subtensor = await async_subtensor_context.__aenter__()
     try:
         epoch_utils.inject_async_subtensor(async_subtensor)

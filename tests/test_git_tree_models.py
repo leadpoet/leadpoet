@@ -11,6 +11,7 @@ from gateway.research_lab.git_tree_models import (
     TreeEvaluation,
     TreeNode,
     TreePolicy,
+    TreeReplacement,
     TreeResult,
     derive_child_slot,
     derive_frontier_commitment_hash,
@@ -116,7 +117,59 @@ def test_tree_policy_defaults_and_invalid_cross_field_config():
         ).required_final_context_seconds(270)
 
 
+def test_tree_replacement_round_trip_and_identity_prevent_root_cycle_collision():
+    policy = TreePolicy(mode="active")
+    run_id = "11111111-1111-4111-8111-111111111111"
+    initial_tree_id = derive_tree_id(
+        run_id=run_id,
+        root_artifact_hash=ROOT_HASH,
+        policy=policy,
+    )
+    first_replacement = TreeReplacement(
+        generation=1,
+        replaces_tree_id=initial_tree_id,
+        cancellation_event_hash="sha256:" + "7" * 64,
+        prior_root_artifact_hash=ROOT_HASH,
+        prior_root_manifest_hash="sha256:" + "8" * 64,
+        prior_policy_hash=policy.policy_hash,
+        root_artifact_hash="sha256:" + "9" * 64,
+        root_manifest_hash="sha256:" + "0" * 64,
+        policy_hash=policy.policy_hash,
+    )
+    assert TreeReplacement.from_mapping(first_replacement.to_dict()) == (
+        first_replacement
+    )
+    first_replacement_tree_id = derive_tree_id(
+        run_id=run_id,
+        root_artifact_hash=first_replacement.root_artifact_hash,
+        policy=policy,
+        replacement=first_replacement,
+    )
+    root_cycle_replacement = TreeReplacement(
+        generation=2,
+        replaces_tree_id=first_replacement_tree_id,
+        cancellation_event_hash="sha256:" + "1" * 64,
+        prior_root_artifact_hash=first_replacement.root_artifact_hash,
+        prior_root_manifest_hash=first_replacement.root_manifest_hash,
+        prior_policy_hash=policy.policy_hash,
+        root_artifact_hash=ROOT_HASH,
+        root_manifest_hash="sha256:" + "8" * 64,
+        policy_hash=policy.policy_hash,
+    )
+    root_cycle_tree_id = derive_tree_id(
+        run_id=run_id,
+        root_artifact_hash=ROOT_HASH,
+        policy=policy,
+        replacement=root_cycle_replacement,
+    )
+
+    assert first_replacement_tree_id != initial_tree_id
+    assert root_cycle_tree_id != initial_tree_id
+    assert root_cycle_tree_id != first_replacement_tree_id
+
+
 def test_tree_policy_rejects_deprecated_or_invalid_values_instead_of_coercing():
+    assert TreePolicy.from_env({}).mode == "off"
     with pytest.raises(
         GitTreeContractError,
         match="deprecated flat/sequential autoresearch environment",

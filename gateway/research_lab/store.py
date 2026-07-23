@@ -812,31 +812,6 @@ async def create_candidate_artifact(request: Any) -> tuple[dict[str, Any], dict[
         or patch.get("candidate_model_manifest_hash")
         or ""
     )
-    existing = await select_one(
-        "research_lab_candidate_artifacts",
-        filters=(("candidate_id", candidate_id),),
-    )
-    if existing:
-        await _record_candidate_tree_handoff(request=request, candidate_id=candidate_id)
-        event = await _existing_or_recovered_event(
-            "research_lab_candidate_evaluation_events",
-            "candidate_id",
-            candidate_id,
-            lambda: create_candidate_evaluation_event(
-                candidate_id=candidate_id,
-                run_id=str(request.run_id),
-                ticket_id=str(request.ticket_id),
-                event_type="queued",
-                candidate_status="queued",
-                reason="candidate_generated_by_gateway_worker",
-                event_doc={
-                    "candidate_artifact_hash": candidate_artifact_hash,
-                    "candidate_patch_hash": candidate_patch_hash,
-                },
-            ),
-        )
-        return existing, event
-
     row = {
         "candidate_id": candidate_id,
         "schema_version": "1.0",
@@ -876,8 +851,42 @@ async def create_candidate_artifact(request: Any) -> tuple[dict[str, Any], dict[
             }
         )
     row["anchored_hash"] = canonical_hash(row)
-    inserted = await insert_row("research_lab_candidate_artifacts", row)
-    await _record_candidate_tree_handoff(request=request, candidate_id=candidate_id)
+    existing = await select_one(
+        "research_lab_candidate_artifacts",
+        filters=(("candidate_id", candidate_id),),
+    )
+    if existing:
+        if tree_id and not _candidate_artifact_content_matches(existing, row):
+            raise ValueError(
+                "existing candidate artifact differs from current Git-tree root or content"
+            )
+        await _record_candidate_tree_handoff(request=request, candidate_id=candidate_id)
+        event = await _existing_or_recovered_event(
+            "research_lab_candidate_evaluation_events",
+            "candidate_id",
+            candidate_id,
+            lambda: create_candidate_evaluation_event(
+                candidate_id=candidate_id,
+                run_id=str(request.run_id),
+                ticket_id=str(request.ticket_id),
+                event_type="queued",
+                candidate_status="queued",
+                reason="candidate_generated_by_gateway_worker",
+                event_doc={
+                    "candidate_artifact_hash": candidate_artifact_hash,
+                    "candidate_patch_hash": candidate_patch_hash,
+                },
+            ),
+        )
+        return existing, event
+    if tree_id:
+        inserted = await _create_candidate_tree_handoff(
+            request=request,
+            candidate_id=candidate_id,
+            candidate_row=row,
+        )
+    else:
+        inserted = await insert_row("research_lab_candidate_artifacts", row)
     event = await create_candidate_evaluation_event(
         candidate_id=candidate_id,
         run_id=str(request.run_id),
@@ -907,6 +916,158 @@ async def _record_candidate_tree_handoff(
         root_git_commit=str(request.git_tree_root_commit),
         node_git_commit=str(request.git_tree_node_commit),
         lineage_hash=str(request.git_tree_lineage_hash),
+    )
+
+
+async def _create_candidate_tree_handoff(
+    *,
+    request: Any,
+    candidate_id: str,
+    candidate_row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Atomically persist a selected candidate and its active-root handoff."""
+
+    tree_id = str(request.git_tree_id)
+    node_id = str(request.git_tree_node_id)
+    root_git_commit = str(request.git_tree_root_commit)
+    node_git_commit = str(request.git_tree_node_commit)
+    lineage_hash = str(request.git_tree_lineage_hash)
+    handoff_doc = {
+        "schema_version": "research_lab.git_tree_candidate_handoff.v1",
+        "tree_id": tree_id,
+        "run_id": str(request.run_id),
+        "candidate_id": str(candidate_id),
+        "node_id": node_id,
+        "root_git_commit": root_git_commit,
+        "node_git_commit": node_git_commit,
+        "lineage_hash": lineage_hash,
+    }
+    handoff_hash = sha256_json(handoff_doc)
+    completion_doc = {
+        "schema_version": "research_lab.git_tree_completed.v1",
+        "tree_id": tree_id,
+        "run_id": str(request.run_id),
+        "candidate_id": str(candidate_id),
+        "node_id": node_id,
+        "handoff_hash": handoff_hash,
+        "paid_finalist_count": 1,
+    }
+    last_error: BaseException | None = None
+    for _attempt in range(5):
+        current = await select_one(
+            "research_lab_autoresearch_tree_current",
+            columns=(
+                "tree_id,current_event_type,current_event_doc,current_event_hash"
+            ),
+            filters=(("tree_id", tree_id),),
+        )
+        if not current:
+            raise RuntimeError("Git-tree candidate handoff tree is missing")
+        current_type = str(current.get("current_event_type") or "")
+        if current_type in {
+            "tree_completed",
+            "tree_failed",
+            "tree_cancelled_root_changed",
+        }:
+            raise RuntimeError(
+                f"Git-tree candidate handoff targets terminal tree {current_type}"
+            )
+        previous_event_hash = str(
+            current.get("current_event_hash") or "sha256:" + "0" * 64
+        )
+        completed_event_hash = sha256_json(
+            {
+                "schema_version": "research_lab.git_tree_event.v1",
+                "tree_id": tree_id,
+                "event_type": "tree_completed",
+                "node_id": node_id,
+                "previous_event_hash": previous_event_hash,
+                "event_doc": completion_doc,
+            }
+        )
+        try:
+            data = await call_rpc(
+                "create_research_lab_git_tree_candidate_handoff",
+                {
+                    "requested_candidate_doc": dict(candidate_row),
+                    "requested_tree_id": tree_id,
+                    "requested_run_id": str(request.run_id),
+                    "requested_candidate_id": str(candidate_id),
+                    "requested_node_id": node_id,
+                    "requested_root_git_commit": root_git_commit,
+                    "requested_node_git_commit": node_git_commit,
+                    "requested_lineage_hash": lineage_hash,
+                    "requested_handoff_doc": handoff_doc,
+                    "requested_handoff_hash": handoff_hash,
+                    "requested_previous_event_hash": previous_event_hash,
+                    "requested_completed_event_hash": completed_event_hash,
+                },
+            )
+        except Exception as exc:
+            last_error = exc
+            candidate = await select_one(
+                "research_lab_candidate_artifacts",
+                filters=(("candidate_id", str(candidate_id)),),
+            )
+            handoff = await select_one(
+                "research_lab_autoresearch_tree_handoffs",
+                columns="tree_id,run_id,candidate_id,handoff_hash",
+                filters=(("tree_id", tree_id),),
+            )
+            if (
+                isinstance(candidate, Mapping)
+                and _candidate_artifact_content_matches(
+                    candidate,
+                    candidate_row,
+                )
+                and isinstance(handoff, Mapping)
+                and str(handoff.get("run_id") or "") == str(request.run_id)
+                and str(handoff.get("candidate_id") or "") == str(candidate_id)
+                and str(handoff.get("handoff_hash") or "") == handoff_hash
+            ):
+                return dict(candidate)
+            message = str(exc).lower()
+            if "stale_active_root" in message:
+                raise
+            if "40001" not in message and "event_conflict" not in message:
+                raise
+            continue
+        if isinstance(data, list):
+            data = data[0] if data else None
+        candidate = data.get("candidate") if isinstance(data, Mapping) else None
+        handoff = data.get("handoff") if isinstance(data, Mapping) else None
+        if (
+            not isinstance(candidate, Mapping)
+            or str(candidate.get("candidate_id") or "") != str(candidate_id)
+            or not isinstance(handoff, Mapping)
+            or not isinstance(handoff.get("handoff"), Mapping)
+            or not isinstance(handoff.get("completion_event"), Mapping)
+        ):
+            raise RuntimeError(
+                "Git-tree candidate creation returned no durable handoff"
+            )
+        return dict(candidate)
+    raise RuntimeError(
+        "Git-tree candidate creation conflicted after retries"
+    ) from last_error
+
+
+def _candidate_artifact_content_matches(
+    persisted: Mapping[str, Any],
+    requested: Mapping[str, Any],
+) -> bool:
+    """Verify timeout recovery cannot accept another candidate's content."""
+
+    return all(
+        persisted.get(field) == requested.get(field)
+        for field in (
+            "candidate_artifact_hash",
+            "candidate_model_manifest_hash",
+            "candidate_model_manifest_doc",
+            "candidate_source_diff_hash",
+            "candidate_patch_hash",
+            "private_model_manifest_hash",
+        )
     )
 
 

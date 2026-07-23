@@ -50,7 +50,10 @@ def test_exact_historical_read_rejects_lite_source(monkeypatch):
         ),
     )
 
-    with pytest.raises(SubnetEpochError, match="official Bittensor archive"):
+    with pytest.raises(
+        SubnetEpochError,
+        match="historical epoch authority uses an unexpected archive endpoint",
+    ):
         archive.read_exact_subnet_epoch_snapshot_from_archive(
             netuid=71,
             block_number=8_637_156,

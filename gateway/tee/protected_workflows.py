@@ -67,6 +67,7 @@ PROTECTED_SYMBOLS = {
     ),
     "gateway/research_lab/git_tree_models.py": (
         "TreePolicy",
+        "TreeReplacement",
         "TreeEvaluation",
         "TreeNode",
         "TreeCheckpoint",

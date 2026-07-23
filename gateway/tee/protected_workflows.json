@@ -107,7 +107,7 @@
       "symbol": "persist_legacy_finalized_allocation_migration_v2"
     },
     {
-      "ast_sha256": "sha256:28103c6f4cbacb839087a6249fd7fac8f791c3d4a4cef67c49a9a4d6e0fdb6eb",
+      "ast_sha256": "sha256:37345988cb96134a1c1ecc941bfdb2db120309acdfc2e5061b9230ecb93f86d6",
       "path": "gateway/research_lab/autoresearch_authority_v2.py",
       "symbol": "run_authoritative_autoresearch_v2"
     },
@@ -162,7 +162,7 @@
       "symbol": "validate_legacy_settlement_migrations_v2"
     },
     {
-      "ast_sha256": "sha256:61d28682599010ff2d3f2da4a090d62f76968122760fc696454dad2249999481",
+      "ast_sha256": "sha256:00bfa7ff965a063cd47fd3f46a80a1934da5b0f047793d344dbd5f75fd1edcd4",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "CodeEditLoopEngine"
     },
@@ -222,6 +222,11 @@
       "symbol": "TreePolicy"
     },
     {
+      "ast_sha256": "sha256:9c5534439500a00741d8470d49bfc2696a91fd317bbd972d1b2745a401b454be",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "TreeReplacement"
+    },
+    {
       "ast_sha256": "sha256:f87f38817be9a2800e493fc69c63624d6c395806463d20f5b3002e16008ba81d",
       "path": "gateway/research_lab/git_tree_models.py",
       "symbol": "TreeResult"
@@ -247,7 +252,7 @@
       "symbol": "derive_frontier_commitment_hash"
     },
     {
-      "ast_sha256": "sha256:71c855d10303d599c526dd7167b979a03692285587d59818c086eb3e2c490fd9",
+      "ast_sha256": "sha256:fff385e5325493028a8baa227d7d28c48ff2f4213afbaff1281b8c1f8e04a3c1",
       "path": "gateway/research_lab/git_tree_models.py",
       "symbol": "derive_tree_id"
     },
@@ -452,7 +457,7 @@
       "symbol": "hourly_batch_task"
     },
     {
-      "ast_sha256": "sha256:35b5b2b8435f2341f261bcf4026031ab9af0f40da4696dd33316e988462606a5",
+      "ast_sha256": "sha256:ea4ac297429d3f970b41335f2e692c5496f4799e0cb79775ed8bc15f1f70ebf5",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "AutoresearchExecutorV2"
     },
@@ -1082,7 +1087,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:cb3078f4933531e267173b2abbb203eea1481c7b6d228dab44ee1c59992953ff",
+  "manifest_hash": "sha256:b5679d08ef6341fdba340f0765559feb5f5aa6fce7c8aac504bbbea1c47c8a3d",
   "protected_source_commit": "c5eca5017b738f3665f6754f2c81e52317fa8df5",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

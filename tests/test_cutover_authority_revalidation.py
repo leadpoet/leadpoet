@@ -54,6 +54,8 @@ def authority_env(monkeypatch):
     monkeypatch.setattr(
         gateway_config, "SUPABASE_SERVICE_ROLE_KEY", "", raising=False
     )
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     return cutover
 
 

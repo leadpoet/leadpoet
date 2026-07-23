@@ -16,7 +16,7 @@ from Leadpoet.utils.subnet_epoch import (
 )
 
 
-MAXIMUM_RESTART_EPOCH_BLOCK = 315
+MAXIMUM_RESTART_EPOCH_BLOCK = 300
 RESTART_START_SCHEMA_VERSION = "leadpoet.restart_epoch_start.v1"
 
 
@@ -29,7 +29,7 @@ def verify_restart_epoch_window(
     *,
     netuid: int = 71,
 ) -> dict[str, Any]:
-    """Read the official scheduler and reject restart starts after block 315."""
+    """Read the official scheduler and reject restart starts after block 300."""
 
     snapshot = read_subnet_epoch_snapshot(subtensor, netuid=netuid)
     result = {

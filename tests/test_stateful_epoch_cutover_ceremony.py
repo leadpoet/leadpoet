@@ -353,6 +353,7 @@ async def test_offline_cutover_injects_gateway_chain_dependencies(monkeypatch):
             events.append(("exited", exc_type))
 
     monkeypatch.setattr("bittensor.AsyncSubtensor", FakeAsyncSubtensor)
+    monkeypatch.setattr("gateway.config.BITTENSOR_NETWORK", "finney")
     monkeypatch.setattr(
         "gateway.utils.epoch.inject_async_subtensor",
         lambda value: events.append(("epoch", value)),

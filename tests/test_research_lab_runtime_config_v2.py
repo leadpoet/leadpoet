@@ -120,7 +120,13 @@ def test_execution_config_commits_and_applies_hosted_run_canary(monkeypatch):
     assert document["behavior_environment"][
         "RESEARCH_LAB_HOSTED_RUN_ALLOWLIST"
     ] == run_id
-    monkeypatch.delenv("RESEARCH_LAB_HOSTED_RUN_ALLOWLIST", raising=False)
+    # Register the environment mutation with monkeypatch before the runtime
+    # applier writes directly to os.environ, so the canary cannot leak into
+    # later worker tests in the same process.
+    monkeypatch.setenv(
+        "RESEARCH_LAB_HOSTED_RUN_ALLOWLIST",
+        "44444444-4444-4444-8444-444444444444",
+    )
     apply_behavior_environment(document)
 
     import os

@@ -202,7 +202,7 @@
       "symbol": "EnclaveChainRpcTransportV2.call"
     },
     {
-      "ast_sha256": "sha256:e8fff23aec4b32f85ea96e8e4785db82aac7ec6874669dd9d2d2f57ccd386e1c",
+      "ast_sha256": "sha256:63444c1c63cfefa9571e7967fad7a0f7ec25654cd27dc148e8534d3ac2ce5276",
       "path": "validator_tee/enclave/chain_source_v2.py",
       "symbol": "ValidatorChainSourceV2.find_finalized_extrinsic_inclusion"
     },
@@ -282,7 +282,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:bd108483968a6076d6177615d0b61b44e0748af4f50289cd8f3a1b5e5907f905",
-  "protected_source_commit": "d8a88c4cf5494f09adc55853e64af76dac2d8732",
+  "manifest_hash": "sha256:aa1ccba07c8ba59396a3b00ea3336149f77dbc2fcc5925612240f8d1fc0a0ede",
+  "protected_source_commit": "71dbc79c8737828c354e72d901febec1779046e1",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

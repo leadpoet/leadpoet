@@ -269,6 +269,22 @@ def _connect_epoch_archive_subtensor(
     ) from last_error
 
 
+def _close_subtensor_connection(subtensor, *, source: str) -> None:
+    """Retire one failed SDK websocket without hiding cleanup failures."""
+
+    close = getattr(subtensor, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception as exc:
+        logger.warning(
+            "auditor_subtensor_close_failed source=%s type=%s",
+            source,
+            type(exc).__name__,
+        )
+
+
 @dataclass(frozen=True)
 class _AuditorEpochState:
     current_block: int
@@ -500,25 +516,34 @@ class AuditorValidator:
                 self.epoch_archive_endpoint,
                 type(first_error).__name__,
             )
-            refreshed = _connect_epoch_archive_subtensor(
-                endpoint=self.epoch_archive_endpoint
-            )
-            validate_subnet_epoch_cutover_anchor(
-                refreshed,
-                self.epoch_cutover,
-                expected_archive_endpoint=self.epoch_archive_endpoint,
-            )
-            self.epoch_archive_subtensor = refreshed
+            stale = self.epoch_archive_subtensor
+            self.epoch_archive_subtensor = None
+            _close_subtensor_connection(stale, source="archive_stale")
+            refreshed = None
             try:
+                refreshed = _connect_epoch_archive_subtensor(
+                    endpoint=self.epoch_archive_endpoint
+                )
+                validate_subnet_epoch_cutover_anchor(
+                    refreshed,
+                    self.epoch_cutover,
+                    expected_archive_endpoint=self.epoch_archive_endpoint,
+                )
                 snapshot = read_subnet_epoch_snapshot(
                     refreshed,
                     netuid=int(self.config.netuid),
                     block_number=int(bundle["block"]),
                 )
             except Exception as retry_error:
+                if refreshed is not None:
+                    _close_subtensor_connection(
+                        refreshed,
+                        source="archive_replacement_failed",
+                    )
                 raise SubnetEpochError(
                     "auditor selected archive could not verify the bundle block"
                 ) from retry_error
+            self.epoch_archive_subtensor = refreshed
         if snapshot.settlement_epoch_id(self.epoch_cutover) != int(
             bundle["epoch_id"]
         ):

@@ -87,7 +87,7 @@ OP_PROVIDER_PREFLIGHT_V2 = "provider_preflight_v2"
 OP_SOURCE_ADD_LEG2_JUDGE_V2 = "source_add_leg2_judge_v2"
 DEV_REPLAY_REQUEST_SCHEMA_VERSION = "leadpoet.dev_replay_request.v4"
 DEV_HYBRID_REQUEST_SCHEMA_VERSION = "leadpoet.dev_hybrid_request.v4"
-PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION = "leadpoet.provider_preflight_request.v2"
+PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION = "leadpoet.provider_preflight_request.v3"
 SOURCE_ADD_JUDGE_REQUEST_SCHEMA_VERSION = "leadpoet.source_add_judge_request.v2"
 SOURCE_ADD_JUDGE_RESULT_SCHEMA_VERSION = "leadpoet.source_add_judge_result.v2"
 PROVIDER_CREDENTIAL_REFS_FIELD = "_v2_provider_credential_ref_hashes"
@@ -756,11 +756,20 @@ class ScoringExecutorV2:
         payload: Mapping[str, Any],
         context: ExecutionContextV2,
     ) -> ExecutionResultV2:
-        required = {"schema_version", "scope_key", "force", "settings"}
+        required = {
+            "schema_version",
+            "measurement_id",
+            "scope_key",
+            "force",
+            "settings",
+        }
         if not isinstance(payload, Mapping) or set(payload) != required:
             raise ValueError("provider preflight request fields are invalid")
         if payload.get("schema_version") != PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION:
             raise ValueError("provider preflight request schema is invalid")
+        measurement_id = str(payload.get("measurement_id") or "")
+        if not re.fullmatch(r"[0-9a-f]{32}", measurement_id):
+            raise ValueError("provider preflight measurement identity is invalid")
         scope_key = str(payload.get("scope_key") or "")
         if not scope_key or len(scope_key) > 255 or "\x00" in scope_key:
             raise ValueError("provider preflight scope is invalid")

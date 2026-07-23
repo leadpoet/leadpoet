@@ -149,6 +149,7 @@ from research_lab.eval import (
     DockerPrivateModelSpec,
     private_model_env_passthrough,
 )
+from research_lab.eval.promotion_metric import promotion_improvement_metric
 
 
 logger = logging.getLogger(__name__)
@@ -6345,12 +6346,8 @@ class ResearchLabHostedWorker:
         for row in score_bundles:
             bundle_id = str(row.get("score_bundle_id") or "")
             doc = row.get("score_bundle_doc") if isinstance(row.get("score_bundle_doc"), Mapping) else {}
-            aggregates = doc.get("aggregates") if isinstance(doc.get("aggregates"), Mapping) else {}
-            if bundle_id and aggregates:
-                bundle_deltas[bundle_id] = {
-                    "score_delta": _safe_float_for_memory(aggregates.get("mean_delta")),
-                    "score_delta_lcb": _safe_float_for_memory(aggregates.get("delta_lcb")),
-                }
+            if bundle_id and doc:
+                bundle_deltas[bundle_id] = _realized_score_delta_for_memory(doc)
         lane_counts: Counter[str] = Counter()
         target_file_counts: Counter[str] = Counter()
         status_counts: Counter[str] = Counter()
@@ -6399,8 +6396,9 @@ class ResearchLabHostedWorker:
             if not aggregates:
                 continue
             scored_count += 1
-            mean_delta = _safe_float_for_memory(aggregates.get("mean_delta"))
-            delta_lcb = _safe_float_for_memory(aggregates.get("delta_lcb"))
+            realized = _realized_score_delta_for_memory(doc)
+            mean_delta = realized["score_delta"]
+            delta_lcb = realized["score_delta_lcb"]
             if mean_delta > 0:
                 positive_delta_count += 1
             else:
@@ -6777,6 +6775,46 @@ def _safe_float_for_memory(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _realized_score_delta_for_memory(
+    score_bundle: Mapping[str, Any],
+) -> dict[str, float]:
+    """Return benchmark-relative deltas for loop-planner feedback.
+
+    Stored-daily-baseline bundles record candidate-vs-zero arithmetic in
+    ``aggregates`` for historical hash compatibility. Those values are not
+    improvement deltas. New stamped bundles carry the verifier-recomputed
+    paired mean/LCB in the promotion metric; historical holdout bundles retain
+    their aggregate daily-baseline delta but have no trustworthy paired LCB.
+    Truly paired legacy bundles have no holdout gate and keep their original
+    aggregate semantics.
+    """
+
+    aggregates = (
+        score_bundle.get("aggregates")
+        if isinstance(score_bundle.get("aggregates"), Mapping)
+        else {}
+    )
+    holdout_gate = score_bundle.get("private_holdout_gate")
+    if not isinstance(holdout_gate, Mapping):
+        return {
+            "score_delta": _safe_float_for_memory(aggregates.get("mean_delta")),
+            "score_delta_lcb": _safe_float_for_memory(
+                aggregates.get("delta_lcb")
+            ),
+        }
+
+    metric = promotion_improvement_metric(score_bundle)
+    mean_delta = (
+        metric.paired_mean_delta
+        if metric.paired_mean_delta is not None
+        else metric.improvement_points
+    )
+    return {
+        "score_delta": _safe_float_for_memory(mean_delta),
+        "score_delta_lcb": _safe_float_for_memory(metric.paired_delta_lcb),
+    }
 
 
 def _looks_secret_like(value: str) -> bool:

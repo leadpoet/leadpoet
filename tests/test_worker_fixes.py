@@ -235,6 +235,76 @@ async def test_tree_preflight_defers_before_paid_run_processing(monkeypatch):
     assert "pointer_missing" in outcome.error
 
 
+def test_outcome_memory_uses_recomputed_daily_baseline_paired_metric():
+    bundle = {
+        "aggregates": {
+            # Stored-daily-baseline bundles retain candidate-vs-zero arithmetic
+            # here for historical hash compatibility. This must never reach
+            # the planner as a realized improvement.
+            "mean_delta": 60.0,
+            "delta_lcb": 55.0,
+        },
+        "private_holdout_gate": {
+            "promotion_metric_version": "paired_lcb_v1",
+            "decision": "private_holdout_approved",
+            "private_holdout_evaluated": True,
+            "baseline_aggregate_score": 20.0,
+            "candidate_total_score": 22.5,
+            "candidate_delta_vs_daily_baseline": 2.5,
+        },
+        "improvement_gate": {
+            "decision": "eligible_for_probation",
+            "eligible_for_probation": True,
+            "blockers": [],
+            "reference_evaluation_mode": "stored_daily_baseline",
+            "advisory_basis": (
+                "recomputed_candidate_vs_stored_daily_baseline_per_icp"
+            ),
+            "mean_delta": 2.5,
+            "se_delta": 0.9,
+            "delta_lcb": 0.7,
+            "compared_icp_count": 20,
+        },
+    }
+
+    assert worker_mod._realized_score_delta_for_memory(bundle) == {
+        "score_delta": 2.5,
+        "score_delta_lcb": 0.7,
+    }
+
+
+def test_outcome_memory_legacy_daily_bundle_never_uses_candidate_vs_zero():
+    bundle = {
+        "aggregates": {"mean_delta": 40.0, "delta_lcb": 35.0},
+        "private_holdout_gate": {
+            "decision": "private_holdout_approved",
+            "private_holdout_evaluated": True,
+            "baseline_aggregate_score": 20.0,
+            "candidate_total_score": 18.5,
+            "candidate_delta_vs_daily_baseline": -1.5,
+        },
+    }
+
+    assert worker_mod._realized_score_delta_for_memory(bundle) == {
+        "score_delta": -1.5,
+        "score_delta_lcb": 0.0,
+    }
+
+
+def test_outcome_memory_preserves_true_paired_legacy_bundle():
+    bundle = {
+        "aggregates": {
+            "mean_delta": -0.2,
+            "delta_lcb": -1.1,
+        },
+    }
+
+    assert worker_mod._realized_score_delta_for_memory(bundle) == {
+        "score_delta": -0.2,
+        "score_delta_lcb": -1.1,
+    }
+
+
 def test_inner_loop_rejects_multiple_paid_finalists():
     candidates = (object(), object(), object())
 

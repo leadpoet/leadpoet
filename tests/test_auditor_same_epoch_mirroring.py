@@ -108,7 +108,15 @@ def test_unknown_stage_fails_closed(routed):
 # ---------------------------------------------------------------------------
 
 
-def _store(monkeypatch, *, finalization_row):
+_DEFAULT_PUBLICATION = object()
+
+
+def _store(
+    monkeypatch,
+    *,
+    finalization_row,
+    publication_row=_DEFAULT_PUBLICATION,
+):
     from gateway.research_lab import attested_v2_store as store
 
     async def fake_bundle(**_kwargs):
@@ -119,11 +127,13 @@ def _store(monkeypatch, *, finalization_row):
 
     async def fake_select_one(table, filters):
         if table == store.PUBLICATION_TABLE:
-            return {
-                "weight_submission_event_hash": "sha256:" + "c" * 64,
-                "publication_receipt_hash": "sha256:" + "d" * 64,
-                "publication_doc": {"kind": "publication-doc"},
-            }
+            if publication_row is _DEFAULT_PUBLICATION:
+                return {
+                    "weight_submission_event_hash": "sha256:" + "c" * 64,
+                    "publication_receipt_hash": "sha256:" + "d" * 64,
+                    "publication_doc": {"kind": "publication-doc"},
+                }
+            return publication_row
         if table == store.FINALIZATION_TABLE:
             return finalization_row
         raise AssertionError(table)
@@ -165,6 +175,44 @@ def test_store_keeps_finalized_only_contract_by_default(monkeypatch):
         )
     )
     assert authority is None
+
+
+def test_store_treats_missing_staged_publication_as_not_ready(monkeypatch):
+    store = _store(
+        monkeypatch,
+        publication_row=None,
+        finalization_row=None,
+    )
+    authority = asyncio.run(
+        store.load_weight_authority_v2(
+            netuid=71,
+            epoch_id=24084,
+            validator_hotkey="hk",
+            require_finalization=False,
+        )
+    )
+    assert authority is None
+
+
+def test_store_keeps_missing_publication_fail_closed_for_finalized_contract(
+    monkeypatch,
+):
+    store = _store(
+        monkeypatch,
+        publication_row=None,
+        finalization_row=None,
+    )
+    with pytest.raises(
+        store.AttestedV2StoreError,
+        match="V2 bundle publication is missing",
+    ):
+        asyncio.run(
+            store.load_weight_authority_v2(
+                netuid=71,
+                epoch_id=24084,
+                validator_hotkey="hk",
+            )
+        )
 
 
 def test_store_upgrades_staged_payload_once_finalized(monkeypatch):

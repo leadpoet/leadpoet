@@ -2108,6 +2108,8 @@ async def load_weight_authority_v2(
         filters=(("bundle_hash", bundle_verified["bundle_hash"]),),
     )
     if not isinstance(publication, Mapping):
+        if not require_finalization:
+            return None
         raise AttestedV2StoreError("V2 bundle publication is missing")
     finalization = await select_one(
         FINALIZATION_TABLE,

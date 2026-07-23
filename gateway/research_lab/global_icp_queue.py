@@ -462,27 +462,107 @@ async def requeue_job(*, job: Mapping[str, Any], result_doc: Mapping[str, Any]) 
     return won is not None
 
 
-async def public_set_complete(queue_generation_id: str) -> bool:
-    """True when none of the candidate's public jobs are still outstanding."""
-    outstanding = await select_many(
-        JOB_TABLE,
-        filters=(("queue_generation_id", queue_generation_id), ("phase", "public")),
-        limit=500,
+async def fail_generation_for_job(
+    *,
+    job: Mapping[str, Any],
+    failure_class: str,
+) -> Mapping[str, Any] | None:
+    """Atomically fail one exhausted job and its entire queue generation."""
+
+    value = await call_rpc(
+        "research_lab_fail_scoring_queue_generation",
+        {
+            "target_job_id": str(job["job_id"]),
+            "expected_claimed_by": str(job.get("claimed_by") or ""),
+            "expected_attempt_count": int(job.get("attempt_count") or 0),
+            "target_failure_class": str(
+                failure_class or "candidate_scoring_error"
+            ),
+        },
     )
-    return all(str(j.get("status")) in ("done", "failed") for j in outstanding) and bool(outstanding)
+    row: Any = value[0] if isinstance(value, list) and value else value
+    if not isinstance(row, Mapping) or row.get("committed") is not True:
+        return None
+    generation = row.get("generation")
+    return dict(generation) if isinstance(generation, Mapping) else None
 
 
-async def phase_set_complete(queue_generation_id: str, phase: str) -> bool:
+async def claim_failed_generation_projection(
+    *,
+    worker_ref: str,
+    lease_seconds: int,
+) -> Mapping[str, Any] | None:
+    value = await call_rpc(
+        "research_lab_claim_scoring_queue_failure_projection",
+        {
+            "target_worker_ref": worker_ref,
+            "target_lease_seconds": max(30, min(3600, int(lease_seconds))),
+        },
+    )
+    row: Any = value[0] if isinstance(value, list) and value else value
+    if not isinstance(row, Mapping) or row.get("decision") != "claimed":
+        return None
+    generation = row.get("generation")
+    return dict(generation) if isinstance(generation, Mapping) else None
+
+
+async def complete_failed_generation_projection(
+    *,
+    generation: Mapping[str, Any],
+    worker_ref: str,
+) -> bool:
+    value = await call_rpc(
+        "research_lab_complete_scoring_queue_failure_projection",
+        {
+            "target_queue_generation_id": str(
+                generation.get("queue_generation_id") or ""
+            ),
+            "expected_claimed_by": worker_ref,
+            "expected_attempt_count": int(
+                generation.get("failure_projection_attempt_count") or 0
+            ),
+        },
+    )
+    row: Any = value[0] if isinstance(value, list) and value else value
+    return bool(isinstance(row, Mapping) and row.get("committed") is True)
+
+
+async def _phase_jobs_complete(
+    queue_generation_id: str,
+    phase: str,
+) -> bool:
     if phase not in {"public", "private", "conditional"}:
         raise ValueError("invalid global scoring queue phase")
-    outstanding = await select_many(
+    candidate = await select_one(
+        CANDIDATE_TABLE,
+        filters=(("queue_generation_id", queue_generation_id),),
+    )
+    if candidate is None:
+        return False
+    expected_field = {
+        "public": "public_total",
+        "private": "private_total",
+        "conditional": "conditional_total",
+    }[phase]
+    expected = int(candidate.get(expected_field) or 0)
+    jobs = await select_many(
         JOB_TABLE,
         filters=(("queue_generation_id", queue_generation_id), ("phase", phase)),
         limit=500,
     )
-    return bool(outstanding) and all(
-        str(job.get("status")) in ("done", "failed") for job in outstanding
+    return len(jobs) == expected and all(
+        str(job.get("status")) == "done" for job in jobs
     )
+
+
+async def public_set_complete(queue_generation_id: str) -> bool:
+    """True only when every declared public job has a successful result."""
+
+    return await _phase_jobs_complete(queue_generation_id, "public")
+
+
+async def phase_set_complete(queue_generation_id: str, phase: str) -> bool:
+    return await _phase_jobs_complete(queue_generation_id, phase)
 
 
 async def try_decide_gate(*, queue_generation_id: str, public_score: float) -> str | None:
@@ -514,7 +594,11 @@ async def try_decide_gate(*, queue_generation_id: str, public_score: float) -> s
     claimed = await _cas_update(
         CANDIDATE_TABLE,
         {"gate_status": "deciding", "updated_at": _iso(_now())},
-        filters=(("queue_generation_id", queue_generation_id), ("gate_status", "pending")),
+        filters=(
+            ("queue_generation_id", queue_generation_id),
+            ("gate_status", "pending"),
+            ("assembly_status", "pending"),
+        ),
     )
     if claimed is None:
         return None
@@ -662,12 +746,45 @@ async def candidate_ready_to_assemble(queue_generation_id: str) -> Mapping[str, 
         row.get("preliminary_gate_status") or ""
     ) not in ("passed", "rejected", "skipped"):
         return None
-    if str(row.get("assembly_status")) == "assembled":
+    if str(row.get("assembly_status")) != "pending":
         return None
     jobs = await select_many(JOB_TABLE, filters=(("queue_generation_id", queue_generation_id),), limit=1000)
-    # Every job must be resolved: done/failed, or (on a rejected gate) held
-    # private jobs that were marked failed. No queued/claimed left.
-    if any(str(j.get("status")) in ("queued", "claimed", "held") for j in jobs):
+    by_phase = {
+        phase: [job for job in jobs if str(job.get("phase") or "") == phase]
+        for phase in ("public", "private", "conditional")
+    }
+    expected = {
+        "public": int(row.get("public_total") or 0),
+        "private": int(row.get("private_total") or 0),
+        "conditional": int(row.get("conditional_total") or 0),
+    }
+    if (
+        len(jobs) != sum(expected.values())
+        or any(len(by_phase[phase]) != expected[phase] for phase in by_phase)
+    ):
+        return None
+    if any(str(job.get("status")) != "done" for job in by_phase["public"]):
+        return None
+    if str(row.get("gate_status")) == "rejected":
+        downstream = [*by_phase["private"], *by_phase["conditional"]]
+        if any(str(job.get("status")) != "failed" for job in downstream):
+            return None
+        return row
+    if any(str(job.get("status")) != "done" for job in by_phase["private"]):
+        return None
+    if expected["conditional"] > 0:
+        preliminary_status = str(row.get("preliminary_gate_status") or "")
+        if preliminary_status not in {"passed", "rejected"}:
+            return None
+        expected_conditional_status = (
+            "done" if preliminary_status == "passed" else "failed"
+        )
+        if any(
+            str(job.get("status")) != expected_conditional_status
+            for job in by_phase["conditional"]
+        ):
+            return None
+    elif by_phase["conditional"]:
         return None
     return row
 
@@ -683,10 +800,13 @@ async def try_claim_assembly(queue_generation_id: str) -> bool:
 
 
 async def mark_assembled(queue_generation_id: str) -> None:
-    await update_row(
+    await _cas_update(
         CANDIDATE_TABLE,
         {"assembly_status": "assembled", "updated_at": _iso(_now())},
-        filters=(("queue_generation_id", queue_generation_id),),
+        filters=(
+            ("queue_generation_id", queue_generation_id),
+            ("assembly_status", "assembling"),
+        ),
     )
 
 
@@ -755,6 +875,8 @@ async def run_queue_scoring_pass(
         [str, Mapping[str, Any], BaseException], Awaitable[bool]
     ] | None = None,
     retryable_job_error: Callable[[Mapping[str, Any], BaseException], bool] | None = None,
+    job_failure_class: Callable[[Mapping[str, Any], BaseException], str] | None = None,
+    candidate_failed: Callable[[Mapping[str, Any]], Awaitable[None]] | None = None,
     candidate_assembled: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> dict[str, int]:
     """One worker's pass over the global queue.
@@ -782,6 +904,36 @@ async def run_queue_scoring_pass(
         lease_grace_seconds=lease_seconds,
         stale_job_recovered=stale_job_recovered,
     )
+
+    async def _project_failed_generation() -> None:
+        if candidate_failed is None:
+            return
+        generation = await claim_failed_generation_projection(
+            worker_ref=worker_ref,
+            lease_seconds=lease_seconds,
+        )
+        if generation is None:
+            return
+        try:
+            await candidate_failed(generation)
+        except Exception:
+            logger.warning(
+                "research_lab_global_queue_candidate_failed_callback_failed",
+                exc_info=True,
+            )
+            return
+        committed = await complete_failed_generation_projection(
+            generation=generation,
+            worker_ref=worker_ref,
+        )
+        if not committed:
+            logger.warning(
+                "research_lab_global_queue_failure_projection_claim_changed "
+                "generation=%s",
+                str(generation.get("queue_generation_id") or "")[:80],
+            )
+
+    await _project_failed_generation()
 
     async def _decide_ready_preliminary_gate(
         queue_generation_id: str,
@@ -911,10 +1063,18 @@ async def run_queue_scoring_pass(
             )
             counters["scored"] += 1
         except Exception as exc:
+            failure_class = (
+                str(job_failure_class(job, exc) or "candidate_scoring_error")
+                if job_failure_class is not None
+                else exc.__class__.__name__
+            )
             if retryable_job_error is not None and retryable_job_error(job, exc):
                 committed = await requeue_job(
                     job=job,
-                    result_doc={"retryable": True, "failure_class": exc.__class__.__name__},
+                    result_doc={
+                        "retryable": True,
+                        "failure_class": failure_class,
+                    },
                 )
                 await _best_effort_callback(
                     "research_lab_global_queue_job_retry_callback_failed",
@@ -927,20 +1087,26 @@ async def run_queue_scoring_pass(
                 )
                 counters["retried"] += 1
                 return counters
-            # A job that errors out is recorded failed, not retried in-loop, so
-            # one bad ICP never blocks the queue; stale-lease recovery covers a
-            # worker that dies mid-job.
-            committed = await complete_job(job=job, result_doc={}, failed=True)
+            failed_generation = await fail_generation_for_job(
+                job=job,
+                failure_class=failure_class,
+            )
+            committed = failed_generation is not None
             await _best_effort_callback(
                 "research_lab_global_queue_job_failed_callback_failed",
                 job_completed,
                 job,
-                {},
+                {"retryable": False, "failure_class": failure_class},
                 True,
                 committed,
                 exc,
             )
             counters["failed"] += 1
+            if failed_generation is not None:
+                await _project_failed_generation()
+            if max_jobs is not None and counters["scored"] + counters["failed"] >= max_jobs:
+                return counters
+            continue
         if str(job.get("phase")) == "public" and await public_set_complete(queue_generation_id):
             docs = await candidate_result_docs(queue_generation_id)
             decision = await try_decide_gate(
@@ -976,7 +1142,10 @@ async def run_queue_scoring_pass(
                 await _cas_update(
                     CANDIDATE_TABLE,
                     {"assembly_status": "pending", "updated_at": _iso(_now())},
-                    filters=(("queue_generation_id", queue_generation_id),),
+                    filters=(
+                        ("queue_generation_id", queue_generation_id),
+                        ("assembly_status", "assembling"),
+                    ),
                 )
         if max_jobs is not None and counters["scored"] + counters["failed"] >= max_jobs:
             return counters

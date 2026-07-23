@@ -161,6 +161,7 @@ PROTECTED_SYMBOLS = {
         "build_baseline_score_summary",
     ),
     "research_lab/eval/promotion_metric.py": (
+        "_paired_lcb_promotion_metric",
         "promotion_improvement_metric",
         "promotion_gate_decision",
     ),

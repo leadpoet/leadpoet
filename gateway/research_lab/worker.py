@@ -20,6 +20,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
+from uuid import UUID
 
 from gateway.research_lab.candidate_diagnostics import (
     build_candidate_generation_failure_summary,
@@ -151,6 +152,7 @@ from research_lab.eval import (
 
 
 logger = logging.getLogger(__name__)
+HOSTED_RUN_ALLOWLIST_ENV = "RESEARCH_LAB_HOSTED_RUN_ALLOWLIST"
 _POSTGREST_TIMESTAMP_RE = re.compile(
     r"^(?P<prefix>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"
     r"\.(?P<fraction>\d{1,9})(?P<suffix>Z|[+-]\d{2}(?::?\d{2})?)?$"
@@ -169,6 +171,40 @@ def _error_backoff_seconds() -> float:
         return max(5.0, float(os.getenv("RESEARCH_LAB_WORKER_ERROR_BACKOFF_SECONDS", "60")))
     except ValueError:
         return 60.0
+
+
+def _hosted_run_allowlist() -> tuple[str, ...]:
+    """Return the canonical run IDs that this worker may claim.
+
+    The empty/default value preserves normal fleet behavior. A configured
+    value is intentionally strict: an invalid canary ID must stop queue
+    selection instead of silently widening the worker back to every paid run.
+    """
+
+    raw = str(os.getenv(HOSTED_RUN_ALLOWLIST_ENV) or "").strip()
+    if not raw:
+        return ()
+    run_ids: set[str] = set()
+    for item in raw.split(","):
+        value = item.strip().lower()
+        if not value:
+            continue
+        try:
+            parsed = str(UUID(value))
+        except (ValueError, AttributeError) as exc:
+            raise HostedResearchLabWorkerError(
+                f"{HOSTED_RUN_ALLOWLIST_ENV} contains an invalid run ID"
+            ) from exc
+        if parsed != value:
+            raise HostedResearchLabWorkerError(
+                f"{HOSTED_RUN_ALLOWLIST_ENV} must contain canonical UUIDs"
+            )
+        run_ids.add(parsed)
+    if not run_ids:
+        raise HostedResearchLabWorkerError(
+            f"{HOSTED_RUN_ALLOWLIST_ENV} contains no run IDs"
+        )
+    return tuple(sorted(run_ids))
 
 
 def _openrouter_generation_attempts() -> int:
@@ -1262,6 +1298,41 @@ def _tree_evaluator_commitment(
     }
 
 
+def _tree_authority_evaluator_commitment(
+    authority_row: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Validate and return the immutable evaluator pinned by a tree row."""
+
+    tree_doc = (
+        dict(authority_row.get("tree_doc") or {})
+        if isinstance(authority_row.get("tree_doc"), Mapping)
+        else {}
+    )
+    raw_commitment = tree_doc.get("evaluator_commitment")
+    commitment = (
+        dict(raw_commitment)
+        if isinstance(raw_commitment, Mapping)
+        and raw_commitment.get("schema_version")
+        == "research_lab.git_tree_evaluator_commitment.v3"
+        else None
+    )
+    if commitment is None:
+        return None
+    resolved_snapshot_uri = str(
+        commitment.get("resolved_snapshot_uri") or ""
+    ).strip()
+    if (
+        not resolved_snapshot_uri
+        or resolved_snapshot_uri.endswith("/current.json")
+        or sha256_json(commitment)
+        != str(authority_row.get("evaluator_commitment_hash") or "")
+    ):
+        raise HostedResearchLabWorkerError(
+            "Git-tree evaluator commitment differs from its authority"
+        )
+    return commitment
+
+
 def _replacement_resume_state(
     checkpoint_doc: Mapping[str, Any] | None,
     *,
@@ -1577,6 +1648,10 @@ class ResearchLabHostedWorker:
 
     async def run_once(self) -> HostedWorkerOutcome:
         self._require_enabled()
+        # Validate the canary boundary before any recovery/reconciliation
+        # write. A typo must fail closed before stale-run reapers can widen the
+        # activation beyond the intended run.
+        _hosted_run_allowlist()
         if not self.config.hosted_worker_dry_run:
             await self._recover_stale_started_runs()
             await self._reconcile_stale_loop_projections()
@@ -1673,6 +1748,32 @@ class ResearchLabHostedWorker:
                 error=str(exc)[:500],
             )
         context = await self._load_run_context(queued)
+        try:
+            tree_preflight_reason = await self._preclaim_tree_readiness(context)
+        except Exception as exc:
+            tree_preflight_reason = (
+                "tree_preclaim_readiness_unavailable:"
+                f"{exc.__class__.__name__}"
+            )
+            logger.warning(
+                "research_lab_git_tree_preclaim_failed run_id=%s error=%s",
+                compact_ref(run_id),
+                str(exc)[:240],
+            )
+        if tree_preflight_reason:
+            logger.warning(
+                "research_lab_git_tree_preclaim_deferred run_id=%s reason=%s",
+                compact_ref(run_id),
+                tree_preflight_reason[:300],
+            )
+            return HostedWorkerOutcome(
+                processed=False,
+                dry_run=False,
+                run_id=run_id,
+                ticket_id=ticket_id,
+                status="tree_preflight_deferred",
+                error=tree_preflight_reason[:500],
+            )
         try:
             return await self._process_run(context)
         except HostedResearchLabClaimLost as exc:
@@ -1816,13 +1917,159 @@ class ResearchLabHostedWorker:
             ) from exc
 
     async def _next_queued_run(self) -> Mapping[str, Any] | None:
+        allowlist = _hosted_run_allowlist()
+        filters: list[tuple[Any, ...]] = [
+            ("current_queue_status", "queued")
+        ]
+        if allowlist:
+            filters.append(("run_id", "in", allowlist))
         rows = await select_many(
             "research_loop_run_queue_current",
-            filters=(("current_queue_status", "queued"),),
+            filters=tuple(filters),
             order_by=(("queue_priority", False), ("current_status_at", False)),
             limit=self.config.hosted_worker_queue_fetch_limit,
         )
+        if allowlist:
+            allowed = set(allowlist)
+            rows = [
+                row for row in rows if str(row.get("run_id") or "") in allowed
+            ]
         return self._select_preferred_queued_row(rows)
+
+    async def _preclaim_tree_readiness(
+        self,
+        context: HostedRunContext,
+    ) -> str:
+        """Check the exact evaluator inputs before any paid-run state mutation."""
+
+        try:
+            await maybe_refresh_dev_snapshot(
+                self.config,
+                worker_index=int(self.config.hosted_worker_index or 0),
+                tree_policy=self.tree_policy,
+            )
+        except Exception as exc:
+            # A refresh failure does not make a still-current immutable
+            # snapshot unusable. The exact readiness check below remains the
+            # fail-closed authority.
+            logger.warning(
+                "research_lab_preclaim_dev_snapshot_refresh_failed "
+                "worker_ref=%s error=%s",
+                self.worker_ref,
+                str(exc)[:200],
+            )
+        active = await load_active_private_model(
+            self.config,
+            register_bootstrap=False,
+        )
+        artifact = active.artifact
+        authority = await select_one(
+            "research_lab_autoresearch_run_tree_current",
+            columns=(
+                "root_artifact_hash,root_manifest_hash,policy_hash,"
+                "evaluator_commitment_hash,tree_doc"
+            ),
+            filters=(("run_id", context.run_id),),
+        )
+        pinned_evaluator_commitment: Mapping[str, Any] | None = None
+        if (
+            isinstance(authority, Mapping)
+            and str(authority.get("root_artifact_hash") or "")
+            == str(artifact.model_artifact_hash or "")
+            and str(authority.get("root_manifest_hash") or "")
+            == str(artifact.manifest_hash or "")
+            and str(authority.get("policy_hash") or "")
+            == self.tree_policy.policy_hash
+        ):
+            pinned_evaluator_commitment = (
+                _tree_authority_evaluator_commitment(authority)
+            )
+        _readiness, _commitment, reason = (
+            await self._load_tree_snapshot_readiness(
+                context=context,
+                artifact=artifact,
+                pinned_evaluator_commitment=pinned_evaluator_commitment,
+            )
+        )
+        return reason
+
+    async def _load_tree_snapshot_readiness(
+        self,
+        *,
+        context: HostedRunContext,
+        artifact: Any,
+        pinned_evaluator_commitment: Mapping[str, Any] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        ticket_doc = (
+            context.ticket.get("ticket_doc")
+            if isinstance(context.ticket.get("ticket_doc"), Mapping)
+            else {}
+        )
+        miner_direction = str(
+            ticket_doc.get("brief_public_summary")
+            or context.ticket.get("brief_public_summary")
+            or ""
+        )
+        snapshot_uri = str(
+            (
+                pinned_evaluator_commitment.get("resolved_snapshot_uri")
+                if pinned_evaluator_commitment is not None
+                else None
+            )
+            or os.getenv("RESEARCH_LAB_DEV_SNAPSHOT_URI")
+            or DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI
+        )
+        readiness = await asyncio.to_thread(
+            snapshot_readiness,
+            snapshot_uri,
+            expected_dev_icp_count=self.tree_policy.live_max_icps_per_node,
+            selection_seed=str(context.run_id),
+            miner_direction=miner_direction,
+            require_current_day=pinned_evaluator_commitment is None,
+        )
+        reason = ""
+        if not dev_eval_runner_enabled():
+            reason = "tree_dev_evaluator_kill_switch_disabled"
+        elif not bool(readiness.get("ready")):
+            reason = "tree_snapshot_not_ready:" + str(
+                readiness.get("reason") or "unknown"
+            )
+        elif float(readiness.get("snapshot_age_seconds") or 0.0) > 14 * 86400:
+            reason = "tree_snapshot_stale"
+        elif str(readiness.get("champion_image_digest") or "") != str(
+            artifact.image_digest or ""
+        ):
+            reason = "tree_snapshot_champion_image_differs_from_active_model"
+        elif str(readiness.get("private_model_manifest_hash") or "") != str(
+            artifact.manifest_hash or ""
+        ):
+            reason = "tree_snapshot_benchmark_model_differs_from_active_model"
+
+        evaluator_commitment: dict[str, Any] = {}
+        if not reason:
+            evaluator_commitment = _tree_evaluator_commitment(
+                readiness,
+                policy=self.tree_policy,
+                snapshot_pointer_hash=(
+                    str(
+                        pinned_evaluator_commitment.get(
+                            "snapshot_pointer_hash"
+                        )
+                        or ""
+                    )
+                    if pinned_evaluator_commitment is not None
+                    else None
+                ),
+            )
+            if (
+                pinned_evaluator_commitment is not None
+                and evaluator_commitment
+                != dict(pinned_evaluator_commitment)
+            ):
+                reason = (
+                    "tree_snapshot_commitment_does_not_match_pinned_tree"
+                )
+        return dict(readiness), evaluator_commitment, reason
 
     def _select_preferred_queued_row(self, rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
         if not rows:
@@ -2141,20 +2388,29 @@ class ResearchLabHostedWorker:
             60,
             int(self.config.active_loop_stale_after_seconds or DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS),
         )
+        allowlist = _hosted_run_allowlist()
+        filters: list[tuple[Any, ...]] = [
+            ("current_queue_status", "started")
+        ]
+        if allowlist:
+            filters.append(("run_id", "in", allowlist))
         rows = await select_many(
             "research_loop_run_queue_current",
             columns=(
                 "run_id,ticket_id,current_queue_status,current_status_at,"
                 "current_event_hash,queue_priority,worker_ref"
             ),
-            filters=(("current_queue_status", "started"),),
+            filters=tuple(filters),
             # Oldest-first so the stalest rows are still seen when the backlog
             # exceeds the fetch limit.
             order_by=(("current_status_at", False),),
             limit=50,
         )
         recovered = 0
+        allowed = set(allowlist)
         for row in rows:
+            if allowed and str(row.get("run_id") or "") not in allowed:
+                continue
             if not _status_is_stale(row.get("current_status_at"), stale_after_seconds):
                 continue
             run_id = str(row.get("run_id") or "")
@@ -2201,20 +2457,29 @@ class ResearchLabHostedWorker:
             60,
             int(self.config.active_loop_stale_after_seconds or DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS),
         )
+        allowlist = _hosted_run_allowlist()
+        filters: list[tuple[Any, ...]] = [
+            ("current_queue_status", "paused")
+        ]
+        if allowlist:
+            filters.append(("run_id", "in", allowlist))
         rows = await select_many(
             "research_loop_run_queue_current",
             columns=(
                 "run_id,ticket_id,current_queue_status,current_reason,current_status_at,"
                 "current_event_hash,queue_priority,worker_ref"
             ),
-            filters=(("current_queue_status", "paused"),),
+            filters=tuple(filters),
             # Oldest-first so the stalest rows are still seen when the backlog
             # exceeds the fetch limit.
             order_by=(("current_status_at", False),),
             limit=50,
         )
         recovered = 0
+        allowed = set(allowlist)
         for row in rows:
+            if allowed and str(row.get("run_id") or "") not in allowed:
+                continue
             if str(row.get("current_reason") or "") in _STALE_PAUSED_REAPER_EXCLUDED_REASONS:
                 # Deliberately parked runs (e.g. blocked_for_credit awaiting a
                 # key top-up) are only revived by their explicit resume paths.
@@ -2392,83 +2657,18 @@ class ResearchLabHostedWorker:
             return tree_authority.outcome
         tree_id = tree_authority.tree_id
         resume_state = tree_authority.resume_state
-        ticket_doc = (
-            context.ticket.get("ticket_doc")
-            if isinstance(context.ticket.get("ticket_doc"), Mapping)
-            else {}
-        )
-        miner_direction = str(
-            ticket_doc.get("brief_public_summary")
-            or context.ticket.get("brief_public_summary")
-            or ""
-        )
-        dev_selection_seed = str(context.run_id)
         pinned_evaluator_commitment = (
             dict(tree_authority.evaluator_commitment)
             if isinstance(tree_authority.evaluator_commitment, Mapping)
             else None
         )
-        snapshot_uri = str(
-            (
-                pinned_evaluator_commitment.get("resolved_snapshot_uri")
-                if pinned_evaluator_commitment is not None
-                else None
+        readiness, evaluator_commitment, tree_preflight_reason = (
+            await self._load_tree_snapshot_readiness(
+                context=context,
+                artifact=artifact,
+                pinned_evaluator_commitment=pinned_evaluator_commitment,
             )
-            or os.getenv("RESEARCH_LAB_DEV_SNAPSHOT_URI")
-            or DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI
         )
-        readiness = await asyncio.to_thread(
-            snapshot_readiness,
-            snapshot_uri,
-            expected_dev_icp_count=self.tree_policy.live_max_icps_per_node,
-            selection_seed=dev_selection_seed,
-            miner_direction=miner_direction,
-            require_current_day=pinned_evaluator_commitment is None,
-        )
-        tree_preflight_reason = ""
-        if not dev_eval_runner_enabled():
-            tree_preflight_reason = "tree_dev_evaluator_kill_switch_disabled"
-        elif not bool(readiness.get("ready")):
-            tree_preflight_reason = "tree_snapshot_not_ready:" + str(
-                readiness.get("reason") or "unknown"
-            )
-        elif float(readiness.get("snapshot_age_seconds") or 0.0) > 14 * 86400:
-            tree_preflight_reason = "tree_snapshot_stale"
-        elif str(readiness.get("champion_image_digest") or "") != str(
-            artifact.image_digest or ""
-        ):
-            tree_preflight_reason = (
-                "tree_snapshot_champion_image_differs_from_active_model"
-            )
-        elif str(readiness.get("private_model_manifest_hash") or "") != str(
-            artifact.manifest_hash or ""
-        ):
-            tree_preflight_reason = (
-                "tree_snapshot_benchmark_model_differs_from_active_model"
-            )
-        evaluator_commitment: dict[str, Any] = {}
-        if not tree_preflight_reason:
-            evaluator_commitment = _tree_evaluator_commitment(
-                readiness,
-                policy=self.tree_policy,
-                snapshot_pointer_hash=(
-                    str(
-                        pinned_evaluator_commitment.get(
-                            "snapshot_pointer_hash"
-                        )
-                        or ""
-                    )
-                    if pinned_evaluator_commitment is not None
-                    else None
-                ),
-            )
-            if (
-                pinned_evaluator_commitment is not None
-                and evaluator_commitment != pinned_evaluator_commitment
-            ):
-                tree_preflight_reason = (
-                    "tree_snapshot_commitment_does_not_match_pinned_tree"
-                )
         if tree_preflight_reason:
             logger.warning(
                 "research_lab_git_tree_preflight_deferred run_id=%s reason=%s",
@@ -4253,28 +4453,7 @@ class ResearchLabHostedWorker:
             if isinstance(existing.get("tree_doc"), Mapping)
             else {}
         )
-        raw_evaluator_commitment = tree_doc.get("evaluator_commitment")
-        evaluator_commitment = (
-            dict(raw_evaluator_commitment)
-            if isinstance(raw_evaluator_commitment, Mapping)
-            and raw_evaluator_commitment.get("schema_version")
-            == "research_lab.git_tree_evaluator_commitment.v3"
-            else None
-        )
-        if evaluator_commitment is not None:
-            if (
-                not str(
-                    evaluator_commitment.get("resolved_snapshot_uri") or ""
-                ).strip()
-                or str(
-                    evaluator_commitment.get("resolved_snapshot_uri") or ""
-                ).endswith("/current.json")
-                or sha256_json(evaluator_commitment)
-                != str(existing.get("evaluator_commitment_hash") or "")
-            ):
-                raise HostedResearchLabWorkerError(
-                    "Git-tree evaluator commitment differs from its authority"
-                )
+        evaluator_commitment = _tree_authority_evaluator_commitment(existing)
         generation = max(0, int(existing.get("tree_generation") or 0))
         current_event_type = str(existing.get("current_event_type") or "")
         current_event_doc = (

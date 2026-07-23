@@ -7,6 +7,9 @@ import math
 from typing import Any, Mapping, Sequence
 
 
+PAIRED_LCB_PROMOTION_METRIC_VERSION = "paired_lcb_v1"
+
+
 @dataclass(frozen=True)
 class PromotionImprovementMetric:
     improvement_points: float
@@ -19,6 +22,11 @@ class PromotionImprovementMetric:
     provider_excluded_icp_ids: tuple[str, ...] = ()
     baseline_basis_adjusted: bool = False
     unadjusted_baseline_aggregate_score: float | None = None
+    promotion_metric_version: str = ""
+    paired_mean_delta: float | None = None
+    paired_se_delta: float | None = None
+    paired_delta_lcb: float | None = None
+    paired_icp_count: int | None = None
 
     def event_doc(self) -> dict[str, Any]:
         return {
@@ -31,6 +39,11 @@ class PromotionImprovementMetric:
             "provider_excluded_icp_ids": list(self.provider_excluded_icp_ids),
             "baseline_basis_adjusted": self.baseline_basis_adjusted,
             "unadjusted_baseline_aggregate_score": self.unadjusted_baseline_aggregate_score,
+            "promotion_metric_version": self.promotion_metric_version,
+            "paired_mean_delta": self.paired_mean_delta,
+            "paired_se_delta": self.paired_se_delta,
+            "paired_delta_lcb": self.paired_delta_lcb,
+            "paired_icp_count": self.paired_icp_count,
         }
 
 
@@ -131,6 +144,17 @@ def promotion_improvement_metric(
                 and bool(gate.get("conditional_holdout_evaluated"))
                 and daily_delta is not None
             ):
+                if (
+                    str(gate.get("promotion_metric_version") or "")
+                    == PAIRED_LCB_PROMOTION_METRIC_VERSION
+                ):
+                    return _paired_lcb_promotion_metric(
+                        score_bundle,
+                        baseline_aggregate=baseline_aggregate,
+                        candidate_total=candidate_total,
+                        daily_delta=daily_delta,
+                        excluded_icp_ids=excluded_icp_ids,
+                    )
                 return PromotionImprovementMetric(
                     improvement_points=float(daily_delta),
                     basis="stored_daily_baseline_conditional_full_bank_delta",
@@ -168,6 +192,17 @@ def promotion_improvement_metric(
             and bool(gate.get("private_holdout_evaluated"))
             and daily_delta is not None
         ):
+            if (
+                str(gate.get("promotion_metric_version") or "")
+                == PAIRED_LCB_PROMOTION_METRIC_VERSION
+            ):
+                return _paired_lcb_promotion_metric(
+                    score_bundle,
+                    baseline_aggregate=baseline_aggregate,
+                    candidate_total=candidate_total,
+                    daily_delta=daily_delta,
+                    excluded_icp_ids=excluded_icp_ids,
+                )
             return PromotionImprovementMetric(
                 improvement_points=float(daily_delta),
                 basis="stored_daily_baseline_total_delta",
@@ -198,6 +233,84 @@ def promotion_improvement_metric(
         improvement_points=float(legacy_delta),
         basis="legacy_paired_mean_delta_no_holdout_gate",
         daily_baseline_available=False,
+    )
+
+
+def _paired_lcb_promotion_metric(
+    score_bundle: Mapping[str, Any],
+    *,
+    baseline_aggregate: float | None,
+    candidate_total: float | None,
+    daily_delta: float,
+    excluded_icp_ids: tuple[str, ...],
+) -> PromotionImprovementMetric:
+    """Use the verifier-recomputed lower confidence bound for new scores."""
+
+    improvement_gate = score_bundle.get("improvement_gate")
+    gate_doc = (
+        improvement_gate if isinstance(improvement_gate, Mapping) else {}
+    )
+    reference_mode = str(
+        gate_doc.get("reference_evaluation_mode") or ""
+    )
+    advisory_basis = str(gate_doc.get("advisory_basis") or "")
+    mean_delta = _finite_optional_float(gate_doc.get("mean_delta"))
+    se_delta = _finite_optional_float(gate_doc.get("se_delta"))
+    delta_lcb = _finite_optional_float(gate_doc.get("delta_lcb"))
+    try:
+        compared_icp_count = int(gate_doc.get("compared_icp_count") or 0)
+    except (TypeError, ValueError):
+        compared_icp_count = 0
+    blockers = gate_doc.get("blockers")
+    blocker_list = (
+        [str(item) for item in blockers]
+        if isinstance(blockers, Sequence)
+        and not isinstance(blockers, (str, bytes, bytearray))
+        else []
+    )
+    confidence_available = (
+        reference_mode == "stored_daily_baseline"
+        and advisory_basis
+        == "recomputed_candidate_vs_stored_daily_baseline_per_icp"
+        and mean_delta is not None
+        and se_delta is not None
+        and se_delta >= 0.0
+        and delta_lcb is not None
+        and compared_icp_count > 0
+    )
+    if not confidence_available:
+        return PromotionImprovementMetric(
+            improvement_points=0.0,
+            basis="stored_daily_baseline_paired_lcb_unavailable",
+            daily_baseline_available=False,
+            baseline_aggregate_score=baseline_aggregate,
+            candidate_total_score=candidate_total,
+            candidate_delta_vs_daily_baseline=float(daily_delta),
+            rejection_status="rejected_paired_lcb_unavailable",
+            provider_excluded_icp_ids=excluded_icp_ids,
+            promotion_metric_version=PAIRED_LCB_PROMOTION_METRIC_VERSION,
+        )
+    rejection_status = None
+    if (
+        str(gate_doc.get("decision") or "") != "eligible_for_probation"
+        or not bool(gate_doc.get("eligible_for_probation"))
+        or blocker_list
+    ):
+        rejection_status = "rejected_paired_lcb_gate_ineligible"
+    return PromotionImprovementMetric(
+        improvement_points=float(delta_lcb),
+        basis="stored_daily_baseline_paired_delta_lcb",
+        daily_baseline_available=True,
+        baseline_aggregate_score=baseline_aggregate,
+        candidate_total_score=candidate_total,
+        candidate_delta_vs_daily_baseline=float(daily_delta),
+        rejection_status=rejection_status,
+        provider_excluded_icp_ids=excluded_icp_ids,
+        promotion_metric_version=PAIRED_LCB_PROMOTION_METRIC_VERSION,
+        paired_mean_delta=float(mean_delta),
+        paired_se_delta=float(se_delta),
+        paired_delta_lcb=float(delta_lcb),
+        paired_icp_count=compared_icp_count,
     )
 
 
@@ -261,6 +374,13 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _finite_optional_float(value: Any) -> float | None:
+    parsed = _optional_float(value)
+    if parsed is None or not math.isfinite(parsed):
+        return None
+    return parsed
 
 
 def _required_finite_score(value: Any, field: str) -> float:

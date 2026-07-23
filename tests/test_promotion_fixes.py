@@ -46,6 +46,9 @@ from gateway.research_lab.promotion import (
     sync_active_model_to_repo_head,
 )
 from research_lab.canonical import sha256_json
+from research_lab.eval.promotion_metric import (
+    PAIRED_LCB_PROMOTION_METRIC_VERSION,
+)
 from gateway.research_lab.source_add_llm_judge import SourceAddJudgeVerdict
 
 
@@ -394,6 +397,99 @@ def test_metric_approved_gate_has_no_rejection() -> None:
     assert metric.rejection_status is None
     assert metric.daily_baseline_available is True
     assert metric.improvement_points == pytest.approx(2.5)
+
+
+def _paired_improvement_gate(**overrides: Any) -> dict[str, Any]:
+    gate = {
+        "decision": "eligible_for_probation",
+        "eligible_for_probation": True,
+        "blockers": [],
+        "reference_evaluation_mode": "stored_daily_baseline",
+        "advisory_basis": (
+            "recomputed_candidate_vs_stored_daily_baseline_per_icp"
+        ),
+        "mean_delta": 2.5,
+        "se_delta": 0.5,
+        "delta_lcb": 1.5,
+        "compared_icp_count": 20,
+    }
+    gate.update(overrides)
+    return gate
+
+
+def test_new_metric_uses_paired_lcb_instead_of_aggregate_mean() -> None:
+    holdout_gate = _approved_gate(
+        promotion_metric_version=PAIRED_LCB_PROMOTION_METRIC_VERSION,
+    )
+    bundle = {
+        "private_holdout_gate": holdout_gate,
+        "improvement_gate": _paired_improvement_gate(
+            mean_delta=2.5,
+            se_delta=0.9,
+            delta_lcb=0.7,
+        ),
+        "aggregates": {},
+    }
+
+    metric = promotion_improvement_metric(bundle)
+    decision = promotion.promotion_gate_decision(
+        bundle,
+        candidate_kind="image_build",
+        candidate_parent="sha256:parent",
+        active_parent="sha256:parent",
+        threshold_points=1.0,
+        auto_promotion_enabled=True,
+    )
+
+    assert metric.improvement_points == pytest.approx(0.7)
+    assert metric.paired_mean_delta == pytest.approx(2.5)
+    assert metric.paired_delta_lcb == pytest.approx(0.7)
+    assert metric.basis == "stored_daily_baseline_paired_delta_lcb"
+    assert decision.status == "rejected_below_threshold"
+
+
+def test_new_metric_rejects_when_paired_confidence_is_missing() -> None:
+    bundle = {
+        "private_holdout_gate": _approved_gate(
+            promotion_metric_version=PAIRED_LCB_PROMOTION_METRIC_VERSION,
+        ),
+        "improvement_gate": {
+            "decision": "not_applicable",
+            "eligible_for_probation": False,
+            "blockers": ["superseded_metric_not_applicable"],
+            "reference_evaluation_mode": "stored_daily_baseline",
+            "advisory_basis": "superseded_metric_not_applicable",
+        },
+        "aggregates": {},
+    }
+
+    metric = promotion_improvement_metric(bundle)
+
+    assert metric.improvement_points == 0.0
+    assert metric.rejection_status == "rejected_paired_lcb_unavailable"
+    assert metric.daily_baseline_available is False
+
+
+def test_new_metric_passes_when_paired_lcb_clears_threshold() -> None:
+    bundle = {
+        "private_holdout_gate": _approved_gate(
+            promotion_metric_version=PAIRED_LCB_PROMOTION_METRIC_VERSION,
+        ),
+        "improvement_gate": _paired_improvement_gate(delta_lcb=1.25),
+        "aggregates": {},
+    }
+
+    decision = promotion.promotion_gate_decision(
+        bundle,
+        candidate_kind="image_build",
+        candidate_parent="sha256:parent",
+        active_parent="sha256:parent",
+        threshold_points=1.0,
+        auto_promotion_enabled=True,
+    )
+
+    assert decision.status == "promotion_passed"
+    assert decision.improvement_points == pytest.approx(1.25)
 
 
 def test_metric_missing_basis_is_explicit_rejection_not_zero_pass() -> None:

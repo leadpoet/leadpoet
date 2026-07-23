@@ -39,6 +39,7 @@ from .private_runtime import (
     publish_incontainer_trace_entries,
 )
 from .provider_costs import summarize_provider_cost_trace_entries
+from .promotion_metric import PAIRED_LCB_PROMOTION_METRIC_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -1712,6 +1713,16 @@ def build_holdout_gate_result(
         "private_holdout_icp_count": private_icp_count,
         "private_holdout_evaluated": bool(passed_public_gate),
         "provider_excluded_icp_ids": _provider_excluded_icp_ids(public_results),
+        **(
+            {
+                "promotion_metric_version": str(
+                    gate.get("promotion_metric_version")
+                )
+            }
+            if str(gate.get("promotion_metric_version") or "")
+            == PAIRED_LCB_PROMOTION_METRIC_VERSION
+            else {}
+        ),
     }
     if not passed_public_gate:
         return list(public_results), gate_result
@@ -1783,6 +1794,16 @@ def _build_conditional_holdout_gate_result(
             gate.get("conditional_validation_policy_hash") or ""
         ),
         "provider_excluded_icp_ids": _provider_excluded_icp_ids(public_results),
+        **(
+            {
+                "promotion_metric_version": str(
+                    gate.get("promotion_metric_version")
+                )
+            }
+            if str(gate.get("promotion_metric_version") or "")
+            == PAIRED_LCB_PROMOTION_METRIC_VERSION
+            else {}
+        ),
     }
     if not passed_public_gate:
         return list(public_results), base_result

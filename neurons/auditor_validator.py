@@ -56,24 +56,48 @@ echo ""
 echo "────────────────────────────────────────────────────────────────"
 echo "🔍 Checking for updates from GitHub..."
 
-# Stash any local changes and pull latest
-if git stash 2>/dev/null; then
-    echo "   💾 Stashed local changes"
+# Consensus code must never start from an unverified or stale checkout.
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "❌ Auditor startup refused: repository checkout is unavailable"
+    exit 1
+fi
+if [ "$(git branch --show-current)" != "main" ]; then
+    echo "❌ Auditor startup refused: checkout is not on main"
+    exit 1
+fi
+if ! git diff --quiet || ! git diff --cached --quiet; then
+    echo "❌ Auditor startup refused: tracked checkout changes are present"
+    exit 1
 fi
 
-if git pull origin main 2>/dev/null; then
-    CURRENT_COMMIT=$(git rev-parse --short HEAD)
-    echo "✅ Repository updated"
-    echo "   Current commit: $CURRENT_COMMIT"
-    
-    # Auto-install new/updated Python packages if requirements.txt changed
-    if git diff HEAD@{1} HEAD --name-only 2>/dev/null | grep -q "requirements.txt"; then
-        echo "📦 requirements.txt changed - updating packages..."
-        pip3 install -r requirements.txt --quiet || echo "   ⚠️  Package install failed (continuing anyway)"
+PREVIOUS_COMMIT="$(git rev-parse HEAD)"
+if ! git fetch origin main; then
+    echo "❌ Auditor startup refused: origin/main could not be fetched"
+    exit 1
+fi
+EXPECTED_COMMIT="$(git rev-parse origin/main)"
+if ! git merge --ff-only origin/main; then
+    echo "❌ Auditor startup refused: main cannot fast-forward to origin/main"
+    exit 1
+fi
+CURRENT_COMMIT="$(git rev-parse HEAD)"
+if [ "$CURRENT_COMMIT" != "$EXPECTED_COMMIT" ]; then
+    echo "❌ Auditor startup refused: HEAD differs from fetched origin/main"
+    exit 1
+fi
+
+echo "✅ Repository updated and verified"
+echo "   Current commit: ${CURRENT_COMMIT:0:12}"
+
+# Auto-install new/updated Python packages if requirements.txt changed.
+if [ "$PREVIOUS_COMMIT" != "$CURRENT_COMMIT" ] && \
+   git diff "$PREVIOUS_COMMIT" "$CURRENT_COMMIT" --name-only -- requirements.txt \
+     | grep -q '^requirements.txt$'; then
+    echo "📦 requirements.txt changed - updating packages..."
+    if ! python3 -m pip install -r requirements.txt --quiet; then
+        echo "❌ Auditor startup refused: package update failed"
+        exit 1
     fi
-else
-    echo "⏭️  Could not update (offline or not a git repo)"
-    echo "   Continuing with current version..."
 fi
 
 RESTART_COUNT=0

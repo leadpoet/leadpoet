@@ -166,8 +166,9 @@ echo "🛑 Auditor stopped. Run command again to pull latest and restart."
         print(f"✅ Created auto-update wrapper: {wrapper_path}")
     except Exception as e:
         print(f"❌ Failed to create wrapper: {e}")
-        print("   Continuing without auto-updates...")
-        # Fall through to normal execution
+        raise SystemExit(
+            "Auditor startup refused: update wrapper could not be created"
+        ) from e
     else:
         # Execute wrapper and replace current process
         print("🚀 Launching auto-update wrapper...\n")
@@ -177,7 +178,9 @@ echo "🛑 Auditor stopped. Run command again to pull latest and restart."
             os.execve(wrapper_path, [wrapper_path] + sys.argv[1:], env)
         except Exception as e:
             print(f"❌ Failed to execute wrapper: {e}")
-            print("   Continuing without auto-updates...")
+            raise SystemExit(
+                "Auditor startup refused: update wrapper could not be executed"
+            ) from e
 
 # ════════════════════════════════════════════════════════════════════════════
 # NORMAL AUDITOR VALIDATOR CODE STARTS BELOW

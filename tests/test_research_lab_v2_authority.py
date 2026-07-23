@@ -664,11 +664,15 @@ async def test_allocation_parent_loader_uses_finalized_allocation_hash(
                 ]
         return []
 
-    async def load_exact(*, artifact_kind, artifact_ref, artifact_hash):
-        exact_requests.append((artifact_kind, artifact_ref, artifact_hash))
+    async def load_exact(artifacts):
+        requested = sorted(artifacts)
+        exact_requests.extend(requested)
         return {
-            "root_receipt_hash": allocation_receipt,
-            "receipts": [{"receipt_hash": allocation_receipt}],
+            key: {
+                "root_receipt_hash": allocation_receipt,
+                "receipts": [{"receipt_hash": allocation_receipt}],
+            }
+            for key in requested
         }
 
     async def load_by_ref(artifacts):
@@ -695,7 +699,7 @@ async def test_allocation_parent_loader_uses_finalized_allocation_hash(
     monkeypatch.setattr(store, "select_all", select_all)
     monkeypatch.setattr(
         attested_v2_store,
-        "load_business_artifact_graph_v2",
+        "load_business_artifact_graphs_v2",
         load_exact,
     )
     monkeypatch.setattr(

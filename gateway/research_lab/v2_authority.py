@@ -1542,7 +1542,7 @@ async def _load_allocation_parent_graphs_v2(
     """Load candidate parent graphs; the enclave independently checks completeness."""
 
     from gateway.research_lab.attested_v2_store import (
-        load_business_artifact_graph_v2,
+        load_business_artifact_graphs_v2,
         load_business_artifact_graphs_by_ref_v2,
         load_receipt_graphs_v2,
     )
@@ -1755,17 +1755,8 @@ async def _load_allocation_parent_graphs_v2(
         (kind, ref, digest)
         for (kind, ref), digest in exact_artifact_refs.items()
     )
-    loaded_exact_graphs = await asyncio.gather(
-        *(
-            load_business_artifact_graph_v2(
-                artifact_kind=kind,
-                artifact_ref=ref,
-                artifact_hash=digest,
-            )
-            for kind, ref, digest in exact_items
-        )
-    )
-    for graph in loaded_exact_graphs:
+    loaded_exact_graphs = await load_business_artifact_graphs_v2(exact_items)
+    for graph in loaded_exact_graphs.values():
         graphs[str(graph["root_receipt_hash"])] = graph
 
     loaded_business_graphs = await load_business_artifact_graphs_by_ref_v2(

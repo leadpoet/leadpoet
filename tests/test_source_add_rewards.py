@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -646,6 +647,115 @@ class TestAllocationRails:
         assert "source_add_obligations" not in bundle["source_state"]
         assert "source_add_allocations" not in bundle["allocation_doc"]
         assert "source_add_alpha_percent" not in bundle["observability"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_allocation_coalesces_only_overlapping_authority_builds(
+    monkeypatch,
+):
+    from gateway.research_lab import allocations as gateway_allocations
+
+    policy = {
+        "policy_id": "research_lab_reimbursement_policy_v1",
+        "lab_cap_alpha_percent": 30.0,
+        "reimbursement_epochs": 20,
+    }
+    authority = _allocation_authority_outcome(
+        epoch=105,
+        netuid=71,
+        policy=policy,
+        source_obligations=[],
+        include_source=False,
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def build(**_kwargs):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return authority
+
+    monkeypatch.setattr(gateway_allocations, "build_allocation_v2", build)
+    config = SimpleNamespace(
+        reimbursement_policy_doc=lambda enabled: dict(policy),
+        reimbursements_enabled=True,
+        weight_mutation_enabled=True,
+        production_writes_enabled=False,
+    )
+
+    first = asyncio.create_task(
+        gateway_allocations.build_research_lab_allocation_bundle(
+            config=config,
+            epoch=105,
+            netuid=71,
+        )
+    )
+    await started.wait()
+    second = asyncio.create_task(
+        gateway_allocations.build_research_lab_allocation_bundle(
+            config=config,
+            epoch=105,
+            netuid=71,
+        )
+    )
+    await asyncio.sleep(0)
+    release.set()
+    first_bundle, second_bundle = await asyncio.gather(first, second)
+
+    assert calls == 1
+    assert first_bundle["allocation_hash"] == second_bundle["allocation_hash"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_allocation_retries_after_shared_build_failure(monkeypatch):
+    from gateway.research_lab import allocations as gateway_allocations
+
+    policy = {
+        "policy_id": "research_lab_reimbursement_policy_v1",
+        "lab_cap_alpha_percent": 30.0,
+        "reimbursement_epochs": 20,
+    }
+    authority = _allocation_authority_outcome(
+        epoch=106,
+        netuid=71,
+        policy=policy,
+        source_obligations=[],
+        include_source=False,
+    )
+    calls = 0
+
+    async def build(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient build failure")
+        return authority
+
+    monkeypatch.setattr(gateway_allocations, "build_allocation_v2", build)
+    config = SimpleNamespace(
+        reimbursement_policy_doc=lambda enabled: dict(policy),
+        reimbursements_enabled=True,
+        weight_mutation_enabled=True,
+        production_writes_enabled=False,
+    )
+
+    with pytest.raises(RuntimeError, match="transient build failure"):
+        await gateway_allocations.build_research_lab_allocation_bundle(
+            config=config,
+            epoch=106,
+            netuid=71,
+        )
+    bundle = await gateway_allocations.build_research_lab_allocation_bundle(
+        config=config,
+        epoch=106,
+        netuid=71,
+    )
+
+    assert calls == 2
+    assert bundle["epoch"] == 106
 
 
 async def _async_value(value):

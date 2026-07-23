@@ -1239,37 +1239,111 @@ async def load_business_artifact_graph_v2(
     digest = str(artifact_hash or "").lower()
     if not kind or not ref or not _HASH_RE.fullmatch(digest):
         raise AttestedV2StoreError("V2 business artifact lookup is invalid")
-    rows = await select_all(
-        BUSINESS_ARTIFACT_TABLE,
-        filters=(
-            ("artifact_kind", kind),
-            ("artifact_ref", ref),
-            ("artifact_hash", digest),
-        ),
+    graphs = await load_business_artifact_graphs_v2(
+        ((kind, ref, digest),),
+        allow_failed_root=allow_failed_root,
     )
-    if len(rows) != 1:
+    return graphs[(kind, ref, digest)]
+
+
+async def load_business_artifact_graphs_v2(
+    artifacts: Iterable[tuple[str, str, str]],
+    *,
+    allow_failed_root: bool = False,
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Resolve exact immutable artifacts while loading shared ancestry once."""
+
+    requested = sorted(
+        {
+            (
+                str(kind or "").strip(),
+                str(ref or "").strip(),
+                str(digest or "").lower(),
+            )
+            for kind, ref, digest in artifacts
+        }
+    )
+    if not requested:
+        return {}
+    if (
+        len(requested) > _MAX_GRAPH_ROWS
+        or any(
+            not kind or not ref or not _HASH_RE.fullmatch(digest)
+            for kind, ref, digest in requested
+        )
+    ):
+        raise AttestedV2StoreError("V2 business artifact lookup is invalid")
+
+    requested_set = set(requested)
+    refs_by_kind: dict[str, list[str]] = {}
+    for kind, ref, _digest in requested:
+        refs_by_kind.setdefault(kind, []).append(ref)
+
+    rows_by_key: dict[tuple[str, str, str], Mapping[str, Any]] = {}
+    for kind in sorted(refs_by_kind):
+        refs = sorted(set(refs_by_kind[kind]))
+        for offset in range(0, len(refs), _GRAPH_QUERY_CHUNK):
+            chunk = refs[offset : offset + _GRAPH_QUERY_CHUNK]
+            rows = await select_all(
+                BUSINESS_ARTIFACT_TABLE,
+                filters=(
+                    ("artifact_kind", kind),
+                    ("artifact_ref", "in", chunk),
+                ),
+                max_rows=_MAX_GRAPH_ROWS,
+                allow_partial=False,
+            )
+            for row in rows:
+                key = (
+                    str(row.get("artifact_kind") or ""),
+                    str(row.get("artifact_ref") or ""),
+                    str(row.get("artifact_hash") or "").lower(),
+                )
+                if key not in requested_set:
+                    continue
+                if key in rows_by_key:
+                    raise AttestedV2StoreError(
+                        "V2 business artifact lineage is missing or ambiguous"
+                    )
+                receipt_hash = str(row.get("receipt_hash") or "").lower()
+                if not _HASH_RE.fullmatch(receipt_hash):
+                    raise AttestedV2StoreError(
+                        "V2 business artifact row conflicts"
+                    )
+                rows_by_key[key] = row
+
+    if set(rows_by_key) != requested_set:
         raise AttestedV2StoreError(
             "V2 business artifact lineage is missing or ambiguous"
         )
-    row = rows[0]
-    for field, expected in (
-        ("artifact_kind", kind),
-        ("artifact_ref", ref),
-        ("artifact_hash", digest),
-    ):
-        if row.get(field) != expected:
-            raise AttestedV2StoreError("V2 business artifact row conflicts")
-    receipt_hash = str(row.get("receipt_hash") or "")
+
+    receipt_hashes = {
+        str(row["receipt_hash"]).lower() for row in rows_by_key.values()
+    }
     if allow_failed_root:
-        graph = await load_receipt_graph_v2(
-            receipt_hash,
-            allowed_failed_receipt_hashes=(receipt_hash,),
-        )
+        graphs = {
+            receipt_hash: await load_receipt_graph_v2(
+                receipt_hash,
+                allowed_failed_receipt_hashes=(receipt_hash,),
+            )
+            for receipt_hash in sorted(receipt_hashes)
+        }
     else:
-        graph = await load_receipt_graph_v2(receipt_hash)
-    if graph.get("root_receipt_hash") != row.get("receipt_hash"):
-        raise AttestedV2StoreError("V2 business artifact graph root differs")
-    return graph
+        graphs = await load_receipt_graphs_v2(receipt_hashes)
+
+    resolved: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for key, row in rows_by_key.items():
+        receipt_hash = str(row["receipt_hash"]).lower()
+        graph = graphs.get(receipt_hash)
+        if (
+            not isinstance(graph, Mapping)
+            or graph.get("root_receipt_hash") != receipt_hash
+        ):
+            raise AttestedV2StoreError(
+                "V2 business artifact graph root differs"
+            )
+        resolved[key] = dict(graph)
+    return resolved
 
 
 async def load_business_artifact_graph_by_ref_v2(

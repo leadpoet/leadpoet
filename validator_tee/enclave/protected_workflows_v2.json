@@ -47,9 +47,24 @@
       "symbol": "build_weight_extrinsic_authorization_v2"
     },
     {
+      "ast_sha256": "sha256:584062dea15800f1517d87cdec2143fe3b2d8684a599de72dfdf22a78b581035",
+      "path": "leadpoet_canonical/hotkey_authority_v2.py",
+      "symbol": "chain_signing_profiles"
+    },
+    {
       "ast_sha256": "sha256:9966553e4180653a17bda402811344646939acc8edd5fa79bec5b96f1f43e036",
       "path": "leadpoet_canonical/hotkey_authority_v2.py",
       "symbol": "classify_application_message_v2"
+    },
+    {
+      "ast_sha256": "sha256:1c1ca65780a612fe13fa279c60371fdaa1d458a24bb2f9471e05b1964786cefb",
+      "path": "leadpoet_canonical/hotkey_authority_v2.py",
+      "symbol": "resolve_chain_signing_profile_hash"
+    },
+    {
+      "ast_sha256": "sha256:01b260d2e4e35368bcea2875fb86b766c7cf7961197768ccd047855601ce2521",
+      "path": "leadpoet_canonical/hotkey_authority_v2.py",
+      "symbol": "select_chain_signing_profile"
     },
     {
       "ast_sha256": "sha256:6f197a1854ea25ad9cc0fbad389a6119b0f15cc9d8417f923ebe204db916aab7",
@@ -57,17 +72,17 @@
       "symbol": "validate_application_signature_request_v2"
     },
     {
-      "ast_sha256": "sha256:99c9cc1b3f2a24d4f6b0f0eebfcd43a92bda4bf72ab18803c8cccec1fa949f57",
+      "ast_sha256": "sha256:bd1862b5f80a07662d986609793d8625fe994486826a3fe5d908bcfde355c8c8",
       "path": "leadpoet_canonical/hotkey_authority_v2.py",
       "symbol": "validate_chain_signing_profile"
     },
     {
-      "ast_sha256": "sha256:10a9287ebd627abcb75013ab69d2737d62e435c688f546db48ab50d73e287869",
+      "ast_sha256": "sha256:9943e92a61b9a06902309f67a2028fba98892346c44e0990a8e9ed099116d6c3",
       "path": "leadpoet_canonical/hotkey_authority_v2.py",
       "symbol": "validate_serve_axon_extrinsic_authorization_v2"
     },
     {
-      "ast_sha256": "sha256:ec9d578980936f90854e108d1dbc2d529916a32906f0161cb96b7be02033c960",
+      "ast_sha256": "sha256:5bfc2f69cc0308e9427d6e141bf466738dc1b0b9b6e84d813be80c3278e4cb0b",
       "path": "leadpoet_canonical/hotkey_authority_v2.py",
       "symbol": "validate_weight_extrinsic_authorization_v2"
     },
@@ -207,6 +222,11 @@
       "symbol": "ValidatorChainSourceV2.find_finalized_extrinsic_inclusion"
     },
     {
+      "ast_sha256": "sha256:b8d28b8e613b7a4e4b4319b444e2ee0449eb500cb052f87599c1b8b5d0460692",
+      "path": "validator_tee/enclave/chain_source_v2.py",
+      "symbol": "ValidatorChainSourceV2.read_chain_signing_runtime"
+    },
+    {
       "ast_sha256": "sha256:63330e816c02230977a33951fde1ef288aee935f02565c43417515d74ca17eeb",
       "path": "validator_tee/enclave/chain_source_v2.py",
       "symbol": "ValidatorChainSourceV2.read_finalized_snapshot"
@@ -242,12 +262,12 @@
       "symbol": "ValidatorHotkeyAuthorityV2.sign_application_message"
     },
     {
-      "ast_sha256": "sha256:c2c3c9a23317e5a5b2da3c52a471fbcec3c256031722d2bb26dc5edcb3e1d5fb",
+      "ast_sha256": "sha256:6d795702155443ec3e48f6c176f8dbc50df2fcde02a1b1f872c2b04bd94f8a6d",
       "path": "validator_tee/enclave/hotkey_authority_v2.py",
       "symbol": "ValidatorHotkeyAuthorityV2.sign_serve_axon_extrinsic"
     },
     {
-      "ast_sha256": "sha256:259b94200bda03fb0288bca26fadae287b16e3be7f352cef35f7efc6a9af89f1",
+      "ast_sha256": "sha256:b54134f10c1248a3110ac33e7b510ab3952ac365e312ab7d7c063b4713559576",
       "path": "validator_tee/enclave/hotkey_authority_v2.py",
       "symbol": "ValidatorHotkeyAuthorityV2.sign_weight_extrinsic"
     },
@@ -282,7 +302,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:c91302f0badd595299ba0fa82b305634dfc7d94ab4e3d55ea845b609df533d08",
+  "manifest_hash": "sha256:6b4876bce5ce0eb3bb51429f5bd3811508d16b409ef7305a550371c52ad610be",
   "protected_source_commit": "71dbc79c8737828c354e72d901febec1779046e1",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

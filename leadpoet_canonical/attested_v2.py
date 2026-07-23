@@ -99,6 +99,7 @@ ROLE_PURPOSES = {
             "validator.weight_snapshot.v2",
             "validator.weights.computed.v2",
             "validator.chain_state.v2",
+            "validator.chain_signing_runtime.v2",
             "validator.subnet_epoch_snapshot.v2",
             "validator.metagraph_state.v2",
             "validator.burn_ownership.v2",

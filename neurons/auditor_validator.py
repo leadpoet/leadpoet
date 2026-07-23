@@ -17,8 +17,10 @@ USAGE:
 import os
 import sys
 import argparse
+import hashlib
 import json
 import re
+import subprocess
 import time
 from urllib.parse import urlparse
 
@@ -220,9 +222,7 @@ from leadpoet_canonical.weights import (
     bundle_weights_hash,
     compare_weights_hash,
     u16_to_emit_floats,
-    weights_within_tolerance,
 )
-from leadpoet_canonical.chain import normalize_chain_weights
 from leadpoet_canonical.events import verify_log_entry
 from leadpoet_canonical.auditor_v2 import (
     fetch_locked_release_identity_cache,
@@ -253,6 +253,39 @@ def _default_gateway_url(environ=None) -> str:
 DEFAULT_GATEWAY_URL = _default_gateway_url()
 AUDITOR_ARCHIVE_ENDPOINT_ENV = "AUDITOR_BITTENSOR_ARCHIVE_ENDPOINT"
 BITTENSOR_ARCHIVE_ENDPOINT_ENV = "BITTENSOR_ARCHIVE_ENDPOINT"
+
+
+def _auditor_runtime_identity() -> Dict[str, str]:
+    """Return public source identities needed to diagnose stale auditors."""
+
+    paths = {
+        "auditor_sha256": Path(__file__).resolve(),
+        "weight_authority_sha256": (
+            Path(_REPO_ROOT) / "leadpoet_canonical" / "weight_authority_v2.py"
+        ),
+        "weight_computation_sha256": (
+            Path(_REPO_ROOT) / "leadpoet_canonical" / "weight_computation.py"
+        ),
+    }
+    identity = {}
+    for field, path in paths.items():
+        try:
+            identity[field] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            identity[field] = "unavailable"
+    try:
+        identity["commit"] = subprocess.run(
+            ["git", "-C", _REPO_ROOT, "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        identity["commit"] = "unavailable"
+    identity["python"] = sys.version.split()[0]
+    identity["bittensor"] = str(getattr(bt, "__version__", "unknown"))
+    return identity
 
 
 def _auditor_archive_endpoint(environ=None) -> str:
@@ -421,8 +454,20 @@ class AuditorValidator:
         self.validator_hotkey = None
         
         weight_protocol = self.auditor_weight_protocol()
+        runtime_identity = _auditor_runtime_identity()
         logger.info("✅ Auditor Validator initialized")
         logger.info("auditor_weight_protocol=%s", weight_protocol)
+        logger.info(
+            "auditor_runtime_identity commit=%s python=%s bittensor=%s "
+            "auditor_sha256=%s weight_authority_sha256=%s "
+            "weight_computation_sha256=%s",
+            runtime_identity["commit"],
+            runtime_identity["python"],
+            runtime_identity["bittensor"],
+            runtime_identity["auditor_sha256"],
+            runtime_identity["weight_authority_sha256"],
+            runtime_identity["weight_computation_sha256"],
+        )
         print(f"✅ Auditor Validator initialized")
         print(f"   Hotkey: {self.wallet.hotkey.ss58_address}")
         print(f"   UID: {self.uid}")
@@ -791,10 +836,13 @@ class AuditorValidator:
     
     async def perform_soft_equivocation_check(self, target_epoch: int) -> bool:
         """
-        Retroactively verify a specific epoch's weights against chain.
+        Verify that a submitted bundle has its exact finalized-chain proof.
         
-        Called at block 30-80 of each new epoch to check N-2 epoch.
-        Compares stored bundle hash with what's actually on chain.
+        Live ``subtensor.weights()`` exposes only the primary validator's most
+        recent vector, so it cannot prove an older epoch after later weights
+        have finalized. The finalized V2 authority instead binds the exact
+        bundle to the enclave-authorized extrinsic and its finalized state
+        transition at the historical block.
         
         Args:
             target_epoch: The epoch to check (typically current_epoch - 2)
@@ -819,52 +867,9 @@ class AuditorValidator:
         print(f"\n{'='*60}")
         print(f"🔍 SOFT EQUIVOCATION CHECK (Epoch {epoch_id})")
         print(f"{'='*60}")
-        print(f"   Checking previous epoch's weights against chain...")
+        print(f"   Checking the bundle's finalized-chain proof...")
         
         try:
-            # Find validator's UID
-            if validator_hotkey not in self.metagraph.hotkeys:
-                print(f"   ⚠️  Validator hotkey not in metagraph, skipping check")
-                self.clear_pending_equivocation_check(epoch_id)
-                return True
-            
-            validator_uid = self.metagraph.hotkeys.index(validator_hotkey)
-            print(f"   Primary validator: {validator_hotkey[:16]}... → UID {validator_uid}")
-            
-            # Get chain weights for the validator
-            print(f"   Fetching chain weights for UID {validator_uid}...")
-            all_chain_weights = self.subtensor.weights(netuid=self.config.netuid)
-            
-            # Debug: show how many validators have weights on chain
-            validators_with_weights = [uid for uid, _ in all_chain_weights]
-            print(f"   Validators with weights on chain: {validators_with_weights}")
-            
-            chain_weights = None
-            for uid, weights_list in all_chain_weights:
-                if uid == validator_uid:
-                    chain_weights = weights_list
-                    # Debug: show raw chain weights before normalization
-                    print(f"   Raw chain weights (first 5):")
-                    for target_uid, w in weights_list[:5]:
-                        print(f"      UID {target_uid}: {w} (type: {type(w).__name__})")
-                    break
-            
-            if not chain_weights:
-                print(f"   ⚠️  No weights on chain for validator UID {validator_uid}")
-                self.clear_pending_equivocation_check(epoch_id)
-                return True
-            
-            # Normalize chain weights to pairs
-            chain_pairs = normalize_chain_weights(chain_weights)
-            
-            # We need to reconstruct bundle weights pairs from the hash
-            # Since we only stored the hash, we need to fetch the bundle again
-            # OR use tolerance-based comparison on the actual weights
-            
-            # For soft check, we'll fetch the bundle and compare with tolerance
-            # (hash comparison is too strict due to ±1 u16 round-trip tolerance)
-            print(f"   Fetching bundle for epoch {epoch_id} to compare weights...")
-            
             bundle, authority_status = await self.fetch_verified_weight_authority(
                 epoch_id
             )
@@ -872,76 +877,60 @@ class AuditorValidator:
             if not bundle:
                 print(
                     f"   ⚠️  Could not verify weight authority for epoch "
-                    f"{epoch_id} ({authority_status}), skipping check"
+                    f"{epoch_id} ({authority_status}), retaining for retry"
                 )
-                self.clear_pending_equivocation_check(epoch_id)
                 return True
-            
+
+            if bundle.get("authority_stage") != "finalized":
+                print(
+                    f"   ⏳ Finalized-chain proof is not available yet; "
+                    f"retaining epoch {epoch_id} for retry"
+                )
+                return True
+
             bundle_uids = bundle.get("uids", [])
             bundle_weights = bundle.get("weights_u16", [])
+            if (
+                not isinstance(bundle_uids, list)
+                or not isinstance(bundle_weights, list)
+                or not bundle_uids
+                or len(bundle_uids) != len(bundle_weights)
+            ):
+                raise ValueError("finalized authority vector is invalid")
             bundle_pairs = list(zip(bundle_uids, bundle_weights))
-            
-            # Debug: show bundle weights for comparison
-            print(f"   Bundle weights (first 5):")
-            for uid, w in bundle_pairs[:5]:
-                print(f"      UID {uid}: {w}")
-            
-            # Convert chain_pairs to dict for comparison
-            chain_dict = {uid: w for uid, w in chain_pairs}
-            bundle_dict = {uid: w for uid, w in bundle_pairs}
-            
-            epoch_state = self._read_epoch_state()
-            current_block = epoch_state.current_block
-            current_epoch = epoch_state.workflow_epoch_id
-            print(f"   Bundle UIDs: {len(bundle_pairs)}, Chain UIDs: {len(chain_pairs)}")
-            
-            # Check if UIDs match
-            bundle_uid_set = set(bundle_uids)
-            chain_uid_set = set(uid for uid, _ in chain_pairs)
-            
-            if bundle_uid_set != chain_uid_set:
-                missing_on_chain = bundle_uid_set - chain_uid_set
-                extra_on_chain = chain_uid_set - bundle_uid_set
-                print(f"\n   ❌ UID MISMATCH!")
-                if missing_on_chain:
-                    print(f"   Missing on chain: {sorted(missing_on_chain)[:10]}...")
-                if extra_on_chain:
-                    print(f"   Extra on chain: {sorted(extra_on_chain)[:10]}...")
-                logger.warning(f"UID_MISMATCH: Epoch {epoch_id} - Bundle and chain have different UIDs (investigating)")
+
+            finalized_compare_hash = compare_weights_hash(
+                int(bundle["netuid"]),
+                int(bundle["epoch_id"]),
+                bundle_pairs,
+            )
+            if (
+                finalized_compare_hash != bundle_compare_hash
+                or str(bundle.get("validator_hotkey") or "") != validator_hotkey
+            ):
+                print(
+                    f"   ❌ Finalized authority differs from the submitted "
+                    f"epoch {epoch_id} bundle"
+                )
+                logger.error(
+                    "auditor_finalized_authority_mismatch epoch=%s",
+                    epoch_id,
+                )
                 self.clear_pending_equivocation_check(epoch_id)
                 return False
-            
-            # Compare weights with ±1 tolerance (u16 round-trip tolerance)
-            mismatches = []
-            for uid in bundle_uid_set:
-                bundle_w = bundle_dict.get(uid, 0)
-                chain_w = chain_dict.get(uid, 0)
-                diff = abs(bundle_w - chain_w)
-                if diff > 1:  # Allow ±1 tolerance
-                    mismatches.append((uid, bundle_w, chain_w, diff))
-            
-            if mismatches:
-                print(f"\n   ❌ WEIGHT MISMATCH (beyond ±1 tolerance)!")
-                print(f"   {len(mismatches)} UIDs with significant differences:")
-                for uid, bw, cw, diff in mismatches[:10]:
-                    print(f"      UID {uid}: bundle={bw}, chain={cw}, diff={diff}")
-                if len(mismatches) > 10:
-                    print(f"      ... and {len(mismatches) - 10} more")
-                logger.warning(f"WEIGHT_MISMATCH: Epoch {epoch_id} - {len(mismatches)} weights differ beyond ±1 tolerance (investigating)")
-                self.clear_pending_equivocation_check(epoch_id)
-                return False
-            
-            # All weights within tolerance
-            print(f"   ✅ MATCH - All {len(bundle_pairs)} weights within ±1 tolerance")
-            print(f"   No equivocation detected for epoch {epoch_id}")
+
+            print(
+                f"   ✅ MATCH - exact bundle finalized in block "
+                f"{bundle['finalized_block']}"
+            )
+            print(f"   Extrinsic: {bundle['extrinsic_hash']}")
             self.clear_pending_equivocation_check(epoch_id)
             return True
                 
         except Exception as e:
             print(f"   ⚠️  Soft equivocation check failed: {e}")
             logger.warning(f"Soft equivocation check error: {e}")
-            self.clear_pending_equivocation_check(epoch_id)
-            return True  # Don't block on errors
+            return True  # Submission already happened; retain evidence for retry.
     
     # ═══════════════════════════════════════════════════════════════════════════
     # Gateway Communication

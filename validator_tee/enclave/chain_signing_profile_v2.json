@@ -21,7 +21,11 @@
     "CheckMortalityAdditionalSigned",
     "CheckMetadataHashAdditionalSigned"
   ],
-  "spec_version": 437,
+  "spec_version": 438,
+  "supported_spec_versions": [
+    437,
+    438
+  ],
   "subnet_reveal_period_epochs": 1,
   "tempo": 360,
   "transaction_version": 1,

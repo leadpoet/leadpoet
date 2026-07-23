@@ -234,6 +234,138 @@ def _archive_adapter(rpc_call):
     return archive_rpc_call
 
 
+def _runtime_rpc(
+    *,
+    runtime_block=99,
+    finalized_block=100,
+    canonical=True,
+    runtime_version=None,
+):
+    calls = []
+    requested_hash = "0x" + "cd" * 32
+    finalized_hash = "0x" + "ab" * 32
+    version = runtime_version or {
+        "specVersion": 438,
+        "transactionVersion": 1,
+    }
+
+    def rpc_call(**kwargs):
+        calls.append(kwargs)
+        method = kwargs["method"]
+        params = kwargs["params"]
+        if method == "chain_getFinalizedHead":
+            result = finalized_hash
+        elif method == "chain_getHeader":
+            result = {
+                "number": hex(
+                    finalized_block
+                    if params == [finalized_hash]
+                    else runtime_block
+                ),
+                "stateRoot": "0x" + "12" * 32,
+                "parentHash": "0x" + "34" * 32,
+                "extrinsicsRoot": "0x" + "56" * 32,
+            }
+        elif method == "chain_getBlockHash":
+            if params == [0]:
+                result = GENESIS_HASH
+            else:
+                assert params == [runtime_block]
+                result = (
+                    requested_hash if canonical else "0x" + "ef" * 32
+                )
+        elif method == "state_getRuntimeVersion":
+            assert params == [requested_hash]
+            result = version
+        else:
+            raise AssertionError(method)
+        attempt = _attempt(
+            job_id=kwargs["job_id"],
+            purpose=kwargs["purpose"],
+            operation=kwargs["logical_operation_id"].split(":")[-1],
+            request_id="%032x" % kwargs["request_id"],
+        )
+        return {"result": result, "attempts": [attempt], "artifacts": []}
+
+    return calls, requested_hash, rpc_call
+
+
+def test_chain_signing_runtime_is_exact_canonical_and_finalized():
+    calls, requested_hash, rpc_call = _runtime_rpc()
+    result = ValidatorChainSourceV2(
+        rpc_call=rpc_call,
+        epoch_authority_supplier=lambda: None,
+    ).read_chain_signing_runtime(
+        runtime_block_hash=requested_hash,
+        max_block_drift=8,
+    )
+
+    assert result["runtime_block"] == 99
+    assert result["finalized_block"] == 100
+    assert result["spec_version"] == 438
+    assert result["transaction_version"] == 1
+    assert result["genesis_hash"] == GENESIS_HASH[2:]
+    assert [item["method"] for item in calls] == [
+        "chain_getFinalizedHead",
+        "chain_getHeader",
+        "chain_getHeader",
+        "chain_getBlockHash",
+        "state_getRuntimeVersion",
+        "chain_getBlockHash",
+    ]
+    assert calls[4]["params"] == [requested_hash]
+
+
+@pytest.mark.parametrize(
+    ("runtime_block", "finalized_block", "canonical", "match"),
+    [
+        (99, 100, False, "not canonical"),
+        (90, 100, True, "not within the finalized signing window"),
+        (101, 100, True, "not within the finalized signing window"),
+    ],
+)
+def test_chain_signing_runtime_fails_closed_on_invalid_exact_block(
+    runtime_block, finalized_block, canonical, match
+):
+    _calls, requested_hash, rpc_call = _runtime_rpc(
+        runtime_block=runtime_block,
+        finalized_block=finalized_block,
+        canonical=canonical,
+    )
+    with pytest.raises(ValidatorChainSourceV2Error, match=match):
+        ValidatorChainSourceV2(
+            rpc_call=rpc_call,
+            epoch_authority_supplier=lambda: None,
+        ).read_chain_signing_runtime(
+            runtime_block_hash=requested_hash,
+            max_block_drift=8,
+        )
+
+
+@pytest.mark.parametrize(
+    "runtime_version",
+    [
+        {"specVersion": True, "transactionVersion": 1},
+        {"specVersion": 438, "transactionVersion": "1"},
+        {"specVersion": 438},
+    ],
+)
+def test_chain_signing_runtime_rejects_malformed_runtime_version(
+    runtime_version,
+):
+    _calls, requested_hash, rpc_call = _runtime_rpc(
+        runtime_version=runtime_version
+    )
+    with pytest.raises(ValidatorChainSourceV2Error):
+        ValidatorChainSourceV2(
+            rpc_call=rpc_call,
+            epoch_authority_supplier=lambda: None,
+        ).read_chain_signing_runtime(
+            runtime_block_hash=requested_hash,
+            max_block_drift=8,
+        )
+
+
 def test_finalized_source_uses_one_block_for_header_and_metagraph():
     calls, rpc_call = _stateful_rpc()
     result = ValidatorChainSourceV2(

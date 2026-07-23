@@ -37,6 +37,7 @@ from leadpoet_canonical.hotkey_authority_v2 import (
     build_weight_extrinsic_authorization_v2,
     encode_signed_extrinsic_v2,
     mortal_era_bounds,
+    select_chain_signing_profile,
     signed_extrinsic_hash_v2,
     validate_chain_signing_profile,
     validate_weight_extrinsic_authorization_v2,
@@ -407,6 +408,35 @@ class ValidatorHotkeyAuthorityV2:
                 "validator hotkey is not provisioned"
             )
         return keypair
+
+    def _profile_for_runtime_block(
+        self, runtime_block_hash: str
+    ) -> Dict[str, Any]:
+        if self._chain_source is None:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "validator chain signing source is unavailable"
+            )
+        try:
+            runtime = self._chain_source.read_chain_signing_runtime(
+                runtime_block_hash=str(runtime_block_hash),
+                max_block_drift=int(
+                    self.chain_profile["max_snapshot_block_drift"]
+                ),
+            )
+            return select_chain_signing_profile(
+                self.chain_profile,
+                runtime_version={
+                    "specVersion": int(runtime["spec_version"]),
+                    "transactionVersion": int(
+                        runtime["transaction_version"]
+                    ),
+                },
+                genesis_hash=str(runtime["genesis_hash"]),
+            )
+        except Exception as exc:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "exact-block chain signing runtime is not authorized"
+            ) from exc
 
     def _prune_prior_epoch_authorizations_locked(
         self, *, incoming_epoch_id: int
@@ -1015,6 +1045,7 @@ class ValidatorHotkeyAuthorityV2:
         self,
         *,
         commit_authorization_id: str,
+        runtime_block_hash: str,
         era_current: int,
         nonce: int,
         block_hash: str,
@@ -1037,8 +1068,11 @@ class ValidatorHotkeyAuthorityV2:
                     "parent weight authorization was not found"
                 )
             result = dict(weight["weight_result"])
+        signing_profile = self._profile_for_runtime_block(
+            runtime_block_hash
+        )
         authorization = build_weight_extrinsic_authorization_v2(
-            profile=self.chain_profile,
+            profile=signing_profile,
             validator_hotkey=self.validator_hotkey,
             hotkey_public_key_hex=self.hotkey_public_key.hex(),
             epoch_id=int(result["epoch_id"]),
@@ -1344,6 +1378,7 @@ class ValidatorHotkeyAuthorityV2:
         protocol: int,
         placeholder1: int,
         placeholder2: int,
+        runtime_block_hash: str,
         era_current: int,
         nonce: int,
         block_hash: str,
@@ -1352,8 +1387,11 @@ class ValidatorHotkeyAuthorityV2:
         """Sign only the exact measured ``serve_axon`` SCALE payload."""
 
         keypair = self._require_keypair()
+        signing_profile = self._profile_for_runtime_block(
+            runtime_block_hash
+        )
         authorization = build_serve_axon_extrinsic_authorization_v2(
-            profile=self.chain_profile,
+            profile=signing_profile,
             validator_hotkey=self.validator_hotkey,
             hotkey_public_key_hex=self.hotkey_public_key.hex(),
             netuid=int(netuid),

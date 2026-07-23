@@ -14,11 +14,14 @@ from leadpoet_canonical.hotkey_authority_v2 import (
     build_weight_inputs_request_v2,
     build_weight_extrinsic_authorization_v2,
     classify_application_message_v2,
+    chain_signing_profiles,
     compact_scale_uint,
     encode_commit_timelocked_call,
     encode_mortal_era,
     encode_serve_axon_call,
     encode_weight_signature_payload,
+    resolve_chain_signing_profile_hash,
+    select_chain_signing_profile,
     subnet_epoch_candidate_authorization_message_v1,
     validate_application_signature_request_v2,
     validate_chain_signing_profile,
@@ -27,6 +30,7 @@ from leadpoet_canonical.hotkey_authority_v2 import (
     validate_weight_inputs_request_v2,
     weight_inputs_request_message_v2,
 )
+from leadpoet_canonical.attested_v2 import sha256_json
 
 
 HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
@@ -115,11 +119,93 @@ def test_checked_in_finney_profile_matches_observed_runtime_payload_fixture():
         block_hash="a23c4fd9e3650f154d48200853e6c44271dd325d9363b7c5aefa582c7a708b23",
     )
     assert preimage.hex() == (
-        "07764700000c6162637b0000000000000004004200140000b501000001000000"
+        "07764700000c6162637b0000000000000004004200140000b601000001000000"
         "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
         "a23c4fd9e3650f154d48200853e6c44271dd325d9363b7c5aefa582c7a708b2300"
     )
     assert signed == preimage
+
+
+def test_compatible_chain_profile_expands_to_exact_hashable_profiles():
+    manifest = {**_profile(), "supported_spec_versions": [431, 432]}
+    profiles = chain_signing_profiles(manifest)
+
+    assert [profile["spec_version"] for profile in profiles] == [431, 432]
+    assert all("supported_spec_versions" not in profile for profile in profiles)
+    selected = select_chain_signing_profile(
+        manifest,
+        runtime_version={"specVersion": 431, "transactionVersion": 1},
+        genesis_hash="0x" + "0" * 64,
+    )
+    assert selected == profiles[0]
+    assert (
+        resolve_chain_signing_profile_hash(
+            manifest, sha256_json(profiles[0])
+        )
+        == profiles[0]
+    )
+
+
+@pytest.mark.parametrize(
+    ("runtime_version", "genesis_hash", "match"),
+    [
+        (
+            {"specVersion": 433, "transactionVersion": 1},
+            "0x" + "0" * 64,
+            "not explicitly supported",
+        ),
+        (
+            {"specVersion": 432, "transactionVersion": 2},
+            "0x" + "0" * 64,
+            "transactionVersion differs",
+        ),
+        (
+            {"specVersion": 432, "transactionVersion": 1},
+            "0x" + "1" * 64,
+            "genesis differs",
+        ),
+    ],
+)
+def test_compatible_chain_profile_fails_closed_on_unmeasured_runtime(
+    runtime_version, genesis_hash, match
+):
+    manifest = {**_profile(), "supported_spec_versions": [431, 432]}
+    with pytest.raises(HotkeyAuthorityV2Error, match=match):
+        select_chain_signing_profile(
+            manifest,
+            runtime_version=runtime_version,
+            genesis_hash=genesis_hash,
+        )
+
+
+def test_authorization_from_prior_compatible_spec_remains_recoverable():
+    prior_profile = {**_profile(), "spec_version": 431}
+    manifest = {**_profile(), "supported_spec_versions": [431, 432]}
+    value = build_weight_extrinsic_authorization_v2(
+        profile=prior_profile,
+        validator_hotkey=HOTKEY,
+        hotkey_public_key_hex="2" * 64,
+        epoch_id=23860,
+        netuid=71,
+        subnet_epoch_index=23807,
+        weight_receipt_hash="sha256:" + "3" * 64,
+        weight_submission_event_hash="sha256:" + "4" * 64,
+        weights_hash="5" * 64,
+        sparse_uids=[0, 14, 213],
+        sparse_weights_u16=[65535, 3210, 2600],
+        commitment=b"encrypted-commitment" * 20,
+        reveal_round=987654,
+        era_current=8596708,
+        nonce=12,
+        block_hash="6" * 64,
+    )
+
+    assert (
+        validate_weight_extrinsic_authorization_v2(
+            value, profile=manifest
+        )
+        == value
+    )
 
 
 def test_mortal_era_encoding_is_stable_for_period_eight():

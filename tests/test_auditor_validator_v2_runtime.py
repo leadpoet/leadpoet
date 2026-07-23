@@ -591,6 +591,130 @@ def test_auditor_source_has_no_verification_burn_or_trust_banner():
     assert "fetch_attested_weights_v1" not in source
 
 
+def _soft_equivocation_auditor(*, pending, authority, status="v2_verified"):
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.config = SimpleNamespace(netuid=71)
+    auditor.load_pending_equivocation_check = lambda **_kwargs: dict(pending)
+    cleared = []
+    auditor.clear_pending_equivocation_check = cleared.append
+
+    async def fetch_verified(_epoch):
+        return authority, status
+
+    auditor.fetch_verified_weight_authority = fetch_verified
+    auditor.subtensor = SimpleNamespace(
+        weights=lambda **_kwargs: pytest.fail(
+            "historical verification must not read the current chain vector"
+        )
+    )
+    return auditor, cleared
+
+
+def test_soft_equivocation_uses_exact_finalized_authority():
+    validator_hotkey = "5" * 48
+    pairs = [(1, 1000), (9, 64535)]
+    compare_hash = auditor_module.compare_weights_hash(71, 24114, pairs)
+    pending = {
+        "bundle_compare_hash": compare_hash,
+        "validator_hotkey": validator_hotkey,
+    }
+    authority = {
+        "authority_stage": "finalized",
+        "epoch_id": 24114,
+        "netuid": 71,
+        "validator_hotkey": validator_hotkey,
+        "uids": [1, 9],
+        "weights_u16": [1000, 64535],
+        "extrinsic_hash": "0x" + ("a" * 64),
+        "finalized_block": 12345,
+    }
+    auditor, cleared = _soft_equivocation_auditor(
+        pending=pending,
+        authority=authority,
+    )
+
+    assert asyncio.run(auditor.perform_soft_equivocation_check(24114)) is True
+    assert cleared == [24114]
+
+
+def test_soft_equivocation_rejects_a_different_finalized_bundle():
+    validator_hotkey = "5" * 48
+    pending = {
+        "bundle_compare_hash": auditor_module.compare_weights_hash(
+            71, 24114, [(1, 65535)]
+        ),
+        "validator_hotkey": validator_hotkey,
+    }
+    authority = {
+        "authority_stage": "finalized",
+        "epoch_id": 24114,
+        "netuid": 71,
+        "validator_hotkey": validator_hotkey,
+        "uids": [2],
+        "weights_u16": [65535],
+        "extrinsic_hash": "0x" + ("b" * 64),
+        "finalized_block": 12345,
+    }
+    auditor, cleared = _soft_equivocation_auditor(
+        pending=pending,
+        authority=authority,
+    )
+
+    assert asyncio.run(auditor.perform_soft_equivocation_check(24114)) is False
+    assert cleared == [24114]
+
+
+@pytest.mark.parametrize(
+    ("authority", "status"),
+    (
+        (
+            {
+                "authority_stage": "published",
+                "epoch_id": 24114,
+                "netuid": 71,
+            },
+            "v2_verified",
+        ),
+        (None, "v2_unavailable"),
+    ),
+)
+def test_soft_equivocation_retains_unfinished_evidence(authority, status):
+    pending = {
+        "bundle_compare_hash": "a" * 64,
+        "validator_hotkey": "5" * 48,
+    }
+    auditor, cleared = _soft_equivocation_auditor(
+        pending=pending,
+        authority=authority,
+        status=status,
+    )
+
+    assert asyncio.run(auditor.perform_soft_equivocation_check(24114)) is True
+    assert cleared == []
+
+
+def test_auditor_runtime_identity_records_public_source_hashes():
+    identity = auditor_module._auditor_runtime_identity()
+
+    assert set(identity) == {
+        "commit",
+        "python",
+        "bittensor",
+        "auditor_sha256",
+        "weight_authority_sha256",
+        "weight_computation_sha256",
+    }
+    assert len(identity["commit"]) == 40
+    for field in (
+        "auditor_sha256",
+        "weight_authority_sha256",
+        "weight_computation_sha256",
+    ):
+        assert len(identity[field]) == 64
+
+
 @pytest.mark.parametrize("protocol", ["legacy_v1_compat", "auto", "banana"])
 def test_non_v2_protocol_is_rejected(monkeypatch, protocol):
     monkeypatch.setenv("AUDITOR_WEIGHT_PROTOCOL", protocol)

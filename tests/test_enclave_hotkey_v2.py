@@ -17,6 +17,7 @@ from validator_tee.host.enclave_hotkey_v2 import (
 
 HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
 PUBLIC_KEY = "a6bfe69c29bf9e4db65c63ac6f6d1e23c252ca871744afb6edc5623d9bc39004"
+FINALIZED_HASH = "0x" + "aa" * 32
 
 
 class FakeClient:
@@ -89,7 +90,8 @@ class FakeSubstrate:
         self.original_calls = []
         self.create_signed_extrinsic = self.original_create_signed_extrinsic
 
-    def init_runtime(self):
+    def init_runtime(self, block_hash=None):
+        assert block_hash == FINALIZED_HASH
         return None
 
     def get_account_nonce(self, address):
@@ -97,10 +99,10 @@ class FakeSubstrate:
         return 7
 
     def get_chain_finalised_head(self):
-        return "0xfinal"
+        return FINALIZED_HASH
 
     def get_block_number(self, head):
-        assert head == "0xfinal"
+        assert head == FINALIZED_HASH
         return 123
 
     def get_block_hash(self, block_id):
@@ -260,6 +262,7 @@ def test_set_weights_context_uses_enclave_commit_and_exact_sdk_payload(monkeypat
     extrinsic_request = [item for item in client.requests if item[0] == "extrinsic"][0][1]
     assert extrinsic_request == {
         "commit_authorization_id": "sha256:" + "2" * 64,
+        "runtime_block_hash": FINALIZED_HASH,
         "era_current": 123,
         "nonce": 7,
         "block_hash": "bb" * 32,
@@ -373,6 +376,7 @@ def test_serve_axon_context_signs_only_exact_measured_call():
     request = [item for item in client.requests if item[0] == "serve_axon"][0][1]
     assert request["netuid"] == 71
     assert request["port"] == 8093
+    assert request["runtime_block_hash"] == FINALIZED_HASH
     assert request["signature_payload_hex"] == b"canonical-scale-payload".hex()
 
 

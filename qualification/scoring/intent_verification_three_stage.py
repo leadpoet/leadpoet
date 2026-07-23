@@ -1326,6 +1326,510 @@ def _decision(verdict: Dict[str, Any]) -> str:
 # ─────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────
+
+
+# ---------------------------------------------------------------------------
+# Bounded intent-corroboration rescue (ported from the site verifier).
+# A medium-confidence, otherwise-supported claim gets ONE bounded pass at
+# independent corroboration: Exa discovery + existing Perplexity citations,
+# wire-syndication and near-duplicate filtering, then a re-judge on the
+# corroborating source. Caps are deliberately small — this is a precision
+# rescue, not a second discovery pipeline. Gated by
+# RESEARCH_LAB_INTENT_CORROBORATION_RESCUE (default off).
+# ---------------------------------------------------------------------------
+
+
+def _corroboration_rescue_enabled() -> bool:
+    """Lab flag for the bounded medium-verdict corroboration rescue.
+
+    Ported from the site verifier (bounded intent corroboration rescue).
+    Default OFF: enabling changes intent verdicts (rescues false negatives),
+    so it is an explicit operator opt-in for the benchmark scoring path.
+    """
+    return str(
+        os.environ.get("RESEARCH_LAB_INTENT_CORROBORATION_RESCUE") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+# A medium-confidence result may receive one bounded corroboration pass.  The
+# caps are deliberately small: this is a precision rescue for an otherwise
+# supported claim, not an unbounded second discovery pipeline.
+CORROBORATION_SEARCH_LIMIT = 6
+CORROBORATION_FETCH_LIMIT = 3
+CORROBORATION_HIGHLIGHT_CHARS = 2_000
+
+# Anti-bot / login-wall / parked-page text markers. When found in a short
+# response body, indicates the scraper hit a challenge page instead of real
+# content — escalate to a stronger tier.
+
+
+def _canonical_host(url: str) -> str:
+    """Return a comparison-safe host without a cosmetic www prefix."""
+    host = _host(url)
+    return host[4:] if host.startswith("www.") else host
+
+
+_WIRE_FAMILIES = {
+    "businesswire": ("businesswire.com",),
+    "prnewswire": ("prnewswire.com",),
+    "globenewswire": ("globenewswire.com",),
+}
+
+_WIRE_SYNDICATION_MARKERS = {
+    "businesswire": (
+        "(business wire)",
+        "business wire) --",
+        "view source version on businesswire.com",
+        "businesswire.com/news/home/",
+    ),
+    "prnewswire": (
+        "(prnewswire)",
+        "pr newswire) --",
+        "prnewswire.com/news-releases/",
+    ),
+    "globenewswire": (
+        "(globe newswire)",
+        "globenewswire.com/news-release/",
+    ),
+}
+
+
+def _wire_family(url: str) -> Optional[str]:
+    host = _canonical_host(url)
+    for family, domains in _WIRE_FAMILIES.items():
+        if any(host == domain or host.endswith(f".{domain}") for domain in domains):
+            return family
+    return None
+
+
+def _looks_like_wire_syndication(text: str, family: Optional[str]) -> bool:
+    """Detect mirrors of the original wire release.
+
+    A mirror is useful for extraction but is not independent corroboration.
+    Keep this deterministic and conservative; the final judge still decides
+    whether genuinely independent content supports the claim.
+    """
+    if not family or not text:
+        return False
+    low = text[:12_000].lower()
+    return any(marker in low for marker in _WIRE_SYNDICATION_MARKERS[family])
+
+
+def _near_duplicate_text(left: str, right: str) -> bool:
+    """Catch unattributed copies while avoiding short-snippet false matches."""
+    def shingles(value: str) -> set:
+        tokens = re.findall(r"[a-z0-9]+", value.lower())[:2_000]
+        return {tuple(tokens[index:index + 5]) for index in range(len(tokens) - 4)}
+
+    left_shingles = shingles(left)
+    right_shingles = shingles(right)
+    if min(len(left_shingles), len(right_shingles)) < 80:
+        return False
+    overlap = len(left_shingles & right_shingles)
+    return overlap / min(len(left_shingles), len(right_shingles)) >= 0.55
+
+
+def _corroboration_query(row: Dict[str, Any]) -> str:
+    parts = [
+        f'"{row.get("company") or ""}"',
+        row.get("claim") or "",
+        row.get("signal_date") or "",
+        row.get("_target_signal_text") or "",
+    ]
+    return " ".join(str(part).strip() for part in parts if str(part).strip())
+
+
+def _citation_url(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, Mapping):
+        return str(value.get("url") or value.get("link") or "").strip()
+    return ""
+
+
+def _candidate_urls(
+    values: List[Any], original_urls: List[str], limit: int,
+) -> List[str]:
+    original_normalized = {_normalize_url(url) for url in original_urls if url}
+    original_hosts = {_canonical_host(url) for url in original_urls if url}
+    output: List[str] = []
+    seen = set(original_normalized)
+    for value in values:
+        url = _citation_url(value)
+        parsed = urlparse(url)
+        normalized = _normalize_url(url)
+        host = _canonical_host(url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not host
+            or normalized in seen
+            or host in original_hosts
+        ):
+            continue
+        seen.add(normalized)
+        output.append(url)
+        if len(output) >= limit:
+            break
+    return output
+
+
+async def _search_exa_corroboration(
+    client: httpx.AsyncClient, row: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Discover a bounded set of possible independent confirmations."""
+    api_key = os.environ.get("EXA_API_KEY")
+    if not api_key:
+        return {"urls": [], "provider": "exa", "error": "missing_key"}
+
+    query = _corroboration_query(row)
+    payload = {
+        "query": query,
+        "type": "auto",
+        "numResults": CORROBORATION_SEARCH_LIMIT,
+        "contents": {
+            "highlights": {
+                "query": row.get("claim") or query,
+                "maxCharacters": CORROBORATION_HIGHLIGHT_CHARS,
+            },
+        },
+    }
+    try:
+        response = await client.post(
+            "https://api.exa.ai/search",
+            headers={"x-api-key": api_key, "Content-Type": "application/json"},
+            json=payload,
+            timeout=SCRAPE_TIMEOUT,
+        )
+        if response.status_code != 200:
+            return {
+                "urls": [], "provider": "exa",
+                "error": f"http_{response.status_code}",
+            }
+        data = response.json()
+        results = data.get("results") if isinstance(data, Mapping) else []
+        urls = _candidate_urls(
+            list(results or []),
+            list(row.get("claimed_source_urls") or []),
+            CORROBORATION_SEARCH_LIMIT,
+        )
+        normalized_results: List[Dict[str, str]] = []
+        allowed = {_normalize_url(url) for url in urls}
+        for result in list(results or []):
+            url = _citation_url(result)
+            if _normalize_url(url) not in allowed:
+                continue
+            highlights = result.get("highlights") if isinstance(result, Mapping) else []
+            if isinstance(highlights, str):
+                highlights = [highlights]
+            body = "\n".join(
+                str(value).strip() for value in list(highlights or [])
+                if str(value).strip()
+            )
+            published = (
+                str(result.get("publishedDate") or "").strip()
+                if isinstance(result, Mapping) else ""
+            )
+            if published:
+                body = f"PUBLISHED DATE: {published}\n{body}".strip()
+            normalized_results.append({
+                "url": url,
+                "title": str(result.get("title") or "")
+                if isinstance(result, Mapping) else "",
+                "text": body[:MAX_SCRAPED_CHARS],
+            })
+        return {
+            "urls": urls,
+            "results": normalized_results,
+            "provider": "exa",
+            "result_count": len(results or []),
+            "error": None,
+        }
+    except Exception as exc:
+        logger.warning(
+            "intent_corroboration_exa_search_failed error_class=%s",
+            type(exc).__name__,
+        )
+        return {
+            "urls": [], "provider": "exa",
+            "error": type(exc).__name__,
+        }
+
+
+def _independent_corroboration(
+    original_contents: Dict[str, Any],
+    candidate_contents: Dict[str, Any],
+    original_urls: List[str],
+) -> Dict[str, Any]:
+    """Remove same-domain, wire-mirror, and near-duplicate candidates."""
+    originals = list(original_contents.get("results") or [])
+    original_hosts = {_canonical_host(url) for url in original_urls if url}
+    original_families = {
+        family for family in (_wire_family(url) for url in original_urls) if family
+    }
+    accepted: List[Dict[str, Any]] = []
+    excluded: List[Dict[str, str]] = []
+
+    for result in list(candidate_contents.get("results") or []):
+        url = str(result.get("url") or "")
+        text = str(result.get("text") or "")
+        host = _canonical_host(url)
+        reason = ""
+        if not host or host in original_hosts:
+            reason = "same_domain"
+        elif _wire_family(url) in original_families:
+            reason = "same_wire_family"
+        elif any(
+            _looks_like_wire_syndication(text, family)
+            for family in original_families
+        ):
+            reason = "wire_syndication"
+        elif any(
+            _near_duplicate_text(str(original.get("text") or ""), text)
+            for original in originals
+        ):
+            reason = "near_duplicate"
+
+        if reason:
+            excluded.append({"url": url, "reason": reason})
+        else:
+            accepted.append(result)
+
+    return {"results": accepted, "excluded": excluded}
+
+
+async def _fetch_corroboration_candidates(
+    urls: List[str], search_results: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Resolve candidate text Exa-first and in parallel.
+
+    Exa Search highlights are exact page passages and can be judged directly
+    when sufficiently substantive.  Missing/thin highlights use Exa Contents;
+    only an Exa failure falls back to the slower hardened SD cascade.
+    """
+    search_by_url = {
+        _normalize_url(str(result.get("url") or "")): result
+        for result in search_results
+    }
+
+    async def fetch_one(url: str) -> Dict[str, Any]:
+        search_result = search_by_url.get(_normalize_url(url)) or {}
+        search_text = str(search_result.get("text") or "")
+        if len(search_text) >= 200:
+            return {
+                "result": {
+                    "url": url,
+                    "title": str(search_result.get("title") or ""),
+                    "text": search_text[:MAX_SCRAPED_CHARS],
+                },
+                "statuses": [{
+                    "url": url,
+                    "source": "exa_search_highlights",
+                    "stage": "ok",
+                }],
+            }
+
+        exa = await _scrape_exa(url)
+        if exa.get("ok") and exa.get("content"):
+            return {
+                "result": {
+                    "url": url,
+                    "title": str(search_result.get("title") or ""),
+                    "text": str(exa["content"])[:MAX_SCRAPED_CHARS],
+                },
+                "statuses": [{
+                    "url": url,
+                    "source": "exa_corroboration_contents",
+                    "stage": exa.get("stage"),
+                }],
+            }
+
+        fallback = await _fetch_sd_then_exa([url])
+        return {
+            "result": (fallback.get("results") or [None])[0],
+            "statuses": list(fallback.get("statuses") or []),
+        }
+
+    batches = await asyncio.gather(*(fetch_one(url) for url in urls))
+    return {
+        "results": [batch["result"] for batch in batches if batch.get("result")],
+        "statuses": [
+            status for batch in batches for status in batch.get("statuses") or []
+        ],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# LinkedIn-aware routing
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _medium_corroboration_eligible(
+    row: Dict[str, Any], item: Dict[str, Any], decision: str,
+) -> bool:
+    """Only rescue a complete, supported claim that missed on confidence."""
+    return bool(
+        decision == "review"
+        and item.get("signal_status") == "supported"
+        and item.get("confidence") == "medium"
+        and item.get("same_entity_check") != "fail"
+        and row.get("signal_date")
+        and item.get("claim_matches_miner_date") != "contradicted"
+    )
+
+
+async def _rescue_medium_with_corroboration(
+    client: httpx.AsyncClient,
+    *,
+    row: Dict[str, Any],
+    original_contents: Dict[str, Any],
+    perplexity_citations: List[Any],
+    stage3_model: str,
+) -> Dict[str, Any]:
+    """Try one bounded independent-source rescue for a medium verdict.
+
+    Exa is the primary discovery provider.  One slot in the three-page fetch
+    budget is reserved for Stage 1's Perplexity native-search citations when
+    available, preventing irrelevant Exa results from starving the fallback.
+    Every candidate is fetched through the existing hardened content path,
+    mirrors are removed deterministically, and the evidence is re-judged once.
+    """
+    original_urls = list(row.get("claimed_source_urls") or [])
+    search = await _search_exa_corroboration(client, row)
+    providers = ["exa"]
+    exa_urls = list(search.get("urls") or [])
+    perplexity_urls = _candidate_urls(
+        list(perplexity_citations or []),
+        original_urls + exa_urls,
+        CORROBORATION_FETCH_LIMIT,
+    )
+    if perplexity_urls:
+        providers.append("perplexity_citations")
+
+    # Reserve one slot for Perplexity when present, then fill any remaining
+    # capacity with Exa.  URL de-duplication already happened above.
+    exa_budget = (
+        CORROBORATION_FETCH_LIMIT - 1
+        if perplexity_urls else CORROBORATION_FETCH_LIMIT
+    )
+    candidate_urls = exa_urls[:exa_budget]
+    candidate_urls.extend(
+        perplexity_urls[:CORROBORATION_FETCH_LIMIT - len(candidate_urls)]
+    )
+    if len(candidate_urls) < CORROBORATION_FETCH_LIMIT:
+        candidate_urls.extend(
+            exa_urls[
+                exa_budget:
+                exa_budget + CORROBORATION_FETCH_LIMIT - len(candidate_urls)
+            ]
+        )
+    fetched = (
+        await _fetch_corroboration_candidates(
+            candidate_urls, list(search.get("results") or []),
+        )
+        if candidate_urls else {"results": [], "statuses": []}
+    )
+    independent = _independent_corroboration(
+        original_contents, fetched, original_urls,
+    )
+
+    independent_results = independent["results"][:CORROBORATION_FETCH_LIMIT]
+    independent_urls = [
+        str(result.get("url") or "") for result in independent_results
+        if result.get("url")
+    ]
+    metadata: Dict[str, Any] = {
+        "attempted": True,
+        "providers": providers,
+        "search_result_count": int(search.get("result_count") or 0),
+        "candidate_count": len(candidate_urls),
+        "fetched_count": len(fetched.get("results") or []),
+        "independent_count": len(independent_results),
+        "independent_urls": independent_urls,
+        "excluded": list(independent.get("excluded") or [])[
+            :CORROBORATION_SEARCH_LIMIT
+        ],
+    }
+    if search.get("error"):
+        metadata["exa_error"] = search["error"]
+
+    if not independent_results:
+        metadata["decision"] = "reject"
+        metadata["reason"] = "no_independent_corroboration"
+        return {"approved": False, "metadata": metadata}
+
+    corroborated_row = dict(row)
+    corroborated_row["claimed_source_urls"] = original_urls + independent_urls
+    corroborated_contents = {
+        "results": list(original_contents.get("results") or [])
+        + independent_results,
+        "statuses": list(original_contents.get("statuses") or [])
+        + list(fetched.get("statuses") or [])
+    }
+    judge_prompt = _build_final_judge_prompt(
+        corroborated_row,
+        corroborated_contents,
+        source_name="original evidence plus independent corroboration",
+    ) + """
+
+CORROBORATION GATE:
+- Approval requires at least one corroborating URL that is either first-party
+  confirmation or an editorially independent authoritative source.
+- A press-release mirror, wire syndication, scraper copy, or page that merely
+  repeats another source without independent reporting is not corroboration.
+- Cite every corroborating URL actually used in evidence_urls_used.
+"""
+    envelope = await _call_openrouter(
+        client,
+        stage3_model,
+        judge_prompt,
+    )
+    if envelope.get("_error"):
+        metadata.update({
+            "decision": "reject",
+            "reason": f"corroboration_judge_error:{envelope['_error']}",
+        })
+        return {"approved": False, "metadata": metadata}
+
+    verdict = _apply_guardrails(
+        corroborated_row, envelope.get("answer") or {},
+    )
+    item = ((verdict.get("signal_evaluations") or [{}]) or [{}])[0]
+    evidence_urls = {
+        _normalize_url(url) for url in (item.get("evidence_urls_used") or [])
+    }
+    cited_independent = any(
+        _normalize_url(url) in evidence_urls for url in independent_urls
+    )
+    approved = bool(
+        item.get("signal_status") == "supported"
+        and item.get("confidence") in {"medium", "high"}
+        and item.get("same_entity_check") == "pass"
+        and item.get("claim_matches_miner_date") != "contradicted"
+        and cited_independent
+    )
+    metadata.update({
+        "decision": "approve" if approved else "reject",
+        "reason": "" if approved else "corroboration_not_confirmed",
+        "status": item.get("signal_status"),
+        "confidence": item.get("confidence"),
+        "same_entity_check": item.get("same_entity_check"),
+        "claim_matches_miner_date": item.get("claim_matches_miner_date"),
+        "cited_independent": cited_independent,
+        "model": envelope.get("model"),
+        "usage": envelope.get("usage") or {},
+    })
+    return {
+        "approved": approved,
+        "metadata": metadata,
+        "verdict": verdict,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Guardrails + decision (identical to standalone pipeline)
+# ─────────────────────────────────────────────────────────────────────
+
+
 async def verify_three_stage(
     client: httpx.AsyncClient,
     *,
@@ -1714,6 +2218,31 @@ async def verify_three_stage(
         stage3_info["domain_override"] = "url_on_lead_domain"
         s3_decision = "review"
 
+    corroboration_info: Optional[Dict[str, Any]] = None
+    if _corroboration_rescue_enabled() and _medium_corroboration_eligible(
+        row, s3_item, s3_decision
+    ):
+        rescue = await _rescue_medium_with_corroboration(
+            client,
+            row=row,
+            original_contents=contents,
+            perplexity_citations=list(s1_envelope.get("citations") or []),
+            stage3_model=stage3_model or STAGE3_MODEL,
+        )
+        corroboration_info = rescue["metadata"]
+        s3_verdict = rescue.get("verdict") or s3_verdict
+        if rescue.get("approved"):
+            stage3_info["original_decision"] = s3_decision
+            stage3_info["decision"] = "approve"
+            stage3_info["corroborated"] = True
+            for field in (
+                "status", "confidence", "same_entity_check",
+                "claim_matches_miner_date", "usage",
+            ):
+                if corroboration_info.get(field) is not None:
+                    stage3_info[field] = corroboration_info[field]
+            s3_decision = "approve"
+
     # Binary mapping for production: approve -> accept; reject -> reject;
     # review -> reject by default (set INTENT_VERIFIER_REVIEW_AS_ACCEPT=on
     # to flip review to accept).
@@ -1724,8 +2253,14 @@ async def verify_three_stage(
         client_ready = False
         reason = f"stage3_{s3_item.get('signal_status') or 'reject'}"
     else:  # review
-        client_ready = review_as_accept
-        reason = "" if review_as_accept else "stage3_review"
+        # An eligible medium result that failed corroboration must stay closed
+        # even when the legacy review-as-accept escape hatch is enabled.
+        if corroboration_info is not None:
+            client_ready = False
+            reason = f"corroboration_{corroboration_info.get('reason') or 'failed'}"
+        else:
+            client_ready = review_as_accept
+            reason = "" if review_as_accept else "stage3_review"
 
     return {
         "client_ready": client_ready,
@@ -1737,4 +2272,5 @@ async def verify_three_stage(
         "stage3": stage3_info,
         "company_check": company_check,
         "verdict": s3_verdict,
+        "corroboration": corroboration_info,
     }

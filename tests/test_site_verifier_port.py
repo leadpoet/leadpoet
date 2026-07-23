@@ -299,3 +299,86 @@ def test_identity_canonical_hash_forbids_floats() -> None:
         canonical_sha256({"score": 1.5})
     # Deterministic over key order.
     assert canonical_sha256({"a": 1, "b": "x"}) == canonical_sha256({"b": "x", "a": 1})
+
+
+# ---------------------------------------------------------------------------
+# Bounded intent-corroboration rescue (ported into three-stage verification)
+# ---------------------------------------------------------------------------
+
+
+def test_corroboration_rescue_default_off(monkeypatch) -> None:
+    import qualification.scoring.intent_verification_three_stage as t3
+
+    monkeypatch.delenv("RESEARCH_LAB_INTENT_CORROBORATION_RESCUE", raising=False)
+    # Default OFF: the call site short-circuits before eligibility, so the
+    # three-stage pipeline behaves byte-for-byte as before the port.
+    assert t3._corroboration_rescue_enabled() is False
+    monkeypatch.setenv("RESEARCH_LAB_INTENT_CORROBORATION_RESCUE", "true")
+    assert t3._corroboration_rescue_enabled() is True
+
+
+def test_corroboration_eligibility_is_narrow() -> None:
+    import qualification.scoring.intent_verification_three_stage as t3
+
+    row = {"signal_date": "2026-07-01"}
+    good = {
+        "signal_status": "supported",
+        "confidence": "medium",
+        "same_entity_check": "pass",
+        "claim_matches_miner_date": "supported",
+    }
+    assert t3._medium_corroboration_eligible(row, good, "review") is True
+    # Every deviation disqualifies: wrong decision, low confidence, entity
+    # failure, contradicted date, or a dateless claim.
+    assert t3._medium_corroboration_eligible(row, good, "reject") is False
+    assert t3._medium_corroboration_eligible(row, {**good, "confidence": "low"}, "review") is False
+    assert t3._medium_corroboration_eligible(row, {**good, "same_entity_check": "fail"}, "review") is False
+    assert t3._medium_corroboration_eligible(
+        row, {**good, "claim_matches_miner_date": "contradicted"}, "review"
+    ) is False
+    assert t3._medium_corroboration_eligible({}, good, "review") is False
+
+
+def test_independent_corroboration_filters_dependent_sources() -> None:
+    import qualification.scoring.intent_verification_three_stage as t3
+
+    filler = " ".join(f"tok{i}" for i in range(120))
+    original_text = f"Acme announced its series B funding round {filler}"
+    original = {"results": [{"url": "https://news.acmewire.com/a", "text": original_text}]}
+    original_urls = [
+        "https://news.acmewire.com/a",
+        "https://www.globenewswire.com/release/acme",
+    ]
+    candidates = {
+        "results": [
+            {"url": "https://news.acmewire.com/b", "text": "same host different path"},
+            {"url": "https://globenewswire.com/other/acme", "text": "any"},
+            {"url": "https://independent-tech-daily.com/acme", "text": original_text},
+            {
+                "url": "https://reporter-desk.com/acme-analysis",
+                "text": "An independent analysis of the announcement with original reporting",
+            },
+        ]
+    }
+    out = t3._independent_corroboration(original, candidates, original_urls)
+    accepted_urls = [r["url"] for r in out["results"]]
+    reasons = {e["url"]: e["reason"] for e in out["excluded"]}
+    assert accepted_urls == ["https://reporter-desk.com/acme-analysis"]
+    assert reasons["https://news.acmewire.com/b"] == "same_domain"
+    # Canonical-host dedup catches the wire domain before family logic.
+    assert reasons["https://globenewswire.com/other/acme"] == "same_domain"
+    assert reasons["https://independent-tech-daily.com/acme"] == "near_duplicate"
+
+
+def test_wire_family_and_syndication_detection() -> None:
+    import qualification.scoring.intent_verification_three_stage as t3
+
+    assert t3._wire_family("https://www.globenewswire.com/x") == "globenewswire"
+    assert t3._wire_family("https://independent-tech-daily.com/x") is None
+    # Mirrors carry the wire distribution marker even on independent hosts.
+    assert t3._looks_like_wire_syndication(
+        "NEW YORK (GLOBE NEWSWIRE) -- Acme Corp today announced", "globenewswire"
+    ) is True
+    assert t3._looks_like_wire_syndication(
+        "An original analysis without wire markers", "globenewswire"
+    ) is False

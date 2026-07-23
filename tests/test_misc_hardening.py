@@ -96,6 +96,9 @@ def _bundle(delta: float, artifact_hash: str = "hash-1", at: str = T2) -> dict:
         "score_bundle_doc": {
             "private_holdout_gate": {
                 "decision": "private_holdout_approved",
+                "private_holdout_evaluated": True,
+                "baseline_aggregate_score": 20.0,
+                "candidate_total_score": 20.0 + delta,
                 "candidate_delta_vs_daily_baseline": delta,
             }
         },

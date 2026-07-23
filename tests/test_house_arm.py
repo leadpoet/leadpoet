@@ -597,6 +597,56 @@ def _bundle(bundle_id: str, mean_delta: float) -> dict[str, Any]:
     }
 
 
+def _daily_bundle(
+    bundle_id: str, *, recorded_mean_delta: float, benchmark_delta: float
+) -> dict[str, Any]:
+    return {
+        "score_bundle_id": bundle_id,
+        "score_bundle_doc": {
+            "aggregates": {"mean_delta": recorded_mean_delta},
+            "private_holdout_gate": {
+                "decision": "private_holdout_approved",
+                "private_holdout_evaluated": True,
+                "baseline_aggregate_score": 20.0,
+                "candidate_total_score": 20.0 + benchmark_delta,
+                "candidate_delta_vs_daily_baseline": benchmark_delta,
+            },
+        },
+    }
+
+
+def _stamped_daily_bundle(
+    bundle_id: str, *, mean_delta: float, delta_lcb: float
+) -> dict[str, Any]:
+    return {
+        "score_bundle_id": bundle_id,
+        "score_bundle_doc": {
+            "aggregates": {"mean_delta": 40.0, "delta_lcb": 35.0},
+            "private_holdout_gate": {
+                "promotion_metric_version": "paired_lcb_v1",
+                "decision": "private_holdout_approved",
+                "private_holdout_evaluated": True,
+                "baseline_aggregate_score": 20.0,
+                "candidate_total_score": 20.0 + mean_delta,
+                "candidate_delta_vs_daily_baseline": mean_delta,
+            },
+            "improvement_gate": {
+                "decision": "eligible_for_probation",
+                "eligible_for_probation": True,
+                "blockers": [],
+                "reference_evaluation_mode": "stored_daily_baseline",
+                "advisory_basis": (
+                    "recomputed_candidate_vs_stored_daily_baseline_per_icp"
+                ),
+                "mean_delta": mean_delta,
+                "se_delta": 0.5,
+                "delta_lcb": delta_lcb,
+                "compared_icp_count": 20,
+            },
+        },
+    }
+
+
 def _range_payment(hotkey: str, *, fee: float = 0.2, compute: float = 5.0) -> dict[str, Any]:
     row = _house_payment_row(fee=fee, spend_compute=compute)
     row["miner_hotkey"] = hotkey
@@ -650,6 +700,52 @@ async def test_comparison_math_matched_budget_yield_per_dollar(store):
     assert comparison["matched_budget_cents"] == 520
     assert comparison["miner_budget_cents"] == comparison["allocator_budget_cents"] == 520
     assert comparison["state"] == "local_stub"
+
+
+async def test_comparison_uses_daily_benchmark_delta_not_candidate_vs_zero(store):
+    store.payments.append(_range_payment(HOUSE_HOTKEY))
+    store.payments.append(_range_payment(MINER_HOTKEY))
+    store.score_bundles.append(
+        _daily_bundle(
+            "bundle-house-daily",
+            recorded_mean_delta=40.0,
+            benchmark_delta=-1.5,
+        )
+    )
+    store.candidates.append(
+        _candidate(HOUSE_HOTKEY, bundle_id="bundle-house-daily")
+    )
+
+    result = await build_house_arm_comparison_report(
+        start_date="2026-06-01", end_date="2026-06-30", config=_fake_config()
+    )
+    house = result["arms"]["house"]
+    assert house["deltas"] == [-1.5]
+    assert house["verified_points"] == 0.0
+    assert house["keeps"] == 0
+
+
+async def test_comparison_keep_uses_paired_lcb_when_available(store):
+    store.payments.append(_range_payment(HOUSE_HOTKEY))
+    store.payments.append(_range_payment(MINER_HOTKEY))
+    store.score_bundles.append(
+        _stamped_daily_bundle(
+            "bundle-house-stamped",
+            mean_delta=2.0,
+            delta_lcb=0.5,
+        )
+    )
+    store.candidates.append(
+        _candidate(HOUSE_HOTKEY, bundle_id="bundle-house-stamped")
+    )
+
+    result = await build_house_arm_comparison_report(
+        start_date="2026-06-01", end_date="2026-06-30", config=_fake_config()
+    )
+    house = result["arms"]["house"]
+    assert house["deltas"] == [2.0]
+    assert house["verified_points"] == 2.0
+    assert house["keeps"] == 0
 
 
 async def test_comparison_reports_insufficient_data_without_house_spend(store):

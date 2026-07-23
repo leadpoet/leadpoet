@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
+from research_lab.eval.promotion_metric import benchmark_relative_score_deltas
 from research_lab.observability.redaction import redact_for_langfuse
 
 from .clusterer import cluster_events
@@ -37,7 +38,6 @@ def _as_float(value: Any) -> float | None:
 
 def _score_bundle_events(row: Mapping[str, Any]) -> list[EngineTraceEvent]:
     doc = row.get("score_bundle_doc") if isinstance(row.get("score_bundle_doc"), Mapping) else {}
-    aggregates = doc.get("aggregates") if isinstance(doc.get("aggregates"), Mapping) else {}
     scoring_health = doc.get("scoring_health") if isinstance(doc.get("scoring_health"), Mapping) else {}
     baseline_health = doc.get("baseline_health") if isinstance(doc.get("baseline_health"), Mapping) else {}
     events: list[EngineTraceEvent] = []
@@ -45,7 +45,7 @@ def _score_bundle_events(row: Mapping[str, Any]) -> list[EngineTraceEvent]:
     ticket_id = str(row.get("ticket_id") or doc.get("ticket_id") or "")
     score_hash = str(row.get("score_bundle_hash") or doc.get("score_bundle_hash") or "")
     created_at = _event_time(row)
-    delta = _as_float(aggregates.get("mean_delta"))
+    delta, _delta_lcb = benchmark_relative_score_deltas(doc)
     if int(scoring_health.get("sourced_zero_no_error_count") or 0) > 0:
         events.append(
             EngineTraceEvent(

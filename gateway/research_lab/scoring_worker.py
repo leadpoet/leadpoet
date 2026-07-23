@@ -14,13 +14,14 @@ import importlib
 import inspect
 import json
 import logging
+import math
 import os
 import random
 from pathlib import Path
 import re
 import threading
 import time
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
@@ -204,6 +205,7 @@ from research_lab.eval.provider_costs import (
     summarize_provider_cost_trace_entries,
 )
 from research_lab.eval.promotion_metric import (
+    PAIRED_LCB_PROMOTION_METRIC_VERSION,
     preliminary_promotion_gate_projection,
     promotion_gate_decision,
 )
@@ -3929,7 +3931,10 @@ class ResearchLabGatewayScoringWorker:
         run_context = self._candidate_run_context(
             candidate, window_hash=window.window_hash, evaluation_epoch=evaluation_epoch
         )
-        evaluation_policy = self._evaluation_policy()
+        evaluation_policy = _stored_daily_baseline_evaluation_policy(
+            self._evaluation_policy(),
+            gate,
+        )
         scoring_config_hash = scoring_configuration_hash()
         public_refs = {str(r) for r in (gate.get("public_icp_refs") or ()) if str(r).strip()}
         conditional_required = bool(gate.get("conditional_validation_required"))
@@ -4847,7 +4852,10 @@ class ResearchLabGatewayScoringWorker:
                 candidate_artifact=ctx["candidate_artifact"],
                 preliminary_results=preliminary_results,
                 run_context={**ctx["run_context"], "signature_ref": "pending"},
-                policy=self._preliminary_evaluation_policy(),
+                policy=_stored_daily_baseline_evaluation_policy(
+                    self._preliminary_evaluation_policy(),
+                    ctx["gate"],
+                ),
                 preliminary_gate=preliminary_gate,
                 parent_receipts=_queue_attested_parent_receipts(
                     docs,
@@ -6065,7 +6073,10 @@ class ResearchLabGatewayScoringWorker:
                 window_hash=window.window_hash,
                 evaluation_epoch=evaluation_epoch,
             )
-            evaluation_policy = self._evaluation_policy()
+            evaluation_policy = _stored_daily_baseline_evaluation_policy(
+                self._evaluation_policy(),
+                private_holdout_gate,
+            )
             scoring_config_hash = scoring_configuration_hash()
             checkpoint_commitment_hash = ""
             if bool(private_holdout_gate.get("conditional_validation_required")):
@@ -6171,7 +6182,10 @@ class ResearchLabGatewayScoringWorker:
                     candidate_artifact=candidate_artifact,
                     preliminary_results=[dict(item) for item in preliminary_results_raw],
                     run_context=unsigned_run_context,
-                    policy=self._preliminary_evaluation_policy(),
+                    policy=_stored_daily_baseline_evaluation_policy(
+                        self._preliminary_evaluation_policy(),
+                        private_holdout_gate,
+                    ),
                     preliminary_gate=payload,
                     parent_receipts=_attested_receipts_from(
                         candidate_runner,
@@ -12618,6 +12632,7 @@ def _private_holdout_gate_from_baseline_row(row: Mapping[str, Any]) -> dict[str,
         policy = assignment.get("policy") if isinstance(assignment.get("policy"), Mapping) else {}
         return {
             "schema_version": "1.1",
+            "promotion_metric_version": PAIRED_LCB_PROMOTION_METRIC_VERSION,
             "gate_type": "public_private_then_conditional_validation",
             "baseline_benchmark_bundle_id": str(row.get("benchmark_bundle_id") or ""),
             "baseline_benchmark_hash": canonical_hash(doc) if doc else "",
@@ -12696,6 +12711,7 @@ def _private_holdout_gate_from_baseline_row(row: Mapping[str, Any]) -> dict[str,
     )
     return {
         "schema_version": "1.0",
+        "promotion_metric_version": PAIRED_LCB_PROMOTION_METRIC_VERSION,
         "gate_type": "public_score_before_private_holdout",
         "baseline_benchmark_bundle_id": str(row.get("benchmark_bundle_id") or ""),
         "baseline_benchmark_hash": canonical_hash(doc) if doc else "",
@@ -12722,6 +12738,9 @@ def _candidate_gate_event_doc(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     return {
+        "promotion_metric_version": str(
+            value.get("promotion_metric_version") or ""
+        ),
         "gate_type": str(value.get("gate_type") or ""),
         "decision": str(value.get("decision") or ""),
         "baseline_benchmark_bundle_id": str(value.get("baseline_benchmark_bundle_id") or ""),
@@ -13062,6 +13081,40 @@ def _safe_float(value: Any, *, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _stored_daily_baseline_evaluation_policy(
+    policy: Mapping[str, Any],
+    gate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind score-bundle arithmetic to the frozen daily baseline per ICP."""
+
+    effective = dict(policy)
+    effective["reference_evaluation_mode"] = "stored_daily_baseline"
+    raw_scores = gate.get("baseline_per_icp_scores")
+    if isinstance(raw_scores, Mapping):
+        baseline_scores: dict[str, float] = {}
+        for key, value in raw_scores.items():
+            ref = str(key or "").strip()
+            if not ref:
+                continue
+            try:
+                score = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(score):
+                baseline_scores[ref] = score
+        if baseline_scores:
+            effective["baseline_per_icp_scores"] = baseline_scores
+    excluded = gate.get("provider_excluded_icp_ids")
+    if (
+        isinstance(excluded, Sequence)
+        and not isinstance(excluded, (str, bytes, bytearray))
+    ):
+        effective["provider_excluded_icp_ids"] = sorted(
+            {str(item).strip() for item in excluded if str(item).strip()}
+        )
+    return effective
 
 
 def _safe_int(value: Any, *, default: int) -> int:

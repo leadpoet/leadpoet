@@ -29,8 +29,9 @@ CREATE POLICY service_role_all ON public.research_loop_run_claim
     FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 CREATE OR REPLACE FUNCTION public.claim_next_research_loop_run(
-    p_holder_ref  TEXT,
-    p_ttl_seconds INTEGER
+    p_holder_ref      TEXT,
+    p_ttl_seconds     INTEGER,
+    p_allowed_run_ids UUID[]
 )
 RETURNS TABLE(
     run_id            UUID,
@@ -64,6 +65,10 @@ BEGIN
     SELECT q.run_id INTO v_id
     FROM public.research_loop_run_queue_current q
     WHERE q.current_queue_status = 'queued'
+      AND (
+          COALESCE(pg_catalog.cardinality(p_allowed_run_ids), 0) = 0
+          OR q.run_id = ANY (p_allowed_run_ids)
+      )
       AND NOT EXISTS (
           SELECT 1 FROM public.research_loop_run_claim cl
           WHERE cl.run_id = q.run_id
@@ -93,9 +98,9 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.claim_next_research_loop_run(TEXT, INTEGER)
+REVOKE ALL ON FUNCTION public.claim_next_research_loop_run(TEXT, INTEGER, UUID[])
     FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.claim_next_research_loop_run(TEXT, INTEGER)
+GRANT EXECUTE ON FUNCTION public.claim_next_research_loop_run(TEXT, INTEGER, UUID[])
     TO service_role;
 
 COMMIT;

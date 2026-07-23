@@ -276,14 +276,26 @@ BEGIN
     VALUES
         ('c1000000-0000-4000-8000-000000000001','f1000000-0000-4000-8000-000000000001',5,'h',now()-interval '3 min','queued'),
         ('c1000000-0000-4000-8000-000000000002','f1000000-0000-4000-8000-000000000002',1,'h',now()-interval '1 min','queued');
-    SELECT run_id INTO ru1 FROM public.claim_next_research_loop_run('w1',120);
-    SELECT run_id INTO ru2 FROM public.claim_next_research_loop_run('w2',120);
+    SELECT run_id INTO ru1 FROM public.claim_next_research_loop_run('w1',120,ARRAY[]::UUID[]);
+    SELECT run_id INTO ru2 FROM public.claim_next_research_loop_run('w2',120,ARRAY[]::UUID[]);
     IF ru1 IS NULL OR ru2 IS NULL OR ru1 = ru2 THEN
         RAISE EXCEPTION '122 sequential run claims must be distinct, got % and %', ru1, ru2;
     END IF;
     -- lower queue_priority sorts first (matches the legacy order).
     IF ru1 <> 'c1000000-0000-4000-8000-000000000002' THEN
         RAISE EXCEPTION '122 priority order wrong, got %', ru1;
+    END IF;
+    -- A canary allowlist is enforced by the same atomic selection operation.
+    INSERT INTO public.research_loop_run_queue_current
+        (run_id, ticket_id, queue_priority, current_event_hash, current_status_at, current_queue_status)
+    VALUES
+        ('c1000000-0000-4000-8000-000000000003','f1000000-0000-4000-8000-000000000003',0,'h',now()-interval '10 min','queued'),
+        ('c1000000-0000-4000-8000-000000000004','f1000000-0000-4000-8000-000000000004',9,'h',now()-interval '1 min','queued');
+    SELECT run_id INTO ru1
+      FROM public.claim_next_research_loop_run(
+          'w3', 120, ARRAY['c1000000-0000-4000-8000-000000000004'::UUID]);
+    IF ru1 <> 'c1000000-0000-4000-8000-000000000004' THEN
+        RAISE EXCEPTION '122 allowlist was not enforced atomically, got %', ru1;
     END IF;
 
     RAISE NOTICE 'RPC-BEHAVIOR-OK';
@@ -435,6 +447,9 @@ def test_atomic_claims_never_double_assign_under_concurrency(pg) -> None:
     assert len(cand) == len(set(cand)), f"candidate double-assign: {cand}"
     assert len(cand) == 20  # 24 available, 20 claimers
 
-    runs = hammer("SELECT run_id FROM claim_next_research_loop_run(%s,120)", ())
+    runs = hammer(
+        "SELECT run_id FROM claim_next_research_loop_run(%s,120,ARRAY[]::UUID[])",
+        (),
+    )
     assert len(runs) == len(set(runs)), f"run double-assign: {runs}"
     assert len(runs) == 20

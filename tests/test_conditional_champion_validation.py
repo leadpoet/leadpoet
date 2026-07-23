@@ -567,6 +567,32 @@ def _gate(
     }
 
 
+def test_holdout_result_propagates_paired_promotion_metric_version() -> None:
+    gate = {
+        **_gate(),
+        "promotion_metric_version": "paired_lcb_v1",
+    }
+    public_results = [
+        {
+            "icp_ref": f"icp-{index:02d}",
+            "candidate_company_scores": [50.0],
+        }
+        for index in range(10)
+    ]
+
+    _results, gate_result = evaluator.build_holdout_gate_result(
+        public_results=public_results,
+        private_results=(),
+        conditional_results=(),
+        public_icp_count=10,
+        private_icp_count=10,
+        conditional_icp_count=20,
+        gate=gate,
+    )
+
+    assert gate_result["promotion_metric_version"] == "paired_lcb_v1"
+
+
 async def _run_gate(
     runner: _Runner,
     gate: Mapping[str, Any],

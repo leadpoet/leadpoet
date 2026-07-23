@@ -180,6 +180,26 @@ def test_score_bundle_signals_derive_three_categories() -> None:
     }
 
 
+def test_score_bundle_signal_uses_daily_benchmark_delta() -> None:
+    row = {
+        "run_id": "run-1",
+        "bundle_status": "rejected",
+        "score_bundle_doc": {
+            "aggregates": {"mean_delta": 40.0},
+            "private_holdout_gate": {
+                "decision": "private_holdout_approved",
+                "private_holdout_evaluated": True,
+                "baseline_aggregate_score": 20.0,
+                "candidate_total_score": 18.5,
+                "candidate_delta_vs_daily_baseline": -1.5,
+            },
+        },
+    }
+    events = _score_bundle_events(row)
+    assert events
+    assert {event.score_delta for event in events} == {-1.5}
+
+
 def test_cost_reason_maps_to_cost_budget_exceeded() -> None:
     event = _candidate_event_to_engine(
         {"candidate_status": "failed", "reason": "cost budget exceeded", "run_id": "run-1", "created_at": _now_iso()}

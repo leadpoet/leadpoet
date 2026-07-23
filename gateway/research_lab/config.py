@@ -986,7 +986,7 @@ class ResearchLabGatewayConfig:
                 max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_CANDIDATE_ZERO_COMPANY_RATE", 1.0)),
             ),
             scoring_health_max_provider_error_rate=min(
-                1.0,
+                0.10,
                 max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_PROVIDER_ERROR_RATE", 0.10)),
             ),
             scoring_health_max_timeout_rate=min(

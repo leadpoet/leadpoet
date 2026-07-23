@@ -1755,6 +1755,18 @@ def test_private_holdout_gate_carries_per_icp_baseline_scores():
     }
     assert gate["baseline_public_score"] == 10.0
     assert gate["baseline_private_holdout_icp_count"] == 2
+    assert gate["promotion_metric_version"] == "paired_lcb_v1"
+
+    policy = sw._stored_daily_baseline_evaluation_policy(
+        {"min_delta": 1.0},
+        gate,
+    )
+    assert policy["reference_evaluation_mode"] == "stored_daily_baseline"
+    assert policy["baseline_per_icp_scores"] == {
+        "icp-a": 10.0,
+        "icp-b": 15.0,
+        "icp-c": 20.0,
+    }
 
 
 @pytest.mark.asyncio

@@ -103,6 +103,27 @@ def test_section_6_4_recommended_defaults(clean_env):
     assert config.private_baseline_rebenchmark_enabled is True
 
 
+def test_provider_error_health_threshold_cannot_be_disabled_by_env(clean_env):
+    clean_env.setenv(
+        "RESEARCH_LAB_SCORING_HEALTH_MAX_PROVIDER_ERROR_RATE",
+        "1.0",
+    )
+
+    assert (
+        ResearchLabGatewayConfig.from_env().scoring_health_max_provider_error_rate
+        == pytest.approx(0.10)
+    )
+
+    clean_env.setenv(
+        "RESEARCH_LAB_SCORING_HEALTH_MAX_PROVIDER_ERROR_RATE",
+        "0.05",
+    )
+    assert (
+        ResearchLabGatewayConfig.from_env().scoring_health_max_provider_error_rate
+        == pytest.approx(0.05)
+    )
+
+
 def test_source_intelligence_defaults_and_independent_rollbacks(clean_env):
     config = ResearchLabGatewayConfig.from_env()
     status = config.public_status()

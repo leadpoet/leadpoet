@@ -29,6 +29,10 @@ from gateway.qualification.utils.chain import (
 )
 from gateway.utils.bans import is_hotkey_banned
 from gateway.utils.rate_limiter import reserve_submission_slot
+from research_lab.eval.promotion_metric import (
+    benchmark_relative_score_deltas,
+    promotion_improvement_metric,
+)
 
 from .allocations import build_research_lab_allocation_bundle
 from .arweave_audit import latest_arweave_anchor
@@ -3946,11 +3950,21 @@ async def _candidate_score_summary(score_bundle_id: str) -> dict[str, Any] | Non
         return None
     bundle = row.get("score_bundle_doc") if isinstance(row.get("score_bundle_doc"), Mapping) else {}
     aggregates = bundle.get("aggregates") if isinstance(bundle.get("aggregates"), Mapping) else {}
+    mean_delta, delta_lcb = benchmark_relative_score_deltas(bundle)
+    metric = promotion_improvement_metric(bundle)
     summary = {
-        "base_score": _float_or_none(aggregates.get("base_score")),
-        "candidate_score": _float_or_none(aggregates.get("candidate_score")),
-        "mean_delta": _float_or_none(aggregates.get("mean_delta")),
-        "delta_lcb": _float_or_none(aggregates.get("delta_lcb")),
+        "base_score": (
+            metric.baseline_aggregate_score
+            if metric.baseline_aggregate_score is not None
+            else _float_or_none(aggregates.get("base_score"))
+        ),
+        "candidate_score": (
+            metric.candidate_total_score
+            if metric.candidate_total_score is not None
+            else _float_or_none(aggregates.get("candidate_score"))
+        ),
+        "mean_delta": mean_delta,
+        "delta_lcb": delta_lcb,
         "icp_count": _int_or_none(aggregates.get("icp_count")),
         "successful_icp_count": _int_or_none(aggregates.get("successful_icp_count")),
         "failure_count": _int_or_none(aggregates.get("failure_count")),

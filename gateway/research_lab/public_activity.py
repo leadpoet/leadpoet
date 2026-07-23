@@ -11,6 +11,8 @@ import os
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
+from research_lab.eval.promotion_metric import benchmark_relative_score_deltas
+
 from .candidate_diagnostics import (
     NO_BUILDABLE_CANDIDATE_EVENT_TYPE,
     build_candidate_generation_failure_summary,
@@ -1536,14 +1538,8 @@ def _score_bundle_delta(row: Mapping[str, Any] | None) -> tuple[float, float]:
     if not row:
         return 0.0, 0.0
     doc = row.get("score_bundle_doc") if isinstance(row.get("score_bundle_doc"), Mapping) else {}
-    gate = doc.get("private_holdout_gate") if isinstance(doc.get("private_holdout_gate"), Mapping) else {}
-    if str(gate.get("decision") or "") == "rejected_before_private_holdout":
-        return 0.0, 0.0
-    daily_delta = gate.get("candidate_delta_vs_daily_baseline")
-    if daily_delta is not None:
-        return _float(daily_delta), 0.0
-    aggregates = doc.get("aggregates") if isinstance(doc.get("aggregates"), Mapping) else {}
-    return _float(aggregates.get("mean_delta")), _float(aggregates.get("delta_lcb"))
+    mean_delta, delta_lcb = benchmark_relative_score_deltas(doc)
+    return _float(mean_delta), _float(delta_lcb)
 
 
 def _float(value: Any) -> float:

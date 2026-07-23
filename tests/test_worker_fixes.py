@@ -133,6 +133,231 @@ async def test_tree_mode_off_returns_before_queue_lookup(monkeypatch):
     assert outcome.processed is False
 
 
+def test_hosted_run_allowlist_rejects_invalid_configuration(monkeypatch):
+    monkeypatch.setenv(worker_mod.HOSTED_RUN_ALLOWLIST_ENV, "not-a-run-id")
+
+    with pytest.raises(
+        worker_mod.HostedResearchLabWorkerError,
+        match="invalid run ID",
+    ):
+        worker_mod._hosted_run_allowlist()
+
+
+@pytest.mark.asyncio
+async def test_invalid_hosted_run_allowlist_prevents_maintenance_writes(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_TREE_MODE", "active")
+    monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "v2")
+    monkeypatch.setenv(worker_mod.HOSTED_RUN_ALLOWLIST_ENV, "not-a-run-id")
+    worker = worker_mod.ResearchLabHostedWorker(
+        ResearchLabGatewayConfig(),
+        worker_ref="worker-a",
+    )
+    worker._require_enabled = lambda: None
+
+    async def forbidden_maintenance():
+        pytest.fail("invalid canary configuration must fail before maintenance")
+
+    monkeypatch.setattr(worker, "_run_preclaim_maintenance", forbidden_maintenance)
+
+    with pytest.raises(
+        worker_mod.HostedResearchLabWorkerError,
+        match="invalid run ID",
+    ):
+        await worker.run_once()
+
+
+@pytest.mark.asyncio
+async def test_provider_preflight_failure_does_not_reserve_run(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_TREE_MODE", "active")
+    monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "v2")
+    worker = worker_mod.ResearchLabHostedWorker(
+        ResearchLabGatewayConfig(),
+        worker_ref="worker-a",
+    )
+    worker._require_enabled = lambda: None
+    worker._code_edit_builder_unavailable_reason = lambda: None
+
+    async def completed_maintenance():
+        return None, {"paused": False, "reason": ""}
+
+    async def unhealthy_preflight(**_kwargs):
+        return {"proceed": False}
+
+    async def forbidden_queue_claim():
+        pytest.fail("provider failure must not reserve a queued run")
+
+    monkeypatch.setattr(
+        worker,
+        "_run_preclaim_maintenance",
+        completed_maintenance,
+    )
+    monkeypatch.setattr(worker_mod, "preflight_gate", unhealthy_preflight)
+    monkeypatch.setattr(worker, "_next_queued_run", forbidden_queue_claim)
+
+    outcome = await worker.run_once()
+
+    assert outcome.status == "provider_preflight_deferred"
+    assert outcome.processed is False
+
+
+@pytest.mark.asyncio
+async def test_hosted_run_allowlist_filters_queue_and_response(monkeypatch, hosted_worker):
+    monkeypatch.setenv(worker_mod.HOSTED_RUN_ALLOWLIST_ENV, RUN_ID)
+    observed = {}
+
+    async def fake_call_rpc(function_name, params):
+        observed["function_name"] = function_name
+        observed["params"] = params
+        return [{"run_id": RUN_ID, "ticket_id": TICKET_ID}]
+
+    monkeypatch.setattr(worker_mod, "call_rpc", fake_call_rpc)
+
+    selected = await hosted_worker._next_queued_run()
+
+    assert observed["function_name"] == "claim_next_research_loop_run"
+    assert observed["params"]["p_allowed_run_ids"] == [RUN_ID]
+    assert selected["run_id"] == RUN_ID
+
+
+@pytest.mark.asyncio
+async def test_tree_preflight_defers_before_paid_run_processing(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_TREE_MODE", "active")
+    monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "v2")
+    worker = worker_mod.ResearchLabHostedWorker(
+        ResearchLabGatewayConfig(),
+        worker_ref="worker-a",
+    )
+    worker._require_enabled = lambda: None
+    worker._code_edit_builder_unavailable_reason = lambda: None
+    worker._require_worker_proxy_for_execution = lambda: None
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    for method_name in (
+        "_recover_stale_started_runs",
+        "_reconcile_stale_loop_projections",
+        "_maybe_reconcile_terminal_tickets",
+        "_maybe_refresh_allocator_priors",
+        "_maybe_expire_unpaid_tickets",
+        "_recover_stale_paused_runs",
+        "_run_periodic_reconciles",
+    ):
+        monkeypatch.setattr(worker, method_name, noop)
+
+    async def maintenance_state():
+        return {"paused": False, "reason": ""}
+
+    async def queued_run():
+        return {"run_id": RUN_ID, "ticket_id": TICKET_ID}
+
+    async def provider_preflight(**_kwargs):
+        return {"proceed": True}
+
+    async def load_context(_queued):
+        return _make_context()
+
+    async def failed_tree_preflight(_context):
+        return "tree_snapshot_not_ready:pointer_missing"
+
+    async def forbidden_process(_context):
+        pytest.fail(
+            "a failed snapshot preflight must not append started events or process the run"
+        )
+
+    monkeypatch.setattr(
+        worker_mod,
+        "get_autoresearch_maintenance_state",
+        maintenance_state,
+    )
+    monkeypatch.setattr(worker_mod, "preflight_gate", provider_preflight)
+    monkeypatch.setattr(worker, "_next_queued_run", queued_run)
+    monkeypatch.setattr(worker, "_load_run_context", load_context)
+    monkeypatch.setattr(
+        worker,
+        "_preclaim_tree_readiness",
+        failed_tree_preflight,
+    )
+    monkeypatch.setattr(worker, "_process_run", forbidden_process)
+
+    outcome = await worker.run_once()
+
+    assert outcome.status == "tree_preflight_deferred"
+    assert outcome.processed is False
+    assert outcome.run_id == RUN_ID
+    assert "pointer_missing" in outcome.error
+
+
+def test_outcome_memory_uses_recomputed_daily_baseline_paired_metric():
+    bundle = {
+        "aggregates": {
+            # Stored-daily-baseline bundles retain candidate-vs-zero arithmetic
+            # here for historical hash compatibility. This must never reach
+            # the planner as a realized improvement.
+            "mean_delta": 60.0,
+            "delta_lcb": 55.0,
+        },
+        "private_holdout_gate": {
+            "promotion_metric_version": "paired_lcb_v1",
+            "decision": "private_holdout_approved",
+            "private_holdout_evaluated": True,
+            "baseline_aggregate_score": 20.0,
+            "candidate_total_score": 22.5,
+            "candidate_delta_vs_daily_baseline": 2.5,
+        },
+        "improvement_gate": {
+            "decision": "eligible_for_probation",
+            "eligible_for_probation": True,
+            "blockers": [],
+            "reference_evaluation_mode": "stored_daily_baseline",
+            "advisory_basis": (
+                "recomputed_candidate_vs_stored_daily_baseline_per_icp"
+            ),
+            "mean_delta": 2.5,
+            "se_delta": 0.9,
+            "delta_lcb": 0.7,
+            "compared_icp_count": 20,
+        },
+    }
+
+    assert worker_mod._realized_score_delta_for_memory(bundle) == {
+        "score_delta": 2.5,
+        "score_delta_lcb": 0.7,
+    }
+
+
+def test_outcome_memory_legacy_daily_bundle_never_uses_candidate_vs_zero():
+    bundle = {
+        "aggregates": {"mean_delta": 40.0, "delta_lcb": 35.0},
+        "private_holdout_gate": {
+            "decision": "private_holdout_approved",
+            "private_holdout_evaluated": True,
+            "baseline_aggregate_score": 20.0,
+            "candidate_total_score": 18.5,
+            "candidate_delta_vs_daily_baseline": -1.5,
+        },
+    }
+
+    assert worker_mod._realized_score_delta_for_memory(bundle) == {
+        "score_delta": -1.5,
+        "score_delta_lcb": 0.0,
+    }
+
+
+def test_outcome_memory_preserves_true_paired_legacy_bundle():
+    bundle = {
+        "aggregates": {
+            "mean_delta": -0.2,
+            "delta_lcb": -1.1,
+        },
+    }
+
+    assert worker_mod._realized_score_delta_for_memory(bundle) == {
+        "score_delta": -0.2,
+        "score_delta_lcb": -1.1,
+    }
+
+
 def test_inner_loop_rejects_multiple_paid_finalists():
     candidates = (object(), object(), object())
 
@@ -1594,6 +1819,58 @@ async def test_stale_started_reaper_scans_oldest_first(hosted_worker, monkeypatc
     monkeypatch.setattr(worker_mod, "select_many", fake_select_many)
     assert await hosted_worker._recover_stale_started_runs() == 0
     assert captured["order_by"] == (("current_status_at", False),)
+
+
+async def test_canary_allowlist_fences_stale_run_reapers(
+    hosted_worker,
+    monkeypatch,
+):
+    other_run_id = "55555555-5555-4555-8555-555555555555"
+    monkeypatch.setenv(worker_mod.HOSTED_RUN_ALLOWLIST_ENV, RUN_ID)
+    stale_at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+    observed_filters = []
+    requeued = []
+
+    async def fake_select_many(_table, **kwargs):
+        observed_filters.append(kwargs["filters"])
+        status = kwargs["filters"][0][1]
+        return [
+            {
+                "run_id": other_run_id,
+                "ticket_id": TICKET_ID,
+                "current_queue_status": status,
+                "current_reason": "maintenance_pause_stale_started",
+                "current_status_at": stale_at,
+                "queue_priority": 0,
+            }
+        ]
+
+    async def fake_blocks(_run_id, _stale_after_seconds):
+        return False
+
+    async def fake_create_queue_event(**kwargs):
+        requeued.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(worker_mod, "select_many", fake_select_many)
+    monkeypatch.setattr(
+        hosted_worker,
+        "_loop_activity_blocks_stale_requeue",
+        fake_blocks,
+    )
+    monkeypatch.setattr(
+        worker_mod,
+        "create_queue_event",
+        fake_create_queue_event,
+    )
+
+    assert await hosted_worker._recover_stale_started_runs() == 0
+    assert await hosted_worker._recover_stale_paused_runs() == 0
+    assert all(
+        ("run_id", "in", (RUN_ID,)) in filters
+        for filters in observed_filters
+    )
+    assert requeued == []
 
 
 def test_blocked_for_credit_is_the_only_reaper_exclusion():

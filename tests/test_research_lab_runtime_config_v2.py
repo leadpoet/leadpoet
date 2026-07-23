@@ -109,6 +109,31 @@ def test_behavior_environment_is_exact_and_applied(monkeypatch):
     assert "RESEARCH_LAB_LOOP_STAGE_ERROR_CONTAINMENT" not in os.environ
 
 
+def test_execution_config_commits_and_applies_hosted_run_canary(monkeypatch):
+    run_id = "33333333-3333-4333-8333-333333333333"
+    document = build_research_lab_execution_config(
+        environment=epoch_test_environment(
+            RESEARCH_LAB_HOSTED_RUN_ALLOWLIST=run_id,
+        )
+    )
+
+    assert document["behavior_environment"][
+        "RESEARCH_LAB_HOSTED_RUN_ALLOWLIST"
+    ] == run_id
+    # Register the environment mutation with monkeypatch before the runtime
+    # applier writes directly to os.environ, so the canary cannot leak into
+    # later worker tests in the same process.
+    monkeypatch.setenv(
+        "RESEARCH_LAB_HOSTED_RUN_ALLOWLIST",
+        "44444444-4444-4444-8444-444444444444",
+    )
+    apply_behavior_environment(document)
+
+    import os
+
+    assert os.environ["RESEARCH_LAB_HOSTED_RUN_ALLOWLIST"] == run_id
+
+
 def test_measured_tree_icp_count_uses_the_committed_override():
     document = build_research_lab_execution_config(
         environment=epoch_test_environment(

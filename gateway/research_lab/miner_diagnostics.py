@@ -29,6 +29,10 @@ from collections import Counter
 from typing import Any, Mapping, Optional, Sequence
 
 from gateway.research_lab.bundles import contains_secret_material, redact_secret_material
+from research_lab.eval.promotion_metric import (
+    benchmark_relative_score_deltas,
+    promotion_improvement_metric,
+)
 
 
 SCHEMA_VERSION = "1.0"
@@ -143,6 +147,14 @@ def _num(value: Any, default: float = 0.0) -> float:
     return result
 
 
+def _num_or_none(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
 _WITHHELD = "[summary withheld: contained a redacted token]"
 
 
@@ -246,9 +258,31 @@ def build_candidate_diagnostics(
     # bundle_doc is guaranteed a Mapping here (per_icp is non-empty above).
     raw_excluded = bundle_doc.get("provider_excluded_icp_ids")
     provider_excluded = {str(x) for x in raw_excluded} if isinstance(raw_excluded, Sequence) and not isinstance(raw_excluded, str) else set()
+    gate = (
+        bundle_doc.get("private_holdout_gate")
+        if isinstance(bundle_doc.get("private_holdout_gate"), Mapping)
+        else None
+    )
+    reference_mode = str(
+        aggregates.get("reference_evaluation_mode")
+        or (gate or {}).get("reference_evaluation_mode")
+        or ""
+    )
+    stored_daily_baseline = (
+        reference_mode == "stored_daily_baseline" or gate is not None
+    )
+    raw_baseline_scores = aggregates.get("baseline_per_icp_scores")
+    baseline_per_icp_scores: dict[str, float] = {}
+    if isinstance(raw_baseline_scores, Mapping):
+        for ref, value in raw_baseline_scores.items():
+            normalized_ref = str(ref or "").strip()
+            score = _num_or_none(value)
+            if normalized_ref and score is not None:
+                baseline_per_icp_scores[normalized_ref] = score
 
     public_icps: list[dict[str, Any]] = []
     priv_helped = priv_hurt = priv_flat = priv_infra = priv_total = 0
+    priv_comparison_unavailable = 0
     priv_budget = 0
     pub_infra = 0
     scored_score_sum = 0.0
@@ -259,9 +293,14 @@ def build_candidate_diagnostics(
         ref = str(row.get("icp_ref") or "")
         is_budget = _is_cost_budget_row(row)
         is_infra = _is_infra_row(row, provider_excluded)
-        delta = _num(row.get("delta_vs_base"))
         cand_score = _num(row.get("candidate_per_icp_score"))
-        base_score = _num(row.get("base_per_icp_score"))
+        comparison_available = not stored_daily_baseline or ref in baseline_per_icp_scores
+        if stored_daily_baseline and comparison_available:
+            base_score = baseline_per_icp_scores[ref]
+            delta = cand_score - base_score
+        else:
+            base_score = _num(row.get("base_per_icp_score"))
+            delta = _num(row.get("delta_vs_base"))
 
         # scored-company stats (count + avg ONLY — never the raw vector)
         raw_scores = row.get("candidate_company_scores")
@@ -275,9 +314,12 @@ def build_candidate_diagnostics(
             entry = {
                 "icp_ref": ref,
                 "candidate_score": round(cand_score, 4),
-                "base_score": round(base_score, 4),
-                "delta": round(delta, 4),
             }
+            if comparison_available:
+                entry["base_score"] = round(base_score, 4)
+                entry["delta"] = round(delta, 4)
+            else:
+                entry["comparison_status"] = "benchmark_per_icp_score_unavailable"
             if is_budget:
                 entry["status"] = _BUDGET_EXCEEDED_STATUS
                 entry["reason"] = _BUDGET_EXCEEDED_LABEL
@@ -297,6 +339,8 @@ def build_candidate_diagnostics(
                 priv_budget += 1
             elif is_infra:
                 priv_infra += 1
+            elif not comparison_available:
+                priv_comparison_unavailable += 1
             else:
                 band = _delta_band(delta, flat_band)
                 if band == "helped":
@@ -310,7 +354,6 @@ def build_candidate_diagnostics(
     infra_total = pub_infra + priv_infra
     infra_fraction = (infra_total / total_icps) if total_icps else 0.0
 
-    gate = bundle_doc.get("private_holdout_gate") if isinstance(bundle_doc, Mapping) else None
     gate_out: dict[str, Any] = {}
     if isinstance(gate, Mapping):
         gate_out = {
@@ -320,11 +363,27 @@ def build_candidate_diagnostics(
             "baseline_public_score": round(_num(gate.get("baseline_public_score")), 4),
         }
 
+    mean_delta, delta_lcb = benchmark_relative_score_deltas(bundle_doc)
+    metric = promotion_improvement_metric(bundle_doc)
     aggregate_out = {
-        "candidate_score": round(_num(aggregates.get("candidate_score")), 4),
-        "base_score": round(_num(aggregates.get("base_score")), 4),
-        "mean_delta": round(_num(aggregates.get("mean_delta")), 4),
-        "delta_lcb": round(_num(aggregates.get("delta_lcb")), 4),
+        "candidate_score": round(
+            _num(
+                metric.candidate_total_score
+                if metric.candidate_total_score is not None
+                else aggregates.get("candidate_score")
+            ),
+            4,
+        ),
+        "base_score": round(
+            _num(
+                metric.baseline_aggregate_score
+                if metric.baseline_aggregate_score is not None
+                else aggregates.get("base_score")
+            ),
+            4,
+        ),
+        "mean_delta": round(_num(mean_delta), 4),
+        "delta_lcb": round(_num(delta_lcb), 4),
         "icp_count": total_icps,
         "gate": gate_out,
         "infra": {
@@ -344,6 +403,7 @@ def build_candidate_diagnostics(
         "flat": priv_flat,
         "infra_excluded": priv_infra,
         "cost_budget_exceeded": priv_budget,
+        "comparison_unavailable": priv_comparison_unavailable,
     }
 
     scored_companies = {

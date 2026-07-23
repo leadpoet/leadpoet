@@ -32,10 +32,13 @@ import math
 import os
 from typing import Any, Mapping, Sequence
 
+from research_lab.eval.promotion_metric import benchmark_relative_score_deltas
+
 logger = logging.getLogger(__name__)
 
 SCORE_BACKFILL_ENABLED_ENV = "RESEARCH_LAB_SCORE_BACKFILL_ENABLED"
 SCORE_CALIBRATION_TABLE = "research_lab_score_calibration"
+SCORE_BUNDLE_CURRENT = "research_evaluation_score_bundle_current"
 
 
 def score_backfill_enabled() -> bool:
@@ -133,8 +136,9 @@ def build_calibration_row(
     hypothesis = hypothesis if isinstance(hypothesis, Mapping) else {}
     build_doc = candidate.get("candidate_build_doc")
     build_doc = build_doc if isinstance(build_doc, Mapping) else {}
-    aggregates = score_bundle.get("aggregates")
-    aggregates = aggregates if isinstance(aggregates, Mapping) else {}
+    realized_mean_delta, realized_delta_lcb = benchmark_relative_score_deltas(
+        score_bundle
+    )
     return {
         "schema_version": "1.0",
         "candidate_id": str(candidate.get("candidate_id") or "")[:120],
@@ -146,8 +150,8 @@ def build_calibration_row(
         "predicted_delta": _float_or_none(hypothesis.get("predicted_delta")),
         "dev_score": _float_or_none(build_doc.get("loop_dev_score")),
         "dev_score_version": str(build_doc.get("loop_dev_score_version") or "")[:120],
-        "realized_mean_delta": _float_or_none(aggregates.get("mean_delta")),
-        "realized_delta_lcb": _float_or_none(aggregates.get("delta_lcb")),
+        "realized_mean_delta": realized_mean_delta,
+        "realized_delta_lcb": realized_delta_lcb,
         "outcome": str(outcome or "")[:80],
         "score_bundle_id": str(score_bundle_id or "")[:120],
         "created_by": str(created_by or "")[:120],
@@ -235,7 +239,7 @@ async def fetch_score_enrichments_by_node(
     unique_node_ids = list(dict.fromkeys(wanted))
     columns = (
         "node_id,candidate_id,lane,plan_path_id,predicted_delta,dev_score,"
-        "realized_mean_delta,realized_delta_lcb,outcome,created_at"
+        "realized_mean_delta,realized_delta_lcb,outcome,score_bundle_id,created_at"
     )
     filters = [("node_id", "in", unique_node_ids)]
     if hasattr(store, "select_all"):
@@ -255,21 +259,81 @@ async def fetch_score_enrichments_by_node(
             order_by=[("created_at", True)],
             limit=max(1000, len(unique_node_ids) * 100),
         )
-    enrichments: dict[str, dict[str, Any]] = {}
+    newest_rows: dict[str, Mapping[str, Any]] = {}
     wanted_set = set(unique_node_ids)
     for row in rows or []:
         if not isinstance(row, Mapping):
             continue
         node_id = str(row.get("node_id") or "")
-        if not node_id or node_id not in wanted_set or node_id in enrichments:
+        if not node_id or node_id not in wanted_set or node_id in newest_rows:
             continue
+        newest_rows[node_id] = row
+        if len(newest_rows) >= max(1, int(limit)):
+            break
+
+    bundle_ids = list(
+        dict.fromkeys(
+            str(row.get("score_bundle_id") or "")
+            for row in newest_rows.values()
+            if str(row.get("score_bundle_id") or "")
+        )
+    )
+    bundle_docs: dict[str, Mapping[str, Any]] = {}
+    if bundle_ids:
+        try:
+            bundle_filters = [("score_bundle_id", "in", bundle_ids)]
+            if hasattr(store, "select_all"):
+                bundle_rows = await store.select_all(
+                    SCORE_BUNDLE_CURRENT,
+                    columns="score_bundle_id,score_bundle_doc",
+                    filters=bundle_filters,
+                    order_by=(),
+                    batch_size=500,
+                    max_rows=max(1000, len(bundle_ids) * 2),
+                )
+            else:
+                bundle_rows = await store.select_many(
+                    SCORE_BUNDLE_CURRENT,
+                    columns="score_bundle_id,score_bundle_doc",
+                    filters=bundle_filters,
+                    order_by=(),
+                    limit=max(1000, len(bundle_ids) * 2),
+                )
+            for bundle_row in bundle_rows or []:
+                if not isinstance(bundle_row, Mapping):
+                    continue
+                bundle_id = str(bundle_row.get("score_bundle_id") or "")
+                bundle_doc = bundle_row.get("score_bundle_doc")
+                if bundle_id and isinstance(bundle_doc, Mapping):
+                    bundle_docs[bundle_id] = bundle_doc
+        except Exception as exc:
+            logger.warning(
+                "research_lab_score_calibration_bundle_lookup_failed error=%s",
+                str(exc)[:200],
+            )
+
+    missing_bundle_ids = sorted(set(bundle_ids) - set(bundle_docs))
+    if missing_bundle_ids:
+        logger.warning(
+            "research_lab_score_calibration_bundle_missing count=%d",
+            len(missing_bundle_ids),
+        )
+
+    enrichments: dict[str, dict[str, Any]] = {}
+    for node_id, row in newest_rows.items():
+        bundle_id = str(row.get("score_bundle_id") or "")
+        bundle_doc = bundle_docs.get(bundle_id)
+        realized_delta: float | None = None
+        realized_delta_lcb: float | None = None
+        if bundle_doc is not None:
+            realized_delta, realized_delta_lcb = (
+                benchmark_relative_score_deltas(bundle_doc)
+            )
         enrichments[node_id] = {
-            "realized_delta": _float_or_none(row.get("realized_mean_delta")),
-            "realized_delta_lcb": _float_or_none(row.get("realized_delta_lcb")),
+            "realized_delta": realized_delta,
+            "realized_delta_lcb": realized_delta_lcb,
             "predicted_delta": _float_or_none(row.get("predicted_delta")),
             "dev_score": _float_or_none(row.get("dev_score")),
             "scored_outcome": str(row.get("outcome") or "")[:80],
         }
-        if len(enrichments) >= max(1, int(limit)):
-            break
     return enrichments

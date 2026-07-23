@@ -49,7 +49,7 @@ from research_lab.eval.snapshot_store import (
 )
 
 
-SCHEMA_VERSION = "leadpoet.research_lab_execution_config.v3"
+SCHEMA_VERSION = "leadpoet.research_lab_execution_config.v4"
 _CONFIG_FIELD_NAMES_HASH = (
     "sha256:7b7b8623e08d23e400fe2e75f40f076c7b6e6a2c2e58df8779c41c393d2224d6"
 )
@@ -71,6 +71,7 @@ HOST_ONLY_SECRET_FIELDS = frozenset(
 # successful path while preventing enclave-local defaults from taking over.
 AUTORESEARCH_BEHAVIOR_ENV_NAMES = (
     "RESEARCH_LAB_DEV_SNAPSHOT_URI",
+    "RESEARCH_LAB_HOSTED_RUN_ALLOWLIST",
     "RESEARCH_LAB_LOOP_BUILD_HEARTBEAT",
     "RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED",
     "RESEARCH_LAB_LOOP_DEV_EVAL_ICP_TIMEOUT_SECONDS",

@@ -77,6 +77,7 @@ from research_lab.counterfactual_gate import (
     CounterfactualYieldRecord,
     build_matched_budget_comparison,
 )
+from research_lab.eval.promotion_metric import benchmark_relative_score_deltas
 
 from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
 from .maintenance import (
@@ -1016,21 +1017,19 @@ def _arm_metrics_template() -> dict[str, Any]:
     }
 
 
-async def _score_bundle_mean_delta(score_bundle_id: str) -> float | None:
+async def _score_bundle_deltas(
+    score_bundle_id: str,
+) -> tuple[float | None, float | None]:
     if not score_bundle_id:
-        return None
+        return None, None
     row = await select_one(
         "research_evaluation_score_bundle_current",
         filters=(("score_bundle_id", score_bundle_id),),
     )
     if not row:
-        return None
+        return None, None
     doc = row.get("score_bundle_doc") if isinstance(row.get("score_bundle_doc"), Mapping) else {}
-    aggregates = doc.get("aggregates") if isinstance(doc.get("aggregates"), Mapping) else {}
-    try:
-        return float(aggregates.get("mean_delta"))
-    except (TypeError, ValueError):
-        return None
+    return benchmark_relative_score_deltas(doc)
 
 
 async def collect_house_arm_comparison_metrics(
@@ -1066,12 +1065,15 @@ async def collect_house_arm_comparison_metrics(
         if str(candidate.get("current_candidate_status") or "") != "scored":
             continue
         arm["candidates_scored"] += 1
-        mean_delta = await _score_bundle_mean_delta(str(candidate.get("current_score_bundle_id") or ""))
+        mean_delta, delta_lcb = await _score_bundle_deltas(
+            str(candidate.get("current_score_bundle_id") or "")
+        )
         if mean_delta is None:
             continue
         arm["deltas"].append(round(mean_delta, 6))
         arm["verified_points"] += max(0.0, mean_delta)
-        if mean_delta >= improvement_threshold_points:
+        keep_metric = delta_lcb if delta_lcb is not None else mean_delta
+        if keep_metric >= improvement_threshold_points:
             arm["keeps"] += 1
 
     payments = await select_all(

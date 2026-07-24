@@ -41,9 +41,11 @@ def test_startup_warm_delay_is_fixed_at_fifteen_seconds(tmp_path):
             sys.executable,
             "-c",
             (
-                "from gateway.utils.pcr0_builder import "
-                "PCR0_STARTUP_WARM_DELAY_SECONDS; "
-                "print(PCR0_STARTUP_WARM_DELAY_SECONDS)"
+                "from gateway.utils import pcr0_builder; "
+                "print(hasattr(pcr0_builder, "
+                "'PCR0_STARTUP_WARM_DELAY_SECONDS')); "
+                "print(pcr0_builder.get_cache_status()"
+                "['startup_warm_delay_seconds'])"
             ),
         ],
         cwd=tmp_path,
@@ -53,7 +55,7 @@ def test_startup_warm_delay_is_fixed_at_fifteen_seconds(tmp_path):
         text=True,
     )
 
-    assert result.stdout.strip() == "15"
+    assert result.stdout.splitlines() == ["False", "15"]
 
 
 @pytest.fixture()

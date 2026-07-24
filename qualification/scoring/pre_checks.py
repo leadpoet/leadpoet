@@ -341,7 +341,11 @@ async def _taxonomy_industry_gate(
         }
 
     if passed:
-        return True, None, _receipt("passed_deterministic")
+        # No receipt on a trivial deterministic pass: with the default shadow
+        # mode this would attach an audit doc to EVERY scored company and
+        # bloat every persisted breakdown for zero audit value. Receipts mark
+        # the non-trivial outcomes (shadow mismatch, rescue, fail-open, zero).
+        return True, None, None
     semantic_verdict: Optional[bool] = None
     semantic_mode = _resolved_semantic_mode()
     semantic_receipt: Optional[Dict[str, Any]] = None

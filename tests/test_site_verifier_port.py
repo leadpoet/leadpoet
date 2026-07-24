@@ -768,3 +768,24 @@ async def test_gate_receipts_persist_into_breakdown_end_to_end(monkeypatch) -> N
     # Round-trips through the model layer (what the evaluator serializes).
     dumped = breakdown.model_dump()
     assert dumped["verifier_gate_receipts"][0]["final_effect"] == "zeroed"
+
+
+@pytest.mark.asyncio
+async def test_clean_pass_carries_no_receipt(monkeypatch) -> None:
+    # Payload discipline: a trivial deterministic pass must NOT attach an
+    # audit receipt — otherwise the default shadow mode would bloat every
+    # persisted breakdown in every benchmark.
+    from qualification.scoring.lead_scorer import _run_autoresearch_binary_fit_checks
+
+    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "shadow")
+    receipts: list = []
+    passed, reason = await pre_checks.run_company_zero_checks(
+        _company("Software", "SaaS"),
+        _icp("Software"),
+        run_cost_usd=0.0,
+        run_time_seconds=1.0,
+        seen_companies=set(),
+        gate_receipts=receipts,
+    )
+    assert passed is True and reason is None
+    assert receipts == []  # nothing to audit on a clean deterministic pass

@@ -158,6 +158,70 @@ def test_unparseable_module_reported_not_raised(tmp_path: Path) -> None:
     assert any(v.startswith("unparseable module sourcing_model/core.py") for v in violations)
 
 
+def test_annotated_constant_assignment_conforms(tmp_path: Path) -> None:
+    """``X: int = 50`` is behaviorally identical to ``X = 50`` and must not
+    be reported as a missing constant (it would wrongly fail a legitimate
+    candidate under enforce)."""
+    _conforming_tree(tmp_path)
+    core = tmp_path / "sourcing_model" / "core.py"
+    core.write_text(
+        core.read_text().replace(
+            "_GOAL_MAX_COMPANIES = ", "_GOAL_MAX_COMPANIES: int = ", 1
+        )
+    )
+    assert verify_source_tree_contract(tmp_path) == []
+
+
+def test_non_utf8_coding_header_is_violation_not_crash(tmp_path: Path) -> None:
+    """A legal PEP 263 latin-1 module must parse like the interpreter parses
+    it; a truly undecodable file must surface as a violation — never as an
+    exception that would let the build gate fail open."""
+    _conforming_tree(tmp_path)
+    core = tmp_path / "sourcing_model" / "core.py"
+    legal = ("# -*- coding: latin-1 -*-\n# café\n" + core.read_text()).encode(
+        "latin-1"
+    )
+    compile(legal, "core.py", "exec")  # sanity: importable Python
+    core.write_bytes(legal)
+    assert verify_source_tree_contract(tmp_path) == []
+
+    # Null byte: rejected by the parser with ValueError, must be a violation.
+    core.write_bytes(b"_GOAL_MAX_COMPANIES = 50\x00\n")
+    violations = verify_source_tree_contract(tmp_path)
+    assert any(
+        v.startswith(("unreadable module sourcing_model/core.py",
+                      "unparseable module sourcing_model/core.py"))
+        for v in violations
+    )
+
+
+def test_dynamic_constant_rebinding_is_violation(tmp_path: Path) -> None:
+    """A conforming literal followed by a top-level non-literal rebinding
+    means the runtime value is no longer statically verifiable — the earlier
+    literal must not satisfy the floor check."""
+    _conforming_tree(tmp_path)
+    core = tmp_path / "sourcing_model" / "core.py"
+    core.write_text(
+        core.read_text()
+        + "\n_GOAL_MAX_COMPANIES = min(2, _GOAL_MAX_ROUNDS)\n"
+    )
+    violations = verify_source_tree_contract(tmp_path)
+    assert any("_GOAL_MAX_COMPANIES" in v and "missing integer constant" in v
+               for v in violations)
+
+    # Augmented assignment likewise poisons the constant.
+    _conforming_tree(tmp_path)
+    core.write_text(core.read_text() + "\n_GOAL_MAX_ROUNDS -= 5\n")
+    violations = verify_source_tree_contract(tmp_path)
+    assert any("_GOAL_MAX_ROUNDS" in v and "missing integer constant" in v
+               for v in violations)
+
+    # And a later conforming literal restores verifiability (last wins).
+    _conforming_tree(tmp_path)
+    core.write_text(core.read_text() + "\n_GOAL_MAX_COMPANIES = 60\n")
+    assert verify_source_tree_contract(tmp_path) == []
+
+
 # ---------------------------------------------------------------------------
 # The flag-gated candidate-build gate
 # ---------------------------------------------------------------------------

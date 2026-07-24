@@ -54,8 +54,27 @@ def _function_params(node: ast.AST) -> List[str]:
     return [a.arg for a in args.posonlyargs + args.args]
 
 
+def _int_constant(value: ast.AST | None) -> int | None:
+    if (
+        isinstance(value, ast.Constant)
+        and isinstance(value.value, int)
+        and not isinstance(value.value, bool)
+    ):
+        return value.value
+    return None
+
+
 def _module_symbols(tree: ast.Module) -> Dict[str, Any]:
-    """Top-level function param-lists and integer constant assignments."""
+    """Top-level function param-lists and integer constant assignments.
+
+    Constants follow last-assignment-wins module semantics: a plain or
+    annotated assignment of an integer literal records the value, and any
+    later top-level rebinding of the same name to a non-literal (call,
+    expression, augmented assignment) discards it — the value the runtime
+    would see is no longer statically verifiable, which downstream reads as
+    a missing-constant violation rather than silently trusting an earlier
+    literal.
+    """
     functions: Dict[str, List[str]] = {}
     constants: Dict[str, int] = {}
     for node in tree.body:
@@ -63,13 +82,21 @@ def _module_symbols(tree: ast.Module) -> Dict[str, Any]:
             functions[node.name] = _function_params(node)
         elif isinstance(node, ast.Assign) and len(node.targets) == 1:
             target = node.targets[0]
-            if (
-                isinstance(target, ast.Name)
-                and isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, int)
-                and not isinstance(node.value.value, bool)
-            ):
-                constants[target.id] = node.value.value
+            if isinstance(target, ast.Name):
+                value = _int_constant(node.value)
+                if value is not None:
+                    constants[target.id] = value
+                else:
+                    constants.pop(target.id, None)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.value is not None:
+                value = _int_constant(node.value)
+                if value is not None:
+                    constants[node.target.id] = value
+                else:
+                    constants.pop(node.target.id, None)
+        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            constants.pop(node.target.id, None)
     return {"functions": functions, "constants": constants}
 
 
@@ -99,9 +126,18 @@ def verify_source_tree_contract(
         if not path.is_file():
             return None
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            # Parse raw bytes so PEP 263 coding declarations are honored the
+            # same way the interpreter honors them — a legal non-UTF-8 module
+            # must parse, and an unreadable one must be a VIOLATION, never an
+            # exception that lets the build gate fail open.
+            tree = ast.parse(path.read_bytes())
         except SyntaxError as exc:
             violations.append(f"unparseable module {relative}: {exc.msg} (line {exc.lineno})")
+            return None
+        except (ValueError, UnicodeDecodeError, OSError) as exc:
+            violations.append(
+                f"unreadable module {relative}: {type(exc).__name__}: {str(exc)[:120]}"
+            )
             return None
         parsed[relative] = tree
         return tree

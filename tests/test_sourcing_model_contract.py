@@ -89,7 +89,7 @@ def _conforming_tree(root: Path) -> None:
         def make_deps():
             pass
 
-        def validate_candidate():
+        async def validate_candidate():
             pass
     """)
 
@@ -220,6 +220,53 @@ def test_dynamic_constant_rebinding_is_violation(tmp_path: Path) -> None:
     _conforming_tree(tmp_path)
     core.write_text(core.read_text() + "\n_GOAL_MAX_COMPANIES = 60\n")
     assert verify_source_tree_contract(tmp_path) == []
+
+
+def test_asyncness_drift_is_violation(tmp_path: Path) -> None:
+    """Sync-vs-async is part of the callable surface: flipping it hands
+    callers a coroutine (or breaks an await) despite identical parameters."""
+    # Frozen-async function made sync → violation.
+    _conforming_tree(tmp_path)
+    val = tmp_path / "sourcing_model" / "validation.py"
+    val.write_text(val.read_text().replace("async def validate_candidate", "def validate_candidate"))
+    violations = verify_source_tree_contract(tmp_path)
+    assert any("asyncness drift" in v and "validate_candidate" in v for v in violations)
+
+    # Frozen-sync function made async → violation.
+    _conforming_tree(tmp_path)
+    core = tmp_path / "sourcing_model" / "core.py"
+    core.write_text(core.read_text().replace("def qualify(icp):", "async def qualify(icp):"))
+    violations = verify_source_tree_contract(tmp_path)
+    assert any("asyncness drift" in v and "qualify" in v for v in violations)
+
+
+def test_simple_alias_rebinding_conforms(tmp_path: Path) -> None:
+    """``qualify = _impl`` is a runtime-valid rebinding — the alias carries
+    the implementation's surface instead of reporting a missing function."""
+    _conforming_tree(tmp_path)
+    core = tmp_path / "sourcing_model" / "core.py"
+    core.write_text(
+        core.read_text().replace("def qualify(icp):", "def _qualify_impl(icp):")
+        + "\nqualify = _qualify_impl\n"
+    )
+    assert verify_source_tree_contract(tmp_path) == []
+
+    # Aliasing to a wrong-signature implementation still drifts.
+    _conforming_tree(tmp_path)
+    core.write_text(
+        core.read_text().replace("def qualify(icp):", "def _qualify_impl(wrong_name):")
+        + "\nqualify = _qualify_impl\n"
+    )
+    violations = verify_source_tree_contract(tmp_path)
+    assert any("parameter drift" in v and "qualify" in v for v in violations)
+
+
+def test_deleted_function_is_missing(tmp_path: Path) -> None:
+    _conforming_tree(tmp_path)
+    core = tmp_path / "sourcing_model" / "core.py"
+    core.write_text(core.read_text() + "\ndel qualify\n")
+    violations = verify_source_tree_contract(tmp_path)
+    assert any("missing function" in v and "qualify" in v for v in violations)
 
 
 # ---------------------------------------------------------------------------

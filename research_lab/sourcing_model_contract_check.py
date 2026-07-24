@@ -32,6 +32,36 @@ from typing import Any, Dict, List, Mapping
 
 CONTRACT_PATH = Path(__file__).with_name("sourcing_model_contract.json")
 
+# Asyncness of the frozen surface at the mirrored contract revision. The
+# contract JSON is a verbatim site mirror and carries no async information,
+# but sync-vs-async IS part of the callable surface: the lab runtime and the
+# harness call these seams the way the frozen source defines them, so a
+# candidate flipping one (e.g. making ``qualify`` async) would hand callers a
+# coroutine and break at invocation despite an identical parameter list.
+# Only names present here are checked — a future contract revision that adds
+# functions skips the asyncness check for them until this map is updated
+# alongside the mirror.
+FROZEN_ASYNCNESS: Dict[str, bool] = {
+    "research_lab_adapter.py:adapter_metadata": False,
+    "research_lab_adapter.py:run_icp": False,
+    "sourcing_model/clients.py:_exa_call": False,
+    "sourcing_model/clients.py:agent_get": False,
+    "sourcing_model/clients.py:agent_post": False,
+    "sourcing_model/clients.py:exa_search": False,
+    "sourcing_model/clients.py:sd_company": False,
+    "sourcing_model/clients.py:sd_scrape": False,
+    "sourcing_model/core.py:_emitted_intent_evidence_url": False,
+    "sourcing_model/core.py:_fallback_sources": False,
+    "sourcing_model/core.py:qualify": False,
+    "sourcing_model/discovery.py:agent_results": False,
+    "sourcing_model/discovery.py:apply_keep_gates": False,
+    "sourcing_model/discovery.py:discover_goal_round": False,
+    "sourcing_model/discovery.py:resolve_linkedin": False,
+    "sourcing_model/validation.py:bonus_requirements": False,
+    "sourcing_model/validation.py:make_deps": False,
+    "sourcing_model/validation.py:validate_candidate": True,
+}
+
 
 def load_wrapper_contract(path: Path | None = None) -> Dict[str, Any]:
     """Load and shape-check the vendored wrapper contract."""
@@ -75,19 +105,30 @@ def _module_symbols(tree: ast.Module) -> Dict[str, Any]:
     a missing-constant violation rather than silently trusting an earlier
     literal.
     """
-    functions: Dict[str, List[str]] = {}
+    functions: Dict[str, Dict[str, Any]] = {}
     constants: Dict[str, int] = {}
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            functions[node.name] = _function_params(node)
+            functions[node.name] = {
+                "params": _function_params(node),
+                "is_async": isinstance(node, ast.AsyncFunctionDef),
+            }
         elif isinstance(node, ast.Assign) and len(node.targets) == 1:
             target = node.targets[0]
             if isinstance(target, ast.Name):
                 value = _int_constant(node.value)
                 if value is not None:
                     constants[target.id] = value
+                    continue
+                constants.pop(target.id, None)
+                # Simple top-level alias (``qualify = _qualify_impl``) is a
+                # runtime-valid rebinding — carry the aliased function's
+                # surface instead of reporting it missing. Anything else
+                # rebinding a function name makes it unverifiable.
+                if isinstance(node.value, ast.Name) and node.value.id in functions:
+                    functions[target.id] = dict(functions[node.value.id])
                 else:
-                    constants.pop(target.id, None)
+                    functions.pop(target.id, None)
         elif isinstance(node, ast.AnnAssign):
             if isinstance(node.target, ast.Name) and node.value is not None:
                 value = _int_constant(node.value)
@@ -95,8 +136,14 @@ def _module_symbols(tree: ast.Module) -> Dict[str, Any]:
                     constants[node.target.id] = value
                 else:
                     constants.pop(node.target.id, None)
+                    functions.pop(node.target.id, None)
         elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
             constants.pop(node.target.id, None)
+        elif isinstance(node, ast.Delete):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    constants.pop(target.id, None)
+                    functions.pop(target.id, None)
     return {"functions": functions, "constants": constants}
 
 
@@ -153,10 +200,18 @@ def verify_source_tree_contract(
                 violations.append(f"missing function {relative}:{name}")
                 continue
             expected = list(expected_params)
-            if expected and actual[: len(expected)] != expected:
+            actual_params = actual["params"]
+            if expected and actual_params[: len(expected)] != expected:
                 violations.append(
                     f"parameter drift {relative}:{name}: expected leading "
-                    f"parameters {expected}, found {actual}"
+                    f"parameters {expected}, found {actual_params}"
+                )
+            frozen_async = FROZEN_ASYNCNESS.get(f"{relative}:{name}")
+            if frozen_async is not None and actual["is_async"] != frozen_async:
+                violations.append(
+                    f"asyncness drift {relative}:{name}: frozen surface is "
+                    f"{'async' if frozen_async else 'sync'}, found "
+                    f"{'async' if actual['is_async'] else 'sync'}"
                 )
 
     for relative, minimums in (document.get("integer_minimums") or {}).items():

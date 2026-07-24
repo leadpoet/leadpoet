@@ -1432,7 +1432,7 @@ class ValidatorChainSourceV2:
             )
         job_id = "weight-finalization:%d:%s" % (
             int(epoch_id),
-            scan_id.removeprefix("sha256:"),
+            scan_id[len("sha256:") :],
         )
         purpose = "validator.weights.finalized.v2"
         attempts = []

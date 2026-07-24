@@ -435,6 +435,43 @@ def _close_subtensor_connection(subtensor, *, source: str) -> None:
         )
 
 
+def _is_subtensor_connection_error(exc: BaseException) -> bool:
+    """Classify only transport failures that a fresh websocket can repair."""
+
+    current = exc
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (TimeoutError, ConnectionError, OSError)):
+            return True
+        name = type(current).__name__.lower()
+        message = str(current).lower()
+        if any(
+            marker in name
+            for marker in ("connection", "timeout", "websocket", "socket")
+        ):
+            return True
+        if any(
+            marker in message
+            for marker in (
+                "broken pipe",
+                "connection aborted",
+                "connection closed",
+                "connection is closed",
+                "connection refused",
+                "connection reset",
+                "handshake",
+                "remote end closed",
+                "timed out",
+                "timeout",
+                "websocket",
+            )
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 @dataclass(frozen=True)
 class _AuditorEpochState:
     current_block: int
@@ -780,15 +817,16 @@ class AuditorValidator:
             elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
         )
     
-    def _get_uid(self) -> Optional[int]:
+    def _get_uid(self, *, subtensor=None) -> Optional[int]:
         """Resolve our current UID directly from canonical chain storage."""
 
-        return self.subtensor.get_uid_for_hotkey_on_subnet(
+        source = self.subtensor if subtensor is None else subtensor
+        return source.get_uid_for_hotkey_on_subnet(
             hotkey_ss58=self.wallet.hotkey.ss58_address,
             netuid=int(self.config.netuid),
         )
     
-    def _reconnect_subtensor(self):
+    def _reconnect_subtensor(self, *, reason: str = "connection_error"):
         """
         Reconnect to subtensor after connection errors.
         
@@ -798,24 +836,47 @@ class AuditorValidator:
         print(f"\n🔄 Reconnecting to subtensor...")
         logger.info("Reconnecting to subtensor after connection error")
         
+        previous = self.subtensor
+        replacement = None
         try:
-            # Create new subtensor instance
-            self.subtensor = bt.Subtensor(config=self.config)
-            
-            # Verify we're still registered
-            new_uid = self._get_uid()
+            replacement = bt.Subtensor(config=self.config)
+            new_uid = self._get_uid(subtensor=replacement)
             if new_uid is None:
-                logger.error("Lost registration after reconnect!")
-                print(f"❌ Lost registration after reconnect!")
-            else:
-                self.uid = new_uid
-                print(f"✅ Reconnected to subtensor (UID: {self.uid})")
-                logger.info(f"Reconnected to subtensor (UID: {self.uid})")
-            
+                raise RuntimeError("auditor hotkey is not registered after reconnect")
+
+            self.subtensor = replacement
+            self.uid = new_uid
             self.consecutive_errors = 0
+            _close_subtensor_connection(
+                previous,
+                source="live_replaced",
+            )
+            _audit_event(
+                "live_subtensor_reconnect_success",
+                netuid=int(self.config.netuid),
+                uid=int(self.uid),
+                reason=reason,
+                sdk_version=str(getattr(bt, "__version__", "unknown")),
+            )
+            print(f"✅ Reconnected to subtensor (UID: {self.uid})")
+            logger.info(f"Reconnected to subtensor (UID: {self.uid})")
             return True
             
         except Exception as e:
+            if replacement is not None:
+                _close_subtensor_connection(
+                    replacement,
+                    source="live_replacement_failed",
+                )
+            _audit_event(
+                "live_subtensor_reconnect_failure",
+                level=logging.ERROR,
+                netuid=int(self.config.netuid),
+                uid=getattr(self, "uid", None),
+                reason=reason,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
             logger.error(f"Failed to reconnect to subtensor: {e}")
             print(f"❌ Failed to reconnect: {e}")
             return False
@@ -2022,32 +2083,64 @@ class AuditorValidator:
     ) -> bool:
         """Retry until the exact verified vector is finalized in this epoch."""
 
-        def epoch_is_current() -> bool:
-            try:
-                self._validate_durable_epoch_runtime_lifecycle(
-                    force_refresh=True,
-                )
-                finalized_state = self._read_epoch_state()
-                if finalized_state.workflow_epoch_id != int(epoch_id):
-                    return False
-                if finalized_state.subnet_epoch_index != subnet_epoch_index:
-                    return False
-                best_state = self._read_best_epoch_state()
-                return (
-                    best_state.workflow_epoch_id == int(epoch_id)
-                    and best_state.subnet_epoch_index == subnet_epoch_index
-                    and best_state.current_block >= finalized_state.current_block
-                    and best_state.blocks_remaining > 0
-                )
-            except Exception as exc:
-                logger.error(
-                    "auditor_weight_epoch_authority_unavailable "
-                    "epoch=%s type=%s error=%s",
-                    epoch_id,
-                    type(exc).__name__,
-                    str(exc)[:200],
-                )
+        def reconnect_transport(
+            exc: BaseException,
+            *,
+            stage: str,
+            attempt: int,
+        ) -> bool:
+            if not _is_subtensor_connection_error(exc):
                 return False
+            _audit_event(
+                "submission_transport_reconnect",
+                level=logging.WARNING,
+                epoch=int(epoch_id),
+                subnet_epoch_index=subnet_epoch_index,
+                netuid=int(self.config.netuid),
+                uid=getattr(self, "uid", None),
+                stage=stage,
+                attempt=attempt,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return self._reconnect_subtensor(
+                reason=f"weight_submission:{stage}",
+            )
+
+        def epoch_is_current() -> bool:
+            for check_attempt in range(1, 3):
+                try:
+                    self._validate_durable_epoch_runtime_lifecycle(
+                        force_refresh=True,
+                    )
+                    finalized_state = self._read_epoch_state()
+                    if finalized_state.workflow_epoch_id != int(epoch_id):
+                        return False
+                    if finalized_state.subnet_epoch_index != subnet_epoch_index:
+                        return False
+                    best_state = self._read_best_epoch_state()
+                    return (
+                        best_state.workflow_epoch_id == int(epoch_id)
+                        and best_state.subnet_epoch_index == subnet_epoch_index
+                        and best_state.current_block >= finalized_state.current_block
+                        and best_state.blocks_remaining > 0
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "auditor_weight_epoch_authority_unavailable "
+                        "epoch=%s type=%s error=%s",
+                        epoch_id,
+                        type(exc).__name__,
+                        str(exc)[:200],
+                    )
+                    if check_attempt == 1 and reconnect_transport(
+                        exc,
+                        stage="epoch_authority",
+                        attempt=check_attempt,
+                    ):
+                        continue
+                    return False
+            return False
 
         def lifecycle_is_open() -> bool:
             try:
@@ -2077,24 +2170,36 @@ class AuditorValidator:
             print(f"⏹️ Refusing stale auditor submission for epoch {epoch_id}")
             return False
 
-        try:
-            baseline_state = self._read_finalized_weight_submission_state()
-        except Exception as exc:
-            _audit_event(
-                "submission_confirmation_failure",
-                level=logging.ERROR,
-                epoch=int(epoch_id),
-                subnet_epoch_index=subnet_epoch_index,
-                netuid=int(self.config.netuid),
-                uid=getattr(self, "uid", None),
-                stage="baseline",
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            print(
-                "⏹️ Refusing auditor submission because finalized chain state "
-                f"cannot be read: {exc}"
-            )
+        baseline_state = None
+        for baseline_attempt in range(1, 3):
+            try:
+                baseline_state = self._read_finalized_weight_submission_state()
+                break
+            except Exception as exc:
+                _audit_event(
+                    "submission_confirmation_failure",
+                    level=logging.ERROR,
+                    epoch=int(epoch_id),
+                    subnet_epoch_index=subnet_epoch_index,
+                    netuid=int(self.config.netuid),
+                    uid=getattr(self, "uid", None),
+                    stage="baseline",
+                    attempt=baseline_attempt,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                if baseline_attempt == 1 and reconnect_transport(
+                    exc,
+                    stage="baseline",
+                    attempt=baseline_attempt,
+                ):
+                    continue
+                print(
+                    "⏹️ Refusing auditor submission because finalized chain state "
+                    f"cannot be read: {exc}"
+                )
+                return False
+        if baseline_state is None:
             return False
 
         baseline_last_update = int(baseline_state["last_update"])
@@ -2175,6 +2280,15 @@ class AuditorValidator:
                         1,
                     ),
                 )
+                if reconnect_transport(
+                    exc,
+                    stage="set_weights",
+                    attempt=attempt,
+                ):
+                    if not epoch_is_current():
+                        return False
+                    time.sleep(1)
+                    continue
                 raise
             _audit_event(
                 "submission_attempt_result",
@@ -2248,6 +2362,11 @@ class AuditorValidator:
                             confirmation_attempt=confirmation_attempt,
                             error_type=type(exc).__name__,
                             error=str(exc),
+                        )
+                        reconnect_transport(
+                            exc,
+                            stage="finalized_confirmation",
+                            attempt=confirmation_attempt,
                         )
                     if confirmation_attempt < 5:
                         time.sleep(3)

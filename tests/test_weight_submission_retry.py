@@ -639,6 +639,159 @@ def test_auditor_accepts_v10_extrinsic_response(monkeypatch):
     ]
 
 
+def test_auditor_reconnect_is_transactional(monkeypatch):
+    closed = []
+
+    class Source:
+        def __init__(self, uid):
+            self.uid = uid
+
+        def get_uid_for_hotkey_on_subnet(self, **_kwargs):
+            return self.uid
+
+        def close(self):
+            closed.append(self)
+
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.config = SimpleNamespace(netuid=71)
+    auditor.wallet = SimpleNamespace(
+        hotkey=SimpleNamespace(ss58_address="5AuditorHotkey")
+    )
+    previous = Source(62)
+    replacement = Source(155)
+    auditor.subtensor = previous
+    auditor.uid = 62
+    auditor.consecutive_errors = 4
+    monkeypatch.setattr(
+        auditor_module.bt,
+        "Subtensor",
+        lambda *, config: replacement,
+    )
+
+    assert auditor._reconnect_subtensor(reason="test") is True
+    assert auditor.subtensor is replacement
+    assert auditor.uid == 155
+    assert auditor.consecutive_errors == 0
+    assert closed == [previous]
+
+
+def test_auditor_failed_reconnect_preserves_previous_source(monkeypatch):
+    closed = []
+
+    class Source:
+        def __init__(self, uid):
+            self.uid = uid
+
+        def get_uid_for_hotkey_on_subnet(self, **_kwargs):
+            return self.uid
+
+        def close(self):
+            closed.append(self)
+
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.config = SimpleNamespace(netuid=71)
+    auditor.wallet = SimpleNamespace(
+        hotkey=SimpleNamespace(ss58_address="5AuditorHotkey")
+    )
+    previous = Source(62)
+    replacement = Source(None)
+    auditor.subtensor = previous
+    auditor.uid = 62
+    auditor.consecutive_errors = 4
+    monkeypatch.setattr(
+        auditor_module.bt,
+        "Subtensor",
+        lambda *, config: replacement,
+    )
+
+    assert auditor._reconnect_subtensor(reason="test") is False
+    assert auditor.subtensor is previous
+    assert auditor.uid == 62
+    assert closed == [replacement]
+
+
+def test_auditor_reconnects_stale_set_weights_socket_and_retries_exact_vector(
+    monkeypatch,
+):
+    auditor = _auditor([(True, "accepted")])
+    healthy = auditor.subtensor
+    stale = _FakeSubtensor([])
+
+    def stale_set_weights(**kwargs):
+        stale.calls.append(dict(kwargs))
+        raise ConnectionError("WebSocket connection is closed")
+
+    stale.set_weights = stale_set_weights
+    auditor.subtensor = stale
+    reconnect_reasons = []
+
+    def reconnect(*, reason):
+        reconnect_reasons.append(reason)
+        auditor.subtensor = healthy
+        return True
+
+    auditor._reconnect_subtensor = reconnect
+    state = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1065,
+        blocks_remaining=20,
+    )
+    auditor._read_epoch_state = lambda: state
+    auditor._read_best_epoch_state = lambda: state
+    sleeps = []
+    monkeypatch.setattr(auditor_module.time, "sleep", sleeps.append)
+
+    result = auditor._set_weights_until_epoch_end(
+        epoch_id=2,
+        uids=[3],
+        weights=[1.0],
+        expected_weights_u16=[65535],
+    )
+
+    assert result is True
+    assert reconnect_reasons == ["weight_submission:set_weights"]
+    assert stale.calls[0]["uids"] == [3]
+    assert healthy.calls[0]["uids"] == [3]
+    assert stale.calls[0]["weights"] == healthy.calls[0]["weights"] == [1.0]
+    assert sleeps == [1]
+
+
+def test_auditor_does_not_reconnect_or_retry_semantic_sdk_exception(
+    monkeypatch,
+):
+    auditor = _auditor([])
+
+    def invalid_set_weights(**_kwargs):
+        raise ValueError("invalid signed weight payload")
+
+    auditor.subtensor.set_weights = invalid_set_weights
+    auditor._reconnect_subtensor = lambda **_kwargs: (_ for _ in ()).throw(
+        AssertionError("semantic errors must not reconnect")
+    )
+    state = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1065,
+        blocks_remaining=20,
+    )
+    auditor._read_epoch_state = lambda: state
+    auditor._read_best_epoch_state = lambda: state
+    monkeypatch.setattr(auditor_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(ValueError, match="invalid signed weight payload"):
+        auditor._set_weights_until_epoch_end(
+            epoch_id=2,
+            uids=[3],
+            weights=[1.0],
+            expected_weights_u16=[65535],
+        )
+
+
 def test_auditor_retries_sdk_success_until_finalized_last_update_advances(
     monkeypatch,
 ):

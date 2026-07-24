@@ -426,7 +426,6 @@ class AuditorValidator:
         )
         self._validate_durable_epoch_runtime_startup()
         self.subtensor = bt.Subtensor(config=config)
-        self.metagraph = self.subtensor.metagraph(config.netuid)
         
         # Verify we're registered as a validator
         self.uid = self._get_uid()
@@ -624,11 +623,12 @@ class AuditorValidator:
             )
     
     def _get_uid(self) -> Optional[int]:
-        """Get our UID from the metagraph."""
-        hotkey = self.wallet.hotkey.ss58_address
-        if hotkey in self.metagraph.hotkeys:
-            return self.metagraph.hotkeys.index(hotkey)
-        return None
+        """Resolve our current UID directly from canonical chain storage."""
+
+        return self.subtensor.get_uid_for_hotkey_on_subnet(
+            hotkey_ss58=self.wallet.hotkey.ss58_address,
+            netuid=int(self.config.netuid),
+        )
     
     def _reconnect_subtensor(self):
         """
@@ -643,7 +643,6 @@ class AuditorValidator:
         try:
             # Create new subtensor instance
             self.subtensor = bt.Subtensor(config=self.config)
-            self.metagraph = self.subtensor.metagraph(self.config.netuid)
             
             # Verify we're still registered
             new_uid = self._get_uid()
@@ -674,13 +673,15 @@ class AuditorValidator:
             print(f"⚠️  No validator_hotkey in weights bundle")
             return None
         
-        # Find UID for this hotkey in metagraph
-        if validator_hotkey in self.metagraph.hotkeys:
-            uid = self.metagraph.hotkeys.index(validator_hotkey)
+        uid = self.subtensor.get_uid_for_hotkey_on_subnet(
+            hotkey_ss58=validator_hotkey,
+            netuid=int(self.config.netuid),
+        )
+        if uid is not None:
             print(f"   Primary validator hotkey: {validator_hotkey[:16]}... → UID {uid}")
             return uid
         
-        print(f"⚠️  Validator hotkey {validator_hotkey[:16]}... not found in metagraph")
+        print(f"⚠️  Validator hotkey {validator_hotkey[:16]}... not found on subnet")
         return None
     
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1841,10 +1842,17 @@ class AuditorValidator:
                             # This is a SOFT check - logs the issue for investigation
                             # Mismatch could be due to: timing, normalization differences, or actual equivocation
                 
-                # Refresh once for each observed official epoch transition.
+                # Re-resolve the UID once per official epoch. Direct storage
+                # avoids runtime-API decoding drift in supported Bittensor 9
+                # environments while retaining canonical chain authority.
                 if epoch_state.identity != last_metagraph_epoch_identity:
-                    print(f"\n🔄 Refreshing metagraph...")
-                    self.metagraph = self.subtensor.metagraph(self.config.netuid)
+                    print(f"\n🔄 Refreshing auditor chain identity...")
+                    current_uid = self._get_uid()
+                    if current_uid is None:
+                        raise RuntimeError(
+                            "auditor hotkey is no longer registered on subnet"
+                        )
+                    self.uid = current_uid
                     last_metagraph_epoch_identity = epoch_state.identity
                 
                 # Reset error counter on successful iteration

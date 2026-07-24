@@ -176,14 +176,16 @@ def _auditor_for_one_verification(verified_result):
     auditor.epoch_cutover = object()
     auditor.subtensor = SimpleNamespace(
         get_current_block=lambda: 345,
-        metagraph=lambda _netuid: object(),
+        get_uid_for_hotkey_on_subnet=lambda **_kwargs: 12,
+    )
+    auditor.wallet = SimpleNamespace(
+        hotkey=SimpleNamespace(ss58_address="5" * 48)
     )
     auditor.config = SimpleNamespace(netuid=71)
     auditor.last_submitted_epoch = None
     auditor.last_authority_epoch = None
     auditor.consecutive_errors = 0
     auditor.max_consecutive_errors = 5
-    auditor.metagraph = object()
 
     async def fetch(_epoch):
         return {"authority": "fixture"}
@@ -716,6 +718,50 @@ def test_auditor_runtime_identity_records_public_source_hashes():
         "weight_computation_sha256",
     ):
         assert len(identity[field]) == 64
+
+
+def test_auditor_uid_resolution_uses_direct_chain_storage():
+    calls = []
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.wallet = SimpleNamespace(
+        hotkey=SimpleNamespace(ss58_address="5Auditor")
+    )
+    auditor.config = SimpleNamespace(netuid=71)
+    auditor.subtensor = SimpleNamespace(
+        get_uid_for_hotkey_on_subnet=lambda **kwargs: (
+            calls.append(kwargs) or 155
+        ),
+        metagraph=lambda *_args, **_kwargs: pytest.fail(
+            "auditor identity must not depend on runtime API metagraph decoding"
+        ),
+    )
+
+    assert auditor._get_uid() == 155
+    assert calls == [{"hotkey_ss58": "5Auditor", "netuid": 71}]
+
+
+def test_primary_uid_resolution_uses_direct_chain_storage(capsys):
+    calls = []
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.config = SimpleNamespace(netuid=71)
+    auditor.subtensor = SimpleNamespace(
+        get_uid_for_hotkey_on_subnet=lambda **kwargs: (
+            calls.append(kwargs) or 0
+        ),
+        metagraph=lambda *_args, **_kwargs: pytest.fail(
+            "primary identity must not depend on runtime API metagraph decoding"
+        ),
+    )
+
+    assert auditor._get_primary_validator_uid(
+        {"validator_hotkey": "5Primary"}
+    ) == 0
+    assert calls == [{"hotkey_ss58": "5Primary", "netuid": 71}]
+    assert "UID 0" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("protocol", ["legacy_v1_compat", "auto", "banana"])

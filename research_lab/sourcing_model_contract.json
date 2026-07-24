@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "contract_id": "leadpoet-sourcing-wrapper-contract-v1",
+  "required_files": [
+    "requirements.txt",
+    "research_lab_adapter.py",
+    "sourcing_model/__init__.py",
+    "sourcing_model/clients.py",
+    "sourcing_model/core.py",
+    "sourcing_model/discovery.py",
+    "sourcing_model/scoring.py",
+    "sourcing_model/validation.py"
+  ],
+  "functions": {
+    "research_lab_adapter.py": {
+      "adapter_metadata": [],
+      "run_icp": ["icp", "context"]
+    },
+    "sourcing_model/clients.py": {
+      "_exa_call": [],
+      "agent_get": [],
+      "agent_post": [],
+      "exa_search": [],
+      "sd_company": [],
+      "sd_scrape": []
+    },
+    "sourcing_model/core.py": {
+      "_emitted_intent_evidence_url": ["c", "icp", "selected_url"],
+      "_fallback_sources": ["primary"],
+      "qualify": ["icp"]
+    },
+    "sourcing_model/discovery.py": {
+      "agent_results": ["icp", "effort", "timeout_s", "avoid_companies"],
+      "apply_keep_gates": ["cand", "source", "today", "max_age"],
+      "discover_goal_round": ["icp", "source"],
+      "resolve_linkedin": ["name", "anchor", "agent_linkedin"]
+    },
+    "sourcing_model/validation.py": {
+      "bonus_requirements": ["icp"],
+      "make_deps": [],
+      "validate_candidate": []
+    }
+  },
+  "integer_minimums": {
+    "sourcing_model/core.py": {
+      "_GOAL_MAX_COMPANIES": 50,
+      "_GOAL_MAX_ROUNDS": 8
+    }
+  }
+}

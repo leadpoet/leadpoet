@@ -7,7 +7,7 @@
       "symbol": "finalize_weights_v2"
     },
     {
-      "ast_sha256": "sha256:2749d39f54e4e18644d239414c278c6aa2b7111a833d6c0e11304315bcd15b21",
+      "ast_sha256": "sha256:29f8ae93f0223fde4ce89757c64a1587d986575ee6fbdfa9759cf8f3fd06a5d3",
       "path": "gateway/api/weights.py",
       "symbol": "get_attested_weights_v2"
     },
@@ -1107,7 +1107,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:c5acd5461998b9d04309e3ba4030f566630df200675d987fd029bed547d77055",
-  "protected_source_commit": "cba7c648296539c2dfab38b06bafc23f555a18e5",
+  "manifest_hash": "sha256:f26179a3a70fdcdfa0507c363198ed32372a42eae80240cb10a36d9a86614bc0",
+  "protected_source_commit": "f00d76d0a827366bdcadc069a3505141a8a23d3e",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

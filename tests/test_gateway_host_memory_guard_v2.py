@@ -112,19 +112,21 @@ def test_cleanup_revalidates_and_terminates_only_matching_process(
     ]
 
 
-def test_gateway_restart_and_attestation_wire_the_memory_guard() -> None:
+def test_gateway_restart_uses_bounded_memory_gates_without_async_termination() -> None:
     root = Path(__file__).resolve().parents[1]
     restart = (root / "gw_restart.sh").read_text(encoding="utf-8")
     workflow = (root / ".github/workflows/attested-v2-release.yml").read_text(
         encoding="utf-8"
     )
 
-    assert "start_gateway_host_memory_guard" in restart
+    assert "wait_for_gateway_build_memory" in restart
     assert 'GATEWAY_HOST_MEMORY_GUARD_PATH="${GATEWAY_HOST_MEMORY_GUARD_PATH:-' in restart
     assert 'local guard="$GATEWAY_HOST_MEMORY_GUARD_PATH"' in restart
-    assert "--watch-parent \"$$\"" in restart
     assert "--minimum-available-mib 16384" in restart
-    assert "--minimum-available-mib 4096" in restart
+    assert "--minimum-available-mib 4096" in workflow
+    assert "--watch-parent" not in restart
+    assert "--watch-parent" not in (
+        root / "gateway" / "tee" / "host_memory_guard_v2.py"
+    ).read_text(encoding="utf-8")
     assert "Guard gateway builder host memory" in workflow
-    assert "--watch-parent \"$$\"" in workflow
-    assert "$BASHPID" not in workflow
+    assert "--watch-parent" not in workflow

@@ -14,7 +14,7 @@
 #
 # ==============================================================================
 
-set -e
+set -eo pipefail
 
 echo "============================================================"
 echo "🐳 DYNAMIC CONTAINERIZED VALIDATOR DEPLOYMENT"
@@ -22,46 +22,37 @@ echo "============================================================"
 echo "📊 Lead distribution: FULLY DYNAMIC (adapts to gateway setting)"
 echo ""
 
-terminate_stale_validator_builds() {
-    local reason="${1:-preflight}"
-    echo "🧹 Cleaning stale validator Docker build processes ($reason)..."
-
-    if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-        sudo -n pkill -TERM -f "docker build -f .*/validator_models/containerizing/Dockerfile" 2>/dev/null || true
-        sudo -n pkill -TERM -f "pip install --no-cache-dir -r requirements.txt" 2>/dev/null || true
-        sleep 3
-        sudo -n pkill -KILL -f "docker build -f .*/validator_models/containerizing/Dockerfile" 2>/dev/null || true
-        sudo -n pkill -KILL -f "pip install --no-cache-dir -r requirements.txt" 2>/dev/null || true
-    else
-        pkill -TERM -f "docker build -f .*/validator_models/containerizing/Dockerfile" 2>/dev/null || true
-        pkill -TERM -f "pip install --no-cache-dir -r requirements.txt" 2>/dev/null || true
-        sleep 3
-        pkill -KILL -f "docker build -f .*/validator_models/containerizing/Dockerfile" 2>/dev/null || true
-        pkill -KILL -f "pip install --no-cache-dir -r requirements.txt" 2>/dev/null || true
-    fi
-    sleep 2
-}
+DEPLOY_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$DEPLOY_SCRIPT_DIR/../../validator_tee/scripts/docker_operation_lock_v2.sh"
+. "$DEPLOY_SCRIPT_DIR/../../validator_tee/scripts/docker_build_retry_v2.sh"
 
 docker_build_validator_image() {
     local timeout_seconds="${VALIDATOR_DOCKER_BUILD_TIMEOUT_SECONDS:-1800}"
     local build_context build_status
+    local -a build_command
     build_context="$(mktemp -d /tmp/leadpoet-validator-build.XXXXXX)"
     git -C "$REPO_ROOT" archive "$VALIDATOR_V2_DEPLOY_COMMIT" \
         | tar -x -C "$build_context"
 
     if command -v timeout >/dev/null 2>&1; then
-        timeout "$timeout_seconds" docker build \
+        build_command=(timeout "$timeout_seconds" docker build \
             --build-arg "LEADPOET_BUILD_COMMIT=$VALIDATOR_V2_DEPLOY_COMMIT" \
             -f "$build_context/validator_models/containerizing/Dockerfile" \
             -t leadpoet-validator:latest \
-            "$build_context" && build_status=0 || build_status=$?
+            "$build_context")
     else
         echo "⚠️  timeout command unavailable; running Docker build without timeout"
-        docker build \
+        build_command=(docker build \
             --build-arg "LEADPOET_BUILD_COMMIT=$VALIDATOR_V2_DEPLOY_COMMIT" \
             -f "$build_context/validator_models/containerizing/Dockerfile" \
             -t leadpoet-validator:latest \
-            "$build_context" && build_status=0 || build_status=$?
+            "$build_context")
+    fi
+    if leadpoet_run_docker_build_with_retry_v2 \
+        "validator application image build" "${build_command[@]}"; then
+        build_status=0
+    else
+        build_status=$?
     fi
     rm -rf "$build_context"
     return "$build_status"
@@ -290,17 +281,15 @@ cd "$(dirname "$0")"  # Go to script directory
 SCRIPT_DIR=$(pwd)
 REPO_ROOT=$(cd ../.. && pwd)  # Go to repo root
 
-terminate_stale_validator_builds "before-build"
+leadpoet_acquire_docker_operation_lock_v2
 
 if docker_build_validator_image; then
     echo "✅ Docker image built successfully"
 else
     BUILD_EXIT_CODE=$?
-    terminate_stale_validator_builds "after-build-failure"
     echo "❌ ERROR: Docker build failed"
     if [ "$BUILD_EXIT_CODE" -eq 124 ]; then
         echo "   Docker build timed out after ${VALIDATOR_DOCKER_BUILD_TIMEOUT_SECONDS:-1800} seconds."
-        echo "   Stale docker/pip build processes were terminated."
     fi
     echo "   This usually means:"
     echo "   1. Dockerfile syntax error"

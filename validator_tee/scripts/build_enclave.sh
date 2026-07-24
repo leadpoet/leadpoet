@@ -21,6 +21,9 @@ RUNTIME_ARTIFACT_LOCK="$VALIDATOR_TEE_DIR/runtime-artifacts-v2.lock.json"
 RUNTIME_ARTIFACT_DIR="$REPO_ROOT/.validator-tee-artifacts"
 OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts/validator-runtime}"
 
+. "$REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
+leadpoet_acquire_docker_operation_lock_v2
+
 echo "=========================================="
 echo "🔨 Building Validator Nitro Enclave Image"
 echo "=========================================="

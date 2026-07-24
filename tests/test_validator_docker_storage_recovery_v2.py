@@ -29,6 +29,8 @@ def _run_recovery(
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
     sudo_log = tmp_path / "sudo.log"
 
     _write_executable(
@@ -85,6 +87,13 @@ exit 2
         """#!/bin/bash
 # No stale mounts under the fake docker/containerd roots (hermetic on CI and
 # macOS, which lacks findmnt entirely).
+exit 0
+""",
+    )
+    _write_executable(
+        bin_dir / "flock",
+        """#!/bin/bash
+# Lock semantics are covered separately; this recovery fixture has one process.
 exit 0
 """,
     )
@@ -174,6 +183,10 @@ fi
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET": "1",
         "VALIDATOR_DOCKER_MIN_FREE_BYTES": "30000000000",
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(
+            tmp_path / "docker-operation.lock"
+        ),
+        "LEADPOET_PROC_ROOT": str(proc_root),
         "FAKE_AVAILABLE": str(available),
         "FAKE_CONTAINERS": str(containers),
         "FAKE_IMAGES": str(images),

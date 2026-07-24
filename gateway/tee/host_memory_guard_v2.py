@@ -185,42 +185,13 @@ def inspect_host(
     return report
 
 
-def watch_parent(
-    parent_pid: int,
-    *,
-    minimum_available_mib: int,
-    interval_seconds: float,
-) -> int:
-    while Path(f"/proc/{parent_pid}").exists():
-        report = inspect_host(
-            minimum_available_mib=minimum_available_mib,
-            cleanup=True,
-        )
-        if report["cleaned_disposable_tests"]:
-            print(json.dumps(report, sort_keys=True), flush=True)
-        if report["status"] != "ready":
-            print(json.dumps(report, sort_keys=True), flush=True)
-            os.kill(parent_pid, signal.SIGTERM)
-            return 2
-        time.sleep(interval_seconds)
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cleanup-disposable-tests", action="store_true")
     parser.add_argument("--minimum-available-mib", type=int, default=16_384)
-    parser.add_argument("--watch-parent", type=int)
-    parser.add_argument("--interval-seconds", type=float, default=5.0)
     args = parser.parse_args()
     if args.minimum_available_mib < 1024:
         parser.error("--minimum-available-mib must be at least 1024")
-    if args.watch_parent is not None:
-        return watch_parent(
-            args.watch_parent,
-            minimum_available_mib=args.minimum_available_mib,
-            interval_seconds=args.interval_seconds,
-        )
     report = inspect_host(
         minimum_available_mib=args.minimum_available_mib,
         cleanup=args.cleanup_disposable_tests,

@@ -47,8 +47,8 @@ export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:
 GATEWAY_DEPLOY_STAGE="${GATEWAY_DEPLOY_STAGE:-bootstrap}"
 GATEWAY_DEPLOY_COMPLETED=0
 GATEWAY_PREFLIGHT_TREE=""
-GATEWAY_HOST_MEMORY_GUARD_PID=""
 GATEWAY_HOST_MEMORY_GUARD_PATH="${GATEWAY_HOST_MEMORY_GUARD_PATH:-$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py}"
+LEADPOET_DOCKER_OPERATION_LOCK_FILE="${LEADPOET_DOCKER_OPERATION_LOCK_FILE:-/home/ec2-user/.config/leadpoet/docker-operation-v2.lock}"
 V2_CREDENTIAL_ENVELOPES=(
   "$GATEWAY_V2_CONFIG_DIR/artifact_master_key.json"
   "$GATEWAY_V2_CONFIG_DIR/openrouter.json"
@@ -184,10 +184,6 @@ finalize_deployment_record() {
 
 on_gateway_restart_exit() {
   local status="$?"
-  if [ -n "${GATEWAY_HOST_MEMORY_GUARD_PID:-}" ]; then
-    kill "$GATEWAY_HOST_MEMORY_GUARD_PID" >/dev/null 2>&1 || true
-    wait "$GATEWAY_HOST_MEMORY_GUARD_PID" >/dev/null 2>&1 || true
-  fi
   if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ]; then
     rm -rf "$GATEWAY_PREFLIGHT_TREE"
   fi
@@ -199,22 +195,32 @@ on_gateway_restart_exit() {
   fi
 }
 
-start_gateway_host_memory_guard() {
+wait_for_gateway_build_memory() {
   local guard="$GATEWAY_HOST_MEMORY_GUARD_PATH"
+  local report
   if [ ! -r "$guard" ]; then
     echo "ERROR: gateway host memory guard is unavailable: $guard" >&2
     return 1
   fi
-  echo "Clearing only disposable /tmp/prtest pytest processes and checking host memory"
-  python3 "$guard" \
-    --cleanup-disposable-tests \
-    --minimum-available-mib 16384
-  python3 "$guard" \
-    --cleanup-disposable-tests \
-    --minimum-available-mib 4096 \
-    --watch-parent "$$" \
-    --interval-seconds 5 &
-  GATEWAY_HOST_MEMORY_GUARD_PID="$!"
+  report="$(mktemp /tmp/gateway-memory-ready.XXXXXX.json)"
+  for attempt in $(seq 1 300); do
+    if python3 "$guard" \
+        --cleanup-disposable-tests \
+        --minimum-available-mib 16384 >"$report"; then
+      cat "$report"
+      rm -f "$report"
+      return 0
+    fi
+    if [ "$attempt" -eq 1 ] || [ $((attempt % 10)) -eq 0 ]; then
+      echo "Waiting for 16 GiB available memory before production shutdown (${attempt}/300)"
+      cat "$report"
+    fi
+    sleep 6
+  done
+  echo "ERROR: gateway build memory did not recover within 30 minutes" >&2
+  cat "$report" >&2
+  rm -f "$report"
+  return 1
 }
 
 run_prepared_gateway_module() {
@@ -547,6 +553,11 @@ elif [ "$GATEWAY_RESTART_PHASE" = "post_activate" ]; then
     echo "ERROR: post-activation gateway restart lost the deployment lock" >&2
     exit 1
   fi
+  if [ "${LEADPOET_DOCKER_OPERATION_LOCK_HELD:-0}" != "1" ] \
+      || [ "$(readlink /proc/$$/fd/7 2>/dev/null || true)" != "$LEADPOET_DOCKER_OPERATION_LOCK_FILE" ]; then
+    echo "ERROR: post-activation gateway restart lost the Docker operation lock" >&2
+    exit 1
+  fi
 else
   echo "ERROR: unsupported GATEWAY_RESTART_PHASE=$GATEWAY_RESTART_PHASE" >&2
   exit 1
@@ -554,8 +565,6 @@ fi
 
 if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then
 cd "$GATEWAY_ROOT"
-
-start_gateway_host_memory_guard
 
 PID="$(pgrep -f "python3 -u main.py|python3 -u -m gateway.main" | head -1 || true)"
 echo "main pid before: ${PID:-none}"
@@ -1115,7 +1124,20 @@ else:
 PY
 fi
 
+DOCKER_LOCK_HELPER="$GATEWAY_PREFLIGHT_TREE/validator_tee/scripts/docker_operation_lock_v2.sh"
+if [ ! -r "$DOCKER_LOCK_HELPER" ]; then
+  echo "ERROR: prepared Docker operation lock helper is unavailable" >&2
+  exit 1
+fi
+. "$DOCKER_LOCK_HELPER"
+leadpoet_acquire_docker_operation_lock_v2
+PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" \
+  -m validator_tee.host.docker_operation_guard_v2 \
+  --wait \
+  --timeout-seconds 1800 \
+  --interval-seconds 3
 wait_for_foreign_docker_builds
+wait_for_gateway_build_memory
 
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
@@ -1182,6 +1204,8 @@ exec env \
   GATEWAY_DEPLOYMENT_MANIFEST="$GATEWAY_DEPLOYMENT_MANIFEST" \
   GATEWAY_LAST_GOOD_MANIFEST="$GATEWAY_LAST_GOOD_MANIFEST" \
   GATEWAY_HOST_RESTART_SCRIPT="$GATEWAY_HOST_RESTART_SCRIPT" \
+  LEADPOET_DOCKER_OPERATION_LOCK_FILE="$LEADPOET_DOCKER_OPERATION_LOCK_FILE" \
+  LEADPOET_DOCKER_OPERATION_LOCK_HELD=1 \
   GATEWAY_TEE_EIF_ROOT="$GATEWAY_TEE_EIF_ROOT" \
   GATEWAY_PYTHON_BIN="$GATEWAY_PYTHON_BIN" \
   RESEARCH_LAB_TEE_PROTOCOL="$RESEARCH_LAB_TEE_PROTOCOL" \
@@ -1296,7 +1320,7 @@ bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"
 echo "Preflight: importing host workers from the canonical Git checkout"
 GATEWAY_DEPLOY_STAGE="worker_import_preflight"
 export GATEWAY_DEPLOY_STAGE
-if ! LEADPOET_REPO_ROOT="$LEADPOET_REPO_ROOT" PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" - <<'PREFLIGHT_HOST'
+if ! PYTHONSAFEPATH=1 LEADPOET_REPO_ROOT="$LEADPOET_REPO_ROOT" PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" - <<'PREFLIGHT_HOST'
 import importlib
 import os
 from pathlib import Path
@@ -1378,6 +1402,9 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     GATEWAY_ENV_FILE="$GATEWAY_ENV_FILE" \
     RESEARCH_LAB_TEE_PROTOCOL="$RESEARCH_LAB_TEE_PROTOCOL" \
     bash ./start_enclave.sh
+
+  . "$LEADPOET_REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
+  leadpoet_release_docker_operation_lock_v2
 
   echo "Starting parent-side opaque enclave egress forwarder"
   cd "$LEADPOET_REPO_ROOT"

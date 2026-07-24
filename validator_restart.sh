@@ -15,6 +15,7 @@ VALIDATOR_V2_RELEASE_MANIFEST="${VALIDATOR_V2_RELEASE_MANIFEST:-/home/ec2-user/.
 VALIDATOR_V2_RELEASE_ARCHIVE_ROOT="${VALIDATOR_V2_RELEASE_ARCHIVE_ROOT:-/home/ec2-user/.config/leadpoet/validator-releases-v2}"
 VALIDATOR_V2_HOTKEY_CONFIG="${VALIDATOR_V2_HOTKEY_CONFIG:-/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json}"
 VALIDATOR_V2_HOTKEY_ENVELOPE="${VALIDATOR_V2_HOTKEY_ENVELOPE:-/home/ec2-user/.config/leadpoet/validator-hotkey-envelope-v2.json}"
+VALIDATOR_DOCKER_OPERATION_LOCK_HELPER="$VALIDATOR_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
 VALIDATOR_V2_RELEASE_BUCKET="${VALIDATOR_V2_RELEASE_BUCKET:-leadpoet-attested-v2-artifacts-493765492819}"
 VALIDATOR_V2_RELEASE_PREFIX="${VALIDATOR_V2_RELEASE_PREFIX:-attested-v2/releases}"
 VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
@@ -410,6 +411,18 @@ if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" != "1" ]; then
   unset LEADPOET_USE_CAPTURED_RESTART_START
 fi
 
+if [ ! -r "$VALIDATOR_DOCKER_OPERATION_LOCK_HELPER" ]; then
+  echo "ERROR: validator Docker operation lock helper is unavailable" >&2
+  exit 1
+fi
+. "$VALIDATOR_DOCKER_OPERATION_LOCK_HELPER"
+leadpoet_acquire_docker_operation_lock_v2
+PYTHONPATH="$VALIDATOR_ROOT" "$VALIDATOR_PYTHON_BIN" \
+  -m validator_tee.host.docker_operation_guard_v2 \
+  --wait \
+  --timeout-seconds 1800 \
+  --interval-seconds 3
+
 echo "Stopping validator processes and containers"
 sudo pkill -TERM -f ".auto_update_wrapper.sh" 2>/dev/null || true
 sudo pkill -TERM -f "neurons/validator.py" 2>/dev/null || true
@@ -501,7 +514,7 @@ echo "Terminating existing validator Nitro enclaves"
   echo "Starting validator-enclave opaque chain TLS relay"
   CHAIN_RELAY_LOG="${VALIDATOR_CHAIN_RELAY_LOG:-/home/ec2-user/validator-chain-relay-v2.log}"
   setsid env PYTHONPATH="$VALIDATOR_ROOT" python3 -m validator_tee.host.chain_relay_v2 \
-    >> "$CHAIN_RELAY_LOG" 2>&1 < /dev/null &
+    >> "$CHAIN_RELAY_LOG" 2>&1 < /dev/null 7>&- &
   CHAIN_RELAY_PID=$!
   sleep 2
   if ! kill -0 "$CHAIN_RELAY_PID" 2>/dev/null; then
@@ -546,6 +559,7 @@ if [ "$(docker inspect -f '{{.State.Running}}' leadpoet-validator-main)" != "tru
   docker logs --tail 160 leadpoet-validator-main >&2 || true
   exit 1
 fi
+leadpoet_release_docker_operation_lock_v2
 if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ]; then
   rm -f "$VALIDATOR_RESTART_START_PATH"
 fi

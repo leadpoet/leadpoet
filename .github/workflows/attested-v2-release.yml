@@ -62,13 +62,15 @@ jobs:
 
       - name: Build gateway and validator evidence
         run: |
+          . validator_tee/scripts/docker_operation_lock_v2.sh
+          leadpoet_acquire_docker_operation_lock_v2
+          python3 -m validator_tee.host.docker_operation_guard_v2 \
+            --wait \
+            --timeout-seconds 1800 \
+            --interval-seconds 3
           python3 gateway/tee/host_memory_guard_v2.py \
             --cleanup-disposable-tests \
-            --minimum-available-mib 4096 \
-            --watch-parent "$$" \
-            --interval-seconds 5 &
-          HOST_MEMORY_GUARD_PID="$!"
-          trap 'kill "$HOST_MEMORY_GUARD_PID" >/dev/null 2>&1 || true' EXIT
+            --minimum-available-mib 4096
 
           export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"
           export GATEWAY_V2_BUILDER_DOMAIN=gateway
@@ -140,6 +142,13 @@ jobs:
 
       - name: Build gateway and validator evidence
         run: |
+          . validator_tee/scripts/docker_operation_lock_v2.sh
+          leadpoet_acquire_docker_operation_lock_v2
+          python3 -m validator_tee.host.docker_operation_guard_v2 \
+            --wait \
+            --timeout-seconds 1800 \
+            --interval-seconds 3
+
           export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"
           export GATEWAY_V2_BUILDER_DOMAIN=validator
           export GATEWAY_V2_BUILDER_ID="validator-parent-${RUNNER_NAME}"

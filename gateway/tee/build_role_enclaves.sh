@@ -5,6 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATEWAY_ROOT="${GATEWAY_ROOT:-/home/ec2-user/gateway}"
+REPO_ROOT="${GATEWAY_ROOT%/gateway}"
 EIF_ROOT="${GATEWAY_TEE_EIF_ROOT:-/home/ec2-user/tee}"
 RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$EIF_ROOT/gateway-v2-release-manifest.json}"
 RELEASE_ARCHIVE_ROOT="${GATEWAY_V2_RELEASE_ARCHIVE_ROOT:-$EIF_ROOT/releases-v2}"
@@ -14,6 +15,9 @@ ROLES=(
   gateway_scoring
   gateway_autoresearch
 )
+
+. "$REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
+leadpoet_acquire_docker_operation_lock_v2
 
 python3 "$SCRIPT_DIR/topology.py" --verify "$SCRIPT_DIR/topology.json"
 if [ "$TOPOLOGY_MODE" = "full" ]; then

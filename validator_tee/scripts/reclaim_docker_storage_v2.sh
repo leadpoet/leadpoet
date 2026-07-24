@@ -5,6 +5,17 @@ set -euo pipefail
 
 MIN_FREE_BYTES="${VALIDATOR_DOCKER_MIN_FREE_BYTES:-30000000000}"
 ALLOW_DATA_ROOT_RESET="${VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET:-0}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+. "$SCRIPT_DIR/docker_operation_lock_v2.sh"
+leadpoet_acquire_docker_operation_lock_v2
+PYTHONPATH="$REPO_ROOT" python3 \
+  -m validator_tee.host.docker_operation_guard_v2 \
+  --wait \
+  --timeout-seconds 1800 \
+  --interval-seconds 3 \
+  --proc-root "${LEADPOET_PROC_ROOT:-/proc}"
 
 available_bytes() {
   df --output=avail -B1 / | tail -1 | tr -d '[:space:]'
@@ -143,7 +154,10 @@ sudo pkill -KILL -f '^/usr/bin/containerd-shim-runc-v2 -namespace moby ' 2>/dev/
 # Stale overlay mounts can survive daemon shutdown even though every guarded
 # runtime inventory above is empty. Unmount only descendants of the two exact
 # validated data roots, deepest paths first, and refuse a lazy/forced unmount.
-mapfile -t STALE_MOUNTS < <(
+while IFS= read -r mount_target; do
+  echo "Unmounting stale empty-runtime mount: $mount_target"
+  sudo umount "$mount_target"
+done < <(
   findmnt -rn -o TARGET \
     | awk -v docker_root="$DOCKER_ROOT/" -v containerd_root="$CONTAINERD_ROOT/" \
         'index($0, docker_root) == 1 || index($0, containerd_root) == 1' \
@@ -151,10 +165,6 @@ mapfile -t STALE_MOUNTS < <(
     | sort -rn \
     | cut -d' ' -f2-
 )
-for mount_target in "${STALE_MOUNTS[@]}"; do
-  echo "Unmounting stale empty-runtime mount: $mount_target"
-  sudo umount "$mount_target"
-done
 if findmnt -rn -o TARGET \
     | awk -v docker_root="$DOCKER_ROOT/" -v containerd_root="$CONTAINERD_ROOT/" \
         'index($0, docker_root) == 1 || index($0, containerd_root) == 1' \

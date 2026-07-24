@@ -16,7 +16,7 @@ def test_builder_daemons_recover_before_any_docker_inventory():
 def test_data_root_reset_unmounts_only_after_empty_runtime_guards():
     guard = SCRIPT.index('if [ "$NON_MOBY_NAMESPACE_COUNT" -ne 0 ]')
     stop = SCRIPT.index("sudo systemctl stop docker.service")
-    mounts = SCRIPT.index("mapfile -t STALE_MOUNTS")
+    mounts = SCRIPT.index("while IFS= read -r mount_target")
     remove = SCRIPT.index('sudo rm -rf --one-file-system "$DOCKER_ROOT"')
 
     assert guard < stop < mounts < remove

@@ -142,27 +142,27 @@
       "symbol": "weight_config_document"
     },
     {
-      "ast_sha256": "sha256:0a313a76743fe3ffbd525d6831231b5e23668ce4e3578eafd6882e751b7332d7",
+      "ast_sha256": "sha256:48308f43e67f902158d5159e0c013b19663a308252a8884cdbae5711d3716c9d",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.fetch_attested_weights_v2"
     },
     {
-      "ast_sha256": "sha256:9ee674ca0c68b7fea13d61906d0bf6529bb0d93b757d0debb0074744bb7b9657",
+      "ast_sha256": "sha256:d3c42d1beb4f18d7dfd48912081c4f6e66fa7730f07356ae73a7f870f104f490",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.fetch_verified_weight_authority"
     },
     {
-      "ast_sha256": "sha256:ba9f5dce0eb70a80d455cb1d6810cd5a876be0478305f7ede3d75008bb8f2118",
+      "ast_sha256": "sha256:200693270543d4282843d7c4a4bdd219f90e2b8ad3d4e116dc7926748d130316",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.run"
     },
     {
-      "ast_sha256": "sha256:d832bbe9cb059d669772f8b22caf5f93a65ffd2d57846eb2e89cd16e49b503cb",
+      "ast_sha256": "sha256:e8b16ffb02989341bada8dcb1349fde71fa307ba7f75c4ee640248a187eea8e7",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.submit_weights_to_chain"
     },
     {
-      "ast_sha256": "sha256:c36fbdab83769a05ded4f60c3a17868a88697d6ea49cdb1e5b105efa3cdc3be7",
+      "ast_sha256": "sha256:3871a8d1d26863dd681d53d1d6f90d293cb049e9ae8acf3576b9f58cb38b2da3",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.verify_attested_weights_v2"
     },
@@ -302,7 +302,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:25c92a3341b58b8073810e60e50a6a9c92eb47f7c826b19777784420da925416",
-  "protected_source_commit": "32f79a84f07512ef02e526d09192b5ed3964b338",
+  "manifest_hash": "sha256:d7be3f83281ff27c01f591bed1766d1d1c806fa1ef2db61f85a89b6d3ebecd0b",
+  "protected_source_commit": "6113b7ac11c5eb84cd32e722265e426c41342785",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

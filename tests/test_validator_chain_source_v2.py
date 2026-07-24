@@ -1267,10 +1267,15 @@ def test_finalized_extrinsic_requires_exact_bytes_and_committed_chain_state():
         minimum_block=BLOCK,
         maximum_block=BLOCK,
         epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
+        finalization_scan_id="sha256:" + "9" * 64,
     )
     assert result["extrinsic_hash"] == extrinsic_hash
     assert result["finalized_block"] == BLOCK
     assert result["state_transition_hash"].startswith("sha256:")
+    assert result["job_id"] == (
+        "weight-finalization:%d:%s"
+        % (STATEFUL_SETTLEMENT_EPOCH_ID, "9" * 64)
+    )
     assert pacing == [FINALIZATION_RPC_PACING_SECONDS] * 4
 
 
@@ -1329,4 +1334,5 @@ def test_finalized_extrinsic_rejects_inclusion_without_expected_state_change():
             minimum_block=BLOCK,
             maximum_block=BLOCK,
             epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
+            finalization_scan_id="sha256:" + "9" * 64,
         )

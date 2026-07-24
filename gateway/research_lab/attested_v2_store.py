@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from datetime import datetime, timezone
 import hashlib
+import logging
 import re
 from typing import Any, Iterable, Mapping, Optional
 
-from gateway.research_lab.store import insert_row, select_all, select_one
+from gateway.research_lab.store import (
+    _is_transient_store_error,
+    insert_row,
+    select_all,
+    select_one,
+)
 from leadpoet_canonical.attested_v2 import (
     build_receipt_graph,
     merkle_root,
@@ -49,6 +56,8 @@ LEGACY_NONFINALIZATION_TABLE = (
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GRAPH_QUERY_CHUNK = 50
 _MAX_GRAPH_ROWS = 10000
+_EXACT_INSERT_ATTEMPTS = 4
+_EXACT_INSERT_BACKOFF_SECONDS = (0.25, 0.75, 1.5)
 _REPLAYABLE_EXECUTION_PAIRS = frozenset(
     {("research_lab_allocation", "research_lab.allocation.v2")}
     | {
@@ -57,6 +66,8 @@ _REPLAYABLE_EXECUTION_PAIRS = frozenset(
         if role == "gateway_coordinator"
     }
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AttestedV2StoreError(RuntimeError):
@@ -111,22 +122,45 @@ async def _insert_exact(
     key_filters: tuple[tuple[str, Any], ...],
 ) -> dict[str, Any]:
     expected = dict(row)
-    try:
-        stored = await insert_row(table, expected)
-    except Exception as exc:
-        if not _is_duplicate_error(exc):
-            raise
-        stored = await select_one(table, filters=key_filters)
-        if not isinstance(stored, Mapping):
-            raise AttestedV2StoreError(
-                "%s duplicate could not be reloaded" % table
-            ) from exc
-    for field, value in expected.items():
-        if not _stored_value_matches(field, stored.get(field), value):
-            raise AttestedV2StoreError(
-                "%s stored row conflicts at %s" % (table, field)
+    for attempt in range(_EXACT_INSERT_ATTEMPTS):
+        try:
+            stored = await insert_row(table, expected)
+        except Exception as exc:
+            duplicate = _is_duplicate_error(exc)
+            transient = _is_transient_store_error(exc)
+            if not duplicate and not transient:
+                raise
+
+            stored = await select_one(table, filters=key_filters)
+            if isinstance(stored, Mapping):
+                _assert_stored_row(table, stored, expected)
+                return dict(stored)
+            if duplicate:
+                raise AttestedV2StoreError(
+                    "%s duplicate could not be reloaded" % table
+                ) from exc
+            if attempt == _EXACT_INSERT_ATTEMPTS - 1:
+                raise
+
+            backoff = _EXACT_INSERT_BACKOFF_SECONDS[
+                min(attempt, len(_EXACT_INSERT_BACKOFF_SECONDS) - 1)
+            ]
+            logger.warning(
+                "transient_exact_insert_retry table=%s attempt=%s/%s "
+                "type=%s error=%s",
+                table,
+                attempt + 1,
+                _EXACT_INSERT_ATTEMPTS,
+                type(exc).__name__,
+                str(exc)[:160],
             )
-    return dict(stored)
+            await asyncio.sleep(backoff)
+            continue
+
+        _assert_stored_row(table, stored, expected)
+        return dict(stored)
+
+    raise AssertionError("exact insert retry loop exhausted unexpectedly")
 
 
 def _attestation_document(identity: Mapping[str, Any]) -> tuple[str, str]:

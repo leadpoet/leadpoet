@@ -18,6 +18,7 @@ HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
 COMPUTED_RECEIPT = "sha256:" + "1" * 64
 ROOT = "sha256:" + "2" * 64
 EVENT = "sha256:" + "3" * 64
+FINALIZATION_SCAN = "sha256:" + "d" * 64
 
 
 class Client:
@@ -62,8 +63,11 @@ class Client:
             "receipt": {"receipt_hash": ROOT},
         }
 
-    def confirm_weight_publication_v2(self, authorization_id):
+    def confirm_weight_publication_v2(
+        self, authorization_id, *, finalization_scan_id
+    ):
         assert authorization_id == "sha256:" + "9" * 64
+        assert finalization_scan_id == FINALIZATION_SCAN
         return {
             "finalization": {
                 "epoch_id": 100,
@@ -440,6 +444,7 @@ async def test_finalization_requires_exact_enclave_and_gateway_ack(monkeypatch):
             "weight_authorization_id": "sha256:" + "9" * 64,
             "weight_submission_event_hash": EVENT,
         },
+        finalization_scan_id=FINALIZATION_SCAN,
         validator_hotkey=HOTKEY,
         gateway_url="https://gateway.example",
         client=Client(),
@@ -475,6 +480,7 @@ async def test_finalization_rejects_gateway_ack_for_another_extrinsic(monkeypatc
                 "weight_authorization_id": "sha256:" + "9" * 64,
                 "weight_submission_event_hash": EVENT,
             },
+            finalization_scan_id=FINALIZATION_SCAN,
             validator_hotkey=HOTKEY,
             gateway_url="https://gateway.example",
             client=Client(),

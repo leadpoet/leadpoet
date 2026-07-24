@@ -25,6 +25,7 @@ Security:
 import asyncio
 import os
 import base64
+import gzip
 import hashlib
 import json
 import logging
@@ -34,9 +35,10 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Set
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 # Canonical imports (MUST use shared module)
@@ -80,6 +82,76 @@ from Leadpoet.utils.subnet_epoch import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/weights", tags=["weights"])
+_WEIGHT_AUTHORITY_GZIP_MIN_BYTES = 1024
+
+
+def _weight_authority_http_response(
+    authority: Mapping[str, Any],
+    *,
+    accept_encoding: str,
+) -> Response:
+    """Serialize one authority once and gzip only its HTTP representation."""
+
+    response = JSONResponse(content=dict(authority))
+    accepts_gzip = False
+    for item in str(accept_encoding or "").split(","):
+        parts = [part.strip().lower() for part in item.split(";")]
+        if parts[0] != "gzip":
+            continue
+        accepts_gzip = not any(
+            part.startswith("q=") and part[2:].strip() in {"0", "0.0", "0.00"}
+            for part in parts[1:]
+        )
+        break
+    if not accepts_gzip or len(response.body) < _WEIGHT_AUTHORITY_GZIP_MIN_BYTES:
+        response.headers["Vary"] = "Accept-Encoding"
+        return response
+    return Response(
+        content=gzip.compress(response.body, compresslevel=1, mtime=0),
+        media_type="application/json",
+        headers={
+            "Content-Encoding": "gzip",
+            "Vary": "Accept-Encoding",
+        },
+    )
+
+
+def _weight_authority_load_exception(
+    exc: BaseException,
+    *,
+    netuid: int,
+    epoch_id: int,
+    log_tag: str,
+    failure_detail: str,
+) -> HTTPException:
+    """Map only recognized store transients to a retryable HTTP response."""
+
+    from gateway.research_lab.store import _is_transient_store_error
+
+    if _is_transient_store_error(exc):
+        logger.warning(
+            "%s netuid=%s epoch=%s error_type=%s error=%s",
+            log_tag,
+            netuid,
+            epoch_id,
+            type(exc).__name__,
+            str(exc)[:240],
+        )
+        return HTTPException(
+            status_code=503,
+            detail="v2 weight authority is temporarily unavailable",
+            headers={"Retry-After": "5"},
+        )
+    logger.error(
+        "%s netuid=%s epoch=%s error_type=%s error=%s",
+        log_tag,
+        netuid,
+        epoch_id,
+        type(exc).__name__,
+        str(exc)[:240],
+    )
+    return HTTPException(status_code=500, detail=failure_detail)
+
 
 # ============================================================================
 # Configuration
@@ -1402,7 +1474,7 @@ async def submit_weights_v2(submission: WeightSubmissionV2) -> WeightSubmissionV
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error(
+        logger.exception(
             "authoritative_weight_submission_v2_failed epoch=%s type=%s error=%s",
             verified["epoch_id"],
             type(exc).__name__,
@@ -1516,7 +1588,11 @@ async def finalize_weights_v2(
 
 
 @router.get("/v2/latest/{netuid}/{epoch_id}")
-async def get_attested_weights_v2(netuid: int, epoch_id: int) -> Dict[str, Any]:
+async def get_attested_weights_v2(
+    netuid: int,
+    epoch_id: int,
+    request: Request,
+) -> Response:
     """Return only complete V2 authority with finalized-chain evidence."""
 
     try:
@@ -1530,25 +1606,31 @@ async def get_attested_weights_v2(netuid: int, epoch_id: int) -> Dict[str, Any]:
             validator_hotkey=next(iter(PRIMARY_VALIDATOR_HOTKEYS)),
         )
     except Exception as exc:
-        logger.error(
-            "weight_submission_v2_sidecar_load_failed netuid=%s epoch=%s "
-            "error_type=%s error=%s",
-            netuid,
-            epoch_id,
-            type(exc).__name__,
-            str(exc)[:240],
-        )
-        raise HTTPException(status_code=500, detail="v2 weight sidecar verification failed") from exc
+        raise _weight_authority_load_exception(
+            exc,
+            netuid=netuid,
+            epoch_id=epoch_id,
+            log_tag="weight_submission_v2_sidecar_load_failed",
+            failure_detail="v2 weight sidecar verification failed",
+        ) from exc
     if authority is None:
         raise HTTPException(
             status_code=404,
             detail="finalized v2 weight authority not found",
         )
-    return authority
+    return await asyncio.to_thread(
+        _weight_authority_http_response,
+        authority,
+        accept_encoding=request.headers.get("accept-encoding", ""),
+    )
 
 
 @router.get("/v2/published/{netuid}/{epoch_id}")
-async def get_published_weights_v2(netuid: int, epoch_id: int) -> Dict[str, Any]:
+async def get_published_weights_v2(
+    netuid: int,
+    epoch_id: int,
+    request: Request,
+) -> Response:
     """Return the strongest staged V2 authority: published or finalized.
 
     The primary's chain finalization completes shortly after the epoch
@@ -1571,23 +1653,23 @@ async def get_published_weights_v2(netuid: int, epoch_id: int) -> Dict[str, Any]
             require_finalization=False,
         )
     except Exception as exc:
-        logger.error(
-            "weight_published_v2_load_failed netuid=%s epoch=%s "
-            "error_type=%s error=%s",
-            netuid,
-            epoch_id,
-            type(exc).__name__,
-            str(exc)[:240],
-        )
-        raise HTTPException(
-            status_code=500, detail="v2 staged weight authority load failed"
+        raise _weight_authority_load_exception(
+            exc,
+            netuid=netuid,
+            epoch_id=epoch_id,
+            log_tag="weight_published_v2_load_failed",
+            failure_detail="v2 staged weight authority load failed",
         ) from exc
     if authority is None:
         raise HTTPException(
             status_code=404,
             detail="published v2 weight authority not found",
         )
-    return authority
+    return await asyncio.to_thread(
+        _weight_authority_http_response,
+        authority,
+        accept_encoding=request.headers.get("accept-encoding", ""),
+    )
 
 
 @router.get("/v2/release-evidence/{commit_sha}")

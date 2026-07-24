@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +19,10 @@ from gateway.research_lab.worker_autostart import (
 from neurons.validator import (
     Validator,
     _ValidatorEpochState,
+    _atomic_write_json_file,
+    _load_fulfillment_work_file,
+    _quarantine_fulfillment_work_file,
+    _shared_block_write_due,
     detect_fulfillment_worker_ids,
 )
 from qualification.scoring.fulfillment_scorer import format_scores_for_gateway
@@ -64,6 +69,42 @@ def _work_paths(
     work = weights / (f"fulfillment_worker_{worker_id}_work_{epoch}_{request_id}.json")
     results = weights / work.name.replace("_work_", "_results_", 1)
     return work, results
+
+
+def test_shared_json_writes_are_atomic_under_concurrency(tmp_path: Path) -> None:
+    path = tmp_path / "shared.json"
+    payloads = [{"writer": index, "items": list(range(50))} for index in range(20)]
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        list(executor.map(lambda payload: _atomic_write_json_file(path, payload), payloads))
+
+    assert json.loads(path.read_text(encoding="utf-8")) in payloads
+    assert not list(tmp_path.glob(".shared.json.*"))
+
+
+def test_invalid_fulfillment_work_is_quarantined_outside_worker_glob(
+    tmp_path: Path,
+) -> None:
+    work, _results = _work_paths(tmp_path)
+    work.write_text('{"epoch":24105,"request_id":', encoding="utf-8")
+
+    with pytest.raises(json.JSONDecodeError):
+        _load_fulfillment_work_file(work)
+    quarantined = _quarantine_fulfillment_work_file(work)
+
+    assert not work.exists()
+    assert quarantined.exists()
+    assert not list(
+        work.parent.glob("fulfillment_worker_*_work_*_*.json")
+    )
+
+
+def test_shared_block_heartbeat_uses_elapsed_time_not_call_count() -> None:
+    owner = SimpleNamespace()
+
+    assert _shared_block_write_due(owner, now=100.0) is True
+    assert _shared_block_write_due(owner, now=111.9) is False
+    assert _shared_block_write_due(owner, now=112.0) is True
 
 
 def test_fulfillment_worker_detection_uses_all_configured_numeric_ids(
@@ -309,6 +350,46 @@ async def test_worker_infrastructure_error_retries_without_scoring_miners_zero(
         ),
         encoding="utf-8",
     )
+
+    await Validator.process_fulfillment_workflow(
+        _validator_stub(last_processed_epoch=epoch),
+        _epoch_state(epoch),
+    )
+
+    assert work.exists()
+    assert work.stat().st_mtime >= original_mtime
+    assert not results.exists()
+
+
+@pytest.mark.asyncio
+async def test_partial_worker_result_is_removed_and_assignment_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ENABLE_FULFILLMENT", "true")
+    _clear_fulfillment_proxies(monkeypatch)
+    monkeypatch.setenv("FULFILLMENT_WEBSHARE_PROXY_1", "http://proxy-1")
+    monkeypatch.setattr(
+        cloud_db,
+        "gateway_get_fulfillment_reveals",
+        lambda _wallet: {"requests": []},
+    )
+    epoch = 24_105
+    work, results = _work_paths(tmp_path, epoch=epoch)
+    work.write_text(
+        json.dumps(
+            {
+                "epoch": epoch,
+                "request_id": "43c6bc55-80f9-49e3-af0c-7a6ae6e39358",
+                "icp": {},
+                "submissions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_mtime = work.stat().st_mtime
+    results.write_text('{"submission_results":', encoding="utf-8")
 
     await Validator.process_fulfillment_workflow(
         _validator_stub(last_processed_epoch=epoch),

@@ -33,6 +33,7 @@ MONITORED FILES (changes trigger rebuild):
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 import hashlib
 import json
 import logging
@@ -41,6 +42,7 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -181,7 +183,36 @@ def validator_v2_artifacts_required(repo_dir: str) -> bool:
 # {cache_key: {"pcr0": "...", "content_hash": "...", "base_image_stamp": "...", "commit_hash": "...", "commit_hashes": ["..."], "commit_timestamp": "...", "built_at": timestamp}}
 # This means: same code content + same base image = same cache key, regardless of commits
 _pcr0_cache: Dict[str, Dict] = {}
-_cache_lock = asyncio.Lock()
+_cache_lock: Optional[asyncio.Lock] = None
+_cache_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+_cache_lock_users = 0
+_cache_lock_guard = threading.Lock()
+
+
+@asynccontextmanager
+async def _cache_lock_scope():
+    """Use a cache lock owned by the current running event loop."""
+
+    global _cache_lock, _cache_lock_loop, _cache_lock_users
+    loop = asyncio.get_running_loop()
+    with _cache_lock_guard:
+        if _cache_lock_loop is not loop:
+            if _cache_lock_users:
+                raise RuntimeError(
+                    "PCR0 cache lock cannot move between active event loops"
+                )
+            _cache_lock = asyncio.Lock()
+            _cache_lock_loop = loop
+        if _cache_lock is None:
+            raise RuntimeError("PCR0 cache lock is unavailable")
+        lock = _cache_lock
+        _cache_lock_users += 1
+    try:
+        async with lock:
+            yield
+    finally:
+        with _cache_lock_guard:
+            _cache_lock_users -= 1
 
 # Is a build currently running?
 _build_in_progress = False
@@ -1317,7 +1348,7 @@ async def check_and_build_pcr0():
         print(f"[PCR0] Building PCR0 for content hash {content_hash}...")
         
         # Build PCR0 for current content
-        async with _cache_lock:
+        async with _cache_lock_scope():
             logger.info(f"[PCR0] Building enclave for content hash {content_hash} (commit {commit_hash[:8]})...")
             
             pcr0 = await build_enclave_and_extract_pcr0(repo_dir)
@@ -1511,7 +1542,7 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
             pcr0 = await build_enclave_and_extract_pcr0(repo_dir)
             
             if pcr0:
-                async with _cache_lock:
+                async with _cache_lock_scope():
                     _pcr0_cache[cache_key] = {
                         "pcr0": pcr0,
                         "content_hash": content_hash,

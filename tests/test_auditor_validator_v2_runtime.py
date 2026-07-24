@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import json
+import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +11,37 @@ from types import SimpleNamespace
 import pytest
 
 import neurons.auditor_validator as auditor_module
+
+
+def test_structured_auditor_event_redacts_credentials(caplog):
+    with caplog.at_level(logging.INFO, logger=auditor_module.__name__):
+        auditor_module._audit_event(
+            "fixture",
+            epoch=24124,
+            uid=155,
+            weights_hash="a" * 64,
+            hotkey="5PublicHotkey",
+            request_signature="do-not-log",
+            error=(
+                "GET https://gateway.example/weights?"
+                "signature=do-not-log&epoch=24124 "
+                "Authorization: Bearer do-not-log"
+            ),
+        )
+
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("auditor_event ")
+    )
+    payload = json.loads(record.removeprefix("auditor_event "))
+    assert payload["event"] == "fixture"
+    assert payload["epoch"] == 24124
+    assert payload["uid"] == 155
+    assert payload["weights_hash"] == "a" * 64
+    assert payload["hotkey"] == "5PublicHotkey"
+    assert payload["request_signature"] == "[redacted]"
+    assert "do-not-log" not in record
 
 
 def test_auditor_cli_config_enables_sdk_argument_parsing(monkeypatch):
@@ -176,14 +209,16 @@ def _auditor_for_one_verification(verified_result):
     auditor.epoch_cutover = object()
     auditor.subtensor = SimpleNamespace(
         get_current_block=lambda: 345,
-        metagraph=lambda _netuid: object(),
+        get_uid_for_hotkey_on_subnet=lambda **_kwargs: 12,
+    )
+    auditor.wallet = SimpleNamespace(
+        hotkey=SimpleNamespace(ss58_address="5" * 48)
     )
     auditor.config = SimpleNamespace(netuid=71)
     auditor.last_submitted_epoch = None
     auditor.last_authority_epoch = None
     auditor.consecutive_errors = 0
     auditor.max_consecutive_errors = 5
-    auditor.metagraph = object()
 
     async def fetch(_epoch):
         return {"authority": "fixture"}
@@ -217,6 +252,7 @@ def test_failed_auditor_verification_never_submits_fallback(monkeypatch, capsys)
 
 def test_v2_404_fails_closed_without_submission(monkeypatch, capsys):
     auditor = _auditor_for_one_verification(None)
+    sleeps = []
 
     async def missing_v2(_epoch):
         auditor._last_v2_authority_was_absent = True
@@ -227,7 +263,8 @@ def test_v2_404_fails_closed_without_submission(monkeypatch, capsys):
         "missing V2 authority must not submit any vector"
     )
 
-    async def stop_after_wait(_seconds):
+    async def stop_after_wait(seconds):
+        sleeps.append(seconds)
         auditor.should_exit = True
 
     monkeypatch.setattr(auditor_module.asyncio, "sleep", stop_after_wait)
@@ -236,6 +273,7 @@ def test_v2_404_fails_closed_without_submission(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "Weights not yet published" in output
     assert "Auditor verification passed" not in output
+    assert sleeps == [5]
 
 
 def test_v2_transport_failure_is_unavailable():
@@ -521,7 +559,7 @@ def test_stateful_bundle_epoch_mismatch_does_not_reconnect(monkeypatch):
         )
 
 
-def test_verifier_failure_emits_no_diagnostic_rows(monkeypatch, caplog):
+def test_verifier_failure_emits_only_safe_summary_diagnostics(monkeypatch, caplog):
     auditor = auditor_module.AuditorValidator.__new__(
         auditor_module.AuditorValidator
     )
@@ -530,16 +568,21 @@ def test_verifier_failure_emits_no_diagnostic_rows(monkeypatch, caplog):
     with caplog.at_level("DEBUG"):
         assert auditor.verify_attested_weights_v2({"authority": "fixture"}) is None
 
-    # A missing PCR0 cache is an operator misconfiguration and must be loud;
-    # verification failures still emit no per-receipt diagnostic rows.
+    # A missing PCR0 cache is an operator misconfiguration and must be loud,
+    # but it must not dump receipt documents or authentication material.
     assert any(
         "auditor_v2_pcr0_cache_missing" in record.message
         for record in caplog.records
     )
-    assert all(
-        "auditor_v2_pcr0_cache_missing" in record.message
+    structured = [
+        record.message
         for record in caplog.records
-    )
+        if record.message.startswith("auditor_event ")
+    ]
+    assert len(structured) == 1
+    assert "authority_cryptographic_verification_failure" in structured[0]
+    assert "receipt_graph" not in structured[0]
+    assert "signature" not in structured[0]
 
 
 def test_successful_auditor_verification_has_one_status_line(monkeypatch, capsys):
@@ -713,6 +756,50 @@ def test_auditor_runtime_identity_records_public_source_hashes():
         "weight_computation_sha256",
     ):
         assert len(identity[field]) == 64
+
+
+def test_auditor_uid_resolution_uses_direct_chain_storage():
+    calls = []
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.wallet = SimpleNamespace(
+        hotkey=SimpleNamespace(ss58_address="5Auditor")
+    )
+    auditor.config = SimpleNamespace(netuid=71)
+    auditor.subtensor = SimpleNamespace(
+        get_uid_for_hotkey_on_subnet=lambda **kwargs: (
+            calls.append(kwargs) or 155
+        ),
+        metagraph=lambda *_args, **_kwargs: pytest.fail(
+            "auditor identity must not depend on runtime API metagraph decoding"
+        ),
+    )
+
+    assert auditor._get_uid() == 155
+    assert calls == [{"hotkey_ss58": "5Auditor", "netuid": 71}]
+
+
+def test_primary_uid_resolution_uses_direct_chain_storage(capsys):
+    calls = []
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.config = SimpleNamespace(netuid=71)
+    auditor.subtensor = SimpleNamespace(
+        get_uid_for_hotkey_on_subnet=lambda **kwargs: (
+            calls.append(kwargs) or 0
+        ),
+        metagraph=lambda *_args, **_kwargs: pytest.fail(
+            "primary identity must not depend on runtime API metagraph decoding"
+        ),
+    )
+
+    assert auditor._get_primary_validator_uid(
+        {"validator_hotkey": "5Primary"}
+    ) == 0
+    assert calls == [{"hotkey_ss58": "5Primary", "netuid": 71}]
+    assert "UID 0" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("protocol", ["legacy_v1_compat", "auto", "banana"])

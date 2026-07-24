@@ -35,7 +35,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Tuple, Optional
 
-from supabase import create_client
+from gateway.db.client import create_http1_sync_client
 
 logger = logging.getLogger(__name__)
 
@@ -60,13 +60,17 @@ _supabase_client = None
 
 
 def _get_supabase():
-    """Get or create Supabase client (lazy initialization)."""
+    """Get or create Supabase client (lazy initialization).
+
+    The cached singleton is shared across threadpool workers, so it must be
+    HTTP/1-pinned: the default HTTP/2 HPACK encoder is not thread-safe.
+    """
     global _supabase_client
     if _supabase_client is None:
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         if supabase_url and supabase_key:
-            _supabase_client = create_client(supabase_url, supabase_key)
+            _supabase_client = create_http1_sync_client(supabase_url, supabase_key)
     return _supabase_client
 
 

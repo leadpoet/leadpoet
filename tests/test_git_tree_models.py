@@ -169,7 +169,7 @@ def test_tree_replacement_round_trip_and_identity_prevent_root_cycle_collision()
 
 
 def test_tree_policy_rejects_deprecated_or_invalid_values_instead_of_coercing():
-    assert TreePolicy.from_env({}).mode == "off"
+    assert TreePolicy.from_env({}).mode == "active"
     with pytest.raises(
         GitTreeContractError,
         match="deprecated flat/sequential autoresearch environment",

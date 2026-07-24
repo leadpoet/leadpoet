@@ -11,10 +11,10 @@ with higher stake/reputation have more influence on the final outcome.
 import asyncio
 from typing import Dict, List
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-from supabase import create_client
+from gateway.db.client import create_http1_sync_client
 
-# Supabase client
-supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+# Supabase client — HTTP/1-pinned (default HTTP/2 HPACK encoder is not thread-safe)
+supabase = create_http1_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 async def compute_weighted_consensus(lead_id: str, epoch_id: int, evidence_data: List = None) -> Dict:

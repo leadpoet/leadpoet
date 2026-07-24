@@ -2,9 +2,12 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import subprocess
 import tarfile
 
-from validator_tee.host.docker_image_normalizer_v2 import normalize_saved_image
+import pytest
+
+from validator_tee.host import docker_image_normalizer_v2 as normalizer
 
 
 def _layer(path: Path, *, mtime: int, reverse: bool, compressed: bool) -> None:
@@ -20,7 +23,13 @@ def _layer(path: Path, *, mtime: int, reverse: bool, compressed: bool) -> None:
             archive.addfile(info, io.BytesIO(content))
 
 
-def _docker_archive(path: Path, *, mtime: int, reverse: bool, compressed: bool) -> None:
+def _docker_archive(
+    path: Path,
+    *,
+    mtime: int,
+    reverse: bool,
+    compressed: bool,
+) -> None:
     root = path.parent / (path.stem + "-root")
     layer = root / "blobs/sha256/original-layer"
     layer.parent.mkdir(parents=True)
@@ -50,7 +59,9 @@ def _docker_archive(path: Path, *, mtime: int, reverse: bool, compressed: bool) 
             archive.add(item, arcname=item.relative_to(root))
 
 
-def test_saved_images_with_different_order_and_times_normalize_identically(tmp_path):
+def test_saved_images_with_different_order_and_times_normalize_identically(
+    tmp_path: Path,
+) -> None:
     first = tmp_path / "first.tar"
     second = tmp_path / "second.tar"
     first_output = tmp_path / "first-normalized.tar"
@@ -58,15 +69,104 @@ def test_saved_images_with_different_order_and_times_normalize_identically(tmp_p
     _docker_archive(first, mtime=100, reverse=False, compressed=False)
     _docker_archive(second, mtime=200, reverse=True, compressed=True)
 
-    first_id = normalize_saved_image(
+    first_id = normalizer.normalize_saved_image(
         archive_path=first,
         output_path=first_output,
         normalized_image="normalized:test",
     )
-    second_id = normalize_saved_image(
+    second_id = normalizer.normalize_saved_image(
         archive_path=second,
         output_path=second_output,
         normalized_image="normalized:test",
     )
 
     assert first_id == second_id
+
+
+def _completed(stdout: str = "") -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=stdout,
+        stderr="",
+    )
+
+
+def test_normalizer_uses_root_backed_build_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    build_root = tmp_path / "gateway-build-work"
+    runner_temp = tmp_path / "runner-temp"
+    monkeypatch.setenv("GATEWAY_V2_BUILD_WORK_ROOT", str(build_root))
+    monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
+
+    saved_archive: list[Path] = []
+    nested_parents: list[Path] = []
+
+    def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        if command[:3] == ["docker", "save", "-o"]:
+            archive = Path(command[3])
+            archive.write_bytes(b"docker-save-placeholder")
+            saved_archive.append(archive)
+            return _completed()
+        if command[:4] == ["docker", "image", "inspect", "-f"]:
+            return _completed("sha256:" + "a" * 64 + "\n")
+        return _completed()
+
+    def fake_normalize_saved_image(
+        *,
+        archive_path: Path,
+        output_path: Path,
+        normalized_image: str,
+        temporary_parent: Path,
+    ) -> str:
+        assert archive_path == saved_archive[0]
+        assert normalized_image == "normalized:test"
+        nested_parents.append(temporary_parent)
+        output_path.write_bytes(b"normalized-placeholder")
+        return "sha256:" + "b" * 64
+
+    monkeypatch.setattr(normalizer, "_run", fake_run)
+    monkeypatch.setattr(
+        normalizer,
+        "normalize_saved_image",
+        fake_normalize_saved_image,
+    )
+
+    observed = normalizer.normalize_docker_image(
+        source_image="source:test",
+        normalized_image="normalized:test",
+    )
+
+    expected_parent = build_root / ".docker-image-normalizer-v2"
+    assert observed == "sha256:" + "a" * 64
+    assert saved_archive[0].parent.parent == expected_parent
+    assert nested_parents == [saved_archive[0].parent]
+    assert not runner_temp.exists()
+    assert list(expected_parent.iterdir()) == []
+
+
+def test_normalizer_uses_runner_temp_when_build_root_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner_temp = tmp_path / "runner-temp"
+    monkeypatch.delenv("GATEWAY_V2_BUILD_WORK_ROOT", raising=False)
+    monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
+
+    assert normalizer._normalization_temp_parent() == (
+        runner_temp / ".docker-image-normalizer-v2"
+    )
+
+
+def test_normalizer_rejects_relative_build_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GATEWAY_V2_BUILD_WORK_ROOT", "relative/build-root")
+
+    with pytest.raises(
+        normalizer.DockerImageNormalizationError,
+        match="GATEWAY_V2_BUILD_WORK_ROOT must be an absolute path",
+    ):
+        normalizer._normalization_temp_parent()

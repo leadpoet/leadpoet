@@ -20,9 +20,10 @@ from datetime import datetime
 from typing import Optional
 from gateway.utils.merkle import compute_merkle_root_from_hashes
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-from supabase import create_client
+from gateway.db.client import create_http1_sync_client
 
-supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+# Shared client — HTTP/1-pinned (default HTTP/2 HPACK encoder is not thread-safe)
+supabase = create_http1_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 async def checkpoint_task():

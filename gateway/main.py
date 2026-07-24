@@ -45,7 +45,8 @@ from gateway.utils.nonce import check_and_store_nonce_async, validate_nonce_form
 from gateway.utils.storage import generate_presigned_put_urls
 
 # Import Supabase
-from supabase import create_client, Client
+from supabase import Client
+from gateway.db.client import create_http1_sync_client
 
 # Import API routers
 # NOTE: reveal router REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE means validators
@@ -81,8 +82,9 @@ from gateway.tasks.icp_generator import icp_rotation_task, ensure_icp_set_exists
 # Import epoch monitor (polling-based, like validator)
 from gateway.tasks.epoch_monitor import EpochMonitor
 
-# Create Supabase client
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+# Create Supabase client (shared across threadpool workers — must stay
+# HTTP/1-pinned; the default HTTP/2 HPACK encoder is not thread-safe)
+supabase: Client = create_http1_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 # ============================================================
 # Lifespan Context Manager (for background tasks)

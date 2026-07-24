@@ -83,9 +83,9 @@ class ResearchLabGitTreeConfigError(ValueError):
 class ResearchLabGitTreeConfig:
     """Single source for Git-tree defaults and environment resolution."""
 
-    # Activation is explicit. An omitted environment must never start a paid
-    # tree while its migration, snapshot, or measured runtime is not ready.
-    mode: str = "off"
+    # Git-tree is the production autoresearch engine. Operators retain the
+    # explicit "off" override as an emergency admission stop.
+    mode: str = "active"
     branch_factor: int = 2
     beam_width: int = 2
     max_depth: int = 2
@@ -648,9 +648,9 @@ class ResearchLabGatewayConfig:
     # private is the inverse regression holdout.
     public_benchmark_public_total_icps: Optional[int] = 10
     public_benchmark_public_weak_total: Optional[int] = 7
-    # Activation is explicit so a deployment cannot silently change promotion
-    # behavior before the matching baseline and schema are ready.
-    conditional_validation_mode: str = "off"
+    # Conditional validation is part of the production promotion contract.
+    # Operators retain the explicit "off" override for rollback.
+    conditional_validation_mode: str = "enforce"
     private_holdout_total_icps: int = 10
     private_holdout_weak_total: int = 3
     conditional_holdout_total_icps: int = 20
@@ -793,8 +793,8 @@ class ResearchLabGatewayConfig:
         improvement_threshold_points = _improvement_threshold_points()
         conditional_validation_mode = os.getenv(
             "RESEARCH_LAB_CONDITIONAL_VALIDATION_MODE",
-            "off",
-        ).strip().lower() or "off"
+            "enforce",
+        ).strip().lower() or "enforce"
         legacy_champion_threshold = os.getenv("RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS")
         if legacy_champion_threshold not in (None, "", str(improvement_threshold_points)):
             logger.warning(

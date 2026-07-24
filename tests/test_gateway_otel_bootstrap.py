@@ -101,12 +101,9 @@ def test_unmatched_route_uses_fixed_label_never_client_path():
     assert "EXAMPLE.COM" not in haystack
 
 
-def test_validator_drops_span_with_extra_attribute():
-    """Fail-closed: a span carrying a non-approved attribute is dropped
-    entirely — not stripped, not partially exported."""
+def _validator_harness(exp, scope="gateway.http"):
+    """Provider + tracer wired through the fail-closed validating exporter."""
     from gateway.observability.otel_bootstrap import _validating_exporter
-
-    exp = InMemorySpanExporter()
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -119,93 +116,134 @@ def test_validator_drops_span_with_extra_attribute():
     )
     provider = TracerProvider(resource=Resource(expected_resource))
     provider.add_span_processor(SimpleSpanProcessor(validating))
-    tracer = provider.get_tracer("gateway.http")
+    return provider.get_tracer(scope)
 
-    def _base_attrs():
-        return {
-            "http.request.method": "GET",
-            "http.route": "/ok",
-            "http.response.status_code": 200,
-            "duration_ms": 1.5,
-        }
+
+def _emit_span(tracer, *, name=None, attrs=None, kind=None, parented=False,
+               event=None):
+    """Emit one finished span shaped like the middleware's, with overrides."""
+    from opentelemetry.context import Context
+    from opentelemetry.trace import SpanKind
+
+    base = {
+        "http.request.method": "GET",
+        "http.route": "/ok",
+        "http.response.status_code": 200,
+        "duration_ms": 1.5,
+    }
+    if attrs is not None:
+        base = attrs
+    span_name = name if name is not None else "%s %s" % (
+        base.get("http.request.method", "GET"), base.get("http.route", "/ok")
+    )
+    kwargs = {"kind": kind if kind is not None else SpanKind.SERVER}
+    if not parented:
+        kwargs["context"] = Context()  # fresh root context
+    span = tracer.start_span(span_name, **kwargs)
+    for k, v in base.items():
+        span.set_attribute(k, v)
+    if event is not None:
+        span.add_event(*event)
+    span.end()
+
+
+def test_validator_drops_nonconforming_attribute_sets():
+    """Fail-closed: a span with a non-approved attribute set is dropped
+    entirely — not stripped, not partially exported."""
+    exp = InMemorySpanExporter()
+    tracer = _validator_harness(exp)
 
     # Conforming span → exported.
-    with tracer.start_as_current_span("GET /ok") as span:
-        for k, v in _base_attrs().items():
-            span.set_attribute(k, v)
+    _emit_span(tracer)
     assert len(exp.get_finished_spans()) == 1
     exp.clear()
 
+    base = {
+        "http.request.method": "GET",
+        "http.route": "/ok",
+        "http.response.status_code": 200,
+        "duration_ms": 1.5,
+    }
+
     # Extra attribute → dropped, nothing exported.
-    with tracer.start_as_current_span("GET /ok") as span:
-        for k, v in _base_attrs().items():
-            span.set_attribute(k, v)
-        span.set_attribute("user.email", "leak@example.com")
-    assert exp.get_finished_spans() == ()
-
+    _emit_span(tracer, attrs={**base, "user.email": "leak@example.com"})
     # Missing attribute → dropped.
-    with tracer.start_as_current_span("GET /ok") as span:
-        attrs = _base_attrs()
-        attrs.pop("duration_ms")
-        for k, v in attrs.items():
-            span.set_attribute(k, v)
-    assert exp.get_finished_spans() == ()
-
+    _emit_span(tracer, attrs={k: v for k, v in base.items() if k != "duration_ms"})
     # Wrong type (status as string) → dropped.
-    with tracer.start_as_current_span("GET /ok") as span:
-        attrs = _base_attrs()
-        attrs["http.response.status_code"] = "200"
-        for k, v in attrs.items():
-            span.set_attribute(k, v)
-    assert exp.get_finished_spans() == ()
-
-    # Event attached → dropped (events could carry exception messages).
-    with tracer.start_as_current_span("GET /ok") as span:
-        for k, v in _base_attrs().items():
-            span.set_attribute(k, v)
-        span.add_event("exception", {"exception.message": "secret traceback"})
-    assert exp.get_finished_spans() == ()
-
+    _emit_span(tracer, attrs={**base, "http.response.status_code": "200"})
+    # Event attached → dropped (events can carry exception messages).
+    _emit_span(tracer, event=("exception", {"exception.message": "secret tb"}))
     # Unregistered route label → dropped.
-    with tracer.start_as_current_span("GET /other") as span:
-        attrs = _base_attrs()
-        attrs["http.route"] = "/not-registered"
-        for k, v in attrs.items():
-            span.set_attribute(k, v)
+    _emit_span(tracer, attrs={**base, "http.route": "/not-registered"})
     assert exp.get_finished_spans() == ()
 
     # Fixed /_unmatched label → allowed.
-    with tracer.start_as_current_span("GET /_unmatched") as span:
-        attrs = _base_attrs()
-        attrs["http.route"] = "/_unmatched"
-        for k, v in attrs.items():
-            span.set_attribute(k, v)
+    _emit_span(tracer, attrs={**base, "http.route": "/_unmatched"})
     assert len(exp.get_finished_spans()) == 1
 
 
-def test_validator_drops_span_from_foreign_scope():
-    """A span produced under any other instrumentation scope (e.g. a library
-    that acquired this provider) is never exported."""
-    from gateway.observability.otel_bootstrap import _validating_exporter
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+def test_validator_drops_nonconforming_span_envelopes():
+    """The COMPLETE envelope is validated: name, method, kind, parent/trace
+    state, and instrumentation scope — not just the attribute dict."""
+    from opentelemetry.trace import SpanKind
 
     exp = InMemorySpanExporter()
-    expected_resource = {"service.name": "leadpoet-gateway"}
-    validating = _validating_exporter(
-        exp, allowed_routes=lambda: {"/ok"}, expected_resource=expected_resource
-    )
-    provider = TracerProvider(resource=Resource(expected_resource))
-    provider.add_span_processor(SimpleSpanProcessor(validating))
-    foreign = provider.get_tracer("some.library")
+    tracer = _validator_harness(exp)
 
-    with foreign.start_as_current_span("GET /ok") as span:
-        span.set_attribute("http.request.method", "GET")
-        span.set_attribute("http.route", "/ok")
-        span.set_attribute("http.response.status_code", 200)
-        span.set_attribute("duration_ms", 1.0)
+    base = {
+        "http.request.method": "GET",
+        "http.route": "/ok",
+        "http.response.status_code": 200,
+        "duration_ms": 1.5,
+    }
+
+    # Arbitrary span name → dropped (must equal "<method> <route>").
+    _emit_span(tracer, name="user query for leak@example.com")
+    # Non-standard (client-controlled) HTTP method string → dropped.
+    _emit_span(tracer, attrs={**base, "http.request.method": "BREW"})
+    # Wrong span kind (INTERNAL) → dropped.
+    _emit_span(tracer, kind=SpanKind.INTERNAL)
     assert exp.get_finished_spans() == ()
+
+    # Parented span (adopted caller context) → dropped.
+    with tracer.start_as_current_span("outer", kind=SpanKind.SERVER):
+        _emit_span(tracer, parented=True)
+    exported = [s.name for s in exp.get_finished_spans()]
+    assert "GET /ok" not in exported
+    exp.clear()
+
+    # Foreign instrumentation scope (e.g. a library that acquired this
+    # provider) → dropped even with a perfect envelope otherwise.
+    foreign = _validator_harness(exp, scope="some.library")
+    _emit_span(foreign)
+    assert exp.get_finished_spans() == ()
+
+
+def test_bootstrap_refuses_ambient_exporter_env(monkeypatch, capsys):
+    """Runtime refusal: any ambient standard exporter variable present in the
+    process environment blocks initialization entirely — a CI grep cannot see
+    vars injected by a restart script or the live process env."""
+    monkeypatch.setenv(
+        "OTEL_EXPORTER" + "_OTLP_HEADERS", "x-secret=abc"
+    )  # split literal keeps the repo-wide env-var guard meaningful
+    exp = InMemorySpanExporter()
+    app, installed = _app(exp)
+    assert installed is False
+    out = capsys.readouterr().out
+    assert "gateway_otel_bootstrap_refused" in out
+    assert "abc" not in out  # names only, never values
+    TestClient(app).get("/research-lab/allocations/attested/1")
+    assert exp.get_finished_spans() == ()
+
+
+def test_production_path_requires_nonempty_token(monkeypatch, capsys):
+    """Without a token the pinned exporter's empty headers dict would fall
+    back to ambient header variables — initialization must refuse instead."""
+    monkeypatch.setenv("GATEWAY_OTEL_ENABLED", "1")
+    monkeypatch.setenv("GATEWAY_OTEL_ENDPOINT", "https://collector.invalid/v1/traces")
+    monkeypatch.delenv("GATEWAY_OTEL_TOKEN", raising=False)
+    assert configure_gateway_otel(FastAPI()) is False
+    assert "token_missing" in capsys.readouterr().out
 
 
 def test_resource_is_fixed_and_ignores_ambient_resource_env(monkeypatch):

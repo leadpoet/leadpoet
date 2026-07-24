@@ -154,6 +154,31 @@ def test_bootstrap_uses_only_namespaced_gateway_variables() -> None:
     )
 
 
+def test_bootstrap_requires_token_and_refuses_ambient_exporter_env() -> None:
+    source = _read(BOOTSTRAP)
+    assert "token_missing" in source and "if not token" in source, (
+        "an empty explicit headers dict lets the pinned exporter fall back "
+        "to ambient header variables — a non-empty token must be required"
+    )
+    assert "_ambient_exporter_env_names" in source and (
+        "gateway_otel_bootstrap_refused" in source
+    ), (
+        "a CI grep cannot see env vars injected by a restart script or the "
+        "live process environment — the bootstrap must refuse initialization "
+        "at runtime when ambient exporter variables are present"
+    )
+
+
+def test_bootstrap_service_name_is_a_constant() -> None:
+    source = _read(BOOTSTRAP)
+    assert re.search(r'^SERVICE_NAME = "leadpoet-gateway"$', source, re.M), (
+        "the service identity must be a fixed constant"
+    )
+    assert "GATEWAY_OTEL_SERVICE_NAME" not in source, (
+        "the service name must not be an arbitrary environment value"
+    )
+
+
 def test_bootstrap_builds_a_fixed_resource() -> None:
     source = _read(BOOTSTRAP)
     assert "Resource.create(" not in source, (

@@ -21,13 +21,18 @@ completions. Health/liveness routes are suppressed entirely.
 ```bash
 export GATEWAY_OTEL_ENABLED=1
 export GATEWAY_OTEL_ENDPOINT="https://<collector>/v1/traces"
-export GATEWAY_OTEL_TOKEN="<token>"            # sent as Authorization: Bearer
-export GATEWAY_OTEL_SERVICE_NAME="leadpoet-gateway"   # optional
+export GATEWAY_OTEL_TOKEN="<token>"            # REQUIRED; sent as Authorization: Bearer
 ```
 
-Both `GATEWAY_OTEL_ENABLED` and `GATEWAY_OTEL_ENDPOINT` are required; anything
-less is a complete no-op. Wiring failures are swallowed — telemetry can never
-delay or break gateway startup.
+All three variables are required; anything less is a complete no-op. The
+token must be non-empty (an empty explicit headers dict would let the pinned
+exporter fall back to ambient header variables). The service name is a
+constant (`leadpoet-gateway`), not an environment value. Initialization is
+REFUSED at runtime if any ambient standard exporter variable is present in
+the process environment — a CI grep cannot see variables injected by a
+restart script or the live process env, so the bootstrap checks and logs the
+offending names (never values) and stays off. Wiring failures are swallowed —
+telemetry can never delay or break gateway startup.
 
 ## Why the boundary is a guarantee, not a promise
 
@@ -38,11 +43,14 @@ delay or break gateway startup.
    The standard ambient exporter/resource variables are never read and
    never set — ambient auto-instrumentation or a stray bare exporter has no
    destination and no-ops.
-2. **Fail-closed span validator.** Before export every span must have the
-   `gateway.http` instrumentation scope, exactly the four attributes above
-   with the approved types, no events/links/status descriptions, the fixed
-   resource, and a registered route template (or the literal `/_unmatched`).
-   A span violating any of that is dropped entirely — never mutated, never
+2. **Fail-closed complete-envelope validator.** Before export every span
+   must have the `gateway.http` instrumentation scope with no
+   version/schema metadata, `SERVER` kind, a root context (no parent, empty
+   trace state), exactly the four attributes above with the approved types,
+   a standard HTTP method, a span name equal to exactly `<method> <route>`,
+   no events/links/status descriptions, the fixed resource, and a
+   registered route template (or the literal `/_unmatched`). A span
+   violating any of that is dropped entirely — never mutated, never
    partially exported — and counted in a warning that omits the rejected
    values.
 3. **CI guard** (`tests/test_otel_boundary_guard.py`) fails the build if:

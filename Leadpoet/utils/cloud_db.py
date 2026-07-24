@@ -12,6 +12,7 @@ from typing import Any, List, Dict, Optional
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from Leadpoet.utils.misc import generate_timestamp
+from Leadpoet.utils.public_supabase import SUPABASE_ANON_KEY, SUPABASE_URL
 from Leadpoet.utils.utils_lead_extraction import get_email, get_field
 
 load_dotenv()
@@ -30,9 +31,6 @@ NETWORK   = os.getenv("SUBTENSOR_NETWORK", "finney")  # Default to mainnet
 # to the transparency_log table via Row Level Security (RLS) policies.
 # Miners can use these to query the transparency log for duplicate checks.
 # ============================================================
-SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
-SUPABASE_ANON_KEY = "sb_publishable_YU7GBMSX-fwEsSH7MnhSBQ_l5ACuFVf"
-
 # Create a response object similar to what supabase-py returns
 class RPCResponse:
     def __init__(self, data):

@@ -323,6 +323,55 @@ async def test_finalization_failure_keeps_durable_journal(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_finalization_retry_refreshes_epoch_and_quarantines_after_rollover(
+    monkeypatch,
+):
+    recovered_extrinsic = {
+        "authorization_hash": "sha256:" + "4" * 64,
+        "extrinsic_hash": "0x" + "5" * 64,
+        "extrinsic_hex": "aabbcc",
+    }
+    journal = _Journal(_record(published=True, signatures=[{"receipt": True}]))
+    client = _Client(
+        signed_extrinsics=[recovered_extrinsic],
+        confirm_error=True,
+    )
+    validator = _validator(journal, client)
+    workflow_epoch = {"value": 100}
+
+    async def state():
+        return SimpleNamespace(workflow_epoch_id=workflow_epoch["value"])
+
+    validator._get_epoch_state_async = state
+    validator._get_best_epoch_state_async = state
+
+    async def fail_finalize(**_kwargs):
+        raise RuntimeError("finalized proof temporarily unavailable")
+
+    async def rollover_on_sleep(_seconds):
+        workflow_epoch["value"] = 101
+
+    monkeypatch.setattr(
+        validator_module,
+        "finalize_authoritative_weight_publication_v2",
+        fail_finalize,
+    )
+    monkeypatch.setattr(validator_module.asyncio, "sleep", rollover_on_sleep)
+
+    outcome = await validator._recover_weight_publication_journal_v2(
+        gateway_url="https://gateway.example"
+    )
+
+    assert outcome.epoch_id == 100
+    assert outcome.status == "quarantined"
+    assert journal.calls[-1][0] == "quarantine"
+    assert journal.calls[-1][1][:2] == (
+        100,
+        "signed_finalization_unresolved",
+    )
+
+
+@pytest.mark.asyncio
 async def test_closed_unsigned_journal_is_quarantined_without_publication_or_signing(
     monkeypatch,
 ):

@@ -20,6 +20,7 @@ from Leadpoet.utils.subnet_epoch import (
     load_subnet_epoch_cutover,
     read_subnet_epoch_snapshot,
 )
+from Leadpoet.utils.public_supabase import call_public_rpc
 from gateway.utils.subnet_epoch_archive import (
     validate_cutover_anchor_from_archive,
 )
@@ -121,6 +122,7 @@ def _read_cutover_state_from_db_sync(
     supabase_url = str(os.getenv("SUPABASE_URL") or "").strip()
     service_role_key = str(os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
 
+    rows = None
     try:
         if supabase_url and service_role_key:
             from gateway.db.client import get_write_client
@@ -135,20 +137,15 @@ def _read_cutover_state_from_db_sync(
             # 101 grants anon read-only access under RLS specifically for this
             # cross-runtime safety gate. Pin the public project authority rather
             # than trusting caller-provided endpoint/key overrides.
-            from Leadpoet.utils.cloud_db import (
-                SUPABASE_ANON_KEY as PUBLIC_SUPABASE_ANON_KEY,
-                SUPABASE_URL as PUBLIC_SUPABASE_URL,
+            public_value = call_public_rpc(
+                _CUTOVER_PUBLIC_STATE_RPC,
+                timeout_seconds=30.0,
             )
-            from gateway.db.client import create_http1_sync_client
-
-            if not PUBLIC_SUPABASE_URL or not PUBLIC_SUPABASE_ANON_KEY:
+            if not isinstance(public_value, list):
                 raise SubnetEpochError(
-                    "durable epoch namespace public authority is unavailable"
+                    "durable epoch namespace public authority response is invalid"
                 )
-            client = create_http1_sync_client(
-                PUBLIC_SUPABASE_URL,
-                PUBLIC_SUPABASE_ANON_KEY,
-            )
+            rows = list(public_value)
         else:
             raise SubnetEpochError(
                 "durable epoch authority is not configured"
@@ -166,14 +163,13 @@ def _read_cutover_state_from_db_sync(
                 .limit(2)
                 .execute()
             )
-        else:
-            result = client.rpc(_CUTOVER_PUBLIC_STATE_RPC).execute()
     except Exception as exc:
         raise SubnetEpochError(
             "durable epoch namespace state database is unavailable"
         ) from exc
 
-    rows = list(getattr(result, "data", None) or [])
+    if rows is None:
+        rows = list(getattr(result, "data", None) or [])
     if len(rows) != 1 or not isinstance(rows[0], dict):
         raise SubnetEpochError(
             "durable epoch namespace singleton is missing or ambiguous"

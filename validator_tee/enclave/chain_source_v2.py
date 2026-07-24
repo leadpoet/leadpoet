@@ -1439,11 +1439,15 @@ class ValidatorChainSourceV2:
         artifacts = []
         rpc_started = False
 
-        def finalization_call(**kwargs: Any) -> Dict[str, Any]:
+        def finalization_call(
+            *,
+            adapter: Optional[Callable[..., Dict[str, Any]]] = None,
+            **kwargs: Any,
+        ) -> Dict[str, Any]:
             nonlocal rpc_started
             if rpc_started:
                 self._finalization_sleep(FINALIZATION_RPC_PACING_SECONDS)
-            result = self._call(**kwargs)
+            result = (adapter or self._call)(**kwargs)
             rpc_started = True
             return result
 
@@ -1480,7 +1484,9 @@ class ValidatorChainSourceV2:
             )
 
         request_id = 3
-        for block_number in range(start, end + 1):
+        # Weight submissions normally land near the end of their mortal era.
+        # Scan newest-first so the proof completes before the epoch rolls.
+        for block_number in range(end, start - 1, -1):
             block_hash_result = finalization_call(
                 method="chain_getBlockHash",
                 params=[block_number],
@@ -1527,7 +1533,17 @@ class ValidatorChainSourceV2:
                         raise ValidatorChainSourceV2Error(
                             "expected commitment fields are invalid"
                         )
+                    # Live nodes may discard exact historical state immediately
+                    # after finalization. Keep the live node's canonical block
+                    # hash and exact extrinsic above, but obtain the state
+                    # transition at that exact hash from the measured archive.
+                    state_call = (
+                        self._archive_call
+                        if self._archive_rpc_call is not None
+                        else self._call
+                    )
                     storage_result = finalization_call(
+                        adapter=state_call,
                         method="state_getStorage",
                         params=[
                             timelocked_weight_commits_storage_key(

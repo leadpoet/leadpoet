@@ -4075,20 +4075,24 @@ class Validator(BaseValidatorNeuron):
         if record is None:
             return None
         epoch_id = int(record["published_bundle"]["weight_result"]["epoch_id"])
-        epoch_closed = False
-        try:
-            finalized_state = await self._get_epoch_state_async()
-            best_state = await self._get_best_epoch_state_async()
-            epoch_closed = (
-                finalized_state.workflow_epoch_id > epoch_id
-                and best_state.workflow_epoch_id > epoch_id
-            )
-        except Exception as exc:
-            bt.logging.error(
-                "weight_publication_journal_epoch_check_failed "
-                f"epoch={epoch_id} type={type(exc).__name__} "
-                f"error={str(exc)[:200]}"
-            )
+
+        async def publication_epoch_closed(stage: str) -> bool:
+            try:
+                finalized_state = await self._get_epoch_state_async()
+                best_state = await self._get_best_epoch_state_async()
+                return (
+                    finalized_state.workflow_epoch_id > epoch_id
+                    and best_state.workflow_epoch_id > epoch_id
+                )
+            except Exception as exc:
+                bt.logging.error(
+                    "weight_publication_journal_epoch_check_failed "
+                    f"epoch={epoch_id} stage={stage} "
+                    f"type={type(exc).__name__} error={str(exc)[:200]}"
+                )
+                return False
+
+        epoch_closed = await publication_epoch_closed("initial")
         if epoch_closed and not record["extrinsic_signature_results"]:
             quarantined = journal.quarantine(
                 expected_epoch=epoch_id,
@@ -4121,6 +4125,10 @@ class Validator(BaseValidatorNeuron):
                 ],
             )
         except Exception as exc:
+            if not epoch_closed:
+                epoch_closed = await publication_epoch_closed(
+                    "recovery_failure"
+                )
             if not epoch_closed:
                 raise
             quarantined = journal.quarantine(
@@ -4165,6 +4173,10 @@ class Validator(BaseValidatorNeuron):
                     finalization_scan_id=finalization_scan_id,
                 )
             except Exception:
+                if not epoch_closed:
+                    epoch_closed = await publication_epoch_closed(
+                        "pre_rebroadcast"
+                    )
                 # Re-submit only the exact enclave-signed bytes already fsynced
                 # before the original SDK call. The enclave independently
                 # proves finalized inclusion; this host response is not trusted.
@@ -4222,6 +4234,9 @@ class Validator(BaseValidatorNeuron):
                 last_error = exc
                 if attempt < 9:
                     await asyncio.sleep(12)
+        epoch_closed = await publication_epoch_closed(
+            "finalization_retries_exhausted"
+        )
         if epoch_closed:
             quarantined = journal.quarantine(
                 expected_epoch=epoch_id,

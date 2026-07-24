@@ -1248,6 +1248,7 @@ def test_finalized_extrinsic_requires_exact_bytes_and_committed_chain_state():
     pacing = []
     result = ValidatorChainSourceV2(
         rpc_call=rpc_call,
+        archive_rpc_call=_archive_adapter(rpc_call),
         finalization_sleep=pacing.append,
         epoch_authority_supplier=lambda: {
             "mode": "stateful_v1",
@@ -1264,7 +1265,7 @@ def test_finalized_extrinsic_requires_exact_bytes_and_committed_chain_state():
                 "reveal_round": reveal_round,
             }
         },
-        minimum_block=BLOCK,
+        minimum_block=BLOCK - 1,
         maximum_block=BLOCK,
         epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
         finalization_scan_id="sha256:" + "9" * 64,
@@ -1276,6 +1277,9 @@ def test_finalized_extrinsic_requires_exact_bytes_and_committed_chain_state():
         "weight-finalization:%d:%s"
         % (STATEFUL_SETTLEMENT_EPOCH_ID, "9" * 64)
     )
+    providers = [attempt["provider_id"] for attempt in result["attempts"]]
+    assert providers[-1] == "bittensor_archive"
+    assert set(providers[:-1]) == {"bittensor_chain"}
     assert pacing == [FINALIZATION_RPC_PACING_SECONDS] * 4
 
 

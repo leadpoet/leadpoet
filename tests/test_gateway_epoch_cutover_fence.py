@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from Leadpoet.utils.subnet_epoch import (
@@ -32,68 +30,40 @@ def _active_state(cutover: SubnetEpochCutover) -> dict:
 
 
 def test_missing_service_credentials_use_fixed_public_rpc(monkeypatch):
-    from Leadpoet.utils import cloud_db
-    from gateway import config
     from gateway.utils import epoch
-    from gateway.db import client as gateway_db_client
 
     cutover = _cutover()
     observed = {}
 
-    class Client:
-        def rpc(self, name):
-            observed["rpc"] = name
-            return self
+    def public_rpc(name, *, timeout_seconds):
+        observed["rpc"] = name
+        observed["timeout_seconds"] = timeout_seconds
+        return [_active_state(cutover)]
 
-        def execute(self):
-            return SimpleNamespace(data=[_active_state(cutover)])
-
-    def create_client(url, key):
-        observed["authority"] = (url, key)
-        return Client()
-
-    monkeypatch.setattr(config, "SUPABASE_URL", None)
-    monkeypatch.setattr(config, "SUPABASE_SERVICE_ROLE_KEY", None)
     monkeypatch.delenv("SUPABASE_URL", raising=False)
     monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     monkeypatch.setenv("BITTENSOR_NETWORK", "finney")
     monkeypatch.setenv("BITTENSOR_NETUID", "71")
-    monkeypatch.setattr(
-        gateway_db_client,
-        "create_http1_sync_client",
-        create_client,
-    )
+    monkeypatch.setattr(epoch, "call_public_rpc", public_rpc)
 
     assert epoch._read_cutover_state_from_db_sync() == _active_state(cutover)
     assert observed == {
-        "authority": (cloud_db.SUPABASE_URL, cloud_db.SUPABASE_ANON_KEY),
         "rpc": "research_lab_stateful_subnet_epoch_cutover_public_state_v1",
+        "timeout_seconds": 30.0,
     }
 
 
 def test_public_lifecycle_rpc_outage_fails_closed(monkeypatch):
-    from gateway import config
     from gateway.utils import epoch
-    from gateway.db import client as gateway_db_client
 
-    class Client:
-        def rpc(self, _name):
-            return self
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("connection refused")
 
-        def execute(self):
-            raise RuntimeError("connection refused")
-
-    monkeypatch.setattr(config, "SUPABASE_URL", None)
-    monkeypatch.setattr(config, "SUPABASE_SERVICE_ROLE_KEY", None)
     monkeypatch.delenv("SUPABASE_URL", raising=False)
     monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     monkeypatch.setenv("BITTENSOR_NETWORK", "finney")
     monkeypatch.setenv("BITTENSOR_NETUID", "71")
-    monkeypatch.setattr(
-        gateway_db_client,
-        "create_http1_sync_client",
-        lambda _url, _key: Client(),
-    )
+    monkeypatch.setattr(epoch, "call_public_rpc", unavailable)
 
     with pytest.raises(
         SubnetEpochError,
@@ -111,11 +81,8 @@ def test_unconfigured_nonproduction_runtime_has_no_database_fallback(
     network,
     netuid,
 ):
-    from gateway import config
     from gateway.utils import epoch
 
-    monkeypatch.setattr(config, "SUPABASE_URL", None)
-    monkeypatch.setattr(config, "SUPABASE_SERVICE_ROLE_KEY", None)
     monkeypatch.delenv("SUPABASE_URL", raising=False)
     monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     monkeypatch.setenv("BITTENSOR_NETWORK", network)

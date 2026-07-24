@@ -163,6 +163,91 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
         )
 
 
+def test_httpx_transport_enforces_artifact_specific_large_response_ceiling(
+    monkeypatch,
+):
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class Stream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+    chunk = b"x" * (1024 * 1024)
+    chunk_count = (MAX_RESPONSE_BODY_BYTES // len(chunk)) + 1
+
+    class Response:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        extensions = {"network_stream": Stream()}
+
+        def iter_bytes(self):
+            for _ in range(chunk_count):
+                yield chunk
+
+    class ResponseContext:
+        def __enter__(self):
+            return Response()
+
+        def __exit__(self, *_args):
+            return False
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            return ResponseContext()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        SimpleNamespace(Client=Client, Proxy=lambda *_args, **_kwargs: object()),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "certifi",
+        SimpleNamespace(where=lambda: "/tmp/test-ca.pem"),
+    )
+
+    with pytest.raises(ProviderBrokerV2Error, match="response exceeds size limit"):
+        HTTPXProviderTransport()(
+            method="GET",
+            url="https://example.com/artifact",
+            headers={},
+            body=b"",
+            timeout_ms=1000,
+        )
+
+    result = HTTPXProviderTransport(
+        response_body_ceiling_bytes=MAX_TRANSPORT_RESPONSE_BODY_BYTES
+    )(
+        method="GET",
+        url="https://example.com/artifact",
+        headers={},
+        body=b"",
+        timeout_ms=1000,
+        max_response_bytes=MAX_TRANSPORT_RESPONSE_BODY_BYTES,
+    )
+
+    assert len(result["body"]) == chunk_count * len(chunk)
+    assert len(result["body"]) > MAX_RESPONSE_BODY_BYTES
+    assert result["tls_peer_chain_hash"] == sha256_bytes(b"peer-certificate")
+    assert result["tls_protocol"] == "TLSv1.3"
+
+
 def test_provider_registry_hash_binds_measured_https_routes():
     document = provider_registry_document()
     assert document["transport"] == {

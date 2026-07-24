@@ -9,11 +9,16 @@ from gateway.tee.artifact_persistence_v2 import (
     ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS,
     ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
     ARTIFACT_POLICY_SCHEMA_VERSION,
+    MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
     ArtifactPersistenceV2Error,
     ArtifactPersistenceVerifierV2,
     validate_artifact_policy,
 )
-from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
+from gateway.tee.artifact_vault_v2 import (
+    MAX_ARTIFACT_BYTES,
+    EncryptedArtifactVaultV2,
+)
+from gateway.tee.provider_broker_v2 import MAX_RESPONSE_BODY_BYTES
 from leadpoet_canonical.attested_v2 import canonical_json
 
 
@@ -62,8 +67,19 @@ class _Transport:
         self.head_mode = head_mode
         self.calls = []
 
-    def __call__(self, *, method, url, headers, body, timeout_ms):
-        self.calls.append((method, url, headers, body, timeout_ms))
+    def __call__(
+        self,
+        *,
+        method,
+        url,
+        headers,
+        body,
+        timeout_ms,
+        max_response_bytes=MAX_RESPONSE_BODY_BYTES,
+    ):
+        self.calls.append(
+            (method, url, headers, body, timeout_ms, max_response_bytes)
+        )
         response_body = (
             canonical_json(self.document).encode("utf-8") if method == "GET" else b""
         )
@@ -110,6 +126,54 @@ def test_verifier_fetches_ciphertext_and_lock_headers_inside_tls() -> None:
     assert result["artifact"]["persisted"] is True
     assert len(result["transport_attempts"]) == 2
     assert [call[0] for call in transport.calls] == ["GET", "HEAD"]
+    assert transport.calls[0][5] == MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
+    assert transport.calls[1][5] == MAX_RESPONSE_BODY_BYTES
+
+
+def test_artifact_readback_budget_covers_ciphertext_base64_expansion() -> None:
+    maximum_ciphertext_bytes = MAX_ARTIFACT_BYTES + 16
+    maximum_ciphertext_b64_bytes = 4 * (
+        (maximum_ciphertext_bytes + 2) // 3
+    )
+
+    assert maximum_ciphertext_b64_bytes > MAX_RESPONSE_BODY_BYTES
+    assert (
+        maximum_ciphertext_b64_bytes + 1024 * 1024
+        < MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
+    )
+
+
+def test_verifier_accepts_production_size_encrypted_readback() -> None:
+    vault = _vault()
+    descriptor = vault.seal(
+        b"x" * (48 * 1024 * 1024),
+        job_id="production-size-contract",
+        purpose="research_lab.company_score.v2",
+        artifact_kind="provider_response",
+    )
+    document = vault.export_ciphertext(descriptor["artifact_id"])[
+        "storage_document"
+    ]
+    wire_size = len(canonical_json(document).encode("utf-8"))
+    transport = _Transport(document)
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=transport,
+        clock=lambda: "2026-07-10T12:00:00Z",
+    )
+
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/attested-v2/artifacts/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert MAX_RESPONSE_BODY_BYTES < wire_size
+    assert wire_size < MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
+    assert result["status"] == "persisted"
 
 
 def test_verifier_rejects_host_redirection_and_unsigned_urls() -> None:
@@ -158,6 +222,37 @@ def test_authenticated_s3_error_is_not_a_transport_failure_or_success() -> None:
     assert result["failure_code"] == "authenticated_http_403"
     assert result["transport_attempts"][0]["terminal_status"] == "authenticated_response"
     assert vault.descriptor(descriptor["artifact_id"])["persisted"] is False
+
+
+def test_oversized_authenticated_storage_document_fails_closed() -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+
+    class OversizedTransport(_Transport):
+        def __call__(self, **kwargs):
+            response = super().__call__(**kwargs)
+            if kwargs["method"] == "GET":
+                response["body"] = b"x" * (
+                    MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES + 1
+                )
+            return response
+
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=OversizedTransport(document),
+        clock=lambda: "2026-07-10T12:00:00Z",
+    )
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure_code"] == "storage_document_too_large"
 
 
 def test_object_lock_mismatch_fails_after_authenticated_readback() -> None:

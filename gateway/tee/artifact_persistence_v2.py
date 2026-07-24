@@ -7,7 +7,7 @@ import json
 import re
 import secrets
 import time
-from typing import Any, Callable, Dict, Mapping, Sequence
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 from urllib.parse import parse_qs, urlsplit
 
 from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
@@ -26,6 +26,7 @@ ARTIFACT_PERSISTENCE_PURPOSE = "leadpoet.artifact_persistence.v2"
 ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS = 4
 ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS = 30000
 ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS = (0.0, 0.25, 1.0, 2.0)
+MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES = 96 * 1024 * 1024
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DNS_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
@@ -135,14 +136,20 @@ class ArtifactPersistenceVerifierV2:
         *,
         vault: EncryptedArtifactVaultV2,
         policy: Mapping[str, Any],
-        transport: Callable[..., Mapping[str, Any]] = HTTPXProviderTransport(),
+        transport: Optional[Callable[..., Mapping[str, Any]]] = None,
         clock: Callable[[], str] = _timestamp,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self._vault = vault
         self._policy = validate_artifact_policy(policy)
         self._policy_hash = sha256_json(self._policy)
-        self._transport = transport
+        self._transport = (
+            transport
+            if transport is not None
+            else HTTPXProviderTransport(
+                response_body_ceiling_bytes=MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
+            )
+        )
         self._clock = clock
         self._sleeper = sleeper
         self._retry_policy_hash = sha256_json(
@@ -154,6 +161,9 @@ class ArtifactPersistenceVerifierV2:
                 ),
                 "timeout_ms": ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
                 "storage_policy_hash": self._policy_hash,
+                "maximum_storage_document_bytes": (
+                    MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
+                ),
             }
         )
 
@@ -181,6 +191,11 @@ class ArtifactPersistenceVerifierV2:
         terminal = {}
         response = {}
         try:
+            transport_kwargs = {}
+            if method == "GET":
+                transport_kwargs["max_response_bytes"] = (
+                    MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
+                )
             response = dict(
                 self._transport(
                     method=method,
@@ -188,6 +203,7 @@ class ArtifactPersistenceVerifierV2:
                     headers={"accept": "application/json"},
                     body=b"",
                     timeout_ms=ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
+                    **transport_kwargs,
                 )
             )
             body = bytes(response.get("body") or b"")
@@ -274,6 +290,8 @@ class ArtifactPersistenceVerifierV2:
                 attempts, "authenticated_http_%s" % get_attempt["http_status"]
             )
         body = bytes(get_response.get("body") or b"")
+        if len(body) > MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES:
+            return self._failure(attempts, "storage_document_too_large")
         try:
             document = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):

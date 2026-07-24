@@ -34,6 +34,7 @@ from gateway.tee.source_add_runtime_v2 import (
 PROVIDER_BROKER_SCHEMA_VERSION = "leadpoet.provider_broker.v2"
 MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
 MAX_RESPONSE_BODY_BYTES = 64 * 1024 * 1024
+MAX_TRANSPORT_RESPONSE_BODY_BYTES = 96 * 1024 * 1024
 MAX_DEDUPLICATION_RECORDS = 10000
 MAX_JOB_CREDENTIAL_LEASES = 1024
 EGRESS_PROXY_CREDENTIAL_SLOT = "egress_proxy"
@@ -394,9 +395,21 @@ class HTTPXProviderTransport:
         *,
         proxy_url: str = "http://127.0.0.1:18080",
         ca_bundle: Optional[str] = None,
+        response_body_ceiling_bytes: int = MAX_RESPONSE_BODY_BYTES,
     ) -> None:
+        if (
+            isinstance(response_body_ceiling_bytes, bool)
+            or not isinstance(response_body_ceiling_bytes, int)
+            or not 1
+            <= response_body_ceiling_bytes
+            <= MAX_TRANSPORT_RESPONSE_BODY_BYTES
+        ):
+            raise ProviderBrokerV2Error(
+                "provider transport response ceiling is invalid"
+            )
         self.proxy_url = proxy_url
         self.ca_bundle = ca_bundle
+        self.response_body_ceiling_bytes = response_body_ceiling_bytes
 
     def __call__(
         self,
@@ -409,6 +422,15 @@ class HTTPXProviderTransport:
         upstream_proxy_url: Optional[str] = None,
         max_response_bytes: int = MAX_RESPONSE_BODY_BYTES,
     ) -> Dict[str, Any]:
+        if (
+            isinstance(max_response_bytes, bool)
+            or not isinstance(max_response_bytes, int)
+            or not 1
+            <= max_response_bytes
+            <= self.response_body_ceiling_bytes
+        ):
+            raise ProviderBrokerV2Error("provider response limit is invalid")
+
         import certifi
         import httpx
 
@@ -427,12 +449,6 @@ class HTTPXProviderTransport:
             timeout=max(0.001, timeout_ms / 1000.0),
             follow_redirects=False,
         ) as client:
-            if (
-                isinstance(max_response_bytes, bool)
-                or not isinstance(max_response_bytes, int)
-                or not 1 <= max_response_bytes <= MAX_RESPONSE_BODY_BYTES
-            ):
-                raise ProviderBrokerV2Error("provider response limit is invalid")
             with client.stream(
                 method,
                 url,

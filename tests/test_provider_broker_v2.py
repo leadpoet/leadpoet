@@ -11,6 +11,8 @@ import pytest
 from gateway.tee.provider_broker_v2 import (
     BUILTIN_PROVIDER_ROUTES,
     HTTPXProviderTransport,
+    MAX_RESPONSE_BODY_BYTES,
+    MAX_TRANSPORT_RESPONSE_BODY_BYTES,
     PROVIDER_BROKER_SCHEMA_VERSION,
     ProviderBrokerV2,
     ProviderBrokerV2Error,
@@ -131,6 +133,34 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
         "tls_peer_chain_hash": sha256_bytes(b"peer-certificate"),
         "tls_protocol": "TLSv1.3",
     }
+
+    artifact_transport = HTTPXProviderTransport(
+        response_body_ceiling_bytes=MAX_TRANSPORT_RESPONSE_BODY_BYTES
+    )
+    response.stream.ssl_object = TLS()
+    artifact_result = artifact_transport(
+        method="GET",
+        url="https://example.com/artifact",
+        headers={},
+        body=b"",
+        timeout_ms=1000,
+        max_response_bytes=MAX_TRANSPORT_RESPONSE_BODY_BYTES,
+    )
+    assert artifact_result["body"] == b'{"ok":true}'
+
+    with pytest.raises(ProviderBrokerV2Error, match="response limit"):
+        HTTPXProviderTransport()(
+            method="GET",
+            url="https://example.com/artifact",
+            headers={},
+            body=b"",
+            timeout_ms=1000,
+            max_response_bytes=MAX_RESPONSE_BODY_BYTES + 1,
+        )
+    with pytest.raises(ProviderBrokerV2Error, match="transport response ceiling"):
+        HTTPXProviderTransport(
+            response_body_ceiling_bytes=MAX_TRANSPORT_RESPONSE_BODY_BYTES + 1
+        )
 
 
 def test_provider_registry_hash_binds_measured_https_routes():

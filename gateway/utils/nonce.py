@@ -18,10 +18,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from gateway.config import NONCE_EXPIRY_SECONDS, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 # Import Supabase
-from supabase import create_client, Client
+from supabase import Client
+from gateway.db.client import _create_sync_client
 
-# Create Supabase client (using service_role key for full access)
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+# Create Supabase client (service_role key; shared across threadpool workers —
+# HTTP/1-pinned because the default HTTP/2 HPACK encoder is not thread-safe)
+supabase: Client = _create_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 async def check_and_store_nonce_async(nonce: str, actor_hotkey: str) -> bool:

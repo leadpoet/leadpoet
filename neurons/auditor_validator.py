@@ -198,7 +198,7 @@ import logging
 import base64
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import bittensor as bt
 import aiohttp
@@ -243,6 +243,70 @@ logger = logging.getLogger(__name__)
 
 # Public gateway used when operators do not provide an override.
 PUBLIC_GATEWAY_URL = "https://gateway.subnet71.com"
+
+_AUDIT_LOG_SENSITIVE_NAMES = (
+    "authorization",
+    "credential",
+    "password",
+    "private",
+    "secret",
+    "signature",
+    "token",
+)
+_AUDIT_LOG_QUERY_SECRET = re.compile(
+    r"(?i)([?&](?:authorization|credential|key|password|secret|signature|token)"
+    r")=[^&\s]+"
+)
+_AUDIT_LOG_BEARER_SECRET = re.compile(r"(?i)\bBearer\s+\S+")
+
+
+def _sanitize_audit_log_value(name: str, value: Any) -> Any:
+    """Return diagnostic context without exposing authentication material."""
+
+    lowered = str(name).lower()
+    if any(marker in lowered for marker in _AUDIT_LOG_SENSITIVE_NAMES):
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {
+            str(key): _sanitize_audit_log_value(str(key), child)
+            for key, child in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _sanitize_audit_log_value(name, child)
+            for child in value
+        ]
+    if isinstance(value, str):
+        text = _AUDIT_LOG_QUERY_SECRET.sub(r"\1=[redacted]", value)
+        text = _AUDIT_LOG_BEARER_SECRET.sub("Bearer [redacted]", text)
+        return text[:500]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:500]
+
+
+def _audit_event(event: str, *, level: int = logging.INFO, **fields: Any) -> None:
+    """Emit one stable JSON event for operator-side incident diagnosis."""
+
+    try:
+        payload = {
+            "event": str(event),
+            **{
+                str(key): _sanitize_audit_log_value(str(key), value)
+                for key, value in fields.items()
+            },
+        }
+        logger.log(
+            level,
+            "auditor_event %s",
+            json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        )
+    except Exception as exc:  # pragma: no cover - diagnostics must be inert
+        logger.warning(
+            "auditor_event_serialization_failure event=%s type=%s",
+            str(event)[:80],
+            type(exc).__name__,
+        )
 
 
 def _default_gateway_url(environ=None) -> str:
@@ -312,10 +376,35 @@ def _connect_epoch_archive_subtensor(
     )
     last_error = None
     for attempt in range(1, int(attempts) + 1):
+        started_at = time.monotonic()
+        _audit_event(
+            "archive_connect_attempt",
+            archive_endpoint=selected_endpoint,
+            attempt=attempt,
+            attempts=attempts,
+        )
         try:
-            return bt.Subtensor(network=selected_endpoint)
+            subtensor = bt.Subtensor(network=selected_endpoint)
+            _audit_event(
+                "archive_connect_success",
+                archive_endpoint=selected_endpoint,
+                attempt=attempt,
+                elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
+                sdk_version=str(getattr(bt, "__version__", "unknown")),
+            )
+            return subtensor
         except Exception as exc:
             last_error = exc
+            _audit_event(
+                "archive_connect_failure",
+                level=logging.WARNING,
+                archive_endpoint=selected_endpoint,
+                attempt=attempt,
+                attempts=attempts,
+                elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             logger.warning(
                 "auditor_archive_connect_failed attempt=%d/%d type=%s",
                 attempt,
@@ -467,6 +556,29 @@ class AuditorValidator:
             runtime_identity["weight_authority_sha256"],
             runtime_identity["weight_computation_sha256"],
         )
+        _audit_event(
+            "startup_ready",
+            commit=runtime_identity["commit"],
+            python_version=runtime_identity["python"],
+            sdk_version=runtime_identity["bittensor"],
+            auditor_sha256=runtime_identity["auditor_sha256"],
+            weight_authority_sha256=runtime_identity["weight_authority_sha256"],
+            weight_computation_sha256=runtime_identity[
+                "weight_computation_sha256"
+            ],
+            netuid=int(self.config.netuid),
+            uid=int(self.uid),
+            hotkey=self.wallet.hotkey.ss58_address,
+            gateway_endpoint=self.gateway_url,
+            archive_endpoint=self.epoch_archive_endpoint,
+            weight_protocol=weight_protocol,
+            transport_auth_mode="public_bundle_with_cryptographic_verification",
+            cutover_mapping_hash=(
+                self.epoch_cutover.mapping_hash
+                if self.epoch_cutover is not None
+                else None
+            ),
+        )
         print(f"✅ Auditor Validator initialized")
         print(f"   Hotkey: {self.wallet.hotkey.ss58_address}")
         print(f"   UID: {self.uid}")
@@ -575,6 +687,16 @@ class AuditorValidator:
     def _verify_stateful_bundle_epoch(self, bundle: Dict) -> None:
         if self.epoch_cutover is None:
             raise SubnetEpochError("auditor subnet epoch cutover is unavailable")
+        started_at = time.monotonic()
+        _audit_event(
+            "exact_block_verification_start",
+            epoch=int(bundle["epoch_id"]),
+            netuid=int(bundle.get("netuid", self.config.netuid)),
+            block=int(bundle["block"]),
+            archive_endpoint=getattr(self, "epoch_archive_endpoint", None),
+            weights_hash=bundle.get("weights_hash"),
+            authority_stage=bundle.get("authority_stage"),
+        )
         try:
             snapshot = read_subnet_epoch_snapshot(
                 self.epoch_archive_subtensor,
@@ -582,6 +704,15 @@ class AuditorValidator:
                 block_number=int(bundle["block"]),
             )
         except Exception as first_error:
+            _audit_event(
+                "exact_block_verification_retry",
+                level=logging.WARNING,
+                epoch=int(bundle["epoch_id"]),
+                block=int(bundle["block"]),
+                archive_endpoint=self.epoch_archive_endpoint,
+                error_type=type(first_error).__name__,
+                error=str(first_error),
+            )
             logger.warning(
                 "auditor_archive_snapshot_reconnect endpoint=%s type=%s",
                 self.epoch_archive_endpoint,
@@ -606,6 +737,19 @@ class AuditorValidator:
                     block_number=int(bundle["block"]),
                 )
             except Exception as retry_error:
+                _audit_event(
+                    "exact_block_verification_failure",
+                    level=logging.ERROR,
+                    epoch=int(bundle["epoch_id"]),
+                    block=int(bundle["block"]),
+                    archive_endpoint=self.epoch_archive_endpoint,
+                    error_type=type(retry_error).__name__,
+                    error=str(retry_error),
+                    elapsed_ms=round(
+                        (time.monotonic() - started_at) * 1000,
+                        1,
+                    ),
+                )
                 if refreshed is not None:
                     _close_subtensor_connection(
                         refreshed,
@@ -621,6 +765,19 @@ class AuditorValidator:
             raise SubnetEpochError(
                 "bundle settlement epoch differs from official chain state"
             )
+        _audit_event(
+            "exact_block_verification_success",
+            epoch=int(bundle["epoch_id"]),
+            netuid=int(bundle.get("netuid", self.config.netuid)),
+            block=int(bundle["block"]),
+            block_hash=getattr(snapshot, "block_hash", None),
+            subnet_epoch_index=getattr(snapshot, "subnet_epoch_index", None),
+            observed_settlement_epoch=snapshot.settlement_epoch_id(
+                self.epoch_cutover
+            ),
+            archive_endpoint=getattr(self, "epoch_archive_endpoint", None),
+            elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
+        )
     
     def _get_uid(self) -> Optional[int]:
         """Resolve our current UID directly from canonical chain storage."""
@@ -975,10 +1132,27 @@ class AuditorValidator:
         }
         try:
             async with aiohttp.ClientSession(trust_env=False) as session:
-                for url in (staged_url, legacy_url):
+                for endpoint_kind, url in (
+                    ("published", staged_url),
+                    ("finalized_legacy", legacy_url),
+                ):
+                    started_at = time.monotonic()
+                    _audit_event(
+                        "bundle_fetch_attempt",
+                        epoch=int(epoch_id),
+                        netuid=netuid,
+                        uid=getattr(self, "uid", None),
+                        endpoint=urlparse(url).path,
+                        endpoint_kind=endpoint_kind,
+                        gateway_endpoint=self.gateway_url,
+                    )
                     async with session.get(
                         url, timeout=aiohttp.ClientTimeout(total=30)
                     ) as response:
+                        elapsed_ms = round(
+                            (time.monotonic() - started_at) * 1000,
+                            1,
+                        )
                         if response.status == 404:
                             try:
                                 not_found = await response.json()
@@ -989,12 +1163,35 @@ class AuditorValidator:
                                 if isinstance(not_found, dict)
                                 else ""
                             )
-                            if url is staged_url and detail == "Not Found":
+                            if url == staged_url and detail == "Not Found":
                                 # The gateway predates the staged route;
                                 # fall through to the legacy view.
+                                _audit_event(
+                                    "bundle_fetch_route_absent",
+                                    epoch=int(epoch_id),
+                                    netuid=netuid,
+                                    endpoint=urlparse(url).path,
+                                    endpoint_kind=endpoint_kind,
+                                    http_status=404,
+                                    elapsed_ms=elapsed_ms,
+                                )
                                 continue
                             self._last_v2_authority_was_absent = detail in (
                                 absent_details | {"Not Found"}
+                            )
+                            _audit_event(
+                                "bundle_fetch_not_found",
+                                level=logging.INFO
+                                if self._last_v2_authority_was_absent
+                                else logging.WARNING,
+                                epoch=int(epoch_id),
+                                netuid=netuid,
+                                endpoint=urlparse(url).path,
+                                endpoint_kind=endpoint_kind,
+                                http_status=404,
+                                authority_absent=self._last_v2_authority_was_absent,
+                                detail=detail,
+                                elapsed_ms=elapsed_ms,
                             )
                             if not self._last_v2_authority_was_absent:
                                 logger.warning(
@@ -1005,6 +1202,16 @@ class AuditorValidator:
                                 )
                             return None
                         if response.status != 200:
+                            _audit_event(
+                                "bundle_fetch_http_failure",
+                                level=logging.WARNING,
+                                epoch=int(epoch_id),
+                                netuid=netuid,
+                                endpoint=urlparse(url).path,
+                                endpoint_kind=endpoint_kind,
+                                http_status=response.status,
+                                elapsed_ms=elapsed_ms,
+                            )
                             logger.warning(
                                 "auditor_v2_fetch_failed epoch=%s status=%s",
                                 epoch_id,
@@ -1012,9 +1219,49 @@ class AuditorValidator:
                             )
                             return None
                         value = await response.json()
+                        _audit_event(
+                            "bundle_fetch_success",
+                            epoch=int(epoch_id),
+                            netuid=netuid,
+                            uid=getattr(self, "uid", None),
+                            endpoint=urlparse(url).path,
+                            endpoint_kind=endpoint_kind,
+                            http_status=response.status,
+                            elapsed_ms=elapsed_ms,
+                            response_bytes=response.content_length,
+                            bundle_epoch=value.get("epoch_id")
+                            if isinstance(value, dict)
+                            else None,
+                            bundle_block=value.get("block")
+                            if isinstance(value, dict)
+                            else None,
+                            authority_stage=value.get("authority_stage")
+                            if isinstance(value, dict)
+                            else None,
+                            weights_hash=value.get("weights_hash")
+                            if isinstance(value, dict)
+                            else None,
+                            bundle_hash=value.get("bundle_hash")
+                            if isinstance(value, dict)
+                            else None,
+                            destination_count=len(value.get("uids", []))
+                            if isinstance(value, dict)
+                            and isinstance(value.get("uids"), list)
+                            else None,
+                        )
                         return value if isinstance(value, dict) else None
             return None
         except Exception as exc:
+            _audit_event(
+                "bundle_fetch_exception",
+                level=logging.WARNING,
+                epoch=int(epoch_id),
+                netuid=netuid,
+                uid=getattr(self, "uid", None),
+                gateway_endpoint=self.gateway_url,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             logger.warning(
                 "auditor_v2_fetch_failed epoch=%s error_type=%s error=%s",
                 epoch_id,
@@ -1044,11 +1291,32 @@ class AuditorValidator:
         """Fetch the authoritative V2 weight bundle."""
 
         self.auditor_weight_protocol()
+        started_at = time.monotonic()
+        _audit_event(
+            "authority_verification_start",
+            epoch=int(epoch_id),
+            netuid=int(self.config.netuid),
+            uid=getattr(self, "uid", None),
+            gateway_endpoint=getattr(self, "gateway_url", None),
+        )
         v2_bundle = await self.fetch_attested_weights_v2(epoch_id)
         if isinstance(v2_bundle, dict):
             try:
                 identity_cache = await self._fetch_release_identity_cache(v2_bundle)
             except Exception as exc:
+                _audit_event(
+                    "release_evidence_verification_failure",
+                    level=logging.ERROR,
+                    epoch=int(epoch_id),
+                    netuid=int(self.config.netuid),
+                    weights_hash=v2_bundle.get("weights_hash"),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    elapsed_ms=round(
+                        (time.monotonic() - started_at) * 1000,
+                        1,
+                    ),
+                )
                 logger.error(
                     "auditor_v2_release_evidence_failed error_type=%s error=%s",
                     type(exc).__name__,
@@ -1060,6 +1328,18 @@ class AuditorValidator:
                 identity_cache=identity_cache,
             )
             if verified is None:
+                _audit_event(
+                    "authority_verification_failure",
+                    level=logging.ERROR,
+                    epoch=int(epoch_id),
+                    netuid=int(self.config.netuid),
+                    weights_hash=v2_bundle.get("weights_hash"),
+                    reason="attested_authority_invalid",
+                    elapsed_ms=round(
+                        (time.monotonic() - started_at) * 1000,
+                        1,
+                    ),
+                )
                 return None, "v2_invalid"
             # A stale-but-genuine authority replays every check; bind the
             # verified document to the epoch and netuid this auditor asked
@@ -1080,10 +1360,55 @@ class AuditorValidator:
                     verified_epoch,
                     verified_netuid,
                 )
+                _audit_event(
+                    "authority_verification_failure",
+                    level=logging.WARNING,
+                    epoch=int(epoch_id),
+                    netuid=int(self.config.netuid),
+                    verified_epoch=verified_epoch,
+                    verified_netuid=verified_netuid,
+                    weights_hash=verified.get("weights_hash"),
+                    reason="requested_identity_mismatch",
+                    elapsed_ms=round(
+                        (time.monotonic() - started_at) * 1000,
+                        1,
+                    ),
+                )
                 return None, "v2_invalid"
+            _audit_event(
+                "authority_verification_success",
+                epoch=verified_epoch,
+                netuid=verified_netuid,
+                uid=getattr(self, "uid", None),
+                bundle_block=verified.get("block"),
+                weights_hash=verified.get("weights_hash"),
+                bundle_hash=verified.get("bundle_hash"),
+                authority_stage=verified.get("authority_stage"),
+                destination_count=len(verified.get("uids", [])),
+                release_identity_count=len(identity_cache.get("entries", [])),
+                elapsed_ms=round(
+                    (time.monotonic() - started_at) * 1000,
+                    1,
+                ),
+            )
             return verified, "v2_verified"
         if getattr(self, "_last_v2_authority_was_absent", False):
+            _audit_event(
+                "authority_unavailable",
+                epoch=int(epoch_id),
+                netuid=int(self.config.netuid),
+                status="v2_absent",
+                elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
+            )
             return None, "v2_absent"
+        _audit_event(
+            "authority_unavailable",
+            level=logging.WARNING,
+            epoch=int(epoch_id),
+            netuid=int(self.config.netuid),
+            status="v2_unavailable",
+            elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
+        )
         return None, "v2_unavailable"
 
     @staticmethod
@@ -1112,14 +1437,35 @@ class AuditorValidator:
 
     async def _fetch_release_identity_cache(self, authority: Dict) -> Dict:
         entries = []
+        commits = self._authority_commits(authority)
+        _audit_event(
+            "release_evidence_fetch_start",
+            epoch=authority.get("epoch_id"),
+            weights_hash=authority.get("weights_hash"),
+            commit_count=len(commits),
+            commits=commits,
+        )
         async with aiohttp.ClientSession(trust_env=False) as session:
-            for commit in self._authority_commits(authority):
+            for commit in commits:
                 url = f"{self.gateway_url}/weights/v2/release-evidence/{commit}"
+                started_at = time.monotonic()
                 async with session.get(
                     url,
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as response:
                     if response.status != 200:
+                        _audit_event(
+                            "release_evidence_fetch_failure",
+                            level=logging.ERROR,
+                            epoch=authority.get("epoch_id"),
+                            commit=commit,
+                            endpoint=urlparse(url).path,
+                            http_status=response.status,
+                            elapsed_ms=round(
+                                (time.monotonic() - started_at) * 1000,
+                                1,
+                            ),
+                        )
                         raise RuntimeError(
                             f"release evidence request failed with HTTP {response.status}"
                         )
@@ -1129,16 +1475,36 @@ class AuditorValidator:
                     evidence,
                 )
                 entries.extend(cache["entries"])
+                _audit_event(
+                    "release_evidence_fetch_success",
+                    epoch=authority.get("epoch_id"),
+                    commit=commit,
+                    endpoint=urlparse(url).path,
+                    http_status=200,
+                    identity_count=len(cache["entries"]),
+                    elapsed_ms=round(
+                        (time.monotonic() - started_at) * 1000,
+                        1,
+                    ),
+                )
         unique = {}
         for entry in entries:
             key = (entry["physical_role"], entry["role"], entry["commit_sha"])
             if key in unique and unique[key] != entry:
                 raise ValueError("independent release identities conflict")
             unique[key] = entry
-        return {
+        result = {
             "schema_version": "leadpoet.independent_pcr0_identities.v2",
             "entries": list(unique.values()),
         }
+        _audit_event(
+            "release_evidence_cache_ready",
+            epoch=authority.get("epoch_id"),
+            weights_hash=authority.get("weights_hash"),
+            identity_count=len(result["entries"]),
+            commits=commits,
+        )
+        return result
 
     def verify_attested_weights_v2(
         self,
@@ -1148,11 +1514,30 @@ class AuditorValidator:
     ) -> Optional[Dict]:
         """Verify finalized V2 authority against independent PCR0 builds."""
         if identity_cache is None:
+            _audit_event(
+                "authority_cryptographic_verification_failure",
+                level=logging.ERROR,
+                epoch=authority.get("epoch_id"),
+                weights_hash=authority.get("weights_hash"),
+                stage="release_identity_cache",
+                reason="missing",
+            )
             logger.error(
                 "auditor_v2_pcr0_cache_missing: automatic immutable release "
                 "evidence was not supplied"
             )
             return None
+        started_at = time.monotonic()
+        _audit_event(
+            "authority_cryptographic_verification_start",
+            epoch=authority.get("epoch_id"),
+            netuid=authority.get("netuid"),
+            bundle_block=authority.get("block"),
+            weights_hash=authority.get("weights_hash"),
+            bundle_hash=authority.get("bundle_hash"),
+            authority_stage=authority.get("authority_stage"),
+            release_identity_count=len(identity_cache.get("entries", [])),
+        )
         try:
             profile_file = Path(
                 os.environ.get(
@@ -1187,8 +1572,40 @@ class AuditorValidator:
                     chain_signing_profile=profile,
                 )
             self._verify_stateful_bundle_epoch(verified)
+            _audit_event(
+                "authority_cryptographic_verification_success",
+                epoch=verified.get("epoch_id"),
+                netuid=verified.get("netuid"),
+                bundle_block=verified.get("block"),
+                weights_hash=verified.get("weights_hash"),
+                bundle_hash=verified.get("bundle_hash"),
+                authority_stage=verified.get("authority_stage"),
+                receipt_graph_hash=verified.get("receipt_graph_hash"),
+                release_identity_count=len(identity_cache.get("entries", [])),
+                destination_count=len(verified.get("uids", [])),
+                elapsed_ms=round(
+                    (time.monotonic() - started_at) * 1000,
+                    1,
+                ),
+            )
             return verified
         except Exception as exc:
+            _audit_event(
+                "authority_cryptographic_verification_failure",
+                level=logging.WARNING,
+                epoch=authority.get("epoch_id"),
+                netuid=authority.get("netuid"),
+                bundle_block=authority.get("block"),
+                weights_hash=authority.get("weights_hash"),
+                bundle_hash=authority.get("bundle_hash"),
+                authority_stage=authority.get("authority_stage"),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                elapsed_ms=round(
+                    (time.monotonic() - started_at) * 1000,
+                    1,
+                ),
+            )
             logger.warning(
                 "auditor_v2_verification_failed error_type=%s error=%s",
                 type(exc).__name__,
@@ -1586,6 +2003,14 @@ class AuditorValidator:
                 return False
 
         if not epoch_is_current():
+            _audit_event(
+                "submission_refused",
+                level=logging.ERROR,
+                epoch=int(epoch_id),
+                subnet_epoch_index=subnet_epoch_index,
+                uid=getattr(self, "uid", None),
+                reason="epoch_not_current",
+            )
             print(f"⏹️ Refusing stale auditor submission for epoch {epoch_id}")
             return False
 
@@ -1595,27 +2020,83 @@ class AuditorValidator:
             # gateway bundle verification cannot authorize a stale process after
             # the operator advances the shared lifecycle.
             if not lifecycle_is_open():
+                _audit_event(
+                    "submission_refused",
+                    level=logging.ERROR,
+                    epoch=int(epoch_id),
+                    subnet_epoch_index=subnet_epoch_index,
+                    uid=getattr(self, "uid", None),
+                    attempt=attempt + 1,
+                    reason="durable_lifecycle_closed",
+                )
                 print(
                     f"⏹️ Durable epoch authority closed before auditor "
                     f"submission for epoch {epoch_id}"
                 )
                 return False
             attempt += 1
-            with weight_hyperparameters_compat(
-                self.subtensor,
+            started_at = time.monotonic()
+            _audit_event(
+                "submission_attempt_start",
+                epoch=int(epoch_id),
+                subnet_epoch_index=subnet_epoch_index,
                 netuid=int(self.config.netuid),
-                sdk_version=str(bt.__version__),
-            ):
-                outcome = ExtrinsicOutcome.from_sdk(
-                    self.subtensor.set_weights(
-                        netuid=self.config.netuid,
-                        wallet=self.wallet,
-                        uids=uids,
-                        weights=weights,
-                        wait_for_finalization=True,
-                        mechid=0,
+                uid=getattr(self, "uid", None),
+                attempt=attempt,
+                sdk_version=str(getattr(bt, "__version__", "unknown")),
+                destination_count=len(uids),
+                wait_for_finalization=True,
+                mechanism_id=0,
+            )
+            try:
+                with weight_hyperparameters_compat(
+                    self.subtensor,
+                    netuid=int(self.config.netuid),
+                    sdk_version=str(bt.__version__),
+                ):
+                    outcome = ExtrinsicOutcome.from_sdk(
+                        self.subtensor.set_weights(
+                            netuid=self.config.netuid,
+                            wallet=self.wallet,
+                            uids=uids,
+                            weights=weights,
+                            wait_for_finalization=True,
+                            mechid=0,
+                        )
                     )
+            except Exception as exc:
+                _audit_event(
+                    "submission_attempt_exception",
+                    level=logging.ERROR,
+                    epoch=int(epoch_id),
+                    subnet_epoch_index=subnet_epoch_index,
+                    netuid=int(self.config.netuid),
+                    uid=getattr(self, "uid", None),
+                    attempt=attempt,
+                    sdk_version=str(getattr(bt, "__version__", "unknown")),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    elapsed_ms=round(
+                        (time.monotonic() - started_at) * 1000,
+                        1,
+                    ),
                 )
+                raise
+            _audit_event(
+                "submission_attempt_result",
+                level=logging.INFO if outcome.success else logging.WARNING,
+                epoch=int(epoch_id),
+                subnet_epoch_index=subnet_epoch_index,
+                netuid=int(self.config.netuid),
+                uid=getattr(self, "uid", None),
+                attempt=attempt,
+                success=bool(outcome.success),
+                chain_message=outcome.message,
+                elapsed_ms=round(
+                    (time.monotonic() - started_at) * 1000,
+                    1,
+                ),
+            )
             if outcome.success:
                 return True
 
@@ -1625,6 +2106,15 @@ class AuditorValidator:
             )
             time.sleep(12)
             if not epoch_is_current():
+                _audit_event(
+                    "submission_failed",
+                    level=logging.ERROR,
+                    epoch=int(epoch_id),
+                    subnet_epoch_index=subnet_epoch_index,
+                    uid=getattr(self, "uid", None),
+                    attempts=attempt,
+                    reason="epoch_ended_after_rejection",
+                )
                 print(
                     f"⏹️ Epoch {epoch_id} ended before the weight submission "
                     "was accepted"
@@ -1654,8 +2144,32 @@ class AuditorValidator:
         try:
             uids = bundle.get("uids", [])
             weights_u16 = bundle.get("weights_u16", [])
+            live_epoch_id = int(
+                epoch_id if submission_epoch_id is None else submission_epoch_id
+            )
+            _audit_event(
+                "submission_prepare_start",
+                epoch=int(epoch_id),
+                submission_epoch=live_epoch_id,
+                netuid=int(self.config.netuid),
+                uid=getattr(self, "uid", None),
+                bundle_block=bundle.get("block"),
+                weights_hash=bundle.get("weights_hash"),
+                bundle_hash=bundle.get("bundle_hash"),
+                authority_stage=bundle.get("authority_stage"),
+                destination_count=len(uids) if isinstance(uids, list) else None,
+                sdk_version=str(getattr(bt, "__version__", "unknown")),
+            )
             
             if not uids:
+                _audit_event(
+                    "submission_prepare_failure",
+                    level=logging.ERROR,
+                    epoch=int(epoch_id),
+                    submission_epoch=live_epoch_id,
+                    uid=getattr(self, "uid", None),
+                    reason="empty_uids",
+                )
                 print(f"⚠️  No UIDs in bundle")
                 return False
             
@@ -1674,9 +2188,6 @@ class AuditorValidator:
                 print(f"      UID {uid} {label}: {pct:.2f}%")
             print(f"   Total: {sum(weights_floats) / total_weight * 100:.2f}%")
             
-            live_epoch_id = int(
-                epoch_id if submission_epoch_id is None else submission_epoch_id
-            )
             success = self._set_weights_until_epoch_end(
                 epoch_id=live_epoch_id,
                 subnet_epoch_index=self._subnet_index_for_workflow_epoch(
@@ -1687,6 +2198,16 @@ class AuditorValidator:
             )
             
             if success:
+                _audit_event(
+                    "submission_success",
+                    epoch=int(epoch_id),
+                    submission_epoch=live_epoch_id,
+                    netuid=int(self.config.netuid),
+                    uid=getattr(self, "uid", None),
+                    weights_hash=bundle.get("weights_hash"),
+                    bundle_hash=bundle.get("bundle_hash"),
+                    destination_count=len(uids),
+                )
                 print(f"✅ Weights submitted for epoch {epoch_id}")
                 self.last_submitted_epoch = live_epoch_id
                 self.last_authority_epoch = epoch_id
@@ -1727,10 +2248,37 @@ class AuditorValidator:
                 
                 return True
             else:
+                _audit_event(
+                    "submission_failed",
+                    level=logging.ERROR,
+                    epoch=int(epoch_id),
+                    submission_epoch=live_epoch_id,
+                    netuid=int(self.config.netuid),
+                    uid=getattr(self, "uid", None),
+                    weights_hash=bundle.get("weights_hash"),
+                    bundle_hash=bundle.get("bundle_hash"),
+                    reason="set_weights_not_accepted",
+                )
                 print(f"❌ Weight submission failed")
                 return False
                 
         except Exception as e:
+            _audit_event(
+                "submission_exception",
+                level=logging.ERROR,
+                epoch=int(epoch_id),
+                submission_epoch=submission_epoch_id,
+                netuid=int(self.config.netuid),
+                uid=getattr(self, "uid", None),
+                weights_hash=bundle.get("weights_hash")
+                if isinstance(bundle, dict)
+                else None,
+                bundle_hash=bundle.get("bundle_hash")
+                if isinstance(bundle, dict)
+                else None,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
             print(f"❌ Weight submission error: {e}")
             import traceback
             traceback.print_exc()
@@ -1747,6 +2295,14 @@ class AuditorValidator:
         print(f"🚀 AUDITOR VALIDATOR STARTING")
         print(f"{'='*60}")
         logger.info("Auditor validator starting")
+        _audit_event(
+            "run_loop_start",
+            netuid=int(self.config.netuid),
+            uid=getattr(self, "uid", None),
+            gateway_endpoint=getattr(self, "gateway_url", None),
+            archive_endpoint=getattr(self, "epoch_archive_endpoint", None),
+            submission_block=int(WEIGHT_SUBMISSION_BLOCK),
+        )
         last_metagraph_epoch_identity = None
         
         while not self.should_exit:
@@ -1766,6 +2322,21 @@ class AuditorValidator:
                 # Check if it's time to submit weights
                 if epoch_state.deadline_reached(WEIGHT_SUBMISSION_BLOCK):
                     if self.last_submitted_epoch != current_epoch:
+                        _audit_event(
+                            "submission_window_entered",
+                            epoch=int(current_epoch),
+                            subnet_epoch_index=getattr(
+                                epoch_state,
+                                "subnet_epoch_index",
+                                None,
+                            ),
+                            current_block=int(current_block),
+                            epoch_block=int(block_within_epoch),
+                            blocks_remaining=int(epoch_state.blocks_remaining),
+                            netuid=int(self.config.netuid),
+                            uid=getattr(self, "uid", None),
+                            last_submitted_epoch=self.last_submitted_epoch,
+                        )
                         print(f"\n\n{'='*60}")
                         print(f"📊 WEIGHT SUBMISSION TIME (Block {block_within_epoch})")
                         print(f"{'='*60}")
@@ -1793,6 +2364,30 @@ class AuditorValidator:
                                 authority_status = candidate_status
                                 break
                         if weights_data is None:
+                            _audit_event(
+                                "submission_window_authority_unavailable",
+                                level=logging.INFO
+                                if authority_status == "v2_absent"
+                                else logging.WARNING,
+                                epoch=int(current_epoch),
+                                subnet_epoch_index=getattr(
+                                    epoch_state,
+                                    "subnet_epoch_index",
+                                    None,
+                                ),
+                                current_block=int(current_block),
+                                epoch_block=int(block_within_epoch),
+                                blocks_remaining=int(
+                                    epoch_state.blocks_remaining
+                                ),
+                                netuid=int(self.config.netuid),
+                                uid=getattr(self, "uid", None),
+                                authority_status=authority_status,
+                                retry_delay_seconds=5
+                                if authority_status
+                                in {"v2_absent", "v2_unavailable"}
+                                else 30,
+                            )
                             # Verification is fail-closed: no fallback vector will be submitted.
                             if authority_status == "v2_absent":
                                 print("   ⏳ Weights not yet published. Waiting 5s...")
@@ -1807,6 +2402,29 @@ class AuditorValidator:
                                 else 30
                             )
                             continue
+                        _audit_event(
+                            "submission_window_authority_ready",
+                            epoch=int(current_epoch),
+                            authority_epoch=int(target_epoch),
+                            subnet_epoch_index=getattr(
+                                epoch_state,
+                                "subnet_epoch_index",
+                                None,
+                            ),
+                            current_block=int(current_block),
+                            epoch_block=int(block_within_epoch),
+                            blocks_remaining=int(epoch_state.blocks_remaining),
+                            netuid=int(self.config.netuid),
+                            uid=getattr(self, "uid", None),
+                            weights_hash=weights_data.get("weights_hash"),
+                            bundle_hash=weights_data.get("bundle_hash"),
+                            authority_stage=weights_data.get(
+                                "authority_stage"
+                            ),
+                            destination_count=len(
+                                weights_data.get("uids", [])
+                            ),
+                        )
                         print("✅ Auditor verification passed")
                         
                         # Save pending equivocation check for next epoch verification
@@ -1868,6 +2486,16 @@ class AuditorValidator:
                 self.consecutive_errors += 1
                 print(f"\n⚠️  Connection error ({self.consecutive_errors}/{self.max_consecutive_errors}): {type(e).__name__}")
                 logger.warning(f"Connection error: {e}")
+                _audit_event(
+                    "run_loop_connection_failure",
+                    level=logging.WARNING,
+                    netuid=int(self.config.netuid),
+                    uid=getattr(self, "uid", None),
+                    consecutive_errors=self.consecutive_errors,
+                    max_consecutive_errors=self.max_consecutive_errors,
+                    error_type=type(e).__name__,
+                    error=str(e),
+                )
                 
                 if self.consecutive_errors >= self.max_consecutive_errors:
                     print(f"   Too many consecutive errors - reconnecting subtensor...")
@@ -1883,6 +2511,15 @@ class AuditorValidator:
                 error_type = type(e).__name__
                 print(f"\n❌ Error in main loop ({error_type}): {e}")
                 logger.error(f"Main loop error: {e}")
+                _audit_event(
+                    "run_loop_failure",
+                    level=logging.ERROR,
+                    netuid=int(self.config.netuid),
+                    uid=getattr(self, "uid", None),
+                    consecutive_errors=self.consecutive_errors,
+                    error_type=error_type,
+                    error=str(e),
+                )
                 
                 # Check if it's a websocket-related error
                 error_str = str(e).lower()

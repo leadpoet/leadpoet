@@ -25,16 +25,20 @@ from typing import Dict, Tuple, Optional
 import threading
 import asyncio
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-from supabase import create_client
+from gateway.db.client import _create_sync_client
 
 # Supabase client for rate limit persistence
 _supabase_client = None
 
 def _get_supabase():
-    """Get or create Supabase client (lazy initialization)."""
+    """Get or create Supabase client (lazy initialization).
+
+    Cached singleton shared across threadpool workers — HTTP/1-pinned because
+    the default HTTP/2 HPACK encoder is not thread-safe.
+    """
     global _supabase_client
     if _supabase_client is None:
-        _supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        _supabase_client = _create_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     return _supabase_client
 
 # In-memory rate limit cache (fast lookups)

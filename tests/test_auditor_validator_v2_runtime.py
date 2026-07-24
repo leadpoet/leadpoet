@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import json
+import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +11,37 @@ from types import SimpleNamespace
 import pytest
 
 import neurons.auditor_validator as auditor_module
+
+
+def test_structured_auditor_event_redacts_credentials(caplog):
+    with caplog.at_level(logging.INFO, logger=auditor_module.__name__):
+        auditor_module._audit_event(
+            "fixture",
+            epoch=24124,
+            uid=155,
+            weights_hash="a" * 64,
+            hotkey="5PublicHotkey",
+            request_signature="do-not-log",
+            error=(
+                "GET https://gateway.example/weights?"
+                "signature=do-not-log&epoch=24124 "
+                "Authorization: Bearer do-not-log"
+            ),
+        )
+
+    record = next(
+        item.message
+        for item in caplog.records
+        if item.message.startswith("auditor_event ")
+    )
+    payload = json.loads(record.removeprefix("auditor_event "))
+    assert payload["event"] == "fixture"
+    assert payload["epoch"] == 24124
+    assert payload["uid"] == 155
+    assert payload["weights_hash"] == "a" * 64
+    assert payload["hotkey"] == "5PublicHotkey"
+    assert payload["request_signature"] == "[redacted]"
+    assert "do-not-log" not in record
 
 
 def test_auditor_cli_config_enables_sdk_argument_parsing(monkeypatch):
@@ -526,7 +559,7 @@ def test_stateful_bundle_epoch_mismatch_does_not_reconnect(monkeypatch):
         )
 
 
-def test_verifier_failure_emits_no_diagnostic_rows(monkeypatch, caplog):
+def test_verifier_failure_emits_only_safe_summary_diagnostics(monkeypatch, caplog):
     auditor = auditor_module.AuditorValidator.__new__(
         auditor_module.AuditorValidator
     )
@@ -535,16 +568,21 @@ def test_verifier_failure_emits_no_diagnostic_rows(monkeypatch, caplog):
     with caplog.at_level("DEBUG"):
         assert auditor.verify_attested_weights_v2({"authority": "fixture"}) is None
 
-    # A missing PCR0 cache is an operator misconfiguration and must be loud;
-    # verification failures still emit no per-receipt diagnostic rows.
+    # A missing PCR0 cache is an operator misconfiguration and must be loud,
+    # but it must not dump receipt documents or authentication material.
     assert any(
         "auditor_v2_pcr0_cache_missing" in record.message
         for record in caplog.records
     )
-    assert all(
-        "auditor_v2_pcr0_cache_missing" in record.message
+    structured = [
+        record.message
         for record in caplog.records
-    )
+        if record.message.startswith("auditor_event ")
+    ]
+    assert len(structured) == 1
+    assert "authority_cryptographic_verification_failure" in structured[0]
+    assert "receipt_graph" not in structured[0]
+    assert "signature" not in structured[0]
 
 
 def test_successful_auditor_verification_has_one_status_line(monkeypatch, capsys):

@@ -36,7 +36,7 @@ from gateway.utils.epoch import (
 from gateway.utils.merkle import compute_merkle_root
 from gateway.utils.linkedin import normalize_linkedin_url, compute_linkedin_combo_hash
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BUILD_ID, MAX_LEADS_PER_EPOCH
-from supabase import create_client
+from gateway.db.client import _create_sync_client
 
 # Import leads cache for prefetching
 from gateway.utils.leads_cache import (
@@ -56,13 +56,13 @@ from gateway.db.company_info import (
 # Role normalization for approved leads
 from gateway.utils.role_normalize import normalize_role_format
 
-# Supabase client
-supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+# Supabase client — HTTP/1-pinned (default HTTP/2 HPACK encoder is not thread-safe)
+supabase = _create_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 # DEDICATED Supabase client for consensus operations
 # This ensures consensus has its own httpx connection pool, isolated from miner traffic
 # Both clients use the same Supabase project - separation is at Python httpx level only
-consensus_supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+consensus_supabase = _create_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 _DURABLE_EPOCH_EVENT_TYPES = {

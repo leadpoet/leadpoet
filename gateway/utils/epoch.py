@@ -139,13 +139,13 @@ def _read_cutover_state_from_db_sync(
                 SUPABASE_ANON_KEY as PUBLIC_SUPABASE_ANON_KEY,
                 SUPABASE_URL as PUBLIC_SUPABASE_URL,
             )
-            from supabase import create_client
+            from gateway.db.client import _create_sync_client
 
             if not PUBLIC_SUPABASE_URL or not PUBLIC_SUPABASE_ANON_KEY:
                 raise SubnetEpochError(
                     "durable epoch namespace public authority is unavailable"
                 )
-            client = create_client(
+            client = _create_sync_client(
                 PUBLIC_SUPABASE_URL,
                 PUBLIC_SUPABASE_ANON_KEY,
             )
@@ -360,9 +360,9 @@ def _validate_cutover_authority_sync(
         _validated_cutover_authority_at = time.monotonic()
         return
 
-    from supabase import create_client
+    from gateway.db.client import _create_sync_client
 
-    client = create_client(supabase_url, service_role_key)
+    client = _create_sync_client(supabase_url, service_role_key)
     result = (
         client.table("research_lab_stateful_subnet_epoch_cutovers_v1")
         .select("mapping_hash,manifest_doc")

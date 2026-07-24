@@ -35,7 +35,7 @@ def test_missing_service_credentials_use_fixed_public_rpc(monkeypatch):
     from Leadpoet.utils import cloud_db
     from gateway import config
     from gateway.utils import epoch
-    import supabase
+    from gateway.db import client as gateway_db_client
 
     cutover = _cutover()
     observed = {}
@@ -58,7 +58,11 @@ def test_missing_service_credentials_use_fixed_public_rpc(monkeypatch):
     monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     monkeypatch.setenv("BITTENSOR_NETWORK", "finney")
     monkeypatch.setenv("BITTENSOR_NETUID", "71")
-    monkeypatch.setattr(supabase, "create_client", create_client)
+    monkeypatch.setattr(
+        gateway_db_client,
+        "create_http1_sync_client",
+        create_client,
+    )
 
     assert epoch._read_cutover_state_from_db_sync() == _active_state(cutover)
     assert observed == {
@@ -70,7 +74,7 @@ def test_missing_service_credentials_use_fixed_public_rpc(monkeypatch):
 def test_public_lifecycle_rpc_outage_fails_closed(monkeypatch):
     from gateway import config
     from gateway.utils import epoch
-    import supabase
+    from gateway.db import client as gateway_db_client
 
     class Client:
         def rpc(self, _name):
@@ -85,7 +89,11 @@ def test_public_lifecycle_rpc_outage_fails_closed(monkeypatch):
     monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     monkeypatch.setenv("BITTENSOR_NETWORK", "finney")
     monkeypatch.setenv("BITTENSOR_NETUID", "71")
-    monkeypatch.setattr(supabase, "create_client", lambda _url, _key: Client())
+    monkeypatch.setattr(
+        gateway_db_client,
+        "create_http1_sync_client",
+        lambda _url, _key: Client(),
+    )
 
     with pytest.raises(
         SubnetEpochError,

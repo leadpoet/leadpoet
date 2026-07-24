@@ -63,6 +63,31 @@ def test_sync_http_client_closes_when_supabase_creation_fails(monkeypatch):
     assert _FakeHttpClient.instances[0].closed is True
 
 
+def test_http1_migration_factory_preserves_legacy_timeout(monkeypatch):
+    expected = SimpleNamespace()
+
+    _FakeHttpClient.instances.clear()
+    monkeypatch.setattr(db_client.httpx, "Client", _FakeHttpClient)
+    monkeypatch.setattr(
+        db_client,
+        "create_client",
+        lambda _url, _key, *, options: expected,
+    )
+
+    assert (
+        db_client.create_http1_sync_client(
+            "https://example.supabase.co",
+            "key",
+        )
+        is expected
+    )
+    timeout = _FakeHttpClient.instances[0].kwargs["timeout"]
+    assert timeout.read == 120.0
+    assert timeout.write == 120.0
+    assert timeout.connect == 120.0
+    assert timeout.pool == 120.0
+
+
 def test_shared_sync_client_handles_100_concurrent_postgrest_reads():
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"

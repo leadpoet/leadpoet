@@ -37,7 +37,8 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-from supabase import create_client, Client
+from gateway.db.client import _create_sync_client
+from supabase import Client
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,9 @@ if not INTERNAL_SECRET and not ALLOW_NO_AUTH:
         "fail closed (503) until set, or set LEADPOET_ALLOW_NO_AUTH=true for dev."
     )
 
-_sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+# Shared across threadpool workers — must stay HTTP/1-pinned; the default
+# HTTP/2 HPACK encoder is not thread-safe.
+_sb: Client = _create_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 router = APIRouter(prefix="/fulfillment", tags=["Role Translation"])
 

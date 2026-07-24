@@ -65,7 +65,12 @@ def _apply_sync_timeout(client: Client) -> Client:
     return client
 
 
-def _create_sync_client(supabase_url: str, supabase_key: str) -> Client:
+def _create_sync_client(
+    supabase_url: str,
+    supabase_key: str,
+    *,
+    timeout_seconds: Optional[float] = None,
+) -> Client:
     """Create a shared sync client without mutable HTTP/2 compression state.
 
     The sync client is intentionally shared by gateway thread-pool workers.
@@ -75,10 +80,15 @@ def _create_sync_client(supabase_url: str, supabase_key: str) -> Client:
     pooling and parallel requests without sharing that compression table.
     """
 
+    effective_timeout = (
+        float(_SYNC_HTTP_TIMEOUT_SECONDS)
+        if timeout_seconds is None
+        else float(timeout_seconds)
+    )
     http_client = httpx.Client(
         http1=True,
         http2=False,
-        timeout=httpx.Timeout(float(_SYNC_HTTP_TIMEOUT_SECONDS)),
+        timeout=httpx.Timeout(effective_timeout),
         follow_redirects=True,
     )
     try:
@@ -90,6 +100,22 @@ def _create_sync_client(supabase_url: str, supabase_key: str) -> Client:
     except BaseException:
         http_client.close()
         raise
+
+
+def create_http1_sync_client(supabase_url: str, supabase_key: str) -> Client:
+    """Create an HTTP/1-pinned client while preserving Supabase's timeout.
+
+    Legacy call sites migrated away from bare ``supabase.create_client`` use
+    this factory so the transport race is removed without silently changing
+    their existing 120-second request deadline. Canonical gateway DB clients
+    continue to use the separately configured bounded timeout above.
+    """
+
+    return _create_sync_client(
+        supabase_url,
+        supabase_key,
+        timeout_seconds=float(SyncClientOptions().postgrest_client_timeout),
+    )
 
 
 # Errors that mean the pooled connection died under us (Supabase's edge sends

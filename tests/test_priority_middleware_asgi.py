@@ -1,12 +1,10 @@
-"""PriorityMiddleware is pure ASGI and cannot hit the anyio task-group race.
+"""PriorityMiddleware is pure ASGI and preserves downstream failures.
 
 Starlette ``BaseHTTPMiddleware`` bridges the app through an anyio task group;
-under concurrency, or when the endpoint raises / the client disconnects, that
-group's ``__aexit__`` mutates its task deque during iteration and raises
-``RuntimeError: deque mutated during iteration``, turning a valid response
-into an intermittent 5xx. On the weight path that dropped whole epochs. The
-pure-ASGI implementation awaits the app directly, so the wrapper — and the
-race — are gone, while the concurrency-pool accounting is unchanged.
+the pure-ASGI implementation awaits the app directly so endpoint exceptions
+remain intact and concurrency-pool accounting is always released. The
+publication-path HPACK concurrency regression is covered separately by
+``test_gateway_db_client_transport.py``.
 """
 
 from __future__ import annotations
@@ -72,9 +70,7 @@ def test_http_request_passes_through_and_releases_slot():
 
 
 def test_downstream_exception_releases_slot_and_propagates():
-    # This is the exact scenario the old BaseHTTPMiddleware masked as
-    # "deque mutated during iteration": the endpoint raises. Pure ASGI must
-    # propagate the real error AND release the slot in finally.
+    # Pure ASGI must propagate the real endpoint error and release the slot.
     async def app(scope, receive, send):
         raise RuntimeError("endpoint failed")
 

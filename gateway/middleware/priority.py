@@ -153,15 +153,12 @@ class PriorityMiddleware:
 
     Implemented as raw ASGI (not Starlette ``BaseHTTPMiddleware``) on purpose.
     ``BaseHTTPMiddleware`` bridges the downstream app through an anyio task
-    group and memory-object streams; under concurrent load, or when the
-    endpoint raises / the client disconnects mid-request, that task group's
-    ``__aexit__`` iterates its internal task deque while it is mutated,
-    surfacing as ``RuntimeError: deque mutated during iteration`` and turning
-    a valid response into an intermittent 5xx. On the weight path that
-    intermittent 5xx burns the validator's tight submission window and drops
-    the epoch. Awaiting ``self.app`` directly keeps the concurrency-pool
-    accounting identical while removing the task-group wrapper entirely, so
-    the race cannot occur.
+    group and memory-object streams, which can obscure the original exception
+    when an endpoint fails or a client disconnects. Awaiting ``self.app``
+    directly preserves the original failure and keeps pool accounting local to
+    this middleware. The independent shared-HTTP/2 fix in ``gateway.db.client``
+    prevents the HPACK ``deque mutated during iteration`` failure observed in
+    weight publication.
     """
 
     def __init__(self, app: ASGIApp, max_concurrent_miners: int | None = None):

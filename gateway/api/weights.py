@@ -1436,7 +1436,7 @@ async def submit_weights_v2(submission: WeightSubmissionV2) -> WeightSubmissionV
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error(
+        logger.exception(
             "authoritative_weight_submission_v2_failed epoch=%s type=%s error=%s",
             verified["epoch_id"],
             type(exc).__name__,

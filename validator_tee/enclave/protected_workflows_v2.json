@@ -182,7 +182,7 @@
       "symbol": "Validator._publish_and_set_weights"
     },
     {
-      "ast_sha256": "sha256:a0138e3e08ba90e3fa5154416661fc8702299b806cd725ce845c8cfec96030b9",
+      "ast_sha256": "sha256:9c82d5bc59940f782e4d9d9794cd541deb4e1efeb51000c8018118bd8bb045f3",
       "path": "neurons/validator.py",
       "symbol": "Validator._recover_weight_publication_journal_v2"
     },
@@ -217,7 +217,7 @@
       "symbol": "EnclaveChainRpcTransportV2.call"
     },
     {
-      "ast_sha256": "sha256:4060c0c18884356c913d7d7a8762322f74cb54eede7ec1c71830af98e771f8b2",
+      "ast_sha256": "sha256:1d2d48d82ff278f99ea31c55731750e812b2367b94b73b8fcc3af70946fef78f",
       "path": "validator_tee/enclave/chain_source_v2.py",
       "symbol": "ValidatorChainSourceV2.find_finalized_extrinsic_inclusion"
     },
@@ -232,7 +232,7 @@
       "symbol": "ValidatorChainSourceV2.read_finalized_snapshot"
     },
     {
-      "ast_sha256": "sha256:ac2d3e3263086240772d11989f11528a77c84ac5ce6734eaccf5dc5abda15be8",
+      "ast_sha256": "sha256:a59b3044db10aff478293e05e90ac765b5533cee63dde48811bf28e480059f02",
       "path": "validator_tee/enclave/hotkey_authority_v2.py",
       "symbol": "ValidatorHotkeyAuthorityV2.confirm_weight_publication"
     },
@@ -302,7 +302,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:ea8303bae2efe7d022fc0d4cd141c521308730ad57d1f98608b9223470a2c01e",
-  "protected_source_commit": "04601a227118805d027dcc7b7031dae439a4baa5",
+  "manifest_hash": "sha256:2499cb23b80cab55b2499c35f873747bdf292f89e88f1421ba9bd73b0e574687",
+  "protected_source_commit": "8ff00754c1a3ac6d0f3dda1209c1ad59a142ed25",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

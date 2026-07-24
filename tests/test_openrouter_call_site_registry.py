@@ -39,6 +39,12 @@ CALL_SITE_REGISTRY = {
     # claims (2026-07-15): same scoring-pipeline capture posture as the other
     # qualification/scoring judges.
     "qualification/scoring/lead_scorer.py": "captured",
+    # Source-grounded semantic gates ported from the site verifier
+    # (2026-07-23): DISABLED by default (VERIFIER_SEMANTIC_GATES_MODE), so no
+    # production OpenRouter traffic exists today. Classified uncaptured by
+    # decision until the observability-capture reconciliation follow-up wires
+    # it through the shared telemetry layer alongside enabling it.
+    "leadpoet_verifier/semantic_gates.py": "uncaptured_by_decision",
     "qualification/validator/hardcoding_detector.py": "captured",
     "validator_models/stage5_verification.py": "captured",
     "gateway/qualification/utils/helpers.py": "captured",

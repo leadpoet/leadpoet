@@ -84,6 +84,10 @@ def test_execution_config_commits_production_defaults_when_env_omits_them():
         behavior["RESEARCH_LAB_DEV_SNAPSHOT_URI"]
         == DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI
     )
+    assert behavior["RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE"] == "shadow"
+    assert behavior["VERIFIER_SEMANTIC_GATES_MODE"] == "disabled"
+    assert behavior["VERIFIER_SEMANTIC_GATE_MODELS"] == ""
+    assert behavior["RESEARCH_LAB_INTENT_CORROBORATION_RESCUE"] == "false"
 
 
 def test_dev_eval_runner_is_enabled_when_override_is_absent(monkeypatch):
@@ -107,6 +111,33 @@ def test_behavior_environment_is_exact_and_applied(monkeypatch):
 
     assert os.environ["RESEARCH_LAB_TREE_MAX_NODES"] == "5"
     assert "RESEARCH_LAB_LOOP_STAGE_ERROR_CONTAINMENT" not in os.environ
+
+
+def test_verifier_behavior_environment_is_measured_and_applied(monkeypatch):
+    document = build_research_lab_execution_config(
+        environment=epoch_test_environment(
+            RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE="enforce",
+            VERIFIER_SEMANTIC_GATES_MODE="shadow",
+            VERIFIER_SEMANTIC_GATE_MODELS="openai/gpt-4.1-mini",
+            RESEARCH_LAB_INTENT_CORROBORATION_RESCUE="true",
+        )
+    )
+    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "disabled")
+    monkeypatch.setenv("VERIFIER_SEMANTIC_GATES_MODE", "disabled")
+    monkeypatch.setenv("VERIFIER_SEMANTIC_GATE_MODELS", "")
+    monkeypatch.setenv("RESEARCH_LAB_INTENT_CORROBORATION_RESCUE", "false")
+
+    apply_behavior_environment(document)
+
+    import os
+
+    assert os.environ["RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE"] == "enforce"
+    assert os.environ["VERIFIER_SEMANTIC_GATES_MODE"] == "shadow"
+    assert (
+        os.environ["VERIFIER_SEMANTIC_GATE_MODELS"]
+        == "openai/gpt-4.1-mini"
+    )
+    assert os.environ["RESEARCH_LAB_INTENT_CORROBORATION_RESCUE"] == "true"
 
 
 def test_execution_config_commits_and_applies_hosted_run_canary(monkeypatch):

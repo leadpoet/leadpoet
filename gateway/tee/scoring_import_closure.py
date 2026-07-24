@@ -40,6 +40,8 @@ MEASURED_DATA_PATHS = (
     "gateway/utils/english_word_cities.txt",
     "gateway/utils/geo_lookup_fast.json",
     "gateway/utils/industry_equivalence.json",
+    "leadpoet_verifier/identity/public_suffix_list.dat",
+    "leadpoet_verifier/leadpoet_industry_taxonomy.json",
     "schemas/evidence_bundle.schema.json",
     "schemas/execution_trace.schema.json",
     "schemas/research_evaluation_score_bundle.schema.json",

@@ -1,0 +1,3005 @@
+{
+  "version": 1,
+  "source": "gateway/utils/industry_taxonomy.py",
+  "parent_industries": [
+    "Administrative Services",
+    "Advertising",
+    "Agriculture and Farming",
+    "Apps",
+    "Artificial Intelligence",
+    "Biotechnology",
+    "Blockchain and Cryptocurrency",
+    "Clothing and Apparel",
+    "Collaboration",
+    "Commerce and Shopping",
+    "Community and Lifestyle",
+    "Consumer Electronics",
+    "Consumer Goods",
+    "Content and Publishing",
+    "Data and Analytics",
+    "Design",
+    "Education",
+    "Energy",
+    "Events",
+    "Financial Services",
+    "Food and Beverage",
+    "Gaming",
+    "Government and Military",
+    "Hardware",
+    "Health Care",
+    "Information Technology",
+    "Internet Services",
+    "Lending and Investments",
+    "Manufacturing",
+    "Media and Entertainment",
+    "Messaging and Telecommunications",
+    "Mobile",
+    "Music and Audio",
+    "Natural Resources",
+    "Navigation and Mapping",
+    "Payments",
+    "Physical Infrastructure",
+    "Platforms",
+    "Privacy and Security",
+    "Professional Services",
+    "Real Estate",
+    "Sales and Marketing",
+    "Science and Engineering",
+    "Social Impact",
+    "Software",
+    "Sports",
+    "Sustainability",
+    "Transportation",
+    "Travel and Tourism",
+    "Video"
+  ],
+  "subindustry_parents": {
+    "3D Printing": [
+      "Manufacturing"
+    ],
+    "3D Technology": [
+      "Hardware",
+      "Software"
+    ],
+    "3PL": [
+      "Transportation"
+    ],
+    "A/B Testing": [
+      "Data and Analytics"
+    ],
+    "ADAS Calibration": [
+      "Transportation"
+    ],
+    "AEC": [
+      "Real Estate",
+      "Science and Engineering"
+    ],
+    "AI Agents": [
+      "Artificial Intelligence",
+      "Software"
+    ],
+    "AI Infrastructure": [
+      "Artificial Intelligence",
+      "Hardware",
+      "Software"
+    ],
+    "AI Safety": [
+      "Artificial Intelligence",
+      "Privacy and Security"
+    ],
+    "Account-Based Marketing": [
+      "Sales and Marketing",
+      "Software"
+    ],
+    "Accounting": [
+      "Financial Services",
+      "Professional Services"
+    ],
+    "Ad Exchange": [
+      "Advertising"
+    ],
+    "Ad Network": [
+      "Advertising"
+    ],
+    "Ad Retargeting": [
+      "Advertising"
+    ],
+    "Ad Server": [
+      "Advertising"
+    ],
+    "Ad Targeting": [
+      "Advertising"
+    ],
+    "AdTech": [
+      "Advertising",
+      "Software"
+    ],
+    "Advanced Materials": [
+      "Manufacturing",
+      "Science and Engineering"
+    ],
+    "Adventure Travel": [
+      "Travel and Tourism"
+    ],
+    "Advertising": [
+      "Advertising",
+      "Sales and Marketing"
+    ],
+    "Advertising Platforms": [
+      "Advertising"
+    ],
+    "Advice": [
+      "Media and Entertainment"
+    ],
+    "Aerospace": [
+      "Science and Engineering"
+    ],
+    "Aesthetics": [
+      "Health Care"
+    ],
+    "Affiliate Marketing": [
+      "Advertising",
+      "Sales and Marketing"
+    ],
+    "AgTech": [
+      "Agriculture and Farming"
+    ],
+    "Agriculture": [
+      "Agriculture and Farming"
+    ],
+    "Air Transportation": [
+      "Transportation"
+    ],
+    "Alternative Medicine": [
+      "Health Care"
+    ],
+    "Alumni": [
+      "Education"
+    ],
+    "American Football": [
+      "Sports"
+    ],
+    "Amusement Park and Arcade": [
+      "Travel and Tourism"
+    ],
+    "Analytics": [
+      "Data and Analytics"
+    ],
+    "Android": [
+      "Mobile",
+      "Platforms",
+      "Software"
+    ],
+    "Angel Investment": [
+      "Financial Services",
+      "Lending and Investments"
+    ],
+    "Animal Feed": [
+      "Agriculture and Farming"
+    ],
+    "Animation": [
+      "Media and Entertainment",
+      "Video"
+    ],
+    "App Discovery": [
+      "Apps",
+      "Sales and Marketing",
+      "Software"
+    ],
+    "App Marketing": [
+      "Sales and Marketing"
+    ],
+    "Applicant Tracking System": [
+      "Software"
+    ],
+    "Application Performance Management": [
+      "Data and Analytics",
+      "Software"
+    ],
+    "Application Specific Integrated Circuit (ASIC)": [
+      "Hardware"
+    ],
+    "Apps": [
+      "Apps",
+      "Software"
+    ],
+    "Aquaculture": [
+      "Agriculture and Farming"
+    ],
+    "Architecture": [
+      "Real Estate"
+    ],
+    "Archiving Service": [
+      "Administrative Services"
+    ],
+    "Art": [
+      "Media and Entertainment"
+    ],
+    "Artificial Intelligence": [
+      "Artificial Intelligence",
+      "Data and Analytics",
+      "Science and Engineering",
+      "Software"
+    ],
+    "Asset Management": [
+      "Financial Services"
+    ],
+    "Assisted Living": [
+      "Health Care"
+    ],
+    "Assistive Technology": [
+      "Health Care"
+    ],
+    "Auctions": [
+      "Commerce and Shopping"
+    ],
+    "Audio": [
+      "Media and Entertainment",
+      "Music and Audio"
+    ],
+    "Audiobooks": [
+      "Media and Entertainment",
+      "Music and Audio"
+    ],
+    "Augmented Reality": [
+      "Hardware",
+      "Software"
+    ],
+    "Auto Body Shop": [
+      "Transportation"
+    ],
+    "Auto Insurance": [
+      "Financial Services"
+    ],
+    "Automotive": [
+      "Transportation"
+    ],
+    "Autonomous Vehicles": [
+      "Transportation"
+    ],
+    "B2B": [
+      "Sales and Marketing"
+    ],
+    "B2B Payments": [
+      "Financial Services",
+      "Payments"
+    ],
+    "B2C": [
+      "Sales and Marketing"
+    ],
+    "BIM": [
+      "Real Estate",
+      "Science and Engineering",
+      "Software"
+    ],
+    "BNPL": [
+      "Financial Services",
+      "Payments"
+    ],
+    "Baby": [
+      "Community and Lifestyle"
+    ],
+    "Background Check": [
+      "Professional Services",
+      "Software"
+    ],
+    "Bakery": [
+      "Food and Beverage"
+    ],
+    "Banking": [
+      "Financial Services",
+      "Lending and Investments"
+    ],
+    "Baseball": [
+      "Sports"
+    ],
+    "Basketball": [
+      "Sports"
+    ],
+    "Battery": [
+      "Energy"
+    ],
+    "Battery Storage": [
+      "Energy",
+      "Sustainability"
+    ],
+    "Beauty": [
+      "Consumer Goods"
+    ],
+    "Behavioral Health": [
+      "Health Care"
+    ],
+    "Big Data": [
+      "Data and Analytics"
+    ],
+    "Billing": [
+      "Payments",
+      "Software"
+    ],
+    "Biofuel": [
+      "Energy",
+      "Natural Resources",
+      "Sustainability"
+    ],
+    "Bioinformatics": [
+      "Biotechnology",
+      "Data and Analytics",
+      "Science and Engineering"
+    ],
+    "Biomass Energy": [
+      "Energy",
+      "Natural Resources",
+      "Sustainability"
+    ],
+    "Biometrics": [
+      "Biotechnology",
+      "Data and Analytics",
+      "Science and Engineering"
+    ],
+    "Biopharma": [
+      "Biotechnology",
+      "Health Care",
+      "Science and Engineering"
+    ],
+    "Biotechnology": [
+      "Biotechnology",
+      "Science and Engineering"
+    ],
+    "Bitcoin": [
+      "Financial Services",
+      "Payments",
+      "Software"
+    ],
+    "Blockchain": [
+      "Blockchain and Cryptocurrency"
+    ],
+    "Blogging Platforms": [
+      "Content and Publishing",
+      "Media and Entertainment"
+    ],
+    "Boating": [
+      "Sports"
+    ],
+    "Body Care": [
+      "Consumer Goods"
+    ],
+    "Brand Marketing": [
+      "Sales and Marketing"
+    ],
+    "Brewing": [
+      "Food and Beverage"
+    ],
+    "Broadcasting": [
+      "Media and Entertainment",
+      "Video"
+    ],
+    "Browser Extensions": [
+      "Software"
+    ],
+    "Bug Bounty": [
+      "Privacy and Security"
+    ],
+    "Building Maintenance": [
+      "Real Estate"
+    ],
+    "Building Material": [
+      "Manufacturing",
+      "Real Estate"
+    ],
+    "Business Development": [
+      "Professional Services"
+    ],
+    "Business Information Systems": [
+      "Information Technology"
+    ],
+    "Business Intelligence": [
+      "Data and Analytics"
+    ],
+    "Business Travel": [
+      "Travel and Tourism"
+    ],
+    "CAD": [
+      "Design",
+      "Software"
+    ],
+    "CI/CD": [
+      "Information Technology",
+      "Software"
+    ],
+    "CMS": [
+      "Information Technology",
+      "Software"
+    ],
+    "CRM": [
+      "Information Technology",
+      "Sales and Marketing",
+      "Software"
+    ],
+    "Call Center": [
+      "Administrative Services"
+    ],
+    "Cannabis": [
+      "Community and Lifestyle",
+      "Food and Beverage",
+      "Health Care"
+    ],
+    "Car Sharing": [
+      "Transportation"
+    ],
+    "Carbon Markets": [
+      "Financial Services",
+      "Sustainability"
+    ],
+    "Carbon Removal": [
+      "Science and Engineering",
+      "Sustainability"
+    ],
+    "Card Issuing": [
+      "Financial Services",
+      "Payments"
+    ],
+    "Career Planning": [
+      "Professional Services"
+    ],
+    "Cargo Insurance": [
+      "Financial Services"
+    ],
+    "Casino": [
+      "Travel and Tourism"
+    ],
+    "Casual Games": [
+      "Gaming"
+    ],
+    "Catering": [
+      "Food and Beverage"
+    ],
+    "Cause Marketing": [
+      "Sales and Marketing"
+    ],
+    "Celebrity": [
+      "Media and Entertainment"
+    ],
+    "Charitable Foundation": [
+      "Lending and Investments",
+      "Social Impact"
+    ],
+    "Charity": [
+      "Social Impact"
+    ],
+    "Charter Schools": [
+      "Education"
+    ],
+    "Chemical": [
+      "Science and Engineering"
+    ],
+    "Chemical Engineering": [
+      "Science and Engineering"
+    ],
+    "Child Care": [
+      "Health Care"
+    ],
+    "Children": [
+      "Community and Lifestyle"
+    ],
+    "CivicTech": [
+      "Government and Military",
+      "Information Technology"
+    ],
+    "Civil Engineering": [
+      "Science and Engineering"
+    ],
+    "Classifieds": [
+      "Commerce and Shopping"
+    ],
+    "Clean Energy": [
+      "Energy",
+      "Sustainability"
+    ],
+    "CleanTech": [
+      "Sustainability"
+    ],
+    "Climate Tech": [
+      "Science and Engineering",
+      "Sustainability"
+    ],
+    "Clinical Trials": [
+      "Health Care"
+    ],
+    "Cloud Computing": [
+      "Information Technology",
+      "Internet Services",
+      "Software"
+    ],
+    "Cloud Data Services": [
+      "Information Technology",
+      "Internet Services"
+    ],
+    "Cloud Infrastructure": [
+      "Hardware",
+      "Internet Services"
+    ],
+    "Cloud Management": [
+      "Information Technology",
+      "Internet Services",
+      "Software"
+    ],
+    "Cloud Security": [
+      "Information Technology",
+      "Privacy and Security"
+    ],
+    "Cloud Security Posture Management": [
+      "Privacy and Security",
+      "Software"
+    ],
+    "Cloud Storage": [
+      "Internet Services"
+    ],
+    "Coffee": [
+      "Food and Beverage"
+    ],
+    "Cold Chain Logistics": [
+      "Transportation"
+    ],
+    "Collaboration": [
+      "Collaboration"
+    ],
+    "Collaborative Consumption": [
+      "Collaboration"
+    ],
+    "Collectibles": [
+      "Commerce and Shopping"
+    ],
+    "Collection Agency": [
+      "Administrative Services",
+      "Financial Services"
+    ],
+    "College Recruiting": [
+      "Administrative Services",
+      "Education"
+    ],
+    "Collision Repair": [
+      "Transportation"
+    ],
+    "Comics": [
+      "Consumer Goods"
+    ],
+    "Commercial Auto Insurance": [
+      "Financial Services"
+    ],
+    "Commercial Insurance": [
+      "Financial Services"
+    ],
+    "Commercial Lending": [
+      "Financial Services",
+      "Lending and Investments"
+    ],
+    "Commercial Real Estate": [
+      "Real Estate"
+    ],
+    "Communication Hardware": [
+      "Hardware"
+    ],
+    "Communications Infrastructure": [
+      "Hardware"
+    ],
+    "Communities": [
+      "Community and Lifestyle"
+    ],
+    "Compensation Management": [
+      "Software"
+    ],
+    "Compliance": [
+      "Professional Services"
+    ],
+    "Computer": [
+      "Consumer Electronics",
+      "Hardware"
+    ],
+    "Computer Vision": [
+      "Hardware",
+      "Software"
+    ],
+    "Concerts": [
+      "Events",
+      "Media and Entertainment"
+    ],
+    "Confectionery": [
+      "Food and Beverage"
+    ],
+    "Console Games": [
+      "Gaming"
+    ],
+    "Construction": [
+      "Real Estate"
+    ],
+    "Consulting": [
+      "Professional Services"
+    ],
+    "Consumer Applications": [
+      "Apps",
+      "Software"
+    ],
+    "Consumer Electronics": [
+      "Consumer Electronics",
+      "Hardware"
+    ],
+    "Consumer Goods": [
+      "Consumer Goods"
+    ],
+    "Consumer Lending": [
+      "Financial Services",
+      "Lending and Investments"
+    ],
+    "Consumer Research": [
+      "Data and Analytics",
+      "Design"
+    ],
+    "Consumer Reviews": [
+      "Commerce and Shopping"
+    ],
+    "Consumer Software": [
+      "Software"
+    ],
+    "Contact Management": [
+      "Information Technology",
+      "Software"
+    ],
+    "Container Orchestration": [
+      "Information Technology",
+      "Software"
+    ],
+    "Content": [
+      "Media and Entertainment"
+    ],
+    "Content Creators": [
+      "Media and Entertainment"
+    ],
+    "Content Delivery Network": [
+      "Content and Publishing"
+    ],
+    "Content Discovery": [
+      "Content and Publishing",
+      "Media and Entertainment"
+    ],
+    "Content Marketing": [
+      "Sales and Marketing"
+    ],
+    "Content Syndication": [
+      "Content and Publishing",
+      "Media and Entertainment"
+    ],
+    "Contests": [
+      "Gaming"
+    ],
+    "Continuing Education": [
+      "Education"
+    ],
+    "Conversion Rate Optimization": [
+      "Sales and Marketing"
+    ],
+    "Cooking": [
+      "Food and Beverage"
+    ],
+    "Corporate Training": [
+      "Education"
+    ],
+    "Corrections Facilities": [
+      "Privacy and Security"
+    ],
+    "Cosmetic Surgery": [
+      "Health Care"
+    ],
+    "Cosmetics": [
+      "Consumer Goods"
+    ],
+    "Coupons": [
+      "Commerce and Shopping"
+    ],
+    "Courier Service": [
+      "Administrative Services",
+      "Transportation"
+    ],
+    "Coworking": [
+      "Real Estate"
+    ],
+    "Craft Beer": [
+      "Food and Beverage"
+    ],
+    "Creative Agency": [
+      "Content and Publishing",
+      "Media and Entertainment"
+    ],
+    "Creator Economy": [
+      "Community and Lifestyle",
+      "Media and Entertainment",
+      "Sales and Marketing",
+      "Software"
+    ],
+    "Credit": [
+      "Financial Services",
+      "Lending and Investments"
+    ],
+    "Credit Bureau": [
+      "Financial Services"
+    ],
+    "Credit Cards": [
+      "Financial Services",
+      "Lending and Investments",
+      "Payments"
+    ],
+    "Cricket": [
+      "Sports"
+    ],
+    "Crowdfunding": [
+      "Financial Services"
+    ],
+    "Crowdsourcing": [
+      "Collaboration"
+    ],
+    "Cryptocurrency": [
+      "Financial Services",
+      "Payments",
+      "Software"
+    ],
+    "Customer Data Platform": [
+      "Data and Analytics",
+      "Sales and Marketing",
+      "Software"
+    ],
+    "Customer Service": [
+      "Professional Services"
+    ],
+    "Cyber Security": [
+      "Information Technology",
+      "Privacy and Security"
+    ],
+    "Cycling": [
+      "Sports"
+    ],
+    "DAO": [
+      "Blockchain and Cryptocurrency"
+    ],
+    "DEX": [
+      "Blockchain and Cryptocurrency",
+      "Financial Services"
+    ],
+    "DIY": [
+      "Consumer Goods"
+    ],
+    "DRM": [
+      "Content and Publishing",
+      "Media and Entertainment",
+      "Privacy and Security"
+    ],
+    "DSP": [
+      "Hardware"
+    ],
+    "Darknet": [
+      "Internet Services"
+    ],
+    "Data Catalog": [
+      "Data and Analytics",
+      "Software"
+    ],
+    "Data Center": [
+      "Hardware",
+      "Information Technology"
+    ],
+    "Data Center Automation": [
+      "Hardware",
+      "Information Technology",
+      "Software"
+    ],
+    "Data Engineering": [
+      "Data and Analytics",
+      "Software"
+    ],
+    "Data Integration": [
+      "Data and Analytics",
+      "Information Technology",
+      "Software"
+    ],
+    "Data Lake": [
+      "Data and Analytics",
+      "Software"
+    ],
+    "Data Mining": [
+      "Data and Analytics",
+      "Information Technology"
+    ],
+    "Data Observability": [
+      "Data and Analytics",
+      "Software"
+    ],
+    "Data Pipelines": [
+      "Data and Analytics",
+      "Software"
+    ],
+    "Data Storage": [
+      "Hardware",
+      "Software"
+    ],
+    "Data Visualization": [
+      "Data and Analytics",
+      "Design",
+      "Information Technology",
+      "Software"
+    ],
+    "Data Warehouse": [
+      "Data and Analytics",
+      "Software"
+    ],
+    "Database": [
+      "Data and Analytics",
+      "Software"
+    ],
+    "Dating": [
+      "Community and Lifestyle"
+    ],
+    "DeFi": [
+      "Blockchain and Cryptocurrency",
+      "Financial Services"
+    ],
+    "Debit Cards": [
+      "Financial Services",
+      "Payments"
+    ],
+    "Delivery": [
+      "Administrative Services",
+      "Transportation"
+    ],
+    "Dental": [
+      "Health Care"
+    ],
+    "Dermatology": [
+      "Health Care"
+    ],
+    "Desktop Apps": [
+      "Software"
+    ],
+    "DevOps": [
+      "Information Technology",
+      "Software"
+    ],
+    "Developer APIs": [
+      "Software"
+    ],
+    "Developer Platform": [
+      "Software"
+    ],
+    "Developer Tools": [
+      "Software"
+    ],
+    "Diabetes": [
+      "Health Care"
+    ],
+    "Dietary Supplements": [
+      "Food and Beverage",
+      "Health Care"
+    ],
+    "Digital Entertainment": [
+      "Media and Entertainment"
+    ],
+    "Digital Marketing": [
+      "Sales and Marketing"
+    ],
+    "Digital Media": [
+      "Media and Entertainment"
+    ],
+    "Digital Signage": [
+      "Sales and Marketing"
+    ],
+    "Digital Therapeutics": [
+      "Health Care",
+      "Software"
+    ],
+    "Direct Marketing": [
+      "Sales and Marketing"
+    ],
+    "Direct-to-Consumer": [
+      "Commerce and Shopping",
+      "Consumer Goods"
+    ],
+    "Distillery": [
+      "Food and Beverage"
+    ],
+    "Diving": [
+      "Sports"
+    ],
+    "Document Management": [
+      "Information Technology",
+      "Software"
+    ],
+    "Document Preparation": [
+      "Administrative Services"
+    ],
+    "Domain Registrar": [
+      "Internet Services"
+    ],
+    "Drone Management": [
+      "Hardware",
+      "Software"
+    ],
+    "Drones": [
+      "Consumer Electronics",
+      "Consumer Goods",
+      "Hardware"
+    ],
+    "E-Commerce": [
+      "Commerce and Shopping"
+    ],
+    "E-Commerce Platforms": [
+      "Commerce and Shopping",
+      "Internet Services"
+    ],
+    "E-Learning": [
+      "Education",
+      "Software"
+    ],
+    "E-Signature": [
+      "Information Technology",
+      "Privacy and Security"
+    ],
+    "EBooks": [
+      "Content and Publishing",
+      "Media and Entertainment"
+    ],
+    "EV Charging": [
+      "Sustainability",
+      "Transportation"
+    ],
+    "EdTech": [
+      "Education",
+      "Software"
+    ],
+    "Edge Computing": [
+      "Hardware",
+      "Information Technology",
+      "Software"
+    ],
+    "Ediscovery": [
+      "Internet Services"
+    ],
+    "Education": [
+      "Education"
+    ],
+    "Edutainment": [
+      "Education",
+      "Media and Entertainment"
+    ],
+    "Elderly": [
+      "Community and Lifestyle"
+    ],
+    "Electric Vehicle": [
+      "Transportation"
+    ],
+    "Electrical Distribution": [
+      "Energy"
+    ],
+    "Electronic Design Automation (EDA)": [
+      "Hardware",
+      "Software"
+    ],
+    "Electronic Health Record (EHR)": [
+      "Health Care"
+    ],
+    "Electronics": [
+      "Consumer Electronics",
+      "Hardware"
+    ],
+    "Email": [
+      "Information Technology",
+      "Internet Services",
+      "Messaging and Telecommunications"
+    ],
+    "Email Marketing": [
+      "Sales and Marketing"
+    ],
+    "Embedded Finance": [
+      "Financial Services",
+      "Software"
+    ],
+    "Embedded Software": [
+      "Software"
+    ],
+    "Embedded Systems": [
+      "Hardware",
+      "Science and Engineering",
+      "Software"
+    ],
+    "Emergency Medicine": [
+      "Health Care"
+    ],
+    "Emerging Markets": [
+      "Commerce and Shopping"
+    ],
+    "Employee Benefits": [
+      "Administrative Services"
+    ],
+    "Employee Experience": [
+      "Professional Services",
+      "Software"
+    ],
+    "Employment": [
+      "Professional Services"
+    ],
+    "Energy": [
+      "Energy"
+    ],
+    "Energy Efficiency": [
+      "Energy",
+      "Sustainability"
+    ],
+    "Energy Management": [
+      "Energy"
+    ],
+    "Energy Storage": [
+      "Energy"
+    ],
+    "Enterprise Applications": [
+      "Apps",
+      "Software"
+    ],
+    "Enterprise Resource Planning (ERP)": [
+      "Software"
+    ],
+    "Enterprise Software": [
+      "Software"
+    ],
+    "Environmental Consulting": [
+      "Professional Services"
+    ],
+    "Environmental Engineering": [
+      "Science and Engineering",
+      "Sustainability"
+    ],
+    "Equestrian": [
+      "Agriculture and Farming"
+    ],
+    "Estate Agent": [
+      "Real Estate"
+    ],
+    "Ethereum": [
+      "Blockchain and Cryptocurrency"
+    ],
+    "Event Management": [
+      "Events",
+      "Media and Entertainment"
+    ],
+    "Event Promotion": [
+      "Events",
+      "Media and Entertainment"
+    ],
+    "Events": [
+      "Events",
+      "Media and Entertainment"
+    ],
+    "Extermination Service": [
+      "Administrative Services"
+    ],
+    "Eyewear": [
+      "Consumer Goods"
+    ],
+    "Facebook": [
+      "Platforms"
+    ],
+    "Facial Recognition": [
+      "Data and Analytics",
+      "Software"
+    ],
+    "Facilities Support Services": [
+      "Administrative Services"
+    ],
+    "Facility Management": [
+      "Real Estate"
+    ],
+    "Family": [
+      "Community and Lifestyle"
+    ],
+    "Family Medicine": [
+      "Health Care"
+    ],
+    "Fantasy Sports": [
+      "Gaming",
+      "Sports"
+    ],
+    "Farmers Market": [
+      "Food and Beverage"
+    ],
+    "Farming": [
+      "Agriculture and Farming"
+    ],
+    "Fashion": [
+      "Clothing and Apparel",
+      "Design"
+    ],
+    "Fast-Moving Consumer Goods": [
+      "Consumer Goods",
+      "Real Estate"
+    ],
+    "Feature Flags": [
+      "Software"
+    ],
+    "Ferry Service": [
+      "Transportation"
+    ],
+    "Fertility": [
+      "Health Care"
+    ],
+    "Field Support": [
+      "Professional Services"
+    ],
+    "Field-Programmable Gate Array (FPGA)": [
+      "Hardware"
+    ],
+    "File Sharing": [
+      "Software"
+    ],
+    "Film": [
+      "Media and Entertainment",
+      "Video"
+    ],
+    "Film Distribution": [
+      "Media and Entertainment",
+      "Video"
+    ],
+    "Film Production": [
+      "Media and Entertainment",
+      "Video"
+    ],
+    "FinTech": [
+      "Financial Services"
+    ],
+    "Finance": [
+      "Financial Services"
+    ],
+    "Financial Exchanges": [
+      "Financial Services",
+      "Lending and Investments"
+    ],
+    "Financial Services": [
+      "Financial Services"
+    ],
+    "First Aid": [
+      "Health Care"
+    ],
+    "Fitness": [
+      "Sports"
+    ],
+    "Flash Sale": [
+      "Commerce and Shopping"
+    ],
+    "Flash Storage": [
+      "Hardware"
+    ],
+    "Fleet Management": [
+      "Transportation"
+    ],
+    "Flowers": [
+      "Consumer Goods"
+    ],
+    "Food Delivery": [
+      "Food and Beverage",
+      "Transportation"
+    ],
+    "Food Processing": [
+      "Food and Beverage"
+    ],
+    "Food Trucks": [
+      "Food and Beverage"
+    ],
+    "Food and Beverage": [
+      "Food and Beverage"
+    ],
+    "Forestry": [
+      "Agriculture and Farming"
+    ],
+    "Fossil Fuels": [
+      "Energy",
+      "Natural Resources"
+    ],
+    "Foundation Models": [
+      "Artificial Intelligence",
+      "Software"
+    ],
+    "Foundries": [
+      "Manufacturing"
+    ],
+    "Franchise": [
+      "Commerce and Shopping",
+      "Community and Lifestyle"
+    ],
+    "Fraud Detection": [
+      "Financial Services",
+      "Payments",
+      "Privacy and Security"
+    ],
+    "Freelance": [
+      "Professional Services"
+    ],
+    "Freight Service": [
+      "Transportation"
+    ],
+    "Fruit": [
+      "Food and Beverage"
+    ],
+    "Fuel": [
+      "Energy"
+    ],
+    "Fuel Cell": [
+      "Energy"
+    ],
+    "Funding Platform": [
+      "Financial Services",
+      "Lending and Investments"
+    ],
+    "Funerals": [
+      "Community and Lifestyle"
+    ],
+    "Furniture": [
+      "Consumer Goods"
+    ],
+    "GPS": [
+      "Hardware",
+      "Navigation and Mapping"
+    ],
+    "GPU": [
+      "Hardware"
+    ],
+    "Gambling": [
+      "Gaming"
+    ],
+    "Gamification": [
+      "Gaming"
+    ],
+    "Gaming": [
+      "Gaming"
+    ],
+    "Generative AI": [
+      "Artificial Intelligence",
+      "Software"
+    ],
+    "Genetics": [
+      "Biotechnology",
+      "Health Care"
+    ],
+    "Geospatial": [
+      "Data and Analytics",
+      "Navigation and Mapping"
+    ],
+    "Gift": [
+      "Commerce and Shopping"
+    ],
+    "Gift Card": [
+      "Commerce and Shopping",
+      "Financial Services"
+    ],
+    "Gift Exchange": [
+      "Commerce and Shopping"
+    ],
+    "Gift Registry": [
+      "Commerce and Shopping"
+    ],
+    "Golf": [
+      "Sports"
+    ],
+    "Google": [
+      "Platforms"
+    ],
+    "Google Glass": [
+      "Consumer Electronics",
+      "Hardware",
+      "Mobile",
+      "Platforms"
+    ],
+    "GovTech": [
+      "Government and Military",
+      "Information Technology"
+    ],
+    "Government": [
+      "Government and Military"
+    ],
+    "Graphic Design": [
+      "Design"
+    ],
+    "Green Building": [
+      "Real Estate",
+      "Sustainability"
+    ],
+    "Green Consumer Goods": [
+      "Consumer Goods",
+      "Sustainability"
+    ],
+    "GreenTech": [
+      "Sustainability"
+    ],
+    "Grocery": [
+      "Food and Beverage"
+    ],
+    "Group Buying": [
+      "Commerce and Shopping"
+    ],
+    "Growth Marketing": [
+      "Sales and Marketing"
+    ],
+    "Guides": [
+      "Media and Entertainment"
+    ],
+    "HR Tech": [
+      "Apps",
+      "Professional Services",
+      "Software"
+    ],
+    "HVAC": [
+      "Physical Infrastructure"
+    ],
+    "Hair Care": [
+      "Consumer Goods"
+    ],
+    "Handmade": [
+      "Consumer Goods"
+    ],
+    "Hardware": [
+      "Hardware"
+    ],
+    "Headless Commerce": [
+      "Commerce and Shopping",
+      "Software"
+    ],
+    "Health Care": [
+      "Health Care"
+    ],
+    "Health Diagnostics": [
+      "Health Care"
+    ],
+    "Health Insurance": [
+      "Financial Services"
+    ],
+    "HealthTech": [
+      "Health Care",
+      "Software"
+    ],
+    "Hedge Funds": [
+      "Financial Services",
+      "Lending and Investments"
+    ],
+    "Higher Education": [
+      "Education"
+    ],
+    "Hockey": [
+      "Sports"
+    ],
+    "Home Decor": [
+      "Real Estate"
+    ],
+    "Home Fragrance": [
+      "Consumer Goods"
+    ],
+    "Home Health Care": [
+      "Health Care"
+    ],
+    "Home Improvement": [
+      "Real Estate"
+    ],
+    "Home Renovation": [
+      "Real Estate"
+    ],
+    "Home Services": [
+      "Real Estate"
+    ],
+    "Home and Garden": [
+      "Real Estate"
+    ],
+    "Homeland Security": [
+      "Privacy and Security"
+    ],
+    "Homeless Shelter": [
+      "Social Impact"
+    ],
+    "Horticulture": [
+      "Agriculture and Farming"
+    ],
+    "Hospital": [
+      "Health Care"
+    ],
+    "Hospitality": [
+      "Travel and Tourism"
+    ],
+    "Hotel": [
+      "Travel and Tourism"
+    ],
+    "Housekeeping Service": [
+      "Administrative Services"
+    ],
+    "Human Computer Interaction": [
+      "Design",
+      "Science and Engineering"
+    ],
+    "Human Resources": [
+      "Administrative Services"
+    ],
+    "Humanitarian": [
+      "Community and Lifestyle"
+    ],
+    "Hunting": [
+      "Sports"
+    ],
+    "Hydroponics": [
+      "Agriculture and Farming"
+    ],
+    "ISP": [
+      "Internet Services"
+    ],
+    "IT Infrastructure": [
+      "Information Technology"
+    ],
+    "IT Management": [
+      "Information Technology"
+    ],
+    "IaaS": [
+      "Software"
+    ],
+    "Identity and Access Management": [
+      "Information Technology",
+      "Privacy and Security",
+      "Software"
+    ],
+    "Image Recognition": [
+      "Data and Analytics",
+      "Software"
+    ],
+    "Impact Investing": [
+      "Financial Services",
+      "Lending and Investments"
+    ],
+    "In-Flight Entertainment": [
+      "Media and Entertainment"
+    ],
+    "Incubators": [
+      "Financial Services",
+      "Lending and Investments"
+    ],
+    "Independent Music": [
+      "Media and Entertainment",
+      "Music and Audio"
+    ],
+    "Indoor Positioning": [
+      "Navigation and Mapping"
+    ],
+    "Industrial": [
+      "Manufacturing"
+    ],
+    "Industrial Design": [
+      "Design",
+      "Hardware"
+    ],
+    "Industrial Engineering": [
+      "Manufacturing",
+      "Science and Engineering"
+    ],
+    "Industrial IoT": [
+      "Hardware",
+      "Manufacturing",
+      "Software"
+    ],
+    "Industrial Manufacturing": [
+      "Manufacturing"
+    ],
+    "Influencer Marketing": [
+      "Advertising",
+      "Sales and Marketing",
+      "Software"
+    ],
+    "Information Services": [
+      "Information Technology"
+    ],
+    "Information Technology": [
+      "Information Technology"
+    ],
+    "Information and Communications Technology (ICT)": [
+      "Information Technology"
+    ],
+    "Infrastructure": [
+      "Physical Infrastructure"
+    ],
+    "Innovation Management": [
+      "Professional Services"
+    ],
+    "InsurTech": [
+      "Financial Services"
+    ],
+    "Insurance": [
+      "Financial Services"
+    ],
+    "Intellectual Property": [
+      "Professional Services"
+    ],
+    "Intelligent Systems": [
+      "Artificial Intelligence",
+      "Data and Analytics",
+      "Science and Engineering"
+    ],
+    "Interior Design": [
+      "Design",
+      "Real Estate"
+    ],
+    "Internal Medicine": [
+      "Health Care"
+    ],
+    "International Development": [
+      "Government and Military",
+      "Social Impact"
+    ],
+    "Internet": [
+      "Internet Services"
+    ],
+    "Internet Radio": [
+      "Media and Entertainment",
+      "Music and Audio"
+    ],
+    "Internet of Things": [
+      "Hardware",
+      "Internet Services",
+      "Software"
+    ],
+    "Intrusion Detection": [
+      "Information Technology",
+      "Privacy and Security"
+    ],
+    "Janitorial Service": [
+      "Real Estate"
+    ],
+    "Jewelry": [
+      "Consumer Goods"
+    ],
+    "Journalism": [
+      "Content and Publishing",
+      "Media and Entertainment"
+    ],
+    "Knowledge Management": [
+      "Administrative Services"
+    ],
+    "LGBT": [
+      "Community and Lifestyle"
+    ],
+    "Landscaping": [
+      "Real Estate"
+    ],
+    "Language Learning": [
+      "Education"
+    ],
+    "Large Language Models": [
+      "Artificial Intelligence",
+      "Software"
+    ],
+    "Laser": [
+      "Hardware",
+      "Science and Engineering"
+    ],
+    "Last Mile Transportation": [
+      "Transportation"
+    ],
+    "Laundry and Dry-cleaning": [
+      "Clothing and Apparel"
+    ],
+    "Law Enforcement": [
+      "Government and Military",
+      "Privacy and Security"
+    ],
+    "Layer 2": [
+      "Blockchain and Cryptocurrency",
+      "Software"
+    ],
+    "Lead Generation": [
+      "Sales and Marketing"
+    ],
+    "Lead Management": [
+      "Sales and Marketing"
+    ],
+    "Leasing": [
+      "Financial Services"
+    ],
+    "Legal": [
+      "Professional Services"
+    ],
+    "Legal Tech": [
+      "Professional Services"
+    ],
+    "Leisure": [
+      "Community and Lifestyle"
+    ],
+    "Lending": [
+      "Financial Services"
+    ],
+    "Letting Agent": [
+      "Real Estate"
+    ],
+    "Life Insurance": [
+      "Financial Services"
+    ],
+    "Life Science": [
+      "Biotechnology",
+      "Science and Engineering"
+    ],
+    "Lifestyle": [
+      "Community and Lifestyle"
+    ],
+    "Lighting": [
+      "Hardware"
+    ],
+    "Limousine Service": [
+      "Transportation"
+    ],
+    "Lingerie": [
+      "Clothing and Apparel",
+      "Consumer Goods"
+    ],
+    "Linux": [
+      "Platforms",
+      "Software"
+    ],
+    "Liquid Staking": [
+      "Blockchain and Cryptocurrency",
+      "Financial Services"
+    ],
+    "Livestock": [
+      "Agriculture and Farming"
+    ],
+    "Local": [
+      "Sales and Marketing"
+    ],
+    "Local Advertising": [
+      "Advertising",
+      "Sales and Marketing"
+    ],
+    "Local Business": [
+      "Sales and Marketing"
+    ],
+    "Local Shopping": [
+      "Commerce and Shopping"
+    ],
+    "Location Based Services": [
+      "Data and Analytics",
+      "Internet Services",
+      "Navigation and Mapping"
+    ],
+    "Logistics": [
+      "Transportation"
+    ],
+    "Low-Code": [
+      "Software"
+    ],
+    "Loyalty Programs": [
+      "Sales and Marketing"
+    ],
+    "MMO Games": [
+      "Gaming"
+    ],
+    "MOOC": [
+      "Education",
+      "Software"
+    ],
+    "Machine Learning": [
+      "Artificial Intelligence",
+      "Data and Analytics",
+      "Software"
+    ],
+    "Machinery Manufacturing": [
+      "Manufacturing"
+    ],
+    "Made to Order": [
+      "Commerce and Shopping"
+    ],
+    "Management Consulting": [
+      "Professional Services"
+    ],
+    "Management Information Systems": [
+      "Information Technology"
+    ],
+    "Manufacturing": [
+      "Manufacturing"
+    ],
+    "Mapping Services": [
+      "Navigation and Mapping"
+    ],
+    "MarTech": [
+      "Sales and Marketing",
+      "Software"
+    ],
+    "Marine Insurance": [
+      "Financial Services"
+    ],
+    "Marine Technology": [
+      "Science and Engineering"
+    ],
+    "Marine Transportation": [
+      "Transportation"
+    ],
+    "Market Research": [
+      "Data and Analytics",
+      "Design"
+    ],
+    "Marketing": [
+      "Advertising",
+      "Sales and Marketing"
+    ],
+    "Marketing Automation": [
+      "Sales and Marketing",
+      "Software"
+    ],
+    "Marketplace": [
+      "Commerce and Shopping"
+    ],
+    "Mechanical Contractor": [
+      "Manufacturing",
+      "Physical Infrastructure"
+    ],
+    "Mechanical Design": [
+      "Design",
+      "Hardware"
+    ],
+    "Mechanical Engineering": [
+      "Science and Engineering"
+    ],
+    "Media and Entertainment": [
+      "Media and Entertainment"
+    ],
+    "Medical": [
+      "Health Care"
+    ],
+    "Medical Device": [
+      "Health Care"
+    ],
+    "Medical Spa": [
+      "Health Care"
+    ],
+    "Meeting Software": [
+      "Messaging and Telecommunications",
+      "Software"
+    ],
+    "Men's": [
+      "Community and Lifestyle"
+    ],
+    "Men's Grooming": [
+      "Consumer Goods"
+    ],
+    "Mental Health": [
+      "Health Care"
+    ],
+    "Messaging": [
+      "Information Technology",
+      "Internet Services",
+      "Messaging and Telecommunications"
+    ],
+    "Micro Lending": [
+      "Financial Services",
+      "Lending and Investments"
+    ],
+    "Military": [
+      "Government and Military",
+      "Information Technology"
+    ],
+    "Mineral": [
+      "Natural Resources"
+    ],
+    "Mining": [
+      "Natural Resources"
+    ],
+    "Mining Technology": [
+      "Natural Resources"
+    ],
+    "Mobile": [
+      "Mobile"
+    ],
+    "Mobile Advertising": [
+      "Advertising",
+      "Sales and Marketing"
+    ],
+    "Mobile Apps": [
+      "Apps",
+      "Mobile",
+      "Software"
+    ],
+    "Mobile Devices": [
+      "Consumer Electronics",
+      "Hardware",
+      "Mobile"
+    ],
+    "Mobile Payments": [
+      "Financial Services",
+      "Mobile",
+      "Payments",
+      "Software"
+    ],
+    "Motion Capture": [
+      "Media and Entertainment",
+      "Video"
+    ],
+    "Multi-level Marketing": [
+      "Sales and Marketing"
+    ],
+    "Museums and Historical Sites": [
+      "Travel and Tourism"
+    ],
+    "Music": [
+      "Media and Entertainment",
+      "Music and Audio"
+    ],
+    "Music Education": [
+      "Education",
+      "Media and Entertainment",
+      "Music and Audio"
+    ],
+    "Music Label": [
+      "Media and Entertainment",
+      "Music and Audio"
+    ],
+    "Music Streaming": [
+      "Internet Services",
+      "Media and Entertainment",
+      "Music and Audio"
+    ],
+    "Music Venues": [
+      "Media and Entertainment"
+    ],
+    "Musical Instruments": [
+      "Media and Entertainment",
+      "Music and Audio"
+    ],
+    "NFC": [
+      "Hardware"
+    ],
+    "NFT": [
+      "Blockchain and Cryptocurrency"
+    ],
+    "NGO": [
+      "Social Impact"
+    ],
+    "Nanotechnology": [
+      "Science and Engineering"
+    ],
+    "National Security": [
+      "Government and Military"
+    ],
+    "Natural Language Processing": [
+      "Artificial Intelligence",
+      "Data and Analytics",
+      "Software"
+    ],
+    "Natural Resources": [
+      "Natural Resources",
+      "Sustainability"
+    ],
+    "Navigation": [
+      "Navigation and Mapping"
+    ],
+    "Neobank": [
+      "Financial Services"
+    ],
+    "Network Hardware": [
+      "Hardware"
+    ],
+    "Network Security": [
+      "Information Technology",
+      "Privacy and Security"
+    ],
+    "Neuroscience": [
+      "Biotechnology",
+      "Science and Engineering"
+    ],
+    "News": [
+      "Content and Publishing",
+      "Media and Entertainment"
+    ],
+    "Nightclubs": [
+      "Events",
+      "Media and Entertainment"
+    ],
+    "Nightlife": [
+      "Events",
+      "Media and Entertainment"
+    ],
+    "Nintendo": [
+      "Consumer Electronics",
+      "Hardware",
+      "Platforms"
+    ],
+    "No-Code": [
+      "Software"
+    ],
+    "Non Profit": [
+      "Social Impact"
+    ],
+    "Nuclear": [
+      "Science and Engineering"
+    ],
+    "Nursing and Residential Care": [
+      "Health Care"
+    ],
+    "Nutraceutical": [
+      "Health Care"
+    ],
+    "Nutrition": [
+      "Food and Beverage",
+      "Health Care"
+    ],
+    "Observability": [
+      "Information Technology",
+      "Software"
+    ],
+    "Office Administration": [
+      "Administrative Services"
+    ],
+    "Oil and Gas": [
+      "Energy",
+      "Natural Resources"
+    ],
+    "On-Chain Analytics": [
+      "Blockchain and Cryptocurrency",
+      "Data and Analytics"
+    ],
+    "Onboarding": [
+      "Software"
+    ],
+    "Online Auctions": [
+      "Commerce and Shopping"
+    ],
+    "Online Forums": [
+      "Community and Lifestyle",
+      "Internet Services"
+    ],
+    "Online Games": [
+      "Gaming"
+    ],
+    "Online Portals": [
+      "Internet Services"
+    ],
+    "Open Banking": [
+      "Financial Services",
+      "Software"
+    ],
+    "Open Source": [
+      "Software"
+    ],
+    "Operating Systems": [
+      "Platforms",
+      "Software"
+    ],
+    "Optical Communication": [
+      "Hardware"
+    ],
+    "Oral Care": [
+      "Consumer Goods",
+      "Health Care"
+    ],
+    "Organic": [
+      "Sustainability"
+    ],
+    "Organic Food": [
+      "Food and Beverage"
+    ],
+    "Outdoor Advertising": [
+      "Advertising",
+      "Sales and Marketing"
+    ],
+    "Outdoors": [
+      "Sports"
+    ],
+    "Outpatient Care": [
+      "Health Care"
+    ],
+    "Outsourcing": [
+      "Professional Services"
+    ],
+    "PC Games": [
+      "Gaming"
+    ],
+    "PaaS": [
+      "Software"
+    ],
+    "Packaging Services": [
+      "Administrative Services"
+    ],
+    "Paper Manufacturing": [
+      "Manufacturing"
+    ],
+    "Parenting": [
+      "Community and Lifestyle"
+    ],
+    "Parking": [
+      "Transportation"
+    ],
+    "Parks": [
+      "Travel and Tourism"
+    ],
+    "Payments": [
+      "Financial Services",
+      "Payments"
+    ],
+    "Payroll": [
+      "Financial Services",
+      "Software"
+    ],
+    "Peer to Peer": [
+      "Collaboration"
+    ],
+    "Penetration Testing": [
+      "Information Technology",
+      "Privacy and Security"
+    ],
+    "Performance Management": [
+      "Software"
+    ],
+    "Performing Arts": [
+      "Media and Entertainment"
+    ],
+    "Personal Branding": [
+      "Sales and Marketing"
+    ],
+    "Personal Care": [
+      "Consumer Goods"
+    ],
+    "Personal Finance": [
+      "Health Care"
+    ],
+    "Personal Health": [
+      "Health Care"
+    ],
+    "Personalization": [
+      "Commerce and Shopping"
+    ],
+    "Pet": [
+      "Community and Lifestyle"
+    ],
+    "Pet Care": [
+      "Consumer Goods"
+    ],
+    "Pet Food": [
+      "Consumer Goods",
+      "Food and Beverage"
+    ],
+    "Pet Supplements": [
+      "Consumer Goods",
+      "Health Care"
+    ],
+    "Pharmaceutical": [
+      "Health Care"
+    ],
+    "Philanthropy": [
+      "Social Impact"
+    ],
+    "Photo Editing": [
+      "Content and Publishing",
+      "Media and Entertainment"
+    ],
+    "Photo Sharing": [
+      "Content and Publishing",
+      "Media and Entertainment"
+    ],
+    "Photography": [
+      "Content and Publishing",
+      "Media and Entertainment"
+    ],
+    "Physical Security": [
+      "Administrative Services",
+      "Privacy and Security"
+    ],
+    "Plastics and Rubber Manufacturing": [
+      "Manufacturing"
+    ],
+    "Platform Engineering": [
+      "Information Technology",
+      "Software"
+    ],
+    "Playstation": [
+      "Consumer Electronics",
+      "Hardware",
+      "Platforms"
+    ],
+    "Plumbing": [
+      "Physical Infrastructure"
+    ],
+    "Podcast": [
+      "Media and Entertainment",
+      "Music and Audio"
+    ],
+    "Point of Sale": [
+      "Commerce and Shopping"
+    ],
+    "Politics": [
+      "Government and Military"
+    ],
+    "Pollution Control": [
+      "Sustainability"
+    ],
+    "Ports and Harbors": [
+      "Transportation"
+    ],
+    "Power Grid": [
+      "Energy"
+    ],
+    "Precious Metals": [
+      "Natural Resources"
+    ],
+    "Precision Medicine": [
+      "Biotechnology",
+      "Health Care"
+    ],
+    "Prediction Markets": [
+      "Financial Services"
+    ],
+    "Predictive Analytics": [
+      "Artificial Intelligence",
+      "Data and Analytics",
+      "Software"
+    ],
+    "Presentation Software": [
+      "Software"
+    ],
+    "Presentations": [
+      "Software"
+    ],
+    "Price Comparison": [
+      "Commerce and Shopping"
+    ],
+    "Primary Education": [
+      "Education"
+    ],
+    "Printing": [
+      "Content and Publishing",
+      "Media and Entertainment"
+    ],
+    "Privacy": [
+      "Privacy and Security"
+    ],
+    "Private Cloud": [
+      "Hardware",
+      "Information Technology",
+      "Internet Services",
+      "Software"
+    ],
+    "Private Social Networking": [
+      "Community and Lifestyle"
+    ],
+    "Procurement": [
+      "Transportation"
+    ],
+    "Product Design": [
+      "Design"
+    ],
+    "Product Management": [
+      "Software"
+    ],
+    "Product Research": [
+      "Data and Analytics",
+      "Design"
+    ],
+    "Product Search": [
+      "Internet Services"
+    ],
+    "Product-Led Growth": [
+      "Sales and Marketing",
+      "Software"
+    ],
+    "Productivity Tools": [
+      "Software"
+    ],
+    "Professional Networking": [
+      "Community and Lifestyle",
+      "Professional Services"
+    ],
+    "Professional Services": [
+      "Professional Services"
+    ],
+    "Project Management": [
+      "Administrative Services"
+    ],
+    "PropTech": [
+      "Data and Analytics",
+      "Real Estate",
+      "Software"
+    ],
+    "Property Development": [
+      "Real Estate"
+    ],
+    "Property Insurance": [
+      "Financial Services"
+    ],
+    "Property Management": [
+      "Real Estate"
+    ],
+    "Psychiatry": [
+      "Health Care"
+    ],
+    "Psychology": [
+      "Health Care"
+    ],
+    "Public Relations": [
+      "Sales and Marketing"
+    ],
+    "Public Safety": [
+      "Government and Military"
+    ],
+    "Public Transportation": [
+      "Transportation"
+    ],
+    "Publishing": [
+      "Content and Publishing",
+      "Media and Entertainment"
+    ],
+    "Q&A": [
+      "Community and Lifestyle"
+    ],
+    "QR Codes": [
+      "Software"
+    ],
+    "Quality Assurance": [
+      "Professional Services"
+    ],
+    "Quantified Self": [
+      "Biotechnology",
+      "Data and Analytics"
+    ],
+    "Quantum Computing": [
+      "Science and Engineering"
+    ],
+    "RFID": [
+      "Hardware"
+    ],
+    "RISC": [
+      "Hardware"
+    ],
+    "Racing": [
+      "Sports"
+    ],
+    "Railroad": [
+      "Transportation"
+    ],
+    "Reading Apps": [
+      "Apps",
+      "Software"
+    ],
+    "Real Estate": [
+      "Real Estate"
+    ],
+    "Real Estate Investment": [
+      "Financial Services",
+      "Real Estate"
+    ],
+    "Recipes": [
+      "Food and Beverage"
+    ],
+    "Recreation": [
+      "Sports"
+    ],
+    "Recreational Vehicles": [
+      "Transportation"
+    ],
+    "Recruiting": [
+      "Professional Services"
+    ],
+    "Recruiting Software": [
+      "Software"
+    ],
+    "Recycling": [
+      "Sustainability"
+    ],
+    "Rehabilitation": [
+      "Health Care"
+    ],
+    "Religion": [
+      "Community and Lifestyle"
+    ],
+    "Relocation Services": [
+      "Administrative Services",
+      "Professional Services"
+    ],
+    "Remote Patient Monitoring": [
+      "Health Care",
+      "Software"
+    ],
+    "Removals and Storage": [
+      "Administrative Services"
+    ],
+    "Renewable Energy": [
+      "Energy",
+      "Sustainability"
+    ],
+    "Rental": [
+      "Commerce and Shopping"
+    ],
+    "Rental Property": [
+      "Real Estate"
+    ],
+    "Reputation": [
+      "Information Technology"
+    ],
+    "Reservations": [
+      "Events",
+      "Media and Entertainment"
+    ],
+    "Residential": [
+      "Real Estate"
+    ],
+    "Resorts": [
+      "Travel and Tourism"
+    ],
+    "Restaurants": [
+      "Food and Beverage"
+    ],
+    "Retail": [
+      "Commerce and Shopping"
+    ],
+    "Retail Technology": [
+      "Commerce and Shopping",
+      "Hardware",
+      "Software"
+    ],
+    "Retirement": [
+      "Community and Lifestyle"
+    ],
+    "Revenue Operations": [
+      "Sales and Marketing",
+      "Software"
+    ],
+    "Reverse ETL": [
+      "Data and Analytics",
+      "Software"
+    ],
+    "Ride Sharing": [
+      "Transportation"
+    ],
+    "Risk Management": [
+      "Professional Services"
+    ],
+    "Robotics": [
+      "Hardware",
+      "Science and Engineering",
+      "Software"
+    ],
+    "Roku": [
+      "Consumer Electronics",
+      "Hardware",
+      "Platforms"
+    ],
+    "Rugby": [
+      "Sports"
+    ],
+    "SEM": [
+      "Advertising",
+      "Internet Services",
+      "Sales and Marketing"
+    ],
+    "SEO": [
+      "Internet Services",
+      "Sales and Marketing"
+    ],
+    "SMS": [
+      "Internet Services",
+      "Messaging and Telecommunications"
+    ],
+    "SNS": [
+      "Software"
+    ],
+    "STEM Education": [
+      "Education",
+      "Science and Engineering"
+    ],
+    "SaaS": [
+      "Software"
+    ],
+    "Sailing": [
+      "Sports"
+    ],
+    "Sales": [
+      "Sales and Marketing"
+    ],
+    "Sales Automation": [
+      "Information Technology",
+      "Sales and Marketing",
+      "Software"
+    ],
+    "Sales Enablement": [
+      "Sales and Marketing",
+      "Software"
+    ],
+    "Sales Engagement": [
+      "Sales and Marketing",
+      "Software"
+    ],
+    "Sales Training": [
+      "Education",
+      "Sales and Marketing"
+    ],
+    "Same Day Delivery": [
+      "Transportation"
+    ],
+    "Satellite Communication": [
+      "Hardware"
+    ],
+    "Scheduling": [
+      "Information Technology",
+      "Software"
+    ],
+    "Seafood": [
+      "Food and Beverage"
+    ],
+    "Search Engine": [
+      "Internet Services"
+    ],
+    "Secondary Education": [
+      "Education"
+    ],
+    "Security": [
+      "Privacy and Security"
+    ],
+    "Self-Storage": [
+      "Real Estate"
+    ],
+    "Semantic Search": [
+      "Internet Services"
+    ],
+    "Semantic Web": [
+      "Internet Services"
+    ],
+    "Semiconductor": [
+      "Hardware",
+      "Science and Engineering"
+    ],
+    "Senior Care": [
+      "Health Care"
+    ],
+    "Sensor": [
+      "Hardware"
+    ],
+    "Sharing Economy": [
+      "Collaboration"
+    ],
+    "Shipping": [
+      "Transportation"
+    ],
+    "Shipping Broker": [
+      "Transportation"
+    ],
+    "Shoes": [
+      "Clothing and Apparel",
+      "Consumer Goods"
+    ],
+    "Shopping": [
+      "Commerce and Shopping"
+    ],
+    "Shopping Mall": [
+      "Commerce and Shopping"
+    ],
+    "Simulation": [
+      "Software"
+    ],
+    "Site Reliability Engineering": [
+      "Information Technology",
+      "Software"
+    ],
+    "Skiing": [
+      "Sports"
+    ],
+    "Skill Assessment": [
+      "Education"
+    ],
+    "Skin Care": [
+      "Consumer Goods",
+      "Health Care"
+    ],
+    "Smart Building": [
+      "Real Estate"
+    ],
+    "Smart Cities": [
+      "Real Estate"
+    ],
+    "Smart Contracts": [
+      "Blockchain and Cryptocurrency",
+      "Software"
+    ],
+    "Smart Home": [
+      "Consumer Electronics",
+      "Real Estate"
+    ],
+    "Snack Food": [
+      "Food and Beverage"
+    ],
+    "Soccer": [
+      "Sports"
+    ],
+    "Social": [
+      "Community and Lifestyle"
+    ],
+    "Social Assistance": [
+      "Government and Military"
+    ],
+    "Social Bookmarking": [
+      "Content and Publishing"
+    ],
+    "Social CRM": [
+      "Information Technology",
+      "Sales and Marketing",
+      "Software"
+    ],
+    "Social Entrepreneurship": [
+      "Community and Lifestyle"
+    ],
+    "Social Impact": [
+      "Social Impact"
+    ],
+    "Social Media": [
+      "Internet Services",
+      "Media and Entertainment"
+    ],
+    "Social Media Advertising": [
+      "Advertising",
+      "Sales and Marketing"
+    ],
+    "Social Media Management": [
+      "Internet Services",
+      "Sales and Marketing"
+    ],
+    "Social Media Marketing": [
+      "Sales and Marketing"
+    ],
+    "Social Network": [
+      "Internet Services"
+    ],
+    "Social News": [
+      "Media and Entertainment"
+    ],
+    "Social Recruiting": [
+      "Professional Services"
+    ],
+    "Social Shopping": [
+      "Commerce and Shopping"
+    ],
+    "Software": [
+      "Software"
+    ],
+    "Software Engineering": [
+      "Science and Engineering",
+      "Software"
+    ],
+    "Solar Energy": [
+      "Energy",
+      "Natural Resources",
+      "Sustainability"
+    ],
+    "Space Travel": [
+      "Transportation"
+    ],
+    "Spam Filtering": [
+      "Information Technology"
+    ],
+    "Speech Recognition": [
+      "Data and Analytics",
+      "Software"
+    ],
+    "Sponsorship": [
+      "Sales and Marketing"
+    ],
+    "Sporting Goods": [
+      "Commerce and Shopping",
+      "Sports"
+    ],
+    "Sports": [
+      "Sports"
+    ],
+    "Stablecoin": [
+      "Blockchain and Cryptocurrency",
+      "Financial Services",
+      "Payments"
+    ],
+    "Staffing Agency": [
+      "Administrative Services"
+    ],
+    "Stock Exchanges": [
+      "Financial Services",
+      "Lending and Investments"
+    ],
+    "Subscription Commerce": [
+      "Commerce and Shopping",
+      "Software"
+    ],
+    "Supply Chain Management": [
+      "Information Technology",
+      "Software",
+      "Transportation"
+    ],
+    "Surfing": [
+      "Sports"
+    ],
+    "Sustainability": [
+      "Sustainability"
+    ],
+    "Swimming": [
+      "Sports"
+    ],
+    "TV": [
+      "Media and Entertainment",
+      "Video"
+    ],
+    "TV Production": [
+      "Media and Entertainment",
+      "Video"
+    ],
+    "Table Tennis": [
+      "Sports"
+    ],
+    "Talent Acquisition": [
+      "Professional Services",
+      "Software"
+    ],
+    "Task Management": [
+      "Software"
+    ],
+    "Taxi Service": [
+      "Transportation"
+    ],
+    "Tea": [
+      "Food and Beverage"
+    ],
+    "Technical Support": [
+      "Information Technology"
+    ],
+    "Teenagers": [
+      "Community and Lifestyle"
+    ],
+    "Telecommunications": [
+      "Hardware"
+    ],
+    "Telehealth": [
+      "Health Care",
+      "Software"
+    ],
+    "Telemedicine": [
+      "Health Care",
+      "Software"
+    ],
+    "Tennis": [
+      "Sports"
+    ],
+    "Test and Measurement": [
+      "Data and Analytics"
+    ],
+    "Text Analytics": [
+      "Data and Analytics",
+      "Software"
+    ],
+    "Textbook": [
+      "Education"
+    ],
+    "Textiles": [
+      "Manufacturing"
+    ],
+    "Theatre": [
+      "Media and Entertainment"
+    ],
+    "Therapeutics": [
+      "Health Care"
+    ],
+    "Ticketing": [
+      "Events",
+      "Media and Entertainment"
+    ],
+    "Timber": [
+      "Natural Resources"
+    ],
+    "Timeshare": [
+      "Real Estate",
+      "Travel and Tourism"
+    ],
+    "Tizen": [
+      "Platforms"
+    ],
+    "Tobacco": [
+      "Consumer Goods",
+      "Food and Beverage"
+    ],
+    "Token Issuer": [
+      "Blockchain and Cryptocurrency"
+    ],
+    "Tokenization": [
+      "Blockchain and Cryptocurrency",
+      "Financial Services"
+    ],
+    "Tour Operator": [
+      "Travel and Tourism"
+    ],
+    "Tourism": [
+      "Travel and Tourism"
+    ],
+    "Toys": [
+      "Consumer Goods"
+    ],
+    "Trade Shows": [
+      "Administrative Services"
+    ],
+    "Trading Platform": [
+      "Financial Services",
+      "Lending and Investments"
+    ],
+    "Training": [
+      "Education"
+    ],
+    "Transaction Processing": [
+      "Financial Services",
+      "Payments",
+      "Software"
+    ],
+    "Translation Service": [
+      "Professional Services"
+    ],
+    "Transportation": [
+      "Transportation"
+    ],
+    "Travel": [
+      "Travel and Tourism"
+    ],
+    "Travel Accommodations": [
+      "Travel and Tourism"
+    ],
+    "Travel Agency": [
+      "Travel and Tourism"
+    ],
+    "Treasury Management": [
+      "Financial Services",
+      "Software"
+    ],
+    "Tutoring": [
+      "Education"
+    ],
+    "Twitter": [
+      "Platforms"
+    ],
+    "UX Design": [
+      "Design"
+    ],
+    "Ultimate Frisbee": [
+      "Sports"
+    ],
+    "Unified Communications": [
+      "Information Technology",
+      "Internet Services",
+      "Messaging and Telecommunications"
+    ],
+    "Universities": [
+      "Education"
+    ],
+    "Usability Testing": [
+      "Data and Analytics",
+      "Design"
+    ],
+    "Vacation Rental": [
+      "Real Estate",
+      "Travel and Tourism"
+    ],
+    "Vending and Concessions": [
+      "Commerce and Shopping"
+    ],
+    "Venture Capital": [
+      "Financial Services",
+      "Lending and Investments"
+    ],
+    "Vertical Search": [
+      "Internet Services"
+    ],
+    "Veterinary": [
+      "Health Care"
+    ],
+    "Video": [
+      "Media and Entertainment",
+      "Video"
+    ],
+    "Video Advertising": [
+      "Advertising",
+      "Sales and Marketing"
+    ],
+    "Video Chat": [
+      "Information Technology",
+      "Internet Services",
+      "Messaging and Telecommunications"
+    ],
+    "Video Conferencing": [
+      "Hardware",
+      "Information Technology",
+      "Internet Services",
+      "Messaging and Telecommunications",
+      "Software"
+    ],
+    "Video Editing": [
+      "Content and Publishing",
+      "Media and Entertainment",
+      "Video"
+    ],
+    "Video Games": [
+      "Gaming"
+    ],
+    "Video Streaming": [
+      "Content and Publishing",
+      "Media and Entertainment",
+      "Video"
+    ],
+    "Video on Demand": [
+      "Media and Entertainment",
+      "Video"
+    ],
+    "Virtual Assistant": [
+      "Software"
+    ],
+    "Virtual Currency": [
+      "Financial Services",
+      "Payments",
+      "Software"
+    ],
+    "Virtual Desktop": [
+      "Software"
+    ],
+    "Virtual Goods": [
+      "Commerce and Shopping",
+      "Software"
+    ],
+    "Virtual Reality": [
+      "Hardware",
+      "Software"
+    ],
+    "Virtual Workforce": [
+      "Administrative Services"
+    ],
+    "Virtual World": [
+      "Community and Lifestyle",
+      "Media and Entertainment",
+      "Software"
+    ],
+    "Virtualization": [
+      "Hardware",
+      "Information Technology",
+      "Software"
+    ],
+    "Visual Search": [
+      "Internet Services"
+    ],
+    "VoIP": [
+      "Information Technology",
+      "Internet Services",
+      "Messaging and Telecommunications"
+    ],
+    "Vocational Education": [
+      "Education"
+    ],
+    "Volleyball": [
+      "Sports"
+    ],
+    "Vulnerability Management": [
+      "Privacy and Security",
+      "Software"
+    ],
+    "Warehousing": [
+      "Transportation"
+    ],
+    "Waste Management": [
+      "Sustainability"
+    ],
+    "Water": [
+      "Natural Resources"
+    ],
+    "Water Purification": [
+      "Sustainability"
+    ],
+    "Water Transportation": [
+      "Transportation"
+    ],
+    "Wealth Management": [
+      "Financial Services"
+    ],
+    "Wearables": [
+      "Consumer Electronics",
+      "Hardware"
+    ],
+    "Web Apps": [
+      "Apps",
+      "Software"
+    ],
+    "Web Browsers": [
+      "Internet Services",
+      "Software"
+    ],
+    "Web Design": [
+      "Design"
+    ],
+    "Web Development": [
+      "Software"
+    ],
+    "Web Hosting": [
+      "Internet Services"
+    ],
+    "Web3": [
+      "Blockchain and Cryptocurrency",
+      "Software"
+    ],
+    "Web3 Investor": [
+      "Blockchain and Cryptocurrency",
+      "Financial Services",
+      "Lending and Investments"
+    ],
+    "WebOS": [
+      "Platforms"
+    ],
+    "Wedding": [
+      "Community and Lifestyle",
+      "Events"
+    ],
+    "Wellness": [
+      "Health Care"
+    ],
+    "Wholesale": [
+      "Commerce and Shopping"
+    ],
+    "Wind Energy": [
+      "Energy",
+      "Natural Resources",
+      "Sustainability"
+    ],
+    "Windows": [
+      "Platforms"
+    ],
+    "Windows Phone": [
+      "Consumer Electronics",
+      "Hardware",
+      "Mobile",
+      "Platforms"
+    ],
+    "Wine And Spirits": [
+      "Food and Beverage"
+    ],
+    "Winery": [
+      "Food and Beverage"
+    ],
+    "Wired Telecommunications": [
+      "Messaging and Telecommunications"
+    ],
+    "Wireless": [
+      "Hardware",
+      "Mobile"
+    ],
+    "Women's": [
+      "Community and Lifestyle"
+    ],
+    "Wood Processing": [
+      "Manufacturing"
+    ],
+    "Workforce Management": [
+      "Professional Services",
+      "Software"
+    ],
+    "Xbox": [
+      "Consumer Electronics",
+      "Hardware",
+      "Platforms"
+    ],
+    "Young Adults": [
+      "Community and Lifestyle"
+    ],
+    "Zero Trust": [
+      "Privacy and Security"
+    ],
+    "eSports": [
+      "Sports"
+    ],
+    "iOS": [
+      "Mobile",
+      "Platforms",
+      "Software"
+    ],
+    "mHealth": [
+      "Health Care",
+      "Mobile"
+    ],
+    "macOS": [
+      "Platforms",
+      "Software"
+    ]
+  }
+}

@@ -24,6 +24,10 @@ from gateway.tee.source_add_runtime_v2 import (
     source_add_dynamic_retry_policy_hash,
 )
 from leadpoet_canonical.attested_v2 import sha256_bytes
+from leadpoet_verifier.semantic_gates import (
+    EvidenceSource,
+    SemanticGateEvaluator,
+)
 
 
 HASH = "sha256:" + "a" * 64
@@ -106,6 +110,79 @@ def test_httpx_request_uses_coordinator_and_preserves_response_shape():
         assert observed[0]["transport_attempt"]["terminal_status"] == "authenticated_response"
         assert transport.calls[0]["headers"]["Authorization"] == "Bearer openrouter-secret"
         assert "runner-placeholder" not in str(observed)
+    finally:
+        router.restore()
+
+
+@pytest.mark.asyncio
+async def test_semantic_gate_openrouter_call_uses_attested_provider_transport():
+    class SemanticTransport(Transport):
+        def __call__(self, **request):
+            self.calls.append(request)
+            judgment = {
+                "decision": "match",
+                "confidence": 0.99,
+                "relationship": "exact",
+                "entity_match": True,
+                "evidence_ids": ["source_1"],
+                "reason": "The cited source directly supports the criterion.",
+            }
+            return {
+                "http_status": 200,
+                "headers": {"content-type": "application/json"},
+                "body": json.dumps(
+                    {
+                        "choices": [
+                            {"message": {"content": json.dumps(judgment)}}
+                        ],
+                        "usage": {
+                            "prompt_tokens": 12,
+                            "completion_tokens": 8,
+                        },
+                    }
+                ).encode("utf-8"),
+                "tls_peer_chain_hash": "sha256:" + "b" * 64,
+                "tls_protocol": "TLSv1.3",
+            }
+
+    transport = SemanticTransport()
+    router, observed = _router(transport)
+    evaluator = SemanticGateEvaluator(
+        api_key="leadpoet-v2-brokered-credential",
+        models=("openai/gpt-4.1-mini",),
+    )
+    source = EvidenceSource(
+        source_id="source_1",
+        url="https://example.com/evidence",
+        source_type="official_company",
+        entity_match=True,
+        content="A" * 300,
+        content_sha256="a" * 64,
+        fetch_stage="test",
+    )
+    try:
+        with _scope(router):
+            judgment, model, prompt_tokens, completion_tokens = (
+                await evaluator._call_model(
+                    "industry",
+                    {"requested_criterion": "Legal technology"},
+                    [source],
+                )
+            )
+
+        assert judgment.decision == "match"
+        assert model == "openai/gpt-4.1-mini"
+        assert prompt_tokens == 12
+        assert completion_tokens == 8
+        assert len(observed) == 1
+        assert observed[0]["transport_attempt"]["provider_id"] == "openrouter"
+        assert transport.calls[0]["headers"]["Authorization"] == (
+            "Bearer openrouter-secret"
+        )
+        body = json.loads(transport.calls[0]["body"])
+        assert body["provider"] == {"data_collection": "deny", "zdr": True}
+        assert body["response_format"]["type"] == "json_schema"
+        assert "leadpoet-v2-brokered-credential" not in str(observed)
     finally:
         router.restore()
 

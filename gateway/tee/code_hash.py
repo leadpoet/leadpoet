@@ -33,7 +33,7 @@ INCLUDE_DIRS = (
     "miner_models",
     ATTESTED_RUNTIME_DIR,
 )
-HASH_SUFFIXES = (".py", ".json", ".txt", ".sh")
+HASH_SUFFIXES = (".py", ".json", ".txt", ".dat", ".sh")
 EXCLUDED_DIRS = {
     "__pycache__",
     ".git",

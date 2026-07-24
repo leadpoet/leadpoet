@@ -18,6 +18,7 @@ from gateway.tee.scoring_import_closure import (
     verify_staged_manifest,
     write_manifest,
 )
+from gateway.tee.code_hash import iter_gateway_code_hash_files
 from gateway.tee.normalize_attested_runtime import normalize_runtime_tree
 from gateway.tee.build_identity import build_identity, load_identity, write_identity
 
@@ -106,9 +107,32 @@ def test_scoring_import_closure_contains_authority_modules():
     assert {item["source_path"] for item in manifest["data_files"]} == set(
         MEASURED_DATA_PATHS
     )
+    assert {
+        "leadpoet_verifier/identity/public_suffix_list.dat",
+        "leadpoet_verifier/leadpoet_industry_taxonomy.json",
+    } <= set(MEASURED_DATA_PATHS)
     assert "RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE" in manifest["environment_variables"]
     assert "QUALIFICATION_OPENROUTER_API_KEY" in manifest["environment_variables"]
     assert manifest["manifest_hash"].startswith("sha256:")
+
+
+def test_gateway_code_hash_includes_verifier_runtime_data():
+    files = {
+        logical_path
+        for logical_path, _path in iter_gateway_code_hash_files(
+            ROOT / "gateway",
+            runtime_fallback_root=ROOT,
+        )
+    }
+
+    assert (
+        "_attested_runtime/leadpoet_verifier/identity/public_suffix_list.dat"
+        in files
+    )
+    assert (
+        "_attested_runtime/leadpoet_verifier/leadpoet_industry_taxonomy.json"
+        in files
+    )
 
 
 def test_staged_manifest_verifies_every_recorded_file(tmp_path: Path):

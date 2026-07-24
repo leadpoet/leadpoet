@@ -170,3 +170,21 @@ def test_normalizer_rejects_relative_build_workspace(
         match="GATEWAY_V2_BUILD_WORK_ROOT must be an absolute path",
     ):
         normalizer._normalization_temp_parent()
+
+
+def test_validator_enclave_normalizer_uses_root_backed_workspace() -> None:
+    root = Path(__file__).resolve().parents[1]
+    build_script = (
+        root / "validator_tee" / "scripts" / "build_enclave.sh"
+    ).read_text(encoding="utf-8")
+    workflow = (
+        root / ".github" / "workflows" / "attested-v2-release.yml"
+    ).read_text(encoding="utf-8")
+
+    assert '"VALIDATOR_V2_BUILD_WORK_ROOT", "RUNNER_TEMP"' in build_script
+    assert 'dir=str(normalization_work_root())' in build_script
+    assert 'tempfile.mkdtemp(prefix="pcr0_normalize_")' not in build_script
+    assert workflow.count(
+        'export VALIDATOR_V2_BUILD_WORK_ROOT="$RUNNER_TEMP/validator-build-work"'
+    ) == 2
+    assert workflow.count('"$RUNNER_TEMP/validator-build-work"') == 4

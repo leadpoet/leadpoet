@@ -226,9 +226,29 @@ import shutil
 from pathlib import Path
 import tempfile
 
+def normalization_work_root():
+    for variable in ("VALIDATOR_V2_BUILD_WORK_ROOT", "RUNNER_TEMP"):
+        configured = os.environ.get(variable)
+        if not configured:
+            continue
+        root = Path(configured).expanduser()
+        if not root.is_absolute():
+            raise RuntimeError(f"{variable} must be an absolute path")
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    root = Path.home() / ".cache" / "leadpoet" / "validator-pcr0-normalizer-v2"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
 def normalize_docker_image(image_name, normalized_name):
     """Normalize Docker image timestamps for reproducible PCR0."""
-    work_dir = Path(tempfile.mkdtemp(prefix="pcr0_normalize_"))
+    work_dir = Path(
+        tempfile.mkdtemp(
+            prefix="pcr0_normalize_",
+            dir=str(normalization_work_root()),
+        )
+    )
     
     try:
         # Export image

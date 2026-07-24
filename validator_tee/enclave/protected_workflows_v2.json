@@ -182,12 +182,12 @@
       "symbol": "Validator._publish_and_set_weights"
     },
     {
-      "ast_sha256": "sha256:e241dc3cc0bf66d121c9f5ee40a8c39ddbf0da0910f7914761f2be7433711415",
+      "ast_sha256": "sha256:a0138e3e08ba90e3fa5154416661fc8702299b806cd725ce845c8cfec96030b9",
       "path": "neurons/validator.py",
       "symbol": "Validator._recover_weight_publication_journal_v2"
     },
     {
-      "ast_sha256": "sha256:5b8d6478f79973f1ce08d20241b7fae08aedbccd92ac0c98b3e88d69a9527fbf",
+      "ast_sha256": "sha256:12040d31ec559f9d2e30c6268dcabc0d221559dd61a9b6c3edc07ccfb8678c9c",
       "path": "neurons/validator.py",
       "symbol": "Validator._research_lab_pre_weight_submission_guard"
     },
@@ -302,7 +302,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:55ee7214186a88b972a45691b3e421f444cef63031fa43781fc0e03996ba4d77",
-  "protected_source_commit": "14c06ab1975643bbef9341528cdb4c2a4737e556",
+  "manifest_hash": "sha256:ea8303bae2efe7d022fc0d4cd141c521308730ad57d1f98608b9223470a2c01e",
+  "protected_source_commit": "04601a227118805d027dcc7b7031dae439a4baa5",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

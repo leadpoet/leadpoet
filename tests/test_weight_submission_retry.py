@@ -23,6 +23,11 @@ class _FakeSubtensor:
     def get_current_block(self):
         return self._blocks.pop(0)
 
+    def get_subnet_hyperparameters(self, _netuid, block=None):
+        raise AssertionError(
+            "the Bittensor 9 compatibility wrapper must replace this method"
+        )
+
 
 class _SdkResponse:
     def __init__(self, success: bool, message: str):

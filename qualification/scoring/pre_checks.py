@@ -202,31 +202,52 @@ def _taxonomy_industry_gate_mode() -> str:
     return value
 
 
+def _resolved_semantic_mode() -> str:
+    """Resolve VERIFIER_SEMANTIC_GATES_MODE, defaulting to disabled on ANY error."""
+    try:
+        from leadpoet_verifier.semantic_gates import semantic_gate_mode
+
+        return semantic_gate_mode()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "semantic_gate_mode_unresolvable error=%s", str(exc)[:200]
+        )
+        return "disabled"
+
+
 async def _semantic_industry_rescue(
-    company: Any, icp: Any, detail: Dict[str, Any]
-) -> Optional[bool]:
+    company: Any, icp: Any, detail: Dict[str, Any], semantic_mode: str
+) -> Tuple[Optional[bool], Optional[Dict[str, Any]]]:
     """Optional source-grounded semantic judge for AMBIGUOUS industry labels.
 
     Site-faithful composition: the semantic judge may only rescue labels the
     canonical taxonomy is SILENT about — a canonical taxonomy conflict is
-    final and never rescued.  Enabled via VERIFIER_SEMANTIC_GATES_MODE
+    final and never consulted.  Enabled via VERIFIER_SEMANTIC_GATES_MODE
     (disabled by default; a real OpenRouter + fetch pipeline when on).
-    Returns True (semantic match), False (semantic no-match), or None when
-    the judge is disabled, ineligible, or unavailable.
-    """
-    from leadpoet_verifier.semantic_gates import (
-        SemanticGateEvaluator,
-        semantic_gate_mode,
-    )
 
-    if semantic_gate_mode() == "disabled":
-        return None
+    Returns ``(verdict, semantic_mode, receipt)``:
+      * verdict — True (semantic match), False (semantic no-match), or None
+        when the judge is disabled, ineligible (canonical conflict), or
+        UNAVAILABLE.  Unavailability is never a verdict.
+      * semantic_mode — the resolved VERIFIER_SEMANTIC_GATES_MODE.
+      * receipt — durable audit document (mode, model, input hash, source
+        hashes, judgment, or the unavailability error class); None when the
+        judge was disabled or ineligible.
+    """
+    from leadpoet_verifier.semantic_gates import SemanticGateEvaluator
+
+    if semantic_mode == "disabled":
+        return None, None
     taxonomy = detail.get("leadpoet_taxonomy") or {}
     if taxonomy.get("decision") == "rejected":
         # Canonical conflict: authoritative, never semantically rescued.
-        return None
+        return None, None
     try:
-        evaluator = SemanticGateEvaluator.from_env()
+        # DeepLine evidence repair is part of the ported gate: enable_repair
+        # is itself env-gated (VERIFIER_DEEPLINE_EVIDENCE_REPAIR_ENABLED +
+        # DEEPLINE_API_KEY), so from_env returns a repair-less evaluator when
+        # the operator has not opted in.
+        evaluator = SemanticGateEvaluator.from_env(enable_repair=True)
         result = await evaluator.evaluate_industry(
             company_name=str(getattr(company, "company_name", "") or ""),
             company_website=str(getattr(company, "company_website", "") or ""),
@@ -238,30 +259,51 @@ async def _semantic_industry_rescue(
         logger.warning(
             "semantic_industry_gate_unavailable error=%s", str(exc)[:200]
         )
-        return None
+        return None, {
+            "status": "unavailable",
+            "error_class": type(exc).__name__,
+        }
+    receipt: Optional[Dict[str, Any]] = None
+    receipt_fn = getattr(result, "receipt", None)
+    if callable(receipt_fn):
+        try:
+            receipt = receipt_fn()
+        except Exception:  # noqa: BLE001 — receipts must never break the gate
+            receipt = None
     outcome = getattr(result, "outcome", None) or (
         result.get("outcome") if isinstance(result, dict) else None
     )
-    return outcome == "passed"
+    return outcome == "passed", receipt
 
 
-async def _taxonomy_industry_gate(company: Any, icp: Any) -> Tuple[bool, Optional[str]]:
+async def _taxonomy_industry_gate(
+    company: Any, icp: Any
+) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
     """Canonical taxonomy/concept industry fit, ported from the site verifier.
 
-    Deterministic core is pure compute (no network, no LLM).  In ``shadow``
-    mode mismatches are only logged with a unique tag so telemetry can size
-    the impact before any enforcement; the scoring outcome is unchanged.
-    ``enforce`` hard-zeros a canonical mismatch and is an explicit operator
-    opt-in.  When the separate VERIFIER_SEMANTIC_GATES_MODE is enabled, an
-    AMBIGUOUS deterministic miss (taxonomy silent) may additionally be judged
-    by the source-grounded semantic gate — a semantic match rescues it in
-    enforce mode; canonical taxonomy conflicts are never rescued.  Any
-    internal failure logs a WARNING and fails open — this gate must never
-    take down scoring availability.
+    Deterministic core is pure compute (no network, no LLM).  Decision table
+    (taxonomy mode x semantic mode), fixed after the PR-28 audit:
+
+      * taxonomy ``shadow``  — outcome is ALWAYS pass; deterministic and (if
+        consulted) semantic verdicts are logged + receipted only.
+      * taxonomy ``enforce``:
+          - canonical taxonomy conflict            -> zero (judge not consulted)
+          - ambiguous + semantic ``disabled``      -> zero
+          - ambiguous + semantic ``shadow``        -> zero (verdict receipted
+            only — semantic shadow NEVER changes the outcome)
+          - ambiguous + semantic ``enforce`` match -> pass (rescued)
+          - ambiguous + semantic ``enforce`` no-match -> zero
+          - ambiguous + semantic ``enforce`` UNAVAILABLE -> pass (fail-open:
+            judge unavailability is never a verdict)
+
+    Returns ``(passed, failure_reason, receipt)``; the receipt is a durable
+    audit document (gate modes, deterministic detail, semantic receipt, and
+    the final scoring effect).  Any internal failure logs a WARNING and fails
+    open — this gate must never take down scoring availability.
     """
     mode = _taxonomy_industry_gate_mode()
     if mode == "disabled":
-        return True, None
+        return True, None, None
     try:
         from leadpoet_verifier.industry_fit import industry_fit
 
@@ -275,16 +317,49 @@ async def _taxonomy_industry_gate(company: Any, icp: Any) -> Tuple[bool, Optiona
         logger.warning(
             "taxonomy_industry_gate_error mode=%s error=%s", mode, str(exc)[:200]
         )
-        return True, None
+        return True, None, None
+    deterministic_receipt = {
+        "passed": passed,
+        "match_strategy": detail.get("match_strategy"),
+        "candidate": detail.get("candidate"),
+        "requested": detail.get("requested"),
+        "matched_concepts": detail.get("matched_concepts"),
+        "leadpoet_taxonomy": detail.get("leadpoet_taxonomy"),
+    }
+
+    def _receipt(final_effect: str, semantic_mode: str = "disabled",
+                 semantic_receipt: Optional[Dict[str, Any]] = None,
+                 semantic_verdict: Optional[bool] = None) -> Dict[str, Any]:
+        return {
+            "gate": "taxonomy_industry",
+            "taxonomy_mode": mode,
+            "semantic_mode": semantic_mode,
+            "deterministic": deterministic_receipt,
+            "semantic_verdict": semantic_verdict,
+            "semantic": semantic_receipt,
+            "final_effect": final_effect,
+        }
+
     if passed:
-        return True, None
+        return True, None, _receipt("passed_deterministic")
     semantic_verdict: Optional[bool] = None
+    semantic_mode = _resolved_semantic_mode()
+    semantic_receipt: Optional[Dict[str, Any]] = None
     try:
-        semantic_verdict = await _semantic_industry_rescue(company, icp, detail)
+        semantic_verdict, semantic_receipt = await _semantic_industry_rescue(
+            company, icp, detail, semantic_mode
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "semantic_industry_gate_error error=%s", str(exc)[:200]
         )
+        if semantic_mode == "enforce":
+            # A configured judge that cannot even start is UNAVAILABLE, not a
+            # verdict — receipt it so the fail-open branch below applies.
+            semantic_receipt = {
+                "status": "unavailable",
+                "error_class": type(exc).__name__,
+            }
     if mode == "shadow":
         logger.warning(
             "taxonomy_industry_gate_shadow_mismatch company=%r icp_industry=%r "
@@ -295,19 +370,40 @@ async def _taxonomy_industry_gate(company: Any, icp: Any) -> Tuple[bool, Optiona
             semantic_verdict,
             {k: detail.get(k) for k in ("candidate", "requested", "matched_concepts")},
         )
-        return True, None
-    if semantic_verdict is True:
-        logger.info(
-            "taxonomy_industry_gate_semantic_rescue company=%r icp_industry=%r",
-            getattr(company, "company_name", None),
-            getattr(icp, "industry", None),
+        return True, None, _receipt(
+            "shadow_pass", semantic_mode, semantic_receipt, semantic_verdict
         )
-        return True, None
+    # taxonomy enforce: only a semantic-ENFORCE judge may change the outcome.
+    if semantic_mode == "enforce":
+        if semantic_verdict is True:
+            logger.info(
+                "taxonomy_industry_gate_semantic_rescue company=%r icp_industry=%r",
+                getattr(company, "company_name", None),
+                getattr(icp, "industry", None),
+            )
+            return True, None, _receipt(
+                "rescued_semantic_enforce", semantic_mode, semantic_receipt, True
+            )
+        if semantic_verdict is None and semantic_receipt is not None:
+            # The judge was consulted but UNAVAILABLE (provider outage or
+            # internal error): unavailability is never a verdict, so the
+            # documented fail-open contract passes the company.
+            logger.warning(
+                "taxonomy_industry_gate_semantic_unavailable_failopen company=%r",
+                getattr(company, "company_name", None),
+            )
+            return True, None, _receipt(
+                "failed_open_semantic_unavailable",
+                semantic_mode,
+                semantic_receipt,
+                None,
+            )
+    receipt = _receipt("zeroed", semantic_mode, semantic_receipt, semantic_verdict)
     return False, (
         "Industry outside canonical taxonomy fit: "
         f"'{getattr(company, 'industry', '')}' does not match ICP industry "
         f"'{getattr(icp, 'industry', '')}'"
-    )
+    ), receipt
 
 
 async def run_company_zero_checks(
@@ -316,6 +412,7 @@ async def run_company_zero_checks(
     run_cost_usd: float,
     run_time_seconds: float,
     seen_companies: Set[str],
+    gate_receipts: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[bool, Optional[str]]:
     """Deterministic pre-checks that run BEFORE any LLM scoring in
     the company-mode model competition.
@@ -370,7 +467,11 @@ async def run_company_zero_checks(
     #   shadow (default) — compute + log mismatches only, outcome unchanged;
     #   enforce — hard-zero on a canonical mismatch (operator opt-in only,
     #   because it changes benchmark scores).
-    taxonomy_passed, taxonomy_reason = await _taxonomy_industry_gate(company, icp)
+    taxonomy_passed, taxonomy_reason, taxonomy_receipt = (
+        await _taxonomy_industry_gate(company, icp)
+    )
+    if gate_receipts is not None and taxonomy_receipt is not None:
+        gate_receipts.append(taxonomy_receipt)
     if not taxonomy_passed:
         logger.info(f"Company failed taxonomy industry gate: {taxonomy_reason}")
         return False, taxonomy_reason
@@ -663,6 +764,13 @@ def _resolve_country(value: str) -> Optional[str]:
     resolved = lookup.get(token.lower())
     if resolved is not None:
         return resolved
+    # Official-style "The X" forms (The Bahamas, The Gambia, The Netherlands)
+    # resolve to the same canonical country as their bare names.
+    lowered = token.lower()
+    if lowered.startswith("the ") and len(lowered) > 4:
+        resolved = lookup.get(lowered[4:].strip())
+        if resolved is not None:
+            return resolved
     # ISO alpha-2/alpha-3 codes must be uppercase in the source text so
     # ordinary words in geography prose cannot masquerade as codes.
     if len(token) in (2, 3) and token.isupper():
@@ -699,7 +807,9 @@ def _allowed_countries_from_icp_geography(value: str) -> frozenset:
         country = _resolve_country(token)
         if country is not None:
             allowed.add(country)
-        continent_code = _CONTINENT_CODES.get(token.lower())
+        continent_code = _CONTINENT_CODES.get(token.lower()) or (
+            "EU" if token == "EU" else None
+        )
         if continent_code:
             allowed.update(_continent_members(continent_code))
         us_state = _lookup_us_state(token)
@@ -740,6 +850,22 @@ def check_country_match(lead_country: str, icp_country: str) -> ValidationResult
 
     allowed = _allowed_countries_from_icp_geography(icp_country)
     if not allowed:
+        geography_token = str(icp_country or "").strip()
+        if (
+            len(geography_token) in (2, 3)
+            and geography_token.isalpha()
+            and geography_token.isupper()
+        ):
+            # A bare code-shaped token (e.g. "ZZ") that resolves to NOTHING is
+            # a broken requirement, not free prose — failing open here would
+            # accept every company against an unknown code (PR-28 audit).
+            return ValidationResult(
+                passed=False,
+                reason=(
+                    f"Country mismatch: ICP geography '{icp_country}' is not "
+                    "a recognized ISO country code"
+                ),
+            )
         # The ICP geography does not resolve to any recognized country or
         # continent (business regions like "EMEA", free prose). Hard-zeroing
         # here would reject every company, so geography nuance is scored by

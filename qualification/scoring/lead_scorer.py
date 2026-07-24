@@ -1096,27 +1096,6 @@ async def score_company_autoresearch_intent_signal(
             signal_date=signal.date,
             buyer_cap_days=getattr(icp, "intent_max_age_days", None),
         )
-        if freshness_reason:
-            logger.info(
-                "Autoresearch intent signal rejected by freshness gate: %s  "
-                "source=%s",
-                freshness_reason,
-                signal.url[:60],
-            )
-            signal_results.append({
-                "raw": 0.0,
-                "after_decay": 0.0,
-                "decay": 0.0,
-                "confidence": 0,
-                "date_status": "fabricated",
-                "matched_icp_signal": matched_idx,
-                "evidence_type": _evidence_type_for(matched_idx),
-                "judge_verdict": {
-                    "decision": "rejected_pregate",
-                    "rejection_reason": "freshness_gate",
-                },
-            })
-            continue
 
         # P12: keep the verifier's structured per-signal verdict alongside the
         # scalar score so the training corpus sees HOW each claim was decided.
@@ -1154,6 +1133,31 @@ async def score_company_autoresearch_intent_signal(
         # Prefer the verifier's authoritative matched index; fall back to the
         # company-asserted one when the verifier didn't resolve a match.
         resolved_idx = _matched_idx if isinstance(_matched_idx, int) and _matched_idx >= 0 else matched_idx
+        judge_verdict = signal_verdicts[-1] if signal_verdicts else {}
+        if freshness_reason:
+            # Fetch and judge the supplied page first so a stale signal still
+            # has a complete, source-grounded receipt. Freshness is a terminal
+            # publication gate and can never be rescued by a positive content
+            # verdict.
+            logger.info(
+                "Autoresearch intent signal rejected after source verification: %s  "
+                "source=%s",
+                freshness_reason,
+                signal.url[:60],
+            )
+            score = 0.0
+            after_decay = 0.0
+            decay = 0.0
+            confidence = 0
+            date_status = "out_of_window"
+            judge_verdict = {
+                **judge_verdict,
+                "decision_before_freshness": judge_verdict.get("decision"),
+                "decision": "rejected_freshness",
+                "rejection_reason": "signal_out_of_window",
+                "freshness_explanation": freshness_reason,
+                "client_ready": False,
+            }
         signal_results.append({
             "raw": score,
             "after_decay": after_decay,
@@ -1162,7 +1166,7 @@ async def score_company_autoresearch_intent_signal(
             "date_status": date_status,
             "matched_icp_signal": resolved_idx,
             "evidence_type": _evidence_type_for(resolved_idx),
-            **({"judge_verdict": signal_verdicts[-1]} if signal_verdicts else {}),
+            **({"judge_verdict": judge_verdict} if judge_verdict else {}),
         })
 
     if not signal_results:
@@ -1534,6 +1538,37 @@ async def _score_single_intent_signal(
             }
         )
 
+    def _verification_trace(result: dict) -> dict:
+        """Return the complete bounded verifier receipt, excluding page text."""
+
+        scrape = result.get("scrape") or {}
+        intent_verdict = result.get("verdict") or {
+            "signal_evaluations": [{
+                "signal_status": "unable_to_verify",
+                "explanation": str(
+                    result.get("rejection_reason") or "Verifier returned no intent verdict"
+                )[:2_000],
+                "verification_mode": "source_grounded",
+            }],
+        }
+        return {
+            "evidence_url": signal.url,
+            "evidence_source": (
+                signal.source.value
+                if hasattr(signal.source, "value")
+                else str(signal.source)
+            ),
+            "extracted_signal_date": str(signal.date) if signal.date else None,
+            "company_identity_determination": result.get("company_check"),
+            "provider_attempts": scrape.get("statuses") or [],
+            "scrape_result_count": scrape.get("result_count"),
+            "stage1": result.get("stage1"),
+            "stage3": result.get("stage3"),
+            "corroboration": result.get("corroboration"),
+            "intent_verdict": intent_verdict,
+            "final_disposition": result.get("decision"),
+        }
+
     # ── Gate 0: miner-asserted matched_icp_signal must be set and in range ──
     # Each intent signal a miner submits MUST be tagged with the index of
     # the client-listed signal that this evidence is meant to satisfy.  A
@@ -1576,6 +1611,7 @@ async def _score_single_intent_signal(
     confidence = 0
     content_found_date: Optional[str] = None
     date_status = "verified"
+    deferred_pregate_reason: Optional[str] = None
 
     source_str = signal.source.value if hasattr(signal.source, "value") else str(signal.source)
     source_lower = source_str.lower()
@@ -1595,13 +1631,19 @@ async def _score_single_intent_signal(
             return 0.0, 5, "fabricated", None, -1
     if source_lower == "other" and len(signal.description or "") < 100:
         logger.warning("Intent signal rejected: 'other' source with short description")
-        _record_verdict("rejected_pregate", rejection_reason="other_source_short_description")
-        return 0.0, 10, "fabricated", None, -1
+        if stage1_soft_reject:
+            deferred_pregate_reason = "other_source_short_description"
+        else:
+            _record_verdict("rejected_pregate", rejection_reason="other_source_short_description")
+            return 0.0, 10, "fabricated", None, -1
     future_err = check_future_date(signal.date)
     if future_err:
         logger.warning(f"Intent signal rejected: future date — {future_err}")
-        _record_verdict("rejected_pregate", rejection_reason="future_dated_signal")
-        return 0.0, 0, "fabricated", None, -1
+        if stage1_soft_reject:
+            deferred_pregate_reason = "future_dated_signal"
+        else:
+            _record_verdict("rejected_pregate", rejection_reason="future_dated_signal")
+            return 0.0, 0, "fabricated", None, -1
 
     # ── Fabricated-source domain guard ───────────────────────────────────
     # The three-stage content verifier checks whether a page's TEXT supports
@@ -1615,8 +1657,11 @@ async def _score_single_intent_signal(
     untrusted = _is_untrusted_evidence_source(signal.url, company_website)
     if untrusted:
         logger.warning(f"Intent signal rejected: untrusted evidence source — {untrusted}")
-        _record_verdict("rejected_pregate", rejection_reason="untrusted_evidence_source")
-        return 0.0, 0, "fabricated", None, -1
+        if stage1_soft_reject:
+            deferred_pregate_reason = "untrusted_evidence_source"
+        else:
+            _record_verdict("rejected_pregate", rejection_reason="untrusted_evidence_source")
+            return 0.0, 0, "fabricated", None, -1
 
     # ── Self-contradicting evidence guard ────────────────────────────────
     # The three-stage verifier's Stage 1 (Sonar with native web search)
@@ -1654,8 +1699,11 @@ async def _score_single_intent_signal(
             f"contains a negation phrase ({_neg_match.group(0)!r}) — "
             f"evidence URL appears to NOT support the claim"
         )
-        _record_verdict("rejected_pregate", rejection_reason="self_contradicting_evidence")
-        return 0.0, 0, "fabricated", None, -1
+        if stage1_soft_reject:
+            deferred_pregate_reason = "self_contradicting_evidence"
+        else:
+            _record_verdict("rejected_pregate", rejection_reason="self_contradicting_evidence")
+            return 0.0, 0, "fabricated", None, -1
 
     # Get source type multiplier (penalize low-value sources like "other")
     source_multiplier = SOURCE_TYPE_MULTIPLIERS.get(source_lower, 0.5)
@@ -1737,6 +1785,25 @@ async def _score_single_intent_signal(
             "rejected_verifier_error",
             rejection_reason="three_stage_exception",
             error_class=type(three_stage_error).__name__,
+            verification_trace={
+                "evidence_url": signal.url,
+                "evidence_source": source_lower,
+                "extracted_signal_date": str(signal.date) if signal.date else None,
+                "company_identity_determination": None,
+                "provider_attempts": [{
+                    "stage": "three_stage",
+                    "outcome": "exception",
+                    "error_class": type(three_stage_error).__name__,
+                }],
+                "intent_verdict": {
+                    "signal_evaluations": [{
+                        "signal_status": "unable_to_verify",
+                        "verification_mode": "source_grounded",
+                        "explanation": "The independent verifier raised before reaching a terminal verdict",
+                    }],
+                },
+                "final_disposition": "unavailable",
+            },
         )
         return 0.0, confidence, "verified", content_found_date, -1
 
@@ -1745,6 +1812,14 @@ async def _score_single_intent_signal(
     scrape_summary = three_stage_result.get("scrape") or {}
     pipeline_decision = three_stage_result.get("decision")
     if not three_stage_result.get("client_ready"):
+        provider_unavailable = (
+            pipeline_decision == "unavailable"
+            or s1_status == "llm_error"
+            or s3_status == "llm_error"
+            or str(three_stage_result.get("rejection_reason") or "").startswith(
+                ("stage1_llm_error:", "stage3_llm_error:")
+            )
+        )
         logger.info(
             "Intent signal three-stage REJECT  reason=%s  "
             "decision=%s  s1_status=%s  s3_status=%s  "
@@ -1755,14 +1830,6 @@ async def _score_single_intent_signal(
             signal.url[:60],
             miner_asserted_idx, target_signal_text[:60],
         )
-        provider_unavailable = (
-            pipeline_decision == "unavailable"
-            or s1_status == "llm_error"
-            or s3_status == "llm_error"
-            or str(three_stage_result.get("rejection_reason") or "").startswith(
-                ("stage1_llm_error:", "stage3_llm_error:")
-            )
-        )
         _record_verdict(
             "rejected_verifier_error" if provider_unavailable else "rejected_three_stage",
             rejection_reason=str(three_stage_result.get("rejection_reason") or "")[:120] or None,
@@ -1771,8 +1838,21 @@ async def _score_single_intent_signal(
             stage3_status=s3_status,
             scrape_result_count=scrape_summary.get("result_count"),
             client_ready=False,
+            verification_trace=_verification_trace(three_stage_result),
         )
         return 0.0, confidence, "verified", content_found_date, -1
+
+    if deferred_pregate_reason:
+        _record_verdict(
+            "rejected_pregate_after_fetch",
+            rejection_reason=deferred_pregate_reason,
+            pipeline_decision=pipeline_decision,
+            stage1_status=s1_status,
+            stage3_status=s3_status,
+            client_ready=False,
+            verification_trace=_verification_trace(three_stage_result),
+        )
+        return 0.0, confidence, "fabricated", content_found_date, -1
 
     miner_date_match = (
         (three_stage_result.get("stage3") or {}).get("claim_matches_miner_date")
@@ -1791,6 +1871,7 @@ async def _score_single_intent_signal(
             stage3_status=s3_status,
             miner_date_match=miner_date_match,
             client_ready=True,
+            verification_trace=_verification_trace(three_stage_result),
         )
         return 0.0, confidence, "fabricated", content_found_date, -1
     if miner_date_match == "contradicted" and trust_signal_date:
@@ -1818,6 +1899,7 @@ async def _score_single_intent_signal(
         scrape_result_count=scrape_summary.get("result_count"),
         source_multiplier=source_multiplier,
         client_ready=True,
+        verification_trace=_verification_trace(three_stage_result),
     )
     return (
         60.0 * source_multiplier,

@@ -1867,8 +1867,8 @@ async def verify_three_stage(
     """3-stage intent verification (sonar -> SD/Exa -> sonar-pro).
 
     Pipeline:
-      1. Stage 1 sonar verdict.  approve / reject -> STOP and return.
-      2. On review: fetch supplied URLs via SD (hardened) with Exa fallback.
+      1. Stage 1 sonar verdict.  In source-grounded mode this is advisory.
+      2. Fetch supplied URLs via SD (hardened) with Exa fallback.
       3. Pre-LLM company-name-in-scrape check on the fetched content.
          If the company name isn't anywhere in any fetched page, short-
          circuit as wrong_entity (no sonar-pro call).
@@ -1889,6 +1889,9 @@ async def verify_three_stage(
         company_check (bool | None): result of the pre-LLM company-in-scrape
             short-circuit.  None when not applicable (Stage 2 didn't fetch
             anything textual).
+        corroboration (dict | None): bounded discovery/fetch/judge receipt for
+            an eligible supported-medium rescue, including provider names,
+            independent URLs, exclusions, and the terminal rescue decision.
     """
     review_as_accept = os.environ.get(
         "INTENT_VERIFIER_REVIEW_AS_ACCEPT", ""
@@ -1928,41 +1931,47 @@ async def verify_three_stage(
         client, stage1_model or STAGE1_MODEL, s1_prompt
     )
     if s1_envelope.get("_error"):
-        return {
-            "client_ready": False,
-            "decision": "reject",
-            "rejection_reason": f"stage1_llm_error:{s1_envelope['_error']}",
-            "stage1": {
-                "model": stage1_model or STAGE1_MODEL,
-                "status": "llm_error",
-                "confidence": None,
-                "decision": "reject",
-                "same_entity_check": None,
-                "usage": {},
-                "error": s1_envelope.get("_error"),
-            },
-            "scrape": None,
-            "stage3": None,
-            "company_check": None,
+        stage1_info = {
+            "model": stage1_model or STAGE1_MODEL,
+            "status": "llm_error",
+            "confidence": None,
+            "decision": "review" if stage1_soft_reject else "reject",
+            "same_entity_check": None,
+            "usage": {},
+            "error": s1_envelope.get("_error"),
         }
-    s1_verdict_raw = (s1_envelope.get("answer") or {})
-    s1_verdict = _apply_guardrails(row, s1_verdict_raw)
-    s1_item = ((s1_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
-    s1_decision = _decision(s1_verdict)
-    stage1_info = {
-        "model": s1_envelope.get("model"),
-        "status": s1_item.get("signal_status"),
-        "confidence": s1_item.get("confidence"),
-        "decision": s1_decision,
-        "same_entity_check": s1_item.get("same_entity_check"),
-        "author_type": s1_item.get("author_type"),
-        "author_employer_matches_lead": s1_item.get("author_employer_matches_lead"),
-        "author_role_matches_spec": s1_item.get("author_role_matches_spec"),
-        "author_satisfies_role_spec": s1_item.get("author_satisfies_role_spec"),
-        "usage": s1_envelope.get("usage") or {},
-    }
+        if not stage1_soft_reject:
+            return {
+                "client_ready": False,
+                "decision": "unavailable",
+                "rejection_reason": f"stage1_llm_error:{s1_envelope['_error']}",
+                "stage1": stage1_info,
+                "scrape": None,
+                "stage3": None,
+                "company_check": None,
+            }
+        s1_verdict = {}
+        s1_item = {}
+        s1_decision = "review"
+    else:
+        s1_verdict_raw = (s1_envelope.get("answer") or {})
+        s1_verdict = _apply_guardrails(row, s1_verdict_raw)
+        s1_item = ((s1_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
+        s1_decision = _decision(s1_verdict)
+        stage1_info = {
+            "model": s1_envelope.get("model"),
+            "status": s1_item.get("signal_status"),
+            "confidence": s1_item.get("confidence"),
+            "decision": s1_decision,
+            "same_entity_check": s1_item.get("same_entity_check"),
+            "author_type": s1_item.get("author_type"),
+            "author_employer_matches_lead": s1_item.get("author_employer_matches_lead"),
+            "author_role_matches_spec": s1_item.get("author_role_matches_spec"),
+            "author_satisfies_role_spec": s1_item.get("author_satisfies_role_spec"),
+            "usage": s1_envelope.get("usage") or {},
+        }
 
-    if s1_decision == "approve":
+    if s1_decision == "approve" and not stage1_soft_reject:
         return {
             "client_ready": True,
             "decision": "approve",
@@ -1973,21 +1982,11 @@ async def verify_three_stage(
             "company_check": None,
             "verdict": s1_verdict,
         }
-    if s1_decision == "reject":
+    if s1_decision == "reject" and not stage1_soft_reject:
         # Override: when URL is on the lead's own domain AND the
         # rejection is specifically for entity-identity reasons
         # (same_entity_check == "fail"), downgrade to review.  URLs on
-        # the lead's own property are structural proof of same-entity,
-        # so wrong_entity for ENTITY reasons can't logically apply.
-        # We do NOT override `wrong_entity` rejects that are actually
-        # for claim-mismatch (same_entity_check != "fail"), nor any
-        # other reject status like `contradicted`.
-        # A DEFINITIVE wrong-entity (entity mismatch on a URL that is NOT on
-        # the lead's own domain) is a cheap, reliable "different company"
-        # filter and always hard-rejects.
-        definitively_wrong_entity = (
-            s1_item.get("same_entity_check") == "fail" and not _on_lead_domain
-        )
+        # the lead's own property are structural proof of same-entity.
         if (
             _on_lead_domain
             and s1_item.get("signal_status") == "wrong_entity"
@@ -1997,18 +1996,6 @@ async def verify_three_stage(
             stage1_info["decision"] = "review"
             stage1_info["same_entity_check"] = "pass"
             stage1_info["domain_override"] = "url_on_lead_domain"
-            # Fall through to Stage 2/3 below
-        elif stage1_soft_reject and not definitively_wrong_entity:
-            # Research-lab opt-in (default OFF, so fulfillment is unchanged):
-            # Stage 1 is blind `sonar` (it never reads the cited URL) and
-            # false-rejects valid evidence as contradicted / unable_to_verify.
-            # Downgrade every non-definitive-wrong-entity reject to review so
-            # Stage 2 (fetch the real URL) + Stage 3 (`sonar-pro` reads it)
-            # make the final call instead of trusting Stage 1's blind verdict.
-            stage1_info["status"] = "review"
-            stage1_info["decision"] = "review"
-            stage1_info["stage1_reject_downgraded"] = s1_item.get("signal_status") or "reject"
-            # Fall through to Stage 2/3 below
         else:
             return {
                 "client_ready": False,
@@ -2022,21 +2009,57 @@ async def verify_three_stage(
                 "company_check": None,
                 "verdict": s1_verdict,
             }
+    elif stage1_soft_reject:
+        # The independent publication verifier must make its terminal decision
+        # from the supplied page, not Stage 1's blind web search. Preserve the
+        # first-pass verdict for diagnostics and always continue to fetch.
+        stage1_info["original_decision"] = s1_decision
+        stage1_info["decision"] = "review"
+        if s1_item.get("signal_status"):
+            stage1_info["source_fetch_required_after"] = s1_item.get("signal_status")
 
     # ── STAGE 2: SD-primary + Exa-fallback fetch ───────────────────
     if not row["claimed_source_urls"]:
         return {
             "client_ready": False,
             "decision": "reject",
-            "rejection_reason": "no_source_url_for_stage2",
+            "rejection_reason": "evidence_fetch_failed",
             "stage1": stage1_info,
-            "scrape": None,
+            "scrape": {"statuses": [], "result_count": 0},
             "stage3": None,
             "company_check": None,
-            "verdict": s1_verdict,
+            "verdict": {
+                "signal_evaluations": [{
+                    "signal_status": "unable_to_verify",
+                    "verification_mode": "source_grounded",
+                    "explanation": "No supplied evidence URL was available to fetch",
+                    "confidence": "high",
+                }],
+            },
         }
 
     contents = await _fetch_sd_then_exa(row["claimed_source_urls"])
+    if not (contents.get("results") or []):
+        return {
+            "client_ready": False,
+            "decision": "reject",
+            "rejection_reason": "evidence_fetch_failed",
+            "stage1": stage1_info,
+            "scrape": {
+                "statuses": contents.get("statuses") or [],
+                "result_count": 0,
+            },
+            "stage3": None,
+            "company_check": None,
+            "verdict": {
+                "signal_evaluations": [{
+                    "signal_status": "unable_to_verify",
+                    "verification_mode": "source_grounded",
+                    "explanation": "Every bounded evidence fetch and fallback returned no usable content",
+                    "confidence": "high",
+                }],
+            },
+        }
 
     # ── PRE-STAGE-3: deterministic company-name-in-scrape check ───
     # A cost pre-filter, NOT the entity judge — Stage 3 (sonar-pro) is the
@@ -2056,7 +2079,14 @@ async def verify_three_stage(
     )
     company_check: Optional[bool] = None
     if combined_text.strip():
-        if company_in_scrape(company_name, combined_text):
+        if _on_lead_domain:
+            # Exact canonical host/subdomain or exact LinkedIn company slug is
+            # structural entity evidence. The page must still pass the Stage-3
+            # source-grounded claim/date judge; this only prevents an official
+            # JavaScript-heavy page whose extracted body omits the brand name
+            # from being mislabeled as a different company.
+            company_check = True
+        elif company_in_scrape(company_name, combined_text):
             company_check = True
         elif _entity_plausibly_present(company_name, combined_text):
             # Ambiguous: distinctive part of the name is present but the exact
@@ -2186,7 +2216,7 @@ async def verify_three_stage(
     if s3_envelope.get("_error"):
         return {
             "client_ready": False,
-            "decision": "reject",
+            "decision": "unavailable",
             "rejection_reason": f"stage3_llm_error:{s3_envelope['_error']}",
             "stage1": stage1_info,
             "scrape": {"statuses": contents.get("statuses") or [],
@@ -2195,7 +2225,7 @@ async def verify_three_stage(
                 "model": stage3_model or STAGE3_MODEL,
                 "status": "llm_error",
                 "confidence": None,
-                "decision": "reject",
+                "decision": "unavailable",
                 "same_entity_check": None,
                 "usage": {},
                 "error": s3_envelope.get("_error"),

@@ -1116,6 +1116,19 @@ def test_auditor_v2_requires_publication_and_finalized_state_transition():
         host="entrypoint-finney.opentensor.ai",
         method="POST",
     )
+    archive_finalization_attempt = _source_attempt(
+        category="weight-finalization-archive",
+        job_id=finalization_job,
+        purpose="validator.weights.finalized.v2",
+        sequence=301,
+        provider_id="bittensor_archive",
+        host="archive.chain.opentensor.ai",
+        method="POST",
+    )
+    finalization_attempts = [
+        finalization_attempt,
+        archive_finalization_attempt,
+    ]
     finalization_doc = {
         "schema_version": "leadpoet.weight_finalization.v2",
         "validator_hotkey": VALIDATOR_HOTKEY,
@@ -1133,61 +1146,99 @@ def test_auditor_v2_requires_publication_and_finalized_state_transition():
         "finalized_block_hash": "d" * 64,
         "state_transition_hash": sha256_json({"state": "committed"}),
     }
-    finalization_receipt = _receipt(
-        role=WEIGHT_ROLE,
-        purpose="validator.weights.finalized.v2",
-        job_id=finalization_job,
-        private_key=weight_key,
-        public_key=weight_pub,
-        boot=finalization_boot,
-        config_hash=weight_config,
-        input_root=sha256_json(
-            {
-                "weight_submission_event_hash": submission_event_hash,
-                "extrinsic_receipt_hashes": [
-                    extrinsic_receipt["receipt_hash"]
+    def finalization_submission_for_attempts(attempts):
+        receipt = _receipt(
+            role=WEIGHT_ROLE,
+            purpose="validator.weights.finalized.v2",
+            job_id=finalization_job,
+            private_key=weight_key,
+            public_key=weight_pub,
+            boot=finalization_boot,
+            config_hash=weight_config,
+            input_root=sha256_json(
+                {
+                    "weight_submission_event_hash": submission_event_hash,
+                    "extrinsic_receipt_hashes": [
+                        extrinsic_receipt["receipt_hash"]
+                    ],
+                }
+            ),
+            output_root=sha256_json(finalization_doc),
+            parents=[extrinsic_receipt["receipt_hash"]],
+            sequence=202,
+            transport_root=merkle_root(
+                [attempt["attempt_hash"] for attempt in attempts],
+                domain="leadpoet-transport-v2",
+            ),
+            artifact_root=merkle_root(
+                [
+                    artifact_hash
+                    for attempt in attempts
+                    for artifact_hash in (
+                        attempt["request_artifact_hash"],
+                        attempt["response_artifact_hash"],
+                    )
                 ],
-            }
-        ),
-        output_root=sha256_json(finalization_doc),
-        parents=[extrinsic_receipt["receipt_hash"]],
-        sequence=202,
-        transport_root=merkle_root(
-            [finalization_attempt["attempt_hash"]],
-            domain="leadpoet-transport-v2",
-        ),
-        artifact_root=merkle_root(
-            [
-                finalization_attempt["request_artifact_hash"],
-                finalization_attempt["response_artifact_hash"],
-            ],
-            domain="leadpoet-artifact-v2",
-        ),
+                domain="leadpoet-artifact-v2",
+            ),
+        )
+        receipts = [
+            item
+            for item in bundle["receipt_graph"]["receipts"]
+            if item["purpose"] != "validator.hotkey_signature.v2"
+        ] + [extrinsic_receipt, receipt]
+        graph = build_receipt_graph(
+            root_receipt_hash=receipt["receipt_hash"],
+            boot_identities=bundle["receipt_graph"]["boot_identities"]
+            + [finalization_boot],
+            receipts=receipts,
+            transport_attempts=bundle["receipt_graph"]["transport_attempts"]
+            + list(attempts),
+        )
+        return {
+            "schema_version": "leadpoet.weight_finalization_submission.v2",
+            "validator_hotkey": VALIDATOR_HOTKEY,
+            "weight_submission_event_hash": submission_event_hash,
+            "finalization": finalization_doc,
+            "receipt_graph": graph,
+        }
+
+    finalization_submission = finalization_submission_for_attempts(
+        finalization_attempts
     )
-    finalization_receipts = [
-        receipt
-        for receipt in bundle["receipt_graph"]["receipts"]
-        if receipt["purpose"] != "validator.hotkey_signature.v2"
-    ] + [extrinsic_receipt, finalization_receipt]
-    finalization_graph = build_receipt_graph(
-        root_receipt_hash=finalization_receipt["receipt_hash"],
-        boot_identities=bundle["receipt_graph"]["boot_identities"]
-        + [finalization_boot],
-        receipts=finalization_receipts,
-        transport_attempts=bundle["receipt_graph"]["transport_attempts"]
-        + [finalization_attempt],
-    )
-    finalization_submission = {
-        "schema_version": "leadpoet.weight_finalization_submission.v2",
-        "validator_hotkey": VALIDATOR_HOTKEY,
-        "weight_submission_event_hash": submission_event_hash,
-        "finalization": finalization_doc,
-        "receipt_graph": finalization_graph,
-    }
     verified_finalization = validate_weight_finalization_submission_v2(
         finalization_submission,
         chain_signing_profile=_chain_profile(),
     )
+    wrong_archive_attempt = _source_attempt(
+        category="weight-finalization-wrong-archive",
+        job_id=finalization_job,
+        purpose="validator.weights.finalized.v2",
+        sequence=302,
+        provider_id="bittensor_archive",
+        host="attacker.example.com",
+        method="POST",
+    )
+    with pytest.raises(
+        WeightAuthorityV2Error,
+        match="weight finalization chain evidence is invalid",
+    ):
+        validate_weight_finalization_submission_v2(
+            finalization_submission_for_attempts(
+                [finalization_attempt, wrong_archive_attempt]
+            ),
+            chain_signing_profile=_chain_profile(),
+        )
+    with pytest.raises(
+        WeightAuthorityV2Error,
+        match="weight finalization has no authenticated live-chain reads",
+    ):
+        validate_weight_finalization_submission_v2(
+            finalization_submission_for_attempts(
+                [archive_finalization_attempt]
+            ),
+            chain_signing_profile=_chain_profile(),
+        )
     finalization_event_hash = sha256_json(
         {
             "weight_submission_event_hash": submission_event_hash,

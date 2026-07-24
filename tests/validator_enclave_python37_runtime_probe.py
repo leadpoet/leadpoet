@@ -179,6 +179,13 @@ def main() -> None:
         raise SystemExit("finalization proof returned the wrong extrinsic")
     if result["finalized_block"] != BLOCK:
         raise SystemExit("finalization proof returned the wrong block")
+    providers = {
+        attempt["provider_id"] for attempt in result["attempts"]
+    }
+    if providers != {"bittensor_chain", "bittensor_archive"}:
+        raise SystemExit(
+            "finalization proof did not preserve live and archive evidence"
+        )
     print("PYTHON37_FINALIZATION_PROBE_SUCCESS")
 
 

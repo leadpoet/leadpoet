@@ -22,6 +22,7 @@ from leadpoet_canonical.attested_v2 import (
 
 ARTIFACT_POLICY_SCHEMA_VERSION = "leadpoet.encrypted_artifact_policy.v2"
 ARTIFACT_PERSISTENCE_PURPOSE = "leadpoet.artifact_persistence.v2"
+ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS = 3
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DNS_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
@@ -232,14 +233,20 @@ class ArtifactPersistenceVerifierV2:
         if urlsplit(normalized_get).path != urlsplit(normalized_head).path:
             raise ArtifactPersistenceV2Error("artifact verification URLs differ")
 
-        get_response, get_attempt = self._request(
-            artifact_id=artifact_id,
-            attestation_job_id=attestation_job_id,
-            method="GET",
-            url=normalized_get,
-            ordinal=0,
-        )
-        attempts = [get_attempt]
+        attempts = []
+        get_response = {}
+        get_attempt = {}
+        for ordinal in range(ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS):
+            get_response, get_attempt = self._request(
+                artifact_id=artifact_id,
+                attestation_job_id=attestation_job_id,
+                method="GET",
+                url=normalized_get,
+                ordinal=ordinal,
+            )
+            attempts.append(get_attempt)
+            if get_attempt["terminal_status"] == "authenticated_response":
+                break
         if get_attempt["terminal_status"] != "authenticated_response":
             return self._failure(attempts, get_attempt["failure_code"])
         if get_attempt["http_status"] != 200:
@@ -256,14 +263,19 @@ class ArtifactPersistenceVerifierV2:
         ) != body:
             return self._failure(attempts, "noncanonical_storage_document")
 
-        head_response, head_attempt = self._request(
-            artifact_id=artifact_id,
-            attestation_job_id=attestation_job_id,
-            method="HEAD",
-            url=normalized_head,
-            ordinal=1,
-        )
-        attempts.append(head_attempt)
+        head_response = {}
+        head_attempt = {}
+        for offset in range(ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS):
+            head_response, head_attempt = self._request(
+                artifact_id=artifact_id,
+                attestation_job_id=attestation_job_id,
+                method="HEAD",
+                url=normalized_head,
+                ordinal=len(attempts),
+            )
+            attempts.append(head_attempt)
+            if head_attempt["terminal_status"] == "authenticated_response":
+                break
         if head_attempt["terminal_status"] != "authenticated_response":
             return self._failure(attempts, head_attempt["failure_code"])
         if head_attempt["http_status"] != 200:

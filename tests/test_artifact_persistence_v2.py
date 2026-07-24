@@ -200,4 +200,53 @@ def test_parent_drop_is_a_visible_transport_failure() -> None:
     )
     assert result["status"] == "failed"
     assert result["failure_code"] == "connection_reset"
-    assert result["transport_attempts"][0]["terminal_status"] == "transport_failure"
+    assert len(result["transport_attempts"]) == 3
+    assert all(
+        item["terminal_status"] == "transport_failure"
+        for item in result["transport_attempts"]
+    )
+
+
+def test_transport_failure_retries_and_binds_every_attempt() -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+    successful = _Transport(document)
+    failures_remaining = {"GET": 1, "HEAD": 1}
+
+    def flaky(**kwargs):
+        method = kwargs["method"]
+        if failures_remaining[method]:
+            failures_remaining[method] -= 1
+            raise EOFError("unexpected EOF")
+        return successful(**kwargs)
+
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=flaky,
+        clock=lambda: "2026-07-10T12:00:00Z",
+    )
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "persisted"
+    assert [item["method"] for item in result["transport_attempts"]] == [
+        "GET",
+        "GET",
+        "HEAD",
+        "HEAD",
+    ]
+    assert [
+        item["terminal_status"] for item in result["transport_attempts"]
+    ] == [
+        "transport_failure",
+        "authenticated_response",
+        "transport_failure",
+        "authenticated_response",
+    ]
+    assert result["artifact"]["persisted"] is True

@@ -1118,6 +1118,9 @@ async def execute_scoring_v2(
         reuse_persisted_artifacts = bool(artifacts) and all(
             item.get("persisted") is True for item in artifacts
         )
+        resume_persisted_artifacts = any(
+            item.get("persisted") is True for item in artifacts
+        )
         from gateway.tee.coordinator_executor_v2 import (
             OP_ATTEST_ARTIFACT_PERSISTENCE,
         )
@@ -1161,6 +1164,8 @@ async def execute_scoring_v2(
                     "V2 encrypted artifact bucket is not configured"
                 )
             for artifact in artifacts:
+                if artifact.get("persisted") is True:
+                    continue
                 persistence_result = await persist_artifact(
                     str(artifact["artifact_id"]),
                     bucket=bucket,
@@ -1242,7 +1247,7 @@ async def execute_scoring_v2(
             raise AttestedScoringV2Error(
                 "V2 encrypted artifact lineage ancestry is invalid"
             )
-        if reuse_persisted_artifacts:
+        if resume_persisted_artifacts:
             lineage_result = lineage.get("result")
             persisted = (
                 lineage_result.get("artifacts")

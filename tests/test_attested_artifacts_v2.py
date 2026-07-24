@@ -41,8 +41,15 @@ def _lineage_evidence(artifacts: list[dict]) -> list[dict]:
     ]
 
 
-async def _exercise(monkeypatch: pytest.MonkeyPatch, *, replay: bool) -> dict:
+async def _exercise(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    replay: bool,
+    partial: bool = False,
+) -> dict:
     artifacts = _artifacts(persisted=replay)
+    if partial:
+        artifacts[0]["persisted"] = True
     committed = [_hash("1"), _hash("2")]
     source_receipt = {
         "receipt_hash": _hash("9"),
@@ -151,6 +158,8 @@ async def _exercise(monkeypatch: pytest.MonkeyPatch, *, replay: bool) -> dict:
         bucket=None if replay else "immutable-bucket",
     )
     assert result["receipt"]["job_id"] == expected_job_id[0]
+    if partial:
+        assert len(persistence_job_ids) == 1
     return result
 
 
@@ -167,4 +176,13 @@ async def test_transport_artifacts_reuse_attested_persistence_on_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result = await _exercise(monkeypatch, replay=True)
+    assert all(item["status"] == "persisted" for item in result["artifacts"])
+
+
+@pytest.mark.asyncio
+async def test_transport_artifacts_resume_after_partial_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = await _exercise(monkeypatch, replay=False, partial=True)
+    assert len(result["artifacts"]) == 2
     assert all(item["status"] == "persisted" for item in result["artifacts"])

@@ -287,12 +287,35 @@ class EncryptedArtifactVaultV2:
         for attempt in transport_attempts:
             validate_transport_attempt(attempt)
             normalized_attempts.append(dict(attempt))
-        if len(normalized_attempts) != 2 or [
-            item["method"] for item in normalized_attempts
-        ] != ["GET", "HEAD"]:
+        methods = [item["method"] for item in normalized_attempts]
+        try:
+            first_head = methods.index("HEAD")
+        except ValueError:
+            first_head = -1
+        if (
+            len(normalized_attempts) < 2
+            or first_head < 1
+            or any(method != "GET" for method in methods[:first_head])
+            or any(method != "HEAD" for method in methods[first_head:])
+        ):
             raise ArtifactVaultV2Error(
                 "artifact persistence requires authenticated GET and HEAD"
             )
+        for attempts_for_method in (
+            normalized_attempts[:first_head],
+            normalized_attempts[first_head:],
+        ):
+            if any(
+                item["terminal_status"] != "transport_failure"
+                for item in attempts_for_method[:-1]
+            ) or (
+                attempts_for_method[-1]["terminal_status"]
+                != "authenticated_response"
+                or attempts_for_method[-1]["http_status"] != 200
+            ):
+                raise ArtifactVaultV2Error(
+                    "artifact persistence transport sequence is invalid"
+                )
         with self._lock:
             record = self._artifacts.get(str(artifact_id or ""))
             persisted_record = self._persisted_artifacts.get(str(artifact_id or ""))

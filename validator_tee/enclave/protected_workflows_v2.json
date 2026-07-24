@@ -152,7 +152,7 @@
       "symbol": "AuditorValidator.fetch_verified_weight_authority"
     },
     {
-      "ast_sha256": "sha256:d43dfef44cf0f534bb936d95e17431f36cbd5de3f9fc29882bf48557cb34d99f",
+      "ast_sha256": "sha256:ba9f5dce0eb70a80d455cb1d6810cd5a876be0478305f7ede3d75008bb8f2118",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.run"
     },
@@ -302,7 +302,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:2bc94193f3e9df1ac0f276cd292bcc2f8782d88b7f6f54ba966cca7dd29ce36b",
-  "protected_source_commit": "f00d76d0a827366bdcadc069a3505141a8a23d3e",
+  "manifest_hash": "sha256:25c92a3341b58b8073810e60e50a6a9c92eb47f7c826b19777784420da925416",
+  "protected_source_commit": "32f79a84f07512ef02e526d09192b5ed3964b338",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

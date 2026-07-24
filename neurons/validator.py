@@ -3932,8 +3932,8 @@ class Validator(BaseValidatorNeuron):
             }
         except Exception as exc:
             bt.logging.error(
-                "Authoritative V2 Research Lab allocation failed closed: %s",
-                exc,
+                "Authoritative V2 Research Lab allocation failed closed: "
+                f"{type(exc).__name__}: {exc}"
             )
             return {
                 "abort_chain_submission": True,
@@ -4194,9 +4194,9 @@ class Validator(BaseValidatorNeuron):
                         )
                     except Exception as exc:
                         bt.logging.warning(
-                            "Exact V2 recovery rebroadcast returned %s; awaiting "
-                            "enclave-authenticated finalization",
-                            type(exc).__name__,
+                            "Exact V2 recovery rebroadcast returned "
+                            f"{type(exc).__name__}: {exc}; awaiting "
+                            "enclave-authenticated finalization"
                         )
         last_error = None
         for attempt in range(10):

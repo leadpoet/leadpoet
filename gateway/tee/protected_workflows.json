@@ -612,7 +612,7 @@
       "symbol": "rpc_method_allowed"
     },
     {
-      "ast_sha256": "sha256:a88aaa014d07c114351c9eb4a92a3fd546c290a09ee03f6df1c36b6c70093534",
+      "ast_sha256": "sha256:e2be987b9c8bab274330bd873a5dc1c008d8e09dc7e5c16fec718b6ffc01f252",
       "path": "gateway/tee/scoring_executor_v2.py",
       "symbol": "ScoringExecutorV2"
     },
@@ -1107,7 +1107,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:f4f022b23a3c406d3d59d140681d2043b76ce0154ede436b237429524894dbc3",
-  "protected_source_commit": "4e7fc7aa40ef6f3f6dee3b269c932410981e18c5",
+  "manifest_hash": "sha256:cafd49bc6a0793e729730eb3dd44c06de33e2916614ce35accd55a6b97b372c7",
+  "protected_source_commit": "b934d62b9e4a84bc4081cc1f42dae2a17bcee43b",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

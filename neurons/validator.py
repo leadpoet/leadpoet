@@ -3931,9 +3931,13 @@ class Validator(BaseValidatorNeuron):
                 },
             }
         except Exception as exc:
+            # bt.logging does not interpolate printf-style args — a "%s"
+            # template prints literally and the cause is dropped, which is
+            # exactly how epoch 24125's allocation failures became
+            # undiagnosable. Pre-format so the cause always lands in the log.
             bt.logging.error(
-                "Authoritative V2 Research Lab allocation failed closed: %s",
-                exc,
+                "Authoritative V2 Research Lab allocation failed closed: "
+                f"{type(exc).__name__}: {exc}"
             )
             return {
                 "abort_chain_submission": True,

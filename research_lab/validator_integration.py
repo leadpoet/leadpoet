@@ -13,8 +13,11 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 import sys
+import time
 from typing import Any, Iterable, Mapping
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -46,6 +49,15 @@ FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "validator_integra
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
 PERCENT_EPSILON = 0.000001
 WEIGHT_INPUT_FETCH_TIMEOUT_SECONDS = 90
+# Bounded in-window retry for the weight-path allocation fetch. A single
+# transient gateway failure (connection refused, 5xx, a brief restart blip)
+# must not cost the validator the whole epoch's weight submission. The retry
+# budget is the caller's total timeout, so the sequence can never run past the
+# on-chain submission window; a single slow response that consumes the budget
+# behaves exactly like the previous single-attempt fetch.
+ALLOCATION_FETCH_MAX_ATTEMPTS = 4
+ALLOCATION_FETCH_RETRY_DELAY_SECONDS = 2.0
+ALLOCATION_FETCH_MIN_ATTEMPT_BUDGET_SECONDS = 5.0
 ATTESTED_ALLOCATION_SCHEMA_VERSION = "leadpoet.attested_allocation_bundle.v2"
 ATTESTED_ALLOCATION_PURPOSE = "research_lab.allocation.v1"
 IMMUTABLE_ECR_IMAGE_RE = re.compile(
@@ -417,6 +429,82 @@ def fetch_research_lab_audit_bundle(
         return json.loads(response.read().decode("utf-8"))
 
 
+def _is_retryable_allocation_fetch_error(exc: BaseException) -> bool:
+    """A transient gateway failure worth another in-window attempt.
+
+    5xx and 429 responses and connection/timeout errors are transient; a 4xx
+    (other than 429) is a client-side rejection that will not resolve on retry.
+    """
+    if isinstance(exc, HTTPError):
+        return exc.code >= 500 or exc.code == 429
+    if isinstance(exc, (URLError, socket.timeout, TimeoutError, ConnectionError)):
+        return True
+    return False
+
+
+def _fetch_allocation_json(
+    url: str,
+    *,
+    deadline_seconds: float,
+    max_attempts: int = ALLOCATION_FETCH_MAX_ATTEMPTS,
+    retry_delay_seconds: float = ALLOCATION_FETCH_RETRY_DELAY_SECONDS,
+) -> dict[str, Any]:
+    """GET one allocation JSON within a total wall-clock budget.
+
+    The whole retry sequence is bounded by ``deadline_seconds`` so it can never
+    exceed the caller's on-chain submission window. Each attempt is given the
+    time remaining in the budget; a single slow response that consumes the
+    budget therefore behaves exactly like the previous single-attempt fetch,
+    while a fast transient failure leaves budget for another attempt.
+    """
+    deadline = time.monotonic() + max(1.0, float(deadline_seconds))
+    attempts = max(1, int(max_attempts))
+    last_error: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        request = Request(
+            url,
+            headers=_request_headers(include_internal_key=True),
+            method="GET",
+        )
+        try:
+            with urlopen(request, timeout=remaining) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001 - reclassified below
+            last_error = exc
+            remaining_after = deadline - time.monotonic()
+            if (
+                attempt >= attempts
+                or not _is_retryable_allocation_fetch_error(exc)
+                or remaining_after <= ALLOCATION_FETCH_MIN_ATTEMPT_BUDGET_SECONDS
+            ):
+                raise
+            delay = min(
+                float(retry_delay_seconds) * (2 ** (attempt - 1)),
+                remaining_after - ALLOCATION_FETCH_MIN_ATTEMPT_BUDGET_SECONDS,
+            )
+            print(
+                "research_lab_allocation_fetch_retry attempt=%d/%d "
+                "delay_seconds=%.1f remaining_seconds=%.1f type=%s error=%s"
+                % (
+                    attempt,
+                    attempts,
+                    max(0.0, delay),
+                    remaining_after,
+                    type(exc).__name__,
+                    str(exc)[:200],
+                ),
+                flush=True,
+            )
+            if delay > 0:
+                time.sleep(delay)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("research lab allocation fetch exhausted without a response")
+
+
 def fetch_research_lab_allocation_bundle(
     gateway_url: str,
     epoch: int,
@@ -429,13 +517,10 @@ def fetch_research_lab_allocation_bundle(
     submission-time snapshot; anonymous callers get a read-only computation.
     """
     base = gateway_url.rstrip("/")
-    request = Request(
+    return _fetch_allocation_json(
         f"{base}/research-lab/allocations/live/{int(epoch)}",
-        headers=_request_headers(include_internal_key=True),
-        method="GET",
+        deadline_seconds=timeout_seconds,
     )
-    with urlopen(request, timeout=timeout_seconds) as response:
-        return json.loads(response.read().decode("utf-8"))
 
 
 def fetch_research_lab_attested_allocation_bundle(
@@ -447,13 +532,10 @@ def fetch_research_lab_attested_allocation_bundle(
     """Fetch the additive enclave receipt for one live allocation bundle."""
 
     base = gateway_url.rstrip("/")
-    request = Request(
+    return _fetch_allocation_json(
         f"{base}/research-lab/allocations/attested/{int(epoch)}",
-        headers=_request_headers(include_internal_key=True),
-        method="GET",
+        deadline_seconds=timeout_seconds,
     )
-    with urlopen(request, timeout=timeout_seconds) as response:
-        return json.loads(response.read().decode("utf-8"))
 
 
 def verify_gateway_allocation_attestation(

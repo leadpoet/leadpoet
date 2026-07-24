@@ -493,17 +493,17 @@ async def payment_already_used(block_hash: str, extrinsic_index: int) -> bool:
         True if payment already used, False otherwise
     """
     try:
-        from supabase import create_client
-        
+        from gateway.db.client import _create_sync_client
+
         # Get Supabase credentials from environment
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
-        
+
         if not supabase_url or not supabase_key:
             logger.warning("Supabase credentials not configured - skipping duplicate check")
             return False
-        
-        supabase = create_client(supabase_url, supabase_key)
+
+        supabase = _create_sync_client(supabase_url, supabase_key)
         
         # Query qualification_payments table
         response = supabase.table("qualification_payments") \

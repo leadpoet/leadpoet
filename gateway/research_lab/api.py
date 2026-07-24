@@ -7,6 +7,7 @@ require explicit Research Lab flags and write only Research Lab tables/events.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import copy
 from datetime import datetime, timezone
 import json
@@ -3057,6 +3058,75 @@ async def get_research_lab_live_allocation(
         raise HTTPException(status_code=500, detail=f"Research Lab allocation unavailable: {str(exc)[:200]}") from exc
 
 
+# Assembling one attested allocation bundle is expensive: it reconstructs the
+# full ancestry receipt graph (hundreds of chunked reads over the large
+# receipt tables) and takes tens of seconds. The validator polls this endpoint
+# inside a fixed on-chain submission window and retries on slow responses, so
+# without coordination every retry — and every concurrent poll — launches a
+# fresh rebuild. The rebuilds then contend for the database pool and the
+# enclave, each one slowing past the validator's fetch timeout, so the
+# validator never receives an allocation and its fail-closed guard blocks the
+# weight submission for the whole epoch. The assembled bundle is deterministic
+# for a given epoch (only a cosmetic bundle_id and generated_at timestamp vary
+# between builds), so it is safe to build it at most once per epoch and serve
+# every other caller from that result.
+_AllocationCacheKey = tuple[int, bool]
+_ALLOCATION_HANDOFF_CACHE: "OrderedDict[_AllocationCacheKey, tuple[float, dict[str, Any]]]" = (
+    OrderedDict()
+)
+_ALLOCATION_BUILD_LOCKS: dict[_AllocationCacheKey, asyncio.Lock] = {}
+_ALLOCATION_CACHE_TTL_SECONDS = 300.0
+_ALLOCATION_CACHE_MAX_EPOCHS = 16
+
+
+def _allocation_cache_key(epoch: int, persist_snapshot: bool) -> _AllocationCacheKey:
+    return (int(epoch), bool(persist_snapshot))
+
+
+def _allocation_handoff_cache_get(
+    epoch: int,
+    persist_snapshot: bool,
+) -> Optional[dict[str, Any]]:
+    key = _allocation_cache_key(epoch, persist_snapshot)
+    entry = _ALLOCATION_HANDOFF_CACHE.get(key)
+    if entry is None:
+        return None
+    expires_at, handoff = entry
+    if time.monotonic() >= expires_at:
+        _ALLOCATION_HANDOFF_CACHE.pop(key, None)
+        return None
+    _ALLOCATION_HANDOFF_CACHE.move_to_end(key)
+    return handoff
+
+
+def _allocation_handoff_cache_put(
+    epoch: int,
+    persist_snapshot: bool,
+    handoff: dict[str, Any],
+) -> None:
+    key = _allocation_cache_key(epoch, persist_snapshot)
+    _ALLOCATION_HANDOFF_CACHE[key] = (
+        time.monotonic() + _ALLOCATION_CACHE_TTL_SECONDS,
+        handoff,
+    )
+    _ALLOCATION_HANDOFF_CACHE.move_to_end(key)
+    while len(_ALLOCATION_HANDOFF_CACHE) > _ALLOCATION_CACHE_MAX_EPOCHS:
+        evicted, _ = _ALLOCATION_HANDOFF_CACHE.popitem(last=False)
+        _ALLOCATION_BUILD_LOCKS.pop(evicted, None)
+
+
+def _allocation_build_lock(
+    epoch: int,
+    persist_snapshot: bool,
+) -> asyncio.Lock:
+    key = _allocation_cache_key(epoch, persist_snapshot)
+    lock = _ALLOCATION_BUILD_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _ALLOCATION_BUILD_LOCKS[key] = lock
+    return lock
+
+
 @router.get("/allocations/attested/{epoch}")
 async def get_research_lab_attested_allocation(
     epoch: int,
@@ -3068,9 +3138,40 @@ async def get_research_lab_attested_allocation(
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
     _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
     _require_enabled(config.shadow_bundles_enabled, "Research Lab report bundles are disabled")
+    # The guard rejects future epochs and decides snapshot persistence; it must
+    # run on every request and is cheap relative to the bundle build.
     persist_snapshot = await _allocation_epoch_guard_and_persistence(
         config, int(epoch), x_leadpoet_internal_key
     )
+    cached_handoff = _allocation_handoff_cache_get(
+        int(epoch),
+        persist_snapshot,
+    )
+    if cached_handoff is not None:
+        return cached_handoff
+    # Serialize builds per epoch so concurrent polls and retries wait for one
+    # rebuild instead of launching contending ones. Re-check the cache after
+    # acquiring the lock: the first builder populates it for everyone waiting.
+    async with _allocation_build_lock(int(epoch), persist_snapshot):
+        cached_handoff = _allocation_handoff_cache_get(
+            int(epoch),
+            persist_snapshot,
+        )
+        if cached_handoff is not None:
+            return cached_handoff
+        return await _build_and_cache_attested_allocation(
+            config=config,
+            epoch=int(epoch),
+            persist_snapshot=persist_snapshot,
+        )
+
+
+async def _build_and_cache_attested_allocation(
+    *,
+    config: "ResearchLabGatewayConfig",
+    epoch: int,
+    persist_snapshot: bool,
+) -> dict[str, Any]:
     attestation: dict[str, Any] = {}
     try:
         bundle = await build_research_lab_allocation_bundle(
@@ -3131,7 +3232,7 @@ async def get_research_lab_attested_allocation(
                     receipt_graph["host_operations"]
                 ),
             }
-        return build_allocation_handoff_v2(
+        handoff = build_allocation_handoff_v2(
             bundle=bundle,
             receipt_graph=receipt_graph,
             lineage_bindings=lineage_bindings,
@@ -3143,6 +3244,14 @@ async def get_research_lab_attested_allocation(
             status_code=503,
             detail="Research Lab allocation V2 handoff is invalid",
         ) from exc
+    # Only fully-assembled bundles are cached; failures above raise and are
+    # retried by the next caller without poisoning the cache.
+    _allocation_handoff_cache_put(
+        int(epoch),
+        persist_snapshot,
+        handoff,
+    )
+    return handoff
 
 
 async def _verify_signed_miner(payload: object) -> None:

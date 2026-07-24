@@ -25,6 +25,10 @@ from gateway.fulfillment.config import (
     epochs_to_seconds,
 )
 from gateway.fulfillment.consensus import compute_fulfillment_consensus
+from gateway.fulfillment.score_coverage import (
+    FulfillmentScoreCoverage,
+    summarize_score_coverage,
+)
 from gateway.models.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -115,6 +119,206 @@ def _try_advisory_lock(supabase) -> bool:
 def _release_advisory_lock(supabase) -> None:
     """No-op companion to _try_advisory_lock.  Historical rationale above."""
     return None
+
+
+def _load_score_coverage(
+    supabase,
+    request_id: str,
+) -> FulfillmentScoreCoverage:
+    """Load complete revealed-lead coverage for one request.
+
+    Both tables can exceed PostgREST's 1,000-row default limit, so each scan
+    is explicitly paginated.  The returned summary is the single authority
+    used by the lifecycle finalization gate.
+    """
+
+    revealed_submissions: list[dict] = []
+    offset = 0
+    while True:
+        page = supabase.table("fulfillment_submissions") \
+            .select("submission_id, lead_data") \
+            .eq("request_id", request_id) \
+            .eq("revealed", True) \
+            .range(offset, offset + 999) \
+            .execute()
+        rows = page.data or []
+        if not rows:
+            break
+        revealed_submissions.extend(rows)
+        if len(rows) < 1000:
+            break
+        offset += 1000
+
+    score_rows: list[dict] = []
+    offset = 0
+    while True:
+        page = supabase.table("fulfillment_scores") \
+            .select("submission_id, lead_id, validator_hotkey, scored_at") \
+            .eq("request_id", request_id) \
+            .range(offset, offset + 999) \
+            .execute()
+        rows = page.data or []
+        if not rows:
+            break
+        score_rows.extend(rows)
+        if len(rows) < 1000:
+            break
+        offset += 1000
+
+    return summarize_score_coverage(
+        revealed_submissions,
+        score_rows,
+        required_validators=FULFILLMENT_MIN_VALIDATORS,
+    )
+
+
+def _consensus_readiness(
+    coverage: FulfillmentScoreCoverage,
+    *,
+    timed_out: bool,
+) -> str:
+    """Return the lifecycle action for the current score coverage.
+
+    A partial non-empty score set is never permission to finalize.  Once any
+    validator has begun a request, the request stays in scoring until every
+    revealed lead reaches the configured validator quorum.  Zero-validator
+    requests retain the existing timeout recycle path so an unavailable
+    validator cannot wedge the queue forever.
+    """
+
+    if not coverage.validator_hotkeys:
+        return "no_validators_timeout" if timed_out else "wait_validators"
+    if not coverage.complete:
+        return "wait_score_coverage"
+    return "ready"
+
+
+def _claim_finalization(
+    supabase,
+    request_id: str,
+    coverage: FulfillmentScoreCoverage,
+) -> bool:
+    """Atomically freeze scoring when consensus used the latest score set.
+
+    Migration 117 locks the request row, compares the exact score watermark,
+    and transitions the request to ``finalizing``. Concurrent score RPCs use
+    the same lock. Therefore either a new score lands first (and this returns
+    false) or finalization wins and the stale score is rejected.
+    """
+
+    result = supabase.rpc(
+        "fulfillment_claim_finalization",
+        {
+            "p_request_id": request_id,
+            "p_expected_score_count": coverage.score_row_count,
+            "p_expected_latest_scored_at": coverage.latest_scored_at,
+        },
+    ).execute()
+    data = result.data
+    if isinstance(data, list):
+        return bool(data and data[0])
+    return data is True
+
+
+_RECONCILABLE_SUCCESSOR_STATUSES = {
+    "pending",
+    "open",
+    "continued_open",
+    "commit_closed",
+}
+
+
+def _successor_quota_payload(
+    icp_details: dict,
+    *,
+    remaining_leads: int,
+    held_companies: list[str],
+) -> dict:
+    """Build the two synchronized quota fields for a continuation row."""
+
+    target = max(0, int(remaining_leads))
+    icp = dict(icp_details or {})
+    icp["num_leads"] = target
+
+    prior = list(icp.get("excluded_companies") or [])
+    seen = {
+        str(company).strip().lower()
+        for company in prior
+        if str(company).strip()
+    }
+    for company in held_companies or []:
+        company_text = str(company or "").strip()
+        if company_text and company_text.lower() not in seen:
+            prior.append(company_text)
+            seen.add(company_text.lower())
+    icp["excluded_companies"] = prior
+
+    return {
+        "num_leads": target,
+        "icp_details": icp,
+    }
+
+
+def _reconcile_active_successor(
+    supabase,
+    successor_request_id: str,
+    *,
+    remaining_leads: int,
+    held_companies: list[str],
+) -> bool:
+    """Update a not-yet-scoring successor after late consensus changes.
+
+    Commit/reveal rows may already exist, so the successor is not deleted or
+    recreated. Updating its quota changes future miner caps and dashboard
+    state while chain top-K still safely caps all already-submitted work.
+    Once scoring starts, the ICP is immutable for that cycle to avoid workers
+    evaluating the same batch against different exclusion snapshots.
+    """
+
+    if not successor_request_id:
+        return False
+    current = supabase.table("fulfillment_requests") \
+        .select("request_id, status, num_leads, icp_details") \
+        .eq("request_id", successor_request_id) \
+        .limit(1) \
+        .execute()
+    if not current.data:
+        logger.warning(
+            "FULFILLMENT_SUCCESSOR_RECONCILE_MISSING successor=%s",
+            successor_request_id,
+        )
+        return False
+
+    row = current.data[0]
+    status = row.get("status")
+    if status not in _RECONCILABLE_SUCCESSOR_STATUSES:
+        logger.warning(
+            "FULFILLMENT_SUCCESSOR_RECONCILE_SKIPPED successor=%s status=%s "
+            "remaining=%s",
+            successor_request_id,
+            status,
+            remaining_leads,
+        )
+        return False
+
+    payload = _successor_quota_payload(
+        row.get("icp_details") or {},
+        remaining_leads=remaining_leads,
+        held_companies=held_companies,
+    )
+    current_icp = row.get("icp_details") or {}
+    if (
+        int(row.get("num_leads") or 0) == payload["num_leads"]
+        and current_icp == payload["icp_details"]
+    ):
+        return False
+
+    updated = supabase.table("fulfillment_requests") \
+        .update(payload) \
+        .eq("request_id", successor_request_id) \
+        .eq("status", status) \
+        .execute()
+    return bool(updated.data)
 
 
 async def fulfillment_lifecycle_task() -> None:
@@ -425,7 +629,8 @@ async def _lifecycle_tick_inner(supabase) -> None:
             )
 
     # Step 3: consensus aggregation for scoring requests + recently-transitioned
-    # partially_fulfilled requests (within the consensus timeout window).
+    # partially_fulfilled requests (within the consensus timeout window), plus
+    # crash-recoverable finalizing requests.
     #
     # Why include partially_fulfilled: FULFILLMENT_MIN_VALIDATORS defaults to 1,
     # so the first validator's submission triggers compute_fulfillment_consensus()
@@ -445,9 +650,10 @@ async def _lifecycle_tick_inner(supabase) -> None:
     #     correctly displace lower-scoring held leads.
     #   * Time-bounded to FULFILLMENT_CONSENSUS_TIMEOUT_MINUTES past
     #     reveal_window_end so we don't re-aggregate ancient requests forever.
-    #   * fulfilled and recycled are NOT included — fulfilled would risk
-    #     double-paying via a second _finalize_chain_rewards; recycled is a
-    #     separate (and rarer) failure mode handled in a follow-up.
+    #   * fulfilled and recycled are NOT included. Migration 117 makes
+    #     fulfilled immutable by rejecting late score writes; `finalizing`
+    #     is the retryable pre-fulfilled state used to finish reward writes
+    #     safely after a process interruption.
     # The time-bound on `reveal_window_end` exists to prevent infinite
     # re-aggregation of `partially_fulfilled` requests when late validator
     # scores trickle in.  It must NOT apply to `scoring` — that status
@@ -459,12 +665,14 @@ async def _lifecycle_tick_inner(supabase) -> None:
     rerun_window_start = (
         now - timedelta(minutes=FULFILLMENT_CONSENSUS_TIMEOUT_MINUTES)
     ).isoformat()
-    # Standard window: scoring (any age) + fresh partially_fulfilled.
+    # Standard window: scoring/finalizing (any age) + fresh
+    # partially_fulfilled.
     scoring_requests = supabase.table("fulfillment_requests") \
         .select("request_id, reveal_window_end, icp_details, num_leads, internal_label, company, required_attributes, status, successor_request_id") \
-        .in_("status", ["scoring", "partially_fulfilled"]) \
+        .in_("status", ["scoring", "partially_fulfilled", "finalizing"]) \
         .or_(
-            f"status.eq.scoring,reveal_window_end.gte.{rerun_window_start}"
+            f"status.eq.scoring,status.eq.finalizing,"
+            f"reveal_window_end.gte.{rerun_window_start}"
         ) \
         .execute()
 
@@ -531,60 +739,33 @@ async def _lifecycle_tick_inner(supabase) -> None:
     for r in (scoring_requests.data or []):
         rid = r["request_id"]
         try:
-            validator_count_resp = supabase.table("fulfillment_scores") \
-                .select("validator_hotkey") \
-                .eq("request_id", rid) \
-                .execute()
-            unique_validators = {s["validator_hotkey"] for s in (validator_count_resp.data or [])}
-
             reveal_end = _isoparse(r["reveal_window_end"])
             timeout = reveal_end + timedelta(minutes=FULFILLMENT_CONSENSUS_TIMEOUT_MINUTES)
+            timed_out = now >= timeout
+            coverage = await asyncio.to_thread(
+                _load_score_coverage,
+                supabase,
+                rid,
+            )
+            unique_validators = set(coverage.validator_hotkeys)
+            readiness = _consensus_readiness(
+                coverage,
+                timed_out=timed_out,
+            )
 
-            if len(unique_validators) < FULFILLMENT_MIN_VALIDATORS and now < timeout:
-                mins_left = (timeout - now).total_seconds() / 60
-                print(f"   {rid[:8]}... waiting for validators: {len(unique_validators)}/{FULFILLMENT_MIN_VALIDATORS} ({mins_left:.1f}min until timeout)")
-                continue
-
-            # ─── Guard: don't run consensus while revealed submissions are still un-scored ─────
-            # Observed 2026-06-01 on request fbeed690-edbb-...: 6 miners had
-            # revealed submissions (3 with 41 leads each + 3 with 9 leads each),
-            # but only 2 of 6 were scored before consensus fired. The other 4
-            # miners' work was discarded when the request transitioned to
-            # `recycled`. Miners (5GpzK4Rm, 5H17R1Za, 5HGP4yPa, 5DcJwmjL)
-            # rightly complained that their submissions "weren't scored".
-            #
-            # Root cause: this loop's gate counts unique VALIDATORS (currently
-            # MIN=1). The moment one validator submits a score for ONE miner's
-            # submission, the gate opens and consensus runs — even if other
-            # miners' revealed submissions are still queued for scoring.
-            #
-            # Fix: count distinct revealed submissions for this request and
-            # distinct submission_ids in fulfillment_scores. If revealed >
-            # scored AND we're inside the consensus grace window, defer.
-            # Once we hit the timeout, fall through to consensus anyway so a
-            # dead validator can't wedge the request forever.
-            revealed_subs_resp = supabase.table("fulfillment_submissions") \
-                .select("submission_id") \
-                .eq("request_id", rid) \
-                .eq("revealed", True) \
-                .execute()
-            revealed_subs = {s["submission_id"] for s in (revealed_subs_resp.data or [])}
-            scored_subs_resp = supabase.table("fulfillment_scores") \
-                .select("submission_id") \
-                .eq("request_id", rid) \
-                .execute()
-            scored_subs = {s.get("submission_id") for s in (scored_subs_resp.data or []) if s.get("submission_id")}
-            unscored_subs = revealed_subs - scored_subs
-            if unscored_subs and now < timeout:
-                mins_left = (timeout - now).total_seconds() / 60
+            if readiness == "wait_validators":
+                mins_left = max(
+                    0.0,
+                    (timeout - now).total_seconds() / 60,
+                )
                 print(
-                    f"   {rid[:8]}... deferring consensus: "
-                    f"{len(unscored_subs)}/{len(revealed_subs)} revealed submissions "
-                    f"still un-scored ({mins_left:.1f}min until forced consensus)"
+                    f"   {rid[:8]}... waiting for validators: "
+                    f"0/{FULFILLMENT_MIN_VALIDATORS} "
+                    f"({mins_left:.1f}min until timeout)"
                 )
                 continue
 
-            if len(unique_validators) == 0 and now >= timeout:
+            if readiness == "no_validators_timeout":
                 print(
                     f"   ⚠️  {rid[:8]}... has 0 validators after timeout — "
                     f"expiring and recycling"
@@ -614,11 +795,32 @@ async def _lifecycle_tick_inner(supabase) -> None:
                 )
                 continue
 
-            if len(unique_validators) < FULFILLMENT_MIN_VALIDATORS:
-                print(
-                    f"   ⚠️  {rid[:8]}... consensus timeout: "
-                    f"{len(unique_validators)}/{FULFILLMENT_MIN_VALIDATORS} validators — proceeding"
+            if readiness == "wait_score_coverage":
+                timing = "after timeout" if timed_out else "before timeout"
+                logger.warning(
+                    "FULFILLMENT_SCORE_COVERAGE_INCOMPLETE request=%s "
+                    "coverage=%s/%s incomplete_submissions=%s "
+                    "missing_score_slots=%s validators=%s timing=%s",
+                    rid,
+                    coverage.covered_leads,
+                    coverage.expected_leads,
+                    coverage.incomplete_submissions,
+                    coverage.missing_score_slots,
+                    len(unique_validators),
+                    timing,
                 )
+                print(
+                    f"   {rid[:8]}... deferring consensus: "
+                    f"{coverage.covered_leads}/{coverage.expected_leads} "
+                    f"revealed leads have "
+                    f"{FULFILLMENT_MIN_VALIDATORS}-validator coverage; "
+                    f"{coverage.incomplete_submissions} submission(s) "
+                    f"incomplete ({timing})"
+                )
+                # Never finalize a non-empty partial score set. The validator
+                # feed re-offers missing leads, and the request deliberately
+                # stays in scoring until every revealed lead reaches quorum.
+                continue
 
             # Skip re-aggregation when no new validator scores have arrived
             # since the last consensus pass.  Heavy work (compute_consensus +
@@ -736,7 +938,43 @@ async def _lifecycle_tick_inner(supabase) -> None:
             # recycle branch when nothing materially changed — otherwise the
             # existing recycle would insert + claim-loss + delete an orphan
             # successor every tick.
-            was_partially_fulfilled = r.get("status") == "partially_fulfilled"
+            was_partially_fulfilled = (
+                r.get("status") == "partially_fulfilled"
+                or (
+                    r.get("status") == "finalizing"
+                    and bool(r.get("successor_request_id"))
+                )
+            )
+
+            # Late scores can change the held set after a continuation was
+            # created. Keep the active successor's remaining quota and miner-
+            # visible ICP synchronized with the authoritative chain top-K.
+            # This is safe through commit_closed; once successor scoring starts
+            # its ICP is frozen for that cycle.
+            if was_partially_fulfilled and held_count < chain_target:
+                remaining = chain_target - held_count
+                try:
+                    reconciled = await asyncio.to_thread(
+                        _reconcile_active_successor,
+                        supabase,
+                        r.get("successor_request_id"),
+                        remaining_leads=remaining,
+                        held_companies=topk_companies,
+                    )
+                    if reconciled:
+                        print(
+                            f"   🔄 reconciled successor "
+                            f"{str(r.get('successor_request_id'))[:8]}... "
+                            f"to remaining quota {remaining}"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "FULFILLMENT_SUCCESSOR_RECONCILE_FAILED "
+                        "request=%s successor=%s error=%s",
+                        rid,
+                        r.get("successor_request_id"),
+                        e,
+                    )
 
             if held_count >= chain_target:
                 # ────────────────────────────────────────────────────────
@@ -755,12 +993,38 @@ async def _lifecycle_tick_inner(supabase) -> None:
                 # cycle runs (chain top-K sees the chain quota already met
                 # via the predecessor's held leads).
                 # ────────────────────────────────────────────────────────
+                claimed = await asyncio.to_thread(
+                    _claim_finalization,
+                    supabase,
+                    rid,
+                    coverage,
+                )
+                if not claimed:
+                    logger.warning(
+                        "FULFILLMENT_FINALIZATION_WATERMARK_CHANGED "
+                        "request=%s expected_score_count=%s "
+                        "expected_latest_scored_at=%s",
+                        rid,
+                        coverage.score_row_count,
+                        coverage.latest_scored_at,
+                    )
+                    # A score committed after coverage/consensus was loaded.
+                    # Leave the request non-terminal and recompute next tick.
+                    continue
+
                 winner_lead_ids = await _finalize_chain_rewards(
                     rid, topk, chain["tied_groups"],
                 )
-                supabase.table("fulfillment_requests").update({
+                finalized = supabase.table("fulfillment_requests").update({
                     "status": "fulfilled",
-                }).eq("request_id", rid).execute()
+                }).eq("request_id", rid) \
+                  .eq("status", "finalizing") \
+                  .execute()
+                if not finalized.data:
+                    raise RuntimeError(
+                        "FULFILLMENT_FINAL_STATUS_WRITE_FAILED "
+                        f"request={rid}"
+                    )
                 print(
                     f"   ✅ {rid[:8]}... -> fulfilled "
                     f"({len(winner_lead_ids)}/{chain_target} winners; "
@@ -852,7 +1116,7 @@ async def _lifecycle_tick_inner(supabase) -> None:
                     print(
                         f"   🔄 {rid[:8]}... re-aggregated "
                         f"({held_count}/{chain_target} held, "
-                        f"still partially_fulfilled; successor unchanged)"
+                        f"still partially_fulfilled; successor reconciled)"
                     )
                 else:
                     # ────────────────────────────────────────────────────
@@ -2008,6 +2272,13 @@ def _recycle_request(
             if successor_num_leads is not None
             else original_request["num_leads"]
         )
+        quota_payload = _successor_quota_payload(
+            successor_icp,
+            remaining_leads=target_num_leads,
+            held_companies=held_companies or [],
+        )
+        target_num_leads = quota_payload["num_leads"]
+        successor_icp = quota_payload["icp_details"]
 
         successor_row = {
             "request_id": new_id,

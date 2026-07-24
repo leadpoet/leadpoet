@@ -1,56 +1,69 @@
-# Telemetry — leadpoet-gateway
+# Gateway infra-only telemetry
 
-Opt-in, **infra-only** OpenTelemetry for the gateway HOST process. Off by
-default; ships nothing unless explicitly enabled via env.
+Opt-in OpenTelemetry for the gateway HOST process. One server span per HTTP
+request; nothing else. See `gateway/observability/otel_bootstrap.py` for the
+full contract.
 
-## Service
+## What a span contains — and all it can ever contain
 
-- `service.name`: `leadpoet-gateway` (override with `OTEL_SERVICE_NAME`)
-- Runtime: Python 3.11 / FastAPI (gateway host process, `python -m gateway.main`)
-- Instrumentation: hand-written request middleware in
-  `gateway/observability/otel_bootstrap.py` using the already-pinned
-  `opentelemetry-sdk` / `opentelemetry-exporter-otlp-proto-http` 1.27.0. **No new
-  dependencies; the attested enclaves are not instrumented and their PCR0 is
-  unaffected.**
-- Last regenerated: 2026-07-24
+| attribute | example |
+|---|---|
+| `http.request.method` | `GET` |
+| `http.route` | `/research-lab/allocations/attested/{epoch}` (route *template* — never the concrete path) |
+| `http.response.status_code` | `200` |
+| `duration_ms` | `12.4` |
 
-## Enabling (deploy env only — never committed)
+No bodies, query strings, headers, DB statements, model I/O, prompts, or
+completions. Health/liveness routes are suppressed entirely.
 
-Both must be set, or the bootstrap is a complete no-op:
+## Enabling (gateway host only)
 
+```bash
+export GATEWAY_OTEL_ENABLED=1
+export GATEWAY_OTEL_ENDPOINT="https://<collector>/v1/traces"
+export GATEWAY_OTEL_TOKEN="<token>"            # sent as Authorization: Bearer
+export GATEWAY_OTEL_SERVICE_NAME="leadpoet-gateway"   # optional
 ```
-GATEWAY_OTEL_ENABLED=true
-OTEL_EXPORTER_OTLP_ENDPOINT=https://leadpoet.logger.onepatch.dev
-OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <token>
-OTEL_SERVICE_NAME=leadpoet-gateway
-OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-```
 
-The endpoint and token are set in the gateway host's runtime environment, never
-baked into an image or committed to the repo.
+Both `GATEWAY_OTEL_ENABLED` and `GATEWAY_OTEL_ENDPOINT` are required; anything
+less is a complete no-op. Wiring failures are swallowed — telemetry can never
+delay or break gateway startup.
 
-## Spans (hand-instrumented)
+## Why the boundary is a guarantee, not a promise
 
-| Span name | Kind | Source | When it fires | Attributes |
-|---|---|---|---|---|
-| `<METHOD> <route-template>` | SERVER | `gateway/observability/otel_bootstrap.py` | Once per HTTP request to the gateway host (health probes suppressed) | `http.request.method`, `http.route`, `http.response.status_code`, `duration_ms` |
+1. **Explicit destination, fixed resource.** The exporter is constructed
+   with explicit `endpoint=`/`headers=` arguments from the private
+   `GATEWAY_OTEL_*` variables, and the provider resource is a fixed
+   attribute dict (the SDK's env-merging resource factory is never used).
+   The standard ambient exporter/resource variables are never read and
+   never set — ambient auto-instrumentation or a stray bare exporter has no
+   destination and no-ops.
+2. **Fail-closed span validator.** Before export every span must have the
+   `gateway.http` instrumentation scope, exactly the four attributes above
+   with the approved types, no events/links/status descriptions, the fixed
+   resource, and a registered route template (or the literal `/_unmatched`).
+   A span violating any of that is dropped entirely — never mutated, never
+   partially exported — and counted in a warning that omits the rejected
+   values.
+3. **CI guard** (`tests/test_otel_boundary_guard.py`) fails the build if:
+   auto-instrumentation packages enter the requirements, a launch path uses
+   the process-wrapping launcher, anything sets the global tracer provider,
+   ambient exporter/resource variables appear anywhere, an OTLP exporter is
+   imported outside the bootstrap module, or the bootstrap stops building a
+   fixed resource / fixed unmatched-route label.
 
-`http.route` is always the **route template** (e.g.
-`/research-lab/allocations/attested/{epoch}`), never the concrete path.
+## Isolation properties
 
-## What is deliberately NOT emitted
+- Dedicated (non-global) tracer provider: Langfuse and every other library
+  are untouched.
+- Unresolved routes export the fixed `/_unmatched` label — a
+  client-controlled path segment is never exported.
+- Gateway host process only — never the attested enclaves; no new
+  dependencies, so no PCR0 change.
 
-This instrumentation is scoped to protect data. It never records:
+## What this does NOT replace
 
-- Concrete path ids, hotkeys, epochs (only route templates)
-- Query strings, request bodies, or response bodies
-- Request/response headers (including auth)
-- Database statements or query parameters
-- Any LLM prompt/completion or model I/O — the Research Lab / scoring / model /
-  Langfuse code paths are **not** instrumented
-- Anything from inside the attested enclaves
-
-The only data that leaves the host is operational metadata: which route was hit,
-its HTTP status, and how long it took. This is enough to observe availability,
-latency, and error-rate incidents (e.g. a gateway outage shows as request
-failures / absence of traffic) without exposing business or training data.
+Code enforcement stops accidental leakage; it is not full security by
+itself. Operationally the collector token should be ingest-only and
+rotated, repository access stays scoped, and the telemetry vendor's
+retention / no-training / deletion terms should be agreed in writing.

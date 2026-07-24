@@ -530,7 +530,7 @@ app.add_middleware(
 # Optional OpenTelemetry (infra-only, off unless configured)
 # ============================================================
 # Emits request method/route-template/status/duration only when
-# GATEWAY_OTEL_ENABLED and OTEL_EXPORTER_OTLP_ENDPOINT are both set. Never
+# GATEWAY_OTEL_ENABLED and GATEWAY_OTEL_ENDPOINT are both set. Never
 # captures bodies, query strings, DB statements, or LLM/training content, and
 # never touches the enclaves. No-op by default.
 from gateway.observability.otel_bootstrap import configure_gateway_otel

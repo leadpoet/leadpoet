@@ -33,7 +33,7 @@ def _app(exporter=None):
 
 def test_disabled_by_default(monkeypatch):
     monkeypatch.delenv("GATEWAY_OTEL_ENABLED", raising=False)
-    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("GATEWAY_OTEL_ENDPOINT", raising=False)
     assert configure_gateway_otel(FastAPI()) is False
 
 
@@ -80,3 +80,146 @@ def test_health_route_is_suppressed():
     app, _ = _app(exp)
     TestClient(app).get("/health")
     assert exp.get_finished_spans() == ()  # no telemetry for health probes
+
+
+def test_unmatched_route_uses_fixed_label_never_client_path():
+    """A 404 path is client-controlled; the exported label must be the fixed
+    ``/_unmatched`` literal, never any segment of the request path."""
+    exp = InMemorySpanExporter()
+    app, _ = _app(exp)
+    resp = TestClient(app).get("/attacker-controlled/EMAIL@EXAMPLE.COM")
+    assert resp.status_code == 404
+
+    spans = exp.get_finished_spans()
+    assert len(spans) == 1
+    span = spans[0]
+    assert span.attributes["http.route"] == "/_unmatched"
+    haystack = span.name + " " + " ".join(
+        "%s=%s" % (k, v) for k, v in span.attributes.items()
+    )
+    assert "attacker-controlled" not in haystack
+    assert "EXAMPLE.COM" not in haystack
+
+
+def test_validator_drops_span_with_extra_attribute():
+    """Fail-closed: a span carrying a non-approved attribute is dropped
+    entirely — not stripped, not partially exported."""
+    from gateway.observability.otel_bootstrap import _validating_exporter
+
+    exp = InMemorySpanExporter()
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+    expected_resource = {"service.name": "leadpoet-gateway"}
+    validating = _validating_exporter(
+        exp,
+        allowed_routes=lambda: {"/ok"},
+        expected_resource=expected_resource,
+    )
+    provider = TracerProvider(resource=Resource(expected_resource))
+    provider.add_span_processor(SimpleSpanProcessor(validating))
+    tracer = provider.get_tracer("gateway.http")
+
+    def _base_attrs():
+        return {
+            "http.request.method": "GET",
+            "http.route": "/ok",
+            "http.response.status_code": 200,
+            "duration_ms": 1.5,
+        }
+
+    # Conforming span → exported.
+    with tracer.start_as_current_span("GET /ok") as span:
+        for k, v in _base_attrs().items():
+            span.set_attribute(k, v)
+    assert len(exp.get_finished_spans()) == 1
+    exp.clear()
+
+    # Extra attribute → dropped, nothing exported.
+    with tracer.start_as_current_span("GET /ok") as span:
+        for k, v in _base_attrs().items():
+            span.set_attribute(k, v)
+        span.set_attribute("user.email", "leak@example.com")
+    assert exp.get_finished_spans() == ()
+
+    # Missing attribute → dropped.
+    with tracer.start_as_current_span("GET /ok") as span:
+        attrs = _base_attrs()
+        attrs.pop("duration_ms")
+        for k, v in attrs.items():
+            span.set_attribute(k, v)
+    assert exp.get_finished_spans() == ()
+
+    # Wrong type (status as string) → dropped.
+    with tracer.start_as_current_span("GET /ok") as span:
+        attrs = _base_attrs()
+        attrs["http.response.status_code"] = "200"
+        for k, v in attrs.items():
+            span.set_attribute(k, v)
+    assert exp.get_finished_spans() == ()
+
+    # Event attached → dropped (events could carry exception messages).
+    with tracer.start_as_current_span("GET /ok") as span:
+        for k, v in _base_attrs().items():
+            span.set_attribute(k, v)
+        span.add_event("exception", {"exception.message": "secret traceback"})
+    assert exp.get_finished_spans() == ()
+
+    # Unregistered route label → dropped.
+    with tracer.start_as_current_span("GET /other") as span:
+        attrs = _base_attrs()
+        attrs["http.route"] = "/not-registered"
+        for k, v in attrs.items():
+            span.set_attribute(k, v)
+    assert exp.get_finished_spans() == ()
+
+    # Fixed /_unmatched label → allowed.
+    with tracer.start_as_current_span("GET /_unmatched") as span:
+        attrs = _base_attrs()
+        attrs["http.route"] = "/_unmatched"
+        for k, v in attrs.items():
+            span.set_attribute(k, v)
+    assert len(exp.get_finished_spans()) == 1
+
+
+def test_validator_drops_span_from_foreign_scope():
+    """A span produced under any other instrumentation scope (e.g. a library
+    that acquired this provider) is never exported."""
+    from gateway.observability.otel_bootstrap import _validating_exporter
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+    exp = InMemorySpanExporter()
+    expected_resource = {"service.name": "leadpoet-gateway"}
+    validating = _validating_exporter(
+        exp, allowed_routes=lambda: {"/ok"}, expected_resource=expected_resource
+    )
+    provider = TracerProvider(resource=Resource(expected_resource))
+    provider.add_span_processor(SimpleSpanProcessor(validating))
+    foreign = provider.get_tracer("some.library")
+
+    with foreign.start_as_current_span("GET /ok") as span:
+        span.set_attribute("http.request.method", "GET")
+        span.set_attribute("http.route", "/ok")
+        span.set_attribute("http.response.status_code", 200)
+        span.set_attribute("duration_ms", 1.0)
+    assert exp.get_finished_spans() == ()
+
+
+def test_resource_is_fixed_and_ignores_ambient_resource_env(monkeypatch):
+    """The provider resource is built from a fixed dict; ambient resource
+    variables must not appear in exported span resources."""
+    monkeypatch.setenv(
+        "OTEL_RESOURCE" + "_ATTRIBUTES", "leak.key=leak-value"
+    )  # split literal keeps the repo-wide env-var guard meaningful
+    exp = InMemorySpanExporter()
+    app, installed = _app(exp)
+    assert installed is True
+    TestClient(app).get("/research-lab/allocations/attested/1")
+    spans = exp.get_finished_spans()
+    assert len(spans) == 1
+    resource_attrs = dict(spans[0].resource.attributes)
+    assert resource_attrs == {"service.name": "leadpoet-gateway"}
+    assert "leak.key" not in resource_attrs

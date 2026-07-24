@@ -1,5 +1,9 @@
+import gzip
+import json
+
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from gateway.api import weights as weights_api
 from leadpoet_canonical.attested_v2 import sha256_json
@@ -19,6 +23,13 @@ DURABLE_HASH = "sha256:" + "e" * 64
 EVENT_HASH = "sha256:" + "f" * 64
 VALIDATOR_HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
 VALIDATOR_BOOT_HASH = "sha256:" + "0" * 64
+
+
+def _request(*, accept_encoding: str = "") -> Request:
+    headers = []
+    if accept_encoding:
+        headers.append((b"accept-encoding", accept_encoding.encode("ascii")))
+    return Request({"type": "http", "headers": headers})
 
 
 def _legacy_submission():
@@ -539,7 +550,13 @@ async def test_v2_latest_returns_only_finalized_authority(monkeypatch):
 
     monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {"validator-hotkey"})
     monkeypatch.setattr(attested_v2_store, "load_weight_authority_v2", _load)
-    assert await weights_api.get_attested_weights_v2(71, 300) == expected
+    response = await weights_api.get_attested_weights_v2(
+        71,
+        300,
+        _request(),
+    )
+    assert json.loads(response.body) == expected
+    assert response.headers["vary"] == "Accept-Encoding"
 
 
 @pytest.mark.asyncio
@@ -565,9 +582,42 @@ async def test_v2_published_returns_not_found_while_publication_is_pending(
     monkeypatch.setattr(attested_v2_store, "load_weight_authority_v2", _load)
 
     with pytest.raises(HTTPException) as exc:
-        await weights_api.get_published_weights_v2(71, 300)
+        await weights_api.get_published_weights_v2(
+            71,
+            300,
+            _request(),
+        )
     assert exc.value.status_code == 404
     assert exc.value.detail == "published v2 weight authority not found"
+
+
+def test_v2_authority_response_gzips_without_changing_json():
+    authority = {
+        "schema_version": "leadpoet.published_weight_authority_stage.v2",
+        "authority_stage": "published",
+        "bundle": {"receipt_graph": {"receipts": ["a" * 4096]}},
+    }
+
+    response = weights_api._weight_authority_http_response(
+        authority,
+        accept_encoding="gzip, deflate",
+    )
+
+    assert response.headers["content-encoding"] == "gzip"
+    assert response.headers["vary"] == "Accept-Encoding"
+    assert json.loads(gzip.decompress(response.body)) == authority
+
+
+def test_v2_authority_response_honors_gzip_q_zero():
+    authority = {"payload": "a" * 4096}
+
+    response = weights_api._weight_authority_http_response(
+        authority,
+        accept_encoding="gzip;q=0, deflate",
+    )
+
+    assert "content-encoding" not in response.headers
+    assert json.loads(response.body) == authority
 
 
 @pytest.mark.asyncio

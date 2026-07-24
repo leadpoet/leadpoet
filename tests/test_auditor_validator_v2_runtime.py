@@ -217,6 +217,7 @@ def test_failed_auditor_verification_never_submits_fallback(monkeypatch, capsys)
 
 def test_v2_404_fails_closed_without_submission(monkeypatch, capsys):
     auditor = _auditor_for_one_verification(None)
+    sleeps = []
 
     async def missing_v2(_epoch):
         auditor._last_v2_authority_was_absent = True
@@ -227,7 +228,8 @@ def test_v2_404_fails_closed_without_submission(monkeypatch, capsys):
         "missing V2 authority must not submit any vector"
     )
 
-    async def stop_after_wait(_seconds):
+    async def stop_after_wait(seconds):
+        sleeps.append(seconds)
         auditor.should_exit = True
 
     monkeypatch.setattr(auditor_module.asyncio, "sleep", stop_after_wait)
@@ -236,6 +238,7 @@ def test_v2_404_fails_closed_without_submission(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "Weights not yet published" in output
     assert "Auditor verification passed" not in output
+    assert sleeps == [5]
 
 
 def test_v2_transport_failure_is_unavailable():

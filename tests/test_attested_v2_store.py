@@ -686,6 +686,153 @@ async def test_duplicate_v2_row_accepts_equivalent_database_timestamp(
     assert stored["identity_doc"] == row["identity_doc"]
 
 
+@pytest.mark.asyncio
+async def test_transient_exact_insert_retries_only_after_absent_readback(
+    monkeypatch,
+):
+    row = {"receipt_hash": HASH, "value": "expected"}
+    attempts = 0
+    sleeps = []
+
+    class CloudflareEdgeError(RuntimeError):
+        code = "400"
+        message = "cloudflare: JSON could not be generated"
+
+    async def _insert(_table, _row):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise CloudflareEdgeError("cloudflare: JSON could not be generated")
+        return dict(row)
+
+    async def _absent(_table, *, filters):
+        assert filters == (("receipt_hash", HASH),)
+        return None
+
+    async def _sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(attested_v2_store, "insert_row", _insert)
+    monkeypatch.setattr(attested_v2_store, "select_one", _absent)
+    monkeypatch.setattr(attested_v2_store.asyncio, "sleep", _sleep)
+
+    stored = await attested_v2_store._insert_exact(
+        "example",
+        row,
+        key_filters=(("receipt_hash", HASH),),
+    )
+
+    assert stored == row
+    assert attempts == 2
+    assert sleeps == [0.25]
+
+
+@pytest.mark.asyncio
+async def test_transient_exact_insert_accepts_only_exact_committed_readback(
+    monkeypatch,
+):
+    row = {"receipt_hash": HASH, "value": "expected"}
+
+    class LostResponseError(ConnectionError):
+        pass
+
+    async def _lost_response(_table, _row):
+        raise LostResponseError("connection reset after commit")
+
+    async def _stored(_table, *, filters):
+        assert filters == (("receipt_hash", HASH),)
+        return dict(row)
+
+    monkeypatch.setattr(attested_v2_store, "insert_row", _lost_response)
+    monkeypatch.setattr(attested_v2_store, "select_one", _stored)
+
+    stored = await attested_v2_store._insert_exact(
+        "example",
+        row,
+        key_filters=(("receipt_hash", HASH),),
+    )
+
+    assert stored == row
+
+
+@pytest.mark.asyncio
+async def test_transient_exact_insert_rejects_conflicting_readback(monkeypatch):
+    row = {"receipt_hash": HASH, "value": "expected"}
+
+    async def _lost_response(_table, _row):
+        raise ConnectionError("connection reset after commit")
+
+    async def _conflicting(_table, *, filters):
+        assert filters == (("receipt_hash", HASH),)
+        return {"receipt_hash": HASH, "value": "different"}
+
+    monkeypatch.setattr(attested_v2_store, "insert_row", _lost_response)
+    monkeypatch.setattr(attested_v2_store, "select_one", _conflicting)
+
+    with pytest.raises(attested_v2_store.AttestedV2StoreError, match="conflicts"):
+        await attested_v2_store._insert_exact(
+            "example",
+            row,
+            key_filters=(("receipt_hash", HASH),),
+        )
+
+
+@pytest.mark.asyncio
+async def test_nontransient_exact_insert_is_never_retried(monkeypatch):
+    calls = 0
+
+    async def _invalid(_table, _row):
+        nonlocal calls
+        calls += 1
+        raise ValueError("invalid row")
+
+    async def _unexpected_read(*_args, **_kwargs):
+        pytest.fail("non-transient insertion must not be reconciled")
+
+    monkeypatch.setattr(attested_v2_store, "insert_row", _invalid)
+    monkeypatch.setattr(attested_v2_store, "select_one", _unexpected_read)
+
+    with pytest.raises(ValueError, match="invalid row"):
+        await attested_v2_store._insert_exact(
+            "example",
+            {"receipt_hash": HASH},
+            key_filters=(("receipt_hash", HASH),),
+        )
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_transient_exact_insert_exhaustion_still_fails_closed(monkeypatch):
+    attempts = 0
+    sleeps = []
+
+    async def _unavailable(_table, _row):
+        nonlocal attempts
+        attempts += 1
+        raise ConnectionError("connection reset")
+
+    async def _absent(_table, *, filters):
+        assert filters == (("receipt_hash", HASH),)
+        return None
+
+    async def _sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(attested_v2_store, "insert_row", _unavailable)
+    monkeypatch.setattr(attested_v2_store, "select_one", _absent)
+    monkeypatch.setattr(attested_v2_store.asyncio, "sleep", _sleep)
+
+    with pytest.raises(ConnectionError, match="connection reset"):
+        await attested_v2_store._insert_exact(
+            "example",
+            {"receipt_hash": HASH},
+            key_filters=(("receipt_hash", HASH),),
+        )
+
+    assert attempts == 4
+    assert sleeps == [0.25, 0.75, 1.5]
+
+
 def test_stored_retention_comparison_accepts_equivalent_database_timestamp():
     attested_v2_store._assert_stored_row(
         "example",

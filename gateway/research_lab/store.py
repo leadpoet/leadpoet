@@ -53,8 +53,8 @@ _TRANSIENT_ERROR_TYPE_SIGNATURES = (
 )
 
 
-def _is_transient_read_error(exc: BaseException) -> bool:
-    """Return whether a read failure is a retryable edge/network transient.
+def _is_transient_store_error(exc: BaseException) -> bool:
+    """Return whether a store failure is a retryable edge/network transient.
 
     Fail-safe: only a recognized transient returns True. An unknown error —
     including a genuine PostgREST/Postgres query error — returns False and
@@ -76,6 +76,12 @@ def _is_transient_read_error(exc: BaseException) -> bool:
     if code and code not in edge_codes and (code.startswith("pgrst") or len(code) == 5):
         return False
     return any(token in haystack for token in _TRANSIENT_ERROR_SIGNATURES)
+
+
+def _is_transient_read_error(exc: BaseException) -> bool:
+    """Backward-compatible name for the shared fail-closed classifier."""
+
+    return _is_transient_store_error(exc)
 
 
 async def _execute_read_with_retry(call, *, label: str):

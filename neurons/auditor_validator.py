@@ -1794,12 +1794,17 @@ class AuditorValidator:
                         if weights_data is None:
                             # Verification is fail-closed: no fallback vector will be submitted.
                             if authority_status == "v2_absent":
-                                print("   ⏳ Weights not yet published. Waiting 30s...")
+                                print("   ⏳ Weights not yet published. Waiting 5s...")
                             elif authority_status == "v2_unavailable":
-                                print("   ⚠️ Gateway weight authority unavailable (fetch error). Waiting 30s...")
+                                print("   ⚠️ Gateway weight authority unavailable (fetch error). Waiting 5s...")
                             else:
                                 print("❌ Auditor verification failed")
-                            await asyncio.sleep(30)
+                            await asyncio.sleep(
+                                5
+                                if authority_status
+                                in {"v2_absent", "v2_unavailable"}
+                                else 30
+                            )
                             continue
                         print("✅ Auditor verification passed")
                         

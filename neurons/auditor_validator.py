@@ -222,6 +222,7 @@ from leadpoet_canonical.weights import (
     bundle_weights_hash,
     compare_weights_hash,
     u16_to_emit_floats,
+    weights_within_tolerance,
 )
 from leadpoet_canonical.events import verify_log_entry
 from leadpoet_canonical.auditor_v2 import (
@@ -1950,6 +1951,65 @@ class AuditorValidator:
     # ═══════════════════════════════════════════════════════════════════════════
     # Weight Submission
     # ═══════════════════════════════════════════════════════════════════════════
+
+    def _read_finalized_weight_submission_state(self) -> Dict[str, Any]:
+        """Read this auditor's finalized LastUpdate and mechanism-0 weights."""
+
+        uid = int(self.uid)
+        netuid = int(self.config.netuid)
+        substrate = self.subtensor.substrate
+        block_hash = str(substrate.get_chain_finalised_head())
+
+        last_updates_result = substrate.query(
+            module="SubtensorModule",
+            storage_function="LastUpdate",
+            params=[netuid],
+            block_hash=block_hash,
+        )
+        last_updates = getattr(
+            last_updates_result,
+            "value",
+            last_updates_result,
+        )
+        if (
+            not isinstance(last_updates, (list, tuple))
+            or uid < 0
+            or uid >= len(last_updates)
+        ):
+            raise RuntimeError("finalized LastUpdate storage response is invalid")
+
+        weights_result = substrate.query(
+            module="SubtensorModule",
+            storage_function="Weights",
+            params=[netuid, uid],
+            block_hash=block_hash,
+        )
+        weights_value = getattr(weights_result, "value", weights_result)
+        if not isinstance(weights_value, (list, tuple)):
+            raise RuntimeError("finalized Weights storage response is invalid")
+
+        weights = []
+        seen_uids = set()
+        for item in weights_value:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                raise RuntimeError("finalized Weights row is invalid")
+            destination_uid = int(item[0])
+            weight_u16 = int(item[1])
+            if (
+                destination_uid < 0
+                or destination_uid in seen_uids
+                or weight_u16 < 0
+                or weight_u16 > 65535
+            ):
+                raise RuntimeError("finalized Weights row contains invalid values")
+            seen_uids.add(destination_uid)
+            weights.append((destination_uid, weight_u16))
+
+        return {
+            "block_hash": block_hash,
+            "last_update": int(last_updates[uid]),
+            "weights": weights,
+        }
     
     def _set_weights_until_epoch_end(
         self,
@@ -1958,8 +2018,9 @@ class AuditorValidator:
         subnet_epoch_index: Optional[int] = None,
         uids,
         weights,
+        expected_weights_u16,
     ) -> bool:
-        """Retry an explicitly rejected chain submission within one epoch."""
+        """Retry until the exact verified vector is finalized in this epoch."""
 
         def epoch_is_current() -> bool:
             try:
@@ -2015,6 +2076,37 @@ class AuditorValidator:
             )
             print(f"⏹️ Refusing stale auditor submission for epoch {epoch_id}")
             return False
+
+        try:
+            baseline_state = self._read_finalized_weight_submission_state()
+        except Exception as exc:
+            _audit_event(
+                "submission_confirmation_failure",
+                level=logging.ERROR,
+                epoch=int(epoch_id),
+                subnet_epoch_index=subnet_epoch_index,
+                netuid=int(self.config.netuid),
+                uid=getattr(self, "uid", None),
+                stage="baseline",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            print(
+                "⏹️ Refusing auditor submission because finalized chain state "
+                f"cannot be read: {exc}"
+            )
+            return False
+
+        baseline_last_update = int(baseline_state["last_update"])
+        expected_pairs = [
+            (int(uid), int(weight))
+            for uid, weight in zip(uids, expected_weights_u16)
+        ]
+        if (
+            len(expected_pairs) != len(uids)
+            or len(expected_pairs) != len(expected_weights_u16)
+        ):
+            raise RuntimeError("expected auditor weight vector lengths differ")
 
         attempt = 0
         while True:
@@ -2100,12 +2192,76 @@ class AuditorValidator:
                 ),
             )
             if outcome.success:
-                return True
+                for confirmation_attempt in range(1, 6):
+                    try:
+                        finalized_state = (
+                            self._read_finalized_weight_submission_state()
+                        )
+                        last_update_advanced = (
+                            int(finalized_state["last_update"])
+                            > baseline_last_update
+                        )
+                        vector_matches = weights_within_tolerance(
+                            expected_pairs,
+                            finalized_state["weights"],
+                        )
+                        _audit_event(
+                            "submission_chain_confirmation",
+                            level=logging.INFO
+                            if last_update_advanced and vector_matches
+                            else logging.WARNING,
+                            epoch=int(epoch_id),
+                            subnet_epoch_index=subnet_epoch_index,
+                            netuid=int(self.config.netuid),
+                            uid=getattr(self, "uid", None),
+                            attempt=attempt,
+                            confirmation_attempt=confirmation_attempt,
+                            baseline_last_update=baseline_last_update,
+                            observed_last_update=int(
+                                finalized_state["last_update"]
+                            ),
+                            finalized_block_hash=finalized_state["block_hash"],
+                            last_update_advanced=last_update_advanced,
+                            vector_matches=vector_matches,
+                            expected_destination_count=len(expected_pairs),
+                            observed_destination_count=len(
+                                finalized_state["weights"]
+                            ),
+                        )
+                        if last_update_advanced and vector_matches:
+                            return True
+                        if last_update_advanced:
+                            print(
+                                "⏹️ Finalized auditor weights differ from the "
+                                "verified gateway bundle"
+                            )
+                            return False
+                    except Exception as exc:
+                        _audit_event(
+                            "submission_chain_confirmation_failure",
+                            level=logging.WARNING,
+                            epoch=int(epoch_id),
+                            subnet_epoch_index=subnet_epoch_index,
+                            netuid=int(self.config.netuid),
+                            uid=getattr(self, "uid", None),
+                            attempt=attempt,
+                            confirmation_attempt=confirmation_attempt,
+                            error_type=type(exc).__name__,
+                            error=str(exc),
+                        )
+                    if confirmation_attempt < 5:
+                        time.sleep(3)
 
-            print(
-                f"❌ Bittensor rejected weight submission attempt {attempt}: "
-                f"{outcome.message}"
-            )
+                print(
+                    "⚠️  SDK reported success, but finalized LastUpdate did "
+                    "not advance; retrying within the current epoch"
+                )
+
+            else:
+                print(
+                    f"❌ Bittensor rejected weight submission attempt {attempt}: "
+                    f"{outcome.message}"
+                )
             time.sleep(12)
             if not epoch_is_current():
                 _audit_event(
@@ -2197,6 +2353,7 @@ class AuditorValidator:
                 ),
                 uids=uids,
                 weights=weights_floats,
+                expected_weights_u16=weights_u16,
             )
             
             if success:
@@ -2213,41 +2370,10 @@ class AuditorValidator:
                 print(f"✅ Weights submitted for epoch {epoch_id}")
                 self.last_submitted_epoch = live_epoch_id
                 self.last_authority_epoch = epoch_id
-                
-                # Verify submission landed on chain
-                print(f"   🔍 Verifying submission landed on chain...")
-                time.sleep(2)  # Brief wait for chain propagation
-                
-                try:
-                    all_chain_weights = self.subtensor.weights(netuid=self.config.netuid)
-                    my_uid = self.uid
-                    
-                    for uid, weights_list in all_chain_weights:
-                        if uid == my_uid:
-                            # Check if first few weights match what we submitted
-                            chain_sample = [(u, w) for u, w in weights_list[:3]]
-                            submitted_sample = [(uids[i], weights_u16[i]) for i in range(min(3, len(uids)))]
-                            print(f"   Chain sample (UID {my_uid}): {chain_sample}")
-                            print(f"   Submitted sample: {submitted_sample}")
-                            
-                            # Quick sanity check
-                            if chain_sample and submitted_sample:
-                                # Compare first weight
-                                chain_first_w = dict(chain_sample).get(submitted_sample[0][0])
-                                submitted_first_w = submitted_sample[0][1]
-                                if chain_first_w is not None:
-                                    diff = abs(chain_first_w - submitted_first_w)
-                                    if diff <= 1:
-                                        print(f"   ✅ Verified: Chain matches submitted (diff={diff})")
-                                    else:
-                                        print(f"   ⚠️  WARNING: Chain differs from submitted (diff={diff})")
-                                        print(f"      Chain has OLD weights - submission may have failed!")
-                            break
-                    else:
-                        print(f"   ⚠️  Could not find our weights on chain (UID {my_uid})")
-                except Exception as e:
-                    print(f"   ⚠️  Could not verify chain weights: {e}")
-                
+                print(
+                    "   ✅ Finalized LastUpdate advanced and the complete "
+                    "on-chain vector matches the verified bundle"
+                )
                 return True
             else:
                 _audit_event(

@@ -61,6 +61,40 @@ def _auditor(results, *, blocks=()):
         lambda *, force_refresh: {"lifecycle_state": "stateful_active"}
     )
     auditor.last_submitted_epoch = None
+    auditor.uid = 9
+    finalized_state = {
+        "block_hash": "0x" + "1" * 64,
+        "last_update": 100,
+        "weights": [],
+    }
+
+    def read_finalized_weight_submission_state():
+        return dict(finalized_state)
+
+    original_set_weights = auditor.subtensor.set_weights
+
+    def set_weights(**kwargs):
+        response = original_set_weights(**kwargs)
+        success = getattr(response, "success", None)
+        if success is None and isinstance(response, (tuple, list)):
+            success = response[0]
+        if success is True:
+            from leadpoet_canonical.weights import normalize_to_u16_with_uids
+
+            emitted_uids, emitted_weights = normalize_to_u16_with_uids(
+                kwargs["uids"],
+                kwargs["weights"],
+            )
+            finalized_state["last_update"] += 1
+            finalized_state["weights"] = list(
+                zip(emitted_uids, emitted_weights)
+            )
+        return response
+
+    auditor.subtensor.set_weights = set_weights
+    auditor._read_finalized_weight_submission_state = (
+        read_finalized_weight_submission_state
+    )
     return auditor
 
 
@@ -553,6 +587,7 @@ def test_auditor_retries_false_tuples_until_true(monkeypatch, capsys):
         epoch_id=2,
         uids=[3, 4],
         weights=[0.4, 0.6],
+        expected_weights_u16=[43690, 65535],
     )
 
     assert result is True
@@ -588,6 +623,7 @@ def test_auditor_accepts_v10_extrinsic_response(monkeypatch):
         epoch_id=2,
         uids=[3],
         weights=[1.0],
+        expected_weights_u16=[65535],
     )
 
     assert result is True
@@ -601,6 +637,108 @@ def test_auditor_accepts_v10_extrinsic_response(monkeypatch):
             "mechid": 0,
         }
     ]
+
+
+def test_auditor_retries_sdk_success_until_finalized_last_update_advances(
+    monkeypatch,
+):
+    auditor = _auditor(
+        [(True, "accepted-but-unobserved"), (True, "accepted-and-finalized")]
+    )
+    state = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1065,
+        blocks_remaining=20,
+    )
+    auditor._read_epoch_state = lambda: state
+    auditor._read_best_epoch_state = lambda: state
+    expected = [(3, 65535)]
+    finalized_states = iter(
+        [
+            {
+                "block_hash": "0x" + "1" * 64,
+                "last_update": 100,
+                "weights": [],
+            },
+            *[
+                {
+                    "block_hash": "0x" + str(index) * 64,
+                    "last_update": 100,
+                    "weights": [],
+                }
+                for index in range(2, 7)
+            ],
+            {
+                "block_hash": "0x" + "7" * 64,
+                "last_update": 101,
+                "weights": expected,
+            },
+        ]
+    )
+    auditor._read_finalized_weight_submission_state = lambda: next(
+        finalized_states
+    )
+    sleeps = []
+    monkeypatch.setattr(auditor_module.time, "sleep", sleeps.append)
+
+    result = auditor._set_weights_until_epoch_end(
+        epoch_id=2,
+        uids=[3],
+        weights=[1.0],
+        expected_weights_u16=[65535],
+    )
+
+    assert result is True
+    assert len(auditor.subtensor.calls) == 2
+    assert sleeps == [3, 3, 3, 3, 12]
+
+
+def test_auditor_rejects_finalized_vector_that_differs_from_bundle(monkeypatch):
+    auditor = _auditor([(True, "accepted")])
+    state = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1065,
+        blocks_remaining=20,
+    )
+    auditor._read_epoch_state = lambda: state
+    auditor._read_best_epoch_state = lambda: state
+    finalized_states = iter(
+        [
+            {
+                "block_hash": "0x" + "1" * 64,
+                "last_update": 100,
+                "weights": [],
+            },
+            {
+                "block_hash": "0x" + "2" * 64,
+                "last_update": 101,
+                "weights": [(3, 60000)],
+            },
+        ]
+    )
+    auditor._read_finalized_weight_submission_state = lambda: next(
+        finalized_states
+    )
+    monkeypatch.setattr(
+        auditor_module.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(
+            AssertionError("mismatched finalized vector must fail immediately")
+        ),
+    )
+
+    result = auditor._set_weights_until_epoch_end(
+        epoch_id=2,
+        uids=[3],
+        weights=[1.0],
+        expected_weights_u16=[65535],
+    )
+
+    assert result is False
+    assert len(auditor.subtensor.calls) == 1
+    assert auditor.last_submitted_epoch is None
 
 
 def test_auditor_lifecycle_transition_before_sdk_fails_closed(monkeypatch):
@@ -629,6 +767,7 @@ def test_auditor_lifecycle_transition_before_sdk_fails_closed(monkeypatch):
         epoch_id=2,
         uids=[0],
         weights=[1.0],
+        expected_weights_u16=[65535],
     )
 
     assert result is False
@@ -708,6 +847,7 @@ def test_auditor_stops_before_retry_after_epoch_rollover(monkeypatch):
         epoch_id=2,
         uids=[0],
         weights=[1.0],
+        expected_weights_u16=[65535],
     )
 
     assert result is False
@@ -750,6 +890,7 @@ def test_auditor_best_head_rollover_stops_retry_while_finalized_remains_old(
         subnet_epoch_index=10,
         uids=[0],
         weights=[1.0],
+        expected_weights_u16=[65535],
     )
 
     assert result is False

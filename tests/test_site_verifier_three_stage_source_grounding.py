@@ -46,16 +46,27 @@ def medium_supported(url: str, date_status: str = "no_date_in_content") -> dict:
     return value
 
 
-# Lab adaptation: the bounded corroboration rescue is flag-gated in this repo
-# (RESEARCH_LAB_INTENT_CORROBORATION_RESCUE, default off). These suites verify
-# the rescue behavior itself, so they run with the flag enabled — exactly how
-# the PR-28 audit exercised them.
-import os as _os
-
-_os.environ.setdefault("RESEARCH_LAB_INTENT_CORROBORATION_RESCUE", "1")
-
-
 class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
+    # Lab adaptation: the bounded corroboration rescue is flag-gated in this
+    # repo (RESEARCH_LAB_INTENT_CORROBORATION_RESCUE, default off). These
+    # tests verify the rescue behavior itself, so the flag is enabled for
+    # THIS class only (setUp/tearDown, no module-level env leakage).
+    def setUp(self):
+        super().setUp()
+        self._prev_rescue_flag = os.environ.get(
+            "RESEARCH_LAB_INTENT_CORROBORATION_RESCUE"
+        )
+        os.environ["RESEARCH_LAB_INTENT_CORROBORATION_RESCUE"] = "1"
+
+    def tearDown(self):
+        if self._prev_rescue_flag is None:
+            os.environ.pop("RESEARCH_LAB_INTENT_CORROBORATION_RESCUE", None)
+        else:
+            os.environ["RESEARCH_LAB_INTENT_CORROBORATION_RESCUE"] = (
+                self._prev_rescue_flag
+            )
+        super().tearDown()
+
     async def test_exact_official_domain_can_establish_entity_but_not_claim(self):
         url = "https://advario.com/news/terminal-project"
         stage_one = supported(url)

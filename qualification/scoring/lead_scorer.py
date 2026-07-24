@@ -485,17 +485,23 @@ async def score_company_autoresearch_intent_v2(
         )
         return _zero_company_breakdown(force_fail_reason)
 
+    gate_receipts: List[dict] = []
     passes, failure_reason = await run_company_zero_checks(
-        company, icp, run_cost_usd, run_time_seconds, seen_companies
+        company, icp, run_cost_usd, run_time_seconds, seen_companies,
+        gate_receipts=gate_receipts,
     )
     if not passes:
         logger.info(f"Autoresearch company failed pre-checks: {failure_reason}")
-        return _zero_company_breakdown(failure_reason)
+        return _zero_company_breakdown(
+            failure_reason, verifier_gate_receipts=gate_receipts or None
+        )
 
     binary_passed, binary_reason = _run_autoresearch_binary_fit_checks(company, icp)
     if not binary_passed:
         logger.info(f"Autoresearch company failed binary fit: {binary_reason}")
-        return _zero_company_breakdown(binary_reason)
+        return _zero_company_breakdown(
+            binary_reason, verifier_gate_receipts=gate_receipts or None
+        )
 
     try:
         co_verified, co_reason = await verify_company_exists(
@@ -509,7 +515,9 @@ async def score_company_autoresearch_intent_v2(
 
     reverify_ok, reverify_reason = await _llm_reverify_company(company, icp)
     if not reverify_ok:
-        return _zero_company_breakdown(reverify_reason)
+        return _zero_company_breakdown(
+            reverify_reason, verifier_gate_receipts=gate_receipts or None
+        )
 
     if company.company_name:
         seen_companies.add(company.company_name.lower().strip())
@@ -547,6 +555,7 @@ async def score_company_autoresearch_intent_v2(
             return _zero_company_breakdown(
                 "Intent fabrication detected (hardcoded date or generic claim)",
                 intent_signals_detail=signal_results,
+                verifier_gate_receipts=gate_receipts or None,
             )
     except Exception as e:
         logger.error(f"Autoresearch intent scoring failed: {e}")
@@ -570,6 +579,7 @@ async def score_company_autoresearch_intent_v2(
         final_score=final_score,
         failure_reason=None,
         intent_signals_detail=signal_results,
+        verifier_gate_receipts=gate_receipts or None,
     )
 
 
@@ -644,6 +654,7 @@ def _zero_company_breakdown(
     reason: Optional[str],
     *,
     intent_signals_detail: Optional[List[dict]] = None,
+    verifier_gate_receipts: Optional[List[dict]] = None,
 ) -> LeadScoreBreakdown:
     return LeadScoreBreakdown(
         icp_fit=0,
@@ -656,6 +667,7 @@ def _zero_company_breakdown(
         final_score=0,
         failure_reason=reason,
         intent_signals_detail=intent_signals_detail,
+        verifier_gate_receipts=verifier_gate_receipts or None,
     )
 
 

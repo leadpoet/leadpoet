@@ -739,3 +739,32 @@ def test_country_eu_shorthand_expands_to_europe() -> None:
     assert check_country_match("Germany", "EU").passed is True
     assert check_country_match("France", "EU").passed is True
     assert check_country_match("Brazil", "EU").passed is False
+
+
+@pytest.mark.asyncio
+async def test_gate_receipts_persist_into_breakdown_end_to_end(monkeypatch) -> None:
+    # Durability proof: the receipt must survive all the way into the
+    # LeadScoreBreakdown the evaluator persists — not just the out-param.
+    from qualification.scoring.lead_scorer import (
+        score_company_autoresearch_intent_v2,
+    )
+
+    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
+    monkeypatch.delenv("VERIFIER_SEMANTIC_GATES_MODE", raising=False)
+    # Canonical conflict zeroes deterministically at pre-checks: no network.
+    breakdown = await score_company_autoresearch_intent_v2(
+        _company("Manufacturing"),
+        _icp("Software"),
+        run_cost_usd=0.0,
+        run_time_seconds=1.0,
+        seen_companies=set(),
+    )
+    assert breakdown.final_score == 0
+    assert "canonical taxonomy" in (breakdown.failure_reason or "")
+    receipts = breakdown.verifier_gate_receipts
+    assert receipts and receipts[0]["gate"] == "taxonomy_industry"
+    assert receipts[0]["final_effect"] == "zeroed"
+    assert receipts[0]["taxonomy_mode"] == "enforce"
+    # Round-trips through the model layer (what the evaluator serializes).
+    dumped = breakdown.model_dump()
+    assert dumped["verifier_gate_receipts"][0]["final_effect"] == "zeroed"

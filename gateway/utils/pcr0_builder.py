@@ -84,10 +84,6 @@ VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT = os.path.expanduser(
 # on demand at checkout), so a deeper clone costs almost nothing.
 PCR0_GIT_HISTORY_DEPTH = max(1, int(os.environ.get("PCR0_GIT_HISTORY_DEPTH", "40")))
 
-# Give the gateway process time to finish serving health/readiness before the
-# Docker/Nitro cache warmer starts competing for host resources. Static PCR0
-# allowlist acceptance remains available while this delayed warmup runs.
-PCR0_STARTUP_WARM_DELAY_SECONDS = int(os.environ.get("PCR0_STARTUP_WARM_DELAY_SECONDS", "60"))
 PCR0_STARTUP_HISTORICAL_WARM_ENABLED = os.environ.get(
     "PCR0_STARTUP_HISTORICAL_WARM_ENABLED",
     "true",
@@ -266,7 +262,7 @@ def get_cache_status() -> Dict:
         ],
         "build_in_progress": _build_in_progress,
         "cache_size": len(_pcr0_cache),
-        "startup_warm_delay_seconds": PCR0_STARTUP_WARM_DELAY_SECONDS,
+        "startup_warm_delay_seconds": 15,
         "startup_historical_warm_enabled": PCR0_STARTUP_HISTORICAL_WARM_ENABLED,
     }
 
@@ -1631,12 +1627,10 @@ async def pcr0_builder_task():
         logger.error("[PCR0] Prerequisites check failed. PCR0 builder disabled.")
         return
     
-    if PCR0_STARTUP_WARM_DELAY_SECONDS > 0:
-        logger.info(
-            "[PCR0] Delaying startup cache warming for %ss so gateway health/readiness can come up first",
-            PCR0_STARTUP_WARM_DELAY_SECONDS,
-        )
-        await asyncio.sleep(PCR0_STARTUP_WARM_DELAY_SECONDS)
+    logger.info(
+        "[PCR0] Delaying startup cache warming for 15s so gateway health/readiness can come up first"
+    )
+    await asyncio.sleep(15)
 
     # STARTUP: Build PCR0s for last N commits (cache warming). This is delayed
     # and optional so a gateway restart does not immediately depend on Docker
@@ -1664,7 +1658,7 @@ def start_pcr0_builder():
     print(f"   Branch: {GITHUB_BRANCH}")
     print(f"   Interval: {PCR0_CHECK_INTERVAL // 60} minutes")
     print(f"   Cache size: {PCR0_CACHE_SIZE} versions")
-    print(f"   Startup warm delay: {PCR0_STARTUP_WARM_DELAY_SECONDS}s")
+    print("   Startup warm delay: 15s")
     print(f"   Mode: PINNED DOCKERFILE (reproducible builds)")
     print(f"   TTL: None (pinned builds are deterministic)")
 

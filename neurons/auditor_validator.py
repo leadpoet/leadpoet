@@ -1228,7 +1228,9 @@ class AuditorValidator:
                             endpoint_kind=endpoint_kind,
                             http_status=response.status,
                             elapsed_ms=elapsed_ms,
-                            response_bytes=response.content_length,
+                            response_bytes=getattr(
+                                response, "content_length", None
+                            ),
                             bundle_epoch=value.get("epoch_id")
                             if isinstance(value, dict)
                             else None,

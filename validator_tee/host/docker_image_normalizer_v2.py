@@ -22,6 +22,24 @@ class DockerImageNormalizationError(RuntimeError):
 _EPOCH = "1970-01-01T00:00:00Z"
 
 
+def _normalization_temp_parent() -> Optional[Path]:
+    """Return the root-backed builder workspace when one is configured."""
+
+    for variable in ("GATEWAY_V2_BUILD_WORK_ROOT", "RUNNER_TEMP"):
+        raw_value = os.environ.get(variable, "").strip()
+        if not raw_value:
+            continue
+        parent = Path(raw_value)
+        if not parent.is_absolute():
+            raise DockerImageNormalizationError(
+                "%s must be an absolute path" % variable
+            )
+        parent = parent / ".docker-image-normalizer-v2"
+        parent.mkdir(parents=True, exist_ok=True)
+        return parent
+    return None
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -100,11 +118,19 @@ def _load_json(path: Path, label: str) -> Any:
 
 
 def normalize_saved_image(
-    *, archive_path: Path, output_path: Path, normalized_image: str
+    *,
+    archive_path: Path,
+    output_path: Path,
+    normalized_image: str,
+    temporary_parent: Optional[Path] = None,
 ) -> str:
     """Normalize a ``docker save`` archive and return its canonical image ID."""
 
-    with tempfile.TemporaryDirectory(prefix="leadpoet-image-normalize-") as temporary:
+    parent = temporary_parent or _normalization_temp_parent()
+    with tempfile.TemporaryDirectory(
+        prefix="leadpoet-image-normalize-",
+        dir=None if parent is None else str(parent),
+    ) as temporary:
         root = Path(temporary)
         _safe_extract(archive_path, root)
         manifest_path = root / "manifest.json"
@@ -211,7 +237,11 @@ def normalize_saved_image(
 def normalize_docker_image(*, source_image: str, normalized_image: str) -> str:
     """Save, canonicalize, and reload a Docker image under a stable tag."""
 
-    with tempfile.TemporaryDirectory(prefix="leadpoet-docker-normalize-") as temporary:
+    parent = _normalization_temp_parent()
+    with tempfile.TemporaryDirectory(
+        prefix="leadpoet-docker-normalize-",
+        dir=None if parent is None else str(parent),
+    ) as temporary:
         root = Path(temporary)
         original = root / "original.tar"
         normalized = root / "normalized.tar"
@@ -220,6 +250,7 @@ def normalize_docker_image(*, source_image: str, normalized_image: str) -> str:
             archive_path=original,
             output_path=normalized,
             normalized_image=normalized_image,
+            temporary_parent=root,
         )
         _run(["docker", "load", "-i", str(normalized)])
         observed_id = _run(

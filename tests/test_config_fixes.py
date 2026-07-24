@@ -70,7 +70,7 @@ def test_bug_32_reconciled_contradictions(clean_env):
     assert (
         declared.conditional_validation_mode
         == from_env.conditional_validation_mode
-        == "off"
+        == "enforce"
     )
 
 

@@ -142,27 +142,27 @@
       "symbol": "weight_config_document"
     },
     {
-      "ast_sha256": "sha256:0a313a76743fe3ffbd525d6831231b5e23668ce4e3578eafd6882e751b7332d7",
+      "ast_sha256": "sha256:f504a0270fe155dd60ecdaed8a2f68a75d54193390e64b627ce3479f39191072",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.fetch_attested_weights_v2"
     },
     {
-      "ast_sha256": "sha256:9ee674ca0c68b7fea13d61906d0bf6529bb0d93b757d0debb0074744bb7b9657",
+      "ast_sha256": "sha256:d3c42d1beb4f18d7dfd48912081c4f6e66fa7730f07356ae73a7f870f104f490",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.fetch_verified_weight_authority"
     },
     {
-      "ast_sha256": "sha256:f2d738d819b2be3b305ebb53ded1f03edb3698dd6e74e244e0cabbcb95e2324d",
+      "ast_sha256": "sha256:200693270543d4282843d7c4a4bdd219f90e2b8ad3d4e116dc7926748d130316",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.run"
     },
     {
-      "ast_sha256": "sha256:d832bbe9cb059d669772f8b22caf5f93a65ffd2d57846eb2e89cd16e49b503cb",
+      "ast_sha256": "sha256:e8b16ffb02989341bada8dcb1349fde71fa307ba7f75c4ee640248a187eea8e7",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.submit_weights_to_chain"
     },
     {
-      "ast_sha256": "sha256:c36fbdab83769a05ded4f60c3a17868a88697d6ea49cdb1e5b105efa3cdc3be7",
+      "ast_sha256": "sha256:3871a8d1d26863dd681d53d1d6f90d293cb049e9ae8acf3576b9f58cb38b2da3",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.verify_attested_weights_v2"
     },
@@ -172,7 +172,7 @@
       "symbol": "Validator.__init__"
     },
     {
-      "ast_sha256": "sha256:d572bbece0ab588b06320803aa1189d385a9cef60e390010ca2d98cbe01f6e3b",
+      "ast_sha256": "sha256:be845dfe43bd247823d7b5371c6f3de62fd741edf49753de82ce0a297f156a08",
       "path": "neurons/validator.py",
       "symbol": "Validator._authorize_and_set_weights_v2"
     },
@@ -182,7 +182,7 @@
       "symbol": "Validator._publish_and_set_weights"
     },
     {
-      "ast_sha256": "sha256:2413f60d36e077c359b0b666dd0f117ff58ab06805b8da43c7fc0cd21ba6964d",
+      "ast_sha256": "sha256:e241dc3cc0bf66d121c9f5ee40a8c39ddbf0da0910f7914761f2be7433711415",
       "path": "neurons/validator.py",
       "symbol": "Validator._recover_weight_publication_journal_v2"
     },
@@ -217,7 +217,7 @@
       "symbol": "EnclaveChainRpcTransportV2.call"
     },
     {
-      "ast_sha256": "sha256:63444c1c63cfefa9571e7967fad7a0f7ec25654cd27dc148e8534d3ac2ce5276",
+      "ast_sha256": "sha256:4060c0c18884356c913d7d7a8762322f74cb54eede7ec1c71830af98e771f8b2",
       "path": "validator_tee/enclave/chain_source_v2.py",
       "symbol": "ValidatorChainSourceV2.find_finalized_extrinsic_inclusion"
     },
@@ -232,7 +232,7 @@
       "symbol": "ValidatorChainSourceV2.read_finalized_snapshot"
     },
     {
-      "ast_sha256": "sha256:f52503f491096702217a2ae38a7b22fd828b452c8ea441038c5312d1c7220ac1",
+      "ast_sha256": "sha256:ac2d3e3263086240772d11989f11528a77c84ac5ce6734eaccf5dc5abda15be8",
       "path": "validator_tee/enclave/hotkey_authority_v2.py",
       "symbol": "ValidatorHotkeyAuthorityV2.confirm_weight_publication"
     },
@@ -282,7 +282,7 @@
       "symbol": "_verify_host_vector"
     },
     {
-      "ast_sha256": "sha256:596ff1eb8279b3429cbe23fedaec9b7e9f204d3b27ec7091a69a2a8fad72f364",
+      "ast_sha256": "sha256:7f10119acfc57fabc26453eb897fc02c93cf0f79a9bb4bc88b6a7d72bc013e9c",
       "path": "validator_tee/host/authoritative_weight_flow_v2.py",
       "symbol": "finalize_authoritative_weight_publication_v2"
     },
@@ -302,7 +302,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:79e3f143c23cfe211f607477b09f91dd04648474e7f1a24d441ac78482d1f9cf",
-  "protected_source_commit": "71dbc79c8737828c354e72d901febec1779046e1",
+  "manifest_hash": "sha256:55ee7214186a88b972a45691b3e421f444cef63031fa43781fc0e03996ba4d77",
+  "protected_source_commit": "14c06ab1975643bbef9341528cdb4c2a4737e556",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

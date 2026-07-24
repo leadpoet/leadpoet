@@ -25,6 +25,7 @@ from typing import Optional
 import httpx
 from supabase import create_client, Client
 from supabase import create_async_client, AsyncClient
+from supabase.lib.client_options import SyncClientOptions
 
 from gateway.config import (
     SUPABASE_URL,
@@ -62,6 +63,59 @@ def _apply_sync_timeout(client: Client) -> Client:
     except Exception as e:  # pragma: no cover - defensive
         logger.warning("Could not apply Supabase sync HTTP timeout: %s", e)
     return client
+
+
+def _create_sync_client(
+    supabase_url: str,
+    supabase_key: str,
+    *,
+    timeout_seconds: Optional[float] = None,
+) -> Client:
+    """Create a shared sync client without mutable HTTP/2 compression state.
+
+    The sync client is intentionally shared by gateway thread-pool workers.
+    postgrest-py enables HTTP/2 by default, but its shared HPACK encoder is not
+    safe when multiple threads encode headers concurrently and can raise
+    ``RuntimeError: deque mutated during iteration``. HTTP/1.1 keeps connection
+    pooling and parallel requests without sharing that compression table.
+    """
+
+    effective_timeout = (
+        float(_SYNC_HTTP_TIMEOUT_SECONDS)
+        if timeout_seconds is None
+        else float(timeout_seconds)
+    )
+    http_client = httpx.Client(
+        http1=True,
+        http2=False,
+        timeout=httpx.Timeout(effective_timeout),
+        follow_redirects=True,
+    )
+    try:
+        return create_client(
+            supabase_url,
+            supabase_key,
+            options=SyncClientOptions(httpx_client=http_client),
+        )
+    except BaseException:
+        http_client.close()
+        raise
+
+
+def create_http1_sync_client(supabase_url: str, supabase_key: str) -> Client:
+    """Create an HTTP/1-pinned client while preserving Supabase's timeout.
+
+    Legacy call sites migrated away from bare ``supabase.create_client`` use
+    this factory so the transport race is removed without silently changing
+    their existing 120-second request deadline. Canonical gateway DB clients
+    continue to use the separately configured bounded timeout above.
+    """
+
+    return _create_sync_client(
+        supabase_url,
+        supabase_key,
+        timeout_seconds=float(SyncClientOptions().postgrest_client_timeout),
+    )
 
 
 # Errors that mean the pooled connection died under us (Supabase's edge sends
@@ -170,9 +224,17 @@ def get_read_client() -> Client:
         logger.warning("⚠️ SUPABASE_ANON_KEY not configured - using SERVICE_ROLE_KEY for reads")
         if not SUPABASE_SERVICE_ROLE_KEY:
             raise RuntimeError("No Supabase key configured")
-        _read_client = _install_sync_send_retry(_apply_sync_timeout(create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)))
+        _read_client = _install_sync_send_retry(
+            _apply_sync_timeout(
+                _create_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+            )
+        )
     else:
-        _read_client = _install_sync_send_retry(_apply_sync_timeout(create_client(SUPABASE_URL, SUPABASE_ANON_KEY)))
+        _read_client = _install_sync_send_retry(
+            _apply_sync_timeout(
+                _create_sync_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+            )
+        )
         logger.info("✅ Supabase READ client initialized (ANON_KEY)")
     
     return _read_client
@@ -193,7 +255,11 @@ def get_write_client() -> Client:
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY not configured")
     
-    _write_client = _install_sync_send_retry(_apply_sync_timeout(create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)))
+    _write_client = _install_sync_send_retry(
+        _apply_sync_timeout(
+            _create_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        )
+    )
     logger.info("✅ Supabase WRITE client initialized (SERVICE_ROLE_KEY)")
     
     return _write_client

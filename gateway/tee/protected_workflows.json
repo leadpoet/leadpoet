@@ -7,7 +7,7 @@
       "symbol": "finalize_weights_v2"
     },
     {
-      "ast_sha256": "sha256:2749d39f54e4e18644d239414c278c6aa2b7111a833d6c0e11304315bcd15b21",
+      "ast_sha256": "sha256:506a6f0040ba556bacd077b45f7ecebca1d52134738dc31d2ceba54817b6c26f",
       "path": "gateway/api/weights.py",
       "symbol": "get_attested_weights_v2"
     },
@@ -22,7 +22,7 @@
       "symbol": "submit_weights"
     },
     {
-      "ast_sha256": "sha256:b7c4abe6955d08361b7387f63212017e17820c3842acd4a6c4a2ffabd23445c8",
+      "ast_sha256": "sha256:87b432a983ab4f2dc605c86aea667486727310fa6699c5ba3d6a3b532f620028",
       "path": "gateway/api/weights.py",
       "symbol": "submit_weights_v2"
     },
@@ -612,7 +612,7 @@
       "symbol": "rpc_method_allowed"
     },
     {
-      "ast_sha256": "sha256:e2be987b9c8bab274330bd873a5dc1c008d8e09dc7e5c16fec718b6ffc01f252",
+      "ast_sha256": "sha256:a88aaa014d07c114351c9eb4a92a3fd546c290a09ee03f6df1c36b6c70093534",
       "path": "gateway/tee/scoring_executor_v2.py",
       "symbol": "ScoringExecutorV2"
     },
@@ -1107,7 +1107,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:ae10b44570c7f37e9f5772932b2a6940c0c6e5da3464c3aab114def74404237a",
-  "protected_source_commit": "a8ab628e1e478ee3387cdf785589b795dc7f5107",
+  "manifest_hash": "sha256:f4f022b23a3c406d3d59d140681d2043b76ce0154ede436b237429524894dbc3",
+  "protected_source_commit": "4e7fc7aa40ef6f3f6dee3b269c932410981e18c5",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

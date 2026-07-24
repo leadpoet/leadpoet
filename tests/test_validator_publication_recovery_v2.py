@@ -36,9 +36,15 @@ class _Journal:
     def __init__(self, record):
         self.record = record
         self.calls = []
+        self.scan_generation = 0
 
     def load(self):
         self.calls.append(("load", None))
+        return self.record
+
+    def record_prepared(self, record):
+        self.calls.append(("prepared", dict(record)))
+        self.record = dict(record)
         return self.record
 
     def record_published(self, acknowledgment):
@@ -56,6 +62,12 @@ class _Journal:
 
     def record_signed(self, result):
         self.calls.append(("signed", dict(result)))
+
+    def reserve_finalization_scan(self):
+        self.scan_generation += 1
+        scan_id = "sha256:" + format(self.scan_generation, "064x")
+        self.calls.append(("finalization_scan", scan_id))
+        return scan_id
 
     def clear(self, *, expected_event_hash):
         self.calls.append(("clear", expected_event_hash))
@@ -80,8 +92,12 @@ class _Client:
             "signed_extrinsics": list(self.signed_extrinsics),
         }
 
-    def confirm_weight_publication_v2(self, authorization_id):
-        self.calls.append(("confirm", authorization_id))
+    def confirm_weight_publication_v2(
+        self, authorization_id, *, finalization_scan_id
+    ):
+        self.calls.append(
+            ("confirm", (authorization_id, finalization_scan_id))
+        )
         if self.confirm_error:
             raise RuntimeError("not finalized yet")
         return {"finalized": True}
@@ -160,10 +176,11 @@ async def test_prepared_crash_replays_gateway_then_uses_epoch_bounded_chain_call
     )
     validator._set_weights_until_epoch_end = set_weights
 
-    epoch = await validator._recover_weight_publication_journal_v2(
+    outcome = await validator._recover_weight_publication_journal_v2(
         gateway_url="https://gateway.example"
     )
-    assert epoch == 100
+    assert outcome.epoch_id == 100
+    assert outcome.status == "finalized"
     assert [item[0] for item in calls] == ["resume", "set", "finalize"]
     set_call = next(value for name, value in calls if name == "set")
     assert set_call["uids"] == [0, 1]
@@ -234,10 +251,11 @@ async def test_signed_crash_rebroadcasts_only_exact_enclave_bytes_then_finalizes
     monkeypatch.setattr(
         validator_module, "finalize_authoritative_weight_publication_v2", finalize
     )
-    epoch = await validator._recover_weight_publication_journal_v2(
+    outcome = await validator._recover_weight_publication_journal_v2(
         gateway_url="https://gateway.example"
     )
-    assert epoch == 100
+    assert outcome.epoch_id == 100
+    assert outcome.status == "finalized"
     assert validator.substrate_calls == [
         ("author_submitExtrinsic", ["0xaabbcc"])
     ]
@@ -327,14 +345,50 @@ async def test_closed_unsigned_journal_is_quarantined_without_publication_or_sig
         never_resume,
     )
 
-    epoch = await validator._recover_weight_publication_journal_v2(
+    outcome = await validator._recover_weight_publication_journal_v2(
         gateway_url="https://gateway.example"
     )
 
-    assert epoch == 100
+    assert outcome.epoch_id == 100
+    assert outcome.status == "quarantined"
     assert client.calls == []
     assert journal.calls[-1][0] == "quarantine"
     assert journal.calls[-1][1][:2] == (100, "unsigned_epoch_closed")
+
+
+@pytest.mark.asyncio
+async def test_current_epoch_quarantine_is_not_reported_as_submission_success(
+    monkeypatch,
+):
+    journal = _Journal(_record(published=False, signatures=[]))
+    validator = _validator(journal, _Client(signed_extrinsics=[]))
+
+    async def closed_state():
+        return SimpleNamespace(workflow_epoch_id=101)
+
+    validator._get_epoch_state_async = closed_state
+    validator._get_best_epoch_state_async = closed_state
+    monkeypatch.setenv("VALIDATOR_V2_GATEWAY_URL", "https://gateway.example")
+
+    async def never_prepare(**_kwargs):
+        pytest.fail("quarantined current epoch must not be republished")
+
+    monkeypatch.setattr(
+        validator_module,
+        "prepare_authoritative_weight_publication_v2",
+        never_prepare,
+    )
+
+    with pytest.raises(RuntimeError, match="quarantined"):
+        await validator._authorize_and_set_weights_v2(
+            epoch_state=SimpleNamespace(subnet_epoch_index=50),
+            snapshot={"epoch_id": 100},
+            host_uids=[0, 1],
+            host_weights=[0.8, 0.2],
+            allocation_hash="sha256:" + "4" * 64,
+            leaderboard_window_start="2026-07-22T00:00:00Z",
+            leaderboard_window_end="2026-07-22T01:00:00Z",
+        )
 
 
 @pytest.mark.asyncio
@@ -354,10 +408,62 @@ async def test_closed_signed_journal_preserves_evidence_when_release_recovery_fa
 
     client.recover_weight_publication_v2 = fail_recovery
 
-    epoch = await validator._recover_weight_publication_journal_v2(
+    outcome = await validator._recover_weight_publication_journal_v2(
         gateway_url="https://gateway.example"
     )
 
-    assert epoch == 100
+    assert outcome.epoch_id == 100
+    assert outcome.status == "quarantined"
     assert journal.calls[-1][0] == "quarantine"
     assert journal.calls[-1][1][:2] == (100, "signed_recovery_unresolved")
+
+
+@pytest.mark.asyncio
+async def test_closed_signed_journal_does_not_block_next_epoch_preparation(
+    monkeypatch,
+):
+    journal = _Journal(_record(published=True, signatures=[{"receipt": True}]))
+    client = _Client(signed_extrinsics=[])
+    validator = _validator(journal, client)
+
+    async def closed_state():
+        return SimpleNamespace(workflow_epoch_id=101)
+
+    validator._get_epoch_state_async = closed_state
+    validator._get_best_epoch_state_async = closed_state
+
+    def fail_recovery(**_kwargs):
+        raise RuntimeError("recovery validator release differs")
+
+    client.recover_weight_publication_v2 = fail_recovery
+    reached = []
+
+    class NextEpochPreparationReached(RuntimeError):
+        pass
+
+    async def prepare(**kwargs):
+        reached.append(kwargs)
+        raise NextEpochPreparationReached
+
+    monkeypatch.setattr(
+        validator_module,
+        "prepare_authoritative_weight_publication_v2",
+        prepare,
+    )
+    monkeypatch.setenv("VALIDATOR_V2_GATEWAY_URL", "https://gateway.example")
+
+    with pytest.raises(NextEpochPreparationReached):
+        await validator._authorize_and_set_weights_v2(
+            epoch_state=SimpleNamespace(subnet_epoch_index=51),
+            snapshot={"epoch_id": 101},
+            host_uids=[0, 1],
+            host_weights=[0.8, 0.2],
+            allocation_hash="sha256:" + "4" * 64,
+            leaderboard_window_start="2026-07-22T00:00:00Z",
+            leaderboard_window_end="2026-07-22T01:00:00Z",
+        )
+
+    assert journal.calls[-1][0] == "quarantine"
+    assert journal.calls[-1][1][:2] == (100, "signed_recovery_unresolved")
+    assert len(reached) == 1
+    assert reached[0]["calculation_snapshot"]["epoch_id"] == 101

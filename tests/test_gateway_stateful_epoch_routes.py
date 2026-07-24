@@ -272,6 +272,30 @@ def _stored_bundle(graph):
     }
 
 
+def _stub_normal_epoch_boot_verification(monkeypatch):
+    """Keep route tests focused after immutable release-lineage verification."""
+
+    def verify_boot(identity):
+        return {"identity": identity}
+
+    monkeypatch.setattr(
+        weights_api,
+        "_verify_authoritative_v2_boot",
+        verify_boot,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_build_authoritative_v2_receipt_boot_verifier",
+        lambda _graph: verify_boot,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_receipt_root_boot_identity",
+        lambda _graph: {},
+    )
+    return verify_boot
+
+
 @pytest.mark.asyncio
 async def test_normal_epoch_route_binds_published_bundle_and_acks_both_snapshots(
     monkeypatch,
@@ -300,6 +324,7 @@ async def test_normal_epoch_route_binds_published_bundle_and_acks_both_snapshots
     )
     calls = []
 
+    boot_verifier = _stub_normal_epoch_boot_verification(monkeypatch)
     monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {HOTKEY})
     monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
     monkeypatch.setattr(weights_api, "load_subnet_epoch_cutover", lambda: cutover)
@@ -321,9 +346,7 @@ async def test_normal_epoch_route_binds_published_bundle_and_acks_both_snapshots
     )
 
     def validate_graph(_value, **kwargs):
-        assert kwargs["boot_attestation_verifier"] is (
-            weights_api._verify_authoritative_v2_boot
-        )
+        assert kwargs["boot_attestation_verifier"] is boot_verifier
         assert kwargs["require_boot_attestation_verification"] is True
         calls.append("graph")
 
@@ -422,6 +445,7 @@ async def test_normal_epoch_route_fails_closed_without_publication(monkeypatch):
         receipt_graph=graph,
     )
 
+    _stub_normal_epoch_boot_verification(monkeypatch)
     monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {HOTKEY})
     monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
     monkeypatch.setattr(weights_api, "load_subnet_epoch_cutover", lambda: cutover)
@@ -514,6 +538,7 @@ async def test_normal_epoch_route_reports_bundle_store_outage_as_unavailable(
         receipt_graph=graph,
     )
 
+    _stub_normal_epoch_boot_verification(monkeypatch)
     monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {HOTKEY})
     monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
     monkeypatch.setattr(weights_api, "load_subnet_epoch_cutover", lambda: cutover)

@@ -1388,6 +1388,7 @@ class ValidatorChainSourceV2:
         minimum_block: int,
         maximum_block: int,
         epoch_id: int,
+        finalization_scan_id: str,
     ) -> Dict[str, Any]:
         """Find one exact enclave-built extrinsic in authenticated finalized blocks."""
 
@@ -1424,7 +1425,15 @@ class ValidatorChainSourceV2:
         requested_end = int(maximum_block)
         if start < 0 or requested_end < start:
             raise ValidatorChainSourceV2Error("finalization scan range is invalid")
-        job_id = "weight-finalization:%d" % int(epoch_id)
+        scan_id = str(finalization_scan_id or "").lower()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", scan_id):
+            raise ValidatorChainSourceV2Error(
+                "finalization scan identity is invalid"
+            )
+        job_id = "weight-finalization:%d:%s" % (
+            int(epoch_id),
+            scan_id.removeprefix("sha256:"),
+        )
         purpose = "validator.weights.finalized.v2"
         attempts = []
         artifacts = []

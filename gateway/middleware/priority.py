@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from collections import Counter
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Optional
 
-from fastapi import Request
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from gateway.utils.ops_registry import set_priority_middleware
 
@@ -103,40 +103,94 @@ def classify_path(path: str) -> str:
 class _Pool:
     def __init__(self, route_class: RouteClass) -> None:
         self.route_class = route_class
-        self.semaphore = asyncio.Semaphore(route_class.max_concurrent)
+        self.semaphore: Optional[asyncio.Semaphore] = None
         self.waiting = 0
         self.in_flight = 0
         self.shed = 0
         self.requests = 0
-        self._lock = asyncio.Lock()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._active_calls = 0
+        self._runtime_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+
+    def _enter_runtime(self) -> asyncio.Semaphore:
+        """Bind loop-owned primitives lazily and retain one request lease."""
+
+        loop = asyncio.get_running_loop()
+        with self._runtime_lock:
+            if self._loop is not loop:
+                if self._active_calls:
+                    raise RuntimeError(
+                        "priority pool cannot move between active event loops"
+                    )
+                self.semaphore = asyncio.Semaphore(
+                    self.route_class.max_concurrent
+                )
+                self._loop = loop
+            if self.semaphore is None:
+                raise RuntimeError("priority pool runtime is unavailable")
+            self._active_calls += 1
+            return self.semaphore
+
+    def _current_runtime(self) -> asyncio.Semaphore:
+        loop = asyncio.get_running_loop()
+        with self._runtime_lock:
+            if (
+                self._loop is not loop
+                or self.semaphore is None
+                or self._active_calls <= 0
+            ):
+                raise RuntimeError("priority pool release has no active lease")
+            return self.semaphore
+
+    def _leave_runtime(self) -> None:
+        with self._runtime_lock:
+            if self._active_calls <= 0:
+                raise RuntimeError("priority pool lease accounting underflow")
+            self._active_calls -= 1
 
     async def acquire(self) -> bool:
-        async with self._lock:
-            self.requests += 1
-            if self.waiting >= self.route_class.max_waiting:
-                self.shed += 1
-                return False
-            self.waiting += 1
+        semaphore = self._enter_runtime()
+        acquired = False
+        slot_acquired = False
         try:
-            await asyncio.wait_for(
-                self.semaphore.acquire(),
-                timeout=self.route_class.wait_timeout_s,
-            )
-        except asyncio.TimeoutError:
-            async with self._lock:
-                self.shed += 1
-            return False
+            with self._state_lock:
+                self.requests += 1
+                if self.waiting >= self.route_class.max_waiting:
+                    self.shed += 1
+                    return False
+                self.waiting += 1
+            try:
+                await asyncio.wait_for(
+                    semaphore.acquire(),
+                    timeout=self.route_class.wait_timeout_s,
+                )
+                slot_acquired = True
+            except asyncio.TimeoutError:
+                with self._state_lock:
+                    self.shed += 1
+                return False
+            finally:
+                with self._state_lock:
+                    self.waiting = max(0, self.waiting - 1)
+            with self._state_lock:
+                self.in_flight += 1
+            acquired = True
+            return True
         finally:
-            async with self._lock:
-                self.waiting = max(0, self.waiting - 1)
-        async with self._lock:
-            self.in_flight += 1
-        return True
+            if not acquired:
+                if slot_acquired:
+                    semaphore.release()
+                self._leave_runtime()
 
     async def release(self) -> None:
-        self.semaphore.release()
-        async with self._lock:
-            self.in_flight = max(0, self.in_flight - 1)
+        semaphore = self._current_runtime()
+        try:
+            with self._state_lock:
+                self.in_flight = max(0, self.in_flight - 1)
+            semaphore.release()
+        finally:
+            self._leave_runtime()
 
     def snapshot(self) -> dict:
         return {
@@ -149,9 +203,21 @@ class _Pool:
         }
 
 
-class PriorityMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, max_concurrent_miners: int | None = None):
-        super().__init__(app)
+class PriorityMiddleware:
+    """Pure-ASGI request-priority middleware.
+
+    Implemented as raw ASGI (not Starlette ``BaseHTTPMiddleware``) on purpose.
+    ``BaseHTTPMiddleware`` bridges the downstream app through an anyio task
+    group and memory-object streams, which can obscure the original exception
+    when an endpoint fails or a client disconnects. Awaiting ``self.app``
+    directly preserves the original failure and keeps pool accounting local to
+    this middleware. The independent shared-HTTP/2 fix in ``gateway.db.client``
+    prevents the HPACK ``deque mutated during iteration`` failure observed in
+    weight publication.
+    """
+
+    def __init__(self, app: ASGIApp, max_concurrent_miners: int | None = None):
+        self.app = app
         if max_concurrent_miners is not None and "MINER_MAX_CONCURRENT" not in os.environ:
             miner_class = RouteClass(
                 MINER_CLASS.name,
@@ -169,8 +235,14 @@ class PriorityMiddleware(BaseHTTPMiddleware):
         self.path_counts = Counter()
         set_priority_middleware(self)
 
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Only HTTP requests are pooled; websockets and lifespan pass through
+        # untouched, exactly as BaseHTTPMiddleware did.
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
         route_class = classify_path(path)
         pool = self.pools[route_class]
         self.path_counts[route_class] += 1
@@ -180,17 +252,19 @@ class PriorityMiddleware(BaseHTTPMiddleware):
             logger.warning(
                 "gateway_request_shed class=%s method=%s path=%s",
                 route_class,
-                request.method,
+                scope.get("method", ""),
                 path,
             )
-            return JSONResponse(
+            response = JSONResponse(
                 status_code=503,
                 content={"detail": "Gateway at capacity - retry shortly"},
                 headers={"Retry-After": "15"},
             )
+            await response(scope, receive, send)
+            return
 
         try:
-            return await call_next(request)
+            await self.app(scope, receive, send)
         finally:
             await pool.release()
 

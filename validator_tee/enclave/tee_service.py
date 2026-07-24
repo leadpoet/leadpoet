@@ -477,16 +477,21 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
             if validator_hotkey_authority_v2 is None:
                 raise RuntimeError("validator V2 hotkey authority is not configured")
             weight_authorization_id = request.get("weight_authorization_id")
-            if not isinstance(weight_authorization_id, str):
+            finalization_scan_id = request.get("finalization_scan_id")
+            if (
+                not isinstance(weight_authorization_id, str)
+                or not isinstance(finalization_scan_id, str)
+            ):
                 return {
                     "status": "error",
-                    "error": "Missing weight publication authorization",
+                    "error": "Missing weight publication finalization request",
                 }
             return {
                 "status": "ok",
                 "finalization_result": (
                     validator_hotkey_authority_v2.confirm_weight_publication(
-                        weight_authorization_id=weight_authorization_id
+                        weight_authorization_id=weight_authorization_id,
+                        finalization_scan_id=finalization_scan_id,
                     )
                 ),
             }

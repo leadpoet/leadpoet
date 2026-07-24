@@ -11,6 +11,8 @@ commits must keep failing closed.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from tests.test_release_lineage_v2 import _identity, _release
@@ -229,6 +231,25 @@ def test_validator_boot_rejects_shared_pcr0_without_exact_commit(
                 "pcr0": "9" * 96,
             }
         )
+
+
+def test_pcr0_cache_lock_rebinds_only_after_previous_loop_is_idle(monkeypatch):
+    from gateway.utils import pcr0_builder
+
+    monkeypatch.setattr(pcr0_builder, "_cache_lock", None)
+    monkeypatch.setattr(pcr0_builder, "_cache_lock_loop", None)
+    monkeypatch.setattr(pcr0_builder, "_cache_lock_users", 0)
+    observed = []
+
+    async def use_lock():
+        async with pcr0_builder._cache_lock_scope():
+            observed.append(id(pcr0_builder._cache_lock))
+
+    asyncio.run(use_lock())
+    asyncio.run(use_lock())
+
+    assert len(observed) == 2
+    assert pcr0_builder._cache_lock_users == 0
 
 
 def test_validator_boot_accepts_exact_commit_alias_for_identical_inputs(

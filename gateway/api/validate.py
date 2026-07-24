@@ -36,11 +36,13 @@ from gateway.utils.registry import is_registered_hotkey_async  # Use async versi
 from gateway.utils.nonce import check_and_store_nonce, validate_nonce_format
 from gateway.utils.logger import log_event
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BITTENSOR_NETWORK
-from supabase import create_client, Client
+from gateway.db.client import create_http1_sync_client
+from supabase import Client
 from postgrest.exceptions import APIError
 
-# Initialize Supabase client
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+# Initialize Supabase client (shared across threadpool workers — must stay
+# HTTP/1-pinned; the default HTTP/2 HPACK encoder is not thread-safe)
+supabase: Client = create_http1_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 # Create router
 router = APIRouter(prefix="/validate", tags=["Validation"])

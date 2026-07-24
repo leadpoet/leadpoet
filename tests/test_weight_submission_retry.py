@@ -79,16 +79,10 @@ def _auditor(results, *, blocks=()):
         if success is None and isinstance(response, (tuple, list)):
             success = response[0]
         if success is True:
-            from leadpoet_canonical.weights import normalize_to_u16_with_uids
-
-            emitted_uids, emitted_weights = normalize_to_u16_with_uids(
-                kwargs["uids"],
-                kwargs["weights"],
-            )
+            # Finney commit-reveal advances LastUpdate when the encrypted
+            # commitment finalizes. The public Weights row remains the prior
+            # vector until the scheduled reveal at the next epoch boundary.
             finalized_state["last_update"] += 1
-            finalized_state["weights"] = list(
-                zip(emitted_uids, emitted_weights)
-            )
         return response
 
     auditor.subtensor.set_weights = set_weights
@@ -603,8 +597,13 @@ def test_auditor_retries_false_tuples_until_true(monkeypatch, capsys):
     assert "rejected-two" in output
 
 
-def test_auditor_accepts_v10_extrinsic_response(monkeypatch):
+def test_auditor_accepts_v10_finalized_commit_before_weight_reveal(
+    monkeypatch,
+    capsys,
+    caplog,
+):
     auditor = _auditor([_SdkResponse(True, "accepted")], blocks=[1065])
+    caplog.set_level("INFO", logger=auditor_module.__name__)
 
     def unexpected_sleep(_seconds):
         raise AssertionError("successful submission must not sleep")
@@ -637,6 +636,11 @@ def test_auditor_accepts_v10_extrinsic_response(monkeypatch):
             "mechid": 0,
         }
     ]
+    output = capsys.readouterr().out
+    assert "visible chain vector remains sealed" in output
+    assert '"confirmation_stage":"timelocked_commit_finalized"' in caplog.text
+    assert '"visible_vector_state":"reveal_pending"' in caplog.text
+    assert '"event":"submission_failed"' not in caplog.text
 
 
 def test_auditor_reconnect_is_transactional(monkeypatch):
@@ -847,8 +851,13 @@ def test_auditor_retries_sdk_success_until_finalized_last_update_advances(
     assert sleeps == [3, 3, 3, 3, 12]
 
 
-def test_auditor_rejects_finalized_vector_that_differs_from_bundle(monkeypatch):
+def test_auditor_does_not_reject_prior_visible_vector_before_reveal(
+    monkeypatch,
+    capsys,
+    caplog,
+):
     auditor = _auditor([(True, "accepted")])
+    caplog.set_level("INFO", logger=auditor_module.__name__)
     state = SimpleNamespace(
         workflow_epoch_id=2,
         subnet_epoch_index=None,
@@ -878,7 +887,7 @@ def test_auditor_rejects_finalized_vector_that_differs_from_bundle(monkeypatch):
         auditor_module.time,
         "sleep",
         lambda _seconds: (_ for _ in ()).throw(
-            AssertionError("mismatched finalized vector must fail immediately")
+            AssertionError("a finalized commitment must not retry before reveal")
         ),
     )
 
@@ -889,9 +898,110 @@ def test_auditor_rejects_finalized_vector_that_differs_from_bundle(monkeypatch):
         expected_weights_u16=[65535],
     )
 
-    assert result is False
+    assert result is True
     assert len(auditor.subtensor.calls) == 1
     assert auditor.last_submitted_epoch is None
+    output = capsys.readouterr().out
+    assert "visible chain vector remains sealed" in output
+    assert '"confirmation_stage":"timelocked_commit_finalized"' in caplog.text
+    assert '"visible_vector_state":"reveal_pending"' in caplog.text
+    assert '"event":"submission_failed"' not in caplog.text
+
+
+def test_auditor_submit_records_commit_finalization_not_visible_reveal(
+    monkeypatch,
+    caplog,
+):
+    auditor = _auditor([_SdkResponse(True, "accepted")])
+    state = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1065,
+        blocks_remaining=20,
+    )
+    auditor._read_epoch_state = lambda: state
+    auditor._read_best_epoch_state = lambda: state
+    auditor._subnet_index_for_workflow_epoch = lambda _epoch: None
+    monkeypatch.setattr(
+        auditor_module.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(
+            AssertionError("a finalized commitment must not retry")
+        ),
+    )
+    caplog.set_level("INFO", logger=auditor_module.__name__)
+
+    result = auditor.submit_weights_to_chain(
+        2,
+        {
+            "epoch_id": 2,
+            "block": 1065,
+            "uids": [3],
+            "weights_u16": [65535],
+            "weights_hash": "weights-hash",
+            "bundle_hash": "bundle-hash",
+            "authority_stage": "finalized",
+        },
+        submission_epoch_id=2,
+    )
+
+    assert result is True
+    assert auditor.last_submitted_epoch == 2
+    assert auditor.last_authority_epoch == 2
+    assert '"event":"submission_success"' in caplog.text
+    assert '"confirmation_stage":"timelocked_commit_finalized"' in caplog.text
+    assert '"event":"submission_failed"' not in caplog.text
+
+
+def test_auditor_reports_visible_vector_when_reveal_already_matches(
+    monkeypatch,
+    capsys,
+):
+    auditor = _auditor([(True, "accepted")])
+    state = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1065,
+        blocks_remaining=20,
+    )
+    auditor._read_epoch_state = lambda: state
+    auditor._read_best_epoch_state = lambda: state
+    finalized_states = iter(
+        [
+            {
+                "block_hash": "0x" + "1" * 64,
+                "last_update": 100,
+                "weights": [(8, 65535)],
+            },
+            {
+                "block_hash": "0x" + "2" * 64,
+                "last_update": 101,
+                "weights": [(3, 65535)],
+            },
+        ]
+    )
+    auditor._read_finalized_weight_submission_state = lambda: next(
+        finalized_states
+    )
+    monkeypatch.setattr(
+        auditor_module.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(
+            AssertionError("a confirmed submission must not retry")
+        ),
+    )
+
+    result = auditor._set_weights_until_epoch_end(
+        epoch_id=2,
+        uids=[3],
+        weights=[1.0],
+        expected_weights_u16=[65535],
+    )
+
+    assert result is True
+    assert len(auditor.subtensor.calls) == 1
+    output = capsys.readouterr().out
+    assert "visible chain vector already matches" in output
 
 
 def test_auditor_lifecycle_transition_before_sdk_fails_closed(monkeypatch):

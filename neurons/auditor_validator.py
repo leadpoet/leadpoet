@@ -2081,7 +2081,7 @@ class AuditorValidator:
         weights,
         expected_weights_u16,
     ) -> bool:
-        """Retry until the exact verified vector is finalized in this epoch."""
+        """Retry until this epoch's timelocked commitment is finalized."""
 
         def reconnect_transport(
             exc: BaseException,
@@ -2319,10 +2319,15 @@ class AuditorValidator:
                             expected_pairs,
                             finalized_state["weights"],
                         )
+                        visible_vector_state = (
+                            "revealed_match"
+                            if vector_matches
+                            else "reveal_pending"
+                        )
                         _audit_event(
                             "submission_chain_confirmation",
                             level=logging.INFO
-                            if last_update_advanced and vector_matches
+                            if last_update_advanced
                             else logging.WARNING,
                             epoch=int(epoch_id),
                             subnet_epoch_index=subnet_epoch_index,
@@ -2336,20 +2341,31 @@ class AuditorValidator:
                             ),
                             finalized_block_hash=finalized_state["block_hash"],
                             last_update_advanced=last_update_advanced,
+                            confirmation_stage=(
+                                "timelocked_commit_finalized"
+                                if last_update_advanced
+                                else "awaiting_finalized_commit"
+                            ),
+                            visible_vector_state=visible_vector_state,
                             vector_matches=vector_matches,
                             expected_destination_count=len(expected_pairs),
                             observed_destination_count=len(
                                 finalized_state["weights"]
                             ),
                         )
-                        if last_update_advanced and vector_matches:
-                            return True
                         if last_update_advanced:
-                            print(
-                                "⏹️ Finalized auditor weights differ from the "
-                                "verified gateway bundle"
-                            )
-                            return False
+                            if vector_matches:
+                                print(
+                                    "   ✅ Timelocked commitment finalized; "
+                                    "the visible chain vector already matches"
+                                )
+                            else:
+                                print(
+                                    "   ✅ Timelocked commitment finalized; "
+                                    "the visible chain vector remains sealed "
+                                    "until its scheduled reveal"
+                                )
+                            return True
                     except Exception as exc:
                         _audit_event(
                             "submission_chain_confirmation_failure",
@@ -2485,13 +2501,18 @@ class AuditorValidator:
                     weights_hash=bundle.get("weights_hash"),
                     bundle_hash=bundle.get("bundle_hash"),
                     destination_count=len(uids),
+                    confirmation_stage="timelocked_commit_finalized",
                 )
-                print(f"✅ Weights submitted for epoch {epoch_id}")
+                print(
+                    f"✅ Weight submission accepted and finalized for epoch "
+                    f"{epoch_id}"
+                )
                 self.last_submitted_epoch = live_epoch_id
                 self.last_authority_epoch = epoch_id
                 print(
-                    "   ✅ Finalized LastUpdate advanced and the complete "
-                    "on-chain vector matches the verified bundle"
+                    "   ✅ Finalized LastUpdate advanced for the auditor's "
+                    "timelocked commitment; the exact vector will become "
+                    "public at its scheduled reveal"
                 )
                 return True
             else:
@@ -2689,7 +2710,11 @@ class AuditorValidator:
                             weights_data,
                             submission_epoch_id=current_epoch,
                         ):
-                            logger.info(f"Weights submitted for epoch {target_epoch}")
+                            logger.info(
+                                "Timelocked weight commitment finalized for "
+                                "epoch %s",
+                                target_epoch,
+                            )
                         else:
                             logger.error(f"Weight submission failed for epoch {target_epoch}")
                 

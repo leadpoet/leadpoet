@@ -276,11 +276,14 @@ class ValidatorEnclaveClient:
     def confirm_weight_publication_v2(
         self,
         weight_authorization_id: str,
+        *,
+        finalization_scan_id: str,
     ) -> Dict[str, Any]:
         response = self._send_request(
             {
                 "command": "confirm_weight_publication_v2",
                 "weight_authorization_id": str(weight_authorization_id),
+                "finalization_scan_id": str(finalization_scan_id),
             },
             timeout_seconds=600,
         )

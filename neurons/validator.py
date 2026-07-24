@@ -23,6 +23,7 @@ import bittensor as bt
 import argparse
 import json
 import gc  # For explicit memory cleanup
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from Leadpoet.base.validator import BaseValidatorNeuron
@@ -109,6 +110,93 @@ from leadpoet_canonical.weight_computation import (
 )
 from leadpoet_canonical.constants import WEIGHT_SUBMISSION_BLOCK
 from leadpoet_verifier.economics import DEFAULT_RESEARCH_LAB_EMISSION_PERCENT
+
+
+def _atomic_write_json_file(path: Path, payload: Mapping[str, Any]) -> None:
+    """Durably replace one shared validator JSON file."""
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = target.stat().st_mode & 0o777
+    except FileNotFoundError:
+        mode = 0o644
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".%s." % target.name,
+        dir=str(target.parent),
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+            descriptor = -1
+            json.dump(dict(payload), handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(temporary), str(target))
+        directory = os.open(str(target.parent), os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _load_fulfillment_work_file(path: Path) -> Dict[str, Any]:
+    """Load one complete fulfillment assignment or fail before scoring."""
+
+    with Path(path).open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError("fulfillment work document is not an object")
+    epoch = payload.get("epoch")
+    if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
+        raise ValueError("fulfillment work epoch is invalid")
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id.strip():
+        raise ValueError("fulfillment work request_id is invalid")
+    if not isinstance(payload.get("icp"), dict):
+        raise ValueError("fulfillment work ICP is invalid")
+    submissions = payload.get("submissions")
+    if not isinstance(submissions, list) or any(
+        not isinstance(item, dict) for item in submissions
+    ):
+        raise ValueError("fulfillment work submissions are invalid")
+    return payload
+
+
+def _quarantine_fulfillment_work_file(path: Path) -> Path:
+    """Remove malformed work from the worker glob without deleting evidence."""
+
+    source = Path(path)
+    target = source.with_name(
+        ".invalid.%s.%d.%d"
+        % (source.name, time.time_ns(), os.getpid())
+    )
+    os.replace(str(source), str(target))
+    directory = os.open(str(source.parent), os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return target
+
+
+def _shared_block_write_due(owner: Any, *, now: Optional[float] = None) -> bool:
+    """Claim the 12-second shared-block heartbeat interval."""
+
+    current = time.monotonic() if now is None else float(now)
+    last = getattr(owner, "_last_block_file_write_monotonic", None)
+    if last is not None and current - float(last) < 12.0:
+        return False
+    owner._last_block_file_write_monotonic = current
+    return True
 
 
 def _canonical_sdk_weight_vector(weight_result: Mapping[str, Any]):
@@ -439,6 +527,18 @@ class _ValidatorEpochState:
             ),
             "timestamp": int(time.time()),
         }
+
+
+@dataclass(frozen=True)
+class _WeightPublicationRecoveryOutcome:
+    """Distinguish finalized recovery from evidence-preserving quarantine."""
+
+    epoch_id: int
+    status: str
+
+    def __post_init__(self) -> None:
+        if self.status not in {"finalized", "quarantined"}:
+            raise ValueError("weight publication recovery status is invalid")
 
 
 def _read_shared_epoch_state_file(*, max_age_seconds: int) -> _ValidatorEpochState:
@@ -2642,17 +2742,12 @@ class Validator(BaseValidatorNeuron):
                 
                 # Write block info to shared file for workers (if coordinator/single mode)
                 # This happens inline (no separate thread) to avoid websocket concurrency issues
-                # Only write every 12 seconds to reduce disk I/O
+                # Write on elapsed monotonic time, not main-loop iteration
+                # count. One slow iteration must not leave worker epoch
+                # authority stale for minutes.
                 if container_mode_check != "worker":
-                    if not hasattr(self, '_block_file_write_counter'):
-                        self._block_file_write_counter = 0
-                        # CRITICAL: Write immediately on first run to prevent worker deadlock
+                    if _shared_block_write_due(self):
                         self._write_shared_block_file(epoch_state)
-                    
-                    self._block_file_write_counter += 1
-                    if self._block_file_write_counter >= 12:
-                        self._write_shared_block_file(epoch_state)
-                        self._block_file_write_counter = 0
             
             # DEBUG: Always log epoch status
             print(
@@ -3895,16 +3990,27 @@ class Validator(BaseValidatorNeuron):
                 "wss://entrypoint-finney.opentensor.ai:443",
             )
         ).strip()
-        recovered_epoch = await self._recover_weight_publication_journal_v2(
+        recovery = await self._recover_weight_publication_journal_v2(
             gateway_url=gateway_url
         )
-        if recovered_epoch is not None:
-            if int(recovered_epoch) == int(snapshot["epoch_id"]):
-                return True
-            print(
-                "   ✅ Recovered and finalized earlier authoritative V2 epoch "
-                f"{recovered_epoch}"
-            )
+        if recovery is not None:
+            if recovery.status == "finalized":
+                if int(recovery.epoch_id) == int(snapshot["epoch_id"]):
+                    return True
+                print(
+                    "   ✅ Recovered and finalized earlier authoritative V2 epoch "
+                    f"{recovery.epoch_id}"
+                )
+            elif int(recovery.epoch_id) == int(snapshot["epoch_id"]):
+                raise RuntimeError(
+                    "current authoritative V2 publication was quarantined "
+                    "without finalized-chain proof"
+                )
+            else:
+                bt.logging.critical(
+                    "weight_publication_prior_epoch_quarantined "
+                    f"epoch={recovery.epoch_id}; continuing current epoch"
+                )
         journal = self._weight_publication_journal_v2
         publication = await prepare_authoritative_weight_publication_v2(
             calculation_snapshot=snapshot,
@@ -3941,8 +4047,10 @@ class Validator(BaseValidatorNeuron):
         )
         if not submitted:
             return False
+        finalization_scan_id = journal.reserve_finalization_scan()
         finalization = await finalize_authoritative_weight_publication_v2(
             prepared_publication=publication,
+            finalization_scan_id=finalization_scan_id,
             validator_hotkey=self.wallet.hotkey.ss58_address,
             gateway_url=gateway_url,
             client=self._validator_v2_client,
@@ -3959,7 +4067,7 @@ class Validator(BaseValidatorNeuron):
 
     async def _recover_weight_publication_journal_v2(
         self, *, gateway_url: str
-    ) -> Optional[int]:
+    ) -> Optional[_WeightPublicationRecoveryOutcome]:
         """Resume one exact journaled publication without blind re-signing."""
 
         journal = self._weight_publication_journal_v2
@@ -3990,7 +4098,10 @@ class Validator(BaseValidatorNeuron):
                 "weight_publication_journal_quarantined "
                 f"epoch={epoch_id} signed=false path={quarantined}"
             )
-            return epoch_id
+            return _WeightPublicationRecoveryOutcome(
+                epoch_id=epoch_id,
+                status="quarantined",
+            )
         if record["publication"] is None:
             acknowledgment = await resume_prepared_weight_publication_v2(
                 journal_record=record,
@@ -4021,7 +4132,10 @@ class Validator(BaseValidatorNeuron):
                 f"epoch={epoch_id} signed=true path={quarantined} "
                 f"recovery_type={type(exc).__name__} error={str(exc)[:200]}"
             )
-            return epoch_id
+            return _WeightPublicationRecoveryOutcome(
+                epoch_id=epoch_id,
+                status="quarantined",
+            )
         authorization_id = str(recovery["weight_authorization_id"])
         record = journal.replace_authorization(authorization_id)
         weight_result = record["published_bundle"]["weight_result"]
@@ -4044,9 +4158,11 @@ class Validator(BaseValidatorNeuron):
                 )
         else:
             try:
+                finalization_scan_id = journal.reserve_finalization_scan()
                 await asyncio.to_thread(
                     self._validator_v2_client.confirm_weight_publication_v2,
                     authorization_id,
+                    finalization_scan_id=finalization_scan_id,
                 )
             except Exception:
                 # Re-submit only the exact enclave-signed bytes already fsynced
@@ -4085,18 +4201,23 @@ class Validator(BaseValidatorNeuron):
         last_error = None
         for attempt in range(10):
             try:
+                finalization_scan_id = journal.reserve_finalization_scan()
                 finalization = await finalize_authoritative_weight_publication_v2(
                     prepared_publication={
                         "weight_authorization_id": authorization_id,
                         "weight_submission_event_hash": event_hash,
                     },
+                    finalization_scan_id=finalization_scan_id,
                     validator_hotkey=self.wallet.hotkey.ss58_address,
                     gateway_url=gateway_url,
                     client=self._validator_v2_client,
                 )
                 self._last_authoritative_weight_finalization_v2 = finalization
                 journal.clear(expected_event_hash=event_hash)
-                return epoch_id
+                return _WeightPublicationRecoveryOutcome(
+                    epoch_id=epoch_id,
+                    status="finalized",
+                )
             except Exception as exc:
                 last_error = exc
                 if attempt < 9:
@@ -4111,7 +4232,10 @@ class Validator(BaseValidatorNeuron):
                 f"epoch={epoch_id} signed=true path={quarantined} "
                 "finalized_chain_proof=false"
             )
-            return epoch_id
+            return _WeightPublicationRecoveryOutcome(
+                epoch_id=epoch_id,
+                status="quarantined",
+            )
         raise RuntimeError(
             "journaled authoritative V2 publication lacks finalized-chain proof"
         ) from last_error
@@ -5725,14 +5849,16 @@ class Validator(BaseValidatorNeuron):
                         for worker_id, request_id, icp_details, submissions in assignments:
                             # request_id is a UUID — safe for filenames
                             work_file = weights_dir / f"fulfillment_worker_{worker_id}_work_{current_epoch}_{request_id}.json"
-                            with open(work_file, 'w') as f:
-                                json.dump({
+                            _atomic_write_json_file(
+                                work_file,
+                                {
                                     "epoch": current_epoch,
                                     "request_id": request_id,
                                     "icp": icp_details,
                                     "submissions": submissions,
                                     "timestamp": time.time(),
-                                }, f, indent=2)
+                                },
+                            )
                             print(f"   📝 Worker {worker_id} → request {request_id[:8]} "
                                   f"({len(submissions)} submission(s))")
 
@@ -5854,8 +5980,30 @@ class Validator(BaseValidatorNeuron):
                 except Exception:
                     wid_token = "?"
 
-                with open(results_file, 'r') as f:
-                    worker_data = json.load(f)
+                try:
+                    with open(results_file, "r", encoding="utf-8") as f:
+                        worker_data = json.load(f)
+                    if not isinstance(worker_data, dict):
+                        raise ValueError("fulfillment worker result is not an object")
+                    if not isinstance(
+                        worker_data.get("submission_results"), list
+                    ):
+                        raise ValueError(
+                            "fulfillment worker result submissions are invalid"
+                        )
+                except (OSError, ValueError, TypeError) as result_exc:
+                    print(
+                        "   ⚠️ fulfillment_worker_result_invalid_retry "
+                        f"worker {wid_token}: {type(result_exc).__name__}: "
+                        f"{str(result_exc)[:200]}"
+                    )
+                    try:
+                        results_file.unlink()
+                        work_file.touch()
+                    except FileNotFoundError:
+                        pass
+                    any_submit_failed = True
+                    continue
 
                 request_id = worker_data.get("request_id", "")
                 submission_results = worker_data.get("submission_results", [])
@@ -11205,6 +11353,27 @@ def run_dedicated_fulfillment_worker(config):
                 print(f"   ⚠️ {len(pending) - 1} additional pending work file(s) will be processed next iteration")
             print(f"{'='*70}")
 
+            try:
+                work_data = _load_fulfillment_work_file(work_file)
+            except (OSError, ValueError, TypeError) as work_exc:
+                try:
+                    quarantined = _quarantine_fulfillment_work_file(work_file)
+                except FileNotFoundError:
+                    return
+                except OSError as quarantine_exc:
+                    print(
+                        "   ❌ fulfillment_work_quarantine_failed "
+                        f"worker {fid}: {type(quarantine_exc).__name__}: "
+                        f"{str(quarantine_exc)[:200]}"
+                    )
+                    return
+                print(
+                    "   ⚠️ fulfillment_work_invalid_quarantined "
+                    f"worker {fid}: {type(work_exc).__name__}: "
+                    f"{str(work_exc)[:200]} path={quarantined.name}"
+                )
+                return
+
             # Lease renewal: prevent Phase 1's TTL-bounded dispatch lock from
             # expiring while this worker is still actively scoring. Without
             # this, attribute-heavy ICPs running >80 min would age past the
@@ -11228,12 +11397,8 @@ def run_dedicated_fulfillment_worker(config):
 
             lease_task = asyncio.create_task(_refresh_lease())
 
-            request_id = ""
+            request_id = str(work_data["request_id"])
             try:
-                with open(work_file, 'r') as f:
-                    work_data = json.load(f)
-
-                request_id = work_data.get("request_id", "")
                 icp_details = work_data.get("icp", {})
                 submissions = work_data.get("submissions", [])
 
@@ -11369,14 +11534,16 @@ def run_dedicated_fulfillment_worker(config):
                         "results": skipped_results,
                     })
 
-                with open(results_file, 'w') as f:
-                    json.dump({
+                _atomic_write_json_file(
+                    results_file,
+                    {
                         "epoch": current_epoch,
                         "fulfillment_worker_id": fid,
                         "request_id": request_id,
                         "submission_results": all_results,
                         "timestamp": time.time(),
-                    }, f, indent=2)
+                    },
+                )
 
                 self._completed_epochs.add(current_epoch)
                 print(f"\n{'='*70}")
@@ -11387,8 +11554,9 @@ def run_dedicated_fulfillment_worker(config):
                 print(f"❌ Fulfillment worker error: {e}")
                 import traceback
                 traceback.print_exc()
-                with open(results_file, 'w') as f:
-                    json.dump({
+                _atomic_write_json_file(
+                    results_file,
+                    {
                         "epoch": current_epoch,
                         "fulfillment_worker_id": fid,
                         "request_id": request_id,
@@ -11396,7 +11564,8 @@ def run_dedicated_fulfillment_worker(config):
                         "error": str(e),
                         "submission_results": [],
                         "timestamp": time.time(),
-                    }, f, indent=2)
+                    },
+                )
                 self._completed_epochs.add(current_epoch)
             finally:
                 # Stop lease renewal — scoring is over (success or failure).

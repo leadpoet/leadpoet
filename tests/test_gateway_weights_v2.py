@@ -591,6 +591,74 @@ async def test_v2_published_returns_not_found_while_publication_is_pending(
     assert exc.value.detail == "published v2 weight authority not found"
 
 
+@pytest.mark.asyncio
+async def test_v2_published_returns_retryable_unavailable_for_store_timeout(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store
+
+    async def _load(**_kwargs):
+        raise TimeoutError("temporary Supabase read timeout")
+
+    monkeypatch.setattr(
+        weights_api,
+        "PRIMARY_VALIDATOR_HOTKEYS",
+        {"validator-hotkey"},
+    )
+    monkeypatch.setattr(attested_v2_store, "load_weight_authority_v2", _load)
+
+    with pytest.raises(HTTPException) as exc:
+        await weights_api.get_published_weights_v2(71, 300, _request())
+
+    assert exc.value.status_code == 503
+    assert exc.value.headers == {"Retry-After": "5"}
+
+
+@pytest.mark.asyncio
+async def test_v2_published_keeps_integrity_failures_as_internal_errors(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store
+
+    async def _load(**_kwargs):
+        raise RuntimeError("stored authority receipt differs")
+
+    monkeypatch.setattr(
+        weights_api,
+        "PRIMARY_VALIDATOR_HOTKEYS",
+        {"validator-hotkey"},
+    )
+    monkeypatch.setattr(attested_v2_store, "load_weight_authority_v2", _load)
+
+    with pytest.raises(HTTPException) as exc:
+        await weights_api.get_published_weights_v2(71, 300, _request())
+
+    assert exc.value.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_v2_latest_returns_retryable_unavailable_for_store_timeout(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store
+
+    async def _load(**_kwargs):
+        raise TimeoutError("temporary Supabase read timeout")
+
+    monkeypatch.setattr(
+        weights_api,
+        "PRIMARY_VALIDATOR_HOTKEYS",
+        {"validator-hotkey"},
+    )
+    monkeypatch.setattr(attested_v2_store, "load_weight_authority_v2", _load)
+
+    with pytest.raises(HTTPException) as exc:
+        await weights_api.get_attested_weights_v2(71, 300, _request())
+
+    assert exc.value.status_code == 503
+    assert exc.value.headers == {"Retry-After": "5"}
+
+
 def test_v2_authority_response_gzips_without_changing_json():
     authority = {
         "schema_version": "leadpoet.published_weight_authority_stage.v2",

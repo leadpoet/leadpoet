@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from collections import Counter
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Optional
 
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -102,40 +103,94 @@ def classify_path(path: str) -> str:
 class _Pool:
     def __init__(self, route_class: RouteClass) -> None:
         self.route_class = route_class
-        self.semaphore = asyncio.Semaphore(route_class.max_concurrent)
+        self.semaphore: Optional[asyncio.Semaphore] = None
         self.waiting = 0
         self.in_flight = 0
         self.shed = 0
         self.requests = 0
-        self._lock = asyncio.Lock()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._active_calls = 0
+        self._runtime_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+
+    def _enter_runtime(self) -> asyncio.Semaphore:
+        """Bind loop-owned primitives lazily and retain one request lease."""
+
+        loop = asyncio.get_running_loop()
+        with self._runtime_lock:
+            if self._loop is not loop:
+                if self._active_calls:
+                    raise RuntimeError(
+                        "priority pool cannot move between active event loops"
+                    )
+                self.semaphore = asyncio.Semaphore(
+                    self.route_class.max_concurrent
+                )
+                self._loop = loop
+            if self.semaphore is None:
+                raise RuntimeError("priority pool runtime is unavailable")
+            self._active_calls += 1
+            return self.semaphore
+
+    def _current_runtime(self) -> asyncio.Semaphore:
+        loop = asyncio.get_running_loop()
+        with self._runtime_lock:
+            if (
+                self._loop is not loop
+                or self.semaphore is None
+                or self._active_calls <= 0
+            ):
+                raise RuntimeError("priority pool release has no active lease")
+            return self.semaphore
+
+    def _leave_runtime(self) -> None:
+        with self._runtime_lock:
+            if self._active_calls <= 0:
+                raise RuntimeError("priority pool lease accounting underflow")
+            self._active_calls -= 1
 
     async def acquire(self) -> bool:
-        async with self._lock:
-            self.requests += 1
-            if self.waiting >= self.route_class.max_waiting:
-                self.shed += 1
-                return False
-            self.waiting += 1
+        semaphore = self._enter_runtime()
+        acquired = False
+        slot_acquired = False
         try:
-            await asyncio.wait_for(
-                self.semaphore.acquire(),
-                timeout=self.route_class.wait_timeout_s,
-            )
-        except asyncio.TimeoutError:
-            async with self._lock:
-                self.shed += 1
-            return False
+            with self._state_lock:
+                self.requests += 1
+                if self.waiting >= self.route_class.max_waiting:
+                    self.shed += 1
+                    return False
+                self.waiting += 1
+            try:
+                await asyncio.wait_for(
+                    semaphore.acquire(),
+                    timeout=self.route_class.wait_timeout_s,
+                )
+                slot_acquired = True
+            except asyncio.TimeoutError:
+                with self._state_lock:
+                    self.shed += 1
+                return False
+            finally:
+                with self._state_lock:
+                    self.waiting = max(0, self.waiting - 1)
+            with self._state_lock:
+                self.in_flight += 1
+            acquired = True
+            return True
         finally:
-            async with self._lock:
-                self.waiting = max(0, self.waiting - 1)
-        async with self._lock:
-            self.in_flight += 1
-        return True
+            if not acquired:
+                if slot_acquired:
+                    semaphore.release()
+                self._leave_runtime()
 
     async def release(self) -> None:
-        self.semaphore.release()
-        async with self._lock:
-            self.in_flight = max(0, self.in_flight - 1)
+        semaphore = self._current_runtime()
+        try:
+            with self._state_lock:
+                self.in_flight = max(0, self.in_flight - 1)
+            semaphore.release()
+        finally:
+            self._leave_runtime()
 
     def snapshot(self) -> dict:
         return {

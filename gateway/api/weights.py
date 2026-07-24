@@ -115,6 +115,44 @@ def _weight_authority_http_response(
         },
     )
 
+
+def _weight_authority_load_exception(
+    exc: BaseException,
+    *,
+    netuid: int,
+    epoch_id: int,
+    log_tag: str,
+    failure_detail: str,
+) -> HTTPException:
+    """Map only recognized store transients to a retryable HTTP response."""
+
+    from gateway.research_lab.store import _is_transient_store_error
+
+    if _is_transient_store_error(exc):
+        logger.warning(
+            "%s netuid=%s epoch=%s error_type=%s error=%s",
+            log_tag,
+            netuid,
+            epoch_id,
+            type(exc).__name__,
+            str(exc)[:240],
+        )
+        return HTTPException(
+            status_code=503,
+            detail="v2 weight authority is temporarily unavailable",
+            headers={"Retry-After": "5"},
+        )
+    logger.error(
+        "%s netuid=%s epoch=%s error_type=%s error=%s",
+        log_tag,
+        netuid,
+        epoch_id,
+        type(exc).__name__,
+        str(exc)[:240],
+    )
+    return HTTPException(status_code=500, detail=failure_detail)
+
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -1568,15 +1606,13 @@ async def get_attested_weights_v2(
             validator_hotkey=next(iter(PRIMARY_VALIDATOR_HOTKEYS)),
         )
     except Exception as exc:
-        logger.error(
-            "weight_submission_v2_sidecar_load_failed netuid=%s epoch=%s "
-            "error_type=%s error=%s",
-            netuid,
-            epoch_id,
-            type(exc).__name__,
-            str(exc)[:240],
-        )
-        raise HTTPException(status_code=500, detail="v2 weight sidecar verification failed") from exc
+        raise _weight_authority_load_exception(
+            exc,
+            netuid=netuid,
+            epoch_id=epoch_id,
+            log_tag="weight_submission_v2_sidecar_load_failed",
+            failure_detail="v2 weight sidecar verification failed",
+        ) from exc
     if authority is None:
         raise HTTPException(
             status_code=404,
@@ -1617,16 +1653,12 @@ async def get_published_weights_v2(
             require_finalization=False,
         )
     except Exception as exc:
-        logger.error(
-            "weight_published_v2_load_failed netuid=%s epoch=%s "
-            "error_type=%s error=%s",
-            netuid,
-            epoch_id,
-            type(exc).__name__,
-            str(exc)[:240],
-        )
-        raise HTTPException(
-            status_code=500, detail="v2 staged weight authority load failed"
+        raise _weight_authority_load_exception(
+            exc,
+            netuid=netuid,
+            epoch_id=epoch_id,
+            log_tag="weight_published_v2_load_failed",
+            failure_detail="v2 staged weight authority load failed",
         ) from exc
     if authority is None:
         raise HTTPException(

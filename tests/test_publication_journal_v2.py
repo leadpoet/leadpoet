@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -18,6 +19,7 @@ from tests.test_validator_hotkey_authority_v2 import _profile
 from tests.test_weight_authority_v2 import _bundle
 from validator_tee.host.publication_journal_v2 import (
     AuthoritativeWeightPublicationJournalV2,
+    EPOCH_EVIDENCE_JOURNAL_SCHEMA_VERSION,
     JOURNAL_SCHEMA_VERSION,
     LEGACY_JOURNAL_SCHEMA_VERSION,
     WeightPublicationJournalV2Error,
@@ -97,6 +99,8 @@ def test_journal_fsyncs_before_publication_and_survives_restart(tmp_path):
     assert prepared["state"] == "prepared"
     assert prepared["schema_version"] == JOURNAL_SCHEMA_VERSION
     assert prepared["epoch_evidence"] is None
+    assert prepared["finalization_scan_generation"] == 0
+    assert prepared["finalization_scan_id"] is None
     assert prepared["publication"] is None
     assert path.exists()
     assert os.stat(path).st_mode & 0o777 == 0o600
@@ -110,6 +114,15 @@ def test_journal_fsyncs_before_publication_and_survives_restart(tmp_path):
     assert signed["state"] == "signed"
     assert len(signed["extrinsic_signature_results"]) == 1
     assert restarted.record_signed(_signature_result(bundle)) == signed
+    first_scan = restarted.reserve_finalization_scan()
+    first_record = restarted.load()
+    second_scan = restarted.reserve_finalization_scan()
+    second_record = restarted.load()
+    assert first_scan != second_scan
+    assert first_record["finalization_scan_generation"] == 1
+    assert first_record["finalization_scan_id"] == first_scan
+    assert second_record["finalization_scan_generation"] == 2
+    assert second_record["finalization_scan_id"] == second_scan
 
     restarted.clear(expected_event_hash=EVENT)
     assert not path.exists()
@@ -173,7 +186,13 @@ def test_journal_reads_an_unfinished_legacy_v2_record(tmp_path):
     legacy_body = {
         key: value
         for key, value in current.items()
-        if key not in {"journal_hash", "epoch_evidence"}
+        if key
+        not in {
+            "journal_hash",
+            "epoch_evidence",
+            "finalization_scan_generation",
+            "finalization_scan_id",
+        }
     }
     legacy_body["schema_version"] = LEGACY_JOURNAL_SCHEMA_VERSION
     legacy = {**legacy_body, "journal_hash": sha256_json(legacy_body)}
@@ -183,6 +202,72 @@ def test_journal_reads_an_unfinished_legacy_v2_record(tmp_path):
     assert loaded["schema_version"] == LEGACY_JOURNAL_SCHEMA_VERSION
     assert "epoch_evidence" not in loaded
     assert loaded["published_bundle"] == bundle
+
+
+def test_journal_upgrades_v3_before_reserving_finalization_scan(tmp_path):
+    bundle = _bundle()
+    path = tmp_path / "weight-publication.json"
+    journal = AuthoritativeWeightPublicationJournalV2(
+        path, chain_profile=_profile()
+    )
+    journal.record_prepared(
+        {
+            "weight_authorization_id": AUTHORIZATION,
+            "published_bundle": bundle,
+        }
+    )
+    journal.record_published(_publication(bundle))
+    current = journal.record_signed(_signature_result(bundle))
+    v3_body = {
+        key: value
+        for key, value in current.items()
+        if key
+        not in {
+            "journal_hash",
+            "finalization_scan_generation",
+            "finalization_scan_id",
+        }
+    }
+    v3_body["schema_version"] = EPOCH_EVIDENCE_JOURNAL_SCHEMA_VERSION
+    path.write_text(
+        json.dumps({**v3_body, "journal_hash": sha256_json(v3_body)}),
+        encoding="utf-8",
+    )
+
+    scan_id = journal.reserve_finalization_scan()
+    upgraded = journal.load()
+
+    assert upgraded["schema_version"] == JOURNAL_SCHEMA_VERSION
+    assert upgraded["finalization_scan_generation"] == 1
+    assert upgraded["finalization_scan_id"] == scan_id
+
+
+def test_finalization_scan_reservations_are_unique_under_concurrency(tmp_path):
+    bundle = _bundle()
+    journal = AuthoritativeWeightPublicationJournalV2(
+        tmp_path / "weight-publication.json", chain_profile=_profile()
+    )
+    journal.record_prepared(
+        {
+            "weight_authorization_id": AUTHORIZATION,
+            "published_bundle": bundle,
+        }
+    )
+    journal.record_published(_publication(bundle))
+    journal.record_signed(_signature_result(bundle))
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        scan_ids = list(
+            executor.map(
+                lambda _index: journal.reserve_finalization_scan(),
+                range(20),
+            )
+        )
+
+    current = journal.load()
+    assert len(set(scan_ids)) == 20
+    assert current["finalization_scan_generation"] == 20
+    assert current["finalization_scan_id"] in scan_ids
 
 
 def test_journal_quarantine_preserves_exact_validated_record(tmp_path):

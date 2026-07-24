@@ -132,6 +132,67 @@ def test_no_slot_leak_under_repeated_exceptions():
     )
 
 
+def test_pool_created_outside_loop_rebinds_after_restart_without_leaks():
+    pool = _Pool(RouteClass("test", 2, 2, 1.0))
+    assert pool.semaphore is None
+
+    async def use_once():
+        assert await pool.acquire() is True
+        await pool.release()
+
+    asyncio.run(use_once())
+    asyncio.run(use_once())
+
+    assert pool.waiting == 0
+    assert pool.in_flight == 0
+    assert pool._active_calls == 0
+    assert pool.semaphore._value == 2
+
+
+def test_pool_enforces_capacity_under_concurrent_requests():
+    pool = _Pool(RouteClass("test", 2, 8, 1.0))
+    peak = 0
+
+    async def drive():
+        nonlocal peak
+
+        async def worker():
+            nonlocal peak
+            assert await pool.acquire() is True
+            peak = max(peak, pool.in_flight)
+            await asyncio.sleep(0)
+            await pool.release()
+
+        await asyncio.gather(*(worker() for _ in range(8)))
+
+    asyncio.run(drive())
+
+    assert peak == 2
+    assert pool.in_flight == 0
+    assert pool.waiting == 0
+    assert pool._active_calls == 0
+
+
+def test_cancelled_waiter_does_not_leak_capacity_or_runtime_lease():
+    pool = _Pool(RouteClass("test", 1, 2, 10.0))
+
+    async def drive():
+        assert await pool.acquire() is True
+        waiter = asyncio.create_task(pool.acquire())
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        await pool.release()
+
+    asyncio.run(drive())
+
+    assert pool.waiting == 0
+    assert pool.in_flight == 0
+    assert pool._active_calls == 0
+    assert pool.semaphore._value == 1
+
+
 def test_integration_in_real_starlette_stack():
     async def ok(request):
         return PlainTextResponse("ok")

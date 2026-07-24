@@ -32,7 +32,10 @@ from validator_tee.host.weight_authority_v2 import (
 
 
 LEGACY_JOURNAL_SCHEMA_VERSION = "leadpoet.validator_weight_publication_journal.v2"
-JOURNAL_SCHEMA_VERSION = "leadpoet.validator_weight_publication_journal.v3"
+EPOCH_EVIDENCE_JOURNAL_SCHEMA_VERSION = (
+    "leadpoet.validator_weight_publication_journal.v3"
+)
+JOURNAL_SCHEMA_VERSION = "leadpoet.validator_weight_publication_journal.v4"
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _EXTRINSIC_HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _SIGNATURE_RE = re.compile(r"^[0-9a-f]{128}$")
@@ -111,15 +114,21 @@ def validate_publication_journal_v2(
         "journal_hash",
     }
     schema_version = value.get("schema_version") if isinstance(value, Mapping) else None
-    fields = (
-        base_fields
-        if schema_version == LEGACY_JOURNAL_SCHEMA_VERSION
-        else base_fields | {"epoch_evidence"}
-    )
+    if schema_version == LEGACY_JOURNAL_SCHEMA_VERSION:
+        fields = base_fields
+    elif schema_version == EPOCH_EVIDENCE_JOURNAL_SCHEMA_VERSION:
+        fields = base_fields | {"epoch_evidence"}
+    else:
+        fields = base_fields | {
+            "epoch_evidence",
+            "finalization_scan_generation",
+            "finalization_scan_id",
+        }
     if not isinstance(value, Mapping) or set(value) != fields:
         raise WeightPublicationJournalV2Error("publication journal fields are invalid")
     if schema_version not in {
         LEGACY_JOURNAL_SCHEMA_VERSION,
+        EPOCH_EVIDENCE_JOURNAL_SCHEMA_VERSION,
         JOURNAL_SCHEMA_VERSION,
     }:
         raise WeightPublicationJournalV2Error("publication journal schema is invalid")
@@ -128,6 +137,23 @@ def validate_publication_journal_v2(
     revision = value.get("revision")
     if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
         raise WeightPublicationJournalV2Error("publication journal revision is invalid")
+    if schema_version == JOURNAL_SCHEMA_VERSION:
+        scan_generation = value.get("finalization_scan_generation")
+        scan_id = value.get("finalization_scan_id")
+        if (
+            not isinstance(scan_generation, int)
+            or isinstance(scan_generation, bool)
+            or scan_generation < 0
+            or (
+                scan_id is not None
+                and not _HASH_RE.fullmatch(str(scan_id))
+            )
+            or (scan_generation == 0 and scan_id is not None)
+            or (scan_generation > 0 and scan_id is None)
+        ):
+            raise WeightPublicationJournalV2Error(
+                "publication journal finalization scan state is invalid"
+            )
     authorization_id = str(value.get("weight_authorization_id") or "").lower()
     if not _HASH_RE.fullmatch(authorization_id):
         raise WeightPublicationJournalV2Error(
@@ -230,7 +256,11 @@ def validate_publication_journal_v2(
         "extrinsic_signature_results": normalized_signatures,
         **(
             {"epoch_evidence": epoch_evidence}
-            if schema_version == JOURNAL_SCHEMA_VERSION
+            if schema_version
+            in {
+                EPOCH_EVIDENCE_JOURNAL_SCHEMA_VERSION,
+                JOURNAL_SCHEMA_VERSION,
+            }
             else {}
         ),
         "journal_hash": value["journal_hash"],
@@ -285,6 +315,8 @@ class AuthoritativeWeightPublicationJournalV2:
                     if isinstance(prepared.get("epoch_evidence"), Mapping)
                     else None
                 ),
+                "finalization_scan_generation": 0,
+                "finalization_scan_id": None,
                 "publication": None,
                 "extrinsic_signature_results": [],
                 "updated_at": _timestamp(),
@@ -354,6 +386,50 @@ class AuthoritativeWeightPublicationJournalV2:
                 state="signed",
                 extrinsic_signature_results=existing + [normalized],
             )
+
+    def reserve_finalization_scan(self) -> str:
+        """Durably allocate one unique finalized-chain scan identity."""
+
+        with self._lock:
+            current = self.load()
+            if (
+                current is None
+                or current.get("publication") is None
+                or not current.get("extrinsic_signature_results")
+            ):
+                raise WeightPublicationJournalV2Error(
+                    "finalization scan requires a signed publication"
+                )
+            generation = int(
+                current.get("finalization_scan_generation") or 0
+            ) + 1
+            scan_id = sha256_json(
+                {
+                    "schema_version": (
+                        "leadpoet.validator_weight_finalization_scan.v1"
+                    ),
+                    "weight_authorization_id": current[
+                        "weight_authorization_id"
+                    ],
+                    "weight_submission_event_hash": current["publication"][
+                        "weight_submission_event_hash"
+                    ],
+                    "generation": generation,
+                    "prior_journal_hash": current["journal_hash"],
+                }
+            )
+            updated = self._replace(
+                current,
+                schema_version=JOURNAL_SCHEMA_VERSION,
+                epoch_evidence=current.get("epoch_evidence"),
+                finalization_scan_generation=generation,
+                finalization_scan_id=scan_id,
+            )
+            if updated["finalization_scan_id"] != scan_id:
+                raise WeightPublicationJournalV2Error(
+                    "finalization scan reservation did not persist"
+                )
+            return scan_id
 
     def clear(self, *, expected_event_hash: str) -> None:
         with self._lock:

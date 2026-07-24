@@ -401,6 +401,7 @@ async def resume_prepared_weight_publication_v2(
 async def finalize_authoritative_weight_publication_v2(
     *,
     prepared_publication: Mapping[str, Any],
+    finalization_scan_id: str,
     validator_hotkey: str,
     gateway_url: str,
     client: Optional[ValidatorEnclaveClient] = None,
@@ -423,6 +424,7 @@ async def finalize_authoritative_weight_publication_v2(
         confirmation = await asyncio.to_thread(
             enclave_client.confirm_weight_publication_v2,
             authorization_id,
+            finalization_scan_id=finalization_scan_id,
         )
         submission = build_weight_finalization_submission_v2(
             validator_hotkey=validator_hotkey,

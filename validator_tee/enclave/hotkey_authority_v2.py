@@ -1153,7 +1153,10 @@ class ValidatorHotkeyAuthorityV2:
         }
 
     def confirm_weight_publication(
-        self, *, weight_authorization_id: str
+        self,
+        *,
+        weight_authorization_id: str,
+        finalization_scan_id: str,
     ) -> Dict[str, Any]:
         """Prove one authorized extrinsic appeared in an authenticated finalized block."""
 
@@ -1162,6 +1165,11 @@ class ValidatorHotkeyAuthorityV2:
                 "validator finalized chain source is unavailable"
             )
         authorization_id = str(weight_authorization_id or "")
+        scan_id = str(finalization_scan_id or "").lower()
+        if not _HASH_RE.fullmatch(scan_id):
+            raise ValidatorHotkeyAuthorityV2Error(
+                "weight finalization scan id is invalid"
+            )
         with self._lock:
             weight = self._weights.get(authorization_id)
             if weight is None:
@@ -1215,6 +1223,7 @@ class ValidatorHotkeyAuthorityV2:
                 minimum_block=min(item[0] for item in bounds),
                 maximum_block=max(item[1] - 1 for item in bounds),
                 epoch_id=int(weight_result["epoch_id"]),
+                finalization_scan_id=scan_id,
             )
         except Exception as exc:
             raise ValidatorHotkeyAuthorityV2Error(

@@ -132,6 +132,8 @@ def test_runtime_lifecycle_requires_active_exact_mapping(monkeypatch):
     from gateway.utils import epoch
 
     cutover = _cutover()
+    monkeypatch.setenv("BITTENSOR_NETWORK", "finney")
+    monkeypatch.setenv("BITTENSOR_NETUID", "71")
     monkeypatch.setattr(epoch, "_cutover_state_cache", None)
     monkeypatch.setattr(
         epoch,

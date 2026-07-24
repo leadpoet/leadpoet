@@ -847,9 +847,9 @@ class EpochMonitor:
                 # Check if this epoch has validation evidence with decisions populated
                 # IMMEDIATE REVEAL: decision is submitted WITH hashes, so check for non-null decisions
                 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-                from gateway.db.client import _create_sync_client
+                from gateway.db.client import create_http1_sync_client
 
-                supabase = _create_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+                supabase = create_http1_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
                 
                 # Query validation evidence with decisions (run in thread to avoid blocking)
                 evidence_check = await asyncio.to_thread(

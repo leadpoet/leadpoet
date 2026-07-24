@@ -772,7 +772,7 @@ async def get_submission_count_this_set(miner_hotkey: str, set_id: int) -> int:
         Number of submissions in this set
     """
     try:
-        from gateway.db.client import _create_sync_client
+        from gateway.db.client import create_http1_sync_client
 
         # Get Supabase credentials
         supabase_url = os.getenv("SUPABASE_URL")
@@ -782,7 +782,7 @@ async def get_submission_count_this_set(miner_hotkey: str, set_id: int) -> int:
             logger.warning("Supabase credentials not configured - returning 0")
             return 0
 
-        supabase = _create_sync_client(supabase_url, supabase_key)
+        supabase = create_http1_sync_client(supabase_url, supabase_key)
         
         # Calculate the time window for this evaluation set
         # Each set lasts EVALUATION_SET_ROTATION_EPOCHS epochs (~20 epochs = ~24 hours)

@@ -19,11 +19,11 @@ from gateway.config import NONCE_EXPIRY_SECONDS, SUPABASE_URL, SUPABASE_SERVICE_
 
 # Import Supabase
 from supabase import Client
-from gateway.db.client import _create_sync_client
+from gateway.db.client import create_http1_sync_client
 
 # Create Supabase client (service_role key; shared across threadpool workers —
 # HTTP/1-pinned because the default HTTP/2 HPACK encoder is not thread-safe)
-supabase: Client = _create_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+supabase: Client = create_http1_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 async def check_and_store_nonce_async(nonce: str, actor_hotkey: str) -> bool:

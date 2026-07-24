@@ -18,11 +18,11 @@ from gateway.utils.signature import verify_wallet_signature
 from gateway.utils.epoch import is_epoch_closed_async
 from gateway.utils.merkle import compute_merkle_root
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BUILD_ID
-from gateway.db.client import _create_sync_client
+from gateway.db.client import create_http1_sync_client
 
 # Supabase client (shared across threadpool workers — must stay HTTP/1-pinned;
 # the default HTTP/2 HPACK encoder is not thread-safe)
-supabase = _create_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+supabase = create_http1_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 # Create router
 router = APIRouter(prefix="/manifest", tags=["Manifest"])

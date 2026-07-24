@@ -22,10 +22,10 @@ from gateway.config import (
     BITTENSOR_NETWORK,
     BUILD_ID
 )
-from gateway.db.client import _create_sync_client
+from gateway.db.client import create_http1_sync_client
 
 # Shared client — HTTP/1-pinned (default HTTP/2 HPACK encoder is not thread-safe)
-supabase = _create_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+supabase = create_http1_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 async def daily_anchor_task():

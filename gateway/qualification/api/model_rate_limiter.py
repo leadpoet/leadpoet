@@ -35,7 +35,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Tuple, Optional
 
-from gateway.db.client import _create_sync_client
+from gateway.db.client import create_http1_sync_client
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ def _get_supabase():
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         if supabase_url and supabase_key:
-            _supabase_client = _create_sync_client(supabase_url, supabase_key)
+            _supabase_client = create_http1_sync_client(supabase_url, supabase_key)
     return _supabase_client
 
 

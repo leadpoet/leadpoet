@@ -46,7 +46,7 @@ from gateway.utils.storage import generate_presigned_put_urls
 
 # Import Supabase
 from supabase import Client
-from gateway.db.client import _create_sync_client
+from gateway.db.client import create_http1_sync_client
 
 # Import API routers
 # NOTE: reveal router REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE means validators
@@ -84,7 +84,7 @@ from gateway.tasks.epoch_monitor import EpochMonitor
 
 # Create Supabase client (shared across threadpool workers — must stay
 # HTTP/1-pinned; the default HTTP/2 HPACK encoder is not thread-safe)
-supabase: Client = _create_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+supabase: Client = create_http1_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 # ============================================================
 # Lifespan Context Manager (for background tasks)

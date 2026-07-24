@@ -25,10 +25,10 @@ import hashlib
 import uuid
 
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-from gateway.db.client import _create_sync_client
+from gateway.db.client import create_http1_sync_client
 
 # Supabase client — HTTP/1-pinned (default HTTP/2 HPACK encoder is not thread-safe)
-supabase = _create_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+supabase = create_http1_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 async def cleanup_deregistered_miner_leads(epoch_id: int):

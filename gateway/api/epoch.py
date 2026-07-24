@@ -24,11 +24,11 @@ from gateway.utils.signature import verify_wallet_signature
 from gateway.utils.registry import is_registered_hotkey_async  # Use async version
 from gateway.utils.leads_cache import get_cached_leads  # Import cache for instant lead distribution
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-from gateway.db.client import _create_sync_client
+from gateway.db.client import create_http1_sync_client
 
 # Supabase client (shared across threadpool workers — must stay HTTP/1-pinned;
 # the default HTTP/2 HPACK encoder is not thread-safe)
-supabase = _create_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+supabase = create_http1_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 _LEADS_SELECT = (
     "lead_id, lead_blob, lead_blob_hash, miner_hotkey, "

@@ -513,6 +513,7 @@ class CodeEditCandidateBuilder:
                 raise CodeEditEmptyOrNoopPatchError("code edit produced no repository changes")
             try:
                 _py_compile_changed_files(repo_dir, changed_files)
+                _sourcing_contract_gate(repo_dir)
                 _run_shell(
                     self.config.private_test_cmd,
                     cwd=repo_dir,
@@ -1747,6 +1748,64 @@ def _run(cmd: list[str], *, cwd: Path, timeout_seconds: int) -> str:
             stdout=_safe_text(exc.stdout, limit=12000),
             exit_code=int(exc.returncode),
         ) from exc
+
+
+def _sourcing_contract_check_mode() -> str:
+    """Resolve the wrapper-contract build gate mode (disabled|shadow|enforce)."""
+    value = str(
+        os.environ.get("RESEARCH_LAB_SOURCING_CONTRACT_CHECK") or "shadow"
+    ).strip().lower()
+    if value not in {"disabled", "shadow", "enforce"}:
+        logger.warning(
+            "sourcing_contract_check_invalid_mode value=%r falling back to shadow",
+            value,
+        )
+        return "shadow"
+    return value
+
+
+def _sourcing_contract_gate(repo_dir: Path) -> None:
+    """Validate the patched model source against the frozen wrapper contract.
+
+    The sourcing model's research-lab surface (research_lab_adapter.run_icp /
+    adapter_metadata, sourcing_model.core.qualify, and the discovery/
+    validation/client seams the production harness monkey-patches) is frozen
+    by research_lab/sourcing_model_contract.json. A code-edit candidate that
+    breaks those symbols would build an image the benchmark runtime and the
+    harness cannot invoke — catch it here, at build time, with a specific
+    violation list instead of a downstream invocation failure.
+
+    Modes via RESEARCH_LAB_SOURCING_CONTRACT_CHECK: shadow (default) logs
+    violations with a unique tag and lets the build proceed; enforce fails
+    the build; disabled skips. Any internal error logs a WARNING and fails
+    open — the gate must never take down candidate building.
+    """
+    mode = _sourcing_contract_check_mode()
+    if mode == "disabled":
+        return
+    try:
+        from research_lab.sourcing_model_contract_check import (
+            verify_source_tree_contract,
+        )
+
+        violations = verify_source_tree_contract(repo_dir)
+    except Exception as exc:  # noqa: BLE001 — availability over strictness
+        logger.warning(
+            "sourcing_contract_gate_error mode=%s error=%s", mode, str(exc)[:200]
+        )
+        return
+    if not violations:
+        return
+    if mode == "shadow":
+        logger.warning(
+            "sourcing_contract_gate_shadow_violation count=%d violations=%s",
+            len(violations),
+            "; ".join(violations[:8])[:800],
+        )
+        return
+    raise CodeEditPrivateTestError(
+        "sourcing wrapper contract violation: " + "; ".join(violations[:8])
+    )
 
 
 def _run_git_apply(

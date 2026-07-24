@@ -220,6 +220,16 @@ STALE_PARENT_REBASE_REPAIR_REASONING_BODY = {"enabled": True, "effort": "max"}
 STALE_PARENT_REBASE_REPAIR_EMPTY_CONTENT_ATTEMPTS = 2
 PRIVATE_BASELINE_FAST_EMPTY_ABORT_AFTER = 6
 PRIVATE_BASELINE_FAST_EMPTY_ABORT_SECONDS = 90.0
+_CONDITIONAL_PRELIMINARY_TERMINAL_REJECTIONS = frozenset(
+    {
+        "disabled",
+        "rejected_legacy_patch_candidate",
+        "rejected_basis_unavailable",
+        "rejected_paired_lcb_unavailable",
+        "rejected_paired_lcb_gate_ineligible",
+        "rejected_below_threshold",
+    }
+)
 _POSTGREST_TIMESTAMP_RE = re.compile(
     r"^(?P<prefix>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"
     r"\.(?P<fraction>\d{1,9})(?P<suffix>Z|[+-]\d{2}(?::?\d{2})?)?$"
@@ -457,9 +467,12 @@ async def _authorize_conditional_preliminary_gate(
                 "completed_icp_count": len(preliminary_results),
             },
         )
-    if decision.status != "promotion_passed":
+    if (
+        decision.status != "promotion_passed"
+        and decision.status not in _CONDITIONAL_PRELIMINARY_TERMINAL_REJECTIONS
+    ):
         raise ConditionalValidationRetryableError(
-            "conditional_preliminary_attested_gate_not_passed:" + decision.status
+            "conditional_preliminary_attested_gate_status_unknown:" + decision.status
         )
 
     bundle_receipt = _attested_execution_receipt(bundle_outcome, "score_bundle")
@@ -6219,6 +6232,43 @@ class ResearchLabGatewayScoringWorker:
                         default=0.0,
                     ),
                 }
+                if proof["status"] != "promotion_passed":
+                    await create_conditional_validation_event(
+                        event_type="preliminary_gate_failed",
+                        event_doc={
+                            "path": "direct_candidate_scoring",
+                            "preliminary_promotion_gate": proof,
+                            "authoritative_decision_status": proof["status"],
+                            "conditional_jobs_released": False,
+                        },
+                        **lifecycle_args,
+                    )
+                    await create_candidate_evaluation_event(
+                        candidate_id=candidate_id,
+                        run_id=str(candidate["run_id"]),
+                        ticket_id=str(candidate["ticket_id"]),
+                        event_type="evaluating",
+                        candidate_status="evaluating",
+                        evaluator_ref=self.worker_ref,
+                        reason="conditional_validation_preliminary_rejected",
+                        event_doc={
+                            "worker_ref": self.worker_ref,
+                            "rolling_window_hash": window.window_hash,
+                            "checkpoint_commitment_hash": checkpoint_commitment_hash,
+                            "private_holdout_gate": _candidate_gate_event_doc(payload),
+                            "authoritative_decision_status": proof["status"],
+                            "preliminary_promotion_gate_proof_hash": proof[
+                                "proof_hash"
+                            ],
+                            "promotion_decision_receipt_hash": proof[
+                                "promotion_decision_receipt_hash"
+                            ],
+                        },
+                    )
+                    return {
+                        "preliminary_promotion_gate": proof,
+                        "preliminary_gate_decision": "rejected",
+                    }
                 await create_conditional_validation_event(
                     event_type="preliminary_gate_passed",
                     event_doc={

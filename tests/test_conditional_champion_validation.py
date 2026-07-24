@@ -606,6 +606,7 @@ async def _run_gate(
         ) -> Mapping[str, Any]:
             return {
                 "preliminary_promotion_gate": {
+                    "status": "promotion_passed",
                     "proof_hash": "sha256:" + "9" * 64,
                 }
             }
@@ -654,6 +655,7 @@ async def test_preliminary_pass_executes_40_and_persists_boundary_first() -> Non
         assert payload["decision"] == "conditional_validation_required"
         return {
             "preliminary_promotion_gate": {
+                "status": "promotion_passed",
                 "proof_hash": "sha256:" + "9" * 64,
             }
         }
@@ -665,6 +667,40 @@ async def test_preliminary_pass_executes_40_and_persists_boundary_first() -> Non
     assert gate["decision"] == "conditional_validation_approved"
     assert gate["candidate_delta_vs_daily_baseline"] == 10.0
     assert gate["conditional_holdout_evaluated"] is True
+
+
+@pytest.mark.asyncio
+async def test_attested_preliminary_rejection_stops_before_conditional_icps() -> None:
+    runner = _Runner(default_score=50.0)
+    proof = {
+        "schema_version": "research_lab_preliminary_promotion_gate.v1",
+        "status": "rejected_below_threshold",
+        "proof_hash": "sha256:" + "f" * 64,
+    }
+    transitions: list[int] = []
+
+    async def transition(
+        action: str,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        assert action == "conditional_validation_started"
+        assert payload["decision"] == "conditional_validation_required"
+        transitions.append(len(runner.calls))
+        return {
+            "preliminary_promotion_gate": proof,
+            "preliminary_gate_decision": "rejected",
+        }
+
+    results, gate = await _run_gate(runner, _gate(), transition=transition)
+
+    assert transitions == [20]
+    assert len(runner.calls) == 20
+    assert len(results) == 20
+    assert gate["decision"] == "rejected_before_conditional_validation"
+    assert gate["preliminary_decision"] == "rejected_before_conditional_validation"
+    assert gate["authoritative_preliminary_decision"] == "rejected_below_threshold"
+    assert gate["preliminary_promotion_gate"] == proof
+    assert gate["conditional_holdout_evaluated"] is False
 
 
 @pytest.mark.asyncio
@@ -694,6 +730,7 @@ async def test_preliminary_authority_proof_is_returned_at_icp_20_and_frozen() ->
     runner = _Runner(default_score=50.0)
     proof = {
         "schema_version": "research_lab_preliminary_promotion_gate.v1",
+        "status": "promotion_passed",
         "proof_hash": "sha256:" + "f" * 64,
     }
     calls: list[int] = []
@@ -862,6 +899,123 @@ async def test_preliminary_authority_runs_bundle_metric_then_unchanged_gate(
     assert order == ["score_bundle", "promotion_metric", "promotion_decision"]
     assert proof["status"] == "promotion_passed"
     assert proof["candidate_parent_artifact_hash"] == parent_hash
+    assert proof["proof_hash"] == sha256_json(
+        {key: value for key, value in proof.items() if key != "proof_hash"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_preliminary_authority_returns_attested_terminal_rejection(
+    monkeypatch,
+) -> None:
+    parent_hash = "sha256:" + "7" * 64
+    candidate_hash = "sha256:" + "6" * 64
+    preliminary_gate = {
+        **_gate(),
+        "decision": "conditional_validation_required",
+        "private_holdout_evaluated": True,
+        "candidate_preliminary_score": 42.0,
+        "candidate_preliminary_delta": 2.0,
+        "public_icp_count": 10,
+        "private_holdout_icp_count": 10,
+    }
+    provisional_bundle = {
+        "score_bundle_hash": "sha256:" + "1" * 64,
+        "private_holdout_gate": preliminary_promotion_gate_projection(
+            preliminary_gate
+        ),
+        "aggregates": {},
+    }
+    decision_doc = {
+        "status": "rejected_below_threshold",
+        "improvement_points": 0.5,
+        "threshold_points": 1.0,
+        "candidate_kind": "image_build",
+        "auto_promotion_enabled": True,
+        "active_parent_matches": True,
+        "metric_rejection_status": None,
+    }
+    decision = types.SimpleNamespace(
+        **decision_doc,
+        to_dict=lambda: dict(decision_doc),
+    )
+
+    async def attested_outcome(
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> Mapping[str, Any]:
+        return {
+            "execution_receipt": {
+                "receipt_hash": "sha256:" + "2" * 64,
+                "output_root": "sha256:" + "3" * 64,
+            }
+        }
+
+    async def active(*_args: Any, **_kwargs: Any) -> Any:
+        return types.SimpleNamespace(
+            artifact=types.SimpleNamespace(model_artifact_hash=parent_hash)
+        )
+
+    monkeypatch.setattr(
+        scoring_worker,
+        "build_score_bundle_from_scored_icps",
+        lambda **_kwargs: dict(provisional_bundle),
+    )
+    monkeypatch.setattr(
+        scoring_worker,
+        "_compare_candidate_score_bundle_in_enclave",
+        attested_outcome,
+    )
+    monkeypatch.setattr(
+        scoring_worker,
+        "compare_attested_promotion_metric",
+        attested_outcome,
+    )
+    monkeypatch.setattr(
+        scoring_worker,
+        "compare_attested_promotion_gate_decision",
+        attested_outcome,
+    )
+    monkeypatch.setattr(
+        scoring_worker,
+        "promotion_gate_decision",
+        lambda *_args, **_kwargs: decision,
+    )
+    monkeypatch.setattr(scoring_worker, "load_active_private_model", active)
+    monkeypatch.setattr(
+        scoring_worker,
+        "scoring_configuration_hash",
+        lambda: "sha256:" + "8" * 64,
+    )
+
+    proof = await scoring_worker._authorize_conditional_preliminary_gate(
+        config=types.SimpleNamespace(
+            improvement_threshold_points=1.0,
+            auto_promotion_enabled=True,
+        ),
+        evaluation_epoch=42,
+        candidate={
+            "candidate_kind": "image_build",
+            "parent_artifact_hash": parent_hash,
+        },
+        artifact=types.SimpleNamespace(model_artifact_hash=parent_hash),
+        benchmark=object(),
+        patch={},
+        candidate_artifact=types.SimpleNamespace(
+            model_artifact_hash=candidate_hash,
+            to_dict=lambda: {},
+        ),
+        preliminary_results=[
+            {"icp_ref": f"icp-{index:02d}"} for index in range(20)
+        ],
+        run_context={"rolling_window_hash": WINDOW_HASH},
+        policy={"min_successful_icps": 20},
+        preliminary_gate=preliminary_gate,
+        parent_receipts=[],
+    )
+
+    assert proof["status"] == "rejected_below_threshold"
+    assert proof["decision"] == decision_doc
     assert proof["proof_hash"] == sha256_json(
         {key: value for key, value in proof.items() if key != "proof_hash"}
     )
@@ -1315,6 +1469,103 @@ async def test_preliminary_gate_restart_reconciliation_has_one_winner_across_ten
     assert sum(result["preliminary_gates_decided"] for result in results) == 1
 
 
+@pytest.mark.asyncio
+async def test_global_queue_commits_attested_preliminary_rejection(
+    monkeypatch,
+) -> None:
+    generation_id = "22222222-2222-4222-8222-222222222222"
+    candidate_row = {
+        "queue_generation_id": generation_id,
+        "candidate_id": "candidate:" + "2" * 64,
+        "conditional_total": 20,
+        "gate_status": "passed",
+        "preliminary_gate_status": "pending",
+        "assembly_status": "pending",
+        "baseline_preliminary_score": 40.0,
+        "threshold_points": 1.0,
+        "preliminary_gate_attempt_count": 0,
+    }
+    state = {"decided": False, "callback": ""}
+
+    async def no_recovery(**_kwargs: Any) -> int:
+        return 0
+
+    async def pending(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [] if state["decided"] else [dict(candidate_row)]
+
+    async def current_candidate(
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> dict[str, Any] | None:
+        return None if state["decided"] else dict(candidate_row)
+
+    async def complete(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    async def claim(**kwargs: Any) -> dict[str, Any]:
+        return {
+            **candidate_row,
+            "preliminary_gate_status": "deciding",
+            "preliminary_gate_attempt_count": 1,
+            "preliminary_gate_claimed_by": kwargs["worker_ref"],
+        }
+
+    async def docs(_generation_id: str) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "public": [{"icp_ref": f"public-{index}"} for index in range(10)],
+            "private": [{"icp_ref": f"private-{index}"} for index in range(10)],
+            "conditional": [],
+        }
+
+    async def authorize(*_args: Any, **_kwargs: Any) -> Mapping[str, Any]:
+        return {
+            "schema_version": "research_lab_preliminary_promotion_gate.v1",
+            "status": "rejected_below_threshold",
+            "proof_hash": "sha256:" + "9" * 64,
+        }
+
+    async def decide(**kwargs: Any) -> str:
+        assert kwargs["preliminary_score"] == 42.0
+        assert (
+            kwargs["preliminary_proof"]["status"]
+            == "rejected_below_threshold"
+        )
+        state["decided"] = True
+        return "rejected"
+
+    async def decided(_generation_id: str, decision: str) -> None:
+        state["callback"] = decision
+
+    async def no_job(**_kwargs: Any) -> None:
+        return None
+
+    async def never_assemble(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("rejected preliminary gate must not assemble early")
+
+    monkeypatch.setattr(global_icp_queue, "recover_stale_leases", no_recovery)
+    monkeypatch.setattr(global_icp_queue, "select_many", pending)
+    monkeypatch.setattr(global_icp_queue, "select_one", current_candidate)
+    monkeypatch.setattr(global_icp_queue, "phase_set_complete", complete)
+    monkeypatch.setattr(global_icp_queue, "claim_preliminary_gate", claim)
+    monkeypatch.setattr(global_icp_queue, "candidate_result_docs", docs)
+    monkeypatch.setattr(global_icp_queue, "try_decide_preliminary_gate", decide)
+    monkeypatch.setattr(global_icp_queue, "claim_next_job", no_job)
+
+    result = await global_icp_queue.run_queue_scoring_pass(
+        worker_ref="worker:rejection",
+        lease_seconds=120,
+        score_icp=lambda _job: None,  # type: ignore[arg-type,return-value]
+        compute_public_score=lambda _rows: 42.0,
+        compute_preliminary_score=lambda _rows: 42.0,
+        preliminary_gate_authorizer=authorize,
+        preliminary_gate_decided=decided,
+        assemble_candidate=never_assemble,
+    )
+
+    assert result["preliminary_gates_decided"] == 1
+    assert state["callback"] == "rejected"
+
+
 def test_conditional_retryable_failure_never_becomes_terminal_from_attempt_cap() -> None:
     assert scoring_worker._candidate_scoring_should_requeue(
         failure_class="conditional_validation_retryable_failure",
@@ -1431,6 +1682,24 @@ def test_migration_serializes_gate_release_and_retry_recording() -> None:
     assert "ALTER TABLE public.research_lab_conditional_validation_events ENABLE ROW LEVEL SECURITY" in sql
     assert "research_lab_requeue_conditional_scoring_job" in sql
     assert sql.index("'retryable_failure'") < sql.index("SET status = 'queued'")
+
+
+def test_attested_preliminary_authority_migration_rejects_without_release() -> None:
+    sql = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "124-research-lab-conditional-preliminary-authority.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "host_score_passed" in sql
+    assert "proof_status = 'promotion_passed'" in sql
+    assert "'rejected_below_threshold'" in sql
+    assert "'rejected_paired_lcb_gate_ineligible'" in sql
+    assert "preliminary_gate_proof = target_preliminary_proof" in sql
+    assert "SET status = CASE WHEN passed THEN 'queued' ELSE 'failed' END" in sql
+    assert sql.index(
+        "INSERT INTO public.research_lab_conditional_validation_events"
+    ) < sql.index("AND phase = 'conditional'")
 
 
 def test_reimbursement_policy_hash_inputs_do_not_include_conditional_controls() -> None:

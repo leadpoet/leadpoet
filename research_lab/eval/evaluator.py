@@ -2046,6 +2046,34 @@ async def _score_with_private_holdout_gate(
         raise ConditionalValidationRetryableError(
             "conditional_preliminary_authority_proof_missing"
         )
+    proof_status = str(proof.get("status") or "")
+    if proof_status != "promotion_passed":
+        if proof_status != "disabled" and not proof_status.startswith("rejected_"):
+            raise ConditionalValidationRetryableError(
+                "conditional_preliminary_authority_status_invalid:"
+                + (proof_status or "missing")
+            )
+        rejected_gate = {
+            **preliminary_gate,
+            "decision": "rejected_before_conditional_validation",
+            "preliminary_decision": "rejected_before_conditional_validation",
+            "authoritative_preliminary_decision": proof_status,
+            "preliminary_promotion_gate": dict(proof),
+        }
+        for item in conditional_items:
+            await _emit_scoring_telemetry(
+                scoring_telemetry_hook,
+                "gate_skipped",
+                {
+                    "icp_ref": str(
+                        item.get("icp_ref") or item.get("icp_hash") or ""
+                    ),
+                    "icp_hash": str(item.get("icp_hash") or ""),
+                    "model_role": "candidate",
+                    "failure_category": "preliminary_gate_rejected",
+                },
+            )
+        return preliminary_results, rejected_gate
     gate = {**dict(gate), "preliminary_promotion_gate": dict(proof)}
 
     conditional_results = await score_private_model_pair_items(

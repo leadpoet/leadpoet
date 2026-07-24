@@ -60,6 +60,8 @@ async def verify_weight_submission_ready_v2(
     gateway_url: str | None = None,
     epoch: int | None = None,
     netuid: int | None = None,
+    http_attempts: int = 3,
+    http_retry_seconds: float = 2.0,
 ) -> dict[str, Any]:
     """Repair legacy authority if requested, then validate the exact V2 handoff."""
 
@@ -148,11 +150,25 @@ async def verify_weight_submission_ready_v2(
             fetch_research_lab_attested_allocation_bundle,
         )
 
-        handoff = await asyncio.to_thread(
-            fetch_research_lab_attested_allocation_bundle,
-            gateway_url,
-            effective_epoch,
-        )
+        if int(http_attempts) < 1:
+            raise ValueError("http_attempts must be positive")
+        if float(http_retry_seconds) < 0:
+            raise ValueError("http_retry_seconds must be non-negative")
+        for attempt in range(1, int(http_attempts) + 1):
+            try:
+                handoff = await asyncio.to_thread(
+                    fetch_research_lab_attested_allocation_bundle,
+                    gateway_url,
+                    effective_epoch,
+                )
+                break
+            except Exception as exc:
+                if attempt >= int(http_attempts):
+                    raise WeightSubmissionReadinessV2Error(
+                        "gateway allocation HTTP handoff failed after "
+                        f"{attempt} attempts: {exc}"
+                    ) from exc
+                await asyncio.sleep(float(http_retry_seconds))
     else:
         from gateway.research_lab.api import (
             get_research_lab_attested_allocation,

@@ -553,11 +553,13 @@ elif [ "$GATEWAY_RESTART_PHASE" = "post_activate" ]; then
     echo "ERROR: post-activation gateway restart lost the deployment lock" >&2
     exit 1
   fi
-  if [ "${LEADPOET_DOCKER_OPERATION_LOCK_HELD:-0}" != "1" ] \
-      || [ "$(readlink /proc/$$/fd/7 2>/dev/null || true)" != "$LEADPOET_DOCKER_OPERATION_LOCK_FILE" ]; then
-    echo "ERROR: post-activation gateway restart lost the Docker operation lock" >&2
+  DOCKER_LOCK_HELPER="$LEADPOET_REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
+  if [ ! -r "$DOCKER_LOCK_HELPER" ]; then
+    echo "ERROR: activated Docker operation lock helper is unavailable" >&2
     exit 1
   fi
+  . "$DOCKER_LOCK_HELPER"
+  leadpoet_ensure_post_activation_docker_operation_lock_v2
 else
   echo "ERROR: unsupported GATEWAY_RESTART_PHASE=$GATEWAY_RESTART_PHASE" >&2
   exit 1

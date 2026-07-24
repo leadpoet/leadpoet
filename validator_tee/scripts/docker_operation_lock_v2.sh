@@ -56,6 +56,31 @@ leadpoet_acquire_docker_operation_lock_v2() {
   echo "Exclusive Docker build/maintenance access acquired"
 }
 
+leadpoet_ensure_post_activation_docker_operation_lock_v2() {
+  local lock_file observed_fd
+
+  lock_file="${LEADPOET_DOCKER_OPERATION_LOCK_FILE:-/home/ec2-user/.config/leadpoet/docker-operation-v2.lock}"
+  observed_fd="$(readlink /proc/$$/fd/7 2>/dev/null || true)"
+
+  if [ "${LEADPOET_DOCKER_OPERATION_LOCK_HELD:-0}" = "1" ] \
+      && [ "$observed_fd" = "$lock_file" ]; then
+    return 0
+  fi
+  if [ -n "$observed_fd" ]; then
+    echo "ERROR: post-activation Docker lock descriptor targets an unexpected file" >&2
+    return 1
+  fi
+
+  # An older installed launcher may activate a newer checkout without having
+  # opened fd 7. Acquire the exact same exclusive lock before the new script
+  # performs any Docker work; never trust a stale inherited marker by itself.
+  unset LEADPOET_DOCKER_OPERATION_LOCK_HELD
+  unset LEADPOET_DOCKER_OPERATION_LOCK_OWNED
+  unset LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID
+  echo "Post-activation Docker lock was not inherited; acquiring it now"
+  leadpoet_acquire_docker_operation_lock_v2
+}
+
 leadpoet_release_docker_operation_lock_v2() {
   if [ "${LEADPOET_DOCKER_OPERATION_LOCK_OWNED:-0}" != "1" ]; then
     if [ "${LEADPOET_DOCKER_OPERATION_LOCK_HELD:-0}" != "1" ] \

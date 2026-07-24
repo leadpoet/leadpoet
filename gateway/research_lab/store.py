@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from decimal import Decimal
 import hashlib
 import json
 import logging
@@ -1875,12 +1876,6 @@ async def create_research_lab_emission_allocation_snapshot(
 ) -> dict[str, Any]:
     allocation_hash = str(allocation_doc["allocation_hash"])
     allocation_id = "lab_allocation:" + allocation_hash
-    existing = await select_one(
-        "research_lab_emission_allocation_snapshots",
-        filters=(("allocation_id", allocation_id),),
-    )
-    if existing:
-        return existing
     row = {
         "allocation_id": allocation_id,
         "schema_version": "1.0",
@@ -1898,7 +1893,68 @@ async def create_research_lab_emission_allocation_snapshot(
         "allocation_hash": allocation_hash,
         "allocation_doc": allocation_doc,
     }
-    return await insert_row("research_lab_emission_allocation_snapshots", row)
+
+    def validate_exact(existing: Mapping[str, Any]) -> dict[str, Any]:
+        numeric_fields = {
+            "lab_cap_alpha_percent",
+            "source_add_alpha_percent",
+            "reimbursement_alpha_percent",
+            "champion_alpha_percent",
+            "queued_champion_alpha_percent",
+            "unallocated_alpha_percent",
+        }
+        for key, expected in row.items():
+            observed = existing.get(key)
+            if key in numeric_fields:
+                try:
+                    matches = Decimal(str(observed)) == Decimal(str(expected))
+                except Exception:
+                    matches = False
+            else:
+                matches = observed == expected
+            if not matches:
+                raise RuntimeError(
+                    "research_lab_emission_allocation_snapshots: "
+                    f"existing {key} differs for {allocation_id}"
+                )
+        return dict(existing)
+
+    filters = (("allocation_id", allocation_id),)
+    existing = await select_one(
+        "research_lab_emission_allocation_snapshots",
+        filters=filters,
+    )
+    if existing:
+        return validate_exact(existing)
+    try:
+        return validate_exact(
+            await insert_row("research_lab_emission_allocation_snapshots", row)
+        )
+    except Exception as exc:
+        message = str(exc).lower()
+        if (
+            "duplicate" not in message
+            and "unique" not in message
+            and "23505" not in message
+        ):
+            raise
+        existing = await select_one(
+            "research_lab_emission_allocation_snapshots",
+            filters=filters,
+        )
+        if not existing:
+            raise RuntimeError(
+                "research_lab_emission_allocation_snapshots: "
+                "duplicate snapshot could not be reloaded"
+            ) from exc
+        logger.warning(
+            "research_lab_allocation_snapshot_duplicate_replayed "
+            "allocation_id=%s epoch=%s netuid=%s",
+            allocation_id,
+            int(epoch),
+            int(netuid),
+        )
+        return validate_exact(existing)
 
 
 async def create_signed_audit_bundle(

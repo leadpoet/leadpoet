@@ -410,6 +410,7 @@ def test_gateway_restart_has_fail_closed_lock_and_official_epoch_gate() -> None:
     assert 'flock -n 9' in script
     assert 'another gateway restart is already running' in script
     assert "Recovering gateway restart lock inherited by a detached runtime process" in script
+    assert "leadpoet_ensure_post_activation_docker_operation_lock_v2" in script
     assert (
         '-m gateway.utils.tee_inter_enclave_relay \\\n'
         '    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null 9>&- &'

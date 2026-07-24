@@ -111,3 +111,166 @@ def test_shell_lock_excludes_competing_docker_operation(tmp_path: Path) -> None:
         check=False,
     )
     assert acquired_after_release.returncode == 0
+
+
+def test_post_activation_reacquires_lock_missing_from_older_launcher(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _fake_flock(bin_dir)
+    lock_file = tmp_path / "docker-operation.lock"
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(lock_file),
+        "LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS": "1",
+        "LEADPOET_DOCKER_OPERATION_LOCK_HELD": "1",
+    }
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f'. "{LOCK_HELPER}"; '
+                "leadpoet_ensure_post_activation_docker_operation_lock_v2; "
+                'test "$(readlink /proc/$$/fd/7)" = '
+                '"$LEADPOET_DOCKER_OPERATION_LOCK_FILE"; '
+                "leadpoet_release_docker_operation_lock_v2"
+            ),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Post-activation Docker lock was not inherited" in result.stdout
+
+
+def test_post_activation_rejects_unexpected_fd_seven(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    other_file = tmp_path / "unrelated.lock"
+    lock_file = tmp_path / "docker-operation.lock"
+    _write_executable(
+        bin_dir / "readlink",
+        f'#!/bin/sh\nprintf "%s\\n" "{other_file}"\n',
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f'. "{LOCK_HELPER}"; '
+                "leadpoet_ensure_post_activation_docker_operation_lock_v2"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(lock_file),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "descriptor targets an unexpected file" in result.stderr
+
+
+def test_post_activation_reacquire_respects_competing_lock(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _fake_flock(bin_dir)
+    lock_file = tmp_path / "docker-operation.lock"
+    ready_file = tmp_path / "holder.ready"
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(lock_file),
+        "LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS": "1",
+    }
+    holder = subprocess.Popen(
+        [
+            "bash",
+            "-c",
+            (
+                f'. "{LOCK_HELPER}"; '
+                "leadpoet_acquire_docker_operation_lock_v2; "
+                f'touch "{ready_file}"; '
+                "sleep 2"
+            ),
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 2
+        while not ready_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready_file.exists(), holder.communicate(timeout=1)
+
+        blocked = subprocess.run(
+            [
+                "bash",
+                "-c",
+                (
+                    f'. "{LOCK_HELPER}"; '
+                    "leadpoet_ensure_post_activation_docker_operation_lock_v2"
+                ),
+            ],
+            env={
+                **env,
+                "LEADPOET_DOCKER_OPERATION_LOCK_HELD": "1",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert blocked.returncode != 0
+        assert "timed out waiting" in blocked.stderr
+    finally:
+        holder.wait(timeout=4)
+
+
+def test_post_activation_accepts_exact_inherited_lock(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    lock_file = tmp_path / "docker-operation.lock"
+    _write_executable(
+        bin_dir / "readlink",
+        f'#!/bin/sh\nprintf "%s\\n" "{lock_file}"\n',
+    )
+    _write_executable(
+        bin_dir / "flock",
+        "#!/bin/sh\nexit 99\n",
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f'. "{LOCK_HELPER}"; '
+                "leadpoet_ensure_post_activation_docker_operation_lock_v2"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(lock_file),
+            "LEADPOET_DOCKER_OPERATION_LOCK_HELD": "1",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""

@@ -5,6 +5,8 @@ from __future__ import annotations
 import builtins
 import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -27,6 +29,31 @@ SENSITIVE_BUILD_INPUTS = (
     "validator_tee/enclave/Cargo.drand-cabi-v2.lock",
     "validator_tee/enclave/libbittensor_drand_v2.sha256",
 )
+
+
+def test_startup_warm_delay_is_fixed_at_fifteen_seconds(tmp_path):
+    env = dict(os.environ)
+    env["PCR0_STARTUP_WARM_DELAY_SECONDS"] = "999"
+    env["PYTHONPATH"] = str(REPO_ROOT)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from gateway.utils.pcr0_builder import "
+                "PCR0_STARTUP_WARM_DELAY_SECONDS; "
+                "print(PCR0_STARTUP_WARM_DELAY_SECONDS)"
+            ),
+        ],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.strip() == "15"
 
 
 @pytest.fixture()

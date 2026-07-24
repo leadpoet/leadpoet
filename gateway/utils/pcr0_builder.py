@@ -84,10 +84,10 @@ VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT = os.path.expanduser(
 # on demand at checkout), so a deeper clone costs almost nothing.
 PCR0_GIT_HISTORY_DEPTH = max(1, int(os.environ.get("PCR0_GIT_HISTORY_DEPTH", "40")))
 
-# Give the gateway process time to finish serving health/readiness before the
-# Docker/Nitro cache warmer starts competing for host resources. Static PCR0
-# allowlist acceptance remains available while this delayed warmup runs.
-PCR0_STARTUP_WARM_DELAY_SECONDS = int(os.environ.get("PCR0_STARTUP_WARM_DELAY_SECONDS", "60"))
+# Give the gateway process a short fixed interval to finish serving
+# health/readiness before the Docker/Nitro cache warmer starts competing for
+# host resources. This is intentionally not operator-configurable.
+PCR0_STARTUP_WARM_DELAY_SECONDS = 15
 PCR0_STARTUP_HISTORICAL_WARM_ENABLED = os.environ.get(
     "PCR0_STARTUP_HISTORICAL_WARM_ENABLED",
     "true",

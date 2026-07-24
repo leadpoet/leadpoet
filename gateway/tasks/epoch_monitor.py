@@ -847,9 +847,11 @@ class EpochMonitor:
                 # Check if this epoch has validation evidence with decisions populated
                 # IMMEDIATE REVEAL: decision is submitted WITH hashes, so check for non-null decisions
                 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-                from gateway.db.client import _create_sync_client
+                from supabase import create_client
 
-                supabase = _create_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+                # Per-call client: constructed fresh for this check, never
+                # shared across threads, so no HPACK pin is needed.
+                supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
                 
                 # Query validation evidence with decisions (run in thread to avoid blocking)
                 evidence_check = await asyncio.to_thread(

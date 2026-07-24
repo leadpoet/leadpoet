@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 from collections.abc import Mapping
 from typing import Any
@@ -12,6 +13,30 @@ from typing import Any
 
 class WeightSubmissionReadinessV2Error(RuntimeError):
     """The authoritative Research Lab allocation is not ready for submission."""
+
+
+logger = logging.getLogger(__name__)
+_RETRYABLE_ALLOCATION_FAILURE_MARKERS = (
+    "connection_refused",
+    "connection_reset",
+    "gateway timeout",
+    "read operation timed out",
+    "timeout",
+    "tls_failure",
+    "unexpected_eof",
+)
+
+
+def _retryable_allocation_failure(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    observed: set[int] = set()
+    messages: list[str] = []
+    while current is not None and id(current) not in observed:
+        observed.add(id(current))
+        messages.append(str(current).lower())
+        current = current.__cause__ or current.__context__
+    text = " ".join(messages)
+    return any(marker in text for marker in _RETRYABLE_ALLOCATION_FAILURE_MARKERS)
 
 
 def _validate_handoff(
@@ -174,10 +199,32 @@ async def verify_weight_submission_ready_v2(
             get_research_lab_attested_allocation,
         )
 
-        handoff = await get_research_lab_attested_allocation(
-            effective_epoch,
-            x_leadpoet_internal_key=None,
-        )
+        if int(http_attempts) < 1:
+            raise ValueError("http_attempts must be positive")
+        if float(http_retry_seconds) < 0:
+            raise ValueError("http_retry_seconds must be non-negative")
+        for attempt in range(1, int(http_attempts) + 1):
+            try:
+                handoff = await get_research_lab_attested_allocation(
+                    effective_epoch,
+                    x_leadpoet_internal_key=None,
+                )
+                break
+            except Exception as exc:
+                if (
+                    not _retryable_allocation_failure(exc)
+                    or attempt >= int(http_attempts)
+                ):
+                    raise
+                logger.warning(
+                    "weight_readiness_allocation_transient_retry "
+                    "epoch=%s attempt=%s/%s error_type=%s",
+                    effective_epoch,
+                    attempt,
+                    int(http_attempts),
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(float(http_retry_seconds) * attempt)
     verified = _validate_handoff(
         handoff,
         epoch=effective_epoch,

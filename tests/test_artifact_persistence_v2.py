@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 import pytest
 
 from gateway.tee.artifact_persistence_v2 import (
+    ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS,
+    ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS,
+    ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
     ARTIFACT_POLICY_SCHEMA_VERSION,
     ArtifactPersistenceV2Error,
     ArtifactPersistenceVerifierV2,
@@ -190,6 +193,7 @@ def test_parent_drop_is_a_visible_transport_failure() -> None:
         policy=POLICY,
         transport=dropped,
         clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
     )
     result = verifier.verify(
         artifact_id=descriptor["artifact_id"],
@@ -200,7 +204,7 @@ def test_parent_drop_is_a_visible_transport_failure() -> None:
     )
     assert result["status"] == "failed"
     assert result["failure_code"] == "connection_reset"
-    assert len(result["transport_attempts"]) == 3
+    assert len(result["transport_attempts"]) == ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
     assert all(
         item["terminal_status"] == "transport_failure"
         for item in result["transport_attempts"]
@@ -225,6 +229,7 @@ def test_transport_failure_retries_and_binds_every_attempt() -> None:
         policy=POLICY,
         transport=flaky,
         clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
     )
     result = verifier.verify(
         artifact_id=descriptor["artifact_id"],
@@ -250,3 +255,116 @@ def test_transport_failure_retries_and_binds_every_attempt() -> None:
         "authenticated_response",
     ]
     assert result["artifact"]["persisted"] is True
+
+
+@pytest.mark.parametrize(
+    "get_failures",
+    range(ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS),
+)
+@pytest.mark.parametrize(
+    "head_failures",
+    range(ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS),
+)
+def test_transport_recovery_at_every_retry_ordinal(
+    get_failures: int,
+    head_failures: int,
+) -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+    successful = _Transport(document)
+    failures_remaining = {"GET": get_failures, "HEAD": head_failures}
+    delays = []
+
+    def flaky(**kwargs):
+        method = kwargs["method"]
+        if failures_remaining[method]:
+            failures_remaining[method] -= 1
+            raise EOFError("unexpected EOF while reading")
+        return successful(**kwargs)
+
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=flaky,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=delays.append,
+    )
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "persisted"
+    assert len(result["transport_attempts"]) == (
+        get_failures + head_failures + 2
+    )
+    assert delays == (
+        list(ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS[1 : get_failures + 1])
+        + list(
+            ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS[1 : head_failures + 1]
+        )
+    )
+    assert all(
+        item["retry_policy_hash"]
+        == result["transport_attempts"][0]["retry_policy_hash"]
+        for item in result["transport_attempts"]
+    )
+    assert result["transport_attempts"][0]["retry_policy_hash"] != verifier._policy_hash
+
+
+def test_transport_retry_budget_fits_presigned_url_lifetime() -> None:
+    assert (
+        len(ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS)
+        == ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
+    )
+    maximum_success_seconds = (
+        2
+        * ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
+        * ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS
+        / 1000
+        + 2 * sum(ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS[1:])
+    )
+    assert maximum_success_seconds < 300
+
+
+def test_exhausted_transport_verification_does_not_poison_later_invocation() -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+    successful = _Transport(document)
+    remaining_failures = ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
+
+    def recover_after_one_exhausted_call(**kwargs):
+        nonlocal remaining_failures
+        if kwargs["method"] == "GET" and remaining_failures:
+            remaining_failures -= 1
+            raise EOFError("unexpected EOF while reading")
+        return successful(**kwargs)
+
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=recover_after_one_exhausted_call,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
+    )
+    first = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+    second = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert first["status"] == "failed"
+    assert first["failure_code"] == "unexpected_eof"
+    assert second["status"] == "persisted"

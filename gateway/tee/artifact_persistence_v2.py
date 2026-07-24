@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 import re
 import secrets
+import time
 from typing import Any, Callable, Dict, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
 
@@ -22,7 +23,9 @@ from leadpoet_canonical.attested_v2 import (
 
 ARTIFACT_POLICY_SCHEMA_VERSION = "leadpoet.encrypted_artifact_policy.v2"
 ARTIFACT_PERSISTENCE_PURPOSE = "leadpoet.artifact_persistence.v2"
-ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS = 3
+ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS = 4
+ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS = 30000
+ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS = (0.0, 0.25, 1.0, 2.0)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DNS_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
@@ -134,12 +137,25 @@ class ArtifactPersistenceVerifierV2:
         policy: Mapping[str, Any],
         transport: Callable[..., Mapping[str, Any]] = HTTPXProviderTransport(),
         clock: Callable[[], str] = _timestamp,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self._vault = vault
         self._policy = validate_artifact_policy(policy)
         self._policy_hash = sha256_json(self._policy)
         self._transport = transport
         self._clock = clock
+        self._sleeper = sleeper
+        self._retry_policy_hash = sha256_json(
+            {
+                "schema_version": "leadpoet.artifact_persistence_retry_policy.v2",
+                "attempts_per_method": ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS,
+                "retry_delays_seconds": list(
+                    ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS
+                ),
+                "timeout_ms": ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
+                "storage_policy_hash": self._policy_hash,
+            }
+        )
 
     def _request(
         self,
@@ -171,7 +187,7 @@ class ArtifactPersistenceVerifierV2:
                     url=url,
                     headers={"accept": "application/json"},
                     body=b"",
-                    timeout_ms=30000,
+                    timeout_ms=ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
                 )
             )
             body = bytes(response.get("body") or b"")
@@ -210,8 +226,8 @@ class ArtifactPersistenceVerifierV2:
             credential_ref_hash=sha256_json(
                 {"policy_hash": self._policy_hash, "sigv4_query_present": True}
             ),
-            retry_policy_hash=self._policy_hash,
-            timeout_ms=30000,
+            retry_policy_hash=self._retry_policy_hash,
+            timeout_ms=ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
             started_at=started_at,
             request_artifact_hash=request_artifact_hash,
             completed_at=self._clock(),
@@ -237,6 +253,10 @@ class ArtifactPersistenceVerifierV2:
         get_response = {}
         get_attempt = {}
         for ordinal in range(ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS):
+            if ordinal:
+                self._sleeper(
+                    ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS[ordinal]
+                )
             get_response, get_attempt = self._request(
                 artifact_id=artifact_id,
                 attestation_job_id=attestation_job_id,
@@ -266,6 +286,10 @@ class ArtifactPersistenceVerifierV2:
         head_response = {}
         head_attempt = {}
         for offset in range(ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS):
+            if offset:
+                self._sleeper(
+                    ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS[offset]
+                )
             head_response, head_attempt = self._request(
                 artifact_id=artifact_id,
                 attestation_job_id=attestation_job_id,

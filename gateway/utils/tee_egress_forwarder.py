@@ -33,6 +33,16 @@ MAX_TUNNEL_BYTES_PER_DIRECTION = 256 * 1024 * 1024
 DEFAULT_IDLE_TIMEOUT_SECONDS = 300.0
 CONNECT_TIMEOUT_SECONDS = 15.0
 RELAY_CHUNK_BYTES = 64 * 1024
+_PEER_CLOSE_ERRNOS = frozenset(
+    value
+    for value in (
+        errno.EPIPE,
+        errno.ECONNRESET,
+        errno.ENOTCONN,
+        getattr(errno, "ESHUTDOWN", None),
+    )
+    if value is not None
+)
 
 
 class TEEEgressForwarderError(RuntimeError):
@@ -131,6 +141,7 @@ def _relay_bidirectional(
     active = {left, right}
     transferred = {left: 0, right: 0}
     first_closed = ""
+    write_closed = ""
     last_activity = time.monotonic()
     while active:
         remaining = max(0.0, idle_timeout_seconds - (time.monotonic() - last_activity))
@@ -151,16 +162,35 @@ def _relay_bidirectional(
                 except Exception:
                     pass
                 continue
-            transferred[source] += len(data)
-            if transferred[source] > MAX_TUNNEL_BYTES_PER_DIRECTION:
+            next_total = transferred[source] + len(data)
+            if next_total > MAX_TUNNEL_BYTES_PER_DIRECTION:
                 raise TEEEgressForwarderError("egress tunnel byte limit exceeded")
-            destination.sendall(data)
+            try:
+                destination.sendall(data)
+            except OSError as exc:
+                if int(getattr(exc, "errno", 0) or 0) not in _PEER_CLOSE_ERRNOS:
+                    raise
+                # A provider may close after a complete response before the
+                # enclave emits its final TLS bytes. Stop only that direction;
+                # the authenticated client still decides whether the response
+                # it received was complete.
+                closed_name = "enclave" if destination is left else "provider"
+                if not first_closed:
+                    first_closed = closed_name
+                if not write_closed:
+                    write_closed = closed_name
+                active.discard(source)
+                continue
+            transferred[source] = next_total
             last_activity = time.monotonic()
-    return {
+    result = {
         "enclave_to_provider_bytes": transferred[left],
         "provider_to_enclave_bytes": transferred[right],
         "first_closed": first_closed or "unknown",
     }
+    if write_closed:
+        result["write_closed"] = write_closed
+    return result
 
 
 def _handle_connection(
@@ -213,11 +243,12 @@ def _handle_connection(
         logger.info(
             "gateway_tee_egress_tunnel_closed destination_ref=%s "
             "enclave_to_provider_bytes=%d provider_to_enclave_bytes=%d "
-            "first_closed=%s",
+            "first_closed=%s write_closed=%s",
             destination_ref,
             relay["enclave_to_provider_bytes"],
             relay["provider_to_enclave_bytes"],
             relay["first_closed"],
+            relay.get("write_closed", "none"),
         )
     except Exception as exc:
         if not connected:

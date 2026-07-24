@@ -3,18 +3,27 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+from datetime import datetime, timedelta, timezone
+import http.client
 import json
 from pathlib import Path
 import socket
+import ssl
 import threading
+import time
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 from gateway.tee.egress_policy import (
     EgressPolicyError,
     destination_policy_hash,
     normalize_destination,
 )
+from gateway.tee.provider_broker_v2 import HTTPXProviderTransport
 from gateway.tee import egress_proxy
 from gateway.tee.egress_proxy import (
     IFF_UP,
@@ -24,6 +33,7 @@ from gateway.tee.egress_proxy import (
     EnclaveEgressProxyError,
     _ensure_loopback_interface,
     _parse_proxy_request,
+    _relay_bidirectional as _relay_enclave_bidirectional,
 )
 from gateway.utils.tee_client import _recv_exact
 from gateway.utils.tee_egress_forwarder import (
@@ -47,6 +57,48 @@ def _read_frame(connection: socket.socket) -> dict:
     assert len(prefix) == 4
     body = _recv_exact(connection, int.from_bytes(prefix, "big"))
     return json.loads(body.decode("ascii"))
+
+
+def _write_test_server_identity(tmp_path: Path) -> tuple[Path, Path]:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "example.com")])
+    now = datetime.now(timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(hours=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName("example.com")]),
+            critical=False,
+        )
+        .sign(private_key, hashes.SHA256())
+    )
+    certificate_path = tmp_path / "server-cert.pem"
+    private_key_path = tmp_path / "server-key.pem"
+    certificate_path.write_bytes(
+        certificate.public_bytes(serialization.Encoding.PEM)
+    )
+    private_key_path.write_bytes(
+        private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return certificate_path, private_key_path
+
+
+def _unused_loopback_port() -> int:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+    finally:
+        listener.close()
 
 
 def test_destination_policy_allows_public_dns_https_only():
@@ -198,6 +250,241 @@ def test_parent_relay_reports_directional_bytes_and_first_close():
     parent.close()
     upstream.close()
     provider.close()
+
+
+def test_parent_relay_tolerates_late_tls_write_after_provider_full_close():
+    enclave, parent = socket.socketpair()
+    upstream, provider = socket.socketpair()
+    observed = {}
+    errors = []
+
+    def run():
+        try:
+            observed.update(
+                _relay_bidirectional(
+                    parent,
+                    upstream,
+                    idle_timeout_seconds=2,
+                )
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    enclave.sendall(b"request")
+    assert provider.recv(64) == b"request"
+    provider.sendall(b"complete-response")
+    provider.close()
+    assert enclave.recv(64) == b"complete-response"
+    assert enclave.recv(1) == b""
+    enclave.sendall(b"late-tls-close")
+    enclave.shutdown(socket.SHUT_WR)
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert observed == {
+        "enclave_to_provider_bytes": 7,
+        "provider_to_enclave_bytes": 17,
+        "first_closed": "provider",
+        "write_closed": "provider",
+    }
+    enclave.close()
+    parent.close()
+    upstream.close()
+
+
+def test_parent_relay_does_not_turn_incomplete_provider_body_into_success():
+    enclave, parent = socket.socketpair()
+    upstream, provider = socket.socketpair()
+    errors = []
+
+    def run():
+        try:
+            _relay_bidirectional(
+                parent,
+                upstream,
+                idle_timeout_seconds=2,
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    enclave.sendall(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+    assert provider.recv(128).startswith(b"GET / HTTP/1.1")
+    provider.sendall(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort"
+    )
+    provider.close()
+
+    response = http.client.HTTPResponse(enclave)
+    response.begin()
+    with pytest.raises(http.client.IncompleteRead):
+        response.read()
+    enclave.sendall(b"late-tls-close")
+    enclave.shutdown(socket.SHUT_WR)
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert errors == []
+    enclave.close()
+    parent.close()
+    upstream.close()
+
+
+def test_enclave_relay_tolerates_late_client_write_after_parent_full_close():
+    client, proxy_side = socket.socketpair()
+    parent_side, upstream = socket.socketpair()
+    observed = {}
+    errors = []
+
+    def run():
+        try:
+            observed.update(
+                _relay_enclave_bidirectional(
+                    proxy_side,
+                    parent_side,
+                    idle_timeout_seconds=2,
+                )
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    client.sendall(b"request")
+    assert upstream.recv(64) == b"request"
+    upstream.sendall(b"complete-response")
+    upstream.close()
+    assert client.recv(64) == b"complete-response"
+    assert client.recv(1) == b""
+    client.sendall(b"late-tls-close")
+    client.shutdown(socket.SHUT_WR)
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert observed == {
+        "client_to_parent_bytes": 7,
+        "parent_to_client_bytes": 17,
+        "first_closed": "parent",
+        "write_closed": "parent",
+    }
+    client.close()
+    proxy_side.close()
+    parent_side.close()
+
+
+def test_httpx_tls_transport_survives_full_close_through_both_relays(
+    tmp_path: Path,
+):
+    certificate_path, private_key_path = _write_test_server_identity(tmp_path)
+    tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_context.load_cert_chain(
+        certfile=str(certificate_path),
+        keyfile=str(private_key_path),
+    )
+    origin_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    origin_listener.bind(("127.0.0.1", 0))
+    origin_listener.listen(1)
+    origin_address = origin_listener.getsockname()
+    origin_errors = []
+
+    def serve_origin():
+        try:
+            connection, _address = origin_listener.accept()
+            protected = tls_context.wrap_socket(connection, server_side=True)
+            request = bytearray()
+            while b"\r\n\r\n" not in request:
+                request.extend(protected.recv(4096))
+            body = b'{"ok":true}'
+            protected.sendall(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 11\r\n"
+                b"Connection: close\r\n\r\n"
+                + body
+            )
+            # Do not perform TLS unwrap: reproduce a provider that closes its
+            # complete response before the client emits its final TLS bytes.
+            protected.close()
+        except Exception as exc:
+            origin_errors.append(exc)
+        finally:
+            origin_listener.close()
+
+    origin_thread = threading.Thread(target=serve_origin, daemon=True)
+    origin_thread.start()
+    host_threads = []
+
+    def open_parent_tunnel(_host, _port):
+        enclave_side, host_side = socket.socketpair()
+        host_thread = threading.Thread(
+            target=_handle_connection,
+            kwargs={
+                "connection": host_side,
+                "connector": lambda _name, _number: socket.create_connection(
+                    origin_address,
+                    timeout=2,
+                ),
+                "idle_timeout_seconds": 2,
+            },
+            daemon=True,
+        )
+        host_thread.start()
+        host_threads.append(host_thread)
+        request = _frame(
+            {
+                "method": "connect",
+                "params": {
+                    "host": "example.com",
+                    "port": 443,
+                    "policy_hash": destination_policy_hash(),
+                },
+            }
+        )
+        enclave_side.sendall(request)
+        response = _read_frame(enclave_side)
+        assert response["result"]["status"] == "connected"
+        return enclave_side
+
+    proxy_port = _unused_loopback_port()
+    proxy = EnclaveEgressProxy(
+        recv_exact=_recv_exact,
+        local_port=proxy_port,
+        loopback_initializer=lambda: None,
+        idle_timeout_seconds=2,
+    )
+    proxy._open_parent_tunnel = open_parent_tunnel
+    proxy.start()
+    try:
+        result = HTTPXProviderTransport(
+            proxy_url=f"http://127.0.0.1:{proxy_port}",
+            ca_bundle=str(certificate_path),
+        )(
+            method="GET",
+            url="https://example.com/artifact",
+            headers={"accept": "application/json"},
+            body=b"",
+            timeout_ms=3000,
+        )
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not proxy.status().get("last_tunnel"):
+            time.sleep(0.01)
+    finally:
+        proxy.stop()
+        origin_thread.join(timeout=2)
+        for thread in host_threads:
+            thread.join(timeout=2)
+
+    assert origin_errors == []
+    assert result["http_status"] == 200
+    assert result["body"] == b'{"ok":true}'
+    assert result["tls_protocol"].startswith("TLSv1.")
+    assert proxy.status().get("last_failure") is None
+    assert proxy.status()["last_tunnel"]["parent_to_client_bytes"] > 0
 
 
 def test_enclave_proxy_parses_connect_without_exposing_http_payload():

@@ -9,9 +9,8 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Iterable
 
-from fastapi import Request
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from gateway.utils.ops_registry import set_priority_middleware
 
@@ -149,9 +148,24 @@ class _Pool:
         }
 
 
-class PriorityMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, max_concurrent_miners: int | None = None):
-        super().__init__(app)
+class PriorityMiddleware:
+    """Pure-ASGI request-priority middleware.
+
+    Implemented as raw ASGI (not Starlette ``BaseHTTPMiddleware``) on purpose.
+    ``BaseHTTPMiddleware`` bridges the downstream app through an anyio task
+    group and memory-object streams; under concurrent load, or when the
+    endpoint raises / the client disconnects mid-request, that task group's
+    ``__aexit__`` iterates its internal task deque while it is mutated,
+    surfacing as ``RuntimeError: deque mutated during iteration`` and turning
+    a valid response into an intermittent 5xx. On the weight path that
+    intermittent 5xx burns the validator's tight submission window and drops
+    the epoch. Awaiting ``self.app`` directly keeps the concurrency-pool
+    accounting identical while removing the task-group wrapper entirely, so
+    the race cannot occur.
+    """
+
+    def __init__(self, app: ASGIApp, max_concurrent_miners: int | None = None):
+        self.app = app
         if max_concurrent_miners is not None and "MINER_MAX_CONCURRENT" not in os.environ:
             miner_class = RouteClass(
                 MINER_CLASS.name,
@@ -169,8 +183,14 @@ class PriorityMiddleware(BaseHTTPMiddleware):
         self.path_counts = Counter()
         set_priority_middleware(self)
 
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Only HTTP requests are pooled; websockets and lifespan pass through
+        # untouched, exactly as BaseHTTPMiddleware did.
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
         route_class = classify_path(path)
         pool = self.pools[route_class]
         self.path_counts[route_class] += 1
@@ -180,17 +200,19 @@ class PriorityMiddleware(BaseHTTPMiddleware):
             logger.warning(
                 "gateway_request_shed class=%s method=%s path=%s",
                 route_class,
-                request.method,
+                scope.get("method", ""),
                 path,
             )
-            return JSONResponse(
+            response = JSONResponse(
                 status_code=503,
                 content={"detail": "Gateway at capacity - retry shortly"},
                 headers={"Retry-After": "15"},
             )
+            await response(scope, receive, send)
+            return
 
         try:
-            return await call_next(request)
+            await self.app(scope, receive, send)
         finally:
             await pool.release()
 

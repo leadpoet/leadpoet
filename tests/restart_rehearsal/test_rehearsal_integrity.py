@@ -35,7 +35,7 @@ def test_gateway_rehearsal_requires_canonical_private_model_environment() -> Non
         verify_gateway_private_model_environment([])
 
 
-def test_rehearsal_driver_must_match_frozen_candidate(
+def test_rehearsal_driver_must_match_frozen_harness_commit(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -51,8 +51,41 @@ def test_rehearsal_driver_must_match_frozen_candidate(
     rehearsal._verify_driver_identity(COMMIT)
 
     driver.write_bytes(b"dirty driver\n")
-    with pytest.raises(SystemExit, match="differs from the frozen candidate"):
+    with pytest.raises(SystemExit, match="differs from the frozen harness"):
         rehearsal._verify_driver_identity(COMMIT)
+
+
+def test_rehearsal_resolves_forward_and_rollback_transitions(monkeypatch) -> None:
+    relationships = {
+        ("from", "target"): True,
+        ("target", "from"): False,
+        ("newer", "older"): False,
+        ("older", "newer"): True,
+    }
+    monkeypatch.setattr(
+        rehearsal,
+        "_is_ancestor",
+        lambda ancestor, descendant: relationships.get(
+            (ancestor, descendant),
+            False,
+        ),
+    )
+
+    assert rehearsal._resolve_transition("from", "target", "auto") == "forward"
+    assert rehearsal._resolve_transition("newer", "older", "auto") == "rollback"
+    assert (
+        rehearsal._resolve_transition("newer", "older", "rollback")
+        == "rollback"
+    )
+    with pytest.raises(SystemExit, match="does not descend"):
+        rehearsal._resolve_transition("newer", "older", "forward")
+
+
+def test_rehearsal_rejects_unrelated_transition(monkeypatch) -> None:
+    monkeypatch.setattr(rehearsal, "_is_ancestor", lambda *_args: False)
+
+    with pytest.raises(SystemExit, match="unrelated"):
+        rehearsal._resolve_transition("from", "target", "auto")
 
 
 def test_exact_rehearsal_rejects_repository_module_substitution() -> None:

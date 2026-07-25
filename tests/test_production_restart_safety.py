@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import re
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -34,6 +36,33 @@ def _snapshot(epoch_block: int) -> SubnetEpochSnapshot:
         tempo=360,
         blocks_since_last_step=epoch_block,
         observed_at="2026-07-18T00:00:00Z",
+    )
+
+
+def test_gateway_and_validator_share_stateful_v2_rollback_floor() -> None:
+    gateway = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    validator = (ROOT / "validator_restart.sh").read_text(encoding="utf-8")
+    pattern = re.compile(
+        r'V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA="([0-9a-f]{40})"'
+    )
+    gateway_floor = pattern.search(gateway)
+    validator_floor = pattern.search(validator)
+
+    assert gateway_floor is not None
+    assert validator_floor is not None
+    assert gateway_floor.group(1) == validator_floor.group(1)
+    assert "predates the supported stateful V2 rollback floor" in gateway
+    assert "predates the supported stateful V2 rollback floor" in validator
+    subprocess.run(
+        [
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            gateway_floor.group(1),
+            "HEAD",
+        ],
+        cwd=ROOT,
+        check=True,
     )
 
 
@@ -245,7 +274,11 @@ def test_validator_restart_does_not_require_a_live_gateway() -> None:
     assert 'gateway_authority_status = "not_aligned"' in deploy
     assert '"gateway_authority_status": gateway_authority_status' in deploy
     assert 'raise SystemExit("VALIDATOR_V2_GATEWAY_URL is missing")' not in deploy
-    assert "gateway V2 authority is not ready" not in deploy
+    assert (
+        'os.environ.get("VALIDATOR_EXACT_RELEASE_PINNED") == "1"'
+        in deploy
+    )
+    assert "pinned gateway V2 authority is not ready" in deploy
 
 
 def test_validator_secret_environment_overrides_local_fallback_files() -> None:

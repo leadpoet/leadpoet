@@ -60,27 +60,63 @@ def _git_file(commit_sha: str, path: str) -> bytes:
     return result.stdout
 
 
-def _image_tag(candidate_sha: str) -> str:
+def _is_ancestor(ancestor: str, descendant: str) -> bool:
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=str(REPO_ROOT),
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if result.returncode not in (0, 1):
+        raise SystemExit("unable to resolve restart rehearsal Git ancestry")
+    return result.returncode == 0
+
+
+def _resolve_transition(
+    from_sha: str,
+    candidate_sha: str,
+    requested: str,
+) -> str:
+    forward = _is_ancestor(from_sha, candidate_sha)
+    rollback = (
+        from_sha != candidate_sha
+        and _is_ancestor(candidate_sha, from_sha)
+    )
+    if requested == "auto":
+        if forward:
+            return "forward"
+        if rollback:
+            return "rollback"
+        raise SystemExit("restart rehearsal commits are unrelated")
+    if requested == "forward" and not forward:
+        raise SystemExit("forward rehearsal target does not descend from --from-sha")
+    if requested == "rollback" and not rollback:
+        raise SystemExit("rollback rehearsal target is not an ancestor of --from-sha")
+    return requested
+
+
+def _image_tag(harness_sha: str) -> str:
     digest = hashlib.sha256()
-    digest.update(b"candidate_sha")
-    digest.update(candidate_sha.encode("ascii"))
+    digest.update(b"harness_sha")
+    digest.update(harness_sha.encode("ascii"))
     digest.update(b"requirements.txt")
-    digest.update(_git_file(candidate_sha, "requirements.txt"))
+    digest.update(_git_file(harness_sha, "requirements.txt"))
     for path in COMMITTED_HARNESS_PATHS:
         digest.update(path.encode("utf-8"))
-        digest.update(_git_file(candidate_sha, path))
+        digest.update(_git_file(harness_sha, path))
     return f"{IMAGE_REPOSITORY}:{digest.hexdigest()[:16]}"
 
 
-def _build_image(tag: str, *, candidate_sha: str) -> None:
+def _build_image(tag: str, *, harness_sha: str) -> None:
     with tempfile.TemporaryDirectory(prefix="leadpoet-restart-image-") as raw:
         context = Path(raw)
         (context / "requirements.txt").write_bytes(
-            _git_file(candidate_sha, "requirements.txt")
+            _git_file(harness_sha, "requirements.txt")
         )
         (context / "Dockerfile").write_bytes(
             _git_file(
-                candidate_sha,
+                harness_sha,
                 "tests/restart_rehearsal/Dockerfile",
             )
         )
@@ -88,7 +124,7 @@ def _build_image(tag: str, *, candidate_sha: str) -> None:
         harness.mkdir()
         for path in COMMITTED_HARNESS_PATHS[1:]:
             (harness / Path(path).name).write_bytes(
-                _git_file(candidate_sha, path)
+                _git_file(harness_sha, path)
             )
         _run(
             [
@@ -104,11 +140,11 @@ def _build_image(tag: str, *, candidate_sha: str) -> None:
         )
 
 
-def _verify_driver_identity(candidate_sha: str) -> None:
+def _verify_driver_identity(harness_sha: str) -> None:
     path = "scripts/run_local_restart_rehearsal.py"
-    if Path(__file__).resolve().read_bytes() != _git_file(candidate_sha, path):
+    if Path(__file__).resolve().read_bytes() != _git_file(harness_sha, path):
         raise SystemExit(
-            "restart rehearsal driver differs from the frozen candidate SHA"
+            "restart rehearsal driver differs from the frozen harness SHA"
         )
 
 
@@ -128,6 +164,7 @@ def _run_component(
     component: str,
     from_sha: str,
     candidate_sha: str,
+    transition: str,
     weight_readiness_scenario: str = "transient_503_recovery",
     scope: str = "exact",
 ) -> None:
@@ -158,6 +195,8 @@ def _run_component(
         f"REHEARSAL_FROM_SHA={from_sha}",
         "--env",
         f"REHEARSAL_CANDIDATE_SHA={candidate_sha}",
+        "--env",
+        f"REHEARSAL_TRANSITION={transition}",
         "--env",
         (
             "REHEARSAL_WEIGHT_READINESS_SCENARIO="
@@ -212,6 +251,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--candidate-sha", default="HEAD")
     parser.add_argument(
+        "--transition",
+        choices=("auto", "forward", "rollback"),
+        default="auto",
+    )
+    parser.add_argument(
         "--component",
         choices=("all", "gateway", "validator"),
         default="all",
@@ -231,12 +275,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from_sha = _git_sha(args.from_sha)
     candidate_sha = _git_sha(args.candidate_sha)
-    _run(["git", "merge-base", "--is-ancestor", from_sha, candidate_sha])
-    _verify_driver_identity(candidate_sha)
+    transition = _resolve_transition(
+        from_sha,
+        candidate_sha,
+        args.transition,
+    )
+    harness_sha = candidate_sha if transition == "forward" else from_sha
+    _verify_driver_identity(harness_sha)
 
-    tag = _image_tag(candidate_sha)
+    tag = _image_tag(harness_sha)
     if args.rebuild_image or not _image_exists(tag):
-        _build_image(tag, candidate_sha=candidate_sha)
+        _build_image(tag, harness_sha=harness_sha)
 
     components = (
         ("gateway", "validator") if args.component == "all" else (args.component,)
@@ -264,7 +313,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 f"Running isolated {component} restart rehearsal "
                 f"{from_sha[:12]} -> {candidate_sha[:12]} "
-                f"scenario={scenario}",
+                f"transition={transition} scenario={scenario}",
                 flush=True,
             )
             _run_component(
@@ -272,6 +321,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 component=component,
                 from_sha=from_sha,
                 candidate_sha=candidate_sha,
+                transition=transition,
                 weight_readiness_scenario=scenario,
                 scope=args.scope.replace("-", "_"),
             )

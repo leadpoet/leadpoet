@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
+V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA="bd71fdda2aca4e17d07b3e55f56a66f7bd1bbdc3"
 VALIDATOR_ROOT="${VALIDATOR_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
 VALIDATOR_ENV_FILE="${VALIDATOR_ENV_FILE:-/home/ec2-user/.config/leadpoet/validator.env}"
 LEADPOET_VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-leadpoet/prod/validator/env}"
@@ -29,6 +30,112 @@ VALIDATOR_WALLET_NAME="${VALIDATOR_WALLET_NAME:-validator_72}"
 VALIDATOR_WALLET_HOTKEY="${VALIDATOR_WALLET_HOTKEY:-default}"
 REQUESTED_VALIDATOR_DEPLOY_COMMIT="${VALIDATOR_DEPLOY_COMMIT:-}"
 unset VALIDATOR_DEPLOY_COMMIT
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --commit)
+      if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+        echo "ERROR: --commit requires a full 40-character SHA" >&2
+        exit 2
+      fi
+      if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
+          && [ "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" != "$2" ]; then
+        echo "ERROR: --commit conflicts with VALIDATOR_DEPLOY_COMMIT" >&2
+        exit 2
+      fi
+      REQUESTED_VALIDATOR_DEPLOY_COMMIT="$2"
+      shift 2
+      ;;
+    --commit=*)
+      requested_commit="${1#--commit=}"
+      if [ -z "$requested_commit" ]; then
+        echo "ERROR: --commit requires a full 40-character SHA" >&2
+        exit 2
+      fi
+      if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
+          && [ "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" != "$requested_commit" ]; then
+        echo "ERROR: --commit conflicts with VALIDATOR_DEPLOY_COMMIT" >&2
+        exit 2
+      fi
+      REQUESTED_VALIDATOR_DEPLOY_COMMIT="$requested_commit"
+      shift
+      ;;
+    *)
+      echo "ERROR: unsupported validator restart argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
+    && ! [[ "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "ERROR: --commit must be a lowercase full 40-character SHA" >&2
+  exit 2
+fi
+
+verify_pinned_gateway_release() {
+  local gateway_health gateway_build_info gateway_release_evidence
+  echo "Verifying the pinned gateway release is active on ${VALIDATOR_DEPLOY_SHA}"
+  gateway_health="$(
+    curl --fail --silent --show-error \
+      --connect-timeout 5 --max-time 35 \
+      "${VALIDATOR_V2_GATEWAY_URL%/}/health/v2-authority"
+  )"
+  gateway_build_info="$(
+    curl --fail --silent --show-error \
+      --connect-timeout 5 --max-time 35 \
+      "${VALIDATOR_V2_GATEWAY_URL%/}/build-info"
+  )"
+  gateway_release_evidence="$(
+    curl --fail --silent --show-error \
+      --connect-timeout 5 --max-time 35 \
+      "${VALIDATOR_V2_GATEWAY_URL%/}/weights/v2/release-evidence/${VALIDATOR_DEPLOY_SHA}"
+  )"
+  "$VALIDATOR_PYTHON_BIN" - \
+    "$VALIDATOR_DEPLOY_SHA" \
+    "$gateway_health" \
+    "$gateway_build_info" \
+    "$gateway_release_evidence" <<'PY'
+import json
+import sys
+
+expected_commit = str(sys.argv[1] or "").lower()
+
+
+def load_json(raw, label):
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        raise SystemExit("pinned gateway %s is invalid JSON" % label)
+    if not isinstance(value, dict):
+        raise SystemExit("pinned gateway %s is not an object" % label)
+    return value
+
+
+health = load_json(sys.argv[2], "V2 authority")
+if (
+    health.get("status") != "ready"
+    or str(health.get("commit_sha") or "").lower() != expected_commit
+):
+    raise SystemExit("pinned gateway V2 authority is not ready on the selected commit")
+
+build_info = load_json(sys.argv[3], "build-info")
+if str(build_info.get("git_commit") or "").lower() != expected_commit:
+    raise SystemExit("pinned gateway build-info differs from the selected commit")
+
+release = load_json(sys.argv[4], "release evidence")
+if (
+    release.get("schema_version") != "leadpoet.auditor_release_evidence.v2"
+    or str(release.get("commit_sha") or "").lower() != expected_commit
+):
+    raise SystemExit("pinned gateway release evidence differs from the selected commit")
+
+print(json.dumps({
+    "status": "pinned_gateway_release_aligned",
+    "commit_sha": expected_commit,
+}, sort_keys=True))
+PY
+}
+
 VALIDATOR_ENV_EXPORT="$(mktemp /tmp/validator_env_export.XXXXXX)"
 SECRET_TMP="$(mktemp /tmp/validator_secret_env.XXXXXX)"
 
@@ -56,6 +163,12 @@ if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
   fi
   if ! git merge-base --is-ancestor "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" origin/main; then
     echo "ERROR: VALIDATOR_DEPLOY_COMMIT is not reachable from origin/main" >&2
+    exit 1
+  fi
+  if ! git merge-base --is-ancestor \
+      "$V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA" \
+      "$REQUESTED_VALIDATOR_DEPLOY_COMMIT"; then
+    echo "ERROR: selected validator commit predates the supported stateful V2 rollback floor" >&2
     exit 1
   fi
   git checkout --detach "$REQUESTED_VALIDATOR_DEPLOY_COMMIT"
@@ -126,6 +239,7 @@ skip_keys = {
     "AWS_SECURITY_TOKEN",
     "AWS_PROFILE",
     "VALIDATOR_DEPLOY_COMMIT",
+    "VALIDATOR_EXACT_RELEASE_PINNED",
 }
 exports = []
 for raw_line in raw.replace("\x00", "\n").splitlines():
@@ -262,6 +376,11 @@ export VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_DEPLOY_SHA"
 export GITHUB_SHA="$VALIDATOR_DEPLOY_SHA"
 export GIT_COMMIT="$VALIDATOR_DEPLOY_SHA"
 export LEADPOET_WRAPPER_ACTIVE=1
+if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
+  export VALIDATOR_EXACT_RELEASE_PINNED=1
+else
+  export VALIDATOR_EXACT_RELEASE_PINNED=0
+fi
 
 case "$VALIDATOR_USE_CAPTURED_RESTART_START" in
   0|1) ;;
@@ -348,6 +467,11 @@ print(json.dumps({
 PY
   echo "Validator remains untouched. Complete the V2 bootstrap ceremony, then rerun this restart." >&2
   exit 75
+fi
+
+if [ "$VALIDATOR_EXACT_RELEASE_PINNED" = "1" ]; then
+  echo "Checking same-SHA gateway alignment before stopping validator"
+  verify_pinned_gateway_release
 fi
 
 echo "Refreshing public validator hotkey measurements for the selected release"
@@ -558,6 +682,10 @@ if [ "$(docker inspect -f '{{.State.Running}}' leadpoet-validator-main)" != "tru
   echo "ERROR: validator coordinator failed its final restart-wrapper check" >&2
   docker logs --tail 160 leadpoet-validator-main >&2 || true
   exit 1
+fi
+if [ "$VALIDATOR_EXACT_RELEASE_PINNED" = "1" ]; then
+  echo "Rechecking same-SHA gateway alignment after validator startup"
+  verify_pinned_gateway_release
 fi
 leadpoet_release_docker_operation_lock_v2
 if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ]; then

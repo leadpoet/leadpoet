@@ -79,6 +79,24 @@ if [ "$HEAD_SHA" != "$VALIDATOR_V2_DEPLOY_COMMIT" ]; then
     echo "   approved=$VALIDATOR_V2_DEPLOY_COMMIT observed=$HEAD_SHA" >&2
     exit 1
 fi
+if [ -z "${VALIDATOR_EXACT_RELEASE_PINNED+x}" ]; then
+    if git -C "$REPO_DIR" symbolic-ref -q HEAD >/dev/null 2>&1; then
+        VALIDATOR_EXACT_RELEASE_PINNED=0
+    else
+        # The N-1 wrapper already pins by detaching HEAD. Inferring the marker
+        # here makes the first exact-commit upgrade enforce the new alignment
+        # gate even though the installed launcher predates this variable.
+        VALIDATOR_EXACT_RELEASE_PINNED=1
+    fi
+fi
+case "$VALIDATOR_EXACT_RELEASE_PINNED" in
+    0|1) ;;
+    *)
+        echo "❌ ERROR: VALIDATOR_EXACT_RELEASE_PINNED must be 0 or 1" >&2
+        exit 1
+        ;;
+esac
+export VALIDATOR_EXACT_RELEASE_PINNED
 echo "✅ Exact validator commit remains active: $HEAD_SHA"
 echo ""
 
@@ -400,6 +418,7 @@ start_container() {
       -e LEADPOET_WRAPPER_ACTIVE=1 \
       -e VALIDATOR_RUNTIME_GENERATION="$VALIDATOR_RUNTIME_GENERATION" \
       -e VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT" \
+      -e VALIDATOR_EXACT_RELEASE_PINNED="${VALIDATOR_EXACT_RELEASE_PINNED:-0}" \
       -e GITHUB_SHA="$VALIDATOR_V2_DEPLOY_COMMIT" \
       -e GIT_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT" \
       -e VALIDATOR_V2_GATEWAY_URL="${VALIDATOR_V2_GATEWAY_URL:-}" \
@@ -803,6 +822,20 @@ if gateway_url:
             gateway_authority_status = "not_aligned"
 else:
     gateway_authority_error_type = "gateway_url_not_configured"
+
+if (
+    os.environ.get("VALIDATOR_EXACT_RELEASE_PINNED") == "1"
+    and gateway_authority_status != "ready"
+):
+    raise SystemExit(
+        "pinned gateway V2 authority is not ready on the validator release commit: "
+        + gateway_authority_status
+        + (
+            " (" + gateway_authority_error_type + ")"
+            if gateway_authority_error_type
+            else ""
+        )
+    )
 
 network = os.environ.get("SUBTENSOR_NETWORK", "finney")
 netuid = int(os.environ.get("NETUID", "71"))

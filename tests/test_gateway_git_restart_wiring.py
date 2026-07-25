@@ -20,6 +20,46 @@ def _ordered_offsets(text: str, markers: tuple[str, ...]) -> list[int]:
     return offsets
 
 
+def test_gateway_restart_accepts_only_one_exact_commit_argument() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    assert 'REQUESTED_GATEWAY_DEPLOY_COMMIT="${GATEWAY_DEPLOY_COMMIT:-}"' in script
+    assert 'requested_commit="${1#--commit=}"' in script
+    assert "unsupported gateway restart argument" in script
+    assert (
+        '[[ "$REQUESTED_GATEWAY_DEPLOY_COMMIT" =~ ^[0-9a-f]{40}$ ]]'
+        in script
+    )
+    assert '--deploy-commit "$REQUESTED_GATEWAY_DEPLOY_COMMIT"' in script
+
+    invalid = subprocess.run(
+        ["bash", str(ROOT / "gw_restart.sh"), "--commit", "abc123"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert invalid.returncode == 2
+    assert "lowercase full 40-character SHA" in invalid.stderr
+    assert "Hydrating gateway env" not in invalid.stdout
+
+    conflict = subprocess.run(
+        [
+            "bash",
+            str(ROOT / "gw_restart.sh"),
+            "--commit",
+            "2" * 40,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env={**os.environ, "GATEWAY_DEPLOY_COMMIT": "1" * 40},
+    )
+    assert conflict.returncode == 2
+    assert "--commit conflicts with GATEWAY_DEPLOY_COMMIT" in conflict.stderr
+
+
 def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     _ordered_offsets(

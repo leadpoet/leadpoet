@@ -626,7 +626,31 @@ def command_curl(argv: list[str]) -> int:
             return 97
     if url.endswith("/build-info"):
         print(json.dumps({"git_commit": _candidate_sha()}, sort_keys=True))
-    elif url.endswith(("/health", "/health/v2-authority", "/research-lab/status", "/attest")):
+    elif url.endswith("/health/v2-authority"):
+        print(
+            json.dumps(
+                {
+                    "schema_version": "leadpoet.gateway_v2_authority_health.v2",
+                    "status": "ready",
+                    "commit_sha": _candidate_sha(),
+                },
+                sort_keys=True,
+            )
+        )
+    elif re.search(r"/weights/v2/release-evidence/[0-9a-f]{40}$", url):
+        print(
+            json.dumps(
+                {
+                    "schema_version": "leadpoet.auditor_release_evidence.v2",
+                    "commit_sha": _candidate_sha(),
+                    "release_channel_version_id": "rehearsal-version",
+                    "release_channel_get_url": "https://release.invalid/get",
+                    "release_channel_head_url": "https://release.invalid/head",
+                },
+                sort_keys=True,
+            )
+        )
+    elif url.endswith(("/health", "/research-lab/status", "/attest")):
         print(json.dumps({"status": "ok"}, sort_keys=True))
     else:
         return _fail("curl", argv, "unknown HTTP endpoint")

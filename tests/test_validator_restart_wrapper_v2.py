@@ -1,4 +1,6 @@
+import os
 from pathlib import Path
+import subprocess
 
 
 def test_restart_preserves_all_tracked_diffs_before_pull():
@@ -23,6 +25,73 @@ def test_restart_allows_only_one_invocation_pinned_ancestor_commit():
     )
     assert 'git checkout --detach "$REQUESTED_VALIDATOR_DEPLOY_COMMIT"' in script
     assert '"VALIDATOR_DEPLOY_COMMIT",' in script
+
+
+def test_restart_accepts_exact_commit_argument_and_rejects_conflicts():
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+
+    assert 'requested_commit="${1#--commit=}"' in script
+    assert "unsupported validator restart argument" in script
+    assert (
+        '[[ "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" =~ ^[0-9a-f]{40}$ ]]'
+        in script
+    )
+
+    invalid = subprocess.run(
+        ["bash", "validator_restart.sh", "--commit", "abc123"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert invalid.returncode == 2
+    assert "lowercase full 40-character SHA" in invalid.stderr
+    assert "Pulling latest GitHub main" not in invalid.stdout
+
+    conflict = subprocess.run(
+        ["bash", "validator_restart.sh", "--commit", "2" * 40],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env={**os.environ, "VALIDATOR_DEPLOY_COMMIT": "1" * 40},
+    )
+    assert conflict.returncode == 2
+    assert "--commit conflicts with VALIDATOR_DEPLOY_COMMIT" in conflict.stderr
+
+
+def test_pinned_restart_requires_same_gateway_release_before_shutdown():
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+    deploy = Path(
+        "validator_models/containerizing/deploy_dynamic.sh"
+    ).read_text(encoding="utf-8")
+
+    prestart_verify = script.index(
+        'echo "Checking same-SHA gateway alignment before stopping validator"'
+    )
+    release_ready = script.index(
+        'if [ "$VALIDATOR_V2_RELEASE_READY" != "1" ]'
+    )
+    shutdown = script.index('echo "Stopping validator processes and containers"')
+    start = script.index('echo "Starting validator"')
+    poststart_verify = script.index(
+        'echo "Rechecking same-SHA gateway alignment after validator startup"'
+    )
+    assert release_ready < prestart_verify < shutdown < start < poststart_verify
+    assert script.count("verify_pinned_gateway_release") == 3
+    for endpoint in (
+        "/health/v2-authority",
+        "/build-info",
+        "/weights/v2/release-evidence/",
+    ):
+        assert endpoint in script
+    assert 'export VALIDATOR_EXACT_RELEASE_PINNED=1' in script
+    assert (
+        '-e VALIDATOR_EXACT_RELEASE_PINNED="${VALIDATOR_EXACT_RELEASE_PINNED:-0}"'
+        in deploy
+    )
+    assert 'git -C "$REPO_DIR" symbolic-ref -q HEAD' in deploy
+    assert "pinned gateway V2 authority is not ready" in deploy
 
 
 def test_restart_loads_one_canonical_cutover_manifest():

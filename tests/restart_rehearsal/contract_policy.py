@@ -67,6 +67,15 @@ EXACT_EXTERNAL_ADAPTER_KINDS = {
     "docker",
     "nitro",
 }
+EXACT_WEIGHT_READINESS_BOUNDARIES = {
+    "chain_epoch",
+    "champion_reward_backfill",
+    "cutover_readiness",
+    "direct_allocation",
+    "localhost_allocation_http",
+    "settlement_backfill",
+    "source_reward_backfill",
+}
 EXACT_CAPACITY_SUBSTITUTIONS = {
     "host.cpu_capacity",
     "host.memory_capacity",
@@ -90,3 +99,20 @@ def is_classified_contract_adapter(identity: str) -> bool:
         or identity in EXACT_CONTRACT_ADAPTER_PROCESSES
         or identity in EXACT_CONTRACT_ADAPTER_BOUNDARIES
     )
+
+
+def is_classified_contract_fixture(row: dict[str, Any]) -> bool:
+    kind = row.get("kind")
+    if kind in EXACT_EXTERNAL_ADAPTER_KINDS:
+        return isinstance(row.get("argv"), list)
+    if kind == "weight-readiness-boundary":
+        return row.get("boundary") in EXACT_WEIGHT_READINESS_BOUNDARIES
+    if kind == "weight-readiness-persistence":
+        attempts = row.get("attempts")
+        return isinstance(attempts, list) and all(
+            isinstance(attempt, dict)
+            and attempt.get("method") in {"GET", "HEAD"}
+            and isinstance(attempt.get("attempt_number"), int)
+            for attempt in attempts
+        )
+    return False

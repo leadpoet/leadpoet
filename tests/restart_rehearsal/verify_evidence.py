@@ -12,16 +12,16 @@ import sys
 try:
     from .contract_policy import (
         EXACT_CAPACITY_SUBSTITUTIONS,
-        EXACT_EXTERNAL_ADAPTER_KINDS,
         is_classified_contract_adapter,
+        is_classified_contract_fixture,
         substitution_identity,
     )
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from contract_policy import (
         EXACT_CAPACITY_SUBSTITUTIONS,
-        EXACT_EXTERNAL_ADAPTER_KINDS,
         is_classified_contract_adapter,
+        is_classified_contract_fixture,
         substitution_identity,
     )
 
@@ -185,8 +185,7 @@ def verify_rehearsal_integrity(
         if row.get("fixture_authenticity") == "contract_enforced"
     ]
     if scope == "exact" and any(
-        row.get("kind") not in EXACT_EXTERNAL_ADAPTER_KINDS
-        or not isinstance(row.get("argv"), list)
+        not is_classified_contract_fixture(row)
         for row in contract_external_fixtures
     ):
         raise SystemExit(

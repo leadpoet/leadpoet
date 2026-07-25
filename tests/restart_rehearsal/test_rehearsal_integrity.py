@@ -319,6 +319,43 @@ def test_exact_rehearsal_accepts_classified_external_contract_fixture() -> None:
         )
 
 
+def test_exact_rehearsal_accepts_classified_weight_contract_fixture() -> None:
+    verify_rehearsal_integrity(
+        [
+            {
+                "kind": "weight-readiness-boundary",
+                "boundary": "direct_allocation",
+                "fixture_authenticity": "contract_enforced",
+            },
+            {
+                "kind": "weight-readiness-persistence",
+                "attempts": [
+                    {
+                        "method": "GET",
+                        "attempt_number": 1,
+                    }
+                ],
+                "fixture_authenticity": "contract_enforced",
+            },
+        ],
+        candidate_sha=COMMIT,
+        scope="exact",
+    )
+
+    with pytest.raises(SystemExit, match="invalid external contract adapter"):
+        verify_rehearsal_integrity(
+            [
+                {
+                    "kind": "weight-readiness-boundary",
+                    "boundary": "future_boundary",
+                    "fixture_authenticity": "contract_enforced",
+                }
+            ],
+            candidate_sha=COMMIT,
+            scope="exact",
+        )
+
+
 def test_production_stage_requires_exact_candidate_source_identity(tmp_path) -> None:
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     subprocess.run(

@@ -38,7 +38,14 @@ def _event(kind: str, **details: Any) -> None:
         "weight-readiness-boundary",
         "weight-readiness-persistence",
     }:
-        details.setdefault("fixture_authenticity", "synthetic")
+        details.setdefault(
+            "fixture_authenticity",
+            (
+                "contract_enforced"
+                if os.environ.get("REHEARSAL_SCOPE", "exact") == "exact"
+                else "synthetic"
+            ),
+        )
     payload = {
         "at_ns": time.time_ns(),
         "kind": kind,

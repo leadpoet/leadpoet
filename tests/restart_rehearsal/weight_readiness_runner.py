@@ -27,7 +27,9 @@ HASH_C = "sha256:" + "c" * 64
 PCR0 = "e" * 96
 NOW = "2026-07-25T00:00:00Z"
 EPOCH = 99999
+POST_LAUNCH_EPOCH = EPOCH + 1
 NETUID = 71
+FRESH_EPOCH_BUILD_SECONDS = 284
 
 
 def _event(kind: str, **details: Any) -> None:
@@ -66,7 +68,7 @@ def _candidate_sha() -> str:
     return value
 
 
-def _build_handoff() -> dict[str, Any]:
+def _build_handoff(epoch: int) -> dict[str, Any]:
     from leadpoet_canonical.allocation_handoff_v2 import (
         build_allocation_handoff_v2,
     )
@@ -90,14 +92,14 @@ def _build_handoff() -> dict[str, Any]:
         "reward_epochs": 20,
     }
     allocation = allocate_research_lab_epoch(
-        EPOCH,
+        epoch,
         policy,
         [],
         [],
         active_source_add_obligations=[],
     )
     source_state = {
-        "epoch": EPOCH,
+        "epoch": epoch,
         "netuid": NETUID,
         "policy_id": policy["policy_id"],
         "policy": policy,
@@ -108,7 +110,7 @@ def _build_handoff() -> dict[str, Any]:
     bundle = {
         "bundle_id": "research_lab_allocation_bundle:restart-rehearsal",
         "bundle_type": "research_lab_live_allocation_bundle",
-        "epoch": EPOCH,
+        "epoch": epoch,
         "netuid": NETUID,
         "submission_allowed": True,
         "on_chain_submission_allowed": True,
@@ -147,8 +149,8 @@ def _build_handoff() -> dict[str, Any]:
         body=build_execution_receipt_body(
             role=COORDINATOR_ROLE,
             purpose="research_lab.allocation.v2",
-            job_id="allocation:%s" % EPOCH,
-            epoch_id=EPOCH,
+            job_id="allocation:%s" % epoch,
+            epoch_id=epoch,
             sequence=0,
             commit_sha=_candidate_sha(),
             pcr0=PCR0,
@@ -415,8 +417,15 @@ def _install_boundaries(stage: str, scenario: str) -> None:
     direct_calls = {"count": 0}
 
     async def resolve(_epoch):
-        _event("weight-readiness-boundary", boundary="chain_epoch", status="ok")
-        return EPOCH
+        resolved_epoch = EPOCH if stage == "repair" else POST_LAUNCH_EPOCH
+        _event(
+            "weight-readiness-boundary",
+            boundary="chain_epoch",
+            status="ok",
+            stage=stage,
+            epoch=resolved_epoch,
+        )
+        return resolved_epoch
 
     async def source_rewards(**_kwargs):
         _event(
@@ -496,17 +505,44 @@ def _install_boundaries(stage: str, scenario: str) -> None:
             ordinal=ordinal,
             status="ok",
         )
-        return _build_handoff()
+        return _build_handoff(EPOCH)
 
-    def http_handoff(gateway_url, epoch):
-        if gateway_url != "http://localhost:8000" or epoch != EPOCH:
+    def http_handoff(
+        gateway_url,
+        epoch,
+        *,
+        timeout_seconds=90,
+    ):
+        if (
+            gateway_url != "http://localhost:8000"
+            or epoch != POST_LAUNCH_EPOCH
+        ):
             raise AssertionError("HTTP allocation invocation differs")
+        if int(timeout_seconds) < FRESH_EPOCH_BUILD_SECONDS:
+            _event(
+                "weight-readiness-boundary",
+                boundary="localhost_allocation_http",
+                status="failed",
+                timeout_seconds=int(timeout_seconds),
+                simulated_build_seconds=FRESH_EPOCH_BUILD_SECONDS,
+                prelaunch_epoch=EPOCH,
+                postlaunch_epoch=POST_LAUNCH_EPOCH,
+                epoch_rollover=True,
+            )
+            raise TimeoutError(
+                "fresh epoch allocation build exceeded HTTP deadline"
+            )
         _event(
             "weight-readiness-boundary",
             boundary="localhost_allocation_http",
             status="ok",
+            timeout_seconds=int(timeout_seconds),
+            simulated_build_seconds=FRESH_EPOCH_BUILD_SECONDS,
+            prelaunch_epoch=EPOCH,
+            postlaunch_epoch=POST_LAUNCH_EPOCH,
+            epoch_rollover=True,
         )
-        return _build_handoff()
+        return _build_handoff(POST_LAUNCH_EPOCH)
 
     maintenance._resolve_maintenance_epoch = resolve
     maintenance.backfill_source_add_reward_v2_authority = source_rewards

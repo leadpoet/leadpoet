@@ -273,8 +273,8 @@ async def test_weight_readiness_http_mode_uses_validator_attested_fetch(
             "historical_classification_coverage": 1.0,
         }
 
-    def fetch(gateway_url, epoch):
-        fetched.append((gateway_url, epoch))
+    def fetch(gateway_url, epoch, *, timeout_seconds):
+        fetched.append((gateway_url, epoch, timeout_seconds))
         return {"handoff": True}
 
     monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
@@ -303,7 +303,61 @@ async def test_weight_readiness_http_mode_uses_validator_attested_fetch(
     )
 
     assert result["status"] == "ready"
-    assert fetched == [("http://localhost:8000", 24032)]
+    assert fetched == [("http://localhost:8000", 24032, 90)]
+
+
+@pytest.mark.asyncio
+async def test_weight_readiness_http_mode_allows_fresh_epoch_build_deadline(
+    monkeypatch,
+):
+    calls = []
+
+    async def resolve(_epoch):
+        # The post-launch check can cross into the epoch after pre-launch repair.
+        return 24033
+
+    async def report(**_kwargs):
+        return {
+            "ready": True,
+            "receipt_coverage": 1.0,
+            "historical_classification_coverage": 1.0,
+        }
+
+    def fetch(gateway_url, epoch, *, timeout_seconds):
+        calls.append((gateway_url, epoch, timeout_seconds))
+        if timeout_seconds < 284:
+            raise TimeoutError("fresh epoch allocation build exceeded deadline")
+        return {"handoff": True}
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        maintenance,
+        "champion_v2_cutover_readiness_report",
+        report,
+    )
+    monkeypatch.setattr(
+        validator_integration,
+        "fetch_research_lab_attested_allocation_bundle",
+        fetch,
+    )
+    monkeypatch.setattr(
+        readiness,
+        "_validate_handoff",
+        lambda value, **_kwargs: {
+            "allocation_hash": "sha256:" + "a" * 64,
+            "root_receipt_hash": "sha256:" + "b" * 64,
+        },
+    )
+
+    result = await readiness.verify_weight_submission_ready_v2(
+        repair=False,
+        gateway_url="http://localhost:8000",
+        http_attempts=1,
+        http_timeout_seconds=360,
+    )
+
+    assert result["status"] == "ready"
+    assert calls == [("http://localhost:8000", 24033, 360)]
 
 
 @pytest.mark.asyncio
@@ -322,8 +376,8 @@ async def test_weight_readiness_http_mode_retries_transient_failure(
             "historical_classification_coverage": 1.0,
         }
 
-    def fetch(gateway_url, epoch):
-        calls.append((gateway_url, epoch))
+    def fetch(gateway_url, epoch, *, timeout_seconds):
+        calls.append((gateway_url, epoch, timeout_seconds))
         if len(calls) == 1:
             raise RuntimeError("HTTP Error 500: Internal Server Error")
         return {"handoff": True}
@@ -357,8 +411,8 @@ async def test_weight_readiness_http_mode_retries_transient_failure(
 
     assert result["status"] == "ready"
     assert calls == [
-        ("http://localhost:8000", 24032),
-        ("http://localhost:8000", 24032),
+        ("http://localhost:8000", 24032, 90),
+        ("http://localhost:8000", 24032, 90),
     ]
 
 
@@ -378,8 +432,8 @@ async def test_weight_readiness_http_mode_fails_closed_after_retries(
             "historical_classification_coverage": 1.0,
         }
 
-    def fetch(gateway_url, epoch):
-        calls.append((gateway_url, epoch))
+    def fetch(gateway_url, epoch, *, timeout_seconds):
+        calls.append((gateway_url, epoch, timeout_seconds))
         raise RuntimeError("HTTP Error 500: Internal Server Error")
 
     monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
@@ -405,7 +459,7 @@ async def test_weight_readiness_http_mode_fails_closed_after_retries(
             http_retry_seconds=0,
         )
 
-    assert calls == [("http://localhost:8000", 24032)] * 3
+    assert calls == [("http://localhost:8000", 24032, 90)] * 3
 
 
 @pytest.mark.asyncio

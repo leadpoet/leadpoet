@@ -4,8 +4,9 @@
 The gateway and validator restart shell scripts execute unchanged. Privileged
 external services may be adapted. A repository module, script, or long-lived
 process that is substituted is recorded explicitly and invalidates a complete
-restart rehearsal. Substitutions are permitted only in a clearly labelled
-targeted regression run.
+restart rehearsal. A constrained outer container may additionally adapt only
+the production host CPU and memory capacity probes. Other substitutions are
+permitted only in a clearly labelled targeted regression run.
 """
 
 from __future__ import annotations
@@ -44,6 +45,10 @@ EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
     "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID": (
         "alias/leadpoet-research-lab-artifact-signing"
     ),
+}
+EXACT_CAPACITY_SUBSTITUTIONS = {
+    "host.cpu_capacity",
+    "host.memory_capacity",
 }
 
 
@@ -148,6 +153,13 @@ def _rehearsal_scope() -> str:
 
 def _targeted_substitutions_allowed() -> bool:
     return _rehearsal_scope() == TARGETED_REGRESSION_SCOPE
+
+
+def _exact_capacity_substitution_allowed(identity: str) -> bool:
+    return (
+        _rehearsal_scope() == "exact"
+        and identity in EXACT_CAPACITY_SUBSTITUTIONS
+    )
 
 
 def _candidate_root() -> Path:
@@ -273,11 +285,14 @@ def _record_internal_substitution(
     script: str = "",
     process: str = "",
     substitution: str = "",
+    **evidence: Any,
 ) -> int:
+    identity = substitution or module or script or process
     details = {
         "status": "substituted",
         "implementation": "internal_substitution",
         "scope": _rehearsal_scope(),
+        **evidence,
     }
     if module:
         details["module"] = module
@@ -288,7 +303,10 @@ def _record_internal_substitution(
     if substitution:
         details["substitution"] = substitution
     _event(kind, argv, **details)
-    if _targeted_substitutions_allowed():
+    if (
+        _targeted_substitutions_allowed()
+        or _exact_capacity_substitution_allowed(identity)
+    ):
         return 0
     return _fail(
         kind,
@@ -706,6 +724,8 @@ def command_getconf(argv: list[str]) -> int:
         kind="host-command",
         argv=argv,
         substitution="host.cpu_capacity",
+        advertised_vcpus=16,
+        outer_limit=os.environ.get("REHEARSAL_OUTER_CPUS", ""),
     ) != 0:
         return 97
     if argv == ["_NPROCESSORS_CONF"]:
@@ -720,6 +740,8 @@ def command_awk(argv: list[str]) -> int:
             kind="host-command",
             argv=argv,
             substitution="host.memory_capacity",
+            advertised_memory_mib=131072,
+            outer_limit=os.environ.get("REHEARSAL_OUTER_MEMORY", ""),
         ) != 0:
             return 97
         print("131072")

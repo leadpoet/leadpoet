@@ -100,14 +100,19 @@ The rehearsal must produce all of the following:
   exact-commit compatibility gate.
 - [ ] Every contract stage passes.
 - [ ] Zero rejected contract events.
-- [ ] Zero `internal_substitution` events. An adapted repository module,
-  repository script, or long-lived application process invalidates the
-  rehearsal even when its fabricated output has the expected shape.
+- [ ] Zero `internal_substitution` events except the strictly validated
+  `host.cpu_capacity` and `host.memory_capacity` contract probes. An adapted
+  repository module, repository script, or long-lived application process
+  invalidates the rehearsal even when its fabricated output has the expected
+  shape.
 - [ ] Zero synthetic external fixtures. Boundary adapters must consume
   sanitized production-shaped inputs and independently validate exact argv,
   environment names, schemas, hashes, ordering, and failure behavior.
-- [ ] The isolated runtime has the production 16-vCPU/128-GiB gateway resource
-  profile. A reduced developer profile is valid only for targeted regressions.
+- [ ] The isolated runtime uses Linux AMD64 semantics. Its outer Docker limits
+  may be reduced to locally available resources (normally 4 CPUs and 6–8 GiB)
+  only when the strict capacity adapter exposes 16 vCPUs/128 GiB, proves the
+  unchanged launchers requested the exact production resources and topology,
+  and records that physical pressure and performance remain simulated.
 
 Targeted launcher regressions are useful but are not deployment evidence. For
 example, the artifact-persistence restart matrix runs the exact N-1 launcher

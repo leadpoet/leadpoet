@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import hashlib
+import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,6 +17,10 @@ from typing import Iterator, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IMAGE_REPOSITORY = "leadpoet-local-restart-rehearsal"
+TARGET_PLATFORM = "linux/amd64"
+TARGET_IMAGE_ARCHITECTURE = "amd64"
+DEFAULT_OUTER_CPUS = "4"
+DEFAULT_OUTER_MEMORY = "6g"
 PYTHON37_IMAGE = (
     "python@sha256:"
     "b53f496ca43e5af6994f8e316cf03af31050bf7944e0e4a308ad86c001cf028b"
@@ -33,6 +39,7 @@ def _run(
     *,
     cwd: Path = REPO_ROOT,
     capture: bool = False,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(args),
@@ -40,6 +47,7 @@ def _run(
         check=True,
         text=True,
         capture_output=capture,
+        env=env,
     )
 
 
@@ -109,7 +117,80 @@ def _image_tag(harness_sha: str) -> str:
     return f"{IMAGE_REPOSITORY}:{digest.hexdigest()[:16]}"
 
 
+def _pinned_base_image(harness_sha: str) -> str:
+    dockerfile = _git_file(
+        harness_sha,
+        "tests/restart_rehearsal/Dockerfile",
+    ).decode("utf-8")
+    for raw_line in dockerfile.splitlines():
+        tokens = raw_line.strip().split()
+        if not tokens or tokens[0].upper() != "FROM":
+            continue
+        image = next(
+            (token for token in tokens[1:] if not token.startswith("--")),
+            "",
+        )
+        if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", image):
+            raise SystemExit(
+                "restart rehearsal base image must use an exact sha256 digest"
+            )
+        return image
+    raise SystemExit("restart rehearsal Dockerfile has no pinned base image")
+
+
+def _image_architecture(tag: str) -> str:
+    result = _run(
+        [
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "{{.Architecture}}",
+            tag,
+        ],
+        capture=True,
+    )
+    return result.stdout.strip()
+
+
+def _verify_image_architecture(tag: str) -> None:
+    architecture = _image_architecture(tag)
+    if architecture != TARGET_IMAGE_ARCHITECTURE:
+        raise SystemExit(
+            "restart rehearsal image architecture is "
+            f"{architecture or '<unknown>'}; expected {TARGET_IMAGE_ARCHITECTURE}"
+        )
+    result = _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--platform",
+            TARGET_PLATFORM,
+            "--entrypoint",
+            "/usr/bin/uname",
+            tag,
+            "-m",
+        ],
+        capture=True,
+    )
+    if result.stdout.strip() != "x86_64":
+        raise SystemExit(
+            "restart rehearsal image did not execute with Linux AMD64 semantics"
+        )
+
+
 def _build_image(tag: str, *, harness_sha: str) -> None:
+    base_image = _pinned_base_image(harness_sha)
+    _run(
+        [
+            "docker",
+            "pull",
+            "--platform",
+            TARGET_PLATFORM,
+            base_image,
+        ]
+    )
     with tempfile.TemporaryDirectory(prefix="leadpoet-restart-image-") as raw:
         context = Path(raw)
         (context / "requirements.txt").write_bytes(
@@ -132,13 +213,15 @@ def _build_image(tag: str, *, harness_sha: str) -> None:
                 "docker",
                 "build",
                 "--platform",
-                "linux/amd64",
+                TARGET_PLATFORM,
                 "--tag",
                 tag,
                 ".",
             ],
             cwd=context,
+            env={**os.environ, "DOCKER_BUILDKIT": "0"},
         )
+    _verify_image_architecture(tag)
 
 
 def _verify_driver_identity(harness_sha: str) -> None:
@@ -226,13 +309,10 @@ def _isolated_source_snapshot(
 
 
 def _image_exists(tag: str) -> bool:
-    result = subprocess.run(
-        ["docker", "image", "inspect", tag],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    return result.returncode == 0
+    try:
+        return _image_architecture(tag) == TARGET_IMAGE_ARCHITECTURE
+    except subprocess.CalledProcessError:
+        return False
 
 
 def _run_component(
@@ -245,20 +325,21 @@ def _run_component(
     transition: str,
     weight_readiness_scenario: str = "transient_503_recovery",
     scope: str = "exact",
+    outer_cpus: str = DEFAULT_OUTER_CPUS,
+    outer_memory: str = DEFAULT_OUTER_MEMORY,
 ) -> None:
-    exact = scope == "exact"
     command = [
         "docker",
         "run",
         "--rm",
         "--platform",
-        "linux/amd64",
+        TARGET_PLATFORM,
         "--network",
         "none",
         "--cpus",
-        "16" if exact else "4",
+        outer_cpus,
         "--memory",
-        "128g" if exact else "6g",
+        outer_memory,
         "--pids-limit",
         "2048",
         "--security-opt",
@@ -282,6 +363,10 @@ def _run_component(
         ),
         "--env",
         f"REHEARSAL_SCOPE={scope}",
+        "--env",
+        f"REHEARSAL_OUTER_CPUS={outer_cpus}",
+        "--env",
+        f"REHEARSAL_OUTER_MEMORY={outer_memory}",
         tag,
     ]
     _run(command)
@@ -296,7 +381,7 @@ def _run_python37_finalization_probe(source_root: Path) -> None:
             "run",
             "--rm",
             "--platform",
-            "linux/amd64",
+            TARGET_PLATFORM,
             "--network",
             "none",
             "--cpus",
@@ -349,7 +434,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--rebuild-image", action="store_true")
+    parser.add_argument(
+        "--outer-cpus",
+        default=DEFAULT_OUTER_CPUS,
+        help=(
+            "CPU limit for the outer local container. The strict capacity "
+            "adapter still exposes and validates the production 16-vCPU contract."
+        ),
+    )
+    parser.add_argument(
+        "--outer-memory",
+        default=DEFAULT_OUTER_MEMORY,
+        help=(
+            "Memory limit for the outer local container. The strict capacity "
+            "adapter still exposes and validates the production 128-GiB contract."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    try:
+        if float(args.outer_cpus) <= 0:
+            raise ValueError
+    except ValueError:
+        parser.error("--outer-cpus must be a positive number")
+    if not re.fullmatch(r"[1-9][0-9]*(?:[bkmgBKMG])?", args.outer_memory):
+        parser.error(
+            "--outer-memory must be a positive Docker memory value such as 6g"
+        )
 
     from_sha = _git_sha(args.from_sha)
     candidate_sha = _git_sha(args.candidate_sha)
@@ -364,9 +475,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     tag = _image_tag(harness_sha)
     if args.rebuild_image or not _image_exists(tag):
         _build_image(tag, harness_sha=harness_sha)
+    else:
+        _verify_image_architecture(tag)
 
     components = (
         ("gateway", "validator") if args.component == "all" else (args.component,)
+    )
+    print(
+        "REHEARSAL_RESOURCE_PROFILE "
+        f"platform={TARGET_PLATFORM} "
+        f"outer_cpus={args.outer_cpus} "
+        f"outer_memory={args.outer_memory} "
+        "advertised_cpus=16 advertised_memory=128g "
+        "physical_pressure=simulated",
+        flush=True,
     )
     with _isolated_source_snapshot(
         harness_sha=harness_sha,
@@ -407,6 +529,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     transition=transition,
                     weight_readiness_scenario=scenario,
                     scope=args.scope.replace("-", "_"),
+                    outer_cpus=args.outer_cpus,
+                    outer_memory=args.outer_memory,
                 )
     return 0
 

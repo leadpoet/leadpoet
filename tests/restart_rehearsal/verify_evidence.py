@@ -21,6 +21,10 @@ EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
         "alias/leadpoet-research-lab-artifact-signing"
     ),
 }
+APPROVED_EXACT_CAPACITY_SUBSTITUTIONS = {
+    "host.cpu_capacity",
+    "host.memory_capacity",
+}
 KNOWN_INTERNAL_SUBSTITUTION_MODULES = {
     "Leadpoet.utils.restart_epoch_gate",
     "gateway.tee.prepare_gateway_envelopes_v2",
@@ -196,17 +200,54 @@ def verify_rehearsal_integrity(
         for row in rows
         if row.get("fixture_authenticity") == "synthetic"
     ]
-    if scope == "exact" and substitutions:
+    disallowed_exact_substitutions = [
+        row
+        for row in substitutions
+        if _substitution_identity(row)
+        not in APPROVED_EXACT_CAPACITY_SUBSTITUTIONS
+    ]
+    if scope == "exact" and disallowed_exact_substitutions:
         identities = sorted(
             {
                 _substitution_identity(row) or "<unknown>"
-                for row in substitutions
+                for row in disallowed_exact_substitutions
             }
         )
         raise SystemExit(
             "exact restart rehearsal used repository-code substitutions: "
             + ", ".join(identities)
         )
+    if scope == "exact":
+        observed_capacity_substitutions = {
+            _substitution_identity(row)
+            for row in substitutions
+            if _substitution_identity(row)
+            in APPROVED_EXACT_CAPACITY_SUBSTITUTIONS
+        }
+        missing_capacity_substitutions = sorted(
+            APPROVED_EXACT_CAPACITY_SUBSTITUTIONS
+            - observed_capacity_substitutions
+        )
+        if missing_capacity_substitutions:
+            raise SystemExit(
+                "exact restart rehearsal is missing required capacity "
+                "contracts: " + ", ".join(missing_capacity_substitutions)
+            )
+        for row in substitutions:
+            identity = _substitution_identity(row)
+            expected = (
+                {"advertised_vcpus": 16}
+                if identity == "host.cpu_capacity"
+                else {"advertised_memory_mib": 131072}
+            )
+            if (
+                not row.get("outer_limit")
+                or any(row.get(key) != value for key, value in expected.items())
+            ):
+                raise SystemExit(
+                    "exact restart rehearsal capacity contract is invalid: "
+                    f"{identity or '<unknown>'}"
+                )
     if scope == "exact" and synthetic_external_fixtures:
         identities = sorted(
             {

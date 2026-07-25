@@ -21,6 +21,26 @@ EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
         "alias/leadpoet-research-lab-artifact-signing"
     ),
 }
+REQUIRED_EXACT_CAPACITY_CONTRACTS = {
+    "host.cpu_capacity",
+    "host.memory_capacity",
+}
+CLASSIFIED_BOUNDARY_CONTRACTS = {
+    "external.aws",
+    "external.curl",
+    "external.docker",
+    "external.nitro",
+    "host.containerd_state",
+    "host.cpu_capacity",
+    "host.filesystem_capacity",
+    "host.memory_capacity",
+    "host.mount_namespace",
+    "host.process_lookup",
+    "host.process_termination",
+    "host.socket_state",
+    "host.systemd",
+    "host.timing",
+}
 KNOWN_INTERNAL_SUBSTITUTION_MODULES = {
     "Leadpoet.utils.restart_epoch_gate",
     "gateway.tee.prepare_gateway_envelopes_v2",
@@ -196,6 +216,11 @@ def verify_rehearsal_integrity(
         for row in rows
         if row.get("fixture_authenticity") == "synthetic"
     ]
+    boundary_contracts = [
+        row
+        for row in rows
+        if row.get("implementation") == "contract_enforced"
+    ]
     if scope == "exact" and substitutions:
         identities = sorted(
             {
@@ -207,6 +232,65 @@ def verify_rehearsal_integrity(
             "exact restart rehearsal used repository-code substitutions: "
             + ", ".join(identities)
         )
+    if scope == "exact":
+        unknown_boundaries = sorted(
+            {
+                str(row.get("boundary") or "<unknown>")
+                for row in boundary_contracts
+                if row.get("boundary") not in CLASSIFIED_BOUNDARY_CONTRACTS
+            }
+        )
+        if unknown_boundaries:
+            raise SystemExit(
+                "exact restart rehearsal used unclassified boundary "
+                "contracts: " + ", ".join(unknown_boundaries)
+            )
+        observed_capacity_contracts = {
+            str(row.get("boundary"))
+            for row in boundary_contracts
+            if row.get("boundary") in REQUIRED_EXACT_CAPACITY_CONTRACTS
+        }
+        missing_capacity_contracts = sorted(
+            REQUIRED_EXACT_CAPACITY_CONTRACTS
+            - observed_capacity_contracts
+        )
+        if missing_capacity_contracts:
+            raise SystemExit(
+                "exact restart rehearsal is missing required capacity "
+                "contracts: " + ", ".join(missing_capacity_contracts)
+            )
+        for row in boundary_contracts:
+            identity = str(row.get("boundary") or "")
+            if identity not in REQUIRED_EXACT_CAPACITY_CONTRACTS:
+                continue
+            expected = (
+                {"advertised_vcpus": 16}
+                if identity == "host.cpu_capacity"
+                else {"advertised_memory_mib": 131072}
+            )
+            if (
+                not row.get("outer_limit")
+                or any(row.get(key) != value for key, value in expected.items())
+            ):
+                raise SystemExit(
+                    "exact restart rehearsal capacity contract is invalid: "
+                    f"{identity or '<unknown>'}"
+                )
+        malformed_external_fixtures = sorted(
+            {
+                str(row.get("boundary") or "<unknown>")
+                for row in boundary_contracts
+                if str(row.get("boundary") or "").startswith("external.")
+                and row.get("fixture_authenticity")
+                != "sanitized_production_shaped"
+            }
+        )
+        if malformed_external_fixtures:
+            raise SystemExit(
+                "exact restart rehearsal used external fixtures without "
+                "sanitized production-shaped evidence: "
+                + ", ".join(malformed_external_fixtures)
+            )
     if scope == "exact" and synthetic_external_fixtures:
         identities = sorted(
             {
@@ -339,20 +423,24 @@ def main() -> int:
             raise SystemExit(
                 "weight readiness did not execute the candidate production module"
             )
-        module_path = Path(
+        canonical_module_path = Path(
             "/home/ec2-user/leadpoet_repo/"
             "gateway/tee/verify_weight_submission_ready_v2.py"
         )
         module_hash = __import__("hashlib").sha256(
-            module_path.read_bytes()
+            canonical_module_path.read_bytes()
         ).hexdigest()
         if any(
-            row.get("module_path") != str(module_path)
+            row.get("source_git_path")
+            != "gateway/tee/verify_weight_submission_ready_v2.py"
+            or row.get("source_kind")
+            not in {"candidate_archive", "candidate_checkout"}
             or row.get("module_sha256") != module_hash
+            or row.get("source_sha256") != module_hash
             for row in weight_rows
         ):
             raise SystemExit(
-                "weight readiness source identity differs from the candidate checkout"
+                "weight readiness source identity differs from the candidate commit"
             )
 
         repair_rows = [

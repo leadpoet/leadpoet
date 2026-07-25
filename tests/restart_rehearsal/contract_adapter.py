@@ -4,8 +4,9 @@
 The gateway and validator restart shell scripts execute unchanged. Privileged
 external services may be adapted. A repository module, script, or long-lived
 process that is substituted is recorded explicitly and invalidates a complete
-restart rehearsal. Substitutions are permitted only in a clearly labelled
-targeted regression run.
+restart rehearsal. A constrained outer container may additionally adapt only
+the production host CPU and memory capacity probes. Other substitutions are
+permitted only in a clearly labelled targeted regression run.
 """
 
 from __future__ import annotations
@@ -44,6 +45,22 @@ EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
     "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID": (
         "alias/leadpoet-research-lab-artifact-signing"
     ),
+}
+CLASSIFIED_BOUNDARY_CONTRACTS = {
+    "external.aws",
+    "external.curl",
+    "external.docker",
+    "external.nitro",
+    "host.containerd_state",
+    "host.cpu_capacity",
+    "host.filesystem_capacity",
+    "host.memory_capacity",
+    "host.mount_namespace",
+    "host.process_lookup",
+    "host.process_termination",
+    "host.socket_state",
+    "host.systemd",
+    "host.timing",
 }
 
 
@@ -94,7 +111,12 @@ def _save_state(handle: io.TextIOWrapper, value: dict[str, Any]) -> None:
 def _event(kind: str, argv: Iterable[str], **details: Any) -> None:
     _ensure_state()
     if kind in {"aws", "curl", "docker", "nitro"}:
-        details.setdefault("fixture_authenticity", "synthetic")
+        details.setdefault("implementation", "contract_enforced")
+        details.setdefault("boundary", f"external.{kind}")
+        details.setdefault(
+            "fixture_authenticity",
+            "sanitized_production_shaped",
+        )
     payload = {
         "at_ns": time.time_ns(),
         "kind": kind,
@@ -273,11 +295,13 @@ def _record_internal_substitution(
     script: str = "",
     process: str = "",
     substitution: str = "",
+    **evidence: Any,
 ) -> int:
     details = {
         "status": "substituted",
         "implementation": "internal_substitution",
         "scope": _rehearsal_scope(),
+        **evidence,
     }
     if module:
         details["module"] = module
@@ -295,6 +319,31 @@ def _record_internal_substitution(
         argv,
         "repository implementation substitution invalidates exact rehearsal",
     )
+
+
+def _record_boundary_contract(
+    *,
+    kind: str,
+    argv: list[str],
+    boundary: str,
+    **evidence: Any,
+) -> int:
+    if boundary not in CLASSIFIED_BOUNDARY_CONTRACTS:
+        return _fail(
+            kind,
+            argv,
+            f"unclassified boundary contract: {boundary}",
+        )
+    _event(
+        kind,
+        argv,
+        status="contract_enforced",
+        implementation="contract_enforced",
+        scope=_rehearsal_scope(),
+        boundary=boundary,
+        **evidence,
+    )
+    return 0
 
 
 def _write_json(path: str | Path, value: dict[str, Any]) -> None:
@@ -613,10 +662,10 @@ def command_systemctl(argv: list[str]) -> int:
     accepted = {"start", "stop", "restart", "reset-failed", "is-active"}
     if not argv or argv[0] not in accepted:
         return _fail("systemctl", argv, "unknown systemctl operation")
-    if _record_internal_substitution(
+    if _record_boundary_contract(
         kind="systemctl",
         argv=argv,
-        substitution="host.systemd",
+        boundary="host.systemd",
     ) != 0:
         return 97
     _event("systemctl", argv, status="ok")
@@ -635,10 +684,10 @@ def command_curl(argv: list[str]) -> int:
         _event("curl", argv, status="ok", operation="download", url=url)
         return 0
     if url.startswith(("http://localhost", "http://127.0.0.1")):
-        if _record_internal_substitution(
+        if _record_boundary_contract(
             kind="curl",
             argv=argv,
-            substitution="http.local_gateway",
+            boundary="external.curl",
         ) != 0:
             return 97
     if url.endswith("/build-info"):
@@ -686,10 +735,10 @@ def command_sudo(argv: list[str]) -> int:
 
 
 def command_df(argv: list[str]) -> int:
-    if _record_internal_substitution(
+    if _record_boundary_contract(
         kind="host-command",
         argv=argv,
-        substitution="host.filesystem_capacity",
+        boundary="host.filesystem_capacity",
     ) != 0:
         return 97
     if any("output=avail" in arg for arg in argv):
@@ -702,10 +751,12 @@ def command_df(argv: list[str]) -> int:
 
 
 def command_getconf(argv: list[str]) -> int:
-    if _record_internal_substitution(
+    if _record_boundary_contract(
         kind="host-command",
         argv=argv,
-        substitution="host.cpu_capacity",
+        boundary="host.cpu_capacity",
+        advertised_vcpus=16,
+        outer_limit=os.environ.get("REHEARSAL_OUTER_CPUS", ""),
     ) != 0:
         return 97
     if argv == ["_NPROCESSORS_CONF"]:
@@ -716,10 +767,12 @@ def command_getconf(argv: list[str]) -> int:
 
 def command_awk(argv: list[str]) -> int:
     if argv and argv[-1] == "/proc/meminfo" and "MemTotal" in " ".join(argv):
-        if _record_internal_substitution(
+        if _record_boundary_contract(
             kind="host-command",
             argv=argv,
-            substitution="host.memory_capacity",
+            boundary="host.memory_capacity",
+            advertised_memory_mib=131072,
+            outer_limit=os.environ.get("REHEARSAL_OUTER_MEMORY", ""),
         ) != 0:
             return 97
         print("131072")
@@ -729,10 +782,10 @@ def command_awk(argv: list[str]) -> int:
 
 
 def command_sleep(argv: list[str]) -> int:
-    if _record_internal_substitution(
+    if _record_boundary_contract(
         kind="host-command",
         argv=argv,
-        substitution="host.timing",
+        boundary="host.timing",
     ) != 0:
         return 97
     _event("sleep", argv, status="shortened")
@@ -741,10 +794,10 @@ def command_sleep(argv: list[str]) -> int:
 
 
 def command_ss(argv: list[str]) -> int:
-    if _record_internal_substitution(
+    if _record_boundary_contract(
         kind="host-command",
         argv=argv,
-        substitution="host.socket_state",
+        boundary="host.socket_state",
     ) != 0:
         return 97
     _event("ss", argv, status="ok")
@@ -755,10 +808,10 @@ def command_ctr(argv: list[str]) -> int:
     allowed_tokens = {"containers", "tasks", "namespaces", "list", "-q", "-n", "moby"}
     if any(item not in allowed_tokens for item in argv):
         return _fail("ctr", argv, "unknown containerd operation")
-    if _record_internal_substitution(
+    if _record_boundary_contract(
         kind="host-command",
         argv=argv,
-        substitution="host.containerd_state",
+        boundary="host.containerd_state",
     ) != 0:
         return 97
     _event("ctr", argv, status="ok")
@@ -771,10 +824,10 @@ def command_nsenter(argv: list[str]) -> int:
     command = argv[argv.index("--") + 1 :]
     if not command:
         return _fail("nsenter", argv, "nsenter command is empty")
-    if _record_internal_substitution(
+    if _record_boundary_contract(
         kind="host-command",
         argv=argv,
-        substitution="host.mount_namespace",
+        boundary="host.mount_namespace",
     ) != 0:
         return 97
     _event("nsenter", argv, status="delegated")
@@ -783,10 +836,10 @@ def command_nsenter(argv: list[str]) -> int:
 
 
 def command_pgrep(argv: list[str]) -> int:
-    if _record_internal_substitution(
+    if _record_boundary_contract(
         kind="host-command",
         argv=argv,
-        substitution="host.process_lookup",
+        boundary="host.process_lookup",
     ) != 0:
         return 97
     pattern = argv[-1] if argv else ""
@@ -812,10 +865,10 @@ def command_pgrep(argv: list[str]) -> int:
 
 
 def command_pkill(argv: list[str]) -> int:
-    if _record_internal_substitution(
+    if _record_boundary_contract(
         kind="host-command",
         argv=argv,
-        substitution="host.process_termination",
+        boundary="host.process_termination",
     ) != 0:
         return 97
     pattern = argv[-1] if argv else ""
@@ -934,6 +987,84 @@ def _module_restart_gate(argv: list[str]) -> int:
     if captured and not Path(captured).is_file():
         return _fail("python-module", argv, "captured restart report is missing")
     print(json.dumps(report, sort_keys=True))
+    return 0
+
+
+def _module_gateway_restart_preflight(argv: list[str]) -> int:
+    config_value = _arg_value(argv, "--config-dir")
+    config_dir = Path(config_value)
+    deploy_commit = _arg_value(argv, "--deploy-commit")
+    configured_plan = os.environ.get("GATEWAY_DEPLOY_PLAN_FILE", "").strip()
+    plan_candidates = (
+        [Path(configured_plan)]
+        if configured_plan
+        else sorted(Path("/tmp").glob("gateway_git_deploy.*.json"))
+    )
+    matching_plans = []
+    for candidate in plan_candidates:
+        try:
+            document = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if document.get("target_sha") == deploy_commit:
+            matching_plans.append(candidate)
+    plan_file = matching_plans[0] if len(matching_plans) == 1 else Path("")
+    script = Path.cwd() / "scripts/gateway_git_deploy.py"
+    if (
+        not config_value
+        or deploy_commit != _candidate_sha()
+        or len(matching_plans) != 1
+        or not script.is_file()
+    ):
+        return _fail(
+            "python-module",
+            argv,
+            "gateway restart preflight tree-verification inputs are incomplete",
+        )
+    command = [
+        REAL_PYTHON,
+        str(script),
+        "verify-tree",
+        "--plan-file",
+        str(plan_file),
+        "--materialized-root",
+        str(Path.cwd()),
+        "--phase",
+        "prepared_archive",
+        "--strict-extras",
+    ]
+    _record_production_script(script, command[1:])
+    result = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(result.stderr, file=sys.stderr)
+        return int(result.returncode)
+    try:
+        evidence = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return _fail(
+            "python-module",
+            argv,
+            "gateway restart preflight tree evidence is invalid",
+        )
+    _write_json(
+        config_dir / "gateway-candidate-tree-preflight.json",
+        evidence,
+    )
+    print(
+        json.dumps(
+            {
+                "status": "ready",
+                "module": "gateway.tee.restart_preflight_v2",
+                "prepared_candidate_tree": evidence,
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -1307,8 +1438,15 @@ def command_python(argv: list[str]) -> int:
             ) != 0:
                 return 97
             result = _module_envelopes(module_argv)
+        elif module == "gateway.tee.restart_preflight_v2":
+            if _record_internal_substitution(
+                kind="python-module",
+                argv=argv,
+                module=module,
+            ) != 0:
+                return 97
+            result = _module_gateway_restart_preflight(module_argv)
         elif module in {
-            "gateway.tee.restart_preflight_v2",
             "validator_tee.host.docker_operation_guard_v2",
             "gateway.research_lab.provider_profiles_v2",
             "gateway.utils.tee_v2_bootstrap",

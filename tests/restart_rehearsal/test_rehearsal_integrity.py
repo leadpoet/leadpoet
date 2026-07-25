@@ -7,6 +7,8 @@ import subprocess
 import pytest
 
 from scripts import run_local_restart_rehearsal as rehearsal
+from tests.restart_rehearsal import contract_adapter
+from tests.restart_rehearsal import weight_readiness_runner
 from tests.restart_rehearsal.verify_evidence import (
     EXPECTED_GATEWAY_PRIVATE_MODEL_ENV,
     verify_gateway_private_model_environment,
@@ -15,6 +17,25 @@ from tests.restart_rehearsal.verify_evidence import (
 
 
 COMMIT = "1" * 40
+
+
+def _exact_capacity_rows() -> list[dict]:
+    return [
+        {
+            "kind": "host-command",
+            "boundary": "host.cpu_capacity",
+            "implementation": "contract_enforced",
+            "advertised_vcpus": 16,
+            "outer_limit": "4",
+        },
+        {
+            "kind": "host-command",
+            "boundary": "host.memory_capacity",
+            "implementation": "contract_enforced",
+            "advertised_memory_mib": 131072,
+            "outer_limit": "6g",
+        },
+    ]
 
 
 def test_gateway_rehearsal_requires_canonical_private_model_environment() -> None:
@@ -101,6 +122,36 @@ def test_rehearsal_source_snapshot_is_independent_and_complete(
     assert not snapshot.exists()
 
 
+def test_weight_readiness_accepts_candidate_archive_and_checkout(
+    tmp_path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout_module = checkout / "gateway/tee/verify_weight_submission_ready_v2.py"
+    checkout_module.parent.mkdir(parents=True)
+    checkout_module.write_text("# checkout\n", encoding="utf-8")
+    assert weight_readiness_runner._candidate_module_location(
+        checkout_module,
+        checkout_root=checkout,
+        archive_root=tmp_path,
+    ) == (
+        "candidate_checkout",
+        "gateway/tee/verify_weight_submission_ready_v2.py",
+    )
+
+    archive = tmp_path / "gateway-v2-preflight.A1b2"
+    archive_module = archive / "gateway/tee/verify_weight_submission_ready_v2.py"
+    archive_module.parent.mkdir(parents=True)
+    archive_module.write_text("# archive\n", encoding="utf-8")
+    assert weight_readiness_runner._candidate_module_location(
+        archive_module,
+        checkout_root=checkout,
+        archive_root=tmp_path,
+    ) == (
+        "candidate_archive",
+        "gateway/tee/verify_weight_submission_ready_v2.py",
+    )
+
+
 def test_rehearsal_resolves_forward_and_rollback_transitions(monkeypatch) -> None:
     relationships = {
         ("from", "target"): True,
@@ -180,6 +231,169 @@ def test_exact_rehearsal_rejects_repository_module_substitution() -> None:
         )
 
 
+def test_exact_rehearsal_accepts_strict_capacity_substitutions() -> None:
+    verify_rehearsal_integrity(
+        _exact_capacity_rows(),
+        candidate_sha=COMMIT,
+        scope="exact",
+    )
+
+
+def test_exact_rehearsal_accepts_classified_host_boundary_contracts() -> None:
+    rows = [
+        *_exact_capacity_rows(),
+        {
+            "kind": "host-command",
+            "boundary": "host.process_lookup",
+            "implementation": "contract_enforced",
+        },
+        {
+            "kind": "host-command",
+            "boundary": "host.filesystem_capacity",
+            "implementation": "contract_enforced",
+        },
+    ]
+
+    verify_rehearsal_integrity(
+        rows,
+        candidate_sha=COMMIT,
+        scope="exact",
+    )
+
+
+def test_exact_rehearsal_rejects_unclassified_boundary_contract() -> None:
+    rows = [
+        *_exact_capacity_rows(),
+        {
+            "kind": "host-command",
+            "boundary": "host.unclassified",
+            "implementation": "contract_enforced",
+        },
+    ]
+
+    with pytest.raises(SystemExit, match="unclassified boundary contracts"):
+        verify_rehearsal_integrity(
+            rows,
+            candidate_sha=COMMIT,
+            scope="exact",
+        )
+
+
+@pytest.mark.parametrize(
+    "missing_identity",
+    ("host.cpu_capacity", "host.memory_capacity"),
+)
+def test_exact_rehearsal_requires_both_capacity_substitutions(
+    missing_identity,
+) -> None:
+    rows = _exact_capacity_rows()
+    rows = [
+        row for row in rows if row["boundary"] != missing_identity
+    ]
+
+    with pytest.raises(
+        SystemExit,
+        match=f"missing required capacity contracts: {missing_identity}",
+    ):
+        verify_rehearsal_integrity(
+            rows,
+            candidate_sha=COMMIT,
+            scope="exact",
+        )
+
+
+def test_exact_rehearsal_rejects_incomplete_capacity_evidence() -> None:
+    rows = [
+        {
+            "kind": "host-command",
+            "boundary": "host.cpu_capacity",
+            "implementation": "contract_enforced",
+            "advertised_vcpus": 16,
+            "outer_limit": "4",
+        },
+        {
+            "kind": "host-command",
+            "boundary": "host.memory_capacity",
+            "implementation": "contract_enforced",
+            "advertised_memory_mib": 131072,
+            "outer_limit": "",
+        }
+    ]
+
+    with pytest.raises(SystemExit, match="capacity contract is invalid"):
+        verify_rehearsal_integrity(
+            rows,
+            candidate_sha=COMMIT,
+            scope="exact",
+        )
+
+
+def test_rehearsal_component_uses_constrained_outer_profile(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        rehearsal,
+        "_run",
+        lambda args, **_kwargs: calls.append(args),
+    )
+
+    rehearsal._run_component(
+        "rehearsal:test",
+        source_root=tmp_path,
+        component="gateway",
+        from_sha="1" * 40,
+        candidate_sha="2" * 40,
+        transition="forward",
+        scope="exact",
+        outer_cpus="3.5",
+        outer_memory="7g",
+    )
+
+    command = calls[0]
+    assert command[command.index("--platform") + 1] == "linux/amd64"
+    assert command[command.index("--cpus") + 1] == "3.5"
+    assert command[command.index("--memory") + 1] == "7g"
+    assert "REHEARSAL_OUTER_CPUS=3.5" in command
+    assert "REHEARSAL_OUTER_MEMORY=7g" in command
+
+
+def test_exact_adapter_separates_boundaries_from_repository_substitutions(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REHEARSAL_SCOPE", "exact")
+    monkeypatch.setattr(
+        contract_adapter,
+        "_event",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        contract_adapter,
+        "_fail",
+        lambda *_args, **_kwargs: 97,
+    )
+
+    assert (
+        contract_adapter._record_boundary_contract(
+            kind="host-command",
+            argv=["getconf", "_NPROCESSORS_CONF"],
+            boundary="host.cpu_capacity",
+            advertised_vcpus=16,
+            outer_limit="4",
+        )
+        == 0
+    )
+    assert (
+        contract_adapter._record_internal_substitution(
+            kind="python-module",
+            argv=["-m", "gateway.tee.restart_preflight_v2"],
+            module="gateway.tee.restart_preflight_v2",
+        )
+        == 97
+    )
+
+
 def test_targeted_regression_is_distinct_and_rejects_unknown_substitution() -> None:
     known = [
         {
@@ -235,6 +449,7 @@ def test_targeted_regression_classifies_dependency_bootstrap() -> None:
 
 def test_exact_rehearsal_rejects_synthetic_external_fixture() -> None:
     rows = [
+        *_exact_capacity_rows(),
         {
             "kind": "aws",
             "operation": "secretsmanager",
@@ -287,8 +502,9 @@ def test_production_stage_requires_exact_candidate_source_identity(tmp_path) -> 
         "source_kind": "candidate_checkout",
         "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
     }
+    rows = [*_exact_capacity_rows(), row]
     verify_rehearsal_integrity(
-        [row],
+        rows,
         candidate_sha=commit,
         scope="exact",
         candidate_roots=(tmp_path,),
@@ -297,7 +513,7 @@ def test_production_stage_requires_exact_candidate_source_identity(tmp_path) -> 
     row["source_sha256"] = "0" * 64
     with pytest.raises(SystemExit, match="Git identity"):
         verify_rehearsal_integrity(
-            [row],
+            rows,
             candidate_sha=commit,
             scope="exact",
             candidate_roots=(tmp_path,),
@@ -307,7 +523,7 @@ def test_production_stage_requires_exact_candidate_source_identity(tmp_path) -> 
     source.write_text("VALUE = 2\n", encoding="utf-8")
     with pytest.raises(SystemExit, match="changed after execution"):
         verify_rehearsal_integrity(
-            [row],
+            rows,
             candidate_sha=commit,
             scope="exact",
             candidate_roots=(tmp_path,),
@@ -370,7 +586,7 @@ def test_rollback_accepts_installed_launcher_source_bound_to_from_sha(
     }
 
     verify_rehearsal_integrity(
-        [row],
+        [*_exact_capacity_rows(), row],
         from_sha=installed,
         candidate_sha=candidate,
         scope="exact",
@@ -379,7 +595,7 @@ def test_rollback_accepts_installed_launcher_source_bound_to_from_sha(
 
     with pytest.raises(SystemExit, match="source identity is invalid"):
         verify_rehearsal_integrity(
-            [row],
+            [*_exact_capacity_rows(), row],
             from_sha="2" * 40,
             candidate_sha=candidate,
             scope="exact",

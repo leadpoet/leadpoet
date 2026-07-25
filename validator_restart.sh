@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA="bd71fdda2aca4e17d07b3e55f56a66f7bd1bbdc3"
+V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA="94f1c923d092d12cbab95ef8d86317420eede621"
 VALIDATOR_ROOT="${VALIDATOR_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
 VALIDATOR_ENV_FILE="${VALIDATOR_ENV_FILE:-/home/ec2-user/.config/leadpoet/validator.env}"
 LEADPOET_VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-leadpoet/prod/validator/env}"
@@ -17,6 +17,8 @@ VALIDATOR_V2_RELEASE_ARCHIVE_ROOT="${VALIDATOR_V2_RELEASE_ARCHIVE_ROOT:-/home/ec
 VALIDATOR_V2_HOTKEY_CONFIG="${VALIDATOR_V2_HOTKEY_CONFIG:-/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json}"
 VALIDATOR_V2_HOTKEY_ENVELOPE="${VALIDATOR_V2_HOTKEY_ENVELOPE:-/home/ec2-user/.config/leadpoet/validator-hotkey-envelope-v2.json}"
 VALIDATOR_DOCKER_OPERATION_LOCK_HELPER="$VALIDATOR_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
+VALIDATOR_PINNED_GATEWAY_VERIFIER_SOURCE="$VALIDATOR_ROOT/validator_tee/scripts/verify_pinned_gateway_release_v2.sh"
+VALIDATOR_PINNED_GATEWAY_VERIFIER=""
 VALIDATOR_V2_RELEASE_BUCKET="${VALIDATOR_V2_RELEASE_BUCKET:-leadpoet-attested-v2-artifacts-493765492819}"
 VALIDATOR_V2_RELEASE_PREFIX="${VALIDATOR_V2_RELEASE_PREFIX:-attested-v2/releases}"
 VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
@@ -73,67 +75,21 @@ if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
 fi
 
 verify_pinned_gateway_release() {
-  local gateway_health gateway_build_info gateway_release_evidence
   echo "Verifying the pinned gateway release is active on ${VALIDATOR_DEPLOY_SHA}"
-  gateway_health="$(
-    curl --fail --silent --show-error \
-      --connect-timeout 5 --max-time 35 \
-      "${VALIDATOR_V2_GATEWAY_URL%/}/health/v2-authority"
-  )"
-  gateway_build_info="$(
-    curl --fail --silent --show-error \
-      --connect-timeout 5 --max-time 35 \
-      "${VALIDATOR_V2_GATEWAY_URL%/}/build-info"
-  )"
-  gateway_release_evidence="$(
-    curl --fail --silent --show-error \
-      --connect-timeout 5 --max-time 35 \
-      "${VALIDATOR_V2_GATEWAY_URL%/}/weights/v2/release-evidence/${VALIDATOR_DEPLOY_SHA}"
-  )"
-  "$VALIDATOR_PYTHON_BIN" - \
-    "$VALIDATOR_DEPLOY_SHA" \
-    "$gateway_health" \
-    "$gateway_build_info" \
-    "$gateway_release_evidence" <<'PY'
-import json
-import sys
+  bash "$VALIDATOR_PINNED_GATEWAY_VERIFIER" \
+    "$VALIDATOR_V2_GATEWAY_URL" \
+    "$VALIDATOR_DEPLOY_SHA"
+}
 
-expected_commit = str(sys.argv[1] or "").lower()
-
-
-def load_json(raw, label):
-    try:
-        value = json.loads(raw)
-    except (TypeError, ValueError):
-        raise SystemExit("pinned gateway %s is invalid JSON" % label)
-    if not isinstance(value, dict):
-        raise SystemExit("pinned gateway %s is not an object" % label)
-    return value
-
-
-health = load_json(sys.argv[2], "V2 authority")
-if (
-    health.get("status") != "ready"
-    or str(health.get("commit_sha") or "").lower() != expected_commit
-):
-    raise SystemExit("pinned gateway V2 authority is not ready on the selected commit")
-
-build_info = load_json(sys.argv[3], "build-info")
-if str(build_info.get("git_commit") or "").lower() != expected_commit:
-    raise SystemExit("pinned gateway build-info differs from the selected commit")
-
-release = load_json(sys.argv[4], "release evidence")
-if (
-    release.get("schema_version") != "leadpoet.auditor_release_evidence.v2"
-    or str(release.get("commit_sha") or "").lower() != expected_commit
-):
-    raise SystemExit("pinned gateway release evidence differs from the selected commit")
-
-print(json.dumps({
-    "status": "pinned_gateway_release_aligned",
-    "commit_sha": expected_commit,
-}, sort_keys=True))
-PY
+stop_pinned_validator_after_alignment_failure() {
+  echo "Stopping pinned validator after persistent gateway release mismatch" >&2
+  docker ps -aq \
+    --filter "name=leadpoet-validator" \
+    --filter "name=leadpoet-qual-worker" \
+    --filter "name=leadpoet-ff-worker" \
+    | xargs -r docker stop >/dev/null 2>&1 || true
+  sudo pkill -TERM -f "validator_tee.host.chain_relay_v2" 2>/dev/null || true
+  sudo nitro-cli terminate-enclave --all >/dev/null 2>&1 || true
 }
 
 VALIDATOR_ENV_EXPORT="$(mktemp /tmp/validator_env_export.XXXXXX)"
@@ -141,6 +97,9 @@ SECRET_TMP="$(mktemp /tmp/validator_secret_env.XXXXXX)"
 
 cleanup() {
   rm -f "$VALIDATOR_ENV_EXPORT" "$SECRET_TMP"
+  if [ -n "$VALIDATOR_PINNED_GATEWAY_VERIFIER" ]; then
+    rm -f "$VALIDATOR_PINNED_GATEWAY_VERIFIER"
+  fi
 }
 trap cleanup EXIT
 
@@ -171,6 +130,22 @@ if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
     echo "ERROR: selected validator commit predates the supported stateful V2 rollback floor" >&2
     exit 1
   fi
+  echo "Validating exact-commit V2 rollback compatibility"
+  python3 "$VALIDATOR_ROOT/Leadpoet/utils/exact_commit_restart_v2.py" \
+    --repo-root "$VALIDATOR_ROOT" \
+    --selected-commit "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" \
+    --branch-ref origin/main \
+    --compatibility-floor "$V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA"
+  if [ ! -r "$VALIDATOR_PINNED_GATEWAY_VERIFIER_SOURCE" ]; then
+    echo "ERROR: pinned gateway release verifier is unavailable" >&2
+    exit 1
+  fi
+  VALIDATOR_PINNED_GATEWAY_VERIFIER="$(
+    mktemp /tmp/verify_pinned_gateway_release_v2.XXXXXX
+  )"
+  cp "$VALIDATOR_PINNED_GATEWAY_VERIFIER_SOURCE" \
+    "$VALIDATOR_PINNED_GATEWAY_VERIFIER"
+  chmod 700 "$VALIDATOR_PINNED_GATEWAY_VERIFIER"
   git checkout --detach "$REQUESTED_VALIDATOR_DEPLOY_COMMIT"
   echo "Selected operator-requested validator commit: $REQUESTED_VALIDATOR_DEPLOY_COMMIT"
 else
@@ -685,7 +660,10 @@ if [ "$(docker inspect -f '{{.State.Running}}' leadpoet-validator-main)" != "tru
 fi
 if [ "$VALIDATOR_EXACT_RELEASE_PINNED" = "1" ]; then
   echo "Rechecking same-SHA gateway alignment after validator startup"
-  verify_pinned_gateway_release
+  if ! verify_pinned_gateway_release; then
+    stop_pinned_validator_after_alignment_failure
+    exit 1
+  fi
 fi
 leadpoet_release_docker_operation_lock_v2
 if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ]; then

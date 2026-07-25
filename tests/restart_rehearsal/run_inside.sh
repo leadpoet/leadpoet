@@ -59,10 +59,17 @@ case "$TRANSITION" in
 esac
 
 git init --bare -q /srv/origin.git
-git --git-dir=/srv/origin.git fetch -q /source \
-  "$CANDIDATE_SHA:refs/heads/main"
-git --git-dir=/srv/origin.git fetch -q /source \
-  "$FROM_SHA:refs/heads/rehearsal-deployed"
+if [ "$TRANSITION" = "rollback" ]; then
+  git --git-dir=/srv/origin.git fetch -q /source \
+    "$FROM_SHA:refs/heads/main"
+  git --git-dir=/srv/origin.git fetch -q /source \
+    "$CANDIDATE_SHA:refs/heads/rehearsal-target"
+else
+  git --git-dir=/srv/origin.git fetch -q /source \
+    "$CANDIDATE_SHA:refs/heads/main"
+  git --git-dir=/srv/origin.git fetch -q /source \
+    "$FROM_SHA:refs/heads/rehearsal-deployed"
+fi
 
 mkdir -p \
   /home/ec2-user/.config/leadpoet \

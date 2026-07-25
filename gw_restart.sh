@@ -2,7 +2,7 @@
 set -euo pipefail
 
 GATEWAY_GIT_DEPLOY_PROTOCOL="1"
-V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA="bd71fdda2aca4e17d07b3e55f56a66f7bd1bbdc3"
+V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA="94f1c923d092d12cbab95ef8d86317420eede621"
 LEADPOET_REPO_ROOT="${LEADPOET_REPO_ROOT:-/home/ec2-user/leadpoet_repo}"
 GATEWAY_ROOT="${GATEWAY_ROOT:-$LEADPOET_REPO_ROOT/gateway}"
 GATEWAY_LOG_ROOT="${GATEWAY_LOG_ROOT:-/home/ec2-user/gateway}"
@@ -965,6 +965,14 @@ if ! git -C "$LEADPOET_REPO_ROOT" merge-base --is-ancestor \
     "$V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA" "$PREPARED_GATEWAY_SHA"; then
   echo "ERROR: selected gateway commit predates the supported stateful V2 rollback floor" >&2
   exit 1
+fi
+if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]; then
+  echo "Validating exact-commit V2 rollback compatibility"
+  python3 "$LEADPOET_REPO_ROOT/Leadpoet/utils/exact_commit_restart_v2.py" \
+    --repo-root "$LEADPOET_REPO_ROOT" \
+    --selected-commit "$PREPARED_GATEWAY_SHA" \
+    --branch-ref origin/main \
+    --compatibility-floor "$V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA"
 fi
 
 echo "Materializing the prepared commit for pre-shutdown V2 tooling"

@@ -65,6 +65,9 @@ def test_pinned_restart_requires_same_gateway_release_before_shutdown():
     deploy = Path(
         "validator_models/containerizing/deploy_dynamic.sh"
     ).read_text(encoding="utf-8")
+    verifier = Path(
+        "validator_tee/scripts/verify_pinned_gateway_release_v2.sh"
+    ).read_text(encoding="utf-8")
 
     prestart_verify = script.index(
         'echo "Checking same-SHA gateway alignment before stopping validator"'
@@ -78,20 +81,48 @@ def test_pinned_restart_requires_same_gateway_release_before_shutdown():
         'echo "Rechecking same-SHA gateway alignment after validator startup"'
     )
     assert release_ready < prestart_verify < shutdown < start < poststart_verify
-    assert script.count("verify_pinned_gateway_release") == 3
+    assert "\n  verify_pinned_gateway_release\n" in script
+    assert "\n  if ! verify_pinned_gateway_release; then\n" in script
     for endpoint in (
         "/health/v2-authority",
         "/build-info",
         "/weights/v2/release-evidence/",
     ):
-        assert endpoint in script
+        assert endpoint in verifier
     assert 'export VALIDATOR_EXACT_RELEASE_PINNED=1' in script
+    assert "verify_pinned_gateway_release_v2.sh" in script
+    assert "stop_pinned_validator_after_alignment_failure" in script
+    assert "if ! verify_pinned_gateway_release; then" in script
     assert (
         '-e VALIDATOR_EXACT_RELEASE_PINNED="${VALIDATOR_EXACT_RELEASE_PINNED:-0}"'
         in deploy
     )
     assert 'git -C "$REPO_DIR" symbolic-ref -q HEAD' in deploy
     assert "pinned gateway V2 authority is not ready" in deploy
+    assert "gateway_attempts = 12 if gateway_exact_release_pinned else 1" in deploy
+    assert "for attempt in range(1, gateway_attempts + 1):" in deploy
+
+
+def test_exact_restart_checks_current_auditor_contract_before_checkout():
+    gateway = Path("gw_restart.sh").read_text(encoding="utf-8")
+    validator = Path("validator_restart.sh").read_text(encoding="utf-8")
+
+    assert "Leadpoet/utils/exact_commit_restart_v2.py" in gateway
+    assert "Leadpoet/utils/exact_commit_restart_v2.py" in validator
+    gateway_compatibility = gateway.index(
+        "Validating exact-commit V2 rollback compatibility"
+    )
+    gateway_shutdown = gateway.index(
+        "Stopping existing gateway and Research Lab worker processes"
+    )
+    validator_compatibility = validator.index(
+        "Validating exact-commit V2 rollback compatibility"
+    )
+    validator_checkout = validator.index(
+        'git checkout --detach "$REQUESTED_VALIDATOR_DEPLOY_COMMIT"'
+    )
+    assert gateway_compatibility < gateway_shutdown
+    assert validator_compatibility < validator_checkout
 
 
 def test_restart_loads_one_canonical_cutover_manifest():

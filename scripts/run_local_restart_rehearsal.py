@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from typing import Sequence
+from typing import Iterator, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -148,6 +149,82 @@ def _verify_driver_identity(harness_sha: str) -> None:
         )
 
 
+@contextmanager
+def _isolated_source_snapshot(
+    *,
+    harness_sha: str,
+    required_shas: Sequence[str],
+) -> Iterator[Path]:
+    """Copy frozen Git objects so sequential containers cannot share mutations."""
+
+    with tempfile.TemporaryDirectory(
+        prefix="leadpoet-restart-source-"
+    ) as raw:
+        source = Path(raw) / "source"
+        _run(
+            [
+                "git",
+                "clone",
+                "--quiet",
+                "--no-hardlinks",
+                "--no-checkout",
+                str(REPO_ROOT),
+                str(source),
+            ]
+        )
+        for commit in required_shas:
+            present = subprocess.run(
+                ["git", "-C", str(source), "cat-file", "-e", f"{commit}^{{commit}}"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if present.returncode != 0:
+                _run(
+                    [
+                        "git",
+                        "-C",
+                        str(source),
+                        "fetch",
+                        "--quiet",
+                        str(REPO_ROOT),
+                        commit,
+                    ]
+                )
+            _run(
+                [
+                    "git",
+                    "-C",
+                    str(source),
+                    "cat-file",
+                    "-e",
+                    f"{commit}^{{commit}}",
+                ]
+            )
+        _run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "checkout",
+                "--quiet",
+                "--detach",
+                harness_sha,
+            ]
+        )
+        _run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "fsck",
+                "--strict",
+                "--no-dangling",
+            ]
+        )
+        yield source
+
+
 def _image_exists(tag: str) -> bool:
     result = subprocess.run(
         ["docker", "image", "inspect", tag],
@@ -161,6 +238,7 @@ def _image_exists(tag: str) -> bool:
 def _run_component(
     tag: str,
     *,
+    source_root: Path,
     component: str,
     from_sha: str,
     candidate_sha: str,
@@ -188,7 +266,7 @@ def _run_component(
         "--tmpfs",
         "/tmp:rw,exec,nosuid,size=2g",
         "--mount",
-        f"type=bind,src={REPO_ROOT},dst=/source,readonly",
+        f"type=bind,src={source_root},dst=/source,readonly",
         "--env",
         f"REHEARSAL_COMPONENT={component}",
         "--env",
@@ -209,7 +287,7 @@ def _run_component(
     _run(command)
 
 
-def _run_python37_finalization_probe() -> None:
+def _run_python37_finalization_probe(source_root: Path) -> None:
     """Exercise the measured enclave's post-broadcast path under CPython 3.7."""
 
     _run(
@@ -230,7 +308,7 @@ def _run_python37_finalization_probe() -> None:
             "--security-opt",
             "no-new-privileges",
             "--mount",
-            f"type=bind,src={REPO_ROOT},dst=/source,readonly",
+            f"type=bind,src={source_root},dst=/source,readonly",
             "--env",
             "PYTHONPATH=/source",
             "--workdir",
@@ -290,41 +368,46 @@ def main(argv: Sequence[str] | None = None) -> int:
     components = (
         ("gateway", "validator") if args.component == "all" else (args.component,)
     )
-    if "validator" in components:
-        print(
-            "Running validator enclave finalization proof under CPython 3.7",
-            flush=True,
-        )
-        _run_python37_finalization_probe()
-    for component in components:
-        scenarios = (
-            (
-                "transient_503_recovery",
-                "exhausted_503",
-                "authenticated_403",
-            )
-            if (
-                component == "gateway"
-                and args.scope == "weight-readiness-regression"
-            )
-            else ("transient_503_recovery",)
-        )
-        for scenario in scenarios:
+    with _isolated_source_snapshot(
+        harness_sha=harness_sha,
+        required_shas=(from_sha, candidate_sha),
+    ) as source_root:
+        if "validator" in components:
             print(
-                f"Running isolated {component} restart rehearsal "
-                f"{from_sha[:12]} -> {candidate_sha[:12]} "
-                f"transition={transition} scenario={scenario}",
+                "Running validator enclave finalization proof under CPython 3.7",
                 flush=True,
             )
-            _run_component(
-                tag,
-                component=component,
-                from_sha=from_sha,
-                candidate_sha=candidate_sha,
-                transition=transition,
-                weight_readiness_scenario=scenario,
-                scope=args.scope.replace("-", "_"),
+            _run_python37_finalization_probe(source_root)
+        for component in components:
+            scenarios = (
+                (
+                    "transient_503_recovery",
+                    "exhausted_503",
+                    "authenticated_403",
+                )
+                if (
+                    component == "gateway"
+                    and args.scope == "weight-readiness-regression"
+                )
+                else ("transient_503_recovery",)
             )
+            for scenario in scenarios:
+                print(
+                    f"Running isolated {component} restart rehearsal "
+                    f"{from_sha[:12]} -> {candidate_sha[:12]} "
+                    f"transition={transition} scenario={scenario}",
+                    flush=True,
+                )
+                _run_component(
+                    tag,
+                    source_root=source_root,
+                    component=component,
+                    from_sha=from_sha,
+                    candidate_sha=candidate_sha,
+                    transition=transition,
+                    weight_readiness_scenario=scenario,
+                    scope=args.scope.replace("-", "_"),
+                )
     return 0
 
 

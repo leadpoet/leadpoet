@@ -184,30 +184,47 @@ def _source_identity(path: Path) -> dict[str, str]:
         raise RuntimeError(f"production source is unavailable: {resolved}")
     relative, source_kind = _candidate_git_path(resolved, root)
     candidate_sha = _candidate_sha()
+    source_commit = candidate_sha
+    if source_kind == "candidate_checkout":
+        source_commit = subprocess.run(
+            ["/usr/bin/git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        from_sha = os.environ.get("REHEARSAL_FROM_SHA", "").strip()
+        if source_commit not in {candidate_sha, from_sha}:
+            raise RuntimeError(
+                "production source checkout is neither the installed nor "
+                f"candidate commit: {source_commit}"
+            )
+        if source_commit == from_sha and from_sha != candidate_sha:
+            source_kind = "installed_checkout"
     result = subprocess.run(
         [
             "/usr/bin/git",
             "-C",
             str(root),
             "show",
-            f"{candidate_sha}:{relative.as_posix()}",
+            f"{source_commit}:{relative.as_posix()}",
         ],
         check=False,
         capture_output=True,
     )
     if result.returncode != 0:
         raise RuntimeError(
-            "production source is not present at the frozen candidate SHA: "
+            "production source is not present at its bound commit: "
             f"{relative.as_posix()}"
         )
     source_bytes = resolved.read_bytes()
     if source_bytes != result.stdout:
         raise RuntimeError(
-            "production source bytes differ from the frozen candidate SHA: "
+            "production source bytes differ from its bound commit: "
             f"{relative.as_posix()}"
         )
     return {
         "candidate_sha": candidate_sha,
+        "source_commit": source_commit,
         "source_path": str(resolved),
         "source_git_path": relative.as_posix(),
         "source_kind": source_kind,

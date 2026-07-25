@@ -24,10 +24,10 @@ relaunched gateway. Normal restarts therefore always follow the fetched head of
 
 ## One-Time Cutover
 
-Invoke the cutover operator at or before official SN71 block 310. The operator
+Invoke the cutover operator at or before official SN71 block 300. The operator
 must capture that start as its first operational action. The same captured
 start remains valid while GitHub attestation, release acquisition, gateway
-restart, and validator restart continue after block 310; later stages must not
+restart, and validator restart continue after block 300; later stages must not
 reapply the deadline. The intended migration commit must already be on the
 configured GitHub branch.
 
@@ -149,9 +149,16 @@ validator release completed successfully. Select one full 40-character commit
 that:
 
 - Is reachable from `origin/main`.
-- Is at or after the stateful V2 compatibility floor.
+- Is at or after the stateful V2 compatibility floor, currently
+  `94f1c923d092d12cbab95ef8d86317420eede621`.
+  The floor includes bounded slow post-rollover allocation readiness and a
+  source-consistent protected-workflow identity; older attestations are not
+  sufficient rollback evidence.
 - Has one immutable release channel containing matching gateway and validator
   manifests.
+- Has the same protected V2 workflow contract as current `origin/main`, so
+  auditors running current public code recompute and verify the same canonical
+  weights.
 - Has passed the exact reverse restart rehearsal from the currently installed
   launcher.
 
@@ -162,8 +169,10 @@ handoff checks to pass. Only then restart the validator with
 
 The pinned validator restart fails before shutdown unless the public gateway
 reports the same commit through V2 authority health, build-info, and immutable
-release evidence. A normal unpinned validator restart retains its independent
-gateway-startup behavior.
+release evidence. These same-SHA checks retry bounded transient failures but
+remain fail closed; a persistent post-start mismatch stops the pinned validator.
+A normal unpinned validator restart retains its independent gateway-startup
+behavior.
 
 Rollback runs the same enclave rebuild and restart workflow. It does not reuse
 newer EIFs or bypass PCR0, attestation, import, or health checks. A commit from

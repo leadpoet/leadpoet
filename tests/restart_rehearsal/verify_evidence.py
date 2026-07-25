@@ -111,6 +111,7 @@ def _substitution_identity(row: dict) -> str:
 
 def _verify_production_identity(
     row: dict,
+    from_sha: str | None,
     candidate_sha: str,
     candidate_roots: tuple[Path, ...],
 ) -> None:
@@ -118,10 +119,24 @@ def _verify_production_identity(
     source_git_path = str(row.get("source_git_path") or "")
     source_kind = str(row.get("source_kind") or "")
     source_hash = str(row.get("source_sha256") or "")
+    source_commit = str(row.get("source_commit") or candidate_sha)
+    allowed_source_commits = {candidate_sha}
+    if from_sha:
+        allowed_source_commits.add(from_sha)
     if (
         row.get("candidate_sha") != candidate_sha
+        or source_commit not in allowed_source_commits
         or not source_git_path
-        or source_kind not in {"candidate_checkout", "candidate_archive"}
+        or source_kind
+        not in {"installed_checkout", "candidate_checkout", "candidate_archive"}
+        or (
+            source_kind == "installed_checkout"
+            and (not from_sha or source_commit != from_sha)
+        )
+        or (
+            source_kind in {"candidate_checkout", "candidate_archive"}
+            and source_commit != candidate_sha
+        )
     ):
         raise SystemExit(
             "candidate production source identity is invalid: %r" % row
@@ -135,7 +150,7 @@ def _verify_production_identity(
                 "-C",
                 str(root),
                 "show",
-                f"{candidate_sha}:{source_git_path}",
+                f"{source_commit}:{source_git_path}",
             ],
             check=False,
             capture_output=True,
@@ -154,7 +169,7 @@ def _verify_production_identity(
                 "candidate production source bytes changed after execution: %r"
                 % row
             )
-    elif source_kind != "candidate_archive":
+    elif source_kind not in {"candidate_archive", "installed_checkout"}:
         raise SystemExit(
             "candidate checkout source disappeared after execution: %r" % row
         )
@@ -163,6 +178,7 @@ def _verify_production_identity(
 def verify_rehearsal_integrity(
     rows: list[dict],
     *,
+    from_sha: str | None = None,
     candidate_sha: str,
     scope: str,
     candidate_roots: tuple[Path, ...] = (
@@ -229,6 +245,7 @@ def verify_rehearsal_integrity(
         if implementation in {"production_module", "production_script"}:
             _verify_production_identity(
                 row,
+                from_sha,
                 candidate_sha,
                 candidate_roots,
             )
@@ -270,6 +287,7 @@ def main() -> int:
         raise SystemExit(f"contract adapter rejected operations: {rejected!r}")
     verify_rehearsal_integrity(
         rows,
+        from_sha=from_sha,
         candidate_sha=candidate_sha,
         scope=scope,
     )

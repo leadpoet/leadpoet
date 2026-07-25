@@ -800,31 +800,43 @@ gateway_url = str(os.environ.get("VALIDATOR_V2_GATEWAY_URL") or "").rstrip("/")
 gateway_health = {}
 gateway_authority_status = "deferred"
 gateway_authority_error_type = ""
+gateway_exact_release_pinned = (
+    os.environ.get("VALIDATOR_EXACT_RELEASE_PINNED") == "1"
+)
 if gateway_url:
-    try:
-        with urllib.request.urlopen(
-            gateway_url + "/health/v2-authority",
-            timeout=30,
-        ) as response:
-            gateway_health = json.load(response)
-    except Exception as exc:
-        gateway_authority_error_type = type(exc).__name__
-    else:
-        live_commit = str(gateway_health.get("commit_sha") or "")
-        expected_commit = str(os.environ.get("VALIDATOR_V2_DEPLOY_COMMIT") or "")
-        if (
-            gateway_health.get("status") == "ready"
-            and live_commit
-            and live_commit == expected_commit
-        ):
-            gateway_authority_status = "ready"
+    gateway_attempts = 12 if gateway_exact_release_pinned else 1
+    for attempt in range(1, gateway_attempts + 1):
+        gateway_health = {}
+        gateway_authority_error_type = ""
+        try:
+            with urllib.request.urlopen(
+                gateway_url + "/health/v2-authority",
+                timeout=30,
+            ) as response:
+                gateway_health = json.load(response)
+        except Exception as exc:
+            gateway_authority_error_type = type(exc).__name__
+            gateway_authority_status = "deferred"
         else:
+            live_commit = str(gateway_health.get("commit_sha") or "")
+            expected_commit = str(
+                os.environ.get("VALIDATOR_V2_DEPLOY_COMMIT") or ""
+            )
+            if (
+                gateway_health.get("status") == "ready"
+                and live_commit
+                and live_commit == expected_commit
+            ):
+                gateway_authority_status = "ready"
+                break
             gateway_authority_status = "not_aligned"
+        if attempt < gateway_attempts:
+            time.sleep(3)
 else:
     gateway_authority_error_type = "gateway_url_not_configured"
 
 if (
-    os.environ.get("VALIDATOR_EXACT_RELEASE_PINNED") == "1"
+    gateway_exact_release_pinned
     and gateway_authority_status != "ready"
 ):
     raise SystemExit(

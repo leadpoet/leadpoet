@@ -51,6 +51,10 @@ def test_gateway_and_validator_share_stateful_v2_rollback_floor() -> None:
     assert gateway_floor is not None
     assert validator_floor is not None
     assert gateway_floor.group(1) == validator_floor.group(1)
+    assert (
+        gateway_floor.group(1)
+        == "94f1c923d092d12cbab95ef8d86317420eede621"
+    )
     assert "predates the supported stateful V2 rollback floor" in gateway
     assert "predates the supported stateful V2 rollback floor" in validator
     subprocess.run(
@@ -64,6 +68,18 @@ def test_gateway_and_validator_share_stateful_v2_rollback_floor() -> None:
         cwd=ROOT,
         check=True,
     )
+    floor_weights = subprocess.run(
+        [
+            "git",
+            "show",
+            gateway_floor.group(1) + ":gateway/api/weights.py",
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert '@router.get("/v2/release-evidence/{commit_sha}")' in floor_weights
 
 
 @pytest.mark.parametrize("epoch_block", [0, 299, 300])

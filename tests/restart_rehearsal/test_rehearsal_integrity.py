@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 import subprocess
 
 import pytest
@@ -55,6 +56,51 @@ def test_rehearsal_driver_must_match_frozen_harness_commit(
         rehearsal._verify_driver_identity(COMMIT)
 
 
+def test_rehearsal_source_snapshot_is_independent_and_complete(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Restart Test"],
+        check=True,
+    )
+    source_file = repo / "source.txt"
+    source_file.write_text("frozen\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "source.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-qm", "frozen source"],
+        check=True,
+    )
+    commit = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    monkeypatch.setattr(rehearsal, "REPO_ROOT", repo)
+
+    with rehearsal._isolated_source_snapshot(
+        harness_sha=commit,
+        required_shas=(commit,),
+    ) as snapshot:
+        assert snapshot != repo
+        assert (snapshot / "source.txt").read_text(encoding="utf-8") == "frozen\n"
+        assert subprocess.run(
+            ["git", "-C", str(snapshot), "cat-file", "-e", f"{commit}^{{commit}}"],
+            check=False,
+        ).returncode == 0
+        assert not (snapshot / ".git" / "objects" / "info" / "alternates").exists()
+
+    assert not snapshot.exists()
+
+
 def test_rehearsal_resolves_forward_and_rollback_transitions(monkeypatch) -> None:
     relationships = {
         ("from", "target"): True,
@@ -86,6 +132,25 @@ def test_rehearsal_rejects_unrelated_transition(monkeypatch) -> None:
 
     with pytest.raises(SystemExit, match="unrelated"):
         rehearsal._resolve_transition("from", "target", "auto")
+
+
+def test_rollback_rehearsal_keeps_newer_commit_on_origin_main() -> None:
+    script = (
+        Path(__file__).resolve().parent / "run_inside.sh"
+    ).read_text(encoding="utf-8")
+    rollback_refs = script.index(
+        'if [ "$TRANSITION" = "rollback" ]; then'
+    )
+    component_setup = script.index(
+        'if [ "$COMPONENT" = "gateway" ]; then'
+    )
+    section = script[rollback_refs:component_setup]
+    rollback_section, forward_section = section.split("\nelse\n", 1)
+
+    assert '"$FROM_SHA:refs/heads/main"' in rollback_section
+    assert '"$CANDIDATE_SHA:refs/heads/rehearsal-target"' in rollback_section
+    assert '"$CANDIDATE_SHA:refs/heads/main"' not in rollback_section
+    assert '"$CANDIDATE_SHA:refs/heads/main"' in forward_section
 
 
 def test_exact_rehearsal_rejects_repository_module_substitution() -> None:
@@ -206,6 +271,7 @@ def test_production_stage_requires_exact_candidate_source_identity(tmp_path) -> 
         "module": "gateway.real_stage",
         "implementation": "production_module",
         "candidate_sha": commit,
+        "source_commit": commit,
         "source_path": str(source),
         "source_git_path": "module.py",
         "source_kind": "candidate_checkout",
@@ -233,6 +299,79 @@ def test_production_stage_requires_exact_candidate_source_identity(tmp_path) -> 
         verify_rehearsal_integrity(
             [row],
             candidate_sha=commit,
+            scope="exact",
+            candidate_roots=(tmp_path,),
+        )
+
+
+def test_rollback_accepts_installed_launcher_source_bound_to_from_sha(
+    tmp_path,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.name", "Restart Test"],
+        check=True,
+    )
+    source = tmp_path / "compatibility.py"
+    source.write_text("VALUE = 'installed'\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", "compatibility.py"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-qm", "rollback target"],
+        check=True,
+    )
+    candidate = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source.write_text("VALUE = 'installed launcher'\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", "compatibility.py"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-qm", "installed launcher"],
+        check=True,
+    )
+    installed = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    row = {
+        "kind": "python-script",
+        "script": "compatibility.py",
+        "implementation": "production_script",
+        "candidate_sha": candidate,
+        "source_commit": installed,
+        "source_path": str(source),
+        "source_git_path": "compatibility.py",
+        "source_kind": "installed_checkout",
+        "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    }
+
+    verify_rehearsal_integrity(
+        [row],
+        from_sha=installed,
+        candidate_sha=candidate,
+        scope="exact",
+        candidate_roots=(tmp_path,),
+    )
+
+    with pytest.raises(SystemExit, match="source identity is invalid"):
+        verify_rehearsal_integrity(
+            [row],
+            from_sha="2" * 40,
+            candidate_sha=candidate,
             scope="exact",
             candidate_roots=(tmp_path,),
         )

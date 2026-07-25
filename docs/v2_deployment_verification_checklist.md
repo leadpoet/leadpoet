@@ -63,6 +63,10 @@ python3 scripts/run_local_restart_rehearsal.py \
 
 Then rerun the forward transition from that supported previous release to the
 same frozen candidate. The three commands must use one unchanged candidate SHA.
+The rollback target must also pass
+`Leadpoet/utils/exact_commit_restart_v2.py` against current `origin/main`;
+protected-workflow differences are an intentional fail-closed rejection because
+current public auditors would otherwise recompute a different canonical bundle.
 
 The rehearsal must produce all of the following:
 

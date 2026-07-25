@@ -394,6 +394,63 @@ def _persisted_rows(graph):
 
 
 @pytest.mark.asyncio
+async def test_v2_edge_value_query_orders_multi_page_results_by_primary_key(
+    monkeypatch,
+):
+    children = [f"child-{index:02d}" for index in range(42)]
+    edge_rows = [
+        {
+            "child_receipt_hash": child,
+            "parent_receipt_hash": f"parent-{child}-{parent:02d}",
+        }
+        for child in children
+        for parent in range(28)
+    ]
+    edge_rows.extend(
+        {
+            "child_receipt_hash": child,
+            "parent_receipt_hash": f"parent-{child}-28",
+        }
+        for child in children[:16]
+    )
+    assert len(edge_rows) == 1192
+
+    async def _select_all(
+        table,
+        *,
+        filters,
+        order_by,
+        max_rows,
+        **_kwargs,
+    ):
+        assert table == attested_v2_store.EDGE_TABLE
+        assert filters == (("child_receipt_hash", "in", children),)
+        assert order_by == (
+            ("child_receipt_hash", False),
+            ("parent_receipt_hash", False),
+        )
+        assert max_rows == 10000
+        return list(reversed(edge_rows))
+
+    monkeypatch.setattr(attested_v2_store, "select_all", _select_all)
+
+    selected = await attested_v2_store._select_by_values(
+        attested_v2_store.EDGE_TABLE,
+        field="child_receipt_hash",
+        values=children,
+        key_fields=("child_receipt_hash", "parent_receipt_hash"),
+    )
+
+    assert len(selected) == 1192
+    assert len(
+        {
+            (row["child_receipt_hash"], row["parent_receipt_hash"])
+            for row in selected
+        }
+    ) == 1192
+
+
+@pytest.mark.asyncio
 async def test_v2_graph_persistence_batch_verifies_existing_ancestry(monkeypatch):
     graph = _graph(with_transport=True, with_parent=True)
     rows = _persisted_rows(graph)

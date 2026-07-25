@@ -54,26 +54,42 @@ def _run(
     *,
     transient_first: bool,
     returned_commit: str = COMMIT,
+    coordination_file: Path | None = None,
+    coordination_max_attempts: int | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], int]:
     bin_dir, state = _fake_commands(
         tmp_path,
         transient_first=transient_first,
     )
+    env = {
+        **os.environ,
+        "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+        "FAKE_CURL_STATE": str(state),
+        "FAKE_COMMIT": returned_commit,
+        "TRANSIENT_FIRST": "1" if transient_first else "0",
+    }
+    if coordination_file is not None:
+        env["VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE"] = str(
+            coordination_file
+        )
+    if coordination_max_attempts is not None:
+        env["VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS"] = str(
+            coordination_max_attempts
+        )
     result = subprocess.run(
         ["bash", str(VERIFIER), "http://gateway.invalid:8000", COMMIT],
         check=False,
         capture_output=True,
         text=True,
-        env={
-            **os.environ,
-            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
-            "FAKE_CURL_STATE": str(state),
-            "FAKE_COMMIT": returned_commit,
-            "TRANSIENT_FIRST": "1" if transient_first else "0",
-        },
+        env=env,
         timeout=10,
     )
-    return result, int(state.read_text(encoding="utf-8").strip())
+    requests = (
+        int(state.read_text(encoding="utf-8").strip())
+        if state.exists()
+        else 0
+    )
+    return result, requests
 
 
 def test_pinned_gateway_verifier_recovers_from_transient_transport_failure(
@@ -99,3 +115,59 @@ def test_pinned_gateway_verifier_fails_closed_after_bounded_mismatch(
     assert result.returncode == 1
     assert "did not align after 12 attempts" in result.stderr
     assert requests == 36
+
+
+def test_pinned_gateway_verifier_rejects_unbounded_wait(
+    tmp_path: Path,
+) -> None:
+    bin_dir, _ = _fake_commands(tmp_path, transient_first=False)
+    result = subprocess.run(
+        ["bash", str(VERIFIER), "http://gateway.invalid:8000", COMMIT],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS": "1201",
+        },
+        timeout=10,
+    )
+
+    assert result.returncode == 2
+    assert "must be between 1 and 1200" in result.stderr
+
+
+def test_pinned_gateway_verifier_requires_coordinator_completion(
+    tmp_path: Path,
+) -> None:
+    barrier = tmp_path / "gateway-restart-complete"
+    barrier.write_text("b" * 40 + "\n", encoding="utf-8")
+    result, requests = _run(
+        tmp_path,
+        transient_first=False,
+        coordination_file=barrier,
+        coordination_max_attempts=2,
+    )
+
+    assert result.returncode == 1
+    assert "coordinated gateway restart did not complete after 2 attempts" in (
+        result.stderr
+    )
+    assert requests == 0
+
+
+def test_pinned_gateway_verifier_accepts_matching_coordinator_completion(
+    tmp_path: Path,
+) -> None:
+    barrier = tmp_path / "gateway-restart-complete"
+    barrier.write_text(COMMIT + "\n", encoding="utf-8")
+    result, requests = _run(
+        tmp_path,
+        transient_first=False,
+        coordination_file=barrier,
+    )
+
+    assert result.returncode == 0
+    assert "pinned_gateway_release_aligned" in result.stdout
+    assert requests == 3

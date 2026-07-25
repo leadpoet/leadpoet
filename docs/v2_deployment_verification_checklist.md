@@ -67,6 +67,20 @@ The rollback target must also pass
 `Leadpoet/utils/exact_commit_restart_v2.py` against current `origin/main`;
 protected-workflow differences are an intentional fail-closed rejection because
 current public auditors would otherwise recompute a different canonical bundle.
+The operator-facing paired rollback must use the same selected SHA for both
+hosts:
+
+```bash
+bash scripts/restart_attested_release_local.sh \
+  --commit <supported-previous-release-sha>
+```
+
+Use a single-component mode only when the other runtime is already verified on
+that exact SHA. The paired command must capture the validator restart start,
+keep the existing validator running until the gateway finishes its complete
+authenticated restart, and release the validator only through the exact-SHA
+coordination marker. A failed gateway restart must leave the marker absent,
+terminate the waiting SSH process, and preserve the existing validator.
 
 The rehearsal must produce all of the following:
 
@@ -76,6 +90,9 @@ The rehearsal must produce all of the following:
 - [ ] Exact rollback succeeds when the change affects restart or release
   selection.
 - [ ] Exact roll-forward succeeds again from the rollback target.
+- [ ] The paired operator coordinator completes gateway before validator,
+  rejects single-component SHA mismatches, and does not release the validator
+  after a gateway failure.
 - [ ] The rollback runtime checkout resolves to the selected historical SHA,
   while both installed host restart controllers remain byte-identical to the
   newer installed launcher. A second rollback invocation must still reach the

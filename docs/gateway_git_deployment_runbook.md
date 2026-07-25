@@ -165,13 +165,35 @@ that:
 - Has passed the exact reverse restart rehearsal from the currently installed
   launcher.
 
-Restart the gateway first with `gw_restart.sh --commit <full-sha>`. Require its
-normal build-info, V2 authority, attestation, and authenticated allocation
-handoff checks to pass. Only then restart the validator with
+When invoking the two lower-level controllers manually, complete the gateway
+with `gw_restart.sh --commit <full-sha>` first. Require its normal build-info,
+V2 authority, attestation, and authenticated allocation handoff checks to pass.
+Only then invoke
 `/home/ec2-user/validator_restart.sh --commit <the-same-full-sha>`. The host
 validator controller is installed by every successful current release and
 remains outside the detached runtime checkout, so the same command remains
-available after rollback.
+available after rollback. Prefer the coordinated command below: it captures the
+validator restart window first but does not stop the running validator until
+the gateway has completed.
+
+The canonical operator command coordinates both restarts while preserving one
+restart-start decision and one selected release:
+
+```bash
+bash scripts/restart_attested_release_local.sh \
+  --commit <full-sha>
+```
+
+Use `--component gateway` or `--component validator` only when the other
+component is already running that exact commit. A mismatch fails before the
+requested component restarts and instructs the operator to use the default
+paired mode. In paired mode the validator captures its official restart start
+first but remains running behind a unique coordination barrier until the
+gateway restart has completed its authenticated handoff and final deployment
+record. The coordinator does not approve a release itself: both installed
+restart controllers still independently require the immutable attested release
+channel, exact manifests and artifacts, PCR0 verification, current-auditor
+workflow compatibility, and their normal readiness checks.
 
 The pinned validator restart fails before shutdown unless the public gateway
 reports the same commit through V2 authority health, build-info, and immutable

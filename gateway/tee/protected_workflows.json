@@ -92,12 +92,12 @@
       "symbol": "load_business_artifact_graph_v2"
     },
     {
-      "ast_sha256": "sha256:2c527f66167c194960b9d048552d3cfa6aeb2d439368ec22aa063f04f2fc44d3",
+      "ast_sha256": "sha256:c71495d4a2845ca21291138293034bddcb17dd9f3a057d2e06f000f806368eba",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "load_business_artifact_graphs_by_ref_v2"
     },
     {
-      "ast_sha256": "sha256:041e564331dadabb64ead09538fb31c9bda66ce523116069c58c2ff121934f51",
+      "ast_sha256": "sha256:51484f80584c8c2481cc16cd2be3568758b0df8ed10e083de6455cfeba9e833f",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "load_business_artifact_graphs_v2"
     },
@@ -107,7 +107,7 @@
       "symbol": "load_receipt_graph_v2"
     },
     {
-      "ast_sha256": "sha256:5635e475ab1968d2bd624020842b91a8159728e18832acae5475c64690c3e835",
+      "ast_sha256": "sha256:086cfce4890ecc9753c4b2efa41c2c8ab042f66c2040a023cb2255b07142ee17",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "load_receipt_graphs_v2"
     },
@@ -1107,7 +1107,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:a6f4ae064f02b2a9b6e6de09a2e0e65580788647c7022cfe5de85cff73fa5bad",
+  "manifest_hash": "sha256:a64be3a048d47228683116aedf5e3e389125c9f3905133dc542e549dba545c0d",
   "protected_source_commit": "5987a8344b69379fad871fa84058631afb39c3c0",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

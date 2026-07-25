@@ -31,6 +31,50 @@ async def test_standalone_maintenance_epoch_uses_direct_capable_resolver(
 
 
 @pytest.mark.asyncio
+async def test_storage_read_preflight_exercises_full_authority_read_without_repair(
+    monkeypatch,
+):
+    calls = []
+
+    async def resolve(epoch):
+        calls.append(("resolve", epoch))
+        return 24153
+
+    async def report(**kwargs):
+        calls.append(("report", kwargs))
+        return {
+            "ready": False,
+            "receipt_coverage": 1.0,
+            "historical_classification_coverage": 0.75,
+        }
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        maintenance,
+        "champion_v2_cutover_readiness_report",
+        report,
+    )
+
+    result = await readiness.verify_weight_submission_storage_readable_v2(
+        netuid=71,
+    )
+
+    assert result == {
+        "schema_version": "leadpoet.weight_submission_storage_readiness.v2",
+        "status": "readable",
+        "epoch": 24153,
+        "netuid": 71,
+        "authority_ready": False,
+        "receipt_coverage": 1.0,
+        "historical_classification_coverage": 0.75,
+    }
+    assert calls == [
+        ("resolve", None),
+        ("report", {"epoch": 24153, "netuid": 71}),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_weight_readiness_repairs_then_validates_exact_handoff(
     monkeypatch,
 ):

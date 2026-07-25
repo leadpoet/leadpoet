@@ -1141,6 +1141,22 @@ if ! install_gateway_python_dependencies; then
   exit 1
 fi
 
+echo "Preflighting durable V2 validator weight authority before production shutdown"
+GATEWAY_DEPLOY_STAGE="validator_weight_input_storage_preflight"
+export GATEWAY_DEPLOY_STAGE
+if ! (
+    set -a
+    . "$ENV_CLONE"
+    set +a
+    run_prepared_gateway_module \
+      gateway.tee.verify_weight_submission_ready_v2 \
+      --storage-read-preflight
+  ); then
+  echo "ERROR: durable V2 validator weight authority is not readable" >&2
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
+fi
+
 echo "Validating the prepared V2 release before production shutdown"
   GATEWAY_DEPLOY_STAGE="v2_pre_shutdown_preflight"
   export GATEWAY_DEPLOY_STAGE

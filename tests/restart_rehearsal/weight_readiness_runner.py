@@ -417,7 +417,11 @@ def _install_boundaries(stage: str, scenario: str) -> None:
     direct_calls = {"count": 0}
 
     async def resolve(_epoch):
-        resolved_epoch = EPOCH if stage == "repair" else POST_LAUNCH_EPOCH
+        resolved_epoch = (
+            EPOCH
+            if stage in {"storage_preflight", "repair"}
+            else POST_LAUNCH_EPOCH
+        )
         _event(
             "weight-readiness-boundary",
             boundary="chain_epoch",
@@ -565,7 +569,9 @@ def main() -> int:
     )
     passthrough = sys.argv[1:]
     stage = (
-        "repair"
+        "storage_preflight"
+        if "--storage-read-preflight" in passthrough
+        else "repair"
         if "--repair" in passthrough
         else "http_handoff"
         if "--gateway-url" in passthrough

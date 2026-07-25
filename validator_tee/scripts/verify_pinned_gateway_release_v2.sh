@@ -10,10 +10,42 @@ GATEWAY_URL="${1%/}"
 EXPECTED_COMMIT="$2"
 MAX_ATTEMPTS=12
 RETRY_DELAY_SECONDS=3
+COORDINATION_FILE="${VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE:-}"
+COORDINATION_MAX_ATTEMPTS="${VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS:-600}"
 
 if ! [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
   echo "ERROR: pinned gateway commit must be a lowercase full Git SHA" >&2
   exit 2
+fi
+if [ -n "$COORDINATION_FILE" ] && [[ "$COORDINATION_FILE" != /* ]]; then
+  echo "ERROR: VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE must be absolute" >&2
+  exit 2
+fi
+if ! [[ "$COORDINATION_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] \
+    || [ "$COORDINATION_MAX_ATTEMPTS" -gt 1200 ]; then
+  echo "ERROR: VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS must be between 1 and 1200" >&2
+  exit 2
+fi
+
+if [ -n "$COORDINATION_FILE" ]; then
+  coordination_ready=0
+  for attempt in $(seq 1 "$COORDINATION_MAX_ATTEMPTS"); do
+    if [ -r "$COORDINATION_FILE" ] \
+        && [ "$(cat "$COORDINATION_FILE")" = "$EXPECTED_COMMIT" ]; then
+      coordination_ready=1
+      break
+    fi
+    if [ "$attempt" -lt "$COORDINATION_MAX_ATTEMPTS" ]; then
+      if [ "$attempt" -eq 1 ] || [ $((attempt % 20)) -eq 0 ]; then
+        echo "Waiting for the coordinated gateway restart to complete ($attempt/$COORDINATION_MAX_ATTEMPTS)" >&2
+      fi
+      sleep "$RETRY_DELAY_SECONDS"
+    fi
+  done
+  if [ "$coordination_ready" != "1" ]; then
+    echo "ERROR: coordinated gateway restart did not complete after $COORDINATION_MAX_ATTEMPTS attempts" >&2
+    exit 1
+  fi
 fi
 
 for attempt in $(seq 1 "$MAX_ATTEMPTS"); do

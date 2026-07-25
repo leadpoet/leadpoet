@@ -11,6 +11,8 @@ import os
 import pytest
 
 from gateway.research_lab.config import (
+    DEFAULT_PRIVATE_MODEL_MANIFEST_URI,
+    DEFAULT_PRIVATE_REPO_BRANCH,
     MIN_IMPROVEMENT_THRESHOLD_POINTS,
     ResearchLabGatewayConfig,
 )
@@ -48,6 +50,43 @@ def test_dataclass_defaults_match_env_parsing_defaults(clean_env):
         if env_value != default_value:
             mismatches[field.name] = {"dataclass": default_value, "from_env": env_value}
     assert not mismatches, f"dataclass defaults diverge from env-parsing defaults: {mismatches}"
+
+
+def test_private_repo_branch_defaults_to_leadpoet_lab_and_allows_override(clean_env):
+    assert DEFAULT_PRIVATE_REPO_BRANCH == "leadpoet-lab"
+    assert DEFAULT_PRIVATE_MODEL_MANIFEST_URI.endswith(
+        "/sourcing-model/branches/leadpoet-lab/current.json"
+    )
+    assert ResearchLabGatewayConfig().private_repo_branch == DEFAULT_PRIVATE_REPO_BRANCH
+    assert (
+        ResearchLabGatewayConfig().private_model_manifest_uri
+        == DEFAULT_PRIVATE_MODEL_MANIFEST_URI
+    )
+    assert (
+        ResearchLabGatewayConfig.from_env().private_repo_branch
+        == DEFAULT_PRIVATE_REPO_BRANCH
+    )
+    assert (
+        ResearchLabGatewayConfig.from_env().private_model_manifest_uri
+        == DEFAULT_PRIVATE_MODEL_MANIFEST_URI
+    )
+
+    clean_env.setenv("RESEARCH_LAB_PRIVATE_REPO_BRANCH", "release-candidate")
+    clean_env.setenv(
+        "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI",
+        "s3://test-models/release-candidate/current.json",
+    )
+    assert ResearchLabGatewayConfig.from_env().private_repo_branch == "release-candidate"
+    assert (
+        ResearchLabGatewayConfig.from_env().private_model_manifest_uri
+        == "s3://test-models/release-candidate/current.json"
+    )
+
+    clean_env.setenv("RESEARCH_LAB_PRIVATE_REPO_BRANCH", "")
+    assert (
+        ResearchLabGatewayConfig.from_env().private_repo_branch
+        == DEFAULT_PRIVATE_REPO_BRANCH
+    )
 
 
 def test_bug_32_reconciled_contradictions(clean_env):

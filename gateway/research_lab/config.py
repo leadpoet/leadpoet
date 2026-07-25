@@ -163,6 +163,11 @@ DEFAULT_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY = "default_5_credits"
 STALE_PARENT_REBASE_REPAIR_MODEL_ID = "anthropic/claude-opus-4.8"
 STALE_PARENT_REBASE_REPAIR_TIMEOUT_SECONDS = 1200
 DEFAULT_PRIVATE_REPO_URL = ""
+DEFAULT_PRIVATE_REPO_BRANCH = "leadpoet-lab"
+DEFAULT_PRIVATE_MODEL_MANIFEST_URI = (
+    "s3://leadpoet-private-model-artifacts-493765492819/"
+    "research-lab/sourcing-model/branches/leadpoet-lab/current.json"
+)
 DEFAULT_PRIVATE_TEST_CMD = r"""
 python3 - <<'PY'
 import research_lab_adapter
@@ -199,7 +204,7 @@ cleanup_candidate_image() {
 }
 trap cleanup_candidate_image EXIT
 PLATFORM="${RESEARCH_LAB_PRIVATE_MODEL_DOCKER_PLATFORM:-linux/amd64}"
-PARENT_MANIFEST_URI="${RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI:-s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json}"
+PARENT_MANIFEST_URI="${RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI:-s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/branches/leadpoet-lab/current.json}"
 MANIFEST_BASE="${PARENT_MANIFEST_URI%/*}"
 MANIFEST_URI="${MANIFEST_BASE}/candidates/${RUN_ID}/${CANDIDATE_INDEX}/${COMMIT_SHA}.json"
 SIGNATURE_URI="${MANIFEST_BASE}/candidates/${RUN_ID}/${CANDIDATE_INDEX}/${COMMIT_SHA}.sig.b64"
@@ -656,11 +661,9 @@ class ResearchLabGatewayConfig:
     conditional_holdout_total_icps: int = 20
     conditional_validation_fresh_icp_count: int = 20
     improvement_threshold_points: float = 1.0
-    private_model_manifest_uri: str = (
-        "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json"
-    )
+    private_model_manifest_uri: str = DEFAULT_PRIVATE_MODEL_MANIFEST_URI
     private_repo_url: str = DEFAULT_PRIVATE_REPO_URL
-    private_repo_branch: str = "main"
+    private_repo_branch: str = DEFAULT_PRIVATE_REPO_BRANCH
     private_patch_applier_cmd: str = ""
     private_test_cmd: str = DEFAULT_PRIVATE_TEST_CMD
     private_build_cmd: str = DEFAULT_PRIVATE_BUILD_CMD
@@ -1260,10 +1263,13 @@ class ResearchLabGatewayConfig:
             improvement_threshold_points=improvement_threshold_points,
             private_model_manifest_uri=os.getenv(
                 "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI",
-                "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json",
+                DEFAULT_PRIVATE_MODEL_MANIFEST_URI,
             ),
             private_repo_url=os.getenv("RESEARCH_LAB_PRIVATE_REPO_URL", DEFAULT_PRIVATE_REPO_URL),
-            private_repo_branch=os.getenv("RESEARCH_LAB_PRIVATE_REPO_BRANCH", "main") or "main",
+            private_repo_branch=(
+                os.getenv("RESEARCH_LAB_PRIVATE_REPO_BRANCH", DEFAULT_PRIVATE_REPO_BRANCH)
+                or DEFAULT_PRIVATE_REPO_BRANCH
+            ),
             private_patch_applier_cmd=os.getenv("RESEARCH_LAB_PRIVATE_PATCH_APPLIER_CMD", ""),
             private_test_cmd=os.getenv("RESEARCH_LAB_PRIVATE_TEST_CMD", DEFAULT_PRIVATE_TEST_CMD),
             private_build_cmd=os.getenv("RESEARCH_LAB_PRIVATE_BUILD_CMD", DEFAULT_PRIVATE_BUILD_CMD),

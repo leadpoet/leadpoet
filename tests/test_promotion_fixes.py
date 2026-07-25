@@ -30,6 +30,7 @@ import pytest
 
 import gateway.research_lab.promotion as promotion
 from gateway.research_lab import attested_v2_store, v2_authority
+from gateway.research_lab.config import DEFAULT_PRIVATE_REPO_BRANCH
 from gateway.research_lab.tee_protocol import ResearchLabTeeProtocolError
 import gateway.research_lab.store as store_module
 from gateway.research_lab.promotion import (
@@ -650,11 +651,13 @@ async def test_repo_head_sync_registers_current_json_with_db_safe_doc(store, mon
     }
     store.select_many_results["research_lab_private_model_version_current:active"] = [previous_row]
 
-    monkeypatch.setattr(
-        promotion,
-        "_resolve_private_repo_head_sha",
-        lambda *, repo_url, branch_name: current_artifact.git_commit_sha,
-    )
+    resolved_branch: dict[str, str] = {}
+
+    def _fake_resolve_head(*, repo_url: str, branch_name: str) -> str:
+        resolved_branch["branch_name"] = branch_name
+        return current_artifact.git_commit_sha
+
+    monkeypatch.setattr(promotion, "_resolve_private_repo_head_sha", _fake_resolve_head)
 
     async def _fake_current_manifest(config: Any, **kwargs: Any) -> tuple[FakeArtifact, dict[str, Any]]:
         return current_artifact, {
@@ -670,18 +673,79 @@ async def test_repo_head_sync_registers_current_json_with_db_safe_doc(store, mon
     result = await sync_active_model_to_repo_head(
         _controller_config(
             private_repo_url="git@github.com:tasnimuldatascience/Sourcing_model.git",
-            private_repo_branch="main",
+            private_repo_branch="",
         ),
         actor_ref="test",
         dry_run=False,
     )
 
     assert result["status"] == "synced_active_model_to_repo_head"
+    assert resolved_branch["branch_name"] == DEFAULT_PRIVATE_REPO_BRANCH
     assert len(store.version_writes) == 1
     version_doc = store.version_writes[0]["redacted_version_doc"]
     _assert_db_doc_safe(version_doc)
+    assert version_doc["repo_branch"] == DEFAULT_PRIVATE_REPO_BRANCH
     assert version_doc["image_ref_hash"].startswith("sha256:")
     assert "image_digest" not in json.dumps(version_doc, sort_keys=True, default=str)
+
+
+async def test_private_source_upgrade_defaults_to_leadpoet_lab(store, monkeypatch):
+    commit_events: list[dict[str, Any]] = []
+    pushed: dict[str, Any] = {}
+
+    async def _fake_commit_event(**kwargs: Any) -> dict[str, Any]:
+        commit_events.append(kwargs)
+        return kwargs
+
+    def _fake_push(**kwargs: Any) -> dict[str, Any]:
+        pushed.update(kwargs)
+        return {
+            "status": "pushed",
+            "git_commit_sha": "f" * 40,
+            "target_files": ["sourcing_model/core.py"],
+            "source_diff_hash": "sha256:" + "1" * 64,
+        }
+
+    monkeypatch.setattr(
+        promotion,
+        "create_private_repo_commit_event",
+        _fake_commit_event,
+    )
+    monkeypatch.setattr(promotion, "_push_candidate_source_diff_to_repo", _fake_push)
+
+    artifact = _valid_fake_artifact()
+    controller = ResearchLabPromotionController(
+        _controller_config(
+            auto_commit_enabled=True,
+            private_repo_url="https://github.com/leadpoet/Sourcing_model.git",
+            private_repo_branch="",
+        ),
+        worker_ref="test-worker",
+    )
+    result = await controller._maybe_push_private_repo_candidate(
+        candidate={
+            "candidate_id": "cand-branch",
+            "candidate_source_diff_hash": "sha256:" + "2" * 64,
+            "candidate_build_doc": {},
+            "candidate_model_manifest_doc": {},
+        },
+        score_bundle_row={"score_bundle_id": "bundle-branch"},
+        score_bundle={},
+        active=ActivePrivateModel(artifact=artifact),
+        new_artifact=artifact,
+        active_parent=artifact.model_artifact_hash,
+        candidate_parent=artifact.model_artifact_hash,
+        rolling_window_hash="sha256:" + "3" * 64,
+        improvement_points=2.0,
+        threshold=1.0,
+    )
+
+    assert result["status"] == "pushed"
+    assert pushed["branch_name"] == DEFAULT_PRIVATE_REPO_BRANCH
+    assert commit_events
+    assert {
+        event["branch_name"] for event in commit_events
+    } == {DEFAULT_PRIVATE_REPO_BRANCH}
 
 
 def _bridge_baseline_row(window_hash: str, baseline_bundle_id: str) -> dict[str, Any]:

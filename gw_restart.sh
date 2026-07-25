@@ -1293,7 +1293,8 @@ enforce_deployment_environment
 validate_runtime_secret_paths
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
-export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="${RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI:-s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json}"
+export RESEARCH_LAB_PRIVATE_REPO_BRANCH="leadpoet-lab"
+export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/branches/leadpoet-lab/current.json"
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 
 ACTUAL_AWS_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
@@ -1568,7 +1569,8 @@ export AWS_REGION="${AWS_REGION:-us-east-1}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 export GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
 export LEADPOET_GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-leadpoet/prod/gateway/env}"
-export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="${RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI:-s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json}"
+export RESEARCH_LAB_PRIVATE_REPO_BRANCH="leadpoet-lab"
+export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/branches/leadpoet-lab/current.json"
 unset RESEARCH_LAB_EVIDENCE_PROXY_URL RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true

@@ -656,3 +656,20 @@ def test_gateway_docker_image_copies_complete_runtime_package_graph() -> None:
         "schemas",
     ):
         assert f"COPY {path}/ ./{path}/" in dockerfile
+
+
+def test_gateway_restart_defaults_research_lab_to_branch_manifest() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    branch_pointer = (
+        "s3://leadpoet-private-model-artifacts-493765492819/"
+        "research-lab/sourcing-model/branches/leadpoet-lab/current.json"
+    )
+
+    assert script.count(
+        'export RESEARCH_LAB_PRIVATE_REPO_BRANCH="leadpoet-lab"'
+    ) == 2
+    assert script.count(
+        f'export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="{branch_pointer}"'
+    ) == 2
+    assert 'RESEARCH_LAB_PRIVATE_REPO_BRANCH="${' not in script
+    assert 'RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="${' not in script

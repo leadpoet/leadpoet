@@ -189,7 +189,8 @@ def test_raw_trace_prefix_has_production_manifest_default(monkeypatch):
     monkeypatch.delenv(ot.PRIVATE_MODEL_MANIFEST_URI_ENV, raising=False)
 
     assert ot.resolved_raw_trace_s3_prefix() == (
-        "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model"
+        "s3://leadpoet-private-model-artifacts-493765492819/"
+        "research-lab/sourcing-model/branches/leadpoet-lab"
     )
 
 

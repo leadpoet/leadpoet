@@ -21,7 +21,10 @@ from gateway.research_lab.attested_scoring import (
     compare_promotion_metric,
 )
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
-from gateway.research_lab.config import ResearchLabGatewayConfig
+from gateway.research_lab.config import (
+    DEFAULT_PRIVATE_REPO_BRANCH,
+    ResearchLabGatewayConfig,
+)
 from gateway.research_lab.public_benchmarks import build_public_benchmark_report
 from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.research_lab.store import (
@@ -380,14 +383,14 @@ class RepoHeadMismatchError(RuntimeError):
 
 
 class RepoHeadManifestNotReadyError(PromotionPausedError):
-    """GitHub main is ahead of the signed current.json manifest."""
+    """The configured source branch is ahead of the signed current.json manifest."""
 
     def __init__(self, *, repo_main_sha: str, current_json_git_sha: str):
         self.repo_main_sha = str(repo_main_sha or "")
         self.current_json_git_sha = str(current_json_git_sha or "")
         super().__init__(
-            "repo_head_manifest_not_ready: private repo main is ahead of current.json "
-            f"(repo_main={self.repo_main_sha[:12]}, current_json={self.current_json_git_sha[:12]}); "
+            "repo_head_manifest_not_ready: configured private repo branch is ahead of current.json "
+            f"(repo_head={self.repo_main_sha[:12]}, current_json={self.current_json_git_sha[:12]}); "
             "daily benchmark deferred so it cannot run a stale active artifact"
         )
 
@@ -722,7 +725,7 @@ async def private_repo_head_alignment_status(
     *,
     current_artifact: PrivateModelArtifactManifest | None = None,
 ) -> dict[str, Any]:
-    """Read-only status for active lineage vs private repo main/current.json."""
+    """Read-only status for active lineage vs the configured source branch."""
 
     if not config.private_repo_url:
         return {
@@ -730,7 +733,7 @@ async def private_repo_head_alignment_status(
             "status": "private_repo_not_configured",
             "active_is_repo_head": False,
         }
-    branch_name = str(config.private_repo_branch or "main")
+    branch_name = str(config.private_repo_branch or DEFAULT_PRIVATE_REPO_BRANCH)
     try:
         repo_main_sha = await asyncio.to_thread(
             _resolve_private_repo_head_sha,
@@ -840,11 +843,12 @@ async def sync_active_model_to_repo_head(
     wait_timeout_seconds: int | None = None,
     poll_seconds: int | None = None,
 ) -> dict[str, Any]:
-    """Make the active lineage row point at private repo main's current.json.
+    """Make the active lineage row point at the configured source branch.
 
-    This is the safety gate for daily rebenchmark: GitHub main is the source of
-    truth for source, S3 current.json is the source of truth for the immutable
-    built/signed image. If they disagree, do not benchmark stale lineage.
+    This is the safety gate for daily rebenchmark: the configured source branch
+    is the source of truth for source, while S3 current.json is the source of
+    truth for the immutable built/signed image. If they disagree, do not
+    benchmark stale lineage.
     """
 
     action = "sync-active-model-to-repo-head"
@@ -865,7 +869,7 @@ async def sync_active_model_to_repo_head(
             "status": "private_repo_not_configured",
             "active_is_repo_head": False,
         }
-    branch_name = str(config.private_repo_branch or "main")
+    branch_name = str(config.private_repo_branch or DEFAULT_PRIVATE_REPO_BRANCH)
     try:
         repo_main_sha = await asyncio.to_thread(
             _resolve_private_repo_head_sha,
@@ -2432,7 +2436,9 @@ class ResearchLabPromotionController:
 
         candidate_id = str(candidate["candidate_id"])
         score_bundle_id = str(score_bundle_row["score_bundle_id"])
-        branch_name = str(self.config.private_repo_branch or "main")
+        branch_name = str(
+            self.config.private_repo_branch or DEFAULT_PRIVATE_REPO_BRANCH
+        )
         repo_ref_hash = canonical_hash(
             {
                 "repo_url": self.config.private_repo_url,

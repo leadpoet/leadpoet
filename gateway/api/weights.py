@@ -1215,10 +1215,11 @@ async def persist_subnet_epoch_evidence_v1(
     }
 
 
-@router.post("/inputs/v2")
+@router.post("/inputs/v2", response_model=WeightInputsV2Response)
 async def get_weight_inputs_v2(
     authorization: WeightInputsV2Authorization,
-) -> WeightInputsV2Response:
+    http_request: Request,
+) -> Response:
     """Return the complete measured gateway-owned input ancestry for one epoch."""
 
     try:
@@ -1306,12 +1307,16 @@ async def get_weight_inputs_v2(
             detail="Authoritative V2 weight input reconstruction failed closed",
         ) from exc
 
-    return WeightInputsV2Response(
+    response = WeightInputsV2Response(
         request_hash=request["request_hash"],
         calculation_snapshot_hash=request["calculation_snapshot_hash"],
         input_receipt_hashes=result["input_receipt_hashes"],
         gateway_authority_event_hash=result["gateway_authority_event_hash"],
         upstream_receipt_set=result["upstream_receipt_set"],
+    )
+    return _weight_authority_http_response(
+        response.model_dump(mode="json"),
+        accept_encoding=http_request.headers.get("accept-encoding", ""),
     )
 
 @router.post("/submit/v2")

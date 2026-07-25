@@ -416,9 +416,16 @@ async def test_weight_inputs_v2_authenticates_and_returns_complete_measured_set(
         attested_weight_inputs_v2, "build_gateway_weight_inputs_v2", build_inputs
     )
 
-    response = await weights_api.get_weight_inputs_v2(authorization)
-    assert response.request_hash == authorization.request["request_hash"]
-    assert response.input_receipt_hashes == expected["input_receipt_hashes"]
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"accept-encoding", b"identity")],
+        }
+    )
+    response = await weights_api.get_weight_inputs_v2(authorization, request)
+    response_doc = json.loads(response.body)
+    assert response_doc["request_hash"] == authorization.request["request_hash"]
+    assert response_doc["input_receipt_hashes"] == expected["input_receipt_hashes"]
     assert calls[0] == (
         "load",
         {
@@ -440,7 +447,7 @@ async def test_weight_inputs_v2_rejects_tampered_snapshot_before_measured_reads(
     monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {VALIDATOR_HOTKEY})
     monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
     with pytest.raises(HTTPException) as exc:
-        await weights_api.get_weight_inputs_v2(authorization)
+        await weights_api.get_weight_inputs_v2(authorization, _request())
     assert exc.value.status_code == 400
     assert "bind" in exc.value.detail
 
@@ -463,7 +470,7 @@ async def test_weight_inputs_v2_fails_closed_on_missing_allocation_lineage(monke
         attested_v2_store, "load_business_artifact_graph_v2", missing
     )
     with pytest.raises(HTTPException) as exc:
-        await weights_api.get_weight_inputs_v2(authorization)
+        await weights_api.get_weight_inputs_v2(authorization, _request())
     assert exc.value.status_code == 503
     assert "failed closed" in exc.value.detail
 

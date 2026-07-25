@@ -32,6 +32,7 @@ import json
 import sys
 import os
 import hashlib
+import zlib
 from datetime import datetime
 from typing import Dict, Any, Optional
 from threading import Lock
@@ -61,8 +62,65 @@ AF_VSOCK = 40  # Address family for vsock
 VMADDR_CID_ANY = 0xFFFFFFFF  # Bind to any CID (inside enclave)
 PARENT_CID = 3  # Parent EC2's CID
 RPC_PORT = 5001  # Use different port from gateway (5001 vs 5000)
-MAX_RPC_REQUEST_BYTES = 8 * 1024 * 1024
-MAX_RPC_RESPONSE_BYTES = 16 * 1024 * 1024
+# Authoritative weight requests and responses include the complete measured
+# receipt graph. Keep the wire envelope small and retain an explicit
+# expanded-size ceiling inside the memory-constrained enclave.
+MAX_RPC_REQUEST_FRAME_BYTES = 8 * 1024 * 1024
+MAX_RPC_RESPONSE_FRAME_BYTES = 16 * 1024 * 1024
+MAX_RPC_REQUEST_BYTES = 64 * 1024 * 1024
+MAX_RPC_RESPONSE_BYTES = 64 * 1024 * 1024
+_COMPRESSED_FRAME_MAGIC = b"LPZ2"
+_COMPRESSED_FRAME_HEADER_BYTES = 8
+
+
+def _encode_rpc_payload(
+    payload: bytes,
+    *,
+    logical_limit: int,
+    frame_limit: int,
+) -> bytes:
+    if len(payload) < 2 or len(payload) > logical_limit:
+        raise ValueError("message size is outside the allowed range")
+    if len(payload) <= frame_limit:
+        return payload
+    compressed = zlib.compress(payload, level=1)
+    framed = (
+        _COMPRESSED_FRAME_MAGIC
+        + len(payload).to_bytes(4, byteorder="big")
+        + compressed
+    )
+    if len(framed) > frame_limit:
+        raise ValueError("compressed frame exceeds the allowed range")
+    return framed
+
+
+def _decode_rpc_payload(payload: bytes, *, logical_limit: int) -> bytes:
+    if not payload.startswith(_COMPRESSED_FRAME_MAGIC):
+        if len(payload) < 2 or len(payload) > logical_limit:
+            raise ValueError("message size is outside the allowed range")
+        return payload
+    if len(payload) <= _COMPRESSED_FRAME_HEADER_BYTES:
+        raise ValueError("compressed frame is incomplete")
+    expected_length = int.from_bytes(payload[4:8], byteorder="big")
+    if expected_length < 2 or expected_length > logical_limit:
+        raise ValueError("decoded message size is outside the allowed range")
+    decompressor = zlib.decompressobj()
+    try:
+        decoded = decompressor.decompress(
+            payload[_COMPRESSED_FRAME_HEADER_BYTES:],
+            expected_length + 1,
+        )
+    except zlib.error as exc:
+        raise ValueError("compressed frame is invalid") from exc
+    if (
+        len(decoded) != expected_length
+        or len(decoded) > logical_limit
+        or not decompressor.eof
+        or decompressor.unused_data
+        or decompressor.unconsumed_tail
+    ):
+        raise ValueError("compressed frame failed validation")
+    return decoded
 
 
 # ============================================================================
@@ -617,17 +675,24 @@ def _receive_request(client: Any) -> tuple[Dict[str, Any], bool]:
             if not chunk:
                 break
             data.extend(chunk)
-            if len(data) > MAX_RPC_REQUEST_BYTES:
+            if len(data) > MAX_RPC_REQUEST_FRAME_BYTES:
                 raise ValueError("legacy request exceeds maximum size")
         request_data = bytes(data)
         length_prefixed = False
     else:
         request_length = int.from_bytes(prefix, byteorder="big")
-        if request_length < 2 or request_length > MAX_RPC_REQUEST_BYTES:
+        if (
+            request_length < 2
+            or request_length > MAX_RPC_REQUEST_FRAME_BYTES
+        ):
             raise ValueError("request length is outside the allowed range")
-        request_data = _recv_exact(client, request_length)
-        if len(request_data) != request_length:
+        request_frame = _recv_exact(client, request_length)
+        if len(request_frame) != request_length:
             raise ValueError("request body is incomplete")
+        request_data = _decode_rpc_payload(
+            request_frame,
+            logical_limit=MAX_RPC_REQUEST_BYTES,
+        )
         length_prefixed = True
     request = json.loads(request_data.decode("utf-8"))
     if not isinstance(request, dict):
@@ -651,6 +716,7 @@ def run_vsock_server():
     print(f"[TEE] ✅ Listening on vsock port {RPC_PORT}", flush=True)
     
     while True:
+        client = None
         try:
             client, addr = server.accept()
             print(f"[TEE] Connection from CID {addr[0]}", flush=True)
@@ -660,19 +726,30 @@ def run_vsock_server():
 
             response = handle_request(request)
             response_data = json.dumps(response).encode()
-            if len(response_data) > MAX_RPC_RESPONSE_BYTES:
-                raise ValueError("response exceeds maximum size")
             if length_prefixed:
-                client.sendall(len(response_data).to_bytes(4, byteorder="big") + response_data)
+                response_frame = _encode_rpc_payload(
+                    response_data,
+                    logical_limit=MAX_RPC_RESPONSE_BYTES,
+                    frame_limit=MAX_RPC_RESPONSE_FRAME_BYTES,
+                )
+                client.sendall(
+                    len(response_frame).to_bytes(4, byteorder="big")
+                    + response_frame
+                )
             else:
+                if len(response_data) > MAX_RPC_RESPONSE_FRAME_BYTES:
+                    raise ValueError("legacy response exceeds maximum size")
                 client.sendall(response_data)
-            
-            client.close()
-            
         except Exception as e:
             print(f"[TEE] ❌ Server error: {e}", flush=True)
             import traceback
             traceback.print_exc()
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
 
 # ============================================================================

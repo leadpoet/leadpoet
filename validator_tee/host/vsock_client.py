@@ -13,14 +13,72 @@ import socket
 import json
 import os
 import subprocess
+import zlib
 from typing import Dict, Any, Optional
 
 # vsock constants
 AF_VSOCK = 40
 PARENT_CID = 3
 RPC_PORT = 5001  # Must match tee_service.py
-MAX_RPC_REQUEST_BYTES = 8 * 1024 * 1024
-MAX_RPC_RESPONSE_BYTES = 16 * 1024 * 1024
+# Weight authority carries the complete measured gateway receipt graph. Keep
+# the wire envelope small; larger logical messages use the versioned compressed
+# frame below while retaining an explicit expanded-size ceiling.
+MAX_RPC_REQUEST_FRAME_BYTES = 8 * 1024 * 1024
+MAX_RPC_RESPONSE_FRAME_BYTES = 16 * 1024 * 1024
+MAX_RPC_REQUEST_BYTES = 64 * 1024 * 1024
+MAX_RPC_RESPONSE_BYTES = 64 * 1024 * 1024
+_COMPRESSED_FRAME_MAGIC = b"LPZ2"
+_COMPRESSED_FRAME_HEADER_BYTES = 8
+
+
+def _encode_rpc_payload(
+    payload: bytes,
+    *,
+    logical_limit: int,
+    frame_limit: int,
+) -> bytes:
+    if len(payload) < 2 or len(payload) > logical_limit:
+        raise RuntimeError("Enclave message size is outside the allowed range")
+    if len(payload) <= frame_limit:
+        return payload
+    compressed = zlib.compress(payload, level=1)
+    framed = (
+        _COMPRESSED_FRAME_MAGIC
+        + len(payload).to_bytes(4, byteorder="big")
+        + compressed
+    )
+    if len(framed) > frame_limit:
+        raise RuntimeError("Enclave compressed frame exceeds the allowed range")
+    return framed
+
+
+def _decode_rpc_payload(payload: bytes, *, logical_limit: int) -> bytes:
+    if not payload.startswith(_COMPRESSED_FRAME_MAGIC):
+        if len(payload) < 2 or len(payload) > logical_limit:
+            raise RuntimeError("Enclave message size is outside the allowed range")
+        return payload
+    if len(payload) <= _COMPRESSED_FRAME_HEADER_BYTES:
+        raise RuntimeError("Enclave compressed frame is incomplete")
+    expected_length = int.from_bytes(payload[4:8], byteorder="big")
+    if expected_length < 2 or expected_length > logical_limit:
+        raise RuntimeError("Enclave decoded message size is outside the allowed range")
+    decompressor = zlib.decompressobj()
+    try:
+        decoded = decompressor.decompress(
+            payload[_COMPRESSED_FRAME_HEADER_BYTES:],
+            expected_length + 1,
+        )
+    except zlib.error as exc:
+        raise RuntimeError("Enclave compressed frame is invalid") from exc
+    if (
+        len(decoded) != expected_length
+        or len(decoded) > logical_limit
+        or not decompressor.eof
+        or decompressor.unused_data
+        or decompressor.unconsumed_tail
+    ):
+        raise RuntimeError("Enclave compressed frame failed validation")
+    return decoded
 
 
 def _recv_exact(sock: socket.socket, size: int) -> bytes:
@@ -131,28 +189,40 @@ class ValidatorEnclaveClient:
         
         # Create vsock socket
         sock = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
-        sock.settimeout(timeout_seconds)
-        
         try:
+            sock.settimeout(timeout_seconds)
+
             # Connect to enclave
             sock.connect((cid, RPC_PORT))
             
             # Send request
             request_data = json.dumps(request).encode()
-            if len(request_data) < 2 or len(request_data) > MAX_RPC_REQUEST_BYTES:
-                raise RuntimeError("Enclave request size is outside the allowed range")
-            sock.sendall(len(request_data).to_bytes(4, byteorder="big") + request_data)
+            request_frame = _encode_rpc_payload(
+                request_data,
+                logical_limit=MAX_RPC_REQUEST_BYTES,
+                frame_limit=MAX_RPC_REQUEST_FRAME_BYTES,
+            )
+            sock.sendall(
+                len(request_frame).to_bytes(4, byteorder="big") + request_frame
+            )
             
             # Receive response
             prefix = _recv_exact(sock, 4)
             if len(prefix) != 4:
                 raise RuntimeError("Failed to read enclave response length")
             response_length = int.from_bytes(prefix, byteorder="big")
-            if response_length < 2 or response_length > MAX_RPC_RESPONSE_BYTES:
+            if (
+                response_length < 2
+                or response_length > MAX_RPC_RESPONSE_FRAME_BYTES
+            ):
                 raise RuntimeError("Enclave response size is outside the allowed range")
-            response_data = _recv_exact(sock, response_length)
-            if len(response_data) != response_length:
+            response_frame = _recv_exact(sock, response_length)
+            if len(response_frame) != response_length:
                 raise RuntimeError("Enclave response body is incomplete")
+            response_data = _decode_rpc_payload(
+                response_frame,
+                logical_limit=MAX_RPC_RESPONSE_BYTES,
+            )
             
             response = json.loads(response_data.decode())
             

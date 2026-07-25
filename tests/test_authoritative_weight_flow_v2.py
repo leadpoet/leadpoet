@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gzip
+import json
 import pytest
 import struct
 
@@ -19,6 +21,49 @@ COMPUTED_RECEIPT = "sha256:" + "1" * 64
 ROOT = "sha256:" + "2" * 64
 EVENT = "sha256:" + "3" * 64
 FINALIZATION_SCAN = "sha256:" + "d" * 64
+
+
+def test_large_gateway_authority_request_uses_deterministic_gzip():
+    payload = {"receipt_graph": "x" * (1024 * 1024)}
+
+    body, headers = flow_module._encode_json_request(payload)
+
+    assert headers == {
+        "Content-Type": "application/json",
+        "Content-Encoding": "gzip",
+    }
+    assert json.loads(gzip.decompress(body)) == payload
+    assert body == gzip.compress(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8"),
+        compresslevel=1,
+        mtime=0,
+    )
+
+
+def test_gateway_authority_request_fails_closed_at_expanded_limit(monkeypatch):
+    monkeypatch.setattr(flow_module, "_MAX_GATEWAY_REQUEST_BYTES", 10)
+
+    with pytest.raises(
+        AuthoritativeWeightFlowV2Error,
+        match="expanded size limit",
+    ):
+        flow_module._encode_json_request({"receipt_graph": "x" * 32})
+
+
+def test_gateway_authority_request_fails_closed_at_wire_limit(monkeypatch):
+    monkeypatch.setattr(flow_module, "_COMPRESS_REQUEST_MIN_BYTES", 1)
+    monkeypatch.setattr(flow_module, "_MAX_GATEWAY_REQUEST_FRAME_BYTES", 1)
+
+    with pytest.raises(
+        AuthoritativeWeightFlowV2Error,
+        match="wire size limit",
+    ):
+        flow_module._encode_json_request({"receipt_graph": "x" * 32})
 
 
 class Client:

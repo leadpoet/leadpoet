@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
+import json
 import re
 import struct
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
@@ -30,6 +32,31 @@ class AuthoritativeWeightFlowV2Error(RuntimeError):
 
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_COMPRESS_REQUEST_MIN_BYTES = 1024 * 1024
+_MAX_GATEWAY_REQUEST_BYTES = 64 * 1024 * 1024
+_MAX_GATEWAY_REQUEST_FRAME_BYTES = 10 * 1024 * 1024
+
+
+def _encode_json_request(payload: Mapping[str, Any]) -> tuple[bytes, Dict[str, str]]:
+    body = json.dumps(
+        dict(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    if len(body) > _MAX_GATEWAY_REQUEST_BYTES:
+        raise AuthoritativeWeightFlowV2Error(
+            "gateway V2 request exceeds the expanded size limit"
+        )
+    headers = {"Content-Type": "application/json"}
+    if len(body) >= _COMPRESS_REQUEST_MIN_BYTES:
+        body = gzip.compress(body, compresslevel=1, mtime=0)
+        if len(body) > _MAX_GATEWAY_REQUEST_FRAME_BYTES:
+            raise AuthoritativeWeightFlowV2Error(
+                "gateway V2 compressed request exceeds the wire size limit"
+            )
+        headers["Content-Encoding"] = "gzip"
+    return body, headers
 
 
 def _float_bits(values: Any) -> list[str]:
@@ -88,8 +115,9 @@ async def _post_json(
     import aiohttp
 
     timeout = aiohttp.ClientTimeout(total=float(timeout_seconds))
+    body, headers = _encode_json_request(payload)
     async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
-        async with session.post(url, json=dict(payload)) as response:
+        async with session.post(url, data=body, headers=headers) as response:
             text = await response.text()
             if response.status != 200:
                 raise AuthoritativeWeightFlowV2Error(

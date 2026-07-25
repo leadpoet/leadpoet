@@ -257,7 +257,10 @@ def test_exact_rehearsal_rejects_incomplete_capacity_evidence() -> None:
         )
 
 
-def test_rehearsal_component_uses_constrained_outer_profile(monkeypatch) -> None:
+def test_rehearsal_component_uses_constrained_outer_profile(
+    monkeypatch,
+    tmp_path,
+) -> None:
     calls = []
     monkeypatch.setattr(
         rehearsal,
@@ -267,9 +270,11 @@ def test_rehearsal_component_uses_constrained_outer_profile(monkeypatch) -> None
 
     rehearsal._run_component(
         "rehearsal:test",
+        source_root=tmp_path,
         component="gateway",
         from_sha="1" * 40,
         candidate_sha="2" * 40,
+        transition="forward",
         scope="exact",
         outer_cpus="3.5",
         outer_memory="7g",
@@ -508,7 +513,7 @@ def test_rollback_accepts_installed_launcher_source_bound_to_from_sha(
     }
 
     verify_rehearsal_integrity(
-        [row],
+        [*_exact_capacity_rows(), row],
         from_sha=installed,
         candidate_sha=candidate,
         scope="exact",
@@ -517,7 +522,7 @@ def test_rollback_accepts_installed_launcher_source_bound_to_from_sha(
 
     with pytest.raises(SystemExit, match="source identity is invalid"):
         verify_rehearsal_integrity(
-            [row],
+            [*_exact_capacity_rows(), row],
             from_sha="2" * 40,
             candidate_sha=candidate,
             scope="exact",

@@ -1463,9 +1463,10 @@ async def _build_ticket_candidate_diagnostics(
     difference between the two callers is the auth gate, so the exact same
     sanitized projection is returned regardless of who asks.
     """
-    rows = await select_many(
+    rows = await select_all(
         "research_lab_candidate_evaluation_current",
         filters=(("ticket_id", ticket_id),),
+        max_rows=20000,
     )
     candidates = [
         row
@@ -1540,11 +1541,11 @@ async def _build_ticket_run_summaries(
     owner's only window into WHY a paid loop stopped (stop_reason, last
     stage, call count, actual spend).
     """
-    rows = await select_many(
+    rows = await select_all(
         "research_lab_auto_research_loop_events",
         filters=(("ticket_id", ticket_id),),
         order_by=(("seq", False),),
-        limit=2000,
+        max_rows=20000,
     )
     failure_classes_by_run: dict[str, list[str]] = {}
     terminal_by_run: dict[str, tuple[str, Mapping[str, Any]]] = {}

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-import re
-import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -39,47 +37,16 @@ def _snapshot(epoch_block: int) -> SubnetEpochSnapshot:
     )
 
 
-def test_gateway_and_validator_share_stateful_v2_rollback_floor() -> None:
+def test_gateway_and_validator_use_protocol_compatibility_not_history_floor() -> None:
     gateway = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     validator = (ROOT / "validator_restart.sh").read_text(encoding="utf-8")
-    pattern = re.compile(
-        r'V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA="([0-9a-f]{40})"'
-    )
-    gateway_floor = pattern.search(gateway)
-    validator_floor = pattern.search(validator)
 
-    assert gateway_floor is not None
-    assert validator_floor is not None
-    assert gateway_floor.group(1) == validator_floor.group(1)
-    assert (
-        gateway_floor.group(1)
-        == "94f1c923d092d12cbab95ef8d86317420eede621"
-    )
-    assert "predates the supported stateful V2 rollback floor" in gateway
-    assert "predates the supported stateful V2 rollback floor" in validator
-    subprocess.run(
-        [
-            "git",
-            "merge-base",
-            "--is-ancestor",
-            gateway_floor.group(1),
-            "HEAD",
-        ],
-        cwd=ROOT,
-        check=True,
-    )
-    floor_weights = subprocess.run(
-        [
-            "git",
-            "show",
-            gateway_floor.group(1) + ":gateway/api/weights.py",
-        ],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    assert '@router.get("/v2/release-evidence/{commit_sha}")' in floor_weights
+    for source in (gateway, validator):
+        assert "exact_commit_restart_v2.py" in source
+        assert "--branch-ref origin/main" in source
+        assert "V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA" not in source
+        assert "predates the supported stateful V2 rollback floor" not in source
+        assert "--compatibility-floor" not in source
 
 
 @pytest.mark.parametrize("epoch_block", [0, 299, 300])

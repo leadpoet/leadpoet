@@ -15,7 +15,7 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
 
     assert 'component="all"' in source
     assert "exact_commit_restart_v2.py" in source
-    assert "--compatibility-floor" in source
+    assert "--compatibility-floor" not in source
     assert "VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS" in source
     assert "VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE" in source
     assert "Acquiring the independently built V2 release channel" in source
@@ -84,6 +84,10 @@ def _fake_operator_commands(tmp_path: Path, commit: str) -> tuple[Path, Path]:
 set -euo pipefail
 for arg in "$@"; do
   if [ "$arg" = "fetch" ]; then
+    exit 0
+  fi
+  if [ "$arg" = "origin/main:Leadpoet/utils/exact_commit_restart_v2.py" ]; then
+    cat "$FAKE_OPERATOR_EXACT_HELPER"
     exit 0
   fi
 done
@@ -205,6 +209,9 @@ def _operator_env(tmp_path: Path, bin_dir: Path, commit: str) -> dict[str, str]:
         "LEADPOET_VALIDATOR_SSH_KEY": str(tmp_path / "validator.pem"),
         "FAKE_GATEWAY_COMMIT": commit,
         "FAKE_VALIDATOR_COMMIT": commit,
+        "FAKE_OPERATOR_EXACT_HELPER": str(
+            ROOT / "Leadpoet" / "utils" / "exact_commit_restart_v2.py"
+        ),
     }
     for line in (tmp_path / "operator-env").read_text(encoding="utf-8").splitlines():
         key, value = line.split("=", 1)

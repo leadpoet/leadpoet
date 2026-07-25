@@ -65,8 +65,9 @@ Then rerun the forward transition from that supported previous release to the
 same frozen candidate. The three commands must use one unchanged candidate SHA.
 The rollback target must also pass
 `Leadpoet/utils/exact_commit_restart_v2.py` against current `origin/main`;
-protected-workflow differences are an intentional fail-closed rejection because
-current public auditors would otherwise recompute a different canonical bundle.
+the helper rejects actual public auditor protocol incompatibility but does not
+reject an attested release merely because its implementation predates later
+reliability fixes.
 The operator-facing paired rollback must use the same selected SHA for both
 hosts:
 

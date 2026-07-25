@@ -113,21 +113,10 @@ branch_commit="$(git -C "$ROOT" rev-parse --verify origin/main^{commit})"
 git -C "$ROOT" cat-file -e "$commit^{commit}"
 git -C "$ROOT" show \
   origin/main:Leadpoet/utils/exact_commit_restart_v2.py > "$helper"
-compatibility_floor="$(
-  git -C "$ROOT" show origin/main:gw_restart.sh \
-    | sed -n \
-      's/^V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA="\([0-9a-f]\{40\}\)"$/\1/p' \
-    | head -n 1
-)"
-if ! [[ "$compatibility_floor" =~ ^[0-9a-f]{40}$ ]]; then
-  echo "ERROR: current V2 rollback compatibility floor is unavailable" >&2
-  exit 1
-fi
 python3 "$helper" \
   --repo-root "$ROOT" \
   --selected-commit "$commit" \
-  --branch-ref origin/main \
-  --compatibility-floor "$compatibility_floor"
+  --branch-ref origin/main
 echo "Selected release is compatible with current public auditors: $commit"
 echo "Current public V2 authority commit: $branch_commit"
 

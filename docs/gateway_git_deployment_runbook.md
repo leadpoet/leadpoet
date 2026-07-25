@@ -152,18 +152,18 @@ validator release completed successfully. Select one full 40-character commit
 that:
 
 - Is reachable from `origin/main`.
-- Is at or after the stateful V2 compatibility floor, currently
-  `94f1c923d092d12cbab95ef8d86317420eede621`.
-  The floor includes bounded slow post-rollover allocation readiness and a
-  source-consistent protected-workflow identity; older attestations are not
-  sufficient rollback evidence.
 - Has one immutable release channel containing matching gateway and validator
   manifests.
-- Has the same gateway and validator protected V2 symbol contracts, and
-  byte-identical protected source files, as current `origin/main`, so auditors
-  running current public code recompute and verify the same canonical weights.
+- Provides the authoritative V2 endpoints, envelope schemas, receipt formats,
+  signing authorization, and canonical weight protocol consumed by current
+  public auditors.
 - Has passed the exact reverse restart rehearsal from the currently installed
   launcher.
+
+The compatibility check intentionally does not compare protected implementation
+hashes or require later reliability fixes. Those differences inform the
+operator's rollback choice but do not make an otherwise attested,
+auditor-protocol-compatible release categorically ineligible.
 
 When invoking the two lower-level controllers manually, complete the gateway
 with `gw_restart.sh --commit <full-sha>` first. Require its normal build-info,
@@ -204,6 +204,7 @@ behavior.
 
 Rollback runs the same enclave rebuild and restart workflow. It does not reuse
 newer EIFs or bypass PCR0, attestation, import, or health checks. A commit from
-before the stateful V2 compatibility floor is intentionally rejected. A
-subsequent roll-forward must run the exact forward rehearsal from the rolled
+an earlier implementation generation is rejected only if it lacks the public
+protocol required by current auditors or fails the normal exact release gates.
+A subsequent roll-forward must run the exact forward rehearsal from the rolled
 back commit before production use.

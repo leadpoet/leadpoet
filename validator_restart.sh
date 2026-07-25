@@ -1,7 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA="94f1c923d092d12cbab95ef8d86317420eede621"
 VALIDATOR_ROOT="${VALIDATOR_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
 VALIDATOR_ENV_FILE="${VALIDATOR_ENV_FILE:-/home/ec2-user/.config/leadpoet/validator.env}"
 LEADPOET_VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-leadpoet/prod/validator/env}"
@@ -185,18 +184,11 @@ if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
     echo "ERROR: VALIDATOR_DEPLOY_COMMIT is not reachable from origin/main" >&2
     exit 1
   fi
-  if ! git merge-base --is-ancestor \
-      "$V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA" \
-      "$REQUESTED_VALIDATOR_DEPLOY_COMMIT"; then
-    echo "ERROR: selected validator commit predates the supported stateful V2 rollback floor" >&2
-    exit 1
-  fi
   echo "Validating exact-commit V2 rollback compatibility"
   python3 "$VALIDATOR_EXACT_COMMIT_HELPER_SOURCE" \
     --repo-root "$VALIDATOR_ROOT" \
     --selected-commit "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" \
-    --branch-ref origin/main \
-    --compatibility-floor "$V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA"
+    --branch-ref origin/main
   if [ ! -r "$VALIDATOR_PINNED_GATEWAY_VERIFIER_SOURCE" ]; then
     echo "ERROR: pinned gateway release verifier is unavailable" >&2
     exit 1

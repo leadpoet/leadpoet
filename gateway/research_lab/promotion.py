@@ -45,10 +45,12 @@ from gateway.research_lab.store import (
 )
 from leadpoet_verifier.economics import build_champion_reward_obligation
 from research_lab.eval import (
+    DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID,
     PrivateModelArtifactManifest,
     load_private_artifact_manifest,
     sign_digest_with_kms,
     validate_private_model_artifact_manifest,
+    verify_private_artifact_manifest_signature,
 )
 from research_lab.eval.promotion_metric import (
     PromotionGateDecision,
@@ -79,6 +81,9 @@ REPO_HEAD_SYNC_ENABLED_ENV = "RESEARCH_LAB_SYNC_ACTIVE_MODEL_TO_REPO_HEAD"
 REPO_HEAD_MANIFEST_WAIT_SECONDS_ENV = "RESEARCH_LAB_REPO_HEAD_MANIFEST_WAIT_SECONDS"
 REPO_HEAD_MANIFEST_POLL_SECONDS_ENV = "RESEARCH_LAB_REPO_HEAD_MANIFEST_POLL_SECONDS"
 REPO_HEAD_GIT_TIMEOUT_SECONDS_ENV = "RESEARCH_LAB_REPO_HEAD_GIT_TIMEOUT_SECONDS"
+PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID_ENV = (
+    "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID"
+)
 DEFAULT_REPO_HEAD_MANIFEST_WAIT_SECONDS = 600
 DEFAULT_REPO_HEAD_MANIFEST_POLL_SECONDS = 15
 DEFAULT_REPO_HEAD_GIT_TIMEOUT_SECONDS = 20
@@ -3693,6 +3698,17 @@ def _load_valid_artifact(uri: str) -> PrivateModelArtifactManifest:
     errors = validate_private_model_artifact_manifest(artifact)
     if errors:
         raise RuntimeError("private artifact manifest failed validation: " + "; ".join(errors))
+    signing_key_id = (
+        os.getenv(
+            PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID_ENV,
+            DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID,
+        ).strip()
+        or DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID
+    )
+    verify_private_artifact_manifest_signature(
+        artifact,
+        key_id=signing_key_id,
+    )
     return artifact
 
 

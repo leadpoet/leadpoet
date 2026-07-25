@@ -18,6 +18,7 @@ from .evaluator import (
 )
 from .patches import CandidatePatchManifest, validate_candidate_patch_manifest
 from .private_runtime import (
+    DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID,
     DockerPrivateModelRunner,
     DockerPrivateModelSpec,
     PrivateModelAdapterSpec,
@@ -29,10 +30,12 @@ from .private_runtime import (
     load_private_artifact_manifest,
     private_model_env_passthrough,
     sign_digest_with_kms,
+    verify_private_artifact_manifest_signature,
 )
 
 __all__ = [
     "CandidatePatchManifest",
+    "DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID",
     "DockerPrivateModelRunner",
     "DockerPrivateModelSpec",
     "PrivateModelArtifactManifest",
@@ -53,5 +56,6 @@ __all__ = [
     "validate_candidate_patch_manifest",
     "validate_private_model_artifact_manifest",
     "validate_sealed_benchmark_set",
+    "verify_private_artifact_manifest_signature",
     "verify_private_model_artifact_manifest",
 ]

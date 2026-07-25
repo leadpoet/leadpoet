@@ -671,5 +671,10 @@ def test_gateway_restart_defaults_research_lab_to_branch_manifest() -> None:
     assert script.count(
         f'export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="{branch_pointer}"'
     ) == 2
+    assert script.count(
+        'export RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID='
+        '"alias/leadpoet-research-lab-artifact-signing"'
+    ) == 2
     assert 'RESEARCH_LAB_PRIVATE_REPO_BRANCH="${' not in script
     assert 'RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="${' not in script
+    assert 'RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID="${' not in script

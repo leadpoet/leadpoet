@@ -20,6 +20,7 @@ from typing import Any, Iterable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+import zlib
 
 from leadpoet_canonical.attested_receipts import (
     SCORING_ROLE,
@@ -442,6 +443,27 @@ def _is_retryable_allocation_fetch_error(exc: BaseException) -> bool:
     return False
 
 
+# Sanity bound for decompressing a gzip allocation response. The handoff is
+# ~10 MB serialized today; this is a zip-bomb guard, not a policy limit, so it
+# is set far above any realistic handoff size.
+_ALLOCATION_RESPONSE_MAX_LOGICAL_BYTES = 256 * 1024 * 1024
+
+
+def _decode_allocation_response_gzip(wire: bytes) -> bytes:
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    body = decompressor.decompress(
+        wire, _ALLOCATION_RESPONSE_MAX_LOGICAL_BYTES + 1
+    )
+    if (
+        len(body) > _ALLOCATION_RESPONSE_MAX_LOGICAL_BYTES
+        or not decompressor.eof
+        or decompressor.unused_data
+        or decompressor.unconsumed_tail
+    ):
+        raise RuntimeError("allocation response gzip failed validation")
+    return body
+
+
 def _fetch_allocation_json(
     url: str,
     *,
@@ -466,12 +488,31 @@ def _fetch_allocation_json(
             break
         request = Request(
             url,
-            headers=_request_headers(include_internal_key=True),
+            headers={
+                **_request_headers(include_internal_key=True),
+                # The attested handoff is multi-MB, hash-dense JSON that
+                # compresses several-fold; ask for gzip so a cold-epoch fetch
+                # spends its 90s budget on the gateway build, not the
+                # transfer. Gateways without response compression ignore this
+                # header and keep returning identity unchanged.
+                "Accept-Encoding": "gzip",
+            },
             method="GET",
         )
         try:
             with urlopen(request, timeout=remaining) as response:
-                return json.loads(response.read().decode("utf-8"))
+                raw = response.read()
+                declared_encoding = str(
+                    response.headers.get("Content-Encoding") or ""
+                ).strip().lower()
+                if declared_encoding == "gzip":
+                    raw = _decode_allocation_response_gzip(raw)
+                elif declared_encoding not in ("", "identity"):
+                    raise RuntimeError(
+                        "unsupported allocation response encoding: %s"
+                        % declared_encoding
+                    )
+                return json.loads(raw.decode("utf-8"))
         except Exception as exc:  # noqa: BLE001 - reclassified below
             last_error = exc
             remaining_after = deadline - time.monotonic()

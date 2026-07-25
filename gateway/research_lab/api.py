@@ -3053,9 +3053,22 @@ async def get_research_lab_live_allocation(
             netuid=BITTENSOR_NETUID,
             persist_snapshot=persist_snapshot,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
+        # This endpoint has no build task to report its failures, so the reason
+        # for a 500 has to be recorded here or it is lost with the response.
+        logger.error(
+            "research_lab_live_allocation_build_failed epoch=%s "
+            "persist_snapshot=%s error_type=%s error=%s",
+            int(epoch),
+            bool(persist_snapshot),
+            type(exc).__name__,
+            str(exc)[:240],
+            exc_info=True,
+        )
+        if isinstance(exc, ValueError):
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
         raise HTTPException(status_code=500, detail=f"Research Lab allocation unavailable: {str(exc)[:200]}") from exc
 
 
@@ -3096,6 +3109,22 @@ def _allocation_handoff_cache_get(
 ) -> Optional[dict[str, Any]]:
     key = _allocation_cache_key(epoch, persist_snapshot)
     entry = _ALLOCATION_HANDOFF_CACHE.get(key)
+    if entry is None and not persist_snapshot:
+        # The cache is keyed by (epoch, persist_snapshot), so an anonymous
+        # caller used to miss a persisting build's entry and launch a second
+        # full rebuild of the same epoch: another multi-minute pass over the
+        # ancestry tables and another ~9 MiB handoff, contending for the exact
+        # database pool and enclave the validator needs inside its submission
+        # window. persist_snapshot only gates the emission-snapshot write (see
+        # allocations.build_research_lab_allocation_bundle); it never changes
+        # the returned document, so the persisted build's handoff is the same
+        # answer and is safe to reuse here.
+        #
+        # This direction only. Serving an authenticated caller from a read-only
+        # entry would skip the snapshot persistence it is entitled to, which
+        # test_read_only_cache_cannot_suppress_authenticated_persistence pins.
+        key = _allocation_cache_key(epoch, True)
+        entry = _ALLOCATION_HANDOFF_CACHE.get(key)
     if entry is None:
         return None
     expires_at, handoff = entry
@@ -3226,6 +3255,16 @@ async def _build_and_cache_attested_allocation(
             detail=f"Research Lab attested allocation unavailable: {str(exc)[:200]}",
         ) from exc
     if attestation.get("status") != "matched":
+        # Not an exception, so the build task's failure callback never sees it:
+        # without this line a 503 inside the submission window leaves nothing
+        # behind but an access-log status code.
+        logger.error(
+            "research_lab_attested_allocation_not_ready epoch=%s "
+            "persist_snapshot=%s status=%s",
+            int(epoch),
+            bool(persist_snapshot),
+            attestation.get("status", "unknown"),
+        )
         raise HTTPException(
             status_code=503,
             detail=f"Research Lab attested allocation is not ready: {attestation.get('status', 'unknown')}",

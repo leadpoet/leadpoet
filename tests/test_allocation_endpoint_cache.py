@@ -228,3 +228,95 @@ async def test_cache_is_bounded_by_max_epochs(monkeypatch):
 
     assert len(api._ALLOCATION_HANDOFF_CACHE) <= 4
     assert not api._ALLOCATION_BUILD_TASKS
+
+
+@pytest.mark.asyncio
+async def test_anonymous_request_reuses_the_persisted_build(monkeypatch):
+    """An anonymous poll must not rebuild an epoch the validator already built.
+
+    The cache is keyed by (epoch, persist_snapshot), so an anonymous caller used
+    to miss the persisting build's entry and launch a second full rebuild of the
+    same epoch — another multi-minute pass over the ancestry tables and another
+    ~9 MiB handoff, contending for the database pool and enclave the validator
+    needs inside its submission window.
+    """
+
+    counter = {"n": 0}
+
+    async def guard(config, epoch, key):
+        return key == "validator-key"
+
+    _install(monkeypatch, build=_matched_build(counter), guard=guard)
+
+    authenticated = await api.get_research_lab_attested_allocation(
+        11,
+        x_leadpoet_internal_key="validator-key",
+    )
+    assert counter["n"] == 1
+
+    anonymous = await api.get_research_lab_attested_allocation(11)
+
+    assert anonymous == authenticated == {"handoff_for": 11}
+    assert counter["n"] == 1  # reused, not rebuilt
+
+
+@pytest.mark.asyncio
+async def test_expired_persisted_entry_is_not_served_to_anonymous_callers(
+    monkeypatch,
+):
+    counter = {"n": 0}
+
+    async def guard(config, epoch, key):
+        return key == "validator-key"
+
+    _install(monkeypatch, build=_matched_build(counter), guard=guard)
+    monkeypatch.setattr(api, "_ALLOCATION_CACHE_TTL_SECONDS", 0.05)
+
+    await api.get_research_lab_attested_allocation(
+        12,
+        x_leadpoet_internal_key="validator-key",
+    )
+    assert counter["n"] == 1
+    time.sleep(0.1)  # let the persisted entry expire
+
+    await api.get_research_lab_attested_allocation(12)
+    assert counter["n"] == 2  # expiry still applies across the reuse path
+
+
+@pytest.mark.asyncio
+async def test_not_ready_attestation_is_logged_before_failing(monkeypatch, caplog):
+    """A 503 is not an exception, so the build task's callback never sees it."""
+
+    async def unmatched_build(**kwargs):
+        kwargs["attestation_out"].update({"status": "pending"})
+        return {"bundle_type": "live", "epoch": kwargs["epoch"]}
+
+    _install(monkeypatch, build=unmatched_build)
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(Exception):
+            await api.get_research_lab_attested_allocation(13)
+
+    assert "research_lab_attested_allocation_not_ready" in caplog.text
+    assert "status=pending" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_live_allocation_failure_is_logged_before_failing(monkeypatch, caplog):
+    async def failing_build(**kwargs):
+        raise RuntimeError("coordinator enclave unavailable")
+
+    monkeypatch.setattr(api.ResearchLabGatewayConfig, "from_env", _config)
+    monkeypatch.setattr(api, "build_research_lab_allocation_bundle", failing_build)
+
+    async def guard(config, epoch, key):
+        return False
+
+    monkeypatch.setattr(api, "_allocation_epoch_guard_and_persistence", guard)
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(Exception):
+            await api.get_research_lab_live_allocation(14)
+
+    assert "research_lab_live_allocation_build_failed" in caplog.text
+    assert "RuntimeError" in caplog.text

@@ -423,20 +423,24 @@ def main() -> int:
             raise SystemExit(
                 "weight readiness did not execute the candidate production module"
             )
-        module_path = Path(
+        canonical_module_path = Path(
             "/home/ec2-user/leadpoet_repo/"
             "gateway/tee/verify_weight_submission_ready_v2.py"
         )
         module_hash = __import__("hashlib").sha256(
-            module_path.read_bytes()
+            canonical_module_path.read_bytes()
         ).hexdigest()
         if any(
-            row.get("module_path") != str(module_path)
+            row.get("source_git_path")
+            != "gateway/tee/verify_weight_submission_ready_v2.py"
+            or row.get("source_kind")
+            not in {"candidate_archive", "candidate_checkout"}
             or row.get("module_sha256") != module_hash
+            or row.get("source_sha256") != module_hash
             for row in weight_rows
         ):
             raise SystemExit(
-                "weight readiness source identity differs from the candidate checkout"
+                "weight readiness source identity differs from the candidate commit"
             )
 
         repair_rows = [

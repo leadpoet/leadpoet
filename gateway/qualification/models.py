@@ -801,6 +801,15 @@ class LeadScoreBreakdown(BaseModel):
         default=None,
         description="Per-signal scoring detail (autoresearch benchmark); None for lead-mode",
     )
+    # Durable verifier-gate receipts (PR-28 audit): audit documents from the
+    # deterministic/semantic industry gate — modes, deterministic detail,
+    # semantic model/input-hash/source-hashes/judgment, and the final scoring
+    # effect. Optional and None by default so legacy callers and persisted
+    # breakdown readers are unaffected.
+    verifier_gate_receipts: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Durable industry-gate audit receipts (taxonomy/semantic); None when gates disabled",
+    )
 
     @model_validator(mode='after')
     def validate_score_consistency(self) -> 'LeadScoreBreakdown':

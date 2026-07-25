@@ -119,6 +119,9 @@ def test_verifier_fails_closed_without_raising_after_malformed_json(monkeypatch)
     )
 
     assert result["client_ready"] is False
-    assert result["decision"] == "reject"
+    # Provider failures are UNAVAILABLE, not content rejections (source-
+    # grounding taxonomy): still fails closed for publication, but the label
+    # lets the evaluator distinguish infrastructure from falsified intent.
+    assert result["decision"] == "unavailable"
     assert result["rejection_reason"] == "stage1_llm_error:invalid_json_content"
     assert result["stage1"]["status"] == "llm_error"

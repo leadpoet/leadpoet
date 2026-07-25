@@ -579,3 +579,213 @@ def test_semantic_no_match_keeps_enforce_zero(monkeypatch) -> None:
     )
     assert passed is False
     assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# PR-28 audit fix: the FULL taxonomy x semantic x provider decision matrix.
+# Semantic shadow must NEVER change the outcome; semantic-enforce provider
+# unavailability must fail OPEN (never a verdict); canonical conflicts are
+# never rescued in any combination.
+# ---------------------------------------------------------------------------
+
+
+class _MatrixEvaluator:
+    def __init__(self, behavior: str, calls: list) -> None:
+        self._behavior = behavior
+        self._calls = calls
+
+    async def evaluate_industry(self, **kwargs):
+        self._calls.append(kwargs)
+        if self._behavior == "error":
+            raise RuntimeError("provider outage")
+        return _FakeSemanticResult("passed" if self._behavior == "match" else "failed")
+
+
+def _install_matrix(monkeypatch, semantic_mode: str, behavior: str):
+    import leadpoet_verifier.semantic_gates as sg
+
+    calls: list = []
+    monkeypatch.setattr(sg, "semantic_gate_mode", lambda value=None: semantic_mode)
+    if behavior == "construct_error":
+        def _boom(cls, **kw):
+            raise RuntimeError("no api key")
+        monkeypatch.setattr(sg.SemanticGateEvaluator, "from_env", classmethod(_boom))
+    else:
+        monkeypatch.setattr(
+            sg.SemanticGateEvaluator,
+            "from_env",
+            classmethod(lambda cls, **kw: _MatrixEvaluator(behavior, calls)),
+        )
+    return calls
+
+
+AMBIGUOUS = ("Bespoke Provider Label Xyz", "Software")   # taxonomy silent
+CONFLICT = ("Manufacturing", "Software")                  # canonical conflict
+
+
+def test_matrix_taxonomy_shadow_is_always_output_neutral(monkeypatch) -> None:
+    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "shadow")
+    for semantic_mode in ("disabled", "shadow", "enforce"):
+        for behavior in ("match", "no_match", "error", "construct_error"):
+            _install_matrix(monkeypatch, semantic_mode, behavior)
+            for cand, req in (AMBIGUOUS, CONFLICT):
+                passed, reason = _run_zero_checks(_company(cand), _icp(req))
+                assert passed is True and reason is None, (
+                    f"taxonomy shadow must pass: semantic={semantic_mode} "
+                    f"behavior={behavior} cand={cand}"
+                )
+
+
+def test_matrix_semantic_shadow_never_changes_enforce_outcome(monkeypatch) -> None:
+    # THE PR-28 AUDIT BUG: semantic shadow used to rescue under taxonomy
+    # enforce. It must behave exactly like semantic disabled.
+    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
+    for behavior in ("match", "no_match", "error", "construct_error"):
+        _install_matrix(monkeypatch, "shadow", behavior)
+        passed, reason = _run_zero_checks(_company(*AMBIGUOUS[:1]), _icp(AMBIGUOUS[1]))
+        assert passed is False, (
+            f"semantic SHADOW must not rescue (behavior={behavior})"
+        )
+        passed, _ = _run_zero_checks(_company(CONFLICT[0]), _icp(CONFLICT[1]))
+        assert passed is False
+
+
+def test_matrix_semantic_enforce_decides_ambiguous_only(monkeypatch) -> None:
+    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
+    # match -> rescued
+    _install_matrix(monkeypatch, "enforce", "match")
+    passed, _ = _run_zero_checks(_company(AMBIGUOUS[0]), _icp(AMBIGUOUS[1]))
+    assert passed is True
+    # no-match -> zero
+    _install_matrix(monkeypatch, "enforce", "no_match")
+    passed, _ = _run_zero_checks(_company(AMBIGUOUS[0]), _icp(AMBIGUOUS[1]))
+    assert passed is False
+    # canonical conflict -> zero even on match, judge never consulted
+    calls = _install_matrix(monkeypatch, "enforce", "match")
+    passed, _ = _run_zero_checks(_company(CONFLICT[0]), _icp(CONFLICT[1]))
+    assert passed is False
+    assert calls == []
+
+
+def test_matrix_semantic_enforce_unavailability_fails_open(monkeypatch) -> None:
+    # THE SECOND PR-28 AUDIT BUG: provider unavailability used to hard-zero.
+    # Unavailability is never a verdict — ambiguous labels FAIL OPEN.
+    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
+    for behavior in ("error", "construct_error"):
+        _install_matrix(monkeypatch, "enforce", behavior)
+        passed, reason = _run_zero_checks(_company(AMBIGUOUS[0]), _icp(AMBIGUOUS[1]))
+        assert passed is True and reason is None, f"must fail open on {behavior}"
+        # ...but canonical conflicts still zero (unavailability changes nothing).
+        passed, _ = _run_zero_checks(_company(CONFLICT[0]), _icp(CONFLICT[1]))
+        assert passed is False
+
+
+def test_gate_receipts_are_durable_and_complete(monkeypatch) -> None:
+    # Audit fix #4: durable receipts carry modes, deterministic detail,
+    # semantic judgment, and the final scoring effect.
+    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
+    _install_matrix(monkeypatch, "enforce", "match")
+    receipts: list = []
+    passed, reason = asyncio.run(
+        pre_checks.run_company_zero_checks(
+            _company(AMBIGUOUS[0]),
+            _icp(AMBIGUOUS[1]),
+            run_cost_usd=0.0,
+            run_time_seconds=1.0,
+            seen_companies=set(),
+            gate_receipts=receipts,
+        )
+    )
+    assert passed is True
+    assert len(receipts) == 1
+    r = receipts[0]
+    assert r["gate"] == "taxonomy_industry"
+    assert r["taxonomy_mode"] == "enforce"
+    assert r["semantic_mode"] == "enforce"
+    assert r["final_effect"] == "rescued_semantic_enforce"
+    assert r["deterministic"]["passed"] is False
+    assert r["semantic_verdict"] is True
+
+
+# ---------------------------------------------------------------------------
+# PR-28 audit fix: country alias + unknown-code handling
+# ---------------------------------------------------------------------------
+
+
+def test_country_the_prefixed_official_names_resolve() -> None:
+    from qualification.scoring.pre_checks import check_country_match
+
+    assert check_country_match("The Bahamas", "BS").passed is True
+    assert check_country_match("BS", "The Bahamas").passed is True
+    assert check_country_match("The Gambia", "GM").passed is True
+    assert check_country_match("GM", "The Gambia").passed is True
+    assert check_country_match("The Netherlands", "Netherlands").passed is True
+
+
+def test_country_unknown_code_fails_closed_prose_still_defers() -> None:
+    from qualification.scoring.pre_checks import check_country_match
+
+    # An unknown code-shaped geography must NOT accept everything.
+    assert check_country_match("Brazil", "ZZ").passed is False
+    assert check_country_match("ZZ", "Brazil").passed is False
+    # Multi-region prose keeps the documented deferral contract.
+    assert check_country_match("Germany", "EMEA").passed is True
+    assert check_country_match("Japan", "APAC").passed is True
+
+
+def test_country_eu_shorthand_expands_to_europe() -> None:
+    from qualification.scoring.pre_checks import check_country_match
+
+    assert check_country_match("Germany", "EU").passed is True
+    assert check_country_match("France", "EU").passed is True
+    assert check_country_match("Brazil", "EU").passed is False
+
+
+@pytest.mark.asyncio
+async def test_gate_receipts_persist_into_breakdown_end_to_end(monkeypatch) -> None:
+    # Durability proof: the receipt must survive all the way into the
+    # LeadScoreBreakdown the evaluator persists — not just the out-param.
+    from qualification.scoring.lead_scorer import (
+        score_company_autoresearch_intent_v2,
+    )
+
+    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
+    monkeypatch.delenv("VERIFIER_SEMANTIC_GATES_MODE", raising=False)
+    # Canonical conflict zeroes deterministically at pre-checks: no network.
+    breakdown = await score_company_autoresearch_intent_v2(
+        _company("Manufacturing"),
+        _icp("Software"),
+        run_cost_usd=0.0,
+        run_time_seconds=1.0,
+        seen_companies=set(),
+    )
+    assert breakdown.final_score == 0
+    assert "canonical taxonomy" in (breakdown.failure_reason or "")
+    receipts = breakdown.verifier_gate_receipts
+    assert receipts and receipts[0]["gate"] == "taxonomy_industry"
+    assert receipts[0]["final_effect"] == "zeroed"
+    assert receipts[0]["taxonomy_mode"] == "enforce"
+    # Round-trips through the model layer (what the evaluator serializes).
+    dumped = breakdown.model_dump()
+    assert dumped["verifier_gate_receipts"][0]["final_effect"] == "zeroed"
+
+
+@pytest.mark.asyncio
+async def test_clean_pass_carries_no_receipt(monkeypatch) -> None:
+    # Payload discipline: a trivial deterministic pass must NOT attach an
+    # audit receipt — otherwise the default shadow mode would bloat every
+    # persisted breakdown in every benchmark.
+    from qualification.scoring.lead_scorer import _run_autoresearch_binary_fit_checks
+
+    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "shadow")
+    receipts: list = []
+    passed, reason = await pre_checks.run_company_zero_checks(
+        _company("Software", "SaaS"),
+        _icp("Software"),
+        run_cost_usd=0.0,
+        run_time_seconds=1.0,
+        seen_companies=set(),
+        gate_receipts=receipts,
+    )
+    assert passed is True and reason is None
+    assert receipts == []  # nothing to audit on a clean deterministic pass

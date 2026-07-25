@@ -1444,11 +1444,22 @@ async def compute_epoch_consensus(epoch_id: int):
                             multiplier = evidence_blob.get("is_icp_multiplier", 1.0)
                             multipliers.append(multiplier)
                         
-                        # Use the most common value (or average if all different)
+                        # Use the most common value, with a DETERMINISTIC
+                        # tie-break. Counter.most_common breaks ties by insertion
+                        # order = arbitrary DB row order, so two validators
+                        # legitimately disagreeing (e.g. +50 vs +20) made the
+                        # persisted reward-adjustment depend on row ordering, not
+                        # consensus — non-reproducible on the trustless path.
+                        # Among the most-common values pick the smallest
+                        # (conservative for the subnet on a genuine tie of equal
+                        # validator support).
                         if multipliers:
                             from collections import Counter
-                            counter = Counter(multipliers)
-                            is_icp_multiplier = counter.most_common(1)[0][0]
+                            counts = Counter(multipliers)
+                            _top = max(counts.values())
+                            is_icp_multiplier = min(
+                                v for v, c in counts.items() if c == _top
+                            )
                             # Detect format: OLD (1.0, 1.5, 5.0) vs NEW (integers -15 to +20)
                             if is_icp_multiplier in {1.0, 1.5, 5.0}:
                                 print(f"         🎯 ICP Multiplier (legacy): {is_icp_multiplier}x (from {len(multipliers)} approving validators)")

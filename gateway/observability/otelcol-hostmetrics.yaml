@@ -1,0 +1,87 @@
+# OpenTelemetry Collector — gateway host metrics (CPU / memory / storage / network).
+#
+# This is a SEPARATE process from the gateway. It does NOT import or touch the
+# in-process span exporter in `otel_bootstrap.py`, adds no Python dependency to
+# the gateway, and runs in no enclave — so the fail-closed span boundary and the
+# PCR0 allowlist are unaffected. It only scrapes the host OS and ships metrics
+# over OTLP/HTTP to the SAME collector the gateway already sends traces to,
+# reusing GATEWAY_OTEL_ENDPOINT / GATEWAY_OTEL_TOKEN (metrics path instead of
+# traces). Install it with ./install_hostmetrics_collector.sh.
+#
+# Requires the otelcol-contrib distribution (the hostmetrics receiver and the
+# resourcedetection processor are contrib components).
+
+receivers:
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.utilization:
+            enabled: true
+      load: {}
+      memory:
+        metrics:
+          system.memory.utilization:
+            enabled: true
+      disk: {}
+      filesystem:
+        metrics:
+          system.filesystem.utilization:
+            enabled: true
+        # Skip pseudo/virtual mounts so the storage panels only show real disks.
+        exclude_mount_points:
+          match_type: regexp
+          mount_points:
+            - /dev.*
+            - /proc.*
+            - /sys.*
+            - /run.*
+            - /var/lib/docker/.*
+        exclude_fs_types:
+          match_type: strict
+          fs_types:
+            - autofs
+            - devtmpfs
+            - overlay
+            - squashfs
+            - tmpfs
+      network: {}
+      paging: {}
+
+processors:
+  # Tag every metric so it is distinguishable from the gateway's request spans
+  # (service.name = leadpoet-gateway) and attributable to a specific host.
+  resource:
+    attributes:
+      - key: service.name
+        value: leadpoet-gateway-host
+        action: upsert
+  # Fill in host.name / host.id and the EC2 instance identity when available,
+  # so dashboards can break metrics out per instance.
+  resourcedetection:
+    detectors: [env, system, ec2]
+    timeout: 5s
+    override: false
+  batch:
+    timeout: 10s
+
+exporters:
+  otlphttp:
+    # Explicit metrics URL (…/v1/metrics). The install script derives this from
+    # GATEWAY_OTEL_ENDPOINT (…/v1/traces) unless GATEWAY_OTEL_METRICS_ENDPOINT
+    # is set explicitly.
+    metrics_endpoint: ${env:GATEWAY_OTEL_METRICS_ENDPOINT}
+    headers:
+      Authorization: "Bearer ${env:GATEWAY_OTEL_TOKEN}"
+
+service:
+  # Keep the collector quiet; its own logs go to the journal via systemd.
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    metrics:
+      receivers: [hostmetrics]
+      processors: [resourcedetection, resource, batch]
+      exporters: [otlphttp]

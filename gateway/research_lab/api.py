@@ -3255,9 +3255,11 @@ async def _build_and_cache_attested_allocation(
             detail=f"Research Lab attested allocation unavailable: {str(exc)[:200]}",
         ) from exc
     if attestation.get("status") != "matched":
-        # Not an exception, so the build task's failure callback never sees it:
-        # without this line a 503 inside the submission window leaves nothing
-        # behind but an access-log status code.
+        # The HTTPException raised below IS surfaced by the build task's
+        # failure callback, but only generically (error_type=HTTPException).
+        # The attestation status that caused it is not, so record it here:
+        # a 503 inside the submission window should be greppable by the
+        # status that produced it, not just by an access-log code.
         logger.error(
             "research_lab_attested_allocation_not_ready epoch=%s "
             "persist_snapshot=%s status=%s",

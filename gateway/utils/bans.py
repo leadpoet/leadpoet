@@ -129,13 +129,23 @@ async def promote_next_champion() -> Optional[Dict[str, Any]]:
             .execute()
         banned_hotkeys = {r["hotkey"] for r in (banned_response.data or [])}
 
-        candidates_response = supabase.table("qualification_models") \
+        candidates_query = supabase.table("qualification_models") \
             .select("id, model_name, miner_hotkey, score, champion_at, "
                     "evaluation_cost_usd, evaluation_time_seconds, code_content") \
             .eq("status", "evaluated") \
             .eq("is_champion", False) \
             .gt("score", 10.0) \
-            .gte("created_at", today_midnight) \
+            .gte("created_at", today_midnight)
+        if banned_hotkeys:
+            # Exclude banned miners IN the query so the score-ordered limit picks
+            # the top ELIGIBLE model. Filtering only in Python after a top-50 fetch
+            # meant that if the 50 highest-scoring models were all banned, a
+            # legitimate lower-scoring model beyond row 50 was silently skipped
+            # and no champion was promoted.
+            candidates_query = candidates_query.not_.in_(
+                "miner_hotkey", list(banned_hotkeys)
+            )
+        candidates_response = candidates_query \
             .order("score", desc=True) \
             .limit(50) \
             .execute()

@@ -241,7 +241,8 @@ def _isolated_source_snapshot(
     """Copy frozen Git objects so sequential containers cannot share mutations."""
 
     with tempfile.TemporaryDirectory(
-        prefix="leadpoet-restart-source-"
+        prefix=".leadpoet-restart-source-",
+        dir=REPO_ROOT,
     ) as raw:
         source = Path(raw) / "source"
         _run(
@@ -305,9 +306,9 @@ def _isolated_source_snapshot(
                 "--no-dangling",
             ]
         )
-        # Docker Desktop on macOS rejects the /var/folders symlink spelling
-        # even though the same directory is mounted under /private/var/folders.
-        # Always hand the daemon the canonical host path.
+        # Keep the bind source under the repository: Docker Desktop and Colima
+        # necessarily share that project path, while macOS's default
+        # /var/folders temporary root is commonly outside the VM's shares.
         yield source.resolve(strict=True)
 
 

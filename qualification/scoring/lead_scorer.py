@@ -1968,7 +1968,9 @@ def calculate_age_months(signal_date: date) -> float:
     """
     today = date.today()
     days_old = (today - signal_date).days
-    return days_old / 30.0  # Approximate months
+    # Clamp future-dated signals to age 0; a negative age would otherwise
+    # register as "fresher than today" and max out the decay multiplier.
+    return max(0, days_old) / 30.0  # Approximate months
 
 
 def calculate_time_decay_multiplier(age_months: float) -> float:

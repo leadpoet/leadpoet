@@ -110,6 +110,11 @@ _ANTIBOT_RE = re.compile("|".join(_ANTIBOT_PATTERNS), re.IGNORECASE)
 # to mention anti-bot phrases in passing.
 _ANTIBOT_MAX_LEN = 4000
 
+# Evidence dated more than this many days in the future is rejected as invalid.
+# The tolerance absorbs clock skew / timezone rounding without accepting the
+# far-future dates an adversary would use to defeat the recency cap.
+_FUTURE_DATE_TOLERANCE_DAYS = 2
+
 
 def check_antibot_wall(content: str) -> Optional[str]:
     """Return a rejection reason if the fetched page is a bot challenge or
@@ -227,6 +232,15 @@ def check_evidence_freshness(claim_text: str,
         return None
 
     age_days = (datetime.now(timezone.utc) - parsed).days
+    # Future-dated evidence is invalid: a negative age would otherwise pass the
+    # freshness/recency cap unconditionally (age_days never exceeds max_age) and
+    # would also max out the downstream time-decay multiplier. Allow a small
+    # tolerance for clock skew / timezone rounding, then reject.
+    if age_days < -_FUTURE_DATE_TOLERANCE_DAYS:
+        return (
+            f"Signal date {date_str} is dated in the future "
+            f"({-age_days} days ahead); future-dated evidence is not valid"
+        )
     if age_days > max_age:
         return (
             f"Signal date {date_str} is {age_days} days old, but claim's "

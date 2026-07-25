@@ -13,6 +13,7 @@ from typing import Iterable, Optional
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from gateway.middleware.body_size import WEIGHT_AUTHORITY_GRAPH_PATHS
 from gateway.utils.ops_registry import set_priority_middleware
 
 
@@ -41,6 +42,12 @@ class RouteClass:
     wait_timeout_s: float
 
 
+WEIGHT_AUTHORITY_CLASS = RouteClass(
+    "weight_authority",
+    _int_env("WEIGHT_AUTHORITY_MAX_CONCURRENT", 2),
+    _int_env("WEIGHT_AUTHORITY_MAX_WAITING", 4),
+    _float_env("WEIGHT_AUTHORITY_SLOT_WAIT_TIMEOUT_SECONDS", 30),
+)
 VALIDATOR_CLASS = RouteClass(
     "validator",
     _int_env("VALIDATOR_MAX_CONCURRENT", 75),
@@ -64,7 +71,6 @@ OTHER_CLASS = RouteClass(
 VALIDATOR_EXACT = {
     "/validate",
     "/weights/submit",
-    "/weights/submit/v2",
     "/fulfillment/scoring",
     "/fulfillment/score",
     "/fulfillment/rewards/active",
@@ -93,6 +99,8 @@ def _matches(path: str, exact: set[str], prefixes: Iterable[str]) -> bool:
 
 
 def classify_path(path: str) -> str:
+    if path in WEIGHT_AUTHORITY_GRAPH_PATHS:
+        return "weight_authority"
     if _matches(path, VALIDATOR_EXACT, VALIDATOR_PREFIXES):
         return "validator"
     if _matches(path, MINER_EXACT, MINER_PREFIXES):
@@ -228,6 +236,7 @@ class PriorityMiddleware:
         else:
             miner_class = MINER_CLASS
         self.pools = {
+            "weight_authority": _Pool(WEIGHT_AUTHORITY_CLASS),
             "validator": _Pool(VALIDATOR_CLASS),
             "miner": _Pool(miner_class),
             "other": _Pool(OTHER_CLASS),

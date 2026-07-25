@@ -48,8 +48,9 @@ class _Collector:
         return None
 
 
-def test_classify_path_unchanged():
-    assert classify_path("/weights/submit/v2") == "validator"
+def test_classify_path_is_explicit():
+    assert classify_path("/weights/submit/v2") == "weight_authority"
+    assert classify_path("/weights/finalize/v2") == "weight_authority"
     assert classify_path("/epoch/24123") == "validator"
     assert classify_path("/fulfillment/requests/active") == "miner"
     assert classify_path("/anything-else") == "other"
@@ -65,8 +66,21 @@ def test_http_request_passes_through_and_releases_slot():
     asyncio.run(mw(_http_scope("/weights/submit/v2"), _receive, send))
 
     assert send.status == 200
-    # The validator slot must be fully released after a normal response.
-    assert mw.pools["validator"].in_flight == 0
+    # The weight-authority slot must be fully released after a normal response.
+    assert mw.pools["weight_authority"].in_flight == 0
+
+
+def test_weight_authority_uses_small_dedicated_pool():
+    async def app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    mw = PriorityMiddleware(app)
+    weight_pool = mw.pools["weight_authority"]
+
+    assert weight_pool is not mw.pools["validator"]
+    assert weight_pool.route_class.max_concurrent == 2
+    assert weight_pool.route_class.max_waiting == 4
 
 
 def test_downstream_exception_releases_slot_and_propagates():
@@ -79,7 +93,7 @@ def test_downstream_exception_releases_slot_and_propagates():
     with pytest.raises(RuntimeError, match="endpoint failed"):
         asyncio.run(mw(_http_scope("/weights/submit/v2"), _receive, send))
 
-    assert mw.pools["validator"].in_flight == 0  # released despite the raise
+    assert mw.pools["weight_authority"].in_flight == 0
 
 
 def test_non_http_scope_passes_through_untouched():
@@ -125,10 +139,10 @@ def test_no_slot_leak_under_repeated_exceptions():
 
     asyncio.run(drive())
     # 50 failing requests must leave zero in-flight and full capacity.
-    assert mw.pools["validator"].in_flight == 0
+    assert mw.pools["weight_authority"].in_flight == 0
     assert (
-        mw.pools["validator"].semaphore._value
-        == mw.pools["validator"].route_class.max_concurrent
+        mw.pools["weight_authority"].semaphore._value
+        == mw.pools["weight_authority"].route_class.max_concurrent
     )
 
 

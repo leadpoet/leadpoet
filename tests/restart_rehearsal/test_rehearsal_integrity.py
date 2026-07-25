@@ -6,10 +6,33 @@ import subprocess
 import pytest
 
 from scripts import run_local_restart_rehearsal as rehearsal
-from tests.restart_rehearsal.verify_evidence import verify_rehearsal_integrity
+from tests.restart_rehearsal.verify_evidence import (
+    EXPECTED_GATEWAY_PRIVATE_MODEL_ENV,
+    verify_gateway_private_model_environment,
+    verify_rehearsal_integrity,
+)
 
 
 COMMIT = "1" * 40
+
+
+def test_gateway_rehearsal_requires_canonical_private_model_environment() -> None:
+    row = {
+        "kind": "process",
+        "process": "gateway.main",
+        "status": "started",
+        "environment_contract": dict(EXPECTED_GATEWAY_PRIVATE_MODEL_ENV),
+    }
+    verify_gateway_private_model_environment([row])
+
+    row["environment_contract"][
+        "RESEARCH_LAB_PRIVATE_REPO_BRANCH"
+    ] = "main"
+    with pytest.raises(SystemExit, match="private-model source environment"):
+        verify_gateway_private_model_environment([row])
+
+    with pytest.raises(SystemExit, match="exactly one gateway.main"):
+        verify_gateway_private_model_environment([])
 
 
 def test_rehearsal_driver_must_match_frozen_candidate(

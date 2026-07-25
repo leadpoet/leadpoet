@@ -11,6 +11,16 @@ import sys
 
 
 TARGETED_REGRESSION_SCOPE = "weight_readiness_regression"
+EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
+    "RESEARCH_LAB_PRIVATE_REPO_BRANCH": "leadpoet-lab",
+    "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI": (
+        "s3://leadpoet-private-model-artifacts-493765492819/"
+        "research-lab/sourcing-model/branches/leadpoet-lab/current.json"
+    ),
+    "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID": (
+        "alias/leadpoet-research-lab-artifact-signing"
+    ),
+}
 KNOWN_INTERNAL_SUBSTITUTION_MODULES = {
     "Leadpoet.utils.restart_epoch_gate",
     "gateway.tee.prepare_gateway_envelopes_v2",
@@ -224,6 +234,28 @@ def verify_rehearsal_integrity(
             )
 
 
+def verify_gateway_private_model_environment(rows: list[dict]) -> None:
+    gateway_processes = [
+        row
+        for row in rows
+        if row.get("kind") == "process"
+        and row.get("process") == "gateway.main"
+        and row.get("status") == "started"
+    ]
+    if len(gateway_processes) != 1:
+        raise SystemExit(
+            "gateway rehearsal did not launch exactly one gateway.main process"
+        )
+    if (
+        gateway_processes[0].get("environment_contract")
+        != EXPECTED_GATEWAY_PRIVATE_MODEL_ENV
+    ):
+        raise SystemExit(
+            "gateway.main private-model source environment differs from "
+            "the canonical restart contract"
+        )
+
+
 def main() -> int:
     component, from_sha, candidate_sha = sys.argv[1:4]
     scenario = (
@@ -419,6 +451,7 @@ def main() -> int:
                 "weight:http_handoff",
             ],
         )
+        verify_gateway_private_model_environment(rows)
         if repair_rows[-1].get("status") != "ok":
             raise SystemExit("real weight repair did not recover")
         direct_rows = [

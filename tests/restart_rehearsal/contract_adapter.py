@@ -35,6 +35,16 @@ PCR0 = hashlib.sha384(b"leadpoet-local-restart-rehearsal").hexdigest()
 HASH64 = hashlib.sha256(b"leadpoet-local-restart-rehearsal").hexdigest()
 ACCOUNT = "493765492819"
 TARGETED_REGRESSION_SCOPE = "weight_readiness_regression"
+EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
+    "RESEARCH_LAB_PRIVATE_REPO_BRANCH": "leadpoet-lab",
+    "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI": (
+        "s3://leadpoet-private-model-artifacts-493765492819/"
+        "research-lab/sourcing-model/branches/leadpoet-lab/current.json"
+    ),
+    "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID": (
+        "alias/leadpoet-research-lab-artifact-signing"
+    ),
+}
 
 
 def _ensure_state() -> None:
@@ -294,6 +304,16 @@ def _gateway_secret() -> dict[str, str]:
         "DEEPLINE_API_KEY": "rehearsal-deepline",
         "TRUELIST_API_KEY": "rehearsal-truelist",
         "RESEARCH_LAB_TEE_PROTOCOL": "v2",
+        # Exercise an installed N-1 secret with stale source values. The
+        # candidate restart must replace all three before gateway.main starts.
+        "RESEARCH_LAB_PRIVATE_REPO_BRANCH": "main",
+        "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI": (
+            "s3://leadpoet-private-model-artifacts-493765492819/"
+            "research-lab/sourcing-model/current.json"
+        ),
+        "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID": (
+            "alias/rehearsal-stale-private-model-signing"
+        ),
         "GATEWAY_PYTHON_BIN": "/home/ec2-user/venv311/bin/python3",
         "GATEWAY_PRIVATE_KEY_PATH": (
             "/home/ec2-user/gateway/secrets/gateway_private_key.pem"
@@ -775,6 +795,19 @@ def command_pkill(argv: list[str]) -> int:
 
 
 def _long_lived_process(key: str, argv: list[str]) -> int:
+    environment_contract: dict[str, str] = {}
+    if key == "gateway.main":
+        environment_contract = {
+            name: os.environ.get(name, "")
+            for name in EXPECTED_GATEWAY_PRIVATE_MODEL_ENV
+        }
+        if environment_contract != EXPECTED_GATEWAY_PRIVATE_MODEL_ENV:
+            return _fail(
+                "process",
+                argv,
+                "gateway private-model source environment differs from "
+                "the canonical restart contract",
+            )
     if _record_internal_substitution(
         kind="process",
         argv=argv,
@@ -792,6 +825,7 @@ def _long_lived_process(key: str, argv: list[str]) -> int:
         pid=os.getpid(),
         implementation="internal_substitution",
         scope=_rehearsal_scope(),
+        environment_contract=environment_contract,
     )
 
     def stop(_signum: int, _frame: Any) -> None:

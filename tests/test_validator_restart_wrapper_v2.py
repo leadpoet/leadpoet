@@ -60,6 +60,24 @@ def test_restart_accepts_exact_commit_argument_and_rejects_conflicts():
     assert "--commit conflicts with VALIDATOR_DEPLOY_COMMIT" in conflict.stderr
 
 
+def test_exact_restart_preserves_newer_validator_restart_controller():
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+
+    capture = script.index("capture_validator_restart_controller")
+    install = script.index("install_validator_restart_controller")
+    checkout = script.index(
+        'git checkout --detach "$REQUESTED_VALIDATOR_DEPLOY_COMMIT"'
+    )
+    assert capture < checkout
+    assert install < checkout
+    assert "VALIDATOR_RESTART_CONTROLLER_CURRENT" in script
+    assert (
+        'VALIDATOR_HOST_RESTART_SCRIPT="${VALIDATOR_HOST_RESTART_SCRIPT:-'
+        '/home/ec2-user/validator_restart.sh}"'
+    ) in script
+    assert "VALIDATOR_EXACT_COMMIT_HELPER_SOURCE" in script
+
+
 def test_pinned_restart_requires_same_gateway_release_before_shutdown():
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
     deploy = Path(

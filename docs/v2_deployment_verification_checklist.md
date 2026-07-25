@@ -76,6 +76,10 @@ The rehearsal must produce all of the following:
 - [ ] Exact rollback succeeds when the change affects restart or release
   selection.
 - [ ] Exact roll-forward succeeds again from the rollback target.
+- [ ] The rollback runtime checkout resolves to the selected historical SHA,
+  while both installed host restart controllers remain byte-identical to the
+  newer installed launcher. A second rollback invocation must still reach the
+  exact-commit compatibility gate.
 - [ ] Every contract stage passes.
 - [ ] Zero rejected contract events.
 - [ ] Zero `internal_substitution` events. An adapted repository module,

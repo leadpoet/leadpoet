@@ -153,6 +153,16 @@ def test_rollback_rehearsal_keeps_newer_commit_on_origin_main() -> None:
     assert '"$CANDIDATE_SHA:refs/heads/main"' in forward_section
 
 
+def test_forward_rehearsal_uses_the_normal_unpinned_operator_paths() -> None:
+    script = (
+        Path(__file__).resolve().parent / "run_inside.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'GATEWAY_DEPLOY_COMMIT="$CANDIDATE_SHA"' not in script
+    assert 'VALIDATOR_DEPLOY_COMMIT="$CANDIDATE_SHA"' not in script
+    assert script.count('--commit "$CANDIDATE_SHA"') == 2
+
+
 def test_exact_rehearsal_rejects_repository_module_substitution() -> None:
     rows = [
         {

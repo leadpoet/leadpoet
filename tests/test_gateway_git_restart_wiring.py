@@ -60,6 +60,26 @@ def test_gateway_restart_accepts_only_one_exact_commit_argument() -> None:
     assert "--commit conflicts with GATEWAY_DEPLOY_COMMIT" in conflict.stderr
 
 
+def test_pinned_gateway_rollback_preserves_newer_restart_controller() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    assert "GATEWAY_RESTART_CONTROLLER_CURRENT" in script
+    assert "GATEWAY_EXACT_COMMIT_HELPER" in script
+    assert (
+        'if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \\\n'
+        '    && [ "$PREPARED_GATEWAY_SHA" != "$ORIGIN_MAIN_GATEWAY_SHA" ]; then'
+        in script
+    )
+    assert (
+        'POST_ACTIVATE_GATEWAY_HOST_RESTART_SCRIPT="$LEADPOET_REPO_ROOT/gw_restart.sh"'
+        in script
+    )
+    assert (
+        'GATEWAY_HOST_RESTART_SCRIPT="$POST_ACTIVATE_GATEWAY_HOST_RESTART_SCRIPT"'
+        in script
+    )
+
+
 def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     _ordered_offsets(

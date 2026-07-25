@@ -28,9 +28,14 @@ def _run(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def _write_release_contract(repo: Path, *, ast_hash: str = "a" * 64) -> None:
-    weight_source = "def compute_final_weights():\n    return %r\n" % ast_hash
-    node = ast.parse(weight_source).body[0]
+def _manifest(
+    *,
+    schema_version: str,
+    path: str,
+    symbol: str,
+    source: str,
+) -> dict:
+    node = ast.parse(source).body[0]
     digest = "sha256:" + hashlib.sha256(
         ast.dump(
             node,
@@ -39,13 +44,13 @@ def _write_release_contract(repo: Path, *, ast_hash: str = "a" * 64) -> None:
         ).encode("utf-8")
     ).hexdigest()
     body = {
-        "schema_version": "leadpoet.validator_protected_workflows.v2",
+        "schema_version": schema_version,
         "baseline_commit": "0" * 40,
         "protected_source_commit": "0" * 40,
         "entries": [
             {
-                "path": "leadpoet_canonical/weight_computation.py",
-                "symbol": "compute_final_weights",
+                "path": path,
+                "symbol": symbol,
                 "ast_sha256": digest,
             }
         ],
@@ -58,6 +63,22 @@ def _write_release_contract(repo: Path, *, ast_hash: str = "a" * 64) -> None:
             ensure_ascii=True,
         ).encode("ascii")
     ).hexdigest()
+    return {**body, "manifest_hash": manifest_hash}
+
+
+def _write_release_contract(
+    repo: Path,
+    *,
+    validator_value: str = "a" * 64,
+    gateway_value: str = "a" * 64,
+) -> None:
+    validator_source = (
+        "def compute_final_weights():\n    return %r\n" % validator_value
+    )
+    gateway_source = (
+        "def build_gateway_weight_inputs_v2():\n    return %r\n"
+        % gateway_value
+    )
     files = {
         "gateway/api/weights.py": (
             '@router.get("/v2/release-evidence/{commit_sha}")\n'
@@ -75,9 +96,24 @@ def _write_release_contract(repo: Path, *, ast_hash: str = "a" * 64) -> None:
         "validator_models/containerizing/deploy_dynamic.sh": (
             "VALIDATOR_V2_DEPLOY_COMMIT\nauthoritative_v2\n"
         ),
-        "leadpoet_canonical/weight_computation.py": weight_source,
+        "leadpoet_canonical/weight_computation.py": validator_source,
+        "gateway/research_lab/weight_inputs_v2.py": gateway_source,
+        "gateway/tee/protected_workflows.json": json.dumps(
+            _manifest(
+                schema_version="leadpoet.protected_workflows.v2",
+                path="gateway/research_lab/weight_inputs_v2.py",
+                symbol="build_gateway_weight_inputs_v2",
+                source=gateway_source,
+            ),
+            sort_keys=True,
+        ),
         "validator_tee/enclave/protected_workflows_v2.json": json.dumps(
-            {**body, "manifest_hash": manifest_hash},
+            _manifest(
+                schema_version="leadpoet.validator_protected_workflows.v2",
+                path="leadpoet_canonical/weight_computation.py",
+                symbol="compute_final_weights",
+                source=validator_source,
+            ),
             sort_keys=True,
         ),
     }
@@ -141,12 +177,57 @@ def test_rollback_rejects_changed_protected_workflow_contract(
 ) -> None:
     repo, floor = _repo(tmp_path)
     selected = floor
-    _write_release_contract(repo, ast_hash="b" * 64)
+    _write_release_contract(repo, validator_value="b" * 64)
     branch = _commit(repo, "change protected weight computation")
 
     with pytest.raises(
         ExactCommitRestartCompatibilityError,
-        match="changes the protected V2 workflow contract",
+        match="changes the validator protected V2 workflow contract",
+    ):
+        verify_exact_commit_restart_compatibility(
+            repo_root=repo,
+            selected_commit=selected,
+            branch_ref=branch,
+            compatibility_floor=floor,
+        )
+
+
+def test_rollback_rejects_changed_gateway_protected_workflow_contract(
+    tmp_path: Path,
+) -> None:
+    repo, floor = _repo(tmp_path)
+    selected = floor
+    _write_release_contract(repo, gateway_value="b" * 64)
+    branch = _commit(repo, "change protected gateway weight input")
+
+    with pytest.raises(
+        ExactCommitRestartCompatibilityError,
+        match="gateway protected V2 workflow contract",
+    ):
+        verify_exact_commit_restart_compatibility(
+            repo_root=repo,
+            selected_commit=selected,
+            branch_ref=branch,
+            compatibility_floor=floor,
+        )
+
+
+def test_rollback_rejects_unmanifested_change_in_protected_source_file(
+    tmp_path: Path,
+) -> None:
+    repo, floor = _repo(tmp_path)
+    selected = floor
+    source = repo / "leadpoet_canonical/weight_computation.py"
+    source.write_text(
+        source.read_text(encoding="utf-8")
+        + "\nHELPER_CONSTANT = 'changed outside protected symbol'\n",
+        encoding="utf-8",
+    )
+    branch = _commit(repo, "change protected source outside declared symbol")
+
+    with pytest.raises(
+        ExactCommitRestartCompatibilityError,
+        match="validator protected V2 source file",
     ):
         verify_exact_commit_restart_compatibility(
             repo_root=repo,

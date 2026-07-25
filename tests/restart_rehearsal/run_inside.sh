@@ -130,7 +130,6 @@ if [ "$COMPONENT" = "gateway" ]; then
   else
     env \
       HOME=/home/ec2-user \
-      GATEWAY_DEPLOY_COMMIT="$CANDIDATE_SHA" \
       LEADPOET_REPO_ROOT=/home/ec2-user/leadpoet_repo \
       GATEWAY_ROOT=/home/ec2-user/leadpoet_repo/gateway \
       GATEWAY_LOG_ROOT=/home/ec2-user/gateway \
@@ -162,7 +161,11 @@ if [ "$COMPONENT" = "gateway" ]; then
 
   test "$(git -C /home/ec2-user/leadpoet_repo rev-parse HEAD)" = "$CANDIDATE_SHA"
   test "$(git -C /home/ec2-user/leadpoet_repo status --porcelain)" = ""
-  test "$(git -C /home/ec2-user/leadpoet_repo show "$CANDIDATE_SHA:gw_restart.sh" | sha256sum | cut -d' ' -f1)" = \
+  EXPECTED_CONTROLLER_SHA="$CANDIDATE_SHA"
+  if [ "$TRANSITION" = "rollback" ]; then
+    EXPECTED_CONTROLLER_SHA="$FROM_SHA"
+  fi
+  test "$(git -C /home/ec2-user/leadpoet_repo show "$EXPECTED_CONTROLLER_SHA:gw_restart.sh" | sha256sum | cut -d' ' -f1)" = \
     "$(sha256sum /home/ec2-user/gw_restart.sh | cut -d' ' -f1)"
   python3 - "$CANDIDATE_SHA" <<'PY'
 import json
@@ -190,6 +193,9 @@ else
   git -C /home/ec2-user/leadpoet/leadpoet branch -f main "$FROM_SHA"
   git -C /home/ec2-user/leadpoet/leadpoet checkout -q main
   git -C /home/ec2-user/leadpoet/leadpoet remote set-url origin /srv/origin.git
+  git -C /home/ec2-user/leadpoet/leadpoet show "$FROM_SHA:validator_restart.sh" \
+    >/home/ec2-user/validator_restart.sh
+  chmod 700 /home/ec2-user/validator_restart.sh
 
   mkdir -p \
     /home/ec2-user/.bittensor/wallets/validator_72/hotkeys \
@@ -204,16 +210,15 @@ else
       VALIDATOR_ROOT=/home/ec2-user/leadpoet/leadpoet \
       VALIDATOR_PYTHON_BIN=/home/ec2-user/venv311/bin/python3 \
       VALIDATOR_DOCKER_MIN_FREE_BYTES=1000000000 \
-      bash /home/ec2-user/leadpoet/leadpoet/validator_restart.sh \
+      bash /home/ec2-user/validator_restart.sh \
         --commit "$CANDIDATE_SHA"
   else
     env \
       HOME=/home/ec2-user \
-      VALIDATOR_DEPLOY_COMMIT="$CANDIDATE_SHA" \
       VALIDATOR_ROOT=/home/ec2-user/leadpoet/leadpoet \
       VALIDATOR_PYTHON_BIN=/home/ec2-user/venv311/bin/python3 \
       VALIDATOR_DOCKER_MIN_FREE_BYTES=1000000000 \
-      bash /home/ec2-user/leadpoet/leadpoet/validator_restart.sh
+      bash /home/ec2-user/validator_restart.sh
   fi
 
   test "$(git -C /home/ec2-user/leadpoet/leadpoet rev-parse HEAD)" = "$CANDIDATE_SHA"
@@ -221,6 +226,17 @@ else
     git -C /home/ec2-user/leadpoet/leadpoet \
       status --porcelain --untracked-files=no
   )" = ""
+  EXPECTED_CONTROLLER_SHA="$CANDIDATE_SHA"
+  if [ "$TRANSITION" = "rollback" ]; then
+    EXPECTED_CONTROLLER_SHA="$FROM_SHA"
+  fi
+  test "$(
+    git -C /home/ec2-user/leadpoet/leadpoet \
+      show "$EXPECTED_CONTROLLER_SHA:validator_restart.sh" \
+      | sha256sum | cut -d' ' -f1
+  )" = "$(
+    sha256sum /home/ec2-user/validator_restart.sh | cut -d' ' -f1
+  )"
 fi
 
 /usr/bin/python3.11 /harness/verify_evidence.py \

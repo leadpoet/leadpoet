@@ -16,9 +16,18 @@ VALIDATOR_V2_RELEASE_MANIFEST="${VALIDATOR_V2_RELEASE_MANIFEST:-/home/ec2-user/.
 VALIDATOR_V2_RELEASE_ARCHIVE_ROOT="${VALIDATOR_V2_RELEASE_ARCHIVE_ROOT:-/home/ec2-user/.config/leadpoet/validator-releases-v2}"
 VALIDATOR_V2_HOTKEY_CONFIG="${VALIDATOR_V2_HOTKEY_CONFIG:-/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json}"
 VALIDATOR_V2_HOTKEY_ENVELOPE="${VALIDATOR_V2_HOTKEY_ENVELOPE:-/home/ec2-user/.config/leadpoet/validator-hotkey-envelope-v2.json}"
-VALIDATOR_DOCKER_OPERATION_LOCK_HELPER="$VALIDATOR_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
+VALIDATOR_RESTART_CONTROLLER_ROOT="${VALIDATOR_RESTART_CONTROLLER_ROOT:-/home/ec2-user/.config/leadpoet/restart-controller/validator}"
+VALIDATOR_RESTART_CONTROLLER_CURRENT="$VALIDATOR_RESTART_CONTROLLER_ROOT/current"
+VALIDATOR_HOST_RESTART_SCRIPT="${VALIDATOR_HOST_RESTART_SCRIPT:-/home/ec2-user/validator_restart.sh}"
+VALIDATOR_EXACT_COMMIT_HELPER_SOURCE="$VALIDATOR_ROOT/Leadpoet/utils/exact_commit_restart_v2.py"
 VALIDATOR_PINNED_GATEWAY_VERIFIER_SOURCE="$VALIDATOR_ROOT/validator_tee/scripts/verify_pinned_gateway_release_v2.sh"
+if [ -r "$VALIDATOR_RESTART_CONTROLLER_CURRENT/Leadpoet/utils/exact_commit_restart_v2.py" ]; then
+  VALIDATOR_EXACT_COMMIT_HELPER_SOURCE="$VALIDATOR_RESTART_CONTROLLER_CURRENT/Leadpoet/utils/exact_commit_restart_v2.py"
+  VALIDATOR_PINNED_GATEWAY_VERIFIER_SOURCE="$VALIDATOR_RESTART_CONTROLLER_CURRENT/validator_tee/scripts/verify_pinned_gateway_release_v2.sh"
+fi
+VALIDATOR_DOCKER_OPERATION_LOCK_HELPER="$VALIDATOR_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
 VALIDATOR_PINNED_GATEWAY_VERIFIER=""
+VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR=""
 VALIDATOR_V2_RELEASE_BUCKET="${VALIDATOR_V2_RELEASE_BUCKET:-leadpoet-attested-v2-artifacts-493765492819}"
 VALIDATOR_V2_RELEASE_PREFIX="${VALIDATOR_V2_RELEASE_PREFIX:-attested-v2/releases}"
 VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
@@ -92,11 +101,63 @@ stop_pinned_validator_after_alignment_failure() {
   sudo nitro-cli terminate-enclave --all >/dev/null 2>&1 || true
 }
 
+capture_validator_restart_controller() {
+  local source_script
+  if [ -n "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR" ]; then
+    return 0
+  fi
+  source_script="$(readlink -f "${BASH_SOURCE[0]}")"
+  VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR="$(
+    mktemp -d /tmp/validator-restart-controller.XXXXXX
+  )"
+  mkdir -p \
+    "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR/Leadpoet/utils" \
+    "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR/validator_tee/scripts"
+  install -m 700 "$source_script" \
+    "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR/validator_restart.sh"
+  install -m 600 "$VALIDATOR_EXACT_COMMIT_HELPER_SOURCE" \
+    "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR/Leadpoet/utils/exact_commit_restart_v2.py"
+  install -m 700 "$VALIDATOR_PINNED_GATEWAY_VERIFIER_SOURCE" \
+    "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR/validator_tee/scripts/verify_pinned_gateway_release_v2.sh"
+}
+
+install_validator_restart_controller() {
+  local controller_hash release_dir temporary_dir temporary_link
+  local target_dir temporary
+  if [ -z "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR" ]; then
+    echo "ERROR: validator restart controller was not captured" >&2
+    return 1
+  fi
+  controller_hash="$(
+    sha256sum "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR/validator_restart.sh" \
+      | cut -d' ' -f1
+  )"
+  mkdir -p "$VALIDATOR_RESTART_CONTROLLER_ROOT/releases"
+  temporary_dir="$(mktemp -d "$VALIDATOR_RESTART_CONTROLLER_ROOT/.release.XXXXXX")"
+  cp -a "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR/." "$temporary_dir/"
+  release_dir="$VALIDATOR_RESTART_CONTROLLER_ROOT/releases/$controller_hash"
+  rm -rf -- "$release_dir"
+  mv -- "$temporary_dir" "$release_dir"
+  temporary_link="$VALIDATOR_RESTART_CONTROLLER_ROOT/.current.$$"
+  ln -s "releases/$controller_hash" "$temporary_link"
+  mv -Tf "$temporary_link" "$VALIDATOR_RESTART_CONTROLLER_CURRENT"
+
+  target_dir="$(dirname "$VALIDATOR_HOST_RESTART_SCRIPT")"
+  mkdir -p "$target_dir"
+  temporary="$(mktemp "$target_dir/.validator_restart.sh.XXXXXX")"
+  install -m 700 "$VALIDATOR_RESTART_CONTROLLER_CURRENT/validator_restart.sh" \
+    "$temporary"
+  mv -f "$temporary" "$VALIDATOR_HOST_RESTART_SCRIPT"
+}
+
 VALIDATOR_ENV_EXPORT="$(mktemp /tmp/validator_env_export.XXXXXX)"
 SECRET_TMP="$(mktemp /tmp/validator_secret_env.XXXXXX)"
 
 cleanup() {
   rm -f "$VALIDATOR_ENV_EXPORT" "$SECRET_TMP"
+  if [ -n "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR" ]; then
+    rm -rf "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR"
+  fi
   if [ -n "$VALIDATOR_PINNED_GATEWAY_VERIFIER" ]; then
     rm -f "$VALIDATOR_PINNED_GATEWAY_VERIFIER"
   fi
@@ -131,7 +192,7 @@ if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
     exit 1
   fi
   echo "Validating exact-commit V2 rollback compatibility"
-  python3 "$VALIDATOR_ROOT/Leadpoet/utils/exact_commit_restart_v2.py" \
+  python3 "$VALIDATOR_EXACT_COMMIT_HELPER_SOURCE" \
     --repo-root "$VALIDATOR_ROOT" \
     --selected-commit "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" \
     --branch-ref origin/main \
@@ -146,6 +207,8 @@ if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
   cp "$VALIDATOR_PINNED_GATEWAY_VERIFIER_SOURCE" \
     "$VALIDATOR_PINNED_GATEWAY_VERIFIER"
   chmod 700 "$VALIDATOR_PINNED_GATEWAY_VERIFIER"
+  capture_validator_restart_controller
+  install_validator_restart_controller
   git checkout --detach "$REQUESTED_VALIDATOR_DEPLOY_COMMIT"
   echo "Selected operator-requested validator commit: $REQUESTED_VALIDATOR_DEPLOY_COMMIT"
 else
@@ -159,6 +222,11 @@ if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
   echo "Restart wrapper updated from GitHub; re-executing latest validator_restart.sh"
   exec env VALIDATOR_RESTART_REEXECED=1 bash "$VALIDATOR_ROOT/validator_restart.sh" "$@"
 fi
+if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
+  VALIDATOR_EXACT_COMMIT_HELPER_SOURCE="$VALIDATOR_ROOT/Leadpoet/utils/exact_commit_restart_v2.py"
+  VALIDATOR_PINNED_GATEWAY_VERIFIER_SOURCE="$VALIDATOR_ROOT/validator_tee/scripts/verify_pinned_gateway_release_v2.sh"
+fi
+capture_validator_restart_controller
 
 echo "Preparing validator runtime env from Secrets Manager"
 mkdir -p "$(dirname "$VALIDATOR_ENV_FILE")" "$VALIDATOR_ENV_BACKUP_DIR"
@@ -636,6 +704,7 @@ python3 -m validator_tee.host.hotkey_bootstrap_v2 \
   --hotkey-envelope "$VALIDATOR_V2_HOTKEY_ENVELOPE"
 
 if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" = "1" ]; then
+  install_validator_restart_controller
   echo "SUCCESS: exact attested validator enclave is prepared for stateful cutover boundary capture"
   exit 0
 fi
@@ -665,6 +734,7 @@ if [ "$VALIDATOR_EXACT_RELEASE_PINNED" = "1" ]; then
     exit 1
   fi
 fi
+install_validator_restart_controller
 leadpoet_release_docker_operation_lock_v2
 if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ]; then
   rm -f "$VALIDATOR_RESTART_START_PATH"

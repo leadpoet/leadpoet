@@ -18,7 +18,18 @@ ENV_SECRET="/tmp/gw_env_secret.sh"
 MIN_FREE_KB=$((10 * 1024 * 1024))
 EXPECTED_AWS_ACCOUNT="493765492819"
 ENV_BACKUP_DIR="/home/ec2-user/.config/leadpoet/env-backups"
-GATEWAY_GIT_HELPER="${GATEWAY_GIT_HELPER:-$LEADPOET_REPO_ROOT/scripts/gateway_git_deploy.py}"
+GATEWAY_RESTART_CONTROLLER_ROOT="${GATEWAY_RESTART_CONTROLLER_ROOT:-/home/ec2-user/.config/leadpoet/restart-controller/gateway}"
+GATEWAY_RESTART_CONTROLLER_CURRENT="$GATEWAY_RESTART_CONTROLLER_ROOT/current"
+GATEWAY_GIT_HELPER_DEFAULT="$LEADPOET_REPO_ROOT/scripts/gateway_git_deploy.py"
+GATEWAY_EXACT_COMMIT_HELPER_DEFAULT="$LEADPOET_REPO_ROOT/Leadpoet/utils/exact_commit_restart_v2.py"
+GATEWAY_HOST_MEMORY_GUARD_DEFAULT="$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py"
+if [ -r "$GATEWAY_RESTART_CONTROLLER_CURRENT/scripts/gateway_git_deploy.py" ]; then
+  GATEWAY_GIT_HELPER_DEFAULT="$GATEWAY_RESTART_CONTROLLER_CURRENT/scripts/gateway_git_deploy.py"
+  GATEWAY_EXACT_COMMIT_HELPER_DEFAULT="$GATEWAY_RESTART_CONTROLLER_CURRENT/Leadpoet/utils/exact_commit_restart_v2.py"
+  GATEWAY_HOST_MEMORY_GUARD_DEFAULT="$GATEWAY_RESTART_CONTROLLER_CURRENT/gateway/tee/host_memory_guard_v2.py"
+fi
+GATEWAY_GIT_HELPER="${GATEWAY_GIT_HELPER:-$GATEWAY_GIT_HELPER_DEFAULT}"
+GATEWAY_EXACT_COMMIT_HELPER="${GATEWAY_EXACT_COMMIT_HELPER:-$GATEWAY_EXACT_COMMIT_HELPER_DEFAULT}"
 GATEWAY_RESTART_PHASE="${GATEWAY_RESTART_PHASE:-prepare}"
 GATEWAY_STATEFUL_CUTOVER_CEREMONY="${GATEWAY_STATEFUL_CUTOVER_CEREMONY:-0}"
 GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS=120
@@ -49,7 +60,7 @@ export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:
 GATEWAY_DEPLOY_STAGE="${GATEWAY_DEPLOY_STAGE:-bootstrap}"
 GATEWAY_DEPLOY_COMPLETED=0
 GATEWAY_PREFLIGHT_TREE=""
-GATEWAY_HOST_MEMORY_GUARD_PATH="${GATEWAY_HOST_MEMORY_GUARD_PATH:-$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py}"
+GATEWAY_HOST_MEMORY_GUARD_PATH="${GATEWAY_HOST_MEMORY_GUARD_PATH:-$GATEWAY_HOST_MEMORY_GUARD_DEFAULT}"
 LEADPOET_DOCKER_OPERATION_LOCK_FILE="${LEADPOET_DOCKER_OPERATION_LOCK_FILE:-/home/ec2-user/.config/leadpoet/docker-operation-v2.lock}"
 REQUESTED_GATEWAY_DEPLOY_COMMIT="${GATEWAY_DEPLOY_COMMIT:-}"
 unset GATEWAY_DEPLOY_COMMIT
@@ -324,9 +335,33 @@ enforce_deployment_environment() {
 }
 
 install_successful_restart_script() {
-  local source_script="$LEADPOET_REPO_ROOT/gw_restart.sh"
+  local controller_sha release_dir temporary_dir temporary_link
+  local source_script
   local target_script="$GATEWAY_HOST_RESTART_SCRIPT"
   local target_dir temporary
+  controller_sha="$GATEWAY_DEPLOY_SHA"
+  mkdir -p "$GATEWAY_RESTART_CONTROLLER_ROOT/releases"
+  release_dir="$GATEWAY_RESTART_CONTROLLER_ROOT/releases/$controller_sha"
+  temporary_dir="$(mktemp -d "$GATEWAY_RESTART_CONTROLLER_ROOT/.release.XXXXXX")"
+  mkdir -p \
+    "$temporary_dir/Leadpoet/utils" \
+    "$temporary_dir/gateway/tee" \
+    "$temporary_dir/scripts"
+  install -m 700 "$LEADPOET_REPO_ROOT/gw_restart.sh" \
+    "$temporary_dir/gw_restart.sh"
+  install -m 600 "$LEADPOET_REPO_ROOT/scripts/gateway_git_deploy.py" \
+    "$temporary_dir/scripts/gateway_git_deploy.py"
+  install -m 600 \
+    "$LEADPOET_REPO_ROOT/Leadpoet/utils/exact_commit_restart_v2.py" \
+    "$temporary_dir/Leadpoet/utils/exact_commit_restart_v2.py"
+  install -m 600 "$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py" \
+    "$temporary_dir/gateway/tee/host_memory_guard_v2.py"
+  rm -rf -- "$release_dir"
+  mv -- "$temporary_dir" "$release_dir"
+  temporary_link="$GATEWAY_RESTART_CONTROLLER_ROOT/.current.$$"
+  ln -s "releases/$controller_sha" "$temporary_link"
+  mv -Tf "$temporary_link" "$GATEWAY_RESTART_CONTROLLER_CURRENT"
+  source_script="$GATEWAY_RESTART_CONTROLLER_CURRENT/gw_restart.sh"
   if [ "$(cd "$(dirname "$source_script")" && pwd)/$(basename "$source_script")" = \
       "$(cd "$(dirname "$target_script")" && pwd)/$(basename "$target_script")" ]; then
     return 0
@@ -968,11 +1003,19 @@ if ! git -C "$LEADPOET_REPO_ROOT" merge-base --is-ancestor \
 fi
 if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]; then
   echo "Validating exact-commit V2 rollback compatibility"
-  python3 "$LEADPOET_REPO_ROOT/Leadpoet/utils/exact_commit_restart_v2.py" \
+  python3 "$GATEWAY_EXACT_COMMIT_HELPER" \
     --repo-root "$LEADPOET_REPO_ROOT" \
     --selected-commit "$PREPARED_GATEWAY_SHA" \
     --branch-ref origin/main \
     --compatibility-floor "$V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA"
+fi
+
+POST_ACTIVATE_GATEWAY_HOST_RESTART_SCRIPT="$GATEWAY_HOST_RESTART_SCRIPT"
+ORIGIN_MAIN_GATEWAY_SHA="$(git -C "$LEADPOET_REPO_ROOT" rev-parse origin/main)"
+if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \
+    && [ "$PREPARED_GATEWAY_SHA" != "$ORIGIN_MAIN_GATEWAY_SHA" ]; then
+  echo "Preserving the newer exact-commit gateway restart controller"
+  POST_ACTIVATE_GATEWAY_HOST_RESTART_SCRIPT="$LEADPOET_REPO_ROOT/gw_restart.sh"
 fi
 
 echo "Materializing the prepared commit for pre-shutdown V2 tooling"
@@ -1261,11 +1304,12 @@ exec env \
   GATEWAY_LOG_FILE="$GATEWAY_LOG_FILE" \
   GATEWAY_ENV_FILE="$GATEWAY_ENV_FILE" \
   GATEWAY_GIT_HELPER="$GATEWAY_GIT_HELPER" \
+  GATEWAY_RESTART_CONTROLLER_ROOT="$GATEWAY_RESTART_CONTROLLER_ROOT" \
   GATEWAY_DEPLOY_PLAN_FILE="$GATEWAY_DEPLOY_PLAN_FILE" \
   GATEWAY_DEPLOYMENT_DIR="$GATEWAY_DEPLOYMENT_DIR" \
   GATEWAY_DEPLOYMENT_MANIFEST="$GATEWAY_DEPLOYMENT_MANIFEST" \
   GATEWAY_LAST_GOOD_MANIFEST="$GATEWAY_LAST_GOOD_MANIFEST" \
-  GATEWAY_HOST_RESTART_SCRIPT="$GATEWAY_HOST_RESTART_SCRIPT" \
+  GATEWAY_HOST_RESTART_SCRIPT="$POST_ACTIVATE_GATEWAY_HOST_RESTART_SCRIPT" \
   LEADPOET_DOCKER_OPERATION_LOCK_FILE="$LEADPOET_DOCKER_OPERATION_LOCK_FILE" \
   LEADPOET_DOCKER_OPERATION_LOCK_HELD=1 \
   GATEWAY_TEE_EIF_ROOT="$GATEWAY_TEE_EIF_ROOT" \

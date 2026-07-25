@@ -16,11 +16,14 @@ independent; an explicit exact-commit validator restart adds the paired
 same-release gate described below.
 
 `--commit <full-sha>` is the canonical operator-only, one-invocation release
-selector. `GATEWAY_DEPLOY_COMMIT` remains accepted for installed-launcher
-compatibility during an N-1-to-N handoff. Persistent copies in Secrets Manager
-or the cached/runtime environment are ignored and are not inherited by the
-relaunched gateway. Normal restarts therefore always follow the fetched head of
-`GITHUB_BRANCH`.
+selector. The host keeps selector-aware restart controllers and their
+pre-selection helpers outside the mutable runtime checkout. A rollback changes
+only the attested runtime checkout; it cannot replace the newer controller with
+the selected older script. `GATEWAY_DEPLOY_COMMIT` remains accepted for
+installed-launcher compatibility during an N-1-to-N handoff. Persistent copies
+in Secrets Manager or the cached/runtime environment are ignored and are not
+inherited by the relaunched gateway. Normal restarts therefore always follow
+the fetched head of `GITHUB_BRANCH`.
 
 ## One-Time Cutover
 
@@ -156,16 +159,19 @@ that:
   sufficient rollback evidence.
 - Has one immutable release channel containing matching gateway and validator
   manifests.
-- Has the same protected V2 workflow contract as current `origin/main`, so
-  auditors running current public code recompute and verify the same canonical
-  weights.
+- Has the same gateway and validator protected V2 symbol contracts, and
+  byte-identical protected source files, as current `origin/main`, so auditors
+  running current public code recompute and verify the same canonical weights.
 - Has passed the exact reverse restart rehearsal from the currently installed
   launcher.
 
 Restart the gateway first with `gw_restart.sh --commit <full-sha>`. Require its
 normal build-info, V2 authority, attestation, and authenticated allocation
 handoff checks to pass. Only then restart the validator with
-`validator_restart.sh --commit <the-same-full-sha>`.
+`/home/ec2-user/validator_restart.sh --commit <the-same-full-sha>`. The host
+validator controller is installed by every successful current release and
+remains outside the detached runtime checkout, so the same command remains
+available after rollback.
 
 The pinned validator restart fails before shutdown unless the public gateway
 reports the same commit through V2 authority health, build-info, and immutable

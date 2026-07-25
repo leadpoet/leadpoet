@@ -13,8 +13,17 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 
 SCHEMA_VERSION = "leadpoet.exact_commit_restart_compatibility.v2"
-PROTECTED_WORKFLOW_MANIFEST = (
-    "validator_tee/enclave/protected_workflows_v2.json"
+PROTECTED_WORKFLOW_MANIFESTS = (
+    (
+        "gateway",
+        "gateway/tee/protected_workflows.json",
+        "leadpoet.protected_workflows.v2",
+    ),
+    (
+        "validator",
+        "validator_tee/enclave/protected_workflows_v2.json",
+        "leadpoet.validator_protected_workflows.v2",
+    ),
 )
 REQUIRED_RELEASE_MARKERS = {
     "gateway/api/weights.py": (
@@ -131,6 +140,21 @@ def _git_file(repo_root: Path, commit: str, path: str) -> str:
     return _git(repo_root, ["show", "%s:%s" % (commit, path)])
 
 
+def _git_file_hash(repo_root: Path, commit: str, path: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "show", "%s:%s" % (commit, path)],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        raise ExactCommitRestartCompatibilityError(
+            "Git could not read protected V2 source at %s:%s"
+            % (commit, path)
+        )
+    return "sha256:" + hashlib.sha256(result.stdout).hexdigest()
+
+
 def _manifest_hash(body: Mapping[str, Any]) -> str:
     encoded = json.dumps(
         dict(body),
@@ -166,10 +190,16 @@ def _symbol_hash(node: ast.AST) -> str:
 def _protected_contract(
     repo_root: Path,
     commit: str,
-) -> Tuple[Tuple[Tuple[str, str], str], ...]:
+    *,
+    manifest_path: str,
+    schema_version: str,
+) -> Tuple[
+    Tuple[Tuple[Tuple[str, str], str], ...],
+    Tuple[Tuple[str, str], ...],
+]:
     try:
         manifest = json.loads(
-            _git_file(repo_root, commit, PROTECTED_WORKFLOW_MANIFEST)
+            _git_file(repo_root, commit, manifest_path)
         )
     except (TypeError, ValueError) as exc:
         raise ExactCommitRestartCompatibilityError(
@@ -185,8 +215,7 @@ def _protected_contract(
     if (
         not isinstance(manifest, Mapping)
         or set(manifest) != expected_fields
-        or manifest.get("schema_version")
-        != "leadpoet.validator_protected_workflows.v2"
+        or manifest.get("schema_version") != schema_version
         or not isinstance(manifest.get("entries"), list)
     ):
         raise ExactCommitRestartCompatibilityError(
@@ -249,7 +278,11 @@ def _protected_contract(
                 "protected V2 workflow manifest differs from source at %s:%s:%s"
                 % (commit, path, symbol)
             )
-    return tuple(sorted(contract.items()))
+    source_contract = tuple(
+        (path, _git_file_hash(repo_root, commit, path))
+        for path in sorted(indexes)
+    )
+    return tuple(sorted(contract.items())), source_contract
 
 
 def _contract_hash(
@@ -258,6 +291,21 @@ def _contract_hash(
     document = [
         {"path": key[0], "symbol": key[1], "ast_sha256": digest}
         for key, digest in contract
+    ]
+    encoded = json.dumps(
+        document,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _source_contract_hash(
+    contract: Tuple[Tuple[str, str], ...],
+) -> str:
+    document = [
+        {"path": path, "source_sha256": digest}
+        for path, digest in contract
     ]
     encoded = json.dumps(
         document,
@@ -315,23 +363,65 @@ def verify_exact_commit_restart_compatibility(
         )
 
     _verify_required_release_contract(root, selected)
-    selected_contract = _protected_contract(root, selected)
-    branch_contract = _protected_contract(root, branch)
-    if selected_contract != branch_contract:
-        selected_entries = dict(selected_contract)
-        branch_entries = dict(branch_contract)
-        changed = sorted(
-            set(selected_entries).symmetric_difference(branch_entries)
-            | {
-                key
-                for key in set(selected_entries).intersection(branch_entries)
-                if selected_entries[key] != branch_entries[key]
-            }
+    contract_reports = {}
+    combined_entries = []
+    combined_sources = []
+    for label, manifest_path, manifest_schema in PROTECTED_WORKFLOW_MANIFESTS:
+        selected_contract, selected_sources = _protected_contract(
+            root,
+            selected,
+            manifest_path=manifest_path,
+            schema_version=manifest_schema,
         )
-        first = changed[0] if changed else ("<unknown>", "<unknown>")
-        raise ExactCommitRestartCompatibilityError(
-            "selected release changes the protected V2 workflow contract "
-            "required by current auditors: %s:%s" % first
+        branch_contract, branch_sources = _protected_contract(
+            root,
+            branch,
+            manifest_path=manifest_path,
+            schema_version=manifest_schema,
+        )
+        if selected_contract != branch_contract:
+            selected_entries = dict(selected_contract)
+            branch_entries = dict(branch_contract)
+            changed = sorted(
+                set(selected_entries).symmetric_difference(branch_entries)
+                | {
+                    key
+                    for key in set(selected_entries).intersection(branch_entries)
+                    if selected_entries[key] != branch_entries[key]
+                }
+            )
+            first = changed[0] if changed else ("<unknown>", "<unknown>")
+            raise ExactCommitRestartCompatibilityError(
+                "selected release changes the %s protected V2 workflow "
+                "contract required by current auditors: %s:%s"
+                % (label, first[0], first[1])
+            )
+        if selected_sources != branch_sources:
+            selected_files = dict(selected_sources)
+            branch_files = dict(branch_sources)
+            changed_paths = sorted(
+                path
+                for path in set(selected_files) | set(branch_files)
+                if selected_files.get(path) != branch_files.get(path)
+            )
+            first_path = changed_paths[0] if changed_paths else "<unknown>"
+            raise ExactCommitRestartCompatibilityError(
+                "selected release changes a %s protected V2 source file "
+                "required by current auditors: %s" % (label, first_path)
+            )
+        contract_reports[label] = {
+            "entry_count": len(selected_contract),
+            "contract_hash": _contract_hash(selected_contract),
+            "source_file_count": len(selected_sources),
+            "source_contract_hash": _source_contract_hash(selected_sources),
+        }
+        combined_entries.extend(
+            ((("%s:%s" % (label, key[0]), key[1]), digest))
+            for key, digest in selected_contract
+        )
+        combined_sources.extend(
+            (("%s:%s" % (label, path), digest))
+            for path, digest in selected_sources
         )
 
     return {
@@ -340,8 +430,15 @@ def verify_exact_commit_restart_compatibility(
         "selected_commit": selected,
         "branch_commit": branch,
         "compatibility_floor": floor,
-        "protected_workflow_contract_hash": _contract_hash(selected_contract),
-        "protected_workflow_entry_count": len(selected_contract),
+        "protected_workflow_contract_hash": _contract_hash(
+            tuple(sorted(combined_entries))
+        ),
+        "protected_workflow_entry_count": len(combined_entries),
+        "protected_source_contract_hash": _source_contract_hash(
+            tuple(sorted(combined_sources))
+        ),
+        "protected_source_file_count": len(combined_sources),
+        "protected_workflow_contracts": contract_reports,
     }
 
 

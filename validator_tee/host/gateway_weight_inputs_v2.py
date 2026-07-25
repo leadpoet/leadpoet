@@ -29,7 +29,11 @@ from validator_tee.host.vsock_client import ValidatorEnclaveClient
 
 logger = logging.getLogger(__name__)
 
-_RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 502, 503, 504})
+# 500 included: the inputs fetch is a read/compute request the gateway
+# serves idempotently (attested executions replay), and a transient
+# app-level 500 (e.g. a DB blip surfacing through the handler) used to
+# abort the whole attempt sequence inside the submission window.
+_RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 _MAX_WEIGHT_INPUT_RESPONSE_FRAME_BYTES = 8 * 1024 * 1024
 _MAX_WEIGHT_INPUT_RESPONSE_BYTES = 64 * 1024 * 1024
 

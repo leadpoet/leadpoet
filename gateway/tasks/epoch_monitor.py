@@ -74,6 +74,12 @@ class EpochMonitor:
         self.netuid = int(os.getenv("BITTENSOR_NETUID", "71"))
         self._validated_cutover_hash = None
         self._stateful_hydrated = False
+        # Epochs already alerted for a missing weight publication (in-epoch
+        # missed-weight early warning; one alert per epoch per stage).
+        self._weight_publication_alerted: set = set()
+        self._weight_finalization_alerted: set = set()
+        self._weight_publication_seen: set = set()
+        self._weight_finalization_done: set = set()
         self.initialized_epochs = set()  # Epochs that SUCCESSFULLY completed initialization
         self.initializing_epochs = set()  # Epochs currently being initialized (prevents duplicate tasks)
         self.validation_ended_epochs = set()
@@ -158,6 +164,7 @@ class EpochMonitor:
                     await self._hydrate_stateful_state(snapshot)
                     self._stateful_hydrated = True
                 await self._process_stateful_snapshot(snapshot)
+                await self._check_weight_publication_alarm(snapshot, cutover)
                 
                 # Wait before next poll (12 seconds = approx block time)
                 await asyncio.sleep(12)
@@ -465,6 +472,90 @@ class EpochMonitor:
                         self.skipped_epochs.add(target_epoch)
             cursor = boundary
         return cursor
+
+    async def _check_weight_publication_alarm(self, snapshot, cutover) -> None:
+        """In-epoch missed-weight early warning.
+
+        Every existing signal (journal quarantine CRITICALs, the >380-block
+        stale cron) fires after the epoch is already lost. The monitor already
+        polls the chain every ~block; from block 330 (~30 blocks / ~6 min of
+        submission window left) check whether the primary validator's durable
+        V2 weight publication exists for this settlement epoch, and emit one
+        loud, uniquely-tagged CRITICAL if it does not — while the validator's
+        retry loops can still save the epoch. Never raises into the poll loop.
+        """
+        try:
+            if snapshot.epoch_block < 330:
+                return
+            settlement_epoch = int(snapshot.settlement_epoch_id(cutover))
+            primary_hotkeys = [
+                item.strip()
+                for item in os.getenv("PRIMARY_VALIDATOR_HOTKEYS", "").split(",")
+                if item.strip()
+            ]
+            if not primary_hotkeys:
+                return
+            if settlement_epoch in self._weight_finalization_done:
+                return
+            if (
+                settlement_epoch in self._weight_publication_seen
+                and snapshot.epoch_block < 350
+            ):
+                # Publication already confirmed; next check is the block-350
+                # finalization stage — skip the authority reload until then.
+                return
+            from gateway.research_lab.attested_v2_store import (
+                load_weight_authority_v2,
+            )
+
+            published = None
+            for hotkey in primary_hotkeys:
+                try:
+                    published = await load_weight_authority_v2(
+                        netuid=int(self.netuid),
+                        epoch_id=settlement_epoch,
+                        validator_hotkey=hotkey,
+                        require_finalization=False,
+                    )
+                except Exception:
+                    published = None
+                if published is not None:
+                    break
+            if published is not None:
+                self._weight_publication_seen.add(settlement_epoch)
+                if str(published.get("authority_stage") or "") == "finalized":
+                    self._weight_finalization_done.add(settlement_epoch)
+                    return
+            if published is None:
+                if settlement_epoch not in self._weight_publication_alerted:
+                    self._weight_publication_alerted.add(settlement_epoch)
+                    message = (
+                        "weight_epoch_missing_publication "
+                        f"netuid={self.netuid} epoch={settlement_epoch} "
+                        f"epoch_block={snapshot.epoch_block} "
+                        f"blocks_remaining={snapshot.blocks_remaining} "
+                        "no durable V2 weight publication with the submission "
+                        "window closing"
+                    )
+                    logging.getLogger(__name__).critical(message)
+                    print(f"🚨 {message}")
+                return
+            if (
+                snapshot.epoch_block >= 350
+                and settlement_epoch not in self._weight_finalization_alerted
+            ):
+                self._weight_finalization_alerted.add(settlement_epoch)
+                self._weight_finalization_done.add(settlement_epoch)
+                message = (
+                    "weight_epoch_missing_finalization "
+                    f"netuid={self.netuid} epoch={settlement_epoch} "
+                    f"epoch_block={snapshot.epoch_block} "
+                    "published but no finalized chain proof yet"
+                )
+                logging.getLogger(__name__).critical(message)
+                print(f"🚨 {message}")
+        except Exception as alarm_error:
+            print(f"   ⚠️ Weight publication alarm check error: {alarm_error}")
 
     async def _process_stateful_snapshot(self, snapshot):
         """Drive lifecycle actions from one official scheduler observation."""

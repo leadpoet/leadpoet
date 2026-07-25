@@ -36,6 +36,18 @@ BLOCKED_KEYS = {
     "hidden_benchmark",
     "hidden_icp",
     "icp_plaintext",
+    # Generic LLM-payload keys (OpenAI/Anthropic SDK shapes). No current call
+    # site passes these, but they carry raw prompt/completion / training data,
+    # so block them fail-closed: the redaction boundary must not depend on a
+    # denylist that omits the most obvious content keys (see audit RL1).
+    "messages",
+    "content",
+    "completion",
+    "system_prompt",
+    "user_prompt",
+    "assistant_message",
+    "chat_history",
+    "model_output",
 }
 
 HASH_VALUE_KEYS = {

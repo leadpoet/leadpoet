@@ -526,7 +526,7 @@ class ProviderBrokerV2:
         self._credentials = {}  # type: Dict[str, str]
         self._job_credentials = {}  # type: Dict[Tuple[str, str], Dict[str, str]]
         self._records = {}  # type: Dict[Tuple[str, int], Dict[str, Any]]
-        self._inflight = {}  # type: Dict[Tuple[str, int], Tuple[str, threading.Event]]
+        self._inflight = {}  # type: Dict[Tuple[str, int], Tuple[str, threading.Event, object]]
         self._lock = threading.Lock()
 
     def health(self) -> Dict[str, Any]:
@@ -562,6 +562,18 @@ class ProviderBrokerV2:
                 return
             self._inflight.pop(deduplication_key, None)
             inflight[1].set()
+
+    def _abandon_owned_inflight(self, owner_token: object) -> None:
+        with self._lock:
+            abandoned = [
+                (key, inflight[1])
+                for key, inflight in self._inflight.items()
+                if inflight[2] is owner_token
+            ]
+            for key, _ in abandoned:
+                self._inflight.pop(key, None)
+            for _, wait_event in abandoned:
+                wait_event.set()
 
     def provision_credentials(self, credentials: Mapping[str, str]) -> Dict[str, Any]:
         expected_slots = set(expected_provider_credential_slots())
@@ -790,6 +802,18 @@ class ProviderBrokerV2:
         return route, normalized_dynamic
 
     def execute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
+        owner_token = object()
+        try:
+            return self._execute(request, owner_token=owner_token)
+        finally:
+            self._abandon_owned_inflight(owner_token)
+
+    def _execute(
+        self,
+        request: Mapping[str, Any],
+        *,
+        owner_token: object,
+    ) -> Dict[str, Any]:
         required = {
             "schema_version",
             "logical_operation_id",
@@ -935,6 +959,7 @@ class ProviderBrokerV2:
                 self._inflight[deduplication_key] = (
                     request_fingerprint,
                     wait_event,
+                    owner_token,
                 )
                 owns_attempt = True
         if not owns_attempt:

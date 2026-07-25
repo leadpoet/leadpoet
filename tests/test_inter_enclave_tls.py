@@ -174,16 +174,23 @@ def test_tls_rpc_round_trip_uses_only_attested_peer_certificates(tmp_path):
     _register(coordinator_registry, scoring_boot, scoring_tls)
     _register(scoring_registry, coordinator_boot, coordinator_tls)
 
+    secret_error = "supabase-service-role-secret must never cross the channel"
+
+    def _handler(method, params, peer):
+        if method == "provider_execute_failure":
+            raise RuntimeError(secret_error)
+        return {
+            "method": method,
+            "job_id": params["job_id"],
+            "peer_role": peer["physical_role"],
+        }
+
     server = AttestedTLSRPCServer(
         local_physical_role="gateway_coordinator",
         local_boot_identity=coordinator_boot,
         local_tls_identity=coordinator_tls,
         peer_registry=coordinator_registry,
-        handler=lambda method, params, peer: {
-            "method": method,
-            "job_id": params["job_id"],
-            "peer_role": peer["physical_role"],
-        },
+        handler=_handler,
         tmpfs_root=tmp_path / "server",
     )
 
@@ -236,3 +243,16 @@ def test_tls_rpc_round_trip_uses_only_attested_peer_certificates(tmp_path):
         "job_id": "job-1",
         "peer_role": "gateway_scoring",
     }
+
+    with pytest.raises(
+        InterEnclaveTLSError,
+        match="inter-enclave remote handler failed: RuntimeError",
+    ) as raised:
+        client.call(
+            target_physical_role="gateway_coordinator",
+            method="provider_execute_failure",
+            params={"job_id": "job-2"},
+            channel_id="1" * 32,
+        )
+    assert secret_error not in str(raised.value)
+    assert not errors

@@ -409,6 +409,21 @@ def test_parent_or_network_error_cannot_masquerade_as_provider_status():
     assert attempt["failure_code"] == "proxy_failure"
 
 
+def test_oversized_response_is_a_canonical_terminal_and_releases_inflight():
+    transport = FakeTransport(
+        error=ProviderBrokerV2Error("provider response exceeds size limit")
+    )
+    broker = _broker(transport)
+
+    result = broker.execute(_request())
+
+    assert result["terminal_status"] == "transport_failure"
+    assert result["failure_code"] == "response_too_large"
+    assert result["transport_attempt"]["failure_code"] == "response_too_large"
+    validate_transport_attempt(result["transport_attempt"])
+    assert broker.health()["inflight_count"] == 0
+
+
 def test_request_artifact_failure_does_not_poison_logical_attempt_retry():
     transport = FakeTransport()
     broker = _broker(transport)
@@ -433,6 +448,73 @@ def test_request_artifact_failure_does_not_poison_logical_attempt_retry():
     assert len(transport.calls) == 1
 
 
+def test_owner_failure_releases_waiters_and_allows_safe_pretransport_retry():
+    transport = FakeTransport()
+    broker = _broker(transport)
+    owner_entered = threading.Event()
+    release_owner = threading.Event()
+
+    def blocking_clock():
+        owner_entered.set()
+        assert release_owner.wait(2)
+        raise RuntimeError("measured clock unavailable")
+
+    broker._clock = blocking_clock
+    errors = []
+
+    def _call():
+        try:
+            broker.execute(_request())
+        except Exception as exc:
+            errors.append(exc)
+
+    owner = threading.Thread(target=_call)
+    owner.start()
+    assert owner_entered.wait(2)
+
+    waiter_entered = threading.Event()
+
+    class ObservedWaitEvent:
+        def __init__(self):
+            self._event = threading.Event()
+
+        def wait(self, timeout):
+            waiter_entered.set()
+            return self._event.wait(timeout)
+
+        def set(self):
+            self._event.set()
+
+    with broker._lock:
+        inflight = broker._inflight[("operation-1", 0)]
+        broker._inflight[("operation-1", 0)] = (
+            inflight[0],
+            ObservedWaitEvent(),
+            inflight[2],
+        )
+
+    waiter = threading.Thread(target=_call)
+    waiter.start()
+    assert waiter_entered.wait(2)
+    release_owner.set()
+    owner.join(2)
+    waiter.join(2)
+
+    assert not owner.is_alive()
+    assert not waiter.is_alive()
+    assert sorted(str(exc) for exc in errors) == [
+        "duplicate provider attempt did not terminate",
+        "measured clock unavailable",
+    ]
+    assert transport.calls == []
+    assert broker.health()["inflight_count"] == 0
+
+    broker._clock = lambda: NOW
+    result = broker.execute(_request())
+    assert result["terminal_status"] == "authenticated_response"
+    assert len(transport.calls) == 1
+
+
 def test_one_logical_attempt_is_executed_and_charged_once_under_concurrency():
     transport = FakeTransport(delay=0.05)
     broker = _broker(transport)
@@ -445,14 +527,14 @@ def test_one_logical_attempt_is_executed_and_charged_once_under_concurrency():
         except Exception as exc:  # pragma: no cover - asserted below
             errors.append(exc)
 
-    threads = [threading.Thread(target=_call) for _ in range(5)]
+    threads = [threading.Thread(target=_call) for _ in range(10)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
     assert not errors
     assert len(transport.calls) == 1
-    assert len(results) == 5
+    assert len(results) == 10
     assert {item["transport_attempt"]["attempt_hash"] for item in results} == {
         results[0]["transport_attempt"]["attempt_hash"]
     }

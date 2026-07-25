@@ -353,9 +353,37 @@ class TEEEgressForwarder:
         while not self._stop.is_set():
             try:
                 connection, _address = self._listener.accept()
+            except OSError as exc:
+                if self._stop.is_set():
+                    return
+                # Transient, recoverable: the peer aborted before accept, a
+                # signal interrupted, or the process is momentarily out of fds.
+                # Keep serving instead of killing the accept thread (which would
+                # leave the process alive but serving NO scoring/provider egress
+                # until a human-run gateway restart).
+                if exc.errno in (
+                    errno.ECONNABORTED, errno.EINTR, errno.EAGAIN,
+                    errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM,
+                ):
+                    logger.warning(
+                        "gateway_tee_egress_forwarder_accept_transient errno=%s: %s",
+                        exc.errno, exc,
+                    )
+                    time.sleep(0.1)  # brief backoff (esp. under fd exhaustion)
+                    continue
+                # Unrecoverable listener loss (e.g. EBADF): exit non-zero so a
+                # supervisor restarts the process, rather than spinning on a dead
+                # listener or silently serving nothing.
+                logger.exception(
+                    "gateway_tee_egress_forwarder_accept_fatal errno=%s", exc.errno
+                )
+                os._exit(1)
             except Exception:
                 if not self._stop.is_set():
+                    # Unexpected non-OSError: fail loud so it's restartable rather
+                    # than leaving the process alive with a dead accept thread.
                     logger.exception("gateway_tee_egress_forwarder_accept_failed")
+                    os._exit(1)
                 return
             threading.Thread(
                 target=_handle_connection,

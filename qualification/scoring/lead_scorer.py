@@ -725,7 +725,7 @@ def _run_autoresearch_binary_fit_checks(
         company_stage = _normalize_company_stage(company.company_stage)
         if not company_stage:
             return False, f"Missing company_stage (ICP requires '{icp.company_stage}')"
-        if company_stage != icp_stage:
+        if not _company_stage_satisfies_icp(company_stage, icp_stage):
             return (
                 False,
                 f"Company stage mismatch: '{company.company_stage}' vs '{icp.company_stage}'",
@@ -866,6 +866,46 @@ def _normalize_company_stage(value) -> str:
         return ""
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return " ".join(text.split())
+
+
+def _company_stage_satisfies_icp(company_stage: str, icp_stage: str) -> bool:
+    """Ladder-aware company-stage match (both args already normalized).
+
+    Exact match wins. Otherwise: a "Series C+" ICP (normalizes to "series c" --
+    the highest listed series, "+" stripped) accepts any Series C or later round
+    plus growth/late-stage; "Public" and "Private Equity" ICPs accept common
+    synonyms. Plain exact-string equality zeroed real companies whose honestly
+    reported stage differed only lexically ("Series E" vs "Series C+",
+    "PE-backed" vs "Private Equity", "Publicly traded" vs "Public").
+    """
+    if company_stage == icp_stage:
+        return True
+
+    def _series_rank(s):
+        m = re.search(r"series ([a-z])\b", s)
+        return (ord(m.group(1)) - ord("a")) if m else None
+
+    icp_rank = _series_rank(icp_stage)
+    if icp_rank is not None:
+        comp_rank = _series_rank(company_stage)
+        # icp_rank 2 == "Series C+" (the only "+" series in the ICP list): accept
+        # C and later rounds. A/B are exact rounds.
+        if comp_rank is not None:
+            return comp_rank >= icp_rank if icp_rank >= 2 else comp_rank == icp_rank
+        if icp_rank >= 2 and any(k in company_stage for k in ("growth", "late stage")):
+            return True
+        return False
+    if icp_stage in ("private equity", "pe"):
+        return company_stage == "pe" or any(
+            k in company_stage
+            for k in ("private equity", "pe backed", "buyout", "lbo")
+        )
+    if icp_stage == "public":
+        return any(
+            k in company_stage
+            for k in ("public", "publicly traded", "listed", "ipo", "nasdaq", "nyse")
+        )
+    return False
 
 
 async def score_company_icp_fit(

@@ -131,6 +131,20 @@ async def compute_weighted_consensus(lead_id: str, epoch_id: int, evidence_data:
         }
     
     # ========================================
+    # Step 2.5: One vote per validator (dedup)
+    # ========================================
+    # Each validator gets exactly one vote for a lead. Duplicate evidence rows
+    # for the same validator (e.g. from a concurrent double-submit that slipped
+    # past the check-only nonce/duplicate guards) must NOT double-count that
+    # validator's v_trust*stake in the weighted sum below, which would let one
+    # validator bias the approve/deny outcome. Keep the last row per validator.
+    _deduped = {}
+    for _v in validations:
+        _hk = _v.get("validator_hotkey")
+        _deduped[_hk if _hk else id(_v)] = _v
+    validations = list(_deduped.values())
+
+    # ========================================
     # Step 3: Compute weighted aggregates
     # ========================================
     total_weight = 0.0
@@ -173,12 +187,27 @@ async def compute_weighted_consensus(lead_id: str, epoch_id: int, evidence_data:
     if total_weight > 0:
         final_rep_score = weighted_rep_score / total_weight
         approval_ratio = weighted_approval / total_weight
+        # Final decision: approve if >50% weighted approval
+        final_decision = "approve" if approval_ratio > 0.5 else "deny"
     else:
-        final_rep_score = 0.0
-        approval_ratio = 0.0
-    
-    # Final decision: approve if >50% weighted approval
-    final_decision = "approve" if approval_ratio > 0.5 else "deny"
+        # Every validator that covered this lead has zero consensus weight
+        # (v_trust*stake == 0) — e.g. brand-new validators whose validator_trust
+        # is still 0, or a vtrust anomaly. Do NOT silently deny a possibly-approved
+        # lead (which would also zero its rep and wrongly increment the miner's
+        # rejection count). Fall back to an unweighted majority and log loudly so
+        # the zero-weight condition is visible rather than masked as a rejection.
+        approve_votes = sum(1 for v in validations if v["decision"] == "approve")
+        deny_votes = len(validations) - approve_votes
+        approval_ratio = (approve_votes / len(validations)) if validations else 0.0
+        final_decision = "approve" if approve_votes > deny_votes else "deny"
+        rep_values = [float(v["rep_score"]) for v in validations]
+        final_rep_score = (sum(rep_values) / len(rep_values)) if rep_values else 0.0
+        print(
+            f"⚠️  consensus_zero_total_weight lead={lead_id[:8]}... "
+            f"validators={len(validations)} approve={approve_votes} deny={deny_votes} "
+            f"decision={final_decision} — fell back to unweighted majority "
+            f"(all covering validators had v_trust*stake==0)"
+        )
     
     # ========================================
     # Step 4.5: Calculate primary rejection reason (WEIGHTED selection)

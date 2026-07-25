@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any
@@ -559,6 +560,30 @@ def _install_boundaries(stage: str, scenario: str) -> None:
     )
 
 
+def _candidate_module_location(
+    module_path: Path,
+    *,
+    checkout_root: Path = Path("/home/ec2-user/leadpoet_repo"),
+    archive_root: Path = Path("/tmp"),
+) -> tuple[str, str]:
+    resolved = module_path.resolve()
+    checkout = checkout_root.resolve()
+    archive_base = archive_root.resolve()
+    if checkout in resolved.parents:
+        return "candidate_checkout", resolved.relative_to(checkout).as_posix()
+
+    for parent in resolved.parents:
+        if (
+            parent.parent == archive_base
+            and re.fullmatch(r"gateway-v2-preflight\.[A-Za-z0-9]+", parent.name)
+        ):
+            return "candidate_archive", resolved.relative_to(parent).as_posix()
+    raise RuntimeError(
+        "weight readiness did not import from the candidate checkout or "
+        f"authenticated candidate archive: {resolved}"
+    )
+
+
 def main() -> int:
     os.environ.setdefault("BITTENSOR_NETWORK", "finney")
     os.environ.setdefault("BITTENSOR_NETUID", str(NETUID))
@@ -581,20 +606,14 @@ def main() -> int:
     from gateway.tee import verify_weight_submission_ready_v2 as readiness
 
     module_path = Path(readiness.__file__).resolve()
-    expected_root = Path("/home/ec2-user/leadpoet_repo").resolve()
-    if expected_root not in module_path.parents:
-        raise RuntimeError(
-            "weight readiness did not import from the candidate checkout"
-        )
+    source_kind, source_git_path = _candidate_module_location(module_path)
     module_hash = hashlib.sha256(module_path.read_bytes()).hexdigest()
     source_identity = {
         "module_path": str(module_path),
         "module_sha256": module_hash,
         "source_path": str(module_path),
-        "source_git_path": (
-            "gateway/tee/verify_weight_submission_ready_v2.py"
-        ),
-        "source_kind": "candidate_checkout",
+        "source_git_path": source_git_path,
+        "source_kind": source_kind,
         "source_sha256": module_hash,
         "candidate_sha": _candidate_sha(),
     }

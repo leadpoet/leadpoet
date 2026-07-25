@@ -8,6 +8,7 @@ import pytest
 
 from scripts import run_local_restart_rehearsal as rehearsal
 from tests.restart_rehearsal import contract_adapter
+from tests.restart_rehearsal import weight_readiness_runner
 from tests.restart_rehearsal.verify_evidence import (
     EXPECTED_GATEWAY_PRIVATE_MODEL_ENV,
     verify_gateway_private_model_environment,
@@ -119,6 +120,36 @@ def test_rehearsal_source_snapshot_is_independent_and_complete(
         assert not (snapshot / ".git" / "objects" / "info" / "alternates").exists()
 
     assert not snapshot.exists()
+
+
+def test_weight_readiness_accepts_candidate_archive_and_checkout(
+    tmp_path,
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout_module = checkout / "gateway/tee/verify_weight_submission_ready_v2.py"
+    checkout_module.parent.mkdir(parents=True)
+    checkout_module.write_text("# checkout\n", encoding="utf-8")
+    assert weight_readiness_runner._candidate_module_location(
+        checkout_module,
+        checkout_root=checkout,
+        archive_root=tmp_path,
+    ) == (
+        "candidate_checkout",
+        "gateway/tee/verify_weight_submission_ready_v2.py",
+    )
+
+    archive = tmp_path / "gateway-v2-preflight.A1b2"
+    archive_module = archive / "gateway/tee/verify_weight_submission_ready_v2.py"
+    archive_module.parent.mkdir(parents=True)
+    archive_module.write_text("# archive\n", encoding="utf-8")
+    assert weight_readiness_runner._candidate_module_location(
+        archive_module,
+        checkout_root=checkout,
+        archive_root=tmp_path,
+    ) == (
+        "candidate_archive",
+        "gateway/tee/verify_weight_submission_ready_v2.py",
+    )
 
 
 def test_rehearsal_resolves_forward_and_rollback_transitions(monkeypatch) -> None:

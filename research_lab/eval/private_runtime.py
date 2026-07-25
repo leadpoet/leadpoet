@@ -1260,7 +1260,17 @@ def _provider_error_line_is_loop_ending(line: str) -> bool:
             status = code
             break
     if status:
-        return status in _LOOP_ENDING_PROVIDER_STATUSES
+        if status in _LOOP_ENDING_PROVIDER_STATUSES:
+            return True
+        # A request-shaped status that ALSO carries an outage text marker
+        # (e.g. "http error 503 temporarily unavailable") is an infra outage,
+        # not the provider rejecting a model input. Without this, the identical
+        # "temporarily unavailable" line is scored as a legitimate zero here but
+        # treated as loop-ending when no status token is present — so whether the
+        # model gets penalized depended on whether a status substring appeared.
+        if any(marker in lowered for marker in _PROVIDER_OUTAGE_TEXT_MARKERS):
+            return True
+        return False
     return any(marker in lowered for marker in _PROVIDER_OUTAGE_TEXT_MARKERS)
 
 

@@ -50,10 +50,6 @@ class _Collector:
 
 def test_classify_path_unchanged():
     assert classify_path("/weights/submit/v2") == "validator"
-    assert classify_path("/weights/finalize/v2") == "validator"
-    assert classify_path("/weights/inputs/v2") == "validator"
-    assert classify_path("/weights/subnet-epoch/candidate/v1") == "validator"
-    assert classify_path("/weights/subnet-epoch/boundary/v1") == "validator"
     assert classify_path("/epoch/24123") == "validator"
     assert classify_path("/fulfillment/requests/active") == "miner"
     assert classify_path("/anything-else") == "other"

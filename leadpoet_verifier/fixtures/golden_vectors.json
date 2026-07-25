@@ -1697,6 +1697,8 @@
         "delta_lcb": 2.08,
         "leads_per_icp_normalizer": 5,
         "lcb_z": 1.96,
+        "fp_penalty_points": 0.0,
+        "fp_unverified_primary_penalty_points": 0.0,
         "per_icp_results": [
           {
             "icp_ref": "icp:a",
@@ -1832,7 +1834,7 @@
       "expected": {
         "passed": true,
         "errors": [],
-        "score_bundle_hash": "sha256:494065bf4f2c6ba28390dab0edd60f0a361b7262b7ca6b573dbcf2a418bba06f",
+        "score_bundle_hash": "sha256:1bf207412caa4b1a36638cff7dfe461902f005dc04eb66e38686a005994285c2",
         "eligible_for_probation": true,
         "on_chain_submission_allowed": false
       }

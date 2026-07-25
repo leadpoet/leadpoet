@@ -261,6 +261,23 @@ def main() -> int:
             labels.append(f"process:{process}")
 
     if component == "gateway":
+        supabase_rows = [
+            row
+            for row in rows
+            if row.get("kind") == "weight-readiness-supabase"
+        ]
+        expected_supabase_runs = (
+            2 if scenario == "transient_503_recovery" else 1
+        )
+        if (
+            len(supabase_rows) != expected_supabase_runs
+            or any(row.get("status") != "ok" for row in supabase_rows)
+            or any(row.get("row_count") != 16 for row in supabase_rows)
+            or any(row.get("page_count") != 9 for row in supabase_rows)
+        ):
+            raise SystemExit(
+                "finalized allocation history pagination was not rehearsed"
+            )
         weight_rows = [
             row for row in rows if row.get("kind") == "weight-readiness"
         ]

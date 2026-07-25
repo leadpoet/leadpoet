@@ -7,6 +7,7 @@ from urllib.parse import parse_qsl, urlsplit
 import pytest
 
 from gateway.tee.supabase_source_v2 import (
+    QUERY_POLICIES,
     SUPABASE_READ_TIMEOUT_MS,
     SUPABASE_WEIGHT_SOURCE_ORIGIN,
     SupabaseSourceReaderV2,
@@ -486,3 +487,38 @@ def test_exhausted_authenticated_errors_fail_with_all_attempts_visible():
         )
     assert len(attempts) == 3
     assert all(item["http_status"] == 500 for item in attempts)
+
+
+def test_finalized_allocation_history_uses_bounded_complete_pages():
+    rows = [{"epoch_id": epoch} for epoch in range(16)]
+    provider = FakeProvider(
+        [
+            {"rows": rows[offset : offset + 2]}
+            for offset in range(0, len(rows), 2)
+        ]
+        + [{"rows": []}]
+    )
+
+    observed, attempts, _artifacts, sleeps = _read(
+        provider,
+        policy_id="finalized_allocation_authorities",
+        parameters={"netuid": 71, "start_epoch": 0, "end_epoch": 100},
+    )
+
+    assert observed == rows
+    assert len(attempts) == 9
+    assert sleeps == []
+    assert QUERY_POLICIES["finalized_allocation_authorities"].page_size == 2
+    assert [
+        request["headers"]["range"] for request in provider.requests
+    ] == [
+        "0-1",
+        "2-3",
+        "4-5",
+        "6-7",
+        "8-9",
+        "10-11",
+        "12-13",
+        "14-15",
+        "16-17",
+    ]

@@ -42,6 +42,7 @@ class SupabaseQueryV2:
     select: str
     parameter_names: Tuple[str, ...]
     max_pages: int
+    page_size: int = SUPABASE_PAGE_SIZE
     order: str = ""
     limit: int = 0
 
@@ -386,7 +387,8 @@ QUERY_POLICIES = {
             "finalized_block_hash,state_transition_hash,finalization_doc"
         ),
         parameter_names=("netuid", "start_epoch", "end_epoch"),
-        max_pages=100,
+        max_pages=500,
+        page_size=2,
         order="epoch_id.asc,validator_hotkey.asc",
     ),
     "legacy_finalized_allocation_migrations": SupabaseQueryV2(
@@ -831,6 +833,8 @@ class SupabaseSourceReaderV2:
         policy = QUERY_POLICIES.get(str(policy_id or ""))
         if policy is None:
             raise SupabaseSourceV2Error("Supabase query policy is not measured")
+        if not 1 <= policy.page_size <= SUPABASE_PAGE_SIZE:
+            raise SupabaseSourceV2Error("Supabase policy page size is invalid")
         filters = _filters(policy, parameters)
         rows = []
         for page_index in range(policy.max_pages):
@@ -844,7 +848,7 @@ class SupabaseSourceReaderV2:
                 record_artifact=record_artifact,
             )
             rows.extend(page)
-            if policy.limit or len(page) < SUPABASE_PAGE_SIZE:
+            if policy.limit or len(page) < policy.page_size:
                 break
         else:
             raise SupabaseSourceV2Error("Supabase query exceeded its measured page limit")
@@ -871,13 +875,14 @@ class SupabaseSourceReaderV2:
             policy.table,
             urlencode(query),
         )
-        start = page_index * SUPABASE_PAGE_SIZE
-        end = start + SUPABASE_PAGE_SIZE - 1
+        start = page_index * policy.page_size
+        end = start + policy.page_size - 1
         query_scope_hash = sha256_json(
             {
                 "schema_version": "leadpoet.supabase_query_scope.v2",
                 "policy_id": policy.policy_id,
                 "filters": [list(item) for item in filters],
+                "page_size": policy.page_size,
             }
         )
         logical_operation_id = "%s:%s:%s:page-%d" % (

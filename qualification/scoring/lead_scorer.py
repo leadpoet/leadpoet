@@ -1415,6 +1415,15 @@ def _apply_signal_time_decay(
     if parsed_date is None:
         if source_lower in SOURCES_DATE_NOT_REQUIRED:
             return raw_score, 1.0
+        # A date-required signal the verifier accepted (date_status is "verified"
+        # here, not "no_date", so the softer NO_DATE_DECAY path above is skipped)
+        # but that carries no usable date is zeroed outright. Keep the zeroing,
+        # but log it: silently dropping a verified signal's entire contribution
+        # is a hidden sentinel feeding company scores and weights.
+        logger.warning(
+            "intent_signal_zeroed_missing_date source=%s date_status=%s raw_score=%.2f",
+            source_lower, date_status, raw_score,
+        )
         return 0.0, 0.0
 
     age_months = calculate_age_months(parsed_date)

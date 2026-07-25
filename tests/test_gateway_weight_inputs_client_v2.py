@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gzip
+
 import pytest
 
 from leadpoet_canonical.attested_v2 import sha256_json
@@ -29,6 +31,34 @@ class FakeClient:
             "signature": "1" * 128,
             "receipt": {"receipt_hash": "sha256:" + "2" * 64},
         }
+
+
+def test_weight_input_response_gzip_is_bounded_and_exact():
+    body = b'{"upstream_receipt_set":"' + b"x" * 2048 + b'"}'
+    wire_body = gzip.compress(body, compresslevel=1, mtime=0)
+
+    assert client_module._decode_response_body(
+        wire_body,
+        content_encoding="gzip",
+        logical_limit=4096,
+    ) == body
+
+
+@pytest.mark.parametrize(
+    "wire_body",
+    (
+        b"not-gzip",
+        gzip.compress(b"x" * 101, mtime=0),
+        gzip.compress(b"{}", mtime=0) + b"trailing",
+    ),
+)
+def test_weight_input_response_gzip_rejects_invalid_or_oversized_body(wire_body):
+    with pytest.raises(GatewayWeightInputsV2Error, match="gzip"):
+        client_module._decode_response_body(
+            wire_body,
+            content_encoding="gzip",
+            logical_limit=100,
+        )
 
 
 def _calculation():

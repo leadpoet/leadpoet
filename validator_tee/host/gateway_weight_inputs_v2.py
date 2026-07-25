@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import zlib
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 from urllib.parse import urlparse
 
@@ -28,6 +30,8 @@ from validator_tee.host.vsock_client import ValidatorEnclaveClient
 logger = logging.getLogger(__name__)
 
 _RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 502, 503, 504})
+_MAX_WEIGHT_INPUT_RESPONSE_FRAME_BYTES = 8 * 1024 * 1024
+_MAX_WEIGHT_INPUT_RESPONSE_BYTES = 64 * 1024 * 1024
 
 
 class GatewayWeightInputsV2Error(RuntimeError):
@@ -36,6 +40,42 @@ class GatewayWeightInputsV2Error(RuntimeError):
     def __init__(self, message: str, *, status_code: Optional[int] = None) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+
+def _decode_response_body(
+    wire_body: bytes,
+    *,
+    content_encoding: str,
+    logical_limit: int = _MAX_WEIGHT_INPUT_RESPONSE_BYTES,
+) -> bytes:
+    encoding = str(content_encoding or "").lower()
+    if encoding == "gzip":
+        decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        try:
+            body = decompressor.decompress(wire_body, logical_limit + 1)
+        except zlib.error as exc:
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 weight input response gzip is invalid"
+            ) from exc
+        if (
+            len(body) > logical_limit
+            or not decompressor.eof
+            or decompressor.unused_data
+            or decompressor.unconsumed_tail
+        ):
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 weight input response gzip failed validation"
+            )
+        return body
+    if encoding in {"", "identity"}:
+        if len(wire_body) > logical_limit:
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 weight input response exceeds size limit"
+            )
+        return wire_body
+    raise GatewayWeightInputsV2Error(
+        "gateway V2 weight input response encoding is unsupported"
+    )
 
 
 def _is_retryable_gateway_error(exc: BaseException) -> bool:
@@ -67,17 +107,41 @@ async def _post_json(
     import aiohttp
 
     timeout = aiohttp.ClientTimeout(total=float(timeout_seconds))
-    async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+    async with aiohttp.ClientSession(
+        timeout=timeout,
+        trust_env=False,
+        auto_decompress=False,
+        headers={"Accept-Encoding": "gzip"},
+    ) as session:
         async with session.post(url, json=dict(payload)) as response:
-            body = await response.text()
+            encoding = str(response.headers.get("Content-Encoding") or "").lower()
+            wire_limit = (
+                _MAX_WEIGHT_INPUT_RESPONSE_FRAME_BYTES
+                if encoding == "gzip"
+                else _MAX_WEIGHT_INPUT_RESPONSE_BYTES
+            )
+            wire_body = bytearray()
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                wire_body.extend(chunk)
+                if len(wire_body) > wire_limit:
+                    raise GatewayWeightInputsV2Error(
+                        "gateway V2 weight input response exceeds size limit"
+                    )
             if response.status != 200:
                 raise GatewayWeightInputsV2Error(
                     "gateway V2 weight input request failed with HTTP %d: %s"
-                    % (response.status, body[:300]),
+                    % (
+                        response.status,
+                        bytes(wire_body[:300]).decode("utf-8", errors="replace"),
+                    ),
                     status_code=int(response.status),
                 )
+            body = _decode_response_body(
+                bytes(wire_body),
+                content_encoding=encoding,
+            )
             try:
-                value = await response.json()
+                value = json.loads(body.decode("utf-8"))
             except Exception as exc:
                 raise GatewayWeightInputsV2Error(
                     "gateway V2 weight input response is not JSON"

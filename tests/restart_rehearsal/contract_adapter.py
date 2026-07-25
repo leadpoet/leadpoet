@@ -990,6 +990,70 @@ def _module_restart_gate(argv: list[str]) -> int:
     return 0
 
 
+def _module_gateway_restart_preflight(argv: list[str]) -> int:
+    config_value = _arg_value(argv, "--config-dir")
+    config_dir = Path(config_value)
+    deploy_commit = _arg_value(argv, "--deploy-commit")
+    plan_file = Path(os.environ.get("GATEWAY_DEPLOY_PLAN_FILE", ""))
+    script = Path.cwd() / "scripts/gateway_git_deploy.py"
+    if (
+        not config_value
+        or deploy_commit != _candidate_sha()
+        or not plan_file.is_file()
+        or not script.is_file()
+    ):
+        return _fail(
+            "python-module",
+            argv,
+            "gateway restart preflight tree-verification inputs are incomplete",
+        )
+    command = [
+        REAL_PYTHON,
+        str(script),
+        "verify-tree",
+        "--plan-file",
+        str(plan_file),
+        "--materialized-root",
+        str(Path.cwd()),
+        "--phase",
+        "prepared_archive",
+        "--strict-extras",
+    ]
+    _record_production_script(script, command[1:])
+    result = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(result.stderr, file=sys.stderr)
+        return int(result.returncode)
+    try:
+        evidence = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return _fail(
+            "python-module",
+            argv,
+            "gateway restart preflight tree evidence is invalid",
+        )
+    _write_json(
+        config_dir / "gateway-candidate-tree-preflight.json",
+        evidence,
+    )
+    print(
+        json.dumps(
+            {
+                "status": "ready",
+                "module": "gateway.tee.restart_preflight_v2",
+                "prepared_candidate_tree": evidence,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _module_envelopes(argv: list[str]) -> int:
     output_dir = Path(_arg_value(argv, "--output-dir"))
     deploy_commit = _arg_value(argv, "--deploy-commit")
@@ -1360,8 +1424,15 @@ def command_python(argv: list[str]) -> int:
             ) != 0:
                 return 97
             result = _module_envelopes(module_argv)
+        elif module == "gateway.tee.restart_preflight_v2":
+            if _record_internal_substitution(
+                kind="python-module",
+                argv=argv,
+                module=module,
+            ) != 0:
+                return 97
+            result = _module_gateway_restart_preflight(module_argv)
         elif module in {
-            "gateway.tee.restart_preflight_v2",
             "validator_tee.host.docker_operation_guard_v2",
             "gateway.research_lab.provider_profiles_v2",
             "gateway.utils.tee_v2_bootstrap",

@@ -22,6 +22,9 @@ from research_lab import validator_integration as vi
 class _FakeResponse:
     def __init__(self, payload):
         self._payload = json.dumps(payload).encode("utf-8")
+        # Mirror the real urlopen response interface: the fetch inspects
+        # Content-Encoding to decode a gzip allocation response.
+        self.headers = {}
 
     def read(self):
         return self._payload

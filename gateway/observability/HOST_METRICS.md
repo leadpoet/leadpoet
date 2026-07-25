@@ -23,10 +23,25 @@ gateway:
 | `otelcol-hostmetrics.yaml` | Collector config: `hostmetrics` receiver (cpu, load, memory, disk, filesystem, network, paging) → `otlphttp` exporter. |
 | `install_hostmetrics_collector.sh` | Installs `otelcol-contrib`, writes the config + a systemd unit (`otelcol-hostmetrics`), enables and starts it. Idempotent. |
 
-## Install (per host)
+## Install — automatic on restart
 
-Requires `GATEWAY_OTEL_ENDPOINT` and `GATEWAY_OTEL_TOKEN` in the gateway env
-file (`/home/ec2-user/.config/leadpoet/gateway.env` by default):
+`gw_restart.sh` calls the installer on every gateway restart
+(`ensure_hostmetrics_collector`), so each host self-installs the collector the
+next time it deploys — no manual step. The call is:
+
+- **Idempotent** — the binary is downloaded only once; subsequent restarts just
+  refresh the config + token and ensure the service is running.
+- **Best-effort** — if the install fails for any reason it logs a warning and
+  the gateway restart proceeds; host metrics are observational, like the spans.
+- **Token-fresh** — it reads the `gateway.env` that `gw_restart.sh` just
+  hydrated from Secrets Manager, so a rotated `GATEWAY_OTEL_TOKEN` is picked up
+  automatically.
+
+### Manual install (optional)
+
+To install without waiting for a restart, run it directly on a host. Requires
+`GATEWAY_OTEL_ENDPOINT` and `GATEWAY_OTEL_TOKEN` in the gateway env file
+(`/home/ec2-user/.config/leadpoet/gateway.env` by default):
 
 ```bash
 sudo gateway/observability/install_hostmetrics_collector.sh

@@ -1581,6 +1581,28 @@ export GATEWAY_DEPLOY_STAGE
     -m gateway.tee.verify_weight_submission_ready_v2 --repair
 )
 
+# Ensure the standalone host-metrics collector is installed and running so each
+# gateway host reports CPU/memory/storage/network. The installer is idempotent
+# and reads the freshly hydrated gateway.env for the OTLP endpoint + token, so a
+# rotated token is picked up here. Best-effort only: a failure never blocks the
+# gateway restart (host metrics are observational, like the request spans).
+ensure_hostmetrics_collector() {
+  local installer="$LEADPOET_REPO_ROOT/gateway/observability/install_hostmetrics_collector.sh"
+  if [ ! -x "$installer" ]; then
+    echo "host-metrics collector installer not present; skipping"
+    return 0
+  fi
+  if [ -z "${GATEWAY_OTEL_ENDPOINT:-}" ] || [ -z "${GATEWAY_OTEL_TOKEN:-}" ]; then
+    echo "GATEWAY_OTEL_ENDPOINT/TOKEN unset; skipping host-metrics collector"
+    return 0
+  fi
+  echo "Ensuring host-metrics collector (otelcol-hostmetrics) is installed and running"
+  if ! sudo env GATEWAY_ENV_FILE="$GATEWAY_ENV_FILE" "$installer"; then
+    echo "WARNING: host-metrics collector install failed; continuing gateway restart" >&2
+  fi
+}
+ensure_hostmetrics_collector
+
 cd "$LEADPOET_REPO_ROOT"
 setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null 9>&- &
 

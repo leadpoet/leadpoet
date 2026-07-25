@@ -64,7 +64,19 @@ OTHER_CLASS = RouteClass(
 VALIDATOR_EXACT = {
     "/validate",
     "/weights/submit",
+    # Every stage of the V2 weight-submission exchange must share the
+    # validator pool. Before this, only /weights/submit/v2 was reserved:
+    # the input fetch, finalize POST, subnet-epoch captures, and the
+    # attested-allocation fetch all fell to the OTHER pool (8s shed,
+    # shared with miscellaneous traffic), so near block 300 under load
+    # the most critical calls of the epoch could be shed with a 503
+    # while ordinary traffic held slots. A shed allocation fetch eats
+    # one of the validator's four fetch attempts inside its 90s budget.
     "/weights/submit/v2",
+    "/weights/finalize/v2",
+    "/weights/inputs/v2",
+    "/weights/subnet-epoch/candidate/v1",
+    "/weights/subnet-epoch/boundary/v1",
     "/fulfillment/scoring",
     "/fulfillment/score",
     "/fulfillment/rewards/active",
@@ -74,6 +86,9 @@ VALIDATOR_PREFIXES = (
     "/qualification/validator/",
     "/fulfillment/ban/",
     "/fulfillment/results/",
+    # Attested/live allocation reads are the fail-closed prerequisite for
+    # every weight submission (validator aborts the epoch without them).
+    "/research-lab/allocations/",
 )
 MINER_EXACT = {
     "/presign",

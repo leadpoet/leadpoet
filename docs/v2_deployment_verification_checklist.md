@@ -43,15 +43,35 @@ production.
 python3 scripts/run_local_restart_rehearsal.py \
   --from-sha <currently-deployed-sha> \
   --candidate-sha HEAD \
+  --transition forward \
   --scope exact \
   --component all
 ```
+
+If the candidate changes either production restart launcher, release
+selection, compatibility-floor enforcement, or the rehearsal harness, also run
+the exact reverse transition before pushing:
+
+```bash
+python3 scripts/run_local_restart_rehearsal.py \
+  --from-sha HEAD \
+  --candidate-sha <supported-previous-release-sha> \
+  --transition rollback \
+  --scope exact \
+  --component all
+```
+
+Then rerun the forward transition from that supported previous release to the
+same frozen candidate. The three commands must use one unchanged candidate SHA.
 
 The rehearsal must produce all of the following:
 
 - [ ] `PYTHON37_FINALIZATION_PROBE_SUCCESS`
 - [ ] `REHEARSAL_SUCCESS component=gateway`
 - [ ] `REHEARSAL_SUCCESS component=validator`
+- [ ] Exact rollback succeeds when the change affects restart or release
+  selection.
+- [ ] Exact roll-forward succeeds again from the rollback target.
 - [ ] Every contract stage passes.
 - [ ] Zero rejected contract events.
 - [ ] Zero `internal_substitution` events. An adapted repository module,

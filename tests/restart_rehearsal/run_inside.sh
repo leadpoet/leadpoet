@@ -3,6 +3,7 @@ set -euo pipefail
 
 FROM_SHA="${REHEARSAL_FROM_SHA:?REHEARSAL_FROM_SHA is required}"
 CANDIDATE_SHA="${REHEARSAL_CANDIDATE_SHA:?REHEARSAL_CANDIDATE_SHA is required}"
+TRANSITION="${REHEARSAL_TRANSITION:?REHEARSAL_TRANSITION is required}"
 COMPONENT="${REHEARSAL_COMPONENT:?REHEARSAL_COMPONENT is required}"
 WEIGHT_READINESS_SCENARIO="${REHEARSAL_WEIGHT_READINESS_SCENARIO:-transient_503_recovery}"
 REHEARSAL_SCOPE="${REHEARSAL_SCOPE:-exact}"
@@ -43,11 +44,25 @@ git config --global --add safe.directory '*'
 
 git -C /source cat-file -e "$FROM_SHA^{commit}"
 git -C /source cat-file -e "$CANDIDATE_SHA^{commit}"
-git -C /source merge-base --is-ancestor "$FROM_SHA" "$CANDIDATE_SHA"
+case "$TRANSITION" in
+  forward)
+    git -C /source merge-base --is-ancestor "$FROM_SHA" "$CANDIDATE_SHA"
+    ;;
+  rollback)
+    test "$FROM_SHA" != "$CANDIDATE_SHA"
+    git -C /source merge-base --is-ancestor "$CANDIDATE_SHA" "$FROM_SHA"
+    ;;
+  *)
+    echo "ERROR: unsupported restart transition: $TRANSITION" >&2
+    exit 1
+    ;;
+esac
 
 git init --bare -q /srv/origin.git
 git --git-dir=/srv/origin.git fetch -q /source \
   "$CANDIDATE_SHA:refs/heads/main"
+git --git-dir=/srv/origin.git fetch -q /source \
+  "$FROM_SHA:refs/heads/rehearsal-deployed"
 
 mkdir -p \
   /home/ec2-user/.config/leadpoet \
@@ -90,20 +105,36 @@ if [ "$COMPONENT" = "gateway" ]; then
     >/home/ec2-user/gw_restart.sh
   chmod 700 /home/ec2-user/gw_restart.sh
 
-  echo "REHEARSAL_START component=gateway from=$FROM_SHA candidate=$CANDIDATE_SHA scenario=$WEIGHT_READINESS_SCENARIO scope=$REHEARSAL_SCOPE"
+  echo "REHEARSAL_START component=gateway from=$FROM_SHA candidate=$CANDIDATE_SHA transition=$TRANSITION scenario=$WEIGHT_READINESS_SCENARIO scope=$REHEARSAL_SCOPE"
   set +e
-  env \
-    HOME=/home/ec2-user \
-    LEADPOET_REPO_ROOT=/home/ec2-user/leadpoet_repo \
-    GATEWAY_ROOT=/home/ec2-user/leadpoet_repo/gateway \
-    GATEWAY_LOG_ROOT=/home/ec2-user/gateway \
-    GATEWAY_LOG_FILE=/home/ec2-user/gateway/gateway.log \
-    GATEWAY_HOST_RESTART_SCRIPT=/home/ec2-user/gw_restart.sh \
-    GATEWAY_TEE_EIF_ROOT=/home/ec2-user/tee \
-    GATEWAY_PYTHON_BIN=/home/ec2-user/venv311/bin/python3 \
-    GATEWAY_TEE_TOPOLOGY_MODE=full \
-    RESEARCH_LAB_TEE_PROTOCOL=v2 \
-    bash /home/ec2-user/gw_restart.sh
+  if [ "$TRANSITION" = "rollback" ]; then
+    env \
+      HOME=/home/ec2-user \
+      LEADPOET_REPO_ROOT=/home/ec2-user/leadpoet_repo \
+      GATEWAY_ROOT=/home/ec2-user/leadpoet_repo/gateway \
+      GATEWAY_LOG_ROOT=/home/ec2-user/gateway \
+      GATEWAY_LOG_FILE=/home/ec2-user/gateway/gateway.log \
+      GATEWAY_HOST_RESTART_SCRIPT=/home/ec2-user/gw_restart.sh \
+      GATEWAY_TEE_EIF_ROOT=/home/ec2-user/tee \
+      GATEWAY_PYTHON_BIN=/home/ec2-user/venv311/bin/python3 \
+      GATEWAY_TEE_TOPOLOGY_MODE=full \
+      RESEARCH_LAB_TEE_PROTOCOL=v2 \
+      bash /home/ec2-user/gw_restart.sh --commit "$CANDIDATE_SHA"
+  else
+    env \
+      HOME=/home/ec2-user \
+      GATEWAY_DEPLOY_COMMIT="$CANDIDATE_SHA" \
+      LEADPOET_REPO_ROOT=/home/ec2-user/leadpoet_repo \
+      GATEWAY_ROOT=/home/ec2-user/leadpoet_repo/gateway \
+      GATEWAY_LOG_ROOT=/home/ec2-user/gateway \
+      GATEWAY_LOG_FILE=/home/ec2-user/gateway/gateway.log \
+      GATEWAY_HOST_RESTART_SCRIPT=/home/ec2-user/gw_restart.sh \
+      GATEWAY_TEE_EIF_ROOT=/home/ec2-user/tee \
+      GATEWAY_PYTHON_BIN=/home/ec2-user/venv311/bin/python3 \
+      GATEWAY_TEE_TOPOLOGY_MODE=full \
+      RESEARCH_LAB_TEE_PROTOCOL=v2 \
+      bash /home/ec2-user/gw_restart.sh
+  fi
   RESTART_STATUS=$?
   set -e
 
@@ -159,13 +190,24 @@ else
   printf '%s\n' '{"ss58Address":"5DummyColdkey"}' \
     >/home/ec2-user/.bittensor/wallets/validator_72/coldkeypub.txt
 
-  echo "REHEARSAL_START component=validator from=$FROM_SHA candidate=$CANDIDATE_SHA"
-  env \
-    HOME=/home/ec2-user \
-    VALIDATOR_ROOT=/home/ec2-user/leadpoet/leadpoet \
-    VALIDATOR_PYTHON_BIN=/home/ec2-user/venv311/bin/python3 \
-    VALIDATOR_DOCKER_MIN_FREE_BYTES=1000000000 \
-    bash /home/ec2-user/leadpoet/leadpoet/validator_restart.sh
+  echo "REHEARSAL_START component=validator from=$FROM_SHA candidate=$CANDIDATE_SHA transition=$TRANSITION"
+  if [ "$TRANSITION" = "rollback" ]; then
+    env \
+      HOME=/home/ec2-user \
+      VALIDATOR_ROOT=/home/ec2-user/leadpoet/leadpoet \
+      VALIDATOR_PYTHON_BIN=/home/ec2-user/venv311/bin/python3 \
+      VALIDATOR_DOCKER_MIN_FREE_BYTES=1000000000 \
+      bash /home/ec2-user/leadpoet/leadpoet/validator_restart.sh \
+        --commit "$CANDIDATE_SHA"
+  else
+    env \
+      HOME=/home/ec2-user \
+      VALIDATOR_DEPLOY_COMMIT="$CANDIDATE_SHA" \
+      VALIDATOR_ROOT=/home/ec2-user/leadpoet/leadpoet \
+      VALIDATOR_PYTHON_BIN=/home/ec2-user/venv311/bin/python3 \
+      VALIDATOR_DOCKER_MIN_FREE_BYTES=1000000000 \
+      bash /home/ec2-user/leadpoet/leadpoet/validator_restart.sh
+  fi
 
   test "$(git -C /home/ec2-user/leadpoet/leadpoet rev-parse HEAD)" = "$CANDIDATE_SHA"
   test "$(

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 GATEWAY_GIT_DEPLOY_PROTOCOL="1"
+V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA="bd71fdda2aca4e17d07b3e55f56a66f7bd1bbdc3"
 LEADPOET_REPO_ROOT="${LEADPOET_REPO_ROOT:-/home/ec2-user/leadpoet_repo}"
 GATEWAY_ROOT="${GATEWAY_ROOT:-$LEADPOET_REPO_ROOT/gateway}"
 GATEWAY_LOG_ROOT="${GATEWAY_LOG_ROOT:-/home/ec2-user/gateway}"
@@ -49,6 +50,50 @@ GATEWAY_DEPLOY_COMPLETED=0
 GATEWAY_PREFLIGHT_TREE=""
 GATEWAY_HOST_MEMORY_GUARD_PATH="${GATEWAY_HOST_MEMORY_GUARD_PATH:-$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py}"
 LEADPOET_DOCKER_OPERATION_LOCK_FILE="${LEADPOET_DOCKER_OPERATION_LOCK_FILE:-/home/ec2-user/.config/leadpoet/docker-operation-v2.lock}"
+REQUESTED_GATEWAY_DEPLOY_COMMIT="${GATEWAY_DEPLOY_COMMIT:-}"
+unset GATEWAY_DEPLOY_COMMIT
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --commit)
+      if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+        echo "ERROR: --commit requires a full 40-character SHA" >&2
+        exit 2
+      fi
+      if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \
+          && [ "$REQUESTED_GATEWAY_DEPLOY_COMMIT" != "$2" ]; then
+        echo "ERROR: --commit conflicts with GATEWAY_DEPLOY_COMMIT" >&2
+        exit 2
+      fi
+      REQUESTED_GATEWAY_DEPLOY_COMMIT="$2"
+      shift 2
+      ;;
+    --commit=*)
+      requested_commit="${1#--commit=}"
+      if [ -z "$requested_commit" ]; then
+        echo "ERROR: --commit requires a full 40-character SHA" >&2
+        exit 2
+      fi
+      if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \
+          && [ "$REQUESTED_GATEWAY_DEPLOY_COMMIT" != "$requested_commit" ]; then
+        echo "ERROR: --commit conflicts with GATEWAY_DEPLOY_COMMIT" >&2
+        exit 2
+      fi
+      REQUESTED_GATEWAY_DEPLOY_COMMIT="$requested_commit"
+      shift
+      ;;
+    *)
+      echo "ERROR: unsupported gateway restart argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \
+    && ! [[ "$REQUESTED_GATEWAY_DEPLOY_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "ERROR: --commit must be a lowercase full 40-character SHA" >&2
+  exit 2
+fi
+
 V2_CREDENTIAL_ENVELOPES=(
   "$GATEWAY_V2_CONFIG_DIR/artifact_master_key.json"
   "$GATEWAY_V2_CONFIG_DIR/openrouter.json"
@@ -909,11 +954,17 @@ PREPARED_GATEWAY_SHA="$(
   python3 "$GATEWAY_GIT_HELPER" prepare \
     --repo-root "$LEADPOET_REPO_ROOT" \
     --env-file "$GATEWAY_ENV_FILE" \
+    --deploy-commit "$REQUESTED_GATEWAY_DEPLOY_COMMIT" \
     --plan-file "$GATEWAY_DEPLOY_PLAN_FILE" \
     --manifest-file "$GATEWAY_DEPLOYMENT_MANIFEST" \
     --last-good-file "$GATEWAY_LAST_GOOD_MANIFEST"
 )"
 echo "Prepared gateway commit: $PREPARED_GATEWAY_SHA"
+if ! git -C "$LEADPOET_REPO_ROOT" merge-base --is-ancestor \
+    "$V2_DEPLOYMENT_COMPATIBILITY_FLOOR_SHA" "$PREPARED_GATEWAY_SHA"; then
+  echo "ERROR: selected gateway commit predates the supported stateful V2 rollback floor" >&2
+  exit 1
+fi
 
 echo "Materializing the prepared commit for pre-shutdown V2 tooling"
 GATEWAY_PREFLIGHT_TREE="$(mktemp -d /tmp/gateway-v2-preflight.XXXXXX)"

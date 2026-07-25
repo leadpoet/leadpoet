@@ -11,12 +11,16 @@ bash /home/ec2-user/gw_restart.sh
 The restart selects one commit from `GITHUB_REPO_URL` and `GITHUB_BRANCH`,
 stops the existing processes, fast-forwards the checkout to that exact commit,
 and then runs the existing cleanup, PCR0, enclave, dependency, process launch,
-and health workflow. It does not add a validator-side deployment gate.
+and health workflow. Normal unpinned gateway and validator restarts remain
+independent; an explicit exact-commit validator restart adds the paired
+same-release gate described below.
 
-`GATEWAY_DEPLOY_COMMIT` is an operator-only, one-invocation rollback control.
-Persistent copies in Secrets Manager or the cached/runtime environment are
-ignored and are not inherited by the relaunched gateway. Normal restarts
-therefore always follow the fetched head of `GITHUB_BRANCH`.
+`--commit <full-sha>` is the canonical operator-only, one-invocation release
+selector. `GATEWAY_DEPLOY_COMMIT` remains accepted for installed-launcher
+compatibility during an N-1-to-N handoff. Persistent copies in Secrets Manager
+or the cached/runtime environment are ignored and are not inherited by the
+relaunched gateway. Normal restarts therefore always follow the fetched head of
+`GITHUB_BRANCH`.
 
 ## One-Time Cutover
 
@@ -139,17 +143,30 @@ Resume using the existing operator workflow only after the normal checks pass:
 
 ## Rollback
 
-Use the `target_sha` from `gateway-last-good.json`. The SHA must be a full
-40-character commit reachable from the configured branch and must support the
-Git restart protocol.
+Rollback is a paired gateway-and-validator deployment. A gateway-only
+`gateway-last-good.json` record is not sufficient evidence that the same
+validator release completed successfully. Select one full 40-character commit
+that:
 
-```bash
-cd /home/ec2-user
-GATEWAY_DEPLOY_COMMIT=<last-good-40-character-sha> \
-  bash /home/ec2-user/gw_restart.sh
-```
+- Is reachable from `origin/main`.
+- Is at or after the stateful V2 compatibility floor.
+- Has one immutable release channel containing matching gateway and validator
+  manifests.
+- Has passed the exact reverse restart rehearsal from the currently installed
+  launcher.
+
+Restart the gateway first with `gw_restart.sh --commit <full-sha>`. Require its
+normal build-info, V2 authority, attestation, and authenticated allocation
+handoff checks to pass. Only then restart the validator with
+`validator_restart.sh --commit <the-same-full-sha>`.
+
+The pinned validator restart fails before shutdown unless the public gateway
+reports the same commit through V2 authority health, build-info, and immutable
+release evidence. A normal unpinned validator restart retains its independent
+gateway-startup behavior.
 
 Rollback runs the same enclave rebuild and restart workflow. It does not reuse
 newer EIFs or bypass PCR0, attestation, import, or health checks. A commit from
-before this migration is intentionally rejected; use the retained flat restart
-backup only for initial cutover recovery.
+before the stateful V2 compatibility floor is intentionally rejected. A
+subsequent roll-forward must run the exact forward rehearsal from the rolled
+back commit before production use.

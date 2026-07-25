@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
+from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
@@ -34,6 +37,29 @@ def test_gateway_rehearsal_requires_canonical_private_model_environment() -> Non
 
     with pytest.raises(SystemExit, match="exactly one gateway.main"):
         verify_gateway_private_model_environment([])
+
+
+def test_contract_adapter_imports_with_python_safe_path(tmp_path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(contract_adapter.__file__).resolve()),
+            "future-command",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PYTHONSAFEPATH": "1",
+            "PYTHONPATH": str(Path.cwd()),
+            "REHEARSAL_STATE_ROOT": str(tmp_path / "state"),
+        },
+    )
+
+    assert result.returncode == 97
+    assert "unknown adapter command" in result.stderr
+    assert "ModuleNotFoundError" not in result.stderr
 
 
 def test_rehearsal_driver_must_match_frozen_candidate(

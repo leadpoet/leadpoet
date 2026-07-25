@@ -27,6 +27,7 @@ from typing import Any, Iterable
 try:
     from .contract_policy import is_classified_contract_adapter
 except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     from contract_policy import is_classified_contract_adapter
 
 

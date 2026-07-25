@@ -17,6 +17,7 @@ try:
         substitution_identity,
     )
 except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     from contract_policy import (
         EXACT_CAPACITY_SUBSTITUTIONS,
         EXACT_EXTERNAL_ADAPTER_KINDS,

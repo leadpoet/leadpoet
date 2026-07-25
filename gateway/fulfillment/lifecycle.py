@@ -1438,19 +1438,29 @@ async def _resolve_chain_topk(
     if topk_lead_ids:
         for chunk in _chunked(chain_request_ids):
             try:
+                # Also clear reward_pct/is_winner: a lead displaced from the
+                # chain top-K must stop paying. Those columns are written only at
+                # finalize and cleared only at epoch expiry, so without this a
+                # displaced-but-previously-paid lead kept earning for up to
+                # L_EPOCHS (~5 days), diluting honest fulfillment miners and
+                # paying a miner that lost its slot.
                 supabase.table("fulfillment_score_consensus").update({
                     "is_chain_held": False,
+                    "reward_pct": None,
+                    "is_winner": False,
                 }).in_("request_id", chunk) \
                   .not_.in_("lead_id", list(topk_lead_ids)) \
                   .execute()
             except Exception as e:
                 print(f"   ⚠️  Failed clearing is_chain_held for displaced rows: {e}")
     else:
-        # Empty top-K — clear everyone in the chain.
+        # Empty top-K — clear everyone in the chain (nobody is a winner now).
         for chunk in _chunked(chain_request_ids):
             try:
                 supabase.table("fulfillment_score_consensus").update({
                     "is_chain_held": False,
+                    "reward_pct": None,
+                    "is_winner": False,
                 }).in_("request_id", chunk) \
                   .execute()
             except Exception as e:

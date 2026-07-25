@@ -6,6 +6,7 @@ import subprocess
 import pytest
 
 from scripts import run_local_restart_rehearsal as rehearsal
+from tests.restart_rehearsal import contract_adapter
 from tests.restart_rehearsal.verify_evidence import (
     EXPECTED_GATEWAY_PRIVATE_MODEL_ENV,
     verify_gateway_private_model_environment,
@@ -70,6 +71,115 @@ def test_exact_rehearsal_rejects_repository_module_substitution() -> None:
             candidate_sha=COMMIT,
             scope="exact",
         )
+
+
+@pytest.mark.parametrize(
+    ("identity", "evidence"),
+    (
+        (
+            "host.cpu_capacity",
+            {"advertised_vcpus": 16, "outer_limit": "4"},
+        ),
+        (
+            "host.memory_capacity",
+            {"advertised_memory_mib": 131072, "outer_limit": "6g"},
+        ),
+    ),
+)
+def test_exact_rehearsal_accepts_strict_capacity_substitutions(
+    identity,
+    evidence,
+) -> None:
+    verify_rehearsal_integrity(
+        [
+            {
+                "kind": "host-command",
+                "substitution": identity,
+                "implementation": "internal_substitution",
+                **evidence,
+            }
+        ],
+        candidate_sha=COMMIT,
+        scope="exact",
+    )
+
+
+def test_exact_rehearsal_rejects_incomplete_capacity_evidence() -> None:
+    rows = [
+        {
+            "kind": "host-command",
+            "substitution": "host.memory_capacity",
+            "implementation": "internal_substitution",
+            "advertised_memory_mib": 131072,
+            "outer_limit": "",
+        }
+    ]
+
+    with pytest.raises(SystemExit, match="capacity contract is invalid"):
+        verify_rehearsal_integrity(
+            rows,
+            candidate_sha=COMMIT,
+            scope="exact",
+        )
+
+
+def test_rehearsal_component_uses_constrained_outer_profile(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        rehearsal,
+        "_run",
+        lambda args, **_kwargs: calls.append(args),
+    )
+
+    rehearsal._run_component(
+        "rehearsal:test",
+        component="gateway",
+        from_sha="1" * 40,
+        candidate_sha="2" * 40,
+        scope="exact",
+        outer_cpus="3.5",
+        outer_memory="7g",
+    )
+
+    command = calls[0]
+    assert command[command.index("--platform") + 1] == "linux/amd64"
+    assert command[command.index("--cpus") + 1] == "3.5"
+    assert command[command.index("--memory") + 1] == "7g"
+    assert "REHEARSAL_OUTER_CPUS=3.5" in command
+    assert "REHEARSAL_OUTER_MEMORY=7g" in command
+
+
+def test_exact_adapter_allows_only_capacity_substitutions(monkeypatch) -> None:
+    monkeypatch.setenv("REHEARSAL_SCOPE", "exact")
+    monkeypatch.setattr(
+        contract_adapter,
+        "_event",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        contract_adapter,
+        "_fail",
+        lambda *_args, **_kwargs: 97,
+    )
+
+    assert (
+        contract_adapter._record_internal_substitution(
+            kind="host-command",
+            argv=["getconf", "_NPROCESSORS_CONF"],
+            substitution="host.cpu_capacity",
+            advertised_vcpus=16,
+            outer_limit="4",
+        )
+        == 0
+    )
+    assert (
+        contract_adapter._record_internal_substitution(
+            kind="python-module",
+            argv=["-m", "gateway.tee.restart_preflight_v2"],
+            module="gateway.tee.restart_preflight_v2",
+        )
+        == 97
+    )
 
 
 def test_targeted_regression_is_distinct_and_rejects_unknown_substitution() -> None:

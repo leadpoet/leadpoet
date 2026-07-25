@@ -1,4 +1,4 @@
-FROM amazonlinux@sha256:0c74e9fbba754003cfa179fd5cc65be7790d7248443276948704b8a858b298e5
+FROM amazonlinux@sha256:2d3d063f7fc9fed492a1a7286a88f9852e9b391aa7a6fe91dedbb8381e0bb5b0
 
 RUN dnf install -y \
       diffutils \

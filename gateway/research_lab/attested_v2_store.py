@@ -302,10 +302,15 @@ async def _select_by_values(
     *,
     field: str,
     values: Iterable[str],
+    key_fields: tuple[str, ...],
 ) -> list[dict[str, Any]]:
+    """Select bounded value chunks in one stable, unique row order."""
+
     normalized = sorted({str(value) for value in values})
     if len(normalized) > _MAX_GRAPH_ROWS:
         raise AttestedV2StoreError("V2 receipt graph exceeds row limit")
+    if not key_fields or len(set(key_fields)) != len(key_fields):
+        raise AttestedV2StoreError("V2 durable row key fields are invalid")
     rows = []
     for offset in range(0, len(normalized), _GRAPH_QUERY_CHUNK):
         chunk = normalized[offset : offset + _GRAPH_QUERY_CHUNK]
@@ -313,6 +318,7 @@ async def _select_by_values(
             await select_all(
                 table,
                 filters=((field, "in", chunk),),
+                order_by=tuple((key_field, False) for key_field in key_fields),
                 max_rows=_MAX_GRAPH_ROWS,
             )
         )
@@ -345,6 +351,7 @@ async def _existing_exact_rows(
         table,
         field=key_field,
         values=expected_by_key,
+        key_fields=(key_field,),
     )
     existing: set[str] = set()
     for stored in stored_rows:
@@ -394,6 +401,7 @@ async def _existing_exact_relations(
         table,
         field=owner_field,
         values=owners,
+        key_fields=key_fields,
     )
     existing: set[tuple[str, ...]] = set()
     for stored in stored_rows:
@@ -628,6 +636,7 @@ async def load_receipt_graphs_v2(
             RECEIPT_TABLE,
             field="receipt_hash",
             values=requested,
+            key_fields=("receipt_hash",),
         )
         by_hash: dict[str, Mapping[str, Any]] = {}
         for row in rows:
@@ -642,6 +651,7 @@ async def load_receipt_graphs_v2(
             EDGE_TABLE,
             field="child_receipt_hash",
             values=requested,
+            key_fields=("child_receipt_hash", "parent_receipt_hash"),
         )
         edge_pairs = set()
         for row in edge_rows:
@@ -684,6 +694,7 @@ async def load_receipt_graphs_v2(
         BOOT_TABLE,
         field="boot_identity_hash",
         values=boot_hashes,
+        key_fields=("boot_identity_hash",),
     )
     boots = {}
     for row in boot_rows:
@@ -708,6 +719,7 @@ async def load_receipt_graphs_v2(
         RECEIPT_TRANSPORT_TABLE,
         field="receipt_hash",
         values=receipt_hashes,
+        key_fields=("receipt_hash", "attempt_hash"),
     )
     link_pairs = set()
     attempt_hashes = set()
@@ -723,6 +735,7 @@ async def load_receipt_graphs_v2(
         TRANSPORT_TABLE,
         field="attempt_hash",
         values=attempt_hashes,
+        key_fields=("attempt_hash",),
     )
     attempts = {}
     for row in attempt_rows:
@@ -742,6 +755,7 @@ async def load_receipt_graphs_v2(
         HOST_OPERATION_TABLE,
         field="receipt_hash",
         values=receipt_hashes,
+        key_fields=("request_hash",),
     )
     host_operations_by_receipt: dict[str, list[dict[str, Any]]] = {}
     seen_requests = set()
@@ -1324,6 +1338,11 @@ async def load_business_artifact_graphs_v2(
                     ("artifact_kind", kind),
                     ("artifact_ref", "in", chunk),
                 ),
+                order_by=(
+                    ("artifact_kind", False),
+                    ("artifact_ref", False),
+                    ("artifact_hash", False),
+                ),
                 max_rows=_MAX_GRAPH_ROWS,
                 allow_partial=False,
             )
@@ -1441,6 +1460,11 @@ async def load_business_artifact_graphs_by_ref_v2(
                 filters=(
                     ("artifact_kind", kind),
                     ("artifact_ref", "in", chunk),
+                ),
+                order_by=(
+                    ("artifact_kind", False),
+                    ("artifact_ref", False),
+                    ("artifact_hash", False),
                 ),
                 max_rows=_MAX_GRAPH_ROWS,
                 allow_partial=False,

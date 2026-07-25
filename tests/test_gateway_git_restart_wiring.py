@@ -142,6 +142,10 @@ def test_gateway_restart_forces_instance_role_for_runtime_aws_calls() -> None:
 
 def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    storage_preflight = script.index("--storage-read-preflight")
+    shutdown = script.index(
+        'echo "Stopping existing gateway and Research Lab worker processes"'
+    )
     runtime_ready = script.index(
         '"$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready'
     )
@@ -170,7 +174,9 @@ def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
 
     assert "GATEWAY_WEIGHT_INPUT_HTTP_TIMEOUT_SECONDS=360" in script
     assert (
-        runtime_ready
+        storage_preflight
+        < shutdown
+        < runtime_ready
         < cutover
         < repair
         < launch
@@ -182,6 +188,32 @@ def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
     assert 'GATEWAY_DEPLOY_STAGE="validator_weight_input_repair"' in script
     assert (
         'GATEWAY_DEPLOY_STAGE="validator_weight_input_http_check"' in script
+    )
+
+
+def test_gateway_weight_storage_preflight_uses_target_before_shutdown() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    dependencies = script.index(
+        'GATEWAY_DEPLOY_STAGE="dependency_preflight"'
+    )
+    stage = script.index(
+        'GATEWAY_DEPLOY_STAGE="validator_weight_input_storage_preflight"'
+    )
+    command = script.index("--storage-read-preflight", stage)
+    shutdown = script.index(
+        'echo "Stopping existing gateway and Research Lab worker processes"'
+    )
+    preflight_block = script[stage:shutdown]
+
+    assert dependencies < stage < command < shutdown
+    assert '. "$ENV_CLONE"' in preflight_block
+    assert (
+        "run_prepared_gateway_module \\\n"
+        "      gateway.tee.verify_weight_submission_ready_v2"
+        in preflight_block
+    )
+    assert "Gateway remains running; production shutdown has not started." in (
+        preflight_block
     )
 
 

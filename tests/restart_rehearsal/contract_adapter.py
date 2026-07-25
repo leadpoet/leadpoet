@@ -1002,7 +1002,11 @@ def _module_stage_artifacts(argv: list[str]) -> int:
 
 
 def _module_weight_ready(argv: list[str]) -> int:
-    if "--repair" not in argv and not _arg_value(argv, "--gateway-url"):
+    if (
+        "--repair" not in argv
+        and "--storage-read-preflight" not in argv
+        and not _arg_value(argv, "--gateway-url")
+    ):
         return _fail("python-module", argv, "weight readiness mode is unknown")
     result = subprocess.run(
         [

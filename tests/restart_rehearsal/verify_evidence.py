@@ -317,7 +317,7 @@ def main() -> int:
             if row.get("kind") == "weight-readiness-supabase"
         ]
         expected_supabase_runs = (
-            2 if scenario == "transient_503_recovery" else 1
+            3 if scenario == "transient_503_recovery" else 2
         )
         if (
             len(supabase_rows) != expected_supabase_runs
@@ -358,6 +358,11 @@ def main() -> int:
         repair_rows = [
             row for row in weight_rows if row.get("stage") == "repair"
         ]
+        storage_preflight_rows = [
+            row
+            for row in weight_rows
+            if row.get("stage") == "storage_preflight"
+        ]
         boundaries = [
             row
             for row in rows
@@ -368,6 +373,14 @@ def main() -> int:
             for row in rows
             if row.get("kind") == "weight-readiness-persistence"
         ]
+        if (
+            not storage_preflight_rows
+            or storage_preflight_rows[0].get("status") != "started"
+            or storage_preflight_rows[-1].get("status") != "ok"
+        ):
+            raise SystemExit(
+                "pre-shutdown weight storage preflight did not pass"
+            )
         if not repair_rows or repair_rows[0].get("status") != "started":
             raise SystemExit("real weight repair did not start")
 
@@ -458,6 +471,7 @@ def main() -> int:
             [
                 "module:gateway.tee.release_channel_v2",
                 "module:gateway.tee.prepare_gateway_envelopes_v2",
+                "weight:storage_preflight",
                 "module:gateway.tee.restart_preflight_v2",
                 "nitro:build",
                 "nitro:run",

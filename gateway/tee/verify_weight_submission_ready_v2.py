@@ -89,6 +89,44 @@ def _validate_handoff(
     }
 
 
+async def verify_weight_submission_storage_readable_v2(
+    *,
+    epoch: int | None = None,
+    netuid: int | None = None,
+) -> dict[str, Any]:
+    """Read the complete durable authority path without repairing or launching."""
+
+    from gateway.research_lab.maintenance import (
+        _resolve_maintenance_epoch,
+        champion_v2_cutover_readiness_report,
+    )
+
+    effective_epoch = await _resolve_maintenance_epoch(epoch)
+    if netuid is None:
+        from gateway.config import BITTENSOR_NETUID
+
+        effective_netuid = int(BITTENSOR_NETUID)
+    else:
+        effective_netuid = int(netuid)
+    readiness = await champion_v2_cutover_readiness_report(
+        epoch=effective_epoch,
+        netuid=effective_netuid,
+    )
+    return {
+        "schema_version": "leadpoet.weight_submission_storage_readiness.v2",
+        "status": "readable",
+        "epoch": effective_epoch,
+        "netuid": effective_netuid,
+        "authority_ready": readiness.get("ready") is True,
+        "receipt_coverage": float(readiness.get("receipt_coverage") or 0.0),
+        "historical_classification_coverage": float(
+            readiness.get("historical_classification_coverage")
+            or readiness.get("historical_settlement_coverage")
+            or 0.0
+        ),
+    }
+
+
 async def verify_weight_submission_ready_v2(
     *,
     repair: bool,
@@ -266,7 +304,9 @@ async def verify_weight_submission_ready_v2(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--repair", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--repair", action="store_true")
+    mode.add_argument("--storage-read-preflight", action="store_true")
     parser.add_argument("--gateway-url")
     parser.add_argument("--epoch", type=int)
     parser.add_argument("--netuid", type=int)
@@ -275,16 +315,27 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = _parser().parse_args()
-    result = asyncio.run(
-        verify_weight_submission_ready_v2(
-            repair=bool(args.repair),
-            gateway_url=args.gateway_url,
-            epoch=args.epoch,
-            netuid=args.netuid,
-            http_timeout_seconds=args.http_timeout_seconds,
+    parser = _parser()
+    args = parser.parse_args()
+    if args.storage_read_preflight:
+        if args.gateway_url:
+            parser.error("--storage-read-preflight cannot use --gateway-url")
+        result = asyncio.run(
+            verify_weight_submission_storage_readable_v2(
+                epoch=args.epoch,
+                netuid=args.netuid,
+            )
         )
-    )
+    else:
+        result = asyncio.run(
+            verify_weight_submission_ready_v2(
+                repair=bool(args.repair),
+                gateway_url=args.gateway_url,
+                epoch=args.epoch,
+                netuid=args.netuid,
+                http_timeout_seconds=args.http_timeout_seconds,
+            )
+        )
     print(json.dumps(result, sort_keys=True))
     return 0
 

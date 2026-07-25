@@ -41,6 +41,9 @@
       "validate_candidate": []
     }
   },
+  "required_imports": {
+    "sourcing_model/clients.py": ["urllib.request"]
+  },
   "integer_minimums": {
     "sourcing_model/core.py": {
       "_GOAL_MAX_COMPANIES": 50,

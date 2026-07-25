@@ -1,14 +1,15 @@
 """Sourcing-model wrapper-contract conformance checks.
 
 The sourcing model's research-lab surface is frozen by the wrapper contract
-(``research_lab/sourcing_model_contract.json``, mirrored from the model repo's
-``release/model-contract.json``): required files, the exact function
-signatures the lab and the production harness call (``research_lab_adapter.
-run_icp``/``adapter_metadata``, ``sourcing_model.core.qualify``, the discovery
-/validation/client seams the harness monkey-patches), and integer floor
-constants.  The new production flow is built AROUND these symbols, so any
-model-source change that breaks them breaks both the lab benchmark runtime
-and the harness.
+(``research_lab/sourcing_model_contract.json``, mirrored from the site's
+``sourcing-worker/release/model-contract.json``): required files, the exact
+function signatures the lab and the production harness call
+(``research_lab_adapter.run_icp``/``adapter_metadata``,
+``sourcing_model.core.qualify``, the discovery/validation/client seams the
+harness monkey-patches), module bindings reached through by the wrapper, and
+integer floor constants. The new production flow is built AROUND these
+symbols, so any model-source change that breaks them breaks both the lab
+benchmark runtime and the harness.
 
 ``verify_source_tree_contract`` validates a model SOURCE TREE against that
 contract using ``ast`` only — no imports, no execution, safe on untrusted
@@ -147,6 +148,28 @@ def _module_symbols(tree: ast.Module) -> Dict[str, Any]:
     return {"functions": functions, "constants": constants}
 
 
+def _module_bound_imports(tree: ast.Module) -> set[str]:
+    """Return dotted modules bound by plain, unaliased ``import a.b``.
+
+    The site wrapper reaches ``clients.urllib.request.urlopen``. That chain is
+    available after ``import urllib.request`` but not after
+    ``from urllib.request import urlopen`` or
+    ``import urllib.request as request``. Match the release bundle's contract
+    check exactly.
+    """
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Import):
+            continue
+        for alias in node.names:
+            if alias.asname:
+                continue
+            parts = alias.name.split(".")
+            for index in range(1, len(parts) + 1):
+                bound.add(".".join(parts[:index]))
+    return bound
+
+
 def verify_source_tree_contract(
     root: Path, contract: Mapping[str, Any] | None = None
 ) -> List[str]:
@@ -212,6 +235,19 @@ def verify_source_tree_contract(
                     f"asyncness drift {relative}:{name}: frozen surface is "
                     f"{'async' if frozen_async else 'sync'}, found "
                     f"{'async' if actual['is_async'] else 'sync'}"
+                )
+
+    for relative, required_modules in (
+        document.get("required_imports") or {}
+    ).items():
+        tree = _tree(relative)
+        if tree is None:
+            continue
+        bound_imports = _module_bound_imports(tree)
+        for module_name in required_modules:
+            if str(module_name) not in bound_imports:
+                violations.append(
+                    f"missing bound import {relative}:{module_name}"
                 )
 
     for relative, minimums in (document.get("integer_minimums") or {}).items():

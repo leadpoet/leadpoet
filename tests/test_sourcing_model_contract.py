@@ -37,6 +37,8 @@ def _conforming_tree(root: Path) -> None:
     """)
     _write(root, "sourcing_model/__init__.py", "from .core import qualify\n")
     _write(root, "sourcing_model/clients.py", """
+        import urllib.request
+
         def _exa_call():
             pass
 
@@ -101,6 +103,9 @@ def test_contract_loads_and_declares_frozen_surface() -> None:
     assert contract["functions"]["research_lab_adapter.py"]["run_icp"] == [
         "icp",
         "context",
+    ]
+    assert contract["required_imports"]["sourcing_model/clients.py"] == [
+        "urllib.request"
     ]
 
 
@@ -238,6 +243,31 @@ def test_asyncness_drift_is_violation(tmp_path: Path) -> None:
     core.write_text(core.read_text().replace("def qualify(icp):", "async def qualify(icp):"))
     violations = verify_source_tree_contract(tmp_path)
     assert any("asyncness drift" in v and "qualify" in v for v in violations)
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        "from urllib.request import urlopen",
+        "import urllib.request as request",
+    ),
+)
+def test_wrapper_reachable_import_must_remain_bound(
+    tmp_path: Path,
+    replacement: str,
+) -> None:
+    _conforming_tree(tmp_path)
+    clients = tmp_path / "sourcing_model" / "clients.py"
+    clients.write_text(
+        clients.read_text().replace("import urllib.request", replacement)
+    )
+
+    violations = verify_source_tree_contract(tmp_path)
+
+    assert (
+        "missing bound import sourcing_model/clients.py:urllib.request"
+        in violations
+    )
 
 
 def test_simple_alias_rebinding_conforms(tmp_path: Path) -> None:

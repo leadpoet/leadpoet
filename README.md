@@ -186,7 +186,13 @@ Use the correct intent source:
 | GitHub repositories or organizations | `github` |
 | G2, Capterra, TrustRadius, Glassdoor, Trustpilot | `review_site` |
 | Wikipedia | `wikipedia` |
-| Other verifiable dated events | `other` |
+| Government or education sources that do not fit another category | `other` |
+
+Fulfillment validates the declared source against the evidence URL before
+applying its score multiplier. First-party `job_board` evidence must be on the
+lead company's own careers/jobs property; third-party job, news, social,
+review, and reference sources must use a recognized platform. Arbitrary
+third-party or self-published domains are not accepted as `other`.
 
 Reference fulfillment code lives in `miner_models/Main_fulfillment_model/`. It is a starting point, not a guaranteed competitive miner.
 

@@ -1704,14 +1704,20 @@ async def compute_epoch_consensus(epoch_id: int):
                                 if isinstance(evidence_blob, str):
                                     evidence_blob = json.loads(evidence_blob)
 
-                                if "enhanced_lead" in evidence_blob:
-                                    rejection_reason = evidence_blob.get("reason", {})
-                                else:
-                                    rejection_reason = evidence_blob.get("rejection_reason", {})
-                                if isinstance(rejection_reason, str):
-                                    rejection_reason = json.loads(rejection_reason)
+                                # company_table_action and the classification
+                                # fields are written under stage_5_verification
+                                # (inside enhanced_lead for coordinator/single
+                                # mode), NOT under the rejection reason. Mirror
+                                # the approved path's unwrap; reading from
+                                # `reason` here always yielded None, so this
+                                # company-insert never fired for rejected leads.
+                                if "enhanced_lead" in evidence_blob and isinstance(evidence_blob["enhanced_lead"], dict):
+                                    evidence_blob = evidence_blob["enhanced_lead"]
+                                stage5 = evidence_blob.get("stage_5_verification", {})
+                                if isinstance(stage5, str):
+                                    stage5 = json.loads(stage5)
 
-                                company_action = rejection_reason.get("company_table_action")
+                                company_action = stage5.get("company_table_action")
                                 if company_action == "insert":
                                     print(f"         📝 Rejected lead but inserting company with correct classification: {company_linkedin[:50]}...")
                                     insert_result = await asyncio.to_thread(
@@ -1719,13 +1725,13 @@ async def compute_epoch_consensus(epoch_id: int):
                                         company_linkedin=company_linkedin,
                                         company_name=lead_data.get("company_name", "") or "",
                                         company_website=lead_data.get("website", "") or "",
-                                        company_description=rejection_reason.get("company_refined_description", ""),
+                                        company_description=stage5.get("company_refined_description", ""),
                                         company_hq_country=lead_data.get("hq_country", "") or "",
                                         company_hq_state=lead_data.get("hq_state", "") or "",
                                         company_hq_city=lead_data.get("hq_city", "") or "",
-                                        industry_top3=rejection_reason.get("company_industry_top3", {}),
-                                        sub_industry_top3=rejection_reason.get("company_sub_industry_top3", {}),
-                                        company_employee_count=rejection_reason.get("company_verified_employee_count", "")
+                                        industry_top3=stage5.get("company_industry_top3", {}),
+                                        sub_industry_top3=stage5.get("company_sub_industry_top3", {}),
+                                        company_employee_count=stage5.get("company_verified_employee_count", "")
                                     )
                                     if insert_result:
                                         print(f"         ✅ Company inserted (lead rejected due to industry mismatch)")

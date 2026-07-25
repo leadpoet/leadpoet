@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import base64
 import contextvars
+from functools import lru_cache
 import json
 import logging
 import os
@@ -75,6 +76,9 @@ PROVIDER_COST_ENV_PASSTHROUGH = (
 )
 PROVIDER_COST_EVALUATION_SCOPE_ENV = "RESEARCH_LAB_PROVIDER_COST_EVALUATION_SCOPE"
 DEFAULT_DOCKER_PLATFORM = "linux/amd64"
+DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID = (
+    "alias/leadpoet-research-lab-artifact-signing"
+)
 DEFAULT_ENV_PASSTHROUGH = (
     "EXA_API_KEY",
     "SCRAPINGDOG_API_KEY",
@@ -603,6 +607,145 @@ def load_private_artifact_manifest(uri: str) -> dict[str, Any]:
     if _contains_secret_material(decoded):
         raise PrivateModelRuntimeError("private model manifest contains raw secret material")
     return dict(decoded)
+
+
+def verify_private_artifact_manifest_signature(
+    manifest: Any,
+    *,
+    key_id: str = DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID,
+    s3_client: Any = None,
+    kms_client: Any = None,
+) -> dict[str, Any]:
+    """Verify that KMS signed the final, self-consistent manifest hash.
+
+    Successful default-client verifications are cached by immutable manifest
+    hash, signature URI, and key identity. Failures are never cached.
+    """
+
+    manifest_hash = _private_manifest_field(manifest, "manifest_hash")
+    signature_ref = _private_manifest_field(manifest, "signature_ref")
+    resolved_key_id = str(key_id or "").strip()
+    if not manifest_hash.startswith("sha256:") or len(manifest_hash) != 71:
+        raise PrivateModelRuntimeError(
+            "private artifact manifest signature requires a sha256 manifest hash"
+        )
+    if not signature_ref.startswith("s3://"):
+        raise PrivateModelRuntimeError(
+            "private artifact manifest signature_ref must be an s3:// URI"
+        )
+    if not resolved_key_id:
+        raise PrivateModelRuntimeError(
+            "private artifact manifest signing KMS key id is required"
+        )
+    payload = _private_manifest_hash_payload(manifest)
+    expected_manifest_hash = sha256_json(payload)
+    if manifest_hash != expected_manifest_hash:
+        raise PrivateModelRuntimeError(
+            "private artifact manifest hash does not match its payload"
+        )
+    if s3_client is None and kms_client is None:
+        return dict(
+            _verify_private_artifact_manifest_signature_cached(
+                manifest_hash,
+                signature_ref,
+                resolved_key_id,
+            )
+        )
+    return _verify_private_artifact_manifest_signature_uncached(
+        manifest_hash=manifest_hash,
+        signature_ref=signature_ref,
+        key_id=resolved_key_id,
+        s3_client=s3_client,
+        kms_client=kms_client,
+    )
+
+
+def _private_manifest_field(manifest: Any, field: str) -> str:
+    if isinstance(manifest, Mapping):
+        value = manifest.get(field)
+    else:
+        value = getattr(manifest, field, "")
+    return str(value or "").strip()
+
+
+def _private_manifest_hash_payload(manifest: Any) -> dict[str, Any]:
+    if isinstance(manifest, Mapping):
+        payload = dict(manifest)
+    else:
+        to_dict = getattr(manifest, "to_dict", None)
+        if not callable(to_dict):
+            raise PrivateModelRuntimeError(
+                "private artifact manifest must be a mapping or manifest object"
+            )
+        payload = dict(to_dict())
+    payload.pop("manifest_hash", None)
+    return payload
+
+
+@lru_cache(maxsize=256)
+def _verify_private_artifact_manifest_signature_cached(
+    manifest_hash: str,
+    signature_ref: str,
+    key_id: str,
+) -> dict[str, Any]:
+    return _verify_private_artifact_manifest_signature_uncached(
+        manifest_hash=manifest_hash,
+        signature_ref=signature_ref,
+        key_id=key_id,
+    )
+
+
+def _verify_private_artifact_manifest_signature_uncached(
+    *,
+    manifest_hash: str,
+    signature_ref: str,
+    key_id: str,
+    s3_client: Any = None,
+    kms_client: Any = None,
+) -> dict[str, Any]:
+    signature_bucket, signature_key = _parse_s3_uri(signature_ref)
+    if s3_client is None or kms_client is None:
+        try:
+            import boto3
+        except Exception as exc:
+            raise PrivateModelRuntimeError(
+                "boto3 is required to verify private artifact manifests"
+            ) from exc
+        s3_client = s3_client or boto3.client("s3")
+        kms_client = kms_client or boto3.client("kms")
+    try:
+        response = s3_client.get_object(
+            Bucket=signature_bucket,
+            Key=signature_key,
+        )
+        encoded_signature = response["Body"].read()
+        if isinstance(encoded_signature, bytes):
+            encoded_signature = encoded_signature.decode("ascii")
+        signature = base64.b64decode(str(encoded_signature).strip(), validate=True)
+        verification = kms_client.verify(
+            KeyId=key_id,
+            Message=manifest_hash.encode("utf-8"),
+            MessageType="RAW",
+            Signature=signature,
+            SigningAlgorithm="ECDSA_SHA_256",
+        )
+    except Exception as exc:
+        raise PrivateModelRuntimeError(
+            "private artifact manifest KMS signature verification failed"
+        ) from exc
+    if not bool(verification.get("SignatureValid")):
+        raise PrivateModelRuntimeError(
+            "private artifact manifest KMS signature was rejected"
+        )
+    return {
+        "verified": True,
+        "manifest_hash": manifest_hash,
+        "signature_ref": signature_ref,
+        "key_id": str(verification.get("KeyId") or key_id),
+        "signing_algorithm": str(
+            verification.get("SigningAlgorithm") or "ECDSA_SHA_256"
+        ),
+    }
 
 
 def sign_digest_with_kms(

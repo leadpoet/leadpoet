@@ -2997,7 +2997,7 @@ class ClaimLostDuringScoring(RuntimeError):
 
 
 class PrivateBaselineRepoHeadChanged(RuntimeError):
-    """Raised at an ICP boundary when repo main advances during a baseline run."""
+    """Raised when the configured source branch advances during a baseline run."""
 
     def __init__(self, *, expected_git_sha: str, repo_main_sha: str, item_index: int, total_icps: int):
         self.expected_git_sha = expected_git_sha
@@ -3007,7 +3007,7 @@ class PrivateBaselineRepoHeadChanged(RuntimeError):
         super().__init__(
             "private baseline repo head changed during run: "
             f"expected={compact_ref(expected_git_sha)} "
-            f"repo_main={compact_ref(repo_main_sha)} "
+            f"repo_head={compact_ref(repo_main_sha)} "
             f"before_icp={item_index}/{total_icps}"
         )
 
@@ -10934,8 +10934,8 @@ class ResearchLabGatewayScoringWorker:
                     ("Worker", self.worker_ref),
                     ("Benchmark date", benchmark_date),
                     ("ICP boundary", f"{item_index}/{total_icps}"),
-                    ("Started repo main", compact_ref(expected)),
-                    ("Current repo main", compact_ref(repo_main_sha)),
+                    ("Started source branch", compact_ref(expected)),
+                    ("Current source branch", compact_ref(repo_main_sha)),
                     ("Action", "failing this attempt so the next pass benchmarks the new artifact"),
                 ),
             )

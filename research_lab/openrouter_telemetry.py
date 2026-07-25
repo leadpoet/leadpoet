@@ -58,7 +58,7 @@ INCLUDE_REASONING_ENV = "RESEARCH_LAB_LLM_INCLUDE_REASONING"
 PRIVATE_MODEL_MANIFEST_URI_ENV = "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI"
 DEFAULT_PRIVATE_MODEL_MANIFEST_URI = (
     "s3://leadpoet-private-model-artifacts-493765492819/"
-    "research-lab/sourcing-model/current.json"
+    "research-lab/sourcing-model/branches/leadpoet-lab/current.json"
 )
 
 _SECRET_PATTERNS = (

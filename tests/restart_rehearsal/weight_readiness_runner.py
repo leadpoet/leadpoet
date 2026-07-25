@@ -12,6 +12,7 @@ from pathlib import Path
 import sys
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -285,6 +286,126 @@ def _run_persistence_probe(
     return result
 
 
+def _run_supabase_history_pagination_probe() -> None:
+    """Reproduce the production finalized-history response-size boundary."""
+
+    from gateway.tee import supabase_source_v2 as source
+    from leadpoet_canonical.attested_v2 import (
+        build_transport_attempt,
+        sha256_bytes,
+    )
+
+    row_count = 16
+    virtual_row_bytes = 20 * 1024 * 1024
+    response_limit = 64 * 1024 * 1024
+    requests: list[dict[str, Any]] = []
+
+    def provider(request):
+        request = dict(request)
+        requests.append(request)
+        start_text, end_text = request["headers"]["range"].split("-", 1)
+        start = int(start_text)
+        end = int(end_text)
+        selected = [
+            {"epoch_id": index}
+            for index in range(start, min(end + 1, row_count))
+        ]
+        oversized = len(selected) * virtual_row_bytes > response_limit
+        body = json.dumps(selected, separators=(",", ":")).encode("utf-8")
+        attempt = build_transport_attempt(
+            request_id="%032x" % len(requests),
+            logical_operation_id=request["logical_operation_id"],
+            job_id=request["job_id"],
+            purpose=request["purpose"],
+            provider_id="supabase",
+            attempt_number=request["attempt_number"],
+            method="GET",
+            destination_host=urlsplit(request["url"]).hostname or "",
+            destination_port=443,
+            path_hash=HASH_A,
+            nonsecret_headers_hash=HASH_B,
+            body_hash=sha256_bytes(b""),
+            credential_ref_hash=HASH_C,
+            retry_policy_hash=HASH_A,
+            timeout_ms=request["timeout_ms"],
+            started_at=NOW,
+            terminal_status=(
+                "transport_failure"
+                if oversized
+                else "authenticated_response"
+            ),
+            http_status=None if oversized else 200,
+            response_hash=None if oversized else sha256_bytes(body),
+            request_artifact_hash=(
+                "sha256:" + "%064x" % (1000 + len(requests))
+            ),
+            response_artifact_hash=(
+                None if oversized else sha256_bytes(body)
+            ),
+            tls_peer_chain_hash=None if oversized else HASH_B,
+            tls_protocol=None if oversized else "TLSv1.3",
+            failure_code="response_too_large" if oversized else None,
+            completed_at=NOW,
+        )
+        if oversized:
+            return {
+                "terminal_status": "transport_failure",
+                "failure_code": "response_too_large",
+                "transport_attempt": attempt,
+            }
+        return {
+            "terminal_status": "authenticated_response",
+            "http_status": 200,
+            "body_b64": base64.b64encode(body).decode("ascii"),
+            "transport_attempt": attempt,
+        }
+
+    attempts: list[dict[str, Any]] = []
+    reader = source.SupabaseSourceReaderV2(
+        execute_provider=provider,
+        retry_policy_hash=HASH_A,
+        sleep=lambda _seconds: None,
+    )
+    rows = reader.read(
+        policy_id="finalized_allocation_authorities",
+        parameters={"netuid": NETUID, "start_epoch": 0, "end_epoch": EPOCH - 1},
+        job_id="restart-rehearsal-allocation-history",
+        purpose="research_lab.allocation.v2",
+        record_transport=lambda attempt: attempts.append(dict(attempt)),
+        record_artifact=lambda _digest: None,
+    )
+    ranges = [request["headers"]["range"] for request in requests]
+    expected_ranges = [
+        "%d-%d" % (offset, offset + 1)
+        for offset in range(0, row_count + 1, 2)
+    ]
+    if (
+        [row.get("epoch_id") for row in rows] != list(range(row_count))
+        or ranges != expected_ranges
+        or any(
+            attempt.get("terminal_status") != "authenticated_response"
+            for attempt in attempts
+        )
+    ):
+        raise RuntimeError("finalized allocation history pagination is incomplete")
+    module_path = Path(source.__file__).resolve()
+    module_hash = hashlib.sha256(module_path.read_bytes()).hexdigest()
+    _event(
+        "weight-readiness-supabase",
+        status="ok",
+        implementation="production_module",
+        fixture_authenticity="sanitized_production_shape",
+        source_path=str(module_path),
+        source_git_path="gateway/tee/supabase_source_v2.py",
+        source_kind="candidate_checkout",
+        source_sha256=module_hash,
+        candidate_sha=_candidate_sha(),
+        row_count=row_count,
+        page_count=len(ranges),
+        ranges=ranges,
+    )
+
+
 def _install_boundaries(stage: str, scenario: str) -> None:
     from gateway.research_lab import api, maintenance
     from gateway.tee import verify_weight_submission_ready_v2 as readiness
@@ -444,6 +565,7 @@ def main() -> int:
         scenario=scenario,
         argv=passthrough,
     )
+    _run_supabase_history_pagination_probe()
     _install_boundaries(stage, scenario)
     original_argv = sys.argv
     sys.argv = [str(module_path), *passthrough]

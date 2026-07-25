@@ -542,8 +542,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync_repo_head = sub.add_parser(
         "sync-active-model-to-repo-head",
-        help="Sync active private model lineage to the signed current.json for private repo main; "
-        "dry-run reports repo/head/current active SHA state",
+        help=(
+            "Sync active private model lineage to the signed current.json for "
+            "the configured source branch; dry-run reports repo/head/current "
+            "active SHA state"
+        ),
     )
     sync_repo_head.add_argument("--actor-ref", default=default_actor_ref())
     sync_repo_head.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
@@ -551,7 +554,10 @@ def build_parser() -> argparse.ArgumentParser:
     sync_repo_head.add_argument(
         "--wait-for-current-json",
         action="store_true",
-        help="Poll current.json until it matches repo main before writing",
+        help=(
+            "Poll current.json until it matches the configured source branch "
+            "before writing"
+        ),
     )
     sync_repo_head.add_argument("--timeout-seconds", type=int, default=None)
     sync_repo_head.add_argument("--poll-seconds", type=int, default=None)

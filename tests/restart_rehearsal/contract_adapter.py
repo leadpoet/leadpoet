@@ -994,12 +994,26 @@ def _module_gateway_restart_preflight(argv: list[str]) -> int:
     config_value = _arg_value(argv, "--config-dir")
     config_dir = Path(config_value)
     deploy_commit = _arg_value(argv, "--deploy-commit")
-    plan_file = Path(os.environ.get("GATEWAY_DEPLOY_PLAN_FILE", ""))
+    configured_plan = os.environ.get("GATEWAY_DEPLOY_PLAN_FILE", "").strip()
+    plan_candidates = (
+        [Path(configured_plan)]
+        if configured_plan
+        else sorted(Path("/tmp").glob("gateway_git_deploy.*.json"))
+    )
+    matching_plans = []
+    for candidate in plan_candidates:
+        try:
+            document = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if document.get("target_sha") == deploy_commit:
+            matching_plans.append(candidate)
+    plan_file = matching_plans[0] if len(matching_plans) == 1 else Path("")
     script = Path.cwd() / "scripts/gateway_git_deploy.py"
     if (
         not config_value
         or deploy_commit != _candidate_sha()
-        or not plan_file.is_file()
+        or len(matching_plans) != 1
         or not script.is_file()
     ):
         return _fail(

@@ -162,7 +162,14 @@ async def compute_fulfillment_consensus(request_id: str) -> List[dict]:
         weighted_scores = []
         for vs in validator_scores:
             hotkey = vs["validator_hotkey"]
-            meta = metagraph_data.get(hotkey, {"v_trust": 1.0, "stake": 1.0})
+            # Fail closed for a validator absent from a successful metagraph
+            # fetch: giving an unknown validator full 1.0*1.0 weight let a
+            # low-/zero-trust validator carry equal weight in the stake-weighted
+            # gate. A truly-registered validator is in the snapshot; an absent
+            # one gets ~its real (low) weight of 0 and is caught by the
+            # zero-weight fallback below. (The whole-fetch-failure path populates
+            # all hotkeys at 1.0, so this default only hits genuine absences.)
+            meta = metagraph_data.get(hotkey, {"v_trust": 0.0, "stake": 0.0})
             v_trust = float(meta.get("v_trust", 0.0))
             stake = float(meta.get("stake", 0.0))
             weight = v_trust * stake

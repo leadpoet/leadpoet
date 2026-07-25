@@ -19,7 +19,9 @@ import time
 from typing import Any, Mapping, Optional, Sequence
 from uuid import uuid4
 
+import gzip
 from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi.responses import Response
 
 from gateway.qualification.api.payment import get_payment_info, verify_payment
 from gateway.qualification.utils.chain import (
@@ -168,6 +170,7 @@ from .source_add_workflow import (
 from research_lab.improvement_engine.fix_generator import sanitized_miner_opportunity
 from research_lab.improvement_engine.scanner import scan_for_issues
 from leadpoet_canonical.constants import EPOCH_LENGTH
+from gateway.research_lab import allocation_handoff_disk_cache
 
 
 logger = logging.getLogger(__name__)
@@ -3199,10 +3202,43 @@ def _allocation_build_task(
     return task
 
 
+async def _allocation_handoff_response(
+    handoff: dict[str, Any],
+    accept_encoding: Optional[str],
+):
+    """Serve the handoff gzip-compressed when the caller asks for it.
+
+    The handoff is multi-MB, hash-dense JSON that compresses several-fold, and
+    it is fetched inside the validator's bounded pre-submission budget — the
+    dominant cost of a cold-epoch fetch should be the build, not the transfer.
+    Callers that do not advertise gzip get the identity JSON exactly as
+    before. Serialization + compression run in a worker thread so the response
+    path never stalls the shared event loop.
+    """
+
+    if "gzip" not in str(accept_encoding or "").lower():
+        return handoff
+
+    def _encode() -> bytes:
+        raw = json.dumps(handoff, separators=(",", ":")).encode("utf-8")
+        return gzip.compress(raw, compresslevel=6)
+
+    wire = await asyncio.to_thread(_encode)
+    return Response(
+        content=wire,
+        media_type="application/json",
+        headers={
+            "Content-Encoding": "gzip",
+            "Vary": "Accept-Encoding",
+        },
+    )
+
+
 @router.get("/allocations/attested/{epoch}")
 async def get_research_lab_attested_allocation(
     epoch: int,
     x_leadpoet_internal_key: Optional[str] = Header(default=None),
+    accept_encoding: Optional[str] = Header(default=None),
 ):
     """Return the unchanged live allocation plus its enclave-signed sidecar."""
 
@@ -3220,18 +3256,43 @@ async def get_research_lab_attested_allocation(
         persist_snapshot,
     )
     if cached_handoff is not None:
-        return cached_handoff
+        return await _allocation_handoff_response(cached_handoff, accept_encoding)
+    # Warm-start after a process restart: the memory cache is wiped by every
+    # gateway restart, and a restart between the block-180 prewarm and the
+    # block-300 submission used to force a full cold rebuild (receipt-ancestry
+    # reconstruction + fresh enclave attestation) inside the validator's 90s
+    # fetch budget. The handoff is deterministic per epoch, the validator
+    # re-validates it fail-closed, and any disk-cache failure falls open to
+    # the normal build below.
+    if _ALLOCATION_BUILD_TASKS.get(
+        _allocation_cache_key(int(epoch), persist_snapshot)
+    ) is None:
+        disk_handoff = await asyncio.to_thread(
+            allocation_handoff_disk_cache.load_handoff,
+            int(epoch),
+            persist_snapshot,
+        )
+        if disk_handoff is not None:
+            _allocation_handoff_cache_put(
+                int(epoch),
+                persist_snapshot,
+                disk_handoff,
+            )
+            return await _allocation_handoff_response(
+                disk_handoff, accept_encoding
+            )
     # Shield the complete build-and-cache task from client disconnects. The
     # previous lock only serialized live requests: when a validator timed out,
     # request cancellation released the lock before the finished authority
     # could be assembled and cached, so the next retry started over.
-    return await asyncio.shield(
+    built_handoff = await asyncio.shield(
         _allocation_build_task(
             config=config,
             epoch=int(epoch),
             persist_snapshot=persist_snapshot,
         )
     )
+    return await _allocation_handoff_response(built_handoff, accept_encoding)
 
 
 async def _build_and_cache_attested_allocation(
@@ -3330,6 +3391,15 @@ async def _build_and_cache_attested_allocation(
         int(epoch),
         persist_snapshot,
         handoff,
+    )
+    # Best-effort restart-surviving copy so a gateway restart mid-window can
+    # warm-start instead of rebuilding cold (fail-open on any disk error).
+    await asyncio.to_thread(
+        allocation_handoff_disk_cache.store_handoff,
+        int(epoch),
+        persist_snapshot,
+        handoff,
+        ttl_seconds=_ALLOCATION_CACHE_TTL_SECONDS,
     )
     return handoff
 

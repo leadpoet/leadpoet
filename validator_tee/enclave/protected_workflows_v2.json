@@ -47,14 +47,24 @@
       "symbol": "build_weight_extrinsic_authorization_v2"
     },
     {
+      "ast_sha256": "sha256:db570f46bfffec5408436ca84e724dad379c29e598b277785e567fd651ccf140",
+      "path": "leadpoet_canonical/hotkey_authority_v2.py",
+      "symbol": "build_weight_transport_authorization_v2"
+    },
+    {
       "ast_sha256": "sha256:584062dea15800f1517d87cdec2143fe3b2d8684a599de72dfdf22a78b581035",
       "path": "leadpoet_canonical/hotkey_authority_v2.py",
       "symbol": "chain_signing_profiles"
     },
     {
-      "ast_sha256": "sha256:9966553e4180653a17bda402811344646939acc8edd5fa79bec5b96f1f43e036",
+      "ast_sha256": "sha256:9006d8f7bb71d28c1e8ba58634710c15bd72a1741c1fe53174d7b74a8ff750f6",
       "path": "leadpoet_canonical/hotkey_authority_v2.py",
       "symbol": "classify_application_message_v2"
+    },
+    {
+      "ast_sha256": "sha256:fbf976fa4e3fc32f22a12cc0864c935a331b3b2c4625d9e0678fef5778312231",
+      "path": "leadpoet_canonical/hotkey_authority_v2.py",
+      "symbol": "parse_weight_transport_authorization_message_v2"
     },
     {
       "ast_sha256": "sha256:1c1ca65780a612fe13fa279c60371fdaa1d458a24bb2f9471e05b1964786cefb",
@@ -85,6 +95,16 @@
       "ast_sha256": "sha256:5bfc2f69cc0308e9427d6e141bf466738dc1b0b9b6e84d813be80c3278e4cb0b",
       "path": "leadpoet_canonical/hotkey_authority_v2.py",
       "symbol": "validate_weight_extrinsic_authorization_v2"
+    },
+    {
+      "ast_sha256": "sha256:8a525238de87dc028703ee21d79c7a7f4e563bc15b66a405fe6b8b48040e1960",
+      "path": "leadpoet_canonical/hotkey_authority_v2.py",
+      "symbol": "validate_weight_transport_authorization_v2"
+    },
+    {
+      "ast_sha256": "sha256:54a9b0d4b0ed8c4c9456dfc427b67cbf79130b583f38645228ae1d3f71b5ab85",
+      "path": "leadpoet_canonical/hotkey_authority_v2.py",
+      "symbol": "weight_transport_authorization_message_v2"
     },
     {
       "ast_sha256": "sha256:ca4917c451f42deb8c1a394125aa3bac38ff1d7bd605603be3eace8b0c5f11c6",
@@ -302,7 +322,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:b56f384724729569c997846483731849c071439e7e3c17925429c251f1515094",
-  "protected_source_commit": "632b2f2e3cd379b52132837f2b164b89f3135db7",
+  "manifest_hash": "sha256:93557a72d21b5ceedd122b10a2e57b374f2cb6e5ae2eeca7982a45ae372e2069",
+  "protected_source_commit": "e6b7ba749bda41f8fb4efeeba826e5121d368ccd",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

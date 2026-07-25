@@ -596,13 +596,19 @@ def canonicalize_generated_icp(
     intent_category = str(normalized.get("intent_category") or "").strip().upper()
     if not intent_category:
         intent_category = intent_category_for_signal(intent_signal)
+    _category_cap = intent_max_age_days_for_category(intent_category)
     intent_max_age_days = normalized.get("intent_max_age_days")
     try:
         intent_max_age_days = int(intent_max_age_days)
     except (TypeError, ValueError):
-        intent_max_age_days = intent_max_age_days_for_category(intent_category)
+        intent_max_age_days = _category_cap
     if intent_max_age_days <= 0:
-        intent_max_age_days = intent_max_age_days_for_category(intent_category)
+        intent_max_age_days = _category_cap
+    # Clamp the LLM value to the per-category recency cap. The generation prompt
+    # hardcodes 365 for every ICP, which would let e.g. an 11-month-old HIRING
+    # signal pass the 90-day HIRING window and judge the same nominal ICP more
+    # leniently than the template path derives -- benchmark non-determinism.
+    intent_max_age_days = min(intent_max_age_days, _category_cap)
 
     bonus_intents = []
     for signal in intent_signals[1:5]:

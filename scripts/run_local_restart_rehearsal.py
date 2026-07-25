@@ -305,7 +305,10 @@ def _isolated_source_snapshot(
                 "--no-dangling",
             ]
         )
-        yield source
+        # Docker Desktop on macOS rejects the /var/folders symlink spelling
+        # even though the same directory is mounted under /private/var/folders.
+        # Always hand the daemon the canonical host path.
+        yield source.resolve(strict=True)
 
 
 def _image_exists(tag: str) -> bool:

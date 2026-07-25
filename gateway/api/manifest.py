@@ -10,6 +10,7 @@ The manifest is a Merkle root of all evidence_ids the validator submitted.
 from fastapi import APIRouter, HTTPException, Body
 from pydantic import BaseModel, Field
 from datetime import datetime
+import asyncio
 import hashlib
 import json
 from uuid import uuid4
@@ -114,15 +115,29 @@ async def submit_epoch_manifest(
     # Step 3: Query validator's evidence from Private DB
     # ========================================
     try:
-        result = supabase.table("validation_evidence_private") \
-            .select("evidence_id") \
-            .eq("validator_hotkey", payload.validator_hotkey) \
-            .eq("epoch_id", payload.epoch_id) \
-            .order("evidence_id") \
-            .execute()
-        
-        evidence_ids = [row["evidence_id"] for row in result.data]
-    
+        # Paginate: PostgREST caps at 1000 rows. A validator with >1000 evidence
+        # rows in an epoch would otherwise get a truncated set, so the Step-4
+        # count check and the Step-5 Merkle root would both mismatch and the
+        # honest manifest would be rejected (400). Also offloaded to a thread so
+        # the sync client doesn't block the gateway event loop.
+        evidence_ids = []
+        _offset = 0
+        while True:
+            page = await asyncio.to_thread(
+                lambda o=_offset: supabase.table("validation_evidence_private")
+                .select("evidence_id")
+                .eq("validator_hotkey", payload.validator_hotkey)
+                .eq("epoch_id", payload.epoch_id)
+                .order("evidence_id")
+                .range(o, o + 999)
+                .execute()
+            )
+            rows = page.data or []
+            evidence_ids.extend(row["evidence_id"] for row in rows)
+            if len(rows) < 1000:
+                break
+            _offset += 1000
+
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -179,8 +194,10 @@ async def submit_epoch_manifest(
             "payload": payload.model_dump()
         }
         
-        supabase.table("transparency_log").insert(log_entry).execute()
-        
+        await asyncio.to_thread(
+            lambda: supabase.table("transparency_log").insert(log_entry).execute()
+        )
+
         print(f"✅ EPOCH_MANIFEST logged")
         print(f"   Epoch: {payload.epoch_id}")
         print(f"   Validator: {payload.validator_hotkey[:20]}...")
@@ -224,20 +241,24 @@ async def get_manifest_stats(epoch_id: int):
     """
     try:
         # Query all manifests for this epoch from transparency_log
-        manifest_result = supabase.table("transparency_log") \
-            .select("actor_hotkey") \
-            .eq("event_type", "EPOCH_MANIFEST") \
-            .filter("payload->>epoch_id", "eq", str(epoch_id)) \
+        manifest_result = await asyncio.to_thread(
+            lambda: supabase.table("transparency_log")
+            .select("actor_hotkey")
+            .eq("event_type", "EPOCH_MANIFEST")
+            .filter("payload->>epoch_id", "eq", str(epoch_id))
             .execute()
+        )
         
         submitted_validators = list(set([row["actor_hotkey"] for row in manifest_result.data]))
         manifests_submitted = len(submitted_validators)
         
         # Query all validators who submitted evidence for this epoch
-        evidence_result = supabase.table("validation_evidence_private") \
-            .select("validator_hotkey", count="exact") \
-            .eq("epoch_id", epoch_id) \
+        evidence_result = await asyncio.to_thread(
+            lambda: supabase.table("validation_evidence_private")
+            .select("validator_hotkey", count="exact")
+            .eq("epoch_id", epoch_id)
             .execute()
+        )
         
         all_validators = list(set([row["validator_hotkey"] for row in evidence_result.data]))
         total_validators = len(all_validators)
@@ -290,13 +311,15 @@ async def get_validator_manifests(
         }
     """
     try:
-        result = supabase.table("transparency_log") \
-            .select("payload, ts") \
-            .eq("event_type", "EPOCH_MANIFEST") \
-            .eq("actor_hotkey", validator_hotkey) \
-            .order("ts", desc=True) \
-            .limit(limit) \
+        result = await asyncio.to_thread(
+            lambda: supabase.table("transparency_log")
+            .select("payload, ts")
+            .eq("event_type", "EPOCH_MANIFEST")
+            .eq("actor_hotkey", validator_hotkey)
+            .order("ts", desc=True)
+            .limit(limit)
             .execute()
+        )
         
         manifests = []
         for row in result.data:

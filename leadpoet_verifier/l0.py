@@ -258,7 +258,13 @@ def _extract_hostname(url: str) -> str:
     if not clean.lower().startswith(("http://", "https://")):
         clean = "https://" + clean
     hostname = urlparse(clean).hostname or ""
-    return hostname.lower().lstrip("www.")
+    host = hostname.lower()
+    # Strip the "www." PREFIX only. lstrip("www.") strips a *character set*
+    # ({w,.}), so it mangled hosts like "wework.com" -> "ework.com" and
+    # "wikipedia.org" -> "ikipedia.org".
+    if host.startswith("www."):
+        host = host[4:]
+    return host
 
 
 def _normalize_text(text: str) -> str:

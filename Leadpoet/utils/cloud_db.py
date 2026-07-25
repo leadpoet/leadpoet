@@ -66,9 +66,9 @@ class CustomSupabaseClient:
         }
         
         try:
-            response = requests.post(url, json=params or {}, headers=headers)
+            response = requests.post(url, json=params or {}, headers=headers, timeout=30)
             response.raise_for_status()
-            
+
             return RPCResponse(response.json() if response.text else [])
         except requests.exceptions.HTTPError as e:
             bt.logging.error(f"RPC call failed: {e}")

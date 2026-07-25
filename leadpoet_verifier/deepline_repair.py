@@ -4,7 +4,7 @@ import asyncio
 import os
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -22,8 +22,8 @@ class DeeplineEvidenceRepairUnavailable(RuntimeError):
         self,
         code: str,
         *,
-        status_code: Optional[int] = None,
-        endpoint: Optional[str] = None,
+        status_code: int | None = None,
+        endpoint: str | None = None,
         retryable: bool = False,
     ) -> None:
         super().__init__(code)
@@ -42,12 +42,12 @@ class DeeplineEvidenceRepairUnavailable(RuntimeError):
 
 
 Transport = Callable[
-    [str, str, Optional[dict[str, Any]]],
+    [str, str, dict[str, Any] | None],
     Awaitable[dict[str, Any]],
 ]
 
 
-def _first_text(value: Any, keys: tuple[str, ...]) -> Optional[str]:
+def _first_text(value: Any, keys: tuple[str, ...]) -> str | None:
     if not isinstance(value, dict):
         return None
     for key in keys:
@@ -57,7 +57,7 @@ def _first_text(value: Any, keys: tuple[str, ...]) -> Optional[str]:
     return None
 
 
-def _run_id(value: dict[str, Any]) -> Optional[str]:
+def _run_id(value: dict[str, Any]) -> str | None:
     return _first_text(value, ("workflowId", "workflow_id", "runId", "run_id", "id"))
 
 
@@ -94,7 +94,7 @@ class DeeplineEvidenceRepairClient:
         host_url: str = "https://code.deepline.com",
         timeout_seconds: float = 90,
         poll_seconds: float = 2,
-        transport: Optional[Transport] = None,
+        transport: Transport | None = None,
     ) -> None:
         self._api_key = api_key.strip()
         self._host_url = host_url.rstrip("/")
@@ -103,7 +103,7 @@ class DeeplineEvidenceRepairClient:
         self._transport = transport or self._request
 
     @classmethod
-    def from_env(cls) -> Optional["DeeplineEvidenceRepairClient"]:
+    def from_env(cls) -> "DeeplineEvidenceRepairClient | None":
         enabled = os.getenv(
             "VERIFIER_DEEPLINE_EVIDENCE_REPAIR_ENABLED", "false"
         ).strip().casefold() in {"1", "true", "yes", "on"}
@@ -129,7 +129,7 @@ class DeeplineEvidenceRepairClient:
         self,
         method: str,
         url: str,
-        body: Optional[dict[str, Any]],
+        body: dict[str, Any] | None,
     ) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -154,7 +154,7 @@ class DeeplineEvidenceRepairClient:
         self,
         method: str,
         url: str,
-        body: Optional[dict[str, Any]],
+        body: dict[str, Any] | None,
         *,
         endpoint: str,
     ) -> dict[str, Any]:
@@ -205,7 +205,7 @@ class DeeplineEvidenceRepairClient:
         company_domain: str,
         requested_criterion: str,
         evidence_kind: str,
-        existing_url: Optional[str],
+        existing_url: str | None,
     ) -> list[dict[str, Any]]:
         if evidence_kind not in {"industry", "required_attribute", "intent"}:
             raise ValueError("unsupported evidence repair kind")

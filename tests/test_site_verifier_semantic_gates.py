@@ -14,7 +14,7 @@ from leadpoet_verifier.semantic_gates import (
     is_safe_public_url,
     semantic_gate_mode,
 )
-from leadpoet_verifier.deepline_repair import DeeplineEvidenceRepairUnavailable
+from leadpoet_verifier.exa_repair import ExaEvidenceRepairUnavailable
 
 
 def page(text: str) -> str:
@@ -142,10 +142,10 @@ class SemanticGateTests(unittest.IsolatedAsyncioTestCase):
             relationship="insufficient_evidence",
             evidence_ids=[],
         )
-        repairer = AsyncMock(side_effect=DeeplineEvidenceRepairUnavailable(
-            "deepline_http_400",
+        repairer = AsyncMock(side_effect=ExaEvidenceRepairUnavailable(
+            "exa_http_400",
             status_code=400,
-            endpoint="plays_run_start",
+            endpoint="exa_search",
             retryable=False,
         ))
         evaluator = SemanticGateEvaluator(
@@ -180,9 +180,9 @@ class SemanticGateTests(unittest.IsolatedAsyncioTestCase):
         )
         repaired = "https://acme.example/products/precision-pumps"
         repairer = AsyncMock(side_effect=[
-            DeeplineEvidenceRepairUnavailable(
-                "deepline_transport_error",
-                endpoint="plays_run_start",
+            ExaEvidenceRepairUnavailable(
+                "exa_transport_error",
+                endpoint="exa_search",
                 retryable=True,
             ),
             [{"url": repaired}],
@@ -742,6 +742,9 @@ class SemanticGateTests(unittest.IsolatedAsyncioTestCase):
             "url": "https://acme.example/projects/battery-storage",
             "excerpt": page("A hallucinated provider excerpt is not trusted."),
             "provider_claimed_match": True,
+            "provider": "exa",
+            "provider_request_id": "req_123",
+            "provider_cost_usd": 0.0123,
         }])
         evaluator = SemanticGateEvaluator(
             api_key="test",
@@ -761,9 +764,15 @@ class SemanticGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.outcome, "passed")
         self.assertEqual(
             result.sources[0]["fetch_stage"],
-            "deepline_repair:independent_fetch",
+            "exa_repair:independent_fetch",
         )
         self.assertEqual(fetcher.await_count, 2)
+        self.assertEqual(result.repair_attempts[0]["stage"], "exa_repair_search")
+        self.assertEqual(
+            result.repair_attempts[0]["provider_request_id"],
+            "req_123",
+        )
+        self.assertEqual(result.repair_attempts[0]["provider_cost_usd"], 0.0123)
         repairer.assert_awaited_once()
         self.assertEqual(
             repairer.await_args.kwargs["requested_criterion"],

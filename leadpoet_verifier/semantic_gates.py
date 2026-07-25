@@ -9,7 +9,7 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -86,12 +86,7 @@ _SHORT_HOST_SUFFIXES = {
 class SemanticGateUnavailable(RuntimeError):
     """The semantic provider path could not reach a trustworthy decision."""
 
-    def __init__(
-        self,
-        code: str,
-        *,
-        receipt: Optional[dict[str, Any]] = None,
-    ) -> None:
+    def __init__(self, code: str, *, receipt: dict[str, Any] | None = None) -> None:
         super().__init__(code)
         self.code = code
         self.receipt = receipt or {}
@@ -190,15 +185,16 @@ class SemanticGateResult(BaseModel):
 
     outcome: GateOutcome
     reason_code: str = Field(min_length=1, max_length=120)
-    judgment: Optional[SemanticJudgment] = None
-    model: Optional[str] = Field(default=None, max_length=160)
+    judgment: SemanticJudgment | None = None
+    model: str | None = Field(default=None, max_length=160)
     input_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     duration_ms: int = Field(ge=0)
     policy_version: str = POLICY_VERSION
     sources: list[dict[str, Any]] = Field(default_factory=list, max_length=3)
-    prompt_tokens: Optional[int] = Field(default=None, ge=0)
-    completion_tokens: Optional[int] = Field(default=None, ge=0)
-    submitted_quote_found: Optional[bool] = None
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+    submitted_quote_found: bool | None = None
+    repair_attempts: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
 
     def receipt(self) -> dict[str, Any]:
         payload = self.model_dump(mode="json", exclude_none=True)
@@ -214,14 +210,46 @@ class SemanticGateResult(BaseModel):
 Fetcher = Callable[[str], Awaitable[RawFetchResult]]
 Judge = Callable[
     [GateKind, dict[str, Any], list[EvidenceSource]],
-    Awaitable[
-        tuple[SemanticJudgment, str, Optional[int], Optional[int]]
-    ],
+    Awaitable[tuple[SemanticJudgment, str, int | None, int | None]],
 ]
 Repairer = Callable[..., Awaitable[list[dict[str, Any]]]]
 
 
-def semantic_gate_mode(value: Optional[str] = None) -> SemanticGateMode:
+def _repair_receipts(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Persist only bounded operational metadata from the repair path."""
+
+    allowed = {
+        "url",
+        "stage",
+        "reason_code",
+        "status_code",
+        "endpoint",
+        "retryable",
+        "provider",
+        "provider_request_id",
+        "provider_cost_usd",
+        "result_count",
+    }
+    receipts: list[dict[str, Any]] = []
+    for attempt in attempts:
+        if not str(attempt.get("stage") or "").startswith(("repair_", "exa_")):
+            continue
+        receipt: dict[str, Any] = {}
+        for key in allowed:
+            value = attempt.get(key)
+            if isinstance(value, str):
+                receipt[key] = value[:2_000] if key == "url" else value[:200]
+            elif isinstance(value, bool) or value is None:
+                receipt[key] = value
+            elif isinstance(value, (int, float)):
+                receipt[key] = value
+        receipts.append(receipt)
+        if len(receipts) >= 8:
+            break
+    return receipts
+
+
+def semantic_gate_mode(value: str | None = None) -> SemanticGateMode:
     raw = (value if value is not None else os.getenv("VERIFIER_SEMANTIC_GATES_MODE", "disabled"))
     normalized = raw.strip().lower()
     if normalized not in {"disabled", "shadow", "enforce"}:
@@ -231,7 +259,7 @@ def semantic_gate_mode(value: Optional[str] = None) -> SemanticGateMode:
     return normalized  # type: ignore[return-value]
 
 
-def _hostname(value: Optional[str]) -> str:
+def _hostname(value: str | None) -> str:
     raw = str(value or "").strip()
     if raw and "://" not in raw:
         raw = f"https://{raw}"
@@ -348,9 +376,7 @@ def _safe_text(value: Any, limit: int) -> str:
     return sanitize_miner_text(str(value or ""))[:limit]
 
 
-def _judgment_unavailable_reason(
-    judgment: SemanticJudgment,
-) -> Optional[str]:
+def _judgment_unavailable_reason(judgment: SemanticJudgment) -> str | None:
     if judgment.decision == "uncertain":
         return "semantic_uncertain"
     if judgment.decision == "match" and judgment.confidence < MIN_ACCEPT_CONFIDENCE:
@@ -434,9 +460,9 @@ class SemanticGateEvaluator:
         *,
         api_key: str,
         models: tuple[str, ...] = DEFAULT_MODELS,
-        fetcher: Optional[Fetcher] = None,
-        judge: Optional[Judge] = None,
-        repairer: Optional[Repairer] = None,
+        fetcher: Fetcher | None = None,
+        judge: Judge | None = None,
+        repairer: Repairer | None = None,
         timeout_seconds: float = 45,
     ) -> None:
         self._api_key = api_key.strip()
@@ -457,9 +483,9 @@ class SemanticGateEvaluator:
         ) or DEFAULT_MODELS
         repairer = None
         if enable_repair:
-            from .deepline_repair import DeeplineEvidenceRepairClient
+            from .exa_repair import ExaEvidenceRepairClient
 
-            repair_client = DeeplineEvidenceRepairClient.from_env()
+            repair_client = ExaEvidenceRepairClient.from_env()
             if repair_client is not None:
                 repairer = repair_client.repair
         return cls(
@@ -508,7 +534,7 @@ class SemanticGateEvaluator:
         company_domain: str,
         requested_criterion: str,
         kind: GateKind,
-        existing_url: Optional[str],
+        existing_url: str | None,
     ) -> str:
         payload = json.dumps({
             "company_name": _safe_text(company_name, 200).casefold(),
@@ -526,7 +552,7 @@ class SemanticGateEvaluator:
         company_domain: str,
         requested_criterion: str,
         kind: GateKind,
-        existing_url: Optional[str],
+        existing_url: str | None,
         sources: list[EvidenceSource],
         attempts: list[dict[str, Any]],
         seen: set[str],
@@ -536,7 +562,7 @@ class SemanticGateEvaluator:
         Repair output is never trusted directly: every returned URL traverses
         the same URL, fetch, injection, entity, and content checks as the
         original evidence. A bounded failure fingerprint prevents candidate
-        retries from calling the same broken Deepline path repeatedly.
+        retries from repeating the same direct Exa search.
         """
 
         if self._repairer is None or len(sources) >= 3:
@@ -552,7 +578,7 @@ class SemanticGateEvaluator:
         if cached_failure is not None:
             attempts.append({
                 "url": None,
-                "stage": "deepline_repair_suppressed",
+                "stage": "exa_repair_suppressed",
                 **cached_failure,
             })
             return
@@ -567,15 +593,18 @@ class SemanticGateEvaluator:
         except Exception as exc:
             failure = {
                 "reason_code": str(
-                    getattr(exc, "code", "deepline_repair_failed")
+                    getattr(exc, "code", "exa_repair_failed")
                 )[:120],
                 "status_code": getattr(exc, "status_code", None),
                 "endpoint": str(getattr(exc, "endpoint", "") or "")[:80] or None,
                 "retryable": bool(getattr(exc, "retryable", False)),
+                "provider_request_id": (
+                    str(getattr(exc, "request_id", "") or "")[:200] or None
+                ),
             }
-            # The transport already received its bounded in-attempt retry.
-            # Cache deterministic failures across candidate retries, but let a
-            # later queue attempt recover from a transient provider outage.
+            # Do not retry a charged POST inside this candidate attempt. Cache
+            # deterministic failures across queue retries, but let a later
+            # attempt recover from a transient provider outage.
             if not failure["retryable"]:
                 self._repair_failure_cache[cache_key] = failure
             LOGGER.warning(
@@ -589,11 +618,33 @@ class SemanticGateEvaluator:
             )
             attempts.append({
                 "url": None,
-                "stage": "deepline_repair_failed",
+                "stage": "exa_repair_failed",
                 **failure,
             })
             return
 
+        if repaired:
+            first = repaired[0] if isinstance(repaired[0], dict) else {}
+            attempts.append({
+                "url": None,
+                "stage": "exa_repair_search",
+                "provider": str(first.get("provider") or "exa")[:40],
+                "provider_request_id": (
+                    str(first.get("provider_request_id") or "")[:200] or None
+                ),
+                "provider_cost_usd": (
+                    first.get("provider_cost_usd")
+                    if isinstance(first.get("provider_cost_usd"), (int, float))
+                    and not isinstance(first.get("provider_cost_usd"), bool)
+                    else None
+                ),
+                "result_count": (
+                    max(0, min(int(first.get("result_count")), 6))
+                    if isinstance(first.get("result_count"), int)
+                    and not isinstance(first.get("result_count"), bool)
+                    else min(len(repaired), 6)
+                ),
+            })
         source_count_before = len(sources)
         for item in repaired[:6]:
             url = str(item.get("url") or "").strip() if isinstance(item, dict) else ""
@@ -641,15 +692,19 @@ class SemanticGateEvaluator:
                 entity_match=True,
                 content=content,
                 content_sha256=hashlib.sha256(content.encode()).hexdigest(),
-                fetch_stage=f"deepline_repair:{fetched.stage}",
+                fetch_stage=f"exa_repair:{fetched.stage}",
             ))
-            attempts.append({"url": url, "stage": f"deepline_repair:{fetched.stage}"})
+            attempts.append({
+                "url": url,
+                "stage": f"exa_repair:{fetched.stage}",
+                "provider": "exa",
+            })
             if len(sources) >= 3:
                 break
 
         if len(sources) == source_count_before:
             failure = {
-                "reason_code": "deepline_repair_no_usable_sources",
+                "reason_code": "exa_repair_no_usable_sources",
                 "status_code": None,
                 "endpoint": None,
                 "retryable": False,
@@ -859,10 +914,7 @@ class SemanticGateEvaluator:
                         "duration_ms": round((time.monotonic() - started) * 1_000),
                         "policy_version": POLICY_VERSION,
                         "sources": [source.receipt_payload(False) for source in sources],
-                        "repair_attempts": [
-                            item for item in attempts
-                            if str(item.get("stage") or "").startswith(("repair_", "deepline_"))
-                        ],
+                        "repair_attempts": _repair_receipts(attempts),
                         **(
                             {"submitted_quote_found": submitted_quote_found}
                             if kind == "required_attribute"
@@ -886,6 +938,7 @@ class SemanticGateEvaluator:
                         "policy_version": POLICY_VERSION,
                         "model": model_value,
                         "sources": [source.receipt_payload(False) for source in sources],
+                        "repair_attempts": _repair_receipts(attempts),
                     },
                 )
             return cited
@@ -937,10 +990,7 @@ class SemanticGateEvaluator:
                         source.receipt_payload(source.source_id in cited_ids)
                         for source in sources
                     ],
-                    "repair_attempts": [
-                        item for item in attempts
-                        if str(item.get("stage") or "").startswith(("repair_", "deepline_"))
-                    ],
+                    "repair_attempts": _repair_receipts(attempts),
                     **(
                         {"submitted_quote_found": submitted_quote_found}
                         if kind == "required_attribute"
@@ -979,6 +1029,7 @@ class SemanticGateEvaluator:
             submitted_quote_found=(
                 submitted_quote_found if kind == "required_attribute" else None
             ),
+            repair_attempts=_repair_receipts(attempts),
         )
         LOGGER.info(
             "semantic gate finished",
@@ -1004,12 +1055,7 @@ class SemanticGateEvaluator:
         kind: GateKind,
         context: dict[str, Any],
         sources: list[EvidenceSource],
-    ) -> tuple[
-        SemanticJudgment,
-        str,
-        Optional[int],
-        Optional[int],
-    ]:
+    ) -> tuple[SemanticJudgment, str, int | None, int | None]:
         if not self._api_key:
             raise SemanticGateUnavailable("missing_openrouter_api_key")
         if not self._models:
@@ -1029,14 +1075,9 @@ class SemanticGateEvaluator:
             },
         ]
         last_code = "provider_unavailable"
-        last_inconclusive: Optional[
-            tuple[
-                SemanticJudgment,
-                str,
-                Optional[int],
-                Optional[int],
-            ]
-        ] = None
+        last_inconclusive: tuple[
+            SemanticJudgment, str, int | None, int | None
+        ] | None = None
         async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
             for model in self._models:
                 body = {

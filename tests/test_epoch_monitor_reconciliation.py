@@ -47,6 +47,89 @@ def _snapshot(
 
 
 @pytest.mark.asyncio
+async def test_weight_publication_alarm_waits_until_block_330(monkeypatch, caplog):
+    from gateway.research_lab import attested_v2_store
+    from gateway.tasks import epoch_monitor
+
+    calls = []
+
+    async def load(**kwargs):
+        calls.append(kwargs)
+        return None
+
+    monkeypatch.setenv("PRIMARY_VALIDATOR_HOTKEYS", "primary-hotkey")
+    monkeypatch.setattr(attested_v2_store, "load_weight_authority_v2", load)
+    monitor = epoch_monitor.EpochMonitor()
+
+    await monitor._check_weight_publication_alarm(
+        _snapshot(block=429),
+        _cutover(),
+    )
+
+    assert calls == []
+    assert "weight_epoch_missing_publication" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_weight_publication_alarm_emits_each_stage_once(monkeypatch, caplog):
+    from gateway.research_lab import attested_v2_store
+    from gateway.tasks import epoch_monitor
+
+    publications = [
+        None,
+        None,
+        {"authority_stage": "published"},
+        {"authority_stage": "published"},
+    ]
+
+    async def load(**_kwargs):
+        return publications.pop(0)
+
+    monkeypatch.setenv("PRIMARY_VALIDATOR_HOTKEYS", "primary-hotkey")
+    monkeypatch.setattr(attested_v2_store, "load_weight_authority_v2", load)
+    caplog.set_level("CRITICAL", logger=epoch_monitor.__name__)
+    monitor = epoch_monitor.EpochMonitor()
+
+    await monitor._check_weight_publication_alarm(_snapshot(block=430), _cutover())
+    await monitor._check_weight_publication_alarm(_snapshot(block=431), _cutover())
+    await monitor._check_weight_publication_alarm(_snapshot(block=449), _cutover())
+    await monitor._check_weight_publication_alarm(_snapshot(block=450), _cutover())
+    await monitor._check_weight_publication_alarm(_snapshot(block=451), _cutover())
+
+    assert caplog.text.count("weight_epoch_missing_publication") == 1
+    assert caplog.text.count("weight_epoch_missing_finalization") == 1
+
+
+@pytest.mark.asyncio
+async def test_weight_publication_alarm_does_not_treat_read_error_as_absence(
+    monkeypatch,
+    caplog,
+):
+    from gateway.research_lab import attested_v2_store
+    from gateway.tasks import epoch_monitor
+
+    async def failed_read(**_kwargs):
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setenv("PRIMARY_VALIDATOR_HOTKEYS", "primary-hotkey")
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_weight_authority_v2",
+        failed_read,
+    )
+    caplog.set_level("WARNING", logger=epoch_monitor.__name__)
+    monitor = epoch_monitor.EpochMonitor()
+
+    await monitor._check_weight_publication_alarm(_snapshot(block=430), _cutover())
+    await monitor._check_weight_publication_alarm(_snapshot(block=431), _cutover())
+
+    assert caplog.text.count(
+        "weight_publication_alarm_authority_read_failed"
+    ) == 1
+    assert "weight_epoch_missing_publication" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_stateful_monitor_uses_finalized_scheduler_snapshot(monkeypatch):
     from gateway.tasks import epoch_monitor
     from gateway.utils import epoch as epoch_utils

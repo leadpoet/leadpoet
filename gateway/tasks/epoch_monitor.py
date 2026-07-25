@@ -78,6 +78,7 @@ class EpochMonitor:
         # missed-weight early warning; one alert per epoch per stage).
         self._weight_publication_alerted: set = set()
         self._weight_finalization_alerted: set = set()
+        self._weight_authority_read_alerted: set = set()
         self._weight_publication_seen: set = set()
         self._weight_finalization_done: set = set()
         self.initialized_epochs = set()  # Epochs that SUCCESSFULLY completed initialization
@@ -509,6 +510,7 @@ class EpochMonitor:
             )
 
             published = None
+            authority_read_failed = False
             for hotkey in primary_hotkeys:
                 try:
                     published = await load_weight_authority_v2(
@@ -517,10 +519,29 @@ class EpochMonitor:
                         validator_hotkey=hotkey,
                         require_finalization=False,
                     )
-                except Exception:
+                except Exception as exc:
+                    authority_read_failed = True
                     published = None
+                    alert_key = (settlement_epoch, hotkey)
+                    if alert_key not in self._weight_authority_read_alerted:
+                        self._weight_authority_read_alerted.add(alert_key)
+                        logging.getLogger(__name__).warning(
+                            "weight_publication_alarm_authority_read_failed "
+                            "netuid=%s epoch=%s validator_hotkey=%s "
+                            "error_type=%s error=%s",
+                            self.netuid,
+                            settlement_epoch,
+                            hotkey,
+                            type(exc).__name__,
+                            str(exc)[:200],
+                        )
                 if published is not None:
                     break
+            if published is None and authority_read_failed:
+                # A store/read failure is not evidence that the durable
+                # publication is absent. Retry on the next poll without
+                # raising a false missing-publication alarm.
+                return
             if published is not None:
                 self._weight_publication_seen.add(settlement_epoch)
                 if str(published.get("authority_stage") or "") == "finalized":

@@ -9,9 +9,12 @@ with higher stake/reputation have more influence on the final outcome.
 """
 
 import asyncio
+import logging
 from typing import Dict, List
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 from gateway.db.client import create_http1_sync_client
+
+logger = logging.getLogger(__name__)
 
 # Supabase client — HTTP/1-pinned (default HTTP/2 HPACK encoder is not thread-safe)
 supabase = create_http1_sync_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -167,9 +170,20 @@ async def compute_weighted_consensus(lead_id: str, epoch_id: int, evidence_data:
         weighted_rep_score += float(v["rep_score"]) * weight
         
         # Accumulate weighted approval (1 = approve, 0 = deny)
+        if v["decision"] != "approve" and v["decision"] != "deny":
+            # Any non-canonical decision is counted as a deny here (and skipped
+            # by the approve-only branches everywhere else), which silently
+            # subtracts that validator's weight from approval. Behavior is
+            # unchanged, but surface it so a validator emitting a malformed
+            # decision (casing/typo/build drift) is detectable instead of
+            # quietly skewing consensus and the weights it feeds.
+            logger.warning(
+                "validation_decision_unrecognized value=%r hotkey=%s lead=%s counted_as=deny",
+                v["decision"], str(v.get("validator_hotkey", "?"))[:12], lead_id,
+            )
         if v["decision"] == "approve":
             weighted_approval += weight
-        else:  # decision == "deny"
+        else:  # anything not "approve" is counted as a deny vote
             # Collect rejection reasons with weights for denied leads
             rejection_reason = v.get("rejection_reason")
             

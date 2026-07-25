@@ -50,6 +50,7 @@ __version__ = "1.0.0"
 # Import key constants for convenience (other modules should import from constants directly)
 from leadpoet_canonical.constants import (
     EPOCH_LENGTH,
+    ALLOCATION_PREPARATION_BLOCK,
     WEIGHT_SUBMISSION_BLOCK,
     MAX_BLOCK_DRIFT,
     VERSION_KEY,
@@ -64,6 +65,7 @@ __all__ = [
     "__version__",
     # Core constants
     "EPOCH_LENGTH",
+    "ALLOCATION_PREPARATION_BLOCK",
     "WEIGHT_SUBMISSION_BLOCK",
     "MAX_BLOCK_DRIFT",
     "VERSION_KEY",
@@ -72,4 +74,3 @@ __all__ = [
     "TRUST_LEVEL_FULL_NITRO",
     "TRUST_LEVEL_SIGNATURE_ONLY",
 ]
-

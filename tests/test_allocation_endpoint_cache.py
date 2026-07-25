@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.research_lab import api
+from leadpoet_canonical.constants import EPOCH_LENGTH
 
 
 def _config():
@@ -32,10 +33,10 @@ def _config():
 @pytest.fixture(autouse=True)
 def _clear_allocation_cache():
     api._ALLOCATION_HANDOFF_CACHE.clear()
-    api._ALLOCATION_BUILD_LOCKS.clear()
+    api._ALLOCATION_BUILD_TASKS.clear()
     yield
     api._ALLOCATION_HANDOFF_CACHE.clear()
-    api._ALLOCATION_BUILD_LOCKS.clear()
+    api._ALLOCATION_BUILD_TASKS.clear()
 
 
 def _install(monkeypatch, *, build, guard=None, handoff=None):
@@ -99,6 +100,27 @@ async def test_concurrent_requests_build_once(monkeypatch):
 
     assert all(r == {"handoff_for": 9} for r in results)
     assert counter["n"] == 1  # 12 concurrent pollers, exactly one build
+
+
+@pytest.mark.asyncio
+async def test_client_cancellation_does_not_cancel_build_or_cache(monkeypatch):
+    counter = {"n": 0}
+    _install(monkeypatch, build=_matched_build(counter, delay=0.1))
+
+    disconnected = asyncio.create_task(
+        api.get_research_lab_attested_allocation(10)
+    )
+    await asyncio.sleep(0.02)
+    disconnected.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await disconnected
+
+    # The server-owned task finishes independently and populates the cache.
+    await asyncio.sleep(0.12)
+    recovered = await api.get_research_lab_attested_allocation(10)
+
+    assert recovered == {"handoff_for": 10}
+    assert counter["n"] == 1
 
 
 @pytest.mark.asyncio
@@ -191,6 +213,10 @@ async def test_cache_entry_expires_after_ttl(monkeypatch):
     assert counter["n"] == 2  # rebuilt after expiry
 
 
+def test_default_cache_lifetime_spans_a_full_target_epoch():
+    assert api._ALLOCATION_CACHE_TTL_SECONDS >= EPOCH_LENGTH * 12
+
+
 @pytest.mark.asyncio
 async def test_cache_is_bounded_by_max_epochs(monkeypatch):
     counter = {"n": 0}
@@ -201,4 +227,4 @@ async def test_cache_is_bounded_by_max_epochs(monkeypatch):
         await api.get_research_lab_attested_allocation(epoch)
 
     assert len(api._ALLOCATION_HANDOFF_CACHE) <= 4
-    assert len(api._ALLOCATION_BUILD_LOCKS) <= 4  # evicted locks are dropped too
+    assert not api._ALLOCATION_BUILD_TASKS

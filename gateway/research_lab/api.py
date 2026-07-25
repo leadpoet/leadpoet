@@ -167,6 +167,7 @@ from .source_add_workflow import (
 )
 from research_lab.improvement_engine.fix_generator import sanitized_miner_opportunity
 from research_lab.improvement_engine.scanner import scan_for_issues
+from leadpoet_canonical.constants import EPOCH_LENGTH
 
 
 logger = logging.getLogger(__name__)
@@ -3074,8 +3075,14 @@ _AllocationCacheKey = tuple[int, bool]
 _ALLOCATION_HANDOFF_CACHE: "OrderedDict[_AllocationCacheKey, tuple[float, dict[str, Any]]]" = (
     OrderedDict()
 )
-_ALLOCATION_BUILD_LOCKS: dict[_AllocationCacheKey, asyncio.Lock] = {}
-_ALLOCATION_CACHE_TTL_SECONDS = 300.0
+_ALLOCATION_BUILD_TASKS: dict[
+    _AllocationCacheKey,
+    asyncio.Task[dict[str, Any]],
+] = {}
+# Finney targets roughly 12-second blocks. Retain a successful handoff for
+# longer than one 360-block epoch so a preparation completed before the weight
+# window survives until block 300, including normal finality/block-time drift.
+_ALLOCATION_CACHE_TTL_SECONDS = float(EPOCH_LENGTH * 15)
 _ALLOCATION_CACHE_MAX_EPOCHS = 16
 
 
@@ -3112,19 +3119,53 @@ def _allocation_handoff_cache_put(
     _ALLOCATION_HANDOFF_CACHE.move_to_end(key)
     while len(_ALLOCATION_HANDOFF_CACHE) > _ALLOCATION_CACHE_MAX_EPOCHS:
         evicted, _ = _ALLOCATION_HANDOFF_CACHE.popitem(last=False)
-        _ALLOCATION_BUILD_LOCKS.pop(evicted, None)
+        completed = _ALLOCATION_BUILD_TASKS.get(evicted)
+        if completed is not None and completed.done():
+            _ALLOCATION_BUILD_TASKS.pop(evicted, None)
 
 
-def _allocation_build_lock(
+def _allocation_build_task(
+    *,
+    config: "ResearchLabGatewayConfig",
     epoch: int,
     persist_snapshot: bool,
-) -> asyncio.Lock:
+) -> asyncio.Task[dict[str, Any]]:
     key = _allocation_cache_key(epoch, persist_snapshot)
-    lock = _ALLOCATION_BUILD_LOCKS.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _ALLOCATION_BUILD_LOCKS[key] = lock
-    return lock
+    task = _ALLOCATION_BUILD_TASKS.get(key)
+    if task is not None:
+        return task
+    task = asyncio.create_task(
+        _build_and_cache_attested_allocation(
+            config=config,
+            epoch=int(epoch),
+            persist_snapshot=bool(persist_snapshot),
+        )
+    )
+    _ALLOCATION_BUILD_TASKS[key] = task
+
+    def clear(completed: asyncio.Task[dict[str, Any]]) -> None:
+        if _ALLOCATION_BUILD_TASKS.get(key) is completed:
+            _ALLOCATION_BUILD_TASKS.pop(key, None)
+        if completed.cancelled():
+            logger.warning(
+                "research_lab_allocation_build_cancelled epoch=%s persist_snapshot=%s",
+                int(epoch),
+                bool(persist_snapshot),
+            )
+            return
+        error = completed.exception()
+        if error is not None:
+            logger.warning(
+                "research_lab_allocation_build_failed epoch=%s "
+                "persist_snapshot=%s error_type=%s error=%s",
+                int(epoch),
+                bool(persist_snapshot),
+                type(error).__name__,
+                str(error)[:240],
+            )
+
+    task.add_done_callback(clear)
+    return task
 
 
 @router.get("/allocations/attested/{epoch}")
@@ -3149,21 +3190,17 @@ async def get_research_lab_attested_allocation(
     )
     if cached_handoff is not None:
         return cached_handoff
-    # Serialize builds per epoch so concurrent polls and retries wait for one
-    # rebuild instead of launching contending ones. Re-check the cache after
-    # acquiring the lock: the first builder populates it for everyone waiting.
-    async with _allocation_build_lock(int(epoch), persist_snapshot):
-        cached_handoff = _allocation_handoff_cache_get(
-            int(epoch),
-            persist_snapshot,
-        )
-        if cached_handoff is not None:
-            return cached_handoff
-        return await _build_and_cache_attested_allocation(
+    # Shield the complete build-and-cache task from client disconnects. The
+    # previous lock only serialized live requests: when a validator timed out,
+    # request cancellation released the lock before the finished authority
+    # could be assembled and cached, so the next retry started over.
+    return await asyncio.shield(
+        _allocation_build_task(
             config=config,
             epoch=int(epoch),
             persist_snapshot=persist_snapshot,
         )
+    )
 
 
 async def _build_and_cache_attested_allocation(

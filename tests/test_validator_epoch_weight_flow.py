@@ -16,6 +16,10 @@ from Leadpoet.utils.subnet_epoch import (
     validate_validator_shared_epoch_file,
 )
 from Leadpoet.validator import reward as reward_module
+from leadpoet_canonical.constants import (
+    ALLOCATION_PREPARATION_BLOCK,
+    WEIGHT_SUBMISSION_BLOCK,
+)
 import neurons.validator as validator_module
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,6 +126,133 @@ def test_gateway_already_submitted_path_checks_weight_submission_before_return()
     assert snippet.index("await self._check_weight_submission_for_processed_epoch(") < snippet.index(
         "self._last_processed_epoch = current_epoch"
     )
+
+
+def test_allocation_preparation_precedes_weight_submission_window():
+    assert 0 < ALLOCATION_PREPARATION_BLOCK < WEIGHT_SUBMISSION_BLOCK
+
+    source = VALIDATOR_SOURCE.read_text(encoding="utf-8")
+    snippet = _between(
+        source,
+        "async def _submit_weights_at_epoch_end_locked(self):",
+        "# ═══════════════════════════════════════════════════════════════════\n"
+        "            # CRITICAL: Check if we've already submitted weights for this epoch",
+    )
+    preparation = snippet.index(
+        "epoch_state.deadline_reached(ALLOCATION_PREPARATION_BLOCK)"
+    )
+    submission = snippet.index(
+        "epoch_state.deadline_reached(WEIGHT_SUBMISSION_BLOCK)"
+    )
+    assert preparation < submission
+
+
+def test_verified_allocation_guard_is_reused_within_epoch(
+    monkeypatch,
+):
+    from leadpoet_canonical import allocation_handoff_v2
+    from research_lab import validator_integration
+    from validator_tee.host import gateway_weight_inputs_v2
+
+    validator = validator_module.Validator.__new__(validator_module.Validator)
+    validator.config = SimpleNamespace(netuid=71)
+    calls = []
+    normalized = {
+        "bundle": {"epoch": 123},
+        "root_receipt_hash": "sha256:" + "1" * 64,
+        "receipt_graph": {"root_receipt_hash": "sha256:" + "1" * 64},
+    }
+    component = {
+        "allocation_hash": "sha256:" + "2" * 64,
+        "allocation_doc": {
+            "allocation_hash": "sha256:" + "2" * 64,
+        },
+    }
+
+    def fetch(*_args, **_kwargs):
+        calls.append("fetch")
+        return {"handoff": True}
+
+    monkeypatch.setenv("VALIDATOR_V2_GATEWAY_URL", "https://gateway.example")
+    monkeypatch.setattr(
+        gateway_weight_inputs_v2,
+        "_gateway_endpoint",
+        lambda value: value,
+    )
+    monkeypatch.setattr(
+        validator_integration,
+        "fetch_research_lab_attested_allocation_bundle",
+        fetch,
+    )
+    monkeypatch.setattr(
+        allocation_handoff_v2,
+        "validate_allocation_handoff_v2",
+        lambda *_args, **_kwargs: normalized,
+    )
+    monkeypatch.setattr(
+        validator_integration.ResearchLabValidatorFlags,
+        "from_mapping",
+        lambda _value: object(),
+    )
+    monkeypatch.setattr(
+        validator_integration,
+        "verify_research_lab_allocation_bundle",
+        lambda *_args, **_kwargs: {"passed": True, "errors": []},
+    )
+    monkeypatch.setattr(
+        validator_integration,
+        "build_research_lab_allocation_component",
+        lambda *_args, **_kwargs: component,
+    )
+
+    async def run():
+        first = await validator._research_lab_pre_weight_submission_guard(123)
+        second = await validator._research_lab_pre_weight_submission_guard(123)
+        return first, second
+
+    first, second = asyncio.run(run())
+
+    assert first is second
+    assert first["verified"] is True
+    assert calls == ["fetch"]
+
+
+def test_allocation_preparation_runs_in_background_and_is_singleflight():
+    validator = validator_module.Validator.__new__(validator_module.Validator)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def guard(epoch):
+        calls.append(epoch)
+        started.set()
+        await release.wait()
+        return {"verified": True, "abort_chain_submission": False}
+
+    validator._research_lab_pre_weight_submission_guard = guard
+
+    async def run():
+        background = await validator._prepare_research_lab_allocation(
+            321,
+            wait=False,
+        )
+        assert background is None
+        await started.wait()
+        release.set()
+        prepared = await validator._prepare_research_lab_allocation(
+            321,
+            wait=True,
+        )
+        reused = await validator._prepare_research_lab_allocation(
+            321,
+            wait=True,
+        )
+        return prepared, reused
+
+    prepared, reused = asyncio.run(run())
+
+    assert prepared is reused
+    assert calls == [321]
 
 
 def test_reward_transition_waits_for_finalized_subnet_epoch(monkeypatch):

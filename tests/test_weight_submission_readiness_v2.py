@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 
 from gateway.research_lab import api, chain, maintenance
 from gateway.tee import verify_weight_submission_ready_v2 as readiness
+from gateway.utils.tee_artifact_store_v2 import TEEArtifactStoreV2Error
 from research_lab import validator_integration
 
 
@@ -404,3 +406,232 @@ async def test_weight_readiness_http_mode_fails_closed_after_retries(
         )
 
     assert calls == [("http://localhost:8000", 24032)] * 3
+
+
+@pytest.mark.asyncio
+async def test_weight_readiness_direct_mode_retries_only_transport_failures(
+    monkeypatch,
+):
+    calls = []
+
+    async def resolve(_epoch):
+        return 24032
+
+    async def report(**_kwargs):
+        return {
+            "ready": True,
+            "receipt_coverage": 1.0,
+            "historical_classification_coverage": 1.0,
+        }
+
+    async def handoff(epoch, x_leadpoet_internal_key):
+        calls.append((epoch, x_leadpoet_internal_key))
+        if len(calls) == 1:
+            raise RuntimeError(
+                "enclave rejected artifact persistence: unexpected_eof"
+            )
+        return {"handoff": True}
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        maintenance,
+        "champion_v2_cutover_readiness_report",
+        report,
+    )
+    monkeypatch.setattr(api, "get_research_lab_attested_allocation", handoff)
+    monkeypatch.setattr(
+        readiness,
+        "_validate_handoff",
+        lambda value, **_kwargs: {
+            "allocation_hash": "sha256:" + "a" * 64,
+            "root_receipt_hash": "sha256:" + "b" * 64,
+        },
+    )
+
+    result = await readiness.verify_weight_submission_ready_v2(
+        repair=False,
+        http_attempts=2,
+        http_retry_seconds=0,
+    )
+
+    assert result["status"] == "ready"
+    assert calls == [(24032, None), (24032, None)]
+
+
+@pytest.mark.asyncio
+async def test_weight_readiness_direct_mode_retries_authenticated_s3_503(
+    monkeypatch,
+):
+    calls = []
+
+    async def resolve(_epoch):
+        return 24032
+
+    async def report(**_kwargs):
+        return {
+            "ready": True,
+            "receipt_coverage": 1.0,
+            "historical_classification_coverage": 1.0,
+        }
+
+    async def handoff(epoch, x_leadpoet_internal_key):
+        calls.append((epoch, x_leadpoet_internal_key))
+        if len(calls) == 1:
+            persistence_error = TEEArtifactStoreV2Error(
+                "enclave rejected artifact persistence: authenticated_http_503"
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Research Lab attested allocation failed",
+            ) from persistence_error
+        return {"handoff": True}
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        maintenance,
+        "champion_v2_cutover_readiness_report",
+        report,
+    )
+    monkeypatch.setattr(api, "get_research_lab_attested_allocation", handoff)
+    monkeypatch.setattr(
+        readiness,
+        "_validate_handoff",
+        lambda value, **_kwargs: {
+            "allocation_hash": "sha256:" + "a" * 64,
+            "root_receipt_hash": "sha256:" + "b" * 64,
+        },
+    )
+
+    result = await readiness.verify_weight_submission_ready_v2(
+        repair=False,
+        http_attempts=2,
+        http_retry_seconds=0,
+    )
+
+    assert result["status"] == "ready"
+    assert calls == [(24032, None), (24032, None)]
+
+
+@pytest.mark.asyncio
+async def test_weight_readiness_direct_mode_exhausts_authenticated_s3_503(
+    monkeypatch,
+):
+    calls = []
+
+    async def resolve(_epoch):
+        return 24032
+
+    async def report(**_kwargs):
+        return {
+            "ready": True,
+            "receipt_coverage": 1.0,
+            "historical_classification_coverage": 1.0,
+        }
+
+    async def handoff(epoch, x_leadpoet_internal_key):
+        calls.append((epoch, x_leadpoet_internal_key))
+        persistence_error = TEEArtifactStoreV2Error(
+            "enclave rejected artifact persistence: authenticated_http_503"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Research Lab attested allocation failed",
+        ) from persistence_error
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        maintenance,
+        "champion_v2_cutover_readiness_report",
+        report,
+    )
+    monkeypatch.setattr(api, "get_research_lab_attested_allocation", handoff)
+
+    with pytest.raises(HTTPException, match="attested allocation failed"):
+        await readiness.verify_weight_submission_ready_v2(
+            repair=False,
+            http_attempts=3,
+            http_retry_seconds=0,
+        )
+
+    assert calls == [(24032, None)] * 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", (400, 401, 403, 404))
+async def test_weight_readiness_direct_mode_does_not_retry_authenticated_4xx(
+    monkeypatch,
+    status,
+):
+    calls = []
+
+    async def resolve(_epoch):
+        return 24032
+
+    async def report(**_kwargs):
+        return {
+            "ready": True,
+            "receipt_coverage": 1.0,
+            "historical_classification_coverage": 1.0,
+        }
+
+    async def handoff(epoch, x_leadpoet_internal_key):
+        calls.append((epoch, x_leadpoet_internal_key))
+        raise TEEArtifactStoreV2Error(
+            "enclave rejected artifact persistence: authenticated_http_%s"
+            % status
+        )
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        maintenance,
+        "champion_v2_cutover_readiness_report",
+        report,
+    )
+    monkeypatch.setattr(api, "get_research_lab_attested_allocation", handoff)
+
+    with pytest.raises(TEEArtifactStoreV2Error, match="authenticated_http"):
+        await readiness.verify_weight_submission_ready_v2(
+            repair=False,
+            http_attempts=3,
+            http_retry_seconds=0,
+        )
+
+    assert calls == [(24032, None)]
+
+
+@pytest.mark.asyncio
+async def test_weight_readiness_direct_mode_does_not_retry_semantic_failure(
+    monkeypatch,
+):
+    calls = []
+
+    async def resolve(_epoch):
+        return 24032
+
+    async def report(**_kwargs):
+        return {
+            "ready": True,
+            "receipt_coverage": 1.0,
+            "historical_classification_coverage": 1.0,
+        }
+
+    async def handoff(epoch, x_leadpoet_internal_key):
+        calls.append((epoch, x_leadpoet_internal_key))
+        raise RuntimeError("allocation receipt graph differs")
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        maintenance,
+        "champion_v2_cutover_readiness_report",
+        report,
+    )
+    monkeypatch.setattr(api, "get_research_lab_attested_allocation", handoff)
+
+    with pytest.raises(RuntimeError, match="receipt graph differs"):
+        await readiness.verify_weight_submission_ready_v2(
+            repair=False,
+            http_attempts=3,
+            http_retry_seconds=0,
+        )
+
+    assert calls == [(24032, None)]

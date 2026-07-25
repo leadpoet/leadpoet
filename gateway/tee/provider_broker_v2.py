@@ -34,6 +34,7 @@ from gateway.tee.source_add_runtime_v2 import (
 PROVIDER_BROKER_SCHEMA_VERSION = "leadpoet.provider_broker.v2"
 MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
 MAX_RESPONSE_BODY_BYTES = 64 * 1024 * 1024
+MAX_TRANSPORT_RESPONSE_BODY_BYTES = 96 * 1024 * 1024
 MAX_DEDUPLICATION_RECORDS = 10000
 MAX_JOB_CREDENTIAL_LEASES = 1024
 EGRESS_PROXY_CREDENTIAL_SLOT = "egress_proxy"
@@ -394,9 +395,21 @@ class HTTPXProviderTransport:
         *,
         proxy_url: str = "http://127.0.0.1:18080",
         ca_bundle: Optional[str] = None,
+        response_body_ceiling_bytes: int = MAX_RESPONSE_BODY_BYTES,
     ) -> None:
+        if (
+            isinstance(response_body_ceiling_bytes, bool)
+            or not isinstance(response_body_ceiling_bytes, int)
+            or not 1
+            <= response_body_ceiling_bytes
+            <= MAX_TRANSPORT_RESPONSE_BODY_BYTES
+        ):
+            raise ProviderBrokerV2Error(
+                "provider transport response ceiling is invalid"
+            )
         self.proxy_url = proxy_url
         self.ca_bundle = ca_bundle
+        self.response_body_ceiling_bytes = response_body_ceiling_bytes
 
     def __call__(
         self,
@@ -409,6 +422,15 @@ class HTTPXProviderTransport:
         upstream_proxy_url: Optional[str] = None,
         max_response_bytes: int = MAX_RESPONSE_BODY_BYTES,
     ) -> Dict[str, Any]:
+        if (
+            isinstance(max_response_bytes, bool)
+            or not isinstance(max_response_bytes, int)
+            or not 1
+            <= max_response_bytes
+            <= self.response_body_ceiling_bytes
+        ):
+            raise ProviderBrokerV2Error("provider response limit is invalid")
+
         import certifi
         import httpx
 
@@ -427,12 +449,6 @@ class HTTPXProviderTransport:
             timeout=max(0.001, timeout_ms / 1000.0),
             follow_redirects=False,
         ) as client:
-            if (
-                isinstance(max_response_bytes, bool)
-                or not isinstance(max_response_bytes, int)
-                or not 1 <= max_response_bytes <= MAX_RESPONSE_BODY_BYTES
-            ):
-                raise ProviderBrokerV2Error("provider response limit is invalid")
             with client.stream(
                 method,
                 url,
@@ -510,7 +526,7 @@ class ProviderBrokerV2:
         self._credentials = {}  # type: Dict[str, str]
         self._job_credentials = {}  # type: Dict[Tuple[str, str], Dict[str, str]]
         self._records = {}  # type: Dict[Tuple[str, int], Dict[str, Any]]
-        self._inflight = {}  # type: Dict[Tuple[str, int], Tuple[str, threading.Event]]
+        self._inflight = {}  # type: Dict[Tuple[str, int], Tuple[str, threading.Event, object]]
         self._lock = threading.Lock()
 
     def health(self) -> Dict[str, Any]:
@@ -546,6 +562,18 @@ class ProviderBrokerV2:
                 return
             self._inflight.pop(deduplication_key, None)
             inflight[1].set()
+
+    def _abandon_owned_inflight(self, owner_token: object) -> None:
+        with self._lock:
+            abandoned = [
+                (key, inflight[1])
+                for key, inflight in self._inflight.items()
+                if inflight[2] is owner_token
+            ]
+            for key, _ in abandoned:
+                self._inflight.pop(key, None)
+            for _, wait_event in abandoned:
+                wait_event.set()
 
     def provision_credentials(self, credentials: Mapping[str, str]) -> Dict[str, Any]:
         expected_slots = set(expected_provider_credential_slots())
@@ -774,6 +802,18 @@ class ProviderBrokerV2:
         return route, normalized_dynamic
 
     def execute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
+        owner_token = object()
+        try:
+            return self._execute(request, owner_token=owner_token)
+        finally:
+            self._abandon_owned_inflight(owner_token)
+
+    def _execute(
+        self,
+        request: Mapping[str, Any],
+        *,
+        owner_token: object,
+    ) -> Dict[str, Any]:
         required = {
             "schema_version",
             "logical_operation_id",
@@ -919,6 +959,7 @@ class ProviderBrokerV2:
                 self._inflight[deduplication_key] = (
                     request_fingerprint,
                     wait_event,
+                    owner_token,
                 )
                 owns_attempt = True
         if not owns_attempt:

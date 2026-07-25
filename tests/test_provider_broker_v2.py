@@ -11,6 +11,8 @@ import pytest
 from gateway.tee.provider_broker_v2 import (
     BUILTIN_PROVIDER_ROUTES,
     HTTPXProviderTransport,
+    MAX_RESPONSE_BODY_BYTES,
+    MAX_TRANSPORT_RESPONSE_BODY_BYTES,
     PROVIDER_BROKER_SCHEMA_VERSION,
     ProviderBrokerV2,
     ProviderBrokerV2Error,
@@ -131,6 +133,119 @@ def test_httpx_transport_captures_tls_before_peer_closes_after_body(monkeypatch)
         "tls_peer_chain_hash": sha256_bytes(b"peer-certificate"),
         "tls_protocol": "TLSv1.3",
     }
+
+    artifact_transport = HTTPXProviderTransport(
+        response_body_ceiling_bytes=MAX_TRANSPORT_RESPONSE_BODY_BYTES
+    )
+    response.stream.ssl_object = TLS()
+    artifact_result = artifact_transport(
+        method="GET",
+        url="https://example.com/artifact",
+        headers={},
+        body=b"",
+        timeout_ms=1000,
+        max_response_bytes=MAX_TRANSPORT_RESPONSE_BODY_BYTES,
+    )
+    assert artifact_result["body"] == b'{"ok":true}'
+
+    with pytest.raises(ProviderBrokerV2Error, match="response limit"):
+        HTTPXProviderTransport()(
+            method="GET",
+            url="https://example.com/artifact",
+            headers={},
+            body=b"",
+            timeout_ms=1000,
+            max_response_bytes=MAX_RESPONSE_BODY_BYTES + 1,
+        )
+    with pytest.raises(ProviderBrokerV2Error, match="transport response ceiling"):
+        HTTPXProviderTransport(
+            response_body_ceiling_bytes=MAX_TRANSPORT_RESPONSE_BODY_BYTES + 1
+        )
+
+
+def test_httpx_transport_enforces_artifact_specific_large_response_ceiling(
+    monkeypatch,
+):
+    class TLS:
+        def getpeercert(self, binary_form=False, /):
+            assert binary_form is True
+            return b"peer-certificate"
+
+        def version(self):
+            return "TLSv1.3"
+
+    class Stream:
+        def get_extra_info(self, name):
+            assert name == "ssl_object"
+            return TLS()
+
+    chunk = b"x" * (1024 * 1024)
+    chunk_count = (MAX_RESPONSE_BODY_BYTES // len(chunk)) + 1
+
+    class Response:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        extensions = {"network_stream": Stream()}
+
+        def iter_bytes(self):
+            for _ in range(chunk_count):
+                yield chunk
+
+    class ResponseContext:
+        def __enter__(self):
+            return Response()
+
+        def __exit__(self, *_args):
+            return False
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            return ResponseContext()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx",
+        SimpleNamespace(Client=Client, Proxy=lambda *_args, **_kwargs: object()),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "certifi",
+        SimpleNamespace(where=lambda: "/tmp/test-ca.pem"),
+    )
+
+    with pytest.raises(ProviderBrokerV2Error, match="response exceeds size limit"):
+        HTTPXProviderTransport()(
+            method="GET",
+            url="https://example.com/artifact",
+            headers={},
+            body=b"",
+            timeout_ms=1000,
+        )
+
+    result = HTTPXProviderTransport(
+        response_body_ceiling_bytes=MAX_TRANSPORT_RESPONSE_BODY_BYTES
+    )(
+        method="GET",
+        url="https://example.com/artifact",
+        headers={},
+        body=b"",
+        timeout_ms=1000,
+        max_response_bytes=MAX_TRANSPORT_RESPONSE_BODY_BYTES,
+    )
+
+    assert len(result["body"]) == chunk_count * len(chunk)
+    assert len(result["body"]) > MAX_RESPONSE_BODY_BYTES
+    assert result["tls_peer_chain_hash"] == sha256_bytes(b"peer-certificate")
+    assert result["tls_protocol"] == "TLSv1.3"
 
 
 def test_provider_registry_hash_binds_measured_https_routes():
@@ -294,6 +409,21 @@ def test_parent_or_network_error_cannot_masquerade_as_provider_status():
     assert attempt["failure_code"] == "proxy_failure"
 
 
+def test_oversized_response_is_a_canonical_terminal_and_releases_inflight():
+    transport = FakeTransport(
+        error=ProviderBrokerV2Error("provider response exceeds size limit")
+    )
+    broker = _broker(transport)
+
+    result = broker.execute(_request())
+
+    assert result["terminal_status"] == "transport_failure"
+    assert result["failure_code"] == "response_too_large"
+    assert result["transport_attempt"]["failure_code"] == "response_too_large"
+    validate_transport_attempt(result["transport_attempt"])
+    assert broker.health()["inflight_count"] == 0
+
+
 def test_request_artifact_failure_does_not_poison_logical_attempt_retry():
     transport = FakeTransport()
     broker = _broker(transport)
@@ -318,6 +448,73 @@ def test_request_artifact_failure_does_not_poison_logical_attempt_retry():
     assert len(transport.calls) == 1
 
 
+def test_owner_failure_releases_waiters_and_allows_safe_pretransport_retry():
+    transport = FakeTransport()
+    broker = _broker(transport)
+    owner_entered = threading.Event()
+    release_owner = threading.Event()
+
+    def blocking_clock():
+        owner_entered.set()
+        assert release_owner.wait(2)
+        raise RuntimeError("measured clock unavailable")
+
+    broker._clock = blocking_clock
+    errors = []
+
+    def _call():
+        try:
+            broker.execute(_request())
+        except Exception as exc:
+            errors.append(exc)
+
+    owner = threading.Thread(target=_call)
+    owner.start()
+    assert owner_entered.wait(2)
+
+    waiter_entered = threading.Event()
+
+    class ObservedWaitEvent:
+        def __init__(self):
+            self._event = threading.Event()
+
+        def wait(self, timeout):
+            waiter_entered.set()
+            return self._event.wait(timeout)
+
+        def set(self):
+            self._event.set()
+
+    with broker._lock:
+        inflight = broker._inflight[("operation-1", 0)]
+        broker._inflight[("operation-1", 0)] = (
+            inflight[0],
+            ObservedWaitEvent(),
+            inflight[2],
+        )
+
+    waiter = threading.Thread(target=_call)
+    waiter.start()
+    assert waiter_entered.wait(2)
+    release_owner.set()
+    owner.join(2)
+    waiter.join(2)
+
+    assert not owner.is_alive()
+    assert not waiter.is_alive()
+    assert sorted(str(exc) for exc in errors) == [
+        "duplicate provider attempt did not terminate",
+        "measured clock unavailable",
+    ]
+    assert transport.calls == []
+    assert broker.health()["inflight_count"] == 0
+
+    broker._clock = lambda: NOW
+    result = broker.execute(_request())
+    assert result["terminal_status"] == "authenticated_response"
+    assert len(transport.calls) == 1
+
+
 def test_one_logical_attempt_is_executed_and_charged_once_under_concurrency():
     transport = FakeTransport(delay=0.05)
     broker = _broker(transport)
@@ -330,14 +527,14 @@ def test_one_logical_attempt_is_executed_and_charged_once_under_concurrency():
         except Exception as exc:  # pragma: no cover - asserted below
             errors.append(exc)
 
-    threads = [threading.Thread(target=_call) for _ in range(5)]
+    threads = [threading.Thread(target=_call) for _ in range(10)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
     assert not errors
     assert len(transport.calls) == 1
-    assert len(results) == 5
+    assert len(results) == 10
     assert {item["transport_attempt"]["attempt_hash"] for item in results} == {
         results[0]["transport_attempt"]["attempt_hash"]
     }

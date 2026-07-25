@@ -35,6 +35,7 @@ TLS_SERVICE_PORT = 5003
 MAX_FRAME_BYTES = 64 * 1024 * 1024
 SCHEMA_VERSION = "leadpoet.inter_enclave_rpc.v2"
 _CHANNEL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_ERROR_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 
 class InterEnclaveTLSError(RuntimeError):
@@ -321,10 +322,28 @@ class AttestedTLSRPCClient:
             )
             _send_frame(tls, request)
             response = _read_frame(tls)
-            if set(response) != {"result", "channel_id"}:
+            if set(response) not in (
+                {"result", "channel_id"},
+                {"error", "channel_id"},
+            ):
                 raise InterEnclaveTLSError("inter-enclave response fields are invalid")
             if response["channel_id"] != channel_id:
                 raise InterEnclaveTLSError("inter-enclave response channel mismatch")
+            if "error" in response:
+                error = response["error"]
+                if (
+                    not isinstance(error, Mapping)
+                    or set(error) != {"code", "error_type"}
+                    or error["code"] != "remote_handler_failed"
+                    or not _ERROR_TYPE_RE.fullmatch(str(error["error_type"]))
+                ):
+                    raise InterEnclaveTLSError(
+                        "inter-enclave response error is invalid"
+                    )
+                raise InterEnclaveTLSError(
+                    "inter-enclave remote handler failed: "
+                    + str(error["error_type"])
+                )
             result = response["result"]
             if not isinstance(result, Mapping):
                 raise InterEnclaveTLSError("inter-enclave response result is invalid")
@@ -379,9 +398,27 @@ class AttestedTLSRPCServer:
                     "boot_identity_hash"
                 ],
             )
-            result = self.handler(request["method"], request["params"], peer)
-            if not isinstance(result, Mapping):
-                raise InterEnclaveTLSError("inter-enclave handler result is invalid")
+            try:
+                result = self.handler(request["method"], request["params"], peer)
+                if not isinstance(result, Mapping):
+                    raise InterEnclaveTLSError(
+                        "inter-enclave handler result is invalid"
+                    )
+            except Exception as exc:
+                error_type = type(exc).__name__
+                if not _ERROR_TYPE_RE.fullmatch(error_type):
+                    error_type = "Exception"
+                _send_frame(
+                    tls,
+                    {
+                        "error": {
+                            "code": "remote_handler_failed",
+                            "error_type": error_type,
+                        },
+                        "channel_id": request["channel_id"],
+                    },
+                )
+                return
             _send_frame(
                 tls,
                 {"result": dict(result), "channel_id": request["channel_id"]},

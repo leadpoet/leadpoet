@@ -9,6 +9,7 @@ local proxy endpoint and other services inside the measured enclave.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -33,6 +34,16 @@ MAX_CONTROL_BYTES = 16 * 1024
 MAX_TUNNEL_BYTES_PER_DIRECTION = 256 * 1024 * 1024
 DEFAULT_IDLE_TIMEOUT_SECONDS = 300.0
 RELAY_CHUNK_BYTES = 64 * 1024
+_PEER_CLOSE_ERRNOS = frozenset(
+    value
+    for value in (
+        errno.EPIPE,
+        errno.ECONNRESET,
+        errno.ENOTCONN,
+        getattr(errno, "ESHUTDOWN", None),
+    )
+    if value is not None
+)
 UPSTREAM_PROXY_HEADER = "x-leadpoet-upstream-proxy-b64"
 SIOCGIFFLAGS = 0x8913
 SIOCSIFFLAGS = 0x8914
@@ -240,6 +251,7 @@ def _relay_bidirectional(
     active = {left, right}
     transferred = {left: 0, right: 0}
     first_closed = ""
+    write_closed = ""
     last_activity = time.monotonic()
     while active:
         remaining = max(0.0, idle_timeout_seconds - (time.monotonic() - last_activity))
@@ -260,16 +272,34 @@ def _relay_bidirectional(
                 except Exception:
                     pass
                 continue
-            transferred[source] += len(data)
-            if transferred[source] > MAX_TUNNEL_BYTES_PER_DIRECTION:
+            next_total = transferred[source] + len(data)
+            if next_total > MAX_TUNNEL_BYTES_PER_DIRECTION:
                 raise EnclaveEgressProxyError("proxy tunnel byte limit exceeded")
-            destination.sendall(data)
+            try:
+                destination.sendall(data)
+            except OSError as exc:
+                if int(getattr(exc, "errno", 0) or 0) not in _PEER_CLOSE_ERRNOS:
+                    raise
+                # Preserve the opposite direction after a clean peer close.
+                # HTTPX still validates TLS and response completeness inside
+                # the enclave, so this cannot turn a partial reply into success.
+                closed_name = "client" if destination is left else "parent"
+                if not first_closed:
+                    first_closed = closed_name
+                if not write_closed:
+                    write_closed = closed_name
+                active.discard(source)
+                continue
+            transferred[source] = next_total
             last_activity = time.monotonic()
-    return {
+    result = {
         "client_to_parent_bytes": transferred[left],
         "parent_to_client_bytes": transferred[right],
         "first_closed": first_closed or "unknown",
     }
+    if write_closed:
+        result["write_closed"] = write_closed
+    return result
 
 
 class EnclaveEgressProxy:

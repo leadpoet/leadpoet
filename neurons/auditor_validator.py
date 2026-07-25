@@ -222,6 +222,7 @@ from leadpoet_canonical.weights import (
     bundle_weights_hash,
     compare_weights_hash,
     u16_to_emit_floats,
+    weights_within_tolerance,
 )
 from leadpoet_canonical.events import verify_log_entry
 from leadpoet_canonical.auditor_v2 import (
@@ -432,6 +433,43 @@ def _close_subtensor_connection(subtensor, *, source: str) -> None:
             source,
             type(exc).__name__,
         )
+
+
+def _is_subtensor_connection_error(exc: BaseException) -> bool:
+    """Classify only transport failures that a fresh websocket can repair."""
+
+    current = exc
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (TimeoutError, ConnectionError, OSError)):
+            return True
+        name = type(current).__name__.lower()
+        message = str(current).lower()
+        if any(
+            marker in name
+            for marker in ("connection", "timeout", "websocket", "socket")
+        ):
+            return True
+        if any(
+            marker in message
+            for marker in (
+                "broken pipe",
+                "connection aborted",
+                "connection closed",
+                "connection is closed",
+                "connection refused",
+                "connection reset",
+                "handshake",
+                "remote end closed",
+                "timed out",
+                "timeout",
+                "websocket",
+            )
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 @dataclass(frozen=True)
@@ -779,15 +817,16 @@ class AuditorValidator:
             elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
         )
     
-    def _get_uid(self) -> Optional[int]:
+    def _get_uid(self, *, subtensor=None) -> Optional[int]:
         """Resolve our current UID directly from canonical chain storage."""
 
-        return self.subtensor.get_uid_for_hotkey_on_subnet(
+        source = self.subtensor if subtensor is None else subtensor
+        return source.get_uid_for_hotkey_on_subnet(
             hotkey_ss58=self.wallet.hotkey.ss58_address,
             netuid=int(self.config.netuid),
         )
     
-    def _reconnect_subtensor(self):
+    def _reconnect_subtensor(self, *, reason: str = "connection_error"):
         """
         Reconnect to subtensor after connection errors.
         
@@ -797,24 +836,47 @@ class AuditorValidator:
         print(f"\n🔄 Reconnecting to subtensor...")
         logger.info("Reconnecting to subtensor after connection error")
         
+        previous = self.subtensor
+        replacement = None
         try:
-            # Create new subtensor instance
-            self.subtensor = bt.Subtensor(config=self.config)
-            
-            # Verify we're still registered
-            new_uid = self._get_uid()
+            replacement = bt.Subtensor(config=self.config)
+            new_uid = self._get_uid(subtensor=replacement)
             if new_uid is None:
-                logger.error("Lost registration after reconnect!")
-                print(f"❌ Lost registration after reconnect!")
-            else:
-                self.uid = new_uid
-                print(f"✅ Reconnected to subtensor (UID: {self.uid})")
-                logger.info(f"Reconnected to subtensor (UID: {self.uid})")
-            
+                raise RuntimeError("auditor hotkey is not registered after reconnect")
+
+            self.subtensor = replacement
+            self.uid = new_uid
             self.consecutive_errors = 0
+            _close_subtensor_connection(
+                previous,
+                source="live_replaced",
+            )
+            _audit_event(
+                "live_subtensor_reconnect_success",
+                netuid=int(self.config.netuid),
+                uid=int(self.uid),
+                reason=reason,
+                sdk_version=str(getattr(bt, "__version__", "unknown")),
+            )
+            print(f"✅ Reconnected to subtensor (UID: {self.uid})")
+            logger.info(f"Reconnected to subtensor (UID: {self.uid})")
             return True
             
         except Exception as e:
+            if replacement is not None:
+                _close_subtensor_connection(
+                    replacement,
+                    source="live_replacement_failed",
+                )
+            _audit_event(
+                "live_subtensor_reconnect_failure",
+                level=logging.ERROR,
+                netuid=int(self.config.netuid),
+                uid=getattr(self, "uid", None),
+                reason=reason,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
             logger.error(f"Failed to reconnect to subtensor: {e}")
             print(f"❌ Failed to reconnect: {e}")
             return False
@@ -1950,6 +2012,65 @@ class AuditorValidator:
     # ═══════════════════════════════════════════════════════════════════════════
     # Weight Submission
     # ═══════════════════════════════════════════════════════════════════════════
+
+    def _read_finalized_weight_submission_state(self) -> Dict[str, Any]:
+        """Read this auditor's finalized LastUpdate and mechanism-0 weights."""
+
+        uid = int(self.uid)
+        netuid = int(self.config.netuid)
+        substrate = self.subtensor.substrate
+        block_hash = str(substrate.get_chain_finalised_head())
+
+        last_updates_result = substrate.query(
+            module="SubtensorModule",
+            storage_function="LastUpdate",
+            params=[netuid],
+            block_hash=block_hash,
+        )
+        last_updates = getattr(
+            last_updates_result,
+            "value",
+            last_updates_result,
+        )
+        if (
+            not isinstance(last_updates, (list, tuple))
+            or uid < 0
+            or uid >= len(last_updates)
+        ):
+            raise RuntimeError("finalized LastUpdate storage response is invalid")
+
+        weights_result = substrate.query(
+            module="SubtensorModule",
+            storage_function="Weights",
+            params=[netuid, uid],
+            block_hash=block_hash,
+        )
+        weights_value = getattr(weights_result, "value", weights_result)
+        if not isinstance(weights_value, (list, tuple)):
+            raise RuntimeError("finalized Weights storage response is invalid")
+
+        weights = []
+        seen_uids = set()
+        for item in weights_value:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                raise RuntimeError("finalized Weights row is invalid")
+            destination_uid = int(item[0])
+            weight_u16 = int(item[1])
+            if (
+                destination_uid < 0
+                or destination_uid in seen_uids
+                or weight_u16 < 0
+                or weight_u16 > 65535
+            ):
+                raise RuntimeError("finalized Weights row contains invalid values")
+            seen_uids.add(destination_uid)
+            weights.append((destination_uid, weight_u16))
+
+        return {
+            "block_hash": block_hash,
+            "last_update": int(last_updates[uid]),
+            "weights": weights,
+        }
     
     def _set_weights_until_epoch_end(
         self,
@@ -1958,35 +2079,68 @@ class AuditorValidator:
         subnet_epoch_index: Optional[int] = None,
         uids,
         weights,
+        expected_weights_u16,
     ) -> bool:
-        """Retry an explicitly rejected chain submission within one epoch."""
+        """Retry until this epoch's timelocked commitment is finalized."""
+
+        def reconnect_transport(
+            exc: BaseException,
+            *,
+            stage: str,
+            attempt: int,
+        ) -> bool:
+            if not _is_subtensor_connection_error(exc):
+                return False
+            _audit_event(
+                "submission_transport_reconnect",
+                level=logging.WARNING,
+                epoch=int(epoch_id),
+                subnet_epoch_index=subnet_epoch_index,
+                netuid=int(self.config.netuid),
+                uid=getattr(self, "uid", None),
+                stage=stage,
+                attempt=attempt,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return self._reconnect_subtensor(
+                reason=f"weight_submission:{stage}",
+            )
 
         def epoch_is_current() -> bool:
-            try:
-                self._validate_durable_epoch_runtime_lifecycle(
-                    force_refresh=True,
-                )
-                finalized_state = self._read_epoch_state()
-                if finalized_state.workflow_epoch_id != int(epoch_id):
+            for check_attempt in range(1, 3):
+                try:
+                    self._validate_durable_epoch_runtime_lifecycle(
+                        force_refresh=True,
+                    )
+                    finalized_state = self._read_epoch_state()
+                    if finalized_state.workflow_epoch_id != int(epoch_id):
+                        return False
+                    if finalized_state.subnet_epoch_index != subnet_epoch_index:
+                        return False
+                    best_state = self._read_best_epoch_state()
+                    return (
+                        best_state.workflow_epoch_id == int(epoch_id)
+                        and best_state.subnet_epoch_index == subnet_epoch_index
+                        and best_state.current_block >= finalized_state.current_block
+                        and best_state.blocks_remaining > 0
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "auditor_weight_epoch_authority_unavailable "
+                        "epoch=%s type=%s error=%s",
+                        epoch_id,
+                        type(exc).__name__,
+                        str(exc)[:200],
+                    )
+                    if check_attempt == 1 and reconnect_transport(
+                        exc,
+                        stage="epoch_authority",
+                        attempt=check_attempt,
+                    ):
+                        continue
                     return False
-                if finalized_state.subnet_epoch_index != subnet_epoch_index:
-                    return False
-                best_state = self._read_best_epoch_state()
-                return (
-                    best_state.workflow_epoch_id == int(epoch_id)
-                    and best_state.subnet_epoch_index == subnet_epoch_index
-                    and best_state.current_block >= finalized_state.current_block
-                    and best_state.blocks_remaining > 0
-                )
-            except Exception as exc:
-                logger.error(
-                    "auditor_weight_epoch_authority_unavailable "
-                    "epoch=%s type=%s error=%s",
-                    epoch_id,
-                    type(exc).__name__,
-                    str(exc)[:200],
-                )
-                return False
+            return False
 
         def lifecycle_is_open() -> bool:
             try:
@@ -2015,6 +2169,49 @@ class AuditorValidator:
             )
             print(f"⏹️ Refusing stale auditor submission for epoch {epoch_id}")
             return False
+
+        baseline_state = None
+        for baseline_attempt in range(1, 3):
+            try:
+                baseline_state = self._read_finalized_weight_submission_state()
+                break
+            except Exception as exc:
+                _audit_event(
+                    "submission_confirmation_failure",
+                    level=logging.ERROR,
+                    epoch=int(epoch_id),
+                    subnet_epoch_index=subnet_epoch_index,
+                    netuid=int(self.config.netuid),
+                    uid=getattr(self, "uid", None),
+                    stage="baseline",
+                    attempt=baseline_attempt,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                if baseline_attempt == 1 and reconnect_transport(
+                    exc,
+                    stage="baseline",
+                    attempt=baseline_attempt,
+                ):
+                    continue
+                print(
+                    "⏹️ Refusing auditor submission because finalized chain state "
+                    f"cannot be read: {exc}"
+                )
+                return False
+        if baseline_state is None:
+            return False
+
+        baseline_last_update = int(baseline_state["last_update"])
+        expected_pairs = [
+            (int(uid), int(weight))
+            for uid, weight in zip(uids, expected_weights_u16)
+        ]
+        if (
+            len(expected_pairs) != len(uids)
+            or len(expected_pairs) != len(expected_weights_u16)
+        ):
+            raise RuntimeError("expected auditor weight vector lengths differ")
 
         attempt = 0
         while True:
@@ -2083,6 +2280,15 @@ class AuditorValidator:
                         1,
                     ),
                 )
+                if reconnect_transport(
+                    exc,
+                    stage="set_weights",
+                    attempt=attempt,
+                ):
+                    if not epoch_is_current():
+                        return False
+                    time.sleep(1)
+                    continue
                 raise
             _audit_event(
                 "submission_attempt_result",
@@ -2100,12 +2306,97 @@ class AuditorValidator:
                 ),
             )
             if outcome.success:
-                return True
+                for confirmation_attempt in range(1, 6):
+                    try:
+                        finalized_state = (
+                            self._read_finalized_weight_submission_state()
+                        )
+                        last_update_advanced = (
+                            int(finalized_state["last_update"])
+                            > baseline_last_update
+                        )
+                        vector_matches = weights_within_tolerance(
+                            expected_pairs,
+                            finalized_state["weights"],
+                        )
+                        visible_vector_state = (
+                            "revealed_match"
+                            if vector_matches
+                            else "reveal_pending"
+                        )
+                        _audit_event(
+                            "submission_chain_confirmation",
+                            level=logging.INFO
+                            if last_update_advanced
+                            else logging.WARNING,
+                            epoch=int(epoch_id),
+                            subnet_epoch_index=subnet_epoch_index,
+                            netuid=int(self.config.netuid),
+                            uid=getattr(self, "uid", None),
+                            attempt=attempt,
+                            confirmation_attempt=confirmation_attempt,
+                            baseline_last_update=baseline_last_update,
+                            observed_last_update=int(
+                                finalized_state["last_update"]
+                            ),
+                            finalized_block_hash=finalized_state["block_hash"],
+                            last_update_advanced=last_update_advanced,
+                            confirmation_stage=(
+                                "timelocked_commit_finalized"
+                                if last_update_advanced
+                                else "awaiting_finalized_commit"
+                            ),
+                            visible_vector_state=visible_vector_state,
+                            vector_matches=vector_matches,
+                            expected_destination_count=len(expected_pairs),
+                            observed_destination_count=len(
+                                finalized_state["weights"]
+                            ),
+                        )
+                        if last_update_advanced:
+                            if vector_matches:
+                                print(
+                                    "   ✅ Timelocked commitment finalized; "
+                                    "the visible chain vector already matches"
+                                )
+                            else:
+                                print(
+                                    "   ✅ Timelocked commitment finalized; "
+                                    "the visible chain vector remains sealed "
+                                    "until its scheduled reveal"
+                                )
+                            return True
+                    except Exception as exc:
+                        _audit_event(
+                            "submission_chain_confirmation_failure",
+                            level=logging.WARNING,
+                            epoch=int(epoch_id),
+                            subnet_epoch_index=subnet_epoch_index,
+                            netuid=int(self.config.netuid),
+                            uid=getattr(self, "uid", None),
+                            attempt=attempt,
+                            confirmation_attempt=confirmation_attempt,
+                            error_type=type(exc).__name__,
+                            error=str(exc),
+                        )
+                        reconnect_transport(
+                            exc,
+                            stage="finalized_confirmation",
+                            attempt=confirmation_attempt,
+                        )
+                    if confirmation_attempt < 5:
+                        time.sleep(3)
 
-            print(
-                f"❌ Bittensor rejected weight submission attempt {attempt}: "
-                f"{outcome.message}"
-            )
+                print(
+                    "⚠️  SDK reported success, but finalized LastUpdate did "
+                    "not advance; retrying within the current epoch"
+                )
+
+            else:
+                print(
+                    f"❌ Bittensor rejected weight submission attempt {attempt}: "
+                    f"{outcome.message}"
+                )
             time.sleep(12)
             if not epoch_is_current():
                 _audit_event(
@@ -2197,6 +2488,7 @@ class AuditorValidator:
                 ),
                 uids=uids,
                 weights=weights_floats,
+                expected_weights_u16=weights_u16,
             )
             
             if success:
@@ -2209,45 +2501,19 @@ class AuditorValidator:
                     weights_hash=bundle.get("weights_hash"),
                     bundle_hash=bundle.get("bundle_hash"),
                     destination_count=len(uids),
+                    confirmation_stage="timelocked_commit_finalized",
                 )
-                print(f"✅ Weights submitted for epoch {epoch_id}")
+                print(
+                    f"✅ Weight submission accepted and finalized for epoch "
+                    f"{epoch_id}"
+                )
                 self.last_submitted_epoch = live_epoch_id
                 self.last_authority_epoch = epoch_id
-                
-                # Verify submission landed on chain
-                print(f"   🔍 Verifying submission landed on chain...")
-                time.sleep(2)  # Brief wait for chain propagation
-                
-                try:
-                    all_chain_weights = self.subtensor.weights(netuid=self.config.netuid)
-                    my_uid = self.uid
-                    
-                    for uid, weights_list in all_chain_weights:
-                        if uid == my_uid:
-                            # Check if first few weights match what we submitted
-                            chain_sample = [(u, w) for u, w in weights_list[:3]]
-                            submitted_sample = [(uids[i], weights_u16[i]) for i in range(min(3, len(uids)))]
-                            print(f"   Chain sample (UID {my_uid}): {chain_sample}")
-                            print(f"   Submitted sample: {submitted_sample}")
-                            
-                            # Quick sanity check
-                            if chain_sample and submitted_sample:
-                                # Compare first weight
-                                chain_first_w = dict(chain_sample).get(submitted_sample[0][0])
-                                submitted_first_w = submitted_sample[0][1]
-                                if chain_first_w is not None:
-                                    diff = abs(chain_first_w - submitted_first_w)
-                                    if diff <= 1:
-                                        print(f"   ✅ Verified: Chain matches submitted (diff={diff})")
-                                    else:
-                                        print(f"   ⚠️  WARNING: Chain differs from submitted (diff={diff})")
-                                        print(f"      Chain has OLD weights - submission may have failed!")
-                            break
-                    else:
-                        print(f"   ⚠️  Could not find our weights on chain (UID {my_uid})")
-                except Exception as e:
-                    print(f"   ⚠️  Could not verify chain weights: {e}")
-                
+                print(
+                    "   ✅ Finalized LastUpdate advanced for the auditor's "
+                    "timelocked commitment; the exact vector will become "
+                    "public at its scheduled reveal"
+                )
                 return True
             else:
                 _audit_event(
@@ -2444,7 +2710,11 @@ class AuditorValidator:
                             weights_data,
                             submission_epoch_id=current_epoch,
                         ):
-                            logger.info(f"Weights submitted for epoch {target_epoch}")
+                            logger.info(
+                                "Timelocked weight commitment finalized for "
+                                "epoch %s",
+                                target_epoch,
+                            )
                         else:
                             logger.error(f"Weight submission failed for epoch {target_epoch}")
                 

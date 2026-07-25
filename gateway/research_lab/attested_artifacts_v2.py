@@ -101,6 +101,9 @@ async def persist_execution_transport_artifacts_v2(
     reuse_persisted_artifacts = bool(artifacts) and all(
         item.get("persisted") is True for item in artifacts
     )
+    resume_persisted_artifacts = any(
+        item.get("persisted") is True for item in artifacts
+    )
     lineage_payload = {
         "source_receipt_hash": str(source_receipt["receipt_hash"]),
         "artifact_ids": [str(item["artifact_id"]) for item in artifacts],
@@ -141,6 +144,8 @@ async def persist_execution_transport_artifacts_v2(
                 "V2 encrypted artifact bucket is not configured"
             )
         for artifact in artifacts:
+            if artifact.get("persisted") is True:
+                continue
             result = await persist_enclave_artifact_v2(
                 str(artifact["artifact_id"]),
                 bucket=target_bucket,
@@ -180,7 +185,7 @@ async def persist_execution_transport_artifacts_v2(
         required_purposes=(purpose, "leadpoet.artifact_persistence.v2"),
         allowed_failed_receipt_hashes=allowed_failed,
     )
-    if reuse_persisted_artifacts:
+    if resume_persisted_artifacts:
         lineage_result = outcome.get("result")
         persisted_evidence = (
             lineage_result.get("artifacts")

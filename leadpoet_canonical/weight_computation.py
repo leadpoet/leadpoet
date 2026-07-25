@@ -136,6 +136,22 @@ def _float32(value: float) -> float:
     return struct.unpack("!f", struct.pack("!f", float(value)))[0]
 
 
+def _ordered_float_sum(values: Sequence[float]) -> float:
+    """Sum consensus floats identically on every supported Python runtime.
+
+    Python 3.12 changed ``sum()`` to use compensated summation for floats.
+    The validator enclave remains on Python 3.7, so relying on the built-in
+    would make strict auditor recomputation depend on the host interpreter.
+    An explicit left-to-right accumulation preserves the enclave's established
+    arithmetic and therefore its committed IEEE-754 output bits.
+    """
+
+    total = 0.0
+    for value in values:
+        total += float(value)
+    return total
+
+
 def normalize_to_u16_with_uids_pure(uids: Sequence[int], weights: Sequence[float]) -> Tuple[List[int], List[int]]:
     """Match Bittensor 9.12.2 ``convert_weights_and_uids_for_emit`` exactly.
 
@@ -152,7 +168,7 @@ def normalize_to_u16_with_uids_pure(uids: Sequence[int], weights: Sequence[float
     normalized_weights = [_float32(_float(weight, "weight")) for weight in weights]
     if min(normalized_weights) < 0:
         raise WeightComputationError("negative weight cannot be emitted")
-    if sum(normalized_weights) == 0:
+    if _ordered_float_sum(normalized_weights) == 0:
         return [], []
     max_weight = float(max(normalized_weights))
     scaled = [float(value) / max_weight for value in normalized_weights]
@@ -323,13 +339,17 @@ def compute_final_weights(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
         rolling_scores.append((hotkey, score))
 
     hotkey_to_uid = {hotkey: index for index, hotkey in enumerate(metagraph_hotkeys)}
-    all_rolling_total = sum(score for _, score in rolling_scores if score > 0)
+    all_rolling_total = _ordered_float_sum(
+        [score for _, score in rolling_scores if score > 0]
+    )
     registered_rows = [
         (hotkey, score, hotkey_to_uid[hotkey])
         for hotkey, score in rolling_scores
         if hotkey in hotkey_to_uid
     ]
-    registered_rolling_total = sum(score for _, score, _ in registered_rows if score > 0)
+    registered_rolling_total = _ordered_float_sum(
+        [score for _, score, _ in registered_rows if score > 0]
+    )
     deregistered_points = all_rolling_total - registered_rolling_total
 
     rolling_lead_count = _int(snapshot["rolling_lead_count"], "rolling_lead_count")
@@ -428,11 +448,11 @@ def compute_final_weights(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
 
     uids = list(uid_weights.keys())
     unnormalized_weights = list(uid_weights.values())
-    weight_sum = sum(unnormalized_weights)
+    weight_sum = _ordered_float_sum(unnormalized_weights)
     if not (0.999 <= weight_sum <= 1.001):
         raise WeightComputationError("weights do not sum to one before normalization")
     weights = [max(0.0, float(weight)) for weight in unnormalized_weights]
-    normalized_total = sum(weights)
+    normalized_total = _ordered_float_sum(weights)
     if normalized_total <= 0:
         raise WeightComputationError("sanitized weights sum to zero")
     weights = [weight / normalized_total for weight in weights]

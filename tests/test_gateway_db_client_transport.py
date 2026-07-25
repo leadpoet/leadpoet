@@ -89,6 +89,9 @@ def test_http1_migration_factory_preserves_legacy_timeout(monkeypatch):
 
 
 def test_shared_sync_client_handles_100_concurrent_postgrest_reads():
+    class ConcurrentTestServer(ThreadingHTTPServer):
+        request_queue_size = 128
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -104,7 +107,7 @@ def test_shared_sync_client_handles_100_concurrent_postgrest_reads():
         def log_message(self, _format, *args) -> None:
             return
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = ConcurrentTestServer(("127.0.0.1", 0), Handler)
     server_thread = Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     client = db_client._create_sync_client(

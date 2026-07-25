@@ -5,12 +5,21 @@ from datetime import datetime, timezone
 import pytest
 
 from gateway.tee.artifact_persistence_v2 import (
+    ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS,
+    ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES,
+    ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS,
+    ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
     ARTIFACT_POLICY_SCHEMA_VERSION,
+    MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES,
     ArtifactPersistenceV2Error,
     ArtifactPersistenceVerifierV2,
     validate_artifact_policy,
 )
-from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
+from gateway.tee.artifact_vault_v2 import (
+    MAX_ARTIFACT_BYTES,
+    EncryptedArtifactVaultV2,
+)
+from gateway.tee.provider_broker_v2 import MAX_RESPONSE_BODY_BYTES
 from leadpoet_canonical.attested_v2 import canonical_json
 
 
@@ -59,8 +68,19 @@ class _Transport:
         self.head_mode = head_mode
         self.calls = []
 
-    def __call__(self, *, method, url, headers, body, timeout_ms):
-        self.calls.append((method, url, headers, body, timeout_ms))
+    def __call__(
+        self,
+        *,
+        method,
+        url,
+        headers,
+        body,
+        timeout_ms,
+        max_response_bytes=MAX_RESPONSE_BODY_BYTES,
+    ):
+        self.calls.append(
+            (method, url, headers, body, timeout_ms, max_response_bytes)
+        )
         response_body = (
             canonical_json(self.document).encode("utf-8") if method == "GET" else b""
         )
@@ -74,6 +94,22 @@ class _Transport:
             "tls_peer_chain_hash": "sha256:" + "b" * 64,
             "tls_protocol": "TLSv1.3",
         }
+
+
+class _StatusSequenceTransport(_Transport):
+    def __init__(self, document, *, get_statuses=(200,), head_statuses=(200,)):
+        super().__init__(document)
+        self.statuses = {
+            "GET": list(get_statuses),
+            "HEAD": list(head_statuses),
+        }
+
+    def __call__(self, **kwargs):
+        response = super().__call__(**kwargs)
+        method = kwargs["method"]
+        statuses = self.statuses[method]
+        response["http_status"] = statuses.pop(0) if len(statuses) > 1 else statuses[0]
+        return response
 
 
 def test_policy_requires_exact_s3_https_boundary() -> None:
@@ -107,6 +143,54 @@ def test_verifier_fetches_ciphertext_and_lock_headers_inside_tls() -> None:
     assert result["artifact"]["persisted"] is True
     assert len(result["transport_attempts"]) == 2
     assert [call[0] for call in transport.calls] == ["GET", "HEAD"]
+    assert transport.calls[0][5] == MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
+    assert transport.calls[1][5] == MAX_RESPONSE_BODY_BYTES
+
+
+def test_artifact_readback_budget_covers_ciphertext_base64_expansion() -> None:
+    maximum_ciphertext_bytes = MAX_ARTIFACT_BYTES + 16
+    maximum_ciphertext_b64_bytes = 4 * (
+        (maximum_ciphertext_bytes + 2) // 3
+    )
+
+    assert maximum_ciphertext_b64_bytes > MAX_RESPONSE_BODY_BYTES
+    assert (
+        maximum_ciphertext_b64_bytes + 1024 * 1024
+        < MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
+    )
+
+
+def test_verifier_accepts_production_size_encrypted_readback() -> None:
+    vault = _vault()
+    descriptor = vault.seal(
+        b"x" * (48 * 1024 * 1024),
+        job_id="production-size-contract",
+        purpose="research_lab.company_score.v2",
+        artifact_kind="provider_response",
+    )
+    document = vault.export_ciphertext(descriptor["artifact_id"])[
+        "storage_document"
+    ]
+    wire_size = len(canonical_json(document).encode("utf-8"))
+    transport = _Transport(document)
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=transport,
+        clock=lambda: "2026-07-10T12:00:00Z",
+    )
+
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/attested-v2/artifacts/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert MAX_RESPONSE_BODY_BYTES < wire_size
+    assert wire_size < MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES
+    assert result["status"] == "persisted"
 
 
 def test_verifier_rejects_host_redirection_and_unsigned_urls() -> None:
@@ -153,8 +237,125 @@ def test_authenticated_s3_error_is_not_a_transport_failure_or_success() -> None:
     )
     assert result["status"] == "failed"
     assert result["failure_code"] == "authenticated_http_403"
+    assert len(result["transport_attempts"]) == 1
     assert result["transport_attempts"][0]["terminal_status"] == "authenticated_response"
     assert vault.descriptor(descriptor["artifact_id"])["persisted"] is False
+
+
+@pytest.mark.parametrize("method", ("GET", "HEAD"))
+@pytest.mark.parametrize(
+    "status",
+    sorted(ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES),
+)
+def test_authenticated_transient_http_status_retries_and_recovers(
+    method: str,
+    status: int,
+) -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+    transport = _StatusSequenceTransport(
+        document,
+        get_statuses=(status, 200) if method == "GET" else (200,),
+        head_statuses=(status, 200) if method == "HEAD" else (200,),
+    )
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=transport,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
+    )
+
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "persisted"
+    method_attempts = [
+        attempt
+        for attempt in result["transport_attempts"]
+        if attempt["method"] == method
+    ]
+    assert [attempt["http_status"] for attempt in method_attempts] == [status, 200]
+
+
+@pytest.mark.parametrize("method", ("GET", "HEAD"))
+@pytest.mark.parametrize(
+    "status",
+    sorted(ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES),
+)
+def test_authenticated_transient_http_status_exhaustion_fails_closed(
+    method: str,
+    status: int,
+) -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+    repeated = (status,) * ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
+    transport = _StatusSequenceTransport(
+        document,
+        get_statuses=repeated if method == "GET" else (200,),
+        head_statuses=repeated if method == "HEAD" else (200,),
+    )
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=transport,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
+    )
+
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure_code"] == "authenticated_http_%s" % status
+    method_attempts = [
+        attempt
+        for attempt in result["transport_attempts"]
+        if attempt["method"] == method
+    ]
+    assert len(method_attempts) == ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
+    assert vault.descriptor(descriptor["artifact_id"])["persisted"] is False
+
+
+def test_oversized_authenticated_storage_document_fails_closed() -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+
+    class OversizedTransport(_Transport):
+        def __call__(self, **kwargs):
+            response = super().__call__(**kwargs)
+            if kwargs["method"] == "GET":
+                response["body"] = b"x" * (
+                    MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES + 1
+                )
+            return response
+
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=OversizedTransport(document),
+        clock=lambda: "2026-07-10T12:00:00Z",
+    )
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure_code"] == "storage_document_too_large"
 
 
 def test_object_lock_mismatch_fails_after_authenticated_readback() -> None:
@@ -190,6 +391,7 @@ def test_parent_drop_is_a_visible_transport_failure() -> None:
         policy=POLICY,
         transport=dropped,
         clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
     )
     result = verifier.verify(
         artifact_id=descriptor["artifact_id"],
@@ -200,4 +402,167 @@ def test_parent_drop_is_a_visible_transport_failure() -> None:
     )
     assert result["status"] == "failed"
     assert result["failure_code"] == "connection_reset"
-    assert result["transport_attempts"][0]["terminal_status"] == "transport_failure"
+    assert len(result["transport_attempts"]) == ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
+    assert all(
+        item["terminal_status"] == "transport_failure"
+        for item in result["transport_attempts"]
+    )
+
+
+def test_transport_failure_retries_and_binds_every_attempt() -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+    successful = _Transport(document)
+    failures_remaining = {"GET": 1, "HEAD": 1}
+
+    def flaky(**kwargs):
+        method = kwargs["method"]
+        if failures_remaining[method]:
+            failures_remaining[method] -= 1
+            raise EOFError("unexpected EOF")
+        return successful(**kwargs)
+
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=flaky,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
+    )
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "persisted"
+    assert [item["method"] for item in result["transport_attempts"]] == [
+        "GET",
+        "GET",
+        "HEAD",
+        "HEAD",
+    ]
+    assert [
+        item["terminal_status"] for item in result["transport_attempts"]
+    ] == [
+        "transport_failure",
+        "authenticated_response",
+        "transport_failure",
+        "authenticated_response",
+    ]
+    assert result["artifact"]["persisted"] is True
+
+
+@pytest.mark.parametrize(
+    "get_failures",
+    range(ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS),
+)
+@pytest.mark.parametrize(
+    "head_failures",
+    range(ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS),
+)
+def test_transport_recovery_at_every_retry_ordinal(
+    get_failures: int,
+    head_failures: int,
+) -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+    successful = _Transport(document)
+    failures_remaining = {"GET": get_failures, "HEAD": head_failures}
+    delays = []
+
+    def flaky(**kwargs):
+        method = kwargs["method"]
+        if failures_remaining[method]:
+            failures_remaining[method] -= 1
+            raise EOFError("unexpected EOF while reading")
+        return successful(**kwargs)
+
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=flaky,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=delays.append,
+    )
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "persisted"
+    assert len(result["transport_attempts"]) == (
+        get_failures + head_failures + 2
+    )
+    assert delays == (
+        list(ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS[1 : get_failures + 1])
+        + list(
+            ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS[1 : head_failures + 1]
+        )
+    )
+    assert all(
+        item["retry_policy_hash"]
+        == result["transport_attempts"][0]["retry_policy_hash"]
+        for item in result["transport_attempts"]
+    )
+    assert result["transport_attempts"][0]["retry_policy_hash"] != verifier._policy_hash
+
+
+def test_transport_retry_budget_fits_presigned_url_lifetime() -> None:
+    assert (
+        len(ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS)
+        == ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
+    )
+    maximum_success_seconds = (
+        2
+        * ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
+        * ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS
+        / 1000
+        + 2 * sum(ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS[1:])
+    )
+    assert maximum_success_seconds < 300
+
+
+def test_exhausted_transport_verification_does_not_poison_later_invocation() -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+    successful = _Transport(document)
+    remaining_failures = ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
+
+    def recover_after_one_exhausted_call(**kwargs):
+        nonlocal remaining_failures
+        if kwargs["method"] == "GET" and remaining_failures:
+            remaining_failures -= 1
+            raise EOFError("unexpected EOF while reading")
+        return successful(**kwargs)
+
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=recover_after_one_exhausted_call,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
+    )
+    first = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+    second = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert first["status"] == "failed"
+    assert first["failure_code"] == "unexpected_eof"
+    assert second["status"] == "persisted"

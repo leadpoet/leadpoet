@@ -86,6 +86,36 @@ jobs:
             research_lab \
             validator_models
 
+      - name: Exercise validator enclave finalization under Python 3.7
+        run: |
+          docker run --rm \
+            --platform linux/amd64 \
+            --network none \
+            --cpus 1 \
+            --memory 512m \
+            --pids-limit 128 \
+            --security-opt no-new-privileges \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --env PYTHONPATH=/source \
+            --workdir /source \
+            python@sha256:b53f496ca43e5af6994f8e316cf03af31050bf7944e0e4a308ad86c001cf028b \
+            python tests/validator_enclave_python37_runtime_probe.py
+
+      - name: Exercise auditor canonical verification under Python 3.12
+        run: |
+          docker run --rm \
+            --platform linux/amd64 \
+            --network none \
+            --cpus 1 \
+            --memory 512m \
+            --pids-limit 128 \
+            --security-opt no-new-privileges \
+            --mount "type=bind,src=$PWD,dst=/source,readonly" \
+            --env PYTHONPATH=/source \
+            --workdir /source \
+            python@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de \
+            python tests/validator_enclave_python37_runtime_probe.py
+
       - name: Ensure PostgreSQL server binaries (migration integration test)
         run: |
           if ! ls /usr/lib/postgresql/*/bin/initdb >/dev/null 2>&1 \

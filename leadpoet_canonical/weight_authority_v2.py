@@ -29,6 +29,7 @@ from leadpoet_canonical.hotkey_authority_v2 import (
 from leadpoet_canonical.chain_source_v2 import (
     CHAIN_ARCHIVE_ENDPOINT_HOST,
     CHAIN_ENDPOINT_HOST,
+    CHAIN_ENDPOINT_PORT,
 )
 from leadpoet_canonical.weight_computation import compute_final_weights
 
@@ -1154,16 +1155,30 @@ def validate_weight_finalization_submission_v2(
         and attempt.get("purpose") == "validator.weights.finalized.v2"
     ]
     _require(scoped_attempts, "weight finalization has no authenticated chain reads")
+    allowed_chain_sources = {
+        ("bittensor_chain", CHAIN_ENDPOINT_HOST),
+        ("bittensor_archive", CHAIN_ARCHIVE_ENDPOINT_HOST),
+    }
     _require(
         all(
-            attempt.get("provider_id") == "bittensor_chain"
-            and attempt.get("destination_host")
-            == "entrypoint-finney.opentensor.ai"
-            and attempt.get("destination_port") == 443
+            (
+                attempt.get("provider_id"),
+                attempt.get("destination_host"),
+            )
+            in allowed_chain_sources
+            and attempt.get("destination_port") == CHAIN_ENDPOINT_PORT
             and attempt.get("terminal_status") == "authenticated_response"
             for attempt in scoped_attempts
         ),
         "weight finalization chain evidence is invalid",
+    )
+    _require(
+        any(
+            attempt.get("provider_id") == "bittensor_chain"
+            and attempt.get("destination_host") == CHAIN_ENDPOINT_HOST
+            for attempt in scoped_attempts
+        ),
+        "weight finalization has no authenticated live-chain reads",
     )
     return {
         "validator_hotkey": hotkey,

@@ -526,6 +526,18 @@ app.add_middleware(
     max_concurrent_miners=75  # Pool=150, miners=75, leaves 75 for validators/consensus (doubled miners: 128→256 UIDs)
 )
 
+# ============================================================
+# Optional OpenTelemetry (infra-only, off unless configured)
+# ============================================================
+# Emits request method/route-template/status/duration only when
+# GATEWAY_OTEL_ENABLED, GATEWAY_OTEL_ENDPOINT, and GATEWAY_OTEL_TOKEN are
+# all set. Never
+# captures bodies, query strings, DB statements, or LLM/training content, and
+# never touches the enclaves. No-op by default.
+from gateway.observability.otel_bootstrap import configure_gateway_otel
+
+configure_gateway_otel(app)
+
 # Production middleware: Only log errors and critical paths
 # Comment out request logging to reduce overhead in production
 # @app.middleware("http")

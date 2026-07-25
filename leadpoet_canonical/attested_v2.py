@@ -139,6 +139,7 @@ TRANSPORT_FAILURE_CODES = frozenset(
         "plaintext_forbidden",
         "policy_denied",
         "proxy_failure",
+        "response_too_large",
         "tls_failure",
         "timeout",
         "unexpected_eof",

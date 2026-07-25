@@ -1227,7 +1227,8 @@ class ValidatorHotkeyAuthorityV2:
             )
         except Exception as exc:
             raise ValidatorHotkeyAuthorityV2Error(
-                "authorized weight extrinsic finalization was not proven"
+                "authorized weight extrinsic finalization was not proven: "
+                f"{type(exc).__name__}: {str(exc)[:240]}"
             ) from exc
         included = [
             item

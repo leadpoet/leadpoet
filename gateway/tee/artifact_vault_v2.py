@@ -23,6 +23,9 @@ ARTIFACT_MASTER_KEY_HASH_DOMAIN = b"leadpoet-artifact-master-key-v2:"
 MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 MAX_IN_MEMORY_ARTIFACTS = 2048
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES = frozenset(
+    {408, 429, 500, 502, 503, 504}
+)
 
 
 class ArtifactVaultV2Error(RuntimeError):
@@ -287,12 +290,40 @@ class EncryptedArtifactVaultV2:
         for attempt in transport_attempts:
             validate_transport_attempt(attempt)
             normalized_attempts.append(dict(attempt))
-        if len(normalized_attempts) != 2 or [
-            item["method"] for item in normalized_attempts
-        ] != ["GET", "HEAD"]:
+        methods = [item["method"] for item in normalized_attempts]
+        try:
+            first_head = methods.index("HEAD")
+        except ValueError:
+            first_head = -1
+        if (
+            len(normalized_attempts) < 2
+            or first_head < 1
+            or any(method != "GET" for method in methods[:first_head])
+            or any(method != "HEAD" for method in methods[first_head:])
+        ):
             raise ArtifactVaultV2Error(
                 "artifact persistence requires authenticated GET and HEAD"
             )
+        for attempts_for_method in (
+            normalized_attempts[:first_head],
+            normalized_attempts[first_head:],
+        ):
+            if any(
+                item["terminal_status"] != "transport_failure"
+                and not (
+                    item["terminal_status"] == "authenticated_response"
+                    and item["http_status"]
+                    in ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES
+                )
+                for item in attempts_for_method[:-1]
+            ) or (
+                attempts_for_method[-1]["terminal_status"]
+                != "authenticated_response"
+                or attempts_for_method[-1]["http_status"] != 200
+            ):
+                raise ArtifactVaultV2Error(
+                    "artifact persistence transport sequence is invalid"
+                )
         with self._lock:
             record = self._artifacts.get(str(artifact_id or ""))
             persisted_record = self._persisted_artifacts.get(str(artifact_id or ""))

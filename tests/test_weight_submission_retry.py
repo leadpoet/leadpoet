@@ -61,6 +61,34 @@ def _auditor(results, *, blocks=()):
         lambda *, force_refresh: {"lifecycle_state": "stateful_active"}
     )
     auditor.last_submitted_epoch = None
+    auditor.uid = 9
+    finalized_state = {
+        "block_hash": "0x" + "1" * 64,
+        "last_update": 100,
+        "weights": [],
+    }
+
+    def read_finalized_weight_submission_state():
+        return dict(finalized_state)
+
+    original_set_weights = auditor.subtensor.set_weights
+
+    def set_weights(**kwargs):
+        response = original_set_weights(**kwargs)
+        success = getattr(response, "success", None)
+        if success is None and isinstance(response, (tuple, list)):
+            success = response[0]
+        if success is True:
+            # Finney commit-reveal advances LastUpdate when the encrypted
+            # commitment finalizes. The public Weights row remains the prior
+            # vector until the scheduled reveal at the next epoch boundary.
+            finalized_state["last_update"] += 1
+        return response
+
+    auditor.subtensor.set_weights = set_weights
+    auditor._read_finalized_weight_submission_state = (
+        read_finalized_weight_submission_state
+    )
     return auditor
 
 
@@ -553,6 +581,7 @@ def test_auditor_retries_false_tuples_until_true(monkeypatch, capsys):
         epoch_id=2,
         uids=[3, 4],
         weights=[0.4, 0.6],
+        expected_weights_u16=[43690, 65535],
     )
 
     assert result is True
@@ -568,8 +597,13 @@ def test_auditor_retries_false_tuples_until_true(monkeypatch, capsys):
     assert "rejected-two" in output
 
 
-def test_auditor_accepts_v10_extrinsic_response(monkeypatch):
+def test_auditor_accepts_v10_finalized_commit_before_weight_reveal(
+    monkeypatch,
+    capsys,
+    caplog,
+):
     auditor = _auditor([_SdkResponse(True, "accepted")], blocks=[1065])
+    caplog.set_level("INFO", logger=auditor_module.__name__)
 
     def unexpected_sleep(_seconds):
         raise AssertionError("successful submission must not sleep")
@@ -588,6 +622,7 @@ def test_auditor_accepts_v10_extrinsic_response(monkeypatch):
         epoch_id=2,
         uids=[3],
         weights=[1.0],
+        expected_weights_u16=[65535],
     )
 
     assert result is True
@@ -601,6 +636,372 @@ def test_auditor_accepts_v10_extrinsic_response(monkeypatch):
             "mechid": 0,
         }
     ]
+    output = capsys.readouterr().out
+    assert "visible chain vector remains sealed" in output
+    assert '"confirmation_stage":"timelocked_commit_finalized"' in caplog.text
+    assert '"visible_vector_state":"reveal_pending"' in caplog.text
+    assert '"event":"submission_failed"' not in caplog.text
+
+
+def test_auditor_reconnect_is_transactional(monkeypatch):
+    closed = []
+
+    class Source:
+        def __init__(self, uid):
+            self.uid = uid
+
+        def get_uid_for_hotkey_on_subnet(self, **_kwargs):
+            return self.uid
+
+        def close(self):
+            closed.append(self)
+
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.config = SimpleNamespace(netuid=71)
+    auditor.wallet = SimpleNamespace(
+        hotkey=SimpleNamespace(ss58_address="5AuditorHotkey")
+    )
+    previous = Source(62)
+    replacement = Source(155)
+    auditor.subtensor = previous
+    auditor.uid = 62
+    auditor.consecutive_errors = 4
+    monkeypatch.setattr(
+        auditor_module.bt,
+        "Subtensor",
+        lambda *, config: replacement,
+    )
+
+    assert auditor._reconnect_subtensor(reason="test") is True
+    assert auditor.subtensor is replacement
+    assert auditor.uid == 155
+    assert auditor.consecutive_errors == 0
+    assert closed == [previous]
+
+
+def test_auditor_failed_reconnect_preserves_previous_source(monkeypatch):
+    closed = []
+
+    class Source:
+        def __init__(self, uid):
+            self.uid = uid
+
+        def get_uid_for_hotkey_on_subnet(self, **_kwargs):
+            return self.uid
+
+        def close(self):
+            closed.append(self)
+
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.config = SimpleNamespace(netuid=71)
+    auditor.wallet = SimpleNamespace(
+        hotkey=SimpleNamespace(ss58_address="5AuditorHotkey")
+    )
+    previous = Source(62)
+    replacement = Source(None)
+    auditor.subtensor = previous
+    auditor.uid = 62
+    auditor.consecutive_errors = 4
+    monkeypatch.setattr(
+        auditor_module.bt,
+        "Subtensor",
+        lambda *, config: replacement,
+    )
+
+    assert auditor._reconnect_subtensor(reason="test") is False
+    assert auditor.subtensor is previous
+    assert auditor.uid == 62
+    assert closed == [replacement]
+
+
+def test_auditor_reconnects_stale_set_weights_socket_and_retries_exact_vector(
+    monkeypatch,
+):
+    auditor = _auditor([(True, "accepted")])
+    healthy = auditor.subtensor
+    stale = _FakeSubtensor([])
+
+    def stale_set_weights(**kwargs):
+        stale.calls.append(dict(kwargs))
+        raise ConnectionError("WebSocket connection is closed")
+
+    stale.set_weights = stale_set_weights
+    auditor.subtensor = stale
+    reconnect_reasons = []
+
+    def reconnect(*, reason):
+        reconnect_reasons.append(reason)
+        auditor.subtensor = healthy
+        return True
+
+    auditor._reconnect_subtensor = reconnect
+    state = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1065,
+        blocks_remaining=20,
+    )
+    auditor._read_epoch_state = lambda: state
+    auditor._read_best_epoch_state = lambda: state
+    sleeps = []
+    monkeypatch.setattr(auditor_module.time, "sleep", sleeps.append)
+
+    result = auditor._set_weights_until_epoch_end(
+        epoch_id=2,
+        uids=[3],
+        weights=[1.0],
+        expected_weights_u16=[65535],
+    )
+
+    assert result is True
+    assert reconnect_reasons == ["weight_submission:set_weights"]
+    assert stale.calls[0]["uids"] == [3]
+    assert healthy.calls[0]["uids"] == [3]
+    assert stale.calls[0]["weights"] == healthy.calls[0]["weights"] == [1.0]
+    assert sleeps == [1]
+
+
+def test_auditor_does_not_reconnect_or_retry_semantic_sdk_exception(
+    monkeypatch,
+):
+    auditor = _auditor([])
+
+    def invalid_set_weights(**_kwargs):
+        raise ValueError("invalid signed weight payload")
+
+    auditor.subtensor.set_weights = invalid_set_weights
+    auditor._reconnect_subtensor = lambda **_kwargs: (_ for _ in ()).throw(
+        AssertionError("semantic errors must not reconnect")
+    )
+    state = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1065,
+        blocks_remaining=20,
+    )
+    auditor._read_epoch_state = lambda: state
+    auditor._read_best_epoch_state = lambda: state
+    monkeypatch.setattr(auditor_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(ValueError, match="invalid signed weight payload"):
+        auditor._set_weights_until_epoch_end(
+            epoch_id=2,
+            uids=[3],
+            weights=[1.0],
+            expected_weights_u16=[65535],
+        )
+
+
+def test_auditor_retries_sdk_success_until_finalized_last_update_advances(
+    monkeypatch,
+):
+    auditor = _auditor(
+        [(True, "accepted-but-unobserved"), (True, "accepted-and-finalized")]
+    )
+    state = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1065,
+        blocks_remaining=20,
+    )
+    auditor._read_epoch_state = lambda: state
+    auditor._read_best_epoch_state = lambda: state
+    expected = [(3, 65535)]
+    finalized_states = iter(
+        [
+            {
+                "block_hash": "0x" + "1" * 64,
+                "last_update": 100,
+                "weights": [],
+            },
+            *[
+                {
+                    "block_hash": "0x" + str(index) * 64,
+                    "last_update": 100,
+                    "weights": [],
+                }
+                for index in range(2, 7)
+            ],
+            {
+                "block_hash": "0x" + "7" * 64,
+                "last_update": 101,
+                "weights": expected,
+            },
+        ]
+    )
+    auditor._read_finalized_weight_submission_state = lambda: next(
+        finalized_states
+    )
+    sleeps = []
+    monkeypatch.setattr(auditor_module.time, "sleep", sleeps.append)
+
+    result = auditor._set_weights_until_epoch_end(
+        epoch_id=2,
+        uids=[3],
+        weights=[1.0],
+        expected_weights_u16=[65535],
+    )
+
+    assert result is True
+    assert len(auditor.subtensor.calls) == 2
+    assert sleeps == [3, 3, 3, 3, 12]
+
+
+def test_auditor_does_not_reject_prior_visible_vector_before_reveal(
+    monkeypatch,
+    capsys,
+    caplog,
+):
+    auditor = _auditor([(True, "accepted")])
+    caplog.set_level("INFO", logger=auditor_module.__name__)
+    state = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1065,
+        blocks_remaining=20,
+    )
+    auditor._read_epoch_state = lambda: state
+    auditor._read_best_epoch_state = lambda: state
+    finalized_states = iter(
+        [
+            {
+                "block_hash": "0x" + "1" * 64,
+                "last_update": 100,
+                "weights": [],
+            },
+            {
+                "block_hash": "0x" + "2" * 64,
+                "last_update": 101,
+                "weights": [(3, 60000)],
+            },
+        ]
+    )
+    auditor._read_finalized_weight_submission_state = lambda: next(
+        finalized_states
+    )
+    monkeypatch.setattr(
+        auditor_module.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(
+            AssertionError("a finalized commitment must not retry before reveal")
+        ),
+    )
+
+    result = auditor._set_weights_until_epoch_end(
+        epoch_id=2,
+        uids=[3],
+        weights=[1.0],
+        expected_weights_u16=[65535],
+    )
+
+    assert result is True
+    assert len(auditor.subtensor.calls) == 1
+    assert auditor.last_submitted_epoch is None
+    output = capsys.readouterr().out
+    assert "visible chain vector remains sealed" in output
+    assert '"confirmation_stage":"timelocked_commit_finalized"' in caplog.text
+    assert '"visible_vector_state":"reveal_pending"' in caplog.text
+    assert '"event":"submission_failed"' not in caplog.text
+
+
+def test_auditor_submit_records_commit_finalization_not_visible_reveal(
+    monkeypatch,
+    caplog,
+):
+    auditor = _auditor([_SdkResponse(True, "accepted")])
+    state = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1065,
+        blocks_remaining=20,
+    )
+    auditor._read_epoch_state = lambda: state
+    auditor._read_best_epoch_state = lambda: state
+    auditor._subnet_index_for_workflow_epoch = lambda _epoch: None
+    monkeypatch.setattr(
+        auditor_module.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(
+            AssertionError("a finalized commitment must not retry")
+        ),
+    )
+    caplog.set_level("INFO", logger=auditor_module.__name__)
+
+    result = auditor.submit_weights_to_chain(
+        2,
+        {
+            "epoch_id": 2,
+            "block": 1065,
+            "uids": [3],
+            "weights_u16": [65535],
+            "weights_hash": "weights-hash",
+            "bundle_hash": "bundle-hash",
+            "authority_stage": "finalized",
+        },
+        submission_epoch_id=2,
+    )
+
+    assert result is True
+    assert auditor.last_submitted_epoch == 2
+    assert auditor.last_authority_epoch == 2
+    assert '"event":"submission_success"' in caplog.text
+    assert '"confirmation_stage":"timelocked_commit_finalized"' in caplog.text
+    assert '"event":"submission_failed"' not in caplog.text
+
+
+def test_auditor_reports_visible_vector_when_reveal_already_matches(
+    monkeypatch,
+    capsys,
+):
+    auditor = _auditor([(True, "accepted")])
+    state = SimpleNamespace(
+        workflow_epoch_id=2,
+        subnet_epoch_index=None,
+        current_block=1065,
+        blocks_remaining=20,
+    )
+    auditor._read_epoch_state = lambda: state
+    auditor._read_best_epoch_state = lambda: state
+    finalized_states = iter(
+        [
+            {
+                "block_hash": "0x" + "1" * 64,
+                "last_update": 100,
+                "weights": [(8, 65535)],
+            },
+            {
+                "block_hash": "0x" + "2" * 64,
+                "last_update": 101,
+                "weights": [(3, 65535)],
+            },
+        ]
+    )
+    auditor._read_finalized_weight_submission_state = lambda: next(
+        finalized_states
+    )
+    monkeypatch.setattr(
+        auditor_module.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(
+            AssertionError("a confirmed submission must not retry")
+        ),
+    )
+
+    result = auditor._set_weights_until_epoch_end(
+        epoch_id=2,
+        uids=[3],
+        weights=[1.0],
+        expected_weights_u16=[65535],
+    )
+
+    assert result is True
+    assert len(auditor.subtensor.calls) == 1
+    output = capsys.readouterr().out
+    assert "visible chain vector already matches" in output
 
 
 def test_auditor_lifecycle_transition_before_sdk_fails_closed(monkeypatch):
@@ -629,6 +1030,7 @@ def test_auditor_lifecycle_transition_before_sdk_fails_closed(monkeypatch):
         epoch_id=2,
         uids=[0],
         weights=[1.0],
+        expected_weights_u16=[65535],
     )
 
     assert result is False
@@ -708,6 +1110,7 @@ def test_auditor_stops_before_retry_after_epoch_rollover(monkeypatch):
         epoch_id=2,
         uids=[0],
         weights=[1.0],
+        expected_weights_u16=[65535],
     )
 
     assert result is False
@@ -750,6 +1153,7 @@ def test_auditor_best_head_rollover_stops_retry_while_finalized_remains_old(
         subnet_epoch_index=10,
         uids=[0],
         weights=[1.0],
+        expected_weights_u16=[65535],
     )
 
     assert result is False

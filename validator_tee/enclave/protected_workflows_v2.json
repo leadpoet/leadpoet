@@ -187,7 +187,7 @@
       "symbol": "Validator._recover_weight_publication_journal_v2"
     },
     {
-      "ast_sha256": "sha256:12040d31ec559f9d2e30c6268dcabc0d221559dd61a9b6c3edc07ccfb8678c9c",
+      "ast_sha256": "sha256:1ac9e7c83ec49fb2d5185b49cef5642d89132fb5368321aaae52a3f14210d0cb",
       "path": "neurons/validator.py",
       "symbol": "Validator._research_lab_pre_weight_submission_guard"
     },
@@ -302,7 +302,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:ff611c07ab16e2be767716ff3eb48dc68fa51dfe31adf7ffd1177d7d5b4a70f1",
-  "protected_source_commit": "e14125ca73282bb338a0d62439f092573ae766ab",
+  "manifest_hash": "sha256:b56f384724729569c997846483731849c071439e7e3c17925429c251f1515094",
+  "protected_source_commit": "632b2f2e3cd379b52132837f2b164b89f3135db7",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

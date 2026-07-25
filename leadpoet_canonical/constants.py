@@ -25,6 +25,11 @@ EPOCH_LENGTH = 360
 # current-epoch auditor mirroring.
 WEIGHT_SUBMISSION_BLOCK = 300
 
+# Begin the expensive, deterministic Research Lab allocation preparation well
+# before the submission window. This does not authorize or publish weights; it
+# only gives the primary time to reconstruct and validate durable ancestry.
+ALLOCATION_PREPARATION_BLOCK = 180
+
 # Maximum allowed drift between gateway-observed block and submission block
 # Submissions with larger drift are rejected to prevent replay attacks
 MAX_BLOCK_DRIFT = 30

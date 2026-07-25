@@ -108,7 +108,10 @@ from leadpoet_canonical.weight_computation import (
     research_lab_uid_weights_from_allocation as canonical_research_lab_uid_weights_from_allocation,
     weight_config_hash as canonical_weight_config_hash,
 )
-from leadpoet_canonical.constants import WEIGHT_SUBMISSION_BLOCK
+from leadpoet_canonical.constants import (
+    ALLOCATION_PREPARATION_BLOCK,
+    WEIGHT_SUBMISSION_BLOCK,
+)
 from leadpoet_verifier.economics import DEFAULT_RESEARCH_LAB_EMISSION_PERCENT
 
 
@@ -3868,6 +3871,11 @@ class Validator(BaseValidatorNeuron):
     async def _research_lab_pre_weight_submission_guard(self, current_epoch: int) -> dict:
         """Fetch the sole V2 allocation authority before final-weight computation."""
 
+        cached = getattr(self, "_research_lab_allocation_guard_cache", {}).get(
+            int(current_epoch)
+        )
+        if isinstance(cached, dict) and cached.get("verified") is True:
+            return cached
         try:
             from leadpoet_canonical.allocation_handoff_v2 import (
                 validate_allocation_handoff_v2,
@@ -3912,7 +3920,7 @@ class Validator(BaseValidatorNeuron):
                 f"champions={float(allocation_doc.get('champion_alpha_percent') or 0):.4f}%, "
                 f"queued={float(allocation_doc.get('queued_champion_alpha_percent') or 0):.4f}%)"
             )
-            return {
+            result = {
                 "abort_chain_submission": False,
                 "verified": True,
                 "allocation_component": component,
@@ -3930,6 +3938,14 @@ class Validator(BaseValidatorNeuron):
                     "passed": True,
                 },
             }
+            # Keep only the current epoch. The allocation authority is
+            # deterministic for an epoch, and retaining the fully verified
+            # handoff prevents block-300 submission from downloading and
+            # validating the same multi-megabyte ancestry again.
+            self._research_lab_allocation_guard_cache = {
+                int(current_epoch): result
+            }
+            return result
         except Exception as exc:
             bt.logging.error(
                 "Authoritative V2 Research Lab allocation failed closed: "
@@ -3944,6 +3960,34 @@ class Validator(BaseValidatorNeuron):
                 "allocation_verification": None,
                 "evaluation_verification": None,
             }
+
+    async def _prepare_research_lab_allocation(
+        self,
+        current_epoch: int,
+        *,
+        wait: bool,
+    ) -> Optional[dict]:
+        """Start one epoch preparation task and optionally wait for its result."""
+
+        epoch = int(current_epoch)
+        tasks = getattr(self, "_research_lab_allocation_preparation_tasks", {})
+        task = tasks.get(epoch)
+        if task is None:
+            task = asyncio.create_task(
+                self._research_lab_pre_weight_submission_guard(epoch)
+            )
+            # Retain only the current epoch so stale multi-megabyte handoffs do
+            # not accumulate in a long-lived validator process.
+            tasks = {epoch: task}
+            self._research_lab_allocation_preparation_tasks = tasks
+        if not wait and not task.done():
+            return None
+        result = await asyncio.shield(task)
+        if result.get("abort_chain_submission"):
+            # A failed preparation is retryable. Successful results stay in
+            # the epoch cache and are reused when the submission window opens.
+            tasks.pop(epoch, None)
+        return result
 
     async def _publish_and_set_weights(
         self,
@@ -4388,6 +4432,21 @@ class Validator(BaseValidatorNeuron):
             current_epoch = epoch_state.workflow_epoch_id
             blocks_into_epoch = epoch_state.epoch_block
             
+            if epoch_state.deadline_reached(ALLOCATION_PREPARATION_BLOCK):
+                prepared = await self._prepare_research_lab_allocation(
+                    current_epoch,
+                    wait=False,
+                )
+                if (
+                    isinstance(prepared, dict)
+                    and prepared.get("abort_chain_submission")
+                ):
+                    bt.logging.warning(
+                        "Authoritative V2 Research Lab allocation preparation "
+                        f"not ready for epoch {current_epoch}; retrying before "
+                        f"block {WEIGHT_SUBMISSION_BLOCK}"
+                    )
+
             if not epoch_state.deadline_reached(WEIGHT_SUBMISSION_BLOCK):
                 return False
             
@@ -4403,7 +4462,11 @@ class Validator(BaseValidatorNeuron):
                 # This is the PRIMARY guard against duplicate submissions
                 return True
 
-            research_lab_guard = await self._research_lab_pre_weight_submission_guard(current_epoch)
+            research_lab_guard = await self._prepare_research_lab_allocation(
+                current_epoch,
+                wait=True,
+            )
+            assert research_lab_guard is not None
             if research_lab_guard.get("abort_chain_submission"):
                 print(f"   ❌ Research Lab pre-submission guard blocked weights: {research_lab_guard.get('reason')}")
                 return False

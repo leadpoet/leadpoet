@@ -464,18 +464,25 @@ def main() -> int:
             for row in weight_rows
             if row.get("stage") == "http_handoff"
         ]
+        localhost_http_rows = [
+            row
+            for row in boundaries
+            if row.get("boundary") == "localhost_allocation_http"
+        ]
         if (
             not http_rows
             or http_rows[0].get("status") != "started"
             or http_rows[-1].get("status") != "ok"
-            or not any(
-                row.get("boundary") == "localhost_allocation_http"
-                and row.get("status") == "ok"
-                for row in boundaries
-            )
+            or len(localhost_http_rows) != 1
+            or localhost_http_rows[0].get("status") != "ok"
+            or localhost_http_rows[0].get("timeout_seconds") != 360
+            or localhost_http_rows[0].get("simulated_build_seconds") != 284
+            or localhost_http_rows[0].get("prelaunch_epoch") != 99999
+            or localhost_http_rows[0].get("postlaunch_epoch") != 100000
+            or localhost_http_rows[0].get("epoch_rollover") is not True
         ):
             raise SystemExit(
-                "real post-launch allocation handoff was not validated"
+                "post-rollover allocation handoff deadline was not validated"
             )
         state = json.loads(
             Path("/rehearsal-state/state.json").read_text(encoding="utf-8")

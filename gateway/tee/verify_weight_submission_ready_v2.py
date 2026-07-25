@@ -97,6 +97,7 @@ async def verify_weight_submission_ready_v2(
     netuid: int | None = None,
     http_attempts: int = 3,
     http_retry_seconds: float = 2.0,
+    http_timeout_seconds: int = 90,
 ) -> dict[str, Any]:
     """Repair legacy authority if requested, then validate the exact V2 handoff."""
 
@@ -189,12 +190,15 @@ async def verify_weight_submission_ready_v2(
             raise ValueError("http_attempts must be positive")
         if float(http_retry_seconds) < 0:
             raise ValueError("http_retry_seconds must be non-negative")
+        if int(http_timeout_seconds) < 1:
+            raise ValueError("http_timeout_seconds must be positive")
         for attempt in range(1, int(http_attempts) + 1):
             try:
                 handoff = await asyncio.to_thread(
                     fetch_research_lab_attested_allocation_bundle,
                     gateway_url,
                     effective_epoch,
+                    timeout_seconds=int(http_timeout_seconds),
                 )
                 break
             except Exception as exc:
@@ -203,6 +207,16 @@ async def verify_weight_submission_ready_v2(
                         "gateway allocation HTTP handoff failed after "
                         f"{attempt} attempts: {exc}"
                     ) from exc
+                logger.warning(
+                    "weight_readiness_http_transient_retry "
+                    "epoch=%s attempt=%s/%s timeout_seconds=%s "
+                    "error_type=%s",
+                    effective_epoch,
+                    attempt,
+                    int(http_attempts),
+                    int(http_timeout_seconds),
+                    type(exc).__name__,
+                )
                 await asyncio.sleep(float(http_retry_seconds))
     else:
         from gateway.research_lab.api import (
@@ -256,6 +270,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--gateway-url")
     parser.add_argument("--epoch", type=int)
     parser.add_argument("--netuid", type=int)
+    parser.add_argument("--http-timeout-seconds", type=int, default=90)
     return parser
 
 
@@ -267,6 +282,7 @@ def main() -> int:
             gateway_url=args.gateway_url,
             epoch=args.epoch,
             netuid=args.netuid,
+            http_timeout_seconds=args.http_timeout_seconds,
         )
     )
     print(json.dumps(result, sort_keys=True))

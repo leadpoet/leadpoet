@@ -100,10 +100,15 @@ def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
     http_handoff = script.index(
         "--gateway-url http://localhost:8000"
     )
+    http_timeout = script.index(
+        '--http-timeout-seconds "$GATEWAY_WEIGHT_INPUT_HTTP_TIMEOUT_SECONDS"',
+        http_handoff,
+    )
     install = script.index(
         'GATEWAY_DEPLOY_STAGE="host_restart_script_install"'
     )
 
+    assert "GATEWAY_WEIGHT_INPUT_HTTP_TIMEOUT_SECONDS=360" in script
     assert (
         runtime_ready
         < cutover
@@ -111,6 +116,7 @@ def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
         < launch
         < base_health
         < http_handoff
+        < http_timeout
         < install
     )
     assert 'GATEWAY_DEPLOY_STAGE="validator_weight_input_repair"' in script

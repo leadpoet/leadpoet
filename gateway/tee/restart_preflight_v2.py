@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -396,6 +397,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--acceptance-corpus-manifest", type=Path)
     parser.add_argument("--acceptance-corpus-root", type=Path)
     args = parser.parse_args(argv)
+    try:
+        from scripts.gateway_git_deploy import (
+            write_tree_verification_evidence,
+        )
+
+        candidate_tree_evidence = write_tree_verification_evidence(
+            repo_root=Path(
+                os.environ.get(
+                    "LEADPOET_REPO_ROOT",
+                    "/home/ec2-user/leadpoet_repo",
+                )
+            ),
+            materialized_root=Path.cwd(),
+            target_sha=str(args.deploy_commit).lower(),
+            phase="prepared_archive",
+            strict_extras=True,
+            output_path=(
+                args.config_dir
+                / "gateway-candidate-tree-preflight.json"
+            ),
+        )
+    except Exception as exc:
+        raise GatewayRestartPreflightV2Error(
+            "prepared gateway candidate tree does not match its exact Git blobs"
+        ) from exc
     parent_vcpus, parent_memory_mib = _observed_capacity()
     import boto3
 
@@ -415,6 +441,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         acceptance_corpus_root=args.acceptance_corpus_root,
         artifact_s3_client=boto3.client("s3"),
     )
+    result["prepared_candidate_tree"] = candidate_tree_evidence
     print(json.dumps(result, sort_keys=True, indent=2))
     return 0
 

@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -17,6 +19,9 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 SCHEMA_VERSION = "leadpoet.gateway_git_deployment.v1"
+TREE_VERIFICATION_SCHEMA_VERSION = (
+    "leadpoet.gateway_candidate_tree_verification.v1"
+)
 DEFAULT_REPO_URL = "https://github.com/leadpoet/leadpoet.git"
 DEFAULT_BRANCH = "main"
 RESTART_PROTOCOL_MARKER = 'GATEWAY_GIT_DEPLOY_PROTOCOL="1"'
@@ -58,6 +63,354 @@ def _run_git(repo_root: Path, *args: str, timeout: float = 120.0) -> str:
             detail = detail[:500] + "..."
         raise GatewayGitDeployError(f"git {args[0]} failed: {detail}")
     return result.stdout.strip()
+
+
+def _run_git_bytes(
+    repo_root: Path,
+    *args: str,
+    timeout: float = 120.0,
+) -> bytes:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            check=False,
+            capture_output=True,
+            timeout=timeout,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GatewayGitDeployError(
+            f"git {args[0]} could not run: {type(exc).__name__}"
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or b"unknown git error")
+        rendered = detail.decode("utf-8", errors="replace").strip()
+        if len(rendered) > 500:
+            rendered = rendered[:500] + "..."
+        raise GatewayGitDeployError(f"git {args[0]} failed: {rendered}")
+    return result.stdout
+
+
+def _candidate_blob_entries(
+    repo_root: Path,
+    target_sha: str,
+) -> dict[str, tuple[str, str]]:
+    raw = _run_git_bytes(
+        repo_root,
+        "ls-tree",
+        "-rz",
+        "--full-tree",
+        target_sha,
+        timeout=120,
+    )
+    entries: dict[str, tuple[str, str]] = {}
+    for encoded in raw.split(b"\x00"):
+        if not encoded:
+            continue
+        try:
+            metadata, encoded_path = encoded.split(b"\t", 1)
+            mode, object_type, object_id = metadata.decode("ascii").split(" ")
+            path = encoded_path.decode("utf-8")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise GatewayGitDeployError(
+                "candidate Git tree contains an unsupported path or entry"
+            ) from exc
+        if object_type != "blob" or mode not in {"100644", "100755", "120000"}:
+            raise GatewayGitDeployError(
+                f"candidate Git tree contains unsupported entry: {path}"
+            )
+        if (
+            not path
+            or path.startswith("/")
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+        ):
+            raise GatewayGitDeployError("candidate Git tree path is unsafe")
+        entries[path] = (mode, object_id.lower())
+    if not entries:
+        raise GatewayGitDeployError("candidate Git tree has no blobs")
+    return entries
+
+
+def _git_blob_id(payload: bytes, object_format: str) -> str:
+    try:
+        digest = hashlib.new(object_format)
+    except ValueError as exc:
+        raise GatewayGitDeployError(
+            f"unsupported Git object format: {object_format}"
+        ) from exc
+    digest.update(f"blob {len(payload)}\0".encode("ascii"))
+    digest.update(payload)
+    return digest.hexdigest()
+
+
+def verify_materialized_tree(
+    *,
+    repo_root: Path,
+    materialized_root: Path,
+    target_sha: str,
+    strict_extras: bool,
+) -> dict[str, Any]:
+    """Verify candidate files and modes against the commit's exact Git blobs."""
+
+    repo_root = repo_root.expanduser().resolve()
+    materialized_root = materialized_root.expanduser().resolve()
+    if not materialized_root.is_dir():
+        raise GatewayGitDeployError(
+            f"materialized candidate tree is missing: {materialized_root}"
+        )
+    resolved_sha = _run_git(
+        repo_root,
+        "rev-parse",
+        f"{target_sha}^{{commit}}",
+        timeout=30,
+    ).lower()
+    if resolved_sha != target_sha:
+        raise GatewayGitDeployError("candidate tree target SHA is not exact")
+    object_format = _run_git(
+        repo_root,
+        "rev-parse",
+        "--show-object-format",
+        timeout=30,
+    ).lower()
+    expected = _candidate_blob_entries(repo_root, target_sha)
+
+    verified_entries: list[dict[str, str]] = []
+    for relative_path, (expected_mode, expected_oid) in sorted(expected.items()):
+        candidate = materialized_root / relative_path
+        try:
+            file_stat = candidate.lstat()
+        except OSError as exc:
+            raise GatewayGitDeployError(
+                f"candidate tree is missing Git blob path: {relative_path}"
+            ) from exc
+        if stat.S_ISLNK(file_stat.st_mode):
+            actual_mode = "120000"
+            payload = os.fsencode(os.readlink(candidate))
+        elif stat.S_ISREG(file_stat.st_mode):
+            actual_mode = (
+                "100755" if file_stat.st_mode & 0o111 else "100644"
+            )
+            try:
+                payload = candidate.read_bytes()
+            except OSError as exc:
+                raise GatewayGitDeployError(
+                    f"candidate Git blob is unreadable: {relative_path}"
+                ) from exc
+        else:
+            raise GatewayGitDeployError(
+                f"candidate Git blob path has invalid type: {relative_path}"
+            )
+        if actual_mode != expected_mode:
+            raise GatewayGitDeployError(
+                f"candidate Git blob mode mismatch: {relative_path}"
+            )
+        actual_oid = _git_blob_id(payload, object_format)
+        if actual_oid != expected_oid:
+            raise GatewayGitDeployError(
+                f"candidate Git blob content mismatch: {relative_path}"
+            )
+        verified_entries.append(
+            {
+                "mode": expected_mode,
+                "object_id": expected_oid,
+                "path": relative_path,
+            }
+        )
+
+    ignored_runtime_cache_count = 0
+    if strict_extras:
+        actual_paths: set[str] = set()
+        for path in materialized_root.rglob("*"):
+            if not (path.is_file() or path.is_symlink()):
+                continue
+            relative = path.relative_to(materialized_root)
+            if ".git" in relative.parts:
+                continue
+            if "__pycache__" in relative.parts or path.suffix in {
+                ".pyc",
+                ".pyo",
+            }:
+                ignored_runtime_cache_count += 1
+                continue
+            actual_paths.add(relative.as_posix())
+        extra_paths = sorted(actual_paths.difference(expected))
+        if extra_paths:
+            raise GatewayGitDeployError(
+                f"candidate tree contains non-Git path: {extra_paths[0]}"
+            )
+
+    manifest_payload = json.dumps(
+        verified_entries,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "schema_version": TREE_VERIFICATION_SCHEMA_VERSION,
+        "target_sha": target_sha,
+        "tree_hash": _run_git(
+            repo_root,
+            "rev-parse",
+            f"{target_sha}^{{tree}}",
+            timeout=30,
+        ).lower(),
+        "object_format": object_format,
+        "blob_count": len(verified_entries),
+        "blob_manifest_sha256": hashlib.sha256(manifest_payload).hexdigest(),
+        "strict_extras": bool(strict_extras),
+        "ignored_runtime_cache_count": ignored_runtime_cache_count,
+    }
+
+
+def _tree_verification_evidence(
+    *,
+    repo_root: Path,
+    materialized_root: Path,
+    target_sha: str,
+    phase: str,
+    strict_extras: bool,
+) -> dict[str, Any]:
+    if phase not in {"prepared_archive", "activated_checkout"}:
+        raise GatewayGitDeployError("candidate tree verification phase is invalid")
+    evidence = verify_materialized_tree(
+        repo_root=repo_root,
+        materialized_root=materialized_root,
+        target_sha=target_sha,
+        strict_extras=strict_extras,
+    )
+    evidence.update(
+        {
+            "phase": phase,
+            "verified_at": _utc_now(),
+        }
+    )
+    return evidence
+
+
+def write_tree_verification_evidence(
+    *,
+    repo_root: Path,
+    materialized_root: Path,
+    target_sha: str,
+    phase: str,
+    strict_extras: bool,
+    output_path: Path,
+) -> dict[str, Any]:
+    evidence = _tree_verification_evidence(
+        repo_root=repo_root,
+        materialized_root=materialized_root,
+        target_sha=target_sha,
+        phase=phase,
+        strict_extras=strict_extras,
+    )
+    _atomic_write_json(output_path, evidence)
+    return evidence
+
+
+def record_tree_verification(
+    *,
+    plan_file: Path,
+    materialized_root: Path,
+    phase: str,
+    strict_extras: bool,
+) -> dict[str, Any]:
+    document = _read_json(plan_file)
+    repo_root = Path(str(document["repo_root"])).resolve()
+    target_sha = str(document.get("target_sha") or "").lower()
+    evidence = _tree_verification_evidence(
+        repo_root=repo_root,
+        materialized_root=materialized_root,
+        target_sha=target_sha,
+        phase=phase,
+        strict_extras=strict_extras,
+    )
+    if evidence["tree_hash"] != document.get("tree_hash"):
+        raise GatewayGitDeployError(
+            "candidate tree verification differs from prepared tree hash"
+        )
+    verifications = dict(document.get("tree_verifications") or {})
+    verifications[phase] = evidence
+    document["tree_verifications"] = verifications
+    _atomic_write_json(plan_file, document)
+    _atomic_write_json(Path(str(document["manifest_file"])), document)
+    return evidence
+
+
+def _read_prepared_tree_evidence(
+    path: Path,
+    *,
+    target_sha: str,
+    tree_hash: str,
+) -> dict[str, Any]:
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise GatewayGitDeployError(
+            "prepared candidate tree evidence is unavailable"
+        ) from exc
+    if (
+        not isinstance(evidence, Mapping)
+        or evidence.get("schema_version") != TREE_VERIFICATION_SCHEMA_VERSION
+        or evidence.get("phase") != "prepared_archive"
+        or evidence.get("target_sha") != target_sha
+        or evidence.get("tree_hash") != tree_hash
+        or evidence.get("strict_extras") is not True
+        or not isinstance(evidence.get("blob_count"), int)
+        or int(evidence["blob_count"]) < 1
+        or not re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(evidence.get("blob_manifest_sha256") or ""),
+        )
+    ):
+        raise GatewayGitDeployError(
+            "prepared candidate tree evidence is invalid"
+        )
+    return dict(evidence)
+
+
+def record_tree_verification_pair(
+    *,
+    plan_file: Path,
+    prepared_evidence_path: Path,
+    activated_root: Path,
+) -> dict[str, Any]:
+    document = _read_json(plan_file)
+    repo_root = Path(str(document["repo_root"])).resolve()
+    target_sha = str(document.get("target_sha") or "").lower()
+    tree_hash = str(document.get("tree_hash") or "").lower()
+    prepared = _read_prepared_tree_evidence(
+        prepared_evidence_path,
+        target_sha=target_sha,
+        tree_hash=tree_hash,
+    )
+    activated = _tree_verification_evidence(
+        repo_root=repo_root,
+        materialized_root=activated_root,
+        target_sha=target_sha,
+        phase="activated_checkout",
+        strict_extras=False,
+    )
+    for field in (
+        "tree_hash",
+        "object_format",
+        "blob_count",
+        "blob_manifest_sha256",
+    ):
+        if prepared.get(field) != activated.get(field):
+            raise GatewayGitDeployError(
+                f"prepared and activated candidate trees differ: {field}"
+            )
+    document["tree_verifications"] = {
+        "prepared_archive": prepared,
+        "activated_checkout": activated,
+    }
+    _atomic_write_json(plan_file, document)
+    _atomic_write_json(Path(str(document["manifest_file"])), document)
+    return {
+        "prepared_archive": prepared,
+        "activated_checkout": activated,
+    }
 
 
 def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -418,6 +771,29 @@ def _parser() -> argparse.ArgumentParser:
     activate = subparsers.add_parser("activate")
     activate.add_argument("--plan-file", required=True, type=Path)
 
+    verify_tree = subparsers.add_parser("verify-tree")
+    verify_tree.add_argument("--plan-file", required=True, type=Path)
+    verify_tree.add_argument("--materialized-root", required=True, type=Path)
+    verify_tree.add_argument(
+        "--phase",
+        required=True,
+        choices=("prepared_archive", "activated_checkout"),
+    )
+    verify_tree.add_argument("--strict-extras", action="store_true")
+
+    verify_tree_pair = subparsers.add_parser("verify-tree-pair")
+    verify_tree_pair.add_argument("--plan-file", required=True, type=Path)
+    verify_tree_pair.add_argument(
+        "--prepared-evidence",
+        required=True,
+        type=Path,
+    )
+    verify_tree_pair.add_argument(
+        "--activated-root",
+        required=True,
+        type=Path,
+    )
+
     field = subparsers.add_parser("field")
     field.add_argument("--plan-file", required=True, type=Path)
     field.add_argument(
@@ -457,6 +833,35 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "activate":
             document = activate_deployment(plan_file=args.plan_file)
             print(document["target_sha"])
+            return 0
+        if args.command == "verify-tree":
+            evidence = record_tree_verification(
+                plan_file=args.plan_file,
+                materialized_root=args.materialized_root,
+                phase=args.phase,
+                strict_extras=args.strict_extras,
+            )
+            print(
+                json.dumps(
+                    evidence,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            return 0
+        if args.command == "verify-tree-pair":
+            evidence = record_tree_verification_pair(
+                plan_file=args.plan_file,
+                prepared_evidence_path=args.prepared_evidence,
+                activated_root=args.activated_root,
+            )
+            print(
+                json.dumps(
+                    evidence,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
             return 0
         if args.command == "field":
             document = _read_json(args.plan_file)

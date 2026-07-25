@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,6 +77,31 @@ def _paths(tmp_path: Path) -> tuple[Path, Path, Path]:
     )
 
 
+def _materialize_commit(
+    repo: Path,
+    commit: str,
+    destination: Path,
+) -> None:
+    archive = destination.parent / f"{destination.name}.tar"
+    destination.mkdir()
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "archive",
+            "--format=tar",
+            "--output",
+            str(archive),
+            commit,
+        ],
+        check=True,
+        capture_output=True,
+    )
+    with tarfile.open(archive) as bundle:
+        bundle.extractall(destination)
+
+
 def _prepare(
     fixture: GitFixture,
     tmp_path: Path,
@@ -143,6 +169,137 @@ def test_fast_forward_is_fetched_before_checkout_activation(
     gateway_git_deploy.activate_deployment(plan_file=_paths(tmp_path)[0])
     assert _git(git_fixture.checkout, "rev-parse", "HEAD") == target
     assert _git(git_fixture.checkout, "branch", "--show-current") == "main"
+
+
+def test_prepared_and_activated_trees_are_verified_against_exact_git_blobs(
+    git_fixture: GitFixture,
+    tmp_path: Path,
+) -> None:
+    plan, manifest, _last_good = _paths(tmp_path)
+    prepared = _prepare(git_fixture, tmp_path)
+    materialized = tmp_path / "materialized"
+    _materialize_commit(
+        git_fixture.checkout,
+        prepared["target_sha"],
+        materialized,
+    )
+    evidence_path = tmp_path / "prepared-tree.json"
+    prepared_evidence = gateway_git_deploy.write_tree_verification_evidence(
+        repo_root=git_fixture.checkout,
+        materialized_root=materialized,
+        target_sha=prepared["target_sha"],
+        phase="prepared_archive",
+        strict_extras=True,
+        output_path=evidence_path,
+    )
+
+    gateway_git_deploy.activate_deployment(plan_file=plan)
+    paired = gateway_git_deploy.record_tree_verification_pair(
+        plan_file=plan,
+        prepared_evidence_path=evidence_path,
+        activated_root=git_fixture.checkout,
+    )
+
+    assert prepared_evidence["blob_count"] > 0
+    assert prepared_evidence["strict_extras"] is True
+    assert (
+        paired["prepared_archive"]["blob_manifest_sha256"]
+        == paired["activated_checkout"]["blob_manifest_sha256"]
+    )
+    recorded = json.loads(manifest.read_text(encoding="utf-8"))
+    assert set(recorded["tree_verifications"]) == {
+        "prepared_archive",
+        "activated_checkout",
+    }
+
+
+def test_candidate_tree_verification_rejects_tampering_and_extra_files(
+    git_fixture: GitFixture,
+    tmp_path: Path,
+) -> None:
+    prepared = _prepare(git_fixture, tmp_path)
+    materialized = tmp_path / "materialized"
+    _materialize_commit(
+        git_fixture.checkout,
+        prepared["target_sha"],
+        materialized,
+    )
+    (materialized / "payload.txt").write_text("tampered", encoding="utf-8")
+    with pytest.raises(
+        gateway_git_deploy.GatewayGitDeployError,
+        match="content mismatch",
+    ):
+        gateway_git_deploy.verify_materialized_tree(
+            repo_root=git_fixture.checkout,
+            materialized_root=materialized,
+            target_sha=prepared["target_sha"],
+            strict_extras=True,
+        )
+
+    _materialize_commit(
+        git_fixture.checkout,
+        prepared["target_sha"],
+        tmp_path / "materialized-clean",
+    )
+    clean = tmp_path / "materialized-clean"
+    runtime_cache = clean / "__pycache__"
+    runtime_cache.mkdir()
+    (runtime_cache / "module.cpython-311.pyc").write_bytes(b"runtime-cache")
+    cache_evidence = gateway_git_deploy.verify_materialized_tree(
+        repo_root=git_fixture.checkout,
+        materialized_root=clean,
+        target_sha=prepared["target_sha"],
+        strict_extras=True,
+    )
+    assert cache_evidence["ignored_runtime_cache_count"] == 1
+
+    (clean / "not-from-git.txt").write_text("extra", encoding="utf-8")
+    with pytest.raises(
+        gateway_git_deploy.GatewayGitDeployError,
+        match="non-Git path",
+    ):
+        gateway_git_deploy.verify_materialized_tree(
+            repo_root=git_fixture.checkout,
+            materialized_root=clean,
+            target_sha=prepared["target_sha"],
+            strict_extras=True,
+        )
+
+
+def test_tree_pair_rejects_prepared_evidence_for_another_tree(
+    git_fixture: GitFixture,
+    tmp_path: Path,
+) -> None:
+    plan, _manifest, _last_good = _paths(tmp_path)
+    prepared = _prepare(git_fixture, tmp_path)
+    materialized = tmp_path / "materialized"
+    _materialize_commit(
+        git_fixture.checkout,
+        prepared["target_sha"],
+        materialized,
+    )
+    evidence_path = tmp_path / "prepared-tree.json"
+    evidence = gateway_git_deploy.write_tree_verification_evidence(
+        repo_root=git_fixture.checkout,
+        materialized_root=materialized,
+        target_sha=prepared["target_sha"],
+        phase="prepared_archive",
+        strict_extras=True,
+        output_path=evidence_path,
+    )
+    evidence["blob_manifest_sha256"] = "0" * 64
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    gateway_git_deploy.activate_deployment(plan_file=plan)
+
+    with pytest.raises(
+        gateway_git_deploy.GatewayGitDeployError,
+        match="prepared and activated candidate trees differ",
+    ):
+        gateway_git_deploy.record_tree_verification_pair(
+            plan_file=plan,
+            prepared_evidence_path=evidence_path,
+            activated_root=git_fixture.checkout,
+        )
 
 
 def test_configured_branch_is_selected(git_fixture: GitFixture, tmp_path: Path) -> None:

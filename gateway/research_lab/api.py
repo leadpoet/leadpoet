@@ -3053,9 +3053,22 @@ async def get_research_lab_live_allocation(
             netuid=BITTENSOR_NETUID,
             persist_snapshot=persist_snapshot,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
+        # This endpoint has no build task to report its failures, so the reason
+        # for a 500 has to be recorded here or it is lost with the response.
+        logger.error(
+            "research_lab_live_allocation_build_failed epoch=%s "
+            "persist_snapshot=%s error_type=%s error=%s",
+            int(epoch),
+            bool(persist_snapshot),
+            type(exc).__name__,
+            str(exc)[:240],
+            exc_info=True,
+        )
+        if isinstance(exc, ValueError):
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
         raise HTTPException(status_code=500, detail=f"Research Lab allocation unavailable: {str(exc)[:200]}") from exc
 
 
@@ -3094,16 +3107,25 @@ def _allocation_handoff_cache_get(
     epoch: int,
     persist_snapshot: bool,
 ) -> Optional[dict[str, Any]]:
-    key = _allocation_cache_key(epoch, persist_snapshot)
-    entry = _ALLOCATION_HANDOFF_CACHE.get(key)
-    if entry is None:
-        return None
-    expires_at, handoff = entry
-    if time.monotonic() >= expires_at:
-        _ALLOCATION_HANDOFF_CACHE.pop(key, None)
-        return None
-    _ALLOCATION_HANDOFF_CACHE.move_to_end(key)
-    return handoff
+    keys = [_allocation_cache_key(epoch, persist_snapshot)]
+    if not persist_snapshot:
+        # persist_snapshot only gates the authorized emission-snapshot write;
+        # it never changes the returned document. A read-only caller may
+        # therefore reuse a persisted handoff, but an authenticated caller must
+        # never reuse a read-only result and skip its required persistence.
+        keys.append(_allocation_cache_key(epoch, True))
+
+    for key in keys:
+        entry = _ALLOCATION_HANDOFF_CACHE.get(key)
+        if entry is None:
+            continue
+        expires_at, handoff = entry
+        if time.monotonic() >= expires_at:
+            _ALLOCATION_HANDOFF_CACHE.pop(key, None)
+            continue
+        _ALLOCATION_HANDOFF_CACHE.move_to_end(key)
+        return handoff
+    return None
 
 
 def _allocation_handoff_cache_put(
@@ -3134,6 +3156,15 @@ def _allocation_build_task(
     task = _ALLOCATION_BUILD_TASKS.get(key)
     if task is not None:
         return task
+    if not persist_snapshot:
+        # If an authenticated validator already owns the build, share that
+        # server-owned task. Its persistence was authorized by that validator;
+        # the anonymous waiter neither initiates nor upgrades persistence.
+        persisted = _ALLOCATION_BUILD_TASKS.get(
+            _allocation_cache_key(epoch, True)
+        )
+        if persisted is not None:
+            return persisted
     task = asyncio.create_task(
         _build_and_cache_attested_allocation(
             config=config,
@@ -3226,6 +3257,18 @@ async def _build_and_cache_attested_allocation(
             detail=f"Research Lab attested allocation unavailable: {str(exc)[:200]}",
         ) from exc
     if attestation.get("status") != "matched":
+        # The HTTPException raised below IS surfaced by the build task's
+        # failure callback, but only generically (error_type=HTTPException).
+        # The attestation status that caused it is not, so record it here:
+        # a 503 inside the submission window should be greppable by the
+        # status that produced it, not just by an access-log code.
+        logger.error(
+            "research_lab_attested_allocation_not_ready epoch=%s "
+            "persist_snapshot=%s status=%s",
+            int(epoch),
+            bool(persist_snapshot),
+            attestation.get("status", "unknown"),
+        )
         raise HTTPException(
             status_code=503,
             detail=f"Research Lab attested allocation is not ready: {attestation.get('status', 'unknown')}",

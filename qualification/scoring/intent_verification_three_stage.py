@@ -1862,6 +1862,7 @@ async def verify_three_stage(
     stage3_model: Optional[str] = None,
     miner_signal_date: Optional[str] = None,
     evidence_type: Optional[str] = None,
+    declared_source: Optional[str] = None,
     stage1_soft_reject: bool = False,
 ) -> Dict[str, Any]:
     """3-stage intent verification (sonar -> SD/Exa -> sonar-pro).
@@ -1908,6 +1909,7 @@ async def verify_three_stage(
         "signal_type": "intent",
         "claimed_source_urls": [source_url] if source_url else [],
         "_target_signal_text": target_signal_text,
+        "_declared_source": (declared_source or "").strip().lower() or None,
         # Dispatcher in _build_verification_prompt routes on this — TECHSTACK
         # adds PART E (tech-stack anti-patterns), SOCIAL_POSTING adds PART D
         # (author-role check), other values fall through to the default
@@ -2178,8 +2180,12 @@ async def verify_three_stage(
         (r.get("meta") or {}).get("kind") == "linkedin_job"
         for r in (contents.get("results") or [])
     )
-    is_job_board = any(
-        _is_job_board_url(u) for u in (row.get("claimed_source_urls") or [])
+    is_job_board = (
+        row.get("_declared_source") == "job_board"
+        or any(
+            _is_job_board_url(u)
+            for u in (row.get("claimed_source_urls") or [])
+        )
     )
     if is_job_board and not has_linkedin_structured:
         combined_for_gate = "\n".join(

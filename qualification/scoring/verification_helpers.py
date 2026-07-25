@@ -42,6 +42,12 @@ from urllib.parse import urlparse
 
 import httpx
 
+from leadpoet_verifier.identity.normalization import (
+    DomainParts,
+    NormalizationError,
+    normalize_url,
+)
+
 try:
     from bs4 import BeautifulSoup
     BS4_AVAILABLE = True
@@ -1112,13 +1118,16 @@ _SOURCE_DOMAIN_ALLOWLIST: Dict[str, frozenset] = {
         "linkedin.com",
         "indeed.com", "glassdoor.com",
         "lever.co", "greenhouse.io", "boards.greenhouse.io",
-        "jobs.lever.co", "apply.workable.com",
+        "jobs.lever.co", "ashbyhq.com",
+        "workable.com", "apply.workable.com",
+        "myworkdayjobs.com",
         "careers.google.com", "jobs.apple.com",
         "builtin.com", "ziprecruiter.com",
         "monster.com", "wellfound.com", "angel.co",
         "dice.com", "simplyhired.com",
         "roberthalf.com", "himalayas.app",
         "remoteok.com", "weworkremotely.com", "flexjobs.com",
+        "startup.jobs", "remoterocketship.com", "salesjobs.com",
     }),
     "news": frozenset({
         "reuters.com", "bloomberg.com", "techcrunch.com",
@@ -1213,31 +1222,78 @@ def _is_known_third_party_domain(domain: str) -> Optional[str]:
     return None
 
 
-def check_source_url_mismatch(source_str: str, url: str) -> Optional[str]:
+def _normalized_url_domain(value: str) -> Optional[DomainParts]:
+    """Normalize one HTTP(S) domain with the pinned PSL and IDNA policy."""
+    try:
+        return normalize_url(
+            value or "",
+            allow_bare_domain=True,
+        ).domain
+    except (NormalizationError, TypeError, ValueError):
+        return None
+
+
+def _domains_share_owner(left: DomainParts, right: DomainParts) -> bool:
+    """Match sibling properties only within one PSL-derived owner domain."""
+    return left.registrable_domain == right.registrable_domain
+
+
+def _is_government_or_education_domain(domain: str) -> bool:
+    """Allow public registries and education sites in the ``other`` bucket."""
+    labels = [label for label in domain.split(".") if label]
+    if not labels:
+        return False
+    if labels[-1] in {"gov", "government", "edu"}:
+        return True
+    return bool(
+        len(labels) >= 2
+        and len(labels[-1]) == 2
+        and labels[-2] in {"gov", "government", "edu", "ac"}
+    )
+
+
+def check_source_url_mismatch(
+    source_str: str,
+    url: str,
+    company_website: Optional[str] = None,
+    *,
+    reject_unknown_third_party: bool = False,
+) -> Optional[str]:
     """
     Check if the declared source type is plausible given the URL domain.
     
     Returns an error message if there's a clear mismatch, None if OK.
     
-    CRITICAL: If source is "company_website" but the URL is actually a known
-    third-party platform (news site, job board, Wikipedia, etc.), flag it.
-    This catches models that label everything as "company_website" to bypass
-    source type validation.
+    ``company_website`` makes first-party classifications identity-bound:
+    ``company_website`` must use the lead's domain, while ``job_board`` may use
+    either a recognized hiring platform or a careers/jobs property owned by the
+    lead.  With ``reject_unknown_third_party=True`` (the fulfillment policy),
+    the low-trust ``other`` bucket is limited to public-sector/education
+    domains instead of accepting an arbitrary self-published site.
     """
     source_lower = source_str.lower().strip()
     
-    try:
-        clean_url = url.strip()
-        if not clean_url.lower().startswith(('http://', 'https://')):
-            clean_url = 'https://' + clean_url
-        url_domain = (urlparse(clean_url).hostname or "").lower()
-        if url_domain.startswith("www."):
-            url_domain = url_domain[4:]
-    except Exception:
-        return None
-    
-    # If source is "company_website", verify URL isn't a known third-party platform
-    if source_lower in ("company_website", "other"):
+    url_parts = _normalized_url_domain(url)
+    if url_parts is None:
+        return "Source URL could not be parsed"
+    url_domain = url_parts.ascii_host
+    company_parts = _normalized_url_domain(company_website or "")
+    company_domain = company_parts.ascii_host if company_parts else ""
+
+    if source_lower == "company_website":
+        if company_parts is None and reject_unknown_third_party:
+            return (
+                "Source declared as 'company_website' but the lead has no "
+                "usable company website domain to bind the evidence to"
+            )
+        if company_parts is not None:
+            if _domains_share_owner(url_parts, company_parts):
+                return None
+            return (
+                f"Source declared as 'company_website' but URL domain "
+                f"'{url_domain}' is not the lead company's domain "
+                f"'{company_domain}'"
+            )
         actual_type = _is_known_third_party_domain(url_domain)
         if actual_type:
             return (
@@ -1246,27 +1302,59 @@ def check_source_url_mismatch(source_str: str, url: str) -> Optional[str]:
             )
         return None
 
+    if source_lower == "other":
+        actual_type = _is_known_third_party_domain(url_domain)
+        if actual_type:
+            return (
+                f"Source declared as '{source_str}' but URL domain '{url_domain}' "
+                f"is a known {actual_type} platform — source type should be '{actual_type}'"
+            )
+        if company_parts is not None and _domains_share_owner(
+            url_parts, company_parts
+        ):
+            return (
+                f"Source declared as 'other' but URL domain '{url_domain}' is "
+                f"owned by the lead company — source type should be "
+                f"'company_website'"
+            )
+        if (
+            reject_unknown_third_party
+            and not _is_government_or_education_domain(url_domain)
+        ):
+            return (
+                f"Source declared as 'other' but URL domain '{url_domain}' is "
+                f"an unrecognized third-party publisher; fulfillment evidence "
+                f"must use a recognized platform, a correctly classified lead-"
+                f"owned page, or a government/education source"
+            )
+        return None
+
     allowed = _SOURCE_DOMAIN_ALLOWLIST.get(source_lower)
     if allowed is None:
         return None
 
-    try:
-        clean_url = url.strip()
-        if not clean_url.lower().startswith(('http://', 'https://')):
-            clean_url = 'https://' + clean_url
-        domain = urlparse(clean_url).hostname or ""
-    except Exception:
+    domain = url_domain
+    if _domain_matches_allowlist(domain, allowed):
         return None
 
-    domain = domain.lower()
-    if domain.startswith("www."):
-        domain = domain[4:]
-    if _domain_matches_allowlist(domain, allowed):
+    if (
+        source_lower == "job_board"
+        and company_parts is not None
+        and _domains_share_owner(url_parts, company_parts)
+    ):
+        # Ownership is the deterministic part of the pre-gate. Fulfillment
+        # always fetches the exact page and the declared-source job-body gate
+        # below Stage 2 proves that the owned page is actually a job listing.
         return None
 
     return (
         f"Source type '{source_str}' declared but URL domain '{domain}' "
         f"is not a recognized {source_str} domain"
+        + (
+            " or a careers/jobs property owned by the lead company"
+            if source_lower == "job_board"
+            else ""
+        )
     )
 
 
@@ -1410,7 +1498,11 @@ async def verify_intent_signal(
         return False, 0, future_err, "fabricated", None
 
     # PRE-CHECK: Source type vs URL domain mismatch
-    mismatch_err = check_source_url_mismatch(source_str, intent_signal.url)
+    mismatch_err = check_source_url_mismatch(
+        source_str,
+        intent_signal.url,
+        company_website,
+    )
     if mismatch_err:
         logger.warning(f"❌ Source/URL mismatch: {mismatch_err}")
         return False, 0, mismatch_err, "fabricated", None

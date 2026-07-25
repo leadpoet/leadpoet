@@ -412,6 +412,38 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     assert script.index('pkill -9 -f "python3 -u -m gateway.main"') > shutdown
 
 
+def test_gateway_restart_verifies_prepared_and_activated_candidate_git_blobs() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    preflight = script.index("gateway.tee.restart_preflight_v2")
+    shutdown = script.index(
+        'echo "Stopping existing gateway and Research Lab worker processes"'
+    )
+    activation = script.index(
+        'echo "Activating prepared gateway Git commit after process shutdown"'
+    )
+    activated_verification = script.index(
+        'echo "Verifying prepared and activated gateway trees against exact Git blobs"'
+    )
+
+    assert preflight < shutdown < activation < activated_verification
+    assert (
+        '"$LEADPOET_REPO_ROOT/scripts/gateway_git_deploy.py" \\\n'
+        "  verify-tree-pair"
+    ) in script
+    assert (
+        '--prepared-evidence \\\n'
+        '    "$GATEWAY_V2_CONFIG_DIR/gateway-candidate-tree-preflight.json"'
+    ) in script
+    assert '--activated-root "$LEADPOET_REPO_ROOT"' in script
+
+    preflight_source = (
+        ROOT / "gateway/tee/restart_preflight_v2.py"
+    ).read_text(encoding="utf-8")
+    assert "write_tree_verification_evidence" in preflight_source
+    assert 'phase="prepared_archive"' in preflight_source
+    assert "strict_extras=True" in preflight_source
+
+
 def test_gateway_restart_installs_declared_host_dependencies_before_shutdown() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     dependency_preflight = script.index(

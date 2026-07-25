@@ -61,6 +61,7 @@ from qualification.scoring.pre_checks import run_company_zero_checks
 from qualification.scoring.verification_helpers import (
     is_generic_intent_description,
     check_future_date,
+    check_source_url_mismatch,
     openrouter_chat,
 )
 from qualification.scoring.intent_signal_gate import check_evidence_freshness, judge_intent_signal
@@ -1519,6 +1520,7 @@ async def _score_single_intent_signal(
     trust_signal_date: bool = False,
     stage1_soft_reject: bool = False,
     llm_only_intent_gate: bool = False,
+    enforce_source_integrity: bool = False,
     verdict_out: Optional[List[dict]] = None,
 ) -> Tuple[float, int, str, Optional[str], int]:
     """
@@ -1627,6 +1629,31 @@ async def _score_single_intent_signal(
 
     source_str = signal.source.value if hasattr(signal.source, "value") else str(signal.source)
     source_lower = source_str.lower()
+
+    # Fulfillment-only publisher/category integrity gate. The miner's declared
+    # ``source`` controls its score multiplier, so accepting that label without
+    # validating the URL lets an arbitrary self-published page claim the 1.0x
+    # ``job_board`` multiplier. The Research Lab calls this shared helper with
+    # the default disabled because its source contract and receipts are
+    # evaluated separately; gateway fulfillment opts in explicitly.
+    if enforce_source_integrity:
+        source_mismatch = check_source_url_mismatch(
+            source_str,
+            signal.url,
+            company_website,
+            reject_unknown_third_party=True,
+        )
+        if source_mismatch:
+            logger.warning(
+                "Intent signal rejected: source URL integrity — %s",
+                source_mismatch,
+            )
+            _record_verdict(
+                "rejected_pregate",
+                rejection_reason="source_url_mismatch",
+                source_integrity_error=source_mismatch,
+            )
+            return 0.0, 0, "source_mismatch", None, -1
 
     # The keyword/length genericity pre-gate is a cheap deterministic filter that
     # runs before the three-stage LLM verifier. It has no vocabulary for several
@@ -1784,6 +1811,9 @@ async def _score_single_intent_signal(
                 target_signal_text=target_signal_text,
                 miner_signal_date=(str(signal.date) if signal.date else None),
                 evidence_type=target_evidence_type,
+                declared_source=(
+                    source_lower if enforce_source_integrity else None
+                ),
                 stage1_soft_reject=stage1_soft_reject,
             )
     except Exception as three_stage_error:

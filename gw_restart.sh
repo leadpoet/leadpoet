@@ -1341,6 +1341,16 @@ if [ "$(git -C "$LEADPOET_REPO_ROOT" rev-parse HEAD)" != "$GATEWAY_DEPLOY_SHA" ]
   echo "ERROR: canonical gateway checkout does not match activated deployment" >&2
   exit 1
 fi
+echo "Verifying prepared and activated gateway trees against exact Git blobs"
+GATEWAY_DEPLOY_STAGE="git_tree_verification"
+export GATEWAY_DEPLOY_STAGE
+"$GATEWAY_PYTHON_BIN" \
+  "$LEADPOET_REPO_ROOT/scripts/gateway_git_deploy.py" \
+  verify-tree-pair \
+  --plan-file "$GATEWAY_DEPLOY_PLAN_FILE" \
+  --prepared-evidence \
+    "$GATEWAY_V2_CONFIG_DIR/gateway-candidate-tree-preflight.json" \
+  --activated-root "$LEADPOET_REPO_ROOT"
 enforce_deployment_environment
 
 echo "Recording exact gateway Git build provenance"

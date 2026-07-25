@@ -5,10 +5,31 @@ import subprocess
 
 import pytest
 
+from scripts import run_local_restart_rehearsal as rehearsal
 from tests.restart_rehearsal.verify_evidence import verify_rehearsal_integrity
 
 
 COMMIT = "1" * 40
+
+
+def test_rehearsal_driver_must_match_frozen_candidate(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    driver = tmp_path / "run_local_restart_rehearsal.py"
+    driver.write_bytes(b"candidate driver\n")
+    monkeypatch.setattr(rehearsal, "__file__", str(driver))
+    monkeypatch.setattr(
+        rehearsal,
+        "_git_file",
+        lambda _sha, _path: b"candidate driver\n",
+    )
+
+    rehearsal._verify_driver_identity(COMMIT)
+
+    driver.write_bytes(b"dirty driver\n")
+    with pytest.raises(SystemExit, match="differs from the frozen candidate"):
+        rehearsal._verify_driver_identity(COMMIT)
 
 
 def test_exact_rehearsal_rejects_repository_module_substitution() -> None:

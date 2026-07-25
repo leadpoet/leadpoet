@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,11 +13,17 @@ from typing import Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-HARNESS_ROOT = REPO_ROOT / "tests" / "restart_rehearsal"
 IMAGE_REPOSITORY = "leadpoet-local-restart-rehearsal"
 PYTHON37_IMAGE = (
     "python@sha256:"
     "b53f496ca43e5af6994f8e316cf03af31050bf7944e0e4a308ad86c001cf028b"
+)
+COMMITTED_HARNESS_PATHS = (
+    "tests/restart_rehearsal/Dockerfile",
+    "tests/restart_rehearsal/contract_adapter.py",
+    "tests/restart_rehearsal/weight_readiness_runner.py",
+    "tests/restart_rehearsal/run_inside.sh",
+    "tests/restart_rehearsal/verify_evidence.py",
 )
 
 
@@ -61,15 +66,9 @@ def _image_tag(candidate_sha: str) -> str:
     digest.update(candidate_sha.encode("ascii"))
     digest.update(b"requirements.txt")
     digest.update(_git_file(candidate_sha, "requirements.txt"))
-    for path in (
-        HARNESS_ROOT / "Dockerfile",
-        HARNESS_ROOT / "contract_adapter.py",
-        HARNESS_ROOT / "weight_readiness_runner.py",
-        HARNESS_ROOT / "run_inside.sh",
-        HARNESS_ROOT / "verify_evidence.py",
-    ):
-        digest.update(path.name.encode("utf-8"))
-        digest.update(path.read_bytes())
+    for path in COMMITTED_HARNESS_PATHS:
+        digest.update(path.encode("utf-8"))
+        digest.update(_git_file(candidate_sha, path))
     return f"{IMAGE_REPOSITORY}:{digest.hexdigest()[:16]}"
 
 
@@ -79,16 +78,18 @@ def _build_image(tag: str, *, candidate_sha: str) -> None:
         (context / "requirements.txt").write_bytes(
             _git_file(candidate_sha, "requirements.txt")
         )
-        shutil.copy2(HARNESS_ROOT / "Dockerfile", context / "Dockerfile")
+        (context / "Dockerfile").write_bytes(
+            _git_file(
+                candidate_sha,
+                "tests/restart_rehearsal/Dockerfile",
+            )
+        )
         harness = context / "harness"
         harness.mkdir()
-        for name in (
-            "contract_adapter.py",
-            "weight_readiness_runner.py",
-            "run_inside.sh",
-            "verify_evidence.py",
-        ):
-            shutil.copy2(HARNESS_ROOT / name, harness / name)
+        for path in COMMITTED_HARNESS_PATHS[1:]:
+            (harness / Path(path).name).write_bytes(
+                _git_file(candidate_sha, path)
+            )
         _run(
             [
                 "docker",
@@ -100,6 +101,14 @@ def _build_image(tag: str, *, candidate_sha: str) -> None:
                 ".",
             ],
             cwd=context,
+        )
+
+
+def _verify_driver_identity(candidate_sha: str) -> None:
+    path = "scripts/run_local_restart_rehearsal.py"
+    if Path(__file__).resolve().read_bytes() != _git_file(candidate_sha, path):
+        raise SystemExit(
+            "restart rehearsal driver differs from the frozen candidate SHA"
         )
 
 
@@ -223,6 +232,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     from_sha = _git_sha(args.from_sha)
     candidate_sha = _git_sha(args.candidate_sha)
     _run(["git", "merge-base", "--is-ancestor", from_sha, candidate_sha])
+    _verify_driver_identity(candidate_sha)
 
     tag = _image_tag(candidate_sha)
     if args.rebuild_image or not _image_exists(tag):

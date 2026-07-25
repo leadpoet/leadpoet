@@ -27,6 +27,7 @@ PYTHON37_IMAGE = (
 COMMITTED_HARNESS_PATHS = (
     "tests/restart_rehearsal/Dockerfile",
     "tests/restart_rehearsal/contract_adapter.py",
+    "tests/restart_rehearsal/contract_policy.py",
     "tests/restart_rehearsal/weight_readiness_runner.py",
     "tests/restart_rehearsal/run_inside.sh",
     "tests/restart_rehearsal/verify_evidence.py",

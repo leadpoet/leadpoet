@@ -2,11 +2,10 @@
 """Strict boundary adapters for isolated restart testing.
 
 The gateway and validator restart shell scripts execute unchanged. Privileged
-external services may be adapted. A repository module, script, or long-lived
-process that is substituted is recorded explicitly and invalidates a complete
-restart rehearsal. A constrained outer container may additionally adapt only
-the production host CPU and memory capacity probes. Other substitutions are
-permitted only in a clearly labelled targeted regression run.
+external services, host-state probes, isolated subprocess helpers, and
+long-lived service processes may be adapted only through the committed strict
+allowlist. Every adaptation is recorded explicitly. An unknown adaptation
+invalidates both exact and targeted rehearsal scopes.
 """
 
 from __future__ import annotations
@@ -24,6 +23,11 @@ import sys
 import tarfile
 import time
 from typing import Any, Iterable
+
+try:
+    from .contract_policy import is_classified_contract_adapter
+except ImportError:
+    from contract_policy import is_classified_contract_adapter
 
 
 STATE_ROOT = Path(os.environ.get("REHEARSAL_STATE_ROOT", "/rehearsal-state"))
@@ -45,10 +49,6 @@ EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
     "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID": (
         "alias/leadpoet-research-lab-artifact-signing"
     ),
-}
-EXACT_CAPACITY_SUBSTITUTIONS = {
-    "host.cpu_capacity",
-    "host.memory_capacity",
 }
 
 
@@ -99,7 +99,14 @@ def _save_state(handle: io.TextIOWrapper, value: dict[str, Any]) -> None:
 def _event(kind: str, argv: Iterable[str], **details: Any) -> None:
     _ensure_state()
     if kind in {"aws", "curl", "docker", "nitro"}:
-        details.setdefault("fixture_authenticity", "synthetic")
+        details.setdefault(
+            "fixture_authenticity",
+            (
+                "contract_enforced"
+                if _rehearsal_scope() == "exact"
+                else "synthetic"
+            ),
+        )
     payload = {
         "at_ns": time.time_ns(),
         "kind": kind,
@@ -155,10 +162,10 @@ def _targeted_substitutions_allowed() -> bool:
     return _rehearsal_scope() == TARGETED_REGRESSION_SCOPE
 
 
-def _exact_capacity_substitution_allowed(identity: str) -> bool:
+def _exact_contract_adapter_allowed(identity: str) -> bool:
     return (
         _rehearsal_scope() == "exact"
-        and identity in EXACT_CAPACITY_SUBSTITUTIONS
+        and is_classified_contract_adapter(identity)
     )
 
 
@@ -288,7 +295,7 @@ def _record_internal_substitution(
     _event(kind, argv, **details)
     if (
         _targeted_substitutions_allowed()
-        or _exact_capacity_substitution_allowed(identity)
+        or _exact_contract_adapter_allowed(identity)
     ):
         return 0
     return _fail(

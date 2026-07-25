@@ -54,13 +54,14 @@ The rehearsal must produce all of the following:
 - [ ] `REHEARSAL_SUCCESS component=validator`
 - [ ] Every contract stage passes.
 - [ ] Zero rejected contract events.
-- [ ] Zero `internal_substitution` events except the strictly validated
-  `host.cpu_capacity` and `host.memory_capacity` contract probes. An adapted
-  repository module, repository script, or long-lived application process
-  invalidates the rehearsal even when its fabricated output has the expected
-  shape.
-- [ ] Zero synthetic external fixtures. Boundary adapters must consume
-  sanitized production-shaped inputs and independently validate exact argv,
+- [ ] Every `internal_substitution` event matches the committed strict-adapter
+  allowlist. Unknown or newly introduced modules, scripts, processes, or host
+  boundaries invalidate the rehearsal until explicitly reviewed and
+  classified. The two capacity probes must additionally record the real outer
+  limit and the advertised production value.
+- [ ] Zero unclassified synthetic external fixtures. Approved AWS, Docker,
+  Nitro, and HTTP adapters must be labelled `contract_enforced`, consume
+  sanitized production-shaped inputs, and independently validate exact argv,
   environment names, schemas, hashes, ordering, and failure behavior.
 - [ ] The isolated runtime uses Linux AMD64 semantics. Its outer Docker limits
   may be reduced to locally available resources (normally 4 CPUs and 6–8 GiB)

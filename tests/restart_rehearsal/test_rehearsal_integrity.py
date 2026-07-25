@@ -56,7 +56,7 @@ def test_rehearsal_driver_must_match_frozen_candidate(
         rehearsal._verify_driver_identity(COMMIT)
 
 
-def test_exact_rehearsal_rejects_repository_module_substitution() -> None:
+def test_exact_rehearsal_allows_only_classified_contract_adapters() -> None:
     rows = [
         {
             "kind": "python-module",
@@ -65,6 +65,13 @@ def test_exact_rehearsal_rejects_repository_module_substitution() -> None:
         }
     ]
 
+    verify_rehearsal_integrity(
+        rows,
+        candidate_sha=COMMIT,
+        scope="exact",
+    )
+
+    rows[0]["module"] = "gateway.future_unexercised_stage"
     with pytest.raises(SystemExit, match="repository-code substitutions"):
         verify_rehearsal_integrity(
             rows,
@@ -149,7 +156,7 @@ def test_rehearsal_component_uses_constrained_outer_profile(monkeypatch) -> None
     assert "REHEARSAL_OUTER_MEMORY=7g" in command
 
 
-def test_exact_adapter_allows_only_capacity_substitutions(monkeypatch) -> None:
+def test_exact_adapter_allows_only_classified_substitutions(monkeypatch) -> None:
     monkeypatch.setenv("REHEARSAL_SCOPE", "exact")
     monkeypatch.setattr(
         contract_adapter,
@@ -177,6 +184,14 @@ def test_exact_adapter_allows_only_capacity_substitutions(monkeypatch) -> None:
             kind="python-module",
             argv=["-m", "gateway.tee.restart_preflight_v2"],
             module="gateway.tee.restart_preflight_v2",
+        )
+        == 0
+    )
+    assert (
+        contract_adapter._record_internal_substitution(
+            kind="python-module",
+            argv=["-m", "gateway.future_unexercised_stage"],
+            module="gateway.future_unexercised_stage",
         )
         == 97
     )
@@ -227,12 +242,11 @@ def test_targeted_regression_classifies_dependency_bootstrap() -> None:
         scope="weight_readiness_regression",
     )
 
-    with pytest.raises(SystemExit, match="repository-code substitutions"):
-        verify_rehearsal_integrity(
-            rows,
-            candidate_sha=COMMIT,
-            scope="exact",
-        )
+    verify_rehearsal_integrity(
+        rows,
+        candidate_sha=COMMIT,
+        scope="exact",
+    )
 
 
 def test_exact_rehearsal_rejects_synthetic_external_fixture() -> None:
@@ -247,6 +261,33 @@ def test_exact_rehearsal_rejects_synthetic_external_fixture() -> None:
     with pytest.raises(SystemExit, match="synthetic external fixtures"):
         verify_rehearsal_integrity(
             rows,
+            candidate_sha=COMMIT,
+            scope="exact",
+        )
+
+
+def test_exact_rehearsal_accepts_classified_external_contract_fixture() -> None:
+    verify_rehearsal_integrity(
+        [
+            {
+                "kind": "docker",
+                "argv": ["run", "--cpus", "16", "--memory", "128g"],
+                "fixture_authenticity": "contract_enforced",
+            }
+        ],
+        candidate_sha=COMMIT,
+        scope="exact",
+    )
+
+    with pytest.raises(SystemExit, match="invalid external contract adapter"):
+        verify_rehearsal_integrity(
+            [
+                {
+                    "kind": "future-service",
+                    "argv": ["run"],
+                    "fixture_authenticity": "contract_enforced",
+                }
+            ],
             candidate_sha=COMMIT,
             scope="exact",
         )

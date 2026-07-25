@@ -9,6 +9,20 @@ from pathlib import Path
 import subprocess
 import sys
 
+try:
+    from .contract_policy import (
+        EXACT_CAPACITY_SUBSTITUTIONS,
+        EXACT_EXTERNAL_ADAPTER_KINDS,
+        is_classified_contract_adapter,
+        substitution_identity,
+    )
+except ImportError:
+    from contract_policy import (
+        EXACT_CAPACITY_SUBSTITUTIONS,
+        EXACT_EXTERNAL_ADAPTER_KINDS,
+        is_classified_contract_adapter,
+        substitution_identity,
+    )
 
 TARGETED_REGRESSION_SCOPE = "weight_readiness_regression"
 EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
@@ -20,66 +34,6 @@ EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
     "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID": (
         "alias/leadpoet-research-lab-artifact-signing"
     ),
-}
-APPROVED_EXACT_CAPACITY_SUBSTITUTIONS = {
-    "host.cpu_capacity",
-    "host.memory_capacity",
-}
-KNOWN_INTERNAL_SUBSTITUTION_MODULES = {
-    "Leadpoet.utils.restart_epoch_gate",
-    "gateway.tee.prepare_gateway_envelopes_v2",
-    "gateway.tee.release_archive_v2",
-    "gateway.tee.release_channel_v2",
-    "gateway.tee.restart_preflight_v2",
-    "gateway.tee.verify_v2_runtime_ready",
-    "gateway.research_lab.provider_profiles_v2",
-    "gateway.utils.tee_kms_provision_v2",
-    "gateway.utils.tee_v2_bootstrap",
-    "validator_tee.host.docker_operation_guard_v2",
-    "validator_tee.host.hotkey_bootstrap_v2",
-    "validator_tee.host.refresh_hotkey_config_v2",
-    "validator_tee.host.release_archive_v2",
-    "validator_tee.host.restart_preflight_v2",
-    "validator_tee.host.runtime_v2_bootstrap",
-    "validator_tee.host.verify_chain_signing_profile_v2",
-    "validator_tee.host.verify_release_gate_v2",
-    "validator_tee.scripts.stage_runtime_artifacts_v2",
-}
-KNOWN_INTERNAL_SUBSTITUTION_SCRIPTS = {
-    "docker_image_normalizer_v2.py",
-    "host_memory_guard_v2.py",
-    "release_manifest_v2.py",
-    "sandbox_runtime_artifact.py",
-    "scoring_wheelhouse.py",
-    "stage_runtime_artifacts_v2.py",
-    "verify_release_artifacts_v2.py",
-    "verify_topology.py",
-}
-KNOWN_INTERNAL_SUBSTITUTION_PROCESSES = {
-    "gateway.main",
-    "gateway.tee_egress",
-    "gateway.tee_relay",
-    "validator.chain_relay",
-}
-KNOWN_INTERNAL_SUBSTITUTION_BOUNDARIES = {
-    "bash.build_drand_cabi_v2",
-    "http.local_gateway",
-    "host.containerd_state",
-    "host.cpu_capacity",
-    "host.filesystem_capacity",
-    "host.memory_capacity",
-    "host.mount_namespace",
-    "host.process_lookup",
-    "host.process_termination",
-    "host.socket_state",
-    "host.systemd",
-    "host.timing",
-    "python.scrub_parent_environment",
-    "python.validator_coordinator",
-    "python_dependencies.download",
-    "python_dependencies.bootstrap",
-    "python_dependencies.install",
-    "python_dependencies.uninstall",
 }
 
 
@@ -101,16 +55,6 @@ def require_order(values: list[str], required: list[str]) -> None:
             raise SystemExit(
                 f"required rehearsal event is missing or out of order: {expected}"
             ) from exc
-
-
-def _substitution_identity(row: dict) -> str:
-    return str(
-        row.get("substitution")
-        or row.get("module")
-        or row.get("script")
-        or row.get("process")
-        or ""
-    )
 
 
 def _verify_production_identity(
@@ -187,13 +131,12 @@ def verify_rehearsal_integrity(
     disallowed_exact_substitutions = [
         row
         for row in substitutions
-        if _substitution_identity(row)
-        not in APPROVED_EXACT_CAPACITY_SUBSTITUTIONS
+        if not is_classified_contract_adapter(substitution_identity(row))
     ]
     if scope == "exact" and disallowed_exact_substitutions:
         identities = sorted(
             {
-                _substitution_identity(row) or "<unknown>"
+                substitution_identity(row) or "<unknown>"
                 for row in disallowed_exact_substitutions
             }
         )
@@ -203,7 +146,9 @@ def verify_rehearsal_integrity(
         )
     if scope == "exact":
         for row in substitutions:
-            identity = _substitution_identity(row)
+            identity = substitution_identity(row)
+            if identity not in EXACT_CAPACITY_SUBSTITUTIONS:
+                continue
             expected = (
                 {"advertised_vcpus": 16}
                 if identity == "host.cpu_capacity"
@@ -233,16 +178,23 @@ def verify_rehearsal_integrity(
             "exact restart rehearsal used synthetic external fixtures: "
             + ", ".join(identities)
         )
+    contract_external_fixtures = [
+        row
+        for row in rows
+        if row.get("fixture_authenticity") == "contract_enforced"
+    ]
+    if scope == "exact" and any(
+        row.get("kind") not in EXACT_EXTERNAL_ADAPTER_KINDS
+        or not isinstance(row.get("argv"), list)
+        for row in contract_external_fixtures
+    ):
+        raise SystemExit(
+            "exact restart rehearsal used an invalid external contract adapter"
+        )
     if scope == TARGETED_REGRESSION_SCOPE:
         for row in substitutions:
-            identity = _substitution_identity(row)
-            allowed = (
-                identity in KNOWN_INTERNAL_SUBSTITUTION_MODULES
-                or identity in KNOWN_INTERNAL_SUBSTITUTION_SCRIPTS
-                or identity in KNOWN_INTERNAL_SUBSTITUTION_PROCESSES
-                or identity in KNOWN_INTERNAL_SUBSTITUTION_BOUNDARIES
-            )
-            if not allowed:
+            identity = substitution_identity(row)
+            if not is_classified_contract_adapter(identity):
                 raise SystemExit(
                     "targeted regression used an unclassified internal "
                     f"substitution: {identity or '<unknown>'}"

@@ -10,7 +10,10 @@ import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 from urllib.parse import parse_qs, urlsplit
 
-from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
+from gateway.tee.artifact_vault_v2 import (
+    ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES,
+    EncryptedArtifactVaultV2,
+)
 from gateway.tee.provider_broker_v2 import HTTPXProviderTransport
 from leadpoet_canonical.attested_v2 import (
     build_transport_attempt,
@@ -159,6 +162,9 @@ class ArtifactPersistenceVerifierV2:
                 "retry_delays_seconds": list(
                     ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS
                 ),
+                "retryable_http_statuses": sorted(
+                    ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES
+                ),
                 "timeout_ms": ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
                 "storage_policy_hash": self._policy_hash,
                 "maximum_storage_document_bytes": (
@@ -282,6 +288,12 @@ class ArtifactPersistenceVerifierV2:
             )
             attempts.append(get_attempt)
             if get_attempt["terminal_status"] == "authenticated_response":
+                if (
+                    get_attempt["http_status"]
+                    in ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES
+                    and ordinal + 1 < ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
+                ):
+                    continue
                 break
         if get_attempt["terminal_status"] != "authenticated_response":
             return self._failure(attempts, get_attempt["failure_code"])
@@ -317,6 +329,12 @@ class ArtifactPersistenceVerifierV2:
             )
             attempts.append(head_attempt)
             if head_attempt["terminal_status"] == "authenticated_response":
+                if (
+                    head_attempt["http_status"]
+                    in ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES
+                    and offset + 1 < ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
+                ):
+                    continue
                 break
         if head_attempt["terminal_status"] != "authenticated_response":
             return self._failure(attempts, head_attempt["failure_code"])

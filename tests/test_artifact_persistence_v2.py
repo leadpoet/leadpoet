@@ -6,6 +6,7 @@ import pytest
 
 from gateway.tee.artifact_persistence_v2 import (
     ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS,
+    ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES,
     ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS,
     ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS,
     ARTIFACT_POLICY_SCHEMA_VERSION,
@@ -93,6 +94,22 @@ class _Transport:
             "tls_peer_chain_hash": "sha256:" + "b" * 64,
             "tls_protocol": "TLSv1.3",
         }
+
+
+class _StatusSequenceTransport(_Transport):
+    def __init__(self, document, *, get_statuses=(200,), head_statuses=(200,)):
+        super().__init__(document)
+        self.statuses = {
+            "GET": list(get_statuses),
+            "HEAD": list(head_statuses),
+        }
+
+    def __call__(self, **kwargs):
+        response = super().__call__(**kwargs)
+        method = kwargs["method"]
+        statuses = self.statuses[method]
+        response["http_status"] = statuses.pop(0) if len(statuses) > 1 else statuses[0]
+        return response
 
 
 def test_policy_requires_exact_s3_https_boundary() -> None:
@@ -220,7 +237,93 @@ def test_authenticated_s3_error_is_not_a_transport_failure_or_success() -> None:
     )
     assert result["status"] == "failed"
     assert result["failure_code"] == "authenticated_http_403"
+    assert len(result["transport_attempts"]) == 1
     assert result["transport_attempts"][0]["terminal_status"] == "authenticated_response"
+    assert vault.descriptor(descriptor["artifact_id"])["persisted"] is False
+
+
+@pytest.mark.parametrize("method", ("GET", "HEAD"))
+@pytest.mark.parametrize(
+    "status",
+    sorted(ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES),
+)
+def test_authenticated_transient_http_status_retries_and_recovers(
+    method: str,
+    status: int,
+) -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+    transport = _StatusSequenceTransport(
+        document,
+        get_statuses=(status, 200) if method == "GET" else (200,),
+        head_statuses=(status, 200) if method == "HEAD" else (200,),
+    )
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=transport,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
+    )
+
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "persisted"
+    method_attempts = [
+        attempt
+        for attempt in result["transport_attempts"]
+        if attempt["method"] == method
+    ]
+    assert [attempt["http_status"] for attempt in method_attempts] == [status, 200]
+
+
+@pytest.mark.parametrize("method", ("GET", "HEAD"))
+@pytest.mark.parametrize(
+    "status",
+    sorted(ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES),
+)
+def test_authenticated_transient_http_status_exhaustion_fails_closed(
+    method: str,
+    status: int,
+) -> None:
+    vault = _vault()
+    descriptor, document = _sealed(vault)
+    repeated = (status,) * ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
+    transport = _StatusSequenceTransport(
+        document,
+        get_statuses=repeated if method == "GET" else (200,),
+        head_statuses=repeated if method == "HEAD" else (200,),
+    )
+    verifier = ArtifactPersistenceVerifierV2(
+        vault=vault,
+        policy=POLICY,
+        transport=transport,
+        clock=lambda: "2026-07-10T12:00:00Z",
+        sleeper=lambda _seconds: None,
+    )
+
+    result = verifier.verify(
+        artifact_id=descriptor["artifact_id"],
+        attestation_job_id="artifact-lineage-job",
+        artifact_ref="s3://immutable.example/item.json",
+        get_url=_url(),
+        head_url=_url(),
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure_code"] == "authenticated_http_%s" % status
+    method_attempts = [
+        attempt
+        for attempt in result["transport_attempts"]
+        if attempt["method"] == method
+    ]
+    assert len(method_attempts) == ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS
     assert vault.descriptor(descriptor["artifact_id"])["persisted"] is False
 
 

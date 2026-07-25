@@ -23,6 +23,9 @@ ARTIFACT_MASTER_KEY_HASH_DOMAIN = b"leadpoet-artifact-master-key-v2:"
 MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 MAX_IN_MEMORY_ARTIFACTS = 2048
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES = frozenset(
+    {408, 429, 500, 502, 503, 504}
+)
 
 
 class ArtifactVaultV2Error(RuntimeError):
@@ -307,6 +310,11 @@ class EncryptedArtifactVaultV2:
         ):
             if any(
                 item["terminal_status"] != "transport_failure"
+                and not (
+                    item["terminal_status"] == "authenticated_response"
+                    and item["http_status"]
+                    in ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES
+                )
                 for item in attempts_for_method[:-1]
             ) or (
                 attempts_for_method[-1]["terminal_status"]

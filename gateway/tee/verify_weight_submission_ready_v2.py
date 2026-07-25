@@ -25,6 +25,10 @@ _RETRYABLE_ALLOCATION_FAILURE_MARKERS = (
     "tls_failure",
     "unexpected_eof",
 )
+_RETRYABLE_AUTHENTICATED_HTTP_FAILURE_MARKERS = tuple(
+    "authenticated_http_%s" % status
+    for status in (408, 429, 500, 502, 503, 504)
+)
 
 
 def _retryable_allocation_failure(exc: BaseException) -> bool:
@@ -36,7 +40,13 @@ def _retryable_allocation_failure(exc: BaseException) -> bool:
         messages.append(str(current).lower())
         current = current.__cause__ or current.__context__
     text = " ".join(messages)
-    return any(marker in text for marker in _RETRYABLE_ALLOCATION_FAILURE_MARKERS)
+    return any(
+        marker in text
+        for marker in (
+            *_RETRYABLE_ALLOCATION_FAILURE_MARKERS,
+            *_RETRYABLE_AUTHENTICATED_HTTP_FAILURE_MARKERS,
+        )
+    )
 
 
 def _validate_handoff(

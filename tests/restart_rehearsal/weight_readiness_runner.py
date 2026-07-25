@@ -392,6 +392,7 @@ def _run_supabase_history_pagination_probe() -> None:
     ):
         raise RuntimeError("finalized allocation history pagination is incomplete")
     module_path = Path(source.__file__).resolve()
+    source_kind, source_git_path = _candidate_module_location(module_path)
     module_hash = hashlib.sha256(module_path.read_bytes()).hexdigest()
     _event(
         "weight-readiness-supabase",
@@ -399,8 +400,8 @@ def _run_supabase_history_pagination_probe() -> None:
         implementation="production_module",
         fixture_authenticity="sanitized_production_shape",
         source_path=str(module_path),
-        source_git_path="gateway/tee/supabase_source_v2.py",
-        source_kind="candidate_checkout",
+        source_git_path=source_git_path,
+        source_kind=source_kind,
         source_sha256=module_hash,
         candidate_sha=_candidate_sha(),
         row_count=row_count,

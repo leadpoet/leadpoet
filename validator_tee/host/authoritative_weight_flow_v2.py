@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import gzip
+import io
+import json
 import re
 import struct
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
+from urllib.parse import urlsplit
 
 from leadpoet_canonical.binding import create_binding_message
-from leadpoet_canonical.attested_v2 import sha256_json
+from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
+from leadpoet_canonical.hotkey_authority_v2 import (
+    MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES,
+    MAX_WEIGHT_TRANSPORT_WIRE_BYTES,
+    build_weight_transport_authorization_v2,
+    weight_transport_authorization_message_v2,
+)
 from validator_tee.host.gateway_weight_inputs_v2 import (
     _gateway_endpoint,
     fetch_gateway_weight_inputs_v2,
@@ -30,6 +41,87 @@ class AuthoritativeWeightFlowV2Error(RuntimeError):
 
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SIGNATURE_RE = re.compile(r"^[0-9a-f]{128}$")
+_COMPRESS_REQUEST_MIN_BYTES = 1024 * 1024
+
+
+def _gzip_compress(body: bytes) -> bytes:
+    output = io.BytesIO()
+    with gzip.GzipFile(
+        filename="",
+        mode="wb",
+        fileobj=output,
+        compresslevel=1,
+        mtime=0,
+    ) as compressed:
+        compressed.write(body)
+    return output.getvalue()
+
+
+def _encode_json_request(
+    payload: Mapping[str, Any],
+) -> tuple[bytes, Dict[str, str], bytes]:
+    logical_body = json.dumps(
+        dict(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    if len(logical_body) > MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES:
+        raise AuthoritativeWeightFlowV2Error(
+            "gateway V2 request exceeds the logical size limit"
+        )
+    headers = {"Content-Type": "application/json"}
+    wire_body = logical_body
+    if len(logical_body) >= _COMPRESS_REQUEST_MIN_BYTES:
+        wire_body = _gzip_compress(logical_body)
+        if len(wire_body) > MAX_WEIGHT_TRANSPORT_WIRE_BYTES:
+            raise AuthoritativeWeightFlowV2Error(
+                "gateway V2 request exceeds the compressed wire size limit"
+            )
+        headers["Content-Encoding"] = "gzip"
+    return wire_body, headers, logical_body
+
+
+async def _authorize_compressed_request(
+    *,
+    url: str,
+    payload: Mapping[str, Any],
+    wire_body: bytes,
+    logical_body: bytes,
+) -> Dict[str, str]:
+    validator_hotkey = str(payload.get("validator_hotkey") or "")
+    authorization = build_weight_transport_authorization_v2(
+        validator_hotkey=validator_hotkey,
+        path=urlsplit(url).path,
+        wire_body_hash=sha256_bytes(wire_body),
+        wire_body_bytes=len(wire_body),
+        logical_body_hash=sha256_bytes(logical_body),
+        logical_body_bytes=len(logical_body),
+    )
+    message = weight_transport_authorization_message_v2(
+        authorization
+    ).encode("utf-8")
+    signature_result = await asyncio.to_thread(
+        ValidatorEnclaveClient().sign_application_message_v2,
+        message,
+    )
+    signature = str(signature_result.get("signature") or "").lower()
+    if (
+        signature_result.get("purpose")
+        != "validator.gateway_weight_transport.v2"
+        or signature_result.get("validator_hotkey") != validator_hotkey
+        or not _SIGNATURE_RE.fullmatch(signature)
+    ):
+        raise AuthoritativeWeightFlowV2Error(
+            "validator enclave did not authorize compressed gateway transport"
+        )
+    return {
+        "X-Leadpoet-Weight-Transport": base64.b64encode(
+            canonical_json(authorization).encode("utf-8")
+        ).decode("ascii"),
+        "X-Leadpoet-Weight-Transport-Signature": signature,
+    }
 
 
 def _float_bits(values: Any) -> list[str]:
@@ -88,8 +180,18 @@ async def _post_json(
     import aiohttp
 
     timeout = aiohttp.ClientTimeout(total=float(timeout_seconds))
+    body, headers, logical_body = _encode_json_request(payload)
+    if headers.get("Content-Encoding") == "gzip":
+        headers.update(
+            await _authorize_compressed_request(
+                url=url,
+                payload=payload,
+                wire_body=body,
+                logical_body=logical_body,
+            )
+        )
     async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
-        async with session.post(url, json=dict(payload)) as response:
+        async with session.post(url, data=body, headers=headers) as response:
             text = await response.text()
             if response.status != 200:
                 raise AuthoritativeWeightFlowV2Error(

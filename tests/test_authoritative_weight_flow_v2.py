@@ -1,9 +1,17 @@
 from __future__ import annotations
 
-import pytest
+import base64
+import gzip
+import json
 import struct
 
-from leadpoet_canonical.attested_v2 import sha256_json
+import pytest
+
+from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
+from leadpoet_canonical.hotkey_authority_v2 import (
+    validate_weight_transport_authorization_v2,
+    weight_transport_authorization_message_v2,
+)
 from validator_tee.host import authoritative_weight_flow_v2 as flow_module
 from validator_tee.host.authoritative_weight_flow_v2 import (
     AuthoritativeWeightFlowV2Error,
@@ -19,6 +27,238 @@ COMPUTED_RECEIPT = "sha256:" + "1" * 64
 ROOT = "sha256:" + "2" * 64
 EVENT = "sha256:" + "3" * 64
 FINALIZATION_SCAN = "sha256:" + "d" * 64
+
+
+def test_small_gateway_authority_request_uses_compact_uncompressed_json():
+    payload = {
+        "receipt_graph": [
+            {"receipt_hash": "sha256:" + str(index).zfill(64)}
+            for index in range(10)
+        ]
+    }
+
+    body, headers, logical_body = flow_module._encode_json_request(payload)
+
+    assert headers == {"Content-Type": "application/json"}
+    assert body == json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    assert logical_body == body
+    assert len(body) < len(json.dumps(payload).encode("utf-8"))
+    assert json.loads(body) == payload
+
+
+def test_large_gateway_authority_request_uses_bounded_gzip_transport():
+    limit = 10 * 1024 * 1024
+    payload = {"receipt_graph": ["x" * 30] * 315_000}
+
+    body, headers, logical_body = flow_module._encode_json_request(payload)
+
+    assert len(body) < limit
+    assert len(logical_body) < limit
+    assert len(json.dumps(payload).encode("utf-8")) > limit
+    assert headers == {
+        "Content-Type": "application/json",
+        "Content-Encoding": "gzip",
+    }
+    assert gzip.decompress(body) == logical_body
+
+
+def test_gateway_authority_request_fails_closed_at_both_size_limits(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        flow_module,
+        "MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES",
+        64,
+    )
+    with pytest.raises(
+        AuthoritativeWeightFlowV2Error,
+        match="logical size limit",
+    ):
+        flow_module._encode_json_request({"value": "x" * 64})
+
+    monkeypatch.setattr(
+        flow_module,
+        "MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES",
+        1024,
+    )
+    monkeypatch.setattr(flow_module, "MAX_WEIGHT_TRANSPORT_WIRE_BYTES", 8)
+    monkeypatch.setattr(flow_module, "_COMPRESS_REQUEST_MIN_BYTES", 1)
+    with pytest.raises(
+        AuthoritativeWeightFlowV2Error,
+        match="compressed wire size limit",
+    ):
+        flow_module._encode_json_request({"value": "not-compressible-enough"})
+
+
+@pytest.mark.asyncio
+async def test_post_json_sends_preencoded_compact_body(monkeypatch):
+    import aiohttp
+
+    observed = {}
+
+    class Response:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def text(self):
+            return '{"success":true}'
+
+        async def json(self):
+            return {"success": True}
+
+    class Session:
+        def __init__(self, **kwargs):
+            observed["session"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def post(self, url, **kwargs):
+            observed["url"] = url
+            observed["request"] = kwargs
+            return Response()
+
+    monkeypatch.setattr(aiohttp, "ClientSession", Session)
+    payload = {"z": [1, 2], "a": {"value": True}}
+
+    result = await flow_module._post_json(
+        "https://gateway.example/weights/submit/v2",
+        payload,
+        30.0,
+    )
+
+    assert result == {"success": True}
+    assert observed["request"] == {
+        "data": b'{"a":{"value":true},"z":[1,2]}',
+        "headers": {"Content-Type": "application/json"},
+    }
+    assert observed["session"]["trust_env"] is False
+
+
+@pytest.mark.asyncio
+async def test_post_json_authorizes_exact_compressed_transport(monkeypatch):
+    import aiohttp
+
+    observed = {}
+
+    class Enclave:
+        def sign_application_message_v2(self, message):
+            observed["signed_message"] = bytes(message)
+            return {
+                "purpose": "validator.gateway_weight_transport.v2",
+                "validator_hotkey": HOTKEY,
+                "signature": "a" * 128,
+            }
+
+    class Response:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def text(self):
+            return '{"success":true}'
+
+        async def json(self):
+            return {"success": True}
+
+    class Session:
+        def __init__(self, **kwargs):
+            observed["session"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def post(self, url, **kwargs):
+            observed["url"] = url
+            observed["request"] = kwargs
+            return Response()
+
+    monkeypatch.setattr(flow_module, "ValidatorEnclaveClient", Enclave)
+    monkeypatch.setattr(aiohttp, "ClientSession", Session)
+    payload = {
+        "validator_hotkey": HOTKEY,
+        "receipt_graph": ["x" * (1024 * 1024)],
+    }
+
+    result = await flow_module._post_json(
+        "https://gateway.example/weights/submit/v2",
+        payload,
+        30.0,
+    )
+
+    request = observed["request"]
+    logical_body = gzip.decompress(request["data"])
+    authorization = validate_weight_transport_authorization_v2(
+        json.loads(
+            base64.b64decode(
+                request["headers"]["X-Leadpoet-Weight-Transport"],
+                validate=True,
+            )
+        )
+    )
+    assert result == {"success": True}
+    assert json.loads(logical_body) == payload
+    assert authorization["path"] == "/weights/submit/v2"
+    assert authorization["wire_body_hash"] == sha256_bytes(request["data"])
+    assert authorization["wire_body_bytes"] == len(request["data"])
+    assert authorization["logical_body_hash"] == sha256_bytes(logical_body)
+    assert authorization["logical_body_bytes"] == len(logical_body)
+    assert observed["signed_message"] == (
+        weight_transport_authorization_message_v2(
+            authorization
+        ).encode("utf-8")
+    )
+    assert request["headers"]["X-Leadpoet-Weight-Transport-Signature"] == (
+        "a" * 128
+    )
+    assert request["headers"]["Content-Encoding"] == "gzip"
+
+
+@pytest.mark.asyncio
+async def test_compressed_transport_rejects_invalid_enclave_authorization(
+    monkeypatch,
+):
+    class Enclave:
+        def sign_application_message_v2(self, _message):
+            return {
+                "purpose": "validator.gateway_weight_transport.v2",
+                "validator_hotkey": HOTKEY,
+                "signature": "short",
+            }
+
+    monkeypatch.setattr(flow_module, "ValidatorEnclaveClient", Enclave)
+    with pytest.raises(
+        AuthoritativeWeightFlowV2Error,
+        match="did not authorize",
+    ):
+        await flow_module._post_json(
+            "https://gateway.example/weights/submit/v2",
+            {
+                "validator_hotkey": HOTKEY,
+                "receipt_graph": ["x" * (1024 * 1024)],
+            },
+            30.0,
+        )
 
 
 class Client:

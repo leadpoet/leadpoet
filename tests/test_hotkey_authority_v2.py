@@ -11,6 +11,7 @@ from leadpoet_canonical.hotkey_authority_v2 import (
     HotkeyAuthorityV2Error,
     build_application_signature_request_v2,
     build_serve_axon_extrinsic_authorization_v2,
+    build_weight_transport_authorization_v2,
     build_weight_inputs_request_v2,
     build_weight_extrinsic_authorization_v2,
     classify_application_message_v2,
@@ -26,8 +27,10 @@ from leadpoet_canonical.hotkey_authority_v2 import (
     validate_application_signature_request_v2,
     validate_chain_signing_profile,
     validate_serve_axon_extrinsic_authorization_v2,
+    validate_weight_transport_authorization_v2,
     validate_weight_extrinsic_authorization_v2,
     validate_weight_inputs_request_v2,
+    weight_transport_authorization_message_v2,
     weight_inputs_request_message_v2,
 )
 from leadpoet_canonical.attested_v2 import sha256_json
@@ -460,6 +463,108 @@ def test_weight_input_request_rejects_other_hotkeys_and_inverted_windows():
         classify_application_message_v2(
             weight_inputs_request_message_v2(request).encode("utf-8"),
             validator_hotkey=HOTKEY,
+        )
+
+
+def test_weight_transport_authorization_is_canonical_and_hotkey_bound():
+    authorization = build_weight_transport_authorization_v2(
+        validator_hotkey=HOTKEY,
+        path="/weights/submit/v2",
+        wire_body_hash="sha256:" + "1" * 64,
+        wire_body_bytes=2_000_000,
+        logical_body_hash="sha256:" + "2" * 64,
+        logical_body_bytes=10_000_000,
+    )
+
+    assert (
+        validate_weight_transport_authorization_v2(authorization)
+        == authorization
+    )
+    message = weight_transport_authorization_message_v2(
+        authorization
+    ).encode("utf-8")
+    assert (
+        classify_application_message_v2(
+            message,
+            validator_hotkey=HOTKEY,
+        )
+        == "validator.gateway_weight_transport.v2"
+    )
+
+    tampered = dict(authorization)
+    tampered["logical_body_bytes"] += 1
+    with pytest.raises(HotkeyAuthorityV2Error, match="canonical"):
+        weight_transport_authorization_message_v2(tampered)
+    with pytest.raises(HotkeyAuthorityV2Error, match="hotkey differs"):
+        classify_application_message_v2(
+            weight_transport_authorization_message_v2(
+                build_weight_transport_authorization_v2(
+                    validator_hotkey=TARGET,
+                    path="/weights/submit/v2",
+                    wire_body_hash="sha256:" + "1" * 64,
+                    wire_body_bytes=2_000_000,
+                    logical_body_hash="sha256:" + "2" * 64,
+                    logical_body_bytes=10_000_000,
+                )
+            ).encode("utf-8"),
+            validator_hotkey=HOTKEY,
+        )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/weights/submit/v2",
+        "/weights/finalize/v2",
+        "/weights/subnet-epoch/candidate/v1",
+        "/weights/subnet-epoch/boundary/v1",
+    ],
+)
+def test_weight_transport_authorization_allows_only_v2_write_paths(path):
+    authorization = build_weight_transport_authorization_v2(
+        validator_hotkey=HOTKEY,
+        path=path,
+        wire_body_hash="sha256:" + "1" * 64,
+        wire_body_bytes=2_000_000,
+        logical_body_hash="sha256:" + "2" * 64,
+        logical_body_bytes=10_000_000,
+    )
+
+    assert authorization["path"] == path
+    assert (
+        classify_application_message_v2(
+            weight_transport_authorization_message_v2(
+                authorization
+            ).encode("utf-8"),
+            validator_hotkey=HOTKEY,
+        )
+        == "validator.gateway_weight_transport.v2"
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "wire_bytes", "logical_bytes"),
+    [
+        ("/health", 100, 200),
+        ("/weights/submit/v2", 0, 200),
+        ("/weights/submit/v2", 100, 0),
+        ("/weights/submit/v2", 10 * 1024 * 1024 + 1, 200),
+        ("/weights/submit/v2", 100, 64 * 1024 * 1024 + 1),
+    ],
+)
+def test_weight_transport_authorization_rejects_open_paths_and_bad_sizes(
+    path,
+    wire_bytes,
+    logical_bytes,
+):
+    with pytest.raises(HotkeyAuthorityV2Error):
+        build_weight_transport_authorization_v2(
+            validator_hotkey=HOTKEY,
+            path=path,
+            wire_body_hash="sha256:" + "1" * 64,
+            wire_body_bytes=wire_bytes,
+            logical_body_hash="sha256:" + "2" * 64,
+            logical_body_bytes=logical_bytes,
         )
 
 

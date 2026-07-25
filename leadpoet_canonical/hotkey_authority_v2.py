@@ -34,6 +34,18 @@ SERVE_AXON_EXTRINSIC_AUTHORIZATION_SCHEMA_VERSION = (
 APPLICATION_SIGNATURE_SCHEMA_VERSION = "leadpoet.application_signature.v2"
 WEIGHT_INPUT_REQUEST_SCHEMA_VERSION = "leadpoet.weight_inputs_request.v2"
 WEIGHT_INPUT_REQUEST_PREFIX = "LEADPOET_WEIGHT_INPUTS_V2|"
+WEIGHT_TRANSPORT_AUTHORIZATION_SCHEMA_VERSION = (
+    "leadpoet.weight_transport_authorization.v2"
+)
+WEIGHT_TRANSPORT_AUTHORIZATION_PREFIX = "LEADPOET_WEIGHT_TRANSPORT_V2|"
+WEIGHT_TRANSPORT_PATHS = (
+    "/weights/submit/v2",
+    "/weights/finalize/v2",
+    "/weights/subnet-epoch/candidate/v1",
+    "/weights/subnet-epoch/boundary/v1",
+)
+MAX_WEIGHT_TRANSPORT_WIRE_BYTES = 10 * 1024 * 1024
+MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES = 64 * 1024 * 1024
 SUBNET_EPOCH_CANDIDATE_MESSAGE_PREFIX = (
     "LEADPOET_SUBNET_EPOCH_BOUNDARY_CANDIDATE_V1"
 )
@@ -934,6 +946,108 @@ def parse_weight_inputs_request_message_v2(message: bytes) -> Dict[str, Any]:
     return validate_weight_inputs_request_v2(value)
 
 
+def build_weight_transport_authorization_v2(
+    *,
+    validator_hotkey: str,
+    path: str,
+    wire_body_hash: str,
+    wire_body_bytes: int,
+    logical_body_hash: str,
+    logical_body_bytes: int,
+) -> Dict[str, Any]:
+    hotkey = str(validator_hotkey or "")
+    normalized_path = str(path or "")
+    _require(bool(_HOTKEY_RE.fullmatch(hotkey)), "validator_hotkey is invalid")
+    _require(
+        normalized_path in WEIGHT_TRANSPORT_PATHS,
+        "weight transport path is invalid",
+    )
+    body = {
+        "schema_version": WEIGHT_TRANSPORT_AUTHORIZATION_SCHEMA_VERSION,
+        "validator_hotkey": hotkey,
+        "method": "POST",
+        "path": normalized_path,
+        "content_encoding": "gzip",
+        "wire_body_hash": _hash(wire_body_hash, "wire_body_hash"),
+        "wire_body_bytes": _integer(
+            wire_body_bytes,
+            "wire_body_bytes",
+            minimum=1,
+            maximum=MAX_WEIGHT_TRANSPORT_WIRE_BYTES,
+        ),
+        "logical_body_hash": _hash(logical_body_hash, "logical_body_hash"),
+        "logical_body_bytes": _integer(
+            logical_body_bytes,
+            "logical_body_bytes",
+            minimum=1,
+            maximum=MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES,
+        ),
+    }
+    return {**body, "request_hash": sha256_json(body)}
+
+
+def validate_weight_transport_authorization_v2(
+    value: Mapping[str, Any],
+) -> Dict[str, Any]:
+    expected_fields = {
+        "schema_version",
+        "validator_hotkey",
+        "method",
+        "path",
+        "content_encoding",
+        "wire_body_hash",
+        "wire_body_bytes",
+        "logical_body_hash",
+        "logical_body_bytes",
+        "request_hash",
+    }
+    _require(
+        isinstance(value, Mapping) and set(value) == expected_fields,
+        "weight transport authorization fields are invalid",
+    )
+    rebuilt = build_weight_transport_authorization_v2(
+        validator_hotkey=value["validator_hotkey"],
+        path=value["path"],
+        wire_body_hash=value["wire_body_hash"],
+        wire_body_bytes=value["wire_body_bytes"],
+        logical_body_hash=value["logical_body_hash"],
+        logical_body_bytes=value["logical_body_bytes"],
+    )
+    _require(
+        dict(value) == rebuilt,
+        "weight transport authorization is not canonical",
+    )
+    return rebuilt
+
+
+def weight_transport_authorization_message_v2(
+    value: Mapping[str, Any],
+) -> str:
+    return (
+        WEIGHT_TRANSPORT_AUTHORIZATION_PREFIX
+        + canonical_json(validate_weight_transport_authorization_v2(value))
+    )
+
+
+def parse_weight_transport_authorization_message_v2(
+    message: bytes,
+) -> Dict[str, Any]:
+    text = _application_message_text(message)
+    _require(
+        text.startswith(WEIGHT_TRANSPORT_AUTHORIZATION_PREFIX),
+        "weight transport authorization prefix is invalid",
+    )
+    try:
+        value = json.loads(
+            text[len(WEIGHT_TRANSPORT_AUTHORIZATION_PREFIX) :]
+        )
+    except (TypeError, ValueError) as exc:
+        raise HotkeyAuthorityV2Error(
+            "weight transport authorization JSON is invalid"
+        ) from exc
+    return validate_weight_transport_authorization_v2(value)
+
+
 def classify_application_message_v2(message: bytes, *, validator_hotkey: str) -> str:
     """Return the exact measured purpose for a recognized validator message."""
 
@@ -948,6 +1062,16 @@ def classify_application_message_v2(message: bytes, *, validator_hotkey: str) ->
             "weight input request hotkey differs",
         )
         return "validator.gateway_weight_inputs.v2"
+
+    if text.startswith(WEIGHT_TRANSPORT_AUTHORIZATION_PREFIX):
+        authorization = parse_weight_transport_authorization_message_v2(
+            message
+        )
+        _require(
+            authorization["validator_hotkey"] == hotkey,
+            "weight transport authorization hotkey differs",
+        )
+        return "validator.gateway_weight_transport.v2"
 
     if text.startswith(SUBNET_EPOCH_CANDIDATE_MESSAGE_PREFIX + "|"):
         expected_prefix = (

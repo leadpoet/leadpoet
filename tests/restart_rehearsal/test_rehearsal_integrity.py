@@ -22,15 +22,15 @@ def _exact_capacity_rows() -> list[dict]:
     return [
         {
             "kind": "host-command",
-            "substitution": "host.cpu_capacity",
-            "implementation": "internal_substitution",
+            "boundary": "host.cpu_capacity",
+            "implementation": "contract_enforced",
             "advertised_vcpus": 16,
             "outer_limit": "4",
         },
         {
             "kind": "host-command",
-            "substitution": "host.memory_capacity",
-            "implementation": "internal_substitution",
+            "boundary": "host.memory_capacity",
+            "implementation": "contract_enforced",
             "advertised_memory_mib": 131072,
             "outer_limit": "6g",
         },
@@ -208,6 +208,46 @@ def test_exact_rehearsal_accepts_strict_capacity_substitutions() -> None:
     )
 
 
+def test_exact_rehearsal_accepts_classified_host_boundary_contracts() -> None:
+    rows = [
+        *_exact_capacity_rows(),
+        {
+            "kind": "host-command",
+            "boundary": "host.process_lookup",
+            "implementation": "contract_enforced",
+        },
+        {
+            "kind": "host-command",
+            "boundary": "host.filesystem_capacity",
+            "implementation": "contract_enforced",
+        },
+    ]
+
+    verify_rehearsal_integrity(
+        rows,
+        candidate_sha=COMMIT,
+        scope="exact",
+    )
+
+
+def test_exact_rehearsal_rejects_unclassified_boundary_contract() -> None:
+    rows = [
+        *_exact_capacity_rows(),
+        {
+            "kind": "host-command",
+            "boundary": "host.unclassified",
+            "implementation": "contract_enforced",
+        },
+    ]
+
+    with pytest.raises(SystemExit, match="unclassified boundary contracts"):
+        verify_rehearsal_integrity(
+            rows,
+            candidate_sha=COMMIT,
+            scope="exact",
+        )
+
+
 @pytest.mark.parametrize(
     "missing_identity",
     ("host.cpu_capacity", "host.memory_capacity"),
@@ -217,7 +257,7 @@ def test_exact_rehearsal_requires_both_capacity_substitutions(
 ) -> None:
     rows = _exact_capacity_rows()
     rows = [
-        row for row in rows if row["substitution"] != missing_identity
+        row for row in rows if row["boundary"] != missing_identity
     ]
 
     with pytest.raises(
@@ -235,15 +275,15 @@ def test_exact_rehearsal_rejects_incomplete_capacity_evidence() -> None:
     rows = [
         {
             "kind": "host-command",
-            "substitution": "host.cpu_capacity",
-            "implementation": "internal_substitution",
+            "boundary": "host.cpu_capacity",
+            "implementation": "contract_enforced",
             "advertised_vcpus": 16,
             "outer_limit": "4",
         },
         {
             "kind": "host-command",
-            "substitution": "host.memory_capacity",
-            "implementation": "internal_substitution",
+            "boundary": "host.memory_capacity",
+            "implementation": "contract_enforced",
             "advertised_memory_mib": 131072,
             "outer_limit": "",
         }
@@ -288,7 +328,9 @@ def test_rehearsal_component_uses_constrained_outer_profile(
     assert "REHEARSAL_OUTER_MEMORY=7g" in command
 
 
-def test_exact_adapter_allows_only_capacity_substitutions(monkeypatch) -> None:
+def test_exact_adapter_separates_boundaries_from_repository_substitutions(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("REHEARSAL_SCOPE", "exact")
     monkeypatch.setattr(
         contract_adapter,
@@ -302,10 +344,10 @@ def test_exact_adapter_allows_only_capacity_substitutions(monkeypatch) -> None:
     )
 
     assert (
-        contract_adapter._record_internal_substitution(
+        contract_adapter._record_boundary_contract(
             kind="host-command",
             argv=["getconf", "_NPROCESSORS_CONF"],
-            substitution="host.cpu_capacity",
+            boundary="host.cpu_capacity",
             advertised_vcpus=16,
             outer_limit="4",
         )

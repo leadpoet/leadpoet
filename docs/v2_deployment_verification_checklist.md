@@ -100,8 +100,8 @@ The rehearsal must produce all of the following:
   exact-commit compatibility gate.
 - [ ] Every contract stage passes.
 - [ ] Zero rejected contract events.
-- [ ] Zero `internal_substitution` events except the strictly validated
-  `host.cpu_capacity` and `host.memory_capacity` contract probes. An adapted
+- [ ] Zero `internal_substitution` events. Strictly classified host and
+  external adapters are recorded separately as `contract_enforced`; an adapted
   repository module, repository script, or long-lived application process
   invalidates the rehearsal even when its fabricated output has the expected
   shape.

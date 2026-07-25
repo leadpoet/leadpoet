@@ -21,9 +21,25 @@ EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
         "alias/leadpoet-research-lab-artifact-signing"
     ),
 }
-APPROVED_EXACT_CAPACITY_SUBSTITUTIONS = {
+REQUIRED_EXACT_CAPACITY_CONTRACTS = {
     "host.cpu_capacity",
     "host.memory_capacity",
+}
+CLASSIFIED_BOUNDARY_CONTRACTS = {
+    "external.aws",
+    "external.curl",
+    "external.docker",
+    "external.nitro",
+    "host.containerd_state",
+    "host.cpu_capacity",
+    "host.filesystem_capacity",
+    "host.memory_capacity",
+    "host.mount_namespace",
+    "host.process_lookup",
+    "host.process_termination",
+    "host.socket_state",
+    "host.systemd",
+    "host.timing",
 }
 KNOWN_INTERNAL_SUBSTITUTION_MODULES = {
     "Leadpoet.utils.restart_epoch_gate",
@@ -200,17 +216,16 @@ def verify_rehearsal_integrity(
         for row in rows
         if row.get("fixture_authenticity") == "synthetic"
     ]
-    disallowed_exact_substitutions = [
+    boundary_contracts = [
         row
-        for row in substitutions
-        if _substitution_identity(row)
-        not in APPROVED_EXACT_CAPACITY_SUBSTITUTIONS
+        for row in rows
+        if row.get("implementation") == "contract_enforced"
     ]
-    if scope == "exact" and disallowed_exact_substitutions:
+    if scope == "exact" and substitutions:
         identities = sorted(
             {
                 _substitution_identity(row) or "<unknown>"
-                for row in disallowed_exact_substitutions
+                for row in substitutions
             }
         )
         raise SystemExit(
@@ -218,23 +233,36 @@ def verify_rehearsal_integrity(
             + ", ".join(identities)
         )
     if scope == "exact":
-        observed_capacity_substitutions = {
-            _substitution_identity(row)
-            for row in substitutions
-            if _substitution_identity(row)
-            in APPROVED_EXACT_CAPACITY_SUBSTITUTIONS
-        }
-        missing_capacity_substitutions = sorted(
-            APPROVED_EXACT_CAPACITY_SUBSTITUTIONS
-            - observed_capacity_substitutions
+        unknown_boundaries = sorted(
+            {
+                str(row.get("boundary") or "<unknown>")
+                for row in boundary_contracts
+                if row.get("boundary") not in CLASSIFIED_BOUNDARY_CONTRACTS
+            }
         )
-        if missing_capacity_substitutions:
+        if unknown_boundaries:
+            raise SystemExit(
+                "exact restart rehearsal used unclassified boundary "
+                "contracts: " + ", ".join(unknown_boundaries)
+            )
+        observed_capacity_contracts = {
+            str(row.get("boundary"))
+            for row in boundary_contracts
+            if row.get("boundary") in REQUIRED_EXACT_CAPACITY_CONTRACTS
+        }
+        missing_capacity_contracts = sorted(
+            REQUIRED_EXACT_CAPACITY_CONTRACTS
+            - observed_capacity_contracts
+        )
+        if missing_capacity_contracts:
             raise SystemExit(
                 "exact restart rehearsal is missing required capacity "
-                "contracts: " + ", ".join(missing_capacity_substitutions)
+                "contracts: " + ", ".join(missing_capacity_contracts)
             )
-        for row in substitutions:
-            identity = _substitution_identity(row)
+        for row in boundary_contracts:
+            identity = str(row.get("boundary") or "")
+            if identity not in REQUIRED_EXACT_CAPACITY_CONTRACTS:
+                continue
             expected = (
                 {"advertised_vcpus": 16}
                 if identity == "host.cpu_capacity"
@@ -248,6 +276,21 @@ def verify_rehearsal_integrity(
                     "exact restart rehearsal capacity contract is invalid: "
                     f"{identity or '<unknown>'}"
                 )
+        malformed_external_fixtures = sorted(
+            {
+                str(row.get("boundary") or "<unknown>")
+                for row in boundary_contracts
+                if str(row.get("boundary") or "").startswith("external.")
+                and row.get("fixture_authenticity")
+                != "sanitized_production_shaped"
+            }
+        )
+        if malformed_external_fixtures:
+            raise SystemExit(
+                "exact restart rehearsal used external fixtures without "
+                "sanitized production-shaped evidence: "
+                + ", ".join(malformed_external_fixtures)
+            )
     if scope == "exact" and synthetic_external_fixtures:
         identities = sorted(
             {

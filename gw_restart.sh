@@ -1071,6 +1071,8 @@ if [ "$V2_RELEASE_READY" != "1" ]; then
 fi
 
 echo "Preparing commit-bound KMS credential envelopes"
+GATEWAY_DEPLOY_STAGE="v2_credential_envelope_preparation"
+export GATEWAY_DEPLOY_STAGE
 if ! run_prepared_gateway_module gateway.tee.prepare_gateway_envelopes_v2 \
     --install \
     --env-file "$ENV_CLONE" \

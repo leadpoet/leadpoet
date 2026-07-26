@@ -13,7 +13,15 @@ import threading
 import time
 from typing import Mapping
 
-from gateway.research_lab.config import resolve_worker_process_count
+from gateway.research_lab.config import (
+    HOSTED_PROXY_PREFIXES,
+    LEGACY_HOSTED_PROXY_PREFIXES,
+    LEGACY_SCORING_PROXY_PREFIXES,
+    SCORING_PROXY_PREFIXES,
+    V2_HOSTED_PROXY_PREFIXES,
+    V2_SCORING_PROXY_PREFIXES,
+    resolve_worker_process_count,
+)
 from Leadpoet.utils.subnet_epoch import (
     SubnetEpochError,
     load_subnet_epoch_cutover,
@@ -70,18 +78,6 @@ def canonical_deferred_worker_fleet_roles(
     roles: frozenset[str],
 ) -> str:
     return ",".join(sorted(roles))
-
-
-HOSTED_PROXY_PREFIXES = (
-    "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY",
-    "RESEARCH_LAB_WORKER_PROXY",
-    "RESEARCH_LAB_WORKER_HTTPS_PROXY",
-)
-SCORING_PROXY_PREFIXES = (
-    "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY",
-    "QUALIFICATION_WEBSHARE_PROXY",
-    "RESEARCH_LAB_SCORING_WORKER_PROXY",
-)
 
 
 def _truthy_env(env: Mapping[str, str], name: str, default: str = "false") -> bool:
@@ -206,6 +202,21 @@ def _configured_proxies(env: Mapping[str, str], prefixes: tuple[str, ...]) -> tu
     return tuple(proxies)
 
 
+def _preferred_proxy_configuration(
+    env: Mapping[str, str],
+    *,
+    v2_prefixes: tuple[str, ...],
+    legacy_prefixes: tuple[str, ...],
+) -> tuple[tuple[str, ...], str]:
+    v2_values = _configured_proxies(env, v2_prefixes)
+    if v2_values:
+        return v2_values, "v2_tls"
+    legacy_values = _configured_proxies(env, legacy_prefixes)
+    if legacy_values:
+        return legacy_values, "legacy"
+    return (), "none"
+
+
 def _proxy_ref(proxy_url: str) -> str:
     return "sha256:" + hashlib.sha256(proxy_url.encode("utf-8")).hexdigest()[:16]
 
@@ -219,6 +230,7 @@ class ResearchLabWorkerFleetPlan:
     proxy_refs: tuple[str, ...]
     enabled: bool
     reason: str = ""
+    proxy_source: str = "none"
     proxy_values: tuple[str, ...] = field(default_factory=tuple, repr=False)
 
 
@@ -234,8 +246,16 @@ def build_research_lab_worker_autostart_plan(
 ) -> ResearchLabWorkerAutoStartPlan:
     env = env or os.environ
     auto_start_enabled = _truthy_env(env, "RESEARCH_LAB_AUTO_START_WORKERS", "true")
-    hosted_proxies = _configured_proxies(env, HOSTED_PROXY_PREFIXES)
-    scoring_proxies = _configured_proxies(env, SCORING_PROXY_PREFIXES)
+    hosted_proxies, hosted_proxy_source = _preferred_proxy_configuration(
+        env,
+        v2_prefixes=V2_HOSTED_PROXY_PREFIXES,
+        legacy_prefixes=LEGACY_HOSTED_PROXY_PREFIXES,
+    )
+    scoring_proxies, scoring_proxy_source = _preferred_proxy_configuration(
+        env,
+        v2_prefixes=V2_SCORING_PROXY_PREFIXES,
+        legacy_prefixes=LEGACY_SCORING_PROXY_PREFIXES,
+    )
     hosted_legacy_count = _int_env(env, "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT", 0)
     scoring_legacy_count = _int_env(env, "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT", 0)
 
@@ -286,6 +306,7 @@ def build_research_lab_worker_autostart_plan(
             proxy_refs=tuple(_proxy_ref(proxy) for proxy in hosted_proxies),
             enabled=hosted_enabled,
             reason=hosted_reason,
+            proxy_source=hosted_proxy_source,
             proxy_values=hosted_proxies,
         ),
         scoring=ResearchLabWorkerFleetPlan(
@@ -296,6 +317,7 @@ def build_research_lab_worker_autostart_plan(
             proxy_refs=tuple(_proxy_ref(proxy) for proxy in scoring_proxies),
             enabled=scoring_enabled,
             reason=scoring_reason,
+            proxy_source=scoring_proxy_source,
             proxy_values=scoring_proxies,
         ),
     )

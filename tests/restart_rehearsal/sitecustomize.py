@@ -50,6 +50,7 @@ _GATEWAY_RUNTIME_OBJECTS: dict[str, dict[str, Any]] = {}
 _GATEWAY_RUNTIME_OBJECTS_LOCK = threading.Lock()
 _REAL_SUBTENSOR_CLASS: Any = None
 _ORIGINAL_SOCKET = socket.socket
+_ORIGINAL_GETADDRINFO = socket.getaddrinfo
 
 
 def _block_hash(block: int) -> str:
@@ -2949,8 +2950,15 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
     _real_boto3_client = boto3.client
     _real_path_read_text = Path.read_text
     _real_socket = _ORIGINAL_SOCKET
+    _real_getaddrinfo = _ORIGINAL_GETADDRINFO
     _real_sysconf = os.sysconf
     _real_urlopen = urllib.request.urlopen
+    _rehearsal_proxy_hosts = {
+        "autoresearch-proxy.example.com",
+        "scoring-proxy.example.com",
+    }
+    _rehearsal_proxy_address = "93.184.216.34"
+    _rehearsal_proxy_port = 18443
 
     def _local_boto3_client(service_name: str, *args: Any, **kwargs: Any) -> Any:
         if service_name == "s3":
@@ -2980,6 +2988,47 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
                 return _LocalVsock(family, type)
             return super().__new__(cls, family, type, proto, fileno)
 
+        def connect(self, address: Any) -> Any:
+            if (
+                isinstance(address, tuple)
+                and len(address) >= 2
+                and str(address[0]) == _rehearsal_proxy_address
+                and int(address[1]) == 443
+            ):
+                _external_event(
+                    "http_service",
+                    "proxy_tls_connect",
+                    destination_port=443,
+                )
+                return super().connect(("127.0.0.1", _rehearsal_proxy_port))
+            return super().connect(address)
+
+    def _local_getaddrinfo(
+        host: Any,
+        port: Any,
+        family: int = 0,
+        type: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> Any:
+        normalized_host = str(host or "").strip().lower().rstrip(".")
+        if normalized_host in _rehearsal_proxy_hosts and int(port) == 443:
+            _external_event(
+                "http_service",
+                "proxy_dns",
+                destination_port=443,
+            )
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    (_rehearsal_proxy_address, 443),
+                )
+            ]
+        return _real_getaddrinfo(host, port, family, type, proto, flags)
+
     def _local_sysconf(name: Any) -> int:
         if name in {"SC_NPROCESSORS_CONF", os.sysconf_names["SC_NPROCESSORS_CONF"]}:
             _external_event("host_kernel", "cpu_capacity", configured_cpus=16)
@@ -3001,4 +3050,5 @@ if os.environ.get("REHEARSAL_SCOPE") == "exact":
 
     os.sysconf = _local_sysconf
     Path.read_text = _local_path_read_text
+    socket.getaddrinfo = _local_getaddrinfo
     socket.socket = _RehearsalSocket

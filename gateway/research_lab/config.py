@@ -26,6 +26,31 @@ from .ticket_lifecycle import UNPAID_TICKET_TTL_SECONDS
 TRUTHY = {"1", "true", "yes", "on"}
 logger = logging.getLogger(__name__)
 
+V2_HOSTED_PROXY_PREFIXES = (
+    "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY",
+)
+LEGACY_HOSTED_PROXY_PREFIXES = (
+    "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY",
+    "RESEARCH_LAB_WORKER_PROXY",
+    "RESEARCH_LAB_WORKER_HTTPS_PROXY",
+)
+HOSTED_PROXY_PREFIXES = (
+    *V2_HOSTED_PROXY_PREFIXES,
+    *LEGACY_HOSTED_PROXY_PREFIXES,
+)
+V2_SCORING_PROXY_PREFIXES = (
+    "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY",
+)
+LEGACY_SCORING_PROXY_PREFIXES = (
+    "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY",
+    "QUALIFICATION_WEBSHARE_PROXY",
+    "RESEARCH_LAB_SCORING_WORKER_PROXY",
+)
+SCORING_PROXY_PREFIXES = (
+    *V2_SCORING_PROXY_PREFIXES,
+    *LEGACY_SCORING_PROXY_PREFIXES,
+)
+
 RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD = {
     "mode": "RESEARCH_LAB_TREE_MODE",
     "branch_factor": "RESEARCH_LAB_TREE_BRANCH_FACTOR",
@@ -385,7 +410,22 @@ def _count_configured_proxy_values(prefixes: tuple[str, ...]) -> int:
                 seen.add(value)
                 count += 1
                 break
+    for prefix in prefixes:
+        value = os.getenv(prefix, "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            count += 1
     return count
+
+
+def _preferred_proxy_prefixes(
+    *,
+    v2_prefixes: tuple[str, ...],
+    legacy_prefixes: tuple[str, ...],
+) -> tuple[str, ...]:
+    if _count_configured_proxy_values(v2_prefixes) > 0:
+        return v2_prefixes
+    return legacy_prefixes
 
 
 # Hard maximum on worker processes per fleet. Bounds both the supervisor's
@@ -766,10 +806,9 @@ class ResearchLabGatewayConfig:
     def from_env(cls) -> "ResearchLabGatewayConfig":
         prod_on = _prod_default(True)
         total_workers = _worker_total_from_proxy_count(
-            prefixes=(
-                "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY",
-                "RESEARCH_LAB_WORKER_PROXY",
-                "RESEARCH_LAB_WORKER_HTTPS_PROXY",
+            prefixes=_preferred_proxy_prefixes(
+                v2_prefixes=V2_HOSTED_PROXY_PREFIXES,
+                legacy_prefixes=LEGACY_HOSTED_PROXY_PREFIXES,
             ),
             legacy_total_env="RESEARCH_LAB_HOSTED_WORKER_TOTAL_WORKERS",
             process_count_env="RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT",
@@ -780,10 +819,9 @@ class ResearchLabGatewayConfig:
         if worker_index >= total_workers:
             worker_index = worker_index % total_workers
         scoring_total_workers = _worker_total_from_proxy_count(
-            prefixes=(
-                "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY",
-                "QUALIFICATION_WEBSHARE_PROXY",
-                "RESEARCH_LAB_SCORING_WORKER_PROXY",
+            prefixes=_preferred_proxy_prefixes(
+                v2_prefixes=V2_SCORING_PROXY_PREFIXES,
+                legacy_prefixes=LEGACY_SCORING_PROXY_PREFIXES,
             ),
             legacy_total_env="RESEARCH_LAB_SCORING_WORKER_TOTAL_WORKERS",
             process_count_env="RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT",

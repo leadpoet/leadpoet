@@ -11,6 +11,7 @@ from __future__ import annotations
 import gateway.research_lab.worker_autostart as wa
 from gateway.research_lab.config import (
     MAX_WORKER_PROCESSES,
+    ResearchLabGatewayConfig,
     _worker_total_from_proxy_count,
     resolve_worker_process_count,
 )
@@ -88,6 +89,35 @@ def test_default_is_one_worker_per_proxy_when_process_count_unset() -> None:
     )
     plan = wa.build_research_lab_worker_autostart_plan(env)
     assert plan.hosted.worker_count == 3  # one per proxy, unchanged default
+
+
+def test_v2_proxy_family_replaces_legacy_family_for_supervisor_and_config(
+    monkeypatch,
+) -> None:
+    env = _hosted_env(
+        RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1="https://auto.example.com:443",
+        RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1="http://legacy-1:6162",
+        RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_2="http://legacy-2:6162",
+        RESEARCH_LAB_V2_SCORING_HTTPS_PROXY=(
+            "https://scoring.example.com:443"
+        ),
+        RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1="http://legacy-3:7421",
+        RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_2="http://legacy-4:7421",
+    )
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    plan = wa.build_research_lab_worker_autostart_plan(env)
+    config = ResearchLabGatewayConfig.from_env()
+
+    assert plan.hosted.proxy_source == "v2_tls"
+    assert plan.hosted.proxy_values == ("https://auto.example.com:443",)
+    assert plan.hosted.worker_count == 1
+    assert config.hosted_worker_total_workers == 1
+    assert plan.scoring.proxy_source == "v2_tls"
+    assert plan.scoring.proxy_values == ("https://scoring.example.com:443",)
+    assert plan.scoring.worker_count == 1
+    assert config.scoring_worker_total_workers == 1
 
 
 def test_config_total_workers_honors_process_count() -> None:

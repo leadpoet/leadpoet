@@ -42,6 +42,7 @@ mkdir -p "$REHEARSAL_STATE_ROOT" /harness/bin /home/ec2-user /evidence
 BOUNDARY_SERVICE_PID=""
 GATEWAY_ENCLAVE_SERVICE_PIDS=""
 VALIDATOR_ENCLAVE_SERVICE_PID=""
+TLS_PROXY_SERVICE_PID=""
 preserve_rehearsal_evidence() {
   if [ -f "$REHEARSAL_STATE_ROOT/events.jsonl" ]; then
     cp "$REHEARSAL_STATE_ROOT/events.jsonl" \
@@ -71,6 +72,10 @@ cleanup_boundary_service() {
   if [ -n "$BOUNDARY_SERVICE_PID" ]; then
     kill "$BOUNDARY_SERVICE_PID" 2>/dev/null || true
     wait "$BOUNDARY_SERVICE_PID" 2>/dev/null || true
+  fi
+  if [ -n "$TLS_PROXY_SERVICE_PID" ]; then
+    kill "$TLS_PROXY_SERVICE_PID" 2>/dev/null || true
+    wait "$TLS_PROXY_SERVICE_PID" 2>/dev/null || true
   fi
 }
 finalize_rehearsal() {
@@ -339,6 +344,26 @@ else
 fi
 
 if [ "$COMPONENT" = "gateway" ]; then
+  PYTHONPATH="" /usr/bin/python3.11 \
+    /harness/tls_connect_proxy_service.py &
+  TLS_PROXY_SERVICE_PID=$!
+  for _attempt in $(seq 1 200); do
+    [ -f "$REHEARSAL_STATE_ROOT/tls-connect-proxy.ready" ] && break
+    kill -0 "$TLS_PROXY_SERVICE_PID" 2>/dev/null || {
+      echo "ERROR: rehearsal TLS CONNECT proxy exited during startup" >&2
+      exit 1
+    }
+    /bin/sleep 0.05
+  done
+  if [ ! -f "$REHEARSAL_STATE_ROOT/tls-connect-proxy.ready" ]; then
+    echo "ERROR: rehearsal TLS CONNECT proxy did not become ready" >&2
+    exit 1
+  fi
+  CERTIFI_BUNDLE="$(
+    PYTHONPATH="" /usr/bin/python3.11 -c 'import certifi; print(certifi.where())'
+  )"
+  cat "$REHEARSAL_STATE_ROOT/tls-connect-proxy-ca.pem" >>"$CERTIFI_BUNDLE"
+
   echo "Materializing the exact measured gateway-enclave filesystem"
   rm -rf /app/gateway
   mkdir -p /app
@@ -443,6 +468,51 @@ if [ "$COMPONENT" = "gateway" ]; then
   RESTART_STATUS=$?
   set -e
 
+  if [ "$WEIGHT_READINESS_SCENARIO" = "plaintext_proxy_rejected" ]; then
+    if [ "$RESTART_STATUS" -ne 75 ]; then
+      echo "ERROR: plaintext proxy regression did not fail closed with status 75" >&2
+      exit 1
+    fi
+    /usr/bin/python3.11 - "$CANDIDATE_SHA" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+candidate = sys.argv[1]
+deployment = json.loads(
+    Path(
+        "/home/ec2-user/.config/leadpoet/deployments/gateway-current.json"
+    ).read_text()
+)
+installed_controller = Path("/home/ec2-user/gw_restart.sh").read_text()
+envelope_stage = 'GATEWAY_DEPLOY_STAGE="v2_credential_envelope_preparation"'
+envelope_call = (
+    "run_prepared_gateway_module "
+    "gateway.tee.prepare_gateway_envelopes_v2"
+)
+expected_stage = (
+    "v2_credential_envelope_preparation"
+    if envelope_stage in installed_controller
+    and installed_controller.index(envelope_stage)
+    < installed_controller.index(envelope_call)
+    else "git_prepared_tree_verification"
+)
+if deployment.get("target_sha") != candidate:
+    raise SystemExit("failed proxy preflight was not bound to the candidate")
+if deployment.get("status") != "failed":
+    raise SystemExit("failed proxy preflight did not record a failed deployment")
+if deployment.get("stage") != expected_stage:
+    raise SystemExit("failed proxy preflight recorded the wrong restart stage")
+transition = Path(
+    "/home/ec2-user/.config/leadpoet/v2/gateway-v2-env-transition.json"
+)
+if transition.exists():
+    raise SystemExit("plaintext proxy failure wrote a V2 transition report")
+PY
+    preserve_rehearsal_evidence
+    echo "TARGETED_RESTART_REGRESSION_SUCCESS component=gateway candidate=$CANDIDATE_SHA scenario=$WEIGHT_READINESS_SCENARIO"
+    exit 0
+  fi
   if [ "$WEIGHT_READINESS_SCENARIO" != "production_success" ]; then
     echo "ERROR: full restart rehearsal received a targeted-only scenario: $WEIGHT_READINESS_SCENARIO" >&2
     exit 1

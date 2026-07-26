@@ -46,7 +46,14 @@
       "reject_unknown": true
     },
     "http_service": {
-      "allowed_operations": ["download", "external_ip", "gateway_request"],
+      "allowed_operations": [
+        "download",
+        "external_ip",
+        "gateway_request",
+        "proxy_connect",
+        "proxy_dns",
+        "proxy_tls_connect"
+      ],
       "reject_unknown": true
     },
     "nitro_enclaves": {

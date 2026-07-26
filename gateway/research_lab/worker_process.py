@@ -27,20 +27,12 @@ from gateway.research_lab.logging_utils import format_worker_block  # noqa: E402
 from gateway.research_lab.scoring_worker import ResearchLabGatewayScoringWorker  # noqa: E402
 from gateway.research_lab.worker import ResearchLabHostedWorker  # noqa: E402
 from gateway.research_lab.worker_autostart import (  # noqa: E402
+    HOSTED_PROXY_PREFIXES,
+    SCORING_PROXY_PREFIXES,
     build_research_lab_worker_environment,
 )
 
 
-HOSTED_PROXY_PREFIXES = (
-    "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY",
-    "RESEARCH_LAB_WORKER_PROXY",
-    "RESEARCH_LAB_WORKER_HTTPS_PROXY",
-)
-SCORING_PROXY_PREFIXES = (
-    "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY",
-    "QUALIFICATION_WEBSHARE_PROXY",
-    "RESEARCH_LAB_SCORING_WORKER_PROXY",
-)
 WORKER_READY_FD_ENV = "RESEARCH_LAB_WORKER_READY_FD"
 
 

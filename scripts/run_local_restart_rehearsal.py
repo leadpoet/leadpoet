@@ -52,6 +52,7 @@ COMMITTED_HARNESS_PATHS = (
     "tests/restart_rehearsal/production_workflow_runner.py",
     "tests/restart_rehearsal/sanitized_weight_fixture.py",
     "tests/restart_rehearsal/sitecustomize.py",
+    "tests/restart_rehearsal/tls_connect_proxy_service.py",
     "tests/restart_rehearsal/validator_enclave_service.py",
     "tests/restart_rehearsal/run_inside.sh",
     "tests/restart_rehearsal/verify_evidence.py",
@@ -882,8 +883,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="active",
         help=(
             "active exercises compliant TLS proxy workers; deferred exercises "
-            "the explicit one-restart recovery path with production-shaped "
-            "legacy HTTP proxy configuration"
+            "the explicit one-restart recovery path while retaining the same "
+            "compliant TLS proxy validation"
         ),
     )
     parser.add_argument("--rebuild-image", action="store_true")

@@ -12,7 +12,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
-from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
+from .config import (
+    DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS,
+    HOSTED_PROXY_PREFIXES,
+    ResearchLabGatewayConfig,
+)
 from .key_vault import (
     OpenRouterKeyVaultError,
     decrypt_openrouter_key,
@@ -45,11 +49,7 @@ _POSTGREST_TIMESTAMP_RE = re.compile(
 
 AUTORESEARCH_MAINTENANCE_CONTROL_KEY = "autoresearch_maintenance"
 SCORING_MAINTENANCE_CONTROL_KEY = "scoring_maintenance"
-AUTORESEARCH_PROXY_PREFIXES = (
-    "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY",
-    "RESEARCH_LAB_WORKER_PROXY",
-    "RESEARCH_LAB_WORKER_HTTPS_PROXY",
-)
+AUTORESEARCH_PROXY_PREFIXES = HOSTED_PROXY_PREFIXES
 TERMINAL_QUEUE_STATUSES = frozenset({"completed", "failed", "cancelled", "tombstoned"})
 ACTIVE_QUEUE_STATUSES = frozenset({"queued", "started", "paused"})
 TICKET_LIFECYCLE_QUEUE_BATCH_SIZE = 100

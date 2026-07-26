@@ -17,7 +17,7 @@ import secrets
 import shlex
 import shutil
 import tempfile
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from gateway.research_lab.worker_autostart import (
     DEFERRED_WORKER_FLEETS_ENV,
@@ -34,6 +34,10 @@ from gateway.tee.provider_broker_v2 import (
     _validated_tls_proxy_url,
     credential_reference_hash,
     credential_value_hash,
+)
+from gateway.tee.proxy_transport_preflight_v2 import (
+    WorkerProxyTransportPreflightV2Error,
+    verify_worker_proxy_fleets_v2,
 )
 from gateway.tee.supabase_schema_preflight_v2 import (
     verify_required_supabase_v2_schema,
@@ -58,7 +62,7 @@ _BOOT_SOURCES = {
     "truelist": ("TRUELIST_API_KEY",),
 }
 _SHARED_PARENT_SLOTS = frozenset(("supabase_service_role", "truelist"))
-_WORKER_PROXY_TRANSPORT_POLICY = "https_port_443.v1"
+_WORKER_PROXY_TRANSPORT_POLICY = "https_port_443_authenticated_connect.v2"
 _SPECIAL_PROFILES = {
     "benchmark_exa.json": (
         "exa",
@@ -325,9 +329,28 @@ def _proxy_names(
     return names
 
 
+def _proxy_environment_names(
+    env: Mapping[str, str], prefixes: Sequence[str]
+) -> set[str]:
+    names = set()
+    for index in range(1, 501):
+        for prefix in prefixes:
+            name = "%s_%d" % (prefix, index)
+            if str(env.get(name) or "").strip():
+                names.add(name)
+    for prefix in prefixes:
+        if str(env.get(prefix) or "").strip():
+            names.add(prefix)
+    return names
+
+
 def _validated_worker_proxy_configuration(
     environment: Mapping[str, str],
-) -> tuple[Any, Dict[str, list[str]]]:
+    *,
+    proxy_fleet_probe: Optional[
+        Callable[[Mapping[str, Sequence[str]]], None]
+    ] = verify_worker_proxy_fleets_v2,
+) -> tuple[Any, Dict[str, list[str]], set[str]]:
     plan = build_research_lab_worker_autostart_plan(environment)
     try:
         deferred_roles = deferred_worker_fleet_roles(environment)
@@ -345,20 +368,47 @@ def _validated_worker_proxy_configuration(
         "gateway_autoresearch": plan.hosted.proxy_values,
         "gateway_scoring": plan.scoring.proxy_values,
     }
+    required_counts = {
+        "gateway_autoresearch": plan.hosted.worker_count,
+        "gateway_scoring": plan.scoring.worker_count,
+    }
+    for role, values in fleets.items():
+        if required_counts[role] > len(values):
+            raise GatewayEnvelopePreparationV2Error(
+                "%s requires %d worker proxy profiles but only %d are configured"
+                % (role, required_counts[role], len(values))
+            )
     commitments: Dict[str, list[str]] = {}
     for role, values in fleets.items():
         commitments[role] = []
         for index, value in enumerate(values):
-            if role not in deferred_roles:
-                try:
-                    _validated_tls_proxy_url(value)
-                except (ProviderBrokerV2Error, ValueError) as exc:
-                    raise GatewayEnvelopePreparationV2Error(
-                        "%s worker proxy %d is incompatible with V2 provider transport"
-                        % (role, index)
-                    ) from exc
+            try:
+                _validated_tls_proxy_url(value)
+            except (ProviderBrokerV2Error, ValueError) as exc:
+                raise GatewayEnvelopePreparationV2Error(
+                    "%s worker proxy %d from %s configuration is incompatible "
+                    "with V2 provider transport"
+                    % (
+                        role,
+                        index + 1,
+                        (
+                            plan.hosted.proxy_source
+                            if role == "gateway_autoresearch"
+                            else plan.scoring.proxy_source
+                        ),
+                    )
+                ) from exc
             commitments[role].append(credential_value_hash(value))
-    return plan, commitments
+    if proxy_fleet_probe is not None:
+        try:
+            proxy_fleet_probe(fleets)
+        except WorkerProxyTransportPreflightV2Error as exc:
+            raise GatewayEnvelopePreparationV2Error(str(exc)) from exc
+    configured_names = _proxy_environment_names(
+        environment,
+        (*HOSTED_PROXY_PREFIXES, *SCORING_PROXY_PREFIXES),
+    )
+    return plan, commitments, configured_names
 
 
 def prepare_gateway_envelopes_v2(
@@ -368,6 +418,9 @@ def prepare_gateway_envelopes_v2(
     deploy_commit: str,
     output_dir: Path,
     kms_client: Any = None,
+    proxy_fleet_probe: Optional[
+        Callable[[Mapping[str, Sequence[str]]], None]
+    ] = verify_worker_proxy_fleets_v2,
 ) -> Dict[str, Any]:
     commit = str(deploy_commit or "").lower()
     if not _COMMIT_RE.fullmatch(commit):
@@ -381,7 +434,12 @@ def prepare_gateway_envelopes_v2(
         import boto3
 
         kms_client = boto3.client("kms")
-    plan, proxy_commitments = _validated_worker_proxy_configuration(environment)
+    plan, proxy_commitments, proxy_environment_names = (
+        _validated_worker_proxy_configuration(
+            environment,
+            proxy_fleet_probe=proxy_fleet_probe,
+        )
+    )
     deferred_roles = deferred_worker_fleet_roles(environment)
     parent = destination.parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -502,12 +560,17 @@ def prepare_gateway_envelopes_v2(
             for name, value in environment.items()
             if str(value) in removal_values
         )
+        removal_names.update(proxy_environment_names)
         report = {
             "schema_version": "leadpoet.gateway_envelope_transition.v2",
             "deploy_commit": commit,
             "hosted_worker_count": plan.hosted.worker_count,
             "scoring_worker_count": plan.scoring.worker_count,
             "worker_proxy_transport_policy": _WORKER_PROXY_TRANSPORT_POLICY,
+            "worker_proxy_source": {
+                "gateway_autoresearch": plan.hosted.proxy_source,
+                "gateway_scoring": plan.scoring.proxy_source,
+            },
             "worker_proxy_credential_ref_hashes": proxy_commitments,
             "deferred_worker_fleet_roles": sorted(deferred_roles),
             "required_count_environment": {
@@ -541,11 +604,19 @@ def install_gateway_envelopes_v2(
     deploy_commit: str,
     install_dir: Path,
     kms_client: Any = None,
+    proxy_fleet_probe: Optional[
+        Callable[[Mapping[str, Sequence[str]]], None]
+    ] = verify_worker_proxy_fleets_v2,
 ) -> Dict[str, Any]:
     """Reuse exact-commit envelopes or atomically install a complete new set."""
 
     destination = Path(install_dir)
-    plan, proxy_commitments = _validated_worker_proxy_configuration(environment)
+    plan, proxy_commitments, proxy_environment_names = (
+        _validated_worker_proxy_configuration(
+            environment,
+            proxy_fleet_probe=proxy_fleet_probe,
+        )
+    )
     deferred_roles = deferred_worker_fleet_roles(environment)
     report_path = destination / "gateway-v2-env-transition.json"
     try:
@@ -561,6 +632,13 @@ def install_gateway_envelopes_v2(
         == proxy_commitments
         and report.get("deferred_worker_fleet_roles")
         == sorted(deferred_roles)
+        and set(proxy_environment_names).issubset(
+            {
+                str(name)
+                for name in report.get("plaintext_environment_names_to_remove")
+                or ()
+            }
+        )
         and report.get("hosted_worker_count") == plan.hosted.worker_count
         and report.get("scoring_worker_count") == plan.scoring.worker_count
     ):
@@ -605,6 +683,7 @@ def install_gateway_envelopes_v2(
         deploy_commit=deploy_commit,
         output_dir=staging,
         kms_client=kms_client,
+        proxy_fleet_probe=None,
     )
     managed_names = {
         path.name for path in staging.iterdir() if path.is_file()

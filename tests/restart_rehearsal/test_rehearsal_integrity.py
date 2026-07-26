@@ -520,12 +520,10 @@ def test_gateway_secret_enables_the_production_weight_authority(
     )
 
 
-def test_deferred_gateway_rehearsal_uses_production_shaped_http_proxies(
+def test_deferred_gateway_rehearsal_keeps_legacy_and_selects_v2_tls_proxies(
     monkeypatch,
 ) -> None:
-    adapter_path = (
-        Path(__file__).resolve().parent / "contract_adapter.py"
-    )
+    adapter_path = Path(__file__).resolve().parent / "contract_adapter.py"
     monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
     monkeypatch.setenv(
         "REHEARSAL_GATEWAY_WORKER_FLEET_MODE",
@@ -540,17 +538,64 @@ def test_deferred_gateway_rehearsal_uses_production_shaped_http_proxies(
     spec.loader.exec_module(adapter)
 
     values = adapter._gateway_secret()
-    hosted = values["RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1"]
-    scoring = values["RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1"]
+    assert values["RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1"].startswith(
+        "http://"
+    )
+    assert values[
+        "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1"
+    ].startswith("http://")
+    assert values[
+        "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1"
+    ].startswith("https://")
+    assert values["RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1"].startswith(
+        "https://"
+    )
 
-    assert hosted.startswith(
-        "http://rehearsal-user:rehearsal-password@"
+
+def test_gateway_secret_exercises_tls_proxy_success_and_plaintext_failure(
+    monkeypatch,
+) -> None:
+    adapter_path = Path(__file__).resolve().parent / "contract_adapter.py"
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    spec = importlib.util.spec_from_file_location(
+        "_rehearsal_gateway_proxy_contract",
+        adapter_path,
     )
-    assert scoring.startswith(
-        "http://rehearsal-user:rehearsal-password@"
+    assert spec is not None and spec.loader is not None
+    adapter = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(adapter)
+
+    success = adapter._gateway_secret()
+    assert success["RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1"].startswith(
+        "http://"
     )
-    assert hosted.rsplit(":", 1)[1].isdigit()
-    assert scoring.rsplit(":", 1)[1].isdigit()
+    assert success["RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1"].startswith(
+        "http://"
+    )
+    assert success["RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1"].startswith(
+        "https://"
+    )
+    assert success["RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1"].endswith(
+        ":443"
+    )
+    assert success["RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1"].startswith(
+        "https://"
+    )
+    assert success["RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1"].endswith(":443")
+
+    monkeypatch.setenv(
+        "REHEARSAL_WEIGHT_READINESS_SCENARIO",
+        "plaintext_proxy_rejected",
+    )
+    failure = adapter._gateway_secret()
+    assert "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1" not in failure
+    assert "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1" not in failure
+    assert failure["RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1"].startswith(
+        "http://"
+    )
+    assert failure["RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1"].startswith(
+        "http://"
+    )
 
 
 def test_contract_adapter_loads_under_production_safe_path() -> None:
@@ -1327,11 +1372,19 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     gateway_service = (
         harness_root / "gateway_enclave_service.py"
     ).read_text(encoding="utf-8")
+    tls_proxy_service = (
+        harness_root / "tls_connect_proxy_service.py"
+    ).read_text(encoding="utf-8")
     dockerfile = (harness_root / "Dockerfile").read_text(encoding="utf-8")
+    contract = json.loads(
+        (harness_root / "boundary_contract.json").read_text(encoding="utf-8")
+    )
 
     assert "/harness/validator_enclave_service.py &" in run_inside
     assert "/harness/gateway_enclave_service.py &" in run_inside
+    assert "/harness/tls_connect_proxy_service.py &" in run_inside
     assert "/harness/gateway_enclave_service.py \\" in dockerfile
+    assert "/harness/tls_connect_proxy_service.py \\" in dockerfile
     assert (
         "tests/restart_rehearsal/gateway_enclave_service.py"
         in rehearsal.COMMITTED_HARNESS_PATHS
@@ -1377,6 +1430,20 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "measured_drand_commit" in service
     assert "trap finalize_rehearsal EXIT" in run_inside
     assert "preserve_rehearsal_evidence" in run_inside
+    assert "tls-connect-proxy-ca.pem" in run_inside
+    assert "https_port_443_authenticated_connect.v2" in (
+        Path(__file__).resolve().parents[2]
+        / "gateway/tee/prepare_gateway_envelopes_v2.py"
+    ).read_text(encoding="utf-8")
+    assert {
+        "proxy_connect",
+        "proxy_dns",
+        "proxy_tls_connect",
+    } <= set(contract["boundaries"]["http_service"]["allowed_operations"])
+    assert "proxy-authorization:" in tls_proxy_service
+    assert "ssl.PROTOCOL_TLS_SERVER" in tls_proxy_service
+    assert '"openrouter.ai:443"' in tls_proxy_service
+    assert '"api.exa.ai:443"' in tls_proxy_service
     drand_install = run_inside.index(
         "/app/validator_tee/enclave/libbittensor_drand_v2.so"
     )
@@ -1387,6 +1454,34 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "_handle_gateway_enclave_rpc(" in gateway_service
     assert "while True:" in service
     assert "while True:" in gateway_service
+
+
+def test_gateway_restart_records_proxy_preflight_as_a_pre_shutdown_stage() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    restart = (repository_root / "gw_restart.sh").read_text(encoding="utf-8")
+    stage = restart.index(
+        'GATEWAY_DEPLOY_STAGE="v2_credential_envelope_preparation"'
+    )
+    preparation = restart.index(
+        "gateway.tee.prepare_gateway_envelopes_v2",
+        stage,
+    )
+    shutdown = restart.index(
+        "Stopping existing gateway and Research Lab worker processes",
+        preparation,
+    )
+    assert stage < preparation < shutdown
+
+    run_inside = (
+        Path(__file__).resolve().parent / "run_inside.sh"
+    ).read_text(encoding="utf-8")
+    scenario = run_inside.index(
+        'if [ "$WEIGHT_READINESS_SCENARIO" = "plaintext_proxy_rejected" ]'
+    )
+    assert '"v2_credential_envelope_preparation"' in run_inside[scenario:]
+    assert "TARGETED_RESTART_REGRESSION_SUCCESS" in run_inside[scenario:]
+
+
 
 
 def test_measured_drand_boundary_preserves_candidate_c_abi_contract(

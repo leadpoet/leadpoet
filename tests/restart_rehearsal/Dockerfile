@@ -65,6 +65,7 @@ RUN chmod 755 \
       /harness/prepare_external_artifacts.py \
       /harness/prepare_host_fixtures.py \
       /harness/production_workflow_runner.py \
+      /harness/tls_connect_proxy_service.py \
       /harness/validator_enclave_service.py
 
 ENV HOME=/home/ec2-user

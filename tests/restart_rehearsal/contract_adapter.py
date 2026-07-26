@@ -440,33 +440,35 @@ def _gateway_secret() -> dict[str, str]:
         "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": "true",
         "RESEARCH_LAB_INTERNAL_API_KEY": "rehearsal-internal",
         "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1": (
-            "https://autoresearch-proxy.example.com"
+            "http://legacy-auto:legacy-password@legacy-proxy.example.com:6162"
         ),
         "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1": (
-            "https://scoring-proxy.example.com"
+            "http://legacy-scoring:legacy-password@legacy-proxy.example.com:7421"
         ),
     }
     worker_fleet_mode = os.environ.get(
         "REHEARSAL_GATEWAY_WORKER_FLEET_MODE",
         "active",
     )
-    if worker_fleet_mode == "deferred":
-        values.update(
-            {
-                "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1": (
-                    "http://rehearsal-user:rehearsal-password@"
-                    "autoresearch-proxy.example.com:12431"
-                ),
-                "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1": (
-                    "http://rehearsal-user:rehearsal-password@"
-                    "scoring-proxy.example.com:13431"
-                ),
-            }
-        )
-    elif worker_fleet_mode != "active":
+    if worker_fleet_mode not in {"active", "deferred"}:
         raise RuntimeError(
             "unknown rehearsal gateway worker fleet mode: "
             + worker_fleet_mode
+        )
+    if os.environ.get("REHEARSAL_WEIGHT_READINESS_SCENARIO") != (
+        "plaintext_proxy_rejected"
+    ):
+        values.update(
+            {
+                "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1": (
+                    "https://rehearsal-auto:rehearsal-auto-password@"
+                    "autoresearch-proxy.example.com:443"
+                ),
+                "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1": (
+                    "https://rehearsal-scoring:rehearsal-scoring-password@"
+                    "scoring-proxy.example.com:443"
+                ),
+            }
         )
     return values
 

@@ -42,7 +42,11 @@ from .allocations import build_research_lab_allocation_bundle
 from .arweave_audit import latest_arweave_anchor
 from .bundles import build_research_lab_audit_bundle, build_shadow_report_bundle, contains_secret_material
 from .candidate_generation_report import fetch_candidate_generation_failure_report
-from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
+from .config import (
+    DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS,
+    HOSTED_PROXY_PREFIXES,
+    ResearchLabGatewayConfig,
+)
 from .key_vault import (
     OpenRouterKeyVaultError,
     encrypt_openrouter_key,
@@ -180,11 +184,7 @@ _OPENROUTER_KEY_REGISTRATION_ATTEMPTS: dict[str, list[float]] = {}
 _OPENROUTER_KEY_REGISTER_MIN_SECONDS = 60.0
 _OPENROUTER_KEY_REGISTER_MAX_PER_HOUR = 6
 ACTIVE_AUTORESEARCH_QUEUE_STATUSES = {"queued", "started", "paused"}
-AUTORESEARCH_PROXY_PREFIXES = (
-    "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY",
-    "RESEARCH_LAB_WORKER_PROXY",
-    "RESEARCH_LAB_WORKER_HTTPS_PROXY",
-)
+AUTORESEARCH_PROXY_PREFIXES = HOSTED_PROXY_PREFIXES
 
 
 def _source_add_provision_credential_ref(miner_hotkey: str, adapter_id: str) -> str:

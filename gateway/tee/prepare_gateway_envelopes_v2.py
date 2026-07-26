@@ -64,7 +64,7 @@ _BOOT_SOURCES = {
     "truelist": ("TRUELIST_API_KEY",),
 }
 _SHARED_PARENT_SLOTS = frozenset(("supabase_service_role", "truelist"))
-_WORKER_PROXY_TRANSPORT_POLICY = "https_port_443_authenticated_connect.v2"
+_WORKER_PROXY_TRANSPORT_POLICY = "authenticated_http_or_https_connect.v2"
 _SPECIAL_PROFILES = {
     "benchmark_exa.json": (
         "exa",
@@ -411,8 +411,8 @@ def _validate_v2_proxy_migration_capacity(
         return
     raise GatewayEnvelopePreparationV2Error(
         "%s V2 proxy migration would reduce worker coverage from %d legacy "
-        "slots to %d selected TLS profile(s); set %s=%d explicitly and "
-        "configure %s with an HTTPS port-443 proxy"
+        "slots to %d selected proxy profile(s); set %s=%d explicitly and "
+        "configure %s with an authenticated HTTP CONNECT or HTTPS proxy"
         % (
             role,
             legacy_profile_count,
@@ -484,8 +484,8 @@ def _validated_worker_proxy_configuration(
                 configuration = _WORKER_PROXY_ROLE_CONFIGURATION[role]
                 raise GatewayEnvelopePreparationV2Error(
                     "%s worker proxy %d from %s configuration is incompatible "
-                    "with V2 provider transport; configure %s with HTTPS "
-                    "port-443 transport and set the intended worker capacity "
+                    "with V2 provider transport; configure %s with authenticated "
+                    "HTTP CONNECT or HTTPS transport and set the intended worker capacity "
                     "in %s (%s)"
                     % (
                         role,

@@ -153,13 +153,13 @@ def test_invalid_proxy_fails_before_write(tmp_path):
 
     with pytest.raises(
         GatewayV2ProxySecretUpdateError,
-        match="HTTPS port-443",
+        match="HTTP CONNECT or HTTPS",
     ):
         update_gateway_v2_proxy_secret(
             secrets_client=client,
             secret_id="gateway-secret",
             backup_directory=tmp_path,
-            autoresearch_proxy="http://legacy.example.com:6100",
+            autoresearch_proxy="socks5://legacy.example.com:6100",
             scoring_proxy="https://score.example.com:443",
             proxy_fleet_probe=lambda _fleets: None,
         )

@@ -468,30 +468,32 @@ class EnclaveEgressProxy:
         destination_port: int,
     ) -> Any:
         parsed = urlsplit(str(proxy_url or ""))
+        proxy_scheme = parsed.scheme.lower()
         try:
-            proxy_port = parsed.port or 443
+            proxy_port = parsed.port or (443 if proxy_scheme == "https" else 80)
         except ValueError as exc:
             raise EnclaveEgressProxyError("upstream proxy port is invalid") from exc
         if (
-            parsed.scheme.lower() != "https"
+            proxy_scheme not in {"http", "https"}
             or not parsed.hostname
-            or proxy_port != 443
             or parsed.path not in {"", "/"}
             or parsed.query
             or parsed.fragment
         ):
             raise EnclaveEgressProxyError(
-                "upstream proxy must use verified TLS on port 443"
+                "upstream proxy must be an HTTP CONNECT or HTTPS proxy URL"
             )
         proxy_host, proxy_port = normalize_destination(parsed.hostname, proxy_port)
         if (parsed.username is None) != (parsed.password is None):
             raise EnclaveEgressProxyError("upstream proxy credentials are incomplete")
         parent = self._open_parent_tunnel(proxy_host, proxy_port)
         try:
-            import certifi
+            protected = parent
+            if proxy_scheme == "https":
+                import certifi
 
-            context = ssl.create_default_context(cafile=certifi.where())
-            protected = context.wrap_socket(parent, server_hostname=proxy_host)
+                context = ssl.create_default_context(cafile=certifi.where())
+                protected = context.wrap_socket(parent, server_hostname=proxy_host)
             lines = [
                 "CONNECT %s:%s HTTP/1.1" % (destination_host, destination_port),
                 "Host: %s:%s" % (destination_host, destination_port),

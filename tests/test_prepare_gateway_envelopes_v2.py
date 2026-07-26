@@ -180,7 +180,7 @@ def test_v2_proxy_fleets_replace_legacy_values_and_scrub_every_alias(tmp_path):
     } <= removal_names
 
 
-def test_production_shaped_plaintext_webshare_fleet_fails_before_kms(tmp_path):
+def test_production_shaped_authenticated_http_connect_fleet_is_sealed(tmp_path):
     environment = {
         name: value
         for name, value in _environment().items()
@@ -200,29 +200,33 @@ def test_production_shaped_plaintext_webshare_fleet_fails_before_kms(tmp_path):
     kms = KMS()
     probe_calls = []
 
-    with pytest.raises(
-        Exception,
-        match=(
-            "gateway_autoresearch worker proxy 1 from legacy configuration "
-            "is incompatible"
-        ),
-    ) as captured:
-        prepare_gateway_envelopes_v2(
-            environment=environment,
-            kms_key_id="alias/gateway-v2",
-            deploy_commit="1" * 40,
-            output_dir=tmp_path / "v2",
-            kms_client=kms,
-            proxy_fleet_probe=lambda fleets: probe_calls.append(fleets),
-        )
+    result = prepare_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        output_dir=tmp_path / "v2",
+        kms_client=kms,
+        proxy_fleet_probe=lambda fleets: probe_calls.append(fleets),
+    )
 
-    message = str(captured.value)
-    assert "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1" in message
-    assert "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT" in message
-    assert "HTTPS port-443 transport" in message
-    assert kms.requests == []
-    assert probe_calls == []
-    assert not (tmp_path / "v2").exists()
+    assert result["worker_proxy_source"] == {
+        "gateway_autoresearch": "legacy",
+        "gateway_scoring": "legacy",
+    }
+    assert result["hosted_worker_count"] == 1
+    assert result["scoring_worker_count"] == 1
+    assert probe_calls == [
+        {
+            "gateway_autoresearch": (
+                "http://user:password@legacy-hosted.example.com:6162",
+            ),
+            "gateway_scoring": (
+                "http://user:password@legacy-scoring.example.com:7421",
+            ),
+        }
+    ]
+    assert (tmp_path / "v2" / "autoresearch_proxy_00.json").is_file()
+    assert (tmp_path / "v2" / "scoring_proxy_00.json").is_file()
 
 
 def _production_sized_proxy_environment() -> dict[str, str]:
@@ -273,7 +277,7 @@ def test_v2_proxy_migration_requires_explicit_production_worker_counts(
         Exception,
         match=(
             "gateway_autoresearch V2 proxy migration would reduce worker "
-            "coverage from 10 legacy slots to 1 selected TLS profile"
+            "coverage from 10 legacy slots to 1 selected proxy profile"
         ),
     ):
         prepare_gateway_envelopes_v2(
@@ -698,7 +702,7 @@ def test_explicit_deferral_seals_only_validated_v2_tls_proxies(
     ]
 
 
-def test_explicit_deferral_does_not_relax_legacy_http_proxy_validation(
+def test_explicit_deferral_seals_legacy_authenticated_http_connect_proxies(
     tmp_path,
 ):
     environment = _legacy_http_proxy_environment()
@@ -708,26 +712,22 @@ def test_explicit_deferral_does_not_relax_legacy_http_proxy_validation(
             name.startswith("RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_")
         ):
             environment.pop(name)
-    kms = KMS()
+    output = tmp_path / "v2"
+    result = prepare_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        output_dir=output,
+        kms_client=KMS(),
+        proxy_fleet_probe=_skip_proxy_probe,
+    )
 
-    with pytest.raises(
-        Exception,
-        match=(
-            "gateway_autoresearch worker proxy 1 from legacy configuration "
-            "is incompatible with V2 provider transport"
-        ),
-    ):
-        prepare_gateway_envelopes_v2(
-            environment=environment,
-            kms_key_id="alias/gateway-v2",
-            deploy_commit="1" * 40,
-            output_dir=tmp_path / "v2",
-            kms_client=kms,
-            proxy_fleet_probe=_skip_proxy_probe,
-        )
-
-    assert kms.requests == []
-    assert not (tmp_path / "v2").exists()
+    assert result["worker_proxy_source"] == {
+        "gateway_autoresearch": "legacy",
+        "gateway_scoring": "legacy",
+    }
+    assert (output / "autoresearch_proxy_01.json").is_file()
+    assert (output / "scoring_proxy_02.json").is_file()
 
 
 def test_one_deferred_role_does_not_relax_the_other_role(tmp_path):
@@ -799,7 +799,7 @@ def test_exact_commit_reuse_revalidates_worker_proxy_contract(tmp_path):
     assert installed["status"] == "installed"
 
     environment["RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1"] = (
-        "http://proxy.example.com:6162"
+        "socks5://proxy.example.com:6162"
     )
     with pytest.raises(
         Exception,
@@ -819,7 +819,7 @@ def test_exact_commit_reuse_revalidates_worker_proxy_contract(tmp_path):
         (destination / "gateway-v2-env-transition.json").read_text()
     )[
         "worker_proxy_transport_policy"
-    ] == "https_port_443_authenticated_connect.v2"
+    ] == "authenticated_http_or_https_connect.v2"
 
 
 def test_install_cli_checks_schema_before_writing_envelopes(

@@ -61,7 +61,7 @@ def verify_tls_proxy_connect_v2(
     connector: Callable[[str, int], Any] = _connect_public_destination,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
-    """Exercise the same certificate-verified CONNECT handshake used in-enclave."""
+    """Exercise the same authenticated CONNECT handshake used in-enclave."""
 
     normalized_proxy_url = _validated_tls_proxy_url(proxy_url)
     normalized_attempts = max(1, int(attempts))
@@ -90,7 +90,7 @@ def verify_tls_proxy_connect_v2(
                 except Exception:
                     pass
     raise WorkerProxyTransportPreflightV2Error(
-        "worker proxy failed certificate-verified authenticated CONNECT preflight"
+        "worker proxy failed authenticated CONNECT preflight"
     ) from last_error
 
 

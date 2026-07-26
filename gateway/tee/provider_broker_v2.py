@@ -306,20 +306,20 @@ def credential_value_hash(value: str) -> str:
 def _validated_tls_proxy_url(value: str) -> str:
     normalized = str(value or "")
     parsed = urlsplit(normalized)
+    scheme = parsed.scheme.lower()
     try:
-        port = parsed.port or 443
+        port = parsed.port or (443 if scheme == "https" else 80)
     except ValueError as exc:
         raise ProviderBrokerV2Error("worker egress proxy port is invalid") from exc
     if (
-        parsed.scheme.lower() != "https"
+        scheme not in {"http", "https"}
         or not parsed.hostname
-        or port != 443
         or parsed.path not in {"", "/"}
         or parsed.query
         or parsed.fragment
     ):
         raise ProviderBrokerV2Error(
-            "worker egress proxy must be an HTTPS proxy on port 443"
+            "worker egress proxy must be an HTTP CONNECT or HTTPS proxy URL"
         )
     normalize_destination(parsed.hostname, port)
     if (parsed.username is None) != (parsed.password is None):

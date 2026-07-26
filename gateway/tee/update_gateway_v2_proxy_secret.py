@@ -156,7 +156,7 @@ def _validated_proxy_values(
             _validated_tls_proxy_url(value)
         except Exception as exc:
             raise GatewayV2ProxySecretUpdateError(
-                "%s proxy must be a complete HTTPS port-443 URL"
+                "%s proxy must be a complete HTTP CONNECT or HTTPS proxy URL"
                 % role
             ) from exc
     try:

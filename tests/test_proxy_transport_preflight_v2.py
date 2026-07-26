@@ -11,7 +11,6 @@ import time
 import pytest
 
 from gateway.tee import proxy_transport_preflight_v2 as module
-from gateway.tee.provider_broker_v2 import ProviderBrokerV2Error
 from gateway.tee.proxy_transport_preflight_v2 import (
     WorkerProxyTransportPreflightV2Error,
     verify_tls_proxy_connect_v2,
@@ -89,20 +88,30 @@ def test_tls_connect_probe_retries_then_succeeds_without_exposing_url(monkeypatc
     assert sleeps == [0.2]
 
 
-def test_tls_connect_probe_rejects_plaintext_before_opening_socket(monkeypatch):
-    monkeypatch.setattr(
-        module,
-        "_HostProxyProbe",
-        lambda **_kwargs: pytest.fail("plaintext proxy reached transport"),
+def test_connect_probe_accepts_authenticated_http_connect_proxy(monkeypatch):
+    observed = []
+
+    class Probe:
+        def __init__(self, **_kwargs):
+            pass
+
+        def _open_upstream_proxy_tunnel(self, **kwargs):
+            observed.append(kwargs)
+            return _Tunnel()
+
+    monkeypatch.setattr(module, "_HostProxyProbe", Probe)
+    verify_tls_proxy_connect_v2(
+        "http://worker:secret@proxy.example.com:6162",
+        destination_host="openrouter.ai",
     )
-    with pytest.raises(
-        ProviderBrokerV2Error,
-        match="HTTPS proxy on port 443",
-    ):
-        verify_tls_proxy_connect_v2(
-            "http://worker:secret@proxy.example.com:6162",
-            destination_host="openrouter.ai",
-        )
+
+    assert observed == [
+        {
+            "proxy_url": "http://worker:secret@proxy.example.com:6162",
+            "destination_host": "openrouter.ai",
+            "destination_port": 443,
+        }
+    ]
 
 
 def test_fleet_probe_checks_role_specific_destinations_and_reports_index():

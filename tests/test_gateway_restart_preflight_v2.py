@@ -164,7 +164,39 @@ def test_full_restart_preflight_accepts_only_complete_approved_release(
         "gateway_autoresearch": 10,
         "gateway_scoring": 25,
     }
+    assert result["deferred_worker_fleet_roles"] == []
     assert result["acceptance_corpus_manifest_hash"] == "sha256:" + "e" * 64
+
+
+def test_full_restart_preflight_reports_explicit_worker_deferral(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    parent_environment = {
+        "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
+        "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
+        "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "10",
+        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "25",
+        "GATEWAY_V2_DEFER_WORKER_FLEETS": (
+            "gateway_autoresearch,gateway_scoring"
+        ),
+    }
+
+    result = _verify(
+        tmp_path,
+        monkeypatch,
+        parent_environment=parent_environment,
+    )
+
+    assert result["status"] == "ready"
+    assert result["worker_counts"] == {
+        "gateway_autoresearch": 10,
+        "gateway_scoring": 25,
+    }
+    assert result["deferred_worker_fleet_roles"] == [
+        "gateway_autoresearch",
+        "gateway_scoring",
+    ]
 
 
 def test_full_restart_preflight_requires_explicit_worker_process_counts(

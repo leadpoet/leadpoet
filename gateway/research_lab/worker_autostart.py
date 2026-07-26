@@ -22,10 +22,54 @@ from Leadpoet.utils.subnet_epoch import (
 
 TRUTHY = {"1", "true", "yes", "on"}
 WORKER_READY_FD_ENV = "RESEARCH_LAB_WORKER_READY_FD"
+DEFERRED_WORKER_FLEETS_ENV = "GATEWAY_V2_DEFER_WORKER_FLEETS"
+WORKER_FLEET_ROLES = frozenset(
+    {"gateway_autoresearch", "gateway_scoring"}
+)
+WORKER_FLEET_ROLE_BY_KIND = {
+    "hosted": "gateway_autoresearch",
+    "scoring": "gateway_scoring",
+}
 
 
 class ResearchLabWorkerStartupError(RuntimeError):
     """An authoritative worker failed before entering its poll loop."""
+
+
+class DeferredWorkerFleetConfigurationError(ValueError):
+    """The explicit one-restart worker deferral setting is invalid."""
+
+
+def deferred_worker_fleet_roles(
+    env: Mapping[str, str] | None = None,
+) -> frozenset[str]:
+    """Return explicitly deferred V2 worker roles.
+
+    Deferral is an operator-selected recovery state, never an inferred
+    fallback. It suppresses host worker processes only; measured enclave
+    topology and proxy transport validation remain unchanged.
+    """
+
+    source = os.environ if env is None else env
+    raw = str(source.get(DEFERRED_WORKER_FLEETS_ENV) or "").strip().lower()
+    if not raw:
+        return frozenset()
+    if raw == "all":
+        return WORKER_FLEET_ROLES
+    roles = frozenset(item.strip() for item in raw.split(",") if item.strip())
+    unknown = roles - WORKER_FLEET_ROLES
+    if not roles or unknown:
+        detail = ",".join(sorted(unknown or roles)) or "empty"
+        raise DeferredWorkerFleetConfigurationError(
+            "invalid deferred V2 worker fleet role(s): %s" % detail
+        )
+    return roles
+
+
+def canonical_deferred_worker_fleet_roles(
+    roles: frozenset[str],
+) -> str:
+    return ",".join(sorted(roles))
 
 
 HOSTED_PROXY_PREFIXES = (
@@ -260,8 +304,20 @@ def build_research_lab_worker_autostart_plan(
 class ResearchLabWorkerSupervisor:
     """Start and stop gateway-owned Research Lab worker child processes."""
 
-    def __init__(self, plan: ResearchLabWorkerAutoStartPlan | None = None):
-        self.plan = plan or build_research_lab_worker_autostart_plan()
+    def __init__(
+        self,
+        plan: ResearchLabWorkerAutoStartPlan | None = None,
+        *,
+        environment: Mapping[str, str] | None = None,
+    ):
+        source = os.environ if environment is None else environment
+        self.plan = plan or build_research_lab_worker_autostart_plan(source)
+        try:
+            self.deferred_worker_fleet_roles = deferred_worker_fleet_roles(
+                source
+            )
+        except DeferredWorkerFleetConfigurationError as exc:
+            raise ResearchLabWorkerStartupError(str(exc)) from exc
         self.children: dict[str, subprocess.Popen[bytes]] = {}
         self._child_specs: dict[str, tuple[ResearchLabWorkerFleetPlan, int]] = {}
         self._stop_event = threading.Event()
@@ -312,6 +368,15 @@ class ResearchLabWorkerSupervisor:
         print("=" * 80 + "\n", flush=True)
 
     def _start_fleet(self, fleet: ResearchLabWorkerFleetPlan) -> None:
+        role = WORKER_FLEET_ROLE_BY_KIND[fleet.kind]
+        if role in self.deferred_worker_fleet_roles:
+            print(
+                "   %s: explicitly deferred for this gateway restart "
+                "(configured=%d, running=0)"
+                % (fleet.kind, fleet.worker_count),
+                flush=True,
+            )
+            return
         if not fleet.enabled:
             print(f"   {fleet.kind}: skipped ({fleet.reason or 'disabled'})", flush=True)
             return
@@ -399,18 +464,33 @@ class ResearchLabWorkerSupervisor:
         missing_ready = sorted(running - self._ready_children)
         hosted_running = sum(key.startswith("hosted:") for key in running)
         scoring_running = sum(key.startswith("scoring:") for key in running)
+        expected_hosted = (
+            0
+            if "gateway_autoresearch" in self.deferred_worker_fleet_roles
+            else self.plan.hosted.worker_count
+        )
+        expected_scoring = (
+            0
+            if "gateway_scoring" in self.deferred_worker_fleet_roles
+            else self.plan.scoring.worker_count
+        )
         if dead or missing_ready:
             raise ResearchLabWorkerStartupError(
                 "authoritative V2 workers are not healthy: dead=%s missing_ready=%s"
                 % (dead, missing_ready)
             )
         if self._full_topology_required() and (
-            hosted_running != self.plan.hosted.worker_count
-            or scoring_running != self.plan.scoring.worker_count
+            hosted_running != expected_hosted
+            or scoring_running != expected_scoring
         ):
             raise ResearchLabWorkerStartupError(
-                "authoritative V2 worker count differs: hosted=%d scoring=%d"
-                % (hosted_running, scoring_running)
+                "authoritative V2 worker count differs: hosted=%d/%d scoring=%d/%d"
+                % (
+                    hosted_running,
+                    expected_hosted,
+                    scoring_running,
+                    expected_scoring,
+                )
             )
         return {
             "schema_version": "leadpoet.research_lab_worker_health.v2",
@@ -418,9 +498,14 @@ class ResearchLabWorkerSupervisor:
             "topology_mode": (
                 "full" if self._full_topology_required() else "component"
             ),
+            "deferred_worker_fleet_roles": sorted(
+                self.deferred_worker_fleet_roles
+            ),
             "hosted_configured": self.plan.hosted.worker_count,
+            "hosted_expected_running": expected_hosted,
             "hosted_running": hosted_running,
             "scoring_configured": self.plan.scoring.worker_count,
+            "scoring_expected_running": expected_scoring,
             "scoring_running": scoring_running,
         }
 

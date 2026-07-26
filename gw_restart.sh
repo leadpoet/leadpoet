@@ -691,7 +691,10 @@ from pathlib import Path
 src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
 raw = src.read_text()
-restart_only_keys = {"GATEWAY_DEPLOY_COMMIT"}
+restart_only_keys = {
+    "GATEWAY_DEPLOY_COMMIT",
+    "GATEWAY_V2_DEFER_WORKER_FLEETS",
+}
 
 try:
     parsed = json.loads(raw)
@@ -748,6 +751,7 @@ skip_keys = {
     "AWS_SECURITY_TOKEN",
     "AWS_PROFILE",
     "GATEWAY_DEPLOY_COMMIT",
+    "GATEWAY_V2_DEFER_WORKER_FLEETS",
     "LEADPOET_REPO_ROOT",
     "GATEWAY_ROOT",
     "GATEWAY_LOG_ROOT",
@@ -828,6 +832,7 @@ skip_keys = {
     "AWS_SECURITY_TOKEN",
     "AWS_PROFILE",
     "GATEWAY_DEPLOY_COMMIT",
+    "GATEWAY_V2_DEFER_WORKER_FLEETS",
     "LEADPOET_REPO_ROOT",
     "GATEWAY_ROOT",
     "GATEWAY_LOG_ROOT",

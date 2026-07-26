@@ -20,9 +20,13 @@ import tempfile
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from gateway.research_lab.worker_autostart import (
+    DEFERRED_WORKER_FLEETS_ENV,
     HOSTED_PROXY_PREFIXES,
     SCORING_PROXY_PREFIXES,
+    DeferredWorkerFleetConfigurationError,
     build_research_lab_worker_autostart_plan,
+    canonical_deferred_worker_fleet_roles,
+    deferred_worker_fleet_roles,
 )
 from gateway.tee.artifact_vault_v2 import artifact_master_key_reference_hash
 from gateway.tee.provider_broker_v2 import (
@@ -189,6 +193,30 @@ def scrub_parent_environment_file_v2(
                 "gateway V2 worker count environment differs from sealed profiles"
             )
         count_environment[name] = str(count)
+    raw_deferred_roles = report.get("deferred_worker_fleet_roles")
+    if not isinstance(raw_deferred_roles, list) or any(
+        not isinstance(role, str) for role in raw_deferred_roles
+    ):
+        raise GatewayEnvelopePreparationV2Error(
+            "gateway V2 deferred worker fleet state is invalid"
+        )
+    try:
+        deferred_roles = deferred_worker_fleet_roles(
+            {
+                DEFERRED_WORKER_FLEETS_ENV: ",".join(raw_deferred_roles),
+            }
+        )
+    except DeferredWorkerFleetConfigurationError as exc:
+        raise GatewayEnvelopePreparationV2Error(
+            "gateway V2 deferred worker fleet state is invalid"
+        ) from exc
+    if raw_deferred_roles != sorted(deferred_roles):
+        raise GatewayEnvelopePreparationV2Error(
+            "gateway V2 deferred worker fleet state is not canonical"
+        )
+    deferred_environment = canonical_deferred_worker_fleet_roles(
+        deferred_roles
+    )
 
     environment_path = Path(environment_path)
     try:
@@ -222,7 +250,7 @@ def scrub_parent_environment_file_v2(
                 "prepared gateway parent environment is malformed"
             )
         name, value = parts[0].split("=", 1)
-        if name in count_environment:
+        if name in count_environment or name == DEFERRED_WORKER_FLEETS_ENV:
             continue
         if name in remove_names or credential_reference_hash(value) in remove_refs:
             removed_names.add(name)
@@ -233,6 +261,14 @@ def scrub_parent_environment_file_v2(
         "export %s=%s" % (name, shlex.quote(value))
         for name, value in sorted(count_environment.items())
     )
+    if deferred_environment:
+        kept.append(
+            "export %s=%s"
+            % (
+                DEFERRED_WORKER_FLEETS_ENV,
+                shlex.quote(deferred_environment),
+            )
+        )
 
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=".gateway-env-scrub.", dir=str(environment_path.parent)
@@ -250,6 +286,7 @@ def scrub_parent_environment_file_v2(
         "removed_line_count": removed_line_count,
         "removed_names": sorted(removed_names),
         "installed_count_environment": dict(sorted(count_environment.items())),
+        "installed_deferred_worker_fleet_roles": sorted(deferred_roles),
     }
 
 
@@ -292,6 +329,10 @@ def _validated_worker_proxy_configuration(
     environment: Mapping[str, str],
 ) -> tuple[Any, Dict[str, list[str]]]:
     plan = build_research_lab_worker_autostart_plan(environment)
+    try:
+        deferred_roles = deferred_worker_fleet_roles(environment)
+    except DeferredWorkerFleetConfigurationError as exc:
+        raise GatewayEnvelopePreparationV2Error(str(exc)) from exc
     if not plan.hosted.enabled or not plan.scoring.enabled:
         raise GatewayEnvelopePreparationV2Error(
             "configured hosted and scoring worker fleets are required"
@@ -308,13 +349,14 @@ def _validated_worker_proxy_configuration(
     for role, values in fleets.items():
         commitments[role] = []
         for index, value in enumerate(values):
-            try:
-                _validated_tls_proxy_url(value)
-            except (ProviderBrokerV2Error, ValueError) as exc:
-                raise GatewayEnvelopePreparationV2Error(
-                    "%s worker proxy %d is incompatible with V2 provider transport"
-                    % (role, index)
-                ) from exc
+            if role not in deferred_roles:
+                try:
+                    _validated_tls_proxy_url(value)
+                except (ProviderBrokerV2Error, ValueError) as exc:
+                    raise GatewayEnvelopePreparationV2Error(
+                        "%s worker proxy %d is incompatible with V2 provider transport"
+                        % (role, index)
+                    ) from exc
             commitments[role].append(credential_value_hash(value))
     return plan, commitments
 
@@ -340,6 +382,7 @@ def prepare_gateway_envelopes_v2(
 
         kms_client = boto3.client("kms")
     plan, proxy_commitments = _validated_worker_proxy_configuration(environment)
+    deferred_roles = deferred_worker_fleet_roles(environment)
     parent = destination.parent
     parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".gateway-v2-envelopes.", dir=parent))
@@ -466,6 +509,7 @@ def prepare_gateway_envelopes_v2(
             "scoring_worker_count": plan.scoring.worker_count,
             "worker_proxy_transport_policy": _WORKER_PROXY_TRANSPORT_POLICY,
             "worker_proxy_credential_ref_hashes": proxy_commitments,
+            "deferred_worker_fleet_roles": sorted(deferred_roles),
             "required_count_environment": {
                 "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": str(
                     plan.hosted.worker_count
@@ -502,6 +546,7 @@ def install_gateway_envelopes_v2(
 
     destination = Path(install_dir)
     plan, proxy_commitments = _validated_worker_proxy_configuration(environment)
+    deferred_roles = deferred_worker_fleet_roles(environment)
     report_path = destination / "gateway-v2-env-transition.json"
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -514,6 +559,8 @@ def install_gateway_envelopes_v2(
         == _WORKER_PROXY_TRANSPORT_POLICY
         and report.get("worker_proxy_credential_ref_hashes")
         == proxy_commitments
+        and report.get("deferred_worker_fleet_roles")
+        == sorted(deferred_roles)
         and report.get("hosted_worker_count") == plan.hosted.worker_count
         and report.get("scoring_worker_count") == plan.scoring.worker_count
     ):
@@ -614,6 +661,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     function = install_gateway_envelopes_v2 if args.install else prepare_gateway_envelopes_v2
     keyword = "install_dir" if args.install else "output_dir"
     environment = load_environment_file(args.env_file)
+    inherited_deferral = str(
+        os.environ.get(DEFERRED_WORKER_FLEETS_ENV) or ""
+    ).strip()
+    file_deferral = str(
+        environment.get(DEFERRED_WORKER_FLEETS_ENV) or ""
+    ).strip()
+    if inherited_deferral and file_deferral:
+        try:
+            inherited_roles = deferred_worker_fleet_roles(
+                {DEFERRED_WORKER_FLEETS_ENV: inherited_deferral}
+            )
+            file_roles = deferred_worker_fleet_roles(
+                {DEFERRED_WORKER_FLEETS_ENV: file_deferral}
+            )
+        except DeferredWorkerFleetConfigurationError as exc:
+            raise GatewayEnvelopePreparationV2Error(str(exc)) from exc
+        if inherited_roles != file_roles:
+            raise GatewayEnvelopePreparationV2Error(
+                "inherited and prepared deferred worker fleet state differ"
+            )
+    requested_deferral = inherited_deferral or file_deferral
+    if requested_deferral:
+        try:
+            requested_roles = deferred_worker_fleet_roles(
+                {DEFERRED_WORKER_FLEETS_ENV: requested_deferral}
+            )
+        except DeferredWorkerFleetConfigurationError as exc:
+            raise GatewayEnvelopePreparationV2Error(str(exc)) from exc
+        environment[DEFERRED_WORKER_FLEETS_ENV] = (
+            canonical_deferred_worker_fleet_roles(requested_roles)
+        )
     schema_result = (
         verify_required_supabase_v2_schema(environment) if args.install else None
     )

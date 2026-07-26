@@ -446,6 +446,12 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     assert script.index('pkill -9 -f "python3 -u -m gateway.main"') > shutdown
 
 
+def test_gateway_worker_deferral_is_restart_scoped() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    assert script.count('"GATEWAY_V2_DEFER_WORKER_FLEETS"') == 3
+
+
 def test_gateway_restart_verifies_prepared_and_activated_candidate_git_blobs() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     preflight = script.index("gateway.tee.restart_preflight_v2")
@@ -606,7 +612,12 @@ def test_gateway_restart_does_not_clone_restart_control_state_into_runtime() -> 
     # stale per-restart /tmp plan path and the next rollout cannot finalize.
     for key in restart_only_keys:
         assert script.count(f'"{key}",') >= 2
-    assert 'restart_only_keys = {"GATEWAY_DEPLOY_COMMIT"}' in script
+    assert (
+        'restart_only_keys = {\n'
+        '    "GATEWAY_DEPLOY_COMMIT",\n'
+        '    "GATEWAY_V2_DEFER_WORKER_FLEETS",\n'
+        "}"
+    ) in script
     assert "unset GATEWAY_DEPLOY_COMMIT" in script
 
 

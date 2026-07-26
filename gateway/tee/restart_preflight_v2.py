@@ -15,7 +15,9 @@ from gateway.research_lab.provider_profiles_v2 import (
     verify_required_worker_proxy_profiles_v2,
 )
 from gateway.research_lab.worker_autostart import (
+    DeferredWorkerFleetConfigurationError,
     build_research_lab_worker_autostart_plan,
+    deferred_worker_fleet_roles,
 )
 from gateway.tee.acceptance_corpus_v2 import (
     load_and_validate_acceptance_corpus_v2,
@@ -335,6 +337,10 @@ def verify_gateway_restart_preflight_v2(
                     "worker process count (got %r)" % (count_env, raw)
                 )
         worker_plan = build_research_lab_worker_autostart_plan(parent_environment)
+        try:
+            deferred_roles = deferred_worker_fleet_roles(parent_environment)
+        except DeferredWorkerFleetConfigurationError as exc:
+            raise GatewayRestartPreflightV2Error(str(exc)) from exc
         if not worker_plan.hosted.enabled or not worker_plan.scoring.enabled:
             raise GatewayRestartPreflightV2Error(
                 "full V2 deployment requires both configured worker fleets"
@@ -359,6 +365,7 @@ def verify_gateway_restart_preflight_v2(
                 )
     else:
         expected_worker_counts = {}
+        deferred_roles = frozenset()
     return {
         "schema_version": "leadpoet.gateway_restart_preflight.v2",
         "status": "ready",
@@ -376,6 +383,7 @@ def verify_gateway_restart_preflight_v2(
         "artifact_bucket_protection": artifact_storage or "not_requested",
         "worker_proxy_profile_count": int(profile_result["profile_count"]),
         "worker_counts": expected_worker_counts,
+        "deferred_worker_fleet_roles": sorted(deferred_roles),
         "acceptance_corpus_manifest_hash": (
             str(acceptance_corpus["manifest_hash"])
             if acceptance_corpus is not None

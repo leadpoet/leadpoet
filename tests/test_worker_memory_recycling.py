@@ -197,6 +197,57 @@ def test_full_topology_worker_health_rejects_empty_fleet(monkeypatch):
         ResearchLabWorkerSupervisor(plan).health()
 
 
+def test_explicit_worker_fleet_deferral_starts_no_host_workers(monkeypatch):
+    monkeypatch.setenv("GATEWAY_TEE_TOPOLOGY_MODE", "full")
+    plan = ResearchLabWorkerAutoStartPlan(
+        auto_start_enabled=True,
+        hosted=_fleet("hosted", 3),
+        scoring=_fleet("scoring", 7),
+    )
+    supervisor = ResearchLabWorkerSupervisor(
+        plan,
+        environment={"GATEWAY_V2_DEFER_WORKER_FLEETS": "all"},
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "_start_child",
+        lambda *_args, **_kwargs: pytest.fail(
+            "deferred host worker was started"
+        ),
+    )
+
+    supervisor.start()
+    health = supervisor.health()
+
+    assert supervisor.children == {}
+    assert health["deferred_worker_fleet_roles"] == [
+        "gateway_autoresearch",
+        "gateway_scoring",
+    ]
+    assert health["hosted_configured"] == 3
+    assert health["hosted_expected_running"] == 0
+    assert health["hosted_running"] == 0
+    assert health["scoring_configured"] == 7
+    assert health["scoring_expected_running"] == 0
+    assert health["scoring_running"] == 0
+
+
+def test_invalid_worker_fleet_deferral_fails_closed():
+    plan = ResearchLabWorkerAutoStartPlan(
+        auto_start_enabled=True,
+        hosted=_fleet("hosted", 3),
+        scoring=_fleet("scoring", 7),
+    )
+    with pytest.raises(
+        ResearchLabWorkerStartupError,
+        match="invalid deferred V2 worker fleet role",
+    ):
+        ResearchLabWorkerSupervisor(
+            plan,
+            environment={"GATEWAY_V2_DEFER_WORKER_FLEETS": "unknown"},
+        )
+
+
 def _trace_line(seq: int, payload_pad: str = "") -> str:
     return (
         f"{INCONTAINER_TRACE_MARKER} "

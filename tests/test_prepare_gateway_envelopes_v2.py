@@ -51,6 +51,30 @@ def _environment():
     }
 
 
+def _legacy_http_proxy_environment():
+    environment = _environment()
+    environment.update(
+        {
+            "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1": (
+                "http://user:password@hosted-1.example.com:12431"
+            ),
+            "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_2": (
+                "http://user:password@hosted-2.example.com:12432"
+            ),
+            "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1": (
+                "http://user:password@scoring-1.example.com:13431"
+            ),
+            "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_2": (
+                "http://user:password@scoring-2.example.com:13432"
+            ),
+            "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_3": (
+                "http://user:password@scoring-3.example.com:13433"
+            ),
+        }
+    )
+    return environment
+
+
 def test_prepares_complete_dynamic_gateway_envelope_set(tmp_path):
     kms = KMS()
     output = tmp_path / "v2"
@@ -268,6 +292,133 @@ def test_rejects_worker_proxy_outside_measured_tls_contract(
     assert not (tmp_path / "v2").exists()
 
 
+def test_explicit_deferral_seals_but_does_not_validate_legacy_http_proxies(
+    tmp_path,
+):
+    environment = _legacy_http_proxy_environment()
+    environment["GATEWAY_V2_DEFER_WORKER_FLEETS"] = "all"
+    output = tmp_path / "v2"
+
+    result = prepare_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        output_dir=output,
+        kms_client=KMS(),
+    )
+
+    assert result["deferred_worker_fleet_roles"] == [
+        "gateway_autoresearch",
+        "gateway_scoring",
+    ]
+    assert len(
+        result["worker_proxy_credential_ref_hashes"][
+            "gateway_autoresearch"
+        ]
+    ) == 2
+    assert len(
+        result["worker_proxy_credential_ref_hashes"]["gateway_scoring"]
+    ) == 3
+    assert (output / "autoresearch_proxy_00.json").is_file()
+    assert (output / "scoring_proxy_02.json").is_file()
+    persisted_documents = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in output.glob("*.json")
+    }
+    assert not any(
+        plaintext in document
+        for document in persisted_documents.values()
+        for plaintext in (
+            "rehearsal-password",
+            "user:password",
+            "http://",
+        )
+    )
+
+    parent_environment = tmp_path / "gateway-parent.env"
+    parent_environment.write_text(
+        "\n".join(
+            "export %s=%s" % (name, value)
+            for name, value in environment.items()
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    transition = scrub_parent_environment_file_v2(
+        environment_path=parent_environment,
+        transition_report_path=output / "gateway-v2-env-transition.json",
+    )
+    scrubbed = load_environment_file(parent_environment)
+    assert scrubbed["GATEWAY_V2_DEFER_WORKER_FLEETS"] == (
+        "gateway_autoresearch,gateway_scoring"
+    )
+    assert not any(
+        name.startswith("RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY")
+        or name.startswith("RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY")
+        for name in scrubbed
+    )
+    assert transition["installed_deferred_worker_fleet_roles"] == [
+        "gateway_autoresearch",
+        "gateway_scoring",
+    ]
+
+
+def test_one_deferred_role_does_not_relax_the_other_role(tmp_path):
+    environment = _legacy_http_proxy_environment()
+    environment["GATEWAY_V2_DEFER_WORKER_FLEETS"] = "gateway_autoresearch"
+    environment["RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1"] = (
+        "https://scoring-1.example.com:443"
+    )
+    environment["RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_2"] = (
+        "https://scoring-2.example.com:443"
+    )
+    environment["RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_3"] = (
+        "http://scoring-3.example.com:13433"
+    )
+
+    with pytest.raises(
+        Exception,
+        match="gateway_scoring worker proxy 2 is incompatible",
+    ):
+        prepare_gateway_envelopes_v2(
+            environment=environment,
+            kms_key_id="alias/gateway-v2",
+            deploy_commit="1" * 40,
+            output_dir=tmp_path / "v2",
+            kms_client=KMS(),
+        )
+
+
+def test_exact_commit_reuse_is_bound_to_deferred_role_set(tmp_path):
+    environment = _environment()
+    destination = tmp_path / "v2"
+    kms = KMS()
+    first = install_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        install_dir=destination,
+        kms_client=kms,
+    )
+    first_request_count = len(kms.requests)
+    assert first["status"] == "installed"
+
+    environment["GATEWAY_V2_DEFER_WORKER_FLEETS"] = "gateway_autoresearch"
+    second = install_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        install_dir=destination,
+        kms_client=kms,
+    )
+
+    assert second["status"] == "installed"
+    assert second["deferred_worker_fleet_roles"] == [
+        "gateway_autoresearch"
+    ]
+    assert len(kms.requests) > first_request_count
+
+
 def test_exact_commit_reuse_revalidates_worker_proxy_contract(tmp_path):
     environment = _environment()
     destination = tmp_path / "v2"
@@ -354,3 +505,57 @@ def test_install_cli_checks_schema_before_writing_envelopes(
     result = json.loads(capsys.readouterr().out)
     assert calls == ["schema", "install"]
     assert result["supabase_v2_schema"]["status"] == "ready"
+
+
+def test_install_cli_carries_explicit_inherited_deferral_into_env_transition(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    environment = {"SUPABASE_URL": "https://project.supabase.co"}
+    env_file = tmp_path / "gateway.env"
+    env_file.write_text(json.dumps(environment), encoding="utf-8")
+    observed = {}
+
+    monkeypatch.setenv("GATEWAY_V2_DEFER_WORKER_FLEETS", "all")
+    monkeypatch.setattr(
+        envelope_module,
+        "verify_required_supabase_v2_schema",
+        lambda _environment: {"status": "ready"},
+    )
+
+    def install(**kwargs):
+        observed.update(kwargs["environment"])
+        return {
+            "status": "installed",
+            "deferred_worker_fleet_roles": [
+                "gateway_autoresearch",
+                "gateway_scoring",
+            ],
+        }
+
+    monkeypatch.setattr(
+        envelope_module,
+        "install_gateway_envelopes_v2",
+        install,
+    )
+
+    assert envelope_module.main(
+        [
+            "--install",
+            "--env-file",
+            str(env_file),
+            "--kms-key-id",
+            "alias/gateway-v2",
+            "--deploy-commit",
+            "1" * 40,
+            "--output-dir",
+            str(tmp_path / "v2"),
+        ]
+    ) == 0
+    assert observed["GATEWAY_V2_DEFER_WORKER_FLEETS"] == (
+        "gateway_autoresearch,gateway_scoring"
+    )
+    assert json.loads(capsys.readouterr().out)[
+        "deferred_worker_fleet_roles"
+    ] == ["gateway_autoresearch", "gateway_scoring"]

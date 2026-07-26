@@ -413,6 +413,7 @@ def _run_component(
     docker_platform: str,
     fixture_seed_root: Path,
     run_ordinal: int,
+    gateway_worker_fleet_mode: str,
 ) -> None:
     limits = PROFILE_LIMITS[profile]
     command = [
@@ -466,6 +467,8 @@ def _run_component(
         f"REHEARSAL_PROFILE={profile}",
         "--env",
         f"REHEARSAL_RUN_ORDINAL={run_ordinal}",
+        "--env",
+        f"REHEARSAL_GATEWAY_WORKER_FLEET_MODE={gateway_worker_fleet_mode}",
         tag,
     ]
     try:
@@ -873,6 +876,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="prepush",
         help="prepush is the bounded developer gate; release runs the full matrix",
     )
+    parser.add_argument(
+        "--gateway-worker-fleet-mode",
+        choices=("active", "deferred"),
+        default="active",
+        help=(
+            "active exercises compliant TLS proxy workers; deferred exercises "
+            "the explicit one-restart recovery path with production-shaped "
+            "legacy HTTP proxy configuration"
+        ),
+    )
     parser.add_argument("--rebuild-image", action="store_true")
     args = parser.parse_args(argv)
 
@@ -973,6 +986,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 docker_platform=docker_platform,
                                 fixture_seed_root=fixture_seeds[run_candidate],
                                 run_ordinal=ordinal + 1,
+                                gateway_worker_fleet_mode=(
+                                    args.gateway_worker_fleet_mode
+                                ),
                             )
                         except subprocess.CalledProcessError as exc:
                             if args.profile != "release":

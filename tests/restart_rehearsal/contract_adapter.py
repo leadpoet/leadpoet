@@ -377,7 +377,7 @@ def _write_json(path: str | Path, value: dict[str, Any]) -> None:
 
 
 def _gateway_secret() -> dict[str, str]:
-    return {
+    values = {
         "AWS_REGION": "us-east-1",
         "AWS_DEFAULT_REGION": "us-east-1",
         "BITTENSOR_NETWORK": "finney",
@@ -446,6 +446,29 @@ def _gateway_secret() -> dict[str, str]:
             "https://scoring-proxy.example.com"
         ),
     }
+    worker_fleet_mode = os.environ.get(
+        "REHEARSAL_GATEWAY_WORKER_FLEET_MODE",
+        "active",
+    )
+    if worker_fleet_mode == "deferred":
+        values.update(
+            {
+                "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1": (
+                    "http://rehearsal-user:rehearsal-password@"
+                    "autoresearch-proxy.example.com:12431"
+                ),
+                "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1": (
+                    "http://rehearsal-user:rehearsal-password@"
+                    "scoring-proxy.example.com:13431"
+                ),
+            }
+        )
+    elif worker_fleet_mode != "active":
+        raise RuntimeError(
+            "unknown rehearsal gateway worker fleet mode: "
+            + worker_fleet_mode
+        )
+    return values
 
 
 def _validator_secret() -> dict[str, str]:

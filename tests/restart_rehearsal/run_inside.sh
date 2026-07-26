@@ -9,6 +9,19 @@ WEIGHT_READINESS_SCENARIO="${REHEARSAL_WEIGHT_READINESS_SCENARIO:-production_suc
 REHEARSAL_SCOPE="${REHEARSAL_SCOPE:-exact}"
 REHEARSAL_PROFILE="${REHEARSAL_PROFILE:-prepush}"
 RUN_ORDINAL="${REHEARSAL_RUN_ORDINAL:-1}"
+GATEWAY_WORKER_FLEET_MODE="${REHEARSAL_GATEWAY_WORKER_FLEET_MODE:-active}"
+case "$GATEWAY_WORKER_FLEET_MODE" in
+  active)
+    GATEWAY_DEFER_WORKER_FLEETS=""
+    ;;
+  deferred)
+    GATEWAY_DEFER_WORKER_FLEETS="all"
+    ;;
+  *)
+    echo "ERROR: invalid rehearsal gateway worker fleet mode" >&2
+    exit 2
+    ;;
+esac
 
 if ! [[ "$RUN_ORDINAL" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: REHEARSAL_RUN_ORDINAL must be a positive integer" >&2
@@ -410,6 +423,7 @@ if [ "$COMPONENT" = "gateway" ]; then
       GATEWAY_PYTHON_BIN=/home/ec2-user/venv311/bin/python3 \
       GATEWAY_TEE_TOPOLOGY_MODE=full \
       RESEARCH_LAB_TEE_PROTOCOL=v2 \
+      GATEWAY_V2_DEFER_WORKER_FLEETS="$GATEWAY_DEFER_WORKER_FLEETS" \
       bash /home/ec2-user/gw_restart.sh --commit "$CANDIDATE_SHA"
   else
     env \
@@ -423,6 +437,7 @@ if [ "$COMPONENT" = "gateway" ]; then
       GATEWAY_PYTHON_BIN=/home/ec2-user/venv311/bin/python3 \
       GATEWAY_TEE_TOPOLOGY_MODE=full \
       RESEARCH_LAB_TEE_PROTOCOL=v2 \
+      GATEWAY_V2_DEFER_WORKER_FLEETS="$GATEWAY_DEFER_WORKER_FLEETS" \
       bash /home/ec2-user/gw_restart.sh
   fi
   RESTART_STATUS=$?

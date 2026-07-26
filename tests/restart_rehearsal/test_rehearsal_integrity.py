@@ -520,6 +520,39 @@ def test_gateway_secret_enables_the_production_weight_authority(
     )
 
 
+def test_deferred_gateway_rehearsal_uses_production_shaped_http_proxies(
+    monkeypatch,
+) -> None:
+    adapter_path = (
+        Path(__file__).resolve().parent / "contract_adapter.py"
+    )
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    monkeypatch.setenv(
+        "REHEARSAL_GATEWAY_WORKER_FLEET_MODE",
+        "deferred",
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_rehearsal_gateway_deferred_proxy_contract",
+        adapter_path,
+    )
+    assert spec is not None and spec.loader is not None
+    adapter = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(adapter)
+
+    values = adapter._gateway_secret()
+    hosted = values["RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1"]
+    scoring = values["RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1"]
+
+    assert hosted.startswith(
+        "http://rehearsal-user:rehearsal-password@"
+    )
+    assert scoring.startswith(
+        "http://rehearsal-user:rehearsal-password@"
+    )
+    assert hosted.rsplit(":", 1)[1].isdigit()
+    assert scoring.rsplit(":", 1)[1].isdigit()
+
+
 def test_contract_adapter_loads_under_production_safe_path() -> None:
     adapter = Path(__file__).resolve().parent / "contract_adapter.py"
     env = {

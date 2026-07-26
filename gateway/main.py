@@ -378,7 +378,9 @@ async def lifespan(app: FastAPI):
         print(
             "✅ Research Lab authoritative workers ready: "
             f"hosted={research_lab_worker_health['hosted_running']} "
-            f"scoring={research_lab_worker_health['scoring_running']}"
+            f"scoring={research_lab_worker_health['scoring_running']} "
+            "deferred_roles="
+            f"{research_lab_worker_health['deferred_worker_fleet_roles']}"
         )
 
         from gateway.research_lab.config import ResearchLabGatewayConfig

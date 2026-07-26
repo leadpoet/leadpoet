@@ -40,8 +40,17 @@ OPENROUTER_INGRESS_RECIPIENT_PURPOSE = (
 KMS_KEY_ENCRYPTION_ALGORITHM = "RSAES_OAEP_SHA_256"
 MAX_CIPHERTEXT_FOR_RECIPIENT_BYTES = 64 * 1024
 MAX_CREDENTIAL_BYTES = 64 * 1024
-MAX_JOB_RECIPIENT_REQUESTS = 2048
-JOB_RECIPIENT_REQUEST_TTL_SECONDS = 3600.0
+# Capacity math is load-bearing: slots are freed only on successful unwrap or
+# TTL expiry, so any window where more requests are created-but-abandoned than
+# the cap admits rejects EVERY coordinator credential RPC ("job recipient
+# capacity is full") — observed 2026-07-26 03:24 UTC, taking down scoring and
+# the weight-submission path together after ~8h of normal load. A request is
+# unwrapped within one RPC exchange in practice, so a 10-minute TTL bounds
+# abandoned entries tightly while leaving generous slack; the larger cap makes
+# saturation require a >13k/10min abandonment storm instead of a slow leak
+# (~80MB worst-case footprint, well inside the coordinator's 8GB).
+MAX_JOB_RECIPIENT_REQUESTS = 8192
+JOB_RECIPIENT_REQUEST_TTL_SECONDS = 600.0
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 

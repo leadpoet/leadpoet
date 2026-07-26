@@ -1,0 +1,81 @@
+{
+  "schema_version": "leadpoet.restart_rehearsal_fixture.v1",
+  "sanitization": {
+    "source": "production-shaped schema export",
+    "contains_production_credentials": false,
+    "contains_personal_data": false,
+    "transform": "stable pseudonymous hotkeys and deterministic hashes"
+  },
+  "network": {
+    "network": "finney",
+    "netuid": 71,
+    "tempo": 360,
+    "subnet_reveal_period_epochs": 1,
+    "block_time_millis": 12000,
+    "spec_version": 432,
+    "transaction_version": 1,
+    "version_key": 10005000,
+    "commit_call_index": "0776",
+    "serve_axon_call_index": "0704",
+    "commit_reveal_version": 4,
+    "mechid": 0,
+    "max_snapshot_block_drift": 64,
+    "extrinsic_period": 8
+  },
+  "validator": {
+    "hotkey": "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK",
+    "hotkey_public_key_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "metagraph": {
+    "burn_target_uid": 0,
+    "burn_target_hotkey": "burn-hotkey",
+    "hotkeys": [
+      "burn-hotkey",
+      "fulfillment-hotkey",
+      "research-lab-hotkey",
+      "source-add-hotkey"
+    ]
+  },
+  "research_lab_allocation": {
+    "lab_cap_percent": 20.0,
+    "unallocated_percent": 15.0,
+    "reimbursement_allocations": [],
+    "champion_allocations": [
+      {
+        "uid": 2,
+        "miner_hotkey": "research-lab-hotkey",
+        "paid_alpha_percent": 5.0
+      }
+    ],
+    "queued_champion_allocations": []
+  },
+  "fulfillment_rows": [
+    {
+      "hotkey": "fulfillment-hotkey",
+      "share": 0.705
+    }
+  ],
+  "leaderboard_entries": [
+    {
+      "miner_hotkey": "fulfillment-hotkey",
+      "wins": 9
+    }
+  ],
+  "fault_matrix": [
+    "dns_failure",
+    "connection_refused",
+    "connection_reset",
+    "tls_failure",
+    "partial_body",
+    "unexpected_eof",
+    "timeout",
+    "http_400",
+    "http_403",
+    "http_429",
+    "http_500",
+    "malformed_json",
+    "duplicate_response",
+    "client_disconnect",
+    "process_restart"
+  ]
+}

@@ -123,23 +123,29 @@ class FakeSubstrate:
 
 
 class FakeServeCall:
-    def __init__(self):
+    def __init__(self, *, include_legacy_identities=True):
         self.data = SimpleNamespace(data=bytes.fromhex("07044700"))
+        call_args = {
+            "version": 10005000,
+            "ip": 2130706433,
+            "port": 8093,
+            "ip_type": 4,
+            "netuid": 71,
+            "protocol": 4,
+            "placeholder1": 0,
+            "placeholder2": 0,
+        }
+        if include_legacy_identities:
+            call_args.update(
+                {
+                    "hotkey": HOTKEY,
+                    "coldkey": HOTKEY,
+                }
+            )
         self.value = {
             "call_module": "SubtensorModule",
             "call_function": "serve_axon",
-            "call_args": {
-                "version": 10005000,
-                "ip": 2130706433,
-                "port": 8093,
-                "ip_type": 4,
-                "netuid": 71,
-                "hotkey": HOTKEY,
-                "coldkey": HOTKEY,
-                "protocol": 4,
-                "placeholder1": 0,
-                "placeholder2": 0,
-            },
+            "call_args": call_args,
         }
 
 
@@ -380,12 +386,46 @@ def test_serve_axon_context_signs_only_exact_measured_call():
     assert request["signature_payload_hex"] == b"canonical-scale-payload".hex()
 
 
+def test_serve_axon_context_accepts_bittensor_10_runtime_call_shape():
+    client = FakeClient()
+    wallet = _wallet(client)
+    substrate = FakeSubstrate()
+    with AuthoritativeServeAxonContextV2(
+        substrate=substrate,
+        wallet=wallet,
+    ) as context:
+        result = substrate.create_signed_extrinsic(
+            call=FakeServeCall(include_legacy_identities=False),
+            keypair=wallet.hotkey,
+            era={"period": 8},
+            nonce=None,
+        )
+
+    assert result.signature == bytes.fromhex("44" * 64)
+    assert len(context.extrinsic_signature_results) == 1
+
+
 def test_serve_axon_context_rejects_any_other_chain_call():
     client = FakeClient()
     wallet = _wallet(client)
     substrate = FakeSubstrate()
     call = FakeServeCall()
     call.value["call_function"] = "add_stake"
+    with AuthoritativeServeAxonContextV2(substrate=substrate, wallet=wallet):
+        with pytest.raises(EnclaveHotkeyV2Error, match="authorized serve_axon"):
+            substrate.create_signed_extrinsic(
+                call=call,
+                keypair=wallet.hotkey,
+                era={"period": 8},
+            )
+
+
+def test_serve_axon_context_rejects_unknown_runtime_call_argument():
+    client = FakeClient()
+    wallet = _wallet(client)
+    substrate = FakeSubstrate()
+    call = FakeServeCall(include_legacy_identities=False)
+    call.value["call_args"]["unknown"] = 1
     with AuthoritativeServeAxonContextV2(substrate=substrate, wallet=wallet):
         with pytest.raises(EnclaveHotkeyV2Error, match="authorized serve_axon"):
             substrate.create_signed_extrinsic(

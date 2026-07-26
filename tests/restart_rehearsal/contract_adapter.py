@@ -18,11 +18,30 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tarfile
 import time
 from typing import Any, Iterable
+
+# The production gateway import preflight deliberately sets PYTHONSAFEPATH=1
+# and replaces PYTHONPATH with the candidate checkout.  Load harness siblings
+# explicitly so the boundary adapter remains self-contained in that exact
+# invocation shape.
+HARNESS_ROOT = Path(__file__).resolve().parent
+if str(HARNESS_ROOT) not in sys.path:
+    sys.path.insert(0, str(HARNESS_ROOT))
+
+from artifact_identity import (
+    ALL_ROLES,
+    GATEWAY_ROLES,
+    VALIDATOR_ROLE,
+    docker_save_archive,
+    eif_bytes,
+    normalized_image_id,
+    pcr0 as artifact_pcr0,
+)
 
 
 STATE_ROOT = Path(os.environ.get("REHEARSAL_STATE_ROOT", "/rehearsal-state"))
@@ -31,7 +50,9 @@ EVENT_PATH = STATE_ROOT / "events.jsonl"
 LOCK_PATH = STATE_ROOT / "adapter.lock"
 REAL_PYTHON = "/usr/bin/python3.11"
 REAL_BASH = "/bin/bash"
-PCR0 = hashlib.sha384(b"leadpoet-local-restart-rehearsal").hexdigest()
+REAL_CURL = "/usr/bin/curl"
+_PCR0_CANDIDATE = os.environ.get("REHEARSAL_CANDIDATE_SHA", "").encode("ascii")
+PCR0 = artifact_pcr0(_PCR0_CANDIDATE.decode("ascii"))
 HASH64 = hashlib.sha256(b"leadpoet-local-restart-rehearsal").hexdigest()
 ACCOUNT = "493765492819"
 TARGETED_REGRESSION_SCOPE = "weight_readiness_regression"
@@ -45,6 +66,8 @@ EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
         "alias/leadpoet-research-lab-artifact-signing"
     ),
 }
+RUNSC_LOCK_PATH = Path("/opt/leadpoet/runsc-runtime.lock.json")
+EXTERNAL_ARTIFACT_ROOT = Path("/opt/leadpoet/external-artifacts")
 
 
 def _ensure_state() -> None:
@@ -93,8 +116,6 @@ def _save_state(handle: io.TextIOWrapper, value: dict[str, Any]) -> None:
 
 def _event(kind: str, argv: Iterable[str], **details: Any) -> None:
     _ensure_state()
-    if kind in {"aws", "curl", "docker", "nitro"}:
-        details.setdefault("fixture_authenticity", "synthetic")
     payload = {
         "at_ns": time.time_ns(),
         "kind": kind,
@@ -233,13 +254,31 @@ def _source_identity(path: Path) -> dict[str, str]:
 
 
 def _module_source(module: str) -> Path:
-    root = _candidate_root()
-    module_path = root.joinpath(*module.split(".")).with_suffix(".py")
-    if module_path.is_file():
-        return module_path
-    package_main = root.joinpath(*module.split("."), "__main__.py")
-    if package_main.is_file():
-        return package_main
+    roots = [Path.cwd()]
+    roots.extend(
+        Path(item)
+        for item in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+        if item
+    )
+    candidate_root = _candidate_root()
+    roots.append(candidate_root)
+    seen: set[Path] = set()
+    for root in roots:
+        resolved_root = root.resolve()
+        if resolved_root in seen:
+            continue
+        seen.add(resolved_root)
+        module_path = resolved_root.joinpath(
+            *module.split(".")
+        ).with_suffix(".py")
+        if module_path.is_file():
+            return module_path
+        package_main = resolved_root.joinpath(
+            *module.split("."),
+            "__main__.py",
+        )
+        if package_main.is_file():
+            return package_main
     raise RuntimeError("candidate module source is unavailable: %s" % module)
 
 
@@ -297,6 +336,37 @@ def _record_internal_substitution(
     )
 
 
+def _record_external_boundary(
+    *,
+    kind: str,
+    argv: list[str],
+    boundary: str,
+    operation: str,
+    status: str = "ok",
+) -> None:
+    contract_path = Path("/harness/boundary_contract.json")
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    definition = (contract.get("boundaries") or {}).get(boundary)
+    if not isinstance(definition, dict):
+        raise RuntimeError(f"external boundary is not allowlisted: {boundary}")
+    allowed = definition.get("allowed_operations") or []
+    if operation not in allowed:
+        raise RuntimeError(
+            f"external boundary operation is not allowlisted: "
+            f"{boundary}.{operation}"
+        )
+    _event(
+        kind,
+        argv,
+        status=status,
+        boundary=boundary,
+        operation=operation,
+        implementation="external_boundary",
+        fixture_authenticity="production_shaped_sanitized",
+        reject_unknown=bool(definition.get("reject_unknown")),
+    )
+
+
 def _write_json(path: str | Path, value: dict[str, Any]) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -310,9 +380,11 @@ def _gateway_secret() -> dict[str, str]:
     return {
         "AWS_REGION": "us-east-1",
         "AWS_DEFAULT_REGION": "us-east-1",
+        "BITTENSOR_NETWORK": "finney",
+        "BITTENSOR_NETUID": "71",
         "GITHUB_REPO_URL": "/srv/origin.git",
         "GITHUB_BRANCH": "main",
-        "SUPABASE_URL": "https://example.invalid",
+        "SUPABASE_URL": "http://127.0.0.1:54321",
         "SUPABASE_ANON_KEY": "rehearsal-public",
         "SUPABASE_SERVICE_ROLE_KEY": "rehearsal-secret",
         "OPENROUTER_API_KEY": "rehearsal-openrouter",
@@ -331,6 +403,24 @@ def _gateway_secret() -> dict[str, str]:
         "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID": (
             "alias/rehearsal-stale-private-model-signing"
         ),
+        "RESEARCH_LAB_RAW_TRACE_S3_PREFIX": (
+            "s3://leadpoet-private-model-artifacts-493765492819/"
+            "research-lab/rehearsal/raw-traces"
+        ),
+        "RESEARCH_LAB_SCORER_TRACE_S3_PREFIX": (
+            "s3://leadpoet-private-model-artifacts-493765492819/"
+            "research-lab/rehearsal/scorer-traces"
+        ),
+        "RESEARCH_LAB_TRACE_KMS_KEY_ID": (
+            "alias/leadpoet-research-lab-trace-encryption"
+        ),
+        "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX": (
+            "s3://leadpoet-private-model-artifacts-493765492819/"
+            "research-lab/rehearsal/incontainer-traces"
+        ),
+        "RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID": (
+            "alias/leadpoet-research-lab-trace-encryption"
+        ),
         "GATEWAY_PYTHON_BIN": "/home/ec2-user/venv311/bin/python3",
         "GATEWAY_PRIVATE_KEY_PATH": (
             "/home/ec2-user/gateway/secrets/gateway_private_key.pem"
@@ -342,6 +432,19 @@ def _gateway_secret() -> dict[str, str]:
         "GATEWAY_TEE_ROLE_READY_TIMEOUT_SECONDS": "5",
         "GATEWAY_TEE_ROLE_READY_RETRY_SECONDS": "1",
         "NO_PROXY": "127.0.0.1,localhost",
+        "RESEARCH_LAB_GATEWAY_API_ENABLED": "true",
+        "RESEARCH_LAB_PRODUCTION_WRITES_ENABLED": "true",
+        "RESEARCH_LAB_RECEIPTS_ENABLED": "true",
+        "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
+        "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
+        "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": "true",
+        "RESEARCH_LAB_INTERNAL_API_KEY": "rehearsal-internal",
+        "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1": (
+            "https://autoresearch-proxy.example.com"
+        ),
+        "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1": (
+            "https://scoring-proxy.example.com"
+        ),
     }
 
 
@@ -352,15 +455,18 @@ def _validator_secret() -> dict[str, str]:
         "LEADPOET_WRAPPER_ACTIVE": "1",
         "GATEWAY_URL": "http://gateway.invalid:8000",
         "VALIDATOR_V2_GATEWAY_URL": "http://gateway.invalid:8000",
-        "SUPABASE_URL": "https://example.invalid",
+        "SUPABASE_URL": "http://127.0.0.1:54321",
         "SUPABASE_ANON_KEY": "rehearsal-public",
         "SUPABASE_SERVICE_ROLE_KEY": "rehearsal-secret",
         "OPENROUTER_API_KEY": "rehearsal-openrouter",
+        "OPENROUTER_KEY": "rehearsal-openrouter",
         "QUALIFICATION_OPENROUTER_API_KEY": "rehearsal-openrouter",
         "FULFILLMENT_OPENROUTER_API_KEY": "rehearsal-openrouter",
         "EXA_API_KEY": "rehearsal-exa",
         "SCRAPINGDOG_API_KEY": "rehearsal-scrapingdog",
         "QUALIFICATION_SCRAPINGDOG_API_KEY": "rehearsal-scrapingdog",
+        "TRUELIST_API_KEY": "rehearsal-truelist",
+        "COMPANIES_HOUSE_API_KEY": "rehearsal-companies-house",
         "AWS_REGION": "us-east-1",
         "AWS_DEFAULT_REGION": "us-east-1",
         "RESEARCH_LAB_VALIDATOR_FETCH_ENABLED": "true",
@@ -384,15 +490,30 @@ def command_aws(argv: list[str]) -> int:
     if argv[:2] == ["secretsmanager", "get-secret-value"]:
         component = os.environ.get("REHEARSAL_COMPONENT", "")
         secret = _gateway_secret() if component == "gateway" else _validator_secret()
-        _event("aws", argv, status="ok", operation="secretsmanager")
+        _record_external_boundary(
+            kind="aws",
+            argv=argv,
+            boundary="aws_cli",
+            operation="secretsmanager",
+        )
         print(json.dumps(secret, sort_keys=True))
         return 0
     if argv[:2] == ["sts", "get-caller-identity"]:
-        _event("aws", argv, status="ok", operation="sts")
+        _record_external_boundary(
+            kind="aws",
+            argv=argv,
+            boundary="aws_cli",
+            operation="sts",
+        )
         print(ACCOUNT)
         return 0
     if argv[:2] == ["ecr", "get-login-password"]:
-        _event("aws", argv, status="ok", operation="ecr_login")
+        _record_external_boundary(
+            kind="aws",
+            argv=argv,
+            boundary="aws_cli",
+            operation="ecr_login",
+        )
         print("rehearsal-ecr-password")
         return 0
     return _fail("aws", argv, "unknown AWS operation")
@@ -402,54 +523,275 @@ def _image_id(name: str) -> str:
     return "sha256:" + hashlib.sha256(name.encode("utf-8")).hexdigest()
 
 
-def _docker_save(path: Path) -> None:
-    layer_bytes = b"leadpoet restart rehearsal layer\n"
-    layer_buffer = io.BytesIO()
-    with tarfile.open(fileobj=layer_buffer, mode="w") as layer_tar:
-        info = tarfile.TarInfo("rehearsal.txt")
-        info.size = len(layer_bytes)
-        info.mtime = 0
-        layer_tar.addfile(info, io.BytesIO(layer_bytes))
-    layer_data = layer_buffer.getvalue()
-    layer_hash = hashlib.sha256(layer_data).hexdigest()
-    config = {
-        "created": "1970-01-01T00:00:00Z",
-        "rootfs": {"type": "layers", "diff_ids": [f"sha256:{layer_hash}"]},
-        "history": [{"created": "1970-01-01T00:00:00Z"}],
-    }
-    config_data = json.dumps(config, separators=(",", ":")).encode("utf-8")
-    config_hash = hashlib.sha256(config_data).hexdigest()
-    manifest = [
-        {
-            "Config": f"blobs/sha256/{config_hash}",
-            "RepoTags": ["validator-tee-enclave:raw"],
-            "Layers": [f"blobs/sha256/{layer_hash}"],
-        }
-    ]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(path, "w") as archive:
-        for name, data in (
-            ("manifest.json", json.dumps(manifest).encode("utf-8")),
-            (f"blobs/sha256/{config_hash}", config_data),
-            (f"blobs/sha256/{layer_hash}", layer_data),
+def _image_record_id(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(value.get("id") or "")
+    return str(value or "")
+
+
+def _image_record_by_id(
+    images: dict[str, Any],
+    image_id: str,
+) -> dict[str, Any] | None:
+    for value in images.values():
+        if (
+            isinstance(value, dict)
+            and _image_record_id(value) == image_id
         ):
-            info = tarfile.TarInfo(name)
-            info.size = len(data)
-            info.mtime = 0
-            archive.addfile(info, io.BytesIO(data))
+            return dict(value)
+    return None
+
+
+def _external_build_role(argv: list[str], tag: str) -> str:
+    if tag == "validator-tee-enclave:raw":
+        dockerfile = _arg_value(argv, "-f")
+        if not dockerfile.endswith("/validator_tee/Dockerfile.enclave"):
+            raise ValueError("validator enclave build used an unexpected Dockerfile")
+        return VALIDATOR_ROLE
+    match = re.fullmatch(r"tee-enclave:(gateway_[a-z]+)-raw", tag)
+    if match is not None:
+        role = match.group(1)
+        if role not in GATEWAY_ROLES:
+            raise ValueError("gateway enclave build used an unknown role")
+        build_arg = _arg_value(argv, "--build-arg")
+        dockerfile = _arg_value(argv, "-f")
+        if (
+            build_arg != f"LEADPOET_ENCLAVE_ROLE={role}"
+            or not dockerfile.endswith("/gateway/tee/Dockerfile.enclave")
+        ):
+            raise ValueError("gateway enclave build contract is invalid")
+        return role
+    return ""
+
+
+def _docker_save(
+    path: Path,
+    *,
+    source_tag: str,
+    record: dict[str, Any],
+) -> None:
+    commit = str(record.get("commit") or "")
+    role = str(record.get("role") or "")
+    if role not in ALL_ROLES:
+        raise ValueError("only commit-bound enclave images may be normalized")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(docker_save_archive(commit, role, source_tag))
+
+
+def _docker_load(path: Path, images: dict[str, Any]) -> list[str]:
+    try:
+        with tarfile.open(path, "r:*") as archive:
+            manifest_member = archive.getmember("manifest.json")
+            manifest_file = archive.extractfile(manifest_member)
+            if manifest_file is None:
+                raise ValueError("Docker load manifest cannot be read")
+            manifest = json.load(manifest_file)
+            if not isinstance(manifest, list) or len(manifest) != 1:
+                raise ValueError("Docker load requires exactly one image")
+            row = manifest[0]
+            config_path = str(row.get("Config") or "")
+            tags = row.get("RepoTags")
+            config_member = archive.getmember(config_path)
+            config_file = archive.extractfile(config_member)
+            if config_file is None:
+                raise ValueError("Docker load config cannot be read")
+            config = json.load(config_file)
+    except (KeyError, OSError, tarfile.TarError, json.JSONDecodeError) as exc:
+        raise ValueError("Docker load archive is invalid") from exc
+    if (
+        not re.fullmatch(r"blobs/sha256/[0-9a-f]{64}", config_path)
+        or not isinstance(tags, list)
+        or not tags
+        or not all(isinstance(tag, str) and tag for tag in tags)
+        or not isinstance(config, dict)
+    ):
+        raise ValueError("Docker load archive contract is incomplete")
+    labels = (
+        config.get("config", {}).get("Labels", {})
+        if isinstance(config.get("config"), dict)
+        else {}
+    )
+    commit = str(labels.get("org.leadpoet.rehearsal.commit") or "")
+    role = str(labels.get("org.leadpoet.rehearsal.role") or "")
+    image_id = "sha256:" + config_path.rsplit("/", 1)[-1]
+    if (
+        role not in ALL_ROLES
+        or image_id != normalized_image_id(commit, role)
+    ):
+        raise ValueError("Docker load image identity differs from build contract")
+    record = {"id": image_id, "commit": commit, "role": role}
+    for tag in tags:
+        images[tag] = dict(record)
+    return list(tags)
+
+
+def _docker_run_contract(
+    argv: list[str],
+) -> tuple[str, dict[str, str], list[str], list[str]]:
+    """Parse the exact Docker run options used by production launchers."""
+
+    environment: dict[str, str] = {}
+    mounts: list[str] = []
+    name = ""
+    image_index = -1
+    options_with_value = {
+        "--entrypoint",
+        "--name",
+        "--network",
+        "--restart",
+        "--log-driver",
+        "--log-opt",
+        "--device",
+        "-e",
+        "--env",
+        "-v",
+        "--volume",
+        "--platform",
+    }
+    flags = {"--rm", "-d", "--privileged", "-i"}
+    index = 1
+    while index < len(argv):
+        item = argv[index]
+        if item in flags:
+            index += 1
+            continue
+        if item.startswith("--log-driver="):
+            if not item.removeprefix("--log-driver="):
+                raise ValueError(
+                    "Docker run --log-driver omitted its value"
+                )
+            index += 1
+            continue
+        if item in options_with_value:
+            if index + 1 >= len(argv):
+                raise ValueError(f"Docker run option omitted value: {item}")
+            value = argv[index + 1]
+            if item == "--name":
+                name = value
+            elif item in {"-e", "--env"}:
+                key, separator, env_value = value.partition("=")
+                if not separator or not key:
+                    raise ValueError("Docker run environment entry is invalid")
+                environment[key] = env_value
+            elif item in {"-v", "--volume"}:
+                mounts.append(value)
+            index += 2
+            continue
+        if item.startswith("-"):
+            raise ValueError(f"Docker run used an unknown option: {item}")
+        image_index = index
+        break
+    if image_index < 0:
+        raise ValueError("Docker run image is missing")
+    return name, environment, mounts, argv[image_index:]
+
+
+def _docker_image_inspect_contract(argv: list[str]) -> tuple[str, str]:
+    """Parse Docker's image-inspect target and optional format argument."""
+
+    if argv[:2] != ["image", "inspect"]:
+        raise ValueError("Docker image inspect operation is invalid")
+    target = ""
+    template = ""
+    index = 2
+    while index < len(argv):
+        item = argv[index]
+        if item in {"-f", "--format"}:
+            if template or index + 1 >= len(argv) or not argv[index + 1]:
+                raise ValueError("Docker image inspect format is invalid")
+            template = argv[index + 1]
+            index += 2
+            continue
+        if item.startswith("-"):
+            raise ValueError(
+                f"Docker image inspect used an unknown option: {item}"
+            )
+        if target:
+            raise ValueError(
+                "Docker image inspect requires exactly one target"
+            )
+        target = item
+        index += 1
+    if not target:
+        raise ValueError("Docker image inspect target is missing")
+    return target, template
+
+
+def _process_is_alive(pid: Any) -> bool:
+    try:
+        normalized = int(pid)
+        os.kill(normalized, 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _stop_container_process(row: dict[str, Any]) -> None:
+    pid = row.get("pid")
+    if not _process_is_alive(pid):
+        row["running"] = False
+        return
+    try:
+        os.killpg(int(pid), signal.SIGTERM)
+    except (OSError, ValueError):
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except (OSError, ValueError):
+            pass
+    deadline = time.monotonic() + 5
+    while _process_is_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if _process_is_alive(pid):
+        try:
+            os.killpg(int(pid), signal.SIGKILL)
+        except (OSError, ValueError):
+            pass
+    row["running"] = False
+
+
+def _run_drand_builder_boundary(
+    argv: list[str],
+    *,
+    mounts: list[str],
+) -> None:
+    if (
+        "--rm" not in argv
+        or _arg_value(argv, "--platform") != "linux/amd64"
+        or _arg_value(argv, "--network") != "bridge"
+    ):
+        raise ValueError("drand builder Docker run contract differs")
+    work_mounts = [
+        value for value in mounts if value.endswith(":/work")
+    ]
+    cache_mounts = [
+        value for value in mounts if value.endswith(":/cargo-cache")
+    ]
+    if len(work_mounts) != 1 or len(cache_mounts) != 1:
+        raise ValueError("drand builder Docker mounts differ")
+    work_root = Path(work_mounts[0].removesuffix(":/work"))
+    source = Path(
+        "/opt/leadpoet/drand-cabi-v2/libbittensor_drand_v2.so"
+    )
+    if not source.is_file():
+        raise ValueError("independently rebuilt drand artifact is unavailable")
+    output = work_root / "output"
+    output.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, output / "libbittensor_drand_v2.so")
+    (output / "max-glibc.txt").write_text("2.26\n", encoding="ascii")
 
 
 def command_docker(argv: list[str]) -> int:
     handle, state = _locked_state()
     images = state.setdefault("images", {})
     containers = state.setdefault("containers", {})
-    operation = " ".join(argv[:3])
+    operation = "state"
     status = 0
     output = ""
     try:
         if not argv:
             return _fail("docker", argv, "missing Docker operation")
         if argv[0] == "info":
+            operation = "state"
             if not state.get("docker_ready", True):
                 status = 1
             elif "--format" in argv:
@@ -457,38 +799,93 @@ def command_docker(argv: list[str]) -> int:
             else:
                 output = "Server Version: rehearsal"
         elif argv[:2] in (["images", "-q"], ["image", "ls"]):
+            operation = "state"
             target = argv[-1] if argv[:2] == ["images", "-q"] and len(argv) > 2 else ""
             if target:
-                output = images.get(target, "")
+                output = _image_record_id(images.get(target))
             else:
-                output = "\n".join(sorted(set(images.values())))
+                output = "\n".join(
+                    sorted(
+                        {
+                            _image_record_id(value)
+                            for value in images.values()
+                            if _image_record_id(value)
+                        }
+                    )
+                )
         elif argv[:2] == ["image", "inspect"]:
-            target = argv[-1]
-            output = images.get(target, _image_id(target))
+            operation = "inspect"
+            try:
+                target, template = _docker_image_inspect_contract(argv)
+            except ValueError as exc:
+                return _fail("docker", argv, str(exc))
+            record = images.get(target)
+            if not isinstance(record, dict):
+                status = 1
+            else:
+                if not template:
+                    output = json.dumps([record], sort_keys=True)
+                elif "org.opencontainers.image.revision" in template:
+                    output = str(record.get("commit") or "")
+                elif ".Id" in template:
+                    output = _image_record_id(record)
+                else:
+                    return _fail(
+                        "docker",
+                        argv,
+                        "unknown Docker image inspect format",
+                    )
         elif argv[0] == "inspect":
+            operation = "inspect"
             target = argv[-1]
             row = containers.get(target, {})
+            if row.get("running") and not _process_is_alive(row.get("pid")):
+                row["running"] = False
             template = _arg_value(argv, "-f")
             if ".State.Running" in template:
                 output = "true" if row.get("running") else "false"
             elif ".RestartCount" in template:
                 output = str(row.get("restart_count", 0))
+            elif ".Config.Env" in template:
+                output = "\n".join(row.get("environment") or [])
             else:
                 output = json.dumps([row])
         elif argv[0] == "build":
+            operation = "build"
             tag = _arg_value(argv, "-t")
             if not tag:
                 return _fail("docker", argv, "Docker build omitted -t")
-            images[tag] = _image_id(tag)
+            try:
+                role = _external_build_role(argv, tag)
+            except ValueError as exc:
+                return _fail("docker", argv, str(exc))
+            commit = _candidate_sha()
+            images[tag] = {
+                "id": (
+                    _image_id(f"raw:{commit}:{role}")
+                    if role
+                    else _image_id(
+                        "build:"
+                        + commit
+                        + ":"
+                        + json.dumps(argv, separators=(",", ":"))
+                    )
+                ),
+                "commit": commit,
+                "role": role,
+            }
         elif argv[0] in {"rmi", "rm", "stop"}:
+            operation = "stop" if argv[0] == "stop" else "remove"
             for item in argv[1:]:
                 if item.startswith("-"):
                     continue
                 if argv[0] == "rmi":
                     images.pop(item, None)
                 elif argv[0] == "stop" and item in containers:
-                    containers[item]["running"] = False
+                    _stop_container_process(containers[item])
                 elif argv[0] == "rm":
+                    if item in containers:
+                        _stop_container_process(containers[item])
                     containers.pop(item, None)
         elif argv[:2] in (
             ["container", "prune"],
@@ -496,40 +893,267 @@ def command_docker(argv: list[str]) -> int:
             ["system", "prune"],
             ["image", "prune"],
         ):
+            operation = "prune"
             output = "rehearsal prune complete"
         elif argv[:2] == ["system", "df"]:
+            operation = "state"
             output = "TYPE TOTAL ACTIVE SIZE RECLAIMABLE"
         elif argv[:2] == ["volume", "ls"]:
+            operation = "state"
             output = ""
         elif argv[0] == "ps":
-            output = ""
+            operation = "state"
+            names = []
+            for name, row in sorted(containers.items()):
+                if row.get("running") and not _process_is_alive(row.get("pid")):
+                    row["running"] = False
+                if argv[1:2] == ["-aq"] or "-a" in argv:
+                    names.append(name)
+                elif row.get("running"):
+                    names.append(name)
+            output = "\n".join(names)
         elif argv[0] == "login":
+            operation = "login"
             sys.stdin.read()
             output = "Login Succeeded"
         elif argv[0] == "save":
+            operation = "save"
             destination = _arg_value(argv, "-o")
-            if not destination:
-                return _fail("docker", argv, "Docker save omitted -o")
-            _docker_save(Path(destination))
-        elif argv[0] == "load":
-            images["validator-tee-enclave:latest"] = _image_id(
-                "validator-tee-enclave:latest"
+            source_tag = (
+                argv[1]
+                if len(argv) > 1 and argv[1] != "-o"
+                else (argv[-1] if argv else "")
             )
-            output = "Loaded image: validator-tee-enclave:latest"
+            record = images.get(source_tag)
+            if not destination or not isinstance(record, dict):
+                return _fail(
+                    "docker",
+                    argv,
+                    "Docker save source or destination is unavailable",
+                )
+            try:
+                _docker_save(
+                    Path(destination),
+                    source_tag=source_tag,
+                    record=record,
+                )
+            except ValueError as exc:
+                return _fail("docker", argv, str(exc))
+        elif argv[0] == "load":
+            operation = "load"
+            source = _arg_value(argv, "-i")
+            if not source:
+                return _fail("docker", argv, "Docker load omitted -i")
+            try:
+                tags = _docker_load(Path(source), images)
+            except ValueError as exc:
+                return _fail("docker", argv, str(exc))
+            output = "\n".join(f"Loaded image: {tag}" for tag in tags)
         elif argv[0] == "tag":
+            operation = "tag"
             if len(argv) < 3:
                 return _fail("docker", argv, "Docker tag is incomplete")
-            images[argv[2]] = _image_id(argv[2])
+            source = images.get(argv[1])
+            if not isinstance(source, dict) and argv[1].startswith("sha256:"):
+                source = _image_record_by_id(images, argv[1])
+            if not isinstance(source, dict):
+                return _fail("docker", argv, "Docker tag source is unavailable")
+            images[argv[2]] = dict(source)
         elif argv[0] == "run":
-            if "-c" in argv:
-                output = "sha256:" + HASH64
+            operation = "run"
+            try:
+                name, environment, mounts, invocation = (
+                    _docker_run_contract(argv)
+                )
+            except ValueError as exc:
+                return _fail("docker", argv, str(exc))
+            image = invocation[0]
+            tail = invocation[1:]
+            if image == "validator-drand-builder:v2":
+                try:
+                    _run_drand_builder_boundary(argv, mounts=mounts)
+                except ValueError as exc:
+                    return _fail("docker", argv, str(exc))
+            elif "-c" in tail and (
+                image == "validator-tee-enclave:latest"
+                or image.startswith(
+                    "493765492819.dkr.ecr.us-east-1.amazonaws.com/"
+                )
+            ):
+                if _arg_value(argv, "--entrypoint") != "python3":
+                    return _fail(
+                        "docker",
+                        argv,
+                        "validator enclave metadata command used the wrong entrypoint",
+                    )
+                if image == "validator-tee-enclave:latest":
+                    record = images.get(image)
+                    if (
+                        not isinstance(record, dict)
+                        or str(record.get("commit") or "")
+                        != _candidate_sha()
+                        or str(record.get("role") or "") != VALIDATOR_ROLE
+                    ):
+                        return _fail(
+                            "docker",
+                            argv,
+                            "validator enclave metadata image is not candidate-bound",
+                        )
+                snippet = _arg_value(tail, "-c")
+                release_input = json.loads(
+                    (STATE_ROOT / "release-build-input.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                if "compute_app_manifest_hash" in snippet:
+                    output = str(
+                        release_input["validator_app_manifest_hash"]
+                    )
+                elif "dependency_lock_hash" in snippet:
+                    output = str(
+                        release_input["validator_dependency_lock_hash"]
+                    )
+                else:
+                    return _fail(
+                        "docker",
+                        argv,
+                        "unknown validator enclave metadata command",
+                    )
+            elif image == "leadpoet-validator:latest":
+                if (
+                    not name
+                    or name != "leadpoet-validator-main"
+                    or "-d" not in argv
+                    or _arg_value(argv, "--network") != "host"
+                    or _arg_value(argv, "--restart") != "unless-stopped"
+                    or environment.get("LEADPOET_CONTAINER_MODE") != "1"
+                    or environment.get("LEADPOET_WRAPPER_ACTIVE") != "1"
+                    or environment.get("VALIDATOR_WEIGHT_PROTOCOL")
+                    != "authoritative_v2"
+                ):
+                    return _fail(
+                        "docker",
+                        argv,
+                        "validator coordinator Docker run contract differs",
+                    )
+                source = Path(
+                    "/home/ec2-user/leadpoet/leadpoet/neurons/validator.py"
+                )
+                if not source.is_file():
+                    return _fail(
+                        "docker", argv, "validator coordinator source is absent"
+                    )
+                log_path = Path("/evidence") / (
+                    "validator-main-"
+                    + os.environ.get("REHEARSAL_RUN_ORDINAL", "1")
+                    + "-"
+                    + os.environ.get("REHEARSAL_TRANSITION", "forward")
+                    + ".log"
+                )
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.unlink(missing_ok=True)
+                child_environment = os.environ.copy()
+                child_environment.update(environment)
+                child_environment.update(
+                    {
+                        "HOME": "/home/ec2-user",
+                        "PYTHONPATH": (
+                            "/harness:/home/ec2-user/leadpoet/leadpoet"
+                        ),
+                        "REHEARSAL_SCOPE": _rehearsal_scope(),
+                        "REHEARSAL_COMPONENT": "validator",
+                    }
+                )
+                log_handle = log_path.open("ab")
+                child = subprocess.Popen(
+                    [REAL_PYTHON, str(source), *tail],
+                    cwd="/home/ec2-user/leadpoet/leadpoet",
+                    env=child_environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                log_handle.close()
+                containers[name] = {
+                    "running": True,
+                    "restart_count": 0,
+                    "pid": child.pid,
+                    "environment": [
+                        f"{key}={value}"
+                        for key, value in sorted(environment.items())
+                    ],
+                    "argv": [str(source), *tail],
+                    "log_path": str(log_path),
+                }
+                _event(
+                    "validator-process",
+                    [str(source), *tail],
+                    status="started",
+                    process="validator.coordinator",
+                    pid=child.pid,
+                    implementation="production_script",
+                    scope=_rehearsal_scope(),
+                    **_source_identity(source),
+                )
+                output = name
             else:
-                output = ""
+                return _fail("docker", argv, "unknown Docker run image")
+        elif argv[0] == "exec":
+            operation = "run"
+            filtered = [item for item in argv[1:] if item != "-i"]
+            if len(filtered) < 2:
+                return _fail("docker", argv, "Docker exec is incomplete")
+            target, command = filtered[0], filtered[1:]
+            row = containers.get(target)
+            if not isinstance(row, dict) or not row.get("running"):
+                return _fail(
+                    "docker", argv, "Docker exec target is not running"
+                )
+            if command[:2] == ["sh", "-c"] and "proc/1/cmdline" in command[2]:
+                if "validator.py" not in " ".join(row.get("argv") or []):
+                    status = 1
+            elif command == ["curl", "-s", "--max-time", "10", "https://api.ipify.org"]:
+                output = "203.0.113.10"
+            elif command == ["python3", "-"]:
+                child_environment = os.environ.copy()
+                child_environment.update(
+                    line.split("=", 1)
+                    for line in row.get("environment") or []
+                    if "=" in line
+                )
+                child_environment["PYTHONPATH"] = (
+                    "/harness:/home/ec2-user/leadpoet/leadpoet"
+                )
+                result = subprocess.run(
+                    [REAL_PYTHON, "-"],
+                    input=sys.stdin.buffer.read(),
+                    cwd="/home/ec2-user/leadpoet/leadpoet",
+                    env=child_environment,
+                    check=False,
+                )
+                status = result.returncode
+            else:
+                return _fail("docker", argv, "unknown Docker exec command")
         elif argv[0] == "logs":
-            output = "rehearsal validator container log"
+            operation = "state"
+            target = argv[-1]
+            row = containers.get(target, {})
+            log_path = Path(str(row.get("log_path") or ""))
+            output = (
+                log_path.read_text(encoding="utf-8", errors="replace")
+                if log_path.is_file()
+                else ""
+            )
         else:
             return _fail("docker", argv, "unknown Docker operation")
-        _event("docker", argv, status="ok" if status == 0 else "failed", operation=operation)
+        _record_external_boundary(
+            kind="docker",
+            argv=argv,
+            boundary="docker_daemon",
+            operation=operation,
+            status="ok" if status == 0 else "failed",
+        )
         if output:
             print(output)
         return status
@@ -540,20 +1164,69 @@ def command_docker(argv: list[str]) -> int:
 def command_nitro(argv: list[str]) -> int:
     handle, state = _locked_state()
     enclaves = state.setdefault("enclaves", [])
+    images = state.setdefault("images", {})
     try:
         if argv[:2] == ["terminate-enclave", "--all"]:
             enclaves.clear()
-            _event("nitro", argv, status="ok", operation="terminate")
+            _record_external_boundary(
+                kind="nitro",
+                argv=argv,
+                boundary="nitro_enclaves",
+                operation="terminate_enclave",
+            )
             return 0
         if argv and argv[0] == "build-enclave":
             output = _arg_value(argv, "--output-file")
             image = _arg_value(argv, "--docker-uri")
             if not output or not image:
                 return _fail("nitro", argv, "build-enclave arguments are incomplete")
+            record = images.get(image)
+            if (
+                not isinstance(record, dict)
+                or str(record.get("commit") or "") != _candidate_sha()
+                or str(record.get("role") or "") not in ALL_ROLES
+                or _image_record_id(record)
+                != normalized_image_id(
+                    str(record["commit"]),
+                    str(record["role"]),
+                )
+            ):
+                return _fail(
+                    "nitro",
+                    argv,
+                    "build-enclave image identity is not commit-bound: "
+                    + json.dumps(
+                        {
+                            "image": image,
+                            "record": record,
+                            "expected_commit": _candidate_sha(),
+                            "expected_role": VALIDATOR_ROLE,
+                        },
+                        sort_keys=True,
+                    ),
+                )
             destination = Path(output)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(b"leadpoet-rehearsal-eif\n")
-            _event("nitro", argv, status="ok", operation="build")
+            if str(record["role"]) == VALIDATOR_ROLE:
+                validator_app = STATE_ROOT / "validator-app"
+                if not validator_app.is_dir():
+                    return _fail(
+                        "nitro",
+                        argv,
+                        "candidate validator application filesystem is absent",
+                    )
+                runtime_app = Path("/app")
+                shutil.rmtree(runtime_app, ignore_errors=True)
+                shutil.copytree(validator_app, runtime_app)
+            destination.write_bytes(
+                eif_bytes(str(record["commit"]), str(record["role"]))
+            )
+            _record_external_boundary(
+                kind="nitro",
+                argv=argv,
+                boundary="nitro_enclaves",
+                operation="build_enclave",
+            )
             print(
                 json.dumps(
                     {
@@ -579,14 +1252,24 @@ def command_nitro(argv: list[str]) -> int:
                 "Measurements": {"PCR0": PCR0},
             }
             enclaves.append(row)
-            _event("nitro", argv, status="ok", operation="run")
+            _record_external_boundary(
+                kind="nitro",
+                argv=argv,
+                boundary="nitro_enclaves",
+                operation="run_enclave",
+            )
             print(json.dumps(row, sort_keys=True))
             return 0
         if argv and argv[0] == "describe-eif":
             eif = _arg_value(argv, "--eif-path")
             if not eif or not Path(eif).is_file():
                 return _fail("nitro", argv, "describe-eif EIF is unavailable")
-            _event("nitro", argv, status="ok", operation="describe-eif")
+            _record_external_boundary(
+                kind="nitro",
+                argv=argv,
+                boundary="nitro_enclaves",
+                operation="describe_enclaves",
+            )
             print(
                 json.dumps(
                     {
@@ -601,7 +1284,12 @@ def command_nitro(argv: list[str]) -> int:
             )
             return 0
         if argv and argv[0] == "describe-enclaves":
-            _event("nitro", argv, status="ok", operation="describe")
+            _record_external_boundary(
+                kind="nitro",
+                argv=argv,
+                boundary="nitro_enclaves",
+                operation="describe_enclaves",
+            )
             print(json.dumps(enclaves, sort_keys=True))
             return 0
         return _fail("nitro", argv, "unknown Nitro operation")
@@ -613,34 +1301,73 @@ def command_systemctl(argv: list[str]) -> int:
     accepted = {"start", "stop", "restart", "reset-failed", "is-active"}
     if not argv or argv[0] not in accepted:
         return _fail("systemctl", argv, "unknown systemctl operation")
-    if _record_internal_substitution(
+    _record_external_boundary(
         kind="systemctl",
         argv=argv,
-        substitution="host.systemd",
-    ) != 0:
-        return 97
-    _event("systemctl", argv, status="ok")
+        boundary="host_kernel",
+        operation="systemd",
+    )
     return 0
 
 
 def command_curl(argv: list[str]) -> int:
     output_path = _arg_value(argv, "--output") or _arg_value(argv, "-o")
+    if argv in (
+        ["-s", "ifconfig.me"],
+        ["-s", "https://ipinfo.io"],
+        ["-s", "myip.dnsomatic.com"],
+    ):
+        print("203.0.113.10")
+        _record_external_boundary(
+            kind="curl",
+            argv=argv,
+            boundary="http_service",
+            operation="external_ip",
+        )
+        return 0
     urls = [arg for arg in argv if re.match(r"^https?://", arg)]
     if len(urls) != 1:
         return _fail("curl", argv, "curl must contain exactly one URL")
     url = urls[0]
+    if url.startswith(("http://localhost", "http://127.0.0.1")):
+        _event(
+            "gateway-http",
+            argv,
+            status="started",
+            implementation="production_http_route",
+            url=url,
+        )
+        os.execv(REAL_CURL, [REAL_CURL, *argv])
+        return 127
     if output_path:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(output_path).write_bytes(b"rehearsal-downloaded-artifact\n")
-        _event("curl", argv, status="ok", operation="download", url=url)
-        return 0
-    if url.startswith(("http://localhost", "http://127.0.0.1")):
-        if _record_internal_substitution(
+        if RUNSC_LOCK_PATH.is_file():
+            runsc_lock = json.loads(
+                RUNSC_LOCK_PATH.read_text(encoding="utf-8")
+            )
+        else:
+            runsc_lock = {}
+        if url == runsc_lock.get("source_url"):
+            artifact = (
+                EXTERNAL_ARTIFACT_ROOT
+                / str(runsc_lock.get("artifact_filename") or "")
+            )
+            if not artifact.is_file():
+                return _fail(
+                    "curl",
+                    argv,
+                    "verified local runsc mirror is unavailable",
+                )
+            shutil.copy2(artifact, output_path)
+        else:
+            Path(output_path).write_bytes(b"rehearsal-downloaded-artifact\n")
+        _record_external_boundary(
             kind="curl",
             argv=argv,
-            substitution="http.local_gateway",
-        ) != 0:
-            return 97
+            boundary="http_service",
+            operation="download",
+        )
+        return 0
     if url.endswith("/build-info"):
         print(json.dumps({"git_commit": _candidate_sha()}, sort_keys=True))
     elif url.endswith("/health/v2-authority"):
@@ -671,7 +1398,12 @@ def command_curl(argv: list[str]) -> int:
         print(json.dumps({"status": "ok"}, sort_keys=True))
     else:
         return _fail("curl", argv, "unknown HTTP endpoint")
-    _event("curl", argv, status="ok", operation="http", url=url)
+    _record_external_boundary(
+        kind="curl",
+        argv=argv,
+        boundary="http_service",
+        operation="gateway_request",
+    )
     return 0
 
 
@@ -686,12 +1418,12 @@ def command_sudo(argv: list[str]) -> int:
 
 
 def command_df(argv: list[str]) -> int:
-    if _record_internal_substitution(
+    _record_external_boundary(
         kind="host-command",
         argv=argv,
-        substitution="host.filesystem_capacity",
-    ) != 0:
-        return 97
+        boundary="host_kernel",
+        operation="filesystem_capacity",
+    )
     if any("output=avail" in arg for arg in argv):
         print("Avail")
         print("107374182400" if "-B1" in argv else "104857600")
@@ -702,12 +1434,12 @@ def command_df(argv: list[str]) -> int:
 
 
 def command_getconf(argv: list[str]) -> int:
-    if _record_internal_substitution(
+    _record_external_boundary(
         kind="host-command",
         argv=argv,
-        substitution="host.cpu_capacity",
-    ) != 0:
-        return 97
+        boundary="host_kernel",
+        operation="cpu_capacity",
+    )
     if argv == ["_NPROCESSORS_CONF"]:
         print("16")
         return 0
@@ -716,12 +1448,12 @@ def command_getconf(argv: list[str]) -> int:
 
 def command_awk(argv: list[str]) -> int:
     if argv and argv[-1] == "/proc/meminfo" and "MemTotal" in " ".join(argv):
-        if _record_internal_substitution(
+        _record_external_boundary(
             kind="host-command",
             argv=argv,
-            substitution="host.memory_capacity",
-        ) != 0:
-            return 97
+            boundary="host_kernel",
+            operation="memory_capacity",
+        )
         print("131072")
         return 0
     os.execv("/usr/bin/awk", ["awk", *argv])
@@ -729,25 +1461,24 @@ def command_awk(argv: list[str]) -> int:
 
 
 def command_sleep(argv: list[str]) -> int:
-    if _record_internal_substitution(
+    _record_external_boundary(
         kind="host-command",
         argv=argv,
-        substitution="host.timing",
-    ) != 0:
-        return 97
-    _event("sleep", argv, status="shortened")
+        boundary="host_kernel",
+        operation="timing",
+        status="shortened",
+    )
     time.sleep(0.01)
     return 0
 
 
 def command_ss(argv: list[str]) -> int:
-    if _record_internal_substitution(
+    _record_external_boundary(
         kind="host-command",
         argv=argv,
-        substitution="host.socket_state",
-    ) != 0:
-        return 97
-    _event("ss", argv, status="ok")
+        boundary="host_kernel",
+        operation="socket_state",
+    )
     return 0
 
 
@@ -755,13 +1486,12 @@ def command_ctr(argv: list[str]) -> int:
     allowed_tokens = {"containers", "tasks", "namespaces", "list", "-q", "-n", "moby"}
     if any(item not in allowed_tokens for item in argv):
         return _fail("ctr", argv, "unknown containerd operation")
-    if _record_internal_substitution(
+    _record_external_boundary(
         kind="host-command",
         argv=argv,
-        substitution="host.containerd_state",
-    ) != 0:
-        return 97
-    _event("ctr", argv, status="ok")
+        boundary="host_kernel",
+        operation="containerd_state",
+    )
     return 0
 
 
@@ -771,24 +1501,24 @@ def command_nsenter(argv: list[str]) -> int:
     command = argv[argv.index("--") + 1 :]
     if not command:
         return _fail("nsenter", argv, "nsenter command is empty")
-    if _record_internal_substitution(
+    _record_external_boundary(
         kind="host-command",
         argv=argv,
-        substitution="host.mount_namespace",
-    ) != 0:
-        return 97
-    _event("nsenter", argv, status="delegated")
+        boundary="host_kernel",
+        operation="mount_namespace",
+        status="delegated",
+    )
     os.execvpe(command[0], command, os.environ.copy())
     return 127
 
 
 def command_pgrep(argv: list[str]) -> int:
-    if _record_internal_substitution(
+    _record_external_boundary(
         kind="host-command",
         argv=argv,
-        substitution="host.process_lookup",
-    ) != 0:
-        return 97
+        boundary="host_kernel",
+        operation="process_lookup",
+    )
     pattern = argv[-1] if argv else ""
     handle, state = _locked_state()
     try:
@@ -812,12 +1542,12 @@ def command_pgrep(argv: list[str]) -> int:
 
 
 def command_pkill(argv: list[str]) -> int:
-    if _record_internal_substitution(
+    _record_external_boundary(
         kind="host-command",
         argv=argv,
-        substitution="host.process_termination",
-    ) != 0:
-        return 97
+        boundary="host_kernel",
+        operation="process_termination",
+    )
     pattern = argv[-1] if argv else ""
     handle, state = _locked_state()
     try:
@@ -829,7 +1559,6 @@ def command_pkill(argv: list[str]) -> int:
                 except (ProcessLookupError, ValueError):
                     pass
                 processes.pop(key, None)
-        _event("pkill", argv, status="ok")
         return 0
     finally:
         _save_state(handle, state)
@@ -876,6 +1605,47 @@ def _long_lived_process(key: str, argv: list[str]) -> int:
     signal.signal(signal.SIGINT, stop)
     while True:
         time.sleep(60)
+
+
+def _exec_long_lived_production_module(
+    key: str,
+    module: str,
+    argv: list[str],
+) -> int:
+    environment_contract: dict[str, str] = {}
+    if key == "gateway.main":
+        environment_contract = {
+            name: os.environ.get(name, "")
+            for name in EXPECTED_GATEWAY_PRIVATE_MODEL_ENV
+        }
+        if environment_contract != EXPECTED_GATEWAY_PRIVATE_MODEL_ENV:
+            return _fail(
+                "process",
+                argv,
+                "gateway private-model source environment differs from "
+                "the canonical restart contract",
+            )
+    handle, state = _locked_state()
+    state.setdefault("processes", {})[key] = os.getpid()
+    _save_state(handle, state)
+    _event(
+        "process",
+        argv,
+        status="started",
+        process=key,
+        pid=os.getpid(),
+        implementation="production_module",
+        scope=_rehearsal_scope(),
+        environment_contract=environment_contract,
+        **_source_identity(_module_source(module)),
+    )
+    current_python_path = os.environ.get("PYTHONPATH", "")
+    python_paths = [item for item in current_python_path.split(":") if item]
+    if "/harness" not in python_paths:
+        python_paths.insert(0, "/harness")
+    os.environ["PYTHONPATH"] = ":".join(python_paths)
+    os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
+    return 127
 
 
 def _release_manifest(role: str) -> dict[str, Any]:
@@ -1001,72 +1771,6 @@ def _module_stage_artifacts(argv: list[str]) -> int:
     return 0
 
 
-def _module_restart_preflight(argv: list[str]) -> int:
-    deploy_commit = _arg_value(argv, "--deploy-commit")
-    config_dir = _arg_value(argv, "--config-dir")
-    if not deploy_commit or not config_dir:
-        return _fail(
-            "python-module",
-            argv,
-            "gateway restart preflight arguments are incomplete",
-        )
-    result = subprocess.run(
-        [
-            REAL_PYTHON,
-            "-c",
-            (
-                "from pathlib import Path\n"
-                "from scripts.gateway_git_deploy import "
-                "write_tree_verification_evidence\n"
-                "write_tree_verification_evidence(\n"
-                "    repo_root=Path('/home/ec2-user/leadpoet_repo'),\n"
-                "    materialized_root=Path.cwd(),\n"
-                "    target_sha=__import__('sys').argv[1],\n"
-                "    phase='prepared_archive',\n"
-                "    strict_extras=True,\n"
-                "    output_path=Path(__import__('sys').argv[2]) / "
-                "'gateway-candidate-tree-preflight.json',\n"
-                ")\n"
-            ),
-            deploy_commit,
-            config_dir,
-        ],
-        check=False,
-    )
-    if result.returncode != 0:
-        return int(result.returncode)
-    print(
-        json.dumps(
-            {
-                "deploy_commit": deploy_commit,
-                "module": "gateway.tee.restart_preflight_v2",
-                "prepared_candidate_tree": "verified",
-                "status": "ready",
-            },
-            sort_keys=True,
-        )
-    )
-    return 0
-
-
-def _module_weight_ready(argv: list[str]) -> int:
-    if (
-        "--repair" not in argv
-        and "--storage-read-preflight" not in argv
-        and not _arg_value(argv, "--gateway-url")
-    ):
-        return _fail("python-module", argv, "weight readiness mode is unknown")
-    result = subprocess.run(
-        [
-            REAL_PYTHON,
-            "/harness/weight_readiness_runner.py",
-            *argv,
-        ],
-        check=False,
-    )
-    return int(result.returncode)
-
-
 def _scrub_parent_env(argv: list[str]) -> int:
     if len(argv) < 2:
         return _fail("python-inline", argv, "scrub-parent-env arguments are missing")
@@ -1096,15 +1800,13 @@ def _scrub_parent_env(argv: list[str]) -> int:
 
 def _python_inline(argv: list[str]) -> int:
     source = sys.stdin.read()
-    if "scrub_parent_environment_file_v2" in source:
-        if _record_internal_substitution(
-            kind="python-inline",
-            argv=argv,
-            substitution="python.scrub_parent_environment",
-        ) != 0:
-            return 97
-        return _scrub_parent_env(argv[1:])
-    _event("python-inline", argv, status="real")
+    _event(
+        "python-inline",
+        argv,
+        status="started",
+        implementation="production_inline",
+        source_sha256=hashlib.sha256(source.encode("utf-8")).hexdigest(),
+    )
     result = subprocess.run([REAL_PYTHON, *argv], input=source, text=True, check=False)
     return result.returncode
 
@@ -1120,118 +1822,26 @@ def _python_script(argv: list[str]) -> int | None:
                 argv,
                 "downloaded get-pip.py does not match the strict rehearsal fixture",
             )
-        if _record_internal_substitution(
+        _record_external_boundary(
             kind="python-script",
             argv=argv,
-            script=name,
-            substitution="python_dependencies.bootstrap",
-        ) != 0:
-            return 97
+            boundary="python_package_index",
+            operation="bootstrap",
+        )
         return 0
     if name in {"gateway_git_deploy.py", "write_gateway_build_info.py"}:
         return None
-    if name == "host_memory_guard_v2.py":
-        if _record_internal_substitution(
-            kind="python-script",
-            argv=argv,
-            script=name,
-        ) != 0:
-            return 97
-        print(
-            json.dumps(
-                {
-                    "schema_version": "leadpoet.gateway_host_memory_guard.v2",
-                    "status": "ready",
-                    "available_memory_mib": 32768,
-                    "minimum_available_memory_mib": 16384,
-                    "cleaned_disposable_tests": [],
-                    "top_processes": [],
-                },
-                sort_keys=True,
-            )
-        )
-        return 0
-    if name == "scoring_wheelhouse.py":
-        if _record_internal_substitution(
-            kind="python-script",
-            argv=argv,
-            script=name,
-        ) != 0:
-            return 97
-        print(json.dumps({"status": "verified", "script": name}))
-        return 0
-    if name == "sandbox_runtime_artifact.py":
-        if _record_internal_substitution(
-            kind="python-script",
-            argv=argv,
-            script=name,
-        ) != 0:
-            return 97
-        operation = argv[1] if len(argv) > 1 else ""
-        lock_path = Path(_arg_value(argv, "--lock"))
-        if operation == "verify":
-            artifact_path = Path(_arg_value(argv, "--artifact"))
-            if not lock_path.is_file():
-                return _fail(
-                    "python-script",
-                    argv,
-                    "sandbox runtime lock is unavailable",
-                )
-            if not artifact_path.is_file():
-                _event(
-                    "python-script",
-                    argv,
-                    status="failed",
-                    script=name,
-                    reason="artifact_missing",
-                )
-                return 1
-            _event(
-                "python-script",
-                argv,
-                status="ok",
-                script=name,
-                operation=operation,
-            )
-            print(json.dumps({"status": "verified", "script": name}))
-            return 0
-        return _fail(
-            "python-script",
-            argv,
-            "unknown sandbox runtime artifact operation",
-        )
-    if name in {
-        "verify_release_artifacts_v2.py",
-        "verify_topology.py",
-        "docker_image_normalizer_v2.py",
-        "release_manifest_v2.py",
-    }:
-        if _record_internal_substitution(
-            kind="python-script",
-            argv=argv,
-            script=name,
-        ) != 0:
-            return 97
-        if name == "docker_image_normalizer_v2.py":
-            normalized = _arg_value(argv, "--normalized-image")
-            handle, state = _locked_state()
-            state.setdefault("images", {})[normalized] = _image_id(normalized)
-            _save_state(handle, state)
-        _event("python-script", argv, status="ok", script=name)
-        print(json.dumps({"status": "verified", "script": name}))
-        return 0
-    if name == "stage_runtime_artifacts_v2.py":
-        if _record_internal_substitution(
-            kind="python-script",
-            argv=argv,
-            script=name,
-        ) != 0:
-            return 97
-        return _module_stage_artifacts(argv[1:])
     return None
 
 
 def command_python(argv: list[str]) -> int:
+    current_python_path = os.environ.get("PYTHONPATH", "")
+    python_paths = [
+        item for item in current_python_path.split(":") if item
+    ]
+    if str(HARNESS_ROOT) not in python_paths:
+        python_paths.insert(0, str(HARNESS_ROOT))
+    os.environ["PYTHONPATH"] = ":".join(python_paths)
     if not argv:
         return _python_inline(argv)
     if argv[0] == "-u":
@@ -1247,29 +1857,42 @@ def command_python(argv: list[str]) -> int:
         module_argv = argv[2:]
         if module == "pip":
             if module_argv and module_argv[0] == "download":
-                if _record_internal_substitution(
+                _record_external_boundary(
                     kind="python-dependencies",
                     argv=module_argv,
-                    substitution="python_dependencies.download",
-                ) != 0:
-                    return 97
+                    boundary="python_package_index",
+                    operation="download",
+                )
                 destination_value = _arg_value(module_argv, "--dest")
                 if not destination_value:
                     return _fail("pip", module_argv, "pip download omitted --dest")
                 destination = Path(destination_value)
                 destination.mkdir(parents=True, exist_ok=True)
-                (destination / "restart_rehearsal-0-py3-none-any.whl").write_bytes(
-                    b"restart-rehearsal-wheel\n"
-                )
+                mirror = Path("/opt/leadpoet/scoring-wheelhouse")
+                wheels = sorted(mirror.glob("*.whl"))
+                if not wheels:
+                    return _fail(
+                        "pip",
+                        module_argv,
+                        "local scoring package mirror is empty",
+                    )
+                if any(destination.iterdir()):
+                    return _fail(
+                        "pip",
+                        module_argv,
+                        "pip download destination is not empty",
+                    )
+                for wheel in wheels:
+                    shutil.copy2(wheel, destination / wheel.name)
                 _event("pip", module_argv, status="ok", operation="download")
                 return 0
             if module_argv and module_argv[0] == "install":
-                if _record_internal_substitution(
+                _record_external_boundary(
                     kind="python-dependencies",
                     argv=module_argv,
-                    substitution="python_dependencies.install",
-                ) != 0:
-                    return 97
+                    boundary="python_package_index",
+                    operation="install",
+                )
                 requirement_paths: list[Path] = []
                 for option in ("--requirement", "-r"):
                     start = 0
@@ -1316,12 +1939,12 @@ def command_python(argv: list[str]) -> int:
                 )
                 return result.returncode
             if module_argv and module_argv[0] == "uninstall":
-                if _record_internal_substitution(
+                _record_external_boundary(
                     kind="python-dependencies",
                     argv=module_argv,
-                    substitution="python_dependencies.uninstall",
-                ) != 0:
-                    return 97
+                    boundary="python_package_index",
+                    operation="uninstall",
+                )
                 _event(
                     "pip",
                     module_argv,
@@ -1332,38 +1955,37 @@ def command_python(argv: list[str]) -> int:
             _event("pip", module_argv, status="real")
             os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         if module == "Leadpoet.utils.restart_epoch_gate":
-            if _record_internal_substitution(
-                kind="python-module",
-                argv=argv,
-                module=module,
-            ) != 0:
-                return 97
-            result = _module_restart_gate(module_argv)
+            _record_production_module(module, argv)
+            current_python_path = os.environ.get("PYTHONPATH", "")
+            python_paths = [
+                item for item in current_python_path.split(":") if item
+            ]
+            if "/harness" not in python_paths:
+                python_paths.insert(0, "/harness")
+            os.environ["PYTHONPATH"] = ":".join(python_paths)
+            os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module == "gateway.tee.release_channel_v2":
-            if _record_internal_substitution(
-                kind="python-module",
-                argv=argv,
-                module=module,
-            ) != 0:
-                return 97
-            result = _module_release_channel(module_argv)
+            _record_production_module(module, argv)
+            current_python_path = os.environ.get("PYTHONPATH", "")
+            python_paths = [
+                item for item in current_python_path.split(":") if item
+            ]
+            if "/harness" not in python_paths:
+                python_paths.insert(0, "/harness")
+            os.environ["PYTHONPATH"] = ":".join(python_paths)
+            os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module == "gateway.tee.prepare_gateway_envelopes_v2":
-            if _record_internal_substitution(
-                kind="python-module",
-                argv=argv,
-                module=module,
-            ) != 0:
-                return 97
-            result = _module_envelopes(module_argv)
-        elif module == "gateway.tee.restart_preflight_v2":
-            if _record_internal_substitution(
-                kind="python-module",
-                argv=argv,
-                module=module,
-            ) != 0:
-                return 97
-            result = _module_restart_preflight(module_argv)
+            _record_production_module(module, argv)
+            current_python_path = os.environ.get("PYTHONPATH", "")
+            python_paths = [
+                item for item in current_python_path.split(":") if item
+            ]
+            if "/harness" not in python_paths:
+                python_paths.insert(0, "/harness")
+            os.environ["PYTHONPATH"] = ":".join(python_paths)
+            os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module in {
+            "gateway.tee.restart_preflight_v2",
             "validator_tee.host.docker_operation_guard_v2",
             "gateway.research_lab.provider_profiles_v2",
             "gateway.utils.tee_v2_bootstrap",
@@ -1378,32 +2000,44 @@ def command_python(argv: list[str]) -> int:
             "validator_tee.host.hotkey_bootstrap_v2",
             "gateway.tee.release_archive_v2",
         }:
-            if _record_internal_substitution(
-                kind="python-module",
-                argv=argv,
-                module=module,
-            ) != 0:
-                return 97
-            print(json.dumps({"status": "ready", "module": module}, sort_keys=True))
-            result = 0
+            _record_production_module(module, argv)
+            current_python_path = os.environ.get("PYTHONPATH", "")
+            python_paths = [
+                item for item in current_python_path.split(":") if item
+            ]
+            if "/harness" not in python_paths:
+                python_paths.insert(0, "/harness")
+            os.environ["PYTHONPATH"] = ":".join(python_paths)
+            os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module == "validator_tee.scripts.stage_runtime_artifacts_v2":
-            if _record_internal_substitution(
-                kind="python-module",
-                argv=argv,
-                module=module,
-            ) != 0:
-                return 97
-            result = _module_stage_artifacts(module_argv)
+            _record_production_module(module, argv)
+            current_python_path = os.environ.get("PYTHONPATH", "")
+            python_paths = [
+                item for item in current_python_path.split(":") if item
+            ]
+            if "/harness" not in python_paths:
+                python_paths.insert(0, "/harness")
+            os.environ["PYTHONPATH"] = ":".join(python_paths)
+            os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module == "gateway.tee.verify_weight_submission_ready_v2":
-            return _module_weight_ready(module_argv)
+            _record_production_module(module, argv)
+            os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module == "gateway.main":
-            return _long_lived_process("gateway.main", argv)
+            return _exec_long_lived_production_module(
+                "gateway.main", module, argv
+            )
         elif module == "gateway.utils.tee_egress_forwarder":
-            return _long_lived_process("gateway.tee_egress", argv)
+            return _exec_long_lived_production_module(
+                "gateway.tee_egress", module, argv
+            )
         elif module == "gateway.utils.tee_inter_enclave_relay":
-            return _long_lived_process("gateway.tee_relay", argv)
+            return _exec_long_lived_production_module(
+                "gateway.tee_relay", module, argv
+            )
         elif module == "validator_tee.host.chain_relay_v2":
-            return _long_lived_process("validator.chain_relay", argv)
+            return _exec_long_lived_production_module(
+                "validator.chain_relay", module, argv
+            )
         else:
             _record_production_module(module, argv)
             os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
@@ -1421,22 +2055,6 @@ def command_python(argv: list[str]) -> int:
         if intercepted is not None:
             return intercepted
         _record_production_script(Path(argv[0]), argv)
-    if Path(argv[0]).name == "validator.py":
-        if _record_internal_substitution(
-            kind="validator-process",
-            argv=argv,
-            substitution="python.validator_coordinator",
-        ) != 0:
-            return 97
-        handle, state = _locked_state()
-        state.setdefault("containers", {})["leadpoet-validator-main"] = {
-            "running": True,
-            "restart_count": 0,
-        }
-        _save_state(handle, state)
-        _event("validator-process", argv, status="started")
-        print("rehearsal validator coordinator started")
-        return 0
     _event("python", argv, status="real")
     os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
     return 127
@@ -1446,23 +2064,6 @@ def command_bash(argv: list[str]) -> int:
     if not argv:
         os.execv(REAL_BASH, [REAL_BASH])
     script = Path(argv[0]).name
-    if script == "build_drand_cabi_v2.sh":
-        if _record_internal_substitution(
-            kind="bash",
-            argv=argv,
-            substitution="bash.build_drand_cabi_v2",
-        ) != 0:
-            return 97
-        if len(argv) < 4:
-            return _fail("bash", argv, "drand build arguments are incomplete")
-        output = Path(argv[2])
-        expected_hash = Path(argv[3]).read_text(encoding="utf-8").strip().split()[0]
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(b"rehearsal-drand-library\n")
-        if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
-            return _fail("bash", argv, "drand expected hash is invalid")
-        _event("bash", argv, status="ok", operation="drand-build-contract")
-        return 0
     _event("bash", argv, status="real", script=script)
     os.execv(REAL_BASH, [REAL_BASH, *argv])
     return 127

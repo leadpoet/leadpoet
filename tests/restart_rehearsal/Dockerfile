@@ -1,4 +1,4 @@
-FROM amazonlinux@sha256:0c74e9fbba754003cfa179fd5cc65be7790d7248443276948704b8a858b298e5
+FROM public.ecr.aws/amazonlinux/amazonlinux@sha256:7942e2a958a238057cdf3304cba7e75f4056d15f75112b8d8e7c1d21a17f2d6c
 
 RUN dnf install -y \
       diffutils \
@@ -32,11 +32,40 @@ RUN python3.11 -m pip install --no-cache-dir --upgrade pip setuptools wheel \
       minio \
       awscli
 
+COPY requirements-scoring-py39.in /opt/leadpoet/requirements-scoring-py39.in
+COPY requirements-scoring-py39.lock /opt/leadpoet/requirements-scoring-py39.lock
+RUN mkdir -p /opt/leadpoet/scoring-wheelhouse \
+    && python3.11 -m pip download \
+      --require-hashes \
+      --no-deps \
+      --only-binary=:all: \
+      --platform manylinux2014_x86_64 \
+      --python-version 3.9 \
+      --implementation cp \
+      --abi cp39 \
+      --dest /opt/leadpoet/scoring-wheelhouse \
+      --requirement /opt/leadpoet/requirements-scoring-py39.lock
+
+COPY runsc-runtime.lock.json /opt/leadpoet/runsc-runtime.lock.json
+COPY runtime-artifacts-v2.lock.json /opt/leadpoet/runtime-artifacts-v2.lock.json
+COPY harness/prepare_external_artifacts.py /opt/leadpoet/prepare_external_artifacts.py
+RUN python3.11 /opt/leadpoet/prepare_external_artifacts.py \
+      --runsc-lock /opt/leadpoet/runsc-runtime.lock.json \
+      --validator-runtime-lock /opt/leadpoet/runtime-artifacts-v2.lock.json \
+      --output-root /opt/leadpoet/external-artifacts
+
 COPY harness/ /harness/
 RUN chmod 755 \
       /harness/run_inside.sh \
       /harness/contract_adapter.py \
-      /harness/weight_readiness_runner.py
+      /harness/gateway_boundary_service.py \
+      /harness/gateway_enclave_service.py \
+      /harness/join_evidence.py \
+      /harness/local_services.py \
+      /harness/prepare_external_artifacts.py \
+      /harness/prepare_host_fixtures.py \
+      /harness/production_workflow_runner.py \
+      /harness/validator_enclave_service.py
 
 ENV HOME=/home/ec2-user
 ENV PYTHONDONTWRITEBYTECODE=1

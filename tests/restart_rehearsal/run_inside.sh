@@ -5,19 +5,89 @@ FROM_SHA="${REHEARSAL_FROM_SHA:?REHEARSAL_FROM_SHA is required}"
 CANDIDATE_SHA="${REHEARSAL_CANDIDATE_SHA:?REHEARSAL_CANDIDATE_SHA is required}"
 TRANSITION="${REHEARSAL_TRANSITION:?REHEARSAL_TRANSITION is required}"
 COMPONENT="${REHEARSAL_COMPONENT:?REHEARSAL_COMPONENT is required}"
-WEIGHT_READINESS_SCENARIO="${REHEARSAL_WEIGHT_READINESS_SCENARIO:-transient_503_recovery}"
+WEIGHT_READINESS_SCENARIO="${REHEARSAL_WEIGHT_READINESS_SCENARIO:-production_success}"
 REHEARSAL_SCOPE="${REHEARSAL_SCOPE:-exact}"
+REHEARSAL_PROFILE="${REHEARSAL_PROFILE:-prepush}"
+RUN_ORDINAL="${REHEARSAL_RUN_ORDINAL:-1}"
+
+if ! [[ "$RUN_ORDINAL" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: REHEARSAL_RUN_ORDINAL must be a positive integer" >&2
+  exit 2
+fi
 
 case "$COMPONENT" in
-  gateway|validator) ;;
+  gateway|validator|workflow) ;;
   *)
-    echo "ERROR: REHEARSAL_COMPONENT must be gateway or validator" >&2
+    echo "ERROR: REHEARSAL_COMPONENT must be gateway, validator, or workflow" >&2
     exit 2
     ;;
 esac
 
 export REHEARSAL_STATE_ROOT=/rehearsal-state
-mkdir -p "$REHEARSAL_STATE_ROOT" /harness/bin /home/ec2-user
+mkdir -p "$REHEARSAL_STATE_ROOT" /harness/bin /home/ec2-user /evidence
+
+BOUNDARY_SERVICE_PID=""
+GATEWAY_ENCLAVE_SERVICE_PIDS=""
+VALIDATOR_ENCLAVE_SERVICE_PID=""
+preserve_rehearsal_evidence() {
+  if [ -f "$REHEARSAL_STATE_ROOT/events.jsonl" ]; then
+    cp "$REHEARSAL_STATE_ROOT/events.jsonl" \
+      "/evidence/${RUN_ORDINAL}-${COMPONENT}-${TRANSITION}-${CANDIDATE_SHA}-events.jsonl" \
+      2>/dev/null || true
+  fi
+  if [ "$COMPONENT" = "gateway" ] \
+    && [ -f /home/ec2-user/gateway/gateway.log ]; then
+    cp /home/ec2-user/gateway/gateway.log \
+      "/evidence/${RUN_ORDINAL}-gateway-${TRANSITION}-${CANDIDATE_SHA}.log" \
+      2>/dev/null || true
+  fi
+}
+cleanup_boundary_service() {
+  if [ -n "$GATEWAY_ENCLAVE_SERVICE_PIDS" ]; then
+    for pid in $GATEWAY_ENCLAVE_SERVICE_PIDS; do
+      kill "$pid" 2>/dev/null || true
+    done
+    for pid in $GATEWAY_ENCLAVE_SERVICE_PIDS; do
+      wait "$pid" 2>/dev/null || true
+    done
+  fi
+  if [ -n "$VALIDATOR_ENCLAVE_SERVICE_PID" ]; then
+    kill "$VALIDATOR_ENCLAVE_SERVICE_PID" 2>/dev/null || true
+    wait "$VALIDATOR_ENCLAVE_SERVICE_PID" 2>/dev/null || true
+  fi
+  if [ -n "$BOUNDARY_SERVICE_PID" ]; then
+    kill "$BOUNDARY_SERVICE_PID" 2>/dev/null || true
+    wait "$BOUNDARY_SERVICE_PID" 2>/dev/null || true
+  fi
+}
+finalize_rehearsal() {
+  local status=$?
+  trap - EXIT INT TERM
+  set +e
+  preserve_rehearsal_evidence
+  cleanup_boundary_service
+  exit "$status"
+}
+trap finalize_rehearsal EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [ "$COMPONENT" = "workflow" ]; then
+  case "$REHEARSAL_PROFILE" in
+    prepush|release) ;;
+    *)
+      echo "ERROR: REHEARSAL_PROFILE must be prepush or release" >&2
+      exit 2
+      ;;
+  esac
+  exec /usr/bin/python3.11 /harness/production_workflow_runner.py \
+    --profile "$REHEARSAL_PROFILE" \
+    --candidate-sha "$CANDIDATE_SHA" \
+    --epochs "${REHEARSAL_EPOCHS:?REHEARSAL_EPOCHS is required}" \
+    --fixture /harness/fixtures/production_shaped_v2.json \
+    --boundary-contract /harness/boundary_contract.json \
+    --output /evidence/workflow.json
+fi
 
 make_adapter() {
   local command="$1"
@@ -35,6 +105,7 @@ for command in \
 done
 
 export PATH="/harness/bin:/usr/local/bin:/usr/bin:/bin"
+export PYTHONPATH="/harness${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p /home/ec2-user/venv311/bin
 ln -sf /harness/bin/python3 /home/ec2-user/venv311/bin/python3
 
@@ -88,19 +159,232 @@ printf '%s\n' '{}' \
   >/home/ec2-user/gateway/secrets/arweave_keyfile.json
 chmod 600 /home/ec2-user/gateway/secrets/*
 
-cat >/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json <<'JSON'
-{
-  "schema_version": "leadpoet.subnet_epoch_cutover.v1",
-  "mapping_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "status": "stateful_active"
+git -C /source show \
+  "$FROM_SHA:config/stateful-epoch-cutover-sn71.json" \
+  >/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json
+PYTHONPATH="/source:/harness" /usr/bin/python3.11 - <<'PY'
+import hashlib
+import json
+from pathlib import Path
+
+from bittensor_wallet import Keypair
+from validator_tee.enclave.hotkey_authority_v2 import (
+    HOTKEY_AUTHORITY_CONFIG_SCHEMA_VERSION,
+    MEASURED_DRAND_LIBRARY_PATH,
+)
+from validator_tee.host.hotkey_bootstrap_v2 import build_hotkey_envelope_v2
+
+root = Path("/home/ec2-user/.config/leadpoet")
+seed = hashlib.sha256(b"leadpoet-local-validator-hotkey").digest()
+keypair = Keypair.create_from_seed(
+    "0x" + seed.hex(),
+)
+hotkey = keypair.ss58_address
+public_key = keypair.public_key.hex()
+drand_hash = Path(
+    "/source/validator_tee/enclave/libbittensor_drand_v2.sha256"
+).read_text(encoding="ascii").strip()
+configuration = {
+    "schema_version": HOTKEY_AUTHORITY_CONFIG_SCHEMA_VERSION,
+    "validator_hotkey": hotkey,
+    "hotkey_public_key": public_key,
+    "chain_signing_profile_hash": "sha256:" + "0" * 64,
+    "drand_library_path": MEASURED_DRAND_LIBRARY_PATH,
+    "drand_library_sha256": drand_hash,
 }
-JSON
-cat >/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json <<'JSON'
-{"schema_version":"leadpoet.validator_hotkey_config.v2","validator_hotkey":"5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"}
-JSON
-cat >/home/ec2-user/.config/leadpoet/validator-hotkey-envelope-v2.json <<'JSON'
-{"schema_version":"leadpoet.validator_hotkey_envelope.v2","ciphertext_b64":"cmVoZWFyc2Fs"}
-JSON
+envelope = build_hotkey_envelope_v2(
+    validator_hotkey=hotkey,
+    hotkey_public_key=public_key,
+    seed=seed,
+    kms_key_id="rehearsal-validator-kms",
+    encryption_context={
+        "leadpoet:purpose": "validator-hotkey-v2",
+        "leadpoet:validator_hotkey": hotkey,
+    },
+)
+for name, value in (
+    ("validator-hotkey-config-v2.json", configuration),
+    ("validator-hotkey-envelope-v2.json", envelope),
+):
+    path = root / name
+    path.write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+PY
+
+if [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; then
+  /usr/bin/python3.11 /harness/gateway_boundary_service.py \
+    --host 127.0.0.1 \
+    --port 54321 \
+    --fixture /harness/fixtures/production_shaped_v2.json \
+    --source-root /source \
+    --state-root "$REHEARSAL_STATE_ROOT" &
+  BOUNDARY_SERVICE_PID=$!
+  for _attempt in $(seq 1 100); do
+    [ -f "$REHEARSAL_STATE_ROOT/local-postgrest.ready" ] && break
+    kill -0 "$BOUNDARY_SERVICE_PID" 2>/dev/null || {
+      echo "ERROR: strict local PostgREST service exited during startup" >&2
+      exit 1
+    }
+    /bin/sleep 0.05
+  done
+  if [ ! -f "$REHEARSAL_STATE_ROOT/local-postgrest.ready" ]; then
+    echo "ERROR: strict local PostgREST service did not become ready" >&2
+    exit 1
+  fi
+fi
+
+if [ "$COMPONENT" = "validator" ]; then
+  test -s /opt/leadpoet/drand-cabi-v2/libbittensor_drand_v2.so
+  mkdir -p /app/validator_tee/enclave
+  install -m 0444 \
+    /opt/leadpoet/drand-cabi-v2/libbittensor_drand_v2.so \
+    /app/validator_tee/enclave/libbittensor_drand_v2.so
+  DRAND_LIBRARY_SHA256="$(
+    tr -d '[:space:]' \
+      </source/validator_tee/enclave/libbittensor_drand_v2.sha256
+  )"
+  echo \
+    "$DRAND_LIBRARY_SHA256  /app/validator_tee/enclave/libbittensor_drand_v2.so" \
+    | sha256sum -c -
+
+  PYTHONPATH="/source:/harness" \
+    /usr/bin/python3.11 /harness/validator_enclave_service.py &
+  VALIDATOR_ENCLAVE_SERVICE_PID=$!
+  for _attempt in $(seq 1 100); do
+    [ -S "$REHEARSAL_STATE_ROOT/validator-enclave.sock" ] \
+      && [ -f "$REHEARSAL_STATE_ROOT/validator-enclave.ready" ] \
+      && break
+    kill -0 "$VALIDATOR_ENCLAVE_SERVICE_PID" 2>/dev/null || {
+      echo "ERROR: persistent validator enclave service exited during startup" >&2
+      exit 1
+    }
+    /bin/sleep 0.05
+  done
+  if [ ! -S "$REHEARSAL_STATE_ROOT/validator-enclave.sock" ]; then
+    echo "ERROR: persistent validator enclave service did not become ready" >&2
+    exit 1
+  fi
+fi
+
+FIXTURE_SEED_ROOT=/rehearsal-fixture-seed
+if [ -d "$FIXTURE_SEED_ROOT" ]; then
+  /usr/bin/python3.11 - "$FIXTURE_SEED_ROOT" "$CANDIDATE_SHA" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+candidate = sys.argv[2]
+manifest = json.loads(
+    (root / "fixture-seed.json").read_text(encoding="utf-8")
+)
+release = json.loads(
+    (root / "release-build-input.json").read_text(encoding="utf-8")
+)
+if (
+    manifest
+    != {
+        "schema_version": "leadpoet.local_fixture_seed.v1",
+        "candidate_sha": candidate,
+    }
+    or release.get("commit_sha") != candidate
+    or not (root / "config-v2/acceptance-corpus-v2.json").is_file()
+    or not (root / "validator-app").is_dir()
+    or not (
+        root / "gateway-attested-runtime/scoring_import_closure.json"
+    ).is_file()
+    or {
+        path.name
+        for path in (root / "gateway-enclave-build-identities").glob("*.json")
+    }
+    != {
+        "gateway_autoresearch.json",
+        "gateway_coordinator.json",
+        "gateway_scoring.json",
+    }
+):
+    raise SystemExit("sanitized fixture seed differs from the target release")
+PY
+  cp -a "$FIXTURE_SEED_ROOT/config-v2/." \
+    /home/ec2-user/.config/leadpoet/v2/
+  cp -a "$FIXTURE_SEED_ROOT/release-build-input.json" \
+    "$REHEARSAL_STATE_ROOT/release-build-input.json"
+  cp -a "$FIXTURE_SEED_ROOT/validator-app" \
+    "$REHEARSAL_STATE_ROOT/validator-app"
+  cp -a "$FIXTURE_SEED_ROOT/gateway-enclave-build-identities" \
+    "$REHEARSAL_STATE_ROOT/gateway-enclave-build-identities"
+  cp -a "$FIXTURE_SEED_ROOT/gateway-attested-runtime" \
+    "$REHEARSAL_STATE_ROOT/gateway-attested-runtime"
+else
+  PYTHONPATH="/source:/harness" \
+    /usr/bin/python3.11 /harness/prepare_host_fixtures.py \
+    --output-dir /home/ec2-user/.config/leadpoet/v2 \
+    --candidate-sha "$CANDIDATE_SHA"
+fi
+
+if [ "$COMPONENT" = "gateway" ]; then
+  echo "Materializing the exact measured gateway-enclave filesystem"
+  rm -rf /app/gateway
+  mkdir -p /app
+  cp -a /source/gateway /app/gateway
+  rm -rf /app/gateway/_attested_runtime
+  cp -a "$REHEARSAL_STATE_ROOT/gateway-attested-runtime" \
+    /app/gateway/_attested_runtime
+  RUNSC_ARTIFACT_NAME="$(
+    /usr/bin/python3.11 - <<'PY'
+import json
+print(
+    json.load(
+        open(
+            "/app/gateway/tee/runsc-runtime.lock.json",
+            encoding="utf-8",
+        )
+    )["artifact_filename"]
+)
+PY
+  )"
+  install -m 0555 \
+    "/opt/leadpoet/external-artifacts/$RUNSC_ARTIFACT_NAME" \
+    /usr/local/bin/runsc
+  PYTHONPATH=/source /usr/bin/python3.11 \
+    /app/gateway/tee/sandbox_runtime_artifact.py verify \
+      --lock /app/gateway/tee/runsc-runtime.lock.json \
+      --artifact /usr/local/bin/runsc
+  PYTHONPATH=/source /usr/bin/python3.11 \
+    /app/gateway/tee/sandbox_runtime_artifact.py write-rootfs-manifest \
+      --lock /app/gateway/tee/runsc-runtime.lock.json \
+      --requirements-lock \
+        /app/gateway/tee/requirements-scoring-py39.lock \
+      --python-version 3.9.24 \
+      --output /leadpoet-model-rootfs.manifest.json
+
+  for role in gateway_coordinator gateway_scoring gateway_autoresearch; do
+    REHEARSAL_GATEWAY_ENCLAVE_ROLE="$role" \
+      REHEARSAL_GATEWAY_CANDIDATE_ROOT="/source/gateway" \
+      REHEARSAL_GATEWAY_CANONICAL_APP_ROOT="/app/gateway" \
+      PYTHONPATH="/source:/harness" \
+      /usr/bin/python3.11 /harness/gateway_enclave_service.py &
+    pid=$!
+    GATEWAY_ENCLAVE_SERVICE_PIDS="$GATEWAY_ENCLAVE_SERVICE_PIDS $pid"
+    ready="$REHEARSAL_STATE_ROOT/gateway-enclave-${role}.ready"
+    socket_path="$REHEARSAL_STATE_ROOT/gateway-enclave-${role}.sock"
+    for _attempt in $(seq 1 600); do
+      [ -S "$socket_path" ] && [ -f "$ready" ] && break
+      kill -0 "$pid" 2>/dev/null || {
+        echo "ERROR: persistent $role enclave service exited during startup" >&2
+        exit 1
+      }
+      /bin/sleep 0.05
+    done
+    if [ ! -S "$socket_path" ]; then
+      echo "ERROR: persistent $role enclave service did not become ready" >&2
+      exit 1
+    fi
+  done
+fi
 
 if [ "$COMPONENT" = "gateway" ]; then
   git clone -q /srv/origin.git /home/ec2-user/leadpoet_repo
@@ -144,18 +428,39 @@ if [ "$COMPONENT" = "gateway" ]; then
   RESTART_STATUS=$?
   set -e
 
-  if [ "$WEIGHT_READINESS_SCENARIO" != "transient_503_recovery" ]; then
-    if [ "$RESTART_STATUS" -eq 0 ]; then
-      echo "ERROR: gateway restart accepted failure scenario $WEIGHT_READINESS_SCENARIO" >&2
-      exit 1
-    fi
-    /usr/bin/python3.11 /harness/verify_evidence.py \
-      "$COMPONENT" "$FROM_SHA" "$CANDIDATE_SHA" "$WEIGHT_READINESS_SCENARIO" "$REHEARSAL_SCOPE"
-    echo "TARGETED_RESTART_REGRESSION_EXPECTED_FAILURE component=$COMPONENT candidate=$CANDIDATE_SHA scenario=$WEIGHT_READINESS_SCENARIO"
-    exit 0
+  if [ "$WEIGHT_READINESS_SCENARIO" != "production_success" ]; then
+    echo "ERROR: full restart rehearsal received a targeted-only scenario: $WEIGHT_READINESS_SCENARIO" >&2
+    exit 1
   fi
   if [ "$RESTART_STATUS" -ne 0 ]; then
-    echo "ERROR: gateway restart recovery scenario failed" >&2
+    echo "REHEARSAL_FAILURE_DIAGNOSTICS component=gateway status=$RESTART_STATUS" >&2
+    for endpoint in /research-lab/status /attest; do
+      body_file="$(mktemp)"
+      http_status="$(
+        /usr/bin/curl \
+          --silent \
+          --show-error \
+          --max-time 10 \
+          --output "$body_file" \
+          --write-out '%{http_code}' \
+          "http://127.0.0.1:8000${endpoint}" || true
+      )"
+      echo "REHEARSAL_HTTP_DIAGNOSTIC endpoint=$endpoint status=${http_status:-curl_failed}" >&2
+      head -c 4096 "$body_file" >&2 || true
+      echo >&2
+      rm -f "$body_file"
+    done
+    if [ -f /home/ec2-user/gateway/gateway.log ]; then
+      echo "REHEARSAL_GATEWAY_LOG_TAIL_BEGIN" >&2
+      tail -n 200 /home/ec2-user/gateway/gateway.log >&2
+      echo "REHEARSAL_GATEWAY_LOG_TAIL_END" >&2
+    fi
+    if [ -f "$REHEARSAL_STATE_ROOT/local-postgrest-events.jsonl" ]; then
+      echo "REHEARSAL_POSTGREST_EVENT_TAIL_BEGIN" >&2
+      tail -n 100 "$REHEARSAL_STATE_ROOT/local-postgrest-events.jsonl" >&2
+      echo "REHEARSAL_POSTGREST_EVENT_TAIL_END" >&2
+    fi
+    echo "ERROR: exact gateway launcher failed" >&2
     exit "$RESTART_STATUS"
   fi
 
@@ -187,12 +492,19 @@ if deployment.get("target_sha") != candidate or deployment.get("status") != "suc
     raise SystemExit("gateway deployment record is not successful")
 PY
 else
+  echo \
+    "$DRAND_LIBRARY_SHA256  /app/validator_tee/enclave/libbittensor_drand_v2.so" \
+    | sha256sum -c -
   mkdir -p /home/ec2-user/leadpoet
   git clone -q /srv/origin.git /home/ec2-user/leadpoet/leadpoet
   git -C /home/ec2-user/leadpoet/leadpoet checkout -q --detach "$FROM_SHA"
   git -C /home/ec2-user/leadpoet/leadpoet branch -f main "$FROM_SHA"
   git -C /home/ec2-user/leadpoet/leadpoet checkout -q main
   git -C /home/ec2-user/leadpoet/leadpoet remote set-url origin /srv/origin.git
+  printf '%s\n' \
+    '# Sanitized production-shaped fallback; inherited V2 env remains authoritative.' \
+    >/home/ec2-user/leadpoet/leadpoet/.env
+  chmod 600 /home/ec2-user/leadpoet/leadpoet/.env
   git -C /home/ec2-user/leadpoet/leadpoet show "$FROM_SHA:validator_restart.sh" \
     >/home/ec2-user/validator_restart.sh
   chmod 700 /home/ec2-user/validator_restart.sh
@@ -200,7 +512,8 @@ else
   mkdir -p \
     /home/ec2-user/.bittensor/wallets/validator_72/hotkeys \
     /home/ec2-user/.bittensor/wallets/validator_72
-  printf '%s\n' '{"ss58Address":"5DummyColdkey"}' \
+  printf '%s\n' \
+    '{"ss58Address":"5CUxhqZ2ewLA61PtdKYzdnLXq1jyFxsvjMg8mRsim4Ni8T3p"}' \
     >/home/ec2-user/.bittensor/wallets/validator_72/coldkeypub.txt
 
   echo "REHEARSAL_START component=validator from=$FROM_SHA candidate=$CANDIDATE_SHA transition=$TRANSITION"
@@ -239,8 +552,11 @@ else
   )"
 fi
 
+preserve_rehearsal_evidence
+
 /usr/bin/python3.11 /harness/verify_evidence.py \
-  "$COMPONENT" "$FROM_SHA" "$CANDIDATE_SHA" "$WEIGHT_READINESS_SCENARIO" "$REHEARSAL_SCOPE"
+  "$COMPONENT" "$FROM_SHA" "$CANDIDATE_SHA" "$WEIGHT_READINESS_SCENARIO" "$REHEARSAL_SCOPE" \
+  | tee "/evidence/${RUN_ORDINAL}-${COMPONENT}-${TRANSITION}-${CANDIDATE_SHA}.json"
 if [ "$REHEARSAL_SCOPE" = "exact" ]; then
   echo "REHEARSAL_SUCCESS component=$COMPONENT candidate=$CANDIDATE_SHA"
 else

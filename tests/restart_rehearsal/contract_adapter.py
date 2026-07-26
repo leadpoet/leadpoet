@@ -468,6 +468,11 @@ def _gateway_secret() -> dict[str, str]:
                     "https://rehearsal-scoring:rehearsal-scoring-password@"
                     "93.184.216.34:443"
                 ),
+                "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_2": (
+                    "https://rehearsal-invalid:invalid-password@"
+                    "93.184.216.34:443"
+                ),
+                "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "1",
             }
         )
     return values

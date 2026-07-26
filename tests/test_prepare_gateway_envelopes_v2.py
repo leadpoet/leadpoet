@@ -288,6 +288,156 @@ def test_production_sized_legacy_http_fleets_preserve_all_worker_slots(
         "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "10",
         "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "25",
     }
+    assert result["worker_proxy_profile_counts"] == {
+        "gateway_autoresearch": {
+            "configured": 10,
+            "verified": 10,
+            "quarantined": 0,
+            "sealed_worker_slots": 10,
+        },
+        "gateway_scoring": {
+            "configured": 25,
+            "verified": 25,
+            "quarantined": 0,
+            "sealed_worker_slots": 25,
+        },
+    }
+
+
+def test_failed_live_profiles_are_not_sealed_but_worker_capacity_is_preserved(
+    tmp_path,
+):
+    environment = _production_sized_proxy_environment()
+    output = tmp_path / "v2"
+    failed_hosted = environment[
+        "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_3"
+    ]
+    failed_scoring = environment[
+        "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_3"
+    ]
+
+    def verified_fleets(fleets):
+        return {
+            "gateway_autoresearch": tuple(
+                value
+                for value in fleets["gateway_autoresearch"]
+                if value != failed_hosted
+            ),
+            "gateway_scoring": tuple(
+                value
+                for value in fleets["gateway_scoring"]
+                if value != failed_scoring
+            ),
+        }
+
+    kms = KMS()
+    result = prepare_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        output_dir=output,
+        kms_client=kms,
+        proxy_fleet_probe=verified_fleets,
+    )
+
+    assert result["hosted_worker_count"] == 10
+    assert result["scoring_worker_count"] == 25
+    assert result["worker_proxy_profile_counts"] == {
+        "gateway_autoresearch": {
+            "configured": 10,
+            "verified": 9,
+            "quarantined": 1,
+            "sealed_worker_slots": 10,
+        },
+        "gateway_scoring": {
+            "configured": 25,
+            "verified": 24,
+            "quarantined": 1,
+            "sealed_worker_slots": 25,
+        },
+    }
+    assert len(tuple(output.glob("autoresearch_proxy_*.json"))) == 10
+    assert len(tuple(output.glob("scoring_proxy_*.json"))) == 25
+    worker_plaintexts = {
+        request["Plaintext"].decode("utf-8")
+        for request in kms.requests
+        if request["EncryptionContext"].get("leadpoet:purpose")
+        == "gateway-worker-egress-v2"
+    }
+    assert failed_hosted not in worker_plaintexts
+    assert failed_scoring not in worker_plaintexts
+    assert len(result["worker_proxy_credential_ref_hashes"][
+        "gateway_autoresearch"
+    ]) == 10
+    assert len(result["worker_proxy_credential_ref_hashes"][
+        "gateway_scoring"
+    ]) == 25
+
+
+def test_install_carries_verified_selection_into_generated_envelopes(tmp_path):
+    environment = _environment()
+    failed_scoring = environment[
+        "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_2"
+    ]
+    kms = KMS()
+
+    def verified_fleets(fleets):
+        return {
+            **fleets,
+            "gateway_scoring": tuple(
+                value
+                for value in fleets["gateway_scoring"]
+                if value != failed_scoring
+            ),
+        }
+
+    result = install_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        install_dir=tmp_path / "v2",
+        kms_client=kms,
+        proxy_fleet_probe=verified_fleets,
+    )
+
+    assert result["status"] == "installed"
+    assert result["worker_proxy_profile_counts"]["gateway_scoring"] == {
+        "configured": 3,
+        "verified": 2,
+        "quarantined": 1,
+        "sealed_worker_slots": 3,
+    }
+    scoring_plaintexts = [
+        request["Plaintext"].decode("utf-8")
+        for request in kms.requests
+        if request["EncryptionContext"].get("leadpoet:role")
+        == "gateway_scoring"
+    ]
+    assert len(scoring_plaintexts) == 3
+    assert failed_scoring not in scoring_plaintexts
+
+
+def test_invalid_probe_selection_fails_before_kms(tmp_path):
+    kms = KMS()
+
+    with pytest.raises(
+        Exception,
+        match="worker proxy preflight returned an invalid fleet selection",
+    ):
+        prepare_gateway_envelopes_v2(
+            environment=_environment(),
+            kms_key_id="alias/gateway-v2",
+            deploy_commit="1" * 40,
+            output_dir=tmp_path / "v2",
+            kms_client=kms,
+            proxy_fleet_probe=lambda fleets: {
+                **fleets,
+                "gateway_scoring": ("https://unknown.example.com",),
+            },
+        )
+
+    assert kms.requests == []
+    assert not (tmp_path / "v2").exists()
 
 
 def test_v2_proxy_migration_requires_explicit_production_worker_counts(

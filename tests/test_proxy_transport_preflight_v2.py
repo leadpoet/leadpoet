@@ -114,7 +114,7 @@ def test_connect_probe_accepts_authenticated_http_connect_proxy(monkeypatch):
     ]
 
 
-def test_fleet_probe_checks_role_specific_destinations_and_reports_index():
+def test_fleet_probe_quarantines_failed_profile_after_all_destination_checks():
     observed = []
 
     def verify(proxy_url, *, destination_host, destination_port):
@@ -122,24 +122,17 @@ def test_fleet_probe_checks_role_specific_destinations_and_reports_index():
         if proxy_url.endswith("bad.example.com"):
             raise WorkerProxyTransportPreflightV2Error("failed")
 
-    with pytest.raises(
-        WorkerProxyTransportPreflightV2Error,
-        match=(
-            "gateway_scoring worker proxy 2 failed V2 TLS CONNECT preflight "
-            r"to api\.exa\.ai:443 \(4/12 probes failed\)"
-        ),
-    ):
-        verify_worker_proxy_fleets_v2(
-            {
-                "gateway_autoresearch": ("https://auto.example.com",),
-                "gateway_scoring": (
-                    "https://score.example.com",
-                    "https://bad.example.com",
-                ),
-            },
-            max_workers=3,
-            verify_proxy=verify,
-        )
+    verified = verify_worker_proxy_fleets_v2(
+        {
+            "gateway_autoresearch": ("https://auto.example.com",),
+            "gateway_scoring": (
+                "https://score.example.com",
+                "https://bad.example.com",
+            ),
+        },
+        max_workers=3,
+        verify_proxy=verify,
+    )
 
     expected_destinations = {
         ("openrouter.ai", 443),
@@ -157,6 +150,33 @@ def test_fleet_probe_checks_role_specific_destinations_and_reports_index():
             for observed_proxy, host, port in observed
             if observed_proxy == proxy
         } == expected_destinations
+    assert verified == {
+        "gateway_autoresearch": ("https://auto.example.com",),
+        "gateway_scoring": ("https://score.example.com",),
+    }
+
+
+def test_fleet_probe_fails_closed_when_role_has_no_verified_profile():
+    def verify(proxy_url, *, destination_host, destination_port):
+        if proxy_url.endswith("bad.example.com"):
+            raise WorkerProxyTransportPreflightV2Error("failed")
+
+    with pytest.raises(
+        WorkerProxyTransportPreflightV2Error,
+        match=(
+            "gateway_scoring worker proxy fleet has no verified profiles; "
+            r"proxy 1 failed V2 TLS CONNECT preflight to api\.exa\.ai:443 "
+            r"\(4/4 role probes failed\)"
+        ),
+    ):
+        verify_worker_proxy_fleets_v2(
+            {
+                "gateway_autoresearch": ("https://auto.example.com",),
+                "gateway_scoring": ("https://bad.example.com",),
+            },
+            max_workers=2,
+            verify_proxy=verify,
+        )
 
 
 def test_rehearsal_tls_service_exercises_verified_authenticated_connect(

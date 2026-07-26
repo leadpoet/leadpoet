@@ -428,12 +428,17 @@ def _validated_worker_proxy_configuration(
     environment: Mapping[str, str],
     *,
     proxy_fleet_probe: Optional[
-        Callable[[Mapping[str, Sequence[str]]], None]
+        Callable[
+            [Mapping[str, Sequence[str]]],
+            Optional[Mapping[str, Sequence[str]]],
+        ]
     ] = verify_worker_proxy_fleets_v2,
 ) -> tuple[
     Any,
     Dict[str, list[str]],
     set[str],
+    Dict[str, tuple[str, ...]],
+    Dict[str, Dict[str, int]],
     Dict[str, tuple[str, ...]],
 ]:
     plan = build_research_lab_worker_autostart_plan(environment)
@@ -464,16 +469,6 @@ def _validated_worker_proxy_configuration(
             proxy_source=proxy_sources[role],
             selected_profile_count=len(values),
         )
-    profile_fleets = {
-        "gateway_autoresearch": _worker_proxy_profile_values(
-            plan.hosted.proxy_values,
-            plan.hosted.worker_count,
-        ),
-        "gateway_scoring": _worker_proxy_profile_values(
-            plan.scoring.proxy_values,
-            plan.scoring.worker_count,
-        ),
-    }
     commitments: Dict[str, list[str]] = {}
     for role, values in configured_fleets.items():
         commitments[role] = []
@@ -496,14 +491,14 @@ def _validated_worker_proxy_configuration(
                         str(exc),
                     )
                 ) from exc
-    for role, values in profile_fleets.items():
-        commitments[role] = [
-            credential_value_hash(value)
-            for value in values
-        ]
+
+    verified_fleets = {
+        role: tuple(str(value) for value in values)
+        for role, values in configured_fleets.items()
+    }
     if proxy_fleet_probe is not None:
         try:
-            proxy_fleet_probe(configured_fleets)
+            probe_result = proxy_fleet_probe(configured_fleets)
         except WorkerProxyTransportPreflightV2Error as exc:
             raise GatewayEnvelopePreparationV2Error(
                 "%s; required proxy environments are %s and %s"
@@ -517,11 +512,80 @@ def _validated_worker_proxy_configuration(
                     ]["required_v2_environment"],
                 )
             ) from exc
+        if probe_result is not None:
+            if (
+                not isinstance(probe_result, Mapping)
+                or set(probe_result) != set(configured_fleets)
+            ):
+                raise GatewayEnvelopePreparationV2Error(
+                    "worker proxy preflight returned an invalid fleet selection"
+                )
+            selected_fleets = {}
+            for role, configured_values in configured_fleets.items():
+                raw_values = probe_result.get(role)
+                if isinstance(raw_values, (str, bytes)) or not isinstance(
+                    raw_values, Sequence
+                ):
+                    raise GatewayEnvelopePreparationV2Error(
+                        "worker proxy preflight returned an invalid fleet selection"
+                    )
+                selected_values = tuple(str(value) for value in raw_values)
+                if not selected_values:
+                    raise GatewayEnvelopePreparationV2Error(
+                        "%s worker proxy fleet has no verified profiles" % role
+                    )
+                configured_iterator = iter(configured_values)
+                if not all(
+                    any(
+                        configured_value == selected_value
+                        for configured_value in configured_iterator
+                    )
+                    for selected_value in selected_values
+                ):
+                    raise GatewayEnvelopePreparationV2Error(
+                        "worker proxy preflight returned an invalid fleet selection"
+                    )
+                selected_fleets[role] = selected_values
+            verified_fleets = selected_fleets
+
+    profile_fleets = {
+        "gateway_autoresearch": _worker_proxy_profile_values(
+            verified_fleets["gateway_autoresearch"],
+            plan.hosted.worker_count,
+        ),
+        "gateway_scoring": _worker_proxy_profile_values(
+            verified_fleets["gateway_scoring"],
+            plan.scoring.worker_count,
+        ),
+    }
+    for role, values in profile_fleets.items():
+        commitments[role] = [
+            credential_value_hash(value)
+            for value in values
+        ]
+    worker_proxy_profile_counts = {
+        role: {
+            "configured": len(configured_fleets[role]),
+            "verified": len(verified_fleets[role]),
+            "quarantined": (
+                len(configured_fleets[role]) - len(verified_fleets[role])
+            ),
+            "sealed_worker_slots": len(profile_fleets[role]),
+        }
+        for role in configured_fleets
+    }
     configured_names = _proxy_environment_names(
         environment,
         (*HOSTED_PROXY_PREFIXES, *SCORING_PROXY_PREFIXES),
     )
-    return plan, commitments, configured_names, profile_fleets
+    return (
+        plan,
+        commitments,
+        configured_names,
+        profile_fleets,
+        worker_proxy_profile_counts,
+        verified_fleets,
+    )
 
 
 def prepare_gateway_envelopes_v2(
@@ -532,7 +596,10 @@ def prepare_gateway_envelopes_v2(
     output_dir: Path,
     kms_client: Any = None,
     proxy_fleet_probe: Optional[
-        Callable[[Mapping[str, Sequence[str]]], None]
+        Callable[
+            [Mapping[str, Sequence[str]]],
+            Optional[Mapping[str, Sequence[str]]],
+        ]
     ] = verify_worker_proxy_fleets_v2,
 ) -> Dict[str, Any]:
     commit = str(deploy_commit or "").lower()
@@ -552,6 +619,8 @@ def prepare_gateway_envelopes_v2(
         proxy_commitments,
         proxy_environment_names,
         proxy_profile_values,
+        worker_proxy_profile_counts,
+        _verified_proxy_fleets,
     ) = (
         _validated_worker_proxy_configuration(
             environment,
@@ -690,6 +759,7 @@ def prepare_gateway_envelopes_v2(
                 "gateway_scoring": plan.scoring.proxy_source,
             },
             "worker_proxy_credential_ref_hashes": proxy_commitments,
+            "worker_proxy_profile_counts": worker_proxy_profile_counts,
             "deferred_worker_fleet_roles": sorted(deferred_roles),
             "required_count_environment": {
                 "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": str(
@@ -723,7 +793,10 @@ def install_gateway_envelopes_v2(
     install_dir: Path,
     kms_client: Any = None,
     proxy_fleet_probe: Optional[
-        Callable[[Mapping[str, Sequence[str]]], None]
+        Callable[
+            [Mapping[str, Sequence[str]]],
+            Optional[Mapping[str, Sequence[str]]],
+        ]
     ] = verify_worker_proxy_fleets_v2,
 ) -> Dict[str, Any]:
     """Reuse exact-commit envelopes or atomically install a complete new set."""
@@ -734,6 +807,8 @@ def install_gateway_envelopes_v2(
         proxy_commitments,
         proxy_environment_names,
         _proxy_profile_values,
+        worker_proxy_profile_counts,
+        verified_proxy_fleets,
     ) = (
         _validated_worker_proxy_configuration(
             environment,
@@ -753,6 +828,8 @@ def install_gateway_envelopes_v2(
         == _WORKER_PROXY_TRANSPORT_POLICY
         and report.get("worker_proxy_credential_ref_hashes")
         == proxy_commitments
+        and report.get("worker_proxy_profile_counts")
+        == worker_proxy_profile_counts
         and report.get("deferred_worker_fleet_roles")
         == sorted(deferred_roles)
         and set(proxy_environment_names).issubset(
@@ -806,7 +883,7 @@ def install_gateway_envelopes_v2(
         deploy_commit=deploy_commit,
         output_dir=staging,
         kms_client=kms_client,
-        proxy_fleet_probe=None,
+        proxy_fleet_probe=lambda _fleets: verified_proxy_fleets,
     )
     managed_names = {
         path.name for path in staging.iterdir() if path.is_file()

@@ -698,6 +698,38 @@ def test_enclave_proxy_uses_authenticated_http_connect_to_global_ip_proxy():
     proxy_side.close()
 
 
+def test_enclave_proxy_reports_407_before_rejecting_response_body():
+    enclave_side, proxy_side = socket.socketpair()
+    enclave = EnclaveEgressProxy(recv_exact=_recv_exact)
+    enclave._open_parent_tunnel = (
+        lambda _host, _port, *, purpose="provider": enclave_side
+    )
+
+    def serve_proxy():
+        headers = b""
+        while b"\r\n\r\n" not in headers:
+            headers += proxy_side.recv(4096)
+        proxy_side.sendall(
+            b"HTTP/1.1 407 Proxy Authentication Required\r\n"
+            b"Content-Length: 17\r\n\r\n"
+            b"not authenticated"
+        )
+
+    thread = threading.Thread(target=serve_proxy, daemon=True)
+    thread.start()
+    with pytest.raises(
+        egress_proxy.EnclaveEgressProxyError,
+        match="CONNECT failed with HTTP status 407",
+    ):
+        enclave._open_upstream_proxy_tunnel(
+            proxy_url="http://worker:invalid@proxy.example.com:6162",
+            destination_host="openrouter.ai",
+            destination_port=443,
+        )
+    thread.join(timeout=2)
+    proxy_side.close()
+
+
 def test_enclave_proxy_rejects_external_plaintext_http():
     with pytest.raises(egress_proxy.EnclaveEgressProxyError, match="forbidden"):
         _parse_proxy_request(

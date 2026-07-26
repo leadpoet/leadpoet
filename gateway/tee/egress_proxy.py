@@ -545,10 +545,6 @@ class EnclaveEgressProxy:
             request = ("\r\n".join(lines) + "\r\n\r\n").encode("iso-8859-1")
             protected.sendall(request)
             response_headers, remainder = _read_headers(protected)
-            if remainder:
-                raise EnclaveEgressProxyError(
-                    "upstream proxy returned unexpected CONNECT payload"
-                )
             status_line = response_headers.split(b"\r\n", 1)[0]
             parts = status_line.split(b" ", 2)
             if len(parts) < 2 or not parts[1].isdigit():
@@ -556,7 +552,11 @@ class EnclaveEgressProxy:
             status = int(parts[1])
             if status < 200 or status >= 300:
                 raise EnclaveEgressProxyError(
-                    "upstream proxy CONNECT was not authenticated as successful"
+                    "upstream proxy CONNECT failed with HTTP status %d" % status
+                )
+            if remainder:
+                raise EnclaveEgressProxyError(
+                    "upstream proxy returned unexpected CONNECT payload"
                 )
             return protected
         except Exception:

@@ -109,8 +109,8 @@ def verify_worker_proxy_fleets_v2(
     *,
     max_workers: int = _DEFAULT_MAX_WORKERS,
     verify_proxy: Callable[..., None] = verify_tls_proxy_connect_v2,
-) -> None:
-    """Verify every selected worker credential without exposing proxy URLs."""
+) -> dict[str, tuple[str, ...]]:
+    """Return profiles that pass every measured destination check."""
 
     tasks = []
     for role, values in fleets.items():
@@ -118,6 +118,10 @@ def verify_worker_proxy_fleets_v2(
         if destinations is None:
             raise WorkerProxyTransportPreflightV2Error(
                 "worker proxy execution role is not measured"
+            )
+        if not values:
+            raise WorkerProxyTransportPreflightV2Error(
+                "%s worker proxy fleet is unavailable" % role
             )
         for index, value in enumerate(values):
             for destination in destinations:
@@ -128,6 +132,7 @@ def verify_worker_proxy_fleets_v2(
         )
 
     failures = []
+    failed_profiles = set()
     worker_count = min(max(1, int(max_workers)), len(tasks))
     with ThreadPoolExecutor(
         max_workers=worker_count,
@@ -148,20 +153,41 @@ def verify_worker_proxy_fleets_v2(
                 future.result()
             except Exception as exc:
                 failures.append((role, index, destination, exc))
-    if failures:
-        role, index, destination, error = sorted(
-            failures,
-            key=lambda item: (item[0], item[1], item[2]),
-        )[0]
+                failed_profiles.add((role, index))
+
+    verified_fleets = {}
+    for role, values in fleets.items():
+        verified = tuple(
+            str(value)
+            for index, value in enumerate(values)
+            if (str(role), index) not in failed_profiles
+        )
+        if verified:
+            verified_fleets[str(role)] = verified
+            continue
+        role_failures = sorted(
+            (
+                failure
+                for failure in failures
+                if failure[0] == str(role)
+            ),
+            key=lambda item: (item[1], item[2]),
+        )
+        if not role_failures:
+            raise WorkerProxyTransportPreflightV2Error(
+                "%s worker proxy fleet has no verified profiles" % role
+            )
+        _, index, destination, error = role_failures[0]
         raise WorkerProxyTransportPreflightV2Error(
-            "%s worker proxy %d failed V2 TLS CONNECT preflight to %s:%d "
-            "(%d/%d probes failed)"
+            "%s worker proxy fleet has no verified profiles; proxy %d failed "
+            "V2 TLS CONNECT preflight to %s:%d (%d/%d role probes failed)"
             % (
                 role,
                 index + 1,
                 destination[0],
                 destination[1],
-                len(failures),
-                len(tasks),
+                len(role_failures),
+                len(values) * len(_PROBE_DESTINATIONS[str(role)]),
             )
         ) from error
+    return verified_fleets

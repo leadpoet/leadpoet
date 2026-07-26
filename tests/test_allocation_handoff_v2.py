@@ -4,6 +4,7 @@ from copy import deepcopy
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from gateway.research_lab import allocation_handoff_disk_cache
 from leadpoet_canonical.allocation_handoff_v2 import (
     AllocationHandoffV2Error,
     build_allocation_handoff_v2,
@@ -124,6 +125,40 @@ def test_allocation_handoff_binds_complete_graph_and_scope():
         expected_netuid=71,
     )
     assert normalized == document
+
+
+def test_disk_cache_accepts_only_matching_attested_release(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "RESEARCH_LAB_ALLOCATION_HANDOFF_DIR",
+        str(tmp_path),
+    )
+    handoff = _document()
+    allocation_handoff_disk_cache.store_handoff(
+        71,
+        23,
+        True,
+        COMMIT,
+        handoff,
+        ttl_seconds=60,
+    )
+    assert allocation_handoff_disk_cache.load_handoff(
+        71,
+        23,
+        True,
+        COMMIT,
+    ) == handoff
+    assert (
+        allocation_handoff_disk_cache.load_handoff(
+            71,
+            23,
+            True,
+            "f" * 40,
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize("mutation", ["allocation", "binding", "persistence"])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -94,7 +95,15 @@ class BodySizeLimitMiddleware:
                     detail="Compressed weight transport is not authorized",
                 )
                 return
-            authorization = self._transport_authorization(
+            # The authorization check imports bittensor and runs an sr25519
+            # verify; the body verification hashes up to 10 MiB compressed +
+            # 64 MiB logical and inflates the gzip. All of that is synchronous
+            # CPU that would otherwise stall the single gateway event loop
+            # (every miner and validator request) for ~100ms+ right at the
+            # weight-submission window. Offload to a worker thread; the check
+            # order and every fail-closed rejection are unchanged.
+            authorization = await asyncio.to_thread(
+                self._transport_authorization,
                 scope=scope,
                 headers=headers,
             )
@@ -112,35 +121,16 @@ class BodySizeLimitMiddleware:
             )
             if compressed is None:
                 return
-            if (
-                len(compressed) != authorization["wire_body_bytes"]
-                or sha256_bytes(compressed)
-                != authorization["wire_body_hash"]
-            ):
+            body, verify_error = await asyncio.to_thread(
+                self._verify_wire_and_decompress,
+                compressed,
+                authorization,
+            )
+            if body is None:
                 await self._reject(
                     send,
                     status=400,
-                    detail="Compressed weight transport body differs",
-                )
-                return
-            try:
-                body = self._decompress_gzip(compressed)
-            except ValueError:
-                await self._reject(
-                    send,
-                    status=400,
-                    detail="Invalid compressed request body",
-                )
-                return
-            if (
-                len(body) != authorization["logical_body_bytes"]
-                or sha256_bytes(body)
-                != authorization["logical_body_hash"]
-            ):
-                await self._reject(
-                    send,
-                    status=400,
-                    detail="Compressed weight transport payload differs",
+                    detail=verify_error or "Invalid compressed request body",
                 )
                 return
             rewritten_headers = [
@@ -200,20 +190,30 @@ class BodySizeLimitMiddleware:
                 return
 
         consumed = 0
+        rejected = False
+
+        async def guarded_send(message):
+            # Once the middleware has emitted the 413, discard a downstream
+            # error response triggered by the synthetic disconnect.
+            if rejected:
+                return
+            await send(message)
 
         async def limited_receive():
-            nonlocal consumed
+            nonlocal consumed, rejected
             message = await receive()
             if message.get("type") == "http.request":
                 consumed += len(message.get("body") or b"")
                 if consumed > self.max_body_bytes:
-                    await self._reject(send)
+                    if not rejected:
+                        await self._reject(send)
+                        rejected = True
                     return {
                         "type": "http.disconnect",
                     }
             return message
 
-        await self.app(scope, limited_receive, send)
+        await self.app(scope, limited_receive, guarded_send)
 
     def _transport_authorization(self, *, scope, headers):
         try:
@@ -280,6 +280,30 @@ class BodySizeLimitMiddleware:
                 return None
             if not message.get("more_body", False):
                 return bytes(body)
+
+    def _verify_wire_and_decompress(
+        self,
+        compressed: bytes,
+        authorization,
+    ):
+        """Runs in a worker thread: byte-count/hash checks and the bounded
+        gzip inflate, in the exact order the inline code used. Returns
+        (logical_body, None) on success or (None, rejection_detail)."""
+        if (
+            len(compressed) != authorization["wire_body_bytes"]
+            or sha256_bytes(compressed) != authorization["wire_body_hash"]
+        ):
+            return None, "Compressed weight transport body differs"
+        try:
+            body = self._decompress_gzip(compressed)
+        except ValueError:
+            return None, "Invalid compressed request body"
+        if (
+            len(body) != authorization["logical_body_bytes"]
+            or sha256_bytes(body) != authorization["logical_body_hash"]
+        ):
+            return None, "Compressed weight transport payload differs"
+        return body, None
 
     def _decompress_gzip(self, body: bytes) -> bytes:
         decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)

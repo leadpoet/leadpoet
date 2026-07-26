@@ -4,6 +4,7 @@ Fulfillment consensus computation (v_trust x stake weighted).
 Mirrors compute_weighted_consensus from gateway/utils/consensus.py.
 """
 
+import asyncio
 import logging
 from typing import List, Dict, Set
 from collections import defaultdict
@@ -21,11 +22,13 @@ async def _fetch_request_scores(request_id: str) -> List[dict]:
     out: List[dict] = []
     offset = 0
     for _ in range(20):
-        page = supabase.table("fulfillment_scores") \
-            .select("*") \
-            .eq("request_id", request_id) \
-            .range(offset, offset + 999) \
+        page = await asyncio.to_thread(
+            lambda o=offset: supabase.table("fulfillment_scores")
+            .select("*")
+            .eq("request_id", request_id)
+            .range(o, o + 999)
             .execute()
+        )
         if not page.data:
             break
         out.extend(page.data)
@@ -41,10 +44,12 @@ async def _fetch_validator_metagraph_data(validator_hotkeys: Set[str]) -> Dict[s
         return {}
     try:
         supabase = _get_supabase()
-        resp = supabase.table("metagraph") \
-            .select("hotkey, validator_trust, stake") \
-            .in_("hotkey", list(validator_hotkeys)) \
+        resp = await asyncio.to_thread(
+            lambda: supabase.table("metagraph")
+            .select("hotkey, validator_trust, stake")
+            .in_("hotkey", list(validator_hotkeys))
             .execute()
+        )
         result = {}
         for row in (resp.data or []):
             result[row["hotkey"]] = {

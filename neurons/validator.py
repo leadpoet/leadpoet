@@ -3158,6 +3158,22 @@ class Validator(BaseValidatorNeuron):
                                 await self.submit_weights_at_epoch_end()
                             except Exception as weight_err:
                                 print(f"   ⚠️ Weight submission check error: {weight_err}")
+                        elif epoch_state_bg.deadline_reached(ALLOCATION_PREPARATION_BLOCK):
+                            # Prewarm the attested allocation from here too. Batch
+                            # validation blocks the main loop for 10+ minutes, so the
+                            # block-180 prewarm inside the weight-submission path may
+                            # not run until the submission window opens — losing the
+                            # 120-block build margin and starting the expensive
+                            # gateway allocation build cold at block 300. The prepare
+                            # task is per-epoch idempotent and wait=False never
+                            # blocks this updater.
+                            try:
+                                await self._prepare_research_lab_allocation(
+                                    current_epoch_bg,
+                                    wait=False,
+                                )
+                            except Exception as prewarm_err:
+                                print(f"   ⚠️ Allocation prewarm error: {prewarm_err}")
                     except asyncio.CancelledError:
                         break  # Stop when batch validation completes
                     except Exception as e:
@@ -4468,7 +4484,12 @@ class Validator(BaseValidatorNeuron):
             )
             assert research_lab_guard is not None
             if research_lab_guard.get("abort_chain_submission"):
-                print(f"   ❌ Research Lab pre-submission guard blocked weights: {research_lab_guard.get('reason')}")
+                reason = research_lab_guard.get("reason")
+                bt.logging.critical(
+                    "weight_submission_blocked_by_guard "
+                    f"epoch={current_epoch} reason={reason}"
+                )
+                print(f"   ❌ Research Lab pre-submission guard blocked weights: {reason}")
                 return False
             research_lab_allocation_component = (
                 research_lab_guard.get("allocation_component")
@@ -4975,7 +4996,8 @@ class Validator(BaseValidatorNeuron):
             try:
                 if ff_enabled:
                     fulfillment_share, fulfillment_per_miner, fulfillment_fetch_ok = (
-                        self._get_fulfillment_emission_share(
+                        await asyncio.to_thread(
+                            self._get_fulfillment_emission_share,
                             current_epoch,
                             effective_fulfillment_pool,
                             include_status=True,

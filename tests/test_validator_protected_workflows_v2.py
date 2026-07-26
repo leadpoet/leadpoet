@@ -35,6 +35,10 @@ def test_committed_validator_protected_manifest_matches_source():
     assert len(manifest["entries"]) == sum(
         len(items) for items in PROTECTED_SYMBOLS.values()
     )
+    assert (
+        "Validator._submit_weights_at_epoch_end_locked"
+        in PROTECTED_SYMBOLS["neurons/validator.py"]
+    )
 
 
 def test_validator_protected_manifest_detects_weight_logic_change(tmp_path: Path):

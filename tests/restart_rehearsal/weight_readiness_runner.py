@@ -9,6 +9,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import subprocess
 import sys
 import time
 from typing import Any
@@ -70,6 +72,69 @@ def _candidate_sha() -> str:
     if len(value) != 40:
         raise RuntimeError("rehearsal candidate SHA is invalid")
     return value
+
+
+def _candidate_source_identity(
+    module_path: Path,
+    *,
+    expected_root: Path = Path("/home/ec2-user/leadpoet_repo"),
+    candidate_sha: str | None = None,
+) -> dict[str, str]:
+    resolved = module_path.resolve()
+    root = expected_root.resolve()
+    source_kind = "candidate_checkout"
+    if resolved == root or root in resolved.parents:
+        source_relative = resolved.relative_to(root)
+    else:
+        archive_root = next(
+            (
+                parent
+                for parent in resolved.parents
+                if parent.parent == Path("/tmp").resolve()
+                and re.fullmatch(
+                    r"gateway-v2-preflight\.[A-Za-z0-9]+",
+                    parent.name,
+                )
+            ),
+            None,
+        )
+        if archive_root is None:
+            raise RuntimeError(
+                "weight readiness did not import from a recognized candidate "
+                "checkout or archive"
+            )
+        source_kind = "candidate_archive"
+        source_relative = resolved.relative_to(archive_root)
+
+    bound_sha = candidate_sha or _candidate_sha()
+    candidate_blob = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(root),
+            "show",
+            f"{bound_sha}:{source_relative.as_posix()}",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    source_bytes = resolved.read_bytes()
+    if candidate_blob != source_bytes:
+        raise RuntimeError(
+            "weight readiness source bytes differ from the candidate commit"
+        )
+
+    source_hash = hashlib.sha256(source_bytes).hexdigest()
+    return {
+        "module_path": str(resolved),
+        "module_sha256": source_hash,
+        "source_path": str(resolved),
+        "source_git_path": source_relative.as_posix(),
+        "source_kind": source_kind,
+        "source_sha256": source_hash,
+        "source_commit": bound_sha,
+        "candidate_sha": bound_sha,
+    }
 
 
 def _build_handoff(epoch: int) -> dict[str, Any]:
@@ -585,54 +650,7 @@ def main() -> int:
     from gateway.tee import verify_weight_submission_ready_v2 as readiness
 
     module_path = Path(readiness.__file__).resolve()
-    expected_root = Path("/home/ec2-user/leadpoet_repo").resolve()
-    source_kind = "candidate_checkout"
-    if expected_root not in module_path.parents:
-        archive_root = next(
-            (
-                parent
-                for parent in module_path.parents
-                if parent.parent == Path("/tmp")
-                and parent.name.startswith("gateway-v2-preflight.")
-            ),
-            None,
-        )
-        if archive_root is None:
-            raise RuntimeError(
-                "weight readiness did not import from a recognized candidate "
-                "checkout or archive"
-            )
-        source_kind = "candidate_archive"
-        source_relative = module_path.relative_to(archive_root)
-    else:
-        source_relative = module_path.relative_to(expected_root)
-    candidate_blob = __import__("subprocess").run(
-        [
-            "/usr/bin/git",
-            "-C",
-            str(expected_root),
-            "show",
-            f"{_candidate_sha()}:{source_relative.as_posix()}",
-        ],
-        check=True,
-        capture_output=True,
-    ).stdout
-    if candidate_blob != module_path.read_bytes():
-        raise RuntimeError(
-            "weight readiness source bytes differ from the candidate commit"
-        )
-    module_hash = hashlib.sha256(module_path.read_bytes()).hexdigest()
-    source_identity = {
-        "module_path": str(module_path),
-        "module_sha256": module_hash,
-        "source_path": str(module_path),
-        "source_git_path": (
-            "gateway/tee/verify_weight_submission_ready_v2.py"
-        ),
-        "source_kind": source_kind,
-        "source_sha256": module_hash,
-        "candidate_sha": _candidate_sha(),
-    }
+    source_identity = _candidate_source_identity(module_path)
     _event(
         "weight-readiness",
         status="started",

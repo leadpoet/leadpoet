@@ -247,6 +247,21 @@ def _merge_graphs(
     )
 
 
+async def _merge_graphs_async(**kwargs: Any) -> Dict[str, Any]:
+    """Merge and verify potentially large receipt graphs off the event loop."""
+
+    return await asyncio.to_thread(_merge_graphs, **kwargs)
+
+
+async def _validate_receipt_graph_async(
+    graph: Mapping[str, Any],
+    **kwargs: Any,
+) -> None:
+    """Run canonical receipt verification without freezing gateway requests."""
+
+    await asyncio.to_thread(validate_receipt_graph, graph, **kwargs)
+
+
 def _release_boot_verifier(release: Mapping[str, Any]):
     def verify(identity: Mapping[str, Any]) -> Mapping[str, Any]:
         physical_role = str(identity.get("physical_role") or "")
@@ -591,7 +606,7 @@ async def execute_scoring_v2(
                 raise AttestedScoringV2Error(
                     "V2 durable execution replay is incomplete"
                 )
-            validate_receipt_graph(
+            await _validate_receipt_graph_async(
                 replay_graph,
                 required_purposes=(purpose,),
                 boot_attestation_verifier=verifier,
@@ -924,7 +939,7 @@ async def execute_scoring_v2(
         request_artifact_hashes + response_artifact_hashes
     )
     if not succeeded:
-        graph = _merge_graphs(
+        graph = await _merge_graphs_async(
             root_receipt=receipt,
             boot_identity=boot_identity,
             local_receipts=local_receipts,
@@ -932,7 +947,7 @@ async def execute_scoring_v2(
             parent_graphs=parent_graphs,
             allowed_failed_receipt_hashes=graph_allowed_failed,
         )
-        validate_receipt_graph(
+        await _validate_receipt_graph_async(
             graph,
             required_purposes=(purpose,),
             allowed_failed_receipt_hashes=graph_allowed_failed,
@@ -978,7 +993,7 @@ async def execute_scoring_v2(
                 raise AttestedScoringV2Error(
                     "V2 scoring failure artifact lineage is unavailable"
                 )
-            validate_receipt_graph(
+            await _validate_receipt_graph_async(
                 artifact_graph,
                 required_purposes=(purpose, "leadpoet.artifact_persistence.v2"),
                 allowed_failed_receipt_hashes=graph_allowed_failed,
@@ -1050,7 +1065,7 @@ async def execute_scoring_v2(
     expected_artifact_hashes = sorted(
         transport_artifact_hashes + expected_sealed_hashes
     )
-    graph = _merge_graphs(
+    graph = await _merge_graphs_async(
         root_receipt=receipt,
         boot_identity=boot_identity,
         local_receipts=local_receipts,
@@ -1058,7 +1073,7 @@ async def execute_scoring_v2(
         parent_graphs=parent_graphs,
         allowed_failed_receipt_hashes=allowed_failed,
     )
-    validate_receipt_graph(
+    await _validate_receipt_graph_async(
         graph,
         required_purposes=(purpose,),
         allowed_failed_receipt_hashes=allowed_failed,
@@ -1229,7 +1244,7 @@ async def execute_scoring_v2(
             raise AttestedScoringV2Error(
                 "V2 encrypted artifact lineage receipt is unavailable"
             )
-        validate_receipt_graph(
+        await _validate_receipt_graph_async(
             lineage_graph,
             required_purposes=(purpose, "leadpoet.artifact_persistence.v2"),
             allowed_failed_receipt_hashes=allowed_failed,

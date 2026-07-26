@@ -3018,10 +3018,29 @@ async def _allocation_epoch_guard_and_persistence(
             str(exc)[:120],
         )
         return False
+    return _allocation_persistence_for_known_current_epoch(
+        config=config,
+        current_epoch=int(current_epoch),
+        requested_epoch=int(epoch),
+        internal_key=internal_key,
+    )
+
+
+def _allocation_persistence_for_known_current_epoch(
+    *,
+    config: ResearchLabGatewayConfig,
+    current_epoch: int,
+    requested_epoch: int,
+    internal_key: Optional[str],
+) -> bool:
+    """Apply the normal persistence policy to an already-resolved epoch."""
+
+    from gateway.research_lab.allocations import allocation_snapshot_persistence_decision
+
     normalized_key = internal_key if isinstance(internal_key, str) else None
     decision = allocation_snapshot_persistence_decision(
         current_epoch=int(current_epoch),
-        requested_epoch=int(epoch),
+        requested_epoch=int(requested_epoch),
         provided_key=normalized_key,
         configured_key=str(getattr(config, "internal_api_key", "") or ""),
         live_allocation_enabled=bool(config.reimbursements_enabled or config.weight_mutation_enabled),
@@ -3029,7 +3048,10 @@ async def _allocation_epoch_guard_and_persistence(
     if decision == "future_epoch":
         raise HTTPException(
             status_code=422,
-            detail=f"allocation epoch {int(epoch)} is in the future (current {int(current_epoch)})",
+            detail=(
+                f"allocation epoch {int(requested_epoch)} is in the future "
+                f"(current {int(current_epoch)})"
+            ),
         )
     if decision == "key_not_configured":
         raise HTTPException(status_code=403, detail="Research Lab internal API key is not configured")
@@ -3239,29 +3261,28 @@ async def _allocation_handoff_response(
     )
 
 
-@router.get("/allocations/attested/{epoch}")
-async def get_research_lab_attested_allocation(
-    epoch: int,
-    x_leadpoet_internal_key: Optional[str] = Header(default=None),
-    accept_encoding: Optional[str] = Header(default=None),
-):
-    """Return the unchanged live allocation plus its enclave-signed sidecar."""
-
+def _research_lab_attested_allocation_config() -> ResearchLabGatewayConfig:
     config = ResearchLabGatewayConfig.from_env()
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
     _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
     _require_enabled(config.shadow_bundles_enabled, "Research Lab report bundles are disabled")
-    # The guard rejects future epochs and decides snapshot persistence; it must
-    # run on every request and is cheap relative to the bundle build.
-    persist_snapshot = await _allocation_epoch_guard_and_persistence(
-        config, int(epoch), x_leadpoet_internal_key
-    )
+    return config
+
+
+async def _get_research_lab_attested_allocation_handoff(
+    *,
+    config: ResearchLabGatewayConfig,
+    epoch: int,
+    persist_snapshot: bool,
+) -> dict[str, Any]:
+    """Load or build one allocation handoff after persistence authorization."""
+
     cached_handoff = _allocation_handoff_cache_get(
         int(epoch),
         persist_snapshot,
     )
     if cached_handoff is not None:
-        return await _allocation_handoff_response(cached_handoff, accept_encoding)
+        return cached_handoff
     # Warm-start after a process restart: the memory cache is wiped by every
     # gateway restart, and a restart between the block-180 prewarm and the
     # block-300 submission used to force a full cold rebuild (receipt-ancestry
@@ -3285,9 +3306,15 @@ async def get_research_lab_attested_allocation(
                 persist_snapshot,
                 disk_handoff,
             )
-            return await _allocation_handoff_response(
-                disk_handoff, accept_encoding
-            )
+            return disk_handoff
+    # A concurrent persisted build can finish while this request yields to the
+    # disk-cache lookup. Recheck memory before creating a second cold build.
+    cached_handoff = _allocation_handoff_cache_get(
+        int(epoch),
+        persist_snapshot,
+    )
+    if cached_handoff is not None:
+        return cached_handoff
     # Shield the complete build-and-cache task from client disconnects. The
     # previous lock only serialized live requests: when a validator timed out,
     # request cancellation released the lock before the finished authority
@@ -3299,7 +3326,51 @@ async def get_research_lab_attested_allocation(
             persist_snapshot=persist_snapshot,
         )
     )
-    return await _allocation_handoff_response(built_handoff, accept_encoding)
+    return built_handoff
+
+
+async def _get_research_lab_attested_allocation_for_resolved_current_epoch(
+    *,
+    epoch: int,
+    current_epoch: int,
+    internal_key: str,
+) -> dict[str, Any]:
+    """Build the pre-launch handoff using an exact epoch resolved by maintenance."""
+
+    config = _research_lab_attested_allocation_config()
+    persist_snapshot = _allocation_persistence_for_known_current_epoch(
+        config=config,
+        current_epoch=int(current_epoch),
+        requested_epoch=int(epoch),
+        internal_key=internal_key,
+    )
+    return await _get_research_lab_attested_allocation_handoff(
+        config=config,
+        epoch=int(epoch),
+        persist_snapshot=persist_snapshot,
+    )
+
+
+@router.get("/allocations/attested/{epoch}")
+async def get_research_lab_attested_allocation(
+    epoch: int,
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+    accept_encoding: Optional[str] = Header(default=None),
+):
+    """Return the unchanged live allocation plus its enclave-signed sidecar."""
+
+    config = _research_lab_attested_allocation_config()
+    # The guard rejects future epochs and decides snapshot persistence; it must
+    # run on every request and is cheap relative to the bundle build.
+    persist_snapshot = await _allocation_epoch_guard_and_persistence(
+        config, int(epoch), x_leadpoet_internal_key
+    )
+    handoff = await _get_research_lab_attested_allocation_handoff(
+        config=config,
+        epoch=int(epoch),
+        persist_snapshot=persist_snapshot,
+    )
+    return await _allocation_handoff_response(handoff, accept_encoding)
 
 
 async def _build_and_cache_attested_allocation(

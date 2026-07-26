@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import copy
+import threading
 
 import pytest
 
 from gateway.research_lab import champion_settlement_v2 as settlement
+from gateway.research_lab import attested_v2_store, store
 from leadpoet_canonical.attested_v2 import sha256_json
 
 
@@ -22,6 +25,59 @@ def _allocation(*, paid: float = 5.0) -> dict:
         "queued_champion_allocations": [],
     }
     return {**payload, "allocation_hash": sha256_json(payload)}
+
+
+@pytest.mark.asyncio
+async def test_finalized_history_validation_does_not_block_event_loop(
+    monkeypatch,
+):
+    started = threading.Event()
+    release = threading.Event()
+
+    async def select_all(*_args, **_kwargs):
+        return []
+
+    async def load_graphs(_roots):
+        return {}
+
+    def validate_native(_rows, *, finalization_graphs):
+        assert finalization_graphs == {}
+        started.set()
+        assert release.wait(timeout=2)
+        return []
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_receipt_graphs_v2",
+        load_graphs,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_finalized_allocation_authorities_v2",
+        validate_native,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_legacy_settlement_migrations_v2",
+        lambda _rows, *, receipt_graphs: [],
+    )
+
+    task = asyncio.create_task(
+        settlement.load_finalized_allocation_history_v2(
+            netuid=71,
+            start_epoch=1,
+            end_epoch=2,
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    try:
+        await asyncio.wait_for(asyncio.sleep(0), timeout=0.2)
+        assert task.done() is False
+    finally:
+        release.set()
+
+    assert await asyncio.wait_for(task, timeout=1) == []
 
 
 def test_legacy_classification_detects_source_add_payments():

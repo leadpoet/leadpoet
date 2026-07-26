@@ -11,10 +11,12 @@ failures are not cached, the guard runs on every request, and the cache expires.
 """
 
 import asyncio
+import threading
 import time
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from gateway.research_lab import api
 from leadpoet_canonical.constants import EPOCH_LENGTH
@@ -27,6 +29,17 @@ def _config():
         shadow_bundles_enabled=True,
         reimbursements_enabled=False,
         weight_mutation_enabled=False,
+    )
+
+
+def _live_config():
+    return SimpleNamespace(
+        api_enabled=True,
+        reports_enabled=True,
+        shadow_bundles_enabled=True,
+        reimbursements_enabled=True,
+        weight_mutation_enabled=False,
+        internal_api_key="validator-secret",
     )
 
 
@@ -74,6 +87,121 @@ def _matched_build(counter, *, delay=0.0):
         return {"bundle_type": "live", "epoch": kwargs["epoch"]}
 
     return build
+
+
+@pytest.mark.asyncio
+async def test_prelaunch_current_epoch_build_persists_without_gateway_chain_client(
+    monkeypatch,
+):
+    observed = []
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        _live_config,
+    )
+
+    async def handoff(*, config, epoch, persist_snapshot):
+        observed.append((config, epoch, persist_snapshot))
+        return {"handoff_for": epoch}
+
+    async def unexpected_guard(*_args, **_kwargs):
+        raise AssertionError("pre-resolved maintenance must not use gateway lifespan state")
+
+    monkeypatch.setattr(
+        api,
+        "_get_research_lab_attested_allocation_handoff",
+        handoff,
+    )
+    monkeypatch.setattr(
+        api,
+        "_allocation_epoch_guard_and_persistence",
+        unexpected_guard,
+    )
+
+    result = await (
+        api._get_research_lab_attested_allocation_for_resolved_current_epoch(
+            epoch=24177,
+            current_epoch=24177,
+            internal_key="validator-secret",
+        )
+    )
+
+    assert result == {"handoff_for": 24177}
+    assert observed == [(_live_config(), 24177, True)]
+
+
+@pytest.mark.asyncio
+async def test_prelaunch_resolved_epoch_keeps_historical_build_read_only(
+    monkeypatch,
+):
+    observed = []
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        _live_config,
+    )
+
+    async def handoff(*, config, epoch, persist_snapshot):
+        observed.append((config, epoch, persist_snapshot))
+        return {"handoff_for": epoch}
+
+    monkeypatch.setattr(
+        api,
+        "_get_research_lab_attested_allocation_handoff",
+        handoff,
+    )
+
+    result = await (
+        api._get_research_lab_attested_allocation_for_resolved_current_epoch(
+            epoch=24176,
+            current_epoch=24177,
+            internal_key="validator-secret",
+        )
+    )
+
+    assert result == {"handoff_for": 24176}
+    assert observed == [(_live_config(), 24176, False)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("epoch", "internal_key", "status_code"),
+    (
+        (24178, "validator-secret", 422),
+        (24177, "wrong-secret", 401),
+    ),
+)
+async def test_prelaunch_resolved_epoch_rejects_unsafe_persistence(
+    monkeypatch,
+    epoch,
+    internal_key,
+    status_code,
+):
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        _live_config,
+    )
+
+    async def unexpected_handoff(**_kwargs):
+        raise AssertionError("rejected persistence must not build a handoff")
+
+    monkeypatch.setattr(
+        api,
+        "_get_research_lab_attested_allocation_handoff",
+        unexpected_handoff,
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        await (
+            api._get_research_lab_attested_allocation_for_resolved_current_epoch(
+                epoch=epoch,
+                current_epoch=24177,
+                internal_key=internal_key,
+            )
+        )
+
+    assert getattr(caught.value, "status_code", None) == status_code
 
 
 @pytest.mark.asyncio
@@ -265,6 +393,10 @@ async def test_anonymous_request_joins_inflight_persisted_build(monkeypatch):
     counter = {"n": 0}
     started = asyncio.Event()
     release = asyncio.Event()
+    disk_lookup_started = threading.Event()
+    release_disk_lookup = threading.Event()
+    disk_lookup_count = 0
+    disk_lookup_lock = threading.Lock()
 
     async def build(**kwargs):
         assert kwargs["persist_snapshot"] is True
@@ -276,7 +408,23 @@ async def test_anonymous_request_joins_inflight_persisted_build(monkeypatch):
     async def guard(config, epoch, key):
         return key == "validator-key"
 
+    def load_handoff(*_args, **_kwargs):
+        nonlocal disk_lookup_count
+        with disk_lookup_lock:
+            disk_lookup_count += 1
+            lookup_ordinal = disk_lookup_count
+        if lookup_ordinal == 1:
+            return None
+        disk_lookup_started.set()
+        assert release_disk_lookup.wait(timeout=2)
+        return None
+
     _install(monkeypatch, build=build, guard=guard)
+    monkeypatch.setattr(
+        api.allocation_handoff_disk_cache,
+        "load_handoff",
+        load_handoff,
+    )
 
     authenticated = asyncio.create_task(
         api.get_research_lab_attested_allocation(
@@ -288,13 +436,13 @@ async def test_anonymous_request_joins_inflight_persisted_build(monkeypatch):
     anonymous = asyncio.create_task(
         api.get_research_lab_attested_allocation(12)
     )
-    await asyncio.sleep(0)
+    assert await asyncio.to_thread(disk_lookup_started.wait, 2)
     release.set()
+    await authenticated
+    release_disk_lookup.set()
 
-    authenticated_result, anonymous_result = await asyncio.gather(
-        authenticated,
-        anonymous,
-    )
+    authenticated_result = authenticated.result()
+    anonymous_result = await anonymous
 
     assert authenticated_result == anonymous_result == {"handoff_for": 12}
     assert counter["n"] == 1

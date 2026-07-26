@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import builtins
+from contextlib import asynccontextmanager
+import fcntl
 import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -288,6 +292,11 @@ async def test_identical_measured_inputs_register_current_commit_without_rebuild
     monkeypatch.setattr(pcr0_builder, "_pcr0_cache", existing_cache)
     monkeypatch.setattr(pcr0_builder, "_last_content_hash", None)
     monkeypatch.setattr(pcr0_builder, "_build_in_progress", False)
+    monkeypatch.setattr(
+        pcr0_builder,
+        "DOCKER_OPERATION_LOCK_FILE",
+        str(repo_copy.parent / "docker-operation.lock"),
+    )
 
     await pcr0_builder.check_and_build_pcr0()
 
@@ -300,3 +309,250 @@ async def test_identical_measured_inputs_register_current_commit_without_rebuild
         "9" * 96,
         expected_commit=current_commit,
     )["valid"] is True
+
+
+@pytest.mark.asyncio
+async def test_pcr0_builder_waits_for_shared_docker_operation_lock(
+    tmp_path,
+    monkeypatch,
+):
+    lock_path = tmp_path / "docker-operation.lock"
+    monkeypatch.setattr(
+        pcr0_builder,
+        "DOCKER_OPERATION_LOCK_FILE",
+        str(lock_path),
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS",
+        2,
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "DOCKER_OPERATION_LOCK_POLL_SECONDS",
+        0.01,
+    )
+
+    owner_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(owner_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    entered = asyncio.Event()
+
+    async def contend():
+        async with pcr0_builder._docker_operation_lock_scope():
+            entered.set()
+
+    task = asyncio.create_task(contend())
+    await asyncio.sleep(0.05)
+    assert entered.is_set() is False
+
+    fcntl.flock(owner_fd, fcntl.LOCK_UN)
+    os.close(owner_fd)
+    await asyncio.wait_for(task, timeout=1)
+    assert entered.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_pcr0_builder_releases_waiting_lock_on_cancellation(
+    tmp_path,
+    monkeypatch,
+):
+    lock_path = tmp_path / "docker-operation.lock"
+    monkeypatch.setattr(
+        pcr0_builder,
+        "DOCKER_OPERATION_LOCK_FILE",
+        str(lock_path),
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS",
+        2,
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "DOCKER_OPERATION_LOCK_POLL_SECONDS",
+        0.01,
+    )
+
+    entered = asyncio.Event()
+    never = asyncio.Event()
+
+    async def hold_lock():
+        async with pcr0_builder._docker_operation_lock_scope():
+            entered.set()
+            await never.wait()
+
+    task = asyncio.create_task(hold_lock())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    probe_fd = os.open(lock_path, os.O_RDWR)
+    try:
+        fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        fcntl.flock(probe_fd, fcntl.LOCK_UN)
+        os.close(probe_fd)
+
+
+@pytest.mark.asyncio
+async def test_sync_build_step_does_not_block_gateway_event_loop():
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_step():
+        started.set()
+        assert release.wait(timeout=2)
+        return "complete"
+
+    task = asyncio.create_task(
+        pcr0_builder._run_sync_build_step_to_completion(blocking_step)
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+
+    loop_progressed = False
+
+    async def mark_progress():
+        nonlocal loop_progressed
+        await asyncio.sleep(0)
+        loop_progressed = True
+
+    await asyncio.wait_for(mark_progress(), timeout=0.2)
+    assert loop_progressed is True
+    assert task.done() is False
+
+    release.set()
+    assert await asyncio.wait_for(task, timeout=1) == "complete"
+
+
+@pytest.mark.asyncio
+async def test_sync_build_step_finishes_before_cancellation_releases_build_lock():
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_step():
+        started.set()
+        assert release.wait(timeout=2)
+        finished.set()
+
+    task = asyncio.create_task(
+        pcr0_builder._run_sync_build_step_to_completion(blocking_step)
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert task.done() is False
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+    assert finished.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_build_subprocess_finishes_before_cancellation_releases_build_lock():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    class Process:
+        async def communicate(self):
+            started.set()
+            await release.wait()
+            finished.set()
+            return b"stdout", b"stderr"
+
+    task = asyncio.create_task(
+        pcr0_builder._communicate_build_process_to_completion(Process())
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert task.done() is False
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+    assert finished.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_current_pcr0_build_holds_docker_operation_lock(
+    repo_copy,
+    monkeypatch,
+):
+    lock_held = False
+    commit = "f" * 40
+
+    @asynccontextmanager
+    async def operation_lock():
+        nonlocal lock_held
+        assert lock_held is False
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+
+    async def prepare_base(_repo):
+        assert lock_held is True
+        return True
+
+    async def build_enclave(_repo):
+        assert lock_held is True
+        return "9" * 96
+
+    monkeypatch.setattr(pcr0_builder, "BUILD_DIR", str(repo_copy))
+    monkeypatch.setattr(
+        pcr0_builder,
+        "clone_or_update_repo",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "compute_files_content_hash",
+        lambda _repo: "current-content",
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "get_latest_commits",
+        AsyncMock(
+            return_value=[
+                {
+                    "hash": commit,
+                    "timestamp": "2",
+                    "message": "current",
+                    "date": "",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "_docker_operation_lock_scope",
+        operation_lock,
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "ensure_base_image_exists",
+        prepare_base,
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "build_pcr0_cache_key",
+        lambda _content_hash, _repo: "current-key",
+    )
+    monkeypatch.setattr(
+        pcr0_builder,
+        "build_enclave_and_extract_pcr0",
+        build_enclave,
+    )
+    monkeypatch.setattr(pcr0_builder, "_pcr0_cache", {})
+    monkeypatch.setattr(pcr0_builder, "_last_content_hash", None)
+    monkeypatch.setattr(pcr0_builder, "_build_in_progress", False)
+
+    await pcr0_builder.check_and_build_pcr0()
+
+    assert lock_held is False
+    assert pcr0_builder._pcr0_cache["current-key"]["pcr0"] == "9" * 96

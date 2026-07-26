@@ -145,11 +145,25 @@ async def verify_weight_submission_ready_v2(
         backfill_champion_reward_v2_authority,
         backfill_champion_settlement_v2_authority,
         backfill_source_add_reward_v2_authority,
-        champion_v2_cutover_readiness_report,
     )
 
     effective_epoch = await _resolve_maintenance_epoch(epoch)
     effective_netuid = int(netuid) if netuid is not None else int(BITTENSOR_NETUID)
+    direct_repair_internal_key: str | None = None
+    direct_repair_current_epoch: int | None = None
+    if repair and not gateway_url:
+        direct_repair_internal_key = os.getenv(
+            "RESEARCH_LAB_INTERNAL_API_KEY", ""
+        ).strip()
+        if not direct_repair_internal_key:
+            raise WeightSubmissionReadinessV2Error(
+                "Research Lab internal API key is not configured"
+            )
+        direct_repair_current_epoch = (
+            int(effective_epoch)
+            if epoch is None
+            else int(await _resolve_maintenance_epoch(None))
+        )
     repairs: dict[str, Any] = {}
     if repair:
         source_reward_result = await backfill_source_add_reward_v2_authority(
@@ -194,31 +208,10 @@ async def verify_weight_submission_ready_v2(
             ),
         }
 
-    readiness = await champion_v2_cutover_readiness_report(
-        epoch=effective_epoch,
-        netuid=effective_netuid,
-    )
-    missing_classifications = (
-        readiness.get("missing_historical_classifications")
-        or readiness.get("missing_historical_settlements")
-        or ()
-    )
-    if (
-        readiness.get("ready") is not True
-        or float(readiness.get("receipt_coverage") or 0.0) != 1.0
-        or float(
-            readiness.get("historical_classification_coverage")
-            or readiness.get("historical_settlement_coverage")
-            or 0.0
-        )
-        != 1.0
-    ):
-        raise WeightSubmissionReadinessV2Error(
-            "champion V2 authority remains incomplete: "
-            f"obligations={len(readiness.get('missing') or ())}, "
-            f"historical_allocations={len(missing_classifications)}"
-        )
-
+    # The allocation builder below owns the same 100%-coverage cutover gate
+    # and returns no handoff unless it passes. Running the standalone report
+    # here repeated the complete growing history scan immediately before that
+    # authoritative build.
     if gateway_url:
         from research_lab.validator_integration import (
             fetch_research_lab_attested_allocation_bundle,
@@ -258,6 +251,7 @@ async def verify_weight_submission_ready_v2(
                 await asyncio.sleep(float(http_retry_seconds))
     else:
         from gateway.research_lab.api import (
+            _get_research_lab_attested_allocation_for_resolved_current_epoch,
             get_research_lab_attested_allocation,
         )
 
@@ -267,10 +261,19 @@ async def verify_weight_submission_ready_v2(
             raise ValueError("http_retry_seconds must be non-negative")
         for attempt in range(1, int(http_attempts) + 1):
             try:
-                handoff = await get_research_lab_attested_allocation(
-                    effective_epoch,
-                    x_leadpoet_internal_key=None,
-                )
+                if direct_repair_internal_key is not None:
+                    handoff = await (
+                        _get_research_lab_attested_allocation_for_resolved_current_epoch(
+                            epoch=effective_epoch,
+                            current_epoch=int(direct_repair_current_epoch),
+                            internal_key=direct_repair_internal_key,
+                        )
+                    )
+                else:
+                    handoff = await get_research_lab_attested_allocation(
+                        effective_epoch,
+                        x_leadpoet_internal_key=None,
+                    )
                 break
             except Exception as exc:
                 if (

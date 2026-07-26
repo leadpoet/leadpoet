@@ -58,6 +58,9 @@ def test_attestation_builds_share_the_same_host_docker_lock() -> None:
     gateway_build = (
         ROOT / "gateway" / "tee" / "build_role_enclaves.sh"
     ).read_text(encoding="utf-8")
+    pcr0_builder = (
+        ROOT / "gateway" / "utils" / "pcr0_builder.py"
+    ).read_text(encoding="utf-8")
 
     assert workflow.count(
         ". validator_tee/scripts/docker_operation_lock_v2.sh"
@@ -70,3 +73,10 @@ def test_attestation_builds_share_the_same_host_docker_lock() -> None:
     assert "docker_operation_guard_v2" in reclaim
     assert "leadpoet_acquire_docker_operation_lock_v2" in validator_build
     assert "leadpoet_acquire_docker_operation_lock_v2" in gateway_build
+    assert (
+        "/home/ec2-user/.config/leadpoet/docker-operation-v2.lock"
+        in pcr0_builder
+    )
+    assert pcr0_builder.count(
+        "async with _docker_operation_lock_scope()"
+    ) == 2

@@ -75,10 +75,37 @@ async def test_storage_read_preflight_exercises_full_authority_read_without_repa
 
 
 @pytest.mark.asyncio
+async def test_weight_readiness_repair_requires_internal_key_before_writes(
+    monkeypatch,
+):
+    monkeypatch.delenv("RESEARCH_LAB_INTERNAL_API_KEY", raising=False)
+
+    async def resolve(_epoch):
+        return 24032
+
+    async def unexpected_write(**_kwargs):
+        raise AssertionError("repair writes must not run without authentication")
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        maintenance,
+        "backfill_source_add_reward_v2_authority",
+        unexpected_write,
+    )
+
+    with pytest.raises(
+        readiness.WeightSubmissionReadinessV2Error,
+        match="internal API key is not configured",
+    ):
+        await readiness.verify_weight_submission_ready_v2(repair=True)
+
+
+@pytest.mark.asyncio
 async def test_weight_readiness_repairs_then_validates_exact_handoff(
     monkeypatch,
 ):
     calls = []
+    monkeypatch.setenv("RESEARCH_LAB_INTERNAL_API_KEY", "validator-secret")
 
     async def resolve(epoch):
         assert epoch is None
@@ -96,21 +123,19 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
         calls.append(("settlements", kwargs))
         return {"ok": True, "classified_count": 149}
 
-    async def report(**kwargs):
-        calls.append(("readiness", kwargs))
-        return {
-            "ready": True,
-            "receipt_coverage": 1.0,
-            "historical_classification_coverage": 1.0,
-        }
+    async def unexpected_report(**_kwargs):
+        raise AssertionError(
+            "the authoritative allocation build owns the cutover gate"
+        )
 
-    async def handoff(epoch, x_leadpoet_internal_key):
+    async def handoff(*, epoch, current_epoch, internal_key):
         calls.append(
             (
                 "handoff",
                 {
                     "epoch": epoch,
-                    "internal_key": x_leadpoet_internal_key,
+                    "current_epoch": current_epoch,
+                    "internal_key": internal_key,
                 },
             )
         )
@@ -135,9 +160,13 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
     monkeypatch.setattr(
         maintenance,
         "champion_v2_cutover_readiness_report",
-        report,
+        unexpected_report,
     )
-    monkeypatch.setattr(api, "get_research_lab_attested_allocation", handoff)
+    monkeypatch.setattr(
+        api,
+        "_get_research_lab_attested_allocation_for_resolved_current_epoch",
+        handoff,
+    )
     monkeypatch.setattr(
         readiness,
         "_validate_handoff",
@@ -157,7 +186,6 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
         "source_rewards",
         "rewards",
         "settlements",
-        "readiness",
         "handoff",
     ]
     assert calls[0][1] == {
@@ -176,11 +204,17 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
         "limit": 10000,
         "dry_run": False,
     }
+    assert calls[3][1] == {
+        "epoch": 24032,
+        "current_epoch": 24032,
+        "internal_key": "validator-secret",
+    }
 
 
 @pytest.mark.asyncio
 async def test_weight_readiness_accepts_already_covered_reward(monkeypatch):
     calls = []
+    monkeypatch.setenv("RESEARCH_LAB_INTERNAL_API_KEY", "validator-secret")
 
     async def resolve(_epoch):
         return 24036
@@ -205,16 +239,14 @@ async def test_weight_readiness_accepts_already_covered_reward(monkeypatch):
         calls.append("settlements")
         return {"ok": True, "classified_count": 0}
 
-    async def report(**_kwargs):
-        calls.append("readiness")
-        return {
-            "ready": True,
-            "receipt_coverage": 1.0,
-            "historical_classification_coverage": 1.0,
-        }
+    async def unexpected_report(**_kwargs):
+        raise AssertionError(
+            "the authoritative allocation build owns the cutover gate"
+        )
 
-    async def handoff(_epoch, x_leadpoet_internal_key):
-        assert x_leadpoet_internal_key is None
+    async def handoff(*, epoch, current_epoch, internal_key):
+        assert epoch == current_epoch == 24036
+        assert internal_key == "validator-secret"
         calls.append("handoff")
         return {"handoff": True}
 
@@ -237,9 +269,13 @@ async def test_weight_readiness_accepts_already_covered_reward(monkeypatch):
     monkeypatch.setattr(
         maintenance,
         "champion_v2_cutover_readiness_report",
-        report,
+        unexpected_report,
     )
-    monkeypatch.setattr(api, "get_research_lab_attested_allocation", handoff)
+    monkeypatch.setattr(
+        api,
+        "_get_research_lab_attested_allocation_for_resolved_current_epoch",
+        handoff,
+    )
     monkeypatch.setattr(
         readiness,
         "_validate_handoff",
@@ -258,46 +294,41 @@ async def test_weight_readiness_accepts_already_covered_reward(monkeypatch):
         "source_rewards",
         "rewards",
         "settlements",
-        "readiness",
         "handoff",
     ]
 
 
 @pytest.mark.asyncio
-async def test_weight_readiness_fails_before_handoff_when_authority_incomplete(
+async def test_weight_readiness_fails_closed_when_allocation_authority_incomplete(
     monkeypatch,
 ):
     async def resolve(epoch):
         return 24032
 
-    async def report(**_kwargs):
-        return {
-            "ready": False,
-            "receipt_coverage": 0.0,
-            "historical_classification_coverage": 0.0,
-            "missing": [{"champion_reward_id": "missing"}],
-            "missing_historical_classifications": [{"epoch": 24031}],
-        }
+    async def unexpected_report(**_kwargs):
+        raise AssertionError(
+            "the authoritative allocation build owns the cutover gate"
+        )
 
-    async def unexpected_handoff(*_args, **_kwargs):
-        raise AssertionError("handoff must not run")
+    async def blocked_handoff(*_args, **_kwargs):
+        raise RuntimeError(
+            "champion V2 cutover blocked: 1 obligations and 1 historical "
+            "allocations lack authoritative classifications"
+        )
 
     monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
     monkeypatch.setattr(
         maintenance,
         "champion_v2_cutover_readiness_report",
-        report,
+        unexpected_report,
     )
     monkeypatch.setattr(
         api,
         "get_research_lab_attested_allocation",
-        unexpected_handoff,
+        blocked_handoff,
     )
 
-    with pytest.raises(
-        readiness.WeightSubmissionReadinessV2Error,
-        match="obligations=1, historical_allocations=1",
-    ):
+    with pytest.raises(RuntimeError, match="champion V2 cutover blocked"):
         await readiness.verify_weight_submission_ready_v2(repair=False)
 
 
@@ -310,12 +341,10 @@ async def test_weight_readiness_http_mode_uses_validator_attested_fetch(
     async def resolve(epoch):
         return 24032
 
-    async def report(**_kwargs):
-        return {
-            "ready": True,
-            "receipt_coverage": 1.0,
-            "historical_classification_coverage": 1.0,
-        }
+    async def unexpected_report(**_kwargs):
+        raise AssertionError(
+            "HTTP readiness must trust only the validated gateway handoff"
+        )
 
     def fetch(gateway_url, epoch, *, timeout_seconds):
         fetched.append((gateway_url, epoch, timeout_seconds))
@@ -325,7 +354,7 @@ async def test_weight_readiness_http_mode_uses_validator_attested_fetch(
     monkeypatch.setattr(
         maintenance,
         "champion_v2_cutover_readiness_report",
-        report,
+        unexpected_report,
     )
     monkeypatch.setattr(
         validator_integration,

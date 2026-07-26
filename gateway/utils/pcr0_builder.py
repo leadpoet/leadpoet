@@ -34,6 +34,7 @@ MONITORED FILES (changes trigger rebuild):
 
 import asyncio
 from contextlib import asynccontextmanager
+import fcntl
 import hashlib
 import json
 import logging
@@ -90,6 +91,18 @@ PCR0_STARTUP_HISTORICAL_WARM_ENABLED = os.environ.get(
     "PCR0_STARTUP_HISTORICAL_WARM_ENABLED",
     "true",
 ).lower() in {"1", "true", "yes", "y", "on"}
+
+DOCKER_OPERATION_LOCK_FILE = os.path.expanduser(
+    os.environ.get(
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE",
+        "/home/ec2-user/.config/leadpoet/docker-operation-v2.lock",
+    )
+)
+DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS = max(
+    1,
+    int(os.environ.get("LEADPOET_DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS", "3600")),
+)
+DOCKER_OPERATION_LOCK_POLL_SECONDS = 0.25
 
 # NOTE: No TTL needed with pinned Dockerfile!
 # With pinned base image + pinned pip versions, builds are DETERMINISTIC.
@@ -218,6 +231,78 @@ async def _cache_lock_scope():
 _build_in_progress = False
 
 
+@asynccontextmanager
+async def _docker_operation_lock_scope():
+    """Coordinate background PCR0 builds with release and restart Docker work."""
+
+    parent = os.path.dirname(DOCKER_OPERATION_LOCK_FILE) or "."
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    os.chmod(parent, 0o700)
+    fd = os.open(
+        DOCKER_OPERATION_LOCK_FILE,
+        os.O_CREAT | os.O_RDWR,
+        0o600,
+    )
+    os.chmod(DOCKER_OPERATION_LOCK_FILE, 0o600)
+    acquired = False
+    deadline = time.monotonic() + DOCKER_OPERATION_LOCK_TIMEOUT_SECONDS
+    try:
+        logger.info(
+            "[PCR0] Waiting for exclusive Docker build/maintenance access: %s",
+            DOCKER_OPERATION_LOCK_FILE,
+        )
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "timed out waiting for exclusive Docker "
+                        "build/maintenance access"
+                    )
+                await asyncio.sleep(
+                    min(DOCKER_OPERATION_LOCK_POLL_SECONDS, remaining)
+                )
+        logger.info("[PCR0] Exclusive Docker build/maintenance access acquired")
+        yield
+    finally:
+        if acquired:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            logger.info("[PCR0] Exclusive Docker build/maintenance access released")
+        os.close(fd)
+
+
+async def _run_sync_build_step_to_completion(function, *args):
+    """Keep a synchronous build step off-loop without abandoning it on cancel."""
+
+    task = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        except Exception:
+            logger.exception("[PCR0] Synchronous build step failed during shutdown")
+        raise
+
+
+async def _communicate_build_process_to_completion(process):
+    """Do not release the Docker-operation lock while a child is still active."""
+
+    task = asyncio.create_task(process.communicate())
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        except Exception:
+            logger.exception("[PCR0] Build subprocess failed during shutdown")
+        raise
+
+
 def get_cached_pcr0_values() -> List[str]:
     """Get all cached PCR0 values (for verification)."""
     return [entry["pcr0"] for entry in _pcr0_cache.values()]
@@ -295,6 +380,7 @@ def get_cache_status() -> Dict:
         "cache_size": len(_pcr0_cache),
         "startup_warm_delay_seconds": 15,
         "startup_historical_warm_enabled": PCR0_STARTUP_HISTORICAL_WARM_ENABLED,
+        "docker_operation_lock_file": DOCKER_OPERATION_LOCK_FILE,
     }
 
 
@@ -816,7 +902,7 @@ async def inspect_base_image_id() -> Optional[str]:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, _stderr = await proc.communicate()
+    stdout, _stderr = await _communicate_build_process_to_completion(proc)
     if proc.returncode != 0:
         return None
     return stdout.decode().strip() or None
@@ -883,7 +969,7 @@ async def ensure_base_image_exists(repo_dir: str) -> bool:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        await proc.communicate()
+        await _communicate_build_process_to_completion(proc)
         # Ignore errors - image might be in use, but we'll build a new one anyway
     
     # Build base image with the same command shape used by the validator script.
@@ -901,7 +987,7 @@ async def ensure_base_image_exists(repo_dir: str) -> bool:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    stdout, stderr = await _communicate_build_process_to_completion(proc)
     
     if proc.returncode != 0:
         logger.error(f"[PCR0] Failed to build base image: {stderr.decode()[-500:]}")
@@ -970,7 +1056,9 @@ async def _stage_validator_v2_artifacts(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _artifact_stdout, artifact_stderr = await proc.communicate()
+    _artifact_stdout, artifact_stderr = (
+        await _communicate_build_process_to_completion(proc)
+    )
     if proc.returncode != 0:
         logger.error(
             "[PCR0] Failed to stage validator V2 artifacts: %s",
@@ -991,7 +1079,9 @@ async def _stage_validator_v2_artifacts(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _drand_stdout, drand_stderr = await proc.communicate()
+    _drand_stdout, drand_stderr = (
+        await _communicate_build_process_to_completion(proc)
+    )
     if proc.returncode != 0:
         logger.error(
             "[PCR0] Failed to build validator drand C ABI: %s",
@@ -1028,7 +1118,7 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        await proc.communicate()
+        await _communicate_build_process_to_completion(proc)
 
         artifact_dir = os.path.join(repo_dir, ".validator-tee-artifacts")
         try:
@@ -1137,7 +1227,7 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await _communicate_build_process_to_completion(proc)
         
         if proc.returncode != 0:
             logger.error(f"[PCR0] Docker build failed: {stderr.decode()[-500:]}")
@@ -1146,7 +1236,11 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
         # Step 2: NORMALIZE the image for reproducible PCR0
         # This ensures identical PCR0 regardless of when image was built
         logger.info("[PCR0] Normalizing image timestamps for reproducibility...")
-        if not normalize_docker_image(docker_image, normalized_image):
+        if not await _run_sync_build_step_to_completion(
+            normalize_docker_image,
+            docker_image,
+            normalized_image,
+        ):
             logger.error("[PCR0] Failed to normalize Docker image")
             return None
         
@@ -1160,7 +1254,7 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await _communicate_build_process_to_completion(proc)
         
         if proc.returncode != 0:
             logger.error(f"[PCR0] nitro-cli build failed: {stderr.decode()[-500:]}")
@@ -1192,7 +1286,7 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                await proc.communicate()
+                await _communicate_build_process_to_completion(proc)
             except Exception:
                 pass
         
@@ -1333,69 +1427,95 @@ async def check_and_build_pcr0():
             logger.error("[PCR0] Failed to compute content hash")
             return
 
-        if not await ensure_base_image_exists(repo_dir):
-            logger.error("[PCR0] Failed to prepare base image")
-            return
-
-        cache_key = build_pcr0_cache_key(content_hash, repo_dir)
-
         commits = await get_latest_commits(repo_dir, 1)
         commit_hash = commits[0]["hash"] if commits else "unknown"
         commit_timestamp = commits[0].get("timestamp", "") if commits else ""
-        
-        # An identical cache key proves that this commit has the same complete
-        # measured inputs. Record the commit alias without rebuilding so exact
-        # commit verification cannot depend on which equivalent commit was seen
-        # first.
-        if cache_key in _pcr0_cache:
-            alias_added = _register_commit_alias(
-                _pcr0_cache[cache_key],
-                commit_hash,
-                commit_timestamp,
-            )
-            logger.info(f"[PCR0] Cache key {cache_key} already cached, skipping build")
-            print(f"[PCR0] Cache key {cache_key} already cached, skipping build")
-            if alias_added:
-                logger.info(
-                    "[PCR0] Registered equivalent measured-input commit %s for cache key %s",
-                    commit_hash[:8],
-                    cache_key,
+
+        # The release workflow and both restart launchers use this same lock.
+        # Hold it across every Docker/Nitro operation so background cache
+        # warming cannot contend with attestation or destructive maintenance.
+        async with _docker_operation_lock_scope():
+            if not await ensure_base_image_exists(repo_dir):
+                logger.error("[PCR0] Failed to prepare base image")
+                return
+
+            cache_key = build_pcr0_cache_key(content_hash, repo_dir)
+
+            # An identical cache key proves that this commit has the same complete
+            # measured inputs. Record the commit alias without rebuilding so exact
+            # commit verification cannot depend on which equivalent commit was seen
+            # first.
+            if cache_key in _pcr0_cache:
+                alias_added = _register_commit_alias(
+                    _pcr0_cache[cache_key],
+                    commit_hash,
+                    commit_timestamp,
                 )
-            _last_content_hash = content_hash
-            return
-        
-        # If we get here, content hash is not in cache - need to build
-        print(f"[PCR0] New content detected! Hash: {content_hash} (previous: {_last_content_hash})")
-        logger.info(f"[PCR0] New content detected - building PCR0...")
-        print(f"[PCR0] Building PCR0 for content hash {content_hash}...")
-        
-        # Build PCR0 for current content
-        async with _cache_lock_scope():
-            logger.info(f"[PCR0] Building enclave for content hash {content_hash} (commit {commit_hash[:8]})...")
-            
-            pcr0 = await build_enclave_and_extract_pcr0(repo_dir)
-            
-            if pcr0:
-                # Store keyed by source content plus base image identity. The
-                # Dockerfile.base hash alone is not enough because the base
-                # layer can be rebuilt to a different image ID from the same
-                # source; that changes PCR0.
-                _pcr0_cache[cache_key] = {
-                    "pcr0": pcr0,
-                    "content_hash": content_hash,
-                    "cache_key": cache_key,
-                    "base_image_stamp": format_base_image_stamp(repo_dir),
-                    "commit_hash": commit_hash,
-                    "commit_hashes": [commit_hash] if commit_hash != "unknown" else [],
-                    "commit_timestamp": commit_timestamp,
-                    "built_at": datetime.utcnow().isoformat(),
-                }
-                print(f"[PCR0] ✅ Cached PCR0 for key {cache_key}: {pcr0[:64]}...")
-                logger.info(f"[PCR0] ✅ Cached PCR0 for key {cache_key}: {pcr0[:32]}...")
-                
-                _prune_pcr0_cache()
-            else:
-                logger.error(f"[PCR0] ❌ Failed to build PCR0 for content {content_hash}")
+                logger.info(
+                    f"[PCR0] Cache key {cache_key} already cached, skipping build"
+                )
+                print(
+                    f"[PCR0] Cache key {cache_key} already cached, skipping build"
+                )
+                if alias_added:
+                    logger.info(
+                        "[PCR0] Registered equivalent measured-input commit %s "
+                        "for cache key %s",
+                        commit_hash[:8],
+                        cache_key,
+                    )
+                _last_content_hash = content_hash
+                return
+
+            # If we get here, content hash is not in cache - need to build
+            print(
+                f"[PCR0] New content detected! Hash: {content_hash} "
+                f"(previous: {_last_content_hash})"
+            )
+            logger.info("[PCR0] New content detected - building PCR0...")
+            print(f"[PCR0] Building PCR0 for content hash {content_hash}...")
+
+            # Build PCR0 for current content
+            async with _cache_lock_scope():
+                logger.info(
+                    "[PCR0] Building enclave for content hash %s (commit %s)...",
+                    content_hash,
+                    commit_hash[:8],
+                )
+
+                pcr0 = await build_enclave_and_extract_pcr0(repo_dir)
+
+                if pcr0:
+                    # Store keyed by source content plus base image identity. The
+                    # Dockerfile.base hash alone is not enough because the base
+                    # layer can be rebuilt to a different image ID from the same
+                    # source; that changes PCR0.
+                    _pcr0_cache[cache_key] = {
+                        "pcr0": pcr0,
+                        "content_hash": content_hash,
+                        "cache_key": cache_key,
+                        "base_image_stamp": format_base_image_stamp(repo_dir),
+                        "commit_hash": commit_hash,
+                        "commit_hashes": (
+                            [commit_hash] if commit_hash != "unknown" else []
+                        ),
+                        "commit_timestamp": commit_timestamp,
+                        "built_at": datetime.utcnow().isoformat(),
+                    }
+                    print(
+                        f"[PCR0] ✅ Cached PCR0 for key {cache_key}: "
+                        f"{pcr0[:64]}..."
+                    )
+                    logger.info(
+                        f"[PCR0] ✅ Cached PCR0 for key {cache_key}: "
+                        f"{pcr0[:32]}..."
+                    )
+
+                    _prune_pcr0_cache()
+                else:
+                    logger.error(
+                        f"[PCR0] ❌ Failed to build PCR0 for content {content_hash}"
+                    )
         
         _last_content_hash = content_hash
         logger.info(f"[PCR0] ✅ Cache updated. Valid PCR0s: {len(_pcr0_cache)}")
@@ -1535,51 +1655,73 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
                 logger.warning(f"[PCR0] Failed to compute content hash for {commit_hash[:8]}")
                 continue
 
-            if not await ensure_base_image_exists(repo_dir):
-                logger.warning(f"[PCR0] Failed to prepare base image for {commit_hash[:8]}")
-                continue
-
-            cache_key = build_pcr0_cache_key(content_hash, repo_dir)
-            
-            # Check if already cached
-            if cache_key in _pcr0_cache:
-                alias_added = _register_commit_alias(
-                    _pcr0_cache[cache_key],
-                    commit_hash,
-                    commit.get("timestamp", ""),
-                )
-                logger.info(f"[PCR0] Cache key {cache_key} already cached, skipping")
-                if alias_added:
-                    logger.info(
-                        "[PCR0] Registered equivalent measured-input commit %s for cache key %s",
-                        commit_hash[:8],
-                        cache_key,
+            async with _docker_operation_lock_scope():
+                if not await ensure_base_image_exists(repo_dir):
+                    logger.warning(
+                        f"[PCR0] Failed to prepare base image for {commit_hash[:8]}"
                     )
-                continue
-            
-            # Build PCR0 for this version
-            logger.info(f"[PCR0] Building PCR0 for {commit_hash[:8]} (content: {content_hash})...")
-            print(f"[PCR0] Building PCR0 for {commit_hash[:8]}...")
-            
-            pcr0 = await build_enclave_and_extract_pcr0(repo_dir)
-            
+                    continue
+
+                cache_key = build_pcr0_cache_key(content_hash, repo_dir)
+
+                # Check if already cached
+                if cache_key in _pcr0_cache:
+                    alias_added = _register_commit_alias(
+                        _pcr0_cache[cache_key],
+                        commit_hash,
+                        commit.get("timestamp", ""),
+                    )
+                    logger.info(
+                        f"[PCR0] Cache key {cache_key} already cached, skipping"
+                    )
+                    if alias_added:
+                        logger.info(
+                            "[PCR0] Registered equivalent measured-input commit "
+                            "%s for cache key %s",
+                            commit_hash[:8],
+                            cache_key,
+                        )
+                    continue
+
+                # Build PCR0 for this version
+                logger.info(
+                    f"[PCR0] Building PCR0 for {commit_hash[:8]} "
+                    f"(content: {content_hash})..."
+                )
+                print(f"[PCR0] Building PCR0 for {commit_hash[:8]}...")
+
+                pcr0 = await build_enclave_and_extract_pcr0(repo_dir)
+
+                if pcr0:
+                    async with _cache_lock_scope():
+                        _pcr0_cache[cache_key] = {
+                            "pcr0": pcr0,
+                            "content_hash": content_hash,
+                            "cache_key": cache_key,
+                            "base_image_stamp": format_base_image_stamp(repo_dir),
+                            "commit_hash": commit_hash,
+                            "commit_hashes": [commit_hash],
+                            "commit_timestamp": commit.get("timestamp", ""),
+                            "built_at": datetime.utcnow().isoformat(),
+                        }
+                    built_count += 1
+                    logger.info(
+                        f"[PCR0] ✅ Cached PCR0 for {commit_hash[:8]}: "
+                        f"{pcr0[:32]}..."
+                    )
+                    print(
+                        f"[PCR0] ✅ Cached PCR0 for {commit_hash[:8]}: "
+                        f"{pcr0[:32]}..."
+                    )
+                else:
+                    logger.warning(
+                        f"[PCR0] ❌ Failed to build PCR0 for {commit_hash[:8]}"
+                    )
+
             if pcr0:
-                async with _cache_lock_scope():
-                    _pcr0_cache[cache_key] = {
-                        "pcr0": pcr0,
-                        "content_hash": content_hash,
-                        "cache_key": cache_key,
-                        "base_image_stamp": format_base_image_stamp(repo_dir),
-                        "commit_hash": commit_hash,
-                        "commit_hashes": [commit_hash],
-                        "commit_timestamp": commit.get("timestamp", ""),
-                        "built_at": datetime.utcnow().isoformat(),
-                    }
-                built_count += 1
-                logger.info(f"[PCR0] ✅ Cached PCR0 for {commit_hash[:8]}: {pcr0[:32]}...")
-                print(f"[PCR0] ✅ Cached PCR0 for {commit_hash[:8]}: {pcr0[:32]}...")
-            else:
-                logger.warning(f"[PCR0] ❌ Failed to build PCR0 for {commit_hash[:8]}")
+                # Give a queued release or restart lock waiter an opportunity to
+                # acquire the host-wide lock before the next historical build.
+                await asyncio.sleep(1)
             
             # Stop if we have enough
             if len(_pcr0_cache) >= PCR0_CACHE_SIZE:

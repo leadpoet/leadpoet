@@ -8,6 +8,7 @@ bundle has a canonical finalized-chain submission.
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from decimal import Decimal
 import logging
@@ -601,11 +602,13 @@ async def load_finalized_allocation_history_v2(
         for root in migration_roots
         if root in loaded_graphs
     }
-    native = validate_finalized_allocation_authorities_v2(
+    native = await asyncio.to_thread(
+        validate_finalized_allocation_authorities_v2,
         native_rows,
         finalization_graphs=graphs,
     )
-    migrated = validate_legacy_settlement_migrations_v2(
+    migrated = await asyncio.to_thread(
+        validate_legacy_settlement_migrations_v2,
         legacy_rows,
         receipt_graphs=migration_graphs,
     )
@@ -647,7 +650,8 @@ async def load_legacy_allocation_nonfinalizations_v2(
         for root in roots
         if root in loaded_graphs
     }
-    return validate_legacy_allocation_nonfinalizations_v2(
+    return await asyncio.to_thread(
+        validate_legacy_allocation_nonfinalizations_v2,
         rows,
         receipt_graphs=graphs,
     )

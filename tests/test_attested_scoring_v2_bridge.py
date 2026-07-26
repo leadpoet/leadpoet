@@ -1,4 +1,6 @@
+import asyncio
 import base64
+import threading
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -9,6 +11,7 @@ from gateway.research_lab.attested_scoring_v2 import (
     _compact_parent_graphs_for_transport,
     execute_scoring_v2,
 )
+from gateway.research_lab import attested_scoring_v2
 from gateway.research_lab.attested_v2_store import (
     AttestedV2StoreError,
     _execution_result_storage_row_v2,
@@ -41,6 +44,60 @@ from leadpoet_canonical.attested_v2 import (
 
 def _hash(character):
     return "sha256:" + character * 64
+
+
+@pytest.mark.asyncio
+async def test_receipt_graph_merge_does_not_block_event_loop(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    expected = {"root_receipt_hash": _hash("a")}
+
+    def merge(**kwargs):
+        assert kwargs == {"marker": "large-graph"}
+        started.set()
+        assert release.wait(timeout=2)
+        return expected
+
+    monkeypatch.setattr(attested_scoring_v2, "_merge_graphs", merge)
+    task = asyncio.create_task(
+        attested_scoring_v2._merge_graphs_async(marker="large-graph")
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    try:
+        await asyncio.wait_for(asyncio.sleep(0), timeout=0.2)
+        assert task.done() is False
+    finally:
+        release.set()
+
+    assert await asyncio.wait_for(task, timeout=1) is expected
+
+
+@pytest.mark.asyncio
+async def test_receipt_graph_validation_does_not_block_event_loop(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+
+    def validate(graph, **kwargs):
+        assert graph == {"root_receipt_hash": _hash("b")}
+        assert kwargs == {"required_purposes": ("purpose",)}
+        started.set()
+        assert release.wait(timeout=2)
+
+    monkeypatch.setattr(attested_scoring_v2, "validate_receipt_graph", validate)
+    task = asyncio.create_task(
+        attested_scoring_v2._validate_receipt_graph_async(
+            {"root_receipt_hash": _hash("b")},
+            required_purposes=("purpose",),
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    try:
+        await asyncio.wait_for(asyncio.sleep(0), timeout=0.2)
+        assert task.done() is False
+    finally:
+        release.set()
+
+    assert await asyncio.wait_for(task, timeout=1) is None
 
 
 def test_parent_graph_transport_compaction_preserves_all_declared_roots():

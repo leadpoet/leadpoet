@@ -62,6 +62,69 @@ async def test_attested_allocation_wraps_unchanged_bundle(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_attested_allocation_warm_starts_from_exact_release_disk_cache(
+    monkeypatch,
+):
+    epoch = 24103
+    commit = "a" * 40
+    handoff = {
+        "schema_version": "leadpoet.attested_allocation_handoff.v2",
+        "epoch": epoch,
+    }
+    observed = {}
+
+    async def guard(_config_value, requested_epoch, internal_key):
+        assert requested_epoch == epoch
+        assert internal_key == "internal"
+        return True
+
+    def load(netuid, requested_epoch, persist_snapshot, release_commit):
+        observed.update(
+            {
+                "netuid": netuid,
+                "epoch": requested_epoch,
+                "persist_snapshot": persist_snapshot,
+                "release_commit": release_commit,
+            }
+        )
+        return handoff
+
+    def unexpected_build(**_kwargs):
+        raise AssertionError("cold allocation build should not run")
+
+    api._ALLOCATION_HANDOFF_CACHE.clear()
+    api._ALLOCATION_BUILD_TASKS.clear()
+    monkeypatch.setattr(api.ResearchLabGatewayConfig, "from_env", _config)
+    monkeypatch.setattr(
+        api,
+        "_allocation_epoch_guard_and_persistence",
+        guard,
+    )
+    monkeypatch.setattr(api, "_allocation_cache_release_commit", lambda: commit)
+    monkeypatch.setattr(
+        api.allocation_handoff_disk_cache,
+        "load_handoff",
+        load,
+    )
+    monkeypatch.setattr(api, "_allocation_build_task", unexpected_build)
+
+    result = await api.get_research_lab_attested_allocation(
+        epoch,
+        x_leadpoet_internal_key="internal",
+    )
+
+    assert result == handoff
+    assert observed == {
+        "netuid": 71,
+        "epoch": epoch,
+        "persist_snapshot": True,
+        "release_commit": commit,
+    }
+    api._ALLOCATION_HANDOFF_CACHE.clear()
+    api._ALLOCATION_BUILD_TASKS.clear()
+
+
+@pytest.mark.asyncio
 async def test_attested_allocation_uses_execution_root_when_artifact_receipt_wraps_it(
     monkeypatch,
 ):

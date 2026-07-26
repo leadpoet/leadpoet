@@ -1777,13 +1777,15 @@ async def get_latest_weights(netuid: int, epoch_id: int) -> dict:
     
     read_client = get_read_client()
     
-    result = read_client.table("published_weight_bundles") \
-        .select("*") \
-        .eq("netuid", netuid) \
-        .eq("epoch_id", epoch_id) \
-        .order("created_at", desc=True) \
-        .limit(1) \
+    result = await asyncio.to_thread(
+        lambda: read_client.table("published_weight_bundles")
+        .select("*")
+        .eq("netuid", netuid)
+        .eq("epoch_id", epoch_id)
+        .order("created_at", desc=True)
+        .limit(1)
         .execute()
+    )
     
     if not result.data:
         raise HTTPException(status_code=404, detail=f"No weights for epoch {epoch_id}")
@@ -1821,12 +1823,14 @@ async def get_current_weights(netuid: int) -> dict:
     
     read_client = get_read_client()
     
-    result = read_client.table("published_weight_bundles") \
-        .select("*") \
-        .eq("netuid", netuid) \
-        .order("epoch_id", desc=True) \
-        .limit(1) \
+    result = await asyncio.to_thread(
+        lambda: read_client.table("published_weight_bundles")
+        .select("*")
+        .eq("netuid", netuid)
+        .order("epoch_id", desc=True)
+        .limit(1)
         .execute()
+    )
     
     if not result.data:
         raise HTTPException(status_code=404, detail=f"No weights for netuid {netuid}")
@@ -1890,11 +1894,13 @@ async def get_transparency_event(event_hash: str) -> dict:
     read_client = get_read_client()
     
     # Query by event_hash (unique identifier)
-    result = read_client.table("transparency_log") \
-        .select("payload") \
-        .eq("event_hash", event_hash) \
-        .limit(1) \
+    result = await asyncio.to_thread(
+        lambda: read_client.table("transparency_log")
+        .select("payload")
+        .eq("event_hash", event_hash)
+        .limit(1)
         .execute()
+    )
     
     if not result.data:
         raise HTTPException(
@@ -1957,7 +1963,7 @@ async def get_transparency_events_range(
     if boot_id:
         query = query.eq("boot_id", boot_id)
     
-    result = query.execute()
+    result = await asyncio.to_thread(query.execute)
     
     events = result.data[:limit] if result.data else []
     has_more = len(result.data) > limit if result.data else False

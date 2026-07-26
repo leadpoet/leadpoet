@@ -107,6 +107,7 @@ PROTECTED_SYMBOLS = {
         "Validator._recover_weight_publication_journal_v2",
         "Validator._set_weights_until_epoch_end",
         "Validator.submit_weights_at_epoch_end",
+        "Validator._submit_weights_at_epoch_end_locked",
     ),
     "neurons/auditor_validator.py": (
         "AuditorValidator.fetch_attested_weights_v2",

@@ -353,3 +353,44 @@ async def test_uncompressed_body_behavior_is_unchanged() -> None:
 
     assert sent[0]["status"] == 204
     assert observed[0][1]["body"] == body
+
+
+@pytest.mark.asyncio
+async def test_streamed_overflow_emits_only_one_response() -> None:
+    sent = []
+
+    async def app(_scope, receive, send):
+        message = await receive()
+        assert message["type"] == "http.disconnect"
+        await send(
+            {"type": "http.response.start", "status": 500, "headers": []}
+        )
+        await send({"type": "http.response.body", "body": b"error"})
+
+    messages = [
+        {
+            "type": "http.request",
+            "body": b"x" * 11,
+            "more_body": False,
+        }
+    ]
+
+    async def receive():
+        return messages.pop(0)
+
+    async def send(message):
+        sent.append(message)
+
+    middleware = BodySizeLimitMiddleware(app, max_body_bytes=10)
+    await middleware(
+        {"type": "http", "method": "POST", "path": "/submit", "headers": []},
+        receive,
+        send,
+    )
+
+    statuses = [
+        message["status"]
+        for message in sent
+        if message["type"] == "http.response.start"
+    ]
+    assert statuses == [413]

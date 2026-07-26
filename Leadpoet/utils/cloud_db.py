@@ -2814,7 +2814,13 @@ def gateway_get_all_fulfillment_rewards(wallet: bt.Wallet, current_epoch: int) -
             )
             response.raise_for_status()
             data = response.json()
-            return data.get("rewards", {})
+            rewards = data.get("rewards") if isinstance(data, dict) else None
+            if not isinstance(rewards, dict):
+                raise RuntimeError(
+                    "fulfillment rewards response malformed: "
+                    "missing/invalid 'rewards'"
+                )
+            return rewards
         except Exception as e:
             last_err = e
             if attempt < len(backoffs):

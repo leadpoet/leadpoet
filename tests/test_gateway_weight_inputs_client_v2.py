@@ -247,6 +247,46 @@ async def test_client_retries_transient_gateway_failure_with_same_authorization(
 
 
 @pytest.mark.asyncio
+async def test_client_retries_gateway_500_with_same_authorization(monkeypatch):
+    monkeypatch.setattr(client_module, "validate_boot_identity", lambda _value: None)
+    monkeypatch.setattr(
+        client_module, "validate_signed_execution_receipt", lambda _value: None
+    )
+    monkeypatch.setattr(client_module, "validate_transport_attempt", lambda _value: None)
+    monkeypatch.setattr(
+        client_module, "validate_host_operation_record", lambda _value: None
+    )
+    payloads = []
+
+    async def post_json(_url, payload, _timeout):
+        payloads.append(payload)
+        if len(payloads) == 1:
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 weight input request failed with HTTP 500",
+                status_code=500,
+            )
+        return _response(payload["request"])
+
+    client = FakeClient()
+    result = await fetch_gateway_weight_inputs_v2(
+        gateway_url="https://gateway.example",
+        calculation_snapshot=_calculation(),
+        validator_hotkey=HOTKEY,
+        allocation_hash="sha256:" + "3" * 64,
+        leaderboard_window_start="2026-07-03T20:00:00Z",
+        leaderboard_window_end="2026-07-10T20:00:00Z",
+        client=client,
+        post_json=post_json,
+        retry_delay_seconds=0,
+    )
+
+    assert len(payloads) == 2
+    assert payloads[0] == payloads[1]
+    assert len(client.messages) == 1
+    assert result["gateway_authority_event_hash"] == "sha256:" + "4" * 64
+
+
+@pytest.mark.asyncio
 async def test_client_does_not_retry_semantic_gateway_400():
     calls = 0
 

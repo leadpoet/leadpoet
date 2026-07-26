@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 
 from gateway.utils.signature import verify_wallet_signature, compute_payload_hash, construct_signed_message
 from gateway.utils.registry import is_registered_hotkey_async  # Use async version
-from gateway.utils.nonce import check_and_store_nonce, validate_nonce_format
+from gateway.utils.nonce import check_and_store_nonce_async, validate_nonce_format
 from gateway.utils.logger import log_event
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, BITTENSOR_NETWORK
 from gateway.db.client import create_http1_sync_client
@@ -222,7 +222,7 @@ async def submit_validation(event: ValidationEvent):
             detail="Invalid nonce format (must be UUID v4)"
         )
     
-    if not check_and_store_nonce(event.nonce, event.actor_hotkey):
+    if not await check_and_store_nonce_async(event.nonce, event.actor_hotkey):
         raise HTTPException(
             status_code=400,
             detail="Nonce already used (replay attack detected)"
@@ -353,12 +353,14 @@ async def submit_validation(event: ValidationEvent):
     # CRITICAL SECURITY: Prevent validators from submitting multiple times
     # for the same epoch (double-dipping)
     try:
-        existing_submission = supabase.table("validation_evidence_private") \
-            .select("evidence_id", count="exact") \
-            .eq("validator_hotkey", event.actor_hotkey) \
-            .eq("epoch_id", event.payload.epoch_id) \
-            .limit(1) \
+        existing_submission = await asyncio.to_thread(
+            lambda: supabase.table("validation_evidence_private")
+            .select("evidence_id", count="exact")
+            .eq("validator_hotkey", event.actor_hotkey)
+            .eq("epoch_id", event.payload.epoch_id)
+            .limit(1)
             .execute()
+        )
         
         expected_count = len(event.payload.validations)
         existing_count = existing_submission.count or 0
@@ -627,10 +629,12 @@ async def submit_validation(event: ValidationEvent):
             for i in range(0, len(lead_ids), BATCH_SIZE):
                 batch = lead_ids[i:i + BATCH_SIZE]
                 
-                supabase.table("leads_private")\
-                    .update({"status": "validating"})\
-                    .in_("lead_id", batch)\
+                await asyncio.to_thread(
+                    lambda b=batch: supabase.table("leads_private")
+                    .update({"status": "validating"})
+                    .in_("lead_id", b)
                     .execute()
+                )
                 
                 total_updated += len(batch)
             

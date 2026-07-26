@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timedelta, timezone
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -31,6 +32,7 @@ PROXY_HOSTS = (
     "autoresearch-proxy.example.com",
     "scoring-proxy.example.com",
 )
+PROXY_IP = "93.184.216.34"
 EXPECTED_CREDENTIALS = {
     "rehearsal-auto": "rehearsal-auto-password",
     "rehearsal-scoring": "rehearsal-scoring-password",
@@ -94,6 +96,7 @@ def _write_certificates() -> None:
         .add_extension(
             x509.SubjectAlternativeName(
                 [x509.DNSName(host) for host in PROXY_HOSTS]
+                + [x509.IPAddress(ipaddress.ip_address(PROXY_IP))]
             ),
             critical=False,
         )

@@ -239,8 +239,8 @@ def _production_sized_proxy_environment() -> dict[str, str]:
     environment.update(
         {
             "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_%d" % index: (
-                "http://user:password@legacy-hosted-%d.example.com:%d"
-                % (index, 6100 + index)
+                "http://user:password@8.8.8.8:%d"
+                % (6100 + index)
             )
             for index in range(1, 11)
         }
@@ -248,8 +248,8 @@ def _production_sized_proxy_environment() -> dict[str, str]:
     environment.update(
         {
             "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_%d" % index: (
-                "http://user:password@legacy-scoring-%d.example.com:%d"
-                % (index, 7100 + index)
+                "http://user:password@1.1.1.1:%d"
+                % (7100 + index)
             )
             for index in range(1, 26)
         }

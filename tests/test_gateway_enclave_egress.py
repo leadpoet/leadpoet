@@ -112,8 +112,28 @@ def test_destination_policy_allows_proxy_port_without_relaxing_provider_port():
         "proxy.example.com",
         6162,
     )
+    assert normalize_proxy_destination("8.8.8.8", 6162) == (
+        "8.8.8.8",
+        6162,
+    )
     with pytest.raises(EgressPolicyError, match="port is blocked"):
         normalize_destination("proxy.example.com", 6162)
+    with pytest.raises(EgressPolicyError, match="IP literal"):
+        normalize_destination("8.8.8.8", 443)
+
+
+@pytest.mark.parametrize(
+    "host",
+    (
+        "127.0.0.1",
+        "10.0.0.1",
+        "169.254.169.254",
+        "192.168.1.1",
+    ),
+)
+def test_destination_policy_rejects_non_global_proxy_ip_literals(host):
+    with pytest.raises(EgressPolicyError, match="not globally routable"):
+        normalize_proxy_destination(host, 6162)
 
 
 @pytest.mark.parametrize(
@@ -223,6 +243,44 @@ def test_parent_forwarder_accepts_nonstandard_port_only_for_proxy_purpose():
         response = _read_frame(client)
         assert response["result"]["status"] == "connected"
         assert called == [("proxy.example.com", 6162)]
+    finally:
+        client.close()
+        origin.close()
+        thread.join(timeout=2)
+
+
+def test_parent_forwarder_accepts_global_ip_only_for_proxy_purpose():
+    client, parent = socket.socketpair()
+    upstream, origin = socket.socketpair()
+    called = []
+
+    def connector(host, port):
+        called.append((host, port))
+        return upstream
+
+    thread = threading.Thread(
+        target=_handle_connection,
+        kwargs={"connection": parent, "connector": connector, "idle_timeout_seconds": 2.0},
+        daemon=True,
+    )
+    thread.start()
+    try:
+        client.sendall(
+            _frame(
+                {
+                    "method": "connect",
+                    "params": {
+                        "host": "8.8.8.8",
+                        "port": 6162,
+                        "policy_hash": destination_policy_hash(),
+                        "purpose": "upstream_proxy",
+                    },
+                }
+            )
+        )
+        response = _read_frame(client)
+        assert response["result"]["status"] == "connected"
+        assert called == [("8.8.8.8", 6162)]
     finally:
         client.close()
         origin.close()
@@ -601,6 +659,40 @@ def test_enclave_proxy_uses_authenticated_http_connect_on_configured_proxy_port(
     assert observed["headers"].startswith(
         b"CONNECT openrouter.ai:443 HTTP/1.1\r\n"
     )
+    assert b"Proxy-Authorization: Basic " in observed["headers"]
+    enclave_side.close()
+    proxy_side.close()
+
+
+def test_enclave_proxy_uses_authenticated_http_connect_to_global_ip_proxy():
+    enclave_side, proxy_side = socket.socketpair()
+    observed = {}
+    enclave = EnclaveEgressProxy(recv_exact=_recv_exact)
+
+    def open_parent(host, port, *, purpose="provider"):
+        observed["parent"] = (host, port, purpose)
+        return enclave_side
+
+    enclave._open_parent_tunnel = open_parent
+
+    def serve_proxy():
+        headers = b""
+        while b"\r\n\r\n" not in headers:
+            headers += proxy_side.recv(4096)
+        observed["headers"] = headers
+        proxy_side.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+
+    thread = threading.Thread(target=serve_proxy, daemon=True)
+    thread.start()
+    tunnel = enclave._open_upstream_proxy_tunnel(
+        proxy_url="http://worker:secret@8.8.8.8:6162",
+        destination_host="openrouter.ai",
+        destination_port=443,
+    )
+    thread.join(timeout=2)
+
+    assert tunnel is enclave_side
+    assert observed["parent"] == ("8.8.8.8", 6162, "upstream_proxy")
     assert b"Proxy-Authorization: Basic " in observed["headers"]
     enclave_side.close()
     proxy_side.close()

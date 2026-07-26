@@ -462,11 +462,11 @@ def _gateway_secret() -> dict[str, str]:
             {
                 "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1": (
                     "https://rehearsal-auto:rehearsal-auto-password@"
-                    "autoresearch-proxy.example.com:443"
+                    "93.184.216.34:443"
                 ),
                 "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1": (
                     "https://rehearsal-scoring:rehearsal-scoring-password@"
-                    "scoring-proxy.example.com:443"
+                    "93.184.216.34:443"
                 ),
             }
         )

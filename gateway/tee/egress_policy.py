@@ -2,9 +2,11 @@
 
 The scoring enclave must reach public HTTPS providers and miner-supplied
 company/evidence URLs. A fixed hostname allowlist cannot cover those inputs,
-so the policy allows public DNS hostnames on TLS port 443 while rejecting every
-IP literal, plaintext destination, and local/private naming convention. The
-parent forwarder separately rejects DNS answers that are not globally routable.
+so the policy allows public DNS hostnames on TLS port 443 while rejecting
+IP-literal provider destinations, plaintext provider destinations, and
+local/private naming conventions. Authenticated upstream proxies may use a
+globally routable IP literal; the parent forwarder independently rejects every
+non-global address before connecting.
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ def policy_document() -> Dict[str, Any]:
         "allowed_ports": list(ALLOWED_PORTS),
         "upstream_proxy_port_range": [1, 65535],
         "upstream_proxy_requires_measured_connect_path": True,
+        "upstream_proxy_global_ip_literals_allowed": True,
         "blocked_exact_hosts": list(BLOCKED_EXACT_HOSTS),
         "blocked_suffixes": list(BLOCKED_SUFFIXES),
         "ip_literals_allowed": False,
@@ -102,7 +105,19 @@ def normalize_destination(host: Any, port: Any) -> Tuple[str, int]:
 def normalize_proxy_destination(host: Any, port: Any) -> Tuple[str, int]:
     """Validate a public proxy endpoint without relaxing provider port policy."""
 
-    normalized_host, _ = normalize_destination(host, 443)
+    raw_host = str(host or "").strip().rstrip(".")
+    if not raw_host or any(character.isspace() for character in raw_host):
+        raise EgressPolicyError("egress proxy host is invalid")
+    try:
+        address = ipaddress.ip_address(raw_host.strip("[]"))
+    except ValueError:
+        normalized_host, _ = normalize_destination(raw_host, 443)
+    else:
+        if not address.is_global:
+            raise EgressPolicyError(
+                "egress proxy IP literal is not globally routable"
+            )
+        normalized_host = address.compressed.lower()
     try:
         normalized_port = int(port)
     except (TypeError, ValueError) as exc:

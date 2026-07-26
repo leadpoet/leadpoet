@@ -13,6 +13,7 @@ import contextvars
 from functools import lru_cache
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -47,6 +48,8 @@ PROVIDER_ERROR_MARKER = "research_lab_private_runtime_provider_error"
 # Pure observation: emission never changes what the hooked calls return, and
 # any capture failure is swallowed.
 INCONTAINER_TRACE_MARKER = "research_lab_private_runtime_trace"
+SOURCING_BRANCH_RECEIPT_MARKER = "sourcing_branch_receipt"
+SOURCING_RUNTIME_EVENT_MARKER = "sourcing_runtime_event"
 INCONTAINER_TRACE_CAPTURE_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_CAPTURE"
 INCONTAINER_TRACE_MAX_CALL_BYTES_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_MAX_CALL_BYTES"
 INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_MAX_TOTAL_BYTES"
@@ -76,6 +79,8 @@ PROVIDER_COST_ENV_PASSTHROUGH = (
 )
 PROVIDER_COST_EVALUATION_SCOPE_ENV = "RESEARCH_LAB_PROVIDER_COST_EVALUATION_SCOPE"
 DEFAULT_DOCKER_PLATFORM = "linux/amd64"
+SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS = 1500.0
+SOURCING_MODEL_MAX_AGENT_TIMEOUT_SECONDS = 900
 DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID = (
     "alias/leadpoet-research-lab-artifact-signing"
 )
@@ -335,7 +340,13 @@ class SubprocessPrivateModelRunner:
             raise PrivateModelRuntimeError(f"private model source path does not exist: {self.spec.source_path}")
 
     def __call__(self, icp: Mapping[str, Any], context: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
-        payload = {"icp": canonicalize_private_model_icp(icp), "context": _redacted_context(context)}
+        payload = {
+            "icp": canonicalize_private_model_icp(icp),
+            "context": context_with_runtime_options(
+                context,
+                outer_timeout_seconds=self.spec.timeout_seconds,
+            ),
+        }
         env = _build_subprocess_env(self.spec)
         command = [
             self.spec.python_executable,
@@ -365,6 +376,10 @@ class SubprocessPrivateModelRunner:
         if completed.returncode != 0:
             stderr = _sanitize_text(stderr_text)[-1200:]
             raise PrivateModelRuntimeError(f"private model adapter failed with code {completed.returncode}: {stderr}")
+        validate_sourcing_runtime_receipt(
+            completed.stderr,
+            expected_runtime_options=payload["context"]["runtime_options"],
+        )
 
         try:
             decoded = _loads_adapter_stdout(completed.stdout)
@@ -410,7 +425,7 @@ class SubprocessPrivateModelRunner:
             raise PrivateModelRuntimeError("private model metadata must return a JSON object")
         if _contains_secret_material(decoded):
             raise PrivateModelRuntimeError("private model metadata returned raw secret material")
-        return decoded
+        return validate_sourcing_adapter_metadata(decoded)
 
 
 @dataclass(frozen=True)
@@ -451,11 +466,18 @@ class DockerPrivateModelRunner:
             self._pull_image()
 
     def __call__(self, icp: Mapping[str, Any], context: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
-        payload = {"icp": canonicalize_private_model_icp(icp), "context": _redacted_context(context)}
+        payload = {
+            "icp": canonicalize_private_model_icp(icp),
+            "context": context_with_runtime_options(
+                context,
+                outer_timeout_seconds=self.spec.timeout_seconds,
+            ),
+        }
         decoded = self._run_json(
             bootstrap=_DOCKER_ADAPTER_BOOTSTRAP,
             argv=(self.spec.module_name, self.spec.callable_name),
             stdin_payload=payload,
+            expected_runtime_options=payload["context"]["runtime_options"],
         )
         return ensure_private_model_outputs(
             decoded,
@@ -473,7 +495,7 @@ class DockerPrivateModelRunner:
             raise PrivateModelRuntimeError("private model metadata must return a JSON object")
         if _contains_secret_material(decoded):
             raise PrivateModelRuntimeError("private model metadata returned raw secret material")
-        return decoded
+        return validate_sourcing_adapter_metadata(decoded)
 
     def _pull_image(self) -> None:
         completed = subprocess.run(
@@ -494,6 +516,7 @@ class DockerPrivateModelRunner:
         bootstrap: str,
         argv: Sequence[str],
         stdin_payload: Mapping[str, Any],
+        expected_runtime_options: Mapping[str, Any] | None = None,
     ) -> Any:
         # Provider evidence cache: bind-mount the recorded baseline cache
         # read-only and repoint the env at the in-container path (the trailing
@@ -575,6 +598,11 @@ class DockerPrivateModelRunner:
         if completed.returncode != 0:
             stderr = _sanitize_text(stderr_text)[-1200:]
             raise PrivateModelRuntimeError(f"docker private model adapter failed with code {completed.returncode}: {stderr}")
+        if expected_runtime_options is not None:
+            validate_sourcing_runtime_receipt(
+                completed.stderr,
+                expected_runtime_options=expected_runtime_options,
+            )
         try:
             decoded = _loads_adapter_stdout(completed.stdout)
         except json.JSONDecodeError as exc:
@@ -889,6 +917,174 @@ def _redacted_context(context: Mapping[str, Any]) -> dict[str, Any]:
     return dict(context)
 
 
+def context_with_runtime_options(
+    context: Mapping[str, Any],
+    *,
+    outer_timeout_seconds: float,
+) -> dict[str, Any]:
+    """Bind model work to the host's actual per-invocation timeout.
+
+    The outer process/container timeout is authoritative. Candidate-supplied
+    options may request a smaller agent budget, but may never widen the cap or
+    consume the final serialization reserve.
+    """
+
+    outer = max(10.0, float(outer_timeout_seconds))
+    cap = min(SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS, max(10.0, outer - 3.0))
+    reserve = min(5.0, max(2.0, cap * 0.1))
+    incoming = dict((context or {}).get("runtime_options") or {})
+    requested_agent = incoming.get("agent_timeout_seconds")
+    try:
+        agent_timeout = int(requested_agent)
+    except (TypeError, ValueError):
+        agent_timeout = int(max(30.0, cap - reserve))
+    agent_timeout = max(
+        5,
+        min(
+            agent_timeout,
+            SOURCING_MODEL_MAX_AGENT_TIMEOUT_SECONDS,
+            int(max(5.0, cap - reserve)),
+        ),
+    )
+    result = _redacted_context(context)
+    result["runtime_options"] = {
+        "runtime_cap_seconds": cap,
+        "finalization_reserve_seconds": reserve,
+        "agent_timeout_seconds": agent_timeout,
+    }
+    return result
+
+
+def validate_sourcing_adapter_metadata(
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Fail closed unless an artifact declares the Lab runtime contract."""
+
+    document = dict(metadata)
+    required_capabilities = {
+        "deadline",
+        "emit",
+        "http_fetch",
+        "probe_origin",
+        "resolve_host",
+    }
+    if document.get("capability_contract_version") != (
+        "sourcing-model-runtime-capabilities:v2"
+    ):
+        raise PrivateModelRuntimeError(
+            "private model does not declare runtime capability contract v2"
+        )
+    capabilities = {
+        str(item) for item in document.get("runtime_capabilities") or ()
+    }
+    if capabilities != required_capabilities:
+        raise PrivateModelRuntimeError(
+            "private model runtime capability set differs from the Lab contract"
+        )
+    if not str(document.get("resilience_policy_version") or "").startswith(
+        "sourcing-model-resilience:"
+    ):
+        raise PrivateModelRuntimeError(
+            "private model does not declare a resilience policy"
+        )
+    firmographic = document.get("firmographic_discovery")
+    if not isinstance(firmographic, Mapping) or not str(
+        firmographic.get("firmographic_policy_version") or ""
+    ).startswith("sourcing-model-firmographic-discovery:"):
+        raise PrivateModelRuntimeError(
+            "private model does not declare firmographic discovery policy"
+        )
+    taxonomy = document.get("industry_taxonomy")
+    taxonomy_hash = (
+        str(taxonomy.get("taxonomy_content_hash") or "")
+        if isinstance(taxonomy, Mapping)
+        else ""
+    )
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", taxonomy_hash):
+        raise PrivateModelRuntimeError(
+            "private model does not declare a valid industry taxonomy hash"
+        )
+    return document
+
+
+def validate_sourcing_runtime_receipt(
+    stderr: str,
+    *,
+    expected_runtime_options: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Require one complete receipt from every successful sourcing call."""
+
+    return validate_sourcing_runtime_receipt_entries(
+        parse_sourcing_runtime_lines(stderr),
+        expected_runtime_options=expected_runtime_options,
+    )
+
+
+def validate_sourcing_runtime_receipt_entries(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    expected_runtime_options: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate receipts already decoded by the measured sandbox."""
+
+    receipts = [
+        dict(entry)
+        for entry in entries
+        if entry.get("kind") == "sourcing_branch_receipt"
+    ]
+    if len(receipts) != 1:
+        raise PrivateModelRuntimeError(
+            f"private model emitted {len(receipts)} sourcing branch receipts; expected 1"
+        )
+    receipt = receipts[0]
+    try:
+        expected_cap = float(expected_runtime_options["runtime_cap_seconds"])
+        receipt_cap = float(receipt.get("runtime_cap_seconds") or 0.0)
+    except (TypeError, ValueError) as exc:
+        raise PrivateModelRuntimeError(
+            "private model receipt runtime cap is not numeric"
+        ) from exc
+    if not math.isfinite(expected_cap) or expected_cap <= 0.0:
+        raise PrivateModelRuntimeError(
+            "Lab runtime allocation does not contain a finite positive cap"
+        )
+    if (
+        not math.isfinite(receipt_cap)
+        or abs(receipt_cap - expected_cap) > 0.001
+    ):
+        raise PrivateModelRuntimeError(
+            "private model receipt runtime cap differs from the Lab allocation"
+        )
+    capability_contract = receipt.get("capability_contract")
+    registered = (
+        set(capability_contract.get("host_registered") or ())
+        if isinstance(capability_contract, Mapping)
+        else set()
+    )
+    if not {"deadline", "emit", "probe_origin", "resolve_host"}.issubset(
+        registered
+    ):
+        raise PrivateModelRuntimeError(
+            "private model receipt does not prove Lab capability registration"
+        )
+    taxonomy = receipt.get("industry_taxonomy")
+    if not isinstance(taxonomy, Mapping) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}",
+        str(taxonomy.get("taxonomy_content_hash") or ""),
+    ):
+        raise PrivateModelRuntimeError(
+            "private model receipt does not bind an industry taxonomy"
+        )
+    firmographic = receipt.get("firmographic_discovery")
+    if not isinstance(firmographic, Mapping) or not isinstance(
+        firmographic.get("plan"), Mapping
+    ):
+        raise PrivateModelRuntimeError(
+            "private model receipt does not bind a firmographic discovery plan"
+        )
+    return receipt
+
+
 # Provider failures that end the whole sourcing run: credit/auth/quota
 # rejections and provider-infra failures. Request-shaped rejections of
 # model-generated inputs (Scrapingdog 400 "Something went wrong", 404 on an
@@ -1056,6 +1252,31 @@ def parse_incontainer_trace_lines(stderr: str) -> list[dict[str, Any]]:
     return entries
 
 
+def parse_sourcing_runtime_lines(stderr: str) -> list[dict[str, Any]]:
+    """Decode bounded, structured model receipts/events from stderr."""
+
+    entries: list[dict[str, Any]] = []
+    for line in (stderr or "").splitlines():
+        for marker, kind in (
+            (SOURCING_BRANCH_RECEIPT_MARKER, "sourcing_branch_receipt"),
+            (SOURCING_RUNTIME_EVENT_MARKER, "sourcing_runtime_event"),
+        ):
+            marker_index = line.find(marker)
+            if marker_index < 0:
+                continue
+            payload = line[marker_index + len(marker):].strip()
+            if not payload or len(payload) > 256 * 1024:
+                continue
+            try:
+                decoded = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(decoded, Mapping):
+                entries.append({"kind": kind, **dict(decoded)})
+            break
+    return entries
+
+
 def _trace_capture_max_bytes() -> int:
     """Per-invocation retention budget for decoded trace entries (0 disables)."""
     try:
@@ -1072,9 +1293,17 @@ def strip_incontainer_trace_lines(text: str) -> str:
     protected-material scanners. Non-trace lines (including provider-error
     marker lines) are preserved.
     """
-    if not text or INCONTAINER_TRACE_MARKER not in text:
+    if not text:
         return text or ""
-    return "\n".join(line for line in text.splitlines() if INCONTAINER_TRACE_MARKER not in line)
+    markers = (
+        INCONTAINER_TRACE_MARKER,
+        SOURCING_BRANCH_RECEIPT_MARKER,
+        SOURCING_RUNTIME_EVENT_MARKER,
+    )
+    return "\n".join(
+        line for line in text.splitlines()
+        if not any(marker in line for marker in markers)
+    )
 
 
 def _collect_incontainer_trace(stderr: str) -> str:
@@ -1084,8 +1313,14 @@ def _collect_incontainer_trace(stderr: str) -> str:
     unconditional so trace payloads never leak into diagnostics even when a
     container emitted them while the host has capture disabled. Never raises.
     """
-    if not stderr or INCONTAINER_TRACE_MARKER not in stderr:
+    if not stderr:
         return stderr or ""
+    runtime_entries = parse_sourcing_runtime_lines(stderr)
+    if runtime_entries:
+        try:
+            publish_incontainer_trace_entries(runtime_entries)
+        except Exception:
+            pass
     if incontainer_trace_capture_enabled():
         try:
             publish_incontainer_trace_entries(parse_incontainer_trace_lines(stderr))
@@ -2458,11 +2693,31 @@ import contextlib
 import importlib
 import json
 import sys
+import time
 
 source_path, module_name, callable_name = sys.argv[1:4]
 sys.path.insert(0, source_path)
 payload = json.load(sys.stdin)
 module = importlib.import_module(module_name)
+try:
+    from sourcing_model import runtime_capabilities as _sourcing_caps
+    _runtime_options = dict((payload.get("context") or {}).get("runtime_options") or {})
+    _runtime_cap = max(10.0, float(_runtime_options.get("runtime_cap_seconds") or 900.0))
+    _runtime_reserve = max(0.0, float(_runtime_options.get("finalization_reserve_seconds") or 0.0))
+    _runtime_deadline = time.monotonic() + max(1.0, _runtime_cap - _runtime_reserve)
+    _sourcing_caps.register("deadline", lambda: _runtime_deadline)
+    _sourcing_caps.register("resolve_host", lambda _name: _sourcing_caps.HostResolution.TIMEOUT)
+    _sourcing_caps.register("probe_origin", lambda _host: _sourcing_caps.OriginReachability.UNKNOWN)
+    def _emit_sourcing_event(event):
+        if isinstance(event, dict):
+            sys.stderr.write("sourcing_runtime_event " + json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+    _sourcing_caps.register("emit", _emit_sourcing_event)
+except ImportError:
+    # A non-sourcing adapter may still fail before returning. Successful Lab
+    # sourcing calls are rejected host-side if they do not emit the receipt.
+    pass
+except (AttributeError, TypeError, ValueError) as exc:
+    raise RuntimeError("failed to register sourcing runtime capabilities") from exc
 _research_lab_patch_strict_qualify(module)
 fn = getattr(module, callable_name)
 with contextlib.redirect_stdout(sys.stderr):
@@ -2491,6 +2746,7 @@ import importlib
 import json
 import logging
 import sys
+import time
 
 for _research_lab_logger_name in (
     "urllib3",
@@ -2505,6 +2761,25 @@ for _research_lab_logger_name in (
 module_name, callable_name = sys.argv[1:3]
 payload = json.load(sys.stdin)
 module = importlib.import_module(module_name)
+try:
+    from sourcing_model import runtime_capabilities as _sourcing_caps
+    _runtime_options = dict((payload.get("context") or {}).get("runtime_options") or {})
+    _runtime_cap = max(10.0, float(_runtime_options.get("runtime_cap_seconds") or 900.0))
+    _runtime_reserve = max(0.0, float(_runtime_options.get("finalization_reserve_seconds") or 0.0))
+    _runtime_deadline = time.monotonic() + max(1.0, _runtime_cap - _runtime_reserve)
+    _sourcing_caps.register("deadline", lambda: _runtime_deadline)
+    _sourcing_caps.register("resolve_host", lambda _name: _sourcing_caps.HostResolution.TIMEOUT)
+    _sourcing_caps.register("probe_origin", lambda _host: _sourcing_caps.OriginReachability.UNKNOWN)
+    def _emit_sourcing_event(event):
+        if isinstance(event, dict):
+            sys.stderr.write("sourcing_runtime_event " + json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+    _sourcing_caps.register("emit", _emit_sourcing_event)
+except ImportError:
+    # A non-sourcing adapter may still fail before returning. Successful Lab
+    # sourcing calls are rejected host-side if they do not emit the receipt.
+    pass
+except (AttributeError, TypeError, ValueError) as exc:
+    raise RuntimeError("failed to register sourcing runtime capabilities") from exc
 _research_lab_patch_strict_qualify(module)
 fn = getattr(module, callable_name)
 with contextlib.redirect_stdout(sys.stderr):

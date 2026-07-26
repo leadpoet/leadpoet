@@ -330,7 +330,20 @@ class TestCompactSidecar:
             spend_microusd=1,
             spend_kind="measured",
         )
-        time.sleep(0.04)
+        # Wait (bounded) for the first background flush to create the sidecar
+        # file; a fixed sleep races the flush thread on loaded CI runners, and
+        # a not-yet-created file is indistinguishable from the partial-JSON
+        # reads this test exists to rule out.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if (
+                load_provider_outcome_sidecar(
+                    str(path), stale_seconds=3600, warn=False
+                )
+                is not None
+            ):
+                break
+            time.sleep(0.01)
         observed_sequences = []
 
         def writer() -> None:

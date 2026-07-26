@@ -127,6 +127,114 @@ def _decoded_body(entry: dict, field: str) -> str:
     return base64.b64decode(entry[field] or b"").decode("utf-8")
 
 
+def test_runtime_context_is_clamped_inside_outer_timeout() -> None:
+    context = private_runtime.context_with_runtime_options(
+        {"runtime_options": {"agent_timeout_seconds": 9999}},
+        outer_timeout_seconds=60,
+    )
+    options = context["runtime_options"]
+    assert options == {
+        "runtime_cap_seconds": 57.0,
+        "finalization_reserve_seconds": 5.0,
+        "agent_timeout_seconds": 52,
+    }
+
+
+def test_runtime_context_respects_model_maxima_for_long_outer_timeout() -> None:
+    context = private_runtime.context_with_runtime_options(
+        {},
+        outer_timeout_seconds=1800,
+    )
+    assert context["runtime_options"] == {
+        "runtime_cap_seconds": 1500.0,
+        "finalization_reserve_seconds": 5.0,
+        "agent_timeout_seconds": 900,
+    }
+
+
+@pytest.mark.parametrize(
+    "runtime_cap",
+    (float("nan"), float("inf"), float("-inf")),
+)
+def test_sourcing_receipt_rejects_non_finite_runtime_cap(runtime_cap: float) -> None:
+    receipt = {
+        "kind": "sourcing_branch_receipt",
+        "runtime_cap_seconds": runtime_cap,
+        "capability_contract": {
+            "host_registered": [
+                "deadline",
+                "emit",
+                "probe_origin",
+                "resolve_host",
+            ],
+        },
+        "industry_taxonomy": {
+            "taxonomy_content_hash": "sha256:" + "a" * 64,
+        },
+        "firmographic_discovery": {"plan": {"target": 5}},
+    }
+
+    with pytest.raises(
+        PrivateModelRuntimeError,
+        match="runtime cap differs from the Lab allocation",
+    ):
+        private_runtime.validate_sourcing_runtime_receipt_entries(
+            [receipt],
+            expected_runtime_options={"runtime_cap_seconds": 897.0},
+        )
+
+
+def test_sourcing_receipts_and_events_are_collected_and_stripped() -> None:
+    stderr = "\n".join(
+        (
+            'sourcing_branch_receipt {"runtime_cap_seconds":57,"returned_count":2}',
+            'sourcing_runtime_event {"event":"candidate_deferred","attempt_ordinal":1}',
+            "ordinary diagnostic",
+        )
+    )
+    entries, token = private_runtime.begin_incontainer_trace_collection()
+    try:
+        stripped = private_runtime._collect_incontainer_trace(stderr)
+    finally:
+        private_runtime.end_incontainer_trace_collection(token)
+    assert entries == [
+        {
+            "kind": "sourcing_branch_receipt",
+            "runtime_cap_seconds": 57,
+            "returned_count": 2,
+        },
+        {
+            "kind": "sourcing_runtime_event",
+            "event": "candidate_deferred",
+            "attempt_ordinal": 1,
+        },
+    ]
+    assert stripped == "ordinary diagnostic"
+
+
+def test_adapter_metadata_gate_requires_all_runtime_readiness_proofs() -> None:
+    ready = {
+        "capability_contract_version": "sourcing-model-runtime-capabilities:v2",
+        "runtime_capabilities": [
+            "deadline",
+            "emit",
+            "http_fetch",
+            "probe_origin",
+            "resolve_host",
+        ],
+        "resilience_policy_version": "sourcing-model-resilience:v1",
+        "firmographic_discovery": {
+            "firmographic_policy_version": "sourcing-model-firmographic-discovery:v1"
+        },
+        "industry_taxonomy": {"taxonomy_content_hash": "sha256:" + "a" * 64},
+    }
+    assert private_runtime.validate_sourcing_adapter_metadata(ready) == ready
+    broken = dict(ready)
+    broken.pop("industry_taxonomy")
+    with pytest.raises(PrivateModelRuntimeError, match="taxonomy hash"):
+        private_runtime.validate_sourcing_adapter_metadata(broken)
+
+
 SUCCESS_AND_FAILURE_PROBE = r"""
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -517,6 +625,15 @@ PUBLISHING_ADAPTER = """
 import json
 import sys
 
+RUNTIME_RECEIPT = {
+    "runtime_cap_seconds": 897.0,
+    "capability_contract": {
+        "host_registered": ["deadline", "emit", "probe_origin", "resolve_host"],
+    },
+    "industry_taxonomy": {"taxonomy_content_hash": "sha256:" + "a" * 64},
+    "firmographic_discovery": {"plan": {"target": 5}},
+}
+
 FAKE_ENTRY = {
     "seq": 1,
     "phase": "call",
@@ -540,6 +657,9 @@ def run_icp(icp, context):
     sys.stderr.write("research_lab_private_runtime_trace " + json.dumps(FAKE_ENTRY) + "\\n")
     second = dict(FAKE_ENTRY, seq=2, provider_class="search")
     sys.stderr.write("research_lab_private_runtime_trace " + json.dumps(second) + "\\n")
+    receipt = dict(RUNTIME_RECEIPT)
+    receipt["runtime_cap_seconds"] = context["runtime_options"]["runtime_cap_seconds"]
+    sys.stderr.write("sourcing_branch_receipt " + json.dumps(receipt) + "\\n")
     sys.stderr.write("adapter diagnostic noise line\\n")
     return [{"company_name": "TraceCo", "company_website": "https://traceco.test", "score": 42.0}]
 """
@@ -589,7 +709,24 @@ def test_subprocess_runner_skips_publish_when_capture_disabled(tmp_path, monkeyp
         outputs = runner(dict(REAL_ICP), {})
     finally:
         private_runtime.end_incontainer_trace_collection(token)
-    assert entries == []
+    assert entries == [
+        {
+            "kind": "sourcing_branch_receipt",
+            "runtime_cap_seconds": 897.0,
+            "capability_contract": {
+                "host_registered": [
+                    "deadline",
+                    "emit",
+                    "probe_origin",
+                    "resolve_host",
+                ],
+            },
+            "industry_taxonomy": {
+                "taxonomy_content_hash": "sha256:" + "a" * 64,
+            },
+            "firmographic_discovery": {"plan": {"target": 5}},
+        }
+    ]
     assert outputs and outputs[0]["company_name"] == "TraceCo"
 
 
@@ -677,13 +814,14 @@ async def test_evaluator_hands_entries_to_custom_sink_and_rows_carry_pointers_on
     rows = await _score_items(runner, items, trace_sink=sink)
 
     entries = received["icp-real"]
-    assert [entry["seq"] for entry in entries] == [1, 2]
+    assert [entry["seq"] for entry in entries if "seq" in entry] == [1, 2]
+    assert sum(entry.get("kind") == "sourcing_branch_receipt" for entry in entries) == 1
     assert all(entry["runner_role"] == "candidate" for entry in entries)
 
     row = rows[0]
     assert row["candidate_company_scores"] == [42.0]
     assert row["incontainer_trace_ref"] == "s3://custom/prefix/icp-real.json"
-    assert row["incontainer_trace_call_count"] == 2
+    assert row["incontainer_trace_call_count"] == 3
     assert row["incontainer_trace_sha256"] == sha256_json(entries)
     assert set(row) == PRE_CAPTURE_ROW_KEYS | POINTER_KEYS
 

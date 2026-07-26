@@ -32,6 +32,26 @@ from research_lab.eval.provider_evidence_cache import (
 from research_lab.eval.snapshot_store import SNAPSHOT_MISS_SENTINEL, SnapshotMiss
 
 
+def _runtime_receipt_stderr(stdin_payload: str) -> str:
+    options = json.loads(stdin_payload)["context"]["runtime_options"]
+    receipt = {
+        "runtime_cap_seconds": options["runtime_cap_seconds"],
+        "capability_contract": {
+            "host_registered": [
+                "deadline",
+                "emit",
+                "probe_origin",
+                "resolve_host",
+            ],
+        },
+        "industry_taxonomy": {
+            "taxonomy_content_hash": "sha256:" + "a" * 64,
+        },
+        "firmographic_discovery": {"plan": {"target": 5}},
+    }
+    return "sourcing_branch_receipt " + json.dumps(receipt) + "\n"
+
+
 def _runtime(tmp_path: Path):
     runsc = tmp_path / "runsc"
     runsc.write_bytes(b"pinned-runsc-binary")
@@ -278,7 +298,7 @@ def test_runsc_dev_replay_has_snapshot_mount_and_no_live_provider_channel(tmp_pa
             return SimpleNamespace(
                 returncode=0,
                 stdout='[{"company_name":"Measured Co"}]',
-                stderr="",
+                stderr=_runtime_receipt_stderr(kwargs["input"]),
             )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -329,7 +349,14 @@ def test_runsc_dev_replay_has_snapshot_mount_and_no_live_provider_channel(tmp_pa
         "/research_lab_dev_snapshots"
     )
     assert "dev_snapshot" in config["process"]["args"][2]
-    assert json.loads(observed["stdin"])["context"] == {"dev_eval": True}
+    assert json.loads(observed["stdin"])["context"] == {
+        "dev_eval": True,
+        "runtime_options": {
+            "runtime_cap_seconds": 27.0,
+            "finalization_reserve_seconds": 2.7,
+            "agent_timeout_seconds": 24,
+        },
+    }
 
 
 def test_runsc_dev_replay_propagates_typed_snapshot_miss(tmp_path):
@@ -372,9 +399,13 @@ def test_runsc_dev_replay_propagates_typed_snapshot_miss(tmp_path):
 
 
 def test_runsc_dev_replay_logs_cleanup_failure(tmp_path, caplog):
-    def runner(command, **_kwargs):
+    def runner(command, **kwargs):
         if "run" in command:
-            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            return SimpleNamespace(
+                returncode=0,
+                stdout="[]",
+                stderr=_runtime_receipt_stderr(kwargs["input"]),
+            )
         raise RuntimeError("delete failed")
 
     request = _request(tmp_path)

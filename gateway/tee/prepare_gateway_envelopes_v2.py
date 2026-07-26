@@ -22,6 +22,8 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 from gateway.research_lab.worker_autostart import (
     DEFERRED_WORKER_FLEETS_ENV,
     HOSTED_PROXY_PREFIXES,
+    LEGACY_HOSTED_PROXY_PREFIXES,
+    LEGACY_SCORING_PROXY_PREFIXES,
     SCORING_PROXY_PREFIXES,
     DeferredWorkerFleetConfigurationError,
     build_research_lab_worker_autostart_plan,
@@ -360,6 +362,68 @@ def _worker_proxy_profile_values(
     )
 
 
+_WORKER_PROXY_ROLE_CONFIGURATION = {
+    "gateway_autoresearch": {
+        "legacy_prefixes": LEGACY_HOSTED_PROXY_PREFIXES,
+        "process_count_environment": (
+            "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT"
+        ),
+        "required_v2_environment": (
+            "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1"
+        ),
+    },
+    "gateway_scoring": {
+        "legacy_prefixes": LEGACY_SCORING_PROXY_PREFIXES,
+        "process_count_environment": (
+            "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT"
+        ),
+        "required_v2_environment": (
+            "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1"
+        ),
+    },
+}
+
+
+def _validate_v2_proxy_migration_capacity(
+    environment: Mapping[str, str],
+    *,
+    role: str,
+    proxy_source: str,
+    selected_profile_count: int,
+) -> None:
+    """Reject an implicit worker-capacity reduction during V2 migration."""
+
+    configuration = _WORKER_PROXY_ROLE_CONFIGURATION[role]
+    process_count_environment = str(
+        configuration["process_count_environment"]
+    )
+    if proxy_source != "v2_tls" or str(
+        environment.get(process_count_environment) or ""
+    ).strip():
+        return
+    legacy_profile_count = len(
+        _proxy_names(
+            environment,
+            configuration["legacy_prefixes"],
+        )
+    )
+    if legacy_profile_count <= selected_profile_count:
+        return
+    raise GatewayEnvelopePreparationV2Error(
+        "%s V2 proxy migration would reduce worker coverage from %d legacy "
+        "slots to %d selected TLS profile(s); set %s=%d explicitly and "
+        "configure %s with an HTTPS port-443 proxy"
+        % (
+            role,
+            legacy_profile_count,
+            selected_profile_count,
+            process_count_environment,
+            legacy_profile_count,
+            configuration["required_v2_environment"],
+        )
+    )
+
+
 def _validated_worker_proxy_configuration(
     environment: Mapping[str, str],
     *,
@@ -389,6 +453,17 @@ def _validated_worker_proxy_configuration(
         "gateway_autoresearch": plan.hosted.proxy_values,
         "gateway_scoring": plan.scoring.proxy_values,
     }
+    proxy_sources = {
+        "gateway_autoresearch": plan.hosted.proxy_source,
+        "gateway_scoring": plan.scoring.proxy_source,
+    }
+    for role, values in configured_fleets.items():
+        _validate_v2_proxy_migration_capacity(
+            environment,
+            role=role,
+            proxy_source=proxy_sources[role],
+            selected_profile_count=len(values),
+        )
     profile_fleets = {
         "gateway_autoresearch": _worker_proxy_profile_values(
             plan.hosted.proxy_values,
@@ -406,17 +481,19 @@ def _validated_worker_proxy_configuration(
             try:
                 _validated_tls_proxy_url(value)
             except (ProviderBrokerV2Error, ValueError) as exc:
+                configuration = _WORKER_PROXY_ROLE_CONFIGURATION[role]
                 raise GatewayEnvelopePreparationV2Error(
                     "%s worker proxy %d from %s configuration is incompatible "
-                    "with V2 provider transport"
+                    "with V2 provider transport; configure %s with HTTPS "
+                    "port-443 transport and set the intended worker capacity "
+                    "in %s (%s)"
                     % (
                         role,
                         index + 1,
-                        (
-                            plan.hosted.proxy_source
-                            if role == "gateway_autoresearch"
-                            else plan.scoring.proxy_source
-                        ),
+                        proxy_sources[role],
+                        configuration["required_v2_environment"],
+                        configuration["process_count_environment"],
+                        str(exc),
                     )
                 ) from exc
     for role, values in profile_fleets.items():
@@ -428,7 +505,18 @@ def _validated_worker_proxy_configuration(
         try:
             proxy_fleet_probe(configured_fleets)
         except WorkerProxyTransportPreflightV2Error as exc:
-            raise GatewayEnvelopePreparationV2Error(str(exc)) from exc
+            raise GatewayEnvelopePreparationV2Error(
+                "%s; required proxy environments are %s and %s"
+                % (
+                    str(exc),
+                    _WORKER_PROXY_ROLE_CONFIGURATION[
+                        "gateway_autoresearch"
+                    ]["required_v2_environment"],
+                    _WORKER_PROXY_ROLE_CONFIGURATION[
+                        "gateway_scoring"
+                    ]["required_v2_environment"],
+                )
+            ) from exc
     configured_names = _proxy_environment_names(
         environment,
         (*HOSTED_PROXY_PREFIXES, *SCORING_PROXY_PREFIXES),

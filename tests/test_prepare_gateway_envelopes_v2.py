@@ -206,7 +206,7 @@ def test_production_shaped_plaintext_webshare_fleet_fails_before_kms(tmp_path):
             "gateway_autoresearch worker proxy 1 from legacy configuration "
             "is incompatible"
         ),
-    ):
+    ) as captured:
         prepare_gateway_envelopes_v2(
             environment=environment,
             kms_key_id="alias/gateway-v2",
@@ -216,9 +216,130 @@ def test_production_shaped_plaintext_webshare_fleet_fails_before_kms(tmp_path):
             proxy_fleet_probe=lambda fleets: probe_calls.append(fleets),
         )
 
+    message = str(captured.value)
+    assert "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1" in message
+    assert "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT" in message
+    assert "HTTPS port-443 transport" in message
     assert kms.requests == []
     assert probe_calls == []
     assert not (tmp_path / "v2").exists()
+
+
+def _production_sized_proxy_environment() -> dict[str, str]:
+    environment = {
+        name: value
+        for name, value in _environment().items()
+        if "V2_AUTORESEARCH_HTTPS_PROXY" not in name
+        and "V2_SCORING_HTTPS_PROXY" not in name
+    }
+    environment.update(
+        {
+            "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_%d" % index: (
+                "http://user:password@legacy-hosted-%d.example.com:%d"
+                % (index, 6100 + index)
+            )
+            for index in range(1, 11)
+        }
+    )
+    environment.update(
+        {
+            "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_%d" % index: (
+                "http://user:password@legacy-scoring-%d.example.com:%d"
+                % (index, 7100 + index)
+            )
+            for index in range(1, 26)
+        }
+    )
+    return environment
+
+
+def test_v2_proxy_migration_requires_explicit_production_worker_counts(
+    tmp_path,
+):
+    environment = _production_sized_proxy_environment()
+    environment.update(
+        {
+            "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1": (
+                "https://hosted-v2.example.com:443"
+            ),
+            "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1": (
+                "https://scoring-v2.example.com:443"
+            ),
+        }
+    )
+    kms = KMS()
+
+    with pytest.raises(
+        Exception,
+        match=(
+            "gateway_autoresearch V2 proxy migration would reduce worker "
+            "coverage from 10 legacy slots to 1 selected TLS profile"
+        ),
+    ):
+        prepare_gateway_envelopes_v2(
+            environment=environment,
+            kms_key_id="alias/gateway-v2",
+            deploy_commit="1" * 40,
+            output_dir=tmp_path / "v2",
+            kms_client=kms,
+            proxy_fleet_probe=_skip_proxy_probe,
+        )
+
+    assert kms.requests == []
+    assert not (tmp_path / "v2").exists()
+
+
+def test_one_v2_proxy_per_role_preserves_production_worker_capacity(
+    tmp_path,
+):
+    environment = _production_sized_proxy_environment()
+    environment.update(
+        {
+            "RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_1": (
+                "https://hosted-v2.example.com:443"
+            ),
+            "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_1": (
+                "https://scoring-v2.example.com:443"
+            ),
+            "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "10",
+            "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "25",
+        }
+    )
+    kms = KMS()
+    observed = []
+
+    result = prepare_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        output_dir=tmp_path / "v2",
+        kms_client=kms,
+        proxy_fleet_probe=lambda fleets: observed.append(fleets),
+    )
+
+    assert observed == [
+        {
+            "gateway_autoresearch": (
+                "https://hosted-v2.example.com:443",
+            ),
+            "gateway_scoring": (
+                "https://scoring-v2.example.com:443",
+            ),
+        }
+    ]
+    assert result["hosted_worker_count"] == 10
+    assert result["scoring_worker_count"] == 25
+    assert result["required_count_environment"] == {
+        "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "10",
+        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "25",
+    }
+    assert result["worker_proxy_source"] == {
+        "gateway_autoresearch": "v2_tls",
+        "gateway_scoring": "v2_tls",
+    }
+    assert len(list((tmp_path / "v2").glob("autoresearch_proxy_*.json"))) == 10
+    assert len(list((tmp_path / "v2").glob("scoring_proxy_*.json"))) == 25
+    assert len(kms.requests) == 47
 
 
 def test_tls_connect_capability_failure_blocks_before_kms(tmp_path):

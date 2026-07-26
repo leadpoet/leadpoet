@@ -44,26 +44,32 @@ python3 scripts/run_local_restart_rehearsal.py \
   --from-sha <currently-deployed-sha> \
   --candidate-sha HEAD \
   --transition forward \
-  --scope exact \
-  --component all
+  --profile prepush
 ```
 
-If the candidate changes either production restart launcher, release
-selection, compatibility-floor enforcement, or the rehearsal harness, also run
-the exact reverse transition before pushing:
+This is the mandatory 5–10 minute developer gate. It runs in Docker without
+production credentials, executes both installed N-1 launchers and the candidate
+Git handoff, then runs one complete gateway/validator/auditor publication
+against strict local chain and durable-database services.
+On ARM developer machines the outer `prepush` container uses native ARM64 to
+avoid QEMU overhead; the unchanged launchers still issue and validate the exact
+production `linux/amd64` Docker/Nitro contracts. The `release` profile always
+runs its outer replica as pinned `linux/amd64` for the final ABI check.
+
+Before an attested release, run the release profile:
 
 ```bash
 python3 scripts/run_local_restart_rehearsal.py \
-  --from-sha HEAD \
-  --candidate-sha <supported-previous-release-sha> \
-  --transition rollback \
-  --scope exact \
-  --component all
+  --from-sha <currently-deployed-sha> \
+  --candidate-sha HEAD \
+  --transition forward \
+  --profile release
 ```
 
-Then rerun the forward transition from that supported previous release to the
-same frozen candidate. The three commands must use one unchanged candidate SHA.
-The rollback target must also pass
+The release profile runs forward, rollback, and roll-forward with the unchanged
+installed launchers, then the full boundary fault matrix, concurrency checks,
+and 100 accelerated stateful subnet epochs. The three transitions use one
+unchanged candidate SHA. The rollback target must also pass
 `Leadpoet/utils/exact_commit_restart_v2.py` against current `origin/main`;
 the helper rejects actual public auditor protocol incompatibility but does not
 reject an attested release merely because its implementation predates later
@@ -83,7 +89,9 @@ authenticated restart, and release the validator only through the exact-SHA
 coordination marker. A failed gateway restart must leave the marker absent,
 terminate the waiting SSH process, and preserve the existing validator.
 
-The rehearsal must produce all of the following:
+Both profiles must produce a joined
+`leadpoet-restart-rehearsal-<sha>-<profile>.json` manifest. The manifest and
+console output must prove all of the following:
 
 - [ ] `PYTHON37_FINALIZATION_PROBE_SUCCESS`
 - [ ] `REHEARSAL_SUCCESS component=gateway`
@@ -106,23 +114,25 @@ The rehearsal must produce all of the following:
 - [ ] Zero synthetic external fixtures. Boundary adapters must consume
   sanitized production-shaped inputs and independently validate exact argv,
   environment names, schemas, hashes, ordering, and failure behavior.
-- [ ] The isolated runtime has the production 16-vCPU/128-GiB gateway resource
-  profile. A reduced developer profile is valid only for targeted regressions.
+- [ ] Release SHA and PCR0 are identical across launcher and workflow evidence.
+- [ ] Bundle, publication, and finalization receipts form one verified ancestry.
+- [ ] Primary and auditor canonical vectors are byte-for-byte equal.
+- [ ] The signed SDK extrinsic is the one finalized by the local chain.
+- [ ] `LastUpdate` equals the finalized block and reveal readback equals the
+  canonical vector.
+- [ ] The local chain, database, processes, injected faults, and locks are clean
+  after completion.
+- [ ] The `prepush` profile uses at most 4 CPUs and 7 GiB per container.
+- [ ] The `release` profile completes exactly 100 epochs, every configured
+  boundary fault, rollback/roll-forward, and the concurrency matrix using at
+  most 6 CPUs and 7 GiB per container.
 
-Targeted launcher regressions are useful but are not deployment evidence. For
-example, the artifact-persistence restart matrix runs the exact N-1 launcher
-through the real candidate readiness module while adapting unrelated stages:
-
-```bash
-python3 scripts/run_local_restart_rehearsal.py \
-  --from-sha <currently-deployed-sha> \
-  --candidate-sha HEAD \
-  --scope weight-readiness-regression \
-  --component gateway
-```
-
-This command must print `TARGETED_RESTART_REGRESSION_*`, never
-`REHEARSAL_SUCCESS`, and cannot satisfy this checklist.
+The reduced resource budget is achieved by replacing only privileged external
+boundaries (Docker daemon, Nitro, AWS, chain, and Supabase) with strict local
+services. Repository-owned launchers, gateway/validator/auditor behavior,
+canonicalization, signing, receipt generation, SDK extrinsic construction, and
+verification remain candidate production code. Any new internal substitution
+must fail both profiles.
 
 ### 4. Verify V2 Integrity
 

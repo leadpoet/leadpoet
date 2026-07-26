@@ -1,0 +1,391 @@
+#!/usr/bin/env python3.11
+"""Create sanitized external approval inputs for the exact restart replica."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tarfile
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from gateway.tee.acceptance_corpus_v2 import (
+    REQUIRED_PROMOTION_BRANCHES,
+    build_acceptance_corpus_v2,
+)
+from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
+
+
+def _hash(label: str) -> str:
+    return "sha256:" + hashlib.sha256(label.encode()).hexdigest()
+
+
+def _fixture(
+    root: Path,
+    *,
+    kind: str,
+    index: int,
+    metadata: dict | None = None,
+) -> dict:
+    relative = Path(kind) / f"{index:04d}.json"
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        {"index": index, "kind": kind, "sanitized": True},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode() + b"\n"
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    return {
+        "kind": kind,
+        "fixture_id": f"{kind}:{index:04d}",
+        "captured_at": f"2026-06-{1 + index % 30:02d}T00:00:00Z",
+        "artifact_path": relative.as_posix(),
+        "artifact_hash": sha256_bytes(payload),
+        "expected_output_hash": _hash(f"output:{kind}:{index}"),
+        "receipt_root": _hash(f"receipt:{kind}:{index}"),
+        "metadata": dict(metadata or {}),
+    }
+
+
+def _extract_candidate(*, source_repo: Path, commit: str, destination: Path) -> None:
+    archive = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(source_repo),
+            "archive",
+            "--format=tar",
+            commit,
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
+        for member in bundle.getmembers():
+            relative = Path(member.name)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise SystemExit("candidate release archive path is unsafe")
+        bundle.extractall(destination)
+
+
+def _prepare_offline_root(*, source_root: Path, destination: Path) -> None:
+    shutil.copytree(
+        "/opt/leadpoet/scoring-wheelhouse",
+        destination / "scoring-wheelhouse-py39",
+    )
+    external = Path("/opt/leadpoet/external-artifacts")
+    runsc_lock = json.loads(
+        (source_root / "gateway/tee/runsc-runtime.lock.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    runsc_filename = str(runsc_lock["artifact_filename"])
+    shutil.copy2(external / runsc_filename, destination / runsc_filename)
+    runtime_lock = json.loads(
+        (source_root / "validator_tee/runtime-artifacts-v2.lock.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    runtime_root = destination / "validator-runtime"
+    runtime_root.mkdir()
+    for artifact in runtime_lock["artifacts"].values():
+        filename = str(artifact["filename"])
+        shutil.copy2(external / filename, runtime_root / filename)
+
+
+def _materialize_validator_app(
+    *,
+    source_root: Path,
+    offline_root: Path,
+    destination: Path,
+) -> tuple[str, str]:
+    """Materialize the exact application COPY surface of Dockerfile.enclave."""
+
+    artifact_root = source_root / ".validator-tee-artifacts"
+    subprocess.run(
+        [
+            "/usr/bin/python3.11",
+            str(
+                source_root
+                / "validator_tee/scripts/stage_runtime_artifacts_v2.py"
+            ),
+            "--lock",
+            str(source_root / "validator_tee/runtime-artifacts-v2.lock.json"),
+            "--output-dir",
+            str(artifact_root),
+            "--offline-artifact-root",
+            str(offline_root / "validator-runtime"),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    drand = Path(
+        "/opt/leadpoet/drand-cabi-v2/libbittensor_drand_v2.so"
+    )
+    if not drand.is_file():
+        raise SystemExit("measured local drand C ABI artifact is unavailable")
+    shutil.copy2(drand, artifact_root / "libbittensor_drand_v2.so")
+
+    shutil.rmtree(destination, ignore_errors=True)
+    destination.mkdir(parents=True)
+    directory_copies = (
+        ("validator_tee/enclave", "validator_tee/enclave"),
+        ("leadpoet_canonical", "leadpoet_canonical"),
+        ("leadpoet_verifier", "leadpoet_verifier"),
+        ("research_lab", "research_lab"),
+        ("gateway/research_lab", "gateway/research_lab"),
+        ("gateway/qualification/utils", "gateway/qualification/utils"),
+        ("qualification/scoring", "qualification/scoring"),
+    )
+    file_copies = (
+        ("validator_tee/runtime-artifacts-v2.lock.json", "validator_tee/runtime-artifacts-v2.lock.json"),
+        (".validator-tee-artifacts/manifest.json", "validator_tee/runtime-artifacts-v2.manifest.json"),
+        (".validator-tee-artifacts/libbittensor_drand_v2.so", "validator_tee/enclave/libbittensor_drand_v2.so"),
+        ("gateway/__init__.py", "gateway/__init__.py"),
+        ("gateway/qualification/__init__.py", "gateway/qualification/__init__.py"),
+        ("gateway/qualification/models.py", "gateway/qualification/models.py"),
+        ("gateway/qualification/config.py", "gateway/qualification/config.py"),
+        ("gateway/db/__init__.py", "gateway/db/__init__.py"),
+        ("gateway/db/client.py", "gateway/db/client.py"),
+        ("gateway/tasks/__init__.py", "gateway/tasks/__init__.py"),
+        ("gateway/tasks/icp_generator.py", "gateway/tasks/icp_generator.py"),
+        ("qualification/__init__.py", "qualification/__init__.py"),
+        ("scripts/run_research_lab_hosted_worker.py", "scripts/run_research_lab_hosted_worker.py"),
+        ("scripts/run_research_lab_hosted_worker_fleet.py", "scripts/run_research_lab_hosted_worker_fleet.py"),
+        ("scripts/run_research_lab_scoring_worker.py", "scripts/run_research_lab_scoring_worker.py"),
+        ("scripts/run_research_lab_scoring_worker_fleet.py", "scripts/run_research_lab_scoring_worker_fleet.py"),
+        ("neurons/validator.py", "neurons/validator.py"),
+        ("validator_models/automated_checks.py", "validator_models/automated_checks.py"),
+    )
+    for source_name, destination_name in directory_copies:
+        shutil.copytree(
+            source_root / source_name,
+            destination / destination_name,
+        )
+    for source_name, destination_name in file_copies:
+        target = destination / destination_name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_root / source_name, target)
+    for path in destination.rglob("*"):
+        path.chmod(0o755 if path.is_dir() else 0o644)
+
+    from validator_tee.enclave.runtime_v2 import compute_app_manifest_hash
+
+    app_manifest_hash = compute_app_manifest_hash(destination)
+    dependency_files = (
+        (
+            "/app/validator_tee/enclave/requirements.txt",
+            destination / "validator_tee/enclave/requirements.txt",
+        ),
+        (
+            "/app/validator_tee/runtime-artifacts-v2.lock.json",
+            destination / "validator_tee/runtime-artifacts-v2.lock.json",
+        ),
+        (
+            "/app/validator_tee/runtime-artifacts-v2.manifest.json",
+            destination / "validator_tee/runtime-artifacts-v2.manifest.json",
+        ),
+    )
+    dependency_lock_hash = sha256_json(
+        [
+            {"path": canonical, "sha256": sha256_bytes(path.read_bytes())}
+            for canonical, path in dependency_files
+        ]
+    )
+    return app_manifest_hash, dependency_lock_hash
+
+
+def _release_build_input(*, commit: str, destination: Path) -> dict:
+    from artifact_identity import eif_hash, normalized_image_id, pcr0
+    from gateway.tee.verify_release_artifacts_v2 import source_manifest_hash
+
+    builder_root = destination / "release-builder"
+    shutil.rmtree(builder_root, ignore_errors=True)
+    source_root = builder_root / "source"
+    offline_root = builder_root / "offline"
+    source_root.mkdir(parents=True)
+    offline_root.mkdir()
+    _extract_candidate(
+        source_repo=Path("/source"),
+        commit=commit,
+        destination=source_root,
+    )
+    _prepare_offline_root(source_root=source_root, destination=offline_root)
+    app_manifest_hash, dependency_lock_hash = _materialize_validator_app(
+        source_root=source_root,
+        offline_root=offline_root,
+        destination=destination / "validator-app",
+    )
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "ATTESTED_RUNTIME_COMMIT_SHA": commit,
+            "ATTESTED_RUNTIME_SOURCE_IS_CLEAN_GIT_ARCHIVE": "1",
+            "GATEWAY_ROOT": str(source_root / "gateway"),
+            "GATEWAY_V2_OFFLINE_ARTIFACT_ROOT": str(offline_root),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "PYTHONPATH": str(source_root),
+            "RESEARCH_LAB_RUNTIME_SOURCE_ROOT": str(source_root),
+        }
+    )
+    subprocess.run(
+        [
+            "/bin/bash",
+            str(source_root / "gateway/tee/stage_attested_runtime.sh"),
+        ],
+        check=True,
+        env=environment,
+        stdout=subprocess.DEVNULL,
+    )
+
+    gateway_root = source_root / "gateway"
+    generated_identities = (
+        gateway_root
+        / "_attested_runtime/gateway_enclave_build_identities"
+    )
+    attested_runtime_output = destination / "gateway-attested-runtime"
+    shutil.rmtree(attested_runtime_output, ignore_errors=True)
+    shutil.copytree(
+        gateway_root / "_attested_runtime",
+        attested_runtime_output,
+    )
+    identity_output = destination / "gateway-enclave-build-identities"
+    shutil.rmtree(identity_output, ignore_errors=True)
+    shutil.copytree(generated_identities, identity_output)
+    source_hash = source_manifest_hash(gateway_root / "_enclave_source")
+    dockerfile_hash = sha256_bytes(
+        (gateway_root / "tee/Dockerfile.enclave").read_bytes()
+    )
+    roles = {}
+    for role in (
+        "gateway_autoresearch",
+        "gateway_coordinator",
+        "gateway_scoring",
+    ):
+        identity = json.loads(
+            (
+                gateway_root
+                / "_attested_runtime/gateway_enclave_build_identities"
+                / f"{role}.json"
+            ).read_text(encoding="utf-8")
+        )
+        roles[role] = {
+            "build_identity_hash": identity["identity_hash"],
+            "commit_sha": commit,
+            "dependency_lock_hash": identity["dependency_lock_hash"],
+            "dockerfile_hash": dockerfile_hash,
+            "eif_hash": eif_hash(commit, role),
+            "execution_manifest_hash": identity["execution_manifest_hash"],
+            "normalized_image_hash": normalized_image_id(commit, role),
+            "pcr0": pcr0(commit),
+            "source_manifest_hash": source_hash,
+            "topology_hash": identity["topology_hash"],
+        }
+    value = {
+        "commit_sha": commit,
+        "gateway_roles": roles,
+        "validator_app_manifest_hash": app_manifest_hash,
+        "validator_dependency_lock_hash": dependency_lock_hash,
+    }
+    (destination / "release-build-input.json").write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    return value
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--candidate-sha", required=True)
+    args = parser.parse_args()
+    destination = args.output_dir
+    corpus = destination / "acceptance-corpus-v2"
+    corpus.mkdir(parents=True, exist_ok=True)
+
+    fixtures = [
+        _fixture(corpus, kind="autoresearch_run", index=0),
+        _fixture(corpus, kind="provider_tape", index=0),
+        _fixture(corpus, kind="reward_allocation", index=0),
+    ]
+    fixtures.extend(
+        _fixture(corpus, kind="score_bundle", index=index)
+        for index in range(100)
+    )
+    fixtures.extend(
+        _fixture(
+            corpus,
+            kind="daily_benchmark",
+            index=index,
+            metadata={"benchmark_date": f"2026-06-{index + 1:02d}"},
+        )
+        for index in range(14)
+    )
+    fixtures.extend(
+        _fixture(
+            corpus,
+            kind="promotion_branch",
+            index=index,
+            metadata={"status": status},
+        )
+        for index, status in enumerate(sorted(REQUIRED_PROMOTION_BRANCHES))
+    )
+    fixtures.extend(
+        _fixture(
+            corpus,
+            kind="weight_epoch",
+            index=index,
+            metadata={"epoch_id": 23_000 + index},
+        )
+        for index in range(50)
+    )
+
+    key = Ed25519PrivateKey.from_private_bytes(
+        hashlib.sha256(b"leadpoet-local-acceptance-signer").digest()
+    )
+    public_key = key.public_key().public_bytes_raw()
+    manifest = build_acceptance_corpus_v2(
+        fixtures=fixtures,
+        captured_from="2026-06-01T00:00:00Z",
+        captured_through="2026-07-01T00:00:00Z",
+        signing_pubkey_hex=public_key.hex(),
+        sign_digest=key.sign,
+    )
+    manifest_path = destination / "acceptance-corpus-v2.json"
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    manifest_path.chmod(0o600)
+    release_input = _release_build_input(
+        commit=args.candidate_sha,
+        destination=Path(
+            os.environ.get("REHEARSAL_STATE_ROOT", "/rehearsal-state")
+        ),
+    )
+    print(
+        json.dumps(
+            {
+                "fixture_count": len(fixtures),
+                "manifest_hash": manifest["manifest_hash"],
+                "release_build_commit": release_input["commit_sha"],
+                "signer_hash": sha256_bytes(public_key),
+                "status": "ready",
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

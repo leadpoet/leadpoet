@@ -1,0 +1,87 @@
+{
+  "schema_version": "leadpoet.local_restart_boundary_contract.v1",
+  "boundaries": {
+    "aws_cli": {
+      "allowed_operations": ["ecr_login", "secretsmanager", "sts"],
+      "reject_unknown": true
+    },
+    "aws_kms": {
+      "allowed_operations": ["decrypt", "encrypt", "generate_data_key_pair_without_plaintext"],
+      "reject_unknown": true
+    },
+    "aws_s3_object_lock": {
+      "allowed_operations": ["get_object", "head_object", "put_object"],
+      "reject_unknown": true
+    },
+    "docker_daemon": {
+      "allowed_operations": [
+        "build",
+        "inspect",
+        "load",
+        "login",
+        "prune",
+        "remove",
+        "run",
+        "save",
+        "state",
+        "stop",
+        "tag"
+      ],
+      "reject_unknown": true
+    },
+    "host_kernel": {
+      "allowed_operations": [
+        "containerd_state",
+        "cpu_capacity",
+        "filesystem_capacity",
+        "instance_metadata",
+        "memory_capacity",
+        "mount_namespace",
+        "process_lookup",
+        "process_termination",
+        "socket_state",
+        "systemd",
+        "timing"
+      ],
+      "reject_unknown": true
+    },
+    "http_service": {
+      "allowed_operations": ["download", "external_ip", "gateway_request"],
+      "reject_unknown": true
+    },
+    "nitro_enclaves": {
+      "allowed_operations": ["build_enclave", "describe_enclaves", "enclave_listener", "enclave_rpc", "measured_drand_cabi", "measured_drand_commit", "measured_runtime_surface", "run_enclave", "terminate_enclave", "verify_attestation"],
+      "reject_unknown": true
+    },
+    "python_package_index": {
+      "allowed_operations": ["bootstrap", "download", "install", "uninstall"],
+      "reject_unknown": true
+    },
+    "stateful_subnet_chain": {
+      "allowed_operations": [
+        "runtime_version",
+        "epoch_snapshot",
+        "finalized_head",
+        "submit_extrinsic",
+        "finalization",
+        "last_update",
+        "revealed_weights"
+      ],
+      "reject_unknown": true
+    },
+    "supabase_postgrest": {
+      "allowed_operations": ["select", "insert", "rpc"],
+      "reject_unknown": true
+    }
+  },
+  "forbidden_substitutions": [
+    "gateway",
+    "validator",
+    "auditor",
+    "canonical_bundle",
+    "receipt_graph",
+    "signature",
+    "sdk_extrinsic",
+    "verification"
+  ]
+}

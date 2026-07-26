@@ -272,24 +272,31 @@ class AuthoritativeServeAxonContextV2(AbstractContextManager):
         }:
             raise EnclaveHotkeyV2Error("serve_axon call metadata is invalid")
         args = value.get("call_args")
-        required_args = {
+        runtime_args = {
             "version",
             "ip",
             "port",
             "ip_type",
             "netuid",
-            "hotkey",
-            "coldkey",
             "protocol",
             "placeholder1",
             "placeholder2",
         }
+        legacy_args = runtime_args | {"hotkey", "coldkey"}
+        actual_args = set(args) if isinstance(args, Mapping) else set()
+        identity_matches = (
+            actual_args == runtime_args
+            or (
+                actual_args == legacy_args
+                and args.get("hotkey") == self.wallet.hotkey.ss58_address
+                and bool(str(args.get("coldkey") or ""))
+            )
+        )
         if (
             value.get("call_module") != "SubtensorModule"
             or value.get("call_function") != "serve_axon"
             or not isinstance(args, Mapping)
-            or set(args) != required_args
-            or args.get("hotkey") != self.wallet.hotkey.ss58_address
+            or not identity_matches
         ):
             raise EnclaveHotkeyV2Error("SDK call is not the authorized serve_axon domain")
         runtime_block_hash = str(self.substrate.get_chain_finalised_head())

@@ -11,6 +11,24 @@ from Leadpoet.utils.subnet_epoch import SubnetEpochCutover, SubnetEpochSnapshot
 GENESIS = "0x" + "11" * 32
 
 
+@pytest.fixture(autouse=True)
+def _gateway_storage_env(monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "test-service-role")
+    from gateway import config
+
+    monkeypatch.setattr(
+        config,
+        "SUPABASE_URL",
+        "https://example.supabase.co",
+    )
+    monkeypatch.setattr(
+        config,
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "test-service-role",
+    )
+
+
 def _cutover() -> SubnetEpochCutover:
     return SubnetEpochCutover(
         network_genesis_hash=GENESIS,

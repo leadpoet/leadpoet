@@ -110,6 +110,62 @@ def _substitution_identity(row: dict) -> str:
     )
 
 
+def _git_blob(
+    roots: tuple[Path, ...],
+    commit: str,
+    git_path: str,
+) -> bytes | None:
+    for root in roots:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "show",
+                f"{commit}:{git_path}",
+            ],
+            check=False,
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            return result.stdout
+    return None
+
+
+def _verify_installed_checkout_handoff(
+    *,
+    source_path: Path,
+    source_git_path: str,
+    candidate_sha: str,
+    candidate_roots: tuple[Path, ...],
+) -> bool:
+    resolved_source = source_path.resolve()
+    for root in candidate_roots:
+        resolved_root = root.resolve()
+        if resolved_source != resolved_root and resolved_root not in resolved_source.parents:
+            continue
+        head = subprocess.run(
+            ["git", "-C", str(resolved_root), "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if head.returncode != 0 or head.stdout.strip() != candidate_sha:
+            return False
+        candidate_blob = _git_blob(
+            (resolved_root,),
+            candidate_sha,
+            source_git_path,
+        )
+        if candidate_blob is None:
+            return not source_path.exists()
+        return (
+            source_path.is_file()
+            and source_path.read_bytes() == candidate_blob
+        )
+    return False
+
+
 def _verify_production_identity(
     row: dict,
     from_sha: str | None,
@@ -143,44 +199,38 @@ def _verify_production_identity(
             "candidate production source identity is invalid: %r" % row
         )
 
-    git_blob: bytes | None = None
-    for root in candidate_roots:
-        result = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(root),
-                "show",
-                f"{source_commit}:{source_git_path}",
-            ],
-            check=False,
-            capture_output=True,
-        )
-        if result.returncode == 0:
-            git_blob = result.stdout
-            break
+    git_blob = _git_blob(candidate_roots, source_commit, source_git_path)
     if git_blob is None or source_hash != hashlib.sha256(git_blob).hexdigest():
         raise SystemExit(
             "candidate production source Git identity is invalid: %r" % row
         )
 
-    if source_kind == "candidate_checkout":
-        if (
-            not source_path.is_file()
-            or source_hash
-            != hashlib.sha256(source_path.read_bytes()).hexdigest()
+    if source_path.is_file():
+        if source_hash != hashlib.sha256(source_path.read_bytes()).hexdigest():
+            if source_kind != "installed_checkout" or not (
+                _verify_installed_checkout_handoff(
+                    source_path=source_path,
+                    source_git_path=source_git_path,
+                    candidate_sha=candidate_sha,
+                    candidate_roots=candidate_roots,
+                )
+            ):
+                raise SystemExit(
+                    "candidate production source bytes changed after execution: %r"
+                    % row
+                )
+    elif source_kind == "installed_checkout":
+        if not _verify_installed_checkout_handoff(
+            source_path=source_path,
+            source_git_path=source_git_path,
+            candidate_sha=candidate_sha,
+            candidate_roots=candidate_roots,
         ):
             raise SystemExit(
-                "candidate production source bytes changed after execution: %r"
-                % row
+                "installed production source disappeared without an exact "
+                "candidate checkout handoff: %r" % row
             )
-    elif source_kind == "candidate_archive" and source_path.is_file():
-        if source_hash != hashlib.sha256(source_path.read_bytes()).hexdigest():
-            raise SystemExit(
-                "candidate archive source bytes changed after execution: %r"
-                % row
-            )
-    elif source_kind not in {"candidate_archive", "installed_checkout"}:
+    elif source_kind != "candidate_archive":
         raise SystemExit(
             "candidate checkout source disappeared after execution: %r" % row
         )
@@ -310,12 +360,82 @@ def selected_weight_storage_preflight_capability(
     )
 
 
+def verify_gateway_weight_readiness_invocations(
+    rows: list[dict],
+    *,
+    candidate_sha: str,
+    transition: str = "forward",
+    storage_preflight_supported: bool = True,
+) -> None:
+    module = "gateway.tee.verify_weight_submission_ready_v2"
+    if not storage_preflight_supported and transition != "rollback":
+        raise SystemExit(
+            "current release does not declare the required weight storage preflight"
+        )
+    expected = []
+    if storage_preflight_supported:
+        expected.append(
+            {
+                "argv": ["-m", module, "--storage-read-preflight"],
+                "source_kind": "candidate_archive",
+            }
+        )
+    expected.extend(
+        [
+        {
+            "argv": ["-m", module, "--repair"],
+            "source_kind": "candidate_checkout",
+        },
+        {
+            "argv": [
+                "-m",
+                module,
+                "--gateway-url",
+                "http://localhost:8000",
+                "--http-timeout-seconds",
+                "360",
+            ],
+            "source_kind": "candidate_checkout",
+        },
+        ]
+    )
+    observed = [
+        row
+        for row in rows
+        if row.get("kind") == "python-module"
+        and row.get("module") == module
+    ]
+    if len(observed) != len(expected):
+        raise SystemExit(
+            "gateway launcher did not execute the exact production weight "
+            f"readiness invocation contract: {observed!r}"
+        )
+    for ordinal, (row, contract) in enumerate(
+        zip(observed, expected),
+        start=1,
+    ):
+        if (
+            row.get("status") != "started"
+            or row.get("implementation") != "production_module"
+            or row.get("candidate_sha") != candidate_sha
+            or row.get("source_commit") != candidate_sha
+            or row.get("source_git_path")
+            != "gateway/tee/verify_weight_submission_ready_v2.py"
+            or row.get("source_kind") != contract["source_kind"]
+            or row.get("argv") != contract["argv"]
+        ):
+            raise SystemExit(
+                "gateway production weight readiness invocation differs from "
+                f"the launcher contract at ordinal {ordinal}: {row!r}"
+            )
+
+
 def main() -> int:
     component, from_sha, candidate_sha = sys.argv[1:4]
     scenario = (
         sys.argv[4]
         if len(sys.argv) > 4
-        else "transient_503_recovery"
+        else "production_success"
     )
     scope = sys.argv[5] if len(sys.argv) > 5 else "exact"
     transition = sys.argv[6] if len(sys.argv) > 6 else "forward"
@@ -341,8 +461,6 @@ def main() -> int:
         process = row.get("process")
         if module:
             labels.append(f"module:{module}")
-        elif kind == "weight-readiness":
-            labels.append(f"weight:{stage}")
         elif kind == "nitro":
             labels.append(f"nitro:{operation}")
         elif kind == "docker":
@@ -351,6 +469,10 @@ def main() -> int:
             labels.append(f"process:{process}")
 
     if component == "gateway":
+        if scenario != "production_success":
+            raise SystemExit(
+                "targeted fault scenario cannot satisfy exact restart evidence"
+            )
         storage_preflight_supported = (
             selected_weight_storage_preflight_capability(
                 (
@@ -359,254 +481,35 @@ def main() -> int:
                 )
             )
         )
-        supabase_rows = [
-            row
-            for row in rows
-            if row.get("kind") == "weight-readiness-supabase"
-        ]
-        expected_supabase_runs = (
-            3 if scenario == "transient_503_recovery" else 2
+        verify_gateway_weight_readiness_invocations(
+            rows,
+            candidate_sha=candidate_sha,
+            transition=transition,
+            storage_preflight_supported=storage_preflight_supported,
         )
-        if not storage_preflight_supported:
-            expected_supabase_runs -= 1
-        if (
-            len(supabase_rows) != expected_supabase_runs
-            or any(row.get("status") != "ok" for row in supabase_rows)
-            or any(row.get("row_count") != 16 for row in supabase_rows)
-            or any(row.get("page_count") != 9 for row in supabase_rows)
-        ):
-            raise SystemExit(
-                "finalized allocation history pagination was not rehearsed"
-            )
-        weight_rows = [
-            row for row in rows if row.get("kind") == "weight-readiness"
-        ]
-        if not weight_rows or any(
-            row.get("implementation") != "production_module"
-            or row.get("candidate_sha") != candidate_sha
-            for row in weight_rows
-        ):
-            raise SystemExit(
-                "weight readiness did not execute the candidate production module"
-            )
-        if any(
-            row.get("source_git_path")
-            != "gateway/tee/verify_weight_submission_ready_v2.py"
-            or row.get("source_kind")
-            not in {"candidate_checkout", "candidate_archive"}
-            or row.get("module_sha256") != row.get("source_sha256")
-            for row in weight_rows
-        ):
-            raise SystemExit(
-                "weight readiness source identity differs from the candidate commit"
-            )
-
-        repair_rows = [
-            row for row in weight_rows if row.get("stage") == "repair"
-        ]
-        storage_preflight_rows = [
-            row
-            for row in weight_rows
-            if row.get("stage") == "storage_preflight"
-        ]
-        boundaries = [
-            row
-            for row in rows
-            if row.get("kind") == "weight-readiness-boundary"
-        ]
-        persistence_rows = [
-            row
-            for row in rows
-            if row.get("kind") == "weight-readiness-persistence"
-        ]
-        if storage_preflight_supported:
-            if (
-                not storage_preflight_rows
-                or storage_preflight_rows[0].get("status") != "started"
-                or storage_preflight_rows[-1].get("status") != "ok"
-            ):
-                raise SystemExit(
-                    "pre-shutdown weight storage preflight did not pass"
-                )
-        elif transition != "rollback":
-            raise SystemExit(
-                "current release does not declare the required weight storage preflight"
-            )
-        elif storage_preflight_rows:
-            raise SystemExit(
-                "historical release executed an undeclared weight storage preflight"
-            )
-        if not repair_rows or repair_rows[0].get("status") != "started":
-            raise SystemExit("real weight repair did not start")
-
-        if scenario != "transient_503_recovery":
-            if any(
-                row.get("process") == "gateway.main"
-                for row in rows
-            ):
-                raise SystemExit(
-                    "gateway launched after a failed weight-readiness gate"
-                )
-            if any(
-                row.get("stage") == "http_handoff"
-                for row in weight_rows
-            ):
-                raise SystemExit(
-                    "post-launch handoff ran after pre-launch readiness failed"
-                )
-            if repair_rows[-1].get("status") != "failed":
-                raise SystemExit(
-                    "failure scenario did not fail the real readiness module"
-                )
-            direct_failures = [
-                row
-                for row in boundaries
-                if row.get("boundary") == "direct_allocation"
-                and row.get("status") == "failed"
-            ]
-            expected_attempts = 3 if scenario == "exhausted_503" else 1
-            expected_code = (
-                "authenticated_http_503"
-                if scenario == "exhausted_503"
-                else "authenticated_http_403"
-            )
-            if (
-                len(direct_failures) != expected_attempts
-                or any(
-                    row.get("failure_code") != expected_code
-                    for row in direct_failures
-                )
-                or len(persistence_rows) != expected_attempts
-            ):
-                raise SystemExit(
-                    "readiness failure retry cardinality is invalid"
-                )
-            if any(
-                row.get("failure_code") != expected_code
-                for row in persistence_rows
-            ):
-                raise SystemExit(
-                    "persistence failure evidence differs from the scenario"
-                )
-            deployment = json.loads(
-                Path(
-                    "/home/ec2-user/.config/leadpoet/deployments/"
-                    "gateway-current.json"
-                ).read_text(encoding="utf-8")
-            )
-            if (
-                deployment.get("target_sha") != candidate_sha
-                or deployment.get("status") != "failed"
-                or deployment.get("stage") != "validator_weight_input_repair"
-            ):
-                raise SystemExit(
-                    "failed restart deployment evidence is invalid"
-                )
-            print(
-                json.dumps(
-                    {
-                        "schema_version": (
-                            "leadpoet.local_restart_rehearsal.v2"
-                        ),
-                        "status": "targeted_expected_failure_passed",
-                        "component": component,
-                        "scope": scope,
-                        "scenario": scenario,
-                        "from_sha": from_sha,
-                        "candidate_sha": candidate_sha,
-                        "event_count": len(rows),
-                    },
-                    sort_keys=True,
-                )
-            )
-            return 0
-
         required_gateway_order = [
             "module:gateway.tee.release_channel_v2",
             "module:gateway.tee.prepare_gateway_envelopes_v2",
         ]
         if storage_preflight_supported:
-            required_gateway_order.append("weight:storage_preflight")
+            required_gateway_order.append(
+                "module:gateway.tee.verify_weight_submission_ready_v2"
+            )
         required_gateway_order.extend(
             [
                 "module:gateway.tee.restart_preflight_v2",
-                "nitro:build",
-                "nitro:run",
+                "nitro:build_enclave",
+                "nitro:run_enclave",
                 "module:gateway.utils.tee_v2_bootstrap",
                 "module:gateway.utils.tee_kms_provision_v2",
                 "module:gateway.tee.verify_v2_runtime_ready",
-                "weight:repair",
+                "module:gateway.tee.verify_weight_submission_ready_v2",
                 "process:gateway.main",
-                "weight:http_handoff",
+                "module:gateway.tee.verify_weight_submission_ready_v2",
             ]
         )
         require_order(labels, required_gateway_order)
         verify_gateway_private_model_environment(rows)
-        if repair_rows[-1].get("status") != "ok":
-            raise SystemExit("real weight repair did not recover")
-        direct_rows = [
-            row
-            for row in boundaries
-            if row.get("boundary") == "direct_allocation"
-        ]
-        if [
-            (row.get("ordinal"), row.get("status"), row.get("failure_code"))
-            for row in direct_rows
-        ] != [
-            (1, "failed", "authenticated_http_503"),
-            (2, "ok", None),
-        ]:
-            raise SystemExit(
-                "transient allocation recovery sequence is invalid"
-            )
-        if (
-            len(persistence_rows) != 2
-            or persistence_rows[0].get("status") != "failed"
-            or persistence_rows[0].get("failure_code")
-            != "authenticated_http_503"
-            or persistence_rows[1].get("status") != "persisted"
-        ):
-            raise SystemExit(
-                "measured artifact persistence recovery was not exercised"
-            )
-        recovered_attempts = persistence_rows[1].get("attempts") or []
-        if [
-            (row.get("method"), row.get("http_status"))
-            for row in recovered_attempts
-        ] != [
-            ("GET", 503),
-            ("GET", 200),
-            ("HEAD", 503),
-            ("HEAD", 200),
-        ]:
-            raise SystemExit(
-                "measured GET/HEAD transient recovery sequence is invalid"
-            )
-        http_rows = [
-            row
-            for row in weight_rows
-            if row.get("stage") == "http_handoff"
-        ]
-        localhost_http_rows = [
-            row
-            for row in boundaries
-            if row.get("boundary") == "localhost_allocation_http"
-        ]
-        if (
-            not http_rows
-            or http_rows[0].get("status") != "started"
-            or http_rows[-1].get("status") != "ok"
-            or len(localhost_http_rows) != 1
-            or localhost_http_rows[0].get("status") != "ok"
-            or localhost_http_rows[0].get("timeout_seconds") != 360
-            or localhost_http_rows[0].get("simulated_build_seconds") != 284
-            or localhost_http_rows[0].get("prelaunch_epoch") != 99999
-            or localhost_http_rows[0].get("postlaunch_epoch") != 100000
-            or localhost_http_rows[0].get("epoch_rollover") is not True
-        ):
-            raise SystemExit(
-                "post-rollover allocation handoff deadline was not validated"
-            )
         state = json.loads(
             Path("/rehearsal-state/state.json").read_text(encoding="utf-8")
         )
@@ -619,8 +522,8 @@ def main() -> int:
                 "module:gateway.tee.release_channel_v2",
                 "module:validator_tee.host.refresh_hotkey_config_v2",
                 "module:validator_tee.host.restart_preflight_v2",
-                "nitro:build",
-                "nitro:run",
+                "nitro:build_enclave",
+                "nitro:run_enclave",
                 "process:validator.chain_relay",
                 "module:validator_tee.host.runtime_v2_bootstrap",
                 "module:validator_tee.host.hotkey_bootstrap_v2",
@@ -630,8 +533,22 @@ def main() -> int:
             Path("/rehearsal-state/state.json").read_text(encoding="utf-8")
         )
         validator = state.get("containers", {}).get("leadpoet-validator-main", {})
-        if validator != {"running": True, "restart_count": 0}:
+        validator_log = Path(str(validator.get("log_path") or ""))
+        if (
+            validator.get("running") is not True
+            or validator.get("restart_count") != 0
+            or not isinstance(validator.get("pid"), int)
+            or int(validator["pid"]) <= 0
+            or not validator_log.is_file()
+        ):
             raise SystemExit("validator final container state is invalid")
+
+    pcr0_values = {
+        str((enclave.get("Measurements") or {}).get("PCR0") or "")
+        for enclave in state.get("enclaves", [])
+    }
+    if len(pcr0_values) != 1 or "" in pcr0_values:
+        raise SystemExit("launcher enclave PCR0 evidence is missing or ambiguous")
 
     print(
         json.dumps(
@@ -649,6 +566,7 @@ def main() -> int:
                 "scenario": scenario,
                 "transition": transition,
                 "event_count": len(rows),
+                "pcr0": next(iter(pcr0_values)),
             },
             sort_keys=True,
         )

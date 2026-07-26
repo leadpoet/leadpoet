@@ -42,6 +42,20 @@ MAX_CIPHERTEXT_FOR_RECIPIENT_BYTES = 64 * 1024
 MAX_CREDENTIAL_BYTES = 64 * 1024
 MAX_JOB_RECIPIENT_REQUESTS = 2048
 JOB_RECIPIENT_REQUEST_TTL_SECONDS = 3600.0
+# Dedicated retention for the per-job credential pool ONLY. On 2026-07-26
+# 03:24 UTC production logs show every coordinator credential RPC rejected
+# with "job recipient capacity is full" after ~8h of scoring load: slots are
+# freed only on successful unwrap or TTL expiry, so entries abandoned between
+# claim and unwrap accumulated for a full hour against the shared 2048 cap,
+# and the weight-submission path (which shares the coordinator) went down
+# with scoring. A job credential is unwrapped within one RPC exchange in
+# practice, so a 10-minute TTL bounds abandoned entries tightly, and the
+# larger cap makes saturation require an abandonment storm rather than a
+# slow leak (~80MB worst case, well inside the coordinator's memory). The
+# SOURCE_ADD and OpenRouter ingress pools keep their existing shared limits
+# unchanged.
+MAX_JOB_CREDENTIAL_REQUESTS = 8192
+JOB_CREDENTIAL_REQUEST_TTL_SECONDS = 600.0
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -497,11 +511,11 @@ class KMSRecipientV2:
                 item_request_id
                 for item_request_id, item in self._job_requests.items()
                 if now - float(item["created_monotonic"])
-                >= JOB_RECIPIENT_REQUEST_TTL_SECONDS
+                >= JOB_CREDENTIAL_REQUEST_TTL_SECONDS
             ]
             for item_request_id in expired:
                 self._job_requests.pop(item_request_id, None)
-            if len(self._job_requests) >= MAX_JOB_RECIPIENT_REQUESTS:
+            if len(self._job_requests) >= MAX_JOB_CREDENTIAL_REQUESTS:
                 raise KMSRecipientV2Error("job recipient capacity is full")
             self._job_requests[request_id] = {
                 "request": dict(request),
@@ -523,7 +537,7 @@ class KMSRecipientV2:
                 raise KMSRecipientV2Error("job recipient request was not found")
             if (
                 time.monotonic() - float(record["created_monotonic"])
-                >= JOB_RECIPIENT_REQUEST_TTL_SECONDS
+                >= JOB_CREDENTIAL_REQUEST_TTL_SECONDS
             ):
                 self._job_requests.pop(normalized_request_id, None)
                 raise KMSRecipientV2Error("job recipient request expired")

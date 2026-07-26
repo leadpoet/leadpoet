@@ -2,6 +2,8 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+
+from gateway.tee.kms_recipient_v2 import JOB_CREDENTIAL_REQUEST_TTL_SECONDS
 from cryptography.hazmat.primitives import hashes, padding as symmetric_padding
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -286,7 +288,7 @@ def test_job_kms_recipient_is_single_use_and_binds_job_key_hash():
 
 
 def test_used_job_recipients_do_not_exhaust_capacity(monkeypatch):
-    monkeypatch.setattr("gateway.tee.kms_recipient_v2.MAX_JOB_RECIPIENT_REQUESTS", 2)
+    monkeypatch.setattr("gateway.tee.kms_recipient_v2.MAX_JOB_CREDENTIAL_REQUESTS", 2)
     manager, _, _ = _manager()
     secret = "miner-specific-key"
 
@@ -304,7 +306,7 @@ def test_used_job_recipients_do_not_exhaust_capacity(monkeypatch):
 
 
 def test_unconsumed_job_recipients_still_fail_closed_at_capacity(monkeypatch):
-    monkeypatch.setattr("gateway.tee.kms_recipient_v2.MAX_JOB_RECIPIENT_REQUESTS", 2)
+    monkeypatch.setattr("gateway.tee.kms_recipient_v2.MAX_JOB_CREDENTIAL_REQUESTS", 2)
     manager, _, _ = _manager()
     secret = "miner-specific-key"
 
@@ -325,7 +327,7 @@ def test_unconsumed_job_recipients_still_fail_closed_at_capacity(monkeypatch):
 
 
 def test_abandoned_job_recipients_expire_without_evicting_live_requests(monkeypatch):
-    monkeypatch.setattr("gateway.tee.kms_recipient_v2.MAX_JOB_RECIPIENT_REQUESTS", 2)
+    monkeypatch.setattr("gateway.tee.kms_recipient_v2.MAX_JOB_CREDENTIAL_REQUESTS", 2)
     now = [100.0]
     monkeypatch.setattr(
         "gateway.tee.kms_recipient_v2.time.monotonic",
@@ -346,7 +348,7 @@ def test_abandoned_job_recipients_expire_without_evicting_live_requests(monkeypa
         credential_value_hash_expected=credential_value_hash(secret),
         key_ref_hash=sha256_json({"key_ref": "encrypted_ref:live"}),
     )
-    now[0] += 3599.5
+    now[0] += JOB_CREDENTIAL_REQUEST_TTL_SECONDS - 0.5
 
     replacement = manager.job_recipient_request(
         job_id="autoresearch-v2:replacement-job",
@@ -384,7 +386,7 @@ def test_expired_job_recipient_is_rejected_before_capacity_sweep(monkeypatch):
         credential_value_hash_expected=credential_value_hash(secret),
         key_ref_hash=sha256_json({"key_ref": "encrypted_ref:expired-direct"}),
     )
-    now[0] += 3600.0
+    now[0] += JOB_CREDENTIAL_REQUEST_TTL_SECONDS
 
     with pytest.raises(KMSRecipientV2Error, match="expired"):
         manager.unwrap_job_credential(

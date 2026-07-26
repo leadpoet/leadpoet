@@ -3523,6 +3523,21 @@ class ResearchLabGatewayScoringWorker:
                         )
                     )
                     last_error_log = now
+                if "job recipient capacity is full" in str(exc):
+                    # Exact match for the coordinator's per-job credential
+                    # pool saturation (kms_recipient_v2). Retrying at normal
+                    # cadence files a fresh request per pass and keeps the
+                    # pool pinned, starving the weight path that shares the
+                    # coordinator; production hit this at 2026-07-26 03:24
+                    # UTC. Back off long enough for TTL evictions to reclaim
+                    # slots and page via a unique tag.
+                    logger.critical(
+                        "coordinator_job_credential_pool_saturated worker=%s "
+                        "backing_off_seconds=120",
+                        self.worker_ref,
+                    )
+                    await asyncio.sleep(120)
+                    continue
                 await asyncio.sleep(max(self.config.scoring_worker_poll_seconds, error_backoff_seconds))
                 continue
             if outcome.get("processed") or outcome.get("status") != "idle":

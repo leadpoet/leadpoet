@@ -163,10 +163,20 @@ def _verify_production_identity(
             "candidate production source Git identity is invalid: %r" % row
         )
 
-    if source_path.is_file():
-        if source_hash != hashlib.sha256(source_path.read_bytes()).hexdigest():
+    if source_kind == "candidate_checkout":
+        if (
+            not source_path.is_file()
+            or source_hash
+            != hashlib.sha256(source_path.read_bytes()).hexdigest()
+        ):
             raise SystemExit(
                 "candidate production source bytes changed after execution: %r"
+                % row
+            )
+    elif source_kind == "candidate_archive" and source_path.is_file():
+        if source_hash != hashlib.sha256(source_path.read_bytes()).hexdigest():
+            raise SystemExit(
+                "candidate archive source bytes changed after execution: %r"
                 % row
             )
     elif source_kind not in {"candidate_archive", "installed_checkout"}:
@@ -339,20 +349,16 @@ def main() -> int:
             raise SystemExit(
                 "weight readiness did not execute the candidate production module"
             )
-        module_path = Path(
-            "/home/ec2-user/leadpoet_repo/"
-            "gateway/tee/verify_weight_submission_ready_v2.py"
-        )
-        module_hash = __import__("hashlib").sha256(
-            module_path.read_bytes()
-        ).hexdigest()
         if any(
-            row.get("module_path") != str(module_path)
-            or row.get("module_sha256") != module_hash
+            row.get("source_git_path")
+            != "gateway/tee/verify_weight_submission_ready_v2.py"
+            or row.get("source_kind")
+            not in {"candidate_checkout", "candidate_archive"}
+            or row.get("module_sha256") != row.get("source_sha256")
             for row in weight_rows
         ):
             raise SystemExit(
-                "weight readiness source identity differs from the candidate checkout"
+                "weight readiness source identity differs from the candidate commit"
             )
 
         repair_rows = [

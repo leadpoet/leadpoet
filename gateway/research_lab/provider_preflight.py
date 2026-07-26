@@ -21,6 +21,7 @@ provider answered, which is all the preflight needs to know.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -300,10 +301,148 @@ class ProviderPreflight:
 
 
 _shared_preflight = ProviderPreflight()
+_attested_preflight_cache_lock = threading.Lock()
+_attested_preflight_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
 
 
 def shared_preflight() -> ProviderPreflight:
     return _shared_preflight
+
+
+async def _cached_attested_preflight(
+    *,
+    scope_key: str,
+    worker_index: int,
+    settings: Mapping[str, Any],
+    authority_check: Callable[..., Any],
+) -> dict[str, Any]:
+    """Reuse one verified measured result for the configured probe TTL."""
+
+    cache_key = (
+        str(scope_key),
+        int(worker_index),
+        json.dumps(dict(settings), sort_keys=True, separators=(",", ":")),
+    )
+    now = time.monotonic()
+    with _attested_preflight_cache_lock:
+        cached = _attested_preflight_cache.get(cache_key)
+        if cached is not None and now < float(cached["expires_at"]):
+            return copy.deepcopy(cached["result"])
+        expired = [
+            key
+            for key, entry in _attested_preflight_cache.items()
+            if now >= float(entry["expires_at"])
+        ]
+        for key in expired:
+            _attested_preflight_cache.pop(key, None)
+
+    result = authority_check(
+        scope_key=str(scope_key),
+        worker_index=int(worker_index),
+        settings=dict(settings),
+        force=False,
+        provider_credential_profile="benchmark_model",
+    )
+    if hasattr(result, "__await__"):
+        result = await result
+    if not isinstance(result, Mapping):
+        raise RuntimeError("attested provider preflight result is invalid")
+    normalized = copy.deepcopy(dict(result))
+    ttl_seconds = max(60.0, float(settings["ttl_seconds"]))
+    with _attested_preflight_cache_lock:
+        _attested_preflight_cache[cache_key] = {
+            "expires_at": time.monotonic() + ttl_seconds,
+            "result": normalized,
+        }
+    return copy.deepcopy(normalized)
+
+
+def _maintenance_state_values(state: Any) -> tuple[bool, str]:
+    if isinstance(state, Mapping):
+        return bool(state.get("paused")), str(state.get("reason") or "")
+    return bool(getattr(state, "paused", False)), str(
+        getattr(state, "reason", "") or ""
+    )
+
+
+async def apply_preflight_control_result(
+    *,
+    scope: str,
+    actor_ref: str,
+    result: Mapping[str, Any],
+    is_paused: Callable[[], Any],
+    set_paused: Callable[..., Any],
+    prefetched_state: Any = None,
+    may_change_pause_state: bool = True,
+) -> None:
+    """Apply one measured or aggregated preflight result to maintenance state."""
+
+    if result.get("disabled") or not may_change_pause_state:
+        return
+    verdicts = list(result.get("verdicts") or [])
+    if result.get("healthy"):
+        if not preflight_auto_resume_enabled():
+            return
+        try:
+            # A measured preflight can run long enough for an operator to
+            # replace the pause. Re-read a preflight-owned pause before
+            # resuming it; never overwrite an operator-owned pause.
+            state = prefetched_state
+            paused, reason = _maintenance_state_values(state)
+            if state is None or (
+                paused and reason.startswith(PREFLIGHT_REASON_PREFIX)
+            ):
+                state = await is_paused()
+                paused, reason = _maintenance_state_values(state)
+            if paused and reason.startswith(PREFLIGHT_REASON_PREFIX):
+                await set_paused(
+                    paused=False,
+                    reason=f"{PREFLIGHT_REASON_PREFIX}providers_recovered",
+                    actor_ref=actor_ref,
+                    event_doc={"scope": scope, "verdicts": verdicts},
+                )
+                logger.warning(
+                    "research_lab_provider_preflight_auto_resumed scope=%s",
+                    scope,
+                )
+        except Exception as exc:  # noqa: BLE001 - resume is best-effort
+            logger.warning(
+                "research_lab_provider_preflight_resume_check_failed scope=%s error=%s",
+                scope,
+                str(exc)[:200],
+            )
+        return
+
+    if not result.get("pause_worthy") or not preflight_auto_pause_enabled():
+        return
+    unhealthy = [v for v in verdicts if not v.get("healthy")]
+    marker = ",".join(
+        f"{v.get('provider')}={v.get('status')}" for v in unhealthy
+    )
+    pause_reason = f"{PREFLIGHT_REASON_PREFIX}{marker}"[:200]
+    try:
+        # Re-read only on a pause-worthy result so concurrent workers observe
+        # an existing pause instead of appending the same event afterward.
+        state = await is_paused()
+        already_paused, _ = _maintenance_state_values(state)
+        if not already_paused:
+            await set_paused(
+                paused=True,
+                reason=pause_reason,
+                actor_ref=actor_ref,
+                event_doc={"scope": scope, "verdicts": verdicts},
+            )
+            logger.warning(
+                "research_lab_provider_preflight_auto_paused scope=%s providers=%s",
+                scope,
+                marker,
+            )
+    except Exception as exc:  # noqa: BLE001 - pause is best-effort
+        logger.warning(
+            "research_lab_provider_preflight_pause_failed scope=%s error=%s",
+            scope,
+            str(exc)[:200],
+        )
 
 
 async def preflight_gate(
@@ -315,6 +454,8 @@ async def preflight_gate(
     worker_index: int = 0,
     authority_check: Callable[..., Any] | None = None,
     prefetched_state: Any = None,
+    may_change_pause_state: bool = True,
+    measurement_scope_key: str | None = None,
 ) -> dict[str, Any]:
     """Async preflight gate for one maintenance scope (scoring/autoresearch).
 
@@ -337,75 +478,51 @@ async def preflight_gate(
             )
 
             authority_check = execute_provider_preflight_v2
-        result = authority_check(
-            scope_key="%s:%s" % (str(scope), str(actor_ref)),
+        result = await _cached_attested_preflight(
+            scope_key=(
+                str(measurement_scope_key)
+                if measurement_scope_key is not None
+                else "%s:%s" % (str(scope), str(actor_ref))
+            ),
             worker_index=int(worker_index),
             settings=provider_preflight_settings(),
-            force=False,
-            provider_credential_profile="benchmark_model",
+            authority_check=authority_check,
         )
-        if hasattr(result, "__await__"):
-            result = await result
     if not isinstance(result, Mapping):
         raise RuntimeError("attested provider preflight result is invalid")
     if result.get("disabled"):
-        return {"proceed": True, "reason": "preflight_disabled", "verdicts": []}
+        return {
+            "proceed": True,
+            "reason": "preflight_disabled",
+            "verdicts": [],
+            "healthy": True,
+            "pause_worthy": False,
+            "disabled": True,
+        }
     verdicts = result.get("verdicts") or []
-    if result.get("healthy"):
-        if preflight_auto_resume_enabled():
-            try:
-                # Reuse the control state the caller already read this pass to
-                # avoid a duplicate research_lab_gateway_control_current read;
-                # fall back to a fresh read only when none was supplied.
-                state = (
-                    prefetched_state
-                    if prefetched_state is not None
-                    else await is_paused()
-                )
-                if isinstance(state, dict):
-                    paused = bool(state.get("paused"))
-                    reason = str(state.get("reason") or "")
-                else:
-                    paused = bool(getattr(state, "paused", False))
-                    reason = str(getattr(state, "reason", "") or "")
-                if paused and reason.startswith(PREFLIGHT_REASON_PREFIX):
-                    await set_paused(
-                        paused=False,
-                        reason=f"{PREFLIGHT_REASON_PREFIX}providers_recovered",
-                        actor_ref=actor_ref,
-                        event_doc={"scope": scope, "verdicts": verdicts},
-                    )
-                    logger.warning(
-                        "research_lab_provider_preflight_auto_resumed scope=%s", scope
-                    )
-            except Exception as exc:  # noqa: BLE001 - resume is best-effort
-                logger.warning(
-                    "research_lab_provider_preflight_resume_check_failed scope=%s error=%s",
-                    scope,
-                    str(exc)[:200],
-                )
-        return {"proceed": True, "reason": "healthy", "verdicts": verdicts}
-    if result.get("pause_worthy") and preflight_auto_pause_enabled():
-        unhealthy = [v for v in verdicts if not v.get("healthy")]
-        marker = ",".join(
-            f"{v.get('provider')}={v.get('status')}" for v in unhealthy
-        )
-        try:
-            await set_paused(
-                paused=True,
-                reason=f"{PREFLIGHT_REASON_PREFIX}{marker}"[:200],
-                actor_ref=actor_ref,
-                event_doc={"scope": scope, "verdicts": verdicts},
-            )
-            logger.warning(
-                "research_lab_provider_preflight_auto_paused scope=%s providers=%s",
-                scope,
-                marker,
-            )
-        except Exception as exc:  # noqa: BLE001 - pause is best-effort
-            logger.warning(
-                "research_lab_provider_preflight_pause_failed scope=%s error=%s",
-                scope,
-                str(exc)[:200],
-            )
-    return {"proceed": False, "reason": "provider_preflight_unhealthy", "verdicts": verdicts}
+    normalized_result = {
+        "healthy": bool(result.get("healthy")),
+        "pause_worthy": bool(result.get("pause_worthy")),
+        "verdicts": list(verdicts),
+    }
+    await apply_preflight_control_result(
+        scope=scope,
+        actor_ref=actor_ref,
+        result=normalized_result,
+        is_paused=is_paused,
+        set_paused=set_paused,
+        prefetched_state=prefetched_state,
+        may_change_pause_state=may_change_pause_state,
+    )
+    return {
+        "proceed": normalized_result["healthy"],
+        "reason": (
+            "healthy"
+            if normalized_result["healthy"]
+            else "provider_preflight_unhealthy"
+        ),
+        "verdicts": normalized_result["verdicts"],
+        "healthy": normalized_result["healthy"],
+        "pause_worthy": normalized_result["pause_worthy"],
+        "disabled": False,
+    }

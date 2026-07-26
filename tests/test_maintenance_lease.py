@@ -314,6 +314,257 @@ async def test_scoring_lease_holder_recovers_across_former_shards(monkeypatch) -
     assert observed == [True]
 
 
+@pytest.mark.asyncio
+async def test_non_owner_checks_only_its_profile_without_pause_authority(
+    monkeypatch,
+) -> None:
+    worker = object.__new__(scoring.ResearchLabGatewayScoringWorker)
+    worker.config = SimpleNamespace(
+        scoring_worker_index=7,
+        scoring_worker_total_workers=10,
+    )
+    worker.worker_ref = "scoring-worker-8"
+    worker._lease_holder_ref = "scoring-worker-8:lease"
+    worker._holds_maintenance_lease = False
+    observed: dict[str, Any] = {}
+
+    async def acquire(**_kwargs: Any) -> bool:
+        return False
+
+    async def noop() -> None:
+        return None
+
+    async def preflight(**kwargs: Any) -> dict[str, Any]:
+        observed.update(kwargs)
+        return {"proceed": True}
+
+    monkeypatch.setattr(scoring, "try_acquire_maintenance_lease", acquire)
+    monkeypatch.setattr(scoring, "preflight_gate", preflight)
+    monkeypatch.setattr(worker, "_recover_stale_candidate_claims", noop)
+    monkeypatch.setattr(worker, "_alert_stuck_candidates", noop)
+    monkeypatch.setattr(worker, "_requeue_quarantined_candidates", noop)
+
+    result = await worker._run_lease_held_recovery_and_preflight(
+        {"paused": False, "reason": ""}
+    )
+
+    assert result == {"proceed": True}
+    assert observed["worker_index"] == 7
+    assert observed["may_change_pause_state"] is False
+    assert observed["measurement_scope_key"] == "scoring:worker_profile:7"
+
+
+@pytest.mark.asyncio
+async def test_non_owner_does_not_probe_during_global_preflight_pause(
+    monkeypatch,
+) -> None:
+    worker = object.__new__(scoring.ResearchLabGatewayScoringWorker)
+    worker.config = SimpleNamespace(
+        scoring_worker_index=7,
+        scoring_worker_total_workers=10,
+    )
+    worker.worker_ref = "scoring-worker-8"
+    worker._lease_holder_ref = "scoring-worker-8:lease"
+    worker._holds_maintenance_lease = False
+
+    async def acquire(**_kwargs: Any) -> bool:
+        return False
+
+    async def forbidden_preflight(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("non-owner must not probe while globally paused")
+
+    monkeypatch.setattr(scoring, "try_acquire_maintenance_lease", acquire)
+    monkeypatch.setattr(scoring, "preflight_gate", forbidden_preflight)
+
+    result = await worker._run_lease_held_recovery_and_preflight(
+        {
+            "paused": True,
+            "reason": "provider_preflight:exa=transport_failure",
+        }
+    )
+
+    assert result["proceed"] is False
+    assert result["reason"] == "provider_preflight_recovery_owner_pending"
+
+
+@pytest.mark.asyncio
+async def test_owner_checks_every_profile_before_global_recovery(
+    monkeypatch,
+) -> None:
+    worker = object.__new__(scoring.ResearchLabGatewayScoringWorker)
+    worker.config = SimpleNamespace(
+        scoring_worker_index=2,
+        scoring_worker_total_workers=30,
+    )
+    worker.worker_ref = "scoring-worker-3"
+    worker._lease_holder_ref = "scoring-worker-3:lease"
+    worker._holds_maintenance_lease = False
+    checked: list[int] = []
+    applied: list[dict[str, Any]] = []
+
+    async def preflight(**kwargs: Any) -> dict[str, Any]:
+        checked.append(int(kwargs["worker_index"]))
+        assert kwargs["may_change_pause_state"] is False
+        return {
+            "proceed": True,
+            "healthy": True,
+            "pause_worthy": False,
+            "disabled": False,
+            "verdicts": [
+                {
+                    "provider": "exa",
+                    "healthy": True,
+                    "status": "healthy",
+                }
+            ],
+        }
+
+    async def apply(**kwargs: Any) -> None:
+        applied.append(kwargs)
+
+    monkeypatch.setattr(scoring, "preflight_gate", preflight)
+    monkeypatch.setattr(scoring, "apply_preflight_control_result", apply)
+
+    class Heartbeat:
+        def ensure_held(self) -> None:
+            return None
+
+    result = await worker._run_owned_provider_preflight(
+        maintenance_state={"paused": True, "reason": "provider_preflight:x"},
+        heartbeat=Heartbeat(),
+    )
+
+    assert sorted(checked) == list(range(30))
+    assert result["proceed"] is True
+    assert len(result["verdicts"]) == 30
+    assert {item["worker_index"] for item in result["verdicts"]} == set(range(30))
+    assert len(applied) == 1
+    assert applied[0]["result"]["healthy"] is True
+
+
+@pytest.mark.asyncio
+async def test_owner_stops_after_failed_batch_and_fails_closed(
+    monkeypatch,
+) -> None:
+    worker = object.__new__(scoring.ResearchLabGatewayScoringWorker)
+    worker.config = SimpleNamespace(
+        scoring_worker_index=0,
+        scoring_worker_total_workers=10,
+    )
+    worker.worker_ref = "scoring-worker-1"
+    checked: list[int] = []
+    applied: list[dict[str, Any]] = []
+
+    async def preflight(**kwargs: Any) -> dict[str, Any]:
+        worker_index = int(kwargs["worker_index"])
+        checked.append(worker_index)
+        if worker_index == 1:
+            raise RuntimeError("job recipient capacity is full")
+        return {
+            "proceed": True,
+            "healthy": True,
+            "pause_worthy": False,
+            "disabled": False,
+            "verdicts": [],
+        }
+
+    async def apply(**kwargs: Any) -> None:
+        applied.append(kwargs)
+
+    monkeypatch.setattr(scoring, "preflight_gate", preflight)
+    monkeypatch.setattr(scoring, "apply_preflight_control_result", apply)
+
+    class Heartbeat:
+        def ensure_held(self) -> None:
+            return None
+
+    result = await worker._run_owned_provider_preflight(
+        maintenance_state={"paused": False, "reason": ""},
+        heartbeat=Heartbeat(),
+    )
+
+    assert sorted(checked) == [0, 1, 2, 3]
+    assert result["proceed"] is False
+    assert result["pause_worthy"] is True
+    assert len(applied) == 1
+    assert applied[0]["result"]["healthy"] is False
+    failure = next(
+        item
+        for item in result["verdicts"]
+        if item["status"] == "preflight_execution_failure"
+    )
+    assert failure["worker_index"] == 1
+    assert "job recipient capacity is full" in failure["detail"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_paused_fleet_has_one_recovery_probe_owner(
+    monkeypatch,
+) -> None:
+    workers = []
+    for index in range(10):
+        worker = object.__new__(scoring.ResearchLabGatewayScoringWorker)
+        worker.config = SimpleNamespace(
+            scoring_worker_index=index,
+            scoring_worker_total_workers=10,
+        )
+        worker.worker_ref = f"scoring-worker-{index + 1}"
+        worker._lease_holder_ref = f"lease-{index}"
+        worker._holds_maintenance_lease = False
+        workers.append(worker)
+
+    async def acquire(**kwargs: Any) -> bool:
+        return kwargs["holder_ref"] == "lease-0"
+
+    async def noop_method(_self) -> None:
+        return None
+
+    owner_calls: list[str] = []
+
+    async def owned_preflight(self, **_kwargs: Any) -> dict[str, Any]:
+        owner_calls.append(self._lease_holder_ref)
+        return {"proceed": False, "reason": "provider_preflight_unhealthy"}
+
+    async def forbidden_profile_probe(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("paused non-owners must not provision preflight jobs")
+
+    monkeypatch.setattr(scoring, "try_acquire_maintenance_lease", acquire)
+    monkeypatch.setattr(scoring, "preflight_gate", forbidden_profile_probe)
+    monkeypatch.setattr(
+        scoring.ResearchLabGatewayScoringWorker,
+        "_run_owned_provider_preflight",
+        owned_preflight,
+    )
+    monkeypatch.setattr(
+        scoring.ResearchLabGatewayScoringWorker,
+        "_recover_stale_candidate_claims",
+        noop_method,
+    )
+    monkeypatch.setattr(
+        scoring.ResearchLabGatewayScoringWorker,
+        "_alert_stuck_candidates",
+        noop_method,
+    )
+
+    results = await asyncio.gather(
+        *(
+            worker._run_lease_held_recovery_and_preflight(
+                {
+                    "paused": True,
+                    "reason": "provider_preflight:exa=transport_failure",
+                }
+            )
+            for worker in workers
+        )
+    )
+
+    assert owner_calls == ["lease-0"]
+    assert sum(
+        result.get("reason") == "provider_preflight_recovery_owner_pending"
+        for result in results
+    ) == 9
+
+
 def test_migration_is_a_locked_down_atomic_lease() -> None:
     assert "research_lab_maintenance_lease" in MIGRATION
     assert "research_lab_acquire_maintenance_lease" in MIGRATION

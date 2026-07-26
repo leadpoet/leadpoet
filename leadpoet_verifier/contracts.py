@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -32,7 +32,7 @@ class SignalDecision(BaseModel):
     input_index: int = Field(ge=0, le=4)
     accepted: bool
     verifier_score: float = Field(ge=0, le=100)
-    failure_reason: str | None = Field(default=None, max_length=500)
+    failure_reason: Optional[str] = Field(default=None, max_length=500)
     detail: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -43,7 +43,7 @@ class VerificationDecision(BaseModel):
     reason_code: str = Field(min_length=1, max_length=120)
     reason_message: str = Field(max_length=2_000)
     verifier_score: float = Field(ge=0, le=100)
-    verified_payload: dict[str, Any] | None = None
+    verified_payload: Optional[dict[str, Any]] = None
     signal_decisions: list[SignalDecision] = Field(default_factory=list, max_length=5)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

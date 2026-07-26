@@ -1001,6 +1001,54 @@ def _module_stage_artifacts(argv: list[str]) -> int:
     return 0
 
 
+def _module_restart_preflight(argv: list[str]) -> int:
+    deploy_commit = _arg_value(argv, "--deploy-commit")
+    config_dir = _arg_value(argv, "--config-dir")
+    if not deploy_commit or not config_dir:
+        return _fail(
+            "python-module",
+            argv,
+            "gateway restart preflight arguments are incomplete",
+        )
+    result = subprocess.run(
+        [
+            REAL_PYTHON,
+            "-c",
+            (
+                "from pathlib import Path\n"
+                "from scripts.gateway_git_deploy import "
+                "write_tree_verification_evidence\n"
+                "write_tree_verification_evidence(\n"
+                "    repo_root=Path('/home/ec2-user/leadpoet_repo'),\n"
+                "    materialized_root=Path.cwd(),\n"
+                "    target_sha=__import__('sys').argv[1],\n"
+                "    phase='prepared_archive',\n"
+                "    strict_extras=True,\n"
+                "    output_path=Path(__import__('sys').argv[2]) / "
+                "'gateway-candidate-tree-preflight.json',\n"
+                ")\n"
+            ),
+            deploy_commit,
+            config_dir,
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        return int(result.returncode)
+    print(
+        json.dumps(
+            {
+                "deploy_commit": deploy_commit,
+                "module": "gateway.tee.restart_preflight_v2",
+                "prepared_candidate_tree": "verified",
+                "status": "ready",
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _module_weight_ready(argv: list[str]) -> int:
     if (
         "--repair" not in argv
@@ -1307,8 +1355,15 @@ def command_python(argv: list[str]) -> int:
             ) != 0:
                 return 97
             result = _module_envelopes(module_argv)
+        elif module == "gateway.tee.restart_preflight_v2":
+            if _record_internal_substitution(
+                kind="python-module",
+                argv=argv,
+                module=module,
+            ) != 0:
+                return 97
+            result = _module_restart_preflight(module_argv)
         elif module in {
-            "gateway.tee.restart_preflight_v2",
             "validator_tee.host.docker_operation_guard_v2",
             "gateway.research_lab.provider_profiles_v2",
             "gateway.utils.tee_v2_bootstrap",

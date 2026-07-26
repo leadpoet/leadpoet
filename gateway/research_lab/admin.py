@@ -362,7 +362,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     champion_v2_readiness = sub.add_parser(
         "champion-v2-cutover-readiness",
-        help="Require 100% V2 receipt coverage for positive champion balances",
+        help="Require 100%% V2 receipt coverage for positive champion balances",
     )
     champion_v2_readiness.add_argument("--epoch", type=int, default=None)
     champion_v2_readiness.add_argument("--netuid", type=int, default=None)

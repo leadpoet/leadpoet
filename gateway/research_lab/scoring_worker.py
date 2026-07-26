@@ -80,6 +80,7 @@ from gateway.research_lab.model_authority_v2 import (
 )
 from gateway.research_lab.provider_preflight import (
     PREFLIGHT_REASON_PREFIX,
+    apply_preflight_control_result,
     preflight_gate,
 )
 from gateway.research_lab.provider_profiles_v2 import (
@@ -3819,16 +3820,45 @@ class ResearchLabGatewayScoringWorker:
                 await self._alert_stuck_candidates()
                 heartbeat.ensure_held()
 
-            # Provider preflight still runs for every scorer. Only the lease
-            # holder performs the global quarantine requeue after it passes.
-            preflight = await preflight_gate(
-                scope="scoring",
-                actor_ref=self.worker_ref,
-                is_paused=get_scoring_maintenance_state,
-                set_paused=set_scoring_maintenance_paused,
-                worker_index=self.config.scoring_worker_index,
-                prefetched_state=maintenance_state,
-            )
+            if (
+                bool(maintenance_state.get("paused"))
+                and str(maintenance_state.get("reason") or "").startswith(
+                    PREFLIGHT_REASON_PREFIX
+                )
+                and not self._holds_maintenance_lease
+            ):
+                # Only the lease owner performs recovery probes while the
+                # fleet is globally preflight-paused. Otherwise every scorer
+                # repeatedly provisions the same measured jobs and can exhaust
+                # the enclave recipient pool before providers recover.
+                return {
+                    "proceed": False,
+                    "reason": "provider_preflight_recovery_owner_pending",
+                    "verdicts": [],
+                }
+
+            if self._holds_maintenance_lease:
+                preflight = await self._run_owned_provider_preflight(
+                    maintenance_state=maintenance_state,
+                    heartbeat=heartbeat,
+                )
+            else:
+                # An unpaused non-owner verifies only its own bound proxy
+                # profile. Global pause/resume authority remains with the
+                # lease owner, which verifies the complete worker fleet.
+                preflight = await preflight_gate(
+                    scope="scoring",
+                    actor_ref=self.worker_ref,
+                    is_paused=get_scoring_maintenance_state,
+                    set_paused=set_scoring_maintenance_paused,
+                    worker_index=self.config.scoring_worker_index,
+                    prefetched_state=maintenance_state,
+                    may_change_pause_state=False,
+                    measurement_scope_key=(
+                        "scoring:worker_profile:%d"
+                        % int(self.config.scoring_worker_index)
+                    ),
+                )
             if preflight.get("proceed") and self._holds_maintenance_lease:
                 heartbeat.ensure_held()
                 await self._requeue_quarantined_candidates()
@@ -3837,6 +3867,120 @@ class ResearchLabGatewayScoringWorker:
         finally:
             if heartbeat is not None:
                 await heartbeat.stop()
+
+    async def _run_owned_provider_preflight(
+        self,
+        *,
+        maintenance_state: Mapping[str, Any],
+        heartbeat: MaintenanceLeaseHeartbeat,
+    ) -> Mapping[str, Any]:
+        """Verify every scoring proxy profile before changing global state."""
+
+        total_workers = max(
+            1,
+            int(self.config.scoring_worker_total_workers or 1),
+        )
+        results: list[tuple[int, Mapping[str, Any]]] = []
+        # Bound measured job pressure. In particular, a full recipient pool
+        # should fail one small batch and globally pause, not launch the rest
+        # of the configured fleet's doomed jobs in parallel.
+        batch_size = min(4, total_workers)
+
+        async def check_profile(worker_index: int) -> tuple[int, Mapping[str, Any]]:
+            try:
+                result = await preflight_gate(
+                    scope="scoring",
+                    actor_ref=self.worker_ref,
+                    is_paused=get_scoring_maintenance_state,
+                    set_paused=set_scoring_maintenance_paused,
+                    worker_index=worker_index,
+                    prefetched_state=maintenance_state,
+                    may_change_pause_state=False,
+                    measurement_scope_key=(
+                        "scoring:worker_profile:%d" % worker_index
+                    ),
+                )
+                return worker_index, result
+            except Exception as exc:  # noqa: BLE001 - aggregate fails closed
+                return worker_index, {
+                    "proceed": False,
+                    "healthy": False,
+                    "pause_worthy": True,
+                    "disabled": False,
+                    "verdicts": [
+                        {
+                            "provider": f"scoring_profile_{worker_index}",
+                            "healthy": False,
+                            "status": "preflight_execution_failure",
+                            "detail": _safe_event_error_text(exc),
+                            "http_status": 0,
+                        }
+                    ],
+                }
+
+        for start in range(0, total_workers, batch_size):
+            heartbeat.ensure_held()
+            batch = await asyncio.gather(
+                *(
+                    check_profile(worker_index)
+                    for worker_index in range(
+                        start,
+                        min(total_workers, start + batch_size),
+                    )
+                )
+            )
+            results.extend(batch)
+            if any(
+                any(
+                    verdict.get("status") == "preflight_execution_failure"
+                    for verdict in (result.get("verdicts") or [])
+                )
+                for _, result in batch
+            ):
+                break
+
+        aggregate_verdicts: list[dict[str, Any]] = []
+        for worker_index, result in results:
+            for raw_verdict in result.get("verdicts") or []:
+                verdict = dict(raw_verdict)
+                verdict["worker_index"] = worker_index
+                aggregate_verdicts.append(verdict)
+        healthy = (
+            len(results) == total_workers
+            and all(bool(result.get("proceed")) for _, result in results)
+        )
+        aggregate = {
+            "healthy": healthy,
+            "pause_worthy": (
+                len(results) != total_workers
+                or any(
+                    bool(result.get("pause_worthy"))
+                    for _, result in results
+                )
+            ),
+            "disabled": (
+                len(results) == total_workers
+                and all(bool(result.get("disabled")) for _, result in results)
+            ),
+            "verdicts": aggregate_verdicts,
+        }
+        heartbeat.ensure_held()
+        await apply_preflight_control_result(
+            scope="scoring",
+            actor_ref=self.worker_ref,
+            result=aggregate,
+            is_paused=get_scoring_maintenance_state,
+            set_paused=set_scoring_maintenance_paused,
+            prefetched_state=maintenance_state,
+            may_change_pause_state=True,
+        )
+        return {
+            "proceed": healthy,
+            "reason": (
+                "healthy" if healthy else "provider_preflight_unhealthy"
+            ),
+            **aggregate,
+        }
 
     async def _candidate_claim_capacity(self) -> dict[str, Any]:
         host_pressure = _scoring_host_pressure_capacity(

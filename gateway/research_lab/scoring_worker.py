@@ -3523,6 +3523,21 @@ class ResearchLabGatewayScoringWorker:
                         )
                     )
                     last_error_log = now
+                if "capacity is full" in str(exc):
+                    # The coordinator's recipient pool is saturated. Hammering
+                    # it at the normal cadence keeps the pool pinned (every
+                    # retry files a fresh request) and starves the weight
+                    # path, which shares the coordinator. Back off long
+                    # enough for TTL evictions to reclaim slots, and log a
+                    # unique tag an alerting cron can page on — this state
+                    # precedes a missed weight set by minutes.
+                    logger.critical(
+                        "coordinator_recipient_pool_saturated worker=%s "
+                        "backing_off_seconds=120",
+                        self.worker_ref,
+                    )
+                    await asyncio.sleep(120)
+                    continue
                 await asyncio.sleep(max(self.config.scoring_worker_poll_seconds, error_backoff_seconds))
                 continue
             if outcome.get("processed") or outcome.get("status") != "idle":

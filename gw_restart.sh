@@ -1018,6 +1018,15 @@ if ! git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA" \
   echo "ERROR: unable to materialize the prepared commit for V2 preflight" >&2
   exit 1
 fi
+echo "Verifying the prepared gateway tree with the preserved restart controller"
+GATEWAY_DEPLOY_STAGE="git_prepared_tree_verification"
+export GATEWAY_DEPLOY_STAGE
+"$GATEWAY_PYTHON_BIN" "$GATEWAY_GIT_HELPER" \
+  verify-tree \
+  --plan-file "$GATEWAY_DEPLOY_PLAN_FILE" \
+  --materialized-root "$GATEWAY_PREFLIGHT_TREE" \
+  --phase prepared_archive \
+  --strict-extras
 
 RESTART_GATE_ARGS=(
   --network "${BITTENSOR_NETWORK:-finney}"
@@ -1137,18 +1146,69 @@ fi
 echo "Preflighting durable V2 validator weight authority before production shutdown"
 GATEWAY_DEPLOY_STAGE="validator_weight_input_storage_preflight"
 export GATEWAY_DEPLOY_STAGE
-if ! (
-    set -a
-    . "$ENV_CLONE"
-    set +a
-    run_prepared_gateway_module \
-      gateway.tee.verify_weight_submission_ready_v2 \
-      --storage-read-preflight
-  ); then
-  echo "ERROR: durable V2 validator weight authority is not readable" >&2
+GATEWAY_WEIGHT_READINESS_SOURCE="$(
+  printf '%s/%s' \
+    "$GATEWAY_PREFLIGHT_TREE" \
+    "gateway/tee/verify_weight_submission_ready_v2.py"
+)"
+if ! GATEWAY_WEIGHT_STORAGE_PREFLIGHT_CAPABILITY="$(
+    "$GATEWAY_PYTHON_BIN" - "$GATEWAY_WEIGHT_READINESS_SOURCE" <<'PY'
+import ast
+from pathlib import Path
+import sys
+
+source_path = Path(sys.argv[1])
+tree = ast.parse(
+    source_path.read_text(encoding="utf-8"),
+    filename=str(source_path),
+)
+supported = any(
+    isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and node.func.attr == "add_argument"
+    and bool(node.args)
+    and isinstance(node.args[0], ast.Constant)
+    and node.args[0].value == "--storage-read-preflight"
+    for node in ast.walk(tree)
+)
+print("supported" if supported else "unsupported")
+PY
+  )"; then
+  echo "ERROR: unable to inspect selected weight-readiness CLI capability" >&2
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 1
 fi
+case "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_CAPABILITY" in
+  supported)
+    if ! (
+        set -a
+        . "$ENV_CLONE"
+        set +a
+        run_prepared_gateway_module \
+          gateway.tee.verify_weight_submission_ready_v2 \
+          --storage-read-preflight
+      ); then
+      echo "ERROR: durable V2 validator weight authority is not readable" >&2
+      echo "Gateway remains running; production shutdown has not started." >&2
+      exit 1
+    fi
+    ;;
+  unsupported)
+    if [ -z "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \
+        || [ "$PREPARED_GATEWAY_SHA" = "$ORIGIN_MAIN_GATEWAY_SHA" ]; then
+      echo "ERROR: selected current release lacks the required weight storage preflight" >&2
+      echo "Gateway remains running; production shutdown has not started." >&2
+      exit 1
+    fi
+    printf '%s\n' \
+      "Selected attested rollback release predates the optional weight storage preflight; continuing with its original fail-closed runtime gates."
+    ;;
+  *)
+    echo "ERROR: selected weight-readiness CLI capability result is invalid" >&2
+    echo "Gateway remains running; production shutdown has not started." >&2
+    exit 1
+    ;;
+esac
 
 echo "Validating the prepared V2 release before production shutdown"
   GATEWAY_DEPLOY_STAGE="v2_pre_shutdown_preflight"

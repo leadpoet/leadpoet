@@ -1010,31 +1010,37 @@ def _module_restart_preflight(argv: list[str]) -> int:
             argv,
             "gateway restart preflight arguments are incomplete",
         )
-    result = subprocess.run(
-        [
-            REAL_PYTHON,
-            "-c",
-            (
-                "from pathlib import Path\n"
-                "from scripts.gateway_git_deploy import "
-                "write_tree_verification_evidence\n"
-                "write_tree_verification_evidence(\n"
-                "    repo_root=Path('/home/ec2-user/leadpoet_repo'),\n"
-                "    materialized_root=Path.cwd(),\n"
-                "    target_sha=__import__('sys').argv[1],\n"
-                "    phase='prepared_archive',\n"
-                "    strict_extras=True,\n"
-                "    output_path=Path(__import__('sys').argv[2]) / "
-                "'gateway-candidate-tree-preflight.json',\n"
-                ")\n"
-            ),
-            deploy_commit,
-            config_dir,
-        ],
-        check=False,
-    )
-    if result.returncode != 0:
-        return int(result.returncode)
+    helper_source = Path("scripts/gateway_git_deploy.py")
+    if (
+        helper_source.is_file()
+        and "def write_tree_verification_evidence("
+        in helper_source.read_text(encoding="utf-8")
+    ):
+        result = subprocess.run(
+            [
+                REAL_PYTHON,
+                "-c",
+                (
+                    "from pathlib import Path\n"
+                    "from scripts.gateway_git_deploy import "
+                    "write_tree_verification_evidence\n"
+                    "write_tree_verification_evidence(\n"
+                    "    repo_root=Path('/home/ec2-user/leadpoet_repo'),\n"
+                    "    materialized_root=Path.cwd(),\n"
+                    "    target_sha=__import__('sys').argv[1],\n"
+                    "    phase='prepared_archive',\n"
+                    "    strict_extras=True,\n"
+                    "    output_path=Path(__import__('sys').argv[2]) / "
+                    "'gateway-candidate-tree-preflight.json',\n"
+                    ")\n"
+                ),
+                deploy_commit,
+                config_dir,
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            return int(result.returncode)
     print(
         json.dumps(
             {

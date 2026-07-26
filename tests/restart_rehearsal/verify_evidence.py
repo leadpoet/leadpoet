@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import hashlib
 from pathlib import Path
@@ -283,6 +284,32 @@ def verify_gateway_private_model_environment(rows: list[dict]) -> None:
         )
 
 
+def selected_weight_storage_preflight_capability(
+    candidate_roots: tuple[Path, ...],
+) -> bool:
+    relative = Path("gateway/tee/verify_weight_submission_ready_v2.py")
+    for root in candidate_roots:
+        source_path = root / relative
+        if not source_path.is_file():
+            continue
+        tree = ast.parse(
+            source_path.read_text(encoding="utf-8"),
+            filename=str(source_path),
+        )
+        return any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_argument"
+            and bool(node.args)
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "--storage-read-preflight"
+            for node in ast.walk(tree)
+        )
+    raise SystemExit(
+        "candidate weight-readiness source is unavailable for capability proof"
+    )
+
+
 def main() -> int:
     component, from_sha, candidate_sha = sys.argv[1:4]
     scenario = (
@@ -291,6 +318,9 @@ def main() -> int:
         else "transient_503_recovery"
     )
     scope = sys.argv[5] if len(sys.argv) > 5 else "exact"
+    transition = sys.argv[6] if len(sys.argv) > 6 else "forward"
+    if transition not in {"forward", "rollback"}:
+        raise SystemExit("unknown rehearsal transition: %s" % transition)
     rows = events()
     rejected = [row for row in rows if row.get("status") == "rejected"]
     if rejected:
@@ -321,6 +351,14 @@ def main() -> int:
             labels.append(f"process:{process}")
 
     if component == "gateway":
+        storage_preflight_supported = (
+            selected_weight_storage_preflight_capability(
+                (
+                    Path("/home/ec2-user/leadpoet_repo"),
+                    Path("/home/ec2-user/leadpoet/leadpoet"),
+                )
+            )
+        )
         supabase_rows = [
             row
             for row in rows
@@ -329,6 +367,8 @@ def main() -> int:
         expected_supabase_runs = (
             3 if scenario == "transient_503_recovery" else 2
         )
+        if not storage_preflight_supported:
+            expected_supabase_runs -= 1
         if (
             len(supabase_rows) != expected_supabase_runs
             or any(row.get("status") != "ok" for row in supabase_rows)
@@ -379,13 +419,22 @@ def main() -> int:
             for row in rows
             if row.get("kind") == "weight-readiness-persistence"
         ]
-        if (
-            not storage_preflight_rows
-            or storage_preflight_rows[0].get("status") != "started"
-            or storage_preflight_rows[-1].get("status") != "ok"
-        ):
+        if storage_preflight_supported:
+            if (
+                not storage_preflight_rows
+                or storage_preflight_rows[0].get("status") != "started"
+                or storage_preflight_rows[-1].get("status") != "ok"
+            ):
+                raise SystemExit(
+                    "pre-shutdown weight storage preflight did not pass"
+                )
+        elif transition != "rollback":
             raise SystemExit(
-                "pre-shutdown weight storage preflight did not pass"
+                "current release does not declare the required weight storage preflight"
+            )
+        elif storage_preflight_rows:
+            raise SystemExit(
+                "historical release executed an undeclared weight storage preflight"
             )
         if not repair_rows or repair_rows[0].get("status") != "started":
             raise SystemExit("real weight repair did not start")
@@ -472,12 +521,14 @@ def main() -> int:
             )
             return 0
 
-        require_order(
-            labels,
+        required_gateway_order = [
+            "module:gateway.tee.release_channel_v2",
+            "module:gateway.tee.prepare_gateway_envelopes_v2",
+        ]
+        if storage_preflight_supported:
+            required_gateway_order.append("weight:storage_preflight")
+        required_gateway_order.extend(
             [
-                "module:gateway.tee.release_channel_v2",
-                "module:gateway.tee.prepare_gateway_envelopes_v2",
-                "weight:storage_preflight",
                 "module:gateway.tee.restart_preflight_v2",
                 "nitro:build",
                 "nitro:run",
@@ -487,8 +538,9 @@ def main() -> int:
                 "weight:repair",
                 "process:gateway.main",
                 "weight:http_handoff",
-            ],
+            ]
         )
+        require_order(labels, required_gateway_order)
         verify_gateway_private_model_environment(rows)
         if repair_rows[-1].get("status") != "ok":
             raise SystemExit("real weight repair did not recover")
@@ -595,6 +647,7 @@ def main() -> int:
                 "from_sha": from_sha,
                 "candidate_sha": candidate_sha,
                 "scenario": scenario,
+                "transition": transition,
                 "event_count": len(rows),
             },
             sort_keys=True,

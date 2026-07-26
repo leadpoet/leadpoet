@@ -78,6 +78,20 @@ def test_pinned_gateway_rollback_preserves_newer_restart_controller() -> None:
         'GATEWAY_HOST_RESTART_SCRIPT="$POST_ACTIVATE_GATEWAY_HOST_RESTART_SCRIPT"'
         in script
     )
+    materialize = script.index(
+        'echo "Materializing the prepared commit for pre-shutdown V2 tooling"'
+    )
+    preserved_tree_check = script.index(
+        'echo "Verifying the prepared gateway tree with the preserved restart controller"'
+    )
+    candidate_preflight = script.index(
+        'echo "Validating the prepared V2 release before production shutdown"'
+    )
+    tree_section = script[preserved_tree_check:candidate_preflight]
+    assert materialize < preserved_tree_check < candidate_preflight
+    assert '"$GATEWAY_PYTHON_BIN" "$GATEWAY_GIT_HELPER"' in tree_section
+    assert "--phase prepared_archive" in tree_section
+    assert "--strict-extras" in tree_section
 
 
 def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() -> None:
@@ -207,9 +221,29 @@ def test_gateway_weight_storage_preflight_uses_target_before_shutdown() -> None:
 
     assert dependencies < stage < command < shutdown
     assert '. "$ENV_CLONE"' in preflight_block
+    assert "ast.parse(" in preflight_block
+    assert (
+        'node.args[0].value == "--storage-read-preflight"'
+        in preflight_block
+    )
+    assert (
+        'if [ -z "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \\\n'
+        '        || [ "$PREPARED_GATEWAY_SHA" = '
+        '"$ORIGIN_MAIN_GATEWAY_SHA" ]; then'
+        in preflight_block
+    )
+    assert (
+        "selected current release lacks the required weight storage preflight"
+        in preflight_block
+    )
+    assert (
+        "Selected attested rollback release predates the optional weight "
+        "storage preflight"
+        in preflight_block
+    )
     assert (
         "run_prepared_gateway_module \\\n"
-        "      gateway.tee.verify_weight_submission_ready_v2"
+        "          gateway.tee.verify_weight_submission_ready_v2"
         in preflight_block
     )
     assert "Gateway remains running; production shutdown has not started." in (

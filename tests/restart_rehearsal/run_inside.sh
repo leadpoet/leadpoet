@@ -150,7 +150,7 @@ if [ "$COMPONENT" = "gateway" ]; then
       exit 1
     fi
     /usr/bin/python3.11 /harness/verify_evidence.py \
-      "$COMPONENT" "$FROM_SHA" "$CANDIDATE_SHA" "$WEIGHT_READINESS_SCENARIO" "$REHEARSAL_SCOPE"
+      "$COMPONENT" "$FROM_SHA" "$CANDIDATE_SHA" "$WEIGHT_READINESS_SCENARIO" "$REHEARSAL_SCOPE" "$TRANSITION"
     echo "TARGETED_RESTART_REGRESSION_EXPECTED_FAILURE component=$COMPONENT candidate=$CANDIDATE_SHA scenario=$WEIGHT_READINESS_SCENARIO"
     exit 0
   fi
@@ -240,7 +240,7 @@ else
 fi
 
 /usr/bin/python3.11 /harness/verify_evidence.py \
-  "$COMPONENT" "$FROM_SHA" "$CANDIDATE_SHA" "$WEIGHT_READINESS_SCENARIO" "$REHEARSAL_SCOPE"
+  "$COMPONENT" "$FROM_SHA" "$CANDIDATE_SHA" "$WEIGHT_READINESS_SCENARIO" "$REHEARSAL_SCOPE" "$TRANSITION"
 if [ "$REHEARSAL_SCOPE" = "exact" ]; then
   echo "REHEARSAL_SUCCESS component=$COMPONENT candidate=$CANDIDATE_SHA"
 else

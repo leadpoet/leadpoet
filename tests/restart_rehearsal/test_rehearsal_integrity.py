@@ -9,12 +9,34 @@ import pytest
 from scripts import run_local_restart_rehearsal as rehearsal
 from tests.restart_rehearsal.verify_evidence import (
     EXPECTED_GATEWAY_PRIVATE_MODEL_ENV,
+    selected_weight_storage_preflight_capability,
     verify_gateway_private_model_environment,
     verify_rehearsal_integrity,
 )
 
 
 COMMIT = "1" * 40
+
+
+def test_weight_storage_preflight_capability_tracks_selected_release(
+    tmp_path,
+) -> None:
+    source = tmp_path / "gateway/tee/verify_weight_submission_ready_v2.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import argparse\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.add_argument('--repair', action='store_true')\n",
+        encoding="utf-8",
+    )
+    assert selected_weight_storage_preflight_capability((tmp_path,)) is False
+
+    source.write_text(
+        source.read_text(encoding="utf-8")
+        + "parser.add_argument('--storage-read-preflight', action='store_true')\n",
+        encoding="utf-8",
+    )
+    assert selected_weight_storage_preflight_capability((tmp_path,)) is True
 
 
 def test_gateway_rehearsal_requires_canonical_private_model_environment() -> None:

@@ -288,15 +288,58 @@ def _proxy_names(
     return names
 
 
+def _deferred_worker_fleet_roles(environment: Mapping[str, str]) -> frozenset[str]:
+    """Roles the operator explicitly deferred from this sealing.
+
+    A weight-submission outage must be recoverable even when the worker
+    fleets cannot currently satisfy the V2 proxy transport (observed: every
+    configured egress proxy was plaintext HTTP while workers were already
+    paused, and the preflight refused to seal at all — holding the
+    coordinator enclave, and with it every weight set, hostage to a paused
+    subsystem's dependency). Deferral is opt-in per restart, never a
+    default: GATEWAY_V2_DEFER_WORKER_FLEETS="all" or a comma list of roles
+    ("gateway_autoresearch,gateway_scoring"). A deferred role is sealed
+    with NO proxy commitments, so no proxy lease can ever validate for it —
+    its workers stay fail-closed until a future sealing provides compliant
+    proxies. Non-deferred roles keep the exact fail-closed behavior.
+    """
+
+    raw = str(
+        environment.get("GATEWAY_V2_DEFER_WORKER_FLEETS") or ""
+    ).strip().lower()
+    if not raw:
+        return frozenset()
+    if raw in {"all", "1", "true"}:
+        return frozenset({"gateway_autoresearch", "gateway_scoring"})
+    roles = frozenset(
+        item.strip() for item in raw.split(",") if item.strip()
+    )
+    unknown = roles - {"gateway_autoresearch", "gateway_scoring"}
+    if unknown:
+        raise GatewayEnvelopePreparationV2Error(
+            "unknown deferred worker fleet role: %s" % ", ".join(sorted(unknown))
+        )
+    return roles
+
+
 def _validated_worker_proxy_configuration(
     environment: Mapping[str, str],
 ) -> tuple[Any, Dict[str, list[str]]]:
     plan = build_research_lab_worker_autostart_plan(environment)
-    if not plan.hosted.enabled or not plan.scoring.enabled:
+    deferred = _deferred_worker_fleet_roles(environment)
+    if "gateway_autoresearch" not in deferred and not plan.hosted.enabled:
         raise GatewayEnvelopePreparationV2Error(
             "configured hosted and scoring worker fleets are required"
         )
-    if not plan.hosted.proxy_values or not plan.scoring.proxy_values:
+    if "gateway_scoring" not in deferred and not plan.scoring.enabled:
+        raise GatewayEnvelopePreparationV2Error(
+            "configured hosted and scoring worker fleets are required"
+        )
+    if "gateway_autoresearch" not in deferred and not plan.hosted.proxy_values:
+        raise GatewayEnvelopePreparationV2Error(
+            "worker proxy values are required for initial V2 sealing"
+        )
+    if "gateway_scoring" not in deferred and not plan.scoring.proxy_values:
         raise GatewayEnvelopePreparationV2Error(
             "worker proxy values are required for initial V2 sealing"
         )
@@ -307,6 +350,17 @@ def _validated_worker_proxy_configuration(
     commitments: Dict[str, list[str]] = {}
     for role, values in fleets.items():
         commitments[role] = []
+        if role in deferred:
+            # Sealed with zero commitments: every proxy lease for this role
+            # fails validation downstream, so the fleet cannot run until a
+            # future sealing restores compliant proxies. Loud by design.
+            print(
+                "⚠️  %s worker fleet DEFERRED from V2 sealing: no proxy "
+                "commitments sealed; its workers stay fail-closed until a "
+                "compliant sealing (GATEWAY_V2_DEFER_WORKER_FLEETS)" % role,
+                flush=True,
+            )
+            continue
         for index, value in enumerate(values):
             try:
                 _validated_tls_proxy_url(value)

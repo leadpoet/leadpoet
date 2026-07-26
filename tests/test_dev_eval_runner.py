@@ -1109,7 +1109,28 @@ def test_default_docker_runner_disables_network_and_mounts_read_only(tmp_path, m
     def _fake_run(command, **kwargs):
         captured["command"] = list(command)
         captured["input"] = kwargs.get("input")
-        return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
+        options = json.loads(kwargs["input"])["context"]["runtime_options"]
+        receipt = {
+            "runtime_cap_seconds": options["runtime_cap_seconds"],
+            "capability_contract": {
+                "host_registered": [
+                    "deadline",
+                    "emit",
+                    "probe_origin",
+                    "resolve_host",
+                ],
+            },
+            "industry_taxonomy": {
+                "taxonomy_content_hash": "sha256:" + "a" * 64,
+            },
+            "firmographic_discovery": {"plan": {"target": 5}},
+        }
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="[]",
+            stderr="sourcing_branch_receipt " + json.dumps(receipt) + "\n",
+        )
 
     monkeypatch.setattr(runner_module.subprocess, "run", _fake_run)
     evaluator = DockerReplayDevEvaluator(snapshot_uri=str(tmp_path))
@@ -1132,3 +1153,8 @@ def test_default_docker_runner_disables_network_and_mounts_read_only(tmp_path, m
     assert any(mount.endswith(":ro") for mount in mounts)
     payload = json.loads(captured["input"])
     assert payload["icp"]["icp_id"] == "dev-0"
+    assert payload["context"]["runtime_options"] == {
+        "runtime_cap_seconds": 27.0,
+        "finalization_reserve_seconds": 2.7,
+        "agent_timeout_seconds": 24,
+    }

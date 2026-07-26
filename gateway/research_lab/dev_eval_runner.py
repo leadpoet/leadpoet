@@ -615,7 +615,10 @@ class DockerReplayDevEvaluator:
             raise DevEvalRunnerError("private_runtime docker adapter bootstrap is unavailable")
         payload = {
             "icp": private_runtime.canonicalize_private_model_icp(icp),
-            "context": dict(context),
+            "context": private_runtime.context_with_runtime_options(
+                context,
+                outer_timeout_seconds=timeout_seconds,
+            ),
         }
         env_args: list[str] = []
         # Provider key names pass through so adapter import-time checks hold;
@@ -669,6 +672,11 @@ class DockerReplayDevEvaluator:
                 f"dev replay adapter failed with code {completed.returncode}: "
                 f"{stderr[-1200:]}"
             )
+        private_runtime._collect_incontainer_trace(str(completed.stderr or ""))
+        private_runtime.validate_sourcing_runtime_receipt(
+            str(completed.stderr or ""),
+            expected_runtime_options=payload["context"]["runtime_options"],
+        )
         decoded = json.loads(completed.stdout)
         if not isinstance(decoded, list):
             raise DevEvalRunnerError("dev replay adapter must return a JSON array")

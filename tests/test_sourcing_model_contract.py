@@ -39,22 +39,22 @@ def _conforming_tree(root: Path) -> None:
     _write(root, "sourcing_model/clients.py", """
         import urllib.request
 
-        def _exa_call():
+        def _exa_call(body):
             pass
 
-        def agent_get():
+        def agent_get(url):
             pass
 
-        def agent_post():
+        def agent_post(url, body):
             pass
 
-        def exa_search():
+        def exa_search(body):
             pass
 
-        def sd_company():
+        def sd_company(slug):
             pass
 
-        def sd_scrape():
+        def sd_scrape(url, dynamic=True):
             pass
     """)
     _write(root, "sourcing_model/core.py", """
@@ -84,6 +84,35 @@ def _conforming_tree(root: Path) -> None:
             pass
     """)
     _write(root, "sourcing_model/scoring.py", "SCORING = True\n")
+    _write(root, "sourcing_model/firmographic_discovery.py", """
+        def plan_for_icp(icp, *, target):
+            return {}
+
+        def policy_metadata():
+            return {}
+    """)
+    _write(root, "sourcing_model/industry_taxonomy.py", """
+        def canonical_categories(industry, subindustry):
+            return ()
+
+        def taxonomy_metadata():
+            return {}
+    """)
+    _write(root, "sourcing_model/orchestrator.py", """
+        def run_branches(icp, qualify_fn, *, max_companies):
+            return []
+    """)
+    _write(root, "sourcing_model/resilience.py", "POLICY = True\n")
+    _write(root, "sourcing_model/runtime_capabilities.py", """
+        def capability_metadata():
+            return {}
+
+        def deadline():
+            return None
+
+        def register(name, implementation):
+            pass
+    """)
     _write(root, "sourcing_model/validation.py", """
         def bonus_requirements(icp):
             pass
@@ -91,14 +120,17 @@ def _conforming_tree(root: Path) -> None:
         def make_deps():
             pass
 
-        async def validate_candidate():
+        async def validate_candidate(
+            c, li, icp, deps, fetch_source, req_signal,
+            seen_companies, seen_domains, today, seen_linkedin_companies=None
+        ):
             pass
     """)
 
 
 def test_contract_loads_and_declares_frozen_surface() -> None:
     contract = load_wrapper_contract()
-    assert contract["contract_id"] == "leadpoet-sourcing-wrapper-contract-v1"
+    assert contract["contract_id"] == "leadpoet-sourcing-wrapper-contract-v2"
     assert "research_lab_adapter.py" in contract["functions"]
     assert contract["functions"]["research_lab_adapter.py"]["run_icp"] == [
         "icp",
@@ -133,8 +165,38 @@ def test_parameter_drift_reported(tmp_path: Path) -> None:
     """)
     violations = verify_source_tree_contract(tmp_path)
     assert any(
-        v.startswith("parameter drift research_lab_adapter.py:run_icp") for v in violations
+        v.startswith("exact parameter drift research_lab_adapter.py:run_icp")
+        for v in violations
     )
+
+
+def test_direct_entrypoints_reject_optional_or_required_trailing_parameters(
+    tmp_path: Path,
+) -> None:
+    _conforming_tree(tmp_path)
+    _write(tmp_path, "research_lab_adapter.py", """
+        def adapter_metadata(required=False):
+            return {}
+
+        def run_icp(icp, context=None, extra=None):
+            return []
+    """)
+    violations = verify_source_tree_contract(tmp_path)
+    assert any("exact parameter drift" in item and "adapter_metadata" in item for item in violations)
+    assert any("exact parameter drift" in item and "run_icp" in item for item in violations)
+
+
+def test_internal_seam_rejects_additional_required_parameter(tmp_path: Path) -> None:
+    _conforming_tree(tmp_path)
+    clients = tmp_path / "sourcing_model" / "clients.py"
+    clients.write_text(
+        clients.read_text().replace(
+            "def exa_search(body):",
+            "def exa_search(body, required):",
+        )
+    )
+    violations = verify_source_tree_contract(tmp_path)
+    assert any("required parameter drift" in item and "exa_search" in item for item in violations)
 
 
 def test_integer_floor_breach_reported(tmp_path: Path) -> None:
@@ -333,13 +395,13 @@ def test_build_gate_enforce_fails_broken_tree(tmp_path: Path, monkeypatch) -> No
     _sourcing_contract_gate(tmp_path)
 
 
-def test_build_gate_disabled_and_fail_open(tmp_path: Path, monkeypatch) -> None:
+def test_build_gate_disabled_and_enforce_fails_closed(tmp_path: Path, monkeypatch) -> None:
     import gateway.research_lab.code_build as cb
 
     monkeypatch.setenv("RESEARCH_LAB_SOURCING_CONTRACT_CHECK", "disabled")
     cb._sourcing_contract_gate(tmp_path)  # empty tree, disabled -> no-op
 
-    # Internal failure fails OPEN even in enforce (availability contract).
+    # Internal verifier failure fails closed in enforce mode.
     monkeypatch.setenv("RESEARCH_LAB_SOURCING_CONTRACT_CHECK", "enforce")
     import research_lab.sourcing_model_contract_check as check_mod
 
@@ -347,7 +409,8 @@ def test_build_gate_disabled_and_fail_open(tmp_path: Path, monkeypatch) -> None:
         raise RuntimeError("contract file unreadable")
 
     monkeypatch.setattr(check_mod, "verify_source_tree_contract", _boom)
-    cb._sourcing_contract_gate(tmp_path)  # must not raise
+    with pytest.raises(cb.CodeEditPrivateTestError, match="failed internally"):
+        cb._sourcing_contract_gate(tmp_path)
 
 
 # ---------------------------------------------------------------------------

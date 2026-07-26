@@ -23,6 +23,7 @@ from gateway.research_lab.code_build import _extract_parent_image_source
 from gateway.research_lab.v2_authority import load_source_add_catalog_snapshot_v2
 from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.tee.model_sandbox_v2 import (
+    MODEL_SANDBOX_TIMEOUT_SECONDS,
     MODEL_SANDBOX_REQUEST_SCHEMA_VERSION,
     provider_evidence_tape_input_root,
 )
@@ -45,7 +46,9 @@ from research_lab.eval import (
 from research_lab.eval.private_runtime import (
     DockerPrivateModelRunner,
     PROVIDER_COST_EVALUATION_SCOPE_ENV,
-    _redacted_context,
+    context_with_runtime_options,
+    validate_sourcing_adapter_metadata,
+    validate_sourcing_runtime_receipt_entries,
     canonicalize_private_model_icp,
     publish_incontainer_trace_entries,
 )
@@ -497,7 +500,13 @@ class AttestedPrivateModelRunnerV2:
             operation="run_icp",
             input_doc={
                 "icp": canonical_icp,
-                "context": _redacted_context(context),
+                "context": context_with_runtime_options(
+                    context,
+                    outer_timeout_seconds=min(
+                        self.spec.timeout_seconds,
+                        MODEL_SANDBOX_TIMEOUT_SECONDS,
+                    ),
+                ),
             },
             provider_evidence_cache=cache_document,
             provider_evidence_cache_ref=cache_ref,
@@ -541,7 +550,13 @@ class AttestedPrivateModelRunnerV2:
             operation="run_icp",
             input_doc={
                 "icp": canonical_icp,
-                "context": _redacted_context(context),
+                "context": context_with_runtime_options(
+                    context,
+                    outer_timeout_seconds=min(
+                        self.spec.timeout_seconds,
+                        MODEL_SANDBOX_TIMEOUT_SECONDS,
+                    ),
+                ),
             },
             provider_evidence_cache=dict(provider_evidence_cache),
             provider_evidence_cache_ref=_provider_evidence_cache_ref(canonical_icp),
@@ -584,20 +599,22 @@ class AttestedPrivateModelRunnerV2:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(
-                self._execute_operation(
-                    operation="metadata",
-                    input_doc={},
-                    provider_evidence_cache={},
-                    provider_evidence_cache_ref="",
-                    provider_evidence_mode="live",
-                    provider_snapshot_bundle={},
-                    provider_snapshot_tree_hash="",
-                    provider_snapshot_manifest_hash="",
-                    provider_cost_scope_override="",
-                    provider_cost_cap_microusd=0,
-                    provider_call_cap=0,
-                    publish_provider_evidence_cache=False,
+            return validate_sourcing_adapter_metadata(
+                asyncio.run(
+                    self._execute_operation(
+                        operation="metadata",
+                        input_doc={},
+                        provider_evidence_cache={},
+                        provider_evidence_cache_ref="",
+                        provider_evidence_mode="live",
+                        provider_snapshot_bundle={},
+                        provider_snapshot_tree_hash="",
+                        provider_snapshot_manifest_hash="",
+                        provider_cost_scope_override="",
+                        provider_cost_cap_microusd=0,
+                        provider_call_cap=0,
+                        publish_provider_evidence_cache=False,
+                    )
                 )
             )
         raise AttestedPrivateModelRunnerV2Error(
@@ -869,6 +886,18 @@ class AttestedPrivateModelRunnerV2:
             raise AttestedPrivateModelRunnerV2Error(
                 "measured model trace commitment differs"
             )
+        if operation == "run_icp":
+            try:
+                validate_sourcing_runtime_receipt_entries(
+                    trace_entries,
+                    expected_runtime_options=dict(
+                        input_doc.get("context") or {}
+                    )["runtime_options"],
+                )
+            except (KeyError, PrivateModelRuntimeError) as exc:
+                raise AttestedPrivateModelRunnerV2Error(
+                    "measured model sourcing runtime receipt is invalid"
+                ) from exc
         cost_summary = summarize_provider_cost_trace_entries(trace_entries)
         if result.get("output_hash") != sha256_json(result.get("output")):
             raise AttestedPrivateModelRunnerV2Error(

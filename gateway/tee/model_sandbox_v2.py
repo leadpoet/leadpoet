@@ -29,6 +29,7 @@ from gateway.tee.source_add_runtime_v2 import (
 )
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
 from research_lab.eval import (
+    PrivateModelRuntimeError,
     PrivateModelArtifactManifest,
     ensure_private_model_outputs,
     validate_private_model_artifact_manifest,
@@ -37,8 +38,11 @@ from research_lab.eval.private_runtime import (
     _DOCKER_ADAPTER_BOOTSTRAP,
     _DOCKER_METADATA_BOOTSTRAP,
     canonicalize_private_model_icp,
+    context_with_runtime_options,
     parse_incontainer_trace_lines,
+    parse_sourcing_runtime_lines,
     strip_incontainer_trace_lines,
+    validate_sourcing_runtime_receipt,
 )
 from research_lab.eval.provider_evidence_cache import (
     EVIDENCE_CACHE_SCHEMA_VERSION,
@@ -68,6 +72,7 @@ DEFAULT_REQUIREMENTS_LOCK_PATH = Path(
     "/app/gateway/tee/requirements-scoring-py39.lock"
 )
 MAX_MODEL_INPUT_BYTES = 16 * 1024 * 1024
+MODEL_SANDBOX_TIMEOUT_SECONDS = 900
 MAX_MODEL_OUTPUT_BYTES = 64 * 1024 * 1024
 MAX_PROVIDER_EVIDENCE_CACHE_BYTES = 32 * 1024 * 1024
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -827,7 +832,10 @@ class RunscModelSandboxV2:
             raise ModelSandboxV2Error("dev replay snapshot root is unavailable")
         stdin_payload = {
             "icp": canonicalize_private_model_icp(icp),
-            "context": dict(context),
+            "context": context_with_runtime_options(
+                context,
+                outer_timeout_seconds=normalized_timeout,
+            ),
         }
         if len(canonical_json(stdin_payload).encode("utf-8")) > MAX_MODEL_INPUT_BYTES:
             raise ModelSandboxV2Error("dev replay input exceeds limit")
@@ -923,7 +931,10 @@ class RunscModelSandboxV2:
             )
         stdin_payload = {
             "icp": canonicalize_private_model_icp(icp),
-            "context": dict(context),
+            "context": context_with_runtime_options(
+                context,
+                outer_timeout_seconds=normalized_timeout,
+            ),
         }
         if len(canonical_json(stdin_payload).encode("utf-8")) > MAX_MODEL_INPUT_BYTES:
             raise ModelSandboxV2Error("dev provider replay input exceeds limit")
@@ -1090,6 +1101,17 @@ class RunscModelSandboxV2:
             raise ModelSandboxV2Error(
                 "dev provider replay adapter must return a JSON array"
             )
+        try:
+            validate_sourcing_runtime_receipt(
+                str(completed.stderr or ""),
+                expected_runtime_options=dict(stdin_payload["context"])[
+                    "runtime_options"
+                ],
+            )
+        except PrivateModelRuntimeError as exc:
+            raise ModelSandboxV2Error(
+                "dev provider replay sourcing runtime receipt is invalid"
+            ) from exc
         return list(
             ensure_private_model_outputs(
                 decoded,
@@ -1200,6 +1222,17 @@ class RunscModelSandboxV2:
             raise ModelSandboxV2Error("dev replay adapter output is invalid JSON") from exc
         if not isinstance(decoded, list):
             raise ModelSandboxV2Error("dev replay adapter must return a JSON array")
+        try:
+            validate_sourcing_runtime_receipt(
+                str(completed.stderr or ""),
+                expected_runtime_options=dict(stdin_payload["context"])[
+                    "runtime_options"
+                ],
+            )
+        except PrivateModelRuntimeError as exc:
+            raise ModelSandboxV2Error(
+                "dev replay sourcing runtime receipt is invalid"
+            ) from exc
         return list(
             ensure_private_model_outputs(
                 decoded,
@@ -1319,7 +1352,7 @@ class RunscModelSandboxV2:
                 input=encoded_input,
                 text=True,
                 capture_output=True,
-                timeout=900,
+                timeout=MODEL_SANDBOX_TIMEOUT_SECONDS,
                 env={
                     "HOME": str(tmp_root),
                     "PATH": "/usr/local/bin:/usr/bin:/bin",
@@ -1369,9 +1402,11 @@ class RunscModelSandboxV2:
                     require_non_empty=False,
                 )
             )
-            return output, parse_incontainer_trace_lines(
-                str(completed.stderr or "")
-            )
+            stderr = str(completed.stderr or "")
+            return output, [
+                *parse_incontainer_trace_lines(stderr),
+                *parse_sourcing_runtime_lines(stderr),
+            ]
         if not isinstance(decoded, Mapping):
             raise ModelSandboxV2Error("model metadata output must be an object")
         return dict(decoded), parse_incontainer_trace_lines(

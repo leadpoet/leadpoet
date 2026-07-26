@@ -75,6 +75,46 @@ async def _load_empty_catalog(*, epoch_id):
     return _catalog_outcome()
 
 
+def _ready_adapter_metadata() -> dict:
+    return {
+        "adapter_version": "sourcing-model-research-lab-adapter:v2",
+        "capability_contract_version": "sourcing-model-runtime-capabilities:v2",
+        "runtime_capabilities": [
+            "deadline",
+            "emit",
+            "http_fetch",
+            "probe_origin",
+            "resolve_host",
+        ],
+        "resilience_policy_version": "sourcing-model-resilience:v1",
+        "firmographic_discovery": {
+            "firmographic_policy_version": "sourcing-model-firmographic-discovery:v1"
+        },
+        "industry_taxonomy": {
+            "taxonomy_content_hash": "sha256:" + "d" * 64
+        },
+    }
+
+
+def _runtime_receipt(runtime_cap_seconds: float) -> dict:
+    return {
+        "kind": "sourcing_branch_receipt",
+        "runtime_cap_seconds": runtime_cap_seconds,
+        "capability_contract": {
+            "host_registered": [
+                "deadline",
+                "emit",
+                "probe_origin",
+                "resolve_host",
+            ],
+        },
+        "industry_taxonomy": {
+            "taxonomy_content_hash": "sha256:" + "d" * 64,
+        },
+        "firmographic_discovery": {"plan": {"target": 5}},
+    }
+
+
 @pytest.mark.asyncio
 async def test_legacy_protocol_cannot_select_host_model_runner(tmp_path, monkeypatch):
     artifact = _artifact(tmp_path)
@@ -196,10 +236,12 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
                     "provider_runtime_catalog"
                 ]["catalog_hash"],
                 "generated_provider_evidence_cache_hash": sha256_json({}),
-                "trace_entries_hash": sha256_json([{"provider": "exa"}]),
+                "trace_entries_hash": sha256_json(
+                    [_runtime_receipt(897.0), {"provider": "exa"}]
+                ),
                 "output_hash": sha256_json(output),
                 "output": output,
-                "trace_entries": [{"provider": "exa"}],
+                "trace_entries": [_runtime_receipt(897.0), {"provider": "exa"}],
                 "generated_provider_evidence_cache": {},
             },
             "receipt": {"receipt_hash": "sha256:" + "4" * 64},
@@ -209,6 +251,7 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
         artifact=artifact,
         spec=DockerPrivateModelSpec(
             image_digest=artifact["image_digest"],
+            timeout_seconds=1800,
             env_passthrough=("EXA_API_KEY",),
             extra_env={
                 "EXA_API_KEY": "parent-secret-value",
@@ -248,8 +291,13 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
     assert payload["input"]["context"] == {
         "evaluation_epoch": 24000,
         "run_id": "run-1",
+        "runtime_options": {
+            "runtime_cap_seconds": 897.0,
+            "finalization_reserve_seconds": 5.0,
+            "agent_timeout_seconds": 892,
+        },
     }
-    assert entries == [{"provider": "exa"}]
+    assert entries == [_runtime_receipt(897.0), {"provider": "exa"}]
     assert runner.attested_receipts() == [
         {"receipt_hash": "sha256:" + "4" * 64}
     ]
@@ -272,7 +320,7 @@ def test_attested_model_metadata_uses_same_measured_authority(tmp_path, monkeypa
 
     async def execute(**kwargs):
         payload = kwargs["payload"]
-        output = {"adapter_version": "v1"}
+        output = _ready_adapter_metadata()
         return {
             "result": {
                 "schema_version": "leadpoet.model_sandbox_result.v2",
@@ -313,7 +361,7 @@ def test_attested_model_metadata_uses_same_measured_authority(tmp_path, monkeypa
         execute=execute,
         catalog_snapshot_loader=_load_empty_catalog,
     )
-    assert runner.metadata() == {"adapter_version": "v1"}
+    assert runner.metadata() == _ready_adapter_metadata()
 
 
 @pytest.mark.asyncio
@@ -398,10 +446,10 @@ async def test_private_baseline_persists_signed_tape_before_atomic_cache_publish
                     "provider_runtime_catalog"
                 ]["catalog_hash"],
                 "generated_provider_evidence_cache_hash": cache_hash,
-                "trace_entries_hash": sha256_json([]),
+                "trace_entries_hash": sha256_json([_runtime_receipt(897.0)]),
                 "output_hash": sha256_json(output),
                 "output": output,
-                "trace_entries": [],
+                "trace_entries": [_runtime_receipt(897.0)],
                 "generated_provider_evidence_cache": cache_doc,
             },
             "receipt": root_receipt,

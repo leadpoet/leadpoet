@@ -1753,14 +1753,14 @@ def _run(cmd: list[str], *, cwd: Path, timeout_seconds: int) -> str:
 def _sourcing_contract_check_mode() -> str:
     """Resolve the wrapper-contract build gate mode (disabled|shadow|enforce)."""
     value = str(
-        os.environ.get("RESEARCH_LAB_SOURCING_CONTRACT_CHECK") or "shadow"
+        os.environ.get("RESEARCH_LAB_SOURCING_CONTRACT_CHECK") or "enforce"
     ).strip().lower()
     if value not in {"disabled", "shadow", "enforce"}:
         logger.warning(
-            "sourcing_contract_check_invalid_mode value=%r falling back to shadow",
+            "sourcing_contract_check_invalid_mode value=%r falling back to enforce",
             value,
         )
-        return "shadow"
+        return "enforce"
     return value
 
 
@@ -1775,10 +1775,10 @@ def _sourcing_contract_gate(repo_dir: Path) -> None:
     harness cannot invoke — catch it here, at build time, with a specific
     violation list instead of a downstream invocation failure.
 
-    Modes via RESEARCH_LAB_SOURCING_CONTRACT_CHECK: shadow (default) logs
-    violations with a unique tag and lets the build proceed; enforce fails
-    the build; disabled skips. Any internal error logs a WARNING and fails
-    open — the gate must never take down candidate building.
+    Modes via RESEARCH_LAB_SOURCING_CONTRACT_CHECK: enforce (default) fails
+    the build; shadow logs violations and lets the build proceed; disabled
+    skips. Internal checker errors fail closed in enforce mode because a
+    verifier outage must not admit an unverified model artifact.
     """
     mode = _sourcing_contract_check_mode()
     if mode == "disabled":
@@ -1789,10 +1789,14 @@ def _sourcing_contract_gate(repo_dir: Path) -> None:
         )
 
         violations = verify_source_tree_contract(repo_dir)
-    except Exception as exc:  # noqa: BLE001 — availability over strictness
+    except Exception as exc:  # noqa: BLE001 — convert to a stable build error
         logger.warning(
             "sourcing_contract_gate_error mode=%s error=%s", mode, str(exc)[:200]
         )
+        if mode == "enforce":
+            raise CodeEditPrivateTestError(
+                "sourcing wrapper contract verification failed internally"
+            ) from exc
         return
     if not violations:
         return

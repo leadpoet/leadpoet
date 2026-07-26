@@ -63,6 +63,21 @@ FROZEN_ASYNCNESS: Dict[str, bool] = {
     "sourcing_model/validation.py:validate_candidate": True,
 }
 
+# These are invoked directly by the Lab/production wrappers, so an additional
+# positional parameter changes the public callable even when it is optional.
+# Internal monkey-patch seams remain call-compatible: optional trailing
+# parameters are allowed, but additional required parameters are not.
+EXACT_SIGNATURES = {
+    "research_lab_adapter.py:adapter_metadata",
+    "research_lab_adapter.py:run_icp",
+    "sourcing_model/core.py:qualify",
+}
+
+FROZEN_REQUIRED_KEYWORD_ONLY: Dict[str, List[str]] = {
+    "sourcing_model/firmographic_discovery.py:plan_for_icp": ["target"],
+    "sourcing_model/orchestrator.py:run_branches": ["max_companies"],
+}
+
 
 def load_wrapper_contract(path: Path | None = None) -> Dict[str, Any]:
     """Load and shape-check the vendored wrapper contract."""
@@ -78,11 +93,26 @@ def load_wrapper_contract(path: Path | None = None) -> Dict[str, Any]:
     return document
 
 
-def _function_params(node: ast.AST) -> List[str]:
+def _function_signature(node: ast.AST) -> Dict[str, Any]:
     args = getattr(node, "args", None)
     if args is None:
-        return []
-    return [a.arg for a in args.posonlyargs + args.args]
+        return {
+            "params": [],
+            "required_positional": 0,
+            "required_keyword_only": [],
+        }
+    positional = list(args.posonlyargs + args.args)
+    required_positional = max(0, len(positional) - len(args.defaults))
+    required_keyword_only = [
+        item.arg
+        for item, default in zip(args.kwonlyargs, args.kw_defaults)
+        if default is None
+    ]
+    return {
+        "params": [item.arg for item in positional],
+        "required_positional": required_positional,
+        "required_keyword_only": required_keyword_only,
+    }
 
 
 def _int_constant(value: ast.AST | None) -> int | None:
@@ -111,7 +141,7 @@ def _module_symbols(tree: ast.Module) -> Dict[str, Any]:
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             functions[node.name] = {
-                "params": _function_params(node),
+                **_function_signature(node),
                 "is_async": isinstance(node, ast.AsyncFunctionDef),
             }
         elif isinstance(node, ast.Assign) and len(node.targets) == 1:
@@ -224,12 +254,33 @@ def verify_source_tree_contract(
                 continue
             expected = list(expected_params)
             actual_params = actual["params"]
-            if expected and actual_params[: len(expected)] != expected:
+            contract_key = f"{relative}:{name}"
+            if contract_key in EXACT_SIGNATURES and actual_params != expected:
+                violations.append(
+                    f"exact parameter drift {relative}:{name}: expected "
+                    f"{expected}, found {actual_params}"
+                )
+            elif expected and actual_params[: len(expected)] != expected:
                 violations.append(
                     f"parameter drift {relative}:{name}: expected leading "
                     f"parameters {expected}, found {actual_params}"
                 )
-            frozen_async = FROZEN_ASYNCNESS.get(f"{relative}:{name}")
+            elif actual["required_positional"] > len(expected):
+                violations.append(
+                    f"required parameter drift {relative}:{name}: expected at most "
+                    f"{len(expected)} required positional parameters, found "
+                    f"{actual['required_positional']}"
+                )
+            expected_required_keyword_only = FROZEN_REQUIRED_KEYWORD_ONLY.get(
+                contract_key, []
+            )
+            if actual["required_keyword_only"] != expected_required_keyword_only:
+                violations.append(
+                    f"required keyword-only parameter drift {relative}:{name}: "
+                    f"expected {expected_required_keyword_only}, found "
+                    f"{actual['required_keyword_only']}"
+                )
+            frozen_async = FROZEN_ASYNCNESS.get(contract_key)
             if frozen_async is not None and actual["is_async"] != frozen_async:
                 violations.append(
                     f"asyncness drift {relative}:{name}: frozen surface is "

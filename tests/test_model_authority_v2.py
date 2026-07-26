@@ -76,8 +76,11 @@ async def _load_empty_catalog(*, epoch_id):
 
 
 def _ready_adapter_metadata() -> dict:
+    routing_catalog = {"schema_version": 1}
+    routing_policy = {"schema_version": 1}
     return {
-        "adapter_version": "sourcing-model-research-lab-adapter:v2",
+        "adapter_version": "sourcing-model-research-lab-adapter:v3",
+        "component_registry_version": "sourcing-model-components:v2",
         "capability_contract_version": "sourcing-model-runtime-capabilities:v2",
         "runtime_capabilities": [
             "deadline",
@@ -92,6 +95,21 @@ def _ready_adapter_metadata() -> dict:
         },
         "industry_taxonomy": {
             "taxonomy_content_hash": "sha256:" + "d" * 64
+        },
+        "routing": {
+            "compiler_version": "routing-compiler-v1",
+            "catalog": routing_catalog,
+            "catalog_sha256": sha256_json(routing_catalog).removeprefix("sha256:"),
+            "policy": routing_policy,
+            "policy_sha256": sha256_json(routing_policy).removeprefix("sha256:"),
+            "intent_sources": ["company_site", "job_listing", "news"],
+            "source_add_requires_manifest_sha256": True,
+            "private_bindings_exposed": False,
+        },
+        "component_registry": {
+            "source_router": {
+                "strategy_options": ["company_site", "job_listing", "news"],
+            }
         },
     }
 
@@ -112,6 +130,19 @@ def _runtime_receipt(runtime_cap_seconds: float) -> dict:
             "taxonomy_content_hash": "sha256:" + "d" * 64,
         },
         "firmographic_discovery": {"plan": {"target": 5}},
+        "branches": [
+            {
+                "source": "news",
+                "compiled_source": "news",
+                "source_override": False,
+                "route_tool_ids": ["intent.news", "intent.company_site"],
+                "route_sources": ["news", "company_site"],
+                "route_plan_sha256": "5" * 64,
+                "route_policy_sha256": "6" * 64,
+                "route_catalog_sha256": "7" * 64,
+                "route_context_sha256": "8" * 64,
+            }
+        ],
     }
 
 

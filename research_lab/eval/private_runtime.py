@@ -81,6 +81,9 @@ PROVIDER_COST_EVALUATION_SCOPE_ENV = "RESEARCH_LAB_PROVIDER_COST_EVALUATION_SCOP
 DEFAULT_DOCKER_PLATFORM = "linux/amd64"
 SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS = 1500.0
 SOURCING_MODEL_MAX_AGENT_TIMEOUT_SECONDS = 900
+EXPECTED_SOURCING_ADAPTER_VERSION = "sourcing-model-research-lab-adapter:v3"
+EXPECTED_COMPONENT_REGISTRY_VERSION = "sourcing-model-components:v2"
+EXPECTED_ROUTING_COMPILER_VERSION = "routing-compiler-v1"
 DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID = (
     "alias/leadpoet-research-lab-artifact-signing"
 )
@@ -961,6 +964,17 @@ def validate_sourcing_adapter_metadata(
     """Fail closed unless an artifact declares the Lab runtime contract."""
 
     document = dict(metadata)
+    if document.get("adapter_version") != EXPECTED_SOURCING_ADAPTER_VERSION:
+        raise PrivateModelRuntimeError(
+            "private model does not declare the supported adapter v3 contract"
+        )
+    if (
+        document.get("component_registry_version")
+        != EXPECTED_COMPONENT_REGISTRY_VERSION
+    ):
+        raise PrivateModelRuntimeError(
+            "private model does not declare the supported component registry v2"
+        )
     required_capabilities = {
         "deadline",
         "emit",
@@ -1003,6 +1017,61 @@ def validate_sourcing_adapter_metadata(
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", taxonomy_hash):
         raise PrivateModelRuntimeError(
             "private model does not declare a valid industry taxonomy hash"
+        )
+    routing = document.get("routing")
+    if not isinstance(routing, Mapping):
+        raise PrivateModelRuntimeError(
+            "private model does not declare model-owned routing metadata"
+        )
+    if routing.get("compiler_version") != EXPECTED_ROUTING_COMPILER_VERSION:
+        raise PrivateModelRuntimeError(
+            "private model routing compiler version is unsupported"
+        )
+    for field in ("catalog_sha256", "policy_sha256"):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(routing.get(field) or "")):
+            raise PrivateModelRuntimeError(
+                f"private model routing {field} is invalid"
+            )
+    catalog = routing.get("catalog")
+    policy = routing.get("policy")
+    if not isinstance(catalog, Mapping) or not isinstance(policy, Mapping):
+        raise PrivateModelRuntimeError(
+            "private model routing catalog and policy must be structured"
+        )
+    for name, payload in (("catalog", catalog), ("policy", policy)):
+        expected_hash = sha256_json(payload).removeprefix("sha256:")
+        if routing.get(f"{name}_sha256") != expected_hash:
+            raise PrivateModelRuntimeError(
+                f"private model routing {name} hash does not match its payload"
+            )
+    if routing.get("private_bindings_exposed") is not False:
+        raise PrivateModelRuntimeError(
+            "private model routing metadata exposes private bindings"
+        )
+    if routing.get("source_add_requires_manifest_sha256") is not True:
+        raise PrivateModelRuntimeError(
+            "private model routing does not require source manifest attestation"
+        )
+    intent_sources = routing.get("intent_sources")
+    if (
+        not isinstance(intent_sources, list)
+        or not intent_sources
+        or any(not str(source or "").strip() for source in intent_sources)
+    ):
+        raise PrivateModelRuntimeError(
+            "private model routing intent source catalog is invalid"
+        )
+    component_registry = document.get("component_registry")
+    source_router = (
+        component_registry.get("source_router")
+        if isinstance(component_registry, Mapping)
+        else None
+    )
+    if not isinstance(source_router, Mapping) or list(
+        source_router.get("strategy_options") or ()
+    ) != list(intent_sources):
+        raise PrivateModelRuntimeError(
+            "source-router strategies differ from model-owned routing metadata"
         )
     return document
 
@@ -1081,6 +1150,66 @@ def validate_sourcing_runtime_receipt_entries(
     ):
         raise PrivateModelRuntimeError(
             "private model receipt does not bind a firmographic discovery plan"
+        )
+    branches = receipt.get("branches")
+    if not isinstance(branches, list) or not branches:
+        raise PrivateModelRuntimeError(
+            "private model receipt does not contain compiled intent branches"
+        )
+    catalog_hashes: set[str] = set()
+    policy_hashes: set[str] = set()
+    for branch in branches:
+        if not isinstance(branch, Mapping):
+            raise PrivateModelRuntimeError(
+                "private model intent branch receipt is malformed"
+            )
+        for field in (
+            "route_plan_sha256",
+            "route_policy_sha256",
+            "route_catalog_sha256",
+            "route_context_sha256",
+        ):
+            value = str(branch.get(field) or "")
+            if not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise PrivateModelRuntimeError(
+                    f"private model intent branch {field} is invalid"
+                )
+        route_tools = branch.get("route_tool_ids")
+        route_sources = branch.get("route_sources")
+        if (
+            not isinstance(route_tools, list)
+            or not route_tools
+            or any(not str(tool or "").strip() for tool in route_tools)
+            or not isinstance(route_sources, list)
+            or not route_sources
+            or any(not str(source or "").strip() for source in route_sources)
+        ):
+            raise PrivateModelRuntimeError(
+                "private model intent branch route is empty or malformed"
+            )
+        if not isinstance(branch.get("source_override"), bool):
+            raise PrivateModelRuntimeError(
+                "private model intent branch source override is not boolean"
+            )
+        compiled_source = str(branch.get("compiled_source") or "")
+        selected_source = str(branch.get("source") or "")
+        if compiled_source != str(route_sources[0]):
+            raise PrivateModelRuntimeError(
+                "private model intent branch compiled source differs from its route"
+            )
+        if not branch["source_override"] and selected_source != compiled_source:
+            raise PrivateModelRuntimeError(
+                "private model intent branch source differs without an override"
+            )
+        if branch["source_override"] and not selected_source:
+            raise PrivateModelRuntimeError(
+                "private model intent branch override source is empty"
+            )
+        catalog_hashes.add(str(branch["route_catalog_sha256"]))
+        policy_hashes.add(str(branch["route_policy_sha256"]))
+    if len(catalog_hashes) != 1 or len(policy_hashes) != 1:
+        raise PrivateModelRuntimeError(
+            "private model intent branches used inconsistent routing contracts"
         )
     return receipt
 

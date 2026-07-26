@@ -48,6 +48,19 @@ def _runtime_receipt_stderr(stdin_payload: str) -> str:
             "taxonomy_content_hash": "sha256:" + "a" * 64,
         },
         "firmographic_discovery": {"plan": {"target": 5}},
+        "branches": [
+            {
+                "source": "news",
+                "compiled_source": "news",
+                "source_override": False,
+                "route_tool_ids": ["intent.news", "intent.company_site"],
+                "route_sources": ["news", "company_site"],
+                "route_plan_sha256": "b" * 64,
+                "route_policy_sha256": "c" * 64,
+                "route_catalog_sha256": "d" * 64,
+                "route_context_sha256": "e" * 64,
+            }
+        ],
     }
     return "sourcing_branch_receipt " + json.dumps(receipt) + "\n"
 

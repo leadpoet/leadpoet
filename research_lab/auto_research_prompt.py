@@ -222,12 +222,12 @@ def _coerce_compact_component_registry(
     manifest_version = str(
         metadata.get("component_registry_version")
         or metadata.get("manifest_version")
-        or "sourcing-model-components:v1"
+        or "sourcing-model-components:v2"
     )
     champion_base = str(
         metadata.get("adapter_version")
         or metadata.get("champion_base")
-        or "sourcing-model-research-lab-adapter:v1"
+        or "sourcing-model-research-lab-adapter:v3"
     )
     eval_version = str(
         metadata.get("scoring_adapter_version")

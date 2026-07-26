@@ -115,6 +115,60 @@ from leadpoet_canonical.constants import (
 from leadpoet_verifier.economics import DEFAULT_RESEARCH_LAB_EMISSION_PERCENT
 
 
+def _close_subtensor_connection(subtensor, *, source: str) -> None:
+    """Retire one failed SDK websocket without masking the caller's result."""
+
+    close = getattr(subtensor, "close", None)
+    if not callable(close):
+        close = getattr(getattr(subtensor, "substrate", None), "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception as exc:
+        bt.logging.warning(
+            "validator_subtensor_close_failed "
+            f"source={source} type={type(exc).__name__}"
+        )
+
+
+def _is_subtensor_connection_error(exc: BaseException) -> bool:
+    """Classify only transport failures that a fresh websocket can repair."""
+
+    current = exc
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (TimeoutError, ConnectionError, OSError)):
+            return True
+        name = type(current).__name__.lower()
+        message = str(current).lower()
+        if any(
+            marker in name
+            for marker in ("connection", "timeout", "websocket", "socket")
+        ):
+            return True
+        if any(
+            marker in message
+            for marker in (
+                "broken pipe",
+                "connection aborted",
+                "connection closed",
+                "connection is closed",
+                "connection refused",
+                "connection reset",
+                "handshake",
+                "remote end closed",
+                "timed out",
+                "timeout",
+                "websocket",
+            )
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _atomic_write_json_file(path: Path, payload: Mapping[str, Any]) -> None:
     """Durably replace one shared validator JSON file."""
 
@@ -1163,6 +1217,7 @@ class Validator(BaseValidatorNeuron):
             self._epoch_cutover,
         )
         self._epoch_snapshot_lock = threading.Lock()
+        self._subtensor_reconnect_lock = threading.Lock()
         self._validate_durable_epoch_runtime_startup()
         journal_path = Path(
             os.environ.get("VALIDATOR_V2_PUBLICATION_JOURNAL_PATH")
@@ -1309,6 +1364,66 @@ class Validator(BaseValidatorNeuron):
         # Block queries are frequent (every few seconds) and fast, so sync is preferred
         return self.subtensor.block
 
+    def _reconnect_subtensor_sync(
+        self,
+        *,
+        expected_source,
+        reason: str,
+    ) -> bool:
+        """Replace one stale live-chain source after validating its successor."""
+
+        lock = getattr(self, "_subtensor_reconnect_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._subtensor_reconnect_lock = lock
+        with lock:
+            if self.subtensor is not expected_source:
+                return True
+            replacement = None
+            try:
+                replacement = bt.Subtensor(config=self.config)
+                with self._epoch_snapshot_lock:
+                    snapshot = read_subnet_epoch_snapshot(
+                        replacement,
+                        netuid=int(self.config.netuid),
+                        finalized=True,
+                    )
+                _ValidatorEpochState.from_snapshot(
+                    snapshot,
+                    self._epoch_cutover,
+                )
+                replacement_uid = replacement.get_uid_for_hotkey_on_subnet(
+                    hotkey_ss58=self.wallet.hotkey.ss58_address,
+                    netuid=int(self.config.netuid),
+                )
+                if replacement_uid is None:
+                    raise RuntimeError(
+                        "validator hotkey is not registered after reconnect"
+                    )
+                self.subtensor = replacement
+                self.uid = int(replacement_uid)
+                _close_subtensor_connection(
+                    expected_source,
+                    source="live_replaced",
+                )
+                bt.logging.warning(
+                    "validator_subtensor_reconnect_success "
+                    f"reason={reason} uid={self.uid}"
+                )
+                return True
+            except Exception as exc:
+                if replacement is not None:
+                    _close_subtensor_connection(
+                        replacement,
+                        source="live_replacement_failed",
+                    )
+                bt.logging.error(
+                    "validator_subtensor_reconnect_failure "
+                    f"reason={reason} type={type(exc).__name__} "
+                    f"error={str(exc)[:200]}"
+                )
+                return False
+
     def _read_epoch_state_sync(self, subtensor=None) -> _ValidatorEpochState:
         """Read one coherent epoch state from one Subtensor connection."""
 
@@ -1318,12 +1433,30 @@ class Validator(BaseValidatorNeuron):
         self._validate_durable_epoch_runtime_lifecycle(
             force_refresh=False,
         )
-        with self._epoch_snapshot_lock:
-            snapshot = read_subnet_epoch_snapshot(
-                source,
-                netuid=int(self.config.netuid),
-                finalized=True,
-            )
+        try:
+            with self._epoch_snapshot_lock:
+                snapshot = read_subnet_epoch_snapshot(
+                    source,
+                    netuid=int(self.config.netuid),
+                    finalized=True,
+                )
+        except Exception as exc:
+            if (
+                subtensor is not None
+                or not _is_subtensor_connection_error(exc)
+                or not self._reconnect_subtensor_sync(
+                    expected_source=source,
+                    reason="finalized_epoch_read",
+                )
+            ):
+                raise
+            source = self.subtensor
+            with self._epoch_snapshot_lock:
+                snapshot = read_subnet_epoch_snapshot(
+                    source,
+                    netuid=int(self.config.netuid),
+                    finalized=True,
+                )
         return _ValidatorEpochState.from_snapshot(snapshot, self._epoch_cutover)
 
     async def _get_epoch_state_async(self) -> _ValidatorEpochState:
@@ -1342,12 +1475,30 @@ class Validator(BaseValidatorNeuron):
         source = subtensor or self.subtensor
         if self._epoch_cutover is None:
             raise SubnetEpochError("subnet epoch cutover is unavailable")
-        with self._epoch_snapshot_lock:
-            snapshot = read_subnet_epoch_snapshot(
-                source,
-                netuid=int(self.config.netuid),
-                finalized=False,
-            )
+        try:
+            with self._epoch_snapshot_lock:
+                snapshot = read_subnet_epoch_snapshot(
+                    source,
+                    netuid=int(self.config.netuid),
+                    finalized=False,
+                )
+        except Exception as exc:
+            if (
+                subtensor is not None
+                or not _is_subtensor_connection_error(exc)
+                or not self._reconnect_subtensor_sync(
+                    expected_source=source,
+                    reason="best_epoch_read",
+                )
+            ):
+                raise
+            source = self.subtensor
+            with self._epoch_snapshot_lock:
+                snapshot = read_subnet_epoch_snapshot(
+                    source,
+                    netuid=int(self.config.netuid),
+                    finalized=False,
+                )
         return _ValidatorEpochState.from_snapshot(snapshot, self._epoch_cutover)
 
     async def _get_best_epoch_state_async(self) -> _ValidatorEpochState:

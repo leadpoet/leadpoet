@@ -527,6 +527,102 @@ def test_validator_irreversible_epoch_state_uses_finalized_head(monkeypatch):
     assert calls == [(validator.subtensor, 71, True)]
 
 
+def test_validator_reconnects_stale_live_source_and_retries_finalized_epoch(
+    monkeypatch,
+):
+    cutover = _cutover()
+    snapshot = _snapshot(
+        block=719,
+        last_epoch_block=360,
+        index=10,
+        head="finalized",
+    )
+
+    class Source:
+        def __init__(self, name):
+            self.name = name
+            self.closed = False
+
+        def get_uid_for_hotkey_on_subnet(self, **_kwargs):
+            return 12
+
+        def close(self):
+            self.closed = True
+
+    stale = Source("stale")
+    replacement = Source("replacement")
+    calls = []
+
+    def read_snapshot(source, *, netuid, finalized=False):
+        calls.append((source.name, netuid, finalized))
+        if source is stale:
+            transport = ConnectionError("websocket connection closed")
+            raise SubnetEpochError("failed to resolve epoch") from transport
+        return snapshot
+
+    monkeypatch.setattr(validator_module, "read_subnet_epoch_snapshot", read_snapshot)
+    monkeypatch.setattr(
+        validator_module.bt,
+        "Subtensor",
+        lambda **_kwargs: replacement,
+    )
+    validator = validator_module.Validator.__new__(validator_module.Validator)
+    validator.config = SimpleNamespace(netuid=71)
+    validator.wallet = SimpleNamespace(
+        hotkey=SimpleNamespace(ss58_address="5Validator")
+    )
+    validator.subtensor = stale
+    validator._epoch_cutover = cutover
+    validator._epoch_snapshot_lock = threading.Lock()
+    validator._subtensor_reconnect_lock = threading.Lock()
+    monkeypatch.setattr(
+        validator,
+        "_validate_durable_epoch_runtime_lifecycle",
+        lambda *, force_refresh: {"lifecycle_state": "active"},
+    )
+
+    state = validator._read_epoch_state_sync()
+
+    assert state.workflow_epoch_id == 100
+    assert validator.subtensor is replacement
+    assert validator.uid == 12
+    assert stale.closed is True
+    assert calls == [
+        ("stale", 71, True),
+        ("replacement", 71, True),
+        ("replacement", 71, True),
+    ]
+
+
+def test_validator_does_not_reconnect_semantic_epoch_failure(monkeypatch):
+    validator = validator_module.Validator.__new__(validator_module.Validator)
+    validator.config = SimpleNamespace(netuid=71)
+    validator.subtensor = object()
+    validator._epoch_cutover = _cutover()
+    validator._epoch_snapshot_lock = threading.Lock()
+    validator._subtensor_reconnect_lock = threading.Lock()
+    monkeypatch.setattr(
+        validator,
+        "_validate_durable_epoch_runtime_lifecycle",
+        lambda *, force_refresh: {"lifecycle_state": "active"},
+    )
+    monkeypatch.setattr(
+        validator_module,
+        "read_subnet_epoch_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SubnetEpochError("authority mapping hash differs")
+        ),
+    )
+    monkeypatch.setattr(
+        validator,
+        "_reconnect_subtensor_sync",
+        lambda **_kwargs: pytest.fail("semantic failures must not reconnect"),
+    )
+
+    with pytest.raises(SubnetEpochError, match="mapping hash differs"):
+        validator._read_epoch_state_sync()
+
+
 def test_validator_submission_liveness_reads_best_head_without_replacing_authority(
     monkeypatch,
 ):

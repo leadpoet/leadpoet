@@ -344,13 +344,34 @@ def _proxy_environment_names(
     return names
 
 
+def _worker_proxy_profile_values(
+    values: Sequence[str],
+    worker_count: int,
+) -> tuple[str, ...]:
+    """Return one sealed profile value for every required worker index."""
+
+    configured = tuple(str(value) for value in values)
+    required = int(worker_count)
+    if not configured or required <= len(configured):
+        return configured
+    return tuple(
+        configured[index % len(configured)]
+        for index in range(required)
+    )
+
+
 def _validated_worker_proxy_configuration(
     environment: Mapping[str, str],
     *,
     proxy_fleet_probe: Optional[
         Callable[[Mapping[str, Sequence[str]]], None]
     ] = verify_worker_proxy_fleets_v2,
-) -> tuple[Any, Dict[str, list[str]], set[str]]:
+) -> tuple[
+    Any,
+    Dict[str, list[str]],
+    set[str],
+    Dict[str, tuple[str, ...]],
+]:
     plan = build_research_lab_worker_autostart_plan(environment)
     try:
         deferred_roles = deferred_worker_fleet_roles(environment)
@@ -364,22 +385,22 @@ def _validated_worker_proxy_configuration(
         raise GatewayEnvelopePreparationV2Error(
             "worker proxy values are required for initial V2 sealing"
         )
-    fleets = {
+    configured_fleets = {
         "gateway_autoresearch": plan.hosted.proxy_values,
         "gateway_scoring": plan.scoring.proxy_values,
     }
-    required_counts = {
-        "gateway_autoresearch": plan.hosted.worker_count,
-        "gateway_scoring": plan.scoring.worker_count,
+    profile_fleets = {
+        "gateway_autoresearch": _worker_proxy_profile_values(
+            plan.hosted.proxy_values,
+            plan.hosted.worker_count,
+        ),
+        "gateway_scoring": _worker_proxy_profile_values(
+            plan.scoring.proxy_values,
+            plan.scoring.worker_count,
+        ),
     }
-    for role, values in fleets.items():
-        if required_counts[role] > len(values):
-            raise GatewayEnvelopePreparationV2Error(
-                "%s requires %d worker proxy profiles but only %d are configured"
-                % (role, required_counts[role], len(values))
-            )
     commitments: Dict[str, list[str]] = {}
-    for role, values in fleets.items():
+    for role, values in configured_fleets.items():
         commitments[role] = []
         for index, value in enumerate(values):
             try:
@@ -398,17 +419,21 @@ def _validated_worker_proxy_configuration(
                         ),
                     )
                 ) from exc
-            commitments[role].append(credential_value_hash(value))
+    for role, values in profile_fleets.items():
+        commitments[role] = [
+            credential_value_hash(value)
+            for value in values
+        ]
     if proxy_fleet_probe is not None:
         try:
-            proxy_fleet_probe(fleets)
+            proxy_fleet_probe(configured_fleets)
         except WorkerProxyTransportPreflightV2Error as exc:
             raise GatewayEnvelopePreparationV2Error(str(exc)) from exc
     configured_names = _proxy_environment_names(
         environment,
         (*HOSTED_PROXY_PREFIXES, *SCORING_PROXY_PREFIXES),
     )
-    return plan, commitments, configured_names
+    return plan, commitments, configured_names, profile_fleets
 
 
 def prepare_gateway_envelopes_v2(
@@ -434,7 +459,12 @@ def prepare_gateway_envelopes_v2(
         import boto3
 
         kms_client = boto3.client("kms")
-    plan, proxy_commitments, proxy_environment_names = (
+    (
+        plan,
+        proxy_commitments,
+        proxy_environment_names,
+        proxy_profile_values,
+    ) = (
         _validated_worker_proxy_configuration(
             environment,
             proxy_fleet_probe=proxy_fleet_probe,
@@ -522,11 +552,11 @@ def prepare_gateway_envelopes_v2(
         }
         fleets = {
             "gateway_autoresearch": (
-                plan.hosted.proxy_values,
+                proxy_profile_values["gateway_autoresearch"],
                 "autoresearch_proxy_{:02d}.json",
             ),
             "gateway_scoring": (
-                plan.scoring.proxy_values,
+                proxy_profile_values["gateway_scoring"],
                 "scoring_proxy_{:02d}.json",
             ),
         }
@@ -611,7 +641,12 @@ def install_gateway_envelopes_v2(
     """Reuse exact-commit envelopes or atomically install a complete new set."""
 
     destination = Path(install_dir)
-    plan, proxy_commitments, proxy_environment_names = (
+    (
+        plan,
+        proxy_commitments,
+        proxy_environment_names,
+        _proxy_profile_values,
+    ) = (
         _validated_worker_proxy_configuration(
             environment,
             proxy_fleet_probe=proxy_fleet_probe,

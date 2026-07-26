@@ -251,7 +251,7 @@ def test_tls_connect_capability_failure_blocks_before_kms(tmp_path):
     assert not (tmp_path / "v2").exists()
 
 
-def test_partial_v2_fleet_cannot_mix_with_or_fall_back_to_legacy(tmp_path):
+def test_partial_v2_fleet_reuses_tls_profile_without_legacy_fallback(tmp_path):
     environment = _environment()
     environment.update(
         {
@@ -266,25 +266,72 @@ def test_partial_v2_fleet_cannot_mix_with_or_fall_back_to_legacy(tmp_path):
     )
     del environment["RESEARCH_LAB_V2_AUTORESEARCH_HTTPS_PROXY_2"]
     kms = KMS()
+    observed = []
 
-    with pytest.raises(
-        Exception,
-        match=(
-            "gateway_autoresearch requires 2 worker proxy profiles "
-            "but only 1 are configured"
-        ),
-    ):
-        prepare_gateway_envelopes_v2(
-            environment=environment,
-            kms_key_id="alias/gateway-v2",
-            deploy_commit="1" * 40,
-            output_dir=tmp_path / "v2",
-            kms_client=kms,
-            proxy_fleet_probe=_skip_proxy_probe,
-        )
+    output = tmp_path / "v2"
+    result = prepare_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        output_dir=output,
+        kms_client=kms,
+        proxy_fleet_probe=lambda fleets: observed.append(fleets),
+    )
 
-    assert kms.requests == []
-    assert not (tmp_path / "v2").exists()
+    assert observed == [
+        {
+            "gateway_autoresearch": (
+                "https://hosted-1.example.com",
+            ),
+            "gateway_scoring": (
+                "https://scoring-1.example.com",
+                "https://scoring-2.example.com",
+                "https://scoring-3.example.com",
+            ),
+        }
+    ]
+    hosted_hash = credential_value_hash("https://hosted-1.example.com")
+    assert result["worker_proxy_credential_ref_hashes"][
+        "gateway_autoresearch"
+    ] == [hosted_hash, hosted_hash]
+    assert json.loads((output / "autoresearch_proxy_00.json").read_text())[
+        "credential_ref_hash"
+    ] == hosted_hash
+    assert json.loads((output / "autoresearch_proxy_01.json").read_text())[
+        "credential_ref_hash"
+    ] == hosted_hash
+    hosted_contexts = [
+        request["EncryptionContext"]
+        for request in kms.requests
+        if request["EncryptionContext"].get("leadpoet:role")
+        == "gateway_autoresearch"
+    ]
+    assert [context["leadpoet:worker_index"] for context in hosted_contexts] == [
+        "0",
+        "1",
+    ]
+    assert all(
+        context["leadpoet:commit"] == "1" * 40
+        and context["leadpoet:purpose"] == "gateway-worker-egress-v2"
+        for context in hosted_contexts
+    )
+    assert result["worker_proxy_source"]["gateway_autoresearch"] == "v2_tls"
+    assert {
+        "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1",
+        "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_2",
+    } <= set(result["plaintext_environment_names_to_remove"])
+
+    request_count = len(kms.requests)
+    reused = install_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        install_dir=output,
+        kms_client=kms,
+        proxy_fleet_probe=_skip_proxy_probe,
+    )
+    assert reused["status"] == "reused"
+    assert len(kms.requests) == request_count
 
 
 def test_install_uses_canonical_secret_names_and_reuses_exact_commit(tmp_path):

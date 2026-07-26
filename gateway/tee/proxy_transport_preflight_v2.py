@@ -12,8 +12,18 @@ from gateway.utils.tee_egress_forwarder import _connect_public_destination
 
 
 _PROBE_DESTINATIONS = {
-    "gateway_autoresearch": ("openrouter.ai", 443),
-    "gateway_scoring": ("api.exa.ai", 443),
+    "gateway_autoresearch": (
+        ("openrouter.ai", 443),
+        ("api.exa.ai", 443),
+        ("api.scrapingdog.com", 443),
+        ("code.deepline.com", 443),
+    ),
+    "gateway_scoring": (
+        ("openrouter.ai", 443),
+        ("api.exa.ai", 443),
+        ("api.scrapingdog.com", 443),
+        ("code.deepline.com", 443),
+    ),
 }
 _DEFAULT_ATTEMPTS = 2
 _DEFAULT_MAX_WORKERS = 8
@@ -94,13 +104,14 @@ def verify_worker_proxy_fleets_v2(
 
     tasks = []
     for role, values in fleets.items():
-        destination = _PROBE_DESTINATIONS.get(str(role))
-        if destination is None:
+        destinations = _PROBE_DESTINATIONS.get(str(role))
+        if destinations is None:
             raise WorkerProxyTransportPreflightV2Error(
                 "worker proxy execution role is not measured"
             )
         for index, value in enumerate(values):
-            tasks.append((str(role), index, str(value), destination))
+            for destination in destinations:
+                tasks.append((str(role), index, str(value), destination))
     if not tasks:
         raise WorkerProxyTransportPreflightV2Error(
             "worker proxy fleet is unavailable"
@@ -118,21 +129,29 @@ def verify_worker_proxy_fleets_v2(
                 value,
                 destination_host=destination[0],
                 destination_port=destination[1],
-            ): (role, index)
+            ): (role, index, destination)
             for role, index, value, destination in tasks
         }
         for future in as_completed(futures):
-            role, index = futures[future]
+            role, index, destination = futures[future]
             try:
                 future.result()
             except Exception as exc:
-                failures.append((role, index, exc))
+                failures.append((role, index, destination, exc))
     if failures:
-        role, index, error = sorted(
+        role, index, destination, error = sorted(
             failures,
-            key=lambda item: (item[0], item[1]),
+            key=lambda item: (item[0], item[1], item[2]),
         )[0]
         raise WorkerProxyTransportPreflightV2Error(
-            "%s worker proxy %d failed V2 TLS CONNECT preflight (%d/%d failed)"
-            % (role, index + 1, len(failures), len(tasks))
+            "%s worker proxy %d failed V2 TLS CONNECT preflight to %s:%d "
+            "(%d/%d probes failed)"
+            % (
+                role,
+                index + 1,
+                destination[0],
+                destination[1],
+                len(failures),
+                len(tasks),
+            )
         ) from error

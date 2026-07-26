@@ -38,6 +38,8 @@ EXPECTED_CREDENTIALS = {
 ALLOWED_TARGETS = {
     "openrouter.ai:443",
     "api.exa.ai:443",
+    "api.scrapingdog.com:443",
+    "code.deepline.com:443",
 }
 _STOP = threading.Event()
 _EVENT_LOCK = threading.Lock()

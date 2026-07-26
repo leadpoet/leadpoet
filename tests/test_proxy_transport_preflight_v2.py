@@ -117,7 +117,7 @@ def test_fleet_probe_checks_role_specific_destinations_and_reports_index():
         WorkerProxyTransportPreflightV2Error,
         match=(
             "gateway_scoring worker proxy 2 failed V2 TLS CONNECT preflight "
-            r"\(1/3 failed\)"
+            r"to api\.exa\.ai:443 \(4/12 probes failed\)"
         ),
     ):
         verify_worker_proxy_fleets_v2(
@@ -132,13 +132,22 @@ def test_fleet_probe_checks_role_specific_destinations_and_reports_index():
             verify_proxy=verify,
         )
 
-    assert sorted(observed) == sorted(
-        [
-            ("https://auto.example.com", "openrouter.ai", 443),
-            ("https://score.example.com", "api.exa.ai", 443),
-            ("https://bad.example.com", "api.exa.ai", 443),
-        ]
-    )
+    expected_destinations = {
+        ("openrouter.ai", 443),
+        ("api.exa.ai", 443),
+        ("api.scrapingdog.com", 443),
+        ("code.deepline.com", 443),
+    }
+    for proxy in (
+        "https://auto.example.com",
+        "https://score.example.com",
+        "https://bad.example.com",
+    ):
+        assert {
+            (host, port)
+            for observed_proxy, host, port in observed
+            if observed_proxy == proxy
+        } == expected_destinations
 
 
 def test_rehearsal_tls_service_exercises_verified_authenticated_connect(
@@ -189,14 +198,21 @@ def test_rehearsal_tls_service_exercises_verified_authenticated_connect(
         def connector(_host, _port):
             return socket.create_connection(("127.0.0.1", port), timeout=2)
 
-        verify_tls_proxy_connect_v2(
-            "https://rehearsal-auto:rehearsal-auto-password@"
-            "autoresearch-proxy.example.com:443",
-            destination_host="openrouter.ai",
-            attempts=1,
-            timeout_seconds=2,
-            connector=connector,
+        destinations = (
+            "openrouter.ai",
+            "api.exa.ai",
+            "api.scrapingdog.com",
+            "code.deepline.com",
         )
+        for destination in destinations:
+            verify_tls_proxy_connect_v2(
+                "https://rehearsal-auto:rehearsal-auto-password@"
+                "autoresearch-proxy.example.com:443",
+                destination_host=destination,
+                attempts=1,
+                timeout_seconds=2,
+                connector=connector,
+            )
         with pytest.raises(
             WorkerProxyTransportPreflightV2Error,
             match="authenticated CONNECT preflight",
@@ -216,10 +232,13 @@ def test_rehearsal_tls_service_exercises_verified_authenticated_connect(
                 encoding="utf-8"
             ).splitlines()
         ]
-        assert len(rows) == 1
-        assert rows[0]["operation"] == "proxy_connect"
-        assert rows[0]["target"] == "openrouter.ai:443"
-        assert rows[0]["authenticated"] is True
+        assert len(rows) == len(destinations)
+        assert all(row["operation"] == "proxy_connect" for row in rows)
+        assert {row["target"] for row in rows} == {
+            destination + ":443"
+            for destination in destinations
+        }
+        assert all(row["authenticated"] is True for row in rows)
         assert "password" not in json.dumps(rows).lower()
     finally:
         service.terminate()

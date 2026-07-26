@@ -1444,6 +1444,8 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "ssl.PROTOCOL_TLS_SERVER" in tls_proxy_service
     assert '"openrouter.ai:443"' in tls_proxy_service
     assert '"api.exa.ai:443"' in tls_proxy_service
+    assert '"api.scrapingdog.com:443"' in tls_proxy_service
+    assert '"code.deepline.com:443"' in tls_proxy_service
     drand_install = run_inside.index(
         "/app/validator_tee/enclave/libbittensor_drand_v2.so"
     )

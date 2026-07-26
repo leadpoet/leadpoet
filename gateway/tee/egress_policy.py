@@ -47,6 +47,8 @@ def policy_document() -> Dict[str, Any]:
     return {
         "schema_version": EGRESS_POLICY_VERSION,
         "allowed_ports": list(ALLOWED_PORTS),
+        "upstream_proxy_port_range": [1, 65535],
+        "upstream_proxy_requires_measured_connect_path": True,
         "blocked_exact_hosts": list(BLOCKED_EXACT_HOSTS),
         "blocked_suffixes": list(BLOCKED_SUFFIXES),
         "ip_literals_allowed": False,
@@ -94,4 +96,17 @@ def normalize_destination(host: Any, port: Any) -> Tuple[str, int]:
         raise EgressPolicyError("egress destination port is invalid") from exc
     if normalized_port not in ALLOWED_PORTS:
         raise EgressPolicyError("egress destination port is blocked")
+    return normalized_host, normalized_port
+
+
+def normalize_proxy_destination(host: Any, port: Any) -> Tuple[str, int]:
+    """Validate a public proxy endpoint without relaxing provider port policy."""
+
+    normalized_host, _ = normalize_destination(host, 443)
+    try:
+        normalized_port = int(port)
+    except (TypeError, ValueError) as exc:
+        raise EgressPolicyError("egress proxy port is invalid") from exc
+    if not 1 <= normalized_port <= 65535:
+        raise EgressPolicyError("egress proxy port is invalid")
     return normalized_host, normalized_port

@@ -22,6 +22,7 @@ from gateway.tee.egress_policy import (
     EgressPolicyError,
     destination_policy_hash,
     normalize_destination,
+    normalize_proxy_destination,
 )
 from gateway.tee.provider_broker_v2 import HTTPXProviderTransport
 from gateway.tee import egress_proxy
@@ -106,6 +107,15 @@ def test_destination_policy_allows_public_dns_https_only():
     assert destination_policy_hash().startswith("sha256:")
 
 
+def test_destination_policy_allows_proxy_port_without_relaxing_provider_port():
+    assert normalize_proxy_destination("Proxy.Example.Com.", 6162) == (
+        "proxy.example.com",
+        6162,
+    )
+    with pytest.raises(EgressPolicyError, match="port is blocked"):
+        normalize_destination("proxy.example.com", 6162)
+
+
 @pytest.mark.parametrize(
     ("host", "port"),
     [
@@ -175,6 +185,44 @@ def test_parent_forwarder_uses_bounded_handshake_then_relays_opaque_bytes():
         assert origin.recv(64) == b"opaque-tls-request"
         origin.sendall(b"opaque-tls-response")
         assert client.recv(64) == b"opaque-tls-response"
+    finally:
+        client.close()
+        origin.close()
+        thread.join(timeout=2)
+
+
+def test_parent_forwarder_accepts_nonstandard_port_only_for_proxy_purpose():
+    client, parent = socket.socketpair()
+    upstream, origin = socket.socketpair()
+    called = []
+
+    def connector(host, port):
+        called.append((host, port))
+        return upstream
+
+    thread = threading.Thread(
+        target=_handle_connection,
+        kwargs={"connection": parent, "connector": connector, "idle_timeout_seconds": 2.0},
+        daemon=True,
+    )
+    thread.start()
+    try:
+        client.sendall(
+            _frame(
+                {
+                    "method": "connect",
+                    "params": {
+                        "host": "proxy.example.com",
+                        "port": 6162,
+                        "policy_hash": destination_policy_hash(),
+                        "purpose": "upstream_proxy",
+                    },
+                }
+            )
+        )
+        response = _read_frame(client)
+        assert response["result"]["status"] == "connected"
+        assert called == [("proxy.example.com", 6162)]
     finally:
         client.close()
         origin.close()
@@ -512,6 +560,50 @@ def test_enclave_proxy_accepts_upstream_proxy_only_as_loopback_control_metadata(
     assert parsed["host"] == "api.exa.ai"
     assert parsed["upstream_proxy_url"] == proxy_url
     assert parsed["forward_headers"] == b""
+
+
+def test_enclave_proxy_uses_authenticated_http_connect_on_configured_proxy_port():
+    enclave_side, proxy_side = socket.socketpair()
+    observed = {}
+    enclave = EnclaveEgressProxy(recv_exact=_recv_exact)
+
+    def open_parent(host, port, *, purpose="provider"):
+        observed["parent"] = (host, port, purpose)
+        return enclave_side
+
+    enclave._open_parent_tunnel = open_parent
+
+    def serve_proxy():
+        headers = b""
+        while b"\r\n\r\n" not in headers:
+            headers += proxy_side.recv(4096)
+        observed["headers"] = headers
+        proxy_side.sendall(
+            b"HTTP/1.1 200 Connection Established\r\n"
+            b"Proxy-Agent: fixture\r\n\r\n"
+        )
+
+    thread = threading.Thread(target=serve_proxy, daemon=True)
+    thread.start()
+    tunnel = enclave._open_upstream_proxy_tunnel(
+        proxy_url="http://worker:secret@proxy.example.com:6162",
+        destination_host="openrouter.ai",
+        destination_port=443,
+    )
+    thread.join(timeout=2)
+
+    assert tunnel is enclave_side
+    assert observed["parent"] == (
+        "proxy.example.com",
+        6162,
+        "upstream_proxy",
+    )
+    assert observed["headers"].startswith(
+        b"CONNECT openrouter.ai:443 HTTP/1.1\r\n"
+    )
+    assert b"Proxy-Authorization: Basic " in observed["headers"]
+    enclave_side.close()
+    proxy_side.close()
 
 
 def test_enclave_proxy_rejects_external_plaintext_http():

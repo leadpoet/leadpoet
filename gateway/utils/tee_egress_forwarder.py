@@ -20,7 +20,11 @@ import threading
 import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from gateway.tee.egress_policy import destination_policy_hash, normalize_destination
+from gateway.tee.egress_policy import (
+    destination_policy_hash,
+    normalize_destination,
+    normalize_proxy_destination,
+)
 from gateway.utils.tee_client import AF_VSOCK, _recv_exact
 
 
@@ -218,11 +222,24 @@ def _handle_connection(
         if request.get("method") != "connect" or not isinstance(request.get("params"), dict):
             raise TEEEgressForwarderError("egress control method is invalid")
         params = request["params"]
-        if set(params) != {"host", "port", "policy_hash"}:
+        base_params = {"host", "port", "policy_hash"}
+        if set(params) not in (base_params, base_params | {"purpose"}):
             raise TEEEgressForwarderError("egress connect parameters are invalid")
         if params.get("policy_hash") != destination_policy_hash():
             raise TEEEgressForwarderError("egress policy hash mismatch")
-        host, port = normalize_destination(params.get("host"), params.get("port"))
+        purpose = str(params.get("purpose") or "provider")
+        if purpose == "provider":
+            host, port = normalize_destination(
+                params.get("host"),
+                params.get("port"),
+            )
+        elif purpose == "upstream_proxy":
+            host, port = normalize_proxy_destination(
+                params.get("host"),
+                params.get("port"),
+            )
+        else:
+            raise TEEEgressForwarderError("egress connect purpose is invalid")
         destination_ref = _destination_ref(host, port)
         upstream = connector(host, port)
         _send_response(

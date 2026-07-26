@@ -790,10 +790,17 @@ def test_job_credential_lease_overrides_boot_key_for_only_that_job():
     assert transport.calls[1]["headers"]["Authorization"] == "Bearer openrouter-secret"
 
 
-def test_job_scoped_tls_proxy_is_bound_to_transport_receipt():
+@pytest.mark.parametrize(
+    "proxy_url",
+    (
+        "https://worker-7:password@proxy.example.com:443",
+        "https://worker-7:password@proxy.example.com:8443",
+        "http://worker-7:password@proxy.example.com:6162",
+    ),
+)
+def test_job_scoped_proxy_is_bound_to_transport_receipt(proxy_url):
     transport = FakeTransport()
     broker = _broker(transport)
-    proxy_url = "https://worker-7:password@proxy.example.com:443"
     proxy_hash = credential_value_hash(proxy_url)
     broker.provision_job_credential(
         job_id="job-1",
@@ -813,12 +820,12 @@ def test_job_scoped_tls_proxy_is_bound_to_transport_receipt():
 @pytest.mark.parametrize(
     "proxy_url",
     (
-        "http://proxy.example.com:443",
-        "https://proxy.example.com:8443",
         "https://user@proxy.example.com:443",
+        "socks5://worker:secret@proxy.example.com:6162",
+        "http://worker:secret@proxy.example.com:0",
     ),
 )
-def test_job_scoped_proxy_rejects_non_tls_or_incomplete_routes(proxy_url):
+def test_job_scoped_proxy_rejects_invalid_or_incomplete_routes(proxy_url):
     broker = _broker(FakeTransport())
     broker.provision_job_credential(
         job_id="job-1",

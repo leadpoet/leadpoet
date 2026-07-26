@@ -16,7 +16,10 @@ import threading
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from gateway.tee.egress_policy import normalize_destination
+from gateway.tee.egress_policy import (
+    normalize_destination,
+    normalize_proxy_destination,
+)
 from leadpoet_canonical.attested_v2 import (
     DIRECT_EGRESS_REF_HASH,
     build_transport_attempt,
@@ -308,7 +311,12 @@ def _validated_tls_proxy_url(value: str) -> str:
     parsed = urlsplit(normalized)
     scheme = parsed.scheme.lower()
     try:
-        port = parsed.port or (443 if scheme == "https" else 80)
+        parsed_port = parsed.port
+        port = (
+            parsed_port
+            if parsed_port is not None
+            else (443 if scheme == "https" else 80)
+        )
     except ValueError as exc:
         raise ProviderBrokerV2Error("worker egress proxy port is invalid") from exc
     if (
@@ -321,7 +329,12 @@ def _validated_tls_proxy_url(value: str) -> str:
         raise ProviderBrokerV2Error(
             "worker egress proxy must be an HTTP CONNECT or HTTPS proxy URL"
         )
-    normalize_destination(parsed.hostname, port)
+    try:
+        normalize_proxy_destination(parsed.hostname, port)
+    except ValueError as exc:
+        raise ProviderBrokerV2Error(
+            "worker egress proxy destination is invalid"
+        ) from exc
     if (parsed.username is None) != (parsed.password is None):
         raise ProviderBrokerV2Error("worker egress proxy credentials are incomplete")
     if any(

@@ -45,7 +45,17 @@ class _HostProxyProbe(EnclaveEgressProxy):
         self._host_connector = connector
         self._host_timeout_seconds = float(timeout_seconds)
 
-    def _open_parent_tunnel(self, host: str, port: int) -> Any:
+    def _open_parent_tunnel(
+        self,
+        host: str,
+        port: int,
+        *,
+        purpose: str = "provider",
+    ) -> Any:
+        if purpose != "upstream_proxy":
+            raise WorkerProxyTransportPreflightV2Error(
+                "proxy preflight attempted a non-proxy parent tunnel"
+            )
         connection = self._host_connector(host, port)
         connection.settimeout(self._host_timeout_seconds)
         return connection

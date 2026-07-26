@@ -257,6 +257,39 @@ def _production_sized_proxy_environment() -> dict[str, str]:
     return environment
 
 
+def test_production_sized_legacy_http_fleets_preserve_all_worker_slots(
+    tmp_path,
+):
+    environment = _production_sized_proxy_environment()
+    output = tmp_path / "v2"
+    observed_fleets = []
+
+    result = prepare_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        output_dir=output,
+        kms_client=KMS(),
+        proxy_fleet_probe=lambda fleets: observed_fleets.append(fleets),
+    )
+
+    assert result["worker_proxy_source"] == {
+        "gateway_autoresearch": "legacy",
+        "gateway_scoring": "legacy",
+    }
+    assert result["hosted_worker_count"] == 10
+    assert result["scoring_worker_count"] == 25
+    assert len(observed_fleets) == 1
+    assert len(observed_fleets[0]["gateway_autoresearch"]) == 10
+    assert len(observed_fleets[0]["gateway_scoring"]) == 25
+    assert len(tuple(output.glob("autoresearch_proxy_*.json"))) == 10
+    assert len(tuple(output.glob("scoring_proxy_*.json"))) == 25
+    assert result["required_count_environment"] == {
+        "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "10",
+        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "25",
+    }
+
+
 def test_v2_proxy_migration_requires_explicit_production_worker_counts(
     tmp_path,
 ):
@@ -600,12 +633,11 @@ def test_transition_rejects_worker_counts_not_bound_to_sealed_profiles(tmp_path)
 @pytest.mark.parametrize(
     "proxy_value",
     (
-        "http://proxy.example.com:6162",
-        "https://proxy.example.com:8443",
+        "socks5://proxy.example.com:6162",
         "https://proxy.invalid",
     ),
 )
-def test_rejects_worker_proxy_outside_measured_tls_contract(
+def test_rejects_worker_proxy_outside_measured_connect_contract(
     tmp_path,
     proxy_value,
 ):
@@ -734,7 +766,7 @@ def test_one_deferred_role_does_not_relax_the_other_role(tmp_path):
     environment = _environment()
     environment["GATEWAY_V2_DEFER_WORKER_FLEETS"] = "gateway_autoresearch"
     environment["RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_3"] = (
-        "http://scoring-3.example.com:13433"
+        "socks5://scoring-3.example.com:13433"
     )
 
     with pytest.raises(

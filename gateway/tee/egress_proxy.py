@@ -22,7 +22,11 @@ import time
 from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import unquote, urlsplit
 
-from gateway.tee.egress_policy import destination_policy_hash, normalize_destination
+from gateway.tee.egress_policy import (
+    destination_policy_hash,
+    normalize_destination,
+    normalize_proxy_destination,
+)
 
 
 AF_VSOCK = 40
@@ -420,18 +424,29 @@ class EnclaveEgressProxy:
                 daemon=True,
             ).start()
 
-    def _open_parent_tunnel(self, host: str, port: int) -> Any:
+    def _open_parent_tunnel(
+        self,
+        host: str,
+        port: int,
+        *,
+        purpose: str = "provider",
+    ) -> Any:
         parent = self._socket_factory(AF_VSOCK, socket.SOCK_STREAM)
         try:
             parent.connect((PARENT_CID, self.forwarder_port))
+            params = {
+                "host": host,
+                "port": port,
+                "policy_hash": destination_policy_hash(),
+            }
+            if purpose == "upstream_proxy":
+                params["purpose"] = purpose
+            elif purpose != "provider":
+                raise EnclaveEgressProxyError("parent egress purpose is invalid")
             request = _canonical_json(
                 {
                     "method": "connect",
-                    "params": {
-                        "host": host,
-                        "port": port,
-                        "policy_hash": destination_policy_hash(),
-                    },
+                    "params": params,
                 }
             )
             if len(request) > MAX_CONTROL_BYTES:
@@ -470,7 +485,12 @@ class EnclaveEgressProxy:
         parsed = urlsplit(str(proxy_url or ""))
         proxy_scheme = parsed.scheme.lower()
         try:
-            proxy_port = parsed.port or (443 if proxy_scheme == "https" else 80)
+            parsed_port = parsed.port
+            proxy_port = (
+                parsed_port
+                if parsed_port is not None
+                else (443 if proxy_scheme == "https" else 80)
+            )
         except ValueError as exc:
             raise EnclaveEgressProxyError("upstream proxy port is invalid") from exc
         if (
@@ -483,10 +503,22 @@ class EnclaveEgressProxy:
             raise EnclaveEgressProxyError(
                 "upstream proxy must be an HTTP CONNECT or HTTPS proxy URL"
             )
-        proxy_host, proxy_port = normalize_destination(parsed.hostname, proxy_port)
+        try:
+            proxy_host, proxy_port = normalize_proxy_destination(
+                parsed.hostname,
+                proxy_port,
+            )
+        except ValueError as exc:
+            raise EnclaveEgressProxyError(
+                "upstream proxy destination is invalid"
+            ) from exc
         if (parsed.username is None) != (parsed.password is None):
             raise EnclaveEgressProxyError("upstream proxy credentials are incomplete")
-        parent = self._open_parent_tunnel(proxy_host, proxy_port)
+        parent = self._open_parent_tunnel(
+            proxy_host,
+            proxy_port,
+            purpose="upstream_proxy",
+        )
         try:
             protected = parent
             if proxy_scheme == "https":

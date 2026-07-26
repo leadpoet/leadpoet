@@ -192,7 +192,7 @@
       "symbol": "AttestedReplayDevEvaluatorV2"
     },
     {
-      "ast_sha256": "sha256:5387e61320f6010b56f49642785acfb10d32f95b14fd8cc9a5d5f8b4855e68cd",
+      "ast_sha256": "sha256:e7ed3cace0fdf095c577d5fc0fbca8b1e3ee3304b6b2ffd19228ff99e16dc9eb",
       "path": "gateway/research_lab/dev_eval_runner.py",
       "symbol": "DockerReplayDevEvaluator"
     },
@@ -532,7 +532,7 @@
       "symbol": "ExecutionJobManagerV2"
     },
     {
-      "ast_sha256": "sha256:28fa91987852fa9c8b64836317f6a67c18817a3b7997ef45bfaba6b0c57e6441",
+      "ast_sha256": "sha256:07c83f2cabd45510db5ff6fa54055cf6ac8118ac2138f153abf0f1f23f4583e2",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2"
     },
@@ -1107,7 +1107,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:a64be3a048d47228683116aedf5e3e389125c9f3905133dc542e549dba545c0d",
-  "protected_source_commit": "5987a8344b69379fad871fa84058631afb39c3c0",
+  "manifest_hash": "sha256:eb9005453aa1816014fa7b92b17d343afa9ffd0870f809e72bc9e46378e9dff4",
+  "protected_source_commit": "5e15060efa307cc0fc865ed16316e9bdcc15ec55",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

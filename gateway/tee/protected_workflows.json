@@ -147,12 +147,12 @@
       "symbol": "champion_v2_cutover_readiness"
     },
     {
-      "ast_sha256": "sha256:ab7d8348c2f06f4d7458c5e99878ab8577fc85819d50143f3249e1ebf4918a97",
+      "ast_sha256": "sha256:df122ad8574fafef3d73dd8b5ac0211738e4528fbd2a8d1b0a32cd00ebf4808a",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "load_finalized_allocation_history_v2"
     },
     {
-      "ast_sha256": "sha256:a2f1a42c6a544ffae29dc43c936f2a217b34f4ea0b7d9ca788a3777ac2409ac2",
+      "ast_sha256": "sha256:8ff81f081159dad9e0eaa3167d07e7785f6383cedae530ceeb4186226cc265c5",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "load_legacy_allocation_nonfinalizations_v2"
     },
@@ -652,7 +652,7 @@
       "symbol": "build_checkpoint"
     },
     {
-      "ast_sha256": "sha256:85565df892250bf1b24bb4f4f83a9e73736e9dad35ce212cac18abee65a0f347",
+      "ast_sha256": "sha256:0a62bcc7a1846df047dfa21408089cd9b94541df8b073e0ba1d75a358d075f4a",
       "path": "gateway/tee/verify_weight_submission_ready_v2.py",
       "symbol": "verify_weight_submission_ready_v2"
     },
@@ -1107,7 +1107,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:4bc1f37305ef7e954cd05b502d586e75ba67b67b072eb305512427ae9e81c777",
-  "protected_source_commit": "9333dd4ab9762ca53a290fbae79573dc26e9f108",
+  "manifest_hash": "sha256:fab574d2de647d1377e8706f6e43583014cf13955c75780bf20e0379daf075da",
+  "protected_source_commit": "aaa2b015d8aff56063d489d3328313260db3674c",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -43,11 +43,11 @@ def _environment():
         "RESEARCH_LAB_V2_DEEPLINE_API_KEY": "deepline-secret",
         "SUPABASE_SERVICE_ROLE_KEY": "supabase-secret",
         "TRUELIST_API_KEY": "truelist-secret",
-        "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1": "https://hosted-1",
-        "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_2": "https://hosted-2",
-        "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1": "https://scoring-1",
-        "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_2": "https://scoring-2",
-        "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_3": "https://scoring-3",
+        "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_1": "https://hosted-1.example.com",
+        "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_2": "https://hosted-2.example.com",
+        "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1": "https://scoring-1.example.com",
+        "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_2": "https://scoring-2.example.com",
+        "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_3": "https://scoring-3.example.com",
     }
 
 
@@ -87,7 +87,7 @@ def test_prepares_complete_dynamic_gateway_envelope_set(tmp_path):
     ] == credential_value_hash("openrouter-secret")
     assert json.loads((output / "autoresearch_proxy_00.json").read_text())[
         "credential_ref_hash"
-    ] == credential_value_hash("https://hosted-1")
+    ] == credential_value_hash("https://hosted-1.example.com")
     assert credential_reference_hash("openrouter-secret") != (
         credential_value_hash("openrouter-secret")
     )
@@ -97,7 +97,7 @@ def test_prepares_complete_dynamic_gateway_envelope_set(tmp_path):
             "openrouter-secret",
             "exa-secret",
             "scrapingdog-secret",
-            "https://hosted-1",
+            "https://hosted-1.example.com",
         )
     )
 
@@ -173,7 +173,7 @@ def test_transition_removes_every_alias_of_sealed_parent_plaintext(tmp_path):
     assert len(result["plaintext_credential_ref_hashes_to_remove"]) == 9
 
     environment["LATE_OPENROUTER_ALIAS"] = "openrouter-secret"
-    environment["LATE_PROXY_ALIAS"] = "https://hosted-1"
+    environment["LATE_PROXY_ALIAS"] = "https://hosted-1.example.com"
     parent_environment = tmp_path / "gateway-parent.env"
     parent_environment.write_text(
         "\n".join(
@@ -234,6 +234,73 @@ def test_transition_rejects_worker_counts_not_bound_to_sealed_profiles(tmp_path)
             environment_path=parent_environment,
             transition_report_path=report_path,
         )
+
+
+@pytest.mark.parametrize(
+    "proxy_value",
+    (
+        "http://proxy.example.com:6162",
+        "https://proxy.example.com:8443",
+        "https://proxy.invalid",
+    ),
+)
+def test_rejects_worker_proxy_outside_measured_tls_contract(
+    tmp_path,
+    proxy_value,
+):
+    environment = _environment()
+    environment["RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1"] = proxy_value
+    kms = KMS()
+
+    with pytest.raises(
+        Exception,
+        match="incompatible with V2 provider transport",
+    ):
+        prepare_gateway_envelopes_v2(
+            environment=environment,
+            kms_key_id="alias/gateway-v2",
+            deploy_commit="1" * 40,
+            output_dir=tmp_path / "v2",
+            kms_client=kms,
+        )
+
+    assert kms.requests == []
+    assert not (tmp_path / "v2").exists()
+
+
+def test_exact_commit_reuse_revalidates_worker_proxy_contract(tmp_path):
+    environment = _environment()
+    destination = tmp_path / "v2"
+    kms = KMS()
+    installed = install_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        install_dir=destination,
+        kms_client=kms,
+    )
+    request_count = len(kms.requests)
+    assert installed["status"] == "installed"
+
+    environment["RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_1"] = (
+        "http://proxy.example.com:6162"
+    )
+    with pytest.raises(
+        Exception,
+        match="incompatible with V2 provider transport",
+    ):
+        install_gateway_envelopes_v2(
+            environment=environment,
+            kms_key_id="alias/gateway-v2",
+            deploy_commit="1" * 40,
+            install_dir=destination,
+            kms_client=kms,
+        )
+
+    assert len(kms.requests) == request_count
+    assert json.loads(
+        (destination / "gateway-v2-env-transition.json").read_text()
+    )["worker_proxy_transport_policy"] == "https_port_443.v1"
 
 
 def test_install_cli_checks_schema_before_writing_envelopes(

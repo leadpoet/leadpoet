@@ -8,6 +8,7 @@ import json
 import re
 import secrets
 import threading
+import time
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from cryptography.hazmat.primitives import serialization
@@ -40,6 +41,7 @@ KMS_KEY_ENCRYPTION_ALGORITHM = "RSAES_OAEP_SHA_256"
 MAX_CIPHERTEXT_FOR_RECIPIENT_BYTES = 64 * 1024
 MAX_CREDENTIAL_BYTES = 64 * 1024
 MAX_JOB_RECIPIENT_REQUESTS = 2048
+JOB_RECIPIENT_REQUEST_TTL_SECONDS = 3600.0
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -490,11 +492,21 @@ class KMSRecipientV2:
             "key_encryption_algorithm": KMS_KEY_ENCRYPTION_ALGORITHM,
         }
         with self._lock:
+            now = time.monotonic()
+            expired = [
+                item_request_id
+                for item_request_id, item in self._job_requests.items()
+                if now - float(item["created_monotonic"])
+                >= JOB_RECIPIENT_REQUEST_TTL_SECONDS
+            ]
+            for item_request_id in expired:
+                self._job_requests.pop(item_request_id, None)
             if len(self._job_requests) >= MAX_JOB_RECIPIENT_REQUESTS:
                 raise KMSRecipientV2Error("job recipient capacity is full")
             self._job_requests[request_id] = {
                 "request": dict(request),
                 "provisioned": False,
+                "created_monotonic": now,
             }
         return request
 
@@ -509,6 +521,12 @@ class KMSRecipientV2:
             record = self._job_requests.get(normalized_request_id)
             if record is None:
                 raise KMSRecipientV2Error("job recipient request was not found")
+            if (
+                time.monotonic() - float(record["created_monotonic"])
+                >= JOB_RECIPIENT_REQUEST_TTL_SECONDS
+            ):
+                self._job_requests.pop(normalized_request_id, None)
+                raise KMSRecipientV2Error("job recipient request expired")
             if record["provisioned"]:
                 raise KMSRecipientV2Error("job recipient request was already used")
             request = dict(record["request"])
@@ -523,10 +541,9 @@ class KMSRecipientV2:
         if credential_value_hash(credential) != request["credential_value_hash"]:
             raise KMSRecipientV2Error("job credential value hash mismatch")
         with self._lock:
-            current = self._job_requests.get(normalized_request_id)
+            current = self._job_requests.pop(normalized_request_id, None)
             if current is None or current["provisioned"]:
                 raise KMSRecipientV2Error("job recipient request changed")
-            current["provisioned"] = True
         return {
             "job_id": str(request["job_id"]),
             "credential_slot": str(request["credential_slot"]),

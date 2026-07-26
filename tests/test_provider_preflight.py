@@ -35,6 +35,7 @@ class _Resp:
 
 @pytest.fixture(autouse=True)
 def _keys(monkeypatch):
+    pp._attested_preflight_cache.clear()
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", "sd-test-key")
     monkeypatch.setenv("EXA_API_KEY", "exa-test-key")
     for name in (
@@ -48,6 +49,8 @@ def _keys(monkeypatch):
         "RESEARCH_LAB_EXA_API_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
+    yield
+    pp._attested_preflight_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +212,53 @@ def _gate(**kwargs):
     return asyncio.run(pp.preflight_gate(**kwargs))
 
 
+def test_attested_preflight_result_is_reused_only_for_its_ttl(monkeypatch):
+    calls = []
+    now = [100.0]
+    pp._attested_preflight_cache.clear()
+    monkeypatch.setattr(pp.time, "monotonic", lambda: now[0])
+    monkeypatch.setenv("RESEARCH_LAB_PROVIDER_PREFLIGHT_TTL_SECONDS", "60")
+
+    async def authority_check(**request):
+        calls.append(request)
+        return {"healthy": True, "pause_worthy": False, "verdicts": []}
+
+    async def is_paused():
+        return {"paused": False, "reason": ""}
+
+    async def set_paused(**_kwargs):
+        raise AssertionError("healthy preflight must not pause")
+
+    for expected_calls in (1, 1):
+        out = asyncio.run(
+            pp.preflight_gate(
+                scope="scoring",
+                actor_ref="worker-1",
+                is_paused=is_paused,
+                set_paused=set_paused,
+                worker_index=1,
+                authority_check=authority_check,
+            )
+        )
+        assert out["proceed"] is True
+        assert len(calls) == expected_calls
+
+    now[0] += 61.0
+    asyncio.run(
+        pp.preflight_gate(
+            scope="scoring",
+            actor_ref="worker-1",
+            is_paused=is_paused,
+            set_paused=set_paused,
+            worker_index=1,
+            authority_check=authority_check,
+        )
+    )
+    assert len(calls) == 2
+    assert all(call["force"] is False for call in calls)
+    pp._attested_preflight_cache.clear()
+
+
 def test_gate_healthy_proceeds_without_touching_pause(monkeypatch):
     _stub_shared(monkeypatch, {"healthy": True, "pause_worthy": False, "verdicts": []})
     set_calls = []
@@ -247,6 +297,115 @@ def test_gate_pause_worthy_auto_pauses_with_marker(monkeypatch):
     assert set_calls[0]["paused"] is True
     assert set_calls[0]["reason"].startswith(pp.PREFLIGHT_REASON_PREFIX)
     assert "exa=credit_or_auth" in set_calls[0]["reason"]
+
+
+@pytest.mark.parametrize(
+    "existing_reason",
+    (
+        "provider_preflight:exa=transport_failure",
+        "operator planned maintenance",
+    ),
+)
+def test_gate_pause_worthy_does_not_duplicate_or_replace_existing_pause(
+    monkeypatch,
+    existing_reason,
+):
+    _stub_shared(
+        monkeypatch,
+        {
+            "healthy": False,
+            "pause_worthy": True,
+            "verdicts": [
+                {
+                    "provider": "exa",
+                    "healthy": False,
+                    "status": "transport_failure",
+                }
+            ],
+        },
+    )
+    set_calls = []
+    state_reads = []
+
+    async def is_paused():
+        state_reads.append(1)
+        return {"paused": True, "reason": existing_reason}
+
+    async def set_paused(**kwargs):
+        set_calls.append(kwargs)
+
+    out = _gate(
+        scope="scoring",
+        actor_ref="w0",
+        is_paused=is_paused,
+        set_paused=set_paused,
+        prefetched_state={"paused": False, "reason": ""},
+    )
+
+    assert out["proceed"] is False
+    assert state_reads == [1]
+    assert set_calls == []
+
+
+def test_gate_without_pause_authority_defers_without_mutating_control(
+    monkeypatch,
+):
+    _stub_shared(
+        monkeypatch,
+        {
+            "healthy": False,
+            "pause_worthy": True,
+            "verdicts": [
+                {
+                    "provider": "exa",
+                    "healthy": False,
+                    "status": "transport_failure",
+                }
+            ],
+        },
+    )
+
+    async def forbidden_state_read():
+        raise AssertionError("non-owner must not race the pause owner")
+
+    async def forbidden_pause_write(**_kwargs):
+        raise AssertionError("non-owner must not mutate maintenance state")
+
+    out = _gate(
+        scope="scoring",
+        actor_ref="non-owner",
+        is_paused=forbidden_state_read,
+        set_paused=forbidden_pause_write,
+        may_change_pause_state=False,
+    )
+
+    assert out["proceed"] is False
+    assert out["reason"] == "provider_preflight_unhealthy"
+
+
+def test_gate_healthy_without_pause_authority_never_auto_resumes(monkeypatch):
+    _stub_shared(monkeypatch, {"healthy": True, "pause_worthy": False, "verdicts": []})
+
+    async def forbidden_state_read():
+        raise AssertionError("non-owner must not inspect pause ownership")
+
+    async def forbidden_pause_write(**_kwargs):
+        raise AssertionError("non-owner must not mutate maintenance state")
+
+    out = _gate(
+        scope="scoring",
+        actor_ref="non-owner",
+        is_paused=forbidden_state_read,
+        set_paused=forbidden_pause_write,
+        may_change_pause_state=False,
+        prefetched_state={
+            "paused": True,
+            "reason": f"{pp.PREFLIGHT_REASON_PREFIX}exa=transport_failure",
+        },
+    )
+
+    assert out["proceed"] is True
+    assert out["reason"] == "healthy"
 
 
 def test_gate_unhealthy_but_not_pause_worthy_defers_without_pausing(monkeypatch):
@@ -299,6 +458,34 @@ def test_gate_healthy_never_resumes_operator_pause(monkeypatch):
 
     out = _gate(scope="scoring", actor_ref="w0", is_paused=is_paused, set_paused=set_paused)
     assert out["proceed"] is True
+    assert set_calls == []
+
+
+def test_gate_healthy_rechecks_preflight_pause_before_auto_resume(monkeypatch):
+    _stub_shared(monkeypatch, {"healthy": True, "pause_worthy": False, "verdicts": []})
+    set_calls = []
+    state_reads = []
+
+    async def is_paused():
+        state_reads.append(1)
+        return {"paused": True, "reason": "operator paused while preflight was running"}
+
+    async def set_paused(**kwargs):
+        set_calls.append(kwargs)
+
+    out = _gate(
+        scope="scoring",
+        actor_ref="w0",
+        is_paused=is_paused,
+        set_paused=set_paused,
+        prefetched_state={
+            "paused": True,
+            "reason": f"{pp.PREFLIGHT_REASON_PREFIX}exa=transport_failure",
+        },
+    )
+
+    assert out["proceed"] is True
+    assert state_reads == [1]
     assert set_calls == []
 
 
@@ -367,16 +554,15 @@ def _healthy_authority(**_kwargs):
     return {"healthy": True, "pause_worthy": False, "verdicts": []}
 
 
-def test_prefetched_state_dedups_the_control_read(monkeypatch):
-    # Egress: preflight_gate must not re-read the maintenance control state when
-    # the caller already read it this pass; the auto-resume path uses the
-    # prefetched state instead.
+def test_prefetched_non_preflight_state_dedups_the_control_read(monkeypatch):
+    # The ordinary healthy path must not add another control read. Only a
+    # preflight-owned pause needs a fresh ownership check before auto-resume.
     monkeypatch.setattr(pp, "preflight_auto_resume_enabled", lambda: True)
     is_paused_calls = []
 
     async def is_paused():
         is_paused_calls.append(1)
-        return {"paused": True, "reason": "provider_preflight:x"}
+        return {"paused": False, "reason": ""}
 
     resumed = []
 
@@ -390,12 +576,12 @@ def test_prefetched_state_dedups_the_control_read(monkeypatch):
             is_paused=is_paused,
             set_paused=set_paused,
             authority_check=_healthy_authority,
-            prefetched_state={"paused": True, "reason": "provider_preflight:x"},
+            prefetched_state={"paused": False, "reason": ""},
         )
     )
     assert out["proceed"] is True
     assert is_paused_calls == []  # deduped: no second control read
-    assert resumed  # auto-resumed using the prefetched marker state
+    assert resumed == []
 
 
 def test_without_prefetched_state_still_reads_control(monkeypatch):

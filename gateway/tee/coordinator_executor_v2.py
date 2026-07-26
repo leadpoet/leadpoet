@@ -7,6 +7,10 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 
 from gateway.research_lab.config import ResearchLabGatewayConfig
 
+from gateway.tee.artifact_vault_v2 import (
+    ARTIFACT_PERSISTENCE_MAX_ATTEMPTS_PER_METHOD,
+    ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES,
+)
 from gateway.tee.execution_job_manager_v2 import (
     ExecutionContextV2,
     ExecutionResultV2,
@@ -18,7 +22,11 @@ from gateway.tee.scoring_executor import (
     ScoringExecutionResult,
     execute_scoring_operation,
 )
-from leadpoet_canonical.attested_v2 import sha256_json
+from leadpoet_canonical.attested_v2 import (
+    sha256_json,
+    transport_root,
+    validate_transport_attempt,
+)
 from leadpoet_canonical.weight_authority_v2 import (
     WEIGHT_INPUT_PURPOSES,
 )
@@ -54,12 +62,104 @@ OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2 = (
 )
 OP_CLASSIFY_LEGACY_ALLOCATION_V2 = "classify_legacy_allocation_v2"
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_ARTIFACT_PERSISTENCE_PURPOSE = "leadpoet.artifact_persistence.v2"
+_ARTIFACT_PERSISTENCE_PROVIDER = "aws_s3_object_lock"
 
 _COORDINATOR_WEIGHT_INPUT_PURPOSES = {
     category: purpose
     for category, (role, purpose) in WEIGHT_INPUT_PURPOSES.items()
     if role == "gateway_coordinator"
 }
+
+
+def _validated_artifact_persistence_attempts(
+    *,
+    artifact_id: str,
+    attempts: Any,
+    context: ExecutionContextV2,
+    expected_transport_root: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(attempts, list):
+        raise ValueError("artifact persistence transport evidence is incomplete")
+    normalized = []
+    for attempt in attempts:
+        if not isinstance(attempt, Mapping):
+            raise ValueError("artifact persistence transport evidence is invalid")
+        validate_transport_attempt(attempt)
+        normalized.append(dict(attempt))
+
+    methods = [item["method"] for item in normalized]
+    try:
+        first_head = methods.index("HEAD")
+    except ValueError:
+        first_head = -1
+    get_count = first_head
+    head_count = len(normalized) - first_head if first_head >= 0 else 0
+    maximum = ARTIFACT_PERSISTENCE_MAX_ATTEMPTS_PER_METHOD
+    if (
+        not 1 <= get_count <= maximum
+        or not 1 <= head_count <= maximum
+        or any(method != "GET" for method in methods[:first_head])
+        or any(method != "HEAD" for method in methods[first_head:])
+    ):
+        raise ValueError("artifact persistence transport evidence is incomplete")
+
+    stable_fields = (
+        "destination_host",
+        "destination_port",
+        "path_hash",
+        "nonsecret_headers_hash",
+        "body_hash",
+        "credential_ref_hash",
+        "egress_proxy_ref_hash",
+        "retry_policy_hash",
+        "timeout_ms",
+    )
+    expected_stable = {
+        field: normalized[0][field]
+        for field in stable_fields
+    }
+    for ordinal, attempt in enumerate(normalized):
+        method = attempt["method"]
+        if (
+            attempt["job_id"] != context.job_id
+            or attempt["purpose"] != _ARTIFACT_PERSISTENCE_PURPOSE
+            or attempt["provider_id"] != _ARTIFACT_PERSISTENCE_PROVIDER
+            or attempt["attempt_number"] != ordinal
+            or attempt["logical_operation_id"]
+            != "%s:%s" % (artifact_id, method.lower())
+            or any(
+                attempt[field] != expected_stable[field]
+                for field in stable_fields
+            )
+        ):
+            raise ValueError("artifact persistence transport binding is invalid")
+
+    for method_attempts in (
+        normalized[:first_head],
+        normalized[first_head:],
+    ):
+        for attempt in method_attempts[:-1]:
+            if attempt["terminal_status"] == "transport_failure":
+                continue
+            if (
+                attempt["terminal_status"] == "authenticated_response"
+                and attempt["http_status"]
+                in ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES
+            ):
+                continue
+            raise ValueError("artifact persistence retry sequence is invalid")
+        final_attempt = method_attempts[-1]
+        if (
+            final_attempt["terminal_status"] != "authenticated_response"
+            or final_attempt["http_status"] != 200
+        ):
+            raise ValueError("artifact persistence transport evidence is incomplete")
+
+    observed_root = transport_root(normalized)
+    if observed_root != expected_transport_root:
+        raise ValueError("artifact persistence transport root differs")
+    return normalized
 
 
 COORDINATOR_OPERATIONS_V2 = {
@@ -638,10 +738,13 @@ class CoordinatorExecutorV2:
         artifact_hashes = []
         output_artifacts = []
         for item in sorted(evidence, key=lambda value: value["artifact_id"]):
-            attempts = item.get("transport_attempts")
-            if not isinstance(attempts, list) or len(attempts) != 2:
-                raise ValueError("artifact persistence transport evidence is incomplete")
-            transport_attempts.extend(dict(attempt) for attempt in attempts)
+            attempts = _validated_artifact_persistence_attempts(
+                artifact_id=item["artifact_id"],
+                attempts=item.get("transport_attempts"),
+                context=context,
+                expected_transport_root=item.get("transport_root"),
+            )
+            transport_attempts.extend(attempts)
             output_artifacts.append(
                 {
                     key: item[key]

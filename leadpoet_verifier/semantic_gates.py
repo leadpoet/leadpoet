@@ -9,7 +9,7 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -86,7 +86,12 @@ _SHORT_HOST_SUFFIXES = {
 class SemanticGateUnavailable(RuntimeError):
     """The semantic provider path could not reach a trustworthy decision."""
 
-    def __init__(self, code: str, *, receipt: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        receipt: Optional[dict[str, Any]] = None,
+    ) -> None:
         super().__init__(code)
         self.code = code
         self.receipt = receipt or {}
@@ -185,15 +190,15 @@ class SemanticGateResult(BaseModel):
 
     outcome: GateOutcome
     reason_code: str = Field(min_length=1, max_length=120)
-    judgment: SemanticJudgment | None = None
-    model: str | None = Field(default=None, max_length=160)
+    judgment: Optional[SemanticJudgment] = None
+    model: Optional[str] = Field(default=None, max_length=160)
     input_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     duration_ms: int = Field(ge=0)
     policy_version: str = POLICY_VERSION
     sources: list[dict[str, Any]] = Field(default_factory=list, max_length=3)
-    prompt_tokens: int | None = Field(default=None, ge=0)
-    completion_tokens: int | None = Field(default=None, ge=0)
-    submitted_quote_found: bool | None = None
+    prompt_tokens: Optional[int] = Field(default=None, ge=0)
+    completion_tokens: Optional[int] = Field(default=None, ge=0)
+    submitted_quote_found: Optional[bool] = None
     repair_attempts: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
 
     def receipt(self) -> dict[str, Any]:
@@ -210,7 +215,9 @@ class SemanticGateResult(BaseModel):
 Fetcher = Callable[[str], Awaitable[RawFetchResult]]
 Judge = Callable[
     [GateKind, dict[str, Any], list[EvidenceSource]],
-    Awaitable[tuple[SemanticJudgment, str, int | None, int | None]],
+    Awaitable[
+        tuple[SemanticJudgment, str, Optional[int], Optional[int]]
+    ],
 ]
 Repairer = Callable[..., Awaitable[list[dict[str, Any]]]]
 
@@ -249,7 +256,7 @@ def _repair_receipts(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return receipts
 
 
-def semantic_gate_mode(value: str | None = None) -> SemanticGateMode:
+def semantic_gate_mode(value: Optional[str] = None) -> SemanticGateMode:
     raw = (value if value is not None else os.getenv("VERIFIER_SEMANTIC_GATES_MODE", "disabled"))
     normalized = raw.strip().lower()
     if normalized not in {"disabled", "shadow", "enforce"}:
@@ -259,7 +266,7 @@ def semantic_gate_mode(value: str | None = None) -> SemanticGateMode:
     return normalized  # type: ignore[return-value]
 
 
-def _hostname(value: str | None) -> str:
+def _hostname(value: Optional[str]) -> str:
     raw = str(value or "").strip()
     if raw and "://" not in raw:
         raw = f"https://{raw}"
@@ -376,7 +383,9 @@ def _safe_text(value: Any, limit: int) -> str:
     return sanitize_miner_text(str(value or ""))[:limit]
 
 
-def _judgment_unavailable_reason(judgment: SemanticJudgment) -> str | None:
+def _judgment_unavailable_reason(
+    judgment: SemanticJudgment,
+) -> Optional[str]:
     if judgment.decision == "uncertain":
         return "semantic_uncertain"
     if judgment.decision == "match" and judgment.confidence < MIN_ACCEPT_CONFIDENCE:
@@ -460,9 +469,9 @@ class SemanticGateEvaluator:
         *,
         api_key: str,
         models: tuple[str, ...] = DEFAULT_MODELS,
-        fetcher: Fetcher | None = None,
-        judge: Judge | None = None,
-        repairer: Repairer | None = None,
+        fetcher: Optional[Fetcher] = None,
+        judge: Optional[Judge] = None,
+        repairer: Optional[Repairer] = None,
         timeout_seconds: float = 45,
     ) -> None:
         self._api_key = api_key.strip()
@@ -534,7 +543,7 @@ class SemanticGateEvaluator:
         company_domain: str,
         requested_criterion: str,
         kind: GateKind,
-        existing_url: str | None,
+        existing_url: Optional[str],
     ) -> str:
         payload = json.dumps({
             "company_name": _safe_text(company_name, 200).casefold(),
@@ -552,7 +561,7 @@ class SemanticGateEvaluator:
         company_domain: str,
         requested_criterion: str,
         kind: GateKind,
-        existing_url: str | None,
+        existing_url: Optional[str],
         sources: list[EvidenceSource],
         attempts: list[dict[str, Any]],
         seen: set[str],
@@ -1055,7 +1064,12 @@ class SemanticGateEvaluator:
         kind: GateKind,
         context: dict[str, Any],
         sources: list[EvidenceSource],
-    ) -> tuple[SemanticJudgment, str, int | None, int | None]:
+    ) -> tuple[
+        SemanticJudgment,
+        str,
+        Optional[int],
+        Optional[int],
+    ]:
         if not self._api_key:
             raise SemanticGateUnavailable("missing_openrouter_api_key")
         if not self._models:
@@ -1075,9 +1089,9 @@ class SemanticGateEvaluator:
             },
         ]
         last_code = "provider_unavailable"
-        last_inconclusive: tuple[
-            SemanticJudgment, str, int | None, int | None
-        ] | None = None
+        last_inconclusive: Optional[
+            tuple[SemanticJudgment, str, Optional[int], Optional[int]]
+        ] = None
         async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
             for model in self._models:
                 body = {

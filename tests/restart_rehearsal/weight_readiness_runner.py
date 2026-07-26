@@ -9,6 +9,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import subprocess
 import sys
 import time
 from typing import Any
@@ -66,6 +68,69 @@ def _candidate_sha() -> str:
     if len(value) != 40:
         raise RuntimeError("rehearsal candidate SHA is invalid")
     return value
+
+
+def _candidate_source_identity(
+    module_path: Path,
+    *,
+    expected_root: Path = Path("/home/ec2-user/leadpoet_repo"),
+    candidate_sha: str | None = None,
+) -> dict[str, str]:
+    resolved = module_path.resolve()
+    root = expected_root.resolve()
+    source_kind = "candidate_checkout"
+    if resolved == root or root in resolved.parents:
+        source_relative = resolved.relative_to(root)
+    else:
+        archive_root = next(
+            (
+                parent
+                for parent in resolved.parents
+                if parent.parent == Path("/tmp").resolve()
+                and re.fullmatch(
+                    r"gateway-v2-preflight\.[A-Za-z0-9]+",
+                    parent.name,
+                )
+            ),
+            None,
+        )
+        if archive_root is None:
+            raise RuntimeError(
+                "weight readiness did not import from a recognized candidate "
+                "checkout or archive"
+            )
+        source_kind = "candidate_archive"
+        source_relative = resolved.relative_to(archive_root)
+
+    bound_sha = candidate_sha or _candidate_sha()
+    candidate_blob = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(root),
+            "show",
+            f"{bound_sha}:{source_relative.as_posix()}",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    source_bytes = resolved.read_bytes()
+    if candidate_blob != source_bytes:
+        raise RuntimeError(
+            "weight readiness source bytes differ from the candidate commit"
+        )
+
+    source_hash = hashlib.sha256(source_bytes).hexdigest()
+    return {
+        "module_path": str(resolved),
+        "module_sha256": source_hash,
+        "source_path": str(resolved),
+        "source_git_path": source_relative.as_posix(),
+        "source_kind": source_kind,
+        "source_sha256": source_hash,
+        "source_commit": bound_sha,
+        "candidate_sha": bound_sha,
+    }
 
 
 def _build_handoff(epoch: int) -> dict[str, Any]:
@@ -391,17 +456,12 @@ def _run_supabase_history_pagination_probe() -> None:
     ):
         raise RuntimeError("finalized allocation history pagination is incomplete")
     module_path = Path(source.__file__).resolve()
-    module_hash = hashlib.sha256(module_path.read_bytes()).hexdigest()
     _event(
         "weight-readiness-supabase",
         status="ok",
         implementation="production_module",
         fixture_authenticity="sanitized_production_shape",
-        source_path=str(module_path),
-        source_git_path="gateway/tee/supabase_source_v2.py",
-        source_kind="candidate_checkout",
-        source_sha256=module_hash,
-        candidate_sha=_candidate_sha(),
+        **_candidate_source_identity(module_path),
         row_count=row_count,
         page_count=len(ranges),
         ranges=ranges,
@@ -581,23 +641,7 @@ def main() -> int:
     from gateway.tee import verify_weight_submission_ready_v2 as readiness
 
     module_path = Path(readiness.__file__).resolve()
-    expected_root = Path("/home/ec2-user/leadpoet_repo").resolve()
-    if expected_root not in module_path.parents:
-        raise RuntimeError(
-            "weight readiness did not import from the candidate checkout"
-        )
-    module_hash = hashlib.sha256(module_path.read_bytes()).hexdigest()
-    source_identity = {
-        "module_path": str(module_path),
-        "module_sha256": module_hash,
-        "source_path": str(module_path),
-        "source_git_path": (
-            "gateway/tee/verify_weight_submission_ready_v2.py"
-        ),
-        "source_kind": "candidate_checkout",
-        "source_sha256": module_hash,
-        "candidate_sha": _candidate_sha(),
-    }
+    source_identity = _candidate_source_identity(module_path)
     _event(
         "weight-readiness",
         status="started",

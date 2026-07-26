@@ -1,4 +1,5 @@
 import base64
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from cryptography.hazmat.primitives import hashes, padding as symmetric_padding
@@ -277,11 +278,167 @@ def test_job_kms_recipient_is_single_use_and_binds_job_key_hash():
     )
     assert lease["job_id"] == "autoresearch-v2:job-1"
     assert lease["credential"] == secret
-    with pytest.raises(KMSRecipientV2Error, match="already used"):
+    with pytest.raises(KMSRecipientV2Error, match="not found"):
         manager.unwrap_job_credential(
             request_id=request["request_id"],
             ciphertext_for_recipient_b64=_encrypt(request, secret),
         )
+
+
+def test_used_job_recipients_do_not_exhaust_capacity(monkeypatch):
+    monkeypatch.setattr("gateway.tee.kms_recipient_v2.MAX_JOB_RECIPIENT_REQUESTS", 2)
+    manager, _, _ = _manager()
+    secret = "miner-specific-key"
+
+    for index in range(5):
+        request = manager.job_recipient_request(
+            job_id=f"autoresearch-v2:job-{index}",
+            slot="openrouter",
+            credential_value_hash_expected=credential_value_hash(secret),
+            key_ref_hash=sha256_json({"key_ref": f"encrypted_ref:{index}"}),
+        )
+        assert manager.unwrap_job_credential(
+            request_id=request["request_id"],
+            ciphertext_for_recipient_b64=_encrypt(request, secret),
+        )["job_id"] == f"autoresearch-v2:job-{index}"
+
+
+def test_unconsumed_job_recipients_still_fail_closed_at_capacity(monkeypatch):
+    monkeypatch.setattr("gateway.tee.kms_recipient_v2.MAX_JOB_RECIPIENT_REQUESTS", 2)
+    manager, _, _ = _manager()
+    secret = "miner-specific-key"
+
+    for index in range(2):
+        manager.job_recipient_request(
+            job_id=f"autoresearch-v2:pending-job-{index}",
+            slot="openrouter",
+            credential_value_hash_expected=credential_value_hash(secret),
+            key_ref_hash=sha256_json({"key_ref": f"encrypted_ref:pending:{index}"}),
+        )
+    with pytest.raises(KMSRecipientV2Error, match="capacity is full"):
+        manager.job_recipient_request(
+            job_id="autoresearch-v2:pending-job-2",
+            slot="openrouter",
+            credential_value_hash_expected=credential_value_hash(secret),
+            key_ref_hash=sha256_json({"key_ref": "encrypted_ref:pending:2"}),
+        )
+
+
+def test_abandoned_job_recipients_expire_without_evicting_live_requests(monkeypatch):
+    monkeypatch.setattr("gateway.tee.kms_recipient_v2.MAX_JOB_RECIPIENT_REQUESTS", 2)
+    now = [100.0]
+    monkeypatch.setattr(
+        "gateway.tee.kms_recipient_v2.time.monotonic",
+        lambda: now[0],
+    )
+    manager, _, _ = _manager()
+    secret = "miner-specific-key"
+    expired = manager.job_recipient_request(
+        job_id="autoresearch-v2:expired-job",
+        slot="openrouter",
+        credential_value_hash_expected=credential_value_hash(secret),
+        key_ref_hash=sha256_json({"key_ref": "encrypted_ref:expired"}),
+    )
+    now[0] += 1.0
+    live = manager.job_recipient_request(
+        job_id="autoresearch-v2:live-job",
+        slot="openrouter",
+        credential_value_hash_expected=credential_value_hash(secret),
+        key_ref_hash=sha256_json({"key_ref": "encrypted_ref:live"}),
+    )
+    now[0] += 3599.5
+
+    replacement = manager.job_recipient_request(
+        job_id="autoresearch-v2:replacement-job",
+        slot="openrouter",
+        credential_value_hash_expected=credential_value_hash(secret),
+        key_ref_hash=sha256_json({"key_ref": "encrypted_ref:replacement"}),
+    )
+
+    with pytest.raises(KMSRecipientV2Error, match="not found"):
+        manager.unwrap_job_credential(
+            request_id=expired["request_id"],
+            ciphertext_for_recipient_b64=_encrypt(expired, secret),
+        )
+    assert manager.unwrap_job_credential(
+        request_id=live["request_id"],
+        ciphertext_for_recipient_b64=_encrypt(live, secret),
+    )["job_id"] == "autoresearch-v2:live-job"
+    assert manager.unwrap_job_credential(
+        request_id=replacement["request_id"],
+        ciphertext_for_recipient_b64=_encrypt(replacement, secret),
+    )["job_id"] == "autoresearch-v2:replacement-job"
+
+
+def test_expired_job_recipient_is_rejected_before_capacity_sweep(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(
+        "gateway.tee.kms_recipient_v2.time.monotonic",
+        lambda: now[0],
+    )
+    manager, _, _ = _manager()
+    secret = "miner-specific-key"
+    request = manager.job_recipient_request(
+        job_id="autoresearch-v2:expired-direct-job",
+        slot="openrouter",
+        credential_value_hash_expected=credential_value_hash(secret),
+        key_ref_hash=sha256_json({"key_ref": "encrypted_ref:expired-direct"}),
+    )
+    now[0] += 3600.0
+
+    with pytest.raises(KMSRecipientV2Error, match="expired"):
+        manager.unwrap_job_credential(
+            request_id=request["request_id"],
+            ciphertext_for_recipient_b64=_encrypt(request, secret),
+        )
+
+
+def test_failed_job_unwrap_remains_retryable_but_success_is_single_use():
+    manager, _, _ = _manager()
+    secret = "miner-specific-key"
+    request = manager.job_recipient_request(
+        job_id="autoresearch-v2:retryable-job",
+        slot="openrouter",
+        credential_value_hash_expected=credential_value_hash(secret),
+        key_ref_hash=sha256_json({"key_ref": "encrypted_ref:retryable"}),
+    )
+
+    with pytest.raises(KMSRecipientV2Error, match="value hash mismatch"):
+        manager.unwrap_job_credential(
+            request_id=request["request_id"],
+            ciphertext_for_recipient_b64=_encrypt(request, "wrong-key"),
+        )
+    assert manager.unwrap_job_credential(
+        request_id=request["request_id"],
+        ciphertext_for_recipient_b64=_encrypt(request, secret),
+    )["credential"] == secret
+
+
+def test_concurrent_job_unwrap_allows_exactly_one_success():
+    manager, _, _ = _manager()
+    secret = "miner-specific-key"
+    request = manager.job_recipient_request(
+        job_id="autoresearch-v2:concurrent-job",
+        slot="openrouter",
+        credential_value_hash_expected=credential_value_hash(secret),
+        key_ref_hash=sha256_json({"key_ref": "encrypted_ref:concurrent"}),
+    )
+    ciphertext = _encrypt(request, secret)
+
+    def unwrap():
+        try:
+            return manager.unwrap_job_credential(
+                request_id=request["request_id"],
+                ciphertext_for_recipient_b64=ciphertext,
+            )
+        except KMSRecipientV2Error as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda _index: unwrap(), range(2)))
+
+    assert sum(isinstance(item, dict) for item in outcomes) == 1
+    assert sum(isinstance(item, KMSRecipientV2Error) for item in outcomes) == 1
 
 
 def test_job_only_slot_does_not_become_a_boot_global_credential():

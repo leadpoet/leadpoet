@@ -26,6 +26,8 @@ from gateway.research_lab.worker_autostart import (
 )
 from gateway.tee.artifact_vault_v2 import artifact_master_key_reference_hash
 from gateway.tee.provider_broker_v2 import (
+    ProviderBrokerV2Error,
+    _validated_tls_proxy_url,
     credential_reference_hash,
     credential_value_hash,
 )
@@ -52,6 +54,7 @@ _BOOT_SOURCES = {
     "truelist": ("TRUELIST_API_KEY",),
 }
 _SHARED_PARENT_SLOTS = frozenset(("supabase_service_role", "truelist"))
+_WORKER_PROXY_TRANSPORT_POLICY = "https_port_443.v1"
 _SPECIAL_PROFILES = {
     "benchmark_exa.json": (
         "exa",
@@ -285,6 +288,37 @@ def _proxy_names(
     return names
 
 
+def _validated_worker_proxy_configuration(
+    environment: Mapping[str, str],
+) -> tuple[Any, Dict[str, list[str]]]:
+    plan = build_research_lab_worker_autostart_plan(environment)
+    if not plan.hosted.enabled or not plan.scoring.enabled:
+        raise GatewayEnvelopePreparationV2Error(
+            "configured hosted and scoring worker fleets are required"
+        )
+    if not plan.hosted.proxy_values or not plan.scoring.proxy_values:
+        raise GatewayEnvelopePreparationV2Error(
+            "worker proxy values are required for initial V2 sealing"
+        )
+    fleets = {
+        "gateway_autoresearch": plan.hosted.proxy_values,
+        "gateway_scoring": plan.scoring.proxy_values,
+    }
+    commitments: Dict[str, list[str]] = {}
+    for role, values in fleets.items():
+        commitments[role] = []
+        for index, value in enumerate(values):
+            try:
+                _validated_tls_proxy_url(value)
+            except (ProviderBrokerV2Error, ValueError) as exc:
+                raise GatewayEnvelopePreparationV2Error(
+                    "%s worker proxy %d is incompatible with V2 provider transport"
+                    % (role, index)
+                ) from exc
+            commitments[role].append(credential_value_hash(value))
+    return plan, commitments
+
+
 def prepare_gateway_envelopes_v2(
     *,
     environment: Mapping[str, str],
@@ -305,15 +339,7 @@ def prepare_gateway_envelopes_v2(
         import boto3
 
         kms_client = boto3.client("kms")
-    plan = build_research_lab_worker_autostart_plan(environment)
-    if not plan.hosted.enabled or not plan.scoring.enabled:
-        raise GatewayEnvelopePreparationV2Error(
-            "configured hosted and scoring worker fleets are required"
-        )
-    if not plan.hosted.proxy_values or not plan.scoring.proxy_values:
-        raise GatewayEnvelopePreparationV2Error(
-            "worker proxy values are required for initial V2 sealing"
-        )
+    plan, proxy_commitments = _validated_worker_proxy_configuration(environment)
     parent = destination.parent
     parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".gateway-v2-envelopes.", dir=parent))
@@ -438,6 +464,8 @@ def prepare_gateway_envelopes_v2(
             "deploy_commit": commit,
             "hosted_worker_count": plan.hosted.worker_count,
             "scoring_worker_count": plan.scoring.worker_count,
+            "worker_proxy_transport_policy": _WORKER_PROXY_TRANSPORT_POLICY,
+            "worker_proxy_credential_ref_hashes": proxy_commitments,
             "required_count_environment": {
                 "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": str(
                     plan.hosted.worker_count
@@ -473,12 +501,22 @@ def install_gateway_envelopes_v2(
     """Reuse exact-commit envelopes or atomically install a complete new set."""
 
     destination = Path(install_dir)
+    plan, proxy_commitments = _validated_worker_proxy_configuration(environment)
     report_path = destination / "gateway-v2-env-transition.json"
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         report = None
-    if isinstance(report, Mapping) and report.get("deploy_commit") == deploy_commit:
+    if (
+        isinstance(report, Mapping)
+        and report.get("deploy_commit") == deploy_commit
+        and report.get("worker_proxy_transport_policy")
+        == _WORKER_PROXY_TRANSPORT_POLICY
+        and report.get("worker_proxy_credential_ref_hashes")
+        == proxy_commitments
+        and report.get("hosted_worker_count") == plan.hosted.worker_count
+        and report.get("scoring_worker_count") == plan.scoring.worker_count
+    ):
         hosted_count = int(report.get("hosted_worker_count") or 0)
         scoring_count = int(report.get("scoring_worker_count") or 0)
         expected_names = {

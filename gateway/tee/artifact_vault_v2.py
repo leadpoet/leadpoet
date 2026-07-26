@@ -26,6 +26,7 @@ _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES = frozenset(
     {408, 429, 500, 502, 503, 504}
 )
+ARTIFACT_PERSISTENCE_MAX_ATTEMPTS_PER_METHOD = 4
 
 
 class ArtifactVaultV2Error(RuntimeError):

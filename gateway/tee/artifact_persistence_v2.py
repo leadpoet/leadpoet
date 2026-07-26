@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 from urllib.parse import parse_qs, urlsplit
 
 from gateway.tee.artifact_vault_v2 import (
+    ARTIFACT_PERSISTENCE_MAX_ATTEMPTS_PER_METHOD,
     ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES,
     EncryptedArtifactVaultV2,
 )
@@ -26,7 +27,9 @@ from leadpoet_canonical.attested_v2 import (
 
 ARTIFACT_POLICY_SCHEMA_VERSION = "leadpoet.encrypted_artifact_policy.v2"
 ARTIFACT_PERSISTENCE_PURPOSE = "leadpoet.artifact_persistence.v2"
-ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS = 4
+ARTIFACT_PERSISTENCE_TRANSPORT_ATTEMPTS = (
+    ARTIFACT_PERSISTENCE_MAX_ATTEMPTS_PER_METHOD
+)
 ARTIFACT_PERSISTENCE_TRANSPORT_TIMEOUT_MS = 30000
 ARTIFACT_PERSISTENCE_RETRY_DELAYS_SECONDS = (0.0, 0.25, 1.0, 2.0)
 MAX_ARTIFACT_STORAGE_DOCUMENT_BYTES = 96 * 1024 * 1024

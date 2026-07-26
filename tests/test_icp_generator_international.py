@@ -1,4 +1,4 @@
-"""International ICP quota: 20% of each generated set, English-speaking markets.
+"""International ICP quota: 25% of each generated set, English-speaking markets.
 
 The generator prompt demands an exact international count and the set-level
 check logs icp_international_quota_missed when generation drifts. The per-ICP
@@ -14,11 +14,12 @@ from gateway.tasks.icp_generator import (
 )
 
 
-def test_target_is_twenty_percent_rounded_min_one():
-    assert international_icp_target(20) == 4
-    assert international_icp_target(10) == 2
+def test_target_is_twenty_five_percent_rounded_min_one():
+    assert international_icp_target(20) == 5
+    assert international_icp_target(10) == 2   # round(2.5) -> 2 (banker's rounding)
+    assert international_icp_target(8) == 2
     assert international_icp_target(5) == 1
-    assert international_icp_target(3) == 1  # never zero
+    assert international_icp_target(3) == 1    # never zero
 
 
 def test_count_international_icps():

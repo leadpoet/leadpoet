@@ -2,12 +2,75 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+import subprocess
+import sys
 from threading import Thread
 from types import SimpleNamespace
 
 import pytest
 
 from gateway.db import client as db_client
+
+
+def test_db_client_import_does_not_construct_async_lock():
+    """Import must work after Python 3.9 has cleared its current event loop."""
+    repo_root = Path(__file__).resolve().parent.parent
+    probe = """
+import asyncio
+import inspect
+
+original_lock = asyncio.Lock
+
+def guarded_lock(*args, **kwargs):
+    caller = inspect.currentframe().f_back
+    if caller.f_globals.get("__name__") == "gateway.db.client":
+        raise AssertionError("gateway.db.client constructed an asyncio.Lock at import time")
+    return original_lock(*args, **kwargs)
+
+asyncio.Lock = guarded_lock
+from gateway.db import client
+assert client._async_lock is None
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.asyncio
+async def test_async_client_lock_is_created_lazily_and_serializes_initialization(
+    monkeypatch,
+):
+    expected = SimpleNamespace()
+    create_calls = 0
+
+    async def create_async_client(_url, _key):
+        nonlocal create_calls
+        create_calls += 1
+        await __import__("asyncio").sleep(0)
+        return expected
+
+    monkeypatch.setattr(db_client, "_async_read_client", None)
+    monkeypatch.setattr(db_client, "_async_write_client", None)
+    monkeypatch.setattr(db_client, "_async_lock", None)
+    monkeypatch.setattr(db_client, "SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setattr(db_client, "SUPABASE_ANON_KEY", "anon-key")
+    monkeypatch.setattr(db_client, "create_async_client", create_async_client)
+    monkeypatch.setattr(db_client, "_install_async_send_retry", lambda client: client)
+
+    assert db_client._async_lock is None
+    clients = await __import__("asyncio").gather(
+        *(db_client.get_async_read_client() for _ in range(10))
+    )
+
+    assert clients == [expected] * 10
+    assert create_calls == 1
+    assert db_client._async_lock is not None
 
 
 class _FakeHttpClient:

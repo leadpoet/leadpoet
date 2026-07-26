@@ -270,7 +270,16 @@ def get_write_client() -> Client:
 # ============================================================
 _async_read_client: Optional[AsyncClient] = None
 _async_write_client: Optional[AsyncClient] = None
-_async_lock = asyncio.Lock()
+_async_lock: Optional[asyncio.Lock] = None
+
+
+def _get_async_lock() -> asyncio.Lock:
+    """Create the singleton lock only from inside the active event loop."""
+    global _async_lock
+
+    if _async_lock is None:
+        _async_lock = asyncio.Lock()
+    return _async_lock
 
 
 async def get_async_read_client() -> AsyncClient:
@@ -283,7 +292,7 @@ async def get_async_read_client() -> AsyncClient:
     if _async_read_client is not None:
         return _async_read_client
 
-    async with _async_lock:
+    async with _get_async_lock():
         if _async_read_client is not None:
             return _async_read_client
 
@@ -312,7 +321,7 @@ async def get_async_write_client() -> AsyncClient:
     if _async_write_client is not None:
         return _async_write_client
 
-    async with _async_lock:
+    async with _get_async_lock():
         if _async_write_client is not None:
             return _async_write_client
 

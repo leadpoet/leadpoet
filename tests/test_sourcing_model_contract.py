@@ -392,7 +392,10 @@ def test_build_gate_shadow_logs_and_proceeds(tmp_path: Path, monkeypatch, caplog
     monkeypatch.setenv("RESEARCH_LAB_SOURCING_CONTRACT_CHECK", "shadow")
     _conforming_tree(tmp_path)
     (tmp_path / "research_lab_adapter.py").unlink()
-    with caplog.at_level("WARNING"):
+    with caplog.at_level(
+        "WARNING",
+        logger="gateway.research_lab.code_build",
+    ):
         _sourcing_contract_gate(tmp_path)  # must NOT raise in shadow
     assert any(
         "sourcing_contract_gate_shadow_violation" in rec.message for rec in caplog.records

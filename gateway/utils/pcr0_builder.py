@@ -741,6 +741,7 @@ BASE_IMAGE_NAME = "validator-base:v1"
 # Docker image metadata. Gateway and validator base images must have identical
 # Docker config, so do not use labels for freshness tracking.
 BASE_IMAGE_STAMP_FILENAME = ".validator-base.dockerfile.sha256"
+BASE_IMAGE_STAMP_DIR_ENV = "PCR0_BASE_IMAGE_STAMP_DIR"
 
 
 def compute_dockerfile_base_hash(repo_dir: str) -> Optional[str]:
@@ -756,8 +757,27 @@ def compute_dockerfile_base_hash(repo_dir: str) -> Optional[str]:
 
 
 def get_base_image_stamp_path(repo_dir: str) -> str:
-    """Return path to external base-image freshness stamp."""
-    return os.path.join(repo_dir, BASE_IMAGE_STAMP_FILENAME)
+    """Return a stamp path outside the disposable sparse Git checkout.
+
+    ``git sparse-checkout set`` may remove untracked files outside its sparse
+    patterns. Keeping the stamp inside ``repo_dir`` therefore made every
+    background refresh look like a base-image change, forcing an unnecessary
+    rebuild and occasionally leaving ``FROM validator-base:v1`` unresolved.
+    The Docker tag is host-global, so its identity belongs in stable host state.
+    """
+
+    configured_dir = str(os.environ.get(BASE_IMAGE_STAMP_DIR_ENV) or "").strip()
+    state_dir = (
+        os.path.expanduser(configured_dir)
+        if configured_dir
+        else os.path.join(
+            os.path.expanduser("~"),
+            ".cache",
+            "leadpoet",
+            "pcr0-builder",
+        )
+    )
+    return os.path.join(state_dir, BASE_IMAGE_STAMP_FILENAME)
 
 
 def read_base_image_stamp(repo_dir: str) -> tuple[Optional[str], Optional[str]]:
@@ -781,7 +801,9 @@ def read_base_image_stamp(repo_dir: str) -> tuple[Optional[str], Optional[str]]:
 def write_base_image_stamp(repo_dir: str, dockerfile_hash: str, image_id: str) -> None:
     """Write the Dockerfile.base content hash and local image id stamp."""
     try:
-        with open(get_base_image_stamp_path(repo_dir), "w", encoding="utf-8") as f:
+        stamp_path = get_base_image_stamp_path(repo_dir)
+        os.makedirs(os.path.dirname(stamp_path), mode=0o700, exist_ok=True)
+        with open(stamp_path, "w", encoding="utf-8") as f:
             f.write(f"{dockerfile_hash} {image_id}\n")
     except Exception as e:
         logger.warning(f"[PCR0] Could not write base image stamp: {e}")

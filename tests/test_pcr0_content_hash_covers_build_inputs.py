@@ -122,6 +122,38 @@ def test_content_hash_fails_closed_when_required_input_is_unreadable(
     assert compute_files_content_hash(str(repo_copy)) is None
 
 
+def test_base_image_stamp_survives_sparse_checkout_replacement(
+    tmp_path,
+    monkeypatch,
+):
+    repo_dir = tmp_path / "pcr0_builder"
+    state_dir = tmp_path / "stable-state"
+    repo_dir.mkdir()
+    monkeypatch.setenv(pcr0_builder.BASE_IMAGE_STAMP_DIR_ENV, str(state_dir))
+
+    pcr0_builder.write_base_image_stamp(
+        str(repo_dir),
+        "dockerfile-hash",
+        "sha256:image-id",
+    )
+    stamp_path = Path(pcr0_builder.get_base_image_stamp_path(str(repo_dir)))
+    assert os.path.commonpath((stamp_path, repo_dir)) != str(repo_dir)
+    assert pcr0_builder.read_base_image_stamp(str(repo_dir)) == (
+        "dockerfile-hash",
+        "sha256:image-id",
+    )
+
+    # Reproduce a sparse-clone refresh that replaces the complete checkout.
+    shutil.rmtree(repo_dir)
+    repo_dir.mkdir()
+
+    assert stamp_path.exists()
+    assert pcr0_builder.read_base_image_stamp(str(repo_dir)) == (
+        "dockerfile-hash",
+        "sha256:image-id",
+    )
+
+
 def test_historical_cache_warming_always_includes_current_deploy_head():
     head = {
         "hash": "f" * 40,

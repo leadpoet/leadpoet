@@ -63,6 +63,8 @@ MAX_CONCURRENCY = 8
 SD_URL = "https://api.scrapingdog.com/scrape"
 SD_TIMEOUT_S = 30                  # per-fetch (legacy default — superseded by
                                    # per-tier timeouts below for the cascade)
+SCRAPINGDOG_PROVIDER_DEADLINE_S = 55
+SCRAPINGDOG_TERMINAL_TIMEOUT_S = 60
 SD_MAX_CONTENT_CHARS = 12_000      # truncate fetched content per cited URL.
                                    # Raised from 4k alongside trafilatura
                                    # body extraction. With body extraction the
@@ -73,8 +75,9 @@ SD_MAX_CONTENT_CHARS = 12_000      # truncate fetched content per cited URL.
 SD_RETRY_DELAYS_S = (1, 2)         # legacy retry (unused by new cascade)
 
 # Content-driven escalation tiers — same cascade used by intent verifier.
-# Cheap tier first; escalate only when response is inadequate (HTTP failure /
-# empty body / anti-bot marker / JS-shell shape). NO host list.
+# Cheap tier first; escalate only for recoverable content failures (empty body,
+# anti-bot marker, JS shell, or selected anti-bot HTTP status). Provider and
+# transport failures stop the ScrapingDog ladder. NO host list.
 _SD_TIERS = (
     ("baseline",        {}),
     ("dynamic_render",  {"dynamic": "true", "wait": "5000"}),
@@ -86,8 +89,16 @@ _SD_TIER_TIMEOUT = {
     "baseline":        20,
     "dynamic_render":  30,
     "premium_stealth": 30,
-    "full_combined":   45,
+    # Only this final tier is intended to await the provider's terminal
+    # response; keep a delivery margin above ScrapingDog's 55-second deadline.
+    "full_combined":   SCRAPINGDOG_TERMINAL_TIMEOUT_S,
 }
+_SD_CONTENT_ESCALATION_VERDICTS = frozenset({
+    "body_too_short",
+    "anti_bot_marker",
+    "js_shell",
+})
+_SD_ANTIBOT_HTTP_VERDICTS = frozenset({"http_400", "http_403"})
 
 # Anti-bot / challenge / login-wall / parked-page markers — same as the
 # intent-verifier set, kept locally so this module is self-contained.
@@ -657,6 +668,25 @@ def _sd_evaluate(status_code: int, body: str) -> str:
     return "ok"
 
 
+def _sd_should_escalate(verdict: str, tier_name: str) -> bool:
+    """Escalate only when rendering or stronger proxying may recover content."""
+    if verdict == "http_404":
+        return tier_name == "baseline"
+    return (
+        verdict in _SD_CONTENT_ESCALATION_VERDICTS
+        or verdict in _SD_ANTIBOT_HTTP_VERDICTS
+    )
+
+
+def _sd_request_id(response: aiohttp.ClientResponse) -> str:
+    request_id = (
+        response.headers.get("x-request-id")
+        or response.headers.get("request-id")
+        or ""
+    )
+    return re.sub(r"[^A-Za-z0-9_.:-]", "_", request_id)[:128]
+
+
 async def _wayback_fetch(session: aiohttp.ClientSession, url: str) -> Tuple[bool, str, str]:
     """Wayback Machine snapshot fallback for URLs Scrapingdog tiers exhaust."""
     try:
@@ -689,11 +719,11 @@ async def fetch_url_via_scrapingdog(
     """Fetch one miner-cited URL via Scrapingdog with content-driven
     escalation + Wayback fallback.
 
-    Cascades through four Scrapingdog tiers, escalating only when the
-    response is inadequate (HTTP failure / empty body / anti-bot marker /
-    JS-shell shape). When all tiers exhaust, falls back to a Wayback
-    Machine snapshot. NO hardcoded host list — every URL goes through the
-    same cascade.
+    Cascades through Scrapingdog tiers only while stronger rendering or
+    proxying may recover inadequate content. Client deadlines, transport
+    errors, throttles, and provider 5xx responses stop the ScrapingDog ladder
+    and move to Wayback. NO hardcoded host list — every URL uses the same
+    failure-aware routing.
 
     Returns ``(ok, content, error)`` where:
       * ``ok=True``  → ``content`` is the page text (truncated to SD_MAX_CONTENT_CHARS).
@@ -724,6 +754,7 @@ async def fetch_url_via_scrapingdog(
             **extra,
         }
         tier_timeout = _SD_TIER_TIMEOUT.get(tier_name, SD_TIMEOUT_S)
+        started = time.monotonic()
         try:
             async with session.get(
                 SD_URL, params=params,
@@ -732,6 +763,16 @@ async def fetch_url_via_scrapingdog(
                 text = await resp.text()
                 verdict = _sd_evaluate(resp.status, text)
                 last_verdict = verdict
+                _sd_logger.info(
+                    "scrapingdog_scrape_attempt tier=%s timeout_s=%s elapsed_ms=%d "
+                    "response_received=true status=%s verdict=%s request_id=%s",
+                    tier_name,
+                    tier_timeout,
+                    int((time.monotonic() - started) * 1000),
+                    resp.status,
+                    verdict,
+                    _sd_request_id(resp),
+                )
                 if verdict == "ok":
                     # Body extraction (trafilatura) — pulls just the article
                     # body from raw HTML, stripping nav/sidebar/footer. Safe
@@ -742,14 +783,43 @@ async def fetch_url_via_scrapingdog(
                     except Exception:
                         pass
                     return True, text[:SD_MAX_CONTENT_CHARS], f"sd:{tier_name}"
-                # If the origin returns 404 even after dynamic-render, the URL
-                # is genuinely dead — escalating to premium won't help.
-                if verdict == "http_404" and tier_name == "dynamic_render":
-                    return False, "", "genuine_404"
+                if not _sd_should_escalate(verdict, tier_name):
+                    break
         except asyncio.TimeoutError:
-            last_verdict = f"timeout:{tier_name}"
+            last_verdict = f"client_deadline:{tier_name}"
+            _sd_logger.info(
+                "scrapingdog_scrape_attempt tier=%s timeout_s=%s elapsed_ms=%d "
+                "response_received=false failure_class=client_deadline",
+                tier_name,
+                tier_timeout,
+                int((time.monotonic() - started) * 1000),
+            )
+            break
+        except aiohttp.ClientError as e:
+            last_verdict = f"transport_error:{type(e).__name__}"
+            _sd_logger.info(
+                "scrapingdog_scrape_attempt tier=%s timeout_s=%s elapsed_ms=%d "
+                "response_received=false failure_class=transport_error error_type=%s",
+                tier_name,
+                tier_timeout,
+                int((time.monotonic() - started) * 1000),
+                type(e).__name__,
+            )
+            break
         except Exception as e:
             last_verdict = f"exception:{type(e).__name__}"
+            _sd_logger.warning(
+                "scrapingdog_scrape_attempt tier=%s timeout_s=%s elapsed_ms=%d "
+                "response_received=false failure_class=unexpected error_type=%s",
+                tier_name,
+                tier_timeout,
+                int((time.monotonic() - started) * 1000),
+                type(e).__name__,
+            )
+            break
+
+    if last_verdict == "http_404":
+        return False, "", "genuine_404"
 
     # All Scrapingdog tiers exhausted. Try Wayback Machine for a cached
     # snapshot — stale evidence is far better than zero evidence when the
@@ -759,8 +829,8 @@ async def fetch_url_via_scrapingdog(
         return True, wb_content, "wayback"
 
     _sd_logger.warning(
-        "SD+Wayback fetch failed url=%s reason=%s wb=%s",
-        url[:200], last_verdict, wb_err,
+        "SD+Wayback fetch failed host=%s reason=%s wb=%s",
+        _sd_host(url), last_verdict, wb_err,
     )
     return False, "", f"all_tiers_exhausted:{last_verdict}"
 

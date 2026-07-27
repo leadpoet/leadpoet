@@ -292,7 +292,7 @@ GEOGRAPHIES = [
     "United States, Southwest",
 ]
 
-# International geographies for the 20% international quota —
+# International geographies for the 25% international quota —
 # English-speaking business markets only, so sourcing/verification content
 # (news, job posts, company sites) stays reliably parseable. Country-first
 # format only ("Country" or "Country, Region"): the deployed scorer gate
@@ -314,11 +314,11 @@ INTERNATIONAL_GEOGRAPHIES = [
 ]
 
 # Share of each generated set that must use international geographies.
-INTERNATIONAL_ICP_SHARE = 0.20
+INTERNATIONAL_ICP_SHARE = 0.25
 
 
 def international_icp_target(total_icps: int) -> int:
-    """How many ICPs of a set must be international (20%, at least 1)."""
+    """How many ICPs of a set must be international (25%, at least 1)."""
     return max(1, round(total_icps * INTERNATIONAL_ICP_SHARE))
 
 
@@ -719,17 +719,33 @@ CONSTRAINT LISTS (use ONLY these values)
 ALLOWED INDUSTRIES (exactly one ICP per industry, in this order):
 Software, Information Technology, Artificial Intelligence, Hardware, Data and Analytics, Privacy and Security, Health Care, Biotechnology, Financial Services, Lending and Investments, Payments, Manufacturing, Commerce and Shopping, Professional Services, Advertising, Sales and Marketing, Real Estate, Energy, Education, Transportation
 
-ALLOWED INTENT SIGNALS (pick 1-2 per ICP; pair naturally with the industry):
-- Recently raised funding
-- Just closed a round
-- Launched or announced a new product
-- Expanded to new markets
-- Acquired another company
-- Recent leadership change
-- Achieved regulatory clearance or certification
-- Announced a strategic partnership
-- Hiring for senior engineering or sales roles
-- Recent factory / facility / store opening
+INTENT SIGNAL — WRITE IT LIKE A REAL SALES-INTELLIGENCE BRIEF (not a generic label):
+Pick 1-2 intents per ICP. Do NOT output a bare category like "Launched a new product".
+Write each intent as a specific, descriptive sentence in the style a real buyer would
+brief a sourcing team — name the kind of behavior and the kind of evidence that proves
+it. Match the intent to the industry.
+
+The intent MUST be based on ONE of these underlying event types (this keeps it verifiable):
+funding round, new product / major capability launch, expansion into a new market,
+acquisition, leadership change, regulatory clearance or certification, strategic
+partnership, hiring for specific roles, or a new facility / office / store opening.
+
+Fulfillment-style examples (write yours the same way — specific wording, still broad enough
+that MANY real companies match):
+- "Launched a new product or major platform capability in the last 12 months, per a press
+   release, product page, or changelog"
+- "Announced a Series A or later funding round in the last 12 months, per a press release,
+   Crunchbase, or news coverage"
+- "Actively hiring for platform, integration, or revenue-operations roles, per current job
+   postings or careers page"
+- "Expanded into a new country or region in the last year, per a press release or company
+   announcement"
+
+CRITICAL — SPECIFIC WORDING, NOT A NARROW REQUIREMENT: the intent must be worded
+specifically but stay broad enough that many real companies verifiably match. Do NOT
+narrow it to a single tool, a single named event, or a niche so tight that fewer than a
+handful of companies qualify. Specificity belongs in the phrasing, not in shrinking the
+candidate pool.
 
 ALLOWED COMPANY STAGES: Seed, Series A, Series B, Series C+, Private Equity, Public
 
@@ -794,12 +810,12 @@ OUTPUT — JSON ONLY, NO PROSE, NO MARKDOWN
       "country": "<the country portion of the geography, e.g. United States, United Kingdom, Canada>",
       "employee_count": ["<3-5 contiguous allowed LinkedIn buckets>"],
       "company_stage": "<from allowed stages>",
-      "product_service": "<broad category — NOT a single named tool>",
-      "required_attribute": "The company offers or provides <product_service or broad category>",
-      "intent_signal": "<required intent from allowed intent list>",
+      "product_service": "<a specific, descriptive value proposition — what the company actually sells and the job it does for its buyer, e.g. 'A subscription B2B platform that revenue and operations teams use to manage pipeline, deals, and customer workflows'. NOT a bare category like 'B2B software'. Do NOT narrow to a single named tool.>",
+      "required_attribute": "<a specific, descriptive attribute the company must have, written like the product_service — e.g. 'Sells a subscription software platform used by revenue or operations teams to manage pipeline, deals, or customer workflows'. Specific WORDING, but broad enough that many real companies match. NOT the bare template 'offers or provides X'.>",
+      "intent_signal": "<a specific, descriptive intent sentence in fulfillment style — see the INTENT SIGNAL section above>",
       "intent_category": "<FUNDING | ACQUISITION | PARTNERSHIP | PRODUCT_LAUNCH | LEADERSHIP_CHANGE | MARKET_EXPANSION | REGULATORY_CLEARANCE | FACILITY_OPENING | HIRING>",
       "intent_max_age_days": 365,
-      "intent_signals": ["<required intent first>", "<optional bonus intent second>"],
+      "intent_signals": ["<required intent first, specific fulfillment-style sentence>", "<optional bonus intent second, specific fulfillment-style sentence>"],
       "bonus_intents": [
         {{"intent_signal": "<optional bonus intent>", "intent_category": "<matching category>", "intent_max_age_days": 365}}
       ],
@@ -810,12 +826,14 @@ OUTPUT — JSON ONLY, NO PROSE, NO MARKDOWN
 
 FINAL CHECK before output (for every ICP):
 1. Is `verified_example_company` a real, currently-operating company? If not, REWRITE with broader constraints.
-2. Does the named example company actually match ALL the ICP's stated criteria? If not, REWRITE.
-3. Does the intent signal fit the industry's shape?
-4. Is the geography broad enough that real candidates exist?
-5. Are there exactly 20 ICPs, one per industry in the listed order?
-6. Are EXACTLY {international_target} ICPs international (non-US, from the allowed international list) with `country` matching their geography?
-7. No job titles, no seniority, no contact-level descriptors in the prompts?"""
+2. Does the named example company actually match ALL the ICP's stated criteria — including the specific `required_attribute` and `intent_signal`? If not, REWRITE.
+3. SUPPLY CHECK: can you name at least THREE more real, currently-operating companies (four total) that verifiably match this ICP's specific `required_attribute` and `intent_signal`? If you cannot, the attribute or intent is too narrow — keep the specific WORDING but broaden the requirement (or broaden geography/stage/employee band) until many real companies match. Specific phrasing, broad candidate pool.
+4. Are the `product_service` and `required_attribute` specific, descriptive value propositions (like a real sales brief) rather than bare categories or the "offers or provides X" template?
+5. Is each `intent_signal` a specific fulfillment-style sentence naming the behavior and the kind of evidence, rather than a bare label?
+6. Is the geography broad enough that real candidates exist?
+7. Are there exactly 20 ICPs, one per industry in the listed order?
+8. Are EXACTLY {international_target} ICPs international (non-US, from the allowed international list) with `country` matching their geography?
+9. No job titles, no seniority, no contact-level descriptors in the prompts?"""
 
     international_target = international_icp_target(total_icps)
     system_prompt = (
@@ -953,7 +971,7 @@ FINAL CHECK before output (for every ICP):
             geography = icp.get("geography", "United States")
 
             # Allow the US plus the English-speaking international markets
-            # (20% quota); override anything else to whole-US. Geography is
+            # (25% quota); override anything else to whole-US. Geography is
             # country-first, so the country is its first comma segment.
             international_match = next(
                 (
@@ -1035,7 +1053,7 @@ FINAL CHECK before output (for every ICP):
         # If the distribution is slightly imperfect, that's OK - the LLM output is approximate
         logger.info(f"Validated {len(validated_icps)} ICPs with distribution: {actual_distribution}")
 
-        # International quota (20% of the set, English-speaking markets). The
+        # International quota (25% of the set, English-speaking markets). The
         # generation prompt demands the exact count; a short set still ships
         # (template fallback would be worse) but never silently — the tag
         # below is the alert hook for drift.

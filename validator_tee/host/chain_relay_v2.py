@@ -260,26 +260,54 @@ class ValidatorChainRelayV2:
         # healthy (main() never relaunches it). Only exit when stop() has been
         # requested; otherwise log and keep serving after a short pause so a
         # persistently broken listener cannot hot-spin.
+        consecutive_errors = 0
         while not self._stop.is_set():
             try:
                 connection, _address = self._listener.accept()
             except Exception as exc:
                 if self._stop.is_set():
                     return
+                consecutive_errors += 1
+                # Log the first failure and then only periodically, so a
+                # sustained fd/socket outage cannot spam the log at the retry
+                # cadence while still leaving one clear, greppable signal plus
+                # the recovery below.
+                if consecutive_errors == 1 or consecutive_errors % 60 == 0:
+                    logger.warning(
+                        "chain_relay_accept_error type=%s error=%s "
+                        "consecutive=%d; continuing to serve chain RPC",
+                        type(exc).__name__,
+                        str(exc)[:200],
+                        consecutive_errors,
+                    )
+                time.sleep(0.5)
+                continue
+            if consecutive_errors:
+                logger.info(
+                    "chain_relay_accept_recovered after=%d errors",
+                    consecutive_errors,
+                )
+                consecutive_errors = 0
+            # Spawning the handler must not be able to kill the accept loop
+            # either (thread exhaustion raises from start()): on failure close
+            # the connection and keep serving.
+            try:
+                threading.Thread(
+                    target=handle_chain_relay_connection,
+                    args=(connection,),
+                    kwargs={"connector": self._connector},
+                    daemon=True,
+                ).start()
+            except Exception as exc:
                 logger.warning(
-                    "chain_relay_accept_error type=%s error=%s; "
-                    "continuing to serve chain RPC",
+                    "chain_relay_handler_spawn_failed type=%s error=%s",
                     type(exc).__name__,
                     str(exc)[:200],
                 )
-                time.sleep(0.5)
-                continue
-            threading.Thread(
-                target=handle_chain_relay_connection,
-                args=(connection,),
-                kwargs={"connector": self._connector},
-                daemon=True,
-            ).start()
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
 
 def main() -> None:

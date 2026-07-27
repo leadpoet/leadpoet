@@ -94,3 +94,58 @@ def test_stop_exits_cleanly_even_mid_error(monkeypatch):
     relay.stop()
     t.join(2)
     assert not t.is_alive()          # stop() cleanly ended it
+
+
+def test_handler_spawn_failure_does_not_kill_the_loop(monkeypatch):
+    # If starting the per-connection handler thread raises (thread exhaustion),
+    # the loop must close the connection and keep accepting, not die. Fail the
+    # spawn ONLY for the handler target so the test's own loop thread is real.
+    closed = []
+
+    class _Conn:
+        def close(self):
+            closed.append(True)
+
+    real_thread = relay_mod.threading.Thread
+
+    class _SelectiveThread:
+        def __init__(self, *a, target=None, **k):
+            self._is_handler = target is relay_mod.handle_chain_relay_connection
+            self._real = None if self._is_handler else real_thread(*a, target=target, **k)
+
+        def start(self):
+            if self._is_handler:
+                raise RuntimeError("can't start thread")
+            self._real.start()
+
+        def join(self, *a):
+            return self._real.join(*a) if self._real else None
+
+        def is_alive(self):
+            return bool(self._real and self._real.is_alive())
+
+    monkeypatch.setattr(relay_mod.threading, "Thread", _SelectiveThread)
+    relay = ValidatorChainRelayV2()
+
+    calls = {"n": 0}
+
+    class _OneConnThenBlock:
+        def accept(self):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return (_Conn(), ("cid", 0))
+            time.sleep(0.05)
+            raise BlockingIOError("idle")
+
+        def close(self):
+            pass
+
+    relay._listener = _OneConnThenBlock()
+    t = real_thread(target=relay._accept_loop, daemon=True)
+    t.start()
+    time.sleep(0.3)
+    alive = t.is_alive()
+    relay.stop()
+    t.join(2)
+    assert alive              # spawn failure did not kill the loop
+    assert closed == [True]   # the orphaned connection was closed

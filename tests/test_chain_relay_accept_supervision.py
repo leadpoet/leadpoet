@@ -149,3 +149,76 @@ def test_handler_spawn_failure_does_not_kill_the_loop(monkeypatch):
     t.join(2)
     assert alive              # spawn failure did not kill the loop
     assert closed == [True]   # the orphaned connection was closed
+
+
+class _FakeSock:
+    """Minimal listener stand-in for start()/re-entrancy tests (no real vsock)."""
+    open_count = 0
+    close_count = 0
+
+    def __init__(self, *_a, **_k):
+        type(self).open_count += 1
+        self.closed = False
+
+    def bind(self, _addr):
+        pass
+
+    def listen(self, _backlog):
+        pass
+
+    def accept(self):
+        # Block until closed so the loop thread stays alive but idle.
+        while not self.closed:
+            time.sleep(0.02)
+        raise OSError("listener closed")
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            type(self).close_count += 1
+
+
+def test_start_is_reentrant_and_closes_stale_listener_on_restart(monkeypatch):
+    _FakeSock.open_count = 0
+    _FakeSock.close_count = 0
+    relay = ValidatorChainRelayV2(socket_factory=lambda *a, **k: _FakeSock())
+    relay.start()
+    first_listener = relay._listener
+    assert relay.status()["status"] == "running"
+
+    # Simulate an unexpected loop-thread death WITHOUT a stop() (the case
+    # main()'s supervisor must recover). The stale listener is still open.
+    relay._thread = None
+    assert not relay._stop.is_set()
+
+    relay.start()  # recovery restart
+    assert relay.status()["status"] == "running"
+    assert relay._listener is not first_listener          # rebound fresh
+    assert first_listener.closed                           # stale one closed
+    assert _FakeSock.open_count == 2 and _FakeSock.close_count >= 1
+    relay.stop()
+
+
+def test_supervisor_restarts_dead_relay_but_respects_stop(monkeypatch):
+    # Exercise the exact decision main()'s loop makes, without its infinite loop.
+    relay = ValidatorChainRelayV2(socket_factory=lambda *a, **k: _FakeSock())
+    relay.start()
+
+    def supervise_once():
+        if relay._stop.is_set():
+            return False
+        if relay.status().get("status") != "running":
+            relay.start()
+            return True
+        return False
+
+    # Healthy -> no restart.
+    assert supervise_once() is False
+    # Dead (no stop) -> restart.
+    relay._thread = None
+    assert supervise_once() is True
+    assert relay.status()["status"] == "running"
+    # Intentional stop -> supervisor must NOT resurrect it.
+    relay.stop()
+    relay._thread = None
+    assert supervise_once() is False

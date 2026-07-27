@@ -58,6 +58,9 @@ jobs:
           ref: ${{ github.event.deployment.ref || github.ref }}
           fetch-depth: 0
 
+      - name: Verify repository instruction parity
+        run: cmp --silent AGENTS.md CLAUDE.md
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

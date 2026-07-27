@@ -1561,7 +1561,8 @@ async def _load_allocation_parent_graphs_v2(
         _source_add_paid_alpha_to_date_from_snapshots,
     )
     from gateway.research_lab.champion_settlement_v2 import (
-        load_finalized_allocation_history_v2,
+        CHAIN_REALIZED_AUTHORITY_TYPE_V1,
+        load_settled_allocation_history_v2,
     )
     from gateway.research_lab.store import select_all
 
@@ -1684,7 +1685,7 @@ async def _load_allocation_parent_graphs_v2(
         history_start = min(history_starts)
         if finalized_champion_history is None:
             normalized_finalized_history = (
-                await load_finalized_allocation_history_v2(
+                await load_settled_allocation_history_v2(
                     netuid=int(netuid),
                     start_epoch=history_start,
                     end_epoch=int(epoch_id) - 1,
@@ -1734,6 +1735,12 @@ async def _load_allocation_parent_graphs_v2(
             add_receipt_root(
                 str(row.get("legacy_settlement_receipt_hash") or "")
             )
+        if CHAIN_REALIZED_AUTHORITY_TYPE_V1 in authority_types:
+            add_receipt_root(
+                str(row.get("chain_realized_settlement_receipt_hash") or "")
+            )
+            for receipt_hash in row.get("chain_realized_credit_receipt_hashes") or ():
+                add_receipt_root(str(receipt_hash))
     source_paid_by_reward = _source_add_paid_alpha_to_date_from_snapshots(
         normalized_finalized_history
     )

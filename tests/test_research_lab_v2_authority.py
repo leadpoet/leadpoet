@@ -620,7 +620,7 @@ async def test_allocation_parent_loader_uses_legacy_settlement_receipt(
     monkeypatch.setattr(store, "select_one", select_one)
     monkeypatch.setattr(
         champion_settlement_v2,
-        "load_finalized_allocation_history_v2",
+        "load_settled_allocation_history_v2",
         load_history,
     )
     monkeypatch.setattr(
@@ -832,7 +832,7 @@ async def test_allocation_parent_loader_skips_fully_paid_legacy_source_receipt(
     monkeypatch.setattr(store, "select_all", select_all)
     monkeypatch.setattr(
         champion_settlement_v2,
-        "load_finalized_allocation_history_v2",
+        "load_settled_allocation_history_v2",
         load_history,
     )
     monkeypatch.setattr(

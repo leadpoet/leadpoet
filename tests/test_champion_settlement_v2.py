@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from decimal import Decimal
 import threading
 
 import pytest
@@ -25,6 +26,111 @@ def _allocation(*, paid: float = 5.0) -> dict:
         "queued_champion_allocations": [],
     }
     return {**payload, "allocation_hash": sha256_json(payload)}
+
+
+def _minimal_receipt_graph(
+    receipt_hash: str,
+    *,
+    purpose: str,
+    output_root: str,
+) -> dict:
+    return {
+        "root_receipt_hash": receipt_hash,
+        "receipts": [
+            {
+                "receipt_hash": receipt_hash,
+                "role": "gateway_coordinator",
+                "purpose": purpose,
+                "status": "succeeded",
+                "output_root": output_root,
+            }
+        ],
+    }
+
+
+def _chain_realized_fixture(
+    *,
+    epoch: int = 100,
+    reward_id: str = "champion_reward:test",
+    observed: str = "30.000000",
+    attributed: str = "5.000000",
+    scheduled: str = "5.000000",
+    credited: str = "5.000000",
+    kind: str = "champion",
+) -> tuple[dict, dict, dict, dict[str, dict]]:
+    credit_doc = {
+        "schema_version": settlement.CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
+        "netuid": 71,
+        "epoch_id": epoch,
+        "obligation_kind": kind,
+        "obligation_source_id": reward_id,
+        "miner_hotkey": "miner-hotkey",
+        "miner_uid": 7,
+        "observed_chain_alpha_percent": observed,
+        "lab_attributed_alpha_percent": attributed,
+        "scheduled_alpha_percent": scheduled,
+        "credited_alpha_percent": credited,
+        "attribution_doc": {
+            "source": "latest_active_lab_allocation",
+            "lab_only": True,
+        },
+        "observation_doc": {
+            "source": "finalized_metagraph",
+            "block_hash": "0x" + "a" * 64,
+        },
+    }
+    credit_hash = sha256_json(credit_doc)
+    settlement_doc = {
+        "schema_version": settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+        "netuid": 71,
+        "epoch_id": epoch,
+        "credit_hashes": [credit_hash],
+        "observation_summary": {
+            "source": "finalized_chain_emission",
+            "complete": True,
+        },
+    }
+    settlement_hash = sha256_json(settlement_doc)
+    settlement_receipt = "sha256:" + "7" * 64
+    credit_receipt = "sha256:" + "8" * 64
+    settlement_row = {
+        "netuid": 71,
+        "epoch_id": epoch,
+        "schema_version": settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+        "settlement_hash": settlement_hash,
+        "settlement_receipt_hash": settlement_receipt,
+        "settlement_doc": settlement_doc,
+    }
+    credit_row = {
+        "netuid": 71,
+        "epoch_id": epoch,
+        "settlement_hash": settlement_hash,
+        "schema_version": settlement.CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
+        "obligation_kind": kind,
+        "obligation_source_id": reward_id,
+        "miner_hotkey": "miner-hotkey",
+        "miner_uid": 7,
+        "observed_chain_alpha_percent": Decimal(observed),
+        "lab_attributed_alpha_percent": Decimal(attributed),
+        "scheduled_alpha_percent": Decimal(scheduled),
+        "credited_alpha_percent": Decimal(credited),
+        "credit_hash": credit_hash,
+        "credit_receipt_hash": credit_receipt,
+        "credit_doc": credit_doc,
+    }
+    graphs = {
+        settlement_receipt: _minimal_receipt_graph(
+            settlement_receipt,
+            purpose=settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+            output_root=settlement_hash,
+        ),
+        credit_receipt: _minimal_receipt_graph(
+            credit_receipt,
+            purpose=settlement.CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
+            output_root=credit_hash,
+        ),
+    }
+    return settlement_row, credit_row, settlement_doc, graphs
 
 
 @pytest.mark.asyncio
@@ -361,6 +467,206 @@ def test_finalized_allocation_authority_fails_on_missing_or_tampered_evidence(
         settlement.validate_finalized_allocation_authorities_v2(
             [tampered],
             finalization_graphs={graph["root_receipt_hash"]: graph},
+        )
+
+
+def test_chain_realized_history_replaces_finalized_weight_intent(monkeypatch):
+    monkeypatch.setattr(settlement, "validate_receipt_graph", lambda _graph: ())
+    settlement_row, credit_row, _doc, graphs = _chain_realized_fixture(
+        observed="30.000000",
+        attributed="5.000000",
+        scheduled="5.000000",
+        credited="5.000000",
+    )
+
+    chain_epochs = settlement.validate_chain_realized_epoch_settlements_v1(
+        [settlement_row],
+        receipt_graphs=graphs,
+    )
+    chain_history = settlement.validate_chain_realized_obligation_credits_v1(
+        [credit_row],
+        settlement_rows=chain_epochs,
+        receipt_graphs=graphs,
+    )
+    finalized_history = [
+        {
+            "epoch": 100,
+            "netuid": 71,
+            "allocation_hash": "sha256:" + "1" * 64,
+            "allocation_doc": {
+                "champion_allocations": [
+                    {
+                        "source_id": "champion_reward:test",
+                        "paid_alpha_percent": 30.0,
+                        "base_desired_alpha_percent": 5.0,
+                    }
+                ],
+                "queued_champion_allocations": [],
+            },
+            "authority_types": ["native_v2_finalization"],
+        }
+    ]
+
+    merged = settlement.merge_settled_allocation_histories_v2(
+        finalized_history,
+        chain_history,
+    )
+
+    assert len(merged) == 1
+    assert merged[0]["authority_types"] == [
+        settlement.CHAIN_REALIZED_AUTHORITY_TYPE_V1
+    ]
+    assert merged[0]["replaced_authority_types"] == [
+        "native_v2_finalization"
+    ]
+    allocation = merged[0]["allocation_doc"]["champion_allocations"][0]
+    assert allocation["paid_alpha_percent"] == pytest.approx(5.0)
+    assert allocation["observed_chain_alpha_percent"] == pytest.approx(30.0)
+    assert allocation["lab_attributed_alpha_percent"] == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize(
+    ("kind", "source_id", "section", "identity_field"),
+    (
+        (
+            "queued_champion",
+            "champion_reward:queued",
+            "queued_champion_allocations",
+            "champion_reward_id",
+        ),
+        (
+            "source_add",
+            "source_add_reward:abcd1234",
+            "source_add_allocations",
+            "source_add_reward_id",
+        ),
+        (
+            "reimbursement",
+            "reimbursement_schedule:test",
+            "reimbursement_allocations",
+            "schedule_id",
+        ),
+    ),
+)
+def test_chain_realized_credit_kinds_map_to_allocation_sections(
+    monkeypatch,
+    kind,
+    source_id,
+    section,
+    identity_field,
+):
+    monkeypatch.setattr(settlement, "validate_receipt_graph", lambda _graph: ())
+    settlement_row, credit_row, _doc, graphs = _chain_realized_fixture(
+        reward_id=source_id,
+        kind=kind,
+    )
+    chain_epochs = settlement.validate_chain_realized_epoch_settlements_v1(
+        [settlement_row],
+        receipt_graphs=graphs,
+    )
+
+    history = settlement.validate_chain_realized_obligation_credits_v1(
+        [credit_row],
+        settlement_rows=chain_epochs,
+        receipt_graphs=graphs,
+    )
+
+    allocation = history[0]["allocation_doc"]
+    assert allocation[section][0]["source_id"] == source_id
+    assert allocation[section][0][identity_field] == source_id
+    for empty_section in {
+        "source_add_allocations",
+        "reimbursement_allocations",
+        "champion_allocations",
+        "queued_champion_allocations",
+    } - {section}:
+        assert allocation[empty_section] == []
+
+
+def test_chain_realized_credit_sets_must_be_epoch_complete(monkeypatch):
+    monkeypatch.setattr(settlement, "validate_receipt_graph", lambda _graph: ())
+    settlement_row, credit_row, _doc, graphs = _chain_realized_fixture()
+    missing_hash_doc = dict(settlement_row["settlement_doc"])
+    missing_hash_doc["credit_hashes"] = [
+        credit_row["credit_hash"],
+        "sha256:" + "9" * 64,
+    ]
+    settlement_row = {
+        **settlement_row,
+        "settlement_doc": missing_hash_doc,
+        "settlement_hash": sha256_json(missing_hash_doc),
+    }
+    credit_row = {
+        **credit_row,
+        "settlement_hash": settlement_row["settlement_hash"],
+    }
+    settlement_receipt = settlement_row["settlement_receipt_hash"]
+    graphs[settlement_receipt] = _minimal_receipt_graph(
+        settlement_receipt,
+        purpose=settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+        output_root=settlement_row["settlement_hash"],
+    )
+
+    chain_epochs = settlement.validate_chain_realized_epoch_settlements_v1(
+        [settlement_row],
+        receipt_graphs=graphs,
+    )
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="credit set is incomplete",
+    ):
+        settlement.validate_chain_realized_obligation_credits_v1(
+            [credit_row],
+            settlement_rows=chain_epochs,
+            receipt_graphs=graphs,
+        )
+
+
+@pytest.mark.parametrize(
+    ("observed", "attributed", "scheduled", "credited", "message"),
+    (
+        (
+            "5.000000",
+            "6.000000",
+            "5.000000",
+            "5.000000",
+            "exceeds observed attribution",
+        ),
+        (
+            "6.000000",
+            "6.000000",
+            "5.000000",
+            "6.000000",
+            "exceeds scheduled epoch amount",
+        ),
+    ),
+)
+def test_chain_realized_credits_cannot_overcredit_obligations(
+    monkeypatch,
+    observed,
+    attributed,
+    scheduled,
+    credited,
+    message,
+):
+    monkeypatch.setattr(settlement, "validate_receipt_graph", lambda _graph: ())
+    settlement_row, credit_row, _doc, graphs = _chain_realized_fixture(
+        observed=observed,
+        attributed=attributed,
+        scheduled=scheduled,
+        credited=credited,
+    )
+    chain_epochs = settlement.validate_chain_realized_epoch_settlements_v1(
+        [settlement_row],
+        receipt_graphs=graphs,
+    )
+
+    with pytest.raises(settlement.ChampionSettlementV2Error, match=message):
+        settlement.validate_chain_realized_obligation_credits_v1(
+            [credit_row],
+            settlement_rows=chain_epochs,
+            receipt_graphs=graphs,
         )
 
 
@@ -1542,3 +1848,60 @@ async def test_legacy_v1_paid_helper_keeps_snapshot_accounting(monkeypatch):
     assert paid == {reward_id: 5.0}
     assert calls[0][0] == "research_lab_emission_allocation_current"
     assert calls[0][1]["allow_partial"] is True
+
+
+@pytest.mark.asyncio
+async def test_finalized_paid_helper_uses_settled_chain_realized_history(
+    monkeypatch,
+):
+    from gateway.research_lab import allocations
+
+    reward_id = "champion_reward:sha256:" + "a" * 64
+
+    async def load_settled(**kwargs):
+        assert kwargs == {
+            "netuid": 71,
+            "start_epoch": 100,
+            "end_epoch": 100,
+        }
+        return [
+            {
+                "epoch": 100,
+                "netuid": 71,
+                "allocation_doc": {
+                    "champion_allocations": [
+                        {
+                            "source_id": reward_id,
+                            "paid_alpha_percent": 5.0,
+                            "base_desired_alpha_percent": 5.0,
+                            "reason": settlement.CHAIN_REALIZED_AUTHORITY_TYPE_V1,
+                        }
+                    ],
+                    "queued_champion_allocations": [],
+                },
+                "authority_types": [
+                    settlement.CHAIN_REALIZED_AUTHORITY_TYPE_V1
+                ],
+            }
+        ]
+
+    monkeypatch.setattr(
+        settlement,
+        "load_settled_allocation_history_v2",
+        load_settled,
+    )
+
+    paid = await allocations._champion_finalized_paid_alpha_to_date(
+        epoch=101,
+        netuid=71,
+        champion_rows=[
+            {
+                "champion_reward_id": reward_id,
+                "start_epoch": 100,
+                "epoch_count": 20,
+                "desired_alpha_percent": 5.0,
+            }
+        ],
+    )
+
+    assert paid == {reward_id: 5.0}

@@ -90,6 +90,12 @@ def test_receipt_allowlist_retains_canonical_contract_and_adds_epoch_authorities
         expected_purposes = set(canonical_purposes)
         if role == "gateway_coordinator":
             expected_purposes.add("research_lab.subnet_epoch_cutover.v2")
+            expected_purposes.discard(
+                "research_lab.chain_realized_epoch_settlement.v1"
+            )
+            expected_purposes.discard(
+                "research_lab.chain_realized_obligation_credit.v1"
+            )
         if role == "validator_weights":
             expected_purposes.add("validator.subnet_epoch_snapshot.v2")
         assert migrated_purposes == expected_purposes, role

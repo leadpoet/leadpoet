@@ -521,10 +521,10 @@ async def _champion_finalized_paid_alpha_to_date(
         return {}
     start_floor = min(start_epochs)
     from gateway.research_lab.champion_settlement_v2 import (
-        load_finalized_allocation_history_v2,
+        load_settled_allocation_history_v2,
     )
 
-    finalized_rows = await load_finalized_allocation_history_v2(
+    finalized_rows = await load_settled_allocation_history_v2(
         netuid=int(netuid),
         start_epoch=int(start_floor),
         end_epoch=int(epoch) - 1,

@@ -15,7 +15,11 @@ from gateway.research_lab.allocations import (
     _source_add_paid_alpha_to_date_from_snapshots,
 )
 from gateway.research_lab.champion_settlement_v2 import (
+    CHAIN_REALIZED_AUTHORITY_TYPE_V1,
+    merge_settled_allocation_histories_v2,
     merge_finalized_allocation_histories_v2,
+    validate_chain_realized_epoch_settlements_v1,
+    validate_chain_realized_obligation_credits_v1,
     validate_finalized_allocation_authorities_v2,
     validate_legacy_settlement_migrations_v2,
 )
@@ -550,6 +554,24 @@ class CoordinatorAllocationSourceV2:
             },
             context,
         )
+        chain_settlement_rows = self._read(
+            "chain_realized_epoch_settlements",
+            {
+                "netuid": netuid,
+                "start_epoch": min(starts),
+                "end_epoch": epoch - 1,
+            },
+            context,
+        )
+        chain_credit_rows = self._read(
+            "chain_realized_obligation_credits",
+            {
+                "netuid": netuid,
+                "start_epoch": min(starts),
+                "end_epoch": epoch - 1,
+            },
+            context,
+        )
         graph_by_root = _receipt_graphs_by_declared_root(
             context.external_receipt_graphs,
             context.parent_receipt_hashes,
@@ -563,6 +585,19 @@ class CoordinatorAllocationSourceV2:
             receipt_graphs=graph_by_root,
         )
         finalized = merge_finalized_allocation_histories_v2(native, migrated)
+        chain_settlements = validate_chain_realized_epoch_settlements_v1(
+            chain_settlement_rows,
+            receipt_graphs=graph_by_root,
+        )
+        chain_realized = validate_chain_realized_obligation_credits_v1(
+            chain_credit_rows,
+            settlement_rows=chain_settlements,
+            receipt_graphs=graph_by_root,
+        )
+        finalized = merge_settled_allocation_histories_v2(
+            finalized,
+            chain_realized,
+        )
         for row in finalized:
             authority_types = set(row.get("authority_types") or ())
             if "native_v2_finalization" in authority_types:
@@ -592,6 +627,30 @@ class CoordinatorAllocationSourceV2:
                         "legacy finalized allocation receipt is not a declared source"
                     )
                 required_parents.add(receipt_hash)
+            if CHAIN_REALIZED_AUTHORITY_TYPE_V1 in authority_types:
+                settlement_receipt = str(
+                    row.get("chain_realized_settlement_receipt_hash") or ""
+                )
+                if (
+                    not settlement_receipt
+                    or settlement_receipt not in graph_by_root
+                    or settlement_receipt not in context.parent_receipt_hashes
+                ):
+                    raise CoordinatorAllocationSourceV2Error(
+                        "chain realized settlement receipt is not a declared source"
+                    )
+                required_parents.add(settlement_receipt)
+                for receipt_hash in row.get("chain_realized_credit_receipt_hashes") or ():
+                    credit_receipt = str(receipt_hash or "")
+                    if (
+                        not credit_receipt
+                        or credit_receipt not in graph_by_root
+                        or credit_receipt not in context.parent_receipt_hashes
+                    ):
+                        raise CoordinatorAllocationSourceV2Error(
+                            "chain realized credit receipt is not a declared source"
+                        )
+                    required_parents.add(credit_receipt)
         used_finalization_roots = {
             str(row.get("finalization_receipt_hash") or "")
             for row in native_rows

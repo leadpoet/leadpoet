@@ -1,9 +1,8 @@
-"""Sourcing-model wrapper-contract conformance checks.
+"""Sourcing-model consumer-contract conformance checks.
 
-The sourcing model's research-lab surface is frozen by the wrapper contract
-(``research_lab/sourcing_model_contract.json``, mirrored from the site's
-``sourcing-worker/release/model-contract.json``): required files, the exact
-function signatures the lab and the production harness call
+The model-owned contract is snapshotted byte-for-byte at
+``research_lab/sourcing_model_contract.json``. The exact function signatures
+the Lab and production harness call
 (``research_lab_adapter.run_icp``/``adapter_metadata``,
 ``sourcing_model.core.qualify``, the discovery/validation/client seams the
 harness monkey-patches), module bindings reached through by the wrapper, and
@@ -20,8 +19,8 @@ patched source.  Intended call sites:
   image the benchmark cannot invoke (flag-gated, see code_build);
 * local/CI checks against a model checkout.
 
-Pure stdlib.  The contract JSON is a derived mirror — when the model repo's
-contract changes, copy it verbatim and note the source revision.
+Pure stdlib. A candidate is rejected unless its embedded canonical contract and
+parity fixtures are byte-identical to these reviewed consumer snapshots.
 """
 
 from __future__ import annotations
@@ -32,62 +31,26 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
 CONTRACT_PATH = Path(__file__).with_name("sourcing_model_contract.json")
-
-# Asyncness of the frozen surface at the mirrored contract revision. The
-# contract JSON is a verbatim site mirror and carries no async information,
-# but sync-vs-async IS part of the callable surface: the lab runtime and the
-# harness call these seams the way the frozen source defines them, so a
-# candidate flipping one (e.g. making ``qualify`` async) would hand callers a
-# coroutine and break at invocation despite an identical parameter list.
-# Only names present here are checked — a future contract revision that adds
-# functions skips the asyncness check for them until this map is updated
-# alongside the mirror.
-FROZEN_ASYNCNESS: Dict[str, bool] = {
-    "research_lab_adapter.py:adapter_metadata": False,
-    "research_lab_adapter.py:run_icp": False,
-    "sourcing_model/clients.py:_exa_call": False,
-    "sourcing_model/clients.py:agent_get": False,
-    "sourcing_model/clients.py:agent_post": False,
-    "sourcing_model/clients.py:exa_search": False,
-    "sourcing_model/clients.py:sd_company": False,
-    "sourcing_model/clients.py:sd_scrape": False,
-    "sourcing_model/core.py:_emitted_intent_evidence_url": False,
-    "sourcing_model/core.py:_fallback_sources": False,
-    "sourcing_model/core.py:qualify": False,
-    "sourcing_model/discovery.py:agent_results": False,
-    "sourcing_model/discovery.py:apply_keep_gates": False,
-    "sourcing_model/discovery.py:discover_goal_round": False,
-    "sourcing_model/discovery.py:resolve_linkedin": False,
-    "sourcing_model/validation.py:bonus_requirements": False,
-    "sourcing_model/validation.py:make_deps": False,
-    "sourcing_model/validation.py:validate_candidate": True,
-}
-
-# These are invoked directly by the Lab/production wrappers, so an additional
-# positional parameter changes the public callable even when it is optional.
-# Internal monkey-patch seams remain call-compatible: optional trailing
-# parameters are allowed, but additional required parameters are not.
-EXACT_SIGNATURES = {
-    "research_lab_adapter.py:adapter_metadata",
-    "research_lab_adapter.py:run_icp",
-    "sourcing_model/core.py:qualify",
-}
-
-FROZEN_REQUIRED_KEYWORD_ONLY: Dict[str, List[str]] = {
-    "sourcing_model/firmographic_discovery.py:plan_for_icp": ["target"],
-    "sourcing_model/orchestrator.py:run_branches": ["max_companies"],
-}
+PARITY_FIXTURE_PATH = Path(__file__).with_name(
+    "sourcing_model_parity_fixtures.json"
+)
 
 
 def load_wrapper_contract(path: Path | None = None) -> Dict[str, Any]:
-    """Load and shape-check the vendored wrapper contract."""
+    """Load and shape-check the reviewed model-owned contract snapshot."""
     document = json.loads(Path(path or CONTRACT_PATH).read_text(encoding="utf-8"))
     if document.get("schema_version") != 1:
         raise ValueError(
             "Unsupported sourcing wrapper contract schema_version: "
             f"{document.get('schema_version')!r}"
         )
-    for key in ("contract_id", "required_files", "functions"):
+    for key in (
+        "contract_id",
+        "canonical_path",
+        "parity_fixture_path",
+        "required_files",
+        "functions",
+    ):
         if key not in document:
             raise ValueError(f"wrapper contract missing required key {key!r}")
     return document
@@ -98,6 +61,10 @@ def _function_signature(node: ast.AST) -> Dict[str, Any]:
     if args is None:
         return {
             "params": [],
+            "all_params": [],
+            "positional_only": [],
+            "vararg": None,
+            "kwarg": None,
             "required_positional": 0,
             "required_keyword_only": [],
         }
@@ -110,6 +77,12 @@ def _function_signature(node: ast.AST) -> Dict[str, Any]:
     ]
     return {
         "params": [item.arg for item in positional],
+        "all_params": [
+            item.arg for item in [*positional, *args.kwonlyargs]
+        ],
+        "positional_only": [item.arg for item in args.posonlyargs],
+        "vararg": args.vararg.arg if args.vararg is not None else None,
+        "kwarg": args.kwarg.arg if args.kwarg is not None else None,
         "required_positional": required_positional,
         "required_keyword_only": required_keyword_only,
     }
@@ -200,6 +173,133 @@ def _module_bound_imports(tree: ast.Module) -> set[str]:
     return bound
 
 
+def _module_scope_bindings(node: ast.AST) -> set[str]:
+    """Return names rebound while evaluating ``node`` at module scope.
+
+    Function and class bodies have their own scopes and are intentionally not
+    traversed. Their names, decorators, bases, defaults, and annotations are
+    evaluated at module scope and therefore still count.
+    """
+
+    bound: set[str] = set()
+
+    class BindingVisitor(ast.NodeVisitor):
+        def visit_Name(self, item: ast.Name) -> None:  # noqa: N802
+            if isinstance(item.ctx, (ast.Store, ast.Del)):
+                bound.add(item.id)
+
+        def _visit_function_binding(
+            self, item: ast.FunctionDef | ast.AsyncFunctionDef
+        ) -> None:
+            bound.add(item.name)
+            for decorator in item.decorator_list:
+                self.visit(decorator)
+            for default in item.args.defaults:
+                self.visit(default)
+            for default in item.args.kw_defaults:
+                if default is not None:
+                    self.visit(default)
+            if item.returns is not None:
+                self.visit(item.returns)
+
+        def visit_FunctionDef(self, item: ast.FunctionDef) -> None:  # noqa: N802
+            self._visit_function_binding(item)
+
+        def visit_AsyncFunctionDef(  # noqa: N802
+            self, item: ast.AsyncFunctionDef
+        ) -> None:
+            self._visit_function_binding(item)
+
+        def visit_ClassDef(self, item: ast.ClassDef) -> None:  # noqa: N802
+            bound.add(item.name)
+            for decorator in item.decorator_list:
+                self.visit(decorator)
+            for base in item.bases:
+                self.visit(base)
+            for keyword in item.keywords:
+                self.visit(keyword.value)
+
+        def visit_Lambda(self, item: ast.Lambda) -> None:  # noqa: N802
+            for default in item.args.defaults:
+                self.visit(default)
+            for default in item.args.kw_defaults:
+                if default is not None:
+                    self.visit(default)
+
+        def visit_Import(self, item: ast.Import) -> None:  # noqa: N802
+            for alias in item.names:
+                bound.add(alias.asname or alias.name.split(".", 1)[0])
+
+        def visit_ImportFrom(self, item: ast.ImportFrom) -> None:  # noqa: N802
+            for alias in item.names:
+                if alias.name != "*":
+                    bound.add(alias.asname or alias.name)
+
+    BindingVisitor().visit(node)
+    return bound
+
+
+def _literal_module_constants(
+    tree: ast.Module,
+    *,
+    names: set[str],
+) -> Dict[str, Any]:
+    """Resolve exact constants with deterministic module last-write semantics.
+
+    Only direct, single-name literal assignments are trusted. Conditional or
+    dynamic writes poison the value unless a later direct literal assignment
+    deterministically overwrites them.
+    """
+
+    constants: Dict[str, Any] = {}
+    for node in tree.body:
+        assigned_name = ""
+        value_node: ast.AST | None = None
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            assigned_name = node.targets[0].id
+            value_node = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(
+            node.target, ast.Name
+        ):
+            assigned_name = node.target.id
+            value_node = node.value
+
+        if assigned_name in names:
+            if value_node is None:
+                constants.pop(assigned_name, None)
+                continue
+            try:
+                constants[assigned_name] = ast.literal_eval(value_node)
+            except (TypeError, ValueError):
+                constants.pop(assigned_name, None)
+            continue
+
+        for rebound_name in _module_scope_bindings(node) & names:
+            constants.pop(rebound_name, None)
+    return constants
+
+
+def _same_literal(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, list):
+        if not isinstance(actual, (list, tuple)):
+            return False
+        return len(actual) == len(expected) and all(
+            _same_literal(left, right)
+            for left, right in zip(actual, expected)
+        )
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return False
+        return actual.keys() == expected.keys() and all(
+            _same_literal(actual[key], expected[key]) for key in expected
+        )
+    return type(actual) is type(expected) and actual == expected
+
+
 def verify_source_tree_contract(
     root: Path, contract: Mapping[str, Any] | None = None
 ) -> List[str]:
@@ -212,6 +312,40 @@ def verify_source_tree_contract(
     root = Path(root)
     document = dict(contract) if contract is not None else load_wrapper_contract()
     violations: List[str] = []
+    frozen_asyncness = dict(document.get("frozen_asyncness") or {})
+    exact_signatures = set(document.get("exact_signatures") or ())
+    frozen_required_keyword_only = dict(
+        document.get("required_keyword_only") or {}
+    )
+
+    canonical_relative = str(document.get("canonical_path") or "")
+    canonical_path = root / canonical_relative
+    if canonical_path.is_file():
+        try:
+            if canonical_path.read_bytes() != CONTRACT_PATH.read_bytes():
+                violations.append(
+                    "model-owned compatibility contract differs from the "
+                    "reviewed Lab snapshot"
+                )
+        except OSError as exc:
+            violations.append(
+                "unable to compare model-owned compatibility contract: "
+                f"{type(exc).__name__}"
+            )
+    parity_relative = str(document.get("parity_fixture_path") or "")
+    parity_path = root / parity_relative
+    if parity_path.is_file():
+        try:
+            if parity_path.read_bytes() != PARITY_FIXTURE_PATH.read_bytes():
+                violations.append(
+                    "model-owned parity fixtures differ from the reviewed "
+                    "Lab snapshot"
+                )
+        except OSError as exc:
+            violations.append(
+                "unable to compare model-owned parity fixtures: "
+                f"{type(exc).__name__}"
+            )
 
     for relative in document.get("required_files", []):
         if not (root / relative).is_file():
@@ -255,10 +389,35 @@ def verify_source_tree_contract(
             expected = list(expected_params)
             actual_params = actual["params"]
             contract_key = f"{relative}:{name}"
-            if contract_key in EXACT_SIGNATURES and actual_params != expected:
+            expected_full = (document.get("full_parameters") or {}).get(
+                contract_key
+            )
+            if (
+                expected_full is not None
+                and (
+                    actual["all_params"] != list(expected_full)
+                    or actual["positional_only"]
+                    or actual["vararg"] is not None
+                    or actual["kwarg"] is not None
+                )
+            ):
+                violations.append(
+                    f"full parameter drift {relative}:{name}: expected "
+                    f"{list(expected_full)}, found {actual['all_params']} "
+                    f"(positional_only={actual['positional_only']}, "
+                    f"vararg={actual['vararg']!r}, kwarg={actual['kwarg']!r})"
+                )
+            if contract_key in exact_signatures and (
+                actual["all_params"] != expected
+                or actual["positional_only"]
+                or actual["vararg"] is not None
+                or actual["kwarg"] is not None
+            ):
                 violations.append(
                     f"exact parameter drift {relative}:{name}: expected "
-                    f"{expected}, found {actual_params}"
+                    f"{expected}, found {actual['all_params']} "
+                    f"(positional_only={actual['positional_only']}, "
+                    f"vararg={actual['vararg']!r}, kwarg={actual['kwarg']!r})"
                 )
             elif expected and actual_params[: len(expected)] != expected:
                 violations.append(
@@ -271,7 +430,7 @@ def verify_source_tree_contract(
                     f"{len(expected)} required positional parameters, found "
                     f"{actual['required_positional']}"
                 )
-            expected_required_keyword_only = FROZEN_REQUIRED_KEYWORD_ONLY.get(
+            expected_required_keyword_only = frozen_required_keyword_only.get(
                 contract_key, []
             )
             if actual["required_keyword_only"] != expected_required_keyword_only:
@@ -280,7 +439,7 @@ def verify_source_tree_contract(
                     f"expected {expected_required_keyword_only}, found "
                     f"{actual['required_keyword_only']}"
                 )
-            frozen_async = FROZEN_ASYNCNESS.get(contract_key)
+            frozen_async = frozen_asyncness.get(contract_key)
             if frozen_async is not None and actual["is_async"] != frozen_async:
                 violations.append(
                     f"asyncness drift {relative}:{name}: frozen surface is "
@@ -313,6 +472,26 @@ def verify_source_tree_contract(
             elif value < int(floor):
                 violations.append(
                     f"integer floor breach {relative}:{name}: {value} < {floor}"
+                )
+
+    for relative, expected_values in (
+        document.get("exact_constants") or {}
+    ).items():
+        tree = _tree(relative)
+        if tree is None:
+            continue
+        constants = _literal_module_constants(
+            tree,
+            names={str(name) for name in expected_values},
+        )
+        missing = object()
+        for name, expected in expected_values.items():
+            actual = constants.get(name, missing)
+            if actual is missing or not _same_literal(actual, expected):
+                violations.append(
+                    f"exact constant drift {relative}:{name}: expected "
+                    f"{expected!r}, found "
+                    f"{None if actual is missing else actual!r}"
                 )
 
     return violations

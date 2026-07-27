@@ -42,6 +42,8 @@ MEASURED_DATA_PATHS = (
     "gateway/utils/industry_equivalence.json",
     "leadpoet_verifier/identity/public_suffix_list.dat",
     "leadpoet_verifier/leadpoet_industry_taxonomy.json",
+    "research_lab/sourcing_model_contract.json",
+    "research_lab/sourcing_model_parity_fixtures.json",
     "schemas/evidence_bundle.schema.json",
     "schemas/execution_trace.schema.json",
     "schemas/research_evaluation_score_bundle.schema.json",

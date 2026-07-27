@@ -82,6 +82,24 @@ a revision until `leadpoet-lab` advances and its branch-specific artifact
 pointer is verified. Capability, resilience, or taxonomy modules remain inert
 until their owning consumer explicitly wires and tests them.
 
+### Model-quality feedback loop
+
+Use this same workflow whether the issue is first observed in Research Lab or
+on the production site:
+
+1. A site or Lab run reveals a model-quality issue.
+2. Reproduce it as a redacted deterministic fixture in `Sourcing_model`.
+3. Implement the model semantics in `Sourcing_model`, not either consumer.
+4. Test the exact immutable artifact through Research Lab.
+5. Promote the reviewed model commit to `Sourcing_model/main`.
+6. Repin the site to that exact source SHA and compatibility-contract hash.
+7. Run the site's compatibility, release, registry, and deployment gates.
+
+Lab and site do not share one operational production flow. They share the
+exact model artifact, semantic contract, capability declarations, and parity
+fixtures while retaining separate queues, credentials, persistence,
+benchmarking, verification, and publication controls.
+
 ## Research Lab artifact consumption
 
 - Resolve the signed branch-specific

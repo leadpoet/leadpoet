@@ -110,7 +110,17 @@ def test_scoring_import_closure_contains_authority_modules():
     assert {
         "leadpoet_verifier/identity/public_suffix_list.dat",
         "leadpoet_verifier/leadpoet_industry_taxonomy.json",
+        "research_lab/sourcing_model_contract.json",
+        "research_lab/sourcing_model_parity_fixtures.json",
     } <= set(MEASURED_DATA_PATHS)
+    contract_data_paths = {
+        "research_lab/sourcing_model_contract.json",
+        "research_lab/sourcing_model_parity_fixtures.json",
+    }
+    for role_manifest in manifest["role_manifests"].values():
+        assert contract_data_paths <= {
+            item["source_path"] for item in role_manifest["data_files"]
+        }
     assert "RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE" in manifest["environment_variables"]
     assert "QUALIFICATION_OPENROUTER_API_KEY" in manifest["environment_variables"]
     assert manifest["manifest_hash"].startswith("sha256:")
@@ -131,6 +141,13 @@ def test_gateway_code_hash_includes_verifier_runtime_data():
     )
     assert (
         "_attested_runtime/leadpoet_verifier/leadpoet_industry_taxonomy.json"
+        in files
+    )
+    assert (
+        "_attested_runtime/research_lab/sourcing_model_contract.json" in files
+    )
+    assert (
+        "_attested_runtime/research_lab/sourcing_model_parity_fixtures.json"
         in files
     )
 

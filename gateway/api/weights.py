@@ -83,6 +83,54 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/weights", tags=["weights"])
 _WEIGHT_AUTHORITY_GZIP_MIN_BYTES = 1024
+_WEIGHT_AUTHORITY_LOADS_INFLIGHT: Dict[
+    tuple[int, int, int, str, bool],
+    asyncio.Task,
+] = {}
+
+
+async def _load_weight_authority_v2_singleflight(
+    *,
+    netuid: int,
+    epoch_id: int,
+    validator_hotkey: str,
+    require_finalization: bool,
+) -> Optional[dict[str, Any]]:
+    """Share only overlapping identical durable authority reconstructions."""
+
+    from gateway.research_lab.attested_v2_store import load_weight_authority_v2
+
+    loop = asyncio.get_running_loop()
+    key = (
+        id(loop),
+        int(netuid),
+        int(epoch_id),
+        str(validator_hotkey),
+        bool(require_finalization),
+    )
+    task = _WEIGHT_AUTHORITY_LOADS_INFLIGHT.get(key)
+    if task is not None and (task.done() or task.get_loop() is not loop):
+        _WEIGHT_AUTHORITY_LOADS_INFLIGHT.pop(key, None)
+        task = None
+    if task is None:
+        task = asyncio.create_task(
+            load_weight_authority_v2(
+                netuid=int(netuid),
+                epoch_id=int(epoch_id),
+                validator_hotkey=str(validator_hotkey),
+                require_finalization=bool(require_finalization),
+            )
+        )
+        _WEIGHT_AUTHORITY_LOADS_INFLIGHT[key] = task
+
+        def _discard(completed: asyncio.Task) -> None:
+            if _WEIGHT_AUTHORITY_LOADS_INFLIGHT.get(key) is completed:
+                _WEIGHT_AUTHORITY_LOADS_INFLIGHT.pop(key, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(_discard)
+    return await asyncio.shield(task)
 
 
 def _weight_authority_http_response(
@@ -1647,11 +1695,9 @@ async def get_published_weights_v2(
     """
 
     try:
-        from gateway.research_lab.attested_v2_store import load_weight_authority_v2
-
         if len(PRIMARY_VALIDATOR_HOTKEYS) != 1:
             raise RuntimeError("authoritative primary validator hotkey is ambiguous")
-        authority = await load_weight_authority_v2(
+        authority = await _load_weight_authority_v2_singleflight(
             netuid=int(netuid),
             epoch_id=int(epoch_id),
             validator_hotkey=next(iter(PRIMARY_VALIDATOR_HOTKEYS)),

@@ -1,3 +1,4 @@
+import asyncio
 import gzip
 import json
 
@@ -596,6 +597,280 @@ async def test_v2_published_returns_not_found_while_publication_is_pending(
         )
     assert exc.value.status_code == 404
     assert exc.value.detail == "published v2 weight authority not found"
+
+
+@pytest.mark.asyncio
+async def test_v2_published_coalesces_only_overlapping_identical_loads(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store
+
+    calls = 0
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _load(**kwargs):
+        nonlocal calls
+        assert kwargs == {
+            "netuid": 71,
+            "epoch_id": 300,
+            "validator_hotkey": "validator-hotkey",
+            "require_finalization": False,
+        }
+        calls += 1
+        if calls == 1:
+            started.set()
+            await release.wait()
+            return {
+                "authority_stage": "published",
+                "epoch_id": 300,
+            }
+        return {
+            "authority_stage": "finalized",
+            "epoch_id": 300,
+        }
+
+    monkeypatch.setattr(
+        weights_api,
+        "PRIMARY_VALIDATOR_HOTKEYS",
+        {"validator-hotkey"},
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_WEIGHT_AUTHORITY_LOADS_INFLIGHT",
+        {},
+    )
+    monkeypatch.setattr(attested_v2_store, "load_weight_authority_v2", _load)
+
+    requests = [
+        asyncio.create_task(
+            weights_api.get_published_weights_v2(71, 300, _request())
+        )
+        for _ in range(3)
+    ]
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.sleep(0)
+    overlapping_calls = calls
+    release.set()
+    responses = await asyncio.wait_for(
+        asyncio.gather(*requests),
+        timeout=1,
+    )
+    assert overlapping_calls == 1
+    assert {
+        json.loads(response.body)["authority_stage"]
+        for response in responses
+    } == {"published"}
+
+    await asyncio.sleep(0)
+    refreshed = await weights_api.get_published_weights_v2(
+        71,
+        300,
+        _request(),
+    )
+    assert calls == 2
+    assert json.loads(refreshed.body)["authority_stage"] == "finalized"
+
+
+@pytest.mark.asyncio
+async def test_v2_published_singleflight_is_scoped_by_epoch(monkeypatch):
+    from gateway.research_lab import attested_v2_store
+
+    calls = []
+    both_started = asyncio.Event()
+
+    async def _load(**kwargs):
+        calls.append(kwargs["epoch_id"])
+        if len(calls) == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        return {
+            "authority_stage": "published",
+            "epoch_id": kwargs["epoch_id"],
+        }
+
+    monkeypatch.setattr(
+        weights_api,
+        "PRIMARY_VALIDATOR_HOTKEYS",
+        {"validator-hotkey"},
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_WEIGHT_AUTHORITY_LOADS_INFLIGHT",
+        {},
+    )
+    monkeypatch.setattr(attested_v2_store, "load_weight_authority_v2", _load)
+
+    responses = await asyncio.wait_for(
+        asyncio.gather(
+            weights_api.get_published_weights_v2(71, 300, _request()),
+            weights_api.get_published_weights_v2(71, 301, _request()),
+        ),
+        timeout=2,
+    )
+
+    assert sorted(calls) == [300, 301]
+    assert [json.loads(response.body)["epoch_id"] for response in responses] == [
+        300,
+        301,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_v2_published_waiter_cancellation_keeps_shared_load_alive(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store
+
+    calls = 0
+    started = asyncio.Event()
+    release = asyncio.Event()
+    loader_cancelled = False
+
+    async def _load(**_kwargs):
+        nonlocal calls, loader_cancelled
+        calls += 1
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            loader_cancelled = True
+            raise
+        return {"authority_stage": "published", "epoch_id": 300}
+
+    monkeypatch.setattr(
+        weights_api,
+        "PRIMARY_VALIDATOR_HOTKEYS",
+        {"validator-hotkey"},
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_WEIGHT_AUTHORITY_LOADS_INFLIGHT",
+        {},
+    )
+    monkeypatch.setattr(attested_v2_store, "load_weight_authority_v2", _load)
+
+    first = asyncio.create_task(
+        weights_api.get_published_weights_v2(71, 300, _request())
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    second = asyncio.create_task(
+        weights_api.get_published_weights_v2(71, 300, _request())
+    )
+    await asyncio.sleep(0)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert loader_cancelled is False
+
+    release.set()
+    response = await asyncio.wait_for(second, timeout=1)
+    assert json.loads(response.body)["epoch_id"] == 300
+    assert calls == 1
+    await asyncio.sleep(0)
+    assert weights_api._WEIGHT_AUTHORITY_LOADS_INFLIGHT == {}
+
+
+@pytest.mark.asyncio
+async def test_v2_published_failed_load_does_not_poison_retry(monkeypatch):
+    from gateway.research_lab import attested_v2_store
+
+    calls = 0
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _load(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            await release.wait()
+            raise TimeoutError("temporary Supabase read timeout")
+        return {"authority_stage": "published", "epoch_id": 300}
+
+    monkeypatch.setattr(
+        weights_api,
+        "PRIMARY_VALIDATOR_HOTKEYS",
+        {"validator-hotkey"},
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_WEIGHT_AUTHORITY_LOADS_INFLIGHT",
+        {},
+    )
+    monkeypatch.setattr(attested_v2_store, "load_weight_authority_v2", _load)
+
+    requests = [
+        asyncio.create_task(
+            weights_api.get_published_weights_v2(71, 300, _request())
+        )
+        for _ in range(2)
+    ]
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.sleep(0)
+    overlapping_calls = calls
+    release.set()
+    failures = await asyncio.wait_for(
+        asyncio.gather(*requests, return_exceptions=True),
+        timeout=1,
+    )
+    assert overlapping_calls == 1
+    assert all(
+        isinstance(exc, HTTPException)
+        and exc.status_code == 503
+        and exc.headers == {"Retry-After": "5"}
+        for exc in failures
+    )
+
+    await asyncio.sleep(0)
+    response = await weights_api.get_published_weights_v2(
+        71,
+        300,
+        _request(),
+    )
+    assert calls == 2
+    assert json.loads(response.body)["epoch_id"] == 300
+
+
+@pytest.mark.asyncio
+async def test_v2_published_pending_result_does_not_hide_later_publication(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store
+
+    calls = 0
+
+    async def _load(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return None
+        return {"authority_stage": "published", "epoch_id": 300}
+
+    monkeypatch.setattr(
+        weights_api,
+        "PRIMARY_VALIDATOR_HOTKEYS",
+        {"validator-hotkey"},
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_WEIGHT_AUTHORITY_LOADS_INFLIGHT",
+        {},
+    )
+    monkeypatch.setattr(attested_v2_store, "load_weight_authority_v2", _load)
+
+    with pytest.raises(HTTPException) as exc:
+        await weights_api.get_published_weights_v2(71, 300, _request())
+    assert exc.value.status_code == 404
+
+    await asyncio.sleep(0)
+    response = await weights_api.get_published_weights_v2(
+        71,
+        300,
+        _request(),
+    )
+    assert calls == 2
+    assert json.loads(response.body)["epoch_id"] == 300
 
 
 @pytest.mark.asyncio

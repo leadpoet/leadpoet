@@ -1,5 +1,6 @@
 import base64
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import hashes, padding as symmetric_padding
@@ -7,7 +8,11 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from gateway.tee.kms_recipient_v2 import KMSRecipientV2, KMSRecipientV2Error
+from gateway.tee.kms_recipient_v2 import (
+    JOB_CREDENTIAL_REQUEST_TTL_SECONDS,
+    KMSRecipientV2,
+    KMSRecipientV2Error,
+)
 from gateway.tee.provider_broker_v2 import (
     credential_reference_hash,
     credential_value_hash,
@@ -286,7 +291,10 @@ def test_job_kms_recipient_is_single_use_and_binds_job_key_hash():
 
 
 def test_used_job_recipients_do_not_exhaust_capacity(monkeypatch):
-    monkeypatch.setattr("gateway.tee.kms_recipient_v2.MAX_JOB_RECIPIENT_REQUESTS", 2)
+    monkeypatch.setattr(
+        "gateway.tee.kms_recipient_v2.MAX_JOB_CREDENTIAL_REQUESTS",
+        2,
+    )
     manager, _, _ = _manager()
     secret = "miner-specific-key"
 
@@ -304,7 +312,10 @@ def test_used_job_recipients_do_not_exhaust_capacity(monkeypatch):
 
 
 def test_unconsumed_job_recipients_still_fail_closed_at_capacity(monkeypatch):
-    monkeypatch.setattr("gateway.tee.kms_recipient_v2.MAX_JOB_RECIPIENT_REQUESTS", 2)
+    monkeypatch.setattr(
+        "gateway.tee.kms_recipient_v2.MAX_JOB_CREDENTIAL_REQUESTS",
+        2,
+    )
     manager, _, _ = _manager()
     secret = "miner-specific-key"
 
@@ -325,7 +336,10 @@ def test_unconsumed_job_recipients_still_fail_closed_at_capacity(monkeypatch):
 
 
 def test_abandoned_job_recipients_expire_without_evicting_live_requests(monkeypatch):
-    monkeypatch.setattr("gateway.tee.kms_recipient_v2.MAX_JOB_RECIPIENT_REQUESTS", 2)
+    monkeypatch.setattr(
+        "gateway.tee.kms_recipient_v2.MAX_JOB_CREDENTIAL_REQUESTS",
+        2,
+    )
     now = [100.0]
     monkeypatch.setattr(
         "gateway.tee.kms_recipient_v2.time.monotonic",
@@ -346,7 +360,7 @@ def test_abandoned_job_recipients_expire_without_evicting_live_requests(monkeypa
         credential_value_hash_expected=credential_value_hash(secret),
         key_ref_hash=sha256_json({"key_ref": "encrypted_ref:live"}),
     )
-    now[0] += 3599.5
+    now[0] += JOB_CREDENTIAL_REQUEST_TTL_SECONDS - 0.5
 
     replacement = manager.job_recipient_request(
         job_id="autoresearch-v2:replacement-job",
@@ -384,9 +398,114 @@ def test_expired_job_recipient_is_rejected_before_capacity_sweep(monkeypatch):
         credential_value_hash_expected=credential_value_hash(secret),
         key_ref_hash=sha256_json({"key_ref": "encrypted_ref:expired-direct"}),
     )
-    now[0] += 3600.0
+    now[0] += JOB_CREDENTIAL_REQUEST_TTL_SECONDS
 
     with pytest.raises(KMSRecipientV2Error, match="expired"):
+        manager.unwrap_job_credential(
+            request_id=request["request_id"],
+            ciphertext_for_recipient_b64=_encrypt(request, secret),
+        )
+
+
+def test_releasing_job_recipients_preserves_other_pending_jobs():
+    manager, _, _ = _manager()
+    secret = "miner-specific-key"
+    released = manager.job_recipient_request(
+        job_id="autoresearch-v2:released-job",
+        slot="openrouter",
+        credential_value_hash_expected=credential_value_hash(secret),
+        key_ref_hash=sha256_json({"key_ref": "encrypted_ref:released"}),
+    )
+    retained = manager.job_recipient_request(
+        job_id="autoresearch-v2:retained-job",
+        slot="openrouter",
+        credential_value_hash_expected=credential_value_hash(secret),
+        key_ref_hash=sha256_json({"key_ref": "encrypted_ref:retained"}),
+    )
+
+    assert manager.release_job_recipient_requests(
+        "autoresearch-v2:released-job"
+    ) == 1
+    with pytest.raises(KMSRecipientV2Error, match="not found"):
+        manager.unwrap_job_credential(
+            request_id=released["request_id"],
+            ciphertext_for_recipient_b64=_encrypt(released, secret),
+        )
+    assert manager.unwrap_job_credential(
+        request_id=retained["request_id"],
+        ciphertext_for_recipient_b64=_encrypt(retained, secret),
+    )["job_id"] == "autoresearch-v2:retained-job"
+
+
+def test_repeated_abandoned_jobs_released_by_job_do_not_exhaust_capacity(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "gateway.tee.kms_recipient_v2.MAX_JOB_CREDENTIAL_REQUESTS",
+        2,
+    )
+    manager, _, _ = _manager()
+    secret = "miner-specific-key"
+
+    for index in range(100):
+        job_id = f"autoresearch-v2:abandoned-job-{index}"
+        manager.job_recipient_request(
+            job_id=job_id,
+            slot="openrouter",
+            credential_value_hash_expected=credential_value_hash(secret),
+            key_ref_hash=sha256_json(
+                {"key_ref": f"encrypted_ref:abandoned:{index}"}
+            ),
+        )
+        assert manager.release_job_recipient_requests(job_id) == 1
+
+
+def test_release_rpc_clears_pending_recipient_and_preserves_wire_result(
+    monkeypatch,
+):
+    monkeypatch.syspath_prepend(
+        str(Path(__file__).resolve().parents[1] / "gateway" / "tee")
+    )
+    from gateway.tee import tee_service
+
+    manager, _, _ = _manager()
+    secret = "miner-specific-key"
+    request = manager.job_recipient_request(
+        job_id="autoresearch-v2:rpc-release-job",
+        slot="openrouter",
+        credential_value_hash_expected=credential_value_hash(secret),
+        key_ref_hash=sha256_json({"key_ref": "encrypted_ref:rpc-release"}),
+    )
+
+    class _Broker:
+        def release_job_credentials(self, job_id):
+            return {
+                "status": "released",
+                "job_id": job_id,
+                "released_slot_count": 0,
+            }
+
+    monkeypatch.setattr(tee_service, "get_v2_runtime_identity", object)
+    monkeypatch.setattr(tee_service, "get_v2_kms_recipient", lambda: manager)
+    monkeypatch.setattr(
+        tee_service,
+        "get_v2_provider_broker",
+        lambda: _Broker(),
+    )
+
+    response = tee_service.handle_v2_runtime_rpc(
+        "v2_release_job_credentials",
+        {"job_id": "autoresearch-v2:rpc-release-job"},
+    )
+
+    assert response == {
+        "result": {
+            "status": "released",
+            "job_id": "autoresearch-v2:rpc-release-job",
+            "released_slot_count": 0,
+        }
+    }
+    with pytest.raises(KMSRecipientV2Error, match="not found"):
         manager.unwrap_job_credential(
             request_id=request["request_id"],
             ciphertext_for_recipient_b64=_encrypt(request, secret),

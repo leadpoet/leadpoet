@@ -1480,9 +1480,11 @@ def handle_v2_runtime_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]
     if method == "v2_release_job_credentials":
         if not isinstance(params, dict) or set(params) != {"job_id"}:
             raise ValueError("V2 job credential release fields are invalid")
+        job_id = str(params.get("job_id") or "")
+        get_v2_kms_recipient().release_job_recipient_requests(job_id)
         return {
             "result": get_v2_provider_broker().release_job_credentials(
-                str(params.get("job_id") or "")
+                job_id
             )
         }
     if method == "v2_list_encrypted_artifacts":

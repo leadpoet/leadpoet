@@ -307,70 +307,94 @@ async def provision_job_provider_envelope_v2(
         credential_value_hash=normalized["credential_value_hash"],
         key_ref_hash=normalized["key_ref_hash"],
     )
-    if (
-        recipient.get("schema_version") != "leadpoet.kms_job_recipient.v2"
-        or recipient.get("job_id") != normalized["job_id"]
-        or recipient.get("credential_slot") != normalized["credential_slot"]
-        or recipient.get("credential_value_hash")
-        != normalized["credential_value_hash"]
-        or recipient.get("key_ref_hash") != normalized["key_ref_hash"]
-        or recipient.get("key_encryption_algorithm")
-        != KMS_KEY_ENCRYPTION_ALGORITHM
-    ):
-        raise TEEKMSProvisionV2Error("coordinator job KMS recipient is invalid")
     try:
-        attestation_document = base64.b64decode(
-            str(recipient["attestation_document_b64"]),
-            validate=True,
+        if (
+            recipient.get("schema_version") != "leadpoet.kms_job_recipient.v2"
+            or recipient.get("job_id") != normalized["job_id"]
+            or recipient.get("credential_slot")
+            != normalized["credential_slot"]
+            or recipient.get("credential_value_hash")
+            != normalized["credential_value_hash"]
+            or recipient.get("key_ref_hash") != normalized["key_ref_hash"]
+            or recipient.get("key_encryption_algorithm")
+            != KMS_KEY_ENCRYPTION_ALGORITHM
+        ):
+            raise TEEKMSProvisionV2Error(
+                "coordinator job KMS recipient is invalid"
+            )
+        try:
+            attestation_document = base64.b64decode(
+                str(recipient["attestation_document_b64"]),
+                validate=True,
+            )
+        except Exception as exc:
+            raise TEEKMSProvisionV2Error(
+                "coordinator job KMS attestation is invalid"
+            ) from exc
+        if kms_client is None:
+            kms_client = _default_kms_client()
+        try:
+            ciphertext_blob = base64.b64decode(
+                normalized["ciphertext_blob_b64"],
+                validate=True,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TEEKMSProvisionV2Error(
+                "job provider envelope ciphertext is invalid"
+            ) from exc
+        response = await asyncio.to_thread(
+            kms_client.decrypt,
+            CiphertextBlob=ciphertext_blob,
+            EncryptionContext=normalized["encryption_context"],
+            Recipient={
+                "KeyEncryptionAlgorithm": KMS_KEY_ENCRYPTION_ALGORITHM,
+                "AttestationDocument": attestation_document,
+            },
         )
-    except Exception as exc:
-        raise TEEKMSProvisionV2Error(
-            "coordinator job KMS attestation is invalid"
-        ) from exc
-    if kms_client is None:
-        kms_client = _default_kms_client()
-    try:
-        ciphertext_blob = base64.b64decode(
-            normalized["ciphertext_blob_b64"],
-            validate=True,
+        if "Plaintext" in response:
+            raise TEEKMSProvisionV2Error(
+                "KMS returned job plaintext to the parent"
+            )
+        if kms_key_reference_hash(
+            str(response.get("KeyId") or "")
+        ) != normalized["kms_key_id_hash"]:
+            raise TEEKMSProvisionV2Error(
+                "job KMS response key differs from envelope"
+            )
+        ciphertext_for_recipient = response.get("CiphertextForRecipient")
+        if not isinstance(
+            ciphertext_for_recipient,
+            (bytes, bytearray),
+        ) or not ciphertext_for_recipient:
+            raise TEEKMSProvisionV2Error(
+                "job KMS recipient ciphertext is missing"
+            )
+        result = await client.v2_provision_job_encrypted_secret(
+            request_id=str(recipient["request_id"]),
+            ciphertext_for_recipient_b64=base64.b64encode(
+                bytes(ciphertext_for_recipient)
+            ).decode("ascii"),
         )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise TEEKMSProvisionV2Error(
-            "job provider envelope ciphertext is invalid"
-        ) from exc
-    response = await asyncio.to_thread(
-        kms_client.decrypt,
-        CiphertextBlob=ciphertext_blob,
-        EncryptionContext=normalized["encryption_context"],
-        Recipient={
-            "KeyEncryptionAlgorithm": KMS_KEY_ENCRYPTION_ALGORITHM,
-            "AttestationDocument": attestation_document,
-        },
-    )
-    if "Plaintext" in response:
-        raise TEEKMSProvisionV2Error("KMS returned job plaintext to the parent")
-    if kms_key_reference_hash(str(response.get("KeyId") or "")) != normalized[
-        "kms_key_id_hash"
-    ]:
-        raise TEEKMSProvisionV2Error("job KMS response key differs from envelope")
-    ciphertext_for_recipient = response.get("CiphertextForRecipient")
-    if not isinstance(ciphertext_for_recipient, (bytes, bytearray)) or not ciphertext_for_recipient:
-        raise TEEKMSProvisionV2Error("job KMS recipient ciphertext is missing")
-    result = await client.v2_provision_job_encrypted_secret(
-        request_id=str(recipient["request_id"]),
-        ciphertext_for_recipient_b64=base64.b64encode(
-            bytes(ciphertext_for_recipient)
-        ).decode("ascii"),
-    )
-    if (
-        result.get("status") != "ready"
-        or result.get("job_id") != normalized["job_id"]
-        or result.get("credential_slot") != normalized["credential_slot"]
-        or result.get("credential_ref_hash")
-        != normalized["credential_value_hash"]
-    ):
-        raise TEEKMSProvisionV2Error("coordinator rejected job credential lease")
-    return dict(result)
+        if (
+            result.get("status") != "ready"
+            or result.get("job_id") != normalized["job_id"]
+            or result.get("credential_slot")
+            != normalized["credential_slot"]
+            or result.get("credential_ref_hash")
+            != normalized["credential_value_hash"]
+        ):
+            raise TEEKMSProvisionV2Error(
+                "coordinator rejected job credential lease"
+            )
+        return dict(result)
+    except BaseException:
+        # A recipient contains no plaintext, but it occupies bounded enclave
+        # state until unwrap. Always discard it when KMS, validation, RPC, or
+        # cancellation aborts the handshake.
+        await asyncio.shield(
+            client.v2_release_job_credentials(normalized["job_id"])
+        )
+        raise
 
 
 def validate_job_credential_envelope_v2(

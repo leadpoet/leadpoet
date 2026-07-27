@@ -41,7 +41,11 @@ KMS_KEY_ENCRYPTION_ALGORITHM = "RSAES_OAEP_SHA_256"
 MAX_CIPHERTEXT_FOR_RECIPIENT_BYTES = 64 * 1024
 MAX_CREDENTIAL_BYTES = 64 * 1024
 MAX_JOB_RECIPIENT_REQUESTS = 2048
-JOB_RECIPIENT_REQUEST_TTL_SECONDS = 3600.0
+# Job recipient requests exist only for the KMS round trip. Keep their
+# retention independent from the ingress pools so abandoned requests cannot
+# accumulate for an hour under scoring load.
+MAX_JOB_CREDENTIAL_REQUESTS = 2048
+JOB_CREDENTIAL_REQUEST_TTL_SECONDS = 600.0
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -497,11 +501,11 @@ class KMSRecipientV2:
                 item_request_id
                 for item_request_id, item in self._job_requests.items()
                 if now - float(item["created_monotonic"])
-                >= JOB_RECIPIENT_REQUEST_TTL_SECONDS
+                >= JOB_CREDENTIAL_REQUEST_TTL_SECONDS
             ]
             for item_request_id in expired:
                 self._job_requests.pop(item_request_id, None)
-            if len(self._job_requests) >= MAX_JOB_RECIPIENT_REQUESTS:
+            if len(self._job_requests) >= MAX_JOB_CREDENTIAL_REQUESTS:
                 raise KMSRecipientV2Error("job recipient capacity is full")
             self._job_requests[request_id] = {
                 "request": dict(request),
@@ -509,6 +513,26 @@ class KMSRecipientV2:
                 "created_monotonic": now,
             }
         return request
+
+    def release_job_recipient_requests(self, job_id: str) -> int:
+        """Discard pending KMS handshakes for one completed or failed job."""
+
+        normalized_job_id = str(job_id or "")
+        if not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}",
+            normalized_job_id,
+        ):
+            raise KMSRecipientV2Error("job recipient id is invalid")
+        with self._lock:
+            request_ids = [
+                request_id
+                for request_id, record in self._job_requests.items()
+                if str(record["request"].get("job_id") or "")
+                == normalized_job_id
+            ]
+            for request_id in request_ids:
+                self._job_requests.pop(request_id, None)
+        return len(request_ids)
 
     def unwrap_job_credential(
         self,
@@ -523,7 +547,7 @@ class KMSRecipientV2:
                 raise KMSRecipientV2Error("job recipient request was not found")
             if (
                 time.monotonic() - float(record["created_monotonic"])
-                >= JOB_RECIPIENT_REQUEST_TTL_SECONDS
+                >= JOB_CREDENTIAL_REQUEST_TTL_SECONDS
             ):
                 self._job_requests.pop(normalized_request_id, None)
                 raise KMSRecipientV2Error("job recipient request expired")

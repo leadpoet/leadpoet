@@ -1868,3 +1868,34 @@ async def test_stale_parent_alert_still_warns_once_for_unrecovered_candidate(mon
     await worker._alert_stuck_candidates()
 
     assert caplog.text.count("research_lab_stale_parent_candidates_overdue") == 1
+
+
+@pytest.mark.asyncio
+async def test_job_recipient_capacity_failure_uses_bounded_backoff(monkeypatch):
+    worker = sw.ResearchLabGatewayScoringWorker(
+        sw.ResearchLabGatewayConfig(),
+        worker_ref="capacity-test-worker",
+    )
+    sleeps = []
+
+    async def fail_run_once():
+        raise RuntimeError("RPC failed: job recipient capacity is full")
+
+    class StopLoop(RuntimeError):
+        pass
+
+    async def stop_after_sleep(seconds):
+        sleeps.append(seconds)
+        raise StopLoop
+
+    monkeypatch.setattr(worker, "run_once", fail_run_once)
+    monkeypatch.setattr(sw.asyncio, "sleep", stop_after_sleep)
+    monkeypatch.setattr(
+        "gateway.research_lab.capture_health.enforce_capture_health",
+        lambda *args, **kwargs: None,
+    )
+
+    with pytest.raises(StopLoop):
+        await worker.run_forever()
+
+    assert sleeps == [120]

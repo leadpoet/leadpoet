@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import sys
@@ -66,6 +67,7 @@ def test_default_kms_client_has_region_without_aws_region_env(monkeypatch):
 class _Client:
     def __init__(self):
         self.provisioned = None
+        self.released_job_ids = []
 
     async def v2_get_kms_recipient(self, slot):
         return {
@@ -121,6 +123,14 @@ class _Client:
             "job_id": "autoresearch-v2:job-1",
             "credential_slot": "openrouter",
             "credential_ref_hash": "sha256:" + "a" * 64,
+        }
+
+    async def v2_release_job_credentials(self, job_id):
+        self.released_job_ids.append(job_id)
+        return {
+            "status": "released",
+            "job_id": job_id,
+            "released_slot_count": 0,
         }
 
     async def v2_provision_job_sealed_openrouter_secret(self, *, envelope):
@@ -299,6 +309,88 @@ async def test_job_key_is_reencrypted_directly_to_attested_coordinator():
     assert kms.request["CiphertextBlob"] == b"kms-encrypted-provider-secret"
     assert kms.request["Recipient"]["AttestationDocument"] == b"nitro-job"
     assert client.job_provisioned[1] == b"rsa-encrypted-for-enclave"
+    assert client.released_job_ids == []
+
+
+@pytest.mark.asyncio
+async def test_failed_job_kms_round_trip_releases_pending_recipient():
+    envelope = {
+        **_envelope(),
+        "schema_version": JOB_PROVIDER_ENVELOPE_SCHEMA_VERSION,
+        "job_id": "autoresearch-v2:job-1",
+        "credential_value_hash": "sha256:" + "a" * 64,
+        "key_ref_hash": "sha256:" + "b" * 64,
+    }
+    client = _Client()
+
+    with pytest.raises(TEEKMSProvisionV2Error, match="key differs"):
+        await provision_job_provider_envelope_v2(
+            envelope,
+            client=client,
+            kms_client=_KMS(
+                {
+                    "KeyId": "attacker-key",
+                    "CiphertextForRecipient": b"ciphertext",
+                }
+            ),
+        )
+
+    assert client.released_job_ids == ["autoresearch-v2:job-1"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_job_recipient_response_releases_pending_job():
+    envelope = {
+        **_envelope(),
+        "schema_version": JOB_PROVIDER_ENVELOPE_SCHEMA_VERSION,
+        "job_id": "autoresearch-v2:job-1",
+        "credential_value_hash": "sha256:" + "a" * 64,
+        "key_ref_hash": "sha256:" + "b" * 64,
+    }
+
+    class _InvalidRecipientClient(_Client):
+        async def v2_get_job_kms_recipient(self, **kwargs):
+            recipient = await super().v2_get_job_kms_recipient(**kwargs)
+            recipient["credential_value_hash"] = "sha256:" + "f" * 64
+            return recipient
+
+    client = _InvalidRecipientClient()
+    with pytest.raises(
+        TEEKMSProvisionV2Error,
+        match="coordinator job KMS recipient is invalid",
+    ):
+        await provision_job_provider_envelope_v2(
+            envelope,
+            client=client,
+            kms_client=_KMS(),
+        )
+
+    assert client.released_job_ids == ["autoresearch-v2:job-1"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_job_provision_releases_pending_recipient():
+    envelope = {
+        **_envelope(),
+        "schema_version": JOB_PROVIDER_ENVELOPE_SCHEMA_VERSION,
+        "job_id": "autoresearch-v2:job-1",
+        "credential_value_hash": "sha256:" + "a" * 64,
+        "key_ref_hash": "sha256:" + "b" * 64,
+    }
+
+    class _CancelledClient(_Client):
+        async def v2_provision_job_encrypted_secret(self, **_kwargs):
+            raise asyncio.CancelledError()
+
+    client = _CancelledClient()
+    with pytest.raises(asyncio.CancelledError):
+        await provision_job_provider_envelope_v2(
+            envelope,
+            client=client,
+            kms_client=_KMS(),
+        )
+
+    assert client.released_job_ids == ["autoresearch-v2:job-1"]
 
 
 @pytest.mark.asyncio

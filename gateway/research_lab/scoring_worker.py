@@ -3523,6 +3523,14 @@ class ResearchLabGatewayScoringWorker:
                         )
                     )
                     last_error_log = now
+                if "job recipient capacity is full" in str(exc):
+                    logger.critical(
+                        "coordinator_job_credential_pool_saturated worker=%s "
+                        "backing_off_seconds=120",
+                        self.worker_ref,
+                    )
+                    await asyncio.sleep(120)
+                    continue
                 await asyncio.sleep(max(self.config.scoring_worker_poll_seconds, error_backoff_seconds))
                 continue
             if outcome.get("processed") or outcome.get("status") != "idle":

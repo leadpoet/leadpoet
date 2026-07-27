@@ -223,6 +223,51 @@ def _conforming_tree(root: Path) -> None:
             return "intent.news"
     """)
     _write(root, "sourcing_model/routing/policy.py", "POLICY = True\n")
+    _write(root, "sourcing_model/routing/runtime.py", """
+        RUNTIME_CATALOG_VERSION = "sourcing-model-runtime-tools:v1"
+        RUNTIME_POLICY_VERSION = "sourcing-model-runtime-routing:v1"
+
+        def runtime_tool_definitions():
+            return ()
+
+        def runtime_policy():
+            return None
+
+        def runtime_catalog(
+            availability=None, *, state_overrides=None, additional_tools=(),
+            additional_states=(), catalog_version=RUNTIME_CATALOG_VERSION
+        ):
+            return None
+
+        def candidate_route_eligibility(
+            qualification_plan, *, deepline_available
+        ):
+            return False, ()
+
+        def compile_candidate_acquisition_route(
+            qualification_plan, *, backlog_available, registry_available,
+            jobs_available, deepline_available, remaining_seconds,
+            remaining_calls, remaining_results, credit_cap, cohort="control",
+            catalog=None, policy=None
+        ):
+            return None
+
+        def compile_intent_evidence_route(
+            category, *, existing_evidence, available_tools,
+            remaining_seconds, remaining_calls, credit_cap, cohort="control",
+            catalog=None, policy=None
+        ):
+            return None
+
+        def candidate_lane_for_tool(tool_id):
+            return None
+
+        def intent_tier_for_tool(tool_id):
+            return None
+
+        def runtime_routing_metadata():
+            return {}
+    """)
     _write(root, "sourcing_model/runtime_capabilities.py", """
         def capability_metadata():
             return {}

@@ -84,6 +84,20 @@ SOURCING_MODEL_MAX_AGENT_TIMEOUT_SECONDS = 900
 EXPECTED_SOURCING_ADAPTER_VERSION = "sourcing-model-research-lab-adapter:v3"
 EXPECTED_COMPONENT_REGISTRY_VERSION = "sourcing-model-components:v2"
 EXPECTED_ROUTING_COMPILER_VERSION = "routing-compiler-v1"
+REQUIRED_RUNTIME_CANDIDATE_TOOLS = {
+    "candidate.backlog",
+    "candidate.registry_feed",
+    "candidate.jobs_feed",
+    "candidate.deepline_firmographic",
+    "candidate.model_semantic",
+}
+REQUIRED_RUNTIME_INTENT_TOOLS = {
+    "intent.existing_evidence",
+    "intent.jobs_feed",
+    "intent.company_search",
+    "intent.first_party",
+    "intent.newsroom",
+}
 LAB_CONSUMER_CONTRACT_PATH = (
     Path(__file__).resolve().parents[1] / "sourcing_model_contract.json"
 )
@@ -1110,6 +1124,67 @@ def validate_sourcing_adapter_metadata(
     if routing.get("source_add_requires_manifest_sha256") is not True:
         raise PrivateModelRuntimeError(
             "private model routing does not require source manifest attestation"
+        )
+    runtime_routing = document.get("runtime_routing")
+    if not isinstance(runtime_routing, Mapping):
+        raise PrivateModelRuntimeError(
+            "private model does not declare runtime routing metadata"
+        )
+    if (
+        runtime_routing.get("compiler_version")
+        != EXPECTED_ROUTING_COMPILER_VERSION
+    ):
+        raise PrivateModelRuntimeError(
+            "private model runtime routing compiler version is unsupported"
+        )
+    for field in ("catalog_sha256", "policy_sha256"):
+        if not re.fullmatch(
+            r"[0-9a-f]{64}", str(runtime_routing.get(field) or "")
+        ):
+            raise PrivateModelRuntimeError(
+                f"private model runtime routing {field} is invalid"
+            )
+    runtime_catalog = runtime_routing.get("catalog")
+    runtime_policy = runtime_routing.get("policy")
+    if not isinstance(runtime_catalog, Mapping) or not isinstance(
+        runtime_policy, Mapping
+    ):
+        raise PrivateModelRuntimeError(
+            "private model runtime routing catalog and policy must be structured"
+        )
+    for name, payload in (
+        ("catalog", runtime_catalog),
+        ("policy", runtime_policy),
+    ):
+        expected_hash = sha256_json(payload).removeprefix("sha256:")
+        if runtime_routing.get(f"{name}_sha256") != expected_hash:
+            raise PrivateModelRuntimeError(
+                f"private model runtime routing {name} hash does not match its payload"
+            )
+    candidate_tools = set(
+        dict(runtime_routing.get("candidate_tool_lanes") or {})
+    )
+    intent_tools = set(dict(runtime_routing.get("intent_tool_tiers") or {}))
+    if not REQUIRED_RUNTIME_CANDIDATE_TOOLS <= candidate_tools:
+        raise PrivateModelRuntimeError(
+            "private model runtime candidate tool catalog is missing required tools"
+        )
+    if not REQUIRED_RUNTIME_INTENT_TOOLS <= intent_tools:
+        raise PrivateModelRuntimeError(
+            "private model runtime intent tool catalog is missing required tools"
+        )
+    catalog_tool_ids = {
+        str(item.get("tool_id") or "")
+        for item in runtime_catalog.get("tools") or ()
+        if isinstance(item, Mapping)
+    }
+    if not candidate_tools | intent_tools <= catalog_tool_ids:
+        raise PrivateModelRuntimeError(
+            "private model runtime routing mappings reference uncataloged tools"
+        )
+    if runtime_routing.get("private_bindings_exposed") is not False:
+        raise PrivateModelRuntimeError(
+            "private model runtime routing metadata exposes private bindings"
         )
     intent_sources = routing.get("intent_sources")
     if (

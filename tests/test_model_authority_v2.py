@@ -78,6 +78,25 @@ async def _load_empty_catalog(*, epoch_id):
 def _ready_adapter_metadata() -> dict:
     routing_catalog = {"schema_version": 1}
     routing_policy = {"schema_version": 1}
+    runtime_catalog = {
+        "schema_version": 1,
+        "tools": [
+            {"tool_id": tool_id}
+            for tool_id in (
+                "candidate.backlog",
+                "candidate.registry_feed",
+                "candidate.jobs_feed",
+                "candidate.deepline_firmographic",
+                "candidate.model_semantic",
+                "intent.existing_evidence",
+                "intent.jobs_feed",
+                "intent.company_search",
+                "intent.first_party",
+                "intent.newsroom",
+            )
+        ],
+    }
+    runtime_policy = {"schema_version": 1}
     return {
         "adapter_version": "sourcing-model-research-lab-adapter:v3",
         "component_registry_version": "sourcing-model-components:v2",
@@ -104,6 +123,28 @@ def _ready_adapter_metadata() -> dict:
             "policy_sha256": sha256_json(routing_policy).removeprefix("sha256:"),
             "intent_sources": ["company_site", "job_listing", "news"],
             "source_add_requires_manifest_sha256": True,
+            "private_bindings_exposed": False,
+        },
+        "runtime_routing": {
+            "compiler_version": "routing-compiler-v1",
+            "catalog": runtime_catalog,
+            "catalog_sha256": sha256_json(runtime_catalog).removeprefix("sha256:"),
+            "policy": runtime_policy,
+            "policy_sha256": sha256_json(runtime_policy).removeprefix("sha256:"),
+            "candidate_tool_lanes": {
+                "candidate.backlog": "backlog",
+                "candidate.registry_feed": "registry_signal",
+                "candidate.jobs_feed": "jobs_signal",
+                "candidate.deepline_firmographic": "deepline_firmographic",
+                "candidate.model_semantic": "model_semantic",
+            },
+            "intent_tool_tiers": {
+                "intent.existing_evidence": "fused",
+                "intent.jobs_feed": "jobs_feed",
+                "intent.company_search": "company_search",
+                "intent.first_party": "first_party",
+                "intent.newsroom": "newsroom",
+            },
             "private_bindings_exposed": False,
         },
         "component_registry": {

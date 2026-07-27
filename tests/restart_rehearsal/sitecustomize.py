@@ -130,6 +130,37 @@ class _LocalCall:
 class _LocalSubstrate:
     url = "ws://127.0.0.1:9944"
     runtime_config = _LocalRuntimeConfig()
+    _SUBTENSOR_MODULE_INDEX = 7
+    _CALL_METADATA = {
+        "commit_timelocked_mechanism_weights": {
+            "index": 118,
+            "fields": [
+                {"name": "netuid", "typeName": "NetUid"},
+                {"name": "mecid", "typeName": "MechId"},
+                {
+                    "name": "commit",
+                    "typeName": (
+                        "BoundedVec<u8, ConstU32<MAX_CRV3_COMMIT_SIZE_BYTES>>"
+                    ),
+                },
+                {"name": "reveal_round", "typeName": "u64"},
+                {"name": "commit_reveal_version", "typeName": "u16"},
+            ],
+        },
+        "serve_axon": {
+            "index": 4,
+            "fields": [
+                {"name": "netuid", "typeName": "NetUid"},
+                {"name": "version", "typeName": "u32"},
+                {"name": "ip", "typeName": "u128"},
+                {"name": "port", "typeName": "u16"},
+                {"name": "ip_type", "typeName": "u8"},
+                {"name": "protocol", "typeName": "u8"},
+                {"name": "placeholder1", "typeName": "u8"},
+                {"name": "placeholder2", "typeName": "u8"},
+            ],
+        },
+    }
 
     def init_runtime(self, block_hash: Optional[str] = None) -> None:
         if block_hash != _block_hash(CURRENT_BLOCK):
@@ -339,6 +370,54 @@ class _LocalSubstrate:
                 return block
         raise ValueError("local chain received an unknown block hash")
 
+    def get_metadata_module(
+        self,
+        module_name: str,
+        *,
+        block_hash: str,
+    ) -> Any:
+        if (
+            module_name != "SubtensorModule"
+            or block_hash != _block_hash(CURRENT_BLOCK)
+        ):
+            raise ValueError("local chain metadata module contract differs")
+        _event(
+            "runtime_version",
+            method="get_metadata_module",
+            module=module_name,
+            block_hash=block_hash,
+        )
+        return SimpleNamespace(
+            value={
+                "name": module_name,
+                "index": self._SUBTENSOR_MODULE_INDEX,
+            }
+        )
+
+    def get_metadata_call_function(
+        self,
+        module_name: str,
+        function_name: str,
+        *,
+        block_hash: str,
+    ) -> Any:
+        if (
+            module_name != "SubtensorModule"
+            or block_hash != _block_hash(CURRENT_BLOCK)
+            or function_name not in self._CALL_METADATA
+        ):
+            raise ValueError("local chain metadata call contract differs")
+        _event(
+            "runtime_version",
+            method="get_metadata_call_function",
+            module=module_name,
+            function=function_name,
+            block_hash=block_hash,
+        )
+        return SimpleNamespace(
+            value=dict(self._CALL_METADATA[function_name])
+        )
+
     def rpc_request(self, method: str, params: list[Any]) -> dict[str, Any]:
         finalized_hash = _block_hash(CURRENT_BLOCK)
         if method == "chain_getFinalizedHead" and params == []:
@@ -351,7 +430,7 @@ class _LocalSubstrate:
                 "specName": "node-subtensor",
                 "implName": "node-subtensor",
                 "authoringVersion": 1,
-                "specVersion": 438,
+                "specVersion": 440,
                 "implVersion": 0,
                 "apis": [],
                 "transactionVersion": 1,
@@ -1150,7 +1229,7 @@ def _local_chain_rpc(body: bytes, *, archive: bool) -> bytes:
             "specName": "node-subtensor",
             "implName": "node-subtensor",
             "authoringVersion": 1,
-            "specVersion": 438,
+            "specVersion": 440,
             "implVersion": 0,
             "apis": [],
             "transactionVersion": 1,

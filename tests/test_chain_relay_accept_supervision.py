@@ -222,3 +222,36 @@ def test_supervisor_restarts_dead_relay_but_respects_stop(monkeypatch):
     relay.stop()
     relay._thread = None
     assert supervise_once() is False
+
+
+def test_control_handshake_has_a_timeout_and_cleans_up_on_stall():
+    # A client that connects and stalls during the control handshake must not
+    # pin the handler thread/fd: the accepted connection gets a timeout, and a
+    # timeout during the read is cleaned up by the finally (both sockets closed).
+    import socket as _socket
+
+    events = {"settimeouts": [], "closed": False}
+
+    class _StalledConn:
+        def settimeout(self, v):
+            events["settimeouts"].append(v)
+
+        def recv(self, _n):
+            # Simulate the socket timeout firing during the handshake read.
+            raise _socket.timeout("timed out")
+
+        def sendall(self, _b):
+            raise AssertionError("must not reach send on a stalled handshake")
+
+        def close(self):
+            events["closed"] = True
+
+    # Should not hang, should not raise out (finally swallows via close), and
+    # must have armed the handshake timeout before reading.
+    try:
+        relay_mod.handle_chain_relay_connection(_StalledConn(), connector=lambda h: None)
+    except _socket.timeout:
+        pass  # acceptable: propagated after cleanup
+    assert events["settimeouts"], "handshake timeout was never armed"
+    assert events["settimeouts"][0] == relay_mod.CONTROL_HANDSHAKE_TIMEOUT_SECONDS
+    assert events["closed"] is True

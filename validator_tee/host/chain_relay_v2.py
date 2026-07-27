@@ -34,6 +34,12 @@ MAX_CONTROL_BYTES = 16 * 1024
 MAX_BYTES_PER_DIRECTION = 32 * 1024 * 1024
 RELAY_CHUNK_BYTES = 64 * 1024
 CONNECT_TIMEOUT_SECONDS = 15.0
+# Bounds the client control handshake so a peer that connects and stalls
+# before/while sending its control frame cannot pin a handler thread and its
+# accepted fd forever — that leak is what cumulatively exhausts fds and drives
+# the accept() failures the loop now survives. _relay keeps its own idle
+# timeout, so the connection returns to blocking mode for the data pump.
+CONTROL_HANDSHAKE_TIMEOUT_SECONDS = 15.0
 IDLE_TIMEOUT_SECONDS = 90.0
 
 
@@ -188,6 +194,7 @@ def handle_chain_relay_connection(
 ) -> None:
     upstream = None
     try:
+        connection.settimeout(CONTROL_HANDSHAKE_TIMEOUT_SECONDS)
         request = _read_control(connection)
         destination_host = _validate_control(request)
         upstream = connector(destination_host)
@@ -198,6 +205,9 @@ def handle_chain_relay_connection(
                 "policy_hash": chain_source_policy_hash(),
             },
         )
+        # Handshake done; the data pump is bounded by _relay's own idle
+        # timeout, so restore blocking mode for it.
+        connection.settimeout(None)
         _relay(connection, upstream)
     finally:
         for candidate in (upstream, connection):

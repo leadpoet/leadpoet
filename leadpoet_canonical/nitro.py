@@ -144,6 +144,8 @@ _pcr0_cache: Dict[str, Any] = {
     "fetch_error": None,
 }
 _pcr0_cache_lock = threading.Lock()
+_pcr0_cache_condition = threading.Condition(_pcr0_cache_lock)
+_pcr0_refresh_in_flight = False
 
 # Fallback values (used if GitHub fetch fails on first attempt)
 # These should match the initial values in pcr0_allowlist.json
@@ -202,34 +204,75 @@ def _refresh_pcr0_cache_if_needed() -> None:
     Refresh the PCR0 cache if TTL has expired.
     Thread-safe implementation.
     """
-    global _pcr0_cache
+    global _pcr0_cache, _pcr0_refresh_in_flight
     
     current_time = time.time()
     
-    with _pcr0_cache_lock:
-        # Check if cache is still valid
+    with _pcr0_cache_condition:
+        if _pcr0_refresh_in_flight:
+            # A previous allowlist is safe to use during a refresh. On the
+            # first process fetch there is no previous authority, so wait for
+            # the fetch (or pinned fallback) instead of returning an empty
+            # allowlist and spuriously rejecting valid attestations.
+            if (
+                _pcr0_cache["gateway_pcr0"]
+                and _pcr0_cache["validator_pcr0"]
+            ):
+                return
+            while _pcr0_refresh_in_flight:
+                _pcr0_cache_condition.wait()
+            return
+        # Check freshness after in-flight state. The refresh owner reserves
+        # last_fetch before network I/O, so checking TTL first would let a
+        # concurrent first-process verifier return an empty allowlist.
         if current_time - _pcr0_cache["last_fetch"] < PCR0_CACHE_TTL_SECONDS:
             return  # Cache is still valid
-        
+
+        # Reserve the refresh window BEFORE fetching. The fetch used to run
+        # while holding this lock and, on failure with a non-empty cache,
+        # last_fetch was never advanced — so with GitHub slow or down every
+        # PCR0 verification re-attempted the fetch and serialized behind a
+        # 10-second urlopen. Reserving first makes the refresh single-flight
+        # (concurrent verifiers keep using the previous allowlist instead of
+        # stalling) and turns a failed fetch into a TTL-length backoff. The
+        # allowlist values themselves only ever change under the lock, and a
+        # PCR0 mismatch still fails closed downstream exactly as before.
+        _pcr0_cache["last_fetch"] = current_time
+        _pcr0_refresh_in_flight = True
+
+    try:
+        # Fetch new allowlist (network I/O outside the lock)
+        allowlist = _fetch_pcr0_allowlist_from_github()
+    except Exception as e:
+        logger.warning(f"[PCR0] Failed to refresh allowlist from GitHub: {e}")
+        with _pcr0_cache_condition:
+            try:
+                _pcr0_cache["fetch_error"] = str(e)
+
+                # If this is the first fetch (cache is empty), use fallback values
+                if not _pcr0_cache["gateway_pcr0"] and not _pcr0_cache["validator_pcr0"]:
+                    logger.warning("[PCR0] Using fallback PCR0 values")
+                    _pcr0_cache["gateway_pcr0"] = FALLBACK_GATEWAY_PCR0_VALUES.copy()
+                    _pcr0_cache["validator_pcr0"] = FALLBACK_VALIDATOR_PCR0_VALUES.copy()
+            finally:
+                _pcr0_refresh_in_flight = False
+                _pcr0_cache_condition.notify_all()
+        return
+    except BaseException:
+        with _pcr0_cache_condition:
+            _pcr0_refresh_in_flight = False
+            _pcr0_cache_condition.notify_all()
+        raise
+
+    with _pcr0_cache_condition:
         try:
-            # Fetch new allowlist
-            allowlist = _fetch_pcr0_allowlist_from_github()
-            
             _pcr0_cache["gateway_pcr0"] = allowlist["gateway_pcr0"]
             _pcr0_cache["validator_pcr0"] = allowlist["validator_pcr0"]
-            _pcr0_cache["last_fetch"] = current_time
+            _pcr0_cache["last_fetch"] = time.time()
             _pcr0_cache["fetch_error"] = None
-            
-        except Exception as e:
-            logger.warning(f"[PCR0] Failed to refresh allowlist from GitHub: {e}")
-            _pcr0_cache["fetch_error"] = str(e)
-            
-            # If this is the first fetch (cache is empty), use fallback values
-            if not _pcr0_cache["gateway_pcr0"] and not _pcr0_cache["validator_pcr0"]:
-                logger.warning("[PCR0] Using fallback PCR0 values")
-                _pcr0_cache["gateway_pcr0"] = FALLBACK_GATEWAY_PCR0_VALUES.copy()
-                _pcr0_cache["validator_pcr0"] = FALLBACK_VALIDATOR_PCR0_VALUES.copy()
-                _pcr0_cache["last_fetch"] = current_time  # Prevent immediate retry
+        finally:
+            _pcr0_refresh_in_flight = False
+            _pcr0_cache_condition.notify_all()
 
 
 def get_allowed_gateway_pcr0() -> List[str]:

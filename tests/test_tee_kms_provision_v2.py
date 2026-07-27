@@ -6,6 +6,7 @@ import types
 
 import pytest
 
+from gateway.utils import tee_kms_provision_v2
 from gateway.tee.kms_recipient_v2 import (
     KMS_KEY_ENCRYPTION_ALGORITHM,
     KMS_RECIPIENT_SCHEMA_VERSION,
@@ -336,6 +337,46 @@ async def test_failed_job_kms_round_trip_releases_pending_recipient():
         )
 
     assert client.released_job_ids == ["autoresearch-v2:job-1"]
+
+
+@pytest.mark.asyncio
+async def test_failed_job_cleanup_preserves_original_error(monkeypatch):
+    envelope = {
+        **_envelope(),
+        "schema_version": JOB_PROVIDER_ENVELOPE_SCHEMA_VERSION,
+        "job_id": "autoresearch-v2:job-1",
+        "credential_value_hash": "sha256:" + "a" * 64,
+        "key_ref_hash": "sha256:" + "b" * 64,
+    }
+
+    class _CleanupFailureClient(_Client):
+        async def v2_release_job_credentials(self, job_id):
+            raise ConnectionResetError("coordinator unavailable during cleanup")
+
+    warnings = []
+    monkeypatch.setattr(
+        tee_kms_provision_v2.logger,
+        "warning",
+        lambda message, *args: warnings.append(message % args),
+    )
+
+    with pytest.raises(TEEKMSProvisionV2Error, match="key differs"):
+        await provision_job_provider_envelope_v2(
+            envelope,
+            client=_CleanupFailureClient(),
+            kms_client=_KMS(
+                {
+                    "KeyId": "attacker-key",
+                    "CiphertextForRecipient": b"ciphertext",
+                }
+            ),
+        )
+
+    assert warnings == [
+        "job_credential_release_after_failure_failed "
+        "job_id=autoresearch-v2:job-1 "
+        "error=coordinator unavailable during cleanup"
+    ]
 
 
 @pytest.mark.asyncio

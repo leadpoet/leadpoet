@@ -29,6 +29,11 @@ EPOCH_INDEX_REPAIR_SQL = (
     / "scripts"
     / "108-repair-legacy-nonfinalization-epoch-index.concurrent.sql"
 ).read_text(encoding="utf-8")
+CHAIN_REALIZED_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "126-research-lab-chain-realized-settlement.sql"
+).read_text(encoding="utf-8")
 
 
 def test_finalized_allocation_view_requires_bundle_publication_and_finalization():
@@ -137,6 +142,47 @@ def test_deployed_receipt_allowlist_accepts_measured_legacy_settlement():
     ) in SQL
 
 
+def test_chain_realized_settlement_tables_are_append_only_and_service_role_only():
+    assert "research_lab_chain_realized_epoch_settlements_v1" in (
+        CHAIN_REALIZED_SQL
+    )
+    assert "research_lab_chain_realized_obligation_credits_v1" in (
+        CHAIN_REALIZED_SQL
+    )
+    assert "leadpoet.research_lab_chain_realized_epoch_settlement.v1" in (
+        CHAIN_REALIZED_SQL
+    )
+    assert "leadpoet.research_lab_chain_realized_obligation_credit.v1" in (
+        CHAIN_REALIZED_SQL
+    )
+    assert "PRIMARY KEY (netuid, epoch_id)" in CHAIN_REALIZED_SQL
+    assert (
+        "PRIMARY KEY (netuid, epoch_id, obligation_kind, obligation_source_id)"
+        in CHAIN_REALIZED_SQL
+    )
+    assert "prevent_research_lab_attested_v2_mutation" in CHAIN_REALIZED_SQL
+    assert "ENABLE ROW LEVEL SECURITY" in CHAIN_REALIZED_SQL
+    assert "FROM PUBLIC, anon, authenticated" in CHAIN_REALIZED_SQL
+    assert "GRANT SELECT, INSERT" in CHAIN_REALIZED_SQL
+
+
+def test_chain_realized_credit_rows_require_complete_epoch_marker():
+    assert "settlement_hash" in CHAIN_REALIZED_SQL
+    assert (
+        "REFERENCES public.research_lab_chain_realized_epoch_settlements_v1"
+        in CHAIN_REALIZED_SQL
+    )
+    assert "jsonb_typeof(settlement_doc->'credit_hashes') = 'array'" in (
+        CHAIN_REALIZED_SQL
+    )
+    assert "credited_alpha_percent <= lab_attributed_alpha_percent" in (
+        CHAIN_REALIZED_SQL
+    )
+    assert "lab_attributed_alpha_percent <= observed_chain_alpha_percent" in (
+        CHAIN_REALIZED_SQL
+    )
+
+
 def test_migration_99_allowlist_matches_canonical_contract_before_migration_101():
     for role, expected_purposes in ROLE_PURPOSES.items():
         match = re.search(
@@ -149,6 +195,12 @@ def test_migration_99_allowlist_matches_canonical_contract_before_migration_101(
         expected_at_99 = set(expected_purposes)
         if role == "gateway_coordinator":
             expected_at_99.discard("research_lab.subnet_epoch_cutover.v2")
+            expected_at_99.discard(
+                "research_lab.chain_realized_epoch_settlement.v1"
+            )
+            expected_at_99.discard(
+                "research_lab.chain_realized_obligation_credit.v1"
+            )
         if role == "validator_weights":
             expected_at_99.discard("validator.subnet_epoch_snapshot.v2")
         assert migrated_purposes == expected_at_99, role

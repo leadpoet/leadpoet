@@ -402,6 +402,31 @@ QUERY_POLICIES = {
         max_pages=100,
         order="epoch_id.asc",
     ),
+    "chain_realized_epoch_settlements": SupabaseQueryV2(
+        policy_id="chain_realized_epoch_settlements",
+        table="research_lab_chain_realized_epoch_settlements_v1",
+        select=(
+            "netuid,epoch_id,schema_version,settlement_hash,"
+            "settlement_receipt_hash,settlement_doc"
+        ),
+        parameter_names=("netuid", "start_epoch", "end_epoch"),
+        max_pages=100,
+        order="epoch_id.asc",
+    ),
+    "chain_realized_obligation_credits": SupabaseQueryV2(
+        policy_id="chain_realized_obligation_credits",
+        table="research_lab_chain_realized_obligation_credits_v1",
+        select=(
+            "netuid,epoch_id,settlement_hash,schema_version,obligation_kind,"
+            "obligation_source_id,miner_hotkey,miner_uid,"
+            "observed_chain_alpha_percent,lab_attributed_alpha_percent,"
+            "scheduled_alpha_percent,credited_alpha_percent,credit_hash,"
+            "credit_receipt_hash,credit_doc"
+        ),
+        parameter_names=("netuid", "start_epoch", "end_epoch"),
+        max_pages=100,
+        order="epoch_id.asc,obligation_kind.asc,obligation_source_id.asc",
+    ),
     "legacy_weight_bundles_by_epoch": SupabaseQueryV2(
         policy_id="legacy_weight_bundles_by_epoch",
         table="published_weight_bundles",
@@ -738,6 +763,8 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
     if policy.policy_id in {
         "finalized_allocation_authorities",
         "legacy_finalized_allocation_migrations",
+        "chain_realized_epoch_settlements",
+        "chain_realized_obligation_credits",
     }:
         start_epoch = _non_negative_int(parameters["start_epoch"], "start_epoch")
         end_epoch = _non_negative_int(parameters["end_epoch"], "end_epoch")

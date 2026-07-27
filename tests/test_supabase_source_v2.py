@@ -405,6 +405,32 @@ def test_historical_settlement_queries_are_fixed_and_epoch_bound():
     provider = FakeProvider([{"rows": []}])
     _read(
         provider,
+        policy_id="chain_realized_epoch_settlements",
+        parameters={"netuid": 71, "start_epoch": 90, "end_epoch": 100},
+    )
+    url = provider.requests[0]["url"]
+    assert "/rest/v1/research_lab_chain_realized_epoch_settlements_v1?" in url
+    assert "netuid=eq.71" in url
+    assert "epoch_id=gte.90" in url
+    assert "epoch_id=lte.100" in url
+    assert "order=epoch_id.asc" in url
+
+    provider = FakeProvider([{"rows": []}])
+    _read(
+        provider,
+        policy_id="chain_realized_obligation_credits",
+        parameters={"netuid": 71, "start_epoch": 90, "end_epoch": 100},
+    )
+    url = provider.requests[0]["url"]
+    assert "/rest/v1/research_lab_chain_realized_obligation_credits_v1?" in url
+    assert "netuid=eq.71" in url
+    assert "epoch_id=gte.90" in url
+    assert "epoch_id=lte.100" in url
+    assert "order=epoch_id.asc%2Cobligation_kind.asc%2Cobligation_source_id.asc" in url
+
+    provider = FakeProvider([{"rows": []}])
+    _read(
+        provider,
         policy_id="legacy_weight_bundles_by_epoch",
         parameters={"netuid": 71, "epoch_id": 100},
     )

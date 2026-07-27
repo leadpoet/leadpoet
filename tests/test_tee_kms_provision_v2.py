@@ -339,6 +339,36 @@ async def test_failed_job_kms_round_trip_releases_pending_recipient():
 
 
 @pytest.mark.asyncio
+async def test_lost_job_recipient_response_releases_pending_job():
+    envelope = {
+        **_envelope(),
+        "schema_version": JOB_PROVIDER_ENVELOPE_SCHEMA_VERSION,
+        "job_id": "autoresearch-v2:job-1",
+        "credential_value_hash": "sha256:" + "a" * 64,
+        "key_ref_hash": "sha256:" + "b" * 64,
+    }
+
+    class _ResponseLossClient(_Client):
+        remote_created = False
+
+        async def v2_get_job_kms_recipient(self, **kwargs):
+            await super().v2_get_job_kms_recipient(**kwargs)
+            self.remote_created = True
+            raise ConnectionResetError("recipient response was lost")
+
+    client = _ResponseLossClient()
+    with pytest.raises(ConnectionResetError, match="response was lost"):
+        await provision_job_provider_envelope_v2(
+            envelope,
+            client=client,
+            kms_client=_KMS(),
+        )
+
+    assert client.remote_created is True
+    assert client.released_job_ids == ["autoresearch-v2:job-1"]
+
+
+@pytest.mark.asyncio
 async def test_invalid_job_recipient_response_releases_pending_job():
     envelope = {
         **_envelope(),

@@ -14,6 +14,7 @@ from collections import Counter
 import hashlib
 import inspect
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -56,6 +57,7 @@ DEFAULT_TIMEOUT_SECONDS = 1800.0
 DEFAULT_POLL_SECONDS = 0.25
 UPLOAD_CHUNK_BYTES = 512 * 1024
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+logger = logging.getLogger(__name__)
 
 
 def _env_flag(name: str) -> bool:
@@ -773,6 +775,7 @@ async def execute_scoring_v2(
 
     leased_credentials = False
     leased_slot_count = 0
+    credential_provisioning_started = False
     try:
         if profile_document is not None and profile_refs:
             if provider_profile_provisioner is None:
@@ -781,6 +784,7 @@ async def execute_scoring_v2(
                 )
 
                 provider_profile_provisioner = provision_provider_profile_v2
+            credential_provisioning_started = True
             lease = await provider_profile_provisioner(
                 profile_document,
                 job_id=job_id,
@@ -811,6 +815,7 @@ async def execute_scoring_v2(
                     for key, item in envelope.items()
                     if key not in {"ciphertext_blob", "envelope_kind"}
                 }
+                credential_provisioning_started = True
                 leased = await job_credential_provisioner(
                     wire_envelope,
                     client=credential_coordinator_client,
@@ -828,7 +833,21 @@ async def execute_scoring_v2(
                 leased_credentials = True
                 leased_slot_count += 1
         status, state, receipt = await run_remote_job()
-    finally:
+    except BaseException:
+        if credential_provisioning_started:
+            try:
+                await asyncio.shield(
+                    credential_coordinator_client.v2_release_job_credentials(
+                        job_id
+                    )
+                )
+            except BaseException:
+                logger.exception(
+                    "V2 scoring credential cleanup failed while preserving "
+                    "the original job failure"
+                )
+        raise
+    else:
         if leased_credentials:
             released = await credential_coordinator_client.v2_release_job_credentials(
                 job_id

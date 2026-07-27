@@ -748,6 +748,174 @@ async def test_v2_bridge_binds_dynamic_provider_id_to_derived_job_slot():
 
 
 @pytest.mark.asyncio
+async def test_v2_bridge_preserves_provisioning_failure_after_idempotent_cleanup():
+    release = _release()
+    credential_hashes = (_hash("7"), _hash("8"))
+    release_counts = []
+
+    class _CredentialClient:
+        active_slot_count = 0
+
+        async def v2_release_job_credentials(self, job_id):
+            released_slot_count = self.active_slot_count
+            self.active_slot_count = 0
+            release_counts.append(released_slot_count)
+            return {
+                "status": "released",
+                "job_id": job_id,
+                "released_slot_count": released_slot_count,
+            }
+
+    credential_client = _CredentialClient()
+
+    def load_profile(*_args, **_kwargs):
+        return {
+            "profile": "default",
+            "credential_ref_hashes": {},
+            "envelopes": [],
+        }
+
+    def build_envelopes(job_id):
+        envelopes = []
+        for index, credential_hash in enumerate(credential_hashes):
+            ciphertext = f"encrypted-source-{index}".encode()
+            context = {"adapter_ref": f"source_add:adapter:{index}"}
+            envelopes.append(
+                {
+                    "schema_version":
+                        "leadpoet.job_provider_credential_envelope.v2",
+                    "job_id": job_id,
+                    "credential_slot":
+                        "source_add_" + f"{index + 1:x}" * 32,
+                    "credential_ref_hash": credential_hash,
+                    "credential_value_hash": credential_hash,
+                    "key_ref_hash": _hash("9"),
+                    "ciphertext_blob_b64":
+                        base64.b64encode(ciphertext).decode(),
+                    "ciphertext_blob_hash": sha256_bytes(ciphertext),
+                    "kms_key_id_hash": _hash("a"),
+                    "encryption_context": context,
+                    "encryption_context_hash": sha256_json(context),
+                }
+            )
+        return envelopes
+
+    provision_attempt = 0
+
+    async def provision_job(envelope, *, client):
+        nonlocal provision_attempt
+        provision_attempt += 1
+        if provision_attempt == 1:
+            client.active_slot_count += 1
+            return {
+                "status": "ready",
+                "job_id": envelope["job_id"],
+                "credential_slot": envelope["credential_slot"],
+                "credential_ref_hash": envelope["credential_value_hash"],
+            }
+        await client.v2_release_job_credentials(envelope["job_id"])
+        raise RuntimeError("ORIGINAL: second credential KMS failed")
+
+    async def persist_graph(graph):
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    with pytest.raises(
+        RuntimeError,
+        match="ORIGINAL: second credential KMS failed",
+    ):
+        await execute_scoring_v2(
+            operation="run_model_sandbox_v2",
+            purpose="research_lab.private_model_run.v2",
+            epoch_id=12,
+            sequence=0,
+            payload={"model_kind": "private"},
+            worker_index=0,
+            provider_credential_ref_hashes={
+                "source_one": credential_hashes[0],
+                "source_two": credential_hashes[1],
+            },
+            provider_profile_loader=load_profile,
+            additional_job_credential_envelope_builder=build_envelopes,
+            job_credential_provisioner=provision_job,
+            credential_coordinator_client=credential_client,
+            release_manifest=release,
+            client=_Client(release),
+            persist_graph=persist_graph,
+            boot_verifier=lambda identity: identity,
+            poll_seconds=0.001,
+        )
+
+    assert provision_attempt == 2
+    assert release_counts == [1, 0]
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_still_fails_closed_on_successful_release_mismatch():
+    release = _release()
+    credential_hash = _hash("7")
+    release_calls = []
+
+    class _CredentialClient:
+        async def v2_release_job_credentials(self, job_id):
+            release_calls.append(job_id)
+            return {
+                "status": "released",
+                "job_id": job_id,
+                "released_slot_count": 0,
+            }
+
+    def load_profile(
+        profile,
+        *,
+        execution_role,
+        worker_index,
+        require_egress_proxy,
+    ):
+        return {
+            "profile": profile,
+            "credential_ref_hashes": {"exa": credential_hash},
+            "envelopes": [{"encrypted": True}],
+        }
+
+    async def provision_profile(document, *, job_id, client):
+        del client
+        return {
+            "profile": document["profile"],
+            "job_id": job_id,
+            "credential_ref_hashes": dict(document["credential_ref_hashes"]),
+            "leased_credential_count": 1,
+            "results": [{"status": "ready"}],
+        }
+
+    async def persist_graph(graph):
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    with pytest.raises(
+        AttestedScoringV2Error,
+        match="provider credential profile release failed",
+    ):
+        await execute_scoring_v2(
+            operation="run_model_sandbox_v2",
+            purpose="research_lab.private_model_run.v2",
+            epoch_id=12,
+            sequence=0,
+            payload={"model_kind": "private"},
+            worker_index=0,
+            provider_credential_profile="benchmark_model",
+            provider_profile_loader=load_profile,
+            provider_profile_provisioner=provision_profile,
+            credential_coordinator_client=_CredentialClient(),
+            release_manifest=release,
+            client=_Client(release),
+            persist_graph=persist_graph,
+            boot_verifier=lambda identity: identity,
+            poll_seconds=0.001,
+        )
+
+    assert len(release_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_v2_bridge_fails_when_persistence_does_not_read_back_root():
     release = _release()
     client = _Client(release)

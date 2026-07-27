@@ -301,13 +301,13 @@ async def provision_job_provider_envelope_v2(
     """KMS unwrap one per-miner key directly into the coordinator enclave."""
 
     normalized = validate_job_provider_envelope(envelope)
-    recipient = await client.v2_get_job_kms_recipient(
-        job_id=normalized["job_id"],
-        credential_slot=normalized["credential_slot"],
-        credential_value_hash=normalized["credential_value_hash"],
-        key_ref_hash=normalized["key_ref_hash"],
-    )
     try:
+        recipient = await client.v2_get_job_kms_recipient(
+            job_id=normalized["job_id"],
+            credential_slot=normalized["credential_slot"],
+            credential_value_hash=normalized["credential_value_hash"],
+            key_ref_hash=normalized["key_ref_hash"],
+        )
         if (
             recipient.get("schema_version") != "leadpoet.kms_job_recipient.v2"
             or recipient.get("job_id") != normalized["job_id"]

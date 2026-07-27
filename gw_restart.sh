@@ -378,6 +378,32 @@ install_successful_restart_script() {
   fi
 }
 
+install_research_lab_admin_wrapper() {
+  local source_script target_dir target_script temporary
+  source_script="$LEADPOET_REPO_ROOT/scripts/research_lab_admin_wrapper_runtime.sh"
+  target_dir="/home/ec2-user/bin"
+  target_script="$target_dir/research-lab-admin"
+  if [ ! -f "$source_script" ]; then
+    echo "ERROR: Research Lab admin wrapper source is missing" >&2
+    return 1
+  fi
+  if ! bash -n "$source_script"; then
+    echo "ERROR: Research Lab admin wrapper source has invalid syntax" >&2
+    return 1
+  fi
+  mkdir -p "$target_dir"
+  temporary="$(mktemp "$target_dir/.research-lab-admin.XXXXXX")"
+  if ! install -m 700 "$source_script" "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! mv -f "$temporary" "$target_script"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  "$target_script" --help >/dev/null
+}
+
 root_free_kb() {
   df --output=avail / | tail -1 | tr -d ' '
 }
@@ -1849,6 +1875,7 @@ timeout 30 curl -fsS http://localhost:8000/attest >/dev/null
 
 GATEWAY_DEPLOY_STAGE="host_restart_script_install"
 export GATEWAY_DEPLOY_STAGE
+install_research_lab_admin_wrapper
 install_successful_restart_script
 
 GATEWAY_DEPLOY_STAGE="completed"

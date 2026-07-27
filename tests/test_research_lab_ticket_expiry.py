@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import subprocess
 
 import pytest
 from fastapi import HTTPException
@@ -92,13 +93,97 @@ def test_expiry_config_and_admin_command_default_fail_closed(monkeypatch) -> Non
 
 
 def test_admin_wrapper_uses_canonical_git_checkout_and_hydrated_env() -> None:
-    wrapper = (ROOT / "scripts" / "install_research_lab_admin_wrapper.sh").read_text(encoding="utf-8")
+    installer = (
+        ROOT / "scripts" / "install_research_lab_admin_wrapper.sh"
+    ).read_text(encoding="utf-8")
+    wrapper = (
+        ROOT / "scripts" / "research_lab_admin_wrapper_runtime.sh"
+    ).read_text(encoding="utf-8")
+    assert 'WRAPPER_SOURCE="$ROOT/scripts/research_lab_admin_wrapper_runtime.sh"' in installer
     assert 'LEADPOET_REPO:-/home/ec2-user/leadpoet_repo}' in wrapper
     assert '/home/ec2-user/.config/leadpoet/gateway.env' in wrapper
     assert 'export PYTHONPATH="$REPO"' in wrapper
     assert 'GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"' in wrapper
+    assert '/home/ec2-user/venv311/bin/python3' in wrapper
+    assert 'export RESEARCH_LAB_PRIVATE_REPO_BRANCH="leadpoet-lab"' in wrapper
+    assert "/branches/leadpoet-lab/current.json" in wrapper
+    assert 'RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID="alias/leadpoet-research-lab-artifact-signing"' in wrapper
+    assert "unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE " in wrapper
+    assert "export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true" in wrapper
     assert 'PYTHONPATH="$REPO:/home/ec2-user' not in wrapper
     assert '/home/ec2-user/gw.environ' not in wrapper
+
+
+def test_admin_wrapper_overrides_stale_model_and_aws_credentials(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "gateway").mkdir(parents=True)
+    env_file = tmp_path / "gateway.env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "RESEARCH_LAB_PRIVATE_REPO_BRANCH=main",
+                "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI=s3://stale/current.json",
+                "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID=alias/stale",
+                "AWS_ACCESS_KEY_ID=stale-access",
+                "AWS_SECRET_ACCESS_KEY=stale-secret",
+                "AWS_PROFILE=stale-profile",
+                "-i",
+            )
+        ),
+        encoding="utf-8",
+    )
+    captured_env = tmp_path / "captured.env"
+    captured_args = tmp_path / "captured.args"
+    python_bin = tmp_path / "python3"
+    python_bin.write_text(
+        "#!/usr/bin/env bash\n"
+        "env > \"$CAPTURED_ENV\"\n"
+        "printf '%s\\n' \"$@\" > \"$CAPTURED_ARGS\"\n",
+        encoding="utf-8",
+    )
+    python_bin.chmod(0o700)
+
+    subprocess.run(
+        [
+            "bash",
+            str(ROOT / "scripts" / "research_lab_admin_wrapper_runtime.sh"),
+            "--help",
+        ],
+        check=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "LEADPOET_REPO": str(repo),
+            "GATEWAY_ENV_FILE": str(env_file),
+            "GATEWAY_PYTHON_BIN": str(python_bin),
+            "CAPTURED_ENV": str(captured_env),
+            "CAPTURED_ARGS": str(captured_args),
+        },
+    )
+
+    values = dict(
+        line.split("=", 1)
+        for line in captured_env.read_text(encoding="utf-8").splitlines()
+        if "=" in line
+    )
+    assert values["RESEARCH_LAB_PRIVATE_REPO_BRANCH"] == "leadpoet-lab"
+    assert values["RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI"].endswith(
+        "/branches/leadpoet-lab/current.json"
+    )
+    assert (
+        values["RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID"]
+        == "alias/leadpoet-research-lab-artifact-signing"
+    )
+    assert values["LEADPOET_AWS_INSTANCE_ROLE_ONLY"] == "true"
+    assert values["GATEWAY_ENV_FILE"] == "/dev/null"
+    assert "AWS_ACCESS_KEY_ID" not in values
+    assert "AWS_SECRET_ACCESS_KEY" not in values
+    assert "AWS_PROFILE" not in values
+    assert captured_args.read_text(encoding="utf-8").splitlines() == [
+        "-m",
+        "gateway.research_lab.admin",
+        "--help",
+    ]
 
 
 @pytest.mark.asyncio

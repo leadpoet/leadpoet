@@ -154,6 +154,46 @@ def test_gateway_restart_forces_instance_role_for_runtime_aws_calls() -> None:
     assert runtime_launch < unset_credentials < instance_role < gateway_launch
 
 
+def test_gateway_restart_installs_commit_bound_admin_wrapper_after_handoff() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    wrapper = (
+        ROOT / "scripts" / "research_lab_admin_wrapper_runtime.sh"
+    ).read_text(encoding="utf-8")
+
+    status_handoff = script.index(
+        "timeout 30 curl -fsS http://localhost:8000/research-lab/status"
+    )
+    install_stage = script.index(
+        'GATEWAY_DEPLOY_STAGE="host_restart_script_install"'
+    )
+    wrapper_install = script.index(
+        "install_research_lab_admin_wrapper",
+        install_stage,
+    )
+    restart_install = script.index(
+        "install_successful_restart_script",
+        wrapper_install,
+    )
+    completed = script.index(
+        'GATEWAY_DEPLOY_STAGE="completed"',
+        restart_install,
+    )
+
+    assert (
+        status_handoff
+        < install_stage
+        < wrapper_install
+        < restart_install
+        < completed
+    )
+    assert (
+        'source_script="$LEADPOET_REPO_ROOT/scripts/'
+        'research_lab_admin_wrapper_runtime.sh"'
+    ) in script
+    assert 'RESEARCH_LAB_PRIVATE_REPO_BRANCH="leadpoet-lab"' in wrapper
+    assert "LEADPOET_AWS_INSTANCE_ROLE_ONLY=true" in wrapper
+
+
 def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     storage_preflight = script.index("--storage-read-preflight")

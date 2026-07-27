@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from gateway.research_lab import v2_authority
@@ -241,7 +243,17 @@ async def test_promotion_decision_requires_metric_graph(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_allocation_binds_every_reward_parent(monkeypatch):
-    monkeypatch.setattr(v2_authority, "validate_receipt_graph", lambda *args, **kwargs: None)
+    loop_thread = threading.get_ident()
+    validation_threads = []
+
+    def validate_receipt_graph(*_args, **_kwargs):
+        validation_threads.append(threading.get_ident())
+
+    monkeypatch.setattr(
+        v2_authority,
+        "validate_receipt_graph",
+        validate_receipt_graph,
+    )
     expected = {"allocation_hash": HASH_A}
     allocation_inputs = {
         "epoch": 10,
@@ -296,6 +308,9 @@ async def test_allocation_binds_every_reward_parent(monkeypatch):
         load_allocation_parent_graphs=load_parent_graphs,
     )
     assert outcome["lineage_complete"] is True
+    assert validation_threads
+    assert set(validation_threads) == {validation_threads[0]}
+    assert validation_threads[0] != loop_thread
 
 
 @pytest.mark.asyncio

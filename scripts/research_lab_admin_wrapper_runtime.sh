@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO="${LEADPOET_REPO:-/home/ec2-user/leadpoet_repo}"
+ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
+PYTHON_BIN="${GATEWAY_PYTHON_BIN:-/home/ec2-user/venv311/bin/python3}"
+
+if [[ ! -d "$REPO/gateway" ]]; then
+  echo "research-lab-admin: repo gateway package not found at $REPO" >&2
+  exit 2
+fi
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "research-lab-admin: gateway Python not executable at $PYTHON_BIN" >&2
+  exit 2
+fi
+
+# Preload only valid KEY=VALUE records before Python imports gateway.config.
+# Canonical release-bound settings below override stale cached values.
+if [[ -f "$ENV_FILE" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#${line%%[![:space:]]*}}"
+    line="${line%${line##*[![:space:]]}}"
+    [[ -z "$line" || "${line:0:1}" == "#" || "$line" != *"="* ]] && continue
+
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key#${key%%[![:space:]]*}}"
+    key="${key%${key##*[![:space:]]}}"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+
+    value="${value#${value%%[![:space:]]*}}"
+    value="${value%${value##*[![:space:]]}}"
+    if [[ ${#value} -ge 2 ]]; then
+      first="${value:0:1}"
+      last="${value: -1}"
+      if { [[ "$first" == "\"" && "$last" == "\"" ]] || [[ "$first" == "'" && "$last" == "'" ]]; }; then
+        value="${value:1:${#value}-2}"
+      fi
+    fi
+    export "$key=$value"
+  done < "$ENV_FILE"
+  export GATEWAY_ENV_FILE=/dev/null
+fi
+
+export AWS_REGION="${AWS_REGION:-us-east-1}"
+export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-$AWS_REGION}"
+export RESEARCH_LAB_PRIVATE_REPO_BRANCH="leadpoet-lab"
+export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/branches/leadpoet-lab/current.json"
+export RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID="alias/leadpoet-research-lab-artifact-signing"
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
+export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true
+
+cd "$REPO"
+export PYTHONPATH="$REPO"
+export GATEWAY_LOG_ROOT="${GATEWAY_LOG_ROOT:-/home/ec2-user/gateway}"
+export GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"
+exec "$PYTHON_BIN" -m gateway.research_lab.admin "$@"

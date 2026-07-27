@@ -72,6 +72,29 @@ class ResearchLabV2AuthorityError(RuntimeError):
     """A protected result did not have complete V2 enclave authority."""
 
 
+def _validate_allocation_parent_graphs(
+    graphs: Sequence[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    bindings: list[dict[str, str]] = []
+    for graph in graphs:
+        validate_receipt_graph(graph)
+        root_hash = str(graph.get("root_receipt_hash") or "")
+        receipts = {
+            str(receipt["receipt_hash"]): receipt for receipt in graph["receipts"]
+        }
+        root = receipts.get(root_hash)
+        if not isinstance(root, Mapping):
+            raise ResearchLabV2AuthorityError("allocation parent graph root is missing")
+        bindings.append(
+            {
+                "receipt_hash": root_hash,
+                "receipt_purpose": str(root.get("purpose") or ""),
+                "receipt_role": str(root.get("role") or ""),
+            }
+        )
+    return bindings
+
+
 async def evaluate_source_add_provenance_v2(
     *,
     submission_id: str,
@@ -1413,23 +1436,7 @@ async def build_allocation_v2(
             }
         )
     graphs = list(await load_allocation_parent_graphs(**parent_loader_kwargs))
-    bindings = []
-    for graph in graphs:
-        validate_receipt_graph(graph)
-        root_hash = str(graph.get("root_receipt_hash") or "")
-        receipts = {
-            str(receipt["receipt_hash"]): receipt for receipt in graph["receipts"]
-        }
-        root = receipts.get(root_hash)
-        if not isinstance(root, Mapping):
-            raise ResearchLabV2AuthorityError("allocation parent graph root is missing")
-        bindings.append(
-            {
-                "receipt_hash": root_hash,
-                "receipt_purpose": str(root.get("purpose") or ""),
-                "receipt_role": str(root.get("role") or ""),
-            }
-        )
+    bindings = await asyncio.to_thread(_validate_allocation_parent_graphs, graphs)
     outcome = await execute(
         operation=OP_RESEARCH_LAB_ALLOCATION,
         purpose="research_lab.allocation.v2",

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 HOST="${1:-leadpoet-gateway}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WRAPPER_SOURCE="$ROOT/scripts/research_lab_admin_wrapper_runtime.sh"
 
 if [[ "${LEADPOET_PROD_WRITE_APPROVED:-}" != "yes" ]]; then
   cat >&2 <<'MSG'
@@ -13,60 +15,25 @@ MSG
   exit 2
 fi
 
-ssh -o BatchMode=yes "$HOST" 'bash -s' <<'REMOTE'
+if [[ ! -f "$WRAPPER_SOURCE" ]]; then
+  echo "Research Lab admin wrapper source not found at $WRAPPER_SOURCE" >&2
+  exit 2
+fi
+
+WRAPPER_B64="$(base64 < "$WRAPPER_SOURCE" | tr -d '\n')"
+ssh -o BatchMode=yes "$HOST" 'bash -s' -- "$WRAPPER_B64" <<'REMOTE'
 set -euo pipefail
 
 mkdir -p /home/ec2-user/bin
 tmp="$(mktemp /home/ec2-user/bin/research-lab-admin.XXXXXX)"
 trap 'rm -f "$tmp"' EXIT
 
-cat > "$tmp" <<'WRAPPER'
-#!/usr/bin/env bash
-set -euo pipefail
+printf '%s' "$1" | base64 --decode > "$tmp"
 
-REPO="${LEADPOET_REPO:-/home/ec2-user/leadpoet_repo}"
-ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
-
-if [[ ! -d "$REPO/gateway" ]]; then
-  echo "research-lab-admin: repo gateway package not found at $REPO" >&2
+if ! bash -n "$tmp"; then
+  echo "research-lab-admin: candidate wrapper syntax check failed" >&2
   exit 2
 fi
-
-# Load valid KEY=VALUE lines before Python imports gateway.config. The gateway
-# fallback loader prints when it loads env itself; preloading keeps JSON output clean.
-if [[ -f "$ENV_FILE" ]]; then
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line#${line%%[![:space:]]*}}"
-    line="${line%${line##*[![:space:]]}}"
-    [[ -z "$line" || "${line:0:1}" == "#" || "$line" != *"="* ]] && continue
-
-    key="${line%%=*}"
-    value="${line#*=}"
-    key="${key#${key%%[![:space:]]*}}"
-    key="${key%${key##*[![:space:]]}}"
-    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-
-    value="${value#${value%%[![:space:]]*}}"
-    value="${value%${value##*[![:space:]]}}"
-    if [[ ${#value} -ge 2 ]]; then
-      first="${value:0:1}"
-      last="${value: -1}"
-      if { [[ "$first" == "\"" && "$last" == "\"" ]] || [[ "$first" == "'" && "$last" == "'" ]]; }; then
-        value="${value:1:${#value}-2}"
-      fi
-    fi
-    export "$key=$value"
-  done < "$ENV_FILE"
-  export GATEWAY_ENV_FILE=/dev/null
-fi
-
-cd "$REPO"
-export PYTHONPATH="$REPO"
-export GATEWAY_LOG_ROOT="${GATEWAY_LOG_ROOT:-/home/ec2-user/gateway}"
-export GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"
-exec python3 -m gateway.research_lab.admin "$@"
-WRAPPER
-
 chmod 700 "$tmp"
 mv "$tmp" /home/ec2-user/bin/research-lab-admin
 trap - EXIT

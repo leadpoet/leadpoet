@@ -1623,13 +1623,10 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     RESEARCH_LAB_TEE_PROTOCOL="$RESEARCH_LAB_TEE_PROTOCOL" \
     bash ./start_enclave.sh
 
-  . "$LEADPOET_REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
-  leadpoet_release_docker_operation_lock_v2
-
   echo "Starting parent-side opaque enclave egress forwarder"
   cd "$LEADPOET_REPO_ROOT"
   PYTHONPATH="$LEADPOET_REPO_ROOT" setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.utils.tee_egress_forwarder \
-    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" 2>&1 < /dev/null 9>&- &
+    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" 2>&1 < /dev/null 7>&- 9>&- &
   TEE_EGRESS_FORWARDER_PID="$!"
   sleep 2
   if ! ps -p "$TEE_EGRESS_FORWARDER_PID" >/dev/null 2>&1; then
@@ -1641,7 +1638,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   echo "Starting opaque inter-enclave TLS relay"
   cd "$LEADPOET_REPO_ROOT"
   PYTHONPATH="$LEADPOET_REPO_ROOT" setsid "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_inter_enclave_relay \
-    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null 9>&- &
+    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null 7>&- 9>&- &
   INTER_ENCLAVE_RELAY_PID="$!"
   sleep 2
   if ! ps -p "$INTER_ENCLAVE_RELAY_PID" >/dev/null 2>&1; then
@@ -1800,6 +1797,15 @@ export GATEWAY_DEPLOY_STAGE
   PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
     -m gateway.tee.verify_weight_submission_ready_v2 --repair
 )
+
+# Keep attestation/PCR0 Docker builds off this host while the pre-launch
+# authority verifier is reconstructing the canonical allocation. The verifier
+# is memory-intensive and runs after enclave creation; releasing the shared
+# lock at enclave launch allowed a newer attestation build to contend with it
+# and lengthen the production outage. Gateway workers may use Docker after
+# launch, so release immediately after the fail-closed verifier completes.
+. "$LEADPOET_REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
+leadpoet_release_docker_operation_lock_v2
 
 cd "$LEADPOET_REPO_ROOT"
 setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null 9>&- &

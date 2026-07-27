@@ -600,7 +600,7 @@ def test_gateway_restart_starts_tee_egress_before_v2_readiness() -> None:
     launch = (
         '-m gateway.utils.tee_egress_forwarder \\\n'
         '    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" '
-        '2>&1 < /dev/null 9>&- &'
+        '2>&1 < /dev/null 7>&- 9>&- &'
     )
     readiness = '"$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready'
 
@@ -623,7 +623,8 @@ def test_gateway_restart_has_fail_closed_lock_and_official_epoch_gate() -> None:
     assert "leadpoet_ensure_post_activation_docker_operation_lock_v2" in script
     assert (
         '-m gateway.utils.tee_inter_enclave_relay \\\n'
-        '    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null 9>&- &'
+        '    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" '
+        '2>&1 < /dev/null 7>&- 9>&- &'
     ) in script
     assert 'VALIDATOR_GATEWAY_PCR0_CACHE_FILE' not in script
     assert 'independent_gateway_identity' not in script

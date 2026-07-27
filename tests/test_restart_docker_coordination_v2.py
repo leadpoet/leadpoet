@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_gateway_holds_shared_docker_lock_only_across_docker_restart_work() -> None:
+def test_gateway_holds_shared_docker_lock_through_authority_repair() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 
     acquire = script.index("leadpoet_acquire_docker_operation_lock_v2")
@@ -12,15 +12,19 @@ def test_gateway_holds_shared_docker_lock_only_across_docker_restart_work() -> N
         'echo "Stopping existing gateway and Research Lab worker processes"'
     )
     enclave = script.index("bash ./start_enclave.sh")
+    repair = script.index(
+        "-m gateway.tee.verify_weight_submission_ready_v2 --repair"
+    )
     release = script.index("leadpoet_release_docker_operation_lock_v2")
     launch = script.index(
         'setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main'
     )
 
-    assert acquire < shutdown < enclave < release < launch
+    assert acquire < shutdown < enclave < repair < release < launch
     assert "wait_for_gateway_build_memory" in script
     assert "--watch-parent" not in script
     assert "PYTHONSAFEPATH=1 LEADPOET_REPO_ROOT=" in script
+    assert script.count("< /dev/null 7>&- 9>&- &") == 2
 
 
 def test_validator_waits_for_shared_host_before_shutdown_and_retries_only_build_transport() -> None:

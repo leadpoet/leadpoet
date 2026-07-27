@@ -29,9 +29,12 @@ _RETRYABLE_AUTHENTICATED_HTTP_FAILURE_MARKERS = tuple(
     "authenticated_http_%s" % status
     for status in (408, 429, 500, 502, 503, 504)
 )
+_REPAIRABLE_AUTHORITY_FAILURE_MARKERS = (
+    "champion v2 cutover blocked:",
+)
 
 
-def _retryable_allocation_failure(exc: BaseException) -> bool:
+def _exception_chain_text(exc: BaseException) -> str:
     current: BaseException | None = exc
     observed: set[int] = set()
     messages: list[str] = []
@@ -39,7 +42,11 @@ def _retryable_allocation_failure(exc: BaseException) -> bool:
         observed.add(id(current))
         messages.append(str(current).lower())
         current = current.__cause__ or current.__context__
-    text = " ".join(messages)
+    return " ".join(messages)
+
+
+def _retryable_allocation_failure(exc: BaseException) -> bool:
+    text = _exception_chain_text(exc)
     return any(
         marker in text
         for marker in (
@@ -47,6 +54,11 @@ def _retryable_allocation_failure(exc: BaseException) -> bool:
             *_RETRYABLE_AUTHENTICATED_HTTP_FAILURE_MARKERS,
         )
     )
+
+
+def _repairable_authority_failure(exc: BaseException) -> bool:
+    text = _exception_chain_text(exc)
+    return any(marker in text for marker in _REPAIRABLE_AUTHORITY_FAILURE_MARKERS)
 
 
 def _validate_handoff(
@@ -164,8 +176,18 @@ async def verify_weight_submission_ready_v2(
             if epoch is None
             else int(await _resolve_maintenance_epoch(None))
         )
-    repairs: dict[str, Any] = {}
-    if repair:
+
+    repairs: dict[str, Any] = (
+        {
+            "source_add_reward_receipts_created": 0,
+            "champion_reward_receipts_created": 0,
+            "historical_allocations_classified": 0,
+        }
+        if repair
+        else {}
+    )
+
+    async def run_authority_repairs() -> dict[str, Any]:
         source_reward_result = await backfill_source_add_reward_v2_authority(
             epoch=effective_epoch,
             limit=10000,
@@ -194,7 +216,7 @@ async def verify_weight_submission_ready_v2(
             raise WeightSubmissionReadinessV2Error(
                 "champion settlement classification backfill failed"
             )
-        repairs = {
+        return {
             "source_add_reward_receipts_created": int(
                 source_reward_result.get("migrated_count") or 0
             ),
@@ -207,6 +229,13 @@ async def verify_weight_submission_ready_v2(
                 or 0
             ),
         }
+
+    # HTTP repair remains an explicit maintenance operation against a running
+    # gateway. The pre-launch direct path below first proves the exact handoff
+    # and only scans/writes historical authority when the cutover gate reports
+    # missing classifications.
+    if repair and gateway_url:
+        repairs = await run_authority_repairs()
 
     # The allocation builder below owns the same 100%-coverage cutover gate
     # and returns no handoff unless it passes. Running the standalone report
@@ -259,37 +288,51 @@ async def verify_weight_submission_ready_v2(
             raise ValueError("http_attempts must be positive")
         if float(http_retry_seconds) < 0:
             raise ValueError("http_retry_seconds must be non-negative")
-        for attempt in range(1, int(http_attempts) + 1):
-            try:
-                if direct_repair_internal_key is not None:
-                    handoff = await (
-                        _get_research_lab_attested_allocation_for_resolved_current_epoch(
-                            epoch=effective_epoch,
-                            current_epoch=int(direct_repair_current_epoch),
-                            internal_key=direct_repair_internal_key,
+
+        async def load_direct_handoff() -> Mapping[str, Any]:
+            for attempt in range(1, int(http_attempts) + 1):
+                try:
+                    if direct_repair_internal_key is not None:
+                        return await (
+                            _get_research_lab_attested_allocation_for_resolved_current_epoch(
+                                epoch=effective_epoch,
+                                current_epoch=int(direct_repair_current_epoch),
+                                internal_key=direct_repair_internal_key,
+                            )
                         )
-                    )
-                else:
-                    handoff = await get_research_lab_attested_allocation(
+                    return await get_research_lab_attested_allocation(
                         effective_epoch,
                         x_leadpoet_internal_key=None,
                     )
-                break
-            except Exception as exc:
-                if (
-                    not _retryable_allocation_failure(exc)
-                    or attempt >= int(http_attempts)
-                ):
-                    raise
-                logger.warning(
-                    "weight_readiness_allocation_transient_retry "
-                    "epoch=%s attempt=%s/%s error_type=%s",
-                    effective_epoch,
-                    attempt,
-                    int(http_attempts),
-                    type(exc).__name__,
-                )
-                await asyncio.sleep(float(http_retry_seconds) * attempt)
+                except Exception as exc:
+                    if (
+                        not _retryable_allocation_failure(exc)
+                        or attempt >= int(http_attempts)
+                    ):
+                        raise
+                    logger.warning(
+                        "weight_readiness_allocation_transient_retry "
+                        "epoch=%s attempt=%s/%s error_type=%s",
+                        effective_epoch,
+                        attempt,
+                        int(http_attempts),
+                        type(exc).__name__,
+                    )
+                    await asyncio.sleep(float(http_retry_seconds) * attempt)
+            raise AssertionError("unreachable direct allocation retry state")
+
+        try:
+            handoff = await load_direct_handoff()
+        except Exception as exc:
+            if not repair or not _repairable_authority_failure(exc):
+                raise
+            logger.warning(
+                "weight_readiness_authority_repair_required epoch=%s netuid=%s",
+                effective_epoch,
+                effective_netuid,
+            )
+            repairs = await run_authority_repairs()
+            handoff = await load_direct_handoff()
     verified = _validate_handoff(
         handoff,
         epoch=effective_epoch,

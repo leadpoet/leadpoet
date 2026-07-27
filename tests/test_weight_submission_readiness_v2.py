@@ -139,6 +139,15 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
                 },
             )
         )
+        if len([item for item in calls if item[0] == "handoff"]) == 1:
+            cause = RuntimeError(
+                "champion V2 cutover blocked: 1 obligations and 1 "
+                "historical allocations lack authoritative classifications"
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Research Lab attested allocation unavailable",
+            ) from cause
         return {"handoff": True}
 
     monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
@@ -183,16 +192,12 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
     assert result["champion_reward_receipts_created"] == 23
     assert result["historical_allocations_classified"] == 149
     assert [name for name, _kwargs in calls] == [
+        "handoff",
         "source_rewards",
         "rewards",
         "settlements",
         "handoff",
     ]
-    assert calls[0][1] == {
-        "epoch": 24032,
-        "limit": 10000,
-        "dry_run": False,
-    }
     assert calls[1][1] == {
         "epoch": 24032,
         "limit": 10000,
@@ -200,11 +205,16 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
     }
     assert calls[2][1] == {
         "epoch": 24032,
-        "netuid": 71,
         "limit": 10000,
         "dry_run": False,
     }
     assert calls[3][1] == {
+        "epoch": 24032,
+        "netuid": 71,
+        "limit": 10000,
+        "dry_run": False,
+    }
+    assert calls[0][1] == calls[4][1] == {
         "epoch": 24032,
         "current_epoch": 24032,
         "internal_key": "validator-secret",
@@ -219,25 +229,8 @@ async def test_weight_readiness_accepts_already_covered_reward(monkeypatch):
     async def resolve(_epoch):
         return 24036
 
-    async def rewards(**_kwargs):
-        calls.append("rewards")
-        return {
-            "ok": True,
-            "already_covered_count": 1,
-            "migrated_count": 0,
-        }
-
-    async def source_rewards(**_kwargs):
-        calls.append("source_rewards")
-        return {
-            "ok": True,
-            "already_covered_count": 1,
-            "migrated_count": 0,
-        }
-
-    async def settlements(**_kwargs):
-        calls.append("settlements")
-        return {"ok": True, "classified_count": 0}
+    async def unexpected_repair(**_kwargs):
+        raise AssertionError("covered authority must not run historical repair")
 
     async def unexpected_report(**_kwargs):
         raise AssertionError(
@@ -254,17 +247,17 @@ async def test_weight_readiness_accepts_already_covered_reward(monkeypatch):
     monkeypatch.setattr(
         maintenance,
         "backfill_source_add_reward_v2_authority",
-        source_rewards,
+        unexpected_repair,
     )
     monkeypatch.setattr(
         maintenance,
         "backfill_champion_reward_v2_authority",
-        rewards,
+        unexpected_repair,
     )
     monkeypatch.setattr(
         maintenance,
         "backfill_champion_settlement_v2_authority",
-        settlements,
+        unexpected_repair,
     )
     monkeypatch.setattr(
         maintenance,
@@ -290,12 +283,133 @@ async def test_weight_readiness_accepts_already_covered_reward(monkeypatch):
     assert result["status"] == "ready"
     assert result["source_add_reward_receipts_created"] == 0
     assert result["champion_reward_receipts_created"] == 0
-    assert calls == [
-        "source_rewards",
-        "rewards",
-        "settlements",
-        "handoff",
-    ]
+    assert result["historical_allocations_classified"] == 0
+    assert calls == ["handoff"]
+
+
+@pytest.mark.asyncio
+async def test_weight_readiness_repair_does_not_mask_invalid_handoff(
+    monkeypatch,
+):
+    repair_calls = []
+    monkeypatch.setenv("RESEARCH_LAB_INTERNAL_API_KEY", "validator-secret")
+
+    async def resolve(_epoch):
+        return 24036
+
+    async def unexpected_repair(**_kwargs):
+        repair_calls.append(True)
+        return {"ok": True, "migrated_count": 0}
+
+    async def handoff(*, epoch, current_epoch, internal_key):
+        assert epoch == current_epoch == 24036
+        assert internal_key == "validator-secret"
+        return {"handoff": "invalid"}
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        maintenance,
+        "backfill_source_add_reward_v2_authority",
+        unexpected_repair,
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "backfill_champion_reward_v2_authority",
+        unexpected_repair,
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "backfill_champion_settlement_v2_authority",
+        unexpected_repair,
+    )
+    monkeypatch.setattr(
+        api,
+        "_get_research_lab_attested_allocation_for_resolved_current_epoch",
+        handoff,
+    )
+    monkeypatch.setattr(
+        readiness,
+        "_validate_handoff",
+        lambda value, **_kwargs: (_ for _ in ()).throw(
+            readiness.WeightSubmissionReadinessV2Error(
+                "allocation signature is invalid"
+            )
+        ),
+    )
+
+    with pytest.raises(
+        readiness.WeightSubmissionReadinessV2Error,
+        match="allocation signature is invalid",
+    ):
+        await readiness.verify_weight_submission_ready_v2(repair=True)
+
+    assert repair_calls == []
+
+
+@pytest.mark.asyncio
+async def test_weight_readiness_repair_retries_transport_without_backfill(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setenv("RESEARCH_LAB_INTERNAL_API_KEY", "validator-secret")
+
+    async def resolve(_epoch):
+        return 24036
+
+    async def unexpected_repair(**_kwargs):
+        raise AssertionError("transport recovery must not run authority repair")
+
+    async def handoff(*, epoch, current_epoch, internal_key):
+        assert epoch == current_epoch == 24036
+        assert internal_key == "validator-secret"
+        calls.append("handoff")
+        if len(calls) == 1:
+            raise RuntimeError(
+                "enclave rejected artifact persistence: unexpected_eof"
+            )
+        return {"handoff": True}
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        maintenance,
+        "backfill_source_add_reward_v2_authority",
+        unexpected_repair,
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "backfill_champion_reward_v2_authority",
+        unexpected_repair,
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "backfill_champion_settlement_v2_authority",
+        unexpected_repair,
+    )
+    monkeypatch.setattr(
+        api,
+        "_get_research_lab_attested_allocation_for_resolved_current_epoch",
+        handoff,
+    )
+    monkeypatch.setattr(
+        readiness,
+        "_validate_handoff",
+        lambda value, **_kwargs: {
+            "allocation_hash": "sha256:" + "a" * 64,
+            "root_receipt_hash": "sha256:" + "b" * 64,
+        },
+    )
+
+    result = await readiness.verify_weight_submission_ready_v2(
+        repair=True,
+        http_attempts=2,
+        http_retry_seconds=0,
+    )
+
+    assert result["status"] == "ready"
+    assert result["source_add_reward_receipts_created"] == 0
+    assert result["champion_reward_receipts_created"] == 0
+    assert result["historical_allocations_classified"] == 0
+    assert calls == ["handoff", "handoff"]
 
 
 @pytest.mark.asyncio

@@ -36,6 +36,29 @@ LEGACY_SETTLEMENT_TABLE_V2 = (
 LEGACY_NONFINALIZATION_TABLE_V2 = (
     "research_lab_legacy_allocation_nonfinalizations_v2"
 )
+CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1 = (
+    "research_lab_chain_realized_epoch_settlements_v1"
+)
+CHAIN_REALIZED_OBLIGATION_CREDIT_TABLE_V1 = (
+    "research_lab_chain_realized_obligation_credits_v1"
+)
+CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1 = (
+    "leadpoet.research_lab_chain_realized_epoch_settlement.v1"
+)
+CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1 = (
+    "leadpoet.research_lab_chain_realized_obligation_credit.v1"
+)
+CHAIN_REALIZED_AUTHORITY_TYPE_V1 = "chain_realized_emission_v1"
+_CHAIN_CREDIT_PURPOSES_V1 = {
+    CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+    CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
+}
+_CHAIN_CREDIT_SECTION_BY_KIND_V1 = {
+    "champion": "champion_allocations",
+    "queued_champion": "queued_champion_allocations",
+    "source_add": "source_add_allocations",
+    "reimbursement": "reimbursement_allocations",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -490,6 +513,416 @@ def validate_legacy_allocation_nonfinalizations_v2(
     return sorted(findings, key=lambda item: int(item["epoch"]))
 
 
+def _non_negative_decimal_v1(value: Any, field: str) -> Decimal:
+    try:
+        result = Decimal(str(value))
+    except Exception as exc:
+        raise ChampionSettlementV2Error(
+            "chain realized %s is invalid" % field
+        ) from exc
+    if result < 0:
+        raise ChampionSettlementV2Error(
+            "chain realized %s is negative" % field
+        )
+    return result
+
+
+def _chain_realized_receipt_root_v1(
+    *,
+    receipt_hash: str,
+    receipt_graphs: Mapping[str, Mapping[str, Any]],
+    purpose: str,
+    output_root: str,
+) -> str:
+    graph = receipt_graphs.get(str(receipt_hash or ""))
+    if not isinstance(graph, Mapping):
+        raise ChampionSettlementV2Error(
+            "chain realized receipt graph is missing"
+        )
+    validate_receipt_graph(graph)
+    if graph.get("root_receipt_hash") != receipt_hash:
+        raise ChampionSettlementV2Error(
+            "chain realized receipt graph root differs"
+        )
+    root = next(
+        (
+            receipt
+            for receipt in graph.get("receipts") or ()
+            if isinstance(receipt, Mapping)
+            and receipt.get("receipt_hash") == receipt_hash
+        ),
+        None,
+    )
+    if (
+        not isinstance(root, Mapping)
+        or root.get("role") != "gateway_coordinator"
+        or root.get("purpose") != purpose
+        or root.get("status") != "succeeded"
+        or root.get("output_root") != output_root
+    ):
+        raise ChampionSettlementV2Error(
+            "chain realized receipt differs"
+        )
+    return receipt_hash
+
+
+def validate_chain_realized_epoch_settlements_v1(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    receipt_graphs: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate complete epoch-level chain-realized settlement markers.
+
+    A per-obligation chain credit is safe only when the epoch settlement marker
+    declares the complete credit-hash set for that netuid/epoch.  This prevents
+    a partial observation from replacing a finalized allocation snapshot and
+    accidentally under-crediting other Lab obligations in the same epoch.
+    """
+
+    settled: list[dict[str, Any]] = []
+    seen_epochs: set[tuple[int, int]] = set()
+    for raw_row in rows:
+        row = dict(raw_row)
+        document = row.get("settlement_doc")
+        if not isinstance(document, Mapping):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement document is missing"
+            )
+        if (
+            set(document)
+            != {
+                "schema_version",
+                "netuid",
+                "epoch_id",
+                "credit_hashes",
+                "observation_summary",
+            }
+            or document.get("schema_version")
+            != CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement document is invalid"
+            )
+        try:
+            netuid = int(document["netuid"])
+            epoch_id = int(document["epoch_id"])
+        except (TypeError, ValueError) as exc:
+            raise ChampionSettlementV2Error(
+                "chain realized settlement scope is invalid"
+            ) from exc
+        if netuid <= 0 or epoch_id < 0:
+            raise ChampionSettlementV2Error(
+                "chain realized settlement scope is invalid"
+            )
+        credit_hashes = document.get("credit_hashes")
+        if (
+            not isinstance(credit_hashes, list)
+            or len(credit_hashes) != len(set(str(item) for item in credit_hashes))
+            or any(
+                not re.fullmatch(r"sha256:[0-9a-f]{64}", str(item or ""))
+                for item in credit_hashes
+            )
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement credit hashes are invalid"
+            )
+        if not isinstance(document.get("observation_summary"), Mapping):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement observation summary is invalid"
+            )
+        settlement_hash = sha256_json(dict(document))
+        expected = {
+            "netuid": netuid,
+            "epoch_id": epoch_id,
+            "schema_version": CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+            "settlement_hash": settlement_hash,
+            "settlement_doc": dict(document),
+        }
+        for field, value in expected.items():
+            if row.get(field) != value:
+                raise ChampionSettlementV2Error(
+                    "chain realized settlement row differs at %s" % field
+                )
+        key = (netuid, epoch_id)
+        if key in seen_epochs:
+            raise ChampionSettlementV2Error(
+                "chain realized settlement epoch is duplicated"
+            )
+        seen_epochs.add(key)
+        receipt_hash = str(row.get("settlement_receipt_hash") or "")
+        _chain_realized_receipt_root_v1(
+            receipt_hash=receipt_hash,
+            receipt_graphs=receipt_graphs,
+            purpose=CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+            output_root=settlement_hash,
+        )
+        settled.append(
+            {
+                "epoch": epoch_id,
+                "netuid": netuid,
+                "settlement_hash": settlement_hash,
+                "settlement_doc": dict(document),
+                "settlement_receipt_hash": receipt_hash,
+                "credit_hashes": sorted(str(item) for item in credit_hashes),
+                "authority_types": [CHAIN_REALIZED_AUTHORITY_TYPE_V1],
+            }
+        )
+    return sorted(settled, key=lambda item: int(item["epoch"]))
+
+
+def validate_chain_realized_obligation_credits_v1(
+    credit_rows: Sequence[Mapping[str, Any]],
+    *,
+    settlement_rows: Sequence[Mapping[str, Any]],
+    receipt_graphs: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate and normalize complete chain-realized obligation credits."""
+
+    settlements = {
+        (
+            int(row["netuid"]),
+            int(row["epoch"]),
+            str(row["settlement_hash"]),
+        ): dict(row)
+        for row in settlement_rows
+    }
+    credits_by_settlement: dict[tuple[int, int, str], list[dict[str, Any]]] = defaultdict(list)
+    seen_credit_hashes: set[str] = set()
+    seen_obligations: set[tuple[int, int, str, str]] = set()
+    for raw_row in credit_rows:
+        row = dict(raw_row)
+        document = row.get("credit_doc")
+        if not isinstance(document, Mapping):
+            raise ChampionSettlementV2Error(
+                "chain realized credit document is missing"
+            )
+        if (
+            set(document)
+            != {
+                "schema_version",
+                "netuid",
+                "epoch_id",
+                "obligation_kind",
+                "obligation_source_id",
+                "miner_hotkey",
+                "miner_uid",
+                "observed_chain_alpha_percent",
+                "lab_attributed_alpha_percent",
+                "scheduled_alpha_percent",
+                "credited_alpha_percent",
+                "attribution_doc",
+                "observation_doc",
+            }
+            or document.get("schema_version")
+            != CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized credit document is invalid"
+            )
+        try:
+            netuid = int(document["netuid"])
+            epoch_id = int(document["epoch_id"])
+            miner_uid = int(document["miner_uid"])
+        except (TypeError, ValueError) as exc:
+            raise ChampionSettlementV2Error(
+                "chain realized credit scope is invalid"
+            ) from exc
+        if netuid <= 0 or epoch_id < 0 or miner_uid < 0:
+            raise ChampionSettlementV2Error(
+                "chain realized credit scope is invalid"
+            )
+        kind = str(document.get("obligation_kind") or "")
+        if kind not in _CHAIN_CREDIT_SECTION_BY_KIND_V1:
+            raise ChampionSettlementV2Error(
+                "chain realized credit obligation kind is invalid"
+            )
+        source_id = str(document.get("obligation_source_id") or "")
+        hotkey = str(document.get("miner_hotkey") or "")
+        if not source_id or not hotkey:
+            raise ChampionSettlementV2Error(
+                "chain realized credit identity is invalid"
+            )
+        observed = _non_negative_decimal_v1(
+            document.get("observed_chain_alpha_percent"),
+            "observed_chain_alpha_percent",
+        )
+        attributed = _non_negative_decimal_v1(
+            document.get("lab_attributed_alpha_percent"),
+            "lab_attributed_alpha_percent",
+        )
+        scheduled = _non_negative_decimal_v1(
+            document.get("scheduled_alpha_percent"),
+            "scheduled_alpha_percent",
+        )
+        credited = _non_negative_decimal_v1(
+            document.get("credited_alpha_percent"),
+            "credited_alpha_percent",
+        )
+        if credited > attributed or attributed > observed:
+            raise ChampionSettlementV2Error(
+                "chain realized credit exceeds observed attribution"
+            )
+        if scheduled > 0 and credited > scheduled:
+            raise ChampionSettlementV2Error(
+                "chain realized credit exceeds scheduled epoch amount"
+            )
+        if not isinstance(document.get("attribution_doc"), Mapping) or not isinstance(
+            document.get("observation_doc"), Mapping
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized credit evidence documents are invalid"
+            )
+        credit_hash = sha256_json(dict(document))
+        settlement_hash = str(row.get("settlement_hash") or "")
+        settlement_key = (netuid, epoch_id, settlement_hash)
+        if settlement_key not in settlements:
+            raise ChampionSettlementV2Error(
+                "chain realized credit has no complete epoch settlement"
+            )
+        expected = {
+            "netuid": netuid,
+            "epoch_id": epoch_id,
+            "schema_version": CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
+            "obligation_kind": kind,
+            "obligation_source_id": source_id,
+            "miner_hotkey": hotkey,
+            "miner_uid": miner_uid,
+            "credit_hash": credit_hash,
+            "credit_doc": dict(document),
+        }
+        for field, value in expected.items():
+            if row.get(field) != value:
+                raise ChampionSettlementV2Error(
+                    "chain realized credit row differs at %s" % field
+                )
+        for field, value in (
+            ("observed_chain_alpha_percent", observed),
+            ("lab_attributed_alpha_percent", attributed),
+            ("scheduled_alpha_percent", scheduled),
+            ("credited_alpha_percent", credited),
+        ):
+            if _non_negative_decimal_v1(row.get(field), field) != value:
+                raise ChampionSettlementV2Error(
+                    "chain realized credit row differs at %s" % field
+                )
+        if credit_hash in seen_credit_hashes:
+            raise ChampionSettlementV2Error(
+                "chain realized credit hash is duplicated"
+            )
+        seen_credit_hashes.add(credit_hash)
+        obligation_key = (netuid, epoch_id, kind, source_id)
+        if obligation_key in seen_obligations:
+            raise ChampionSettlementV2Error(
+                "chain realized obligation credit is duplicated"
+            )
+        seen_obligations.add(obligation_key)
+        receipt_hash = str(row.get("credit_receipt_hash") or "")
+        _chain_realized_receipt_root_v1(
+            receipt_hash=receipt_hash,
+            receipt_graphs=receipt_graphs,
+            purpose=CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
+            output_root=credit_hash,
+        )
+        credits_by_settlement[settlement_key].append(
+            {
+                "epoch": epoch_id,
+                "netuid": netuid,
+                "settlement_hash": settlement_hash,
+                "credit_hash": credit_hash,
+                "credit_receipt_hash": receipt_hash,
+                "obligation_kind": kind,
+                "obligation_source_id": source_id,
+                "miner_hotkey": hotkey,
+                "miner_uid": miner_uid,
+                "observed_chain_alpha_percent": observed,
+                "lab_attributed_alpha_percent": attributed,
+                "scheduled_alpha_percent": scheduled,
+                "credited_alpha_percent": credited,
+                "attribution_doc": dict(document["attribution_doc"]),
+                "observation_doc": dict(document["observation_doc"]),
+            }
+        )
+
+    normalized: list[dict[str, Any]] = []
+    for key, settlement in sorted(settlements.items()):
+        expected_hashes = set(str(item) for item in settlement["credit_hashes"])
+        credits = credits_by_settlement.get(key, [])
+        observed_hashes = {str(item["credit_hash"]) for item in credits}
+        if observed_hashes != expected_hashes:
+            raise ChampionSettlementV2Error(
+                "chain realized settlement credit set is incomplete"
+            )
+        allocation_doc: dict[str, Any] = {
+            "schema_version": CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+            "epoch": int(settlement["epoch"]),
+            "netuid": int(settlement["netuid"]),
+            "settlement_hash": str(settlement["settlement_hash"]),
+            "authority_type": CHAIN_REALIZED_AUTHORITY_TYPE_V1,
+            "source": "chain_realized_obligation_credits",
+            "source_add_allocations": [],
+            "reimbursement_allocations": [],
+            "champion_allocations": [],
+            "queued_champion_allocations": [],
+        }
+        for credit in sorted(
+            credits,
+            key=lambda item: (
+                str(item["obligation_kind"]),
+                str(item["obligation_source_id"]),
+            ),
+        ):
+            section = _CHAIN_CREDIT_SECTION_BY_KIND_V1[
+                str(credit["obligation_kind"])
+            ]
+            item = {
+                "uid": int(credit["miner_uid"]),
+                "miner_uid": int(credit["miner_uid"]),
+                "miner_hotkey": str(credit["miner_hotkey"]),
+                "source_id": str(credit["obligation_source_id"]),
+                "paid_alpha_percent": float(credit["credited_alpha_percent"]),
+                "base_desired_alpha_percent": float(
+                    credit["scheduled_alpha_percent"]
+                ),
+                "observed_chain_alpha_percent": float(
+                    credit["observed_chain_alpha_percent"]
+                ),
+                "lab_attributed_alpha_percent": float(
+                    credit["lab_attributed_alpha_percent"]
+                ),
+                "credit_hash": str(credit["credit_hash"]),
+                "credit_receipt_hash": str(credit["credit_receipt_hash"]),
+                "settlement_hash": str(credit["settlement_hash"]),
+                "reason": CHAIN_REALIZED_AUTHORITY_TYPE_V1,
+            }
+            if section in {"champion_allocations", "queued_champion_allocations"}:
+                item["champion_reward_id"] = str(credit["obligation_source_id"])
+            if section == "source_add_allocations":
+                item["source_add_reward_id"] = str(credit["obligation_source_id"])
+            if section == "reimbursement_allocations":
+                item["schedule_id"] = str(credit["obligation_source_id"])
+            allocation_doc[section].append(item)
+        normalized.append(
+            {
+                "epoch": int(settlement["epoch"]),
+                "netuid": int(settlement["netuid"]),
+                "allocation_hash": str(settlement["settlement_hash"]),
+                "allocation_doc": allocation_doc,
+                "authority_types": [CHAIN_REALIZED_AUTHORITY_TYPE_V1],
+                "chain_realized_settlement_hash": str(
+                    settlement["settlement_hash"]
+                ),
+                "chain_realized_settlement_receipt_hash": str(
+                    settlement["settlement_receipt_hash"]
+                ),
+                "chain_realized_credit_hashes": sorted(observed_hashes),
+                "chain_realized_credit_receipt_hashes": sorted(
+                    str(item["credit_receipt_hash"]) for item in credits
+                ),
+            }
+        )
+    return normalized
+
+
 def merge_finalized_allocation_histories_v2(
     native_rows: Sequence[Mapping[str, Any]],
     legacy_rows: Sequence[Mapping[str, Any]],
@@ -541,6 +974,37 @@ def merge_finalized_allocation_histories_v2(
             ):
                 if row.get(field):
                     existing[field] = row[field]
+    return [merged[key] for key in sorted(merged)]
+
+
+def merge_settled_allocation_histories_v2(
+    finalized_rows: Sequence[Mapping[str, Any]],
+    chain_realized_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Prefer complete chain-realized epoch credits over weight intent.
+
+    A finalized weight bundle proves what this validator submitted.  A complete
+    chain-realized settlement proves what the hotkeys actually received for
+    that epoch window.  When both exist, the realized settlement wins for that
+    netuid/epoch and prevents double-counting.
+    """
+
+    merged: dict[tuple[int, int], dict[str, Any]] = {}
+    for raw_row in finalized_rows:
+        row = dict(raw_row)
+        merged[(int(row["netuid"]), int(row["epoch"]))] = row
+    for raw_row in chain_realized_rows:
+        row = dict(raw_row)
+        key = (int(row["netuid"]), int(row["epoch"]))
+        existing = merged.get(key)
+        if existing is not None:
+            row["replaced_authority_types"] = sorted(
+                set(existing.get("authority_types") or ())
+            )
+            row["replaced_allocation_hash"] = str(
+                existing.get("allocation_hash") or ""
+            )
+        merged[key] = row
     return [merged[key] for key in sorted(merged)]
 
 
@@ -613,6 +1077,103 @@ async def load_finalized_allocation_history_v2(
         receipt_graphs=migration_graphs,
     )
     return merge_finalized_allocation_histories_v2(native, migrated)
+
+
+async def load_chain_realized_allocation_history_v1(
+    *,
+    netuid: int,
+    start_epoch: int,
+    end_epoch: int,
+) -> list[dict[str, Any]]:
+    """Load complete realized-chain Lab settlement epochs."""
+
+    if int(end_epoch) < int(start_epoch):
+        return []
+    from gateway.research_lab.attested_v2_store import load_receipt_graphs_v2
+    from gateway.research_lab.store import select_all
+
+    settlement_rows = await select_all(
+        CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1,
+        filters=(
+            ("netuid", int(netuid)),
+            ("epoch_id", "gte", int(start_epoch)),
+            ("epoch_id", "lte", int(end_epoch)),
+        ),
+        order_by=(("epoch_id", False),),
+        max_rows=max(1000, int(end_epoch) - int(start_epoch) + 1),
+        allow_partial=False,
+    )
+    if not settlement_rows:
+        return []
+    settlement_roots = {
+        str(row.get("settlement_receipt_hash") or "")
+        for row in settlement_rows
+        if row.get("settlement_receipt_hash")
+    }
+    settlement_graphs_loaded = await load_receipt_graphs_v2(settlement_roots)
+    settlement_graphs = {
+        root: settlement_graphs_loaded[root]
+        for root in settlement_roots
+        if root in settlement_graphs_loaded
+    }
+    settlements = await asyncio.to_thread(
+        validate_chain_realized_epoch_settlements_v1,
+        settlement_rows,
+        receipt_graphs=settlement_graphs,
+    )
+    credit_rows = await select_all(
+        CHAIN_REALIZED_OBLIGATION_CREDIT_TABLE_V1,
+        filters=(
+            ("netuid", int(netuid)),
+            ("epoch_id", "gte", int(start_epoch)),
+            ("epoch_id", "lte", int(end_epoch)),
+        ),
+        order_by=(("epoch_id", False), ("obligation_kind", False), ("obligation_source_id", False)),
+        max_rows=max(1000, (int(end_epoch) - int(start_epoch) + 1) * 100),
+        allow_partial=False,
+    )
+    credit_roots = {
+        str(row.get("credit_receipt_hash") or "")
+        for row in credit_rows
+        if row.get("credit_receipt_hash")
+    }
+    credit_graphs_loaded = await load_receipt_graphs_v2(credit_roots)
+    credit_graphs = {
+        root: credit_graphs_loaded[root]
+        for root in credit_roots
+        if root in credit_graphs_loaded
+    }
+    return await asyncio.to_thread(
+        validate_chain_realized_obligation_credits_v1,
+        credit_rows,
+        settlement_rows=settlements,
+        receipt_graphs=credit_graphs,
+    )
+
+
+async def load_settled_allocation_history_v2(
+    *,
+    netuid: int,
+    start_epoch: int,
+    end_epoch: int,
+) -> list[dict[str, Any]]:
+    """Load settlement history, preferring actual chain-realized credits."""
+
+    if int(end_epoch) < int(start_epoch):
+        return []
+    finalized, chain_realized = await asyncio.gather(
+        load_finalized_allocation_history_v2(
+            netuid=int(netuid),
+            start_epoch=int(start_epoch),
+            end_epoch=int(end_epoch),
+        ),
+        load_chain_realized_allocation_history_v1(
+            netuid=int(netuid),
+            start_epoch=int(start_epoch),
+            end_epoch=int(end_epoch),
+        ),
+    )
+    return merge_settled_allocation_histories_v2(finalized, chain_realized)
 
 
 async def load_legacy_allocation_nonfinalizations_v2(

@@ -428,6 +428,14 @@ def test_finalized_champion_history_requires_declared_chain_roots(monkeypatch):
             "legacy_finalized_allocation_migrations",
             {"netuid": 71, "start_epoch": 99, "end_epoch": 99},
         ),
+        (
+            "chain_realized_epoch_settlements",
+            {"netuid": 71, "start_epoch": 99, "end_epoch": 99},
+        ),
+        (
+            "chain_realized_obligation_credits",
+            {"netuid": 71, "start_epoch": 99, "end_epoch": 99},
+        ),
     ]
 
     monkeypatch.setattr(

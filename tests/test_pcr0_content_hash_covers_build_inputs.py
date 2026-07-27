@@ -192,6 +192,121 @@ def test_historical_cache_warming_always_includes_current_deploy_head():
     ]
 
 
+def test_historical_cache_warming_prioritizes_deployed_runtime_commit():
+    deployed = {
+        "hash": "d" * 40,
+        "timestamp": "3",
+        "message": "deployed release changed no measured input",
+        "date": "",
+    }
+    head = {
+        "hash": "f" * 40,
+        "timestamp": "4",
+        "message": "branch head",
+        "date": "",
+    }
+    measured_history = [
+        {
+            "hash": "a" * 40,
+            "timestamp": "2",
+            "message": "last measured change",
+            "date": "",
+        },
+        {
+            "hash": "b" * 40,
+            "timestamp": "1",
+            "message": "older measured change",
+            "date": "",
+        },
+    ]
+
+    selected = pcr0_builder._include_current_head_commit(
+        measured_history,
+        [head],
+        3,
+        required_commits=[deployed],
+    )
+
+    assert [commit["hash"] for commit in selected] == [
+        deployed["hash"],
+        head["hash"],
+        measured_history[0]["hash"],
+    ]
+
+
+def test_cache_pruning_retains_deployed_runtime_commit(monkeypatch):
+    deployed = "d" * 40
+    monkeypatch.setattr(pcr0_builder, "PCR0_CACHE_SIZE", 2)
+    monkeypatch.setattr(pcr0_builder, "_active_runtime_commit", lambda: deployed)
+    monkeypatch.setattr(
+        pcr0_builder,
+        "_pcr0_cache",
+        {
+            "deployed": {
+                "pcr0": "1" * 96,
+                "commit_hash": deployed,
+                "commit_hashes": [deployed],
+                "commit_timestamp": "1",
+            },
+            "newest": {
+                "pcr0": "2" * 96,
+                "commit_hash": "e" * 40,
+                "commit_timestamp": "3",
+            },
+            "middle": {
+                "pcr0": "3" * 96,
+                "commit_hash": "c" * 40,
+                "commit_timestamp": "2",
+            },
+        },
+    )
+
+    pcr0_builder._prune_pcr0_cache()
+
+    assert list(pcr0_builder._pcr0_cache) == ["deployed", "newest"]
+
+
+@pytest.mark.asyncio
+async def test_deployed_runtime_commit_is_fetched_when_shallow_history_lacks_it(
+    monkeypatch,
+):
+    deployed = "d" * 40
+    metadata = {
+        "hash": deployed,
+        "timestamp": "3",
+        "message": "deployed",
+        "date": "",
+    }
+    get_metadata = AsyncMock(side_effect=[None, metadata])
+    monkeypatch.setattr(pcr0_builder, "_get_commit_metadata", get_metadata)
+
+    class FetchProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    create_process = AsyncMock(return_value=FetchProcess())
+    monkeypatch.setattr(
+        pcr0_builder.asyncio,
+        "create_subprocess_exec",
+        create_process,
+    )
+
+    assert (
+        await pcr0_builder._get_required_commit_metadata("/builder", deployed)
+        == metadata
+    )
+    assert create_process.await_args.args[:6] == (
+        "git",
+        "fetch",
+        "--depth",
+        "1",
+        "origin",
+        deployed,
+    )
+
+
 @pytest.mark.asyncio
 async def test_unreadable_input_aborts_builder_without_docker_or_cache_relabel(
     repo_copy,

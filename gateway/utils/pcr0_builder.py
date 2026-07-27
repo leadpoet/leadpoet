@@ -330,6 +330,22 @@ def _entry_commit_hashes(entry: Dict) -> List[str]:
     return commits
 
 
+def _active_runtime_commit() -> str:
+    """Return the exact commit selected by the canonical gateway launcher."""
+    try:
+        from gateway.build_info import get_build_info
+
+        commit = str(get_build_info().get("git_commit") or "").strip().lower()
+    except Exception as exc:
+        logger.error("[PCR0] Failed to resolve active runtime commit: %s", exc)
+        commit = ""
+    if len(commit) not in {40, 64} or any(
+        character not in "0123456789abcdef" for character in commit
+    ):
+        return ""
+    return commit
+
+
 def _register_commit_alias(
     entry: Dict,
     commit_hash: str,
@@ -359,6 +375,7 @@ def _register_commit_alias(
 
 def get_cache_status() -> Dict:
     """Get current cache status for debugging."""
+    active_runtime_commit = _active_runtime_commit()
     return {
         "cached_cache_keys": list(_pcr0_cache.keys()),
         "cached_content_hashes": [v.get("content_hash", k) for k, v in _pcr0_cache.items()],
@@ -378,6 +395,14 @@ def get_cache_status() -> Dict:
         ],
         "build_in_progress": _build_in_progress,
         "cache_size": len(_pcr0_cache),
+        "active_runtime_commit": active_runtime_commit or None,
+        "active_runtime_commit_cached": bool(
+            active_runtime_commit
+            and any(
+                active_runtime_commit in _entry_commit_hashes(entry)
+                for entry in _pcr0_cache.values()
+            )
+        ),
         "startup_warm_delay_seconds": 15,
         "startup_historical_warm_enabled": PCR0_STARTUP_HISTORICAL_WARM_ENABLED,
         "docker_operation_lock_file": DOCKER_OPERATION_LOCK_FILE,
@@ -396,15 +421,20 @@ def _cache_commit_timestamp(entry: Dict) -> int:
 
 
 def _prune_pcr0_cache() -> None:
-    """Prune cache by commit recency, with build time only as a fallback tie-breaker."""
+    """Prune by recency without evicting the independently rebuilt live release."""
     global _pcr0_cache
 
     if len(_pcr0_cache) <= PCR0_CACHE_SIZE:
         return
 
+    active_runtime_commit = _active_runtime_commit()
     sorted_entries = sorted(
         _pcr0_cache.items(),
         key=lambda item: (
+            bool(
+                active_runtime_commit
+                and active_runtime_commit in _entry_commit_hashes(item[1])
+            ),
             _cache_commit_timestamp(item[1]),
             item[1].get("built_at") or "",
         ),
@@ -451,25 +481,89 @@ def _include_current_head_commit(
     commits: List[Dict],
     head_commits: List[Dict],
     limit: int,
+    required_commits: Optional[List[Dict]] = None,
 ) -> List[Dict]:
-    """Include the deploy HEAD even when it did not change measured EIF files."""
+    """Include runtime and branch heads even when they changed no EIF input."""
     if limit <= 0:
         return []
 
-    selected = list(commits)
-    if head_commits:
-        head = head_commits[0]
-        head_hash = str(head.get("hash") or "").strip().lower()
-        if head_hash:
-            selected = [
-                head,
-                *[
-                    commit
-                    for commit in selected
-                    if str(commit.get("hash") or "").strip().lower() != head_hash
-                ],
-            ]
+    selected: List[Dict] = []
+    seen = set()
+    for commit in [
+        *(required_commits or []),
+        *(head_commits[:1] if head_commits else []),
+        *commits,
+    ]:
+        commit_hash = str(commit.get("hash") or "").strip().lower()
+        if not commit_hash or commit_hash in seen:
+            continue
+        seen.add(commit_hash)
+        selected.append(commit)
     return selected[:limit]
+
+
+async def _get_commit_metadata(repo_dir: str, commit_hash: str) -> Optional[Dict]:
+    """Read one exact Git commit after proving it exists in the builder clone."""
+    commit = str(commit_hash or "").strip().lower()
+    if not commit:
+        return None
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "show",
+        "-s",
+        "--format=%H|%ct|%s|%ai",
+        commit,
+        cwd=repo_dir,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _stderr = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+    line = stdout.decode().strip()
+    if "|" not in line:
+        return None
+    parts = line.split("|", 3)
+    return {
+        "hash": parts[0],
+        "timestamp": parts[1] if len(parts) > 1 else "",
+        "message": parts[2] if len(parts) > 2 else "",
+        "date": parts[3] if len(parts) > 3 else "",
+    }
+
+
+async def _get_required_commit_metadata(
+    repo_dir: str,
+    commit_hash: str,
+) -> Optional[Dict]:
+    """Resolve the deployed commit even after it falls outside shallow history."""
+    metadata = await _get_commit_metadata(repo_dir, commit_hash)
+    if metadata is not None:
+        return metadata
+
+    git_env = os.environ.copy()
+    git_env["GIT_TERMINAL_PROMPT"] = "0"
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "fetch",
+        "--depth",
+        "1",
+        "origin",
+        commit_hash,
+        cwd=repo_dir,
+        env=git_env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        logger.error(
+            "[PCR0] Failed to fetch active runtime commit %s: %s",
+            commit_hash,
+            stderr.decode()[:500],
+        )
+        return None
+    return await _get_commit_metadata(repo_dir, commit_hash)
 
 
 async def clone_or_update_repo(repo_dir: str) -> bool:
@@ -1605,10 +1699,27 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
                     })
             commits = commits[:num_commits]  # Limit to requested count
 
+        active_runtime_commit = _active_runtime_commit()
+        required_commits = []
+        if active_runtime_commit:
+            active_metadata = await _get_required_commit_metadata(
+                repo_dir,
+                active_runtime_commit,
+            )
+            if active_metadata is None:
+                logger.error(
+                    "[PCR0] Active runtime commit %s is unavailable in the "
+                    "independent builder clone",
+                    active_runtime_commit,
+                )
+            else:
+                required_commits.append(active_metadata)
+
         commits = _include_current_head_commit(
             commits,
             await get_latest_commits(repo_dir, 1),
             num_commits,
+            required_commits=required_commits,
         )
         
         if not commits:

@@ -440,6 +440,129 @@ async def test_weight_inputs_v2_authenticates_and_returns_complete_measured_set(
 
 
 @pytest.mark.asyncio
+async def test_weight_inputs_v2_coalesces_retries_and_caches_exact_success(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store, attested_weight_inputs_v2
+
+    authorization = _weight_inputs_authorization()
+    expected = {
+        "input_receipt_hashes": {
+            "research_lab_allocation": "sha256:" + "7" * 64
+        },
+        "gateway_authority_event_hash": "sha256:" + "6" * 64,
+        "upstream_receipt_set": {
+            "boot_identities": [],
+            "receipts": [],
+            "transport_attempts": [],
+            "host_operations": [],
+        },
+    }
+    calls = 0
+    started = asyncio.Event()
+    release = asyncio.Event()
+    _patch_epoch_authority(monkeypatch)
+
+    async def load_graph(**_kwargs):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return {"root_receipt_hash": "sha256:" + "6" * 64}
+
+    async def build_inputs(**_kwargs):
+        return expected
+
+    monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {VALIDATOR_HOTKEY})
+    monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
+    monkeypatch.setattr(weights_api, "verify_wallet_signature", lambda *args: True)
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_LOADS_INFLIGHT", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RESULTS", {})
+    monkeypatch.setattr(attested_v2_store, "load_business_artifact_graph_v2", load_graph)
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "build_gateway_weight_inputs_v2",
+        build_inputs,
+    )
+
+    first = asyncio.create_task(
+        weights_api.get_weight_inputs_v2(authorization, _request())
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    second = asyncio.create_task(
+        weights_api.get_weight_inputs_v2(authorization, _request())
+    )
+    await asyncio.sleep(0)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    release.set()
+    response = await asyncio.wait_for(second, timeout=1)
+    assert json.loads(response.body)["input_receipt_hashes"] == expected[
+        "input_receipt_hashes"
+    ]
+
+    cached = await weights_api.get_weight_inputs_v2(authorization, _request())
+    assert json.loads(cached.body) == json.loads(response.body)
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_weight_inputs_v2_failed_shared_load_does_not_poison_retry(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store, attested_weight_inputs_v2
+
+    authorization = _weight_inputs_authorization()
+    calls = 0
+    _patch_epoch_authority(monkeypatch)
+
+    async def load_graph(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("temporary graph read timeout")
+        return {"root_receipt_hash": "sha256:" + "6" * 64}
+
+    async def build_inputs(**_kwargs):
+        return {
+            "input_receipt_hashes": {
+                "research_lab_allocation": "sha256:" + "7" * 64
+            },
+            "gateway_authority_event_hash": "sha256:" + "6" * 64,
+            "upstream_receipt_set": {
+                "boot_identities": [],
+                "receipts": [],
+                "transport_attempts": [],
+                "host_operations": [],
+            },
+        }
+
+    monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {VALIDATOR_HOTKEY})
+    monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
+    monkeypatch.setattr(weights_api, "verify_wallet_signature", lambda *args: True)
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_LOADS_INFLIGHT", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RESULTS", {})
+    monkeypatch.setattr(attested_v2_store, "load_business_artifact_graph_v2", load_graph)
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "build_gateway_weight_inputs_v2",
+        build_inputs,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await weights_api.get_weight_inputs_v2(authorization, _request())
+    assert exc.value.status_code == 503
+    await asyncio.sleep(0)
+
+    response = await weights_api.get_weight_inputs_v2(authorization, _request())
+    assert json.loads(response.body)["request_hash"] == authorization.request[
+        "request_hash"
+    ]
+    assert calls == 2
+
+
+@pytest.mark.asyncio
 async def test_weight_inputs_v2_rejects_tampered_snapshot_before_measured_reads(
     monkeypatch,
 ):

@@ -87,6 +87,16 @@ _WEIGHT_AUTHORITY_LOADS_INFLIGHT: Dict[
     tuple[int, int, int, str, bool],
     asyncio.Task,
 ] = {}
+_WEIGHT_INPUT_LOADS_INFLIGHT: Dict[
+    tuple[int, str],
+    asyncio.Task,
+] = {}
+_WEIGHT_INPUT_RESULTS: Dict[
+    tuple[int, str],
+    tuple[float, Dict[str, Any]],
+] = {}
+_WEIGHT_INPUT_RESULT_TTL_SECONDS = 120.0
+_WEIGHT_INPUT_RESULT_MAX_ENTRIES = 1
 
 
 async def _load_weight_authority_v2_singleflight(
@@ -130,6 +140,80 @@ async def _load_weight_authority_v2_singleflight(
                 completed.exception()
 
         task.add_done_callback(_discard)
+    return await asyncio.shield(task)
+
+
+async def _build_weight_inputs_v2_singleflight(
+    *,
+    request_hash: str,
+    epoch_id: int,
+    allocation_hash: str,
+    calculation_snapshot: Dict[str, Any],
+    leaderboard_window_start: str,
+    leaderboard_window_end: str,
+) -> Dict[str, Any]:
+    """Share one exact immutable input reconstruction across HTTP retries."""
+
+    from gateway.research_lab.attested_v2_store import (
+        load_business_artifact_graph_v2,
+    )
+    from gateway.research_lab.attested_weight_inputs_v2 import (
+        build_gateway_weight_inputs_v2,
+    )
+
+    loop = asyncio.get_running_loop()
+    key = (id(loop), str(request_hash))
+    cached = _WEIGHT_INPUT_RESULTS.get(key)
+    if cached is not None:
+        expires_at, result = cached
+        if expires_at > loop.time():
+            return result
+        _WEIGHT_INPUT_RESULTS.pop(key, None)
+
+    task = _WEIGHT_INPUT_LOADS_INFLIGHT.get(key)
+    if task is not None and (task.done() or task.get_loop() is not loop):
+        _WEIGHT_INPUT_LOADS_INFLIGHT.pop(key, None)
+        task = None
+    if task is None:
+        async def _build() -> Dict[str, Any]:
+            allocation_graph = await load_business_artifact_graph_v2(
+                artifact_kind="allocation",
+                artifact_ref=f"epoch:{int(epoch_id)}",
+                artifact_hash=str(allocation_hash),
+            )
+            return await build_gateway_weight_inputs_v2(
+                calculation_snapshot=calculation_snapshot,
+                allocation_graph=allocation_graph,
+                leaderboard_window_start=str(leaderboard_window_start),
+                leaderboard_window_end=str(leaderboard_window_end),
+            )
+
+        task = asyncio.create_task(_build())
+        _WEIGHT_INPUT_LOADS_INFLIGHT[key] = task
+
+        def _complete(completed: asyncio.Task) -> None:
+            if _WEIGHT_INPUT_LOADS_INFLIGHT.get(key) is completed:
+                _WEIGHT_INPUT_LOADS_INFLIGHT.pop(key, None)
+            if completed.cancelled():
+                return
+            try:
+                result = completed.result()
+            except BaseException:
+                return
+            now = loop.time()
+            for cached_key, (expires_at, _cached_result) in list(
+                _WEIGHT_INPUT_RESULTS.items()
+            ):
+                if expires_at <= now:
+                    _WEIGHT_INPUT_RESULTS.pop(cached_key, None)
+            while len(_WEIGHT_INPUT_RESULTS) >= _WEIGHT_INPUT_RESULT_MAX_ENTRIES:
+                _WEIGHT_INPUT_RESULTS.pop(next(iter(_WEIGHT_INPUT_RESULTS)))
+            _WEIGHT_INPUT_RESULTS[key] = (
+                now + _WEIGHT_INPUT_RESULT_TTL_SECONDS,
+                result,
+            )
+
+        task.add_done_callback(_complete)
     return await asyncio.shield(task)
 
 
@@ -1323,21 +1407,11 @@ async def get_weight_inputs_v2(
     )
 
     try:
-        from gateway.research_lab.attested_v2_store import (
-            load_business_artifact_graph_v2,
-        )
-        from gateway.research_lab.attested_weight_inputs_v2 import (
-            build_gateway_weight_inputs_v2,
-        )
-
-        allocation_graph = await load_business_artifact_graph_v2(
-            artifact_kind="allocation",
-            artifact_ref=f"epoch:{request['epoch_id']}",
-            artifact_hash=request["allocation_hash"],
-        )
-        result = await build_gateway_weight_inputs_v2(
+        result = await _build_weight_inputs_v2_singleflight(
+            request_hash=request["request_hash"],
+            epoch_id=request["epoch_id"],
+            allocation_hash=request["allocation_hash"],
             calculation_snapshot=calculation,
-            allocation_graph=allocation_graph,
             leaderboard_window_start=request["leaderboard_window_start"],
             leaderboard_window_end=request["leaderboard_window_end"],
         )

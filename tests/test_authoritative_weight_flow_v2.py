@@ -449,6 +449,7 @@ async def test_flow_orders_inputs_compute_parent_binding_and_durable_publication
     assert client.binding_requests[0][1] == ROOT
     assert b"version=" + ("8" * 40).encode() in client.binding_requests[0][0]
     assert observed["url"] == "https://gateway.example/weights/submit/v2"
+    assert observed["timeout"] == 600.0
     assert result["uids"] == [0, 1]
     assert result["weight_submission_event_hash"] == EVENT
     assert order == ["journal", "post"]

@@ -81,7 +81,10 @@ _PROFILE_FIELDS = {
     "extrinsic_period",
     "signed_extensions",
 }
-_PROFILE_OPTIONAL_FIELDS = {"supported_spec_versions"}
+_PROFILE_OPTIONAL_FIELDS = {
+    "supported_spec_versions",
+    "runtime_upgrade_policy",
+}
 
 _EXPECTED_SIGNED_EXTENSIONS = (
     "CheckMortality",
@@ -207,10 +210,8 @@ def validate_chain_signing_profile(value: Mapping[str, Any]) -> Dict[str, Any]:
     fields = set(value) if isinstance(value, Mapping) else set()
     _require(
         isinstance(value, Mapping)
-        and fields in (
-            _PROFILE_FIELDS,
-            _PROFILE_FIELDS | _PROFILE_OPTIONAL_FIELDS,
-        ),
+        and _PROFILE_FIELDS.issubset(fields)
+        and fields.issubset(_PROFILE_FIELDS | _PROFILE_OPTIONAL_FIELDS),
         "chain signing profile fields are invalid",
     )
     _require(
@@ -308,6 +309,28 @@ def validate_chain_signing_profile(value: Mapping[str, Any]) -> Dict[str, Any]:
             "supported spec versions are not canonical",
         )
         normalized["supported_spec_versions"] = normalized_supported
+    if "runtime_upgrade_policy" in value:
+        policy = value.get("runtime_upgrade_policy")
+        _require(
+            isinstance(policy, Mapping)
+            and set(policy)
+            == {"mode", "minimum_spec_version"},
+            "runtime upgrade policy is invalid",
+        )
+        minimum_spec_version = _integer(
+            policy.get("minimum_spec_version"),
+            "minimum runtime spec version",
+            maximum=(1 << 32) - 1,
+        )
+        _require(
+            policy.get("mode") == "exact_payload_invariants_v1"
+            and minimum_spec_version <= spec_version,
+            "runtime upgrade policy is invalid",
+        )
+        normalized["runtime_upgrade_policy"] = {
+            "mode": "exact_payload_invariants_v1",
+            "minimum_spec_version": minimum_spec_version,
+        }
     return normalized
 
 
@@ -323,7 +346,7 @@ def chain_signing_profiles(
     base = {
         key: item
         for key, item in manifest.items()
-        if key != "supported_spec_versions"
+        if key not in {"supported_spec_versions", "runtime_upgrade_policy"}
     }
     return tuple(
         {**base, "spec_version": int(spec_version)}
@@ -360,11 +383,24 @@ def select_chain_signing_profile(
         int(profile["spec_version"]): profile
         for profile in chain_signing_profiles(value)
     }
-    _require(
-        spec_version in candidates,
-        "runtime specVersion is not explicitly supported",
-    )
-    selected = candidates[spec_version]
+    selected = candidates.get(spec_version)
+    if selected is None:
+        policy = validate_chain_signing_profile(value).get(
+            "runtime_upgrade_policy"
+        )
+        _require(
+            isinstance(policy, Mapping)
+            and policy.get("mode") == "exact_payload_invariants_v1"
+            and spec_version >= int(policy["minimum_spec_version"]),
+            "runtime specVersion is not explicitly supported",
+        )
+        base = {
+            key: item
+            for key, item in validate_chain_signing_profile(value).items()
+            if key
+            not in {"supported_spec_versions", "runtime_upgrade_policy"}
+        }
+        selected = {**base, "spec_version": spec_version}
     _require(
         transaction_version == int(selected["transaction_version"]),
         "runtime transactionVersion differs from the measured profile",
@@ -377,15 +413,34 @@ def select_chain_signing_profile(
 
 
 def resolve_chain_signing_profile_hash(
-    value: Mapping[str, Any], profile_hash: Any
+    value: Mapping[str, Any],
+    profile_hash: Any,
+    *,
+    runtime_spec_version: Any = None,
 ) -> Dict[str, Any]:
     """Resolve an authorization to one exact member of a measured manifest."""
 
     expected_hash = _hash(profile_hash, "chain_signing_profile_hash")
+    candidates = list(chain_signing_profiles(value))
+    if runtime_spec_version is not None:
+        manifest = validate_chain_signing_profile(value)
+        candidates.append(
+            select_chain_signing_profile(
+                manifest,
+                runtime_version={
+                    "specVersion": runtime_spec_version,
+                    "transactionVersion": manifest["transaction_version"],
+                },
+                genesis_hash=manifest["genesis_hash"],
+            )
+        )
+    matches_by_hash = {
+        sha256_json(profile): profile for profile in candidates
+    }
     matches = [
         profile
-        for profile in chain_signing_profiles(value)
-        if sha256_json(profile) == expected_hash
+        for digest, profile in matches_by_hash.items()
+        if digest == expected_hash
     ]
     _require(
         len(matches) == 1,
@@ -578,6 +633,7 @@ def build_weight_extrinsic_authorization_v2(
         "sparse_uids": uids,
         "sparse_weights_u16": values,
         "chain_signing_profile_hash": sha256_json(normalized_profile),
+        "runtime_spec_version": normalized_profile["spec_version"],
         "commitment_hex": bytes(commitment).hex(),
         "commitment_hash": sha256_bytes(bytes(commitment)),
         "reveal_round": _integer(
@@ -615,6 +671,7 @@ def validate_weight_extrinsic_authorization_v2(
         "sparse_uids",
         "sparse_weights_u16",
         "chain_signing_profile_hash",
+        "runtime_spec_version",
         "commitment_hex",
         "commitment_hash",
         "reveal_round",
@@ -629,9 +686,15 @@ def validate_weight_extrinsic_authorization_v2(
         "signed_message_hash",
         "authorization_hash",
     }
-    _require(set(value) == expected_fields, "weight extrinsic authorization fields are invalid")
+    legacy = set(value) == expected_fields - {"runtime_spec_version"}
+    _require(
+        set(value) == expected_fields or legacy,
+        "weight extrinsic authorization fields are invalid",
+    )
     selected_profile = resolve_chain_signing_profile_hash(
-        profile, value["chain_signing_profile_hash"]
+        profile,
+        value["chain_signing_profile_hash"],
+        runtime_spec_version=value.get("runtime_spec_version"),
     )
     rebuilt = build_weight_extrinsic_authorization_v2(
         profile=selected_profile,
@@ -651,6 +714,10 @@ def validate_weight_extrinsic_authorization_v2(
         nonce=value["nonce"],
         block_hash=value["block_hash"],
     )
+    if legacy:
+        rebuilt.pop("runtime_spec_version")
+        body = {key: item for key, item in rebuilt.items() if key != "authorization_hash"}
+        rebuilt["authorization_hash"] = sha256_json(body)
     _require(dict(value) == rebuilt, "weight extrinsic authorization is not canonical")
     return rebuilt
 
@@ -769,6 +836,7 @@ def build_serve_axon_extrinsic_authorization_v2(
             placeholder2, "axon placeholder2", maximum=(1 << 8) - 1
         ),
         "chain_signing_profile_hash": sha256_json(normalized_profile),
+        "runtime_spec_version": normalized_profile["spec_version"],
         "call_data_hex": call.hex(),
         "call_data_hash": sha256_bytes(call),
         "era_current": _integer(
@@ -801,6 +869,7 @@ def validate_serve_axon_extrinsic_authorization_v2(
         "placeholder1",
         "placeholder2",
         "chain_signing_profile_hash",
+        "runtime_spec_version",
         "call_data_hex",
         "call_data_hash",
         "era_current",
@@ -812,9 +881,15 @@ def validate_serve_axon_extrinsic_authorization_v2(
         "signed_message_hash",
         "authorization_hash",
     }
-    _require(set(value) == expected_fields, "serve axon authorization fields are invalid")
+    legacy = set(value) == expected_fields - {"runtime_spec_version"}
+    _require(
+        set(value) == expected_fields or legacy,
+        "serve axon authorization fields are invalid",
+    )
     selected_profile = resolve_chain_signing_profile_hash(
-        profile, value["chain_signing_profile_hash"]
+        profile,
+        value["chain_signing_profile_hash"],
+        runtime_spec_version=value.get("runtime_spec_version"),
     )
     rebuilt = build_serve_axon_extrinsic_authorization_v2(
         profile=selected_profile,
@@ -832,6 +907,10 @@ def validate_serve_axon_extrinsic_authorization_v2(
         nonce=value["nonce"],
         block_hash=value["block_hash"],
     )
+    if legacy:
+        rebuilt.pop("runtime_spec_version")
+        body = {key: item for key, item in rebuilt.items() if key != "authorization_hash"}
+        rebuilt["authorization_hash"] = sha256_json(body)
     _require(dict(value) == rebuilt, "serve axon authorization is not canonical")
     return rebuilt
 

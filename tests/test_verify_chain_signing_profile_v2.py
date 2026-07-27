@@ -18,6 +18,7 @@ def _profile():
         ).read_text()
     )
     profile.pop("supported_spec_versions", None)
+    profile.pop("runtime_upgrade_policy", None)
     profile["spec_version"] = 437
     profile["genesis_hash"] = "ab" * 32
     return profile
@@ -109,4 +110,76 @@ def test_chain_signing_profile_rejects_malformed_runtime(runtime_version):
             profile=_compatible_profile(),
             runtime_version=runtime_version,
             genesis_hash="0x" + "ab" * 32,
+        )
+
+
+def test_chain_signing_profile_accepts_invariant_checked_future_spec():
+    profile = {
+        **_compatible_profile(),
+        "runtime_upgrade_policy": {
+            "mode": "exact_payload_invariants_v1",
+            "minimum_spec_version": 437,
+        },
+    }
+    result = verify_chain_signing_profile_v2(
+        profile=profile,
+        runtime_version={"specVersion": 440, "transactionVersion": 1},
+        genesis_hash="0x" + "ab" * 32,
+        call_metadata={
+            "commit_timelocked_mechanism_weights": {
+                "call_index": profile["commit_call_index"],
+                "fields": [
+                    {"name": "netuid", "typeName": "NetUid"},
+                    {"name": "mecid", "typeName": "MechId"},
+                    {
+                        "name": "commit",
+                        "typeName": "BoundedVec<u8, ConstU32<MAX_CRV3_COMMIT_SIZE_BYTES>>",
+                    },
+                    {"name": "reveal_round", "typeName": "u64"},
+                    {"name": "commit_reveal_version", "typeName": "u16"},
+                ],
+            },
+            "serve_axon": {
+                "call_index": profile["serve_axon_call_index"],
+                "fields": [
+                    {"name": "netuid", "typeName": "NetUid"},
+                    {"name": "version", "typeName": "u32"},
+                    {"name": "ip", "typeName": "u128"},
+                    {"name": "port", "typeName": "u16"},
+                    {"name": "ip_type", "typeName": "u8"},
+                    {"name": "protocol", "typeName": "u8"},
+                    {"name": "placeholder1", "typeName": "u8"},
+                    {"name": "placeholder2", "typeName": "u8"},
+                ],
+            },
+        },
+    )
+    assert result["spec_version"] == 440
+
+
+def test_chain_signing_profile_rejects_future_spec_with_changed_call():
+    profile = {
+        **_compatible_profile(),
+        "runtime_upgrade_policy": {
+            "mode": "exact_payload_invariants_v1",
+            "minimum_spec_version": 437,
+        },
+    }
+    with pytest.raises(
+        ChainSigningProfileV2Error, match="call contract differs"
+    ):
+        verify_chain_signing_profile_v2(
+            profile=profile,
+            runtime_version={"specVersion": 440, "transactionVersion": 1},
+            genesis_hash="0x" + "ab" * 32,
+            call_metadata={
+                "commit_timelocked_mechanism_weights": {
+                    "call_index": "0777",
+                    "fields": [],
+                },
+                "serve_axon": {
+                    "call_index": profile["serve_axon_call_index"],
+                    "fields": [],
+                },
+            },
         )

@@ -133,6 +133,16 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         "research_lab_corpus_complete",
         ("trajectory_id", "run_id", "source_watermark", "completed_at"),
     ),
+    (
+        "scripts/125-research-lab-artifact-key-lineage.sql",
+        "research_lab_provider_evidence_cache_v2",
+        ("artifact_master_key_ref_hash",),
+    ),
+    (
+        "scripts/125-research-lab-artifact-key-lineage.sql",
+        "research_lab_provider_outcome_checkpoints_v2",
+        ("artifact_master_key_ref_hash",),
+    ),
 )
 
 REQUIRED_SUPABASE_V2_RPCS = (

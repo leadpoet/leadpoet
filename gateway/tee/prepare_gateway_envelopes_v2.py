@@ -44,7 +44,10 @@ from gateway.tee.proxy_transport_preflight_v2 import (
 from gateway.tee.supabase_schema_preflight_v2 import (
     verify_required_supabase_v2_schema,
 )
-from gateway.utils.tee_kms_provision_v2 import build_provider_envelope_v2
+from gateway.utils.tee_kms_provision_v2 import (
+    build_provider_envelope_v2,
+    validate_provider_envelope,
+)
 
 
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -595,6 +598,7 @@ def prepare_gateway_envelopes_v2(
     deploy_commit: str,
     output_dir: Path,
     kms_client: Any = None,
+    artifact_master_key_envelope: Optional[Mapping[str, Any]] = None,
     proxy_fleet_probe: Optional[
         Callable[
             [Mapping[str, Sequence[str]]],
@@ -635,25 +639,48 @@ def prepare_gateway_envelopes_v2(
     removal_names = set()
     removal_values = set()
     try:
-        artifact_key = secrets.token_bytes(32)
-        artifact_context = {
-            "leadpoet:commit": commit,
-            "leadpoet:purpose": "gateway-artifact-master-key-v2",
-            "leadpoet:slot": "artifact_master_key",
-        }
-        _write_json(
-            staging / "artifact_master_key.json",
-            build_provider_envelope_v2(
+        if artifact_master_key_envelope is None:
+            artifact_key = secrets.token_bytes(32)
+            artifact_envelope = build_provider_envelope_v2(
                 credential_slot="artifact_master_key",
                 plaintext=artifact_key,
                 credential_ref_hash=artifact_master_key_reference_hash(artifact_key),
                 kms_key_id=kms_key_id,
-                encryption_context=artifact_context,
+                encryption_context={
+                    "leadpoet:key-lineage": "gateway-production-v2",
+                    "leadpoet:purpose": "gateway-artifact-master-key-v2",
+                    "leadpoet:slot": "artifact_master_key",
+                },
                 kms_client=kms_client,
                 allow_binary=True,
-            ),
-        )
-        del artifact_key
+            )
+            del artifact_key
+        else:
+            try:
+                normalized_artifact_envelope = validate_provider_envelope(
+                    artifact_master_key_envelope
+                )
+            except Exception as exc:
+                raise GatewayEnvelopePreparationV2Error(
+                    "existing artifact master key envelope is invalid"
+                ) from exc
+            if (
+                normalized_artifact_envelope["credential_slot"]
+                != "artifact_master_key"
+                or normalized_artifact_envelope["encryption_context"].get(
+                    "leadpoet:purpose"
+                )
+                != "gateway-artifact-master-key-v2"
+                or normalized_artifact_envelope["encryption_context"].get(
+                    "leadpoet:slot"
+                )
+                != "artifact_master_key"
+            ):
+                raise GatewayEnvelopePreparationV2Error(
+                    "existing artifact master key envelope purpose is invalid"
+                )
+            artifact_envelope = dict(artifact_master_key_envelope)
+        _write_json(staging / "artifact_master_key.json", artifact_envelope)
 
         boot_values: Dict[str, str] = {}
         for slot, names in _BOOT_SOURCES.items():
@@ -760,6 +787,9 @@ def prepare_gateway_envelopes_v2(
             },
             "worker_proxy_credential_ref_hashes": proxy_commitments,
             "worker_proxy_profile_counts": worker_proxy_profile_counts,
+            "artifact_master_key_ref_hash": artifact_envelope[
+                "credential_ref_hash"
+            ],
             "deferred_worker_fleet_roles": sorted(deferred_roles),
             "required_count_environment": {
                 "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": str(
@@ -877,12 +907,31 @@ def install_gateway_envelopes_v2(
     backup = destination.parent / (
         ".gateway-v2-envelope-backup.%s" % secrets.token_hex(8)
     )
+    artifact_envelope_path = destination / "artifact_master_key.json"
+    artifact_master_key_envelope = None
+    if artifact_envelope_path.exists() or artifact_envelope_path.is_symlink():
+        if (
+            artifact_envelope_path.is_symlink()
+            or not artifact_envelope_path.is_file()
+        ):
+            raise GatewayEnvelopePreparationV2Error(
+                "existing artifact master key envelope is not a regular file"
+            )
+        try:
+            artifact_master_key_envelope = json.loads(
+                artifact_envelope_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise GatewayEnvelopePreparationV2Error(
+                "existing artifact master key envelope cannot be read"
+            ) from exc
     generated = prepare_gateway_envelopes_v2(
         environment=environment,
         kms_key_id=kms_key_id,
         deploy_commit=deploy_commit,
         output_dir=staging,
         kms_client=kms_client,
+        artifact_master_key_envelope=artifact_master_key_envelope,
         proxy_fleet_probe=lambda _fleets: verified_proxy_fleets,
     )
     managed_names = {

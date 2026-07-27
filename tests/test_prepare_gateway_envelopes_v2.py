@@ -683,6 +683,107 @@ def test_install_uses_canonical_secret_names_and_reuses_exact_commit(tmp_path):
     assert len(kms.requests) == request_count
 
 
+def test_install_preserves_artifact_master_key_across_release_and_rollback(
+    tmp_path,
+):
+    destination = tmp_path / "v2"
+    kms = KMS()
+    first = install_gateway_envelopes_v2(
+        environment=_environment(),
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        install_dir=destination,
+        kms_client=kms,
+        proxy_fleet_probe=_skip_proxy_probe,
+    )
+    first_envelope = json.loads(
+        (destination / "artifact_master_key.json").read_text()
+    )
+    first_key_encryptions = [
+        request
+        for request in kms.requests
+        if request["EncryptionContext"].get("leadpoet:slot")
+        == "artifact_master_key"
+    ]
+
+    second = install_gateway_envelopes_v2(
+        environment=_environment(),
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="2" * 40,
+        install_dir=destination,
+        kms_client=kms,
+        proxy_fleet_probe=_skip_proxy_probe,
+    )
+    second_envelope = json.loads(
+        (destination / "artifact_master_key.json").read_text()
+    )
+    rollback = install_gateway_envelopes_v2(
+        environment=_environment(),
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        install_dir=destination,
+        kms_client=kms,
+        proxy_fleet_probe=_skip_proxy_probe,
+    )
+    rollback_envelope = json.loads(
+        (destination / "artifact_master_key.json").read_text()
+    )
+
+    assert first["artifact_master_key_ref_hash"] == second[
+        "artifact_master_key_ref_hash"
+    ] == rollback["artifact_master_key_ref_hash"]
+    assert first_envelope == second_envelope == rollback_envelope
+    assert len(first_key_encryptions) == 1
+    assert len(
+        [
+            request
+            for request in kms.requests
+            if request["EncryptionContext"].get("leadpoet:slot")
+            == "artifact_master_key"
+        ]
+    ) == 1
+
+
+def test_install_fails_closed_on_invalid_existing_artifact_key(tmp_path):
+    destination = tmp_path / "v2"
+    destination.mkdir()
+    (destination / "artifact_master_key.json").write_text("{}")
+
+    with pytest.raises(
+        Exception, match="existing artifact master key envelope is invalid"
+    ):
+        install_gateway_envelopes_v2(
+            environment=_environment(),
+            kms_key_id="alias/gateway-v2",
+            deploy_commit="1" * 40,
+            install_dir=destination,
+            kms_client=KMS(),
+            proxy_fleet_probe=_skip_proxy_probe,
+        )
+
+    assert (destination / "artifact_master_key.json").read_text() == "{}"
+
+
+def test_install_fails_closed_on_artifact_key_symlink(tmp_path):
+    destination = tmp_path / "v2"
+    destination.mkdir()
+    external = tmp_path / "external-key.json"
+    external.write_text("{}")
+    (destination / "artifact_master_key.json").symlink_to(external)
+
+    with pytest.raises(Exception, match="not a regular file"):
+        install_gateway_envelopes_v2(
+            environment=_environment(),
+            kms_key_id="alias/gateway-v2",
+            deploy_commit="1" * 40,
+            install_dir=destination,
+            kms_client=KMS(),
+            proxy_fleet_probe=_skip_proxy_probe,
+        )
+
+    assert external.read_text() == "{}"
+
+
 def test_transition_removes_every_alias_of_sealed_parent_plaintext(tmp_path):
     environment = _environment()
     environment.update(

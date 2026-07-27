@@ -181,6 +181,42 @@ def test_compatible_chain_profile_fails_closed_on_unmeasured_runtime(
         )
 
 
+def test_runtime_upgrade_policy_accepts_new_spec_with_exact_invariants():
+    manifest = {
+        **_profile(),
+        "spec_version": 438,
+        "supported_spec_versions": [437, 438],
+        "runtime_upgrade_policy": {
+            "mode": "exact_payload_invariants_v1",
+            "minimum_spec_version": 437,
+        },
+    }
+    selected = select_chain_signing_profile(
+        manifest,
+        runtime_version={"specVersion": 440, "transactionVersion": 1},
+        genesis_hash="0x" + "0" * 64,
+    )
+    assert selected["spec_version"] == 440
+    assert "runtime_upgrade_policy" not in selected
+    assert "supported_spec_versions" not in selected
+
+
+def test_runtime_upgrade_policy_still_rejects_incompatible_runtime():
+    manifest = {
+        **_profile(),
+        "runtime_upgrade_policy": {
+            "mode": "exact_payload_invariants_v1",
+            "minimum_spec_version": 431,
+        },
+    }
+    with pytest.raises(HotkeyAuthorityV2Error, match="transactionVersion differs"):
+        select_chain_signing_profile(
+            manifest,
+            runtime_version={"specVersion": 440, "transactionVersion": 2},
+            genesis_hash="0x" + "0" * 64,
+        )
+
+
 def test_authorization_from_prior_compatible_spec_remains_recoverable():
     prior_profile = {**_profile(), "spec_version": 431}
     manifest = {**_profile(), "supported_spec_versions": [431, 432]}

@@ -23,6 +23,7 @@ ARTIFACT_MASTER_KEY_SLOT = "artifact_master_key"
 ARTIFACT_MASTER_KEY_HASH_DOMAIN = b"leadpoet-artifact-master-key-v2:"
 MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 MAX_IN_MEMORY_ARTIFACTS = 2048
+TRANSIENT_EVICTION_MIN_AGE_SECONDS = 600.0
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES = frozenset(
     {408, 429, 500, 502, 503, 504}
@@ -77,13 +78,20 @@ class EncryptedArtifactVaultV2:
         if not _HASH_RE.fullmatch(str(boot_identity_hash or "")):
             raise ArtifactVaultV2Error("artifact vault boot identity is invalid")
         self._aead = AESGCM(bytes(master_key))
+        self._master_key_ref_hash = artifact_master_key_reference_hash(master_key)
         self._boot_identity_hash = str(boot_identity_hash)
         self._retention_days = max(1, int(retention_days))
         self._clock = clock
         self._artifacts = {}  # type: Dict[str, Dict[str, Any]]
         self._persisted_artifacts = {}  # type: Dict[str, Dict[str, Any]]
+        self._active_transaction_counts = {}  # type: Dict[str, int]
+        self._evicted_transient_count = 0
         self._lock = threading.RLock()
         self._transaction_state = threading.local()
+
+    @property
+    def master_key_ref_hash(self) -> str:
+        return self._master_key_ref_hash
 
     @contextmanager
     def transient_artifact_transaction(self):
@@ -105,6 +113,15 @@ class EncryptedArtifactVaultV2:
                         del self._artifacts[artifact_id]
             raise
         finally:
+            with self._lock:
+                for artifact_id in created:
+                    remaining = (
+                        self._active_transaction_counts.get(artifact_id, 0) - 1
+                    )
+                    if remaining > 0:
+                        self._active_transaction_counts[artifact_id] = remaining
+                    else:
+                        self._active_transaction_counts.pop(artifact_id, None)
             stack.pop()
             if not stack:
                 del self._transaction_state.stack
@@ -158,20 +175,58 @@ class EncryptedArtifactVaultV2:
             "object_lock_mode": "COMPLIANCE",
             "retain_until": retain_until,
             "persistence": None,
+            "_sealed_at": now,
         }
-        created = False
+        transactions = tuple(getattr(self._transaction_state, "stack", ()))
         with self._lock:
             existing = self._artifacts.get(artifact_id)
             if existing is not None:
                 return self.descriptor(artifact_id)
             if len(self._artifacts) >= MAX_IN_MEMORY_ARTIFACTS:
-                raise ArtifactVaultV2Error("artifact vault capacity is full")
+                self._evict_stale_transients(now)
+                if len(self._artifacts) >= MAX_IN_MEMORY_ARTIFACTS:
+                    raise ArtifactVaultV2Error("artifact vault capacity is full")
             self._artifacts[artifact_id] = record
-            created = True
-        if created:
-            for transaction in getattr(self._transaction_state, "stack", ()):
+            for transaction in transactions:
                 transaction.add(artifact_id)
+                self._active_transaction_counts[artifact_id] = (
+                    self._active_transaction_counts.get(artifact_id, 0) + 1
+                )
         return self.descriptor(artifact_id)
+
+    def _evict_stale_transients(self, now: datetime) -> int:
+        """Reclaim old orphan envelopes only when capacity blocks new work."""
+
+        eligible = sorted(
+            (
+                (record["_sealed_at"], artifact_id)
+                for artifact_id, record in self._artifacts.items()
+                if record["persistence"] is None
+                and self._active_transaction_counts.get(artifact_id, 0) == 0
+                and (now - record["_sealed_at"]).total_seconds()
+                >= TRANSIENT_EVICTION_MIN_AGE_SECONDS
+            ),
+            key=lambda item: item[0],
+        )
+        needed = len(self._artifacts) - MAX_IN_MEMORY_ARTIFACTS + 1
+        freed = 0
+        for _sealed_at, artifact_id in eligible:
+            if freed >= needed:
+                break
+            record = self._artifacts.get(artifact_id)
+            if record is not None and record["persistence"] is None:
+                del self._artifacts[artifact_id]
+                freed += 1
+        self._evicted_transient_count += freed
+        return freed
+
+    def transient_capacity_state(self) -> Dict[str, int]:
+        with self._lock:
+            return {
+                "transient_artifact_count": len(self._artifacts),
+                "maximum_transient_artifacts": MAX_IN_MEMORY_ARTIFACTS,
+                "evicted_orphan_count": self._evicted_transient_count,
+            }
 
     def descriptor(self, artifact_id: str) -> Dict[str, Any]:
         with self._lock:

@@ -26,6 +26,10 @@
     437,
     438
   ],
+  "runtime_upgrade_policy": {
+    "mode": "exact_payload_invariants_v1",
+    "minimum_spec_version": 437
+  },
   "subnet_reveal_period_epochs": 1,
   "tempo": 360,
   "transaction_version": 1,

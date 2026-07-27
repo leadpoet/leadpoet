@@ -328,6 +328,7 @@ class ProviderOutcomeStoreV2:
         return self._validate_row(
             {
                 "schema_version": CHECKPOINT_ROW_SCHEMA_VERSION,
+                "artifact_master_key_ref_hash": self._vault.master_key_ref_hash,
                 "utc_day": payload["utc_day"],
                 "sequence": payload["sequence"],
                 "checkpoint_hash": payload["checkpoint_hash"],
@@ -341,6 +342,7 @@ class ProviderOutcomeStoreV2:
     def _validate_row(self, value: Mapping[str, Any]) -> Dict[str, Any]:
         fields = {
             "schema_version",
+            "artifact_master_key_ref_hash",
             "utc_day",
             "sequence",
             "checkpoint_hash",
@@ -370,6 +372,10 @@ class ProviderOutcomeStoreV2:
             )
         return {
             "schema_version": CHECKPOINT_ROW_SCHEMA_VERSION,
+            "artifact_master_key_ref_hash": _hash(
+                value.get("artifact_master_key_ref_hash"),
+                "artifact master key reference hash",
+            ),
             "utc_day": _day(value.get("utc_day")),
             "sequence": sequence,
             "checkpoint_hash": _hash(value.get("checkpoint_hash"), "checkpoint_hash"),
@@ -402,7 +408,12 @@ class ProviderOutcomeStoreV2:
                 "select",
                 "schema_version,utc_day,sequence,checkpoint_hash,"
                 "previous_checkpoint_hash,state_document_hash,"
-                "checkpoint_artifact_id,encrypted_checkpoint_doc",
+                "checkpoint_artifact_id,encrypted_checkpoint_doc,"
+                "artifact_master_key_ref_hash",
+            ),
+            (
+                "artifact_master_key_ref_hash",
+                "eq.%s" % self._vault.master_key_ref_hash,
             ),
             ("utc_day", "eq.%s" % _day(utc_day)),
         ]

@@ -480,6 +480,7 @@ class ProviderEvidenceCacheStoreV2:
         return self._validate_row(
             {
                 "schema_version": CACHE_ROW_SCHEMA_VERSION,
+                "artifact_master_key_ref_hash": self._vault.master_key_ref_hash,
                 "utc_day": payload["utc_day"],
                 "request_fingerprint": payload["request_fingerprint"],
                 "cache_entry_hash": cache_entry_hash,
@@ -496,6 +497,7 @@ class ProviderEvidenceCacheStoreV2:
     def _validate_row(self, value: Mapping[str, Any]) -> Dict[str, Any]:
         fields = {
             "schema_version",
+            "artifact_master_key_ref_hash",
             "utc_day",
             "request_fingerprint",
             "cache_entry_hash",
@@ -520,6 +522,10 @@ class ProviderEvidenceCacheStoreV2:
             )
         return {
             "schema_version": CACHE_ROW_SCHEMA_VERSION,
+            "artifact_master_key_ref_hash": _hash(
+                value.get("artifact_master_key_ref_hash"),
+                "artifact master key reference hash",
+            ),
             "utc_day": _day(value.get("utc_day")),
             "request_fingerprint": _fingerprint(value.get("request_fingerprint")),
             "cache_entry_hash": _hash(value.get("cache_entry_hash"), "cache_entry_hash"),
@@ -548,7 +554,12 @@ class ProviderEvidenceCacheStoreV2:
                     "select",
                     "schema_version,utc_day,request_fingerprint,cache_entry_hash,"
                     "cache_artifact_id,source_record_hash,source_boot_identity_hash,"
-                    "response_body_hash,encrypted_cache_doc",
+                    "response_body_hash,encrypted_cache_doc,"
+                    "artifact_master_key_ref_hash",
+                ),
+                (
+                    "artifact_master_key_ref_hash",
+                    "eq.%s" % self._vault.master_key_ref_hash,
                 ),
                 ("utc_day", "eq.%s" % _day(utc_day)),
                 (

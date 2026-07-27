@@ -15,6 +15,8 @@ from pathlib import Path
 import pytest
 
 from research_lab.sourcing_model_contract_check import (
+    CONTRACT_PATH,
+    PARITY_FIXTURE_PATH,
     load_wrapper_contract,
     verify_source_tree_contract,
 )
@@ -29,6 +31,9 @@ def _write(root: Path, relative: str, body: str) -> None:
 def _conforming_tree(root: Path) -> None:
     _write(root, "requirements.txt", "httpx\n")
     _write(root, "research_lab_adapter.py", """
+        ADAPTER_VERSION = "sourcing-model-research-lab-adapter:v3"
+        COMPONENT_REGISTRY_VERSION = "sourcing-model-components:v2"
+
         def adapter_metadata():
             return {}
 
@@ -36,6 +41,31 @@ def _conforming_tree(root: Path) -> None:
             return []
     """)
     _write(root, "sourcing_model/__init__.py", "from .core import qualify\n")
+    contract_path = root / "sourcing_model" / "consumer_contract.json"
+    contract_path.parent.mkdir(parents=True, exist_ok=True)
+    contract_path.write_bytes(CONTRACT_PATH.read_bytes())
+    parity_path = root / "sourcing_model" / "consumer_parity_fixtures.json"
+    parity_path.write_bytes(PARITY_FIXTURE_PATH.read_bytes())
+    _write(
+        root,
+        "sourcing_model/consumer_parity.py",
+        """
+        def evaluate_all(document):
+            return []
+
+        def evaluate_parity_case(case):
+            return {}
+
+        def load_parity_fixtures(path=None):
+            return {}
+
+        def sha256_file(path):
+            return "0" * 64
+
+        def verify_expected_projections(document=None):
+            return True
+        """,
+    )
     _write(root, "sourcing_model/clients.py", """
         import urllib.request
 
@@ -85,7 +115,7 @@ def _conforming_tree(root: Path) -> None:
     """)
     _write(root, "sourcing_model/scoring.py", "SCORING = True\n")
     _write(root, "sourcing_model/firmographic_discovery.py", """
-        def plan_for_icp(icp, *, target):
+        def plan_for_icp(icp, *, target, allow_paid_escalation=True):
             return {}
 
         def policy_metadata():
@@ -98,11 +128,93 @@ def _conforming_tree(root: Path) -> None:
         def taxonomy_metadata():
             return {}
     """)
+    _write(root, "sourcing_model/normalized_icp_discovery_plan.py", """
+        DISCOVERY_PLAN_SCHEMA_VERSION = 1
+        DISCOVERY_PLAN_CONTRACT_ID = "normalized-icp-discovery-plan:v1"
+
+        def compile_normalized_icp_discovery_plan(normalized_icp):
+            return {}
+    """)
     _write(root, "sourcing_model/orchestrator.py", """
-        def run_branches(icp, qualify_fn, *, max_companies):
+        def intent_source_for_category(category):
+            return "news"
+
+        def plan_branches(icp, *, max_companies):
+            return []
+
+        def run_branches(icp, qualify_fn, *, max_companies, runtime_options=None):
             return []
     """)
     _write(root, "sourcing_model/resilience.py", "POLICY = True\n")
+    _write(root, "sourcing_model/routing/__init__.py", "")
+    _write(root, "sourcing_model/routing/contracts.py", """
+        def canonical_json(value):
+            return "{}"
+
+        def reject_secret_shaped_keys(value, *, path="$"):
+            return None
+
+        def sha256_payload(value):
+            return "0" * 64
+    """)
+    _write(root, "sourcing_model/routing/compiler.py", """
+        COMPILER_VERSION = "routing-compiler-v1"
+
+        def compile_route(catalog, policy, context):
+            return None
+    """)
+    _write(root, "sourcing_model/routing/defaults.py", """
+        DEFAULT_CATALOG_VERSION = "sourcing-model-tools:v1"
+        DEFAULT_POLICY_VERSION = "sourcing-model-routing:v1"
+
+        def builtin_definitions():
+            return ()
+
+        def compile_candidate_route(
+            *, structured_query, allow_paid_escalation,
+            semantic_available, remaining_seconds, remaining_calls,
+            remaining_results, credit_cap, cohort="control",
+            catalog=None, policy=None
+        ):
+            return None
+
+        def compile_intent_route(
+            category, *, existing_evidence=False, available_tools=None,
+            remaining_seconds=300, remaining_calls=8,
+            remaining_results=1, credit_cap=8, cohort="control",
+            catalog=None, policy=None
+        ):
+            return None
+
+        def default_catalog(
+            availability=None, *, state_overrides=None, additional_tools=(),
+            additional_states=(), catalog_version=DEFAULT_CATALOG_VERSION
+        ):
+            return None
+
+        def default_policy():
+            return None
+
+        def intent_source_for_category(
+            category, *, catalog=None, policy=None, cohort="control"
+        ):
+            return "news"
+
+        def intent_sources_for_category(
+            category, *, catalog=None, policy=None, cohort="control"
+        ):
+            return ("news",)
+
+        def routing_metadata():
+            return {}
+
+        def source_for_tool(tool_id):
+            return "news"
+
+        def tool_for_source(source):
+            return "intent.news"
+    """)
+    _write(root, "sourcing_model/routing/policy.py", "POLICY = True\n")
     _write(root, "sourcing_model/runtime_capabilities.py", """
         def capability_metadata():
             return {}
@@ -130,7 +242,7 @@ def _conforming_tree(root: Path) -> None:
 
 def test_contract_loads_and_declares_frozen_surface() -> None:
     contract = load_wrapper_contract()
-    assert contract["contract_id"] == "leadpoet-sourcing-wrapper-contract-v2"
+    assert contract["contract_id"] == "leadpoet-sourcing-wrapper-contract-v3"
     assert "research_lab_adapter.py" in contract["functions"]
     assert contract["functions"]["research_lab_adapter.py"]["run_icp"] == [
         "icp",
@@ -139,6 +251,24 @@ def test_contract_loads_and_declares_frozen_surface() -> None:
     assert contract["required_imports"]["sourcing_model/clients.py"] == [
         "urllib.request"
     ]
+
+
+def test_nonidentical_contract_and_parity_snapshots_fail_closed(
+    tmp_path: Path,
+) -> None:
+    _conforming_tree(tmp_path)
+    contract = tmp_path / "sourcing_model" / "consumer_contract.json"
+    contract.write_text(contract.read_text() + "\n", encoding="utf-8")
+    violations = verify_source_tree_contract(tmp_path)
+    assert any("compatibility contract differs" in item for item in violations)
+
+    _conforming_tree(tmp_path)
+    fixtures = (
+        tmp_path / "sourcing_model" / "consumer_parity_fixtures.json"
+    )
+    fixtures.write_text(fixtures.read_text() + "\n", encoding="utf-8")
+    violations = verify_source_tree_contract(tmp_path)
+    assert any("parity fixtures differ" in item for item in violations)
 
 
 def test_conforming_tree_has_no_violations(tmp_path: Path) -> None:
@@ -197,6 +327,25 @@ def test_internal_seam_rejects_additional_required_parameter(tmp_path: Path) -> 
     )
     violations = verify_source_tree_contract(tmp_path)
     assert any("required parameter drift" in item and "exa_search" in item for item in violations)
+
+
+def test_wrapper_reachable_optional_parameter_surface_is_exact(
+    tmp_path: Path,
+) -> None:
+    _conforming_tree(tmp_path)
+    module = tmp_path / "sourcing_model" / "firmographic_discovery.py"
+    module.write_text(
+        module.read_text(encoding="utf-8").replace(
+            ", allow_paid_escalation=True", ""
+        ),
+        encoding="utf-8",
+    )
+    violations = verify_source_tree_contract(tmp_path)
+    assert any(
+        "full parameter drift" in item
+        and "firmographic_discovery.py:plan_for_icp" in item
+        for item in violations
+    )
 
 
 def test_integer_floor_breach_reported(tmp_path: Path) -> None:

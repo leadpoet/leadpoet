@@ -29,6 +29,8 @@ class PrivateModelArtifactManifest:
     manifest_hash: str
     signature_ref: str
     build_id: str = ""
+    compatibility_contract: Mapping[str, str] | None = None
+    consumer_parity_fixtures: Mapping[str, str] | None = None
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "PrivateModelArtifactManifest":
@@ -43,10 +45,36 @@ class PrivateModelArtifactManifest:
             manifest_hash=str(data["manifest_hash"]),
             signature_ref=str(data["signature_ref"]),
             build_id=str(data.get("build_id", "")),
+            compatibility_contract=(
+                {
+                    str(key): str(value)
+                    for key, value in data["compatibility_contract"].items()
+                }
+                if isinstance(
+                    data.get("compatibility_contract"), Mapping
+                )
+                else None
+            ),
+            consumer_parity_fixtures=(
+                {
+                    str(key): str(value)
+                    for key, value in data[
+                        "consumer_parity_fixtures"
+                    ].items()
+                }
+                if isinstance(
+                    data.get("consumer_parity_fixtures"), Mapping
+                )
+                else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            key: value
+            for key, value in asdict(self).items()
+            if value is not None
+        }
 
     def hash_payload(self) -> dict[str, Any]:
         payload = self.to_dict()

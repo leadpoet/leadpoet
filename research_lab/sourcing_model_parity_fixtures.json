@@ -1,0 +1,511 @@
+{
+  "schema_version": 1,
+  "fixture_set_id": "routerverse-cross-consumer-parity-v1",
+  "cases": [
+    {
+      "fixture_id": "us-ai-sales-hiring-10-200",
+      "normalized_icp": {
+        "employee_count": [
+          "11-50",
+          "51-200"
+        ],
+        "geography": "United States",
+        "industry": "Artificial Intelligence",
+        "intent_category": "HIRING",
+        "intent_signal": "Hiring sales positions",
+        "required_intent": {
+          "category": "HIRING",
+          "max_age_days": 365,
+          "signal": "Hiring sales positions"
+        },
+        "required_attribute": "Builds or sells artificial intelligence software"
+      },
+      "routing": {
+        "candidate": {
+          "allow_paid_escalation": true,
+          "credit_cap": 2.0,
+          "remaining_calls": 3,
+          "remaining_results": 25,
+          "remaining_seconds": 300,
+          "semantic_available": true,
+          "structured_query": true
+        },
+        "intent": {
+          "credit_cap": 2.0,
+          "existing_evidence": false,
+          "remaining_calls": 3,
+          "remaining_results": 1,
+          "remaining_seconds": 180
+        }
+      },
+      "qualification_cases": [
+        {
+          "case_id": "accepted",
+          "disposition": "qualified"
+        },
+        {
+          "case_id": "missing-hiring-evidence",
+          "disposition": "rejected",
+          "failure_reason": "no current sales role",
+          "failure_stage": "required_intent"
+        },
+        {
+          "case_id": "wrong-industry",
+          "disposition": "rejected",
+          "failure_reason": "AI requirement not established",
+          "failure_stage": "required_attribute"
+        }
+      ]
+    },
+    {
+      "fixture_id": "us-ai-sales-hiring-existing-evidence",
+      "normalized_icp": {
+        "employee_count": [
+          "11-50",
+          "51-200"
+        ],
+        "geography": "United States",
+        "industry": "Artificial Intelligence",
+        "intent_category": "HIRING",
+        "intent_signal": "Hiring sales positions",
+        "required_intent": {
+          "category": "HIRING",
+          "max_age_days": 365,
+          "signal": "Hiring sales positions"
+        },
+        "required_attribute": "Builds or sells artificial intelligence software"
+      },
+      "routing": {
+        "candidate": {
+          "allow_paid_escalation": false,
+          "credit_cap": 0.0,
+          "remaining_calls": 1,
+          "remaining_results": 10,
+          "remaining_seconds": 120,
+          "semantic_available": false,
+          "structured_query": true
+        },
+        "intent": {
+          "credit_cap": 0.0,
+          "existing_evidence": true,
+          "remaining_calls": 1,
+          "remaining_results": 1,
+          "remaining_seconds": 60
+        }
+      },
+      "qualification_cases": [
+        {
+          "case_id": "accepted",
+          "disposition": "qualified"
+        },
+        {
+          "case_id": "generic-rejection",
+          "disposition": "rejected",
+          "failure_reason": "company fit rejected",
+          "failure_stage": "company_fit"
+        }
+      ]
+    }
+  ],
+  "expected_projections": [
+    {
+      "adapter_metadata": {
+        "adapter_version": "sourcing-model-research-lab-adapter:v3",
+        "capability_contract_version": "sourcing-model-runtime-capabilities:v2",
+        "component_registry_version": "sourcing-model-components:v2",
+        "resilience_policy_version": "sourcing-model-resilience:v1",
+        "routing_catalog_sha256": "733898474edf199507859cabd0215c401127de64b6044c237afaa9c235d1bc8f",
+        "routing_compiler_version": "routing-compiler-v1",
+        "routing_policy_sha256": "f82dc74fca23c7b7e173a93edd81b1820053bbac477b104adf0ae940dd576578",
+        "taxonomy_content_hash": "sha256:a8ade1218bb78062f7af508489d32ca0ff00e24e0647f2afaf274c5a64a64619"
+      },
+      "candidate_route": {
+        "catalog_sha256": "733898474edf199507859cabd0215c401127de64b6044c237afaa9c235d1bc8f",
+        "context_sha256": "bbd62ce79946c30085ec632da36703647f8857c4287a15097bad332c4a8fc33a",
+        "exclusions": [],
+        "plan_sha256": "245c3737f89103f0b0f454f345c58d9eb60e2c10d47abd91d9252ab5dc64ce5b",
+        "policy_sha256": "f82dc74fca23c7b7e173a93edd81b1820053bbac477b104adf0ae940dd576578",
+        "policy_version": "sourcing-model-routing:v1+routing-compiler-v1",
+        "schema_version": 1,
+        "stage": "candidate_acquisition",
+        "steps": [
+          {
+            "credit_cap": 0.0,
+            "execution_mode": "invoke",
+            "max_calls": 1,
+            "max_results": 25,
+            "order": 10,
+            "policy_reason": "structured_free_first",
+            "stop_on_success": true,
+            "timeout_seconds": 120.0,
+            "tool_id": "candidate.deepline_free_corpus"
+          },
+          {
+            "credit_cap": 0.05,
+            "execution_mode": "invoke",
+            "max_calls": 1,
+            "max_results": 25,
+            "order": 20,
+            "policy_reason": "structured_paid_fallback",
+            "stop_on_success": true,
+            "timeout_seconds": 180.0,
+            "tool_id": "candidate.crustdata_companydb"
+          },
+          {
+            "credit_cap": 1.0,
+            "execution_mode": "invoke",
+            "max_calls": 1,
+            "max_results": 25,
+            "order": 100,
+            "policy_reason": "semantic_residual",
+            "stop_on_success": false,
+            "timeout_seconds": 300.0,
+            "tool_id": "candidate.exa_semantic"
+          }
+        ]
+      },
+      "fixture_id": "us-ai-sales-hiring-10-200",
+      "intent_route": {
+        "catalog_sha256": "733898474edf199507859cabd0215c401127de64b6044c237afaa9c235d1bc8f",
+        "context_sha256": "5635d4dfbc8f4e703a684f8bfe13d121b381b4a100c0853aaf8f408191609b5b",
+        "exclusions": [
+          {
+            "reason_code": "required_feature_absent",
+            "tool_id": "intent.existing_evidence"
+          },
+          {
+            "reason_code": "intent_category_unsupported",
+            "tool_id": "intent.podcast"
+          },
+          {
+            "reason_code": "intent_category_unsupported",
+            "tool_id": "intent.social"
+          }
+        ],
+        "plan_sha256": "ce70b08fb6deaf082ed3460ed328b28ceece158ef03c2db372b8004dff723dcf",
+        "policy_sha256": "f82dc74fca23c7b7e173a93edd81b1820053bbac477b104adf0ae940dd576578",
+        "policy_version": "sourcing-model-routing:v1+routing-compiler-v1",
+        "schema_version": 1,
+        "stage": "intent_evidence",
+        "steps": [
+          {
+            "credit_cap": 1.0,
+            "execution_mode": "invoke",
+            "max_calls": 1,
+            "max_results": 1,
+            "order": 10,
+            "policy_reason": "intent_native",
+            "stop_on_success": true,
+            "timeout_seconds": 60.0,
+            "tool_id": "intent.job_listing"
+          },
+          {
+            "credit_cap": 1.0,
+            "execution_mode": "invoke",
+            "max_calls": 1,
+            "max_results": 1,
+            "order": 20,
+            "policy_reason": "company_scoped_search",
+            "stop_on_success": true,
+            "timeout_seconds": 60.0,
+            "tool_id": "intent.news"
+          },
+          {
+            "credit_cap": 0.0,
+            "execution_mode": "invoke",
+            "max_calls": 1,
+            "max_results": 1,
+            "order": 30,
+            "policy_reason": "first_party_fallback",
+            "stop_on_success": true,
+            "timeout_seconds": 45.0,
+            "tool_id": "intent.company_site"
+          }
+        ]
+      },
+      "normalized_icp": {
+        "employee_count": [
+          "11-50",
+          "51-200"
+        ],
+        "geography": "United States",
+        "industry": "Artificial Intelligence",
+        "intent_category": "HIRING",
+        "intent_signal": "Hiring sales positions",
+        "required_intent": {
+          "category": "HIRING",
+          "max_age_days": 365,
+          "signal": "Hiring sales positions"
+        },
+        "required_attribute": "Builds or sells artificial intelligence software"
+      },
+      "discovery_plan": {
+        "contract_id": "normalized-icp-discovery-plan:v1",
+        "input_sha256": "cec9b65568364ddf4c131ac925e8d3495f67146c487803e6a82c81405758fac3",
+        "plan": {
+          "attributes": {
+            "all_of": [
+              "Builds or sells artificial intelligence software"
+            ],
+            "conditional": []
+          },
+          "employee_bands_any_of": [
+            "10_50",
+            "50_200"
+          ],
+          "geography": {
+            "countries": [
+              "US"
+            ],
+            "mode": "hq_in"
+          },
+          "intent": {
+            "any_of": [
+              {
+                "category": "HIRING",
+                "max_age_days": 365,
+                "signal": "Hiring sales positions"
+              }
+            ],
+            "bonus_only": [],
+            "minimum_matches": 1
+          },
+          "segments_any_of": [
+            {
+              "id": "normalized_icp",
+              "industry_terms": [
+                "Artificial Intelligence"
+              ]
+            }
+          ]
+        },
+        "plan_sha256": "6ce5215f42aa2636aa9743a1a01150f839a5d4b50fa01064ff77594307885f92",
+        "schema_version": 1
+      },
+      "qualification_outcomes": [
+        {
+          "case_id": "accepted",
+          "outcome": "qualified",
+          "reason_code": "verifier_accepted"
+        },
+        {
+          "case_id": "missing-hiring-evidence",
+          "model_reason": "no current sales role",
+          "outcome": "rejected",
+          "reason_code": "intent_evidence_rejected"
+        },
+        {
+          "case_id": "wrong-industry",
+          "model_reason": "AI requirement not established",
+          "outcome": "rejected",
+          "reason_code": "attribute_missing"
+        }
+      ],
+      "reason_codes": {
+        "candidate_exclusions": [],
+        "candidate_steps": [
+          "structured_free_first",
+          "structured_paid_fallback",
+          "semantic_residual"
+        ],
+        "intent_exclusions": [
+          "required_feature_absent",
+          "intent_category_unsupported",
+          "intent_category_unsupported"
+        ],
+        "intent_steps": [
+          "intent_native",
+          "company_scoped_search",
+          "first_party_fallback"
+        ]
+      }
+    },
+    {
+      "adapter_metadata": {
+        "adapter_version": "sourcing-model-research-lab-adapter:v3",
+        "capability_contract_version": "sourcing-model-runtime-capabilities:v2",
+        "component_registry_version": "sourcing-model-components:v2",
+        "resilience_policy_version": "sourcing-model-resilience:v1",
+        "routing_catalog_sha256": "733898474edf199507859cabd0215c401127de64b6044c237afaa9c235d1bc8f",
+        "routing_compiler_version": "routing-compiler-v1",
+        "routing_policy_sha256": "f82dc74fca23c7b7e173a93edd81b1820053bbac477b104adf0ae940dd576578",
+        "taxonomy_content_hash": "sha256:a8ade1218bb78062f7af508489d32ca0ff00e24e0647f2afaf274c5a64a64619"
+      },
+      "candidate_route": {
+        "catalog_sha256": "343ab25e67561ec2899d6a87fc32c8b14511484eee349ab6675d8980e9aa53de",
+        "context_sha256": "db96c3bea520c0c96817d8ccb1d7ea6d24def9654e97af2c2ab4160a81aab914",
+        "exclusions": [
+          {
+            "reason_code": "tool_unavailable",
+            "tool_id": "candidate.crustdata_companydb"
+          },
+          {
+            "reason_code": "tool_unavailable",
+            "tool_id": "candidate.exa_semantic"
+          }
+        ],
+        "plan_sha256": "bcd13bcda75e73ca4321635cad8f6096c9602b0794d0d05427ec57cfbde9d376",
+        "policy_sha256": "f82dc74fca23c7b7e173a93edd81b1820053bbac477b104adf0ae940dd576578",
+        "policy_version": "sourcing-model-routing:v1+routing-compiler-v1",
+        "schema_version": 1,
+        "stage": "candidate_acquisition",
+        "steps": [
+          {
+            "credit_cap": 0.0,
+            "execution_mode": "invoke",
+            "max_calls": 1,
+            "max_results": 10,
+            "order": 10,
+            "policy_reason": "structured_free_first",
+            "stop_on_success": true,
+            "timeout_seconds": 120.0,
+            "tool_id": "candidate.deepline_free_corpus"
+          }
+        ]
+      },
+      "fixture_id": "us-ai-sales-hiring-existing-evidence",
+      "intent_route": {
+        "catalog_sha256": "733898474edf199507859cabd0215c401127de64b6044c237afaa9c235d1bc8f",
+        "context_sha256": "cdbc6b7d978b57dedb7e19b5f37623abfdecc5a8a32850e869d6181d0ab3f361",
+        "exclusions": [
+          {
+            "reason_code": "credit_budget_exhausted",
+            "tool_id": "intent.job_listing"
+          },
+          {
+            "reason_code": "credit_budget_exhausted",
+            "tool_id": "intent.news"
+          },
+          {
+            "reason_code": "intent_category_unsupported",
+            "tool_id": "intent.podcast"
+          },
+          {
+            "reason_code": "intent_category_unsupported",
+            "tool_id": "intent.social"
+          }
+        ],
+        "plan_sha256": "e56ab0126d665be3104c1b8a25d2dfc0b8084091b18bc964cda7cf12ffeffadc",
+        "policy_sha256": "f82dc74fca23c7b7e173a93edd81b1820053bbac477b104adf0ae940dd576578",
+        "policy_version": "sourcing-model-routing:v1+routing-compiler-v1",
+        "schema_version": 1,
+        "stage": "intent_evidence",
+        "steps": [
+          {
+            "credit_cap": 0.0,
+            "execution_mode": "virtual",
+            "max_calls": 0,
+            "max_results": 1,
+            "order": 5,
+            "policy_reason": "existing_evidence",
+            "stop_on_success": true,
+            "timeout_seconds": 1.0,
+            "tool_id": "intent.existing_evidence"
+          },
+          {
+            "credit_cap": 0.0,
+            "execution_mode": "invoke",
+            "max_calls": 1,
+            "max_results": 1,
+            "order": 30,
+            "policy_reason": "first_party_fallback",
+            "stop_on_success": true,
+            "timeout_seconds": 45.0,
+            "tool_id": "intent.company_site"
+          }
+        ]
+      },
+      "normalized_icp": {
+        "employee_count": [
+          "11-50",
+          "51-200"
+        ],
+        "geography": "United States",
+        "industry": "Artificial Intelligence",
+        "intent_category": "HIRING",
+        "intent_signal": "Hiring sales positions",
+        "required_intent": {
+          "category": "HIRING",
+          "max_age_days": 365,
+          "signal": "Hiring sales positions"
+        },
+        "required_attribute": "Builds or sells artificial intelligence software"
+      },
+      "discovery_plan": {
+        "contract_id": "normalized-icp-discovery-plan:v1",
+        "input_sha256": "cec9b65568364ddf4c131ac925e8d3495f67146c487803e6a82c81405758fac3",
+        "plan": {
+          "attributes": {
+            "all_of": [
+              "Builds or sells artificial intelligence software"
+            ],
+            "conditional": []
+          },
+          "employee_bands_any_of": [
+            "10_50",
+            "50_200"
+          ],
+          "geography": {
+            "countries": [
+              "US"
+            ],
+            "mode": "hq_in"
+          },
+          "intent": {
+            "any_of": [
+              {
+                "category": "HIRING",
+                "max_age_days": 365,
+                "signal": "Hiring sales positions"
+              }
+            ],
+            "bonus_only": [],
+            "minimum_matches": 1
+          },
+          "segments_any_of": [
+            {
+              "id": "normalized_icp",
+              "industry_terms": [
+                "Artificial Intelligence"
+              ]
+            }
+          ]
+        },
+        "plan_sha256": "6ce5215f42aa2636aa9743a1a01150f839a5d4b50fa01064ff77594307885f92",
+        "schema_version": 1
+      },
+      "qualification_outcomes": [
+        {
+          "case_id": "accepted",
+          "outcome": "qualified",
+          "reason_code": "verifier_accepted"
+        },
+        {
+          "case_id": "generic-rejection",
+          "model_reason": "company fit rejected",
+          "outcome": "rejected",
+          "reason_code": "qualification_rejected"
+        }
+      ],
+      "reason_codes": {
+        "candidate_exclusions": [
+          "tool_unavailable",
+          "tool_unavailable"
+        ],
+        "candidate_steps": [
+          "structured_free_first"
+        ],
+        "intent_exclusions": [
+          "credit_budget_exhausted",
+          "credit_budget_exhausted",
+          "intent_category_unsupported",
+          "intent_category_unsupported"
+        ],
+        "intent_steps": [
+          "existing_evidence",
+          "first_party_fallback"
+        ]
+      }
+    }
+  ]
+}

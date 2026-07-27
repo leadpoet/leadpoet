@@ -84,6 +84,25 @@ SOURCING_MODEL_MAX_AGENT_TIMEOUT_SECONDS = 900
 EXPECTED_SOURCING_ADAPTER_VERSION = "sourcing-model-research-lab-adapter:v3"
 EXPECTED_COMPONENT_REGISTRY_VERSION = "sourcing-model-components:v2"
 EXPECTED_ROUTING_COMPILER_VERSION = "routing-compiler-v1"
+LAB_CONSUMER_CONTRACT_PATH = (
+    Path(__file__).resolve().parents[1] / "sourcing_model_contract.json"
+)
+LAB_CONSUMER_PARITY_FIXTURE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "sourcing_model_parity_fixtures.json"
+)
+_LAB_CONSUMER_CONTRACT = json.loads(
+    LAB_CONSUMER_CONTRACT_PATH.read_text(encoding="utf-8")
+)
+EXPECTED_CONSUMER_CONTRACT_ID = str(
+    _LAB_CONSUMER_CONTRACT["contract_id"]
+)
+EXPECTED_CONSUMER_CONTRACT_PATH = str(
+    _LAB_CONSUMER_CONTRACT["canonical_path"]
+)
+EXPECTED_CONSUMER_PARITY_FIXTURE_PATH = str(
+    _LAB_CONSUMER_CONTRACT["parity_fixture_path"]
+)
 DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID = (
     "alias/leadpoet-research-lab-artifact-signing"
 )
@@ -674,6 +693,7 @@ def verify_private_artifact_manifest_signature(
         raise PrivateModelRuntimeError(
             "private artifact manifest hash does not match its payload"
         )
+    _verify_consumer_contract_manifest(payload)
     if s3_client is None and kms_client is None:
         return dict(
             _verify_private_artifact_manifest_signature_cached(
@@ -711,6 +731,32 @@ def _private_manifest_hash_payload(manifest: Any) -> dict[str, Any]:
         payload = dict(to_dict())
     payload.pop("manifest_hash", None)
     return payload
+
+
+def _verify_consumer_contract_manifest(payload: Mapping[str, Any]) -> None:
+    contract = payload.get("compatibility_contract")
+    fixtures = payload.get("consumer_parity_fixtures")
+    expected_contract = {
+        "contract_id": EXPECTED_CONSUMER_CONTRACT_ID,
+        "path": EXPECTED_CONSUMER_CONTRACT_PATH,
+        "sha256": sha256_bytes(LAB_CONSUMER_CONTRACT_PATH.read_bytes()),
+    }
+    expected_fixtures = {
+        "path": EXPECTED_CONSUMER_PARITY_FIXTURE_PATH,
+        "sha256": sha256_bytes(
+            LAB_CONSUMER_PARITY_FIXTURE_PATH.read_bytes()
+        ),
+    }
+    if contract != expected_contract:
+        raise PrivateModelRuntimeError(
+            "private artifact compatibility contract differs from the "
+            "reviewed Lab snapshot"
+        )
+    if fixtures != expected_fixtures:
+        raise PrivateModelRuntimeError(
+            "private artifact parity fixtures differ from the reviewed Lab "
+            "snapshot"
+        )
 
 
 @lru_cache(maxsize=256)
@@ -867,6 +913,19 @@ def build_local_private_artifact_manifest(
         "config_hash": sha256_json(config_payload or {}),
         "component_registry_version": str(component_registry_version),
         "scoring_adapter_version": str(scoring_adapter_version),
+        "compatibility_contract": {
+            "contract_id": EXPECTED_CONSUMER_CONTRACT_ID,
+            "path": EXPECTED_CONSUMER_CONTRACT_PATH,
+            "sha256": sha256_bytes(
+                LAB_CONSUMER_CONTRACT_PATH.read_bytes()
+            ),
+        },
+        "consumer_parity_fixtures": {
+            "path": EXPECTED_CONSUMER_PARITY_FIXTURE_PATH,
+            "sha256": sha256_bytes(
+                LAB_CONSUMER_PARITY_FIXTURE_PATH.read_bytes()
+            ),
+        },
         "manifest_uri": str(manifest_uri),
         "signature_ref": str(signature_ref),
         "build_id": str(build_id),

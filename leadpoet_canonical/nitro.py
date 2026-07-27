@@ -210,26 +210,37 @@ def _refresh_pcr0_cache_if_needed() -> None:
         # Check if cache is still valid
         if current_time - _pcr0_cache["last_fetch"] < PCR0_CACHE_TTL_SECONDS:
             return  # Cache is still valid
-        
-        try:
-            # Fetch new allowlist
-            allowlist = _fetch_pcr0_allowlist_from_github()
-            
-            _pcr0_cache["gateway_pcr0"] = allowlist["gateway_pcr0"]
-            _pcr0_cache["validator_pcr0"] = allowlist["validator_pcr0"]
-            _pcr0_cache["last_fetch"] = current_time
-            _pcr0_cache["fetch_error"] = None
-            
-        except Exception as e:
-            logger.warning(f"[PCR0] Failed to refresh allowlist from GitHub: {e}")
+        # Reserve the refresh window BEFORE fetching. The fetch used to run
+        # while holding this lock and, on failure with a non-empty cache,
+        # last_fetch was never advanced — so with GitHub slow or down every
+        # PCR0 verification re-attempted the fetch and serialized behind a
+        # 10-second urlopen. Reserving first makes the refresh single-flight
+        # (concurrent verifiers keep using the previous allowlist instead of
+        # stalling) and turns a failed fetch into a TTL-length backoff. The
+        # allowlist values themselves only ever change under the lock, and a
+        # PCR0 mismatch still fails closed downstream exactly as before.
+        _pcr0_cache["last_fetch"] = current_time
+
+    try:
+        # Fetch new allowlist (network I/O outside the lock)
+        allowlist = _fetch_pcr0_allowlist_from_github()
+    except Exception as e:
+        logger.warning(f"[PCR0] Failed to refresh allowlist from GitHub: {e}")
+        with _pcr0_cache_lock:
             _pcr0_cache["fetch_error"] = str(e)
-            
+
             # If this is the first fetch (cache is empty), use fallback values
             if not _pcr0_cache["gateway_pcr0"] and not _pcr0_cache["validator_pcr0"]:
                 logger.warning("[PCR0] Using fallback PCR0 values")
                 _pcr0_cache["gateway_pcr0"] = FALLBACK_GATEWAY_PCR0_VALUES.copy()
                 _pcr0_cache["validator_pcr0"] = FALLBACK_VALIDATOR_PCR0_VALUES.copy()
-                _pcr0_cache["last_fetch"] = current_time  # Prevent immediate retry
+        return
+
+    with _pcr0_cache_lock:
+        _pcr0_cache["gateway_pcr0"] = allowlist["gateway_pcr0"]
+        _pcr0_cache["validator_pcr0"] = allowlist["validator_pcr0"]
+        _pcr0_cache["last_fetch"] = time.time()
+        _pcr0_cache["fetch_error"] = None
 
 
 def get_allowed_gateway_pcr0() -> List[str]:

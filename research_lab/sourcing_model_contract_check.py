@@ -1,9 +1,8 @@
-"""Sourcing-model wrapper-contract conformance checks.
+"""Sourcing-model consumer-contract conformance checks.
 
-The sourcing model's research-lab surface is frozen by the wrapper contract
-(``research_lab/sourcing_model_contract.json``, mirrored from the site's
-``sourcing-worker/release/model-contract.json``): required files, the exact
-function signatures the lab and the production harness call
+The model-owned contract is snapshotted byte-for-byte at
+``research_lab/sourcing_model_contract.json``. The exact function signatures
+the Lab and production harness call
 (``research_lab_adapter.run_icp``/``adapter_metadata``,
 ``sourcing_model.core.qualify``, the discovery/validation/client seams the
 harness monkey-patches), module bindings reached through by the wrapper, and
@@ -20,8 +19,8 @@ patched source.  Intended call sites:
   image the benchmark cannot invoke (flag-gated, see code_build);
 * local/CI checks against a model checkout.
 
-Pure stdlib.  The contract JSON is a derived mirror — when the model repo's
-contract changes, copy it verbatim and note the source revision.
+Pure stdlib. A candidate is rejected unless its embedded canonical contract and
+parity fixtures are byte-identical to these reviewed consumer snapshots.
 """
 
 from __future__ import annotations
@@ -32,62 +31,34 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
 CONTRACT_PATH = Path(__file__).with_name("sourcing_model_contract.json")
-
-# Asyncness of the frozen surface at the mirrored contract revision. The
-# contract JSON is a verbatim site mirror and carries no async information,
-# but sync-vs-async IS part of the callable surface: the lab runtime and the
-# harness call these seams the way the frozen source defines them, so a
-# candidate flipping one (e.g. making ``qualify`` async) would hand callers a
-# coroutine and break at invocation despite an identical parameter list.
-# Only names present here are checked — a future contract revision that adds
-# functions skips the asyncness check for them until this map is updated
-# alongside the mirror.
-FROZEN_ASYNCNESS: Dict[str, bool] = {
-    "research_lab_adapter.py:adapter_metadata": False,
-    "research_lab_adapter.py:run_icp": False,
-    "sourcing_model/clients.py:_exa_call": False,
-    "sourcing_model/clients.py:agent_get": False,
-    "sourcing_model/clients.py:agent_post": False,
-    "sourcing_model/clients.py:exa_search": False,
-    "sourcing_model/clients.py:sd_company": False,
-    "sourcing_model/clients.py:sd_scrape": False,
-    "sourcing_model/core.py:_emitted_intent_evidence_url": False,
-    "sourcing_model/core.py:_fallback_sources": False,
-    "sourcing_model/core.py:qualify": False,
-    "sourcing_model/discovery.py:agent_results": False,
-    "sourcing_model/discovery.py:apply_keep_gates": False,
-    "sourcing_model/discovery.py:discover_goal_round": False,
-    "sourcing_model/discovery.py:resolve_linkedin": False,
-    "sourcing_model/validation.py:bonus_requirements": False,
-    "sourcing_model/validation.py:make_deps": False,
-    "sourcing_model/validation.py:validate_candidate": True,
-}
-
-# These are invoked directly by the Lab/production wrappers, so an additional
-# positional parameter changes the public callable even when it is optional.
-# Internal monkey-patch seams remain call-compatible: optional trailing
-# parameters are allowed, but additional required parameters are not.
-EXACT_SIGNATURES = {
-    "research_lab_adapter.py:adapter_metadata",
-    "research_lab_adapter.py:run_icp",
-    "sourcing_model/core.py:qualify",
-}
-
-FROZEN_REQUIRED_KEYWORD_ONLY: Dict[str, List[str]] = {
-    "sourcing_model/firmographic_discovery.py:plan_for_icp": ["target"],
-    "sourcing_model/orchestrator.py:run_branches": ["max_companies"],
-}
+PARITY_FIXTURE_PATH = Path(__file__).with_name(
+    "sourcing_model_parity_fixtures.json"
+)
+_CONTRACT = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+FROZEN_ASYNCNESS: Dict[str, bool] = dict(
+    _CONTRACT.get("frozen_asyncness") or {}
+)
+EXACT_SIGNATURES = set(_CONTRACT.get("exact_signatures") or ())
+FROZEN_REQUIRED_KEYWORD_ONLY: Dict[str, List[str]] = dict(
+    _CONTRACT.get("required_keyword_only") or {}
+)
 
 
 def load_wrapper_contract(path: Path | None = None) -> Dict[str, Any]:
-    """Load and shape-check the vendored wrapper contract."""
+    """Load and shape-check the reviewed model-owned contract snapshot."""
     document = json.loads(Path(path or CONTRACT_PATH).read_text(encoding="utf-8"))
     if document.get("schema_version") != 1:
         raise ValueError(
             "Unsupported sourcing wrapper contract schema_version: "
             f"{document.get('schema_version')!r}"
         )
-    for key in ("contract_id", "required_files", "functions"):
+    for key in (
+        "contract_id",
+        "canonical_path",
+        "parity_fixture_path",
+        "required_files",
+        "functions",
+    ):
         if key not in document:
             raise ValueError(f"wrapper contract missing required key {key!r}")
     return document
@@ -98,6 +69,7 @@ def _function_signature(node: ast.AST) -> Dict[str, Any]:
     if args is None:
         return {
             "params": [],
+            "all_params": [],
             "required_positional": 0,
             "required_keyword_only": [],
         }
@@ -110,6 +82,9 @@ def _function_signature(node: ast.AST) -> Dict[str, Any]:
     ]
     return {
         "params": [item.arg for item in positional],
+        "all_params": [
+            item.arg for item in [*positional, *args.kwonlyargs]
+        ],
         "required_positional": required_positional,
         "required_keyword_only": required_keyword_only,
     }
@@ -213,6 +188,35 @@ def verify_source_tree_contract(
     document = dict(contract) if contract is not None else load_wrapper_contract()
     violations: List[str] = []
 
+    canonical_relative = str(document.get("canonical_path") or "")
+    canonical_path = root / canonical_relative
+    if canonical_path.is_file():
+        try:
+            if canonical_path.read_bytes() != CONTRACT_PATH.read_bytes():
+                violations.append(
+                    "model-owned compatibility contract differs from the "
+                    "reviewed Lab snapshot"
+                )
+        except OSError as exc:
+            violations.append(
+                "unable to compare model-owned compatibility contract: "
+                f"{type(exc).__name__}"
+            )
+    parity_relative = str(document.get("parity_fixture_path") or "")
+    parity_path = root / parity_relative
+    if parity_path.is_file():
+        try:
+            if parity_path.read_bytes() != PARITY_FIXTURE_PATH.read_bytes():
+                violations.append(
+                    "model-owned parity fixtures differ from the reviewed "
+                    "Lab snapshot"
+                )
+        except OSError as exc:
+            violations.append(
+                "unable to compare model-owned parity fixtures: "
+                f"{type(exc).__name__}"
+            )
+
     for relative in document.get("required_files", []):
         if not (root / relative).is_file():
             violations.append(f"missing required file: {relative}")
@@ -255,6 +259,17 @@ def verify_source_tree_contract(
             expected = list(expected_params)
             actual_params = actual["params"]
             contract_key = f"{relative}:{name}"
+            expected_full = (document.get("full_parameters") or {}).get(
+                contract_key
+            )
+            if (
+                expected_full is not None
+                and actual["all_params"] != list(expected_full)
+            ):
+                violations.append(
+                    f"full parameter drift {relative}:{name}: expected "
+                    f"{list(expected_full)}, found {actual['all_params']}"
+                )
             if contract_key in EXACT_SIGNATURES and actual_params != expected:
                 violations.append(
                     f"exact parameter drift {relative}:{name}: expected "
@@ -313,6 +328,28 @@ def verify_source_tree_contract(
             elif value < int(floor):
                 violations.append(
                     f"integer floor breach {relative}:{name}: {value} < {floor}"
+                )
+
+    for relative, expected_values in (
+        document.get("exact_constants") or {}
+    ).items():
+        tree = _tree(relative)
+        if tree is None:
+            continue
+        constants: Dict[str, Any] = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if isinstance(target, ast.Name):
+                    try:
+                        constants[target.id] = ast.literal_eval(node.value)
+                    except (TypeError, ValueError):
+                        constants.pop(target.id, None)
+        for name, expected in expected_values.items():
+            if constants.get(name) != expected:
+                violations.append(
+                    f"exact constant drift {relative}:{name}: expected "
+                    f"{expected!r}, found {constants.get(name)!r}"
                 )
 
     return violations

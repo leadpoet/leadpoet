@@ -23,6 +23,14 @@ ARTIFACT_MASTER_KEY_SLOT = "artifact_master_key"
 ARTIFACT_MASTER_KEY_HASH_DOMAIN = b"leadpoet-artifact-master-key-v2:"
 MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 MAX_IN_MEMORY_ARTIFACTS = 2048
+# Minimum age before a still-transient artifact may be evicted to admit a new
+# seal when the vault is full. In-flight artifacts are persisted within seconds
+# of sealing, so this window keeps a concurrent execution's about-to-persist
+# artifact safe while reclaiming orphans stranded by a failed execution
+# (see the inter-enclave seal path, which strands transients on any pre-persist
+# raise). Without this, an accumulated leak fills the vault and fails EVERY
+# execute_scoring_v2 closed — including the weight-path allocation build.
+TRANSIENT_EVICTION_MIN_AGE_SECONDS = 600.0
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ARTIFACT_PERSISTENCE_RETRYABLE_HTTP_STATUSES = frozenset(
     {408, 429, 500, 502, 503, 504}
@@ -82,6 +90,7 @@ class EncryptedArtifactVaultV2:
         self._clock = clock
         self._artifacts = {}  # type: Dict[str, Dict[str, Any]]
         self._persisted_artifacts = {}  # type: Dict[str, Dict[str, Any]]
+        self._evicted_transient_count = 0
         self._lock = threading.RLock()
         self._transaction_state = threading.local()
 
@@ -158,6 +167,7 @@ class EncryptedArtifactVaultV2:
             "object_lock_mode": "COMPLIANCE",
             "retain_until": retain_until,
             "persistence": None,
+            "_sealed_at": now,
         }
         created = False
         with self._lock:
@@ -165,13 +175,46 @@ class EncryptedArtifactVaultV2:
             if existing is not None:
                 return self.descriptor(artifact_id)
             if len(self._artifacts) >= MAX_IN_MEMORY_ARTIFACTS:
-                raise ArtifactVaultV2Error("artifact vault capacity is full")
+                self._evict_stale_transients(now)
+                if len(self._artifacts) >= MAX_IN_MEMORY_ARTIFACTS:
+                    raise ArtifactVaultV2Error("artifact vault capacity is full")
             self._artifacts[artifact_id] = record
             created = True
         if created:
             for transaction in getattr(self._transaction_state, "stack", ()):
                 transaction.add(artifact_id)
         return self.descriptor(artifact_id)
+
+    def _evict_stale_transients(self, now) -> int:
+        """Reclaim orphaned transients so a leak can't fail the vault closed.
+
+        Must be called holding self._lock. Every record in self._artifacts is
+        transient (persistence is None until confirm_persistence moves it to
+        self._persisted_artifacts), so eviction here never removes a persisted
+        artifact a durable receipt relies on. Only artifacts older than
+        TRANSIENT_EVICTION_MIN_AGE_SECONDS are eligible, so an in-flight
+        artifact seconds from persistence is never dropped. Oldest-first, only
+        as many as needed to admit one new seal.
+        """
+
+        eligible = sorted(
+            (
+                (record["_sealed_at"], artifact_id)
+                for artifact_id, record in self._artifacts.items()
+                if (now - record["_sealed_at"]).total_seconds()
+                >= TRANSIENT_EVICTION_MIN_AGE_SECONDS
+            ),
+            key=lambda item: item[0],
+        )
+        needed = len(self._artifacts) - MAX_IN_MEMORY_ARTIFACTS + 1
+        freed = 0
+        for _sealed_at, artifact_id in eligible:
+            if freed >= needed:
+                break
+            if self._artifacts.pop(artifact_id, None) is not None:
+                freed += 1
+        self._evicted_transient_count += freed
+        return freed
 
     def descriptor(self, artifact_id: str) -> Dict[str, Any]:
         with self._lock:

@@ -72,6 +72,22 @@ class ProviderOutcomeStoreV2:
         job_id: str,
         purpose: str,
     ) -> Dict[str, Any]:
+        with self._vault.transient_artifact_transaction():
+            return self._persist(
+                document,
+                previous_checkpoint_hash=previous_checkpoint_hash,
+                job_id=job_id,
+                purpose=purpose,
+            )
+
+    def _persist(
+        self,
+        document: Mapping[str, Any],
+        *,
+        previous_checkpoint_hash: str,
+        job_id: str,
+        purpose: str,
+    ) -> Dict[str, Any]:
         utc_day = _day(document.get("utc_day"))
         normalized_document = validate_provider_outcome_state_document_v2(
             document,
@@ -156,6 +172,20 @@ class ProviderOutcomeStoreV2:
         }
 
     def load_latest(
+        self,
+        *,
+        utc_day: str,
+        job_id: str,
+        purpose: str,
+    ) -> Dict[str, Any]:
+        with self._vault.transient_artifact_transaction():
+            return self._load_latest(
+                utc_day=utc_day,
+                job_id=job_id,
+                purpose=purpose,
+            )
+
+    def _load_latest(
         self,
         *,
         utc_day: str,

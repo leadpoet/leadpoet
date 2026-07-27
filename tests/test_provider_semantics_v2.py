@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
 import threading
@@ -16,6 +17,7 @@ from gateway.research_lab.provider_evidence_proxy import (
     REPLAY_ONLY_HEADER,
 )
 from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
+from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
 from gateway.tee.provider_semantics_v2 import ProviderSemanticsAuthorityV2
 from gateway.tee.source_add_runtime_v2 import (
     build_source_add_runtime_catalog_v2,
@@ -280,7 +282,14 @@ class _Broker:
         }
 
 
-def _authority(*, broker=None, cache=None, artifacts=None, outcome_store=None):
+def _authority(
+    *,
+    broker=None,
+    cache=None,
+    artifacts=None,
+    outcome_store=None,
+    artifact_transaction=None,
+):
     broker = broker or _Broker()
     cache = cache or _CacheStore()
     artifacts = artifacts or _Artifacts()
@@ -299,6 +308,7 @@ def _authority(*, broker=None, cache=None, artifacts=None, outcome_store=None):
         artifact_sink=artifacts.seal,
         boot_identity_supplier=lambda: boot,
         sign_digest=key.sign,
+        artifact_transaction=artifact_transaction,
         clock=lambda: "2026-07-10T00:00:00Z",
         sleeper=lambda _seconds: None,
         outcome_store=outcome_store,
@@ -509,6 +519,38 @@ def test_provider_outcome_state_survives_restart_and_persistence_is_fail_closed(
                 body=b'{"query":"new"}',
             )
         )
+
+
+def test_failed_outcome_persistence_removes_uncommitted_job_artifacts():
+    vault = EncryptedArtifactVaultV2(
+        master_key=bytes(range(32)),
+        boot_identity_hash=_hash("b"),
+        retention_days=30,
+        clock=lambda: datetime(2026, 7, 10, tzinfo=timezone.utc),
+    )
+
+    class FailingOutcomeStore(_OutcomeStore):
+        def persist(self, document, *, previous_checkpoint_hash, job_id, purpose):
+            vault.seal(
+                b"uncommitted provider outcome checkpoint",
+                job_id=job_id,
+                purpose=purpose,
+                artifact_kind="provider_outcome_checkpoint",
+            )
+            raise RuntimeError("outcome persistence failed")
+
+    authority, _broker, _cache, _artifacts = _authority(
+        artifacts=SimpleNamespace(seal=vault.seal),
+        outcome_store=FailingOutcomeStore(),
+        artifact_transaction=vault.transient_artifact_transaction,
+    )
+    with pytest.raises(RuntimeError, match="outcome persistence failed"):
+        authority.execute(_request())
+
+    assert vault.job_artifacts(
+        job_id="job-provider-semantics",
+        purpose="research_lab.company_score.v2",
+    ) == ()
 
 
 def test_replay_only_miss_and_budget_modes_do_not_call_provider():

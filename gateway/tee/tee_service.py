@@ -1653,6 +1653,7 @@ def get_v2_provider_semantics_authority():
             broker=get_v2_provider_broker(),
             cache_store=get_v2_provider_cache_store(),
             artifact_sink=get_v2_artifact_vault().seal,
+            artifact_transaction=get_v2_artifact_vault().transient_artifact_transaction,
             boot_identity_supplier=get_v2_runtime_identity().boot_identity,
             sign_digest=sign_data,
             outcome_store=get_v2_provider_outcome_store(),

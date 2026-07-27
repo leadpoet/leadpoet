@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -137,6 +138,7 @@ class ProviderSemanticsAuthorityV2:
         artifact_sink: Callable[..., Mapping[str, Any]],
         boot_identity_supplier: Callable[[], Mapping[str, Any]],
         sign_digest: Callable[[bytes], Any],
+        artifact_transaction: Optional[Callable[[], Any]] = None,
         clock: Callable[[], str] = _timestamp,
         sleeper: Callable[[float], None] = time.sleep,
         outcome_ledger: Optional[ProviderOutcomeLedgerV2] = None,
@@ -147,6 +149,7 @@ class ProviderSemanticsAuthorityV2:
         self._broker = broker
         self._cache_store = cache_store
         self._artifact_sink = artifact_sink
+        self._artifact_transaction = artifact_transaction or nullcontext
         self._boot_identity_supplier = boot_identity_supplier
         self._sign_digest = sign_digest
         self._clock = clock
@@ -205,20 +208,30 @@ class ProviderSemanticsAuthorityV2:
             }
 
     def execute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
-        result = dict(self._execute(request))
-        persistence = self._record_provider_outcome(request, result)
-        if persistence:
-            result["additional_transport_attempts"] = [
-                *[dict(item) for item in result.get("additional_transport_attempts") or ()],
-                *[dict(item) for item in persistence["transport_attempts"]],
-            ]
-            result["evidence_artifact_hashes"] = sorted(
-                {
-                    *[str(item) for item in result.get("evidence_artifact_hashes") or ()],
-                    *[str(item) for item in persistence["evidence_artifact_hashes"]],
-                }
-            )
-        return result
+        with self._artifact_transaction():
+            result = dict(self._execute(request))
+            persistence = self._record_provider_outcome(request, result)
+            if persistence:
+                result["additional_transport_attempts"] = [
+                    *[
+                        dict(item)
+                        for item in result.get("additional_transport_attempts") or ()
+                    ],
+                    *[dict(item) for item in persistence["transport_attempts"]],
+                ]
+                result["evidence_artifact_hashes"] = sorted(
+                    {
+                        *[
+                            str(item)
+                            for item in result.get("evidence_artifact_hashes") or ()
+                        ],
+                        *[
+                            str(item)
+                            for item in persistence["evidence_artifact_hashes"]
+                        ],
+                    }
+                )
+            return result
 
     def _execute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
         normalized, original_body, parsed, fingerprint = self._request(request)

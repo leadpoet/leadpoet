@@ -120,6 +120,22 @@ class ProviderEvidenceCacheStoreV2:
     ) -> Dict[str, Any]:
         """Insert once and authenticate an exact readback before acceptance."""
 
+        with self._vault.transient_artifact_transaction():
+            return self._persist_recorded(
+                terminal,
+                utc_day=utc_day,
+                job_id=job_id,
+                purpose=purpose,
+            )
+
+    def _persist_recorded(
+        self,
+        terminal: Mapping[str, Any],
+        *,
+        utc_day: str,
+        job_id: str,
+        purpose: str,
+    ) -> Dict[str, Any]:
         normalized_day = _day(utc_day)
         payload = self._cache_payload(terminal, utc_day=normalized_day)
         payload_bytes = canonical_json(payload).encode("utf-8")
@@ -198,6 +214,22 @@ class ProviderEvidenceCacheStoreV2:
     ) -> Dict[str, Any]:
         """Read one exact daily entry and reopen it inside the coordinator."""
 
+        with self._vault.transient_artifact_transaction():
+            return self._load(
+                utc_day=utc_day,
+                request_fingerprint=request_fingerprint,
+                job_id=job_id,
+                purpose=purpose,
+            )
+
+    def _load(
+        self,
+        *,
+        utc_day: str,
+        request_fingerprint: str,
+        job_id: str,
+        purpose: str,
+    ) -> Dict[str, Any]:
         normalized_day = _day(utc_day)
         normalized_fingerprint = _fingerprint(request_fingerprint)
         rows, attempts, artifacts = self._read_rows(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -82,6 +83,31 @@ class EncryptedArtifactVaultV2:
         self._artifacts = {}  # type: Dict[str, Dict[str, Any]]
         self._persisted_artifacts = {}  # type: Dict[str, Dict[str, Any]]
         self._lock = threading.RLock()
+        self._transaction_state = threading.local()
+
+    @contextmanager
+    def transient_artifact_transaction(self):
+        """Discard only this thread's newly sealed artifacts after an error."""
+
+        stack = getattr(self._transaction_state, "stack", None)
+        if stack is None:
+            stack = []
+            self._transaction_state.stack = stack
+        created = set()
+        stack.append(created)
+        try:
+            yield
+        except BaseException:
+            with self._lock:
+                for artifact_id in created:
+                    record = self._artifacts.get(artifact_id)
+                    if record is not None and record["persistence"] is None:
+                        del self._artifacts[artifact_id]
+            raise
+        finally:
+            stack.pop()
+            if not stack:
+                del self._transaction_state.stack
 
     def seal(
         self,
@@ -133,6 +159,7 @@ class EncryptedArtifactVaultV2:
             "retain_until": retain_until,
             "persistence": None,
         }
+        created = False
         with self._lock:
             existing = self._artifacts.get(artifact_id)
             if existing is not None:
@@ -140,6 +167,10 @@ class EncryptedArtifactVaultV2:
             if len(self._artifacts) >= MAX_IN_MEMORY_ARTIFACTS:
                 raise ArtifactVaultV2Error("artifact vault capacity is full")
             self._artifacts[artifact_id] = record
+            created = True
+        if created:
+            for transaction in getattr(self._transaction_state, "stack", ()):
+                transaction.add(artifact_id)
         return self.descriptor(artifact_id)
 
     def descriptor(self, artifact_id: str) -> Dict[str, Any]:

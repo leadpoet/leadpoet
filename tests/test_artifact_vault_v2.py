@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import threading
 
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -135,6 +137,71 @@ def test_transient_envelope_can_be_released_after_durable_ciphertext_readback() 
     with pytest.raises(ArtifactVaultV2Error, match="unavailable"):
         vault.descriptor(artifact_id)
     assert vault.decrypt_storage_document(storage_document) == b"hidden provider response"
+
+
+def test_transient_transaction_discards_only_failed_thread_artifacts() -> None:
+    vault = _vault()
+    failing_sealed = threading.Event()
+    successful_sealed = threading.Event()
+
+    def failing_transaction():
+        with pytest.raises(RuntimeError, match="persistence failed"):
+            with vault.transient_artifact_transaction():
+                descriptor = vault.seal(
+                    b"failed checkpoint",
+                    job_id="shared-job",
+                    purpose="research_lab.provider_preflight.v2",
+                    artifact_kind="provider_outcome_checkpoint",
+                )
+                failing_sealed.set()
+                assert successful_sealed.wait(timeout=2.0)
+                raise RuntimeError("persistence failed")
+        return descriptor["artifact_id"]
+
+    def successful_transaction():
+        assert failing_sealed.wait(timeout=2.0)
+        with vault.transient_artifact_transaction():
+            descriptor = vault.seal(
+                b"successful provider response",
+                job_id="shared-job",
+                purpose="research_lab.provider_preflight.v2",
+                artifact_kind="provider_response",
+            )
+            successful_sealed.set()
+        return descriptor["artifact_id"]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        failed_id = executor.submit(failing_transaction)
+        successful_id = executor.submit(successful_transaction)
+        failed_id = failed_id.result(timeout=3.0)
+        successful_id = successful_id.result(timeout=3.0)
+
+    with pytest.raises(ArtifactVaultV2Error, match="unavailable"):
+        vault.descriptor(failed_id)
+    assert vault.descriptor(successful_id)["persisted"] is False
+    assert [item["artifact_id"] for item in vault.job_artifacts(
+        job_id="shared-job",
+        purpose="research_lab.provider_preflight.v2",
+    )] == [successful_id]
+
+
+def test_transient_transaction_discards_cancelled_artifacts() -> None:
+    vault = _vault()
+
+    with pytest.raises(KeyboardInterrupt):
+        with vault.transient_artifact_transaction():
+            vault.seal(
+                b"cancelled provider response",
+                job_id="cancelled-job",
+                purpose="research_lab.provider_preflight.v2",
+                artifact_kind="provider_response",
+            )
+            raise KeyboardInterrupt
+
+    assert vault.job_artifacts(
+        job_id="cancelled-job",
+        purpose="research_lab.provider_preflight.v2",
+    ) == ()
 
 
 @pytest.mark.parametrize(

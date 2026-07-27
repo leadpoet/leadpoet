@@ -127,6 +127,27 @@ class _LocalCall:
         self.data = SimpleNamespace(data=bytes(call_data))
 
 
+def _local_chain_signing_profile() -> dict[str, Any]:
+    from leadpoet_canonical.hotkey_authority_v2 import (
+        select_chain_signing_profile,
+    )
+
+    measured = json.loads(
+        (
+            SOURCE_ROOT
+            / "validator_tee/enclave/chain_signing_profile_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+    return select_chain_signing_profile(
+        measured,
+        runtime_version={
+            "specVersion": 440,
+            "transactionVersion": 1,
+        },
+        genesis_hash=GENESIS_HASH.removeprefix("0x"),
+    )
+
+
 class _LocalSubstrate:
     url = "ws://127.0.0.1:9944"
     runtime_config = _LocalRuntimeConfig()
@@ -196,12 +217,7 @@ class _LocalSubstrate:
             encode_serve_axon_call,
         )
 
-        profile = json.loads(
-            (
-                SOURCE_ROOT
-                / "validator_tee/enclave/chain_signing_profile_v2.json"
-            ).read_text(encoding="utf-8")
-        )
+        profile = _local_chain_signing_profile()
         call_data = encode_serve_axon_call(
             profile=profile,
             netuid=int(call_params["netuid"]),
@@ -238,12 +254,7 @@ class _LocalSubstrate:
             build_serve_axon_extrinsic_authorization_v2,
         )
 
-        profile = json.loads(
-            (
-                SOURCE_ROOT
-                / "validator_tee/enclave/chain_signing_profile_v2.json"
-            ).read_text(encoding="utf-8")
-        )
+        profile = _local_chain_signing_profile()
         args = call.value["call_args"]
         validator_hotkey = getattr(self, "_active_signer_address", "")
         if not validator_hotkey:

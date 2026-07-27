@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import select
 import socket
 import threading
@@ -25,6 +26,8 @@ from leadpoet_canonical.chain_source_v2 import (
 
 AF_VSOCK = 40
 VMADDR_CID_ANY = 0xFFFFFFFF
+logger = logging.getLogger(__name__)
+
 CHAIN_RELAY_VSOCK_PORT = 5002
 MAX_CONTROL_BYTES = 16 * 1024
 MAX_BYTES_PER_DIRECTION = 32 * 1024 * 1024
@@ -250,11 +253,27 @@ class ValidatorChainRelayV2:
         self._listener = None
 
     def _accept_loop(self) -> None:
+        # A transient accept() failure (EMFILE under fd pressure, ECONNABORTED,
+        # ENOMEM) must not permanently kill this loop: the relay is the
+        # enclave's only chain-RPC path, so a dead accept loop silently stops
+        # all weight-extrinsic signing with the host process still looking
+        # healthy (main() never relaunches it). Only exit when stop() has been
+        # requested; otherwise log and keep serving after a short pause so a
+        # persistently broken listener cannot hot-spin.
         while not self._stop.is_set():
             try:
                 connection, _address = self._listener.accept()
-            except Exception:
-                return
+            except Exception as exc:
+                if self._stop.is_set():
+                    return
+                logger.warning(
+                    "chain_relay_accept_error type=%s error=%s; "
+                    "continuing to serve chain RPC",
+                    type(exc).__name__,
+                    str(exc)[:200],
+                )
+                time.sleep(0.5)
+                continue
             threading.Thread(
                 target=handle_chain_relay_connection,
                 args=(connection,),

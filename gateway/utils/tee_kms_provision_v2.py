@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import logging
 import base64
 import hashlib
 import json
@@ -23,6 +24,8 @@ from gateway.tee.kms_recipient_v2 import (
 )
 from gateway.utils.tee_client import coordinator_tee_client
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
+
+logger = logging.getLogger(__name__)
 
 
 PROVIDER_ENVELOPE_SCHEMA_VERSION = "leadpoet.provider_credential_envelope.v2"
@@ -390,10 +393,22 @@ async def provision_job_provider_envelope_v2(
     except BaseException:
         # A recipient contains no plaintext, but it occupies bounded enclave
         # state until unwrap. Always discard it when KMS, validation, RPC, or
-        # cancellation aborts the handshake.
-        await asyncio.shield(
-            client.v2_release_job_credentials(normalized["job_id"])
-        )
+        # cancellation aborts the handshake. The release itself must never
+        # mask the original failure: when the coordinator is unreachable, the
+        # release RPC fails for the same reason the handshake did, and
+        # surfacing that secondary error instead of the root cause hid the
+        # real diagnosis (matching the guarded release in execute_scoring_v2).
+        try:
+            await asyncio.shield(
+                client.v2_release_job_credentials(normalized["job_id"])
+            )
+        except BaseException as release_error:
+            logger.warning(
+                "job_credential_release_after_failure_failed job_id=%s "
+                "error=%s",
+                normalized["job_id"],
+                str(release_error)[:200],
+            )
         raise
 
 

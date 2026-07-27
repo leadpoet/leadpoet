@@ -215,6 +215,25 @@ def test_sourcing_receipts_and_events_are_collected_and_stripped() -> None:
 def test_adapter_metadata_gate_requires_all_runtime_readiness_proofs() -> None:
     routing_catalog = {"schema_version": 1}
     routing_policy = {"schema_version": 1}
+    runtime_catalog = {
+        "schema_version": 1,
+        "tools": [
+            {"tool_id": tool_id}
+            for tool_id in (
+                "candidate.backlog",
+                "candidate.registry_feed",
+                "candidate.jobs_feed",
+                "candidate.deepline_firmographic",
+                "candidate.model_semantic",
+                "intent.existing_evidence",
+                "intent.jobs_feed",
+                "intent.company_search",
+                "intent.first_party",
+                "intent.newsroom",
+            )
+        ],
+    }
+    runtime_policy = {"schema_version": 1}
     ready = {
         "adapter_version": "sourcing-model-research-lab-adapter:v3",
         "component_registry_version": "sourcing-model-components:v2",
@@ -239,6 +258,28 @@ def test_adapter_metadata_gate_requires_all_runtime_readiness_proofs() -> None:
             "policy_sha256": sha256_json(routing_policy).removeprefix("sha256:"),
             "intent_sources": ["company_site", "job_listing", "news"],
             "source_add_requires_manifest_sha256": True,
+            "private_bindings_exposed": False,
+        },
+        "runtime_routing": {
+            "compiler_version": "routing-compiler-v1",
+            "catalog": runtime_catalog,
+            "catalog_sha256": sha256_json(runtime_catalog).removeprefix("sha256:"),
+            "policy": runtime_policy,
+            "policy_sha256": sha256_json(runtime_policy).removeprefix("sha256:"),
+            "candidate_tool_lanes": {
+                "candidate.backlog": "backlog",
+                "candidate.registry_feed": "registry_signal",
+                "candidate.jobs_feed": "jobs_signal",
+                "candidate.deepline_firmographic": "deepline_firmographic",
+                "candidate.model_semantic": "model_semantic",
+            },
+            "intent_tool_tiers": {
+                "intent.existing_evidence": "fused",
+                "intent.jobs_feed": "jobs_feed",
+                "intent.company_search": "company_search",
+                "intent.first_party": "first_party",
+                "intent.newsroom": "newsroom",
+            },
             "private_bindings_exposed": False,
         },
         "component_registry": {
@@ -266,6 +307,30 @@ def test_adapter_metadata_gate_requires_all_runtime_readiness_proofs() -> None:
     broken = json.loads(json.dumps(ready))
     broken["routing"]["catalog"]["schema_version"] = 2
     with pytest.raises(PrivateModelRuntimeError, match="catalog hash"):
+        private_runtime.validate_sourcing_adapter_metadata(broken)
+
+    broken = json.loads(json.dumps(ready))
+    broken["runtime_routing"]["candidate_tool_lanes"].pop(
+        "candidate.jobs_feed"
+    )
+    with pytest.raises(PrivateModelRuntimeError, match="missing required tools"):
+        private_runtime.validate_sourcing_adapter_metadata(broken)
+
+    extended = json.loads(json.dumps(ready))
+    extended["runtime_routing"]["candidate_tool_lanes"][
+        "candidate.future_provider"
+    ] = "future_provider"
+    extended["runtime_routing"]["catalog"]["tools"].append(
+        {"tool_id": "candidate.future_provider"}
+    )
+    extended["runtime_routing"]["catalog_sha256"] = sha256_json(
+        extended["runtime_routing"]["catalog"]
+    ).removeprefix("sha256:")
+    private_runtime.validate_sourcing_adapter_metadata(extended)
+
+    broken = json.loads(json.dumps(ready))
+    broken["runtime_routing"]["private_bindings_exposed"] = True
+    with pytest.raises(PrivateModelRuntimeError, match="private bindings"):
         private_runtime.validate_sourcing_adapter_metadata(broken)
 
 

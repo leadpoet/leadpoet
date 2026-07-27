@@ -23,6 +23,7 @@
     "sourcing_model/routing/contracts.py",
     "sourcing_model/routing/defaults.py",
     "sourcing_model/routing/policy.py",
+    "sourcing_model/routing/runtime.py",
     "sourcing_model/runtime_capabilities.py",
     "sourcing_model/scoring.py",
     "sourcing_model/validation.py"
@@ -179,6 +180,27 @@
         "source"
       ]
     },
+    "sourcing_model/routing/runtime.py": {
+      "candidate_lane_for_tool": [
+        "tool_id"
+      ],
+      "candidate_route_eligibility": [
+        "qualification_plan"
+      ],
+      "compile_candidate_acquisition_route": [
+        "qualification_plan"
+      ],
+      "compile_intent_evidence_route": [
+        "category"
+      ],
+      "intent_tier_for_tool": [
+        "tool_id"
+      ],
+      "runtime_catalog": [],
+      "runtime_policy": [],
+      "runtime_routing_metadata": [],
+      "runtime_tool_definitions": []
+    },
     "sourcing_model/runtime_capabilities.py": {
       "capability_metadata": [],
       "deadline": [],
@@ -290,6 +312,42 @@
       "catalog",
       "policy",
       "cohort"
+    ],
+    "sourcing_model/routing/runtime.py:candidate_route_eligibility": [
+      "qualification_plan",
+      "deepline_available"
+    ],
+    "sourcing_model/routing/runtime.py:compile_candidate_acquisition_route": [
+      "qualification_plan",
+      "backlog_available",
+      "registry_available",
+      "jobs_available",
+      "deepline_available",
+      "remaining_seconds",
+      "remaining_calls",
+      "remaining_results",
+      "credit_cap",
+      "cohort",
+      "catalog",
+      "policy"
+    ],
+    "sourcing_model/routing/runtime.py:compile_intent_evidence_route": [
+      "category",
+      "existing_evidence",
+      "available_tools",
+      "remaining_seconds",
+      "remaining_calls",
+      "credit_cap",
+      "cohort",
+      "catalog",
+      "policy"
+    ],
+    "sourcing_model/routing/runtime.py:runtime_catalog": [
+      "availability",
+      "state_overrides",
+      "additional_tools",
+      "additional_states",
+      "catalog_version"
     ]
   },
   "required_keyword_only": {
@@ -309,6 +367,26 @@
       "remaining_seconds",
       "remaining_calls",
       "remaining_results",
+      "credit_cap"
+    ],
+    "sourcing_model/routing/runtime.py:candidate_route_eligibility": [
+      "deepline_available"
+    ],
+    "sourcing_model/routing/runtime.py:compile_candidate_acquisition_route": [
+      "backlog_available",
+      "registry_available",
+      "jobs_available",
+      "deepline_available",
+      "remaining_seconds",
+      "remaining_calls",
+      "remaining_results",
+      "credit_cap"
+    ],
+    "sourcing_model/routing/runtime.py:compile_intent_evidence_route": [
+      "existing_evidence",
+      "available_tools",
+      "remaining_seconds",
+      "remaining_calls",
       "credit_cap"
     ]
   },
@@ -360,6 +438,10 @@
     "sourcing_model/routing/defaults.py": {
       "DEFAULT_CATALOG_VERSION": "sourcing-model-tools:v1",
       "DEFAULT_POLICY_VERSION": "sourcing-model-routing:v1"
+    },
+    "sourcing_model/routing/runtime.py": {
+      "RUNTIME_CATALOG_VERSION": "sourcing-model-runtime-tools:v1",
+      "RUNTIME_POLICY_VERSION": "sourcing-model-runtime-routing:v1"
     },
     "sourcing_model/normalized_icp_discovery_plan.py": {
       "CONTACT_PERSONA_SENIORITY_LEVELS": [

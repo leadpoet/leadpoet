@@ -249,8 +249,29 @@ def test_paired_operator_waits_for_full_gateway_success_before_validator(
         "gateway_verified",
         "validator_verified",
     ]
-    positions = [observed.index(event) for event in required]
-    assert positions == sorted(positions)
+    positions = {event: observed.index(event) for event in required}
+    assert (
+        positions["validator_start"]
+        < positions["validator_captured"]
+        < positions["gateway_start"]
+        < positions["gateway_complete"]
+    )
+    # The validator may observe the atomically published coordination marker
+    # before the parent SSH process records its post-move diagnostic event.
+    # Both events must remain gateway-gated and precede release verification,
+    # but their relative log order is intentionally unconstrained.
+    assert (
+        positions["gateway_complete"]
+        < positions["barrier_released"]
+        < positions["gateway_verified"]
+        < positions["validator_verified"]
+    )
+    assert (
+        positions["gateway_complete"]
+        < positions["validator_complete"]
+        < positions["gateway_verified"]
+        < positions["validator_verified"]
+    )
     assert "barrier_before_gateway" not in observed
     assert "SUCCESS: gateway and validator are aligned" in result.stdout
 

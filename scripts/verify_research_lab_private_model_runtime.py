@@ -32,6 +32,31 @@ from research_lab.eval.private_runtime import (  # noqa: E402
 import research_lab.eval.private_runtime as private_runtime_module  # noqa: E402
 
 
+def _routing_receipt_line(runtime_cap_seconds: float) -> str:
+    receipt = {
+        "runtime_cap_seconds": runtime_cap_seconds,
+        "capability_contract": {
+            "host_registered": ["deadline", "emit", "probe_origin", "resolve_host"],
+        },
+        "industry_taxonomy": {"taxonomy_content_hash": "sha256:" + "a" * 64},
+        "firmographic_discovery": {"plan": {"target": 5}},
+        "branches": [
+            {
+                "source": "company_site",
+                "compiled_source": "company_site",
+                "source_override": False,
+                "route_tool_ids": ["intent.company_site"],
+                "route_sources": ["company_site"],
+                "route_plan_sha256": "b" * 64,
+                "route_policy_sha256": "c" * 64,
+                "route_catalog_sha256": "d" * 64,
+                "route_context_sha256": "e" * 64,
+            }
+        ],
+    }
+    return "sourcing_branch_receipt " + json.dumps(receipt)
+
+
 def main() -> int:
     errors: list[str] = []
     with tempfile.TemporaryDirectory(prefix="research-lab-private-runtime-") as tmp:
@@ -39,6 +64,10 @@ def main() -> int:
         adapter = root / "research_lab_adapter.py"
         adapter.write_text(
             """
+import json
+import sys
+
+
 def run_icp(icp, context):
     print("diagnostic line that must not corrupt adapter JSON")
     required = ("required_attribute", "intent_signal", "intent_category", "employee_count", "geography")
@@ -47,6 +76,30 @@ def run_icp(icp, context):
     if context.get("patch", {}).get("patch_type") == "STRATEGY_SWAP":
         icp = dict(icp)
         icp["intent_source"] = context["patch"].get("patch_doc", {}).get("strategy_option", "news")
+    compiled_source = "company_site"
+    selected_source = icp.get("intent_source", compiled_source)
+    receipt = {
+        "runtime_cap_seconds": context["runtime_options"]["runtime_cap_seconds"],
+        "capability_contract": {
+            "host_registered": ["deadline", "emit", "probe_origin", "resolve_host"],
+        },
+        "industry_taxonomy": {"taxonomy_content_hash": "sha256:" + "a" * 64},
+        "firmographic_discovery": {"plan": {"target": 5}},
+        "branches": [
+            {
+                "source": selected_source,
+                "compiled_source": compiled_source,
+                "source_override": selected_source != compiled_source,
+                "route_tool_ids": ["intent.company_site"],
+                "route_sources": [compiled_source],
+                "route_plan_sha256": "b" * 64,
+                "route_policy_sha256": "c" * 64,
+                "route_catalog_sha256": "d" * 64,
+                "route_context_sha256": "e" * 64,
+            }
+        ],
+    }
+    sys.stderr.write("sourcing_branch_receipt " + json.dumps(receipt) + "\\n")
     return [{
         "company_name": "Acme AI",
         "company_website": "https://acme.example",
@@ -137,14 +190,14 @@ def run_icp(icp, context):
             errors.append("empty candidate output was rejected")
 
         tree_hash_a = compute_private_source_tree_hash(root)
-        (root / "__pycache__").mkdir()
+        (root / "__pycache__").mkdir(exist_ok=True)
         (root / "__pycache__" / "ignored.pyc").write_bytes(b"ignored")
         tree_hash_b = compute_private_source_tree_hash(root)
         if tree_hash_a != tree_hash_b:
             errors.append("source tree hash included ignored pycache files")
 
         manifest_payload = {
-            "component_registry_version": "sourcing-model-components:v1",
+            "component_registry_version": "sourcing-model-components:v2",
             "scoring_adapter_version": "qualification-company-scorer:v1",
         }
         manifest = build_local_private_artifact_manifest(
@@ -173,7 +226,7 @@ def run_icp(icp, context):
         class _Completed:
             returncode = 0
             stdout = 'debug line before JSON\n[{"raw_secret":"should-fail"}]'
-            stderr = ""
+            stderr = _routing_receipt_line(27.0)
 
         def _fake_run(*_args, **_kwargs):
             return _Completed()
@@ -199,7 +252,7 @@ def run_icp(icp, context):
         class _CommandCompleted:
             returncode = 0
             stdout = "[]"
-            stderr = ""
+            stderr = _routing_receipt_line(27.0)
 
         def _fake_command_run(command, *_args, **_kwargs):
             captured_commands.append(list(command))
@@ -222,7 +275,12 @@ def run_icp(icp, context):
         class _ProviderErrorCompleted:
             returncode = 0
             stdout = "[]"
-            stderr = "research_lab_private_runtime_provider_error HTTPError: HTTP Error 401: Unauthorized"
+            stderr = "\n".join(
+                (
+                    _routing_receipt_line(27.0),
+                    "research_lab_private_runtime_provider_error HTTPError: HTTP Error 401: Unauthorized",
+                )
+            )
 
         def _fake_provider_error_run(*_args, **_kwargs):
             return _ProviderErrorCompleted()

@@ -1431,7 +1431,7 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "trap finalize_rehearsal EXIT" in run_inside
     assert "preserve_rehearsal_evidence" in run_inside
     assert "tls-connect-proxy-ca.pem" in run_inside
-    assert "https_port_443_authenticated_connect.v2" in (
+    assert "authenticated_http_or_https_connect.v2" in (
         Path(__file__).resolve().parents[2]
         / "gateway/tee/prepare_gateway_envelopes_v2.py"
     ).read_text(encoding="utf-8")

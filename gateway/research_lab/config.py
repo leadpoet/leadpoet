@@ -199,7 +199,10 @@ import research_lab_adapter
 import sourcing_model
 
 metadata = research_lab_adapter.adapter_metadata()
-assert metadata.get("adapter_version")
+assert metadata.get("adapter_version") == "sourcing-model-research-lab-adapter:v3"
+assert metadata.get("component_registry_version") == "sourcing-model-components:v2"
+assert metadata.get("routing", {}).get("compiler_version") == "routing-compiler-v1"
+assert metadata.get("routing", {}).get("private_bindings_exposed") is False
 assert sourcing_model is not None
 PY
 """.strip()
@@ -253,6 +256,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import research_lab_adapter
 
 output = Path(sys.argv[1])
 image_digest, manifest_uri, signature_ref, git_commit_sha = sys.argv[2:6]
@@ -279,10 +283,11 @@ for path in sorted(Path(".").rglob("*")):
         continue
     digest_inputs.append((rel, sha256_bytes(path.read_bytes())))
 
+runtime_metadata = research_lab_adapter.adapter_metadata()
 config_payload = {
-    "component_registry_version": "sourcing-model-components:v1",
-    "scoring_adapter_version": "qualification-company-scorer:v1",
-    "adapter_version": "sourcing-model-research-lab-adapter:v1",
+    "component_registry_version": str(runtime_metadata["component_registry_version"]),
+    "scoring_adapter_version": str(runtime_metadata["scoring_adapter_version"]),
+    "adapter_version": str(runtime_metadata["adapter_version"]),
 }
 payload = {
     "model_artifact_hash": sha256_json(digest_inputs),

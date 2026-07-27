@@ -213,7 +213,11 @@ def test_sourcing_receipts_and_events_are_collected_and_stripped() -> None:
 
 
 def test_adapter_metadata_gate_requires_all_runtime_readiness_proofs() -> None:
+    routing_catalog = {"schema_version": 1}
+    routing_policy = {"schema_version": 1}
     ready = {
+        "adapter_version": "sourcing-model-research-lab-adapter:v3",
+        "component_registry_version": "sourcing-model-components:v2",
         "capability_contract_version": "sourcing-model-runtime-capabilities:v2",
         "runtime_capabilities": [
             "deadline",
@@ -227,12 +231,89 @@ def test_adapter_metadata_gate_requires_all_runtime_readiness_proofs() -> None:
             "firmographic_policy_version": "sourcing-model-firmographic-discovery:v1"
         },
         "industry_taxonomy": {"taxonomy_content_hash": "sha256:" + "a" * 64},
+        "routing": {
+            "compiler_version": "routing-compiler-v1",
+            "catalog": routing_catalog,
+            "catalog_sha256": sha256_json(routing_catalog).removeprefix("sha256:"),
+            "policy": routing_policy,
+            "policy_sha256": sha256_json(routing_policy).removeprefix("sha256:"),
+            "intent_sources": ["company_site", "job_listing", "news"],
+            "source_add_requires_manifest_sha256": True,
+            "private_bindings_exposed": False,
+        },
+        "component_registry": {
+            "source_router": {
+                "strategy_options": ["company_site", "job_listing", "news"],
+            }
+        },
     }
     assert private_runtime.validate_sourcing_adapter_metadata(ready) == ready
     broken = dict(ready)
     broken.pop("industry_taxonomy")
     with pytest.raises(PrivateModelRuntimeError, match="taxonomy hash"):
         private_runtime.validate_sourcing_adapter_metadata(broken)
+
+    broken = dict(ready)
+    broken["adapter_version"] = "sourcing-model-research-lab-adapter:v2"
+    with pytest.raises(PrivateModelRuntimeError, match="adapter v3"):
+        private_runtime.validate_sourcing_adapter_metadata(broken)
+
+    broken = dict(ready)
+    broken.pop("routing")
+    with pytest.raises(PrivateModelRuntimeError, match="routing metadata"):
+        private_runtime.validate_sourcing_adapter_metadata(broken)
+
+    broken = json.loads(json.dumps(ready))
+    broken["routing"]["catalog"]["schema_version"] = 2
+    with pytest.raises(PrivateModelRuntimeError, match="catalog hash"):
+        private_runtime.validate_sourcing_adapter_metadata(broken)
+
+
+def test_sourcing_receipt_requires_compiled_route_replay_anchors() -> None:
+    receipt = {
+        "kind": "sourcing_branch_receipt",
+        "runtime_cap_seconds": 897.0,
+        "capability_contract": {
+            "host_registered": [
+                "deadline",
+                "emit",
+                "probe_origin",
+                "resolve_host",
+            ],
+        },
+        "industry_taxonomy": {
+            "taxonomy_content_hash": "sha256:" + "a" * 64,
+        },
+        "firmographic_discovery": {"plan": {"target": 5}},
+        "branches": [
+            {
+                "source": "news",
+                "compiled_source": "news",
+                "source_override": False,
+                "route_tool_ids": ["intent.news", "intent.company_site"],
+                "route_sources": ["news", "company_site"],
+                "route_plan_sha256": "b" * 64,
+                "route_policy_sha256": "c" * 64,
+                "route_catalog_sha256": "d" * 64,
+                "route_context_sha256": "e" * 64,
+            }
+        ],
+    }
+    assert (
+        private_runtime.validate_sourcing_runtime_receipt_entries(
+            [receipt],
+            expected_runtime_options={"runtime_cap_seconds": 897.0},
+        )
+        == receipt
+    )
+
+    broken = json.loads(json.dumps(receipt))
+    broken["branches"][0].pop("route_plan_sha256")
+    with pytest.raises(PrivateModelRuntimeError, match="route_plan_sha256"):
+        private_runtime.validate_sourcing_runtime_receipt_entries(
+            [broken],
+            expected_runtime_options={"runtime_cap_seconds": 897.0},
+        )
 
 
 SUCCESS_AND_FAILURE_PROBE = r"""
@@ -632,6 +713,19 @@ RUNTIME_RECEIPT = {
     },
     "industry_taxonomy": {"taxonomy_content_hash": "sha256:" + "a" * 64},
     "firmographic_discovery": {"plan": {"target": 5}},
+    "branches": [
+        {
+            "source": "news",
+            "compiled_source": "news",
+            "source_override": False,
+            "route_tool_ids": ["intent.news", "intent.company_site"],
+            "route_sources": ["news", "company_site"],
+            "route_plan_sha256": "b" * 64,
+            "route_policy_sha256": "c" * 64,
+            "route_catalog_sha256": "d" * 64,
+            "route_context_sha256": "e" * 64,
+        }
+    ],
 }
 
 FAKE_ENTRY = {
@@ -725,6 +819,22 @@ def test_subprocess_runner_skips_publish_when_capture_disabled(tmp_path, monkeyp
                 "taxonomy_content_hash": "sha256:" + "a" * 64,
             },
             "firmographic_discovery": {"plan": {"target": 5}},
+            "branches": [
+                {
+                    "source": "news",
+                    "compiled_source": "news",
+                    "source_override": False,
+                    "route_tool_ids": [
+                        "intent.news",
+                        "intent.company_site",
+                    ],
+                    "route_sources": ["news", "company_site"],
+                    "route_plan_sha256": "b" * 64,
+                    "route_policy_sha256": "c" * 64,
+                    "route_catalog_sha256": "d" * 64,
+                    "route_context_sha256": "e" * 64,
+                }
+            ],
         }
     ]
     assert outputs and outputs[0]["company_name"] == "TraceCo"

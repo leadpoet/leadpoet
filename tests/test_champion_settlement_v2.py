@@ -2644,6 +2644,9 @@ async def test_champion_settlement_backfill_is_dry_run_safe_and_resumable(
         assert kwargs == {"epoch": 102, "netuid": 71}
         return {
             "ready": state["covered"],
+            "historical_classification_coverage": (
+                1.0 if state["covered"] else 0.0
+            ),
                 "missing_historical_classifications": (
                     [] if state["covered"] else [missing]
                 ),

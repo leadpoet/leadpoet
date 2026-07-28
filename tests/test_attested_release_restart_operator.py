@@ -13,6 +13,15 @@ SCRIPT = ROOT / "scripts" / "restart_attested_release_local.sh"
 def test_attested_release_restart_operator_is_fail_closed() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
 
+    expected_key = "$HOME/Downloads/leadpoet-2026-07-28.pem"
+    assert (
+        f'GATEWAY_KEY="${{LEADPOET_GATEWAY_SSH_KEY:-{expected_key}}}"'
+        in source
+    )
+    assert (
+        f'VALIDATOR_KEY="${{LEADPOET_VALIDATOR_SSH_KEY:-{expected_key}}}"'
+        in source
+    )
     assert 'component="all"' in source
     assert "exact_commit_restart_v2.py" in source
     assert "--compatibility-floor" not in source

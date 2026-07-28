@@ -1176,3 +1176,110 @@ def test_all_active_submission_paths_use_epoch_bounded_helpers():
     assert "_submit_weights_v2" not in primary_source
     assert "VALIDATOR_ATTESTED_WEIGHT_MODE" not in primary_source
     assert "VALIDATOR_WEIGHT_PROTOCOL" in primary_source
+
+
+def test_primary_retries_within_epoch_after_transport_exception(
+    monkeypatch, capsys
+):
+    """A transient finney transport failure (WebSocket 503 / timeout) raises out
+    of ``set_weights`` instead of returning a rejection. It must be classified,
+    reconnected, and retried inside the epoch window — never allowed to escape
+    and abandon the whole epoch's weight submission (the chronic-miss bug)."""
+
+    validator = _primary([], blocks=[345, 346])
+
+    outcomes = [
+        TimeoutError("server rejected WebSocket connection: HTTP 503"),
+        _SdkResponse(True, "accepted"),
+    ]
+
+    def set_weights(**kwargs):
+        validator.subtensor.calls.append(dict(kwargs))
+        result = outcomes.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    validator.subtensor.set_weights = set_weights
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(validator_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        validator_module, "AuthoritativeSetWeightsContextV2", _AuthoritativeContext
+    )
+
+    async def current(**_kwargs):
+        return True
+
+    validator._weight_submission_epoch_is_current = current
+
+    reconnects = []
+
+    def reconnect(*, expected_source, reason):
+        reconnects.append(reason)
+        return True
+
+    validator._reconnect_subtensor_sync = reconnect
+
+    result = asyncio.run(
+        validator._set_weights_until_epoch_end(
+            epoch_id=0,
+            uids=[0],
+            weights=[1.0],
+            **_authoritative_args(),
+        )
+    )
+
+    assert result is True
+    # Two chain calls: the transport failure, then the successful retry.
+    assert len(validator.subtensor.calls) == 2
+    # Exactly one reconnect, tagged for the weight-submission transport path.
+    assert reconnects == ["weight_submission_transport"]
+    assert "transport error" in capsys.readouterr().out
+
+
+def test_primary_reraises_non_transport_exception(monkeypatch):
+    """A non-transport exception (a real signing/auth failure) must propagate,
+    not be silently swallowed or retried — only transport faults are retried."""
+
+    validator = _primary([], blocks=[345])
+
+    def set_weights(**kwargs):
+        validator.subtensor.calls.append(dict(kwargs))
+        raise ValueError("enclave refused to sign")
+
+    validator.subtensor.set_weights = set_weights
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(validator_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        validator_module, "AuthoritativeSetWeightsContextV2", _AuthoritativeContext
+    )
+
+    async def current(**_kwargs):
+        return True
+
+    validator._weight_submission_epoch_is_current = current
+
+    reconnected = []
+    validator._reconnect_subtensor_sync = (
+        lambda **kwargs: reconnected.append(kwargs) or True
+    )
+
+    with pytest.raises(ValueError, match="enclave refused to sign"):
+        asyncio.run(
+            validator._set_weights_until_epoch_end(
+                epoch_id=0,
+                uids=[0],
+                weights=[1.0],
+                **_authoritative_args(),
+            )
+        )
+
+    # A non-transport error must not trigger a reconnect or a silent retry.
+    assert reconnected == []
+    assert len(validator.subtensor.calls) == 1

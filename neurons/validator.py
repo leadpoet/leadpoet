@@ -4506,64 +4506,118 @@ class Validator(BaseValidatorNeuron):
         )
 
         attempt = 0
-        with AuthoritativeSetWeightsContextV2(
-            substrate=self.subtensor.substrate,
-            wallet=self.wallet,
-            weight_authorization_id=weight_authorization_id,
-            weight_submission_event_hash=weight_submission_event_hash,
-            on_signed_extrinsic=on_signed_extrinsic,
-            expected_era_period=extrinsic_period,
-        ) as signing_context:
-            while True:
-                # Re-read Supabase after entering the signing context and again
-                # before every retry. A fence/activation racing with preparation
-                # must win before the SDK receives any extrinsic.
-                if not await self._weight_submission_lifecycle_is_open(
-                    epoch_id=epoch_id,
-                ):
-                    self._last_weight_extrinsic_receipts_v2 = list(
-                        signing_context.extrinsic_signature_results
-                    )
-                    print(
-                        f"   ⏹️ Durable epoch authority closed before weight "
-                        f"submission for epoch {epoch_id}"
-                    )
-                    return False
-                attempt += 1
-                outcome = ExtrinsicOutcome.from_sdk(
-                    self.subtensor.set_weights(
-                        netuid=self.config.netuid,
-                        wallet=self.wallet,
-                        uids=uids,
-                        weights=weights,
-                        wait_for_finalization=True,
-                        mechid=0,
-                        period=extrinsic_period,
-                    )
-                )
-                if outcome.success:
-                    self._last_weight_extrinsic_receipts_v2 = list(
-                        signing_context.extrinsic_signature_results
-                    )
-                    return True
+        # Outer loop: (re)create the enclave signing context. A finney transport
+        # failure below needs a fresh Subtensor, and the reconnect helper swaps
+        # self.subtensor for a new instance — so the context, which patches one
+        # specific substrate for enclave signing, must be rebuilt around the new
+        # substrate rather than reconnected in place.
+        while True:
+            transport_error: Optional[BaseException] = None
+            with AuthoritativeSetWeightsContextV2(
+                substrate=self.subtensor.substrate,
+                wallet=self.wallet,
+                weight_authorization_id=weight_authorization_id,
+                weight_submission_event_hash=weight_submission_event_hash,
+                on_signed_extrinsic=on_signed_extrinsic,
+                expected_era_period=extrinsic_period,
+            ) as signing_context:
+                while True:
+                    # Re-read Supabase after entering the signing context and again
+                    # before every retry. A fence/activation racing with preparation
+                    # must win before the SDK receives any extrinsic.
+                    if not await self._weight_submission_lifecycle_is_open(
+                        epoch_id=epoch_id,
+                    ):
+                        self._last_weight_extrinsic_receipts_v2 = list(
+                            signing_context.extrinsic_signature_results
+                        )
+                        print(
+                            f"   ⏹️ Durable epoch authority closed before weight "
+                            f"submission for epoch {epoch_id}"
+                        )
+                        return False
+                    attempt += 1
+                    try:
+                        sdk_result = self.subtensor.set_weights(
+                            netuid=self.config.netuid,
+                            wallet=self.wallet,
+                            uids=uids,
+                            weights=weights,
+                            wait_for_finalization=True,
+                            mechid=0,
+                            period=extrinsic_period,
+                        )
+                    except Exception as exc:
+                        # A finney transport failure (WebSocket 503, request
+                        # timeout, dropped connection) raises here instead of
+                        # returning a rejection outcome. Without this guard the
+                        # exception escapes the whole retry loop and the epoch's
+                        # weight submission is abandoned — the sole cause of the
+                        # chronic intermittent primary weight-set misses. The
+                        # auditor submission path already handles this identically
+                        # (classify transport error, reconnect, retry within the
+                        # epoch). Only transport faults are retried; any other
+                        # exception is re-raised so real signing/auth failures are
+                        # never masked. A dead websocket needs a fresh Subtensor,
+                        # which the reconnect below rebuilds outside this context.
+                        if not _is_subtensor_connection_error(exc):
+                            raise
+                        self._last_weight_extrinsic_receipts_v2 = list(
+                            signing_context.extrinsic_signature_results
+                        )
+                        print(
+                            f"   ⚠️ Weight submission attempt {attempt} hit a chain "
+                            f"transport error ({type(exc).__name__}); reconnecting "
+                            f"and retrying within epoch {epoch_id}"
+                        )
+                        transport_error = exc
+                        break
+                    outcome = ExtrinsicOutcome.from_sdk(sdk_result)
+                    if outcome.success:
+                        self._last_weight_extrinsic_receipts_v2 = list(
+                            signing_context.extrinsic_signature_results
+                        )
+                        return True
 
-                print(
-                    f"   ❌ Bittensor rejected weight submission attempt {attempt}: "
-                    f"{outcome.message}"
-                )
-                await asyncio.sleep(12)
-                if not await self._weight_submission_epoch_is_current(
-                    epoch_id=epoch_id,
-                    subnet_epoch_index=subnet_epoch_index,
-                ):
-                    self._last_weight_extrinsic_receipts_v2 = list(
-                        signing_context.extrinsic_signature_results
-                    )
                     print(
-                        f"   ⏹️ Epoch {epoch_id} ended before the weight "
-                        "submission was accepted"
+                        f"   ❌ Bittensor rejected weight submission attempt {attempt}: "
+                        f"{outcome.message}"
                     )
-                    return False
+                    await asyncio.sleep(12)
+                    if not await self._weight_submission_epoch_is_current(
+                        epoch_id=epoch_id,
+                        subnet_epoch_index=subnet_epoch_index,
+                    ):
+                        self._last_weight_extrinsic_receipts_v2 = list(
+                            signing_context.extrinsic_signature_results
+                        )
+                        print(
+                            f"   ⏹️ Epoch {epoch_id} ended before the weight "
+                            "submission was accepted"
+                        )
+                        return False
+
+            # Reached only when the inner loop broke on a transport error: the
+            # signing context has exited (extrinsic-signing patch restored and the
+            # global signing lock released), so it is now safe to replace the
+            # live-chain source and rebuild a fresh context for the next attempt.
+            if transport_error is None:
+                return False
+            await asyncio.sleep(12)
+            if not await self._weight_submission_epoch_is_current(
+                epoch_id=epoch_id,
+                subnet_epoch_index=subnet_epoch_index,
+            ):
+                print(
+                    f"   ⏹️ Epoch {epoch_id} ended before the weight "
+                    "submission was accepted"
+                )
+                return False
+            await asyncio.to_thread(
+                self._reconnect_subtensor_sync,
+                expected_source=self.subtensor,
+                reason="weight_submission_transport",
+            )
 
     async def submit_weights_at_epoch_end(self):
         """Run at most one automatic weight publication attempt at a time."""

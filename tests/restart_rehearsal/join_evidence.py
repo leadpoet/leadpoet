@@ -7,9 +7,25 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import sys
 from typing import Any, Sequence
+
+
+SOURCE_ROOT = Path(
+    os.environ.get("REHEARSAL_SOURCE_ROOT", "/source")
+).resolve()
+if not (SOURCE_ROOT / "gateway").is_dir():
+    SOURCE_ROOT = Path(__file__).resolve().parents[2]
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
+
+from gateway.tee.rehearsal_behavior_contract_v2 import (  # noqa: E402
+    build_rehearsal_behavior_contract_v2,
+    validate_rehearsal_behavior_contract_v2,
+)
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -128,6 +144,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     expected_epochs = 1 if args.profile == "prepush" else 100
     epochs = workflow.get("epochs")
     workflow_stages = workflow.get("stages")
+    serialized_contract = workflow.get("behavior_contract")
+    if not isinstance(serialized_contract, dict):
+        raise SystemExit("candidate behavior contract evidence is missing")
+    try:
+        observed_contract = validate_rehearsal_behavior_contract_v2(
+            serialized_contract
+        )
+        expected_contract = validate_rehearsal_behavior_contract_v2(
+            build_rehearsal_behavior_contract_v2(
+                source_root=SOURCE_ROOT,
+                candidate_sha=args.candidate_sha,
+                profile=args.profile,
+                epoch_count=expected_epochs,
+            )
+        )
+    except Exception as exc:
+        raise SystemExit(
+            f"candidate behavior contract is invalid: {exc}"
+        ) from exc
+    if (
+        observed_contract != expected_contract
+        or workflow.get("behavior_contract_hash")
+        != expected_contract["contract_hash"]
+    ):
+        raise SystemExit("candidate behavior contract differs from source")
     if (
         workflow.get("status") != "passed"
         or workflow.get("profile") != args.profile
@@ -144,42 +185,51 @@ def main(argv: Sequence[str] | None = None) -> int:
         for item in workflow_stages
         if isinstance(item, dict)
     }
-    required_workflow_stages = {
-        "input-contract",
-        "diagnostic:candidate-bundle-generation",
-        "diagnostic:host-bundle-composition",
-        "diagnostic:primary-bundle-verification",
-        "diagnostic:auditor-bundle-verification",
-        "diagnostic:primary-auditor-vector-equality",
-        "diagnostic:sdk-signing-bridge",
-        "boundary-start",
-        "boundary-cleanup",
-        "workflow-evidence-validation",
-        *{
-            f"epoch-{30_000 + ordinal}"
-            for ordinal in range(expected_epochs)
-        },
-    }
-    source_stage_count = sum(
-        stage.startswith("source-identity:") for stage in stage_status
-    )
-    fault_stage_count = sum(
-        stage.startswith("fault:") for stage in stage_status
+    required_workflow_stages = set(
+        expected_contract["required_stage_ids"]
     )
     if (
         len(stage_status) != len(workflow_stages)
         or any(status != "passed" for status in stage_status.values())
-        or not required_workflow_stages.issubset(stage_status)
-        or source_stage_count != 9
-        or (
-            args.profile == "release"
-            and (
-                stage_status.get("concurrency") != "passed"
-                or fault_stage_count < 15
-            )
-        )
+        or set(stage_status) != required_workflow_stages
     ):
         raise SystemExit("production workflow stage evidence is incomplete")
+    invariants = workflow.get("behavioral_invariants")
+    required_invariants = set(
+        expected_contract["required_invariant_ids"]
+    )
+    if (
+        not isinstance(invariants, dict)
+        or set(invariants) != required_invariants
+        or any(value is not True for value in invariants.values())
+    ):
+        raise SystemExit("production workflow invariant evidence is incomplete")
+    behavior_evidence = workflow.get("behavior_evidence")
+    if (
+        not isinstance(behavior_evidence, dict)
+        or set(behavior_evidence)
+        != set(expected_contract["behavior_scenarios"])
+    ):
+        raise SystemExit("production workflow behavior evidence is incomplete")
+    identities = workflow.get("production_source_identities")
+    if (
+        not isinstance(identities, list)
+        or len(identities)
+        != len(expected_contract["production_source_paths"])
+        or any(not isinstance(item, dict) for item in identities)
+        or sorted(str(item.get("path")) for item in identities)
+        != sorted(expected_contract["production_source_paths"])
+        or any(
+            not isinstance(item, dict)
+            or item.get("commit_sha") != args.candidate_sha
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(item.get("sha256") or ""),
+            )
+            for item in identities
+        )
+    ):
+        raise SystemExit("production source identity evidence is incomplete")
     pcr0s = {str(epoch.get("pcr0")) for epoch in epochs}
     forward_pcr0s = {
         str(row.get("pcr0"))
@@ -210,11 +260,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         or cleanup.get("local_chain_epochs") != expected_epochs
     ):
         raise SystemExit("rehearsal cleanup evidence is incomplete")
-    if args.profile == "release" and (
-        len(workflow.get("fault_matrix") or []) < 15
-        or workflow.get("concurrent_write_count") != 32
-    ):
-        raise SystemExit("release fault or concurrency evidence is incomplete")
+    faults = workflow.get("fault_matrix") or []
+    if args.profile == "release":
+        if (
+            not isinstance(faults, list)
+            or [str(item.get("fault")) for item in faults]
+            != expected_contract["fault_ids"]
+            or any(item.get("status") != "fail_closed" for item in faults)
+            or workflow.get("concurrent_write_count") != 32
+        ):
+            raise SystemExit(
+                "release fault or concurrency evidence is incomplete"
+            )
+    elif faults or workflow.get("concurrent_write_count") != 0:
+        raise SystemExit("prepush included undeclared release-only evidence")
 
     last_epoch = epochs[-1]
     joined = {
@@ -253,8 +312,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "epoch_count": expected_epochs,
         "launcher_evidence": launcher_rows,
         "postgres_contract_sha256": candidate_postgres_contract_sha256,
+        "behavior_contract_hash": expected_contract["contract_hash"],
+        "behavioral_invariants": invariants,
         "workflow_evidence_hash": _sha256(workflow_path),
-        "fault_matrix_count": len(workflow.get("fault_matrix") or []),
+        "fault_matrix_count": len(faults),
         "concurrent_write_count": workflow.get("concurrent_write_count"),
         "cleanup": cleanup,
         "completed_at": datetime.now(timezone.utc).isoformat(),

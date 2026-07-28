@@ -9,6 +9,7 @@ and production database are replaced by :mod:`local_services`.
 from __future__ import annotations
 
 import argparse
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
@@ -66,6 +67,10 @@ from validator_tee.enclave.hotkey_authority_v2 import (  # noqa: E402
 from validator_tee.host.weight_authority_v2 import (  # noqa: E402
     build_authoritative_weight_bundle_v2,
 )
+from gateway.tee.rehearsal_behavior_contract_v2 import (  # noqa: E402
+    build_rehearsal_behavior_contract_v2,
+    validate_rehearsal_behavior_contract_v2,
+)
 from validator_tee.host.enclave_hotkey_v2 import (  # noqa: E402
     AuthoritativeSetWeightsContextV2,
     _weight_extrinsic_module,
@@ -76,19 +81,6 @@ NOW = "2026-07-25T00:00:00Z"
 GENESIS_HASH = (
     "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
 )
-PRODUCTION_SOURCE_PATHS = (
-    "leadpoet_canonical/attested_v2.py",
-    "leadpoet_canonical/auditor_v2.py",
-    "leadpoet_canonical/hotkey_authority_v2.py",
-    "leadpoet_canonical/weight_authority_v2.py",
-    "leadpoet_canonical/weight_computation.py",
-    "neurons/auditor_validator.py",
-    "validator_tee/enclave/hotkey_authority_v2.py",
-    "validator_tee/host/enclave_hotkey_v2.py",
-    "validator_tee/host/weight_authority_v2.py",
-)
-
-
 def _canonical(value: Any) -> bytes:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
@@ -1088,6 +1080,561 @@ def _exercise_concurrency(services: LocalBoundaryServices) -> int:
     return len(hashes)
 
 
+async def _exercise_chain_settlement_state_space_async() -> dict[str, Any]:
+    """Exercise every prefix topology through the production bootstrap gate."""
+
+    from gateway.research_lab import champion_settlement_v2 as settlement
+    from gateway.research_lab import store
+
+    netuid = 71
+    activation_epoch = 40_000
+    target_epoch = activation_epoch + 4
+    source_bundle_hash = sha256_json(
+        {"kind": "rehearsal-settlement-source", "epoch": activation_epoch}
+    )
+    activation = {
+        "netuid": netuid,
+        "schema_version": (
+            "leadpoet.research_lab_chain_realized_settlement_activation.v1"
+        ),
+        "first_epoch_id": activation_epoch,
+        "source_bundle_hash": source_bundle_hash,
+        "source_bundle_epoch_id": activation_epoch,
+        "source_finalized_block": 8_700_039,
+    }
+    state: dict[str, Any] = {"rows": []}
+    validated_ranges: list[tuple[int, int]] = []
+
+    async def select_many(table: str, **_kwargs: Any) -> list[dict[str, Any]]:
+        if table == settlement.CHAIN_REALIZED_SETTLEMENT_ACTIVATION_TABLE_V1:
+            return [dict(activation)]
+        if table == settlement.FINALIZED_ALLOCATION_VIEW_V2:
+            return [
+                {
+                    "bundle_hash": source_bundle_hash,
+                    "netuid": netuid,
+                    "epoch_id": activation_epoch,
+                    "finalized_block": activation["source_finalized_block"],
+                    "finalization_receipt_hash": sha256_json(
+                        {"kind": "finalization", "epoch": activation_epoch}
+                    ),
+                }
+            ]
+        raise AssertionError(f"unexpected settlement select_many table: {table}")
+
+    async def select_all(table: str, **_kwargs: Any) -> list[dict[str, Any]]:
+        if table != settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1:
+            raise AssertionError(
+                f"unexpected settlement select_all table: {table}"
+            )
+        return [dict(row) for row in state["rows"]]
+
+    async def load_chain_history(
+        *,
+        netuid: int,
+        start_epoch: int,
+        end_epoch: int,
+    ) -> list[dict[str, Any]]:
+        if netuid != 71 or start_epoch != activation_epoch:
+            raise AssertionError("settlement prefix validation range differs")
+        validated_ranges.append((start_epoch, end_epoch))
+        return [
+            {"epoch": epoch}
+            for epoch in range(start_epoch, end_epoch + 1)
+        ]
+
+    async def load_finalized_history(
+        *,
+        netuid: int,
+        start_epoch: int,
+        end_epoch: int,
+    ) -> list[dict[str, Any]]:
+        if (
+            netuid != 71
+            or start_epoch != activation_epoch
+            or end_epoch != target_epoch
+        ):
+            raise AssertionError("finalized source validation range differs")
+        return [
+            {
+                "epoch": activation_epoch,
+                "finalized_bundle_hashes": [source_bundle_hash],
+            }
+        ]
+
+    originals = (
+        store.select_many,
+        store.select_all,
+        settlement.load_chain_realized_allocation_history_v1,
+        settlement.load_finalized_allocation_history_v2,
+    )
+    store.select_many = select_many
+    store.select_all = select_all
+    settlement.load_chain_realized_allocation_history_v1 = load_chain_history
+    settlement.load_finalized_allocation_history_v2 = load_finalized_history
+    try:
+        accepted: list[dict[str, Any]] = []
+        total_epochs = target_epoch - activation_epoch + 1
+        for prefix_length in range(total_epochs + 1):
+            validated_ranges.clear()
+            state["rows"] = [
+                {
+                    "netuid": netuid,
+                    "epoch_id": epoch,
+                    "settlement_hash": sha256_json(
+                        {"kind": "settlement", "epoch": epoch}
+                    ),
+                }
+                for epoch in range(
+                    activation_epoch,
+                    activation_epoch + prefix_length,
+                )
+            ]
+            result = (
+                await settlement.validate_chain_realized_settlement_bootstrap_v1(
+                    netuid=netuid,
+                    target_epoch=target_epoch,
+                    maximum_backlog=total_epochs,
+                )
+            )
+            expected_status = (
+                "pristine_bootstrap_pending"
+                if prefix_length == 0
+                else "resumable_bootstrap_pending"
+            )
+            if (
+                result["status"] != expected_status
+                or result["backlog_epoch_count"]
+                != total_epochs - prefix_length
+                or result["validated_chain_realized_epochs"]
+                != [
+                    activation_epoch + offset
+                    for offset in range(prefix_length)
+                ]
+                or (
+                    prefix_length > 0
+                    and validated_ranges
+                    != [
+                        (
+                            activation_epoch,
+                            activation_epoch + prefix_length - 1,
+                        )
+                    ]
+                )
+                or (prefix_length == 0 and validated_ranges)
+            ):
+                raise RuntimeError(
+                    "chain settlement prefix behavior differs from contract"
+                )
+            accepted.append(
+                {
+                    "prefix_length": prefix_length,
+                    "status": result["status"],
+                    "backlog_epoch_count": result["backlog_epoch_count"],
+                }
+            )
+
+        invalid_states = {
+            "duplicate": [activation_epoch, activation_epoch],
+            "gap": [activation_epoch, activation_epoch + 2],
+            "missing-first": [activation_epoch + 1],
+            "ahead": list(range(activation_epoch, target_epoch + 2)),
+        }
+        rejected: list[str] = []
+        for name, epochs in invalid_states.items():
+            state["rows"] = [
+                {
+                    "netuid": netuid,
+                    "epoch_id": epoch,
+                    "settlement_hash": sha256_json(
+                        {"kind": "invalid-settlement", "name": name, "epoch": epoch}
+                    ),
+                }
+                for epoch in epochs
+            ]
+            try:
+                await settlement.validate_chain_realized_settlement_bootstrap_v1(
+                    netuid=netuid,
+                    target_epoch=target_epoch,
+                    maximum_backlog=total_epochs,
+                )
+            except settlement.ChampionSettlementV2Error:
+                rejected.append(name)
+            else:
+                raise RuntimeError(
+                    f"invalid settlement topology was accepted: {name}"
+                )
+
+        state["rows"] = []
+        try:
+            await settlement.validate_chain_realized_settlement_bootstrap_v1(
+                netuid=netuid,
+                target_epoch=target_epoch,
+                maximum_backlog=total_epochs - 1,
+            )
+        except settlement.ChampionSettlementV2Error:
+            rejected.append("backlog-exceeds-policy")
+        else:
+            raise RuntimeError("excessive settlement backlog was accepted")
+        return {
+            "accepted_prefixes": accepted,
+            "accepted_count": len(accepted),
+            "rejected_state_classes": sorted(rejected),
+        }
+    finally:
+        (
+            store.select_many,
+            store.select_all,
+            settlement.load_chain_realized_allocation_history_v1,
+            settlement.load_finalized_allocation_history_v2,
+        ) = originals
+
+
+def _exercise_chain_settlement_state_space() -> dict[str, Any]:
+    return asyncio.run(_exercise_chain_settlement_state_space_async())
+
+
+def _exercise_conditional_icp_policy() -> dict[str, Any]:
+    """Validate configured tails and center through the production selector."""
+
+    from gateway.research_lab.config import ResearchLabGatewayConfig
+    from research_lab.eval.conditional_validation import (
+        build_conditional_category_assignment,
+    )
+
+    policy = (
+        ResearchLabGatewayConfig.from_env().conditional_validation_policy()
+    )
+    policy_doc = policy.to_dict()
+    if not policy.enabled:
+        try:
+            build_conditional_category_assignment(
+                rolling_window_hash=sha256_json({"window": "disabled"}),
+                benchmark_items=[],
+                per_icp_summaries=[],
+                policy=policy,
+                baseline_serving_model_version_hash=sha256_json(
+                    {"model": "disabled"}
+                ),
+            )
+        except ValueError:
+            return {
+                "mode": policy.mode,
+                "policy_hash": policy_doc["policy_hash"],
+                "assignment_status": "disabled_fail_closed",
+            }
+        raise RuntimeError("disabled conditional policy accepted an assignment")
+
+    items = []
+    summaries = []
+    for index in range(policy.total_icps):
+        ref = f"rehearsal-icp-{index:04d}"
+        items.append(
+            {
+                "icp_ref": ref,
+                "icp_hash": sha256_json({"icp": index}),
+                "intent_signal_signature": sha256_json(
+                    {"intent": index}
+                ),
+                "set_id": index // max(1, policy.fresh_icp_count),
+                "day_index": index,
+                "day_rank": index + 1,
+                "cohort": (
+                    "fresh"
+                    if index < policy.fresh_icp_count
+                    else "retained"
+                ),
+            }
+        )
+        score = (
+            50.0
+            if policy.total_icps == 1
+            else (100.0 * index) / (policy.total_icps - 1)
+        )
+        summaries.append({"icp_ref": ref, "score": score})
+
+    kwargs = {
+        "rolling_window_hash": sha256_json({"window": "configured"}),
+        "benchmark_items": items,
+        "per_icp_summaries": summaries,
+        "policy": policy,
+        "baseline_serving_model_version_hash": sha256_json(
+            {"model": "configured"}
+        ),
+    }
+    assignment = build_conditional_category_assignment(**kwargs)
+    replay = build_conditional_category_assignment(**kwargs)
+    if assignment != replay:
+        raise RuntimeError("conditional ICP assignment is not deterministic")
+    rows = sorted(assignment["items"], key=lambda row: float(row["score"]))
+    low_refs = {
+        row["icp_ref"] for row in rows[: policy.low_tail_count]
+    }
+    conditional_refs = {
+        row["icp_ref"]
+        for row in rows[
+            policy.low_tail_count : (
+                policy.low_tail_count + policy.conditional_total_icps
+            )
+        ]
+    }
+    high_refs = {
+        row["icp_ref"]
+        for row in rows[
+            policy.low_tail_count + policy.conditional_total_icps :
+        ]
+    }
+    assigned = assignment["items"]
+    actual_conditional = {
+        row["icp_ref"]
+        for row in assigned
+        if row["category"] == "conditional"
+    }
+    initial_refs = {
+        row["icp_ref"]
+        for row in assigned
+        if row["category"] in {"public", "private"}
+    }
+    if (
+        actual_conditional != conditional_refs
+        or initial_refs != low_refs | high_refs
+        or assignment["category_counts"]
+        != {
+            "public": policy.public_total_icps,
+            "private": policy.private_total_icps,
+            "conditional": policy.conditional_total_icps,
+        }
+        or sum(
+            row["category"] == "public"
+            and row["strength_label"] == "weak"
+            for row in assigned
+        )
+        != policy.public_weak_total
+        or sum(
+            row["category"] == "private"
+            and row["strength_label"] == "weak"
+            for row in assigned
+        )
+        != policy.private_weak_total
+    ):
+        raise RuntimeError(
+            "conditional ICP assignment differs from configured tail policy"
+        )
+    return {
+        "policy_hash": policy_doc["policy_hash"],
+        "assignment_hash": assignment["assignment_hash"],
+        "category_counts": assignment["category_counts"],
+        "low_tail_count": policy.low_tail_count,
+        "high_tail_count": policy.high_tail_count,
+        "conditional_count": policy.conditional_total_icps,
+    }
+
+
+def _exercise_conditional_candidate_gate() -> dict[str, Any]:
+    """Prove conditional work runs only after the configured initial gate."""
+
+    from gateway.research_lab.config import ResearchLabGatewayConfig
+    from research_lab.eval.evaluator import build_holdout_gate_result
+
+    policy = ResearchLabGatewayConfig.from_env().conditional_validation_policy()
+    if not policy.enabled:
+        return {
+            "mode": policy.mode,
+            "policy_hash": policy.to_dict()["policy_hash"],
+            "advancement_status": "disabled_fail_closed",
+        }
+
+    def rows(prefix: str, count: int, score: float) -> list[dict[str, Any]]:
+        return [
+            {
+                "icp_ref": f"{prefix}-{index:04d}",
+                "candidate_company_scores": [float(score)],
+            }
+            for index in range(count)
+        ]
+
+    gate = {
+        "conditional_validation_required": True,
+        "baseline_benchmark_bundle_id": "private_benchmark:" + "1" * 64,
+        "baseline_benchmark_hash": sha256_json({"baseline": "candidate-gate"}),
+        "category_assignment_hash": sha256_json({"assignment": "candidate-gate"}),
+        "conditional_validation_policy_hash": policy.to_dict()["policy_hash"],
+        "baseline_public_score": 0.0,
+        "baseline_private_score": 0.0,
+        "baseline_conditional_score": 0.0,
+        "baseline_preliminary_score": 0.0,
+        "baseline_aggregate_score": 0.0,
+        "threshold_points": float(policy.threshold_points),
+    }
+    passing_score = float(policy.threshold_points)
+    public = rows("public", policy.public_total_icps, passing_score)
+    private = rows("private", policy.private_total_icps, passing_score)
+    conditional = rows(
+        "conditional",
+        policy.conditional_total_icps,
+        passing_score,
+    )
+
+    preliminary_rows, preliminary = build_holdout_gate_result(
+        public_results=public,
+        private_results=private,
+        conditional_results=(),
+        public_icp_count=policy.public_total_icps,
+        private_icp_count=policy.private_total_icps,
+        conditional_icp_count=policy.conditional_total_icps,
+        gate=gate,
+    )
+    final_rows, final = build_holdout_gate_result(
+        public_results=public,
+        private_results=private,
+        conditional_results=conditional,
+        public_icp_count=policy.public_total_icps,
+        private_icp_count=policy.private_total_icps,
+        conditional_icp_count=policy.conditional_total_icps,
+        gate=gate,
+    )
+    rejected_rows, rejected = build_holdout_gate_result(
+        public_results=rows(
+            "public-rejected",
+            policy.public_total_icps,
+            0.0,
+        ),
+        private_results=rows(
+            "private-rejected",
+            policy.private_total_icps,
+            0.0,
+        ),
+        conditional_results=conditional,
+        public_icp_count=policy.public_total_icps,
+        private_icp_count=policy.private_total_icps,
+        conditional_icp_count=policy.conditional_total_icps,
+        gate={
+            **gate,
+            "baseline_preliminary_score": 50.0,
+        },
+    )
+    initial_count = policy.public_total_icps + policy.private_total_icps
+    if (
+        preliminary.get("decision") != "conditional_validation_required"
+        or preliminary.get("conditional_holdout_evaluated") is not False
+        or len(preliminary_rows) != initial_count
+        or final.get("decision") != "conditional_validation_approved"
+        or final.get("conditional_holdout_evaluated") is not True
+        or len(final_rows) != policy.total_icps
+        or rejected.get("decision")
+        != "rejected_before_conditional_validation"
+        or rejected.get("conditional_holdout_evaluated") is not False
+        or len(rejected_rows) != initial_count
+    ):
+        raise RuntimeError(
+            "conditional candidate advancement differs from configured gate"
+        )
+    return {
+        "policy_hash": policy.to_dict()["policy_hash"],
+        "initial_count": initial_count,
+        "conditional_count": policy.conditional_total_icps,
+        "final_count": len(final_rows),
+        "preliminary_decision": preliminary["decision"],
+        "final_decision": final["decision"],
+        "rejected_decision": rejected["decision"],
+    }
+
+
+def _exercise_git_tree_replacement() -> dict[str, Any]:
+    """Validate deterministic replacement ancestry using configured tree policy."""
+
+    from gateway.research_lab.git_tree_models import (
+        TreePolicy,
+        TreeReplacement,
+        derive_tree_id,
+    )
+
+    policy = TreePolicy.from_env(os.environ)
+    run_id = "00000000-0000-4000-8000-000000000001"
+    roots = [
+        sha256_json({"root": ordinal})
+        for ordinal in range(3)
+    ]
+    manifests = [
+        sha256_json({"manifest": ordinal})
+        for ordinal in range(3)
+    ]
+    initial_tree_id = derive_tree_id(
+        run_id=run_id,
+        root_artifact_hash=roots[0],
+        policy=policy,
+    )
+    first = TreeReplacement(
+        generation=1,
+        replaces_tree_id=initial_tree_id,
+        cancellation_event_hash=sha256_json({"cancel": 0}),
+        prior_root_artifact_hash=roots[0],
+        prior_root_manifest_hash=manifests[0],
+        prior_policy_hash=policy.policy_hash,
+        root_artifact_hash=roots[1],
+        root_manifest_hash=manifests[1],
+        policy_hash=policy.policy_hash,
+    )
+    first_tree_id = derive_tree_id(
+        run_id=run_id,
+        root_artifact_hash=roots[1],
+        policy=policy,
+        replacement=first,
+    )
+    second = TreeReplacement(
+        generation=2,
+        replaces_tree_id=first_tree_id,
+        cancellation_event_hash=sha256_json({"cancel": 1}),
+        prior_root_artifact_hash=roots[1],
+        prior_root_manifest_hash=manifests[1],
+        prior_policy_hash=policy.policy_hash,
+        root_artifact_hash=roots[2],
+        root_manifest_hash=manifests[2],
+        policy_hash=policy.policy_hash,
+        reason="replacement_target_advanced",
+    )
+    second_tree_id = derive_tree_id(
+        run_id=run_id,
+        root_artifact_hash=roots[2],
+        policy=policy,
+        replacement=second,
+    )
+    if (
+        len({initial_tree_id, first_tree_id, second_tree_id}) != 3
+        or TreeReplacement.from_mapping(first.to_dict()) != first
+        or TreeReplacement.from_mapping(second.to_dict()) != second
+        or derive_tree_id(
+            run_id=run_id,
+            root_artifact_hash=roots[2],
+            policy=policy,
+            replacement=second,
+        )
+        != second_tree_id
+    ):
+        raise RuntimeError("Git-tree replacement identity is not deterministic")
+    return {
+        "policy_hash": policy.policy_hash,
+        "max_nodes": policy.max_nodes,
+        "tree_ids": [
+            initial_tree_id,
+            first_tree_id,
+            second_tree_id,
+        ],
+        "replacement_hashes": [
+            first.replacement_hash,
+            second.replacement_hash,
+        ],
+    }
+
+
+BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
+    "chain-settlement-state-space": _exercise_chain_settlement_state_space,
+    "conditional-icp-policy": _exercise_conditional_icp_policy,
+    "conditional-candidate-gate": _exercise_conditional_candidate_gate,
+    "git-tree-replacement": _exercise_git_tree_replacement,
+}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=("prepush", "release"), required=True)
@@ -1107,16 +1654,21 @@ def main() -> int:
 
     stages: list[dict[str, Any]] = []
     fixture: dict[str, Any] | None = None
-    contract: dict[str, Any] | None = None
+    boundary_contract: dict[str, Any] | None = None
+    behavior_contract: dict[str, Any] | None = None
 
-    def load_inputs() -> tuple[dict[str, Any], dict[str, Any]]:
+    def load_inputs() -> tuple[
+        dict[str, Any],
+        dict[str, Any],
+        dict[str, Any],
+    ]:
         loaded_fixture = json.loads(args.fixture.read_text(encoding="utf-8"))
-        loaded_contract = json.loads(
+        loaded_boundary_contract = json.loads(
             args.boundary_contract.read_text(encoding="utf-8")
         )
         if loaded_fixture["sanitization"]["contains_production_credentials"]:
             raise RuntimeError("rehearsal fixture contains production credentials")
-        if set(loaded_contract["forbidden_substitutions"]) != {
+        if set(loaded_boundary_contract["forbidden_substitutions"]) != {
             "gateway",
             "validator",
             "auditor",
@@ -1127,7 +1679,25 @@ def main() -> int:
             "verification",
         }:
             raise RuntimeError("rehearsal substitution policy is incomplete")
-        return loaded_fixture, loaded_contract
+        loaded_behavior_contract = validate_rehearsal_behavior_contract_v2(
+            build_rehearsal_behavior_contract_v2(
+                source_root=SOURCE_ROOT,
+                candidate_sha=args.candidate_sha,
+                profile=args.profile,
+                epoch_count=args.epochs,
+            )
+        )
+        if args.profile == "release" and list(
+            loaded_fixture.get("fault_matrix") or []
+        ) != loaded_behavior_contract["fault_ids"]:
+            raise RuntimeError(
+                "mounted fault matrix differs from candidate contract"
+            )
+        return (
+            loaded_fixture,
+            loaded_boundary_contract,
+            loaded_behavior_contract,
+        )
 
     inputs_passed, inputs = _run_workflow_stage(
         stage="input-contract",
@@ -1135,10 +1705,15 @@ def main() -> int:
         stages=stages,
     )
     if inputs_passed:
-        fixture, contract = inputs
+        fixture, boundary_contract, behavior_contract = inputs
 
     identities: list[dict[str, str]] = []
-    for path in PRODUCTION_SOURCE_PATHS:
+    source_paths = (
+        list(behavior_contract["production_source_paths"])
+        if behavior_contract is not None
+        else []
+    )
+    for path in source_paths:
         passed, identity = _run_workflow_stage(
             stage=f"source-identity:{path}",
             action=lambda path=path: _file_identity(path, args.candidate_sha),
@@ -1146,6 +1721,33 @@ def main() -> int:
         )
         if passed:
             identities.append(identity)
+
+    behavior_evidence: dict[str, Any] = {}
+    behavior_scenarios = (
+        list(behavior_contract["behavior_scenarios"])
+        if behavior_contract is not None
+        else []
+    )
+    for scenario in behavior_scenarios:
+        action = BEHAVIOR_ACTIONS.get(scenario)
+        if action is None:
+            _run_workflow_stage(
+                stage=f"behavior:{scenario}",
+                action=lambda scenario=scenario: (_ for _ in ()).throw(
+                    RuntimeError(
+                        f"candidate behavior scenario has no runner: {scenario}"
+                    )
+                ),
+                stages=stages,
+            )
+            continue
+        passed, result = _run_workflow_stage(
+            stage=f"behavior:{scenario}",
+            action=action,
+            stages=stages,
+        )
+        if passed:
+            behavior_evidence[scenario] = result
 
     _run_independent_epoch_diagnostics(
         candidate_sha=args.candidate_sha,
@@ -1293,24 +1895,167 @@ def main() -> int:
     validation_dependencies = [
         item["stage"] for item in stages if item.get("status") != "passed"
     ]
+    stage_status = {
+        str(item.get("stage")): str(item.get("status"))
+        for item in stages
+        if isinstance(item, Mapping)
+    }
+    duplicate_stage_ids = len(stage_status) != len(stages)
+    expected_before_validation = (
+        set(behavior_contract["required_stage_ids"])
+        - {"workflow-evidence-validation"}
+        if behavior_contract is not None
+        else set()
+    )
+    observed_before_validation = set(stage_status)
 
-    def validate_workflow_evidence() -> None:
-        if (
-            cleanup["pending_faults"] != 0
-            or cleanup["boundary_thread_alive_after_close"]
-            or len(epochs) != expected_epochs
-            or any(
-                not epoch["canonical_vector_equal"]
-                or not epoch["receipt_ancestry_verified"]
-                or not epoch["auditor_verified"]
-                or not epoch["auditor_runtime_verified"]
-                or epoch["last_update"] != epoch["finalized_block"]
+    epoch_authority_complete = (
+        len(epochs) == expected_epochs
+        and all(
+            epoch.get("canonical_vector_equal") is True
+            and epoch.get("receipt_ancestry_verified") is True
+            and epoch.get("auditor_verified") is True
+            and epoch.get("auditor_runtime_verified") is True
+            and epoch.get("sdk_bridge_verified") is True
+            and bool(epoch.get("signed_extrinsic_hash"))
+            and epoch.get("last_update") == epoch.get("finalized_block")
+            for epoch in epochs
+        )
+    )
+    identity_paths = [str(item.get("path")) for item in identities]
+    identity_commits = {
+        str(item.get("commit_sha")) for item in identities
+    }
+    boundary_definitions = (
+        boundary_contract.get("boundaries")
+        if isinstance(boundary_contract, Mapping)
+        else None
+    )
+    unknown_boundaries_rejected = (
+        isinstance(boundary_definitions, Mapping)
+        and bool(boundary_definitions)
+        and all(
+            isinstance(definition, Mapping)
+            and definition.get("reject_unknown") is True
+            for definition in boundary_definitions.values()
+        )
+    )
+    behavioral_invariants = {
+        "candidate_identity_exact": (
+            behavior_contract is not None
+            and behavior_contract.get("candidate_sha") == args.candidate_sha
+        ),
+        "protected_source_identity_exact": (
+            behavior_contract is not None
+            and sorted(identity_paths)
+            == sorted(behavior_contract["production_source_paths"])
+            and identity_commits == {args.candidate_sha}
+        ),
+        "chain_settlement_state_space_complete": (
+            "chain-settlement-state-space" in behavior_evidence
+        ),
+        "conditional_icp_policy_config_bound": (
+            "conditional-icp-policy" in behavior_evidence
+            and behavior_contract is not None
+            and behavior_evidence["conditional-icp-policy"].get(
+                "policy_hash"
+            )
+            == behavior_contract["policy_commitments"]["conditional_icp"].get(
+                "policy_hash"
+            )
+        ),
+        "conditional_candidate_advancement_exact": (
+            "conditional-candidate-gate" in behavior_evidence
+            and behavior_contract is not None
+            and behavior_evidence["conditional-candidate-gate"].get(
+                "policy_hash"
+            )
+            == behavior_contract["policy_commitments"]["conditional_icp"].get(
+                "policy_hash"
+            )
+        ),
+        "git_tree_replacement_deterministic": (
+            "git-tree-replacement" in behavior_evidence
+            and behavior_contract is not None
+            and behavior_evidence["git-tree-replacement"].get("policy_hash")
+            == behavior_contract["policy_commitments"]["git_tree"].get(
+                "policy_hash"
+            )
+        ),
+        "canonical_vector_primary_auditor_equal": (
+            epoch_authority_complete
+            and all(
+                epoch.get("canonical_vector_equal") is True
                 for epoch in epochs
             )
-        ):
-            raise RuntimeError("joined V2 workflow evidence is incomplete")
+        ),
+        "receipt_ancestry_verified": (
+            epoch_authority_complete
+            and all(
+                epoch.get("receipt_ancestry_verified") is True
+                for epoch in epochs
+            )
+        ),
+        "sdk_signing_bridge_verified": (
+            epoch_authority_complete
+            and all(
+                epoch.get("sdk_bridge_verified") is True
+                for epoch in epochs
+            )
+        ),
+        "submission_finalized": (
+            epoch_authority_complete
+            and all(bool(epoch.get("signed_extrinsic_hash")) for epoch in epochs)
+        ),
+        "last_update_readback_equal": (
+            epoch_authority_complete
+            and all(
+                epoch.get("last_update") == epoch.get("finalized_block")
+                for epoch in epochs
+            )
+        ),
+        "boundary_cleanup_complete": (
+            cleanup["pending_faults"] == 0
+            and cleanup["boundary_thread_alive_after_close"] is False
+            and cleanup["local_chain_epochs"] == expected_epochs
+        ),
+        "unknown_boundaries_rejected": unknown_boundaries_rejected,
+    }
+
+    def validate_workflow_evidence() -> None:
+        if behavior_contract is None:
+            raise RuntimeError("candidate behavior contract is unavailable")
+        if duplicate_stage_ids:
+            raise RuntimeError("workflow emitted duplicate stage evidence")
+        if observed_before_validation != expected_before_validation:
+            missing = sorted(
+                expected_before_validation - observed_before_validation
+            )
+            unexpected = sorted(
+                observed_before_validation - expected_before_validation
+            )
+            raise RuntimeError(
+                "workflow stage contract differs "
+                f"missing={missing} unexpected={unexpected}"
+            )
+        required_invariants = set(
+            behavior_contract["required_invariant_ids"]
+        )
+        if set(behavioral_invariants) != required_invariants:
+            raise RuntimeError("workflow invariant contract differs")
+        failed_invariants = sorted(
+            name
+            for name, passed in behavioral_invariants.items()
+            if passed is not True
+        )
+        if failed_invariants:
+            raise RuntimeError(
+                "joined V2 workflow invariants failed: "
+                + ",".join(failed_invariants)
+            )
         if args.profile == "release" and (
-            len(faults) < 15 or concurrent_writes != 32
+            len(faults) != len(behavior_contract["fault_ids"])
+            or concurrent_writes != 32
         ):
             raise RuntimeError("release fault or concurrency evidence is incomplete")
 
@@ -1339,8 +2084,18 @@ def main() -> int:
         "release_sha": args.candidate_sha,
         "fixture_hash": sha256_json(fixture) if fixture is not None else None,
         "boundary_contract_hash": (
-            sha256_json(contract) if contract is not None else None
+            sha256_json(boundary_contract)
+            if boundary_contract is not None
+            else None
         ),
+        "behavior_contract": behavior_contract,
+        "behavior_contract_hash": (
+            behavior_contract.get("contract_hash")
+            if behavior_contract is not None
+            else None
+        ),
+        "behavior_evidence": behavior_evidence,
+        "behavioral_invariants": behavioral_invariants,
         "production_source_identities": identities,
         "epoch_count": len(epochs),
         "epochs": epochs,

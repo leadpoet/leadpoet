@@ -70,6 +70,17 @@ later fault cases or epochs. Dependency-blocked stages must be recorded as
 `unexercised` with their exact prerequisites; they are never inferred to pass.
 The controller exits nonzero after collecting the full blocker set.
 
+The frozen candidate also generates one hash-bound behavioral contract from
+its protected-workflow manifest, exact production entrypoints, effective
+conditional-ICP and Git-tree policies, release profile, and fault contract.
+The workflow runner and final evidence join reconstruct it independently from
+the read-only candidate source. Do not add fixed source counts, ICP splits,
+tree widths, fault minimums, or duplicate stage lists to either component.
+Policy-sized state generators must exercise the production assignment,
+replacement-lineage, settlement, bundle, primary-validator, auditor, signing,
+publication, finalization, and readback code. A missing, duplicate, stale, or
+undeclared stage/invariant must fail the joined manifest.
+
 Before an attested release, run the release profile:
 
 ```bash
@@ -112,6 +123,15 @@ console output must prove all of the following:
 - [ ] `REHEARSAL_SUCCESS component=validator`
 - [ ] `REHEARSAL_STAGE_EVIDENCE` points to the exact candidate's stage ledger.
 - [ ] Every declared stage is present exactly once and has status `passed`.
+- [ ] Runner and join report the same candidate behavioral-contract hash.
+- [ ] Production source identities exactly cover the candidate-derived
+  protected-workflow and entrypoint inventory; no fixed file count is used.
+- [ ] Conditional ICP and Git-tree evidence use the candidate's effective
+  policy hashes and generated sizes rather than fixed current defaults.
+- [ ] Settlement evidence accepts every legal contiguous persisted prefix and
+  rejects duplicate, gapped, missing-first, ahead-of-target, and excessive
+  backlog states through the production validator.
+- [ ] Missing and unexpected stages both fail the final evidence join.
 - [ ] Zero `failed` and zero `unexercised` production-critical stages.
 - [ ] The multi-failure regression proves gateway, validator, and canonical
   workflow diagnostics are aggregated in one invocation.

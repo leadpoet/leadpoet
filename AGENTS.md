@@ -230,12 +230,45 @@ rehearsal controller must inject at least two independent simultaneous failures
 and prove that both are reported while later stages still execute. A test that
 only proves the first exception is not rehearsal coverage.
 
-When a production or rehearsal change adds, removes, reorders, or changes a
-restart/downstream stage, update the aggregate stage inventory, evidence join,
-failure regression, `AGENTS.md`/`CLAUDE.md`, and the deployment checklist in
-the same change. Except for the exact emergency push-now workflow above, do not
-push from a run that stopped at its first error or omitted its complete stage
-ledger.
+### Candidate-owned behavioral contract
+
+The frozen candidate is the rehearsal source of truth. Build one versioned,
+hash-bound behavior contract from the candidate's protected-workflow manifest,
+exact production entrypoints, effective Research Lab/ICP/Git-tree policies,
+fault contract, and release profile. The workflow runner and final evidence
+join must independently reconstruct that same contract from the read-only
+candidate source. They may not maintain separate fixed source counts, stage
+lists, ICP counts, tree widths, fault minimums, or other implementation-shaped
+expectations.
+
+The contract declares stable observable invariants, not private implementation
+phases. Generate test sizes and legal/illegal state spaces from the candidate's
+validated production configuration, then exercise the production selector,
+lineage, settlement, canonical bundle, primary validator, auditor, signing,
+publication, finalization, and readback functions. A changed ICP split, tree
+topology, settlement prefix, protected source inventory, or profile therefore
+changes the contract and its generated evidence automatically. Missing,
+duplicate, stale, or undeclared stages and invariants fail the final join.
+
+The exact installed N-1 launchers remain authoritative for process sequencing,
+environment hydration, filesystem state, activation, and restart behavior.
+Repository-owned production logic may never be replaced by a fabricated
+success. Strict adapters are permitted only at privileged external boundaries
+and must reject every unknown or unconsumed operation. Adding a genuinely new
+external boundary or top-level production behavior requires registering its
+stable invariant and strict adapter in the same candidate; until then the
+candidate fails closed. This explicit declaration is required because no test
+harness can safely infer the intended semantics of arbitrary new production
+features.
+
+When production or rehearsal code adds, removes, reorders, or changes a
+restart/downstream behavior, update the candidate-owned contract, generated
+state-space regression, `AGENTS.md`/`CLAUDE.md`, and deployment checklist in
+the same change only when the existing contract does not already derive and
+exercise it. Do not duplicate the resulting inventory in the runner or join.
+Except for the explicit emergency push-now workflow above, do not push from a
+run that stopped at its first error or omitted its complete candidate-derived
+stage ledger.
 
 Permanent regression families include: dirty/detached checkouts and stale
 launchers; restart-window and release-channel races; env hydration and proxy

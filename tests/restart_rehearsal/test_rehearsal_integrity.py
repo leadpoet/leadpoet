@@ -60,6 +60,9 @@ from tests.restart_rehearsal.verify_evidence import (
     verify_rehearsal_integrity,
     verify_restart_epoch_transient_recovery,
 )
+from gateway.tee.rehearsal_behavior_contract_v2 import (
+    build_rehearsal_behavior_contract_v2,
+)
 
 
 COMMIT = "1" * 40
@@ -2334,6 +2337,13 @@ def test_joined_manifest_requires_every_authority_field(
         "auditor_verified": True,
         "auditor_runtime_verified": True,
     }
+    source_root = Path(__file__).resolve().parents[2]
+    behavior_contract = build_rehearsal_behavior_contract_v2(
+        source_root=source_root,
+        candidate_sha=COMMIT,
+        profile="prepush",
+        epoch_count=1,
+    )
     workflow_path = tmp_path / "workflow.json"
     workflow = {
         "status": "passed",
@@ -2343,38 +2353,32 @@ def test_joined_manifest_requires_every_authority_field(
         "epochs": [epoch],
         "fault_matrix": [],
         "concurrent_write_count": 0,
+        "behavior_contract": behavior_contract,
+        "behavior_contract_hash": behavior_contract["contract_hash"],
+        "behavior_evidence": {
+            scenario: {"status": "passed"}
+            for scenario in behavior_contract["behavior_scenarios"]
+        },
+        "behavioral_invariants": {
+            invariant: True
+            for invariant in behavior_contract["required_invariant_ids"]
+        },
+        "production_source_identities": [
+            {
+                "path": path,
+                "commit_sha": COMMIT,
+                "sha256": "f" * 64,
+            }
+            for path in behavior_contract["production_source_paths"]
+        ],
         "cleanup": {
             "pending_faults": 0,
             "boundary_thread_alive_after_close": False,
             "local_chain_epochs": 1,
         },
         "stages": [
-            {"stage": "input-contract", "status": "passed"},
-            *[
-                {
-                    "stage": f"source-identity:production-{index}.py",
-                    "status": "passed",
-                }
-                for index in range(9)
-            ],
-            *[
-                {"stage": stage, "status": "passed"}
-                for stage in (
-                    "diagnostic:candidate-bundle-generation",
-                    "diagnostic:host-bundle-composition",
-                    "diagnostic:primary-bundle-verification",
-                    "diagnostic:auditor-bundle-verification",
-                    "diagnostic:primary-auditor-vector-equality",
-                    "diagnostic:sdk-signing-bridge",
-                )
-            ],
-            {"stage": "boundary-start", "status": "passed"},
-            {"stage": "epoch-30000", "status": "passed"},
-            {"stage": "boundary-cleanup", "status": "passed"},
-            {
-                "stage": "workflow-evidence-validation",
-                "status": "passed",
-            },
+            {"stage": stage, "status": "passed"}
+            for stage in behavior_contract["required_stage_ids"]
         ],
     }
     workflow_path.write_text(json.dumps(workflow), encoding="utf-8")
@@ -2399,6 +2403,55 @@ def test_joined_manifest_requires_every_authority_field(
     joined = json.loads(output.read_text())
     assert joined["status"] == "passed"
     assert joined["postgres_contract_sha256"] == "e" * 64
+    assert (
+        joined["behavior_contract_hash"]
+        == behavior_contract["contract_hash"]
+    )
+
+    missing_stage = workflow["stages"].pop(1)
+    workflow_path.write_text(json.dumps(workflow), encoding="utf-8")
+    with pytest.raises(
+        SystemExit,
+        match="workflow stage evidence is incomplete",
+    ):
+        join_evidence.main(
+            [
+                "--evidence-root",
+                str(tmp_path),
+                "--from-sha",
+                "2" * 40,
+                "--candidate-sha",
+                COMMIT,
+                "--profile",
+                "prepush",
+                "--output",
+                str(output),
+            ]
+        )
+    workflow["stages"].insert(1, missing_stage)
+    workflow["stages"].append(
+        {"stage": "unexpected-future-stage", "status": "passed"}
+    )
+    workflow_path.write_text(json.dumps(workflow), encoding="utf-8")
+    with pytest.raises(
+        SystemExit,
+        match="workflow stage evidence is incomplete",
+    ):
+        join_evidence.main(
+            [
+                "--evidence-root",
+                str(tmp_path),
+                "--from-sha",
+                "2" * 40,
+                "--candidate-sha",
+                COMMIT,
+                "--profile",
+                "prepush",
+                "--output",
+                str(output),
+            ]
+        )
+    workflow["stages"].pop()
 
     validator_path = (
         tmp_path / f"1-validator-forward-{COMMIT}.json"
@@ -2463,6 +2516,69 @@ def test_joined_manifest_requires_every_authority_field(
                 str(output),
             ]
         )
+
+
+def test_behavior_contract_tracks_candidate_runtime_policies(
+    monkeypatch,
+) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    baseline = build_rehearsal_behavior_contract_v2(
+        source_root=source_root,
+        candidate_sha=COMMIT,
+        profile="prepush",
+        epoch_count=1,
+    )
+
+    monkeypatch.setenv(
+        "RESEARCH_LAB_CONDITIONAL_HOLDOUT_TOTAL_ICPS",
+        "18",
+    )
+    monkeypatch.setenv(
+        "RESEARCH_LAB_TREE_MAX_NODES",
+        "8",
+    )
+    changed = build_rehearsal_behavior_contract_v2(
+        source_root=source_root,
+        candidate_sha=COMMIT,
+        profile="prepush",
+        epoch_count=1,
+    )
+
+    assert (
+        changed["policy_commitments"]["conditional_icp"]["total_icps"]
+        == baseline["policy_commitments"]["conditional_icp"]["total_icps"] - 2
+    )
+    assert changed["policy_commitments"]["git_tree"]["max_nodes"] == 8
+    assert changed["contract_hash"] != baseline["contract_hash"]
+
+
+def test_candidate_behavior_scenarios_follow_nondefault_policy(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "RESEARCH_LAB_CONDITIONAL_HOLDOUT_TOTAL_ICPS",
+        "18",
+    )
+    monkeypatch.setenv(
+        "RESEARCH_LAB_TREE_MAX_NODES",
+        "8",
+    )
+
+    assignment = (
+        production_workflow_runner._exercise_conditional_icp_policy()
+    )
+    candidate_gate = (
+        production_workflow_runner._exercise_conditional_candidate_gate()
+    )
+    replacement = (
+        production_workflow_runner._exercise_git_tree_replacement()
+    )
+
+    assert assignment["category_counts"]["conditional"] == 18
+    assert candidate_gate["initial_count"] == 20
+    assert candidate_gate["conditional_count"] == 18
+    assert candidate_gate["final_count"] == 38
+    assert replacement["max_nodes"] == 8
 
 
 def test_weight_storage_preflight_capability_tracks_selected_release(
@@ -2814,6 +2930,56 @@ def test_workflow_runner_continues_across_failed_release_epochs(
         production_workflow_runner,
         "_run_epoch",
         run_epoch,
+    )
+    behavior_contract = {
+        "candidate_sha": COMMIT,
+        "production_source_paths": [],
+        "behavior_scenarios": [],
+        "authority_diagnostics": [],
+        "fault_ids": [],
+        "required_stage_ids": [
+            "input-contract",
+            "concurrency",
+            "boundary-start",
+            *[f"epoch-{30_000 + ordinal}" for ordinal in range(100)],
+            "boundary-cleanup",
+            "workflow-evidence-validation",
+        ],
+        "required_invariant_ids": [
+            "candidate_identity_exact",
+            "protected_source_identity_exact",
+            "chain_settlement_state_space_complete",
+            "conditional_icp_policy_config_bound",
+            "conditional_candidate_advancement_exact",
+            "git_tree_replacement_deterministic",
+            "canonical_vector_primary_auditor_equal",
+            "receipt_ancestry_verified",
+            "sdk_signing_bridge_verified",
+            "submission_finalized",
+            "last_update_readback_equal",
+            "boundary_cleanup_complete",
+            "unknown_boundaries_rejected",
+        ],
+        "policy_commitments": {
+            "conditional_icp": {},
+            "git_tree": {},
+        },
+        "contract_hash": "sha256:" + "a" * 64,
+    }
+    monkeypatch.setattr(
+        production_workflow_runner,
+        "build_rehearsal_behavior_contract_v2",
+        lambda **_kwargs: behavior_contract,
+    )
+    monkeypatch.setattr(
+        production_workflow_runner,
+        "validate_rehearsal_behavior_contract_v2",
+        lambda value: value,
+    )
+    monkeypatch.setattr(
+        production_workflow_runner,
+        "_run_independent_epoch_diagnostics",
+        lambda **_kwargs: None,
     )
     monkeypatch.setattr(
         sys,

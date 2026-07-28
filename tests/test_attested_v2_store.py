@@ -138,8 +138,16 @@ async def test_chain_settlement_atomic_retry_and_complete_readback(
 
     def validate_credits(rows, **_kwargs):
         return [
-            {"credit_hash": row["credit_hash"]}
-            for row in rows
+            {
+                "epoch": 100,
+                "netuid": 71,
+                "allocation_hash": settlement_hash,
+                "chain_realized_settlement_hash": settlement_hash,
+                "chain_realized_settlement_receipt_hash": HASH,
+                "chain_realized_credit_hashes": sorted(
+                    row["credit_hash"] for row in rows
+                ),
+            }
         ]
 
     async def call_rpc(_name, parameters):

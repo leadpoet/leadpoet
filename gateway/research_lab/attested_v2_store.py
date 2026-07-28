@@ -1919,19 +1919,41 @@ async def persist_chain_realized_settlement_v1(
         [stored_settlement],
         receipt_graphs=graph_by_root,
     )
-    durable_credits = validate_chain_realized_obligation_credits_v1(
+    durable_allocations = validate_chain_realized_obligation_credits_v1(
         stored_credits,
         settlement_rows=durable_settlements,
         receipt_graphs=graph_by_root,
     )
+    expected_credit_hashes = sorted(
+        str(row["credit_hash"]) for row in credit_rows
+    )
+    stored_credit_hashes = sorted(
+        str(row.get("credit_hash") or "") for row in stored_credits
+    )
+    durable_credit_hashes = (
+        sorted(
+            str(item)
+            for item in (
+                durable_allocations[0].get("chain_realized_credit_hashes")
+                or ()
+            )
+        )
+        if len(durable_allocations) == 1
+        else []
+    )
     if (
         len(durable_settlements) != 1
-        or len(durable_credits) != len(credit_rows)
-        or sorted(
-            str(item["credit_hash"])
-            for item in durable_credits
+        or len(durable_allocations) != 1
+        or int(durable_allocations[0].get("netuid", -1)) != netuid
+        or int(durable_allocations[0].get("epoch", -1)) != epoch_id
+        or durable_allocations[0].get("chain_realized_settlement_hash")
+        != settlement_hash
+        or durable_allocations[0].get(
+            "chain_realized_settlement_receipt_hash"
         )
-        != [str(row["credit_hash"]) for row in credit_rows]
+        != normalized_receipt_hash
+        or stored_credit_hashes != expected_credit_hashes
+        or durable_credit_hashes != expected_credit_hashes
     ):
         raise AttestedV2StoreError(
             "chain-realized settlement durable readback differs"

@@ -476,9 +476,16 @@ class LocalPostgRESTState:
                 raise ValueError(
                     "local PostgREST chain activation fixture predates cutover"
                 )
-            first_epoch = int(cutover["first_settlement_epoch_id"]) + (
+            current_settlement_epoch = int(
+                cutover["first_settlement_epoch_id"]
+            ) + (
                 subnet_epoch_index - first_subnet_epoch
             )
+            first_epoch = current_settlement_epoch - 1
+            if first_epoch < int(cutover["first_settlement_epoch_id"]):
+                raise ValueError(
+                    "local PostgREST settlement backlog predates cutover"
+                )
             self.rows[chain_activation_table] = [
                 {
                     "netuid": int(cutover["netuid"]),
@@ -493,6 +500,169 @@ class LocalPostgRESTState:
             ]
         self.cutover_state = list(self.rows.get(state_table, []))
         self.events = state_root / "local-postgrest-events.jsonl"
+
+    def persist_chain_realized_settlement(
+        self,
+        *,
+        rpc_name: str,
+        body: Any,
+    ) -> dict[str, Any]:
+        if not isinstance(body, dict) or set(body) != {
+            "requested_settlement",
+            "requested_credits",
+        }:
+            raise ValueError("chain settlement RPC body is invalid")
+        settlement = body.get("requested_settlement")
+        credits = body.get("requested_credits")
+        if not isinstance(settlement, dict) or not isinstance(credits, list):
+            raise ValueError("chain settlement RPC payload is invalid")
+        required_settlement_fields = {
+            "netuid",
+            "epoch_id",
+            "schema_version",
+            "settlement_hash",
+            "settlement_receipt_hash",
+            "settlement_doc",
+        }
+        if set(settlement) != required_settlement_fields:
+            raise ValueError("chain settlement row fields are invalid")
+        netuid = int(settlement["netuid"])
+        epoch_id = int(settlement["epoch_id"])
+        schema_version = str(settlement["schema_version"])
+        expected_schema = (
+            "leadpoet.research_lab_chain_realized_epoch_settlement.v2"
+            if rpc_name
+            == "persist_research_lab_chain_realized_unattributed_v2"
+            else "leadpoet.research_lab_chain_realized_epoch_settlement.v1"
+        )
+        if schema_version != expected_schema:
+            raise ValueError("chain settlement RPC schema differs")
+        if expected_schema.endswith(".v2") and credits:
+            raise ValueError("unattributed chain settlement contains credits")
+        settlement_doc = settlement.get("settlement_doc")
+        if (
+            not isinstance(settlement_doc, dict)
+            or settlement_doc.get("schema_version") != schema_version
+            or int(settlement_doc.get("netuid", -1)) != netuid
+            or int(settlement_doc.get("epoch_id", -1)) != epoch_id
+        ):
+            raise ValueError("chain settlement document differs")
+        expected_hashes = sorted(
+            str(item)
+            for item in (settlement_doc.get("credit_hashes") or ())
+        )
+        requested_hashes = sorted(
+            str(item.get("credit_hash") or "")
+            for item in credits
+            if isinstance(item, dict)
+        )
+        if len(requested_hashes) != len(credits) or (
+            requested_hashes != expected_hashes
+        ):
+            raise ValueError("chain settlement credit set differs")
+
+        settlement_table = (
+            "research_lab_chain_realized_epoch_settlements_v1"
+        )
+        credit_table = (
+            "research_lab_chain_realized_obligation_credits_v1"
+        )
+        activation_table = (
+            "research_lab_chain_realized_settlement_activation_v1"
+        )
+        with self.lock:
+            activation = [
+                row
+                for row in self.rows[activation_table]
+                if int(row["netuid"]) == netuid
+            ]
+            if len(activation) != 1:
+                raise ValueError("chain settlement activation is ambiguous")
+            first_epoch = int(activation[0]["first_epoch_id"])
+            if epoch_id < first_epoch:
+                raise ValueError("chain settlement predates activation")
+            if epoch_id > first_epoch and not any(
+                int(row["netuid"]) == netuid
+                and int(row["epoch_id"]) == epoch_id - 1
+                for row in self.rows[settlement_table]
+            ):
+                raise ValueError("chain settlement predecessor is missing")
+
+            existing = next(
+                (
+                    row
+                    for row in self.rows[settlement_table]
+                    if int(row["netuid"]) == netuid
+                    and int(row["epoch_id"]) == epoch_id
+                ),
+                None,
+            )
+            exact_settlement = dict(settlement)
+            if existing is None:
+                exact_settlement["created_at"] = (
+                    "2026-07-25T00:00:00+00:00"
+                )
+                self.rows[settlement_table].append(exact_settlement)
+            elif any(
+                existing.get(field) != settlement.get(field)
+                for field in required_settlement_fields
+            ):
+                raise ValueError("chain settlement conflicts with durable row")
+
+            for credit in credits:
+                if not isinstance(credit, dict):
+                    raise ValueError("chain settlement credit row is invalid")
+                existing_credit = next(
+                    (
+                        row
+                        for row in self.rows[credit_table]
+                        if int(row["netuid"]) == netuid
+                        and int(row["epoch_id"]) == epoch_id
+                        and row.get("obligation_kind")
+                        == credit.get("obligation_kind")
+                        and row.get("obligation_source_id")
+                        == credit.get("obligation_source_id")
+                    ),
+                    None,
+                )
+                if existing_credit is None:
+                    stored_credit = dict(credit)
+                    stored_credit["created_at"] = (
+                        "2026-07-25T00:00:00+00:00"
+                    )
+                    self.rows[credit_table].append(stored_credit)
+                elif any(
+                    existing_credit.get(field) != value
+                    for field, value in credit.items()
+                ):
+                    raise ValueError(
+                        "chain settlement credit conflicts with durable row"
+                    )
+            durable_hashes = sorted(
+                str(row.get("credit_hash") or "")
+                for row in self.rows[credit_table]
+                if int(row["netuid"]) == netuid
+                and int(row["epoch_id"]) == epoch_id
+                and row.get("settlement_hash")
+                == settlement.get("settlement_hash")
+            )
+            if durable_hashes != expected_hashes:
+                raise ValueError("durable chain settlement credit set differs")
+
+        return {
+            "schema_version": (
+                "leadpoet.research_lab_chain_realized_"
+                "settlement_persistence.v1"
+            ),
+            "netuid": netuid,
+            "epoch_id": epoch_id,
+            "settlement_hash": str(settlement["settlement_hash"]),
+            "settlement_receipt_hash": str(
+                settlement["settlement_receipt_hash"]
+            ),
+            "credit_count": len(credits),
+            "credit_hashes": expected_hashes,
+        }
 
     def record(self, **row: Any) -> None:
         payload = {
@@ -602,7 +772,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self._json_response(404, {"message": "unknown local RPC"})
                 return
-            self._body()
+            body = self._body()
             self.server.state.record(
                 status="ok",
                 operation="rpc",
@@ -614,6 +784,14 @@ class Handler(BaseHTTPRequestHandler):
                 "research_lab_stateful_subnet_epoch_cutover_public_state_v1"
             ):
                 response = self.server.state.cutover_state
+            elif name in {
+                "persist_research_lab_chain_realized_settlement_v1",
+                "persist_research_lab_chain_realized_unattributed_v2",
+            }:
+                response = self.server.state.persist_chain_realized_settlement(
+                    rpc_name=name,
+                    body=body,
+                )
             self._json_response(200, response)
             return
         if (

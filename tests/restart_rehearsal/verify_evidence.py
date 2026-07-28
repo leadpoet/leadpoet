@@ -334,6 +334,38 @@ def verify_gateway_private_model_environment(rows: list[dict]) -> None:
         )
 
 
+def verify_restart_epoch_transient_recovery(rows: list[dict]) -> None:
+    head_reads = [
+        row
+        for row in rows
+        if row.get("boundary") == "stateful_subnet_chain"
+        and row.get("operation") == "epoch_snapshot"
+        and row.get("method") == "get_chain_head"
+    ]
+    failed_ordinals = [
+        ordinal
+        for ordinal, row in enumerate(head_reads)
+        if row.get("injected_failure") is True
+    ]
+    successful_ordinals = [
+        ordinal
+        for ordinal, row in enumerate(head_reads)
+        if row.get("injected_failure") is False
+    ]
+    if not failed_ordinals or not successful_ordinals:
+        raise SystemExit(
+            "restart launcher did not exercise transient epoch-read recovery"
+        )
+    if not any(
+        successful > failed
+        for failed in failed_ordinals
+        for successful in successful_ordinals
+    ):
+        raise SystemExit(
+            "restart launcher did not recover after the injected epoch-read failure"
+        )
+
+
 def selected_weight_storage_preflight_capability(
     candidate_roots: tuple[Path, ...],
 ) -> bool:
@@ -451,6 +483,8 @@ def main() -> int:
         candidate_sha=candidate_sha,
         scope=scope,
     )
+    if transition == "forward":
+        verify_restart_epoch_transient_recovery(rows)
 
     labels: list[str] = []
     for row in rows:

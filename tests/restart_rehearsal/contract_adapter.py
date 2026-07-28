@@ -1993,6 +1993,10 @@ def command_python(argv: list[str]) -> int:
             if "/harness" not in python_paths:
                 python_paths.insert(0, "/harness")
             os.environ["PYTHONPATH"] = ":".join(python_paths)
+            if os.environ.get("REHEARSAL_TRANSITION", "forward") == "forward":
+                os.environ[
+                    "LEADPOET_REHEARSAL_RESTART_EPOCH_TRANSIENT_FAILURES"
+                ] = "1"
             os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module == "gateway.tee.release_channel_v2":
             _record_production_module(module, argv)

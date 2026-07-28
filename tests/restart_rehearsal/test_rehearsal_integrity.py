@@ -42,6 +42,7 @@ from tests.restart_rehearsal.verify_evidence import (
     verify_gateway_private_model_environment,
     verify_gateway_weight_readiness_invocations,
     verify_rehearsal_integrity,
+    verify_restart_epoch_transient_recovery,
 )
 
 
@@ -232,6 +233,37 @@ def test_gateway_rehearsal_chain_adapter_enforces_exact_cutover_reads(
             json.dumps(request).encode(),
             archive=False,
         )
+
+
+def test_restart_rehearsal_injects_and_proves_transient_epoch_read_recovery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event_path = tmp_path / "events.jsonl"
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(rehearsal_sitecustomize, "EVENT_PATH", event_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "_RESTART_EPOCH_TRANSIENT_HEAD_CALLS",
+        0,
+    )
+    monkeypatch.setenv(
+        "LEADPOET_REHEARSAL_RESTART_EPOCH_TRANSIENT_FAILURES",
+        "1",
+    )
+
+    first = rehearsal_sitecustomize._LocalSubstrate().get_chain_head()
+    second = rehearsal_sitecustomize._LocalSubstrate().get_chain_head()
+
+    assert first == "malformed-transient-head"
+    assert second == rehearsal_sitecustomize._block_hash(
+        rehearsal_sitecustomize.CURRENT_BLOCK
+    )
+    rows = [
+        json.loads(line)
+        for line in event_path.read_text(encoding="utf-8").splitlines()
+    ]
+    verify_restart_epoch_transient_recovery(rows)
 
 
 def test_chain_adapter_signs_bittensor_10_serve_axon_runtime_shape(

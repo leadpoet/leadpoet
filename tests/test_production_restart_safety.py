@@ -80,6 +80,124 @@ def test_restart_gate_rejects_official_epoch_block_after_300(
         verify_restart_epoch_window(object(), netuid=71)
 
 
+def test_restart_gate_retries_transient_epoch_read_with_fresh_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    subtensors = []
+    sleeps = []
+
+    class Subtensor:
+        def __init__(self, *, network):
+            self.network = network
+            self.closed = False
+            subtensors.append(self)
+
+        def close(self):
+            self.closed = True
+
+    def read_snapshot(subtensor, *, netuid):
+        assert netuid == 71
+        if subtensor is subtensors[0]:
+            raise SubnetEpochError(
+                "block_hash must be a 32-byte lowercase hex hash"
+            )
+        return _snapshot(200)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "bittensor",
+        SimpleNamespace(Subtensor=Subtensor),
+    )
+    monkeypatch.setattr(
+        restart_epoch_gate,
+        "read_subnet_epoch_snapshot",
+        read_snapshot,
+    )
+    monkeypatch.setattr(
+        restart_epoch_gate.time,
+        "sleep",
+        lambda seconds: sleeps.append(seconds),
+    )
+
+    assert restart_epoch_gate.main(["--network", "finney"]) == 0
+
+    assert len(subtensors) == 2
+    assert all(subtensor.closed for subtensor in subtensors)
+    assert sleeps == [restart_epoch_gate.RESTART_EPOCH_RETRY_DELAY_SECONDS]
+    assert '"restart_allowed": true' in capsys.readouterr().out
+
+
+def test_restart_gate_fails_closed_after_bounded_transient_read_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subtensors = []
+
+    class Subtensor:
+        def __init__(self, *, network):
+            self.network = network
+            self.closed = False
+            subtensors.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "bittensor",
+        SimpleNamespace(Subtensor=Subtensor),
+    )
+
+    def fail_read(_subtensor, *, netuid):
+        assert netuid == 71
+        raise SubnetEpochError("temporary malformed head")
+
+    monkeypatch.setattr(
+        restart_epoch_gate,
+        "read_subnet_epoch_snapshot",
+        fail_read,
+    )
+    monkeypatch.setattr(restart_epoch_gate.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(SubnetEpochError, match="temporary malformed head"):
+        restart_epoch_gate.main(["--network", "finney"])
+
+    assert len(subtensors) == restart_epoch_gate.RESTART_EPOCH_READ_ATTEMPTS
+    assert all(subtensor.closed for subtensor in subtensors)
+
+
+def test_restart_gate_does_not_retry_policy_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subtensors = []
+
+    class Subtensor:
+        def __init__(self, *, network):
+            self.network = network
+            self.closed = False
+            subtensors.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "bittensor",
+        SimpleNamespace(Subtensor=Subtensor),
+    )
+    monkeypatch.setattr(
+        restart_epoch_gate,
+        "read_subnet_epoch_snapshot",
+        lambda subtensor, *, netuid: _snapshot(301),
+    )
+
+    with pytest.raises(RestartEpochGateError, match="observed 301"):
+        restart_epoch_gate.main(["--network", "finney"])
+
+    assert len(subtensors) == 1
+    assert subtensors[0].closed is True
+
+
 def test_captured_restart_start_is_not_rechecked_after_block_300(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

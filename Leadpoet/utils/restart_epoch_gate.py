@@ -6,6 +6,8 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sys
+import time
 from typing import Any, Optional, Sequence
 
 from Leadpoet.utils.subnet_epoch import (
@@ -18,6 +20,8 @@ from Leadpoet.utils.subnet_epoch import (
 
 MAXIMUM_RESTART_EPOCH_BLOCK = 300
 RESTART_START_SCHEMA_VERSION = "leadpoet.restart_epoch_start.v1"
+RESTART_EPOCH_READ_ATTEMPTS = 3
+RESTART_EPOCH_RETRY_DELAY_SECONDS = 1.0
 
 
 class RestartEpochGateError(RuntimeError):
@@ -220,23 +224,43 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     import bittensor as bt
 
-    subtensor = bt.Subtensor(network=args.network)
-    try:
-        if args.captured_report is not None:
-            result = verify_captured_restart_epoch_start(
-                subtensor,
-                path=args.captured_report,
-                netuid=args.netuid,
+    for attempt in range(1, RESTART_EPOCH_READ_ATTEMPTS + 1):
+        subtensor = bt.Subtensor(network=args.network)
+        try:
+            if args.captured_report is not None:
+                result = verify_captured_restart_epoch_start(
+                    subtensor,
+                    path=args.captured_report,
+                    netuid=args.netuid,
+                )
+            elif args.capture_output is not None:
+                result = capture_restart_epoch_start(
+                    subtensor,
+                    netuid=args.netuid,
+                )
+                write_restart_epoch_start(args.capture_output, result)
+            else:
+                result = verify_restart_epoch_window(
+                    subtensor,
+                    netuid=args.netuid,
+                )
+            break
+        except SubnetEpochError as exc:
+            if attempt >= RESTART_EPOCH_READ_ATTEMPTS:
+                raise
+            print(
+                "Transient official subnet epoch read failed; retrying with "
+                "a fresh chain connection "
+                f"({attempt}/{RESTART_EPOCH_READ_ATTEMPTS}): "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
             )
-        elif args.capture_output is not None:
-            result = capture_restart_epoch_start(subtensor, netuid=args.netuid)
-            write_restart_epoch_start(args.capture_output, result)
-        else:
-            result = verify_restart_epoch_window(subtensor, netuid=args.netuid)
-    finally:
-        close = getattr(subtensor, "close", None)
-        if callable(close):
-            close()
+            time.sleep(RESTART_EPOCH_RETRY_DELAY_SECONDS)
+        finally:
+            close = getattr(subtensor, "close", None)
+            if callable(close):
+                close()
     print(json.dumps(result, sort_keys=True))
     return 0
 

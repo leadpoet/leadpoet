@@ -74,6 +74,7 @@ ALTER TABLE public.research_lab_attested_execution_results_v2
         OR (
             operation = 'attest_weight_input'
             AND purpose IN (
+                'research_lab.allocation.v2',
                 'research_lab.champion_input.v2',
                 'research_lab.reimbursement_input.v2',
                 'research_lab.source_add_reward_input.v2',

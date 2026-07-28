@@ -1,7 +1,8 @@
 from pathlib import Path
 import re
 
-from leadpoet_canonical.attested_v2 import ROLE_PURPOSES
+from leadpoet_canonical.attested_v2 import COORDINATOR_ROLE, ROLE_PURPOSES
+from leadpoet_canonical.weight_authority_v2 import WEIGHT_INPUT_PURPOSES
 
 
 SQL = (
@@ -206,6 +207,25 @@ def test_chain_realized_migration_extends_replay_contract_exactly():
         r"AND purpose\s*=\s*"
         r"'research_lab\.chain_realized_epoch_settlement\.v1'",
         CHAIN_REALIZED_SQL,
+    )
+    weight_input_match = re.search(
+        r"operation\s*=\s*'attest_weight_input'\s*"
+        r"AND purpose IN \((.*?)\n\s*\)\s*\n\s*\)\s*\n\s*OR",
+        CHAIN_REALIZED_SQL,
+        re.DOTALL,
+    )
+    assert weight_input_match is not None
+    migrated_weight_input_purposes = set(
+        re.findall(r"'([^']+)'", weight_input_match.group(1))
+    )
+    canonical_weight_input_purposes = {
+        purpose
+        for role, purpose in WEIGHT_INPUT_PURPOSES.values()
+        if role == COORDINATOR_ROLE
+    }
+    assert (
+        migrated_weight_input_purposes
+        == canonical_weight_input_purposes
     )
 
 

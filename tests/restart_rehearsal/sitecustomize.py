@@ -51,6 +51,7 @@ _GATEWAY_RUNTIME_OBJECTS_LOCK = threading.Lock()
 _REAL_SUBTENSOR_CLASS: Any = None
 _ORIGINAL_SOCKET = socket.socket
 _ORIGINAL_GETADDRINFO = socket.getaddrinfo
+_RESTART_EPOCH_TRANSIENT_HEAD_CALLS = 0
 
 
 def _block_hash(block: int) -> str:
@@ -371,7 +372,25 @@ class _LocalSubstrate:
         return result
 
     def get_chain_head(self) -> str:
-        _event("epoch_snapshot", method="get_chain_head")
+        global _RESTART_EPOCH_TRANSIENT_HEAD_CALLS
+        configured_failures = int(
+            os.environ.get(
+                "LEADPOET_REHEARSAL_RESTART_EPOCH_TRANSIENT_FAILURES",
+                "0",
+            )
+        )
+        _RESTART_EPOCH_TRANSIENT_HEAD_CALLS += 1
+        injected_failure = (
+            _RESTART_EPOCH_TRANSIENT_HEAD_CALLS <= configured_failures
+        )
+        _event(
+            "epoch_snapshot",
+            method="get_chain_head",
+            injected_failure=injected_failure,
+            attempt=_RESTART_EPOCH_TRANSIENT_HEAD_CALLS,
+        )
+        if injected_failure:
+            return "malformed-transient-head"
         return _block_hash(CURRENT_BLOCK)
 
     def get_chain_finalised_head(self) -> str:

@@ -233,6 +233,28 @@ exact model artifact, semantic contract, capability declarations, and parity
 fixtures while retaining separate queues, credentials, persistence,
 benchmarking, verification, and publication controls.
 
+### Approved source suggestions from miners
+
+- A miner may suggest an already approved SOURCE_ADD provider for either
+  company discovery or intent discovery by naming the provider and the
+  discovery stage in `brief_public_summary`.
+- The loop may translate that prose only through the runtime-ready provider
+  capability catalog. It must emit a manifest-bound
+  `leadpoet.routerverse_source_incorporation.v1` request; an unapproved,
+  inactive, credential-unready, unattested, ambiguous, or stage-less mention
+  fails closed and cannot authorize a patch.
+- The code-edit plan must use the `source_routing` lane and edit
+  `sourcing_model/routing/runtime.py::SOURCE_ADD_ROUTING_REGISTRATIONS` through
+  `SourceAddRoutingRegistration`. Query-only changes, hard-coded provider
+  branches, new endpoints, credentials, dependencies, or network clients do
+  not satisfy the request.
+- Generated diffs must match the approved provider ID, stage, and immutable
+  manifest exactly. Lab validates those fields before building the candidate.
+- A successful model candidate is still only a model proposal. The provider
+  remains unavailable until the reviewed Sourcing_model change reaches the
+  `leadpoet-lab` artifact and each consumer separately binds and activates the
+  exact tool ID.
+
 ## Research Lab artifact consumption
 
 - Resolve the signed branch-specific

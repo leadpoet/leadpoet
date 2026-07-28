@@ -455,6 +455,61 @@ def test_loop_direction_planner_prompt_allows_source_routing_and_query_construct
     assert '"allowed_lanes":["provider_fallback"]' not in content
 
 
+def test_loop_direction_planner_binds_approved_source_to_model_registration():
+    source_context = {
+        "schema_version": "1.0",
+        "provider_count": 1,
+        "providers": [
+            {
+                "provider_id": "community_accounts",
+                "provider_alias": "community accounts",
+                "governance_origin": "source_add",
+                "manifest_sha256": "a" * 64,
+            }
+        ],
+        "routerverse_source_incorporation": {
+            "schema_version": "leadpoet.routerverse_source_suggestions.v1",
+            "requests": [
+                {
+                    "provider_id": "community_accounts",
+                    "stage": "candidate_acquisition",
+                    "manifest_sha256": "a" * 64,
+                    "registration_symbol": (
+                        "sourcing_model/routing/runtime.py::"
+                        "SOURCE_ADD_ROUTING_REGISTRATIONS"
+                    ),
+                }
+            ],
+            "clarifications": [],
+        },
+    }
+    messages = code_editing.build_loop_direction_planner_messages(
+        ticket={
+            "ticket_id": "ticket-source-add",
+            "brief_public_summary": (
+                "Use community accounts for company discovery."
+            ),
+        },
+        artifact_manifest={"git_commit_sha": "a" * 40},
+        component_registry={},
+        benchmark_public_summary={},
+        runtime_source_index={
+            "editable_files": ["sourcing_model/routing/runtime.py"]
+        },
+        budget_context={},
+        provider_capability_summary=source_context,
+    )
+    content = messages[-1]["content"]
+    context = json.loads(content.split("Context JSON:\n", 1)[1])
+
+    assert context["approved_provider_capabilities"][
+        "routerverse_source_incorporation"
+    ]["requests"][0]["provider_id"] == "community_accounts"
+    assert "select source_routing" in content
+    assert "exact SourceAddRoutingRegistration" in content
+    assert "Never register a provider merely because its name appears" in content
+
+
 def test_code_edit_prompt_names_source_routing_lane():
     messages = code_editing.build_code_edit_auto_research_messages(
         ticket={"ticket_id": "ticket-source-routing", "brief_public_summary": "try an alternate discovery surface"},
@@ -475,6 +530,54 @@ def test_code_edit_prompt_names_source_routing_lane():
 
     assert "source_routing" in context["allowed_lanes"]
     assert "source routing" in content
+
+
+def test_code_edit_prompt_requires_source_add_registration_not_host_wiring():
+    source_context = {
+        "routerverse_source_incorporation": {
+            "requests": [
+                {
+                    "provider_id": "community_signals",
+                    "stage": "intent_evidence",
+                    "manifest_sha256": "b" * 64,
+                    "registration_symbol": (
+                        "sourcing_model/routing/runtime.py::"
+                        "SOURCE_ADD_ROUTING_REGISTRATIONS"
+                    ),
+                }
+            ],
+            "clarifications": [],
+        }
+    }
+    messages = code_editing.build_code_edit_auto_research_messages(
+        ticket={
+            "ticket_id": "ticket-source-add",
+            "brief_public_summary": (
+                "Use community signals for intent discovery."
+            ),
+        },
+        artifact_manifest={"git_commit_sha": "a" * 40},
+        component_registry={},
+        benchmark_public_summary={},
+        runtime_source_context={
+            "editable_files": ["sourcing_model/routing/runtime.py"]
+        },
+        source_inspection_context={
+            "read_files": ["sourcing_model/routing/runtime.py"]
+        },
+        budget_context={},
+        loop_direction_plan={
+            "required_lane": "source_routing",
+            "selected_path_id": "register-community-signals",
+        },
+        max_candidates=1,
+        provider_capability_summary=source_context,
+    )
+    content = messages[-1]["content"]
+
+    assert "add the exact SourceAddRoutingRegistration" in content
+    assert "hard-coded provider branch" in content
+    assert "consumer separately binds and activates" in content
 
 
 def test_code_edit_prompt_requires_direct_git_parent_and_safe_branch_feedback():

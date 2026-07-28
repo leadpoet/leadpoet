@@ -7,6 +7,7 @@ embedded here or projected into miner-visible activity.
 
 from __future__ import annotations
 
+import ast
 import base64
 import binascii
 from dataclasses import dataclass
@@ -58,6 +59,15 @@ _ENV_READ_RE = re.compile(r"\b(?:os\.getenv|os\.environ|environ\.get|getenv)\s*[
 _CREDENTIAL_NAME_RE = re.compile(r"\b(?:api[_-]?key|access[_-]?token|credential|client[_-]?secret)\b", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
 _ENV_REF_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
+_SOURCE_ADD_MANIFEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_COMPANY_DISCOVERY_PATTERNS = (
+    re.compile(r"\b(?:company|candidate|account)\s+(?:discovery|sourcing|acquisition)\b"),
+    re.compile(r"\b(?:discover|source|find)\s+(?:companies|candidates|accounts)\b"),
+)
+_INTENT_DISCOVERY_PATTERNS = (
+    re.compile(r"\b(?:intent|signal|evidence)\s+(?:discovery|sourcing|acquisition)\b"),
+    re.compile(r"\b(?:discover|source|find)\s+(?:intent|signals|evidence)\b"),
+)
 
 
 def capability_catalog_enabled() -> bool:
@@ -246,7 +256,12 @@ class EffectiveProviderCapabilities:
             "warning_count": len(self.warning_codes),
         }
 
-    def prompt_summary(self, *, live_model_ids: Mapping[str, Sequence[str]] | None = None) -> dict[str, Any]:
+    def prompt_summary(
+        self,
+        *,
+        live_model_ids: Mapping[str, Sequence[str]] | None = None,
+        miner_focus: str = "",
+    ) -> dict[str, Any]:
         """Private planner context; callers persist only diagnostic hash/count."""
 
         summaries: list[dict[str, Any]] = []
@@ -266,8 +281,18 @@ class EffectiveProviderCapabilities:
             provider_id = str(provider.get("id") or "")
             if provider_id in live_ids:
                 summary["live_text_model_ids"] = sorted({str(item) for item in live_ids[provider_id]})[:100]
+            if str(provider.get("origin") or "") == "source_add":
+                summary.update(
+                    {
+                        "governance_origin": "source_add",
+                        "provider_id": provider_id,
+                        "manifest_sha256": str(
+                            provider.get("source_add_manifest_sha256") or ""
+                        ),
+                    }
+                )
             summaries.append(summary)
-        return {
+        output = {
             "schema_version": "1.0",
             "capability_hash": self.capability_hash,
             "provider_count": len(summaries),
@@ -279,6 +304,425 @@ class EffectiveProviderCapabilities:
                 "new_dependencies_forbidden": True,
             },
         }
+        source_context = approved_source_router_suggestions(
+            miner_focus,
+            self.providers,
+        )
+        if source_context["requests"] or source_context["clarifications"]:
+            output["routerverse_source_incorporation"] = source_context
+        return output
+
+
+def _normalized_words(value: Any) -> str:
+    return " ".join(
+        re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).split()
+    )
+
+
+def _source_mention_forms(provider: Mapping[str, Any]) -> tuple[str, ...]:
+    planner = (
+        provider.get("planner_summary")
+        if isinstance(provider.get("planner_summary"), Mapping)
+        else {}
+    )
+    forms = {
+        _normalized_words(provider.get("id")),
+        _normalized_words(planner.get("provider_alias")),
+    }
+    return tuple(sorted(item for item in forms if len(item) >= 3))
+
+
+def _mentioned_source_add_providers(
+    miner_focus: str,
+    providers: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    focus = f" {_normalized_words(miner_focus)} "
+    matches: list[dict[str, Any]] = []
+    for provider in providers:
+        if (
+            str(provider.get("origin") or "") != "source_add"
+            or provider.get("active", True) is not True
+            or provider.get("credential_ready") is not True
+        ):
+            continue
+        manifest = str(provider.get("source_add_manifest_sha256") or "")
+        if not _SOURCE_ADD_MANIFEST_RE.fullmatch(manifest):
+            continue
+        if any(f" {form} " in focus for form in _source_mention_forms(provider)):
+            matches.append(dict(provider))
+    return tuple(
+        sorted(matches, key=lambda item: str(item.get("id") or ""))
+    )
+
+
+def approved_source_router_suggestions(
+    miner_focus: str,
+    providers: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Translate an explicit miner mention into attested router registrations.
+
+    Only active, runtime-ready SOURCE_ADD providers can produce a request.
+    The miner must also name company discovery and/or intent discovery; a
+    provider mention without a stage is retained only as a clarification and
+    cannot authorize a model edit.
+    """
+
+    normalized_focus = _normalized_words(miner_focus)
+    stages: list[str] = []
+    if any(pattern.search(normalized_focus) for pattern in _COMPANY_DISCOVERY_PATTERNS):
+        stages.append("candidate_acquisition")
+    if any(pattern.search(normalized_focus) for pattern in _INTENT_DISCOVERY_PATTERNS):
+        stages.append("intent_evidence")
+    providers_mentioned = _mentioned_source_add_providers(
+        miner_focus,
+        providers,
+    )
+    focus_with_boundaries = f" {normalized_focus} "
+    directly_named = tuple(
+        provider
+        for provider in providers_mentioned
+        if f" {_normalized_words(provider.get('id'))} "
+        in focus_with_boundaries
+    )
+    if directly_named:
+        providers_mentioned = directly_named
+    elif len(providers_mentioned) > 1:
+        return {
+            "schema_version": "leadpoet.routerverse_source_suggestions.v1",
+            "requests": [],
+            "clarifications": [
+                {
+                    "provider_id": "",
+                    "provider_alias": "",
+                    "reason_code": "approved_source_mention_ambiguous",
+                }
+            ],
+            "rules": {
+                "approved_source_add_only": True,
+                "explicit_discovery_stage_required": True,
+                "model_registration_required": True,
+                "consumer_binding_activation_separate": True,
+            },
+        }
+    requests: list[dict[str, Any]] = []
+    clarifications: list[dict[str, str]] = []
+    for provider in providers_mentioned:
+        provider_id = str(provider.get("id") or "")
+        planner = (
+            provider.get("planner_summary")
+            if isinstance(provider.get("planner_summary"), Mapping)
+            else {}
+        )
+        provider_alias = str(
+            planner.get("provider_alias") or provider_id
+        )[:80]
+        if not stages:
+            clarifications.append(
+                {
+                    "provider_id": provider_id,
+                    "provider_alias": provider_alias,
+                    "reason_code": "discovery_stage_not_explicit",
+                }
+            )
+            continue
+        cost_model = (
+            provider.get("cost_model")
+            if isinstance(provider.get("cost_model"), Mapping)
+            else {}
+        )
+        try:
+            microusd = max(
+                0,
+                int(cost_model.get("est_cost_microusd_per_call") or 0),
+            )
+        except (TypeError, ValueError):
+            microusd = 0
+        manifest = str(provider.get("source_add_manifest_sha256") or "")
+        for stage in stages:
+            candidate_stage = stage == "candidate_acquisition"
+            requests.append(
+                {
+                    "schema_version": (
+                        "leadpoet.routerverse_source_incorporation.v1"
+                    ),
+                    "provider_id": provider_id,
+                    "provider_alias": provider_alias,
+                    "stage": stage,
+                    "tool_id": (
+                        f"candidate.source_add.{provider_id}"
+                        if candidate_stage
+                        else f"intent.source_add.{provider_id}"
+                    ),
+                    "registration_symbol": (
+                        "sourcing_model/routing/runtime.py::"
+                        "SOURCE_ADD_ROUTING_REGISTRATIONS"
+                    ),
+                    "registration_type": "SourceAddRoutingRegistration",
+                    "revision": f"source-add-{manifest[:12]}",
+                    "manifest_sha256": manifest,
+                    "priority": 80 if candidate_stage else 35,
+                    "capabilities": [
+                        (
+                            "candidate.provider_discovery"
+                            if candidate_stage
+                            else "intent.provider_evidence"
+                        )
+                    ],
+                    "idempotency": "idempotent",
+                    "cost_class": "metered" if microusd else "free",
+                    "unit_cost": (
+                        round(max(microusd / 1_000_000, 0.000001), 6)
+                        if microusd
+                        else 0.0
+                    ),
+                    "max_calls": 1,
+                    "max_results": 100 if candidate_stage else 1,
+                    "timeout_seconds": 60.0 if candidate_stage else 30.0,
+                    "evidence_types": (
+                        ["provider_database"]
+                        if candidate_stage
+                        else ["external"]
+                    ),
+                    "runtime_binding_id": provider_id,
+                }
+            )
+    return {
+        "schema_version": "leadpoet.routerverse_source_suggestions.v1",
+        "requests": requests,
+        "clarifications": clarifications,
+        "rules": {
+            "approved_source_add_only": True,
+            "explicit_discovery_stage_required": True,
+            "model_registration_required": True,
+            "consumer_binding_activation_separate": True,
+        },
+    }
+
+
+def validate_source_add_registration_diff(
+    unified_diff: str,
+    source_context: Mapping[str, Any] | None,
+    *,
+    existing_runtime_source: str = "",
+) -> list[str]:
+    """Fail closed when a source-incorporation draft does not match approval."""
+
+    registration_fields = (
+        "provider_id",
+        "stage",
+        "revision",
+        "manifest_sha256",
+        "priority",
+        "capabilities",
+        "idempotency",
+        "cost_class",
+        "unit_cost",
+        "max_calls",
+        "max_results",
+        "timeout_seconds",
+        "evidence_types",
+    )
+
+    def registration_values(node: ast.Call) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        for keyword in node.keywords:
+            if keyword.arg not in registration_fields:
+                continue
+            try:
+                values[str(keyword.arg)] = ast.literal_eval(keyword.value)
+            except (ValueError, TypeError, SyntaxError):
+                continue
+        return values
+
+    def registration_from_block(block: str) -> dict[str, Any] | None:
+        try:
+            expression = ast.parse(block.strip().rstrip(","), mode="eval").body
+        except (SyntaxError, ValueError):
+            return None
+        if not isinstance(expression, ast.Call):
+            return None
+        function_name = (
+            expression.func.id
+            if isinstance(expression.func, ast.Name)
+            else expression.func.attr
+            if isinstance(expression.func, ast.Attribute)
+            else ""
+        )
+        if function_name != "SourceAddRoutingRegistration":
+            return None
+        return registration_values(expression)
+
+    def normalized_registration(
+        value: Mapping[str, Any],
+    ) -> tuple[tuple[str, Any], ...]:
+        normalized: list[tuple[str, Any]] = []
+        for field_name in registration_fields:
+            field_value = value.get(field_name)
+            if field_name in {"capabilities", "evidence_types"}:
+                if not isinstance(field_value, (list, tuple)):
+                    field_value = ()
+                field_value = tuple(str(item) for item in field_value)
+            elif field_name in {"unit_cost", "timeout_seconds"}:
+                if isinstance(field_value, bool) or not isinstance(
+                    field_value, (int, float)
+                ):
+                    field_value = None
+                else:
+                    field_value = float(field_value)
+            normalized.append((field_name, field_value))
+        return tuple(normalized)
+
+    requests = (
+        source_context.get("requests")
+        if isinstance(source_context, Mapping)
+        and isinstance(source_context.get("requests"), list)
+        else []
+    )
+    lines = str(unified_diff or "").splitlines()
+    added_lines = [
+        line[1:]
+        for line in lines
+        if line.startswith("+") and not line.startswith("+++")
+    ]
+    removed_lines = [
+        line[1:]
+        for line in lines
+        if line.startswith("-") and not line.startswith("---")
+    ]
+    added = "\n".join(added_lines)
+    removed = "\n".join(removed_lines)
+    added_registration_blocks = re.findall(
+        r"SourceAddRoutingRegistration\(\s*.*?^\s*\),?\s*$",
+        added,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    added_registrations = tuple(
+        registration
+        for block in added_registration_blocks
+        if (registration := registration_from_block(block)) is not None
+    )
+    adds_source_add_structure = bool(added_registration_blocks) or (
+        "ORIGIN_SOURCE_ADD" in added
+        or bool(
+            re.search(
+                r"['\"](?:candidate|intent)\.source_add\.",
+                added,
+            )
+        )
+    )
+    removes_source_add_structure = (
+        "SourceAddRoutingRegistration" in removed
+        or "SOURCE_ADD_ROUTING_REGISTRATIONS" in removed
+        or bool(
+            re.search(
+                r"['\"](?:candidate|intent)\.source_add\.",
+                removed,
+            )
+        )
+    )
+    if not requests:
+        errors = []
+        if adds_source_add_structure:
+            errors.append("source_add_registration_without_approved_request")
+        if removes_source_add_structure:
+            errors.append("source_add_registration_removal_forbidden")
+        return errors
+    errors: list[str] = []
+    if removes_source_add_structure:
+        errors.append("source_add_registration_removal_forbidden")
+    targets_runtime = any(
+        line.startswith(
+            "diff --git a/sourcing_model/routing/runtime.py "
+            "b/sourcing_model/routing/runtime.py"
+        )
+        for line in lines
+    )
+
+    existing_registrations: tuple[dict[str, Any], ...] = ()
+    if existing_runtime_source:
+        try:
+            tree = ast.parse(existing_runtime_source)
+        except (SyntaxError, ValueError):
+            tree = None
+        if tree is not None:
+            parsed_existing: list[dict[str, Any]] = []
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                function_name = (
+                    node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else ""
+                )
+                if function_name != "SourceAddRoutingRegistration":
+                    continue
+                parsed_existing.append(registration_values(node))
+            existing_registrations = tuple(parsed_existing)
+
+    request_registrations = tuple(
+        {
+            field_name: request.get(field_name)
+            for field_name in registration_fields
+        }
+        for request in requests
+        if isinstance(request, Mapping)
+    )
+    expected_registrations = {
+        normalized_registration(item)
+        for item in request_registrations
+    }
+    existing_normalized = {
+        normalized_registration(item)
+        for item in existing_registrations
+    }
+    added_normalized = {
+        normalized_registration(item)
+        for item in added_registrations
+    }
+    missing_registrations = expected_registrations - (
+        existing_normalized | added_normalized
+    )
+    registrations_already_present = bool(expected_registrations) and (
+        expected_registrations <= existing_normalized
+    )
+    approved_provider_ids = {
+        str(item.get("provider_id") or "")
+        for item in requests
+        if isinstance(item, Mapping)
+    }
+    approved_tool_ids = {
+        str(item.get("tool_id") or "")
+        for item in requests
+        if isinstance(item, Mapping)
+    }
+    if missing_registrations:
+        errors.append("source_add_registration_missing_approved_request")
+    if not registrations_already_present and not targets_runtime:
+        errors.append("source_add_registration_wrong_model_target")
+
+    added_provider_ids = {
+        match.group(1)
+        for match in re.finditer(
+            r"provider_id\s*=\s*['\"]([a-z][a-z0-9_-]{1,79})['\"]",
+            added,
+        )
+    }
+    if added_provider_ids - approved_provider_ids:
+        errors.append("source_add_registration_unapproved_provider")
+    added_tool_ids = {
+        match.group(1)
+        for match in re.finditer(
+            r"['\"]((?:candidate|intent)\.source_add\.[a-z][a-z0-9_-]{1,79})['\"]",
+            added,
+        )
+    }
+    if added_tool_ids - approved_tool_ids:
+        errors.append("source_add_registration_unapproved_tool")
+    if "ORIGIN_SOURCE_ADD" in added:
+        errors.append("source_add_registration_direct_definition_forbidden")
+    return sorted(set(errors))
 
 
 def _credential_ready(provider: Mapping[str, Any]) -> bool:
@@ -357,6 +801,9 @@ def _provider_doc_from_source_row(
         {
             "origin": "source_add",
             "reward_eligible": True,
+            "source_add_manifest_sha256": sha256_json(dict(row)).split(
+                ":", 1
+            )[-1],
             "probe_endpoints": [dict(item) for item in probe_endpoints if isinstance(item, Mapping)],
             "capability_policy": {
                 "routes": routes,

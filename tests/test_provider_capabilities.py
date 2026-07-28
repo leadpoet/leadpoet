@@ -6,11 +6,13 @@ import json
 from gateway.research_lab.provider_capabilities import (
     EffectiveProviderCapabilities,
     LiveTextModelCatalog,
+    approved_source_router_suggestions,
     load_effective_provider_capabilities_sync,
     provider_request_allowed,
     summary_mentions_private_capability,
     validate_candidate_provider_diff,
     validate_capability_provider_doc,
+    validate_source_add_registration_diff,
 )
 from gateway.research_lab.provider_evidence_proxy import (
     ProviderRegistryEntry,
@@ -29,7 +31,7 @@ def _provider_doc(
     origin: str = "builtin",
     policy: dict | None = None,
 ) -> dict:
-    return {
+    provider = {
         "id": provider_id,
         "base_url": base_url,
         "auth_kind": "none",
@@ -55,6 +57,9 @@ def _provider_doc(
         },
         "probe_endpoints": [],
     }
+    if origin == "source_add":
+        provider["source_add_manifest_sha256"] = "a" * 64
+    return provider
 
 
 def _private_row(*providers: dict) -> dict:
@@ -115,6 +120,12 @@ def test_private_snapshot_merges_ready_source_add_and_continuity_fallback():
         "legacy_feed",
     }
     assert capabilities.source_add_provider_count == 1
+    community = next(
+        item
+        for item in capabilities.providers
+        if item["id"] == "community_feed"
+    )
+    assert len(community["source_add_manifest_sha256"]) == 64
     summary = capabilities.prompt_summary()
     assert summary["provider_count"] == 3
     diagnostic_text = json.dumps(capabilities.diagnostic(), sort_keys=True)
@@ -259,6 +270,309 @@ def test_private_capability_summary_reaches_hidden_planner_context():
         "Improve bounded source routing while preserving output checks",
         capabilities,
     ) is False
+
+
+def test_approved_source_mention_creates_company_router_registration_request():
+    provider = _provider_doc(
+        "community_accounts",
+        origin="source_add",
+    )
+    capabilities = _capabilities(provider, private_loaded=False)
+    summary = capabilities.prompt_summary(
+        miner_focus=(
+            "Incorporate community accounts for company discovery."
+        )
+    )
+    incorporation = summary["routerverse_source_incorporation"]
+    request = incorporation["requests"][0]
+
+    assert request["provider_id"] == "community_accounts"
+    assert request["stage"] == "candidate_acquisition"
+    assert request["tool_id"] == (
+        "candidate.source_add.community_accounts"
+    )
+    assert request["manifest_sha256"] == "a" * 64
+    assert request["registration_symbol"].endswith(
+        "::SOURCE_ADD_ROUTING_REGISTRATIONS"
+    )
+    assert incorporation["clarifications"] == []
+
+
+def test_approved_source_mention_creates_intent_router_registration_request():
+    provider = _provider_doc(
+        "community_signals",
+        origin="source_add",
+    )
+    context = approved_source_router_suggestions(
+        "Use community signals for intent discovery.",
+        _capabilities(provider, private_loaded=False).providers,
+    )
+
+    assert [item["stage"] for item in context["requests"]] == [
+        "intent_evidence"
+    ]
+    assert context["requests"][0]["tool_id"] == (
+        "intent.source_add.community_signals"
+    )
+
+
+def test_source_mention_without_discovery_stage_fails_closed_for_clarification():
+    provider = _provider_doc(
+        "community_signals",
+        origin="source_add",
+    )
+    context = approved_source_router_suggestions(
+        "Please incorporate community signals into Routerverse.",
+        _capabilities(provider, private_loaded=False).providers,
+    )
+
+    assert context["requests"] == []
+    assert context["clarifications"] == [
+        {
+            "provider_id": "community_signals",
+            "provider_alias": "synthetic discovery",
+            "reason_code": "discovery_stage_not_explicit",
+        }
+    ]
+
+
+def test_unapproved_or_unmentioned_source_cannot_create_router_request():
+    source_add = _provider_doc(
+        "community_signals",
+        origin="source_add",
+    )
+    builtin = _provider_doc("built_in_search")
+
+    assert approved_source_router_suggestions(
+        "Use built in search for company discovery.",
+        _capabilities(source_add, builtin).providers,
+    )["requests"] == []
+    assert approved_source_router_suggestions(
+        "Improve company discovery without changing providers.",
+        _capabilities(source_add).providers,
+    )["requests"] == []
+
+
+def test_colliding_approved_source_aliases_require_exact_provider_id():
+    first = _provider_doc("first_source", origin="source_add")
+    second = _provider_doc("second_source", origin="source_add")
+    capabilities = _capabilities(first, second, private_loaded=False)
+
+    ambiguous = approved_source_router_suggestions(
+        "Use synthetic discovery for company discovery.",
+        capabilities.providers,
+    )
+    assert ambiguous["requests"] == []
+    assert ambiguous["clarifications"][0]["reason_code"] == (
+        "approved_source_mention_ambiguous"
+    )
+
+    exact = approved_source_router_suggestions(
+        "Use first_source for company discovery.",
+        capabilities.providers,
+    )
+    assert [item["provider_id"] for item in exact["requests"]] == [
+        "first_source"
+    ]
+
+
+def test_source_add_registration_diff_must_match_approved_attestation():
+    provider = _provider_doc(
+        "community_accounts",
+        origin="source_add",
+    )
+    context = approved_source_router_suggestions(
+        "Use community accounts for company discovery.",
+        _capabilities(provider, private_loaded=False).providers,
+    )
+    good = """diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py
+--- a/sourcing_model/routing/runtime.py
++++ b/sourcing_model/routing/runtime.py
+@@ -1,2 +1,8 @@
+ SOURCE_ADD_ROUTING_REGISTRATIONS = (
++    SourceAddRoutingRegistration(
++        provider_id="community_accounts",
++        stage="candidate_acquisition",
++        revision="source-add-aaaaaaaaaaaa",
++        manifest_sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++        priority=80,
++        capabilities=("candidate.provider_discovery",),
++        idempotency="idempotent",
++        cost_class="metered",
++        unit_cost=0.005,
++        max_calls=1,
++        max_results=100,
++        timeout_seconds=60.0,
++        evidence_types=("provider_database",),
++    ),
+ )
+"""
+    assert validate_source_add_registration_diff(good, context) == []
+
+    wrong_manifest = good.replace("a" * 64, "b" * 64)
+    assert validate_source_add_registration_diff(
+        wrong_manifest,
+        context,
+    ) == ["source_add_registration_missing_approved_request"]
+
+    unapproved_provider = good.replace(
+        "community_accounts",
+        "other_accounts",
+    )
+    assert "source_add_registration_unapproved_provider" in (
+        validate_source_add_registration_diff(
+            unapproved_provider,
+            context,
+        )
+    )
+
+    existing = """
+SOURCE_ADD_ROUTING_REGISTRATIONS = (
+    SourceAddRoutingRegistration(
+        provider_id="community_accounts",
+        stage="candidate_acquisition",
+        revision="source-add-aaaaaaaaaaaa",
+        manifest_sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        priority=80,
+        capabilities=("candidate.provider_discovery",),
+        idempotency="idempotent",
+        cost_class="metered",
+        unit_cost=0.005,
+        max_calls=1,
+        max_results=100,
+        timeout_seconds=60.0,
+        evidence_types=("provider_database",),
+    ),
+)
+"""
+    child_diff = """diff --git a/sourcing_model/discovery.py b/sourcing_model/discovery.py
+--- a/sourcing_model/discovery.py
++++ b/sourcing_model/discovery.py
+@@ -1,2 +1,2 @@
+-VALUE = 1
++VALUE = 2
+"""
+    assert validate_source_add_registration_diff(
+        child_diff,
+        context,
+        existing_runtime_source=existing,
+    ) == []
+
+
+def test_source_add_registration_diff_requires_every_stage_and_exact_bounds():
+    provider = _provider_doc(
+        "community_source",
+        origin="source_add",
+    )
+    context = approved_source_router_suggestions(
+        (
+            "Use community source for company discovery and intent "
+            "discovery."
+        ),
+        _capabilities(provider, private_loaded=False).providers,
+    )
+    assert len(context["requests"]) == 2
+    candidate_only = """diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py
+--- a/sourcing_model/routing/runtime.py
++++ b/sourcing_model/routing/runtime.py
+@@ -1,2 +1,15 @@
+ SOURCE_ADD_ROUTING_REGISTRATIONS = (
++    SourceAddRoutingRegistration(
++        provider_id="community_source",
++        stage="candidate_acquisition",
++        revision="source-add-aaaaaaaaaaaa",
++        manifest_sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++        priority=80,
++        capabilities=("candidate.provider_discovery",),
++        idempotency="idempotent",
++        cost_class="metered",
++        unit_cost=0.005,
++        max_calls=1,
++        max_results=100,
++        timeout_seconds=60.0,
++        evidence_types=("provider_database",),
++    ),
+ )
+"""
+    assert validate_source_add_registration_diff(
+        candidate_only,
+        context,
+    ) == ["source_add_registration_missing_approved_request"]
+
+    altered_timeout = candidate_only.replace(
+        "timeout_seconds=60.0",
+        "timeout_seconds=600.0",
+    )
+    candidate_context = {
+        **context,
+        "requests": [
+            item
+            for item in context["requests"]
+            if item["stage"] == "candidate_acquisition"
+        ],
+    }
+    assert validate_source_add_registration_diff(
+        altered_timeout,
+        candidate_context,
+    ) == ["source_add_registration_missing_approved_request"]
+
+    direct_extra_tool = candidate_only.replace(
+        " )\n",
+        '+    ToolDefinition(tool_id="intent.source_add.evil_source", origin=ORIGIN_SOURCE_ADD),\n )\n',
+    )
+    errors = validate_source_add_registration_diff(
+        direct_extra_tool,
+        candidate_context,
+    )
+    assert "source_add_registration_unapproved_tool" in errors
+    assert "source_add_registration_direct_definition_forbidden" in errors
+
+
+def test_source_add_registration_diff_without_approved_request_fails_closed():
+    unauthorized = """diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py
+--- a/sourcing_model/routing/runtime.py
++++ b/sourcing_model/routing/runtime.py
+@@ -1,2 +1,5 @@
+ SOURCE_ADD_ROUTING_REGISTRATIONS = (
++    SourceAddRoutingRegistration(
++        provider_id="unapproved_source",
++        stage="candidate_acquisition",
++    ),
+ )
+"""
+    assert validate_source_add_registration_diff(
+        unauthorized,
+        None,
+    ) == ["source_add_registration_without_approved_request"]
+
+    direct_definition = """diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py
+--- a/sourcing_model/routing/runtime.py
++++ b/sourcing_model/routing/runtime.py
+@@ -1,2 +1,3 @@
+ TOOLS = (
++    ToolDefinition(tool_id="intent.source_add.unapproved", origin=ORIGIN_SOURCE_ADD),
+ )
+"""
+    assert validate_source_add_registration_diff(
+        direct_definition,
+        {"requests": []},
+    ) == ["source_add_registration_without_approved_request"]
+
+    removal = """diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py
+--- a/sourcing_model/routing/runtime.py
++++ b/sourcing_model/routing/runtime.py
+@@ -1,5 +1,2 @@
+ SOURCE_ADD_ROUTING_REGISTRATIONS = (
+-    SourceAddRoutingRegistration(
+-        provider_id="approved_source",
+-        stage="candidate_acquisition",
+-    ),
+ )
+"""
+    assert validate_source_add_registration_diff(
+        removal,
+        None,
+    ) == ["source_add_registration_removal_forbidden"]
 
 
 def test_route_policy_allows_unlisted_safe_paths_and_blocks_admin_paths():

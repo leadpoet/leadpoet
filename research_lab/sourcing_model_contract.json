@@ -440,8 +440,8 @@
       "DEFAULT_POLICY_VERSION": "sourcing-model-routing:v1"
     },
     "sourcing_model/routing/runtime.py": {
-      "RUNTIME_CATALOG_VERSION": "sourcing-model-runtime-tools:v1",
-      "RUNTIME_POLICY_VERSION": "sourcing-model-runtime-routing:v1"
+      "RUNTIME_CATALOG_VERSION": "sourcing-model-runtime-tools:v2",
+      "RUNTIME_POLICY_VERSION": "sourcing-model-runtime-routing:v2"
     },
     "sourcing_model/normalized_icp_discovery_plan.py": {
       "CONTACT_PERSONA_SENIORITY_LEVELS": [

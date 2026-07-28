@@ -48,10 +48,16 @@ CHAIN_REALIZED_OBLIGATION_CREDIT_TABLE_V1 = (
 CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1 = (
     "leadpoet.research_lab_chain_realized_epoch_settlement.v1"
 )
+CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2 = (
+    "leadpoet.research_lab_chain_realized_epoch_settlement.v2"
+)
 CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1 = (
     "leadpoet.research_lab_chain_realized_obligation_credit.v1"
 )
 CHAIN_REALIZED_AUTHORITY_TYPE_V1 = "chain_realized_emission_v1"
+CHAIN_REALIZED_UNATTRIBUTED_AUTHORITY_TYPE_V1 = (
+    "chain_realized_unattributed_v1"
+)
 CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1 = (
     "leadpoet.chain_realized_weight_observation.v1"
 )
@@ -677,6 +683,54 @@ def build_chain_realized_settlement_package_v1(
     }
 
 
+def build_unattributed_chain_realized_settlement_package_v2(
+    *,
+    observation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Record an exact chain observation without granting Lab credit.
+
+    This is the fail-closed path for a realized primary vector that has no
+    canonical finalized V2 bundle.  It advances the immutable epoch history
+    while deliberately leaving every obligation unpaid.
+    """
+
+    observed = validate_chain_weight_observation_v1(observation)
+    settlement_doc = {
+        "schema_version": CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2,
+        "netuid": int(observed["netuid"]),
+        "epoch_id": int(observed["epoch_id"]),
+        "credit_hashes": [],
+        "observation_summary": {
+            "schema_version": (
+                "leadpoet.chain_realized_unattributed_observation_summary.v1"
+            ),
+            "authority_mode": "unattributed_chain_observation",
+            "observation_hash": sha256_json(observed),
+            "weights_vector_hash": str(observed["weights_vector_hash"]),
+            "close_block": int(observed["close_block"]),
+            "close_block_hash": str(observed["close_block_hash"]),
+            "official_subnet_epoch_id": int(
+                observed["official_subnet_epoch_id"]
+            ),
+            "validator_hotkey": str(observed["validator_hotkey"]),
+            "validator_uid": int(observed["validator_uid"]),
+            "last_update_block": int(observed["last_update_block"]),
+            "last_update_block_hash": str(
+                observed["last_update_block_hash"]
+            ),
+            "active_source_epoch_id": int(
+                observed["active_source_epoch_id"]
+            ),
+            "complete": True,
+        },
+    }
+    return {
+        "settlement_doc": settlement_doc,
+        "settlement_hash": sha256_json(settlement_doc),
+        "credits": [],
+    }
+
+
 def _allocation_authority_receipt_hash_v2(
     *,
     bundle_doc: Mapping[str, Any],
@@ -1199,18 +1253,17 @@ def validate_chain_realized_epoch_settlements_v1(
             raise ChampionSettlementV2Error(
                 "chain realized settlement document is missing"
             )
-        if (
-            set(document)
-            != {
-                "schema_version",
-                "netuid",
-                "epoch_id",
-                "credit_hashes",
-                "observation_summary",
-            }
-            or document.get("schema_version")
-            != CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1
-        ):
+        schema_version = str(document.get("schema_version") or "")
+        if set(document) != {
+            "schema_version",
+            "netuid",
+            "epoch_id",
+            "credit_hashes",
+            "observation_summary",
+        } or schema_version not in {
+            CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+            CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2,
+        }:
             raise ChampionSettlementV2Error(
                 "chain realized settlement document is invalid"
             )
@@ -1238,10 +1291,7 @@ def validate_chain_realized_epoch_settlements_v1(
                 "chain realized settlement credit hashes are invalid"
             )
         observation_summary = document.get("observation_summary")
-        if (
-            not isinstance(observation_summary, Mapping)
-            or set(observation_summary)
-            != {
+        finalized_summary_fields = {
                 "schema_version",
                 "observation_hash",
                 "weights_vector_hash",
@@ -1258,19 +1308,54 @@ def validate_chain_realized_epoch_settlements_v1(
                 "last_update_block_hash",
                 "active_source_epoch_id",
                 "complete",
-            }
-            or observation_summary.get("schema_version")
-            != "leadpoet.chain_realized_observation_summary.v1"
-            or observation_summary.get("complete") is not True
-        ):
+        }
+        unattributed_summary_fields = {
+            "schema_version",
+            "authority_mode",
+            "observation_hash",
+            "weights_vector_hash",
+            "close_block",
+            "close_block_hash",
+            "official_subnet_epoch_id",
+            "validator_hotkey",
+            "validator_uid",
+            "last_update_block",
+            "last_update_block_hash",
+            "active_source_epoch_id",
+            "complete",
+        }
+        finalized_authority = (
+            schema_version
+            == CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1
+        )
+        if not isinstance(observation_summary, Mapping) or (
+            finalized_authority
+            and (
+                set(observation_summary) != finalized_summary_fields
+                or observation_summary.get("schema_version")
+                != "leadpoet.chain_realized_observation_summary.v1"
+            )
+        ) or (
+            not finalized_authority
+            and (
+                set(observation_summary) != unattributed_summary_fields
+                or observation_summary.get("schema_version")
+                != (
+                    "leadpoet.chain_realized_unattributed_"
+                    "observation_summary.v1"
+                )
+                or observation_summary.get("authority_mode")
+                != "unattributed_chain_observation"
+                or credit_hashes
+            )
+        ) or observation_summary.get("complete") is not True:
             raise ChampionSettlementV2Error(
                 "chain realized settlement observation summary is invalid"
             )
-        for field in (
-            "observation_hash",
-            "weights_vector_hash",
-            "source_bundle_hash",
-        ):
+        hash_fields = ["observation_hash", "weights_vector_hash"]
+        if finalized_authority:
+            hash_fields.append("source_bundle_hash")
+        for field in hash_fields:
             if not re.fullmatch(
                 r"sha256:[0-9a-f]{64}",
                 str(observation_summary.get(field) or ""),
@@ -1292,30 +1377,14 @@ def validate_chain_realized_epoch_settlements_v1(
             raise ChampionSettlementV2Error(
                 "chain realized settlement observation summary is invalid"
             )
-        if not re.fullmatch(
-            r"[0-9a-f]{64}",
-            str(
-                observation_summary.get(
-                    "source_bundle_finalized_block_hash"
-                )
-                or ""
-            ),
-        ):
-            raise ChampionSettlementV2Error(
-                "chain realized settlement observation summary is invalid"
-            )
         try:
             summary_epoch = int(
                 observation_summary["official_subnet_epoch_id"]
             )
-            source_epoch = int(observation_summary["source_bundle_epoch_id"])
             active_source_epoch = int(
                 observation_summary["active_source_epoch_id"]
             )
             close_block = int(observation_summary["close_block"])
-            finalized_block = int(
-                observation_summary["source_bundle_finalized_block"]
-            )
             last_update_block = int(
                 observation_summary["last_update_block"]
             )
@@ -1324,32 +1393,58 @@ def validate_chain_realized_epoch_settlements_v1(
             raise ChampionSettlementV2Error(
                 "chain realized settlement observation summary is invalid"
             ) from exc
-        if (
-            min(
-                summary_epoch,
-                source_epoch,
-                active_source_epoch,
-                close_block,
-                finalized_block,
-                last_update_block,
-                validator_uid,
-            )
-            < 0
-            or source_epoch != active_source_epoch
-            or finalized_block != last_update_block
-            or observation_summary["source_bundle_finalized_block_hash"]
-            != observation_summary["last_update_block_hash"]
-            or last_update_block > close_block
-            or active_source_epoch > epoch_id
-        ):
+        if min(
+            summary_epoch,
+            active_source_epoch,
+            close_block,
+            last_update_block,
+            validator_uid,
+        ) < 0 or last_update_block > close_block or active_source_epoch > epoch_id:
             raise ChampionSettlementV2Error(
                 "chain realized settlement observation summary is invalid"
             )
+        if finalized_authority:
+            if not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(
+                    observation_summary.get(
+                        "source_bundle_finalized_block_hash"
+                    )
+                    or ""
+                ),
+            ):
+                raise ChampionSettlementV2Error(
+                    "chain realized settlement observation summary is invalid"
+                )
+            try:
+                source_epoch = int(
+                    observation_summary["source_bundle_epoch_id"]
+                )
+                finalized_block = int(
+                    observation_summary["source_bundle_finalized_block"]
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ChampionSettlementV2Error(
+                    "chain realized settlement observation summary is invalid"
+                ) from exc
+            if (
+                source_epoch < 0
+                or finalized_block < 0
+                or source_epoch != active_source_epoch
+                or finalized_block != last_update_block
+                or observation_summary[
+                    "source_bundle_finalized_block_hash"
+                ]
+                != observation_summary["last_update_block_hash"]
+            ):
+                raise ChampionSettlementV2Error(
+                    "chain realized settlement observation summary is invalid"
+                )
         settlement_hash = sha256_json(dict(document))
         expected = {
             "netuid": netuid,
             "epoch_id": epoch_id,
-            "schema_version": CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+            "schema_version": schema_version,
             "settlement_hash": settlement_hash,
             "settlement_doc": dict(document),
         }
@@ -1379,7 +1474,13 @@ def validate_chain_realized_epoch_settlements_v1(
                 "settlement_doc": dict(document),
                 "settlement_receipt_hash": receipt_hash,
                 "credit_hashes": sorted(str(item) for item in credit_hashes),
-                "authority_types": [CHAIN_REALIZED_AUTHORITY_TYPE_V1],
+                "authority_types": [
+                    (
+                        CHAIN_REALIZED_AUTHORITY_TYPE_V1
+                        if finalized_authority
+                        else CHAIN_REALIZED_UNATTRIBUTED_AUTHORITY_TYPE_V1
+                    )
+                ],
             }
         )
     return sorted(settled, key=lambda item: int(item["epoch"]))
@@ -1873,6 +1974,142 @@ async def load_finalized_allocation_history_v2(
         receipt_graphs=migration_graphs,
     )
     return merge_finalized_allocation_histories_v2(native, migrated)
+
+
+async def validate_chain_realized_settlement_bootstrap_v1(
+    *,
+    netuid: int,
+    target_epoch: int,
+    maximum_backlog: int = 100,
+) -> dict[str, Any]:
+    """Validate the one pristine state that a new enclave must bootstrap.
+
+    Migration 126 creates an immutable activation row before the candidate
+    enclave is launched. The old enclave cannot produce the new measured
+    settlement receipts, so a pre-shutdown read may legitimately see the
+    activation with no settlement rows. This validator accepts only that
+    pristine state and proves its finalized activation source. Any partial
+    history remains a hard error.
+    """
+
+    from gateway.research_lab.store import select_many
+
+    normalized_netuid = int(netuid)
+    normalized_target = int(target_epoch)
+    if normalized_netuid <= 0 or int(maximum_backlog) <= 0:
+        raise ChampionSettlementV2Error(
+            "chain realized settlement bootstrap policy is invalid"
+        )
+    activation_rows = await select_many(
+        CHAIN_REALIZED_SETTLEMENT_ACTIVATION_TABLE_V1,
+        columns=(
+            "netuid,schema_version,first_epoch_id,source_bundle_hash,"
+            "source_bundle_epoch_id,source_finalized_block"
+        ),
+        filters=(("netuid", normalized_netuid),),
+        order_by=(("first_epoch_id", False),),
+        limit=2,
+    )
+    if len(activation_rows) != 1:
+        raise ChampionSettlementV2Error(
+            "chain realized settlement activation is unavailable"
+        )
+    activation = activation_rows[0]
+    try:
+        activation_netuid = int(activation["netuid"])
+        activation_epoch = int(activation["first_epoch_id"])
+        source_epoch = int(activation["source_bundle_epoch_id"])
+        source_finalized_block = int(activation["source_finalized_block"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ChampionSettlementV2Error(
+            "chain realized settlement activation is invalid"
+        ) from exc
+    source_bundle_hash = str(activation.get("source_bundle_hash") or "")
+    if (
+        activation.get("schema_version")
+        != "leadpoet.research_lab_chain_realized_settlement_activation.v1"
+        or activation_netuid != normalized_netuid
+        or activation_epoch < 0
+        or source_epoch != activation_epoch
+        or source_finalized_block < 0
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", source_bundle_hash)
+    ):
+        raise ChampionSettlementV2Error(
+            "chain realized settlement activation is invalid"
+        )
+    if normalized_target < activation_epoch:
+        raise ChampionSettlementV2Error(
+            "chain realized settlement bootstrap target predates activation"
+        )
+    backlog = normalized_target - activation_epoch + 1
+    if backlog > int(maximum_backlog):
+        raise ChampionSettlementV2Error(
+            "chain-realized settlement backlog exceeds policy"
+        )
+
+    existing_rows = await select_many(
+        CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1,
+        columns="netuid,epoch_id,settlement_hash",
+        filters=(("netuid", normalized_netuid),),
+        order_by=(("epoch_id", True),),
+        limit=1,
+    )
+    if existing_rows:
+        raise ChampionSettlementV2Error(
+            "chain realized settlement history is incomplete"
+        )
+
+    source_rows = await select_many(
+        FINALIZED_ALLOCATION_VIEW_V2,
+        columns=(
+            "bundle_hash,netuid,epoch_id,finalized_block,"
+            "finalization_receipt_hash"
+        ),
+        filters=(
+            ("netuid", normalized_netuid),
+            ("epoch_id", source_epoch),
+            ("bundle_hash", source_bundle_hash),
+            ("finalized_block", source_finalized_block),
+        ),
+        order_by=(("bundle_hash", False),),
+        limit=2,
+    )
+    if len(source_rows) != 1:
+        raise ChampionSettlementV2Error(
+            "chain realized settlement activation source is unavailable"
+        )
+
+    finalized = await load_finalized_allocation_history_v2(
+        netuid=normalized_netuid,
+        start_epoch=activation_epoch,
+        end_epoch=normalized_target,
+    )
+    source_authorities = [
+        row
+        for row in finalized
+        if int(row.get("epoch") or -1) == source_epoch
+        and source_bundle_hash
+        in set(row.get("finalized_bundle_hashes") or ())
+    ]
+    if len(source_authorities) != 1:
+        raise ChampionSettlementV2Error(
+            "chain realized settlement activation source is not authoritative"
+        )
+    return {
+        "schema_version": (
+            "leadpoet.chain_realized_settlement_bootstrap_readiness.v1"
+        ),
+        "status": "pristine_bootstrap_pending",
+        "netuid": normalized_netuid,
+        "activation_epoch": activation_epoch,
+        "target_epoch": normalized_target,
+        "backlog_epoch_count": backlog,
+        "source_bundle_hash": source_bundle_hash,
+        "source_finalized_block": source_finalized_block,
+        "validated_finalized_candidate_epochs": sorted(
+            int(row["epoch"]) for row in finalized
+        ),
+    }
 
 
 async def load_chain_realized_allocation_history_v1(

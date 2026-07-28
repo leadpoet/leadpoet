@@ -63,6 +63,9 @@ CHAIN_REALIZED_CREDIT_TABLE = (
 CHAIN_REALIZED_SETTLEMENT_RPC = (
     "persist_research_lab_chain_realized_settlement_v1"
 )
+CHAIN_REALIZED_UNATTRIBUTED_SETTLEMENT_RPC = (
+    "persist_research_lab_chain_realized_unattributed_v2"
+)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GRAPH_QUERY_CHUNK = 50
 _MAX_GRAPH_ROWS = 10000
@@ -1708,6 +1711,7 @@ async def persist_chain_realized_settlement_v1(
 
     from gateway.research_lab.champion_settlement_v2 import (
         CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+        CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2,
         CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
         validate_chain_realized_epoch_settlements_v1,
         validate_chain_realized_obligation_credits_v1,
@@ -1819,7 +1823,15 @@ async def persist_chain_realized_settlement_v1(
     )
     if (
         settlement_row["schema_version"]
-        != CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1
+        not in {
+            CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+            CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2,
+        }
+        or (
+            settlement_row["schema_version"]
+            == CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2
+            and credit_rows
+        )
         or any(
             row["schema_version"]
             != CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1
@@ -1831,10 +1843,16 @@ async def persist_chain_realized_settlement_v1(
         )
 
     result: Any = None
+    persistence_rpc = (
+        CHAIN_REALIZED_UNATTRIBUTED_SETTLEMENT_RPC
+        if settlement_row["schema_version"]
+        == CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2
+        else CHAIN_REALIZED_SETTLEMENT_RPC
+    )
     for attempt in range(_EXACT_INSERT_ATTEMPTS):
         try:
             result = await call_rpc(
-                CHAIN_REALIZED_SETTLEMENT_RPC,
+                persistence_rpc,
                 {
                     "requested_settlement": settlement_row,
                     "requested_credits": credit_rows,

@@ -478,7 +478,11 @@ def _run_supabase_history_pagination_probe() -> None:
 
 
 def _install_boundaries(stage: str, scenario: str) -> None:
-    from gateway.research_lab import api, maintenance
+    from gateway.research_lab import (
+        api,
+        champion_settlement_v2,
+        maintenance,
+    )
     from gateway.tee import verify_weight_submission_ready_v2 as readiness
     from gateway.utils.tee_artifact_store_v2 import TEEArtifactStoreV2Error
     from research_lab import validator_integration
@@ -525,6 +529,10 @@ def _install_boundaries(stage: str, scenario: str) -> None:
         return {"ok": True, "classified_count": 0}
 
     async def report(**_kwargs):
+        if stage == "storage_preflight":
+            raise champion_settlement_v2.ChampionSettlementV2Error(
+                "chain realized settlement history is incomplete"
+            )
         _event(
             "weight-readiness-boundary",
             boundary="cutover_readiness",
@@ -534,6 +542,34 @@ def _install_boundaries(stage: str, scenario: str) -> None:
             "ready": True,
             "receipt_coverage": 1.0,
             "historical_classification_coverage": 1.0,
+        }
+
+    async def settlement_bootstrap(**kwargs):
+        expected = {"netuid": NETUID, "target_epoch": EPOCH - 1}
+        if kwargs != expected:
+            raise AssertionError(
+                "chain-realized bootstrap invocation differs: %r" % kwargs
+            )
+        _event(
+            "weight-readiness-boundary",
+            boundary="chain_realized_settlement_bootstrap",
+            status="ok",
+            activation_epoch=EPOCH - 3,
+            target_epoch=EPOCH - 1,
+            backlog_epoch_count=3,
+        )
+        return {
+            "schema_version": (
+                "leadpoet.chain_realized_settlement_bootstrap_readiness.v1"
+            ),
+            "status": "pristine_bootstrap_pending",
+            "netuid": NETUID,
+            "activation_epoch": EPOCH - 3,
+            "target_epoch": EPOCH - 1,
+            "backlog_epoch_count": 3,
+            "source_bundle_hash": HASH_A,
+            "source_finalized_block": 1234,
+            "validated_finalized_candidate_epochs": [EPOCH - 3],
         }
 
     async def direct_handoff(epoch, x_leadpoet_internal_key):
@@ -622,6 +658,9 @@ def _install_boundaries(stage: str, scenario: str) -> None:
     maintenance.backfill_champion_reward_v2_authority = champion_rewards
     maintenance.backfill_champion_settlement_v2_authority = settlements
     maintenance.champion_v2_cutover_readiness_report = report
+    champion_settlement_v2.validate_chain_realized_settlement_bootstrap_v1 = (
+        settlement_bootstrap
+    )
     api.get_research_lab_attested_allocation = direct_handoff
     validator_integration.fetch_research_lab_attested_allocation_bundle = (
         http_handoff

@@ -392,12 +392,35 @@ def selected_weight_storage_preflight_capability(
     )
 
 
+def selected_weight_storage_bootstrap_capability(
+    candidate_roots: tuple[Path, ...],
+) -> bool:
+    relative = Path("gateway/tee/verify_weight_submission_ready_v2.py")
+    for root in candidate_roots:
+        source_path = root / relative
+        if not source_path.is_file():
+            continue
+        tree = ast.parse(
+            source_path.read_text(encoding="utf-8"),
+            filename=str(source_path),
+        )
+        return any(
+            isinstance(node, ast.Name)
+            and node.id == "validate_chain_realized_settlement_bootstrap_v1"
+            for node in ast.walk(tree)
+        )
+    raise SystemExit(
+        "candidate weight-readiness source is unavailable for bootstrap proof"
+    )
+
+
 def verify_gateway_weight_readiness_invocations(
     rows: list[dict],
     *,
     candidate_sha: str,
     transition: str = "forward",
     storage_preflight_supported: bool = True,
+    bootstrap_preflight_supported: bool = False,
 ) -> None:
     module = "gateway.tee.verify_weight_submission_ready_v2"
     if not storage_preflight_supported and transition != "rollback":
@@ -460,6 +483,23 @@ def verify_gateway_weight_readiness_invocations(
                 "gateway production weight readiness invocation differs from "
                 f"the launcher contract at ordinal {ordinal}: {row!r}"
             )
+    if bootstrap_preflight_supported:
+        bootstrap_rows = [
+            row
+            for row in rows
+            if row.get("kind") == "weight-readiness-boundary"
+            and row.get("boundary")
+            == "chain_realized_settlement_bootstrap"
+        ]
+        if (
+            len(bootstrap_rows) != 1
+            or bootstrap_rows[0].get("status") != "ok"
+            or int(bootstrap_rows[0].get("backlog_epoch_count") or 0) <= 0
+        ):
+            raise SystemExit(
+                "gateway storage preflight did not exercise the pristine "
+                "chain-realized settlement bootstrap contract"
+            )
 
 
 def main() -> int:
@@ -515,11 +555,23 @@ def main() -> int:
                 )
             )
         )
+        bootstrap_preflight_supported = (
+            selected_weight_storage_bootstrap_capability(
+                (
+                    Path("/home/ec2-user/leadpoet_repo"),
+                    Path("/home/ec2-user/leadpoet/leadpoet"),
+                )
+            )
+        )
         verify_gateway_weight_readiness_invocations(
             rows,
             candidate_sha=candidate_sha,
             transition=transition,
             storage_preflight_supported=storage_preflight_supported,
+            bootstrap_preflight_supported=(
+                bootstrap_preflight_supported
+                and transition == "forward"
+            ),
         )
         required_gateway_order = [
             "module:gateway.tee.release_channel_v2",

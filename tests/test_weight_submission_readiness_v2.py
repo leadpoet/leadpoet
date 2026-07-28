@@ -75,6 +75,100 @@ async def test_storage_read_preflight_exercises_full_authority_read_without_repa
 
 
 @pytest.mark.asyncio
+async def test_storage_read_preflight_accepts_only_pristine_settlement_bootstrap(
+    monkeypatch,
+):
+    from gateway.research_lab import champion_settlement_v2 as settlement
+
+    async def resolve(_epoch):
+        return 24206
+
+    async def report(**_kwargs):
+        raise settlement.ChampionSettlementV2Error(
+            "chain realized settlement history is incomplete"
+        )
+
+    async def bootstrap(**kwargs):
+        assert kwargs == {"netuid": 71, "target_epoch": 24205}
+        return {
+            "schema_version": (
+                "leadpoet.chain_realized_settlement_bootstrap_readiness.v1"
+            ),
+            "status": "pristine_bootstrap_pending",
+            "netuid": 71,
+            "activation_epoch": 24202,
+            "target_epoch": 24205,
+            "backlog_epoch_count": 4,
+            "source_bundle_hash": "sha256:" + "a" * 64,
+            "source_finalized_block": 8717384,
+            "validated_finalized_candidate_epochs": [24202, 24205],
+        }
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        maintenance,
+        "champion_v2_cutover_readiness_report",
+        report,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_chain_realized_settlement_bootstrap_v1",
+        bootstrap,
+    )
+
+    result = await readiness.verify_weight_submission_storage_readable_v2(
+        netuid=71,
+    )
+
+    assert result["status"] == "readable"
+    assert result["authority_ready"] is False
+    assert result["chain_realized_settlement_bootstrap"][
+        "status"
+    ] == "pristine_bootstrap_pending"
+    assert result["chain_realized_settlement_bootstrap"][
+        "backlog_epoch_count"
+    ] == 4
+
+
+@pytest.mark.asyncio
+async def test_storage_read_preflight_does_not_mask_other_settlement_failures(
+    monkeypatch,
+):
+    from gateway.research_lab import champion_settlement_v2 as settlement
+
+    async def resolve(_epoch):
+        return 24206
+
+    async def report(**_kwargs):
+        raise settlement.ChampionSettlementV2Error(
+            "chain realized settlement activation is invalid"
+        )
+
+    async def unexpected_bootstrap(**_kwargs):
+        raise AssertionError("non-bootstrap failures must remain fail-closed")
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        maintenance,
+        "champion_v2_cutover_readiness_report",
+        report,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_chain_realized_settlement_bootstrap_v1",
+        unexpected_bootstrap,
+    )
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="activation is invalid",
+    ):
+        await readiness.verify_weight_submission_storage_readable_v2(
+            netuid=71,
+        )
+
+
+@pytest.mark.asyncio
 async def test_weight_readiness_repair_requires_internal_key_before_writes(
     monkeypatch,
 ):

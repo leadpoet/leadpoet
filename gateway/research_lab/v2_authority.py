@@ -1533,6 +1533,8 @@ async def settle_chain_realized_epoch_v1(
 
     from gateway.research_lab.champion_settlement_v2 import (
         CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+        CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2,
+        ChampionSettlementV2Error,
         select_chain_realized_bundle_candidate_v1,
         validate_chain_realized_epoch_settlements_v1,
         validate_chain_realized_obligation_credits_v1,
@@ -1622,21 +1624,30 @@ async def settle_chain_realized_epoch_v1(
         order_by=(("finalized_block", True), ("bundle_hash", False)),
         limit=100,
     )
-    candidate = select_chain_realized_bundle_candidate_v1(
-        candidate_rows,
-        observation=observation,
-    )
-    finalization_receipt_hash = str(
-        candidate["finalization_receipt_hash"]
-    )
-    finalization_graphs = await _graphs_for_roots(
-        {finalization_receipt_hash},
-        load_graph=load_graph,
-    )
-    if len(finalization_graphs) != 1:
-        raise ResearchLabV2AuthorityError(
-            "chain settlement finalization graph is ambiguous"
+    candidate = None
+    finalization_graphs: list[dict[str, Any]] = []
+    if candidate_rows:
+        try:
+            candidate = select_chain_realized_bundle_candidate_v1(
+                candidate_rows,
+                observation=observation,
+            )
+        except ChampionSettlementV2Error as exc:
+            raise ResearchLabV2AuthorityError(str(exc)) from exc
+        finalization_receipt_hash = str(
+            candidate["finalization_receipt_hash"]
         )
+        finalization_graphs = await _graphs_for_roots(
+            {finalization_receipt_hash},
+            load_graph=load_graph,
+        )
+        if len(finalization_graphs) != 1:
+            raise ResearchLabV2AuthorityError(
+                "chain settlement finalization graph is ambiguous"
+            )
+    authority_mode = (
+        "finalized_bundle" if candidate is not None else "unattributed"
+    )
 
     settlement_outcome = await execute(
         operation=OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
@@ -1649,11 +1660,16 @@ async def settle_chain_realized_epoch_v1(
             "epoch_id": normalized_epoch,
             "observation": observation,
             "observation_receipt_hash": observation_receipt_hash,
-            "bundle_hash": str(candidate["bundle_hash"]),
+            "authority_mode": authority_mode,
+            "bundle_hash": (
+                str(candidate["bundle_hash"])
+                if candidate is not None
+                else None
+            ),
         },
         parent_graphs=(
             dict(observation_graph),
-            dict(finalization_graphs[0]),
+            *(dict(graph) for graph in finalization_graphs),
         ),
     )
     package = settlement_outcome.get("result")
@@ -1682,7 +1698,10 @@ async def settle_chain_realized_epoch_v1(
         or not isinstance(credits, list)
         or settlement_hash != sha256_json(dict(settlement_doc))
         or settlement_doc.get("schema_version")
-        != CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1
+        not in {
+            CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+            CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2,
+        }
         or settlement_receipt.get("role") != "gateway_coordinator"
         or settlement_receipt.get("purpose")
         != CHAIN_REALIZED_SETTLEMENT_PURPOSE_V1

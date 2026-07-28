@@ -112,6 +112,10 @@ async def verify_weight_submission_storage_readable_v2(
         _resolve_maintenance_epoch,
         champion_v2_cutover_readiness_report,
     )
+    from gateway.research_lab.champion_settlement_v2 import (
+        ChampionSettlementV2Error,
+        validate_chain_realized_settlement_bootstrap_v1,
+    )
 
     effective_epoch = await _resolve_maintenance_epoch(epoch)
     if netuid is None:
@@ -120,16 +124,30 @@ async def verify_weight_submission_storage_readable_v2(
         effective_netuid = int(BITTENSOR_NETUID)
     else:
         effective_netuid = int(netuid)
-    readiness = await champion_v2_cutover_readiness_report(
-        epoch=effective_epoch,
-        netuid=effective_netuid,
-    )
-    return {
+    bootstrap = None
+    try:
+        readiness = await champion_v2_cutover_readiness_report(
+            epoch=effective_epoch,
+            netuid=effective_netuid,
+        )
+    except ChampionSettlementV2Error as exc:
+        if str(exc) != "chain realized settlement history is incomplete":
+            raise
+        bootstrap = await validate_chain_realized_settlement_bootstrap_v1(
+            netuid=effective_netuid,
+            target_epoch=effective_epoch - 1,
+        )
+        readiness = {
+            "ready": False,
+            "receipt_coverage": 0.0,
+            "historical_classification_coverage": 0.0,
+        }
+    result = {
         "schema_version": "leadpoet.weight_submission_storage_readiness.v2",
         "status": "readable",
         "epoch": effective_epoch,
         "netuid": effective_netuid,
-        "authority_ready": readiness.get("ready") is True,
+        "authority_ready": bootstrap is None and readiness.get("ready") is True,
         "receipt_coverage": float(readiness.get("receipt_coverage") or 0.0),
         "historical_classification_coverage": float(
             readiness.get("historical_classification_coverage")
@@ -137,6 +155,9 @@ async def verify_weight_submission_storage_readable_v2(
             or 0.0
         ),
     }
+    if bootstrap is not None:
+        result["chain_realized_settlement_bootstrap"] = bootstrap
+    return result
 
 
 async def verify_weight_submission_ready_v2(

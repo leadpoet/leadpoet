@@ -241,6 +241,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "scripts/126-research-lab-chain-realized-settlement.sql",
         "persist_research_lab_chain_realized_settlement_v1",
     ),
+    (
+        "scripts/127-research-lab-chain-unattributed-settlement.sql",
+        "persist_research_lab_chain_realized_unattributed_v2",
+    ),
 )
 
 

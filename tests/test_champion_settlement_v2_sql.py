@@ -35,6 +35,11 @@ CHAIN_REALIZED_SQL = (
     / "scripts"
     / "126-research-lab-chain-realized-settlement.sql"
 ).read_text(encoding="utf-8")
+CHAIN_UNATTRIBUTED_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "127-research-lab-chain-unattributed-settlement.sql"
+).read_text(encoding="utf-8")
 
 
 def test_finalized_allocation_view_requires_bundle_publication_and_finalization():
@@ -257,6 +262,31 @@ def test_chain_realized_credit_rows_require_complete_epoch_marker():
     assert "lab_attributed_alpha_percent <= observed_chain_alpha_percent" in (
         CHAIN_REALIZED_SQL
     )
+
+
+def test_unattributed_chain_marker_is_zero_credit_and_receipt_backed():
+    assert "research_lab_chain_realized_epoch_settlement.v2" in (
+        CHAIN_UNATTRIBUTED_SQL
+    )
+    assert "persist_research_lab_chain_realized_unattributed_v2" in (
+        CHAIN_UNATTRIBUTED_SQL
+    )
+    assert "jsonb_array_length(requested_credits) <> 0" in (
+        CHAIN_UNATTRIBUTED_SQL
+    )
+    assert "settlement_doc->'credit_hashes' = '[]'::JSONB" in (
+        CHAIN_UNATTRIBUTED_SQL
+    )
+    assert "research_lab_attested_execution_receipts_v2" in (
+        CHAIN_UNATTRIBUTED_SQL
+    )
+    assert "research_lab.chain_realized_epoch_settlement.v1" in (
+        CHAIN_UNATTRIBUTED_SQL
+    )
+    assert "INSERT INTO public.research_lab_chain_realized_obligation" not in (
+        CHAIN_UNATTRIBUTED_SQL
+    )
+    assert "GRANT EXECUTE" in CHAIN_UNATTRIBUTED_SQL
 
 
 def test_chain_realized_rpc_enforces_activation_contiguity_and_receipt():

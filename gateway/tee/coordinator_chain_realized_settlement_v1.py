@@ -13,6 +13,7 @@ from gateway.research_lab.champion_settlement_v2 import (
     ChampionSettlementV2Error,
     _preliminary_finalized_bundle_authority_v1,
     build_chain_realized_settlement_package_v1,
+    build_unattributed_chain_realized_settlement_package_v2,
     select_chain_realized_bundle_candidate_v1,
     validate_chain_weight_observation_v1,
     validate_finalized_allocation_authorities_v2,
@@ -170,6 +171,7 @@ class CoordinatorChainRealizedSettlementV1:
             "epoch_id",
             "observation",
             "observation_receipt_hash",
+            "authority_mode",
             "bundle_hash",
         }:
             raise CoordinatorChainRealizedSettlementV1Error(
@@ -182,6 +184,7 @@ class CoordinatorChainRealizedSettlementV1:
             additional_fields={
                 "observation",
                 "observation_receipt_hash",
+                "authority_mode",
                 "bundle_hash",
             },
         )
@@ -215,6 +218,11 @@ class CoordinatorChainRealizedSettlementV1:
                 "chain settlement observation receipt differs"
             )
 
+        authority_mode = str(payload.get("authority_mode") or "")
+        if authority_mode not in {"finalized_bundle", "unattributed"}:
+            raise CoordinatorChainRealizedSettlementV1Error(
+                "chain settlement authority mode is invalid"
+            )
         rows = self._read(
             "finalized_authority_by_chain_vector",
             {
@@ -238,10 +246,17 @@ class CoordinatorChainRealizedSettlementV1:
             },
             context,
         )
+        if authority_mode == "unattributed":
+            if rows or payload.get("bundle_hash") is not None:
+                raise CoordinatorChainRealizedSettlementV1Error(
+                    "unattributed settlement has finalized bundle authority"
+                )
+            return build_unattributed_chain_realized_settlement_package_v2(
+                observation=observation,
+            )
         try:
             selected = select_chain_realized_bundle_candidate_v1(
-                rows,
-                observation=observation,
+                rows, observation=observation
             )
         except ChampionSettlementV2Error as exc:
             raise CoordinatorChainRealizedSettlementV1Error(str(exc)) from exc

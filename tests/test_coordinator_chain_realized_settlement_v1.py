@@ -212,6 +212,7 @@ def test_settlement_rereads_exact_vector_and_rejects_host_substitution(
                 "epoch_id": 101,
                 "observation": observation,
                 "observation_receipt_hash": HASH_A,
+                "authority_mode": "finalized_bundle",
                 "bundle_hash": "sha256:" + "d" * 64,
             },
             context=_context(graphs=graphs),
@@ -293,9 +294,121 @@ def test_settlement_accepts_only_independently_verified_exact_authority(
             "epoch_id": 101,
             "observation": observation,
             "observation_receipt_hash": HASH_A,
+            "authority_mode": "finalized_bundle",
             "bundle_hash": HASH_B,
         },
         context=_context(graphs=graphs),
     )
 
     assert result == package
+
+
+def test_settlement_records_missing_finalized_authority_without_credit(
+    monkeypatch,
+):
+    observation = _observation()
+    observation_receipt = {
+        "receipt_hash": HASH_A,
+        "role": "gateway_coordinator",
+        "purpose": authority.CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
+        "status": "succeeded",
+        "epoch_id": 101,
+        "output_root": sha256_json(observation),
+    }
+    reader = _Reader({"finalized_authority_by_chain_vector": []})
+    source = authority.CoordinatorChainRealizedSettlementV1(
+        reader=reader,
+        chain_source=_Chain(_chain_state()),
+    )
+    monkeypatch.setattr(
+        authority,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = source.settle(
+        payload={
+            "schema_version": (
+                authority.CHAIN_REALIZED_SETTLEMENT_REQUEST_SCHEMA_VERSION_V1
+            ),
+            "netuid": 71,
+            "epoch_id": 101,
+            "observation": observation,
+            "observation_receipt_hash": HASH_A,
+            "authority_mode": "unattributed",
+            "bundle_hash": None,
+        },
+        context=_context(
+            graphs=(
+                {
+                    "root_receipt_hash": HASH_A,
+                    "receipts": [observation_receipt],
+                },
+            )
+        ),
+    )
+
+    assert result["credits"] == []
+    assert result["settlement_doc"]["credit_hashes"] == []
+    assert result["settlement_doc"]["schema_version"] == (
+        "leadpoet.research_lab_chain_realized_epoch_settlement.v2"
+    )
+    assert result["settlement_doc"]["observation_summary"][
+        "authority_mode"
+    ] == "unattributed_chain_observation"
+
+
+def test_unattributed_settlement_rejects_existing_finalized_authority(
+    monkeypatch,
+):
+    observation = _observation()
+    observation_receipt = {
+        "receipt_hash": HASH_A,
+        "role": "gateway_coordinator",
+        "purpose": authority.CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
+        "status": "succeeded",
+        "epoch_id": 101,
+        "output_root": sha256_json(observation),
+    }
+    reader = _Reader(
+        {
+            "finalized_authority_by_chain_vector": [
+                {"candidate": True, "bundle_hash": HASH_B}
+            ]
+        }
+    )
+    source = authority.CoordinatorChainRealizedSettlementV1(
+        reader=reader,
+        chain_source=_Chain(_chain_state()),
+    )
+    monkeypatch.setattr(
+        authority,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        authority.CoordinatorChainRealizedSettlementV1Error,
+        match="has finalized bundle authority",
+    ):
+        source.settle(
+            payload={
+                "schema_version": (
+                    authority.CHAIN_REALIZED_SETTLEMENT_REQUEST_SCHEMA_VERSION_V1
+                ),
+                "netuid": 71,
+                "epoch_id": 101,
+                "observation": observation,
+                "observation_receipt_hash": HASH_A,
+                "authority_mode": "unattributed",
+                "bundle_hash": None,
+            },
+            context=_context(
+                graphs=(
+                    {
+                        "root_receipt_hash": HASH_A,
+                        "receipts": [observation_receipt],
+                    },
+                )
+            ),
+        )

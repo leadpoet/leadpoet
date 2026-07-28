@@ -491,6 +491,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/122-research-lab-atomic-run-claim.sql",
         "scripts/123-research-lab-corpus-completeness.sql",
         "scripts/126-research-lab-chain-realized-settlement.sql",
+        "scripts/127-research-lab-chain-unattributed-settlement.sql",
     }.issubset(set(result["migration_files"]))
     assert "service-role-value" not in str(result)
 

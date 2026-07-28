@@ -39,6 +39,7 @@ from tests.restart_rehearsal.gateway_boundary_service import (
 from tests.restart_rehearsal.local_services import LocalBoundaryServices
 from tests.restart_rehearsal.verify_evidence import (
     EXPECTED_GATEWAY_PRIVATE_MODEL_ENV,
+    selected_weight_storage_bootstrap_capability,
     selected_weight_storage_preflight_capability,
     verify_gateway_private_model_environment,
     verify_gateway_weight_readiness_invocations,
@@ -1948,6 +1949,14 @@ def test_weight_storage_preflight_capability_tracks_selected_release(
     )
     assert selected_weight_storage_preflight_capability((tmp_path,)) is True
 
+    assert selected_weight_storage_bootstrap_capability((tmp_path,)) is False
+    source.write_text(
+        source.read_text(encoding="utf-8")
+        + "validate_chain_realized_settlement_bootstrap_v1()\n",
+        encoding="utf-8",
+    )
+    assert selected_weight_storage_bootstrap_capability((tmp_path,)) is True
+
 
 def test_gateway_rehearsal_requires_canonical_private_model_environment() -> None:
     row = {
@@ -2229,6 +2238,26 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
         rows,
         candidate_sha=COMMIT,
     )
+
+    bootstrap_event = {
+        "kind": "weight-readiness-boundary",
+        "boundary": "chain_realized_settlement_bootstrap",
+        "status": "ok",
+        "backlog_epoch_count": 4,
+    }
+    rows.append(bootstrap_event)
+    verify_gateway_weight_readiness_invocations(
+        rows,
+        candidate_sha=COMMIT,
+        bootstrap_preflight_supported=True,
+    )
+    rows.pop()
+    with pytest.raises(SystemExit, match="pristine chain-realized"):
+        verify_gateway_weight_readiness_invocations(
+            rows,
+            candidate_sha=COMMIT,
+            bootstrap_preflight_supported=True,
+        )
 
     rows[2]["argv"][-1] = "30"
     with pytest.raises(SystemExit, match="launcher contract"):

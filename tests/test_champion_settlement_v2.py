@@ -400,6 +400,34 @@ def _install_validators(monkeypatch, validations: dict[str, dict]) -> None:
     )
 
 
+def test_preliminary_chain_authority_accepts_exact_view_shape(monkeypatch):
+    row, _graph, verified = _authority_row("1", allocation=_allocation())
+    _install_validators(monkeypatch, {"1": verified})
+    row["finalization_doc"].update(verified["finalization"])
+
+    authority = settlement._preliminary_finalized_bundle_authority_v1(row)
+
+    assert "weight_receipt_hash" not in row
+    assert authority["weight_receipt_hash"] == (
+        verified["bundle"]["weight_receipt_hash"]
+    )
+
+
+def test_preliminary_chain_authority_rejects_tampered_weight_receipt(
+    monkeypatch,
+):
+    row, _graph, verified = _authority_row("1", allocation=_allocation())
+    _install_validators(monkeypatch, {"1": verified})
+    row["finalization_doc"].update(verified["finalization"])
+    row["finalization_doc"]["weight_receipt_hash"] = "sha256:" + "0" * 64
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="finalization differs at weight_receipt_hash",
+    ):
+        settlement._preliminary_finalized_bundle_authority_v1(row)
+
+
 def _chain_observation(
     *,
     epoch_id: int,

@@ -295,13 +295,19 @@ def _preliminary_finalized_bundle_authority_v1(
         ("netuid", bundle["netuid"]),
         ("epoch_id", bundle["epoch_id"]),
         ("weights_hash", bundle["weights_hash"]),
-        ("weight_receipt_hash", bundle["weight_receipt_hash"]),
         ("finalized_block", finalized_block),
     ):
         if finalization_doc.get(field) != expected or row.get(field) != expected:
             raise ChampionSettlementV2Error(
                 "chain settlement finalization differs at %s" % field
             )
+    if (
+        finalization_doc.get("weight_receipt_hash")
+        != bundle["weight_receipt_hash"]
+    ):
+        raise ChampionSettlementV2Error(
+            "chain settlement finalization differs at weight_receipt_hash"
+        )
     return {
         **bundle,
         "bundle_doc": dict(bundle_doc),

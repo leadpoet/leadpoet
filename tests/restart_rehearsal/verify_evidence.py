@@ -80,13 +80,20 @@ KNOWN_INTERNAL_SUBSTITUTION_BOUNDARIES = {
 }
 
 
-def events() -> list[dict]:
-    path = Path("/rehearsal-state/events.jsonl")
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+def events(
+    state_root: Path = Path("/rehearsal-state"),
+) -> list[dict]:
+    rows: list[dict] = []
+    for name in ("events.jsonl", "local-postgrest-events.jsonl"):
+        path = state_root / name
+        if not path.is_file():
+            continue
+        rows.extend(
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+    return sorted(rows, key=lambda row: int(row.get("at_ns") or 0))
 
 
 def require_order(values: list[str], required: list[str]) -> None:

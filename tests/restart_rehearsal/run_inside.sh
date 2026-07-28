@@ -49,6 +49,11 @@ preserve_rehearsal_evidence() {
       "/evidence/${RUN_ORDINAL}-${COMPONENT}-${TRANSITION}-${CANDIDATE_SHA}-events.jsonl" \
       2>/dev/null || true
   fi
+  if [ -f "$REHEARSAL_STATE_ROOT/local-postgrest-events.jsonl" ]; then
+    cp "$REHEARSAL_STATE_ROOT/local-postgrest-events.jsonl" \
+      "/evidence/${RUN_ORDINAL}-${COMPONENT}-${TRANSITION}-${CANDIDATE_SHA}-postgrest-events.jsonl" \
+      2>/dev/null || true
+  fi
   if [ "$COMPONENT" = "gateway" ] \
     && [ -f /home/ec2-user/gateway/gateway.log ]; then
     cp /home/ec2-user/gateway/gateway.log \

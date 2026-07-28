@@ -51,6 +51,7 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
 from tests.restart_rehearsal.local_services import LocalBoundaryServices
 from tests.restart_rehearsal.verify_evidence import (
     EXPECTED_GATEWAY_PRIVATE_MODEL_ENV,
+    events,
     selected_weight_storage_preflight_capability,
     verify_gateway_private_model_environment,
     verify_migration_backed_database_contract,
@@ -237,6 +238,29 @@ def test_chain_settlement_evidence_requires_persistence_then_readback() -> None:
     verify_chain_settlement_durable_readback(
         [persisted, settlement_read, credit_read]
     )
+
+
+def test_rehearsal_evidence_merges_postgrest_events_in_time_order(
+    tmp_path,
+) -> None:
+    (tmp_path / "events.jsonl").write_text(
+        json.dumps({"at_ns": 10, "kind": "host-command"}) + "\n"
+        + json.dumps({"at_ns": 30, "kind": "gateway-http"}) + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "local-postgrest-events.jsonl").write_text(
+        json.dumps(
+            {
+                "at_ns": 20,
+                "kind": "local-postgrest",
+                "operation": "chain_settlement_persisted",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert [row["at_ns"] for row in events(tmp_path)] == [10, 20, 30]
 
 
 def test_gateway_rehearsal_discovers_candidate_direct_provider_tables() -> None:

@@ -2594,8 +2594,51 @@ async def backfill_champion_settlement_v2_authority(
         epoch=effective_epoch,
         netuid=effective_netuid,
     )
+    after_missing = list(
+        after.get("missing_historical_classifications")
+        or after.get("missing_historical_settlements")
+        or ()
+    )
+    unresolved_identities = {
+        (
+            int(item["epoch"]),
+            str(item.get("allocation_hash") or ""),
+        )
+        for item in after_missing
+        if isinstance(item, Mapping) and item.get("epoch") is not None
+    }
+    unresolved_failed = [
+        item
+        for item in failed
+        if (
+            int(item["epoch"]),
+            str(item.get("allocation_hash") or ""),
+        )
+        in unresolved_identities
+    ]
+    recovered_after_readback = [
+        item
+        for item in failed
+        if (
+            int(item["epoch"]),
+            str(item.get("allocation_hash") or ""),
+        )
+        not in unresolved_identities
+    ]
+    classifications_complete = (
+        not after_missing
+        and float(
+            after.get("historical_classification_coverage")
+            or after.get("historical_settlement_coverage")
+            or 0.0
+        )
+        == 1.0
+    )
     return {
-        "ok": not blocked and not failed,
+        # An enclave/database operation can commit durably before its response
+        # is lost. The authoritative readback, not the transport outcome,
+        # decides whether any classification remains missing.
+        "ok": classifications_complete,
         "dry_run": False,
         "action": "backfill-champion-v2-settlements",
         "epoch": effective_epoch,
@@ -2615,8 +2658,18 @@ async def backfill_champion_settlement_v2_authority(
         # Compatibility aliases for the existing operator command response.
         "migrated_count": len(classified),
         "migrated": classified,
-        "blocked": blocked,
-        "failed": failed,
+        "blocked": [
+            dict(item)
+            for item in after_missing
+            if not (
+                isinstance(item, Mapping)
+                and item.get("reason")
+                == "missing_finalized_chain_classification_authority"
+            )
+        ],
+        "failed": unresolved_failed,
+        "recovered_after_readback_count": len(recovered_after_readback),
+        "recovered_after_readback": recovered_after_readback,
         "readiness_before": before,
         "readiness_after": after,
     }

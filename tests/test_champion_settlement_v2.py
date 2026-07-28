@@ -2701,6 +2701,58 @@ async def test_champion_settlement_backfill_is_dry_run_safe_and_resumable(
 
 
 @pytest.mark.asyncio
+async def test_champion_settlement_backfill_accepts_durable_readback_after_lost_response(
+    monkeypatch,
+):
+    from gateway.research_lab import maintenance, v2_authority
+
+    missing = {
+        "epoch": 100,
+        "allocation_hash": "sha256:" + "1" * 64,
+        "reason": "missing_finalized_chain_classification_authority",
+    }
+    state = {"covered": False}
+
+    async def readiness(**_kwargs):
+        return {
+            "ready": state["covered"],
+            "historical_classification_coverage": (
+                1.0 if state["covered"] else 0.0
+            ),
+            "missing_historical_classifications": (
+                [] if state["covered"] else [missing]
+            ),
+        }
+
+    async def classify(**_kwargs):
+        state["covered"] = True
+        raise RuntimeError("response lost after durable classification")
+
+    monkeypatch.setattr(
+        maintenance,
+        "champion_v2_cutover_readiness_report",
+        readiness,
+    )
+    monkeypatch.setattr(
+        v2_authority,
+        "classify_historical_champion_allocation_v2",
+        classify,
+    )
+
+    result = await maintenance.backfill_champion_settlement_v2_authority(
+        epoch=102,
+        netuid=71,
+        dry_run=False,
+    )
+
+    assert result["ok"] is True
+    assert result["failed"] == []
+    assert result["recovered_after_readback_count"] == 1
+    assert result["recovered_after_readback"][0]["epoch"] == 100
+    assert result["readiness_after"]["historical_classification_coverage"] == 1.0
+
+
+@pytest.mark.asyncio
 async def test_champion_settlement_backfill_never_migrates_invalid_evidence(
     monkeypatch,
 ):

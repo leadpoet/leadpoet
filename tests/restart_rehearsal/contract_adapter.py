@@ -2055,6 +2055,33 @@ def command_python(argv: list[str]) -> int:
             os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module == "gateway.tee.verify_weight_submission_ready_v2":
             _record_production_module(module, argv)
+            if (
+                "--repair" in argv
+                and os.environ.get(
+                    "REHEARSAL_WEIGHT_READINESS_FAIL_ONCE", ""
+                )
+                == "1"
+            ):
+                handle, state = _locked_state()
+                attempts = int(
+                    state.get("weight_readiness_repair_attempts", 0)
+                ) + 1
+                state["weight_readiness_repair_attempts"] = attempts
+                _save_state(handle, state)
+                if attempts == 1:
+                    _event(
+                        "fault-injection",
+                        argv,
+                        status="injected-transient-failure",
+                        module=module,
+                        implementation="real-module-process-boundary",
+                        scope=_rehearsal_scope(),
+                    )
+                    print(
+                        "REHEARSAL_INJECTED_WEIGHT_READINESS_FAILURE",
+                        file=sys.stderr,
+                    )
+                    return 75
             os.execv(REAL_PYTHON, [REAL_PYTHON, *argv])
         elif module == "gateway.main":
             return _exec_long_lived_production_module(

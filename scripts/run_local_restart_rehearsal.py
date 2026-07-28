@@ -938,6 +938,10 @@ def _run_workflow(
         "--env",
         "REHEARSAL_FAULT_MATRIX="
         + ("1" if limits["fault_matrix"] else "0"),
+        "--env",
+        "REHEARSAL_WEIGHT_READINESS_FAIL_ONCE=1",
+        "--env",
+        "GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS=0",
         tag,
     ]
     try:

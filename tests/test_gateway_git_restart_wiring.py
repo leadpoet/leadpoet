@@ -207,7 +207,8 @@ def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
         'echo "Executing the one-time receipt-backed stateful epoch cutover"'
     )
     repair = script.index(
-        "-m gateway.tee.verify_weight_submission_ready_v2 --repair"
+        "\nrepair_and_verify_gateway_weight_input\n",
+        cutover,
     )
     launch = script.index(
         'setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main'
@@ -227,6 +228,23 @@ def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
     )
 
     assert "GATEWAY_WEIGHT_INPUT_HTTP_TIMEOUT_SECONDS=360" in script
+    assert (
+        'GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS="${'
+        'GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS:-3}"'
+    ) in script
+    assert (
+        'GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS="${'
+        'GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS:-5}"'
+    ) in script
+    assert "repair_and_verify_gateway_weight_input()" in script
+    assert (
+        'for attempt in $(seq 1 "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS")'
+        in script
+    )
+    assert (
+        'sleep "$GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS"'
+        in script
+    )
     assert (
         storage_preflight
         < shutdown
@@ -409,11 +427,18 @@ def test_gateway_weight_input_repair_runs_from_canonical_repo_root() -> None:
     )
     repair_command = script.index(
         "-m gateway.tee.verify_weight_submission_ready_v2 --repair",
+    )
+    repair_call = script.index(
+        "\nrepair_and_verify_gateway_weight_input\n",
         repair_stage,
     )
-    repair_block = script[repair_stage:repair_command]
+    repair_function = script.index(
+        "repair_and_verify_gateway_weight_input()"
+    )
+    repair_block = script[repair_function:repair_command]
 
-    assert '(\n  cd "$LEADPOET_REPO_ROOT"\n' in repair_block
+    assert 'cd "$LEADPOET_REPO_ROOT"\n' in repair_block
+    assert repair_command < repair_stage < repair_call
 
 
 def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> None:

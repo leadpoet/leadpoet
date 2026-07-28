@@ -33,6 +33,8 @@ GATEWAY_RESTART_PHASE="${GATEWAY_RESTART_PHASE:-prepare}"
 GATEWAY_STATEFUL_CUTOVER_CEREMONY="${GATEWAY_STATEFUL_CUTOVER_CEREMONY:-0}"
 GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS=120
 GATEWAY_WEIGHT_INPUT_HTTP_TIMEOUT_SECONDS=360
+GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS="${GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS:-3}"
+GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS="${GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS:-5}"
 GATEWAY_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
 GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST="${GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
 GATEWAY_RESTART_START_PATH="/home/ec2-user/.config/leadpoet/restart-start-v1.json"
@@ -118,6 +120,38 @@ GATEWAY_HOST_EXTRA_PYTHON_PACKAGES=(
   minio
   awscli
 )
+
+repair_and_verify_gateway_weight_input() {
+  local attempt status
+  if ! [[ "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS must be a positive integer" >&2
+    return 2
+  fi
+  if ! [[ "$GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS must be a non-negative integer" >&2
+    return 2
+  fi
+
+  for attempt in $(seq 1 "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS"); do
+    echo "Authoritative V2 validator weight input repair attempt ${attempt}/${GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS}"
+    if (
+      cd "$LEADPOET_REPO_ROOT"
+      PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+        -m gateway.tee.verify_weight_submission_ready_v2 --repair
+    ); then
+      return 0
+    else
+      status=$?
+    fi
+    if [ "$attempt" -ge "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS" ]; then
+      echo "ERROR: authoritative V2 validator weight input repair failed after ${attempt} attempt(s)" >&2
+      return "$status"
+    fi
+    echo "Authoritative repair did not complete; retrying after durable readback in ${GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS}s" >&2
+    sleep "$GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS"
+  done
+  return 1
+}
 
 install_gateway_python_dependencies() {
   local legacy_project_metadata pip_scope=() requirements_file
@@ -1792,11 +1826,7 @@ export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true
 echo "Repairing and verifying the authoritative V2 validator weight input"
 GATEWAY_DEPLOY_STAGE="validator_weight_input_repair"
 export GATEWAY_DEPLOY_STAGE
-(
-  cd "$LEADPOET_REPO_ROOT"
-  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-    -m gateway.tee.verify_weight_submission_ready_v2 --repair
-)
+repair_and_verify_gateway_weight_input
 
 # Keep attestation/PCR0 Docker builds off this host while the pre-launch
 # authority verifier is reconstructing the canonical allocation. The verifier

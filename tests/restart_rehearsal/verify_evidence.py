@@ -518,43 +518,61 @@ def verify_gateway_weight_readiness_invocations(
         raise SystemExit(
             "current release does not declare the required weight storage preflight"
         )
-    expected = []
+    expected_prefix = []
     if storage_preflight_supported:
-        expected.append(
+        expected_prefix.append(
             {
                 "argv": ["-m", module, "--storage-read-preflight"],
                 "source_kind": "candidate_archive",
             }
         )
-    expected.extend(
-        [
-        {
-            "argv": ["-m", module, "--repair"],
-            "source_kind": "candidate_checkout",
-        },
-        {
-            "argv": [
-                "-m",
-                module,
-                "--gateway-url",
-                "http://localhost:8000",
-                "--http-timeout-seconds",
-                "360",
-            ],
-            "source_kind": "candidate_checkout",
-        },
-        ]
-    )
+    repair_contract = {
+        "argv": ["-m", module, "--repair"],
+        "source_kind": "candidate_checkout",
+    }
+    http_contract = {
+        "argv": [
+            "-m",
+            module,
+            "--gateway-url",
+            "http://localhost:8000",
+            "--http-timeout-seconds",
+            "360",
+        ],
+        "source_kind": "candidate_checkout",
+    }
     observed = [
         row
         for row in rows
         if row.get("kind") == "python-module"
         and row.get("module") == module
     ]
-    if len(observed) != len(expected):
+    prefix_count = len(expected_prefix)
+    if len(observed) < prefix_count + 2:
         raise SystemExit(
             "gateway launcher did not execute the exact production weight "
             f"readiness invocation contract: {observed!r}"
+        )
+    repair_rows = observed[prefix_count:-1]
+    if not repair_rows:
+        raise SystemExit(
+            "gateway launcher did not execute weight readiness repair"
+        )
+    expected = [
+        *expected_prefix,
+        *([repair_contract] * len(repair_rows)),
+        http_contract,
+    ]
+    injected = any(
+        row.get("kind") == "fault-injection"
+        and row.get("module") == module
+        and row.get("status") == "injected-transient-failure"
+        for row in rows
+    )
+    if injected and len(repair_rows) < 2:
+        raise SystemExit(
+            "gateway launcher did not retry weight readiness after the "
+            "injected transient failure"
         )
     for ordinal, (row, contract) in enumerate(
         zip(observed, expected),

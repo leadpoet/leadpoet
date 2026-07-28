@@ -2000,17 +2000,17 @@ async def validate_chain_realized_settlement_bootstrap_v1(
     target_epoch: int,
     maximum_backlog: int = 100,
 ) -> dict[str, Any]:
-    """Validate the one pristine state that a new enclave must bootstrap.
+    """Validate a safe pre-launch settlement state for enclave repair.
 
     Migration 126 creates an immutable activation row before the candidate
     enclave is launched. The old enclave cannot produce the new measured
-    settlement receipts, so a pre-shutdown read may legitimately see the
-    activation with no settlement rows. This validator accepts only that
-    pristine state and proves its finalized activation source. Any partial
-    history remains a hard error.
+    settlement receipts, so a pre-shutdown read may legitimately see either
+    no settlement rows or a validated contiguous prefix left by an earlier
+    repair attempt. Gaps, unverified rows, and rows beyond the target remain
+    hard errors.
     """
 
-    from gateway.research_lab.store import select_many
+    from gateway.research_lab.store import select_all, select_many
 
     normalized_netuid = int(netuid)
     normalized_target = int(target_epoch)
@@ -2059,22 +2059,48 @@ async def validate_chain_realized_settlement_bootstrap_v1(
         raise ChampionSettlementV2Error(
             "chain realized settlement bootstrap target predates activation"
         )
-    backlog = normalized_target - activation_epoch + 1
-    if backlog > int(maximum_backlog):
-        raise ChampionSettlementV2Error(
-            "chain-realized settlement backlog exceeds policy"
-        )
-
-    existing_rows = await select_many(
+    existing_rows = await select_all(
         CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1,
         columns="netuid,epoch_id,settlement_hash",
         filters=(("netuid", normalized_netuid),),
-        order_by=(("epoch_id", True),),
-        limit=1,
+        order_by=(("epoch_id", False),),
+        max_rows=10000,
+        allow_partial=False,
     )
-    if existing_rows:
+    try:
+        existing_epochs = [int(row["epoch_id"]) for row in existing_rows]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ChampionSettlementV2Error(
+            "chain realized settlement history is invalid"
+        ) from exc
+    if len(existing_epochs) != len(set(existing_epochs)):
         raise ChampionSettlementV2Error(
             "chain realized settlement history is incomplete"
+        )
+    settled_through = (
+        max(existing_epochs) if existing_epochs else activation_epoch - 1
+    )
+    if settled_through > normalized_target:
+        raise ChampionSettlementV2Error(
+            "chain realized settlement history is ahead of target"
+        )
+    expected_existing_epochs = list(
+        range(activation_epoch, settled_through + 1)
+    )
+    if sorted(existing_epochs) != expected_existing_epochs:
+        raise ChampionSettlementV2Error(
+            "chain realized settlement history is incomplete"
+        )
+    pending_epoch_count = normalized_target - settled_through
+    if pending_epoch_count > int(maximum_backlog):
+        raise ChampionSettlementV2Error(
+            "chain-realized settlement backlog exceeds policy"
+        )
+    if existing_epochs:
+        await load_chain_realized_allocation_history_v1(
+            netuid=normalized_netuid,
+            start_epoch=activation_epoch,
+            end_epoch=settled_through,
         )
 
     source_rows = await select_many(
@@ -2117,13 +2143,21 @@ async def validate_chain_realized_settlement_bootstrap_v1(
         "schema_version": (
             "leadpoet.chain_realized_settlement_bootstrap_readiness.v1"
         ),
-        "status": "pristine_bootstrap_pending",
+        "status": (
+            "resumable_bootstrap_pending"
+            if existing_epochs
+            else "pristine_bootstrap_pending"
+        ),
         "netuid": normalized_netuid,
         "activation_epoch": activation_epoch,
         "target_epoch": normalized_target,
-        "backlog_epoch_count": backlog,
+        "settled_through_epoch": (
+            settled_through if existing_epochs else None
+        ),
+        "backlog_epoch_count": pending_epoch_count,
         "source_bundle_hash": source_bundle_hash,
         "source_finalized_block": source_finalized_block,
+        "validated_chain_realized_epochs": sorted(existing_epochs),
         "validated_finalized_candidate_epochs": sorted(
             int(row["epoch"]) for row in finalized
         ),

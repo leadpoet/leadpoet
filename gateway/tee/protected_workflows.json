@@ -207,6 +207,11 @@
       "symbol": "validate_chain_realized_obligation_credits_v1"
     },
     {
+      "ast_sha256": "sha256:30b2d13b215b68f4fdc198dffe3599e86ef2339dc8c5a65dc437000e5d0b6b3d",
+      "path": "gateway/research_lab/champion_settlement_v2.py",
+      "symbol": "validate_chain_realized_settlement_bootstrap_v1"
+    },
+    {
       "ast_sha256": "sha256:9933e704d832fba9642fa52b01c76ee6971c2f7eb3530ec33354a95f7455f7d4",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "validate_chain_weight_observation_v1"
@@ -1227,7 +1232,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:fb36410f0f111a77356b5f01e0139bd5ced6e5c0e1b4d692148c0a1d53614887",
+  "manifest_hash": "sha256:4a93cea414ac674fbda201b7d55b78e95dae4c8363d42c0c82548bc4a795b403",
   "protected_source_commit": "2e0c9f950c29bf651603206876472e88dff0ba95",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

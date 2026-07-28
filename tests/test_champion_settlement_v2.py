@@ -845,8 +845,6 @@ async def test_chain_realized_pristine_bootstrap_validates_activation_source(
     async def select_many(table, *, filters=(), **_kwargs):
         if table == settlement.CHAIN_REALIZED_SETTLEMENT_ACTIVATION_TABLE_V1:
             return [activation]
-        if table == settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1:
-            return []
         if table == settlement.FINALIZED_ALLOCATION_VIEW_V2:
             assert ("bundle_hash", source_hash) in filters
             assert ("finalized_block", 1234) in filters
@@ -860,6 +858,10 @@ async def test_chain_realized_pristine_bootstrap_validates_activation_source(
                 }
             ]
         raise AssertionError(table)
+
+    async def select_all(table, **_kwargs):
+        assert table == settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1
+        return []
 
     async def load_finalized(**kwargs):
         assert kwargs == {"netuid": 71, "start_epoch": 100, "end_epoch": 103}
@@ -877,6 +879,7 @@ async def test_chain_realized_pristine_bootstrap_validates_activation_source(
         ]
 
     monkeypatch.setattr(store, "select_many", select_many)
+    monkeypatch.setattr(store, "select_all", select_all)
     monkeypatch.setattr(
         settlement,
         "load_finalized_allocation_history_v2",
@@ -892,11 +895,101 @@ async def test_chain_realized_pristine_bootstrap_validates_activation_source(
     assert result["activation_epoch"] == 100
     assert result["target_epoch"] == 103
     assert result["backlog_epoch_count"] == 4
+    assert result["settled_through_epoch"] is None
+    assert result["validated_chain_realized_epochs"] == []
     assert result["validated_finalized_candidate_epochs"] == [100, 103]
 
 
 @pytest.mark.asyncio
-async def test_chain_realized_bootstrap_rejects_any_partial_history(
+async def test_chain_realized_bootstrap_accepts_valid_contiguous_prefix(
+    monkeypatch,
+):
+    from gateway.research_lab import store
+
+    source_hash = "sha256:" + "a" * 64
+    activation = {
+        "netuid": 71,
+        "schema_version": (
+            "leadpoet.research_lab_chain_realized_settlement_activation.v1"
+        ),
+        "first_epoch_id": 100,
+        "source_bundle_hash": source_hash,
+        "source_bundle_epoch_id": 100,
+        "source_finalized_block": 1234,
+    }
+
+    async def select_many(table, *, filters=(), **_kwargs):
+        if table == settlement.CHAIN_REALIZED_SETTLEMENT_ACTIVATION_TABLE_V1:
+            return [activation]
+        if table == settlement.FINALIZED_ALLOCATION_VIEW_V2:
+            assert ("bundle_hash", source_hash) in filters
+            return [
+                {
+                    "netuid": 71,
+                    "epoch_id": 100,
+                    "bundle_hash": source_hash,
+                    "source_finalized_block": 1234,
+                    "finalized_block": 1234,
+                    "finalization_receipt_hash": "sha256:" + "b" * 64,
+                }
+            ]
+        raise AssertionError(table)
+
+    async def select_all(table, **_kwargs):
+        assert table == settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1
+        return [
+            {
+                "netuid": 71,
+                "epoch_id": epoch,
+                "settlement_hash": "sha256:" + f"{epoch - 99:x}" * 64,
+            }
+            for epoch in (100, 101)
+        ]
+
+    async def load_chain_realized(**kwargs):
+        assert kwargs == {
+            "netuid": 71,
+            "start_epoch": 100,
+            "end_epoch": 101,
+        }
+        return [{"netuid": 71, "epoch": 100}, {"netuid": 71, "epoch": 101}]
+
+    async def load_finalized(**kwargs):
+        assert kwargs == {"netuid": 71, "start_epoch": 100, "end_epoch": 103}
+        return [
+            {
+                "epoch": 100,
+                "netuid": 71,
+                "finalized_bundle_hashes": [source_hash],
+            }
+        ]
+
+    monkeypatch.setattr(store, "select_many", select_many)
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(
+        settlement,
+        "load_chain_realized_allocation_history_v1",
+        load_chain_realized,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "load_finalized_allocation_history_v2",
+        load_finalized,
+    )
+
+    result = await settlement.validate_chain_realized_settlement_bootstrap_v1(
+        netuid=71,
+        target_epoch=103,
+    )
+
+    assert result["status"] == "resumable_bootstrap_pending"
+    assert result["settled_through_epoch"] == 101
+    assert result["backlog_epoch_count"] == 2
+    assert result["validated_chain_realized_epochs"] == [100, 101]
+
+
+@pytest.mark.asyncio
+async def test_chain_realized_bootstrap_rejects_gapped_partial_history(
     monkeypatch,
 ):
     from gateway.research_lab import store
@@ -916,17 +1009,21 @@ async def test_chain_realized_bootstrap_rejects_any_partial_history(
                     "source_finalized_block": 1234,
                 }
             ]
-        if table == settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1:
-            return [
-                {
-                    "netuid": 71,
-                    "epoch_id": 100,
-                    "settlement_hash": "sha256:" + "b" * 64,
-                }
-            ]
         raise AssertionError(table)
 
+    async def select_all(table, **_kwargs):
+        assert table == settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1
+        return [
+            {
+                "netuid": 71,
+                "epoch_id": epoch,
+                "settlement_hash": "sha256:" + f"{epoch - 99:x}" * 64,
+            }
+            for epoch in (100, 102)
+        ]
+
     monkeypatch.setattr(store, "select_many", select_many)
+    monkeypatch.setattr(store, "select_all", select_all)
 
     with pytest.raises(
         settlement.ChampionSettlementV2Error,
@@ -958,13 +1055,16 @@ async def test_chain_realized_bootstrap_rejects_unbounded_or_missing_source(
     async def select_many(table, **_kwargs):
         if table == settlement.CHAIN_REALIZED_SETTLEMENT_ACTIVATION_TABLE_V1:
             return [activation]
-        if table == settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1:
-            return []
         if table == settlement.FINALIZED_ALLOCATION_VIEW_V2:
             return []
         raise AssertionError(table)
 
+    async def select_all(table, **_kwargs):
+        assert table == settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1
+        return []
+
     monkeypatch.setattr(store, "select_many", select_many)
+    monkeypatch.setattr(store, "select_all", select_all)
 
     with pytest.raises(
         settlement.ChampionSettlementV2Error,

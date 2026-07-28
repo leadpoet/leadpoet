@@ -127,6 +127,7 @@ PROTECTED_SYMBOLS = {
         "merge_settled_allocation_histories_v2",
         "load_finalized_allocation_history_v2",
         "load_chain_realized_allocation_history_v1",
+        "validate_chain_realized_settlement_bootstrap_v1",
         "load_settled_allocation_history_v2",
         "load_legacy_allocation_nonfinalizations_v2",
         "champion_v2_cutover_readiness",

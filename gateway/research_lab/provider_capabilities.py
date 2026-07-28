@@ -13,14 +13,18 @@ import binascii
 from dataclasses import dataclass
 import json
 import logging
+import math
 import os
+from pathlib import Path
 import re
+import tempfile
 import threading
 import time
 import urllib.parse
 import urllib.request
 from typing import Any, Callable, Mapping, Sequence
 
+from gateway.research_lab.code_build import CodeEditBuildError, _run_git_apply
 from research_lab.canonical import sha256_json
 
 
@@ -60,6 +64,22 @@ _CREDENTIAL_NAME_RE = re.compile(r"\b(?:api[_-]?key|access[_-]?token|credential|
 _URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
 _ENV_REF_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _SOURCE_ADD_MANIFEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_ADD_RUNTIME_PATH = "sourcing_model/routing/runtime.py"
+_SOURCE_ADD_REGISTRATION_FIELDS = (
+    "provider_id",
+    "stage",
+    "revision",
+    "manifest_sha256",
+    "priority",
+    "capabilities",
+    "idempotency",
+    "cost_class",
+    "unit_cost",
+    "max_calls",
+    "max_results",
+    "timeout_seconds",
+    "evidence_types",
+)
 _COMPANY_DISCOVERY_PATTERNS = (
     re.compile(r"\b(?:company|candidate|account)\s+(?:discovery|sourcing|acquisition)\b"),
     re.compile(r"\b(?:discover|source|find)\s+(?:companies|candidates|accounts)\b"),
@@ -505,72 +525,240 @@ def validate_source_add_registration_diff(
     *,
     existing_runtime_source: str = "",
 ) -> list[str]:
-    """Fail closed when a source-incorporation draft does not match approval."""
+    """Validate the complete patched Routerverse registration assignment.
 
-    registration_fields = (
-        "provider_id",
-        "stage",
-        "revision",
-        "manifest_sha256",
-        "priority",
-        "capabilities",
-        "idempotency",
-        "cost_class",
-        "unit_cost",
-        "max_calls",
-        "max_results",
-        "timeout_seconds",
-        "evidence_types",
-    )
+    Added-line parsing is insufficient here: changing one field in an existing
+    registration, adding an unknown keyword, or placing an approved constructor
+    in dead code can all look valid in isolation. Apply only the runtime file's
+    diff to the exact parent source, then compare the complete typed registry.
+    """
 
-    def registration_values(node: ast.Call) -> dict[str, Any]:
+    def function_name(node: ast.Call) -> str:
+        if isinstance(node.func, ast.Name):
+            return node.func.id
+        if isinstance(node.func, ast.Attribute):
+            return node.func.attr
+        return ""
+
+    def normalize_registration(value: Mapping[str, Any]) -> dict[str, Any]:
+        normalized = dict(value)
+        provider_id = normalized.get("provider_id")
+        stage = normalized.get("stage")
+        revision = normalized.get("revision")
+        manifest = normalized.get("manifest_sha256")
+        if not isinstance(provider_id, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_-]{1,79}", provider_id
+        ):
+            raise ValueError("provider_id is invalid")
+        if stage not in {"candidate_acquisition", "intent_evidence"}:
+            raise ValueError("stage is invalid")
+        if (
+            not isinstance(manifest, str)
+            or not _SOURCE_ADD_MANIFEST_RE.fullmatch(manifest)
+            or revision != f"source-add-{manifest[:12]}"
+        ):
+            raise ValueError("registration revision is not manifest-bound")
+        for name in ("capabilities", "evidence_types"):
+            field_value = normalized.get(name)
+            if (
+                not isinstance(field_value, (list, tuple))
+                or not field_value
+                or any(
+                    not isinstance(item, str) or not item
+                    for item in field_value
+                )
+            ):
+                raise ValueError(f"{name} must be a literal sequence")
+            normalized[name] = tuple(field_value)
+        for name in ("priority", "max_calls", "max_results"):
+            field_value = normalized.get(name)
+            if isinstance(field_value, bool) or not isinstance(field_value, int):
+                raise ValueError(f"{name} must be an integer")
+        for name in ("unit_cost", "timeout_seconds"):
+            field_value = normalized.get(name)
+            if isinstance(field_value, bool) or not isinstance(
+                field_value, (int, float)
+            ):
+                raise ValueError(f"{name} must be numeric")
+            field_value = float(field_value)
+            if not math.isfinite(field_value) or field_value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
+            normalized[name] = field_value
+        expected_by_stage = {
+            "candidate_acquisition": {
+                "priority": 80,
+                "capabilities": ("candidate.provider_discovery",),
+                "max_results": 100,
+                "timeout_seconds": 60.0,
+                "evidence_types": ("provider_database",),
+            },
+            "intent_evidence": {
+                "priority": 35,
+                "capabilities": ("intent.provider_evidence",),
+                "max_results": 1,
+                "timeout_seconds": 30.0,
+                "evidence_types": ("external",),
+            },
+        }
+        expected = expected_by_stage[str(stage)]
+        if any(normalized.get(name) != expected_value for name, expected_value in expected.items()):
+            raise ValueError("registration stage contract is invalid")
+        if (
+            normalized.get("idempotency") != "idempotent"
+            or normalized.get("cost_class") not in {"free", "metered"}
+            or normalized.get("max_calls") != 1
+            or (
+                normalized.get("cost_class") == "free"
+                and normalized.get("unit_cost") != 0.0
+            )
+            or (
+                normalized.get("cost_class") == "metered"
+                and normalized.get("unit_cost") <= 0.0
+            )
+        ):
+            raise ValueError("registration execution contract is invalid")
+        return normalized
+
+    def registration_from_request(request: Mapping[str, Any]) -> dict[str, Any]:
+        provider_id = request.get("provider_id")
+        stage = request.get("stage")
+        expected_tool_id = (
+            f"candidate.source_add.{provider_id}"
+            if stage == "candidate_acquisition"
+            else f"intent.source_add.{provider_id}"
+        )
+        if (
+            request.get("schema_version")
+            != "leadpoet.routerverse_source_incorporation.v1"
+            or request.get("registration_symbol")
+            != (
+                "sourcing_model/routing/runtime.py::"
+                "SOURCE_ADD_ROUTING_REGISTRATIONS"
+            )
+            or request.get("registration_type")
+            != "SourceAddRoutingRegistration"
+            or request.get("runtime_binding_id") != provider_id
+            or request.get("tool_id") != expected_tool_id
+            or not isinstance(request.get("provider_alias"), str)
+            or not 0 < len(request["provider_alias"]) <= 80
+        ):
+            raise ValueError("approved request metadata is invalid")
+        return normalize_registration(
+            {
+                field: request.get(field)
+                for field in _SOURCE_ADD_REGISTRATION_FIELDS
+            }
+        )
+
+    def registration_from_call(node: ast.Call) -> dict[str, Any]:
+        if function_name(node) != "SourceAddRoutingRegistration":
+            raise ValueError("registry contains a non-registration value")
+        if node.args or any(keyword.arg is None for keyword in node.keywords):
+            raise ValueError("registration must use explicit keyword literals")
+        keyword_names = [str(keyword.arg) for keyword in node.keywords]
+        if (
+            len(keyword_names) != len(set(keyword_names))
+            or set(keyword_names) != set(_SOURCE_ADD_REGISTRATION_FIELDS)
+        ):
+            raise ValueError("registration fields differ from the contract")
         values: dict[str, Any] = {}
         for keyword in node.keywords:
-            if keyword.arg not in registration_fields:
-                continue
             try:
                 values[str(keyword.arg)] = ast.literal_eval(keyword.value)
-            except (ValueError, TypeError, SyntaxError):
-                continue
-        return values
+            except (ValueError, TypeError, SyntaxError) as exc:
+                raise ValueError(
+                    "registration fields must be literal"
+                ) from exc
+        return normalize_registration(values)
 
-    def registration_from_block(block: str) -> dict[str, Any] | None:
-        try:
-            expression = ast.parse(block.strip().rstrip(","), mode="eval").body
-        except (SyntaxError, ValueError):
-            return None
-        if not isinstance(expression, ast.Call):
-            return None
-        function_name = (
-            expression.func.id
-            if isinstance(expression.func, ast.Name)
-            else expression.func.attr
-            if isinstance(expression.func, ast.Attribute)
-            else ""
-        )
-        if function_name != "SourceAddRoutingRegistration":
-            return None
-        return registration_values(expression)
+    def registrations_from_source(source: str) -> dict[tuple[str, str], dict[str, Any]]:
+        tree = ast.parse(source)
+        assignments: list[ast.AST] = []
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name)
+                and target.id == "SOURCE_ADD_ROUTING_REGISTRATIONS"
+                for target in node.targets
+            ):
+                assignments.append(node.value)
+            elif (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "SOURCE_ADD_ROUTING_REGISTRATIONS"
+            ):
+                assignments.append(node.value)
+        if len(assignments) != 1 or not isinstance(
+            assignments[0], (ast.List, ast.Tuple)
+        ):
+            raise ValueError("registration assignment is missing or ambiguous")
+        elements = assignments[0].elts
+        registration_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and function_name(node) == "SourceAddRoutingRegistration"
+        ]
+        if len(registration_calls) != len(elements):
+            raise ValueError("registration constructor exists outside the registry")
+        registrations: dict[tuple[str, str], dict[str, Any]] = {}
+        for element in elements:
+            if not isinstance(element, ast.Call):
+                raise ValueError("registry contains a dynamic value")
+            registration = registration_from_call(element)
+            key = (
+                str(registration.get("provider_id") or ""),
+                str(registration.get("stage") or ""),
+            )
+            if (
+                not re.fullmatch(r"[a-z][a-z0-9_-]{1,79}", key[0])
+                or key[1] not in {"candidate_acquisition", "intent_evidence"}
+                or key in registrations
+            ):
+                raise ValueError("registration identity is invalid or duplicated")
+            registrations[key] = registration
+        return registrations
 
-    def normalized_registration(
-        value: Mapping[str, Any],
-    ) -> tuple[tuple[str, Any], ...]:
-        normalized: list[tuple[str, Any]] = []
-        for field_name in registration_fields:
-            field_value = value.get(field_name)
-            if field_name in {"capabilities", "evidence_types"}:
-                if not isinstance(field_value, (list, tuple)):
-                    field_value = ()
-                field_value = tuple(str(item) for item in field_value)
-            elif field_name in {"unit_cost", "timeout_seconds"}:
-                if isinstance(field_value, bool) or not isinstance(
-                    field_value, (int, float)
-                ):
-                    field_value = None
-                else:
-                    field_value = float(field_value)
-            normalized.append((field_name, field_value))
-        return tuple(normalized)
+    def diff_sections(diff_text: str) -> list[tuple[str, str, str]]:
+        sections: list[tuple[str, str, str]] = []
+        current: list[str] = []
+        old_path = ""
+        new_path = ""
+        for line in diff_text.splitlines(keepends=True):
+            match = re.fullmatch(
+                r"diff --git a/(\S+) b/(\S+)\r?\n?",
+                line,
+            )
+            if match is not None:
+                if current:
+                    sections.append((old_path, new_path, "".join(current)))
+                old_path, new_path = match.groups()
+                current = [line]
+            elif current:
+                current.append(line)
+        if current:
+            sections.append((old_path, new_path, "".join(current)))
+        return sections
+
+    def patched_runtime_source(
+        source: str,
+        runtime_diff: str,
+    ) -> str:
+        with tempfile.TemporaryDirectory(
+            prefix="leadpoet-source-registration-check-"
+        ) as raw:
+            root = Path(raw)
+            runtime_path = root / _SOURCE_ADD_RUNTIME_PATH
+            runtime_path.parent.mkdir(parents=True)
+            runtime_path.write_text(source, encoding="utf-8")
+            patch_path = root / "runtime.diff"
+            patch_path.write_text(runtime_diff, encoding="utf-8")
+            _run_git_apply(
+                patch_path,
+                cwd=root,
+                timeout_seconds=5,
+                check=False,
+            )
+            return runtime_path.read_text(encoding="utf-8")
 
     requests = (
         source_context.get("requests")
@@ -578,144 +766,30 @@ def validate_source_add_registration_diff(
         and isinstance(source_context.get("requests"), list)
         else []
     )
-    lines = str(unified_diff or "").splitlines()
-    added_lines = [
+    diff_text = str(unified_diff or "")
+    sections = diff_sections(diff_text)
+    runtime_sections = [
+        section
+        for old_path, new_path, section in sections
+        if old_path == _SOURCE_ADD_RUNTIME_PATH
+        and new_path == _SOURCE_ADD_RUNTIME_PATH
+    ]
+    touches_runtime = bool(runtime_sections)
+    added = "\n".join(
         line[1:]
-        for line in lines
+        for line in diff_text.splitlines()
         if line.startswith("+") and not line.startswith("+++")
-    ]
-    removed_lines = [
+    )
+    removed = "\n".join(
         line[1:]
-        for line in lines
+        for line in diff_text.splitlines()
         if line.startswith("-") and not line.startswith("---")
-    ]
-    added = "\n".join(added_lines)
-    removed = "\n".join(removed_lines)
-    added_registration_blocks = re.findall(
-        r"SourceAddRoutingRegistration\(\s*.*?^\s*\),?\s*$",
-        added,
-        flags=re.MULTILINE | re.DOTALL,
     )
-    added_registrations = tuple(
-        registration
-        for block in added_registration_blocks
-        if (registration := registration_from_block(block)) is not None
-    )
-    adds_source_add_structure = bool(added_registration_blocks) or (
-        "ORIGIN_SOURCE_ADD" in added
-        or bool(
-            re.search(
-                r"['\"](?:candidate|intent)\.source_add\.",
-                added,
-            )
-        )
-    )
-    removes_source_add_structure = (
-        "SourceAddRoutingRegistration" in removed
-        or bool(
-            re.search(
-                r"['\"](?:candidate|intent)\.source_add\.",
-                removed,
-            )
-        )
-    )
-    if not requests:
-        errors = []
-        if adds_source_add_structure:
-            errors.append("source_add_registration_without_approved_request")
-        if removes_source_add_structure:
-            errors.append("source_add_registration_removal_forbidden")
-        return errors
-    errors: list[str] = []
-    if removes_source_add_structure:
-        errors.append("source_add_registration_removal_forbidden")
-    targets_runtime = any(
-        line.startswith(
-            "diff --git a/sourcing_model/routing/runtime.py "
-            "b/sourcing_model/routing/runtime.py"
-        )
-        for line in lines
-    )
-
-    existing_registrations: tuple[dict[str, Any], ...] = ()
-    if existing_runtime_source:
-        try:
-            tree = ast.parse(existing_runtime_source)
-        except (SyntaxError, ValueError):
-            tree = None
-        if tree is not None:
-            parsed_existing: list[dict[str, Any]] = []
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call):
-                    continue
-                function_name = (
-                    node.func.id
-                    if isinstance(node.func, ast.Name)
-                    else node.func.attr
-                    if isinstance(node.func, ast.Attribute)
-                    else ""
-                )
-                if function_name != "SourceAddRoutingRegistration":
-                    continue
-                parsed_existing.append(registration_values(node))
-            existing_registrations = tuple(parsed_existing)
-
-    request_registrations = tuple(
-        {
-            field_name: request.get(field_name)
-            for field_name in registration_fields
-        }
-        for request in requests
-        if isinstance(request, Mapping)
-    )
-    expected_registrations = {
-        normalized_registration(item)
-        for item in request_registrations
-    }
-    existing_normalized = {
-        normalized_registration(item)
-        for item in existing_registrations
-    }
-    added_normalized = {
-        normalized_registration(item)
-        for item in added_registrations
-    }
-    missing_registrations = expected_registrations - (
-        existing_normalized | added_normalized
-    )
-    registrations_already_present = bool(expected_registrations) and (
-        expected_registrations <= existing_normalized
-    )
-    approved_provider_ids = {
-        str(item.get("provider_id") or "")
-        for item in requests
-        if isinstance(item, Mapping)
-    }
     approved_tool_ids = {
         str(item.get("tool_id") or "")
         for item in requests
         if isinstance(item, Mapping)
     }
-    if missing_registrations:
-        errors.append("source_add_registration_missing_approved_request")
-    if added_normalized - expected_registrations:
-        errors.append("source_add_registration_unapproved_registration")
-    if len(added_registrations) != added.count(
-        "SourceAddRoutingRegistration("
-    ):
-        errors.append("source_add_registration_unparseable")
-    if not registrations_already_present and not targets_runtime:
-        errors.append("source_add_registration_wrong_model_target")
-
-    added_provider_ids = {
-        match.group(1)
-        for match in re.finditer(
-            r"provider_id\s*=\s*['\"]([a-z][a-z0-9_-]{1,79})['\"]",
-            added,
-        )
-    }
-    if added_provider_ids - approved_provider_ids:
-        errors.append("source_add_registration_unapproved_provider")
     added_tool_ids = {
         match.group(1)
         for match in re.finditer(
@@ -723,23 +797,119 @@ def validate_source_add_registration_diff(
             added,
         )
     }
+    errors: list[str] = []
     if added_tool_ids - approved_tool_ids:
         errors.append("source_add_registration_unapproved_tool")
-    adds_direct_source_definition = (
+    if (
         "ToolDefinition(" in added
         and (
             "ORIGIN_SOURCE_ADD" in added
-            or bool(
-                re.search(
-                    r"origin\s*=\s*['\"]source_add['\"]",
-                    added,
-                )
-            )
+            or "source_add" in added
             or bool(added_tool_ids)
         )
-    )
-    if adds_direct_source_definition:
+    ):
         errors.append("source_add_registration_direct_definition_forbidden")
+    source_markers_outside_runtime = any(
+        (
+            "SourceAddRoutingRegistration" in section
+            or "SOURCE_ADD_ROUTING_REGISTRATIONS" in section
+        )
+        for old_path, new_path, section in sections
+        if (
+            old_path != _SOURCE_ADD_RUNTIME_PATH
+            or new_path != _SOURCE_ADD_RUNTIME_PATH
+        )
+    )
+    if source_markers_outside_runtime:
+        errors.append("source_add_registration_wrong_model_target")
+
+    needs_registry_validation = bool(requests) or touches_runtime or any(
+        marker in added or marker in removed
+        for marker in (
+            "SourceAddRoutingRegistration",
+            "SOURCE_ADD_ROUTING_REGISTRATIONS",
+        )
+    )
+    if not needs_registry_validation:
+        return sorted(set(errors))
+    if not existing_runtime_source:
+        errors.append("source_add_registration_source_unavailable")
+        return sorted(set(errors))
+    try:
+        existing = registrations_from_source(existing_runtime_source)
+    except (SyntaxError, ValueError):
+        errors.append("source_add_registration_existing_source_invalid")
+        return sorted(set(errors))
+
+    patched_source = existing_runtime_source
+    if touches_runtime:
+        if len(runtime_sections) != 1:
+            errors.append("source_add_registration_runtime_diff_ambiguous")
+            return sorted(set(errors))
+        try:
+            patched_source = patched_runtime_source(
+                existing_runtime_source,
+                runtime_sections[0],
+            )
+        except (CodeEditBuildError, OSError, ValueError):
+            errors.append("source_add_registration_runtime_diff_unapplicable")
+            return sorted(set(errors))
+    try:
+        observed = registrations_from_source(patched_source)
+    except (SyntaxError, ValueError):
+        errors.append("source_add_registration_patched_source_invalid")
+        return sorted(set(errors))
+
+    expected: dict[tuple[str, str], dict[str, Any]] = {}
+    try:
+        for request in requests:
+            if not isinstance(request, Mapping):
+                raise ValueError("approved request is invalid")
+            registration = registration_from_request(request)
+            key = (
+                str(registration.get("provider_id") or ""),
+                str(registration.get("stage") or ""),
+            )
+            if key in expected:
+                raise ValueError("approved request is duplicated")
+            expected[key] = registration
+    except ValueError:
+        errors.append("source_add_approved_request_invalid")
+        return sorted(set(errors))
+
+    desired = dict(existing)
+    desired.update(expected)
+    if not requests:
+        if set(existing) - set(observed):
+            errors.append("source_add_registration_removal_forbidden")
+        if observed != existing:
+            errors.append("source_add_registration_without_approved_request")
+        return sorted(set(errors))
+
+    if any(observed.get(key) != registration for key, registration in expected.items()):
+        errors.append("source_add_registration_missing_approved_request")
+    if set(existing) - set(expected) - set(observed):
+        errors.append("source_add_registration_removal_forbidden")
+    if any(
+        key not in desired or desired[key] != registration
+        for key, registration in observed.items()
+    ):
+        errors.append("source_add_registration_unapproved_registration")
+    if any(
+        str(item.get("provider_id") or "") not in {
+            str(request.get("provider_id") or "")
+            for request in requests
+            if isinstance(request, Mapping)
+        }
+        for item in observed.values()
+        if item not in existing.values()
+    ):
+        errors.append("source_add_registration_unapproved_provider")
+    if expected and not touches_runtime and any(
+        existing.get(key) != registration
+        for key, registration in expected.items()
+    ):
+        errors.append("source_add_registration_wrong_model_target")
     return sorted(set(errors))
 
 

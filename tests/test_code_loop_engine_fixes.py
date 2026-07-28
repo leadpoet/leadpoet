@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+import difflib
 import json
 from pathlib import Path
 import sys
@@ -22,6 +23,9 @@ from gateway.research_lab.code_build import (
     CodeEditBuildResult,
     CodeEditPatchApplyError,
     ParentImageSourceContext,
+)
+from gateway.research_lab.provider_capabilities import (
+    EffectiveProviderCapabilities,
 )
 from gateway.research_lab.git_tree_models import TreePolicy, derive_tree_id
 from gateway.research_lab.git_tree_repository import GitTreeCommit
@@ -167,6 +171,76 @@ def _source_context(tmp_path):
         editable_files=("sourcing_model/discovery.py",),
         file_previews=(),
         planner_source_index=planner_source_index,
+    )
+
+
+def _source_add_context(tmp_path):
+    base_context = _source_context(tmp_path)
+    runtime_path = (
+        base_context.source_root / "sourcing_model" / "routing" / "runtime.py"
+    )
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(
+        "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    editable_files = tuple(
+        sorted(
+            {
+                *base_context.editable_files,
+                "sourcing_model/routing/runtime.py",
+            }
+        )
+    )
+    return replace(
+        base_context,
+        editable_files=editable_files,
+        planner_source_index=build_source_symbol_index(
+            source_root=base_context.source_root,
+            editable_files=editable_files,
+            source_tree_hash=base_context.source_tree_hash,
+            parent_image_digest_hash=base_context.parent_image_digest_hash,
+        ),
+    )
+
+
+def _source_add_runtime_diff(*, provider_id: str, manifest: str) -> str:
+    before = (
+        "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+        ")\n"
+    )
+    after = (
+        "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+        "    SourceAddRoutingRegistration(\n"
+        f"        provider_id={provider_id!r},\n"
+        "        stage='candidate_acquisition',\n"
+        f"        revision={'source-add-' + manifest[:12]!r},\n"
+        f"        manifest_sha256={manifest!r},\n"
+        "        priority=80,\n"
+        "        capabilities=('candidate.provider_discovery',),\n"
+        "        idempotency='idempotent',\n"
+        "        cost_class='metered',\n"
+        "        unit_cost=0.005,\n"
+        "        max_calls=1,\n"
+        "        max_results=100,\n"
+        "        timeout_seconds=60.0,\n"
+        "        evidence_types=('provider_database',),\n"
+        "    ),\n"
+        ")\n"
+    )
+    unified = "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile="a/sourcing_model/routing/runtime.py",
+            tofile="b/sourcing_model/routing/runtime.py",
+        )
+    )
+    return (
+        "diff --git a/sourcing_model/routing/runtime.py "
+        "b/sourcing_model/routing/runtime.py\n"
+        f"{unified}"
     )
 
 
@@ -1194,6 +1268,166 @@ async def test_sanitized_production_plans_bind_and_reach_patch_drafting(
     assert normalized["must_inspect"] == normalized_selected["must_inspect"]
     assert all("::" in reference for reference in normalized["must_inspect"])
     assert any(event.event_type == "code_edit_drafted" for event in events)
+
+
+async def test_source_add_request_reaches_exact_registration_validation_and_build(
+    tmp_path,
+):
+    source_context = _source_add_context(tmp_path)
+    builder = _PlannerBuildsCandidateBuilder(source_context)
+    builder.config.provider_capability_catalog_enabled = True
+    provider_id = "community_accounts"
+    manifest = "a" * 64
+    capabilities = EffectiveProviderCapabilities(
+        providers=(
+            {
+                "id": provider_id,
+                "active": True,
+                "credential_ready": True,
+                "origin": "source_add",
+                "source_add_manifest_sha256": manifest,
+                "cost_model": {"est_cost_microusd_per_call": 5000},
+                "planner_summary": {
+                    "provider_alias": "community accounts",
+                    "endpoint_families": ["company discovery"],
+                    "model_policy": "",
+                    "probe_metadata": [],
+                },
+            },
+        ),
+        capability_hash="sha256:" + "c" * 64,
+        private_snapshot_loaded=False,
+        source_add_provider_count=1,
+    )
+    plan_path_id = "register-community-accounts"
+    plan = _loop_direction_plan_payload(
+        required_lane="source_routing",
+        required_mechanism=(
+            "register the approved community accounts company source"
+        ),
+        must_inspect=[
+            (
+                "sourcing_model/routing/runtime.py::"
+                "SOURCE_ADD_ROUTING_REGISTRATIONS"
+            )
+        ],
+        ranked_paths=[
+            {
+                "path_id": plan_path_id,
+                "lane": "source_routing",
+                "mechanism": (
+                    "register the approved community accounts company source"
+                ),
+            }
+        ],
+        selected_path_id=plan_path_id,
+    )
+    draft = _draft(
+        lane="source_routing",
+        target_files=("sourcing_model/routing/runtime.py",),
+        unified_diff=_source_add_runtime_diff(
+            provider_id=provider_id,
+            manifest=manifest,
+        ),
+        mechanism=plan["required_mechanism"],
+        plan_path_id=plan_path_id,
+        redacted_summary="register approved community accounts source",
+    )
+    events = []
+    prompt_contexts = {}
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        del timeout_seconds, max_tokens
+        prompt_contexts[stage] = _model_prompt_context(messages)
+        if stage == "loop_planner":
+            return OpenRouterCallResult(
+                content=json.dumps(plan),
+                provider_usage={"provider": "fixture", "response_id": "planner"},
+                cost_microusd=1,
+            )
+        if stage == "source_inspection":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "requests": [
+                            {
+                                "operation": "read_file",
+                                "path": "sourcing_model/routing/runtime.py",
+                            }
+                        ]
+                    }
+                ),
+                provider_usage={"provider": "fixture", "response_id": "inspection"},
+                cost_microusd=1,
+            )
+        if stage == "code_edit_draft":
+            return OpenRouterCallResult(
+                content=json.dumps({"candidates": [draft.to_dict()]}),
+                provider_usage={"provider": "fixture", "response_id": "draft"},
+                cost_microusd=1,
+            )
+        raise AssertionError(f"unexpected stage: {stage}")
+
+    async def event_sink(event):
+        events.append(event)
+
+    result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchRuntimeSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=1,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=builder,
+        provider_registry_loader=lambda: ([], capabilities),
+    ).run(
+        run_id="run-source-add-registration",
+        ticket={
+            "ticket_id": "ticket-source-add-registration",
+            "miner_hotkey": "fixture-hotkey",
+            "island": "generalist",
+            "brief_sanitized_ref": "fixture-brief",
+            "ticket_doc": {
+                "brief_public_summary": (
+                    "Use community accounts for company discovery."
+                )
+            },
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="fixture/model",
+        budget_context={
+            "requested_compute_budget_usd": 5.0,
+            "research_model_tier": "default",
+        },
+        requested_loop_count=1,
+    )
+
+    request = prompt_contexts["loop_planner"][
+        "approved_provider_capabilities"
+    ]["routerverse_source_incorporation"]["requests"][0]
+    assert request["provider_id"] == provider_id
+    assert request["manifest_sha256"] == manifest
+    assert prompt_contexts["source_inspection"][
+        "approved_provider_capabilities"
+    ]["routerverse_source_incorporation"]["requests"] == [request]
+    assert prompt_contexts["code_edit_draft"][
+        "approved_provider_capabilities"
+    ]["routerverse_source_incorporation"]["requests"] == [request]
+    assert result.status == "completed"
+    assert builder.builds == [(plan_path_id, 0)]
+    assert not any(
+        event.event_type == "code_edit_validation_failed"
+        for event in events
+    )
 
 
 @pytest.mark.parametrize("repeat_index", range(20))

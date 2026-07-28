@@ -33,6 +33,16 @@ from urllib.request import urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IMAGE_REPOSITORY = "leadpoet-local-restart-rehearsal"
+REHEARSAL_BASE_IMAGES = {
+    "linux/amd64": (
+        "public.ecr.aws/amazonlinux/amazonlinux@sha256:"
+        "7dfb72e165c7b2f5fd2ee050c202160ee0cced24991f14736b831221f2004eee"
+    ),
+    "linux/arm64": (
+        "public.ecr.aws/amazonlinux/amazonlinux@sha256:"
+        "d23b77c815875a32165bc160248a6fcaf932dbbcdb7adc157680c39e4d254b38"
+    ),
+}
 PYTHON37_IMAGE = (
     "python@sha256:"
     "b53f496ca43e5af6994f8e316cf03af31050bf7944e0e4a308ad86c001cf028b"
@@ -161,6 +171,15 @@ def _docker_platform(profile: str) -> str:
     raise SystemExit(f"unsupported local Docker architecture: {machine}")
 
 
+def _rehearsal_base_image(docker_platform: str) -> str:
+    try:
+        return REHEARSAL_BASE_IMAGES[docker_platform]
+    except KeyError as exc:
+        raise SystemExit(
+            f"unsupported rehearsal Docker platform: {docker_platform}"
+        ) from exc
+
+
 def _image_tag(harness_sha: str, *, docker_platform: str) -> str:
     digest = hashlib.sha256()
     digest.update(b"harness_sha")
@@ -219,6 +238,9 @@ def _build_image(
                 "build",
                 "--platform",
                 docker_platform,
+                "--build-arg",
+                "REHEARSAL_BASE_IMAGE="
+                + _rehearsal_base_image(docker_platform),
                 "--tag",
                 tag,
                 ".",

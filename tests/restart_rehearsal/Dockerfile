@@ -1,4 +1,5 @@
-FROM public.ecr.aws/amazonlinux/amazonlinux@sha256:7942e2a958a238057cdf3304cba7e75f4056d15f75112b8d8e7c1d21a17f2d6c
+ARG REHEARSAL_BASE_IMAGE
+FROM ${REHEARSAL_BASE_IMAGE}
 
 RUN dnf install -y \
       diffutils \

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import http.client
 import json
 
@@ -22,6 +23,64 @@ from gateway.research_lab.provider_evidence_proxy import (
 from research_lab.canonical import sha256_json
 from research_lab.code_editing import build_loop_direction_planner_messages
 from research_lab.eval.provider_evidence_cache import canonical_request_fingerprint
+
+
+_EMPTY_ROUTER_RUNTIME = "SOURCE_ADD_ROUTING_REGISTRATIONS = ()\n"
+
+
+def _router_registration_source(
+    *,
+    provider_id: str = "community_accounts",
+    stage: str = "candidate_acquisition",
+    manifest: str = "a" * 64,
+    priority: int | None = None,
+    unknown_field: str = "",
+    outside_registry: str = "",
+) -> str:
+    candidate_stage = stage == "candidate_acquisition"
+    priority = priority if priority is not None else (80 if candidate_stage else 35)
+    capabilities = (
+        ("candidate.provider_discovery",)
+        if candidate_stage
+        else ("intent.provider_evidence",)
+    )
+    evidence_types = (
+        ("provider_database",) if candidate_stage else ("external",)
+    )
+    return f"""SOURCE_ADD_ROUTING_REGISTRATIONS = (
+    SourceAddRoutingRegistration(
+        provider_id={provider_id!r},
+        stage={stage!r},
+        revision={f"source-add-{manifest[:12]}"!r},
+        manifest_sha256={manifest!r},
+        priority={priority},
+        capabilities={capabilities!r},
+        idempotency="idempotent",
+        cost_class="metered",
+        unit_cost=0.005,
+        max_calls=1,
+        max_results={100 if candidate_stage else 1},
+        timeout_seconds={60.0 if candidate_stage else 30.0},
+        evidence_types={evidence_types!r},
+{unknown_field}    ),
+)
+{outside_registry}"""
+
+
+def _router_runtime_diff(before: str, after: str) -> str:
+    body = "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile="a/sourcing_model/routing/runtime.py",
+            tofile="b/sourcing_model/routing/runtime.py",
+        )
+    )
+    return (
+        "diff --git a/sourcing_model/routing/runtime.py "
+        "b/sourcing_model/routing/runtime.py\n"
+        f"{body}"
+    )
 
 
 def _provider_doc(
@@ -408,16 +467,18 @@ def test_source_add_registration_diff_must_match_approved_attestation():
 +    ),
 +)
 """
-    assert validate_source_add_registration_diff(good, context) == []
+    assert validate_source_add_registration_diff(
+        good,
+        context,
+        existing_runtime_source=_EMPTY_ROUTER_RUNTIME,
+    ) == []
 
     wrong_manifest = good.replace("a" * 64, "b" * 64)
     assert validate_source_add_registration_diff(
         wrong_manifest,
         context,
-    ) == [
-        "source_add_registration_missing_approved_request",
-        "source_add_registration_unapproved_registration",
-    ]
+        existing_runtime_source=_EMPTY_ROUTER_RUNTIME,
+    ) == ["source_add_registration_patched_source_invalid"]
 
     unapproved_provider = good.replace(
         "community_accounts",
@@ -427,6 +488,7 @@ def test_source_add_registration_diff_must_match_approved_attestation():
         validate_source_add_registration_diff(
             unapproved_provider,
             context,
+            existing_runtime_source=_EMPTY_ROUTER_RUNTIME,
         )
     )
 
@@ -501,6 +563,10 @@ def test_source_add_registration_diff_requires_every_stage_and_exact_bounds():
     assert validate_source_add_registration_diff(
         candidate_only,
         context,
+        existing_runtime_source=(
+            "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+            ")\n"
+        ),
     ) == ["source_add_registration_missing_approved_request"]
 
     altered_timeout = candidate_only.replace(
@@ -518,9 +584,12 @@ def test_source_add_registration_diff_requires_every_stage_and_exact_bounds():
     assert validate_source_add_registration_diff(
         altered_timeout,
         candidate_context,
+        existing_runtime_source=(
+            "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+            ")\n"
+        ),
     ) == [
-        "source_add_registration_missing_approved_request",
-        "source_add_registration_unapproved_registration",
+        "source_add_registration_patched_source_invalid",
     ]
 
     direct_extra_tool = candidate_only.replace(
@@ -530,6 +599,10 @@ def test_source_add_registration_diff_requires_every_stage_and_exact_bounds():
     errors = validate_source_add_registration_diff(
         direct_extra_tool,
         candidate_context,
+        existing_runtime_source=(
+            "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+            ")\n"
+        ),
     )
     assert "source_add_registration_unapproved_tool" in errors
     assert "source_add_registration_direct_definition_forbidden" in errors
@@ -558,6 +631,10 @@ def test_source_add_registration_diff_requires_every_stage_and_exact_bounds():
         validate_source_add_registration_diff(
             extra_registration,
             candidate_context,
+            existing_runtime_source=(
+                "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+                ")\n"
+            ),
         )
     )
 
@@ -565,10 +642,14 @@ def test_source_add_registration_diff_requires_every_stage_and_exact_bounds():
         " )\n",
         "+    SourceAddRoutingRegistration(**untrusted_registration),\n )\n",
     )
-    assert "source_add_registration_unparseable" in (
+    assert "source_add_registration_patched_source_invalid" in (
         validate_source_add_registration_diff(
             computed_registration,
             candidate_context,
+            existing_runtime_source=(
+                "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+                ")\n"
+            ),
         )
     )
 
@@ -588,7 +669,11 @@ def test_source_add_registration_diff_without_approved_request_fails_closed():
     assert validate_source_add_registration_diff(
         unauthorized,
         None,
-    ) == ["source_add_registration_without_approved_request"]
+        existing_runtime_source=(
+            "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
+            ")\n"
+        ),
+    ) == ["source_add_registration_patched_source_invalid"]
 
     direct_definition = """diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py
 --- a/sourcing_model/routing/runtime.py
@@ -601,23 +686,144 @@ def test_source_add_registration_diff_without_approved_request_fails_closed():
     assert validate_source_add_registration_diff(
         direct_definition,
         {"requests": []},
-    ) == ["source_add_registration_without_approved_request"]
+        existing_runtime_source=(
+            "TOOLS = (\n"
+            ")\n"
+            "SOURCE_ADD_ROUTING_REGISTRATIONS = ()\n"
+        ),
+    ) == [
+        "source_add_registration_direct_definition_forbidden",
+        "source_add_registration_unapproved_tool",
+    ]
 
-    removal = """diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py
---- a/sourcing_model/routing/runtime.py
-+++ b/sourcing_model/routing/runtime.py
-@@ -1,5 +1,2 @@
- SOURCE_ADD_ROUTING_REGISTRATIONS = (
--    SourceAddRoutingRegistration(
--        provider_id="approved_source",
--        stage="candidate_acquisition",
--    ),
- )
-"""
+    existing_registration = _router_registration_source(
+        provider_id="approved_source",
+    )
+    removal = _router_runtime_diff(
+        existing_registration,
+        _EMPTY_ROUTER_RUNTIME,
+    )
     assert validate_source_add_registration_diff(
         removal,
         None,
-    ) == ["source_add_registration_removal_forbidden"]
+        existing_runtime_source=existing_registration,
+    ) == [
+        "source_add_registration_removal_forbidden",
+        "source_add_registration_without_approved_request",
+    ]
+
+
+def test_source_add_registration_diff_validates_complete_patched_registry():
+    provider = _provider_doc("community_accounts", origin="source_add")
+    context = approved_source_router_suggestions(
+        "Use community accounts for company discovery.",
+        _capabilities(provider, private_loaded=False).providers,
+    )
+    expected = _router_registration_source()
+
+    changed_cost = expected.replace("unit_cost=0.005", "unit_cost=0.01")
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(expected, changed_cost),
+        context,
+        existing_runtime_source=expected,
+    ) == [
+        "source_add_registration_missing_approved_request",
+        "source_add_registration_unapproved_registration",
+    ]
+
+    unknown_keyword = expected.replace(
+        "    ),\n",
+        "        unreviewed_behavior=True,\n    ),\n",
+    )
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(expected, unknown_keyword),
+        context,
+        existing_runtime_source=expected,
+    ) == ["source_add_registration_patched_source_invalid"]
+
+    dead_code_constructor = expected + """
+if False:
+    SourceAddRoutingRegistration(
+        provider_id="community_accounts",
+        stage="candidate_acquisition",
+    )
+"""
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(expected, dead_code_constructor),
+        context,
+        existing_runtime_source=expected,
+    ) == ["source_add_registration_patched_source_invalid"]
+
+
+def test_source_add_registration_diff_allows_only_exact_approved_replacement():
+    provider = _provider_doc("community_accounts", origin="source_add")
+    context = approved_source_router_suggestions(
+        "Use community accounts for company discovery.",
+        _capabilities(provider, private_loaded=False).providers,
+    )
+    stale = _router_registration_source(manifest="b" * 64)
+    expected = _router_registration_source()
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(stale, expected),
+        context,
+        existing_runtime_source=stale,
+    ) == []
+
+    malformed_context = {
+        **context,
+        "requests": [
+            {
+                **context["requests"][0],
+                "registration_symbol": "sourcing_model/routing/other.py::TOOLS",
+            }
+        ],
+    }
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(stale, expected),
+        malformed_context,
+        existing_runtime_source=stale,
+    ) == ["source_add_approved_request_invalid"]
+
+
+def test_source_add_registration_diff_rejects_wrong_target_and_unapplicable_patch():
+    provider = _provider_doc("community_accounts", origin="source_add")
+    context = approved_source_router_suggestions(
+        "Use community accounts for company discovery.",
+        _capabilities(provider, private_loaded=False).providers,
+    )
+    existing = _router_registration_source()
+    wrong_target = """diff --git a/sourcing_model/helper.py b/sourcing_model/helper.py
+--- a/sourcing_model/helper.py
++++ b/sourcing_model/helper.py
+@@ -1 +1,2 @@
+ VALUE = 1
++SOURCE_ADD_ROUTING_REGISTRATIONS = ()
+"""
+    assert validate_source_add_registration_diff(
+        wrong_target,
+        context,
+        existing_runtime_source=existing,
+    ) == ["source_add_registration_wrong_model_target"]
+
+    unapplicable = _router_runtime_diff(
+        _EMPTY_ROUTER_RUNTIME,
+        _router_registration_source(),
+    )
+    assert validate_source_add_registration_diff(
+        unapplicable,
+        context,
+        existing_runtime_source=existing,
+    ) == ["source_add_registration_runtime_diff_unapplicable"]
+
+
+def test_source_add_registration_diff_allows_unrelated_runtime_change():
+    existing = _EMPTY_ROUTER_RUNTIME + "ROUTER_BATCH_SIZE = 10\n"
+    changed = _EMPTY_ROUTER_RUNTIME + "ROUTER_BATCH_SIZE = 20\n"
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(existing, changed),
+        None,
+        existing_runtime_source=existing,
+    ) == []
 
 
 def test_route_policy_allows_unlisted_safe_paths_and_blocks_admin_paths():

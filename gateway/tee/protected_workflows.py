@@ -65,6 +65,18 @@ PROTECTED_SYMBOLS = {
         "CodeEditLoopEngine",
         "_bind_loop_direction_plan",
     ),
+    "gateway/research_lab/provider_capabilities.py": (
+        "EffectiveProviderCapabilities",
+        "_normalized_words",
+        "_source_mention_forms",
+        "_mentioned_source_add_providers",
+        "approved_source_router_suggestions",
+        "validate_source_add_registration_diff",
+        "_credential_ready",
+        "_resolved_credential_ready",
+        "_provider_doc_from_source_row",
+        "load_effective_provider_capabilities_sync",
+    ),
     "gateway/research_lab/git_tree_models.py": (
         "TreePolicy",
         "TreeReplacement",

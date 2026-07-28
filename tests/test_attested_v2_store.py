@@ -608,6 +608,72 @@ async def test_v2_batch_graph_loader_reuses_shared_ancestry(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_v2_batch_graph_loader_splits_only_aggregate_row_limit(
+    monkeypatch,
+):
+    roots = tuple("sha256:" + f"{index:064x}" for index in range(1, 5))
+    batches = []
+
+    async def _load_batch(root_hashes, *, allowed_failed_receipt_hashes=()):
+        normalized = tuple(root_hashes)
+        batches.append(normalized)
+        assert not tuple(allowed_failed_receipt_hashes)
+        if len(normalized) > 1:
+            raise attested_v2_store.AttestedV2StoreError(
+                "V2 receipt graph exceeds row limit"
+            )
+        return {
+            normalized[0]: {
+                "root_receipt_hash": normalized[0],
+            }
+        }
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "_load_receipt_graph_batch_v2",
+        _load_batch,
+    )
+
+    loaded = await attested_v2_store.load_receipt_graphs_v2(roots)
+
+    assert set(loaded) == set(roots)
+    assert batches == [
+        roots,
+        roots[:2],
+        roots[:1],
+        roots[1:2],
+        roots[2:],
+        roots[2:3],
+        roots[3:],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_v2_batch_graph_loader_keeps_single_graph_row_limit_fail_closed(
+    monkeypatch,
+):
+    root = "sha256:" + "1" * 64
+
+    async def _load_batch(_root_hashes, *, allowed_failed_receipt_hashes=()):
+        assert not tuple(allowed_failed_receipt_hashes)
+        raise attested_v2_store.AttestedV2StoreError(
+            "V2 receipt graph exceeds row limit"
+        )
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "_load_receipt_graph_batch_v2",
+        _load_batch,
+    )
+
+    with pytest.raises(
+        attested_v2_store.AttestedV2StoreError,
+        match="V2 receipt graph exceeds row limit",
+    ):
+        await attested_v2_store.load_receipt_graphs_v2((root,))
+
+
+@pytest.mark.asyncio
 async def test_v2_batch_graph_loader_rejects_shared_failed_allowance():
     with pytest.raises(
         attested_v2_store.AttestedV2StoreError,

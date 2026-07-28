@@ -601,12 +601,12 @@ async def persist_receipt_graph_v2(
     }
 
 
-async def load_receipt_graphs_v2(
+async def _load_receipt_graph_batch_v2(
     root_receipt_hashes: Iterable[str],
     *,
     allowed_failed_receipt_hashes: Iterable[str] = (),
 ) -> dict[str, dict[str, Any]]:
-    """Reconstruct complete persisted ancestry for many roots in set queries."""
+    """Reconstruct one bounded batch of persisted receipt graphs."""
 
     root_hashes = sorted({str(value or "") for value in root_receipt_hashes})
     if not root_hashes:
@@ -828,6 +828,39 @@ async def load_receipt_graphs_v2(
             allowed_failed_receipt_hashes=graph_allowed_failed,
         )
     return graphs
+
+
+async def load_receipt_graphs_v2(
+    root_receipt_hashes: Iterable[str],
+    *,
+    allowed_failed_receipt_hashes: Iterable[str] = (),
+) -> dict[str, dict[str, Any]]:
+    """Reconstruct complete persisted ancestry without weakening graph limits."""
+
+    root_hashes = sorted({str(value or "") for value in root_receipt_hashes})
+    allowed_failed = sorted(
+        {str(value or "") for value in allowed_failed_receipt_hashes}
+    )
+    try:
+        return await _load_receipt_graph_batch_v2(
+            root_hashes,
+            allowed_failed_receipt_hashes=allowed_failed,
+        )
+    except AttestedV2StoreError as exc:
+        if (
+            str(exc) != "V2 receipt graph exceeds row limit"
+            or len(root_hashes) < 2
+            or allowed_failed
+        ):
+            raise
+
+    midpoint = len(root_hashes) // 2
+    left = await load_receipt_graphs_v2(root_hashes[:midpoint])
+    right = await load_receipt_graphs_v2(root_hashes[midpoint:])
+    overlap = set(left).intersection(right)
+    if overlap:
+        raise AttestedV2StoreError("V2 receipt graph root is duplicated")
+    return {**left, **right}
 
 
 async def load_receipt_graph_v2(

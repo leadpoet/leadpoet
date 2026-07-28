@@ -112,6 +112,7 @@ PROTECTED_SYMBOLS = {
         "champion_v2_cutover_readiness",
     ),
     "gateway/research_lab/attested_v2_store.py": (
+        "_load_receipt_graph_batch_v2",
         "load_receipt_graph_v2",
         "load_receipt_graphs_v2",
         "load_business_artifact_graph_v2",

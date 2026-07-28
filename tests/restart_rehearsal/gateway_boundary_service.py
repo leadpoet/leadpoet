@@ -792,6 +792,16 @@ class Handler(BaseHTTPRequestHandler):
                     rpc_name=name,
                     body=body,
                 )
+                self.server.state.record(
+                    status="ok",
+                    operation="chain_settlement_persisted",
+                    method=self.command,
+                    target=name,
+                    netuid=response["netuid"],
+                    epoch_id=response["epoch_id"],
+                    settlement_hash=response["settlement_hash"],
+                    credit_count=response["credit_count"],
+                )
             self._json_response(200, response)
             return
         if (

@@ -374,6 +374,52 @@ def verify_gateway_private_model_environment(rows: list[dict]) -> None:
         )
 
 
+def verify_chain_settlement_durable_readback(rows: list[dict]) -> None:
+    persistence_ordinals = [
+        ordinal
+        for ordinal, row in enumerate(rows)
+        if row.get("kind") == "local-postgrest"
+        and row.get("operation") == "chain_settlement_persisted"
+        and row.get("status") == "ok"
+        and row.get("target")
+        in {
+            "persist_research_lab_chain_realized_settlement_v1",
+            "persist_research_lab_chain_realized_unattributed_v2",
+        }
+    ]
+    if not persistence_ordinals:
+        raise SystemExit(
+            "gateway rehearsal did not persist a chain-realized settlement"
+        )
+    settlement_reads = [
+        ordinal
+        for ordinal, row in enumerate(rows)
+        if row.get("kind") == "local-postgrest"
+        and row.get("operation") == "select"
+        and row.get("status") == "ok"
+        and row.get("target")
+        == "research_lab_chain_realized_epoch_settlements_v1"
+    ]
+    credit_reads = [
+        ordinal
+        for ordinal, row in enumerate(rows)
+        if row.get("kind") == "local-postgrest"
+        and row.get("operation") == "select"
+        and row.get("status") == "ok"
+        and row.get("target")
+        == "research_lab_chain_realized_obligation_credits_v1"
+    ]
+    first_persistence = min(persistence_ordinals)
+    if not any(ordinal > first_persistence for ordinal in settlement_reads):
+        raise SystemExit(
+            "gateway rehearsal did not read back its durable settlement"
+        )
+    if not any(ordinal > first_persistence for ordinal in credit_reads):
+        raise SystemExit(
+            "gateway rehearsal did not read back durable settlement credits"
+        )
+
+
 def verify_restart_epoch_transient_recovery(rows: list[dict]) -> None:
     head_reads = [
         row
@@ -562,6 +608,7 @@ def main() -> int:
             transition=transition,
             storage_preflight_supported=storage_preflight_supported,
         )
+        verify_chain_settlement_durable_readback(rows)
         required_gateway_order = [
             "module:gateway.tee.release_channel_v2",
             "module:gateway.tee.prepare_gateway_envelopes_v2",

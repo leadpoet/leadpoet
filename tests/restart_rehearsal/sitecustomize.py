@@ -3049,7 +3049,7 @@ def _local_urlopen(
         == "/rest/v1/research_lab_chain_realized_settlement_activation_v1"
         and "limit=2" in parsed.query
     ):
-        activation_epoch = _current_settlement_epoch_id()
+        activation_epoch = _current_settlement_epoch_id() - 1
         body = json.dumps(
             [
                 {

@@ -54,6 +54,7 @@ from tests.restart_rehearsal.verify_evidence import (
     verify_gateway_private_model_environment,
     verify_migration_backed_database_contract,
     verify_gateway_weight_readiness_invocations,
+    verify_chain_settlement_durable_readback,
     verify_rehearsal_integrity,
     verify_restart_epoch_transient_recovery,
 )
@@ -63,7 +64,7 @@ COMMIT = "1" * 40
 VALIDATOR_HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
 
 
-def test_chain_settlement_activation_fixture_tracks_current_epoch(
+def test_chain_settlement_activation_fixture_creates_one_epoch_backlog(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -90,10 +91,11 @@ def test_chain_settlement_activation_fixture_tracks_current_epoch(
     assert fixture["network"]["subnet_epoch_index"] == (
         rehearsal_sitecustomize.SUBNET_EPOCH_INDEX
     )
-    expected_epoch = int(cutover["first_settlement_epoch_id"]) + (
+    current_epoch = int(cutover["first_settlement_epoch_id"]) + (
         int(fixture["network"]["subnet_epoch_index"])
         - int(cutover["first_subnet_epoch_index"])
     )
+    activation_epoch = current_epoch - 1
     state = LocalPostgRESTState(
         state_root=tmp_path,
         fixture=fixture,
@@ -113,16 +115,126 @@ def test_chain_settlement_activation_fixture_tracks_current_epoch(
             "schema_version": (
                 "leadpoet.research_lab_chain_realized_settlement_activation.v1"
             ),
-            "first_epoch_id": expected_epoch,
+            "first_epoch_id": activation_epoch,
             "source_bundle_hash": "sha256:" + "a" * 64,
-            "source_bundle_epoch_id": expected_epoch,
+            "source_bundle_epoch_id": activation_epoch,
             "source_finalized_block": (
                 int(fixture["network"]["current_block"]) - 1
             ),
         }
     ]
     assert rehearsal_sitecustomize._current_settlement_epoch_id() == (
-        expected_epoch
+        current_epoch
+    )
+
+
+def test_chain_settlement_boundary_persists_zero_credit_readback(
+    tmp_path,
+) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    fixture = json.loads(
+        (
+            source_root
+            / "tests/restart_rehearsal/fixtures/production_shaped_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+    tables = {
+        "research_lab_chain_realized_settlement_activation_v1",
+        "research_lab_chain_realized_epoch_settlements_v1",
+        "research_lab_chain_realized_obligation_credits_v1",
+        "research_lab_stateful_subnet_epoch_cutover_state_v1",
+        "research_lab_stateful_subnet_epoch_cutovers_v1",
+    }
+    state = LocalPostgRESTState(
+        state_root=tmp_path,
+        fixture=fixture,
+        source_root=source_root,
+        tables=tables,
+        rpcs={
+            "persist_research_lab_chain_realized_unattributed_v2",
+        },
+    )
+    activation_epoch = state.rows[
+        "research_lab_chain_realized_settlement_activation_v1"
+    ][0]["first_epoch_id"]
+    settlement_hash = "sha256:" + "1" * 64
+    receipt_hash = "sha256:" + "2" * 64
+    settlement = {
+        "netuid": 71,
+        "epoch_id": activation_epoch,
+        "schema_version": (
+            "leadpoet.research_lab_chain_realized_epoch_settlement.v2"
+        ),
+        "settlement_hash": settlement_hash,
+        "settlement_receipt_hash": receipt_hash,
+        "settlement_doc": {
+            "schema_version": (
+                "leadpoet.research_lab_chain_realized_epoch_settlement.v2"
+            ),
+            "netuid": 71,
+            "epoch_id": activation_epoch,
+            "credit_hashes": [],
+        },
+    }
+    body = {
+        "requested_settlement": settlement,
+        "requested_credits": [],
+    }
+
+    first = state.persist_chain_realized_settlement(
+        rpc_name="persist_research_lab_chain_realized_unattributed_v2",
+        body=body,
+    )
+    second = state.persist_chain_realized_settlement(
+        rpc_name="persist_research_lab_chain_realized_unattributed_v2",
+        body=body,
+    )
+
+    assert first == second
+    assert first["credit_count"] == 0
+    assert len(
+        state.rows[
+            "research_lab_chain_realized_epoch_settlements_v1"
+        ]
+    ) == 1
+    assert state.rows[
+        "research_lab_chain_realized_obligation_credits_v1"
+    ] == []
+
+
+def test_chain_settlement_evidence_requires_persistence_then_readback() -> None:
+    persisted = {
+        "kind": "local-postgrest",
+        "operation": "chain_settlement_persisted",
+        "status": "ok",
+        "target": "persist_research_lab_chain_realized_unattributed_v2",
+    }
+    settlement_read = {
+        "kind": "local-postgrest",
+        "operation": "select",
+        "status": "ok",
+        "target": "research_lab_chain_realized_epoch_settlements_v1",
+    }
+    credit_read = {
+        "kind": "local-postgrest",
+        "operation": "select",
+        "status": "ok",
+        "target": "research_lab_chain_realized_obligation_credits_v1",
+    }
+    with pytest.raises(SystemExit, match="did not persist"):
+        verify_chain_settlement_durable_readback(
+            [settlement_read, credit_read]
+        )
+    with pytest.raises(SystemExit, match="durable settlement$"):
+        verify_chain_settlement_durable_readback(
+            [settlement_read, persisted, credit_read]
+        )
+    with pytest.raises(SystemExit, match="settlement credits"):
+        verify_chain_settlement_durable_readback(
+            [persisted, settlement_read]
+        )
+    verify_chain_settlement_durable_readback(
+        [persisted, settlement_read, credit_read]
     )
 
 

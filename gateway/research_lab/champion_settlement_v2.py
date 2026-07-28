@@ -1749,12 +1749,24 @@ def validate_chain_realized_obligation_credits_v1(
             raise ChampionSettlementV2Error(
                 "chain realized settlement credit set is incomplete"
             )
+        settlement_schema_version = str(
+            settlement["settlement_doc"]["schema_version"]
+        )
+        authority_types = list(settlement["authority_types"])
+        if authority_types not in (
+            [CHAIN_REALIZED_AUTHORITY_TYPE_V1],
+            [CHAIN_REALIZED_UNATTRIBUTED_AUTHORITY_TYPE_V1],
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement authority type is invalid"
+            )
+        authority_type = authority_types[0]
         allocation_doc: dict[str, Any] = {
-            "schema_version": CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+            "schema_version": settlement_schema_version,
             "epoch": int(settlement["epoch"]),
             "netuid": int(settlement["netuid"]),
             "settlement_hash": str(settlement["settlement_hash"]),
-            "authority_type": CHAIN_REALIZED_AUTHORITY_TYPE_V1,
+            "authority_type": authority_type,
             "source": "chain_realized_obligation_credits",
             "source_add_allocations": [],
             "reimbursement_allocations": [],
@@ -1804,7 +1816,7 @@ def validate_chain_realized_obligation_credits_v1(
                 "netuid": int(settlement["netuid"]),
                 "allocation_hash": str(settlement["settlement_hash"]),
                 "allocation_doc": allocation_doc,
-                "authority_types": [CHAIN_REALIZED_AUTHORITY_TYPE_V1],
+                "authority_types": authority_types,
                 "chain_realized_settlement_hash": str(
                     settlement["settlement_hash"]
                 ),

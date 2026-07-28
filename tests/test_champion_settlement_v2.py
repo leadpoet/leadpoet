@@ -1011,6 +1011,74 @@ def test_chain_realized_history_replaces_finalized_weight_intent(monkeypatch):
     assert allocation["lab_attributed_alpha_percent"] == pytest.approx(5.0)
 
 
+def test_unattributed_chain_history_remains_zero_credit_v2_authority(
+    monkeypatch,
+):
+    monkeypatch.setattr(settlement, "validate_receipt_graph", lambda _graph: ())
+    settlement_row, _credit_row, settlement_doc, _graphs = (
+        _chain_realized_fixture()
+    )
+    summary = dict(settlement_doc["observation_summary"])
+    for field in (
+        "source_bundle_hash",
+        "source_bundle_epoch_id",
+        "source_bundle_finalized_block",
+        "source_bundle_finalized_block_hash",
+    ):
+        summary.pop(field)
+    summary["schema_version"] = (
+        "leadpoet.chain_realized_unattributed_observation_summary.v1"
+    )
+    summary["authority_mode"] = "unattributed_chain_observation"
+    unattributed_doc = {
+        **settlement_doc,
+        "schema_version": (
+            settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2
+        ),
+        "credit_hashes": [],
+        "observation_summary": summary,
+    }
+    settlement_hash = sha256_json(unattributed_doc)
+    receipt_hash = settlement_row["settlement_receipt_hash"]
+    unattributed_row = {
+        **settlement_row,
+        "schema_version": (
+            settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2
+        ),
+        "settlement_hash": settlement_hash,
+        "settlement_doc": unattributed_doc,
+    }
+    graphs = {
+        receipt_hash: _minimal_receipt_graph(
+            receipt_hash,
+            purpose=settlement.CHAIN_REALIZED_SETTLEMENT_RECEIPT_PURPOSE_V1,
+            output_root=settlement_hash,
+        )
+    }
+
+    chain_epochs = settlement.validate_chain_realized_epoch_settlements_v1(
+        [unattributed_row],
+        receipt_graphs=graphs,
+    )
+    history = settlement.validate_chain_realized_obligation_credits_v1(
+        [],
+        settlement_rows=chain_epochs,
+        receipt_graphs=graphs,
+    )
+
+    assert history[0]["authority_types"] == [
+        settlement.CHAIN_REALIZED_UNATTRIBUTED_AUTHORITY_TYPE_V1
+    ]
+    assert history[0]["allocation_doc"]["schema_version"] == (
+        settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2
+    )
+    assert history[0]["allocation_doc"]["authority_type"] == (
+        settlement.CHAIN_REALIZED_UNATTRIBUTED_AUTHORITY_TYPE_V1
+    )
+    assert history[0]["allocation_doc"]["champion_allocations"] == []
+    assert history[0]["chain_realized_credit_hashes"] == []
+
+
 @pytest.mark.parametrize(
     ("kind", "source_id", "section", "identity_field"),
     (

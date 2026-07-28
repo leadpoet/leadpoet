@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 from types import SimpleNamespace
 
 import pytest
@@ -1170,9 +1171,216 @@ def test_all_active_submission_paths_use_epoch_bounded_helpers():
     assert "_set_legacy_weights_until_epoch_end" not in primary_source
     assert auditor_source.count("self._set_weights_until_epoch_end(") == 1
     assert "submit_burn_weights_to_uid0" not in auditor_source
-    assert primary_source.count("self.subtensor.set_weights(") == 1
+    assert primary_source.count("failed_source.set_weights(") == 1
+    assert primary_source.count("self.subtensor.set_weights(") == 0
     assert auditor_source.count("self.subtensor.set_weights(") == 1
     assert "_submit_weights_to_gateway" not in primary_source
     assert "_submit_weights_v2" not in primary_source
     assert "VALIDATOR_ATTESTED_WEIGHT_MODE" not in primary_source
     assert "VALIDATOR_WEIGHT_PROTOCOL" in primary_source
+
+
+def test_primary_reconnects_failed_source_before_rechecking_epoch(
+    monkeypatch,
+    capsys,
+):
+    validator = _primary([])
+    failed_source = validator.subtensor
+    replacement = _FakeSubtensor([_SdkResponse(True, "accepted")])
+    events = []
+    context_substrates = []
+
+    def fail_set_weights(**kwargs):
+        failed_source.calls.append(dict(kwargs))
+        events.append(("set_weights", failed_source))
+        raise TimeoutError("server rejected WebSocket connection: HTTP 503")
+
+    failed_source.set_weights = fail_set_weights
+
+    class TrackingContext(_AuthoritativeContext):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            context_substrates.append(kwargs["substrate"])
+
+    async def no_sleep(_seconds):
+        return None
+
+    async def current(**_kwargs):
+        events.append(("epoch", validator.subtensor))
+        return True
+
+    def reconnect(*, expected_source, reason):
+        events.append(("reconnect", expected_source))
+        assert expected_source is failed_source
+        assert reason == "weight_submission_transport"
+        validator.subtensor = replacement
+        return True
+
+    monkeypatch.setattr(validator_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        validator_module,
+        "AuthoritativeSetWeightsContextV2",
+        TrackingContext,
+    )
+    validator._weight_submission_epoch_is_current = current
+    validator._reconnect_subtensor_sync = reconnect
+
+    result = asyncio.run(
+        validator._set_weights_until_epoch_end(
+            epoch_id=0,
+            uids=[0],
+            weights=[1.0],
+            **_authoritative_args(),
+        )
+    )
+
+    assert result is True
+    assert events[:4] == [
+        ("epoch", failed_source),
+        ("set_weights", failed_source),
+        ("reconnect", failed_source),
+        ("epoch", replacement),
+    ]
+    assert len(failed_source.calls) == 1
+    assert len(replacement.calls) == 1
+    assert context_substrates == [
+        failed_source.substrate,
+        replacement.substrate,
+    ]
+    assert "transport error" in capsys.readouterr().out
+
+
+def test_primary_propagates_transport_error_when_reconnect_fails(monkeypatch):
+    validator = _primary([])
+    failed_source = validator.subtensor
+
+    def fail_set_weights(**kwargs):
+        failed_source.calls.append(dict(kwargs))
+        raise TimeoutError("finney websocket timed out")
+
+    failed_source.set_weights = fail_set_weights
+
+    async def no_sleep(_seconds):
+        return None
+
+    async def current(**_kwargs):
+        return True
+
+    reconnects = []
+
+    def reconnect(*, expected_source, reason):
+        reconnects.append((expected_source, reason))
+        return False
+
+    monkeypatch.setattr(validator_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        validator_module,
+        "AuthoritativeSetWeightsContextV2",
+        _AuthoritativeContext,
+    )
+    validator._weight_submission_epoch_is_current = current
+    validator._reconnect_subtensor_sync = reconnect
+
+    with pytest.raises(TimeoutError, match="finney websocket timed out"):
+        asyncio.run(
+            validator._set_weights_until_epoch_end(
+                epoch_id=0,
+                uids=[0],
+                weights=[1.0],
+                **_authoritative_args(),
+            )
+        )
+
+    assert reconnects == [
+        (failed_source, "weight_submission_transport")
+    ]
+    assert len(failed_source.calls) == 1
+
+
+def test_primary_does_not_misclassify_local_journal_io_as_transport(
+    monkeypatch,
+):
+    validator = _primary([])
+
+    def fail_set_weights(**kwargs):
+        validator.subtensor.calls.append(dict(kwargs))
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    validator.subtensor.set_weights = fail_set_weights
+
+    async def current(**_kwargs):
+        return True
+
+    reconnects = []
+    validator._weight_submission_epoch_is_current = current
+    validator._reconnect_subtensor_sync = (
+        lambda **kwargs: reconnects.append(kwargs) or True
+    )
+    monkeypatch.setattr(
+        validator_module,
+        "AuthoritativeSetWeightsContextV2",
+        _AuthoritativeContext,
+    )
+
+    with pytest.raises(OSError) as caught:
+        asyncio.run(
+            validator._set_weights_until_epoch_end(
+                epoch_id=0,
+                uids=[0],
+                weights=[1.0],
+                **_authoritative_args(),
+            )
+        )
+
+    assert caught.value.errno == errno.ENOSPC
+    assert reconnects == []
+    assert len(validator.subtensor.calls) == 1
+
+
+def test_primary_stops_after_reconnect_when_epoch_authority_closed(
+    monkeypatch,
+):
+    validator = _primary([])
+    failed_source = validator.subtensor
+    replacement = _FakeSubtensor([_SdkResponse(True, "must-not-submit")])
+
+    def fail_set_weights(**kwargs):
+        failed_source.calls.append(dict(kwargs))
+        raise ConnectionResetError("finney reset the websocket")
+
+    failed_source.set_weights = fail_set_weights
+    epoch_checks = iter([True, False])
+
+    async def current(**_kwargs):
+        return next(epoch_checks)
+
+    async def no_sleep(_seconds):
+        return None
+
+    def reconnect(*, expected_source, reason):
+        assert expected_source is failed_source
+        assert reason == "weight_submission_transport"
+        validator.subtensor = replacement
+        return True
+
+    monkeypatch.setattr(validator_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        validator_module,
+        "AuthoritativeSetWeightsContextV2",
+        _AuthoritativeContext,
+    )
+    validator._weight_submission_epoch_is_current = current
+    validator._reconnect_subtensor_sync = reconnect
+
+    result = asyncio.run(
+        validator._set_weights_until_epoch_end(
+            epoch_id=0,
+            uids=[0],
+            weights=[1.0],
+            **_authoritative_args(),
+        )
+    )
+
+    assert result is False
+    assert len(failed_source.calls) == 1
+    assert replacement.calls == []

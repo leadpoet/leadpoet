@@ -792,17 +792,12 @@
       "symbol": "_allocate_champions"
     },
     {
-      "ast_sha256": "sha256:6b956ca01d6f6099cff6e6b940a2be80774c6382908cd3ddd1fae891480c2ee7",
+      "ast_sha256": "sha256:477a22c85b18c2a4858217d0b803f59f073800fa7de249700cd9c016474e2399",
       "path": "leadpoet_verifier/economics.py",
-      "symbol": "_allocate_reimbursements_no_champions"
+      "symbol": "_allocate_reimbursements_at_set_rate"
     },
     {
-      "ast_sha256": "sha256:b618941b9f870e9e7c34aba68d9dd9c5c385899aefcf65bd1f4beee69c3a783e",
-      "path": "leadpoet_verifier/economics.py",
-      "symbol": "_allocate_reimbursements_with_champions"
-    },
-    {
-      "ast_sha256": "sha256:ad88a086387a11d1bad2c203c3e2976e8bbc19578377ed6c8d01f100842ea95f",
+      "ast_sha256": "sha256:ced28025a3c4198d93e9b61628156ad2bff56fef442eec0937105f2de82fc918",
       "path": "leadpoet_verifier/economics.py",
       "symbol": "_allocate_research_lab_epoch_existing"
     },
@@ -1112,7 +1107,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:1b0cce0d12b317ffdd9b149598af17a45da8d0bd1fbb3d65bca051dcaf6ab275",
-  "protected_source_commit": "c5e3552731ba1f1833a6a532e9fe1afec31a27f1",
+  "manifest_hash": "sha256:05e5e09fb0317b0e42b7d60cccbdbb555b9f3fb0f16ccff7a485c30d29101888",
+  "protected_source_commit": "4842da2c789b7edb97e511f3c0f46c72a7c0defa",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

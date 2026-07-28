@@ -1567,7 +1567,10 @@ async def settle_chain_realized_epoch_v1(
         observation_outcome.get("execution_receipt")
         or observation_outcome.get("receipt")
     )
-    observation_graph = observation_outcome.get("receipt_graph")
+    observation_graph = (
+        observation_outcome.get("execution_receipt_graph")
+        or observation_outcome.get("receipt_graph")
+    )
     if (
         not isinstance(observation_result, Mapping)
         or not isinstance(observation_receipt, Mapping)
@@ -1677,7 +1680,10 @@ async def settle_chain_realized_epoch_v1(
         settlement_outcome.get("execution_receipt")
         or settlement_outcome.get("receipt")
     )
-    settlement_graph = settlement_outcome.get("receipt_graph")
+    settlement_graph = (
+        settlement_outcome.get("execution_receipt_graph")
+        or settlement_outcome.get("receipt_graph")
+    )
     if (
         not isinstance(package, Mapping)
         or not isinstance(settlement_receipt, Mapping)

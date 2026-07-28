@@ -10,6 +10,7 @@ from leadpoet_canonical.attested_v2 import sha256_json
 HASH = "sha256:" + "a" * 64
 HASH_B = "sha256:" + "b" * 64
 HASH_C = "sha256:" + "c" * 64
+HASH_D = "sha256:" + "d" * 64
 
 
 def _activation(epoch: int = 100) -> dict[str, object]:
@@ -192,8 +193,12 @@ async def test_settle_chain_realized_epoch_executes_both_measured_authorities(
             return {
                 "result": observation,
                 "execution_receipt": receipt,
-                "receipt_graph": {
+                "execution_receipt_graph": {
                     "root_receipt_hash": HASH,
+                    "receipts": [receipt],
+                },
+                "receipt_graph": {
+                    "root_receipt_hash": HASH_D,
                     "receipts": [receipt],
                 },
             }
@@ -208,8 +213,12 @@ async def test_settle_chain_realized_epoch_executes_both_measured_authorities(
         return {
             "result": package,
             "execution_receipt": receipt,
-            "receipt_graph": {
+            "execution_receipt_graph": {
                 "root_receipt_hash": HASH_B,
+                "receipts": [receipt],
+            },
+            "receipt_graph": {
+                "root_receipt_hash": HASH_D,
                 "receipts": [receipt],
             },
         }

@@ -52,10 +52,40 @@ _REAL_SUBTENSOR_CLASS: Any = None
 _ORIGINAL_SOCKET = socket.socket
 _ORIGINAL_GETADDRINFO = socket.getaddrinfo
 _RESTART_EPOCH_TRANSIENT_HEAD_CALLS = 0
+_BLOCK_NUMBERS_BY_HASH: dict[str, int] = {}
 
 
 def _block_hash(block: int) -> str:
-    return "0x" + hashlib.sha256(f"leadpoet-local-block:{block}".encode()).hexdigest()
+    normalized_block = int(block)
+    value = "0x" + hashlib.sha256(
+        f"leadpoet-local-block:{normalized_block}".encode()
+    ).hexdigest()
+    _BLOCK_NUMBERS_BY_HASH[value] = normalized_block
+    return value
+
+
+def _block_number(block_hash: str) -> int:
+    value = str(block_hash)
+    if value == CUTOVER_BLOCK_HASH:
+        return CUTOVER_BLOCK
+    if value in _BLOCK_NUMBERS_BY_HASH:
+        return _BLOCK_NUMBERS_BY_HASH[value]
+    raise ValueError("local chain block hash is unknown")
+
+
+def _subnet_epoch_index_at(block: int) -> int:
+    normalized_block = int(block)
+    if normalized_block < CUTOVER_BLOCK:
+        return CUTOVER_EPOCH_INDEX - 1
+    if normalized_block >= LAST_EPOCH_BLOCK:
+        return SUBNET_EPOCH_INDEX
+    span = LAST_EPOCH_BLOCK - CUTOVER_BLOCK
+    transitions = SUBNET_EPOCH_INDEX - CUTOVER_EPOCH_INDEX
+    if span <= 0 or transitions <= 0:
+        raise ValueError("local chain epoch fixture is invalid")
+    return CUTOVER_EPOCH_INDEX + (
+        ((normalized_block - CUTOVER_BLOCK) * transitions) // span
+    )
 
 
 def _current_settlement_epoch_id() -> int:
@@ -1203,7 +1233,7 @@ class _LocalRuntimeIdentity:
 
 def _selective_metagraph_fixture(block: int) -> str:
     owner = bytes.fromhex(
-        "924620afb270acb1ee27bd034aa9e97108ef276da5079db982883cd70294741a"
+        "a6bfe69c29bf9e4db65c63ac6f6d1e23c252ca871744afb6edc5623d9bc39004"
     )
     miner = bytes.fromhex(
         "74adb27b7edd7126a81f5bac79e9bda1a4c8ec94d2c4f2ce795e0c56932a5383"
@@ -1220,7 +1250,11 @@ def _selective_metagraph_fixture(block: int) -> str:
 
 
 def _local_chain_rpc(body: bytes, *, archive: bool) -> bytes:
-    from leadpoet_canonical.chain_source_v2 import subnet_epoch_storage_key
+    from leadpoet_canonical.chain_source_v2 import (
+        last_update_storage_key,
+        subnet_epoch_storage_key,
+        weights_storage_key,
+    )
 
     try:
         request = json.loads(body)
@@ -1249,14 +1283,7 @@ def _local_chain_rpc(body: bytes, *, archive: bool) -> bytes:
             result = _block_hash(block)
     elif method == "chain_getHeader" and len(params) == 1:
         at_hash = str(params[0])
-        known = {
-            current_hash: CURRENT_BLOCK,
-            CUTOVER_BLOCK_HASH: CUTOVER_BLOCK,
-            predecessor_hash: CUTOVER_BLOCK - 1,
-        }
-        if at_hash not in known:
-            raise ValueError("local chain header hash is unknown")
-        block = known[at_hash]
+        block = _block_number(at_hash)
         result = {
             "number": hex(block),
             "stateRoot": _block_hash(block + 1),
@@ -1282,51 +1309,78 @@ def _local_chain_rpc(body: bytes, *, archive: bool) -> bytes:
     elif method == "state_call" and len(params) == 3:
         runtime_method = str(params[0])
         at_hash = str(params[2])
-        if at_hash != current_hash:
-            raise ValueError("local runtime call is not pinned to finalized head")
+        block = _block_number(at_hash)
         if runtime_method == "SubnetInfoRuntimeApi_get_selective_mechagraph":
-            result = _selective_metagraph_fixture(CURRENT_BLOCK)
+            result = _selective_metagraph_fixture(block)
         elif runtime_method == "SwapRuntimeApi_current_alpha_price":
+            if at_hash != current_hash:
+                raise ValueError(
+                    "local price runtime call is not pinned to finalized head"
+                )
             result = "0x9a0f4f0000000000"
         else:
             raise ValueError("local runtime method is unknown")
     elif method == "state_getStorage" and len(params) == 2:
         storage_key, at_hash = map(str, params)
-        names = (
-            "Tempo",
-            "LastEpochBlock",
-            "PendingEpochAt",
-            "SubnetEpochIndex",
-            "BlocksSinceLastStep",
+        block = _block_number(at_hash)
+        subnet_epoch_key = subnet_epoch_storage_key(
+            storage_name="SubnetEpochIndex",
+            netuid=71,
         )
-        matching = [
-            name
-            for name in names
-            if storage_key
-            == subnet_epoch_storage_key(storage_name=name, netuid=71)
-        ]
-        if len(matching) != 1:
-            raise ValueError("local chain storage key is unknown")
-        name = matching[0]
-        if at_hash == CUTOVER_BLOCK_HASH:
-            values = {
-                "SubnetEpochIndex": CUTOVER_EPOCH_INDEX,
-                "LastEpochBlock": CUTOVER_BLOCK,
-            }
-        elif at_hash == predecessor_hash:
-            values = {"SubnetEpochIndex": CUTOVER_EPOCH_INDEX - 1}
-        elif at_hash == current_hash:
-            values = {
-                "Tempo": TEMPO,
-                "LastEpochBlock": LAST_EPOCH_BLOCK,
-                "PendingEpochAt": 0,
-                "SubnetEpochIndex": SUBNET_EPOCH_INDEX,
-                "BlocksSinceLastStep": CURRENT_BLOCK - LAST_EPOCH_BLOCK,
-            }
+        weight_key = weights_storage_key(netuid=71, validator_uid=0)
+        update_key = last_update_storage_key(netuid=71)
+        if storage_key == subnet_epoch_key:
+            result = "0x" + _subnet_epoch_index_at(block).to_bytes(
+                8, "little"
+            ).hex()
+        elif storage_key == weight_key:
+            result = "0x" + (
+                b"\x08"
+                + (0).to_bytes(2, "little")
+                + (65_535).to_bytes(2, "little")
+                + (1).to_bytes(2, "little")
+                + (16_384).to_bytes(2, "little")
+            ).hex()
+        elif storage_key == update_key:
+            last_update = min(block, LAST_EPOCH_BLOCK - 1)
+            result = "0x" + (
+                b"\x08"
+                + last_update.to_bytes(8, "little")
+                + last_update.to_bytes(8, "little")
+            ).hex()
         else:
-            raise ValueError("local chain storage hash is unknown")
-        width = 2 if name == "Tempo" else 8
-        result = "0x" + int(values[name]).to_bytes(width, "little").hex()
+            names = (
+                "Tempo",
+                "LastEpochBlock",
+                "PendingEpochAt",
+                "BlocksSinceLastStep",
+            )
+            matching = [
+                name
+                for name in names
+                if storage_key
+                == subnet_epoch_storage_key(storage_name=name, netuid=71)
+            ]
+            if len(matching) != 1:
+                raise ValueError("local chain storage key is unknown")
+            name = matching[0]
+            if at_hash == CUTOVER_BLOCK_HASH:
+                values = {
+                    "LastEpochBlock": CUTOVER_BLOCK,
+                }
+            elif at_hash == current_hash:
+                values = {
+                    "Tempo": TEMPO,
+                    "LastEpochBlock": LAST_EPOCH_BLOCK,
+                    "PendingEpochAt": 0,
+                    "BlocksSinceLastStep": CURRENT_BLOCK - LAST_EPOCH_BLOCK,
+                }
+            else:
+                raise ValueError("local chain storage hash is unknown")
+            if name not in values:
+                raise ValueError("local chain storage value is unavailable")
+            width = 2 if name == "Tempo" else 8
+            result = "0x" + int(values[name]).to_bytes(width, "little").hex()
     else:
         raise ValueError(
             "local chain received an unknown RPC: %s %r" % (method, params)

@@ -557,6 +557,114 @@ def test_gateway_rehearsal_chain_adapter_enforces_exact_cutover_reads(
         )
 
 
+def test_gateway_rehearsal_chain_adapter_supports_exact_epoch_close_search(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from gateway.tee.coordinator_chain_source_v2 import CoordinatorChainSourceV2
+    from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+    from leadpoet_canonical.attested_v2 import (
+        build_transport_attempt,
+        sha256_bytes,
+        sha256_json,
+    )
+
+    source_root = Path(__file__).resolve().parents[2]
+    cutover = json.loads(
+        (
+            source_root / "config/stateful-epoch-cutover-sn71.json"
+        ).read_text(encoding="utf-8")
+    )
+    monkeypatch.setattr(rehearsal_sitecustomize, "SOURCE_ROOT", source_root)
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize, "EVENT_PATH", tmp_path / "events.jsonl"
+    )
+    rehearsal_sitecustomize._BLOCK_NUMBERS_BY_HASH.clear()
+    attempt_sequence = 0
+
+    def execute(request):
+        nonlocal attempt_sequence
+        attempt_sequence += 1
+        request_body = base64.b64decode(request["body_b64"], validate=True)
+        body = rehearsal_sitecustomize._local_chain_rpc(
+            request_body,
+            archive=request["provider_id"] == "bittensor_archive",
+        )
+        response_hash = sha256_bytes(body)
+        attempt = build_transport_attempt(
+            request_id=f"{attempt_sequence:032x}",
+            logical_operation_id=request["logical_operation_id"],
+            job_id=request["job_id"],
+            purpose=request["purpose"],
+            provider_id=request["provider_id"],
+            attempt_number=request["attempt_number"],
+            method=request["method"],
+            destination_host=(
+                "archive.chain.opentensor.ai"
+                if request["provider_id"] == "bittensor_archive"
+                else "entrypoint-finney.opentensor.ai"
+            ),
+            destination_port=443,
+            path_hash="sha256:" + "4" * 64,
+            nonsecret_headers_hash="sha256:" + "5" * 64,
+            body_hash=sha256_bytes(request_body),
+            credential_ref_hash="sha256:" + "6" * 64,
+            retry_policy_hash=request["retry_policy_hash"],
+            timeout_ms=request["timeout_ms"],
+            started_at="2026-07-25T00:00:00Z",
+            terminal_status="authenticated_response",
+            http_status=200,
+            response_hash=response_hash,
+            request_artifact_hash=sha256_json(
+                {"request": attempt_sequence}
+            ),
+            response_artifact_hash=response_hash,
+            tls_peer_chain_hash="sha256:" + "7" * 64,
+            tls_protocol="TLSv1.3",
+            failure_code=None,
+            completed_at="2026-07-25T00:00:01Z",
+        )
+        return {
+            "terminal_status": "authenticated_response",
+            "http_status": 200,
+            "body_b64": base64.b64encode(body).decode("ascii"),
+            "transport_attempt": attempt,
+        }
+
+    source = CoordinatorChainSourceV2(
+        execute_provider=execute,
+        retry_policy_hashes={
+            "bittensor_chain": "sha256:" + "1" * 64,
+            "bittensor_archive": "sha256:" + "2" * 64,
+            "coingecko": "sha256:" + "3" * 64,
+        },
+        epoch_authority={"mode": "stateful_v1", "cutover": cutover},
+        sleep=lambda _seconds: None,
+    )
+    settlement_epoch = rehearsal_sitecustomize._current_settlement_epoch_id() - 1
+    result = source.read_stateful_epoch_close_weights(
+        netuid=71,
+        epoch_id=settlement_epoch,
+        validator_hotkey=VALIDATOR_HOTKEY,
+        context=ExecutionContextV2(
+            job_id="rehearsal-stateful-close",
+            purpose="research_lab.chain_weight_observation.v1",
+            epoch_id=settlement_epoch,
+        ),
+    )
+
+    assert result["epoch_id"] == settlement_epoch
+    assert result["official_subnet_epoch_id"] == (
+        rehearsal_sitecustomize.SUBNET_EPOCH_INDEX - 1
+    )
+    assert result["next_epoch_block"] == rehearsal_sitecustomize.LAST_EPOCH_BLOCK
+    assert result["close_block"] == rehearsal_sitecustomize.LAST_EPOCH_BLOCK - 1
+    assert result["validator_uid"] == 0
+    assert result["active_source_epoch_id"] == settlement_epoch
+    assert result["weights"] == [[0, 65_535], [1, 16_384]]
+
+
 def test_restart_rehearsal_injects_and_proves_transient_epoch_read_recovery(
     tmp_path,
     monkeypatch,

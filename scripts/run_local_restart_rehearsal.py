@@ -440,6 +440,9 @@ def _run_component(
     gateway_worker_fleet_mode: str,
 ) -> None:
     limits = PROFILE_LIMITS[profile]
+    launcher_log = evidence_root / (
+        f"{run_ordinal}-{component}-{transition}-{candidate_sha}-launcher.log"
+    )
     command = [
         "docker",
         "run",
@@ -496,7 +499,32 @@ def _run_component(
         tag,
     ]
     try:
-        _run(command)
+        with launcher_log.open("w", encoding="utf-8") as output:
+            process = subprocess.Popen(
+                command,
+                cwd=str(REPO_ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            try:
+                assert process.stdout is not None
+                for line in process.stdout:
+                    output.write(line)
+                    output.flush()
+                    print(line, end="", flush=True)
+                returncode = process.wait()
+            except BaseException:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                raise
+        if returncode:
+            raise subprocess.CalledProcessError(returncode, command)
     except BaseException:
         _preserve_failure_evidence(
             evidence_root=evidence_root,

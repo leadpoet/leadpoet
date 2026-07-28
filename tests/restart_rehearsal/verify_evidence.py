@@ -324,6 +324,7 @@ def verify_migration_backed_database_contract(candidate_sha: str) -> str:
         "post_128_transport_persisted",
         "transport_contract_valid",
         "finalized_view_projection_exact",
+        "finalized_view_seed_available",
         "settlement_authority_parsed",
         "measured_settlement_receipt_projection_exact",
         "tampered_weight_receipt_rejected",
@@ -348,6 +349,26 @@ def verify_migration_backed_database_contract(candidate_sha: str) -> str:
     ):
         raise SystemExit(
             "migration-backed finalized allocation view evidence is missing"
+        )
+    seed_rows = document.get("seed_rows")
+    finalized_rows = (
+        seed_rows.get("research_lab_finalized_allocation_epochs_v2")
+        if isinstance(seed_rows, dict)
+        else None
+    )
+    if (
+        not isinstance(finalized_rows, list)
+        or len(finalized_rows) != 1
+        or not isinstance(finalized_rows[0], dict)
+        or set(finalized_rows[0])
+        != set(
+            relations["research_lab_finalized_allocation_epochs_v2"][
+                "columns"
+            ]
+        )
+    ):
+        raise SystemExit(
+            "migration-backed finalized authority seed is missing"
         )
     return hashlib.sha256(path.read_bytes()).hexdigest()
 

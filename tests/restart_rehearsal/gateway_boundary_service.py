@@ -411,6 +411,35 @@ def _migration_schema_contract(
     return relations, set(raw_rpcs)
 
 
+def _migration_seed_rows(
+    path: Path,
+    *,
+    candidate_sha: str,
+    relation_columns: dict[str, frozenset[str]],
+) -> dict[str, list[dict[str, Any]]]:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    raw = document.get("seed_rows")
+    target = "research_lab_finalized_allocation_epochs_v2"
+    if (
+        document.get("candidate_sha") != candidate_sha
+        or not isinstance(raw, dict)
+        or set(raw) != {target}
+        or not isinstance(raw[target], list)
+        or len(raw[target]) != 1
+        or not isinstance(raw[target][0], dict)
+    ):
+        raise RuntimeError(
+            "migration-backed finalized authority seed is invalid"
+        )
+    row = dict(raw[target][0])
+    expected_columns = relation_columns.get(target)
+    if expected_columns is None or set(row) != set(expected_columns):
+        raise RuntimeError(
+            "migration-backed finalized authority seed columns differ"
+        )
+    return {target: [row]}
+
+
 class LocalPostgRESTState:
     def __init__(
         self,
@@ -421,6 +450,7 @@ class LocalPostgRESTState:
         tables: set[str],
         rpcs: set[str],
         relation_columns: dict[str, frozenset[str]] | None = None,
+        seed_rows: dict[str, list[dict[str, Any]]] | None = None,
     ):
         self.state_root = state_root
         self.fixture = fixture
@@ -431,6 +461,20 @@ class LocalPostgRESTState:
         self.rows: dict[str, list[dict[str, Any]]] = {
             name: [] for name in tables
         }
+        for table, rows in (seed_rows or {}).items():
+            if (
+                table not in self.rows
+                or table not in self.relation_columns
+                or any(
+                    not isinstance(row, dict)
+                    or set(row) != set(self.relation_columns[table])
+                    for row in rows
+                )
+            ):
+                raise ValueError(
+                    "local PostgREST seed rows differ from migration schema"
+                )
+            self.rows[table] = [dict(row) for row in rows]
         cutover = json.loads(
             (
                 source_root / "config/stateful-epoch-cutover-sn71.json"
@@ -936,6 +980,11 @@ def main() -> int:
         args.schema_contract,
         candidate_sha=args.candidate_sha,
     )
+    seed_rows = _migration_seed_rows(
+        args.schema_contract,
+        candidate_sha=args.candidate_sha,
+        relation_columns=relation_columns,
+    )
     tables.update(relation_columns)
     rpcs.update(migration_rpcs)
     args.state_root.mkdir(parents=True, exist_ok=True)
@@ -946,6 +995,7 @@ def main() -> int:
         tables=tables,
         rpcs=rpcs,
         relation_columns=relation_columns,
+        seed_rows=seed_rows,
     )
     server = LocalPostgRESTServer((args.host, args.port), state)
     (args.state_root / "local-postgrest.ready").write_text(

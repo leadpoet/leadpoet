@@ -36,6 +36,7 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     _attested_store_tables,
     _direct_provider_store_tables,
     _measured_query_tables,
+    _migration_seed_rows,
     _migration_schema_contract,
     _schema_contract,
 )
@@ -340,6 +341,14 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "pre_128_transport_rejected": True,
             "post_128_transport_persisted": True,
         },
+        "seed_rows": {
+            "research_lab_finalized_allocation_epochs_v2": [
+                {
+                    column: None
+                    for column in EXPECTED_FINALIZED_VIEW_COLUMNS
+                }
+            ],
+        },
     }
     path = tmp_path / "postgres-contract.json"
     path.write_text(json.dumps(contract), encoding="utf-8")
@@ -353,6 +362,11 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
         "research_lab_finalized_allocation_epochs_v2"
     ] == frozenset(EXPECTED_FINALIZED_VIEW_COLUMNS)
     assert "research_lab_attested_transport_purpose_contract_v2" in rpcs
+    assert _migration_seed_rows(
+        path,
+        candidate_sha=COMMIT,
+        relation_columns=relation_columns,
+    ) == contract["seed_rows"]
     with pytest.raises(RuntimeError, match="differs from candidate"):
         _migration_schema_contract(path, candidate_sha="2" * 40)
 
@@ -378,10 +392,19 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "post_128_transport_persisted": True,
             "transport_contract_valid": True,
             "finalized_view_projection_exact": True,
+            "finalized_view_seed_available": True,
             "settlement_authority_parsed": True,
             "measured_settlement_receipt_projection_exact": True,
             "tampered_weight_receipt_rejected": True,
             "required_schema_migrations_declared": True,
+        },
+        "seed_rows": {
+            "research_lab_finalized_allocation_epochs_v2": [
+                {
+                    column: None
+                    for column in EXPECTED_FINALIZED_VIEW_COLUMNS
+                }
+            ],
         },
     }
     contract_path.write_text(json.dumps(contract), encoding="utf-8")

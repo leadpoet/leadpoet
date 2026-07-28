@@ -21,7 +21,6 @@ def _policy(usd_per_0_1_percent_epoch: float) -> dict[str, object]:
         "research_lab_emission_percent": 30.0,
         "reward_epochs": 20,
         "reimbursement_epochs": 20,
-        "reimbursement_allow_overpay_without_champions": True,
         "reimbursement_max_cost_multiplier_with_champions": 1.0,
         "champion_min_alpha_percent": 7.0,
         "champion_extra_alpha_percent_per_point": 0.3,

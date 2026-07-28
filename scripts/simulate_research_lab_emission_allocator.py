@@ -20,7 +20,6 @@ POLICY = {
     "fulfillment_leaderboard_emission_percent": 9.5,
     "reward_epochs": 20,
     "usd_per_0_1_percent_epoch": 0.162,
-    "reimbursement_allow_overpay_without_champions": True,
     "reimbursement_max_cost_multiplier_with_champions": 1.0,
     "champion_min_alpha_percent": 4.0,
     "champion_extra_alpha_percent_per_point": 0.2,

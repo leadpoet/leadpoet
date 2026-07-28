@@ -184,7 +184,6 @@ def _run_lab_allocator_simulations() -> None:
         "fulfillment_leaderboard_emission_percent": 9.5,
         "reward_epochs": 20,
         "usd_per_0_1_percent_epoch": 0.162,
-        "reimbursement_allow_overpay_without_champions": True,
         "reimbursement_max_cost_multiplier_with_champions": 1.0,
         "champion_min_alpha_percent": 4.0,
         "champion_extra_alpha_percent_per_point": 0.2,
@@ -206,9 +205,16 @@ def _run_lab_allocator_simulations() -> None:
     high = _paid_for_uid(allocation["reimbursement_allocations"], 1)
     low = _paid_for_uid(allocation["reimbursement_allocations"], 6)
     _assert_close(high, low * 2, "no-champion reimbursement should be spend-proportional")
-    _assert_close(sum(item["paid_alpha_percent"] for item in allocation["reimbursement_allocations"]), 20.0, "no-champion reimbursement should use full lab cap")
-    if all(item["overpaid_alpha_percent"] <= 0 for item in allocation["reimbursement_allocations"]):
-        raise AssertionError("no-champion reimbursement should allow overpayment")
+    for item in allocation["reimbursement_allocations"]:
+        _assert_close(
+            item["paid_alpha_percent"],
+            item["intended_alpha_percent"],
+            "no-champion reimbursement should stop at its set rate",
+        )
+        if item["overpaid_alpha_percent"] > 0:
+            raise AssertionError("no-champion reimbursement must not overpay")
+    if allocation["unallocated_percent"] <= 0:
+        raise AssertionError("unused no-champion lab capacity should remain unallocated")
 
     two_champions = [
         _champion_obligation(101, start_epoch=100, improvement_points=4.0),

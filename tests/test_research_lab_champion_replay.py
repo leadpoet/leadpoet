@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+
 import pytest
 
 from gateway.research_lab.allocations import (
@@ -8,6 +10,12 @@ from gateway.research_lab.allocations import (
     _source_add_paid_alpha_to_date_from_snapshots,
 )
 from gateway.research_lab.config import ResearchLabGatewayConfig
+from leadpoet_canonical.weight_computation import (
+    WEIGHT_SNAPSHOT_SCHEMA_VERSION,
+    compute_final_weights,
+    research_lab_uid_weights_from_allocation,
+    weight_config_hash,
+)
 from leadpoet_verifier.economics import (
     DEFAULT_RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO,
     allocate_research_lab_epoch,
@@ -21,7 +29,6 @@ def _policy(*, lab_cap: float = 20.0) -> dict[str, object]:
         "research_lab_emission_percent": lab_cap,
         "reward_epochs": 20,
         "reimbursement_epochs": 20,
-        "reimbursement_allow_overpay_without_champions": True,
         "reimbursement_max_cost_multiplier_with_champions": 1.0,
         "champion_placeholder_alpha_percent": 0.0001,
         "champion_queue_trigger_ratio": 0.50,
@@ -277,17 +284,193 @@ def test_champion_queue_trigger_default_is_shared_by_gateway_and_verifier():
     assert allocation["champion_alpha_percent"] == pytest.approx(15.0)
 
 
-def test_no_champion_reimbursements_can_use_full_lab_cap_pro_rata():
+def test_no_champion_reimbursements_stop_at_set_rate_and_leave_remainder_unallocated():
     reimbursements = [_reimbursement(uid, spend_usd=500.0) for uid in range(1, 6)]
 
-    allocation = allocate_research_lab_epoch(12, _policy(lab_cap=30.0), reimbursements, [])
+    policy = _policy(lab_cap=30.0)
+    policy["reimbursement_allow_overpay_without_champions"] = True
+    allocation = allocate_research_lab_epoch(12, policy, reimbursements, [])
 
-    assert allocation["reimbursement_alpha_percent"] == pytest.approx(30.0)
+    assert allocation["reimbursement_alpha_percent"] == pytest.approx(18.75)
     assert allocation["champion_alpha_percent"] == pytest.approx(0.0)
+    assert allocation["unallocated_percent"] == pytest.approx(11.25)
     for row in allocation["reimbursement_allocations"]:
-        assert row["paid_alpha_percent"] == pytest.approx(6.0)
-        assert row["overpaid_alpha_percent"] == pytest.approx(2.25)
-        assert row["reason"] == "overpay_no_active_champions"
+        assert row["paid_alpha_percent"] == pytest.approx(3.75)
+        assert row["paid_alpha_percent"] == pytest.approx(row["intended_alpha_percent"])
+        assert row["overpaid_alpha_percent"] == pytest.approx(0.0)
+        assert row["reason"] == "full_reimbursement"
+
+
+def test_legacy_overpay_environment_switch_is_inert(monkeypatch):
+    monkeypatch.setenv(
+        "RESEARCH_LAB_REIMBURSEMENT_ALLOW_OVERPAY_WITHOUT_CHAMPIONS",
+        "true",
+    )
+
+    config = ResearchLabGatewayConfig.from_env()
+
+    assert config.lab_reimbursement_allow_overpay_without_champions is False
+    assert (
+        config.reimbursement_policy_doc(enabled=True)[
+            "reimbursement_allow_overpay_without_champions"
+        ]
+        is False
+    )
+
+
+def test_no_champion_reimbursements_scale_down_when_set_rates_exceed_lab_cap():
+    reimbursements = [_reimbursement(uid, spend_usd=500.0) for uid in range(1, 6)]
+
+    allocation = allocate_research_lab_epoch(12, _policy(lab_cap=10.0), reimbursements, [])
+
+    assert allocation["reimbursement_alpha_percent"] == pytest.approx(10.0)
+    assert allocation["unallocated_percent"] == pytest.approx(0.0)
+    for row in allocation["reimbursement_allocations"]:
+        assert row["paid_alpha_percent"] == pytest.approx(2.0)
+        assert row["paid_alpha_percent"] < row["intended_alpha_percent"]
+        assert row["overpaid_alpha_percent"] == pytest.approx(0.0)
+        assert row["reason"] == "scaled_by_lab_capacity"
+
+
+def test_no_champion_set_rate_remainder_reaches_final_weight_burn_uid():
+    reimbursement = [_reimbursement(2, spend_usd=500.0)]
+    allocation = allocate_research_lab_epoch(
+        12,
+        _policy(lab_cap=30.0),
+        reimbursement,
+        [],
+    )
+    snapshot = {
+        "schema_version": WEIGHT_SNAPSHOT_SCHEMA_VERSION,
+        "netuid": 71,
+        "epoch_id": 12,
+        "block": 4679,
+        "commit_sha": "a" * 40,
+        "config_hash": "",
+        "parent_receipt_hashes": [],
+        "research_lab_allocation_receipt_hash": "",
+        "burn_target_uid": 0,
+        "expected_burn_target_hotkey": "burn-hotkey",
+        "metagraph_hotkeys": [
+            "burn-hotkey",
+            "fulfillment-hotkey",
+            "5Freimburse2",
+        ],
+        "banned_hotkeys": [],
+        "banned_lookup_ok": True,
+        "ff_enabled": True,
+        "base_burn_share": 0.0,
+        "champion_share": 0.0,
+        "champion_uid": None,
+        "effective_champion_share": 0.0,
+        "research_lab_fallback_share": 0.30,
+        "research_lab_allocation_doc": allocation,
+        "leaderboard_bonus_share": 0.0,
+        "leaderboard_rank_shares": [],
+        "leaderboard_entries": [],
+        "leaderboard_fetch_ok": True,
+        "fulfillment_share": 0.70,
+        "fulfillment_rows": [
+            {"hotkey": "fulfillment-hotkey", "share": 0.70}
+        ],
+        "fulfillment_fetch_ok": True,
+        "rolling_lead_count": 0,
+        "rolling_scores": [],
+        "sourcing_floor_threshold": 125_000,
+        "min_total_rep_for_distribution": 100,
+    }
+    snapshot["config_hash"] = weight_config_hash(snapshot)
+
+    result = compute_final_weights(snapshot)
+
+    assert allocation["reimbursement_alpha_percent"] == pytest.approx(3.75)
+    assert allocation["unallocated_percent"] == pytest.approx(26.25)
+    assert result["uids"] == [0, 1, 2]
+    assert result["weights"] == pytest.approx([0.2625, 0.70, 0.0375])
+    assert result["components"]["research_lab_burn"] == pytest.approx(0.2625)
+    assert result["components"]["research_lab_paid"] == pytest.approx(0.0375)
+
+
+def test_no_champion_reimbursement_never_overpays_across_randomized_inputs():
+    rng = random.Random(710_2026_07_28)
+    for case in range(1_000):
+        lab_cap = rng.uniform(0.0001, 30.0)
+        reimbursements = [
+            _reimbursement(
+                uid,
+                spend_usd=rng.uniform(0.01, 5_000.0),
+                weight=rng.uniform(0.01, 4.0),
+            )
+            for uid in range(1, rng.randint(2, 35))
+        ]
+        policy = _policy(lab_cap=lab_cap)
+        policy["reimbursement_allow_overpay_without_champions"] = bool(case % 2)
+
+        allocation = allocate_research_lab_epoch(
+            12,
+            policy,
+            reimbursements,
+            [],
+        )
+
+        paid_total = 0.0
+        for row in allocation["reimbursement_allocations"]:
+            paid = float(row["paid_alpha_percent"])
+            intended = float(row["intended_alpha_percent"])
+            paid_total += paid
+            assert paid <= intended + 0.000001, case
+            assert float(row["overpaid_alpha_percent"]) == pytest.approx(0.0), case
+        assert paid_total <= lab_cap + 0.000001, case
+        assert paid_total + float(allocation["unallocated_percent"]) == pytest.approx(
+            lab_cap,
+            abs=0.000002,
+        ), case
+
+
+def test_no_champion_set_rate_and_burn_conserve_100_accelerated_epochs():
+    policy = _policy(lab_cap=30.0)
+    policy["reimbursement_allow_overpay_without_champions"] = True
+    for epoch in range(100, 200):
+        miner_count = 1 + epoch % 20
+        reimbursements = []
+        hotkeys = ["burn-hotkey"]
+        for uid in range(1, miner_count + 1):
+            obligation = _reimbursement(
+                uid,
+                spend_usd=float((epoch % 13 + 1) * uid * 25),
+                weight=1.0 + (uid % 3) * 0.25,
+            )
+            obligation["start_epoch"] = epoch
+            reimbursements.append(obligation)
+            hotkeys.append(str(obligation["miner_hotkey"]))
+
+        allocation = allocate_research_lab_epoch(
+            epoch,
+            policy,
+            reimbursements,
+            [],
+        )
+        uid_weights, burn_share, breakdown = (
+            research_lab_uid_weights_from_allocation(
+                allocation,
+                metagraph_hotkeys=hotkeys,
+                reserved_share=0.30,
+            )
+        )
+
+        assert all(
+            float(row["overpaid_alpha_percent"]) == 0.0
+            for row in allocation["reimbursement_allocations"]
+        ), epoch
+        assert burn_share == pytest.approx(
+            float(allocation["unallocated_percent"]) / 100.0,
+            abs=0.000002,
+        ), epoch
+        assert sum(uid_weights.values()) + burn_share == pytest.approx(
+            0.30,
+            abs=0.000002,
+        ), epoch
+        assert breakdown["deregistered"] == pytest.approx(0.0), epoch
 
 
 def test_crowded_reimbursements_scale_by_spend_and_island_weight():

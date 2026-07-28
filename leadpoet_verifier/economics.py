@@ -335,10 +335,9 @@ def allocate_research_lab_epoch(
     and intended to be stored as the per-epoch Lab allocation snapshot.
 
     SOURCE_ADD is an independent, first-priority allocation. Its fixed payment
-    is deducted from the configured Lab cap, then the pre-existing
-    reimbursement/champion allocator runs unchanged against the remainder.
-    Calls without SOURCE_ADD obligations retain the exact legacy output shape
-    and hash behavior.
+    is deducted from the configured Lab cap, then the reimbursement/champion
+    allocator runs against the remainder. Calls without SOURCE_ADD obligations
+    retain the legacy output shape.
     """
     if not active_source_add_obligations:
         return _allocate_research_lab_epoch_existing(
@@ -376,9 +375,9 @@ def allocate_research_lab_epoch(
     )
     remaining_cap = max(Decimal("0"), lab_cap - source_add_paid)
 
-    # This is the behavioral boundary that preserves the existing economics:
-    # only the cap changes. Every reimbursement and champion input, formula,
-    # ordering rule, reserve, queue rule, and surplus rule remains untouched.
+    # SOURCE_ADD changes only the cap available to the reimbursement/champion
+    # allocator. Every input, formula, ordering rule, reserve, queue rule, and
+    # surplus rule otherwise remains untouched.
     remaining_policy = dict(policy)
     remaining_policy["research_lab_emission_percent"] = _rate_float(remaining_cap)
     existing = _allocate_research_lab_epoch_existing(
@@ -474,13 +473,19 @@ def _allocate_research_lab_epoch_existing(
 
     reimbursement_paid = Decimal("0")
     if reimbursements:
-        if not champions and bool(policy.get("reimbursement_allow_overpay_without_champions", True)):
-            reimbursement_allocations = _allocate_reimbursements_no_champions(reimbursements, lab_cap)
-            _cap_allocation_sections_to_pool((reimbursement_allocations,), lab_cap)
-        else:
-            reimbursement_pool = _reimbursement_pool_with_champions(champions, lab_cap, policy)
-            reimbursement_allocations = _allocate_reimbursements_with_champions(reimbursements, reimbursement_pool)
-            _cap_allocation_sections_to_pool((reimbursement_allocations,), reimbursement_pool)
+        reimbursement_pool = (
+            _reimbursement_pool_with_champions(champions, lab_cap, policy)
+            if champions
+            else lab_cap
+        )
+        reimbursement_allocations = _allocate_reimbursements_at_set_rate(
+            reimbursements,
+            reimbursement_pool,
+        )
+        _cap_allocation_sections_to_pool(
+            (reimbursement_allocations,),
+            reimbursement_pool,
+        )
         reimbursement_paid = sum(_decimal(item["paid_alpha_percent"]) for item in reimbursement_allocations)
 
     remaining_for_champions = max(Decimal("0"), lab_cap - reimbursement_paid)
@@ -1284,21 +1289,7 @@ def _reimbursement_pool_with_champions(
     return min(max(Decimal("0"), lab_cap - champion_reserve), reimbursement_share_cap)
 
 
-def _allocate_reimbursements_no_champions(
-    reimbursements: Sequence[Mapping[str, Any]],
-    lab_cap: Decimal,
-) -> list[Dict[str, Any]]:
-    weight_sum = sum(_decimal(item["pro_rata_weight"]) for item in reimbursements)
-    if weight_sum <= 0:
-        return [_reimbursement_allocation(item, Decimal("0"), "no_weight") for item in reimbursements]
-    allocations = []
-    for item in reimbursements:
-        paid = lab_cap * _decimal(item["pro_rata_weight"]) / weight_sum
-        allocations.append(_reimbursement_allocation(item, paid, "overpay_no_active_champions"))
-    return allocations
-
-
-def _allocate_reimbursements_with_champions(
+def _allocate_reimbursements_at_set_rate(
     reimbursements: Sequence[Mapping[str, Any]],
     pool: Decimal,
 ) -> list[Dict[str, Any]]:
@@ -1380,8 +1371,8 @@ def _allocate_champions(
     # exists), the remainder splits across active champions by improvement
     # points. Replay tracking still caps each champion's *due* at its
     # remaining balance; the surplus split deliberately pays beyond it, which
-    # retires obligations early and hands the slice back to the
-    # no-champion reimbursement overpay path once no active champions remain.
+    # retires obligations early. Once no active champion remains, future
+    # capacity not needed for set-rate reimbursements stays unallocated.
     # SOURCE_ADD legs and other labeled grants ride these rails with fixed
     # owner-set sizes; only genuine champion rewards share the surplus.
     surplus_indices = [

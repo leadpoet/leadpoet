@@ -22,7 +22,7 @@ WEIGHT_SNAPSHOT_SCHEMA_VERSION = "leadpoet.weight_computation_request.v1"
 WEIGHT_RESULT_SCHEMA_VERSION = "leadpoet.weight_computation_result.v1"
 U16_MAX = 65535
 
-_SNAPSHOT_FIELDS = {
+_SNAPSHOT_FIELDS_CURRENT = {
     "schema_version",
     "netuid",
     "epoch_id",
@@ -44,6 +44,7 @@ _SNAPSHOT_FIELDS = {
     "research_lab_fallback_share",
     "research_lab_allocation_doc",
     "leaderboard_bonus_share",
+    "leaderboard_emissions_enabled",
     "leaderboard_rank_shares",
     "leaderboard_entries",
     "leaderboard_fetch_ok",
@@ -55,6 +56,10 @@ _SNAPSHOT_FIELDS = {
     "sourcing_floor_threshold",
     "min_total_rep_for_distribution",
 }
+_SNAPSHOT_FIELDS_LEGACY = _SNAPSHOT_FIELDS_CURRENT - {
+    "leaderboard_emissions_enabled"
+}
+_SNAPSHOT_FIELD_SETS = (_SNAPSHOT_FIELDS_CURRENT, _SNAPSHOT_FIELDS_LEGACY)
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
@@ -93,6 +98,15 @@ def weight_config_document(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
         "champion_share": snapshot.get("champion_share"),
         "research_lab_fallback_share": snapshot.get("research_lab_fallback_share"),
         "leaderboard_bonus_share": snapshot.get("leaderboard_bonus_share"),
+        **(
+            {
+                "leaderboard_emissions_enabled": snapshot.get(
+                    "leaderboard_emissions_enabled"
+                )
+            }
+            if "leaderboard_emissions_enabled" in snapshot
+            else {}
+        ),
         "leaderboard_rank_shares": snapshot.get("leaderboard_rank_shares"),
         "sourcing_floor_threshold": snapshot.get("sourcing_floor_threshold"),
         "min_total_rep_for_distribution": snapshot.get("min_total_rep_for_distribution"),
@@ -118,6 +132,12 @@ def _non_negative_float(value: Any, field: str) -> float:
     if result < 0:
         raise WeightComputationError("%s must be non-negative" % field)
     return result
+
+
+def _bool_flag(value: Any, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise WeightComputationError("%s must be boolean" % field)
+    return value
 
 
 def _int(value: Any, field: str, minimum: int = 0) -> int:
@@ -267,7 +287,9 @@ def _add_weight(uid_weights: Dict[int, float], uid: int, weight: float) -> None:
 
 
 def compute_final_weights(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
-    if not isinstance(snapshot, Mapping) or set(snapshot) != _SNAPSHOT_FIELDS:
+    if not isinstance(snapshot, Mapping) or not any(
+        set(snapshot) == fields for fields in _SNAPSHOT_FIELD_SETS
+    ):
         raise WeightComputationError("weight snapshot fields do not match the canonical schema")
     if snapshot.get("schema_version") != WEIGHT_SNAPSHOT_SCHEMA_VERSION:
         raise WeightComputationError("unsupported weight snapshot schema")
@@ -310,6 +332,10 @@ def compute_final_weights(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
     champion_uid_value = snapshot.get("champion_uid")
     champion_uid = None if champion_uid_value is None else _int(champion_uid_value, "champion_uid")
     leaderboard_share = _non_negative_float(snapshot["leaderboard_bonus_share"], "leaderboard_bonus_share")
+    leaderboard_emissions_enabled = _bool_flag(
+        snapshot.get("leaderboard_emissions_enabled", True),
+        "leaderboard_emissions_enabled",
+    )
     fulfillment_pool_share = max(0.0, 1.0 - research_lab_share - champion_share - leaderboard_share)
     max_sourcing_share = max(
         0.0,
@@ -380,10 +406,16 @@ def compute_final_weights(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
     leaderboard_entries = snapshot["leaderboard_entries"]
     if not isinstance(rank_shares, list) or not isinstance(leaderboard_entries, list):
         raise WeightComputationError("leaderboard inputs must be lists")
+    if not leaderboard_emissions_enabled and leaderboard_entries:
+        raise WeightComputationError(
+            "disabled leaderboard emissions require empty leaderboard entries"
+        )
     rank_shares = [_non_negative_float(value, "leaderboard rank share") for value in rank_shares]
     leaderboard_weights = {}  # type: Dict[int, float]
-    leaderboard_burn = 0.0 if ff_enabled else leaderboard_share
-    if ff_enabled:
+    leaderboard_burn = (
+        0.0 if ff_enabled and leaderboard_emissions_enabled else leaderboard_share
+    )
+    if ff_enabled and leaderboard_emissions_enabled:
         if not snapshot["leaderboard_fetch_ok"]:
             leaderboard_burn = leaderboard_share
         else:
@@ -491,6 +523,7 @@ def compute_final_weights(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
             "research_lab_paid": research_lab_breakdown["paid"],
             "fulfillment_pool_share": fulfillment_pool_share,
             "fulfillment_share": fulfillment_share,
+            "leaderboard_emissions_enabled": leaderboard_emissions_enabled,
             "leaderboard_burn": leaderboard_burn,
             "max_sourcing_share": max_sourcing_share,
             "effective_sourcing_share": effective_sourcing_share,

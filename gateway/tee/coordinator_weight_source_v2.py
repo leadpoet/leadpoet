@@ -54,6 +54,15 @@ def _allocation_share(calculation: Mapping[str, Any]) -> float:
     return float(calculation["research_lab_fallback_share"])
 
 
+def _leaderboard_emissions_enabled(calculation: Mapping[str, Any]) -> bool:
+    value = calculation.get("leaderboard_emissions_enabled", True)
+    if not isinstance(value, bool):
+        raise CoordinatorWeightSourceV2Error(
+            "leaderboard_emissions_enabled must be boolean"
+        )
+    return value
+
+
 class CoordinatorWeightSourceV2:
     def __init__(self, reader: SupabaseSourceReaderV2) -> None:
         self._reader = reader
@@ -430,6 +439,25 @@ class CoordinatorWeightSourceV2:
         window_end: str,
         context: ExecutionContextV2,
     ) -> Dict[str, Any]:
+        leaderboard_enabled = _leaderboard_emissions_enabled(calculation)
+        if not bool(calculation["ff_enabled"]) or not leaderboard_enabled:
+            value = {
+                "leaderboard_bonus_share": calculation[
+                    "leaderboard_bonus_share"
+                ],
+                "leaderboard_rank_shares": list(
+                    calculation["leaderboard_rank_shares"]
+                ),
+                "leaderboard_entries": [],
+                "leaderboard_fetch_ok": True,
+            }
+            if "leaderboard_emissions_enabled" in calculation:
+                value["leaderboard_emissions_enabled"] = leaderboard_enabled
+            return {
+                **{key: proposed[key] for key in proposed if key != "value"},
+                "value": value,
+            }
+
         winner_rows = self._read(
             "fulfillment_leaderboard_winners",
             {"window_start": window_start, "window_end": window_end},
@@ -465,18 +493,17 @@ class CoordinatorWeightSourceV2:
             if bool(calculation["ff_enabled"])
             else []
         )
+        value = {
+            "leaderboard_bonus_share": calculation["leaderboard_bonus_share"],
+            "leaderboard_rank_shares": list(calculation["leaderboard_rank_shares"]),
+            "leaderboard_entries": entries,
+            "leaderboard_fetch_ok": True,
+        }
+        if "leaderboard_emissions_enabled" in calculation:
+            value["leaderboard_emissions_enabled"] = leaderboard_enabled
         return {
             **{key: proposed[key] for key in proposed if key != "value"},
-            "value": {
-                "leaderboard_bonus_share": calculation[
-                    "leaderboard_bonus_share"
-                ],
-                "leaderboard_rank_shares": list(
-                    calculation["leaderboard_rank_shares"]
-                ),
-                "leaderboard_entries": entries,
-                "leaderboard_fetch_ok": True,
-            },
+            "value": value,
         }
 
     def _sourcing_document(

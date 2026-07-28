@@ -86,13 +86,14 @@ def _legacy_current_host_formula(snapshot):
     sourcing_to_miners = effective_sourcing - dereg_burn
 
     ff_enabled = snapshot["ff_enabled"]
+    leaderboard_enabled = snapshot.get("leaderboard_emissions_enabled", True)
     fulfillment_share = snapshot["fulfillment_share"] if ff_enabled and snapshot["fulfillment_fetch_ok"] else 0.0
     fulfillment_rows = snapshot["fulfillment_rows"] if ff_enabled and snapshot["fulfillment_fetch_ok"] else []
     unused_fulfillment = fulfillment_pool - fulfillment_share
 
     leaderboard_by_uid = {}
-    leaderboard_burn = 0.0 if ff_enabled else leaderboard_share
-    if ff_enabled:
+    leaderboard_burn = 0.0 if ff_enabled and leaderboard_enabled else leaderboard_share
+    if ff_enabled and leaderboard_enabled:
         if not snapshot["leaderboard_fetch_ok"]:
             leaderboard_burn = leaderboard_share
         else:
@@ -150,6 +151,7 @@ def _random_snapshot(rng, case):
     size = rng.randint(4, 40)
     hotkeys = ["burn"] + ["hotkey-%s" % index for index in range(1, size)]
     ff_enabled = rng.choice([True, False])
+    leaderboard_enabled = rng.choice([True, False])
     lab_cap = rng.choice([0.0, 10.0, 20.0])
     leaderboard_share = 0.095
     champion_share = rng.choice([0.0, 0.1])
@@ -181,7 +183,7 @@ def _random_snapshot(rng, case):
     leaderboard_entries = [
         {"miner_hotkey": rng.choice(hotkeys[1:] + ["deregistered-lb"]), "wins": rng.randint(1, 20)}
         for _ in range(rng.randint(0, 3))
-    ]
+    ] if leaderboard_enabled else []
     rolling_scores = []
     for index in range(rng.randint(0, size + 4)):
         hotkey = hotkeys[rng.randrange(1, size)] if index < size else "deregistered-%s" % index
@@ -212,6 +214,7 @@ def _random_snapshot(rng, case):
         "research_lab_fallback_share": 0.2,
         "research_lab_allocation_doc": allocation,
         "leaderboard_bonus_share": leaderboard_share,
+        "leaderboard_emissions_enabled": leaderboard_enabled,
         "leaderboard_rank_shares": [0.05, 0.03, 0.015],
         "leaderboard_entries": leaderboard_entries,
         "leaderboard_fetch_ok": rng.choice([True, True, False]),

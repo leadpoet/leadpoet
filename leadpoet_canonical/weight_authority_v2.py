@@ -287,6 +287,15 @@ def _weight_input_value_documents_v2(
                 "leaderboard_bonus_share": calculation[
                     "leaderboard_bonus_share"
                 ],
+                **(
+                    {
+                        "leaderboard_emissions_enabled": calculation[
+                            "leaderboard_emissions_enabled"
+                        ]
+                    }
+                    if "leaderboard_emissions_enabled" in calculation
+                    else {}
+                ),
                 "leaderboard_rank_shares": list(
                     calculation["leaderboard_rank_shares"]
                 ),
@@ -348,7 +357,18 @@ def _weight_input_value_documents_v2(
         ),
         "feature_flags": document(
             "feature_flags",
-            {"ff_enabled": calculation["ff_enabled"]},
+            {
+                "ff_enabled": calculation["ff_enabled"],
+                **(
+                    {
+                        "leaderboard_emissions_enabled": calculation[
+                            "leaderboard_emissions_enabled"
+                        ]
+                    }
+                    if "leaderboard_emissions_enabled" in calculation
+                    else {}
+                ),
+            },
         ),
         "constants": document(
             "constants",

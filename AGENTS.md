@@ -7,14 +7,18 @@ directory.
 remain word-for-word identical. Every change to either file must update the
 other in the same pull request, and CI must fail if they diverge.
 
-## Highest priority override: exact push-now authorization
+## Highest priority override: explicit push-now authorization
 
-The exact user phrase **"I'm authorizing you to push now"** activates an
-emergency push-first workflow for the requested fix. This narrow, explicit
-exception takes precedence over the deployment-timing and mandatory V2
-pre-push test/rehearsal rules below.
+Any unambiguous current-turn instruction that both directs Codex to push the
+requested fix immediately and grants authorization to push activates an
+emergency push-first workflow. Natural-language variants count; no exact
+phrase is required. Examples include **"I'm authorizing you to push now"**,
+**"I authorize you to push now"**, **"push the fix; you have authorization"**,
+and **"push immediately, then test"**. This narrow, explicit exception takes
+precedence over the deployment-timing and mandatory V2 pre-push
+test/rehearsal rules below.
 
-When that exact phrase is present:
+When that authorization is present:
 
 1. Treat the next two minutes as a hard push deadline. Stop lower-priority
    investigation, reporting, polishing, and test work. Dedicate available
@@ -38,11 +42,13 @@ When that exact phrase is present:
    rerun all affected tests. Do not make precautionary, cosmetic, or unrelated
    follow-up pushes.
 
-This override is triggered only by the exact quoted phrase. Similar wording,
-general implementation approval, "push when ready", or standing authorization
-does not trigger it. Without the exact phrase, every normal rigorous pre-push
-test, rehearsal, deployment-timing, block, and attestation rule in this
-document remains fully mandatory and unchanged.
+Interpret the user's ordinary meaning instead of requiring a magic phrase. A
+general implementation request, standalone standing authorization, "push when
+ready", or a future conditional instruction without a current immediate-push
+directive does not trigger the override. Without an unambiguous current-turn
+instruction to push immediately, every normal rigorous pre-push test,
+rehearsal, deployment-timing, block, and attestation rule in this document
+remains fully mandatory and unchanged.
 
 ## Highest priority: deployment timing
 

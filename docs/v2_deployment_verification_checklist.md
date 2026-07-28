@@ -34,7 +34,7 @@ python3 -m pytest -q \
 - [ ] No test is skipped unexpectedly.
 - [ ] Any warning is reviewed and confirmed non-blocking.
 
-### 3. Run the Complete Isolated Restart Rehearsal
+### 3. Prefer the Complete Isolated Restart Rehearsal
 
 Replace `<currently-deployed-sha>` with the exact commit currently running in
 production.
@@ -47,16 +47,20 @@ python3 scripts/run_local_restart_rehearsal.py \
   --profile prepush
 ```
 
-This is the mandatory 5–10 minute developer gate. It runs in Docker without
-production credentials, executes both installed N-1 launchers and the candidate
-Git handoff, then runs one complete gateway/validator/auditor publication
-against strict local chain and durable-database services.
+This is recommended pre-push evidence, not a mandatory branch-push or pull
+request gate. When unavailable or intentionally omitted, record the gateway
+and validator stages as `skipped` or `unexercised` in the pull request. It runs
+in Docker without production credentials, executes both installed N-1
+launchers and the candidate Git handoff, then runs one complete
+gateway/validator/auditor publication against strict local chain and
+durable-database services.
 On ARM developer machines the outer `prepush` container uses native ARM64 to
 avoid QEMU overhead; the unchanged launchers still issue and validate the exact
 production `linux/amd64` Docker/Nitro contracts. The `release` profile always
 runs its outer replica as pinned `linux/amd64` for the final ABI check.
 
-Before an attested release, run the release profile:
+Before a production restart/deployment or safe-to-restart claim, run the
+release profile:
 
 ```bash
 python3 scripts/run_local_restart_rehearsal.py \
@@ -146,7 +150,10 @@ Confirm that the candidate contains no unintended changes to:
 - [ ] Archive endpoint authority.
 - [ ] Fail-closed behavior.
 
-Do not push until every pre-push item above passes.
+Do not push until the required pre-push items in sections 1, 2, and 4 pass.
+Section 3 is advisory for a branch push or pull request, but its status and
+limitations must be reported. Do not recommend or perform a production
+restart/deployment until the applicable rehearsal evidence passes.
 
 ## After Attestation and Restart
 

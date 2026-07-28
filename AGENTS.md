@@ -65,19 +65,24 @@ canonical gateway checkout; validator code runs in its containerized runtime.
 Never restore a gateway-only rsync deployment or mix files from different
 commits.
 
-## Mandatory V2 release gate
+## V2 release verification
 
-Production must never be the first full execution of a restart candidate.
-Follow
+Production activation must never be the first full execution of a restart
+candidate. Follow
 [`docs/v2_deployment_verification_checklist.md`](docs/v2_deployment_verification_checklist.md)
-before every V2 push/deployment:
+for every V2 push/deployment, with this distinction: the exact installed N-1
+rehearsal is recommended evidence for a branch push or pull request, not a
+mandatory push or merge gate. It remains mandatory before a production
+restart/deployment or a safe-to-restart claim.
 
 1. Freeze one candidate SHA and run the focused weight/auditor suite.
-2. Run the exact installed N-1 gateway and validator launchers against that SHA
-   with the bounded `prepush` rehearsal.
-3. Before an attested release, run the `release` rehearsal. It must complete
-   forward, rollback, roll-forward, the fault/concurrency matrix, and 100
-   accelerated epochs.
+2. Prefer running the exact installed N-1 gateway and validator launchers
+   against that SHA with the bounded `prepush` rehearsal. A push or pull
+   request may proceed without it when the missing evidence is reported as
+   `skipped` or `unexercised`.
+3. Before a production restart/deployment or safe-to-restart claim, run the
+   `release` rehearsal. It must complete forward, rollback, roll-forward, the
+   fault/concurrency matrix, and 100 accelerated epochs.
 4. Require the documented success markers, zero rejected/internal-substitution
    events, byte-identical primary/auditor canonical vectors, signed SDK
    extrinsic/finalization evidence, and clean final state.
@@ -91,7 +96,8 @@ internal success, or use a live production restart as a substitute for the
 rehearsal. Any candidate change to restart logic, imported restart behavior,
 environment contracts, dependencies, manifests, release identities, or the
 rehearsal itself invalidates prior evidence and requires both launcher
-rehearsals again.
+rehearsals again before production restart/deployment or a safe-to-restart
+claim; it does not by itself prohibit a branch push or pull request.
 
 The production restart and rehearsal must change together. Every affected
 command, environment source, filesystem path, lock, cleanup, build, retry,

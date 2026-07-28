@@ -1479,12 +1479,14 @@ def test_rehearsal_base_images_are_immutable_platform_children() -> None:
         rehearsal._rehearsal_base_image("linux/unknown")
 
 
-def test_rehearsal_dockerfile_requires_explicit_platform_image() -> None:
+def test_rehearsal_dockerfile_has_valid_immutable_default_image() -> None:
     dockerfile = (
         Path(__file__).resolve().parent / "Dockerfile"
     ).read_text(encoding="utf-8")
     assert dockerfile.startswith(
-        "ARG REHEARSAL_BASE_IMAGE\nFROM ${REHEARSAL_BASE_IMAGE}\n"
+        "ARG REHEARSAL_BASE_IMAGE="
+        + rehearsal.REHEARSAL_BASE_IMAGES["linux/amd64"]
+        + "\nFROM ${REHEARSAL_BASE_IMAGE}\n"
     )
     assert (
         "7942e2a958a238057cdf3304cba7e75f4056d15f75112b8d8e7c1d21a17f2d6c"

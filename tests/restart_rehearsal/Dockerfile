@@ -1,4 +1,4 @@
-ARG REHEARSAL_BASE_IMAGE
+ARG REHEARSAL_BASE_IMAGE=public.ecr.aws/amazonlinux/amazonlinux@sha256:7dfb72e165c7b2f5fd2ee050c202160ee0cced24991f14736b831221f2004eee
 FROM ${REHEARSAL_BASE_IMAGE}
 
 RUN dnf install -y \

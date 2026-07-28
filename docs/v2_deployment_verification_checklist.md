@@ -47,6 +47,28 @@ python3 scripts/run_local_restart_rehearsal.py \
   --profile prepush
 ```
 
+On a constrained workstation, cap the primary outer Docker replicas without
+changing the enforced production capacity contract:
+
+```bash
+python3 scripts/run_local_restart_rehearsal.py \
+  --from-sha <currently-deployed-sha> \
+  --candidate-sha HEAD \
+  --transition forward \
+  --profile prepush \
+  --outer-cpus 4 \
+  --outer-memory 6g
+```
+
+The outer limits may only reduce the selected profile's Docker budget. The
+strict adapters continue to advertise and validate the production
+16-vCPU/128-GiB topology, and reject any launcher request that changes it.
+When a Docker runtime such as Colima does not share the operating system's
+default temporary directory, set
+`LEADPOET_RESTART_REHEARSAL_TEMP_ROOT` to an existing Docker-shared host
+directory. The driver validates that root and places every bind-mounted
+temporary beneath it; it never falls back after an invalid explicit value.
+
 This is the mandatory 5–10 minute developer gate. It runs in Docker without
 production credentials, executes both installed N-1 launchers and the candidate
 Git handoff, then runs one complete gateway/validator/auditor publication

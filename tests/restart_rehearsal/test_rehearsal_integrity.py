@@ -1360,6 +1360,135 @@ def test_profiles_are_fixed_and_fit_the_developer_docker_budget() -> None:
     }
 
 
+def test_constrained_outer_limits_only_reduce_profile_capacity() -> None:
+    assert rehearsal._effective_profile_limits(
+        "prepush",
+        outer_cpus="4",
+        outer_memory="6g",
+    ) == {
+        "cpus": "4",
+        "memory": "6g",
+        "epochs": 1,
+        "fault_matrix": False,
+    }
+    assert rehearsal._effective_profile_limits(
+        "release",
+        outer_cpus="3.5",
+        outer_memory="6144m",
+    ) == {
+        "cpus": "3.5",
+        "memory": "6144m",
+        "epochs": 100,
+        "fault_matrix": True,
+    }
+
+    with pytest.raises(SystemExit, match="cannot exceed"):
+        rehearsal._effective_profile_limits(
+            "prepush",
+            outer_cpus="4.1",
+            outer_memory=None,
+        )
+    with pytest.raises(SystemExit, match="cannot exceed"):
+        rehearsal._effective_profile_limits(
+            "prepush",
+            outer_cpus=None,
+            outer_memory="8g",
+        )
+
+
+@pytest.mark.parametrize(
+    ("outer_cpus", "outer_memory"),
+    (
+        ("0", None),
+        ("not-a-number", None),
+        (None, "0g"),
+        (None, "six-gib"),
+    ),
+)
+def test_constrained_outer_limits_reject_malformed_values(
+    outer_cpus: str | None,
+    outer_memory: str | None,
+) -> None:
+    with pytest.raises(SystemExit, match="must be a positive Docker"):
+        rehearsal._effective_profile_limits(
+            "prepush",
+            outer_cpus=outer_cpus,
+            outer_memory=outer_memory,
+        )
+
+
+def test_docker_bind_source_resolves_host_symlinks(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "canonical-source"
+    target.mkdir()
+    alias = tmp_path / "source-alias"
+    alias.symlink_to(target, target_is_directory=True)
+
+    assert rehearsal._docker_bind_source(alias) == str(target.resolve())
+
+    with pytest.raises(SystemExit, match="bind source is unavailable"):
+        rehearsal._docker_bind_source(tmp_path / "missing")
+
+
+def test_rehearsal_temp_root_is_explicit_and_fail_closed(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    shared_root = tmp_path / "docker-shared"
+    shared_root.mkdir()
+    monkeypatch.setenv(
+        rehearsal.REHEARSAL_TEMP_ROOT_ENV,
+        str(shared_root),
+    )
+    with rehearsal._temporary_directory(prefix="candidate-") as raw:
+        created = Path(raw)
+        assert created.parent == shared_root.resolve()
+        assert created.name.startswith("candidate-")
+
+    monkeypatch.setenv(
+        rehearsal.REHEARSAL_TEMP_ROOT_ENV,
+        str(tmp_path / "missing"),
+    )
+    with pytest.raises(SystemExit, match="is unavailable"):
+        rehearsal._temporary_directory(prefix="candidate-")
+
+
+def test_rehearsal_help_exposes_constrained_host_options() -> None:
+    result = subprocess.run(
+        [sys.executable, str(Path(rehearsal.__file__)), "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "--scope {exact}" in result.stdout
+    assert "--component {all}" in result.stdout
+    assert "--outer-cpus" in result.stdout
+    assert "--outer-memory" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    (
+        ("--scope", "targeted"),
+        ("--component", "gateway"),
+        ("--component", "validator"),
+    ),
+)
+def test_rehearsal_cli_rejects_partial_execution(
+    option: str,
+    value: str,
+) -> None:
+    result = subprocess.run(
+        [sys.executable, str(Path(rehearsal.__file__)), option, value],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "invalid choice" in result.stderr
+
+
 def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> None:
     harness_root = Path(__file__).resolve().parent
     run_inside = (harness_root / "run_inside.sh").read_text(encoding="utf-8")

@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack, contextmanager
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+import os
 import platform
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +36,7 @@ from urllib.request import urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IMAGE_REPOSITORY = "leadpoet-local-restart-rehearsal"
+REHEARSAL_TEMP_ROOT_ENV = "LEADPOET_RESTART_REHEARSAL_TEMP_ROOT"
 PYTHON37_IMAGE = (
     "python@sha256:"
     "b53f496ca43e5af6994f8e316cf03af31050bf7944e0e4a308ad86c001cf028b"
@@ -79,6 +83,101 @@ PROFILE_LIMITS = {
         "fault_matrix": True,
     },
 }
+_MEMORY_LIMIT_RE = re.compile(r"^(?P<amount>[1-9][0-9]*)(?P<unit>[kmgt]?)b?$", re.I)
+_MEMORY_UNIT_BYTES = {
+    "": 1,
+    "k": 1024,
+    "m": 1024**2,
+    "g": 1024**3,
+    "t": 1024**4,
+}
+
+
+def _cpu_limit(value: str, *, option: str) -> Decimal:
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise SystemExit(f"{option} must be a positive Docker CPU limit") from exc
+    if not parsed.is_finite() or parsed <= 0:
+        raise SystemExit(f"{option} must be a positive Docker CPU limit")
+    return parsed
+
+
+def _memory_limit_bytes(value: str, *, option: str) -> int:
+    match = _MEMORY_LIMIT_RE.fullmatch(value.strip())
+    if match is None:
+        raise SystemExit(
+            f"{option} must be a positive Docker memory limit such as 6g"
+        )
+    return int(match.group("amount")) * _MEMORY_UNIT_BYTES[
+        match.group("unit").lower()
+    ]
+
+
+def _effective_profile_limits(
+    profile: str,
+    *,
+    outer_cpus: str | None,
+    outer_memory: str | None,
+) -> dict[str, Any]:
+    """Return bounded outer limits without changing the production contract."""
+
+    limits = dict(PROFILE_LIMITS[profile])
+    if outer_cpus is not None:
+        requested_cpus = _cpu_limit(outer_cpus, option="--outer-cpus")
+        profile_cpus = _cpu_limit(str(limits["cpus"]), option="profile CPU limit")
+        if requested_cpus > profile_cpus:
+            raise SystemExit(
+                "--outer-cpus cannot exceed the selected profile CPU limit"
+            )
+        limits["cpus"] = str(outer_cpus).strip()
+    if outer_memory is not None:
+        requested_memory = _memory_limit_bytes(
+            outer_memory,
+            option="--outer-memory",
+        )
+        profile_memory = _memory_limit_bytes(
+            str(limits["memory"]),
+            option="profile memory limit",
+        )
+        if requested_memory > profile_memory:
+            raise SystemExit(
+                "--outer-memory cannot exceed the selected profile memory limit"
+            )
+        limits["memory"] = str(outer_memory).strip().lower()
+    return limits
+
+
+def _docker_bind_source(path: Path) -> str:
+    """Return the canonical host path Docker Desktop can bind safely."""
+
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise SystemExit(f"Docker bind source is unavailable: {path}") from exc
+    if not resolved.is_absolute():
+        raise SystemExit(f"Docker bind source is not absolute: {path}")
+    return str(resolved)
+
+
+def _temporary_directory(*, prefix: str) -> tempfile.TemporaryDirectory[str]:
+    raw_root = os.getenv(REHEARSAL_TEMP_ROOT_ENV, "").strip()
+    root: Path | None = None
+    if raw_root:
+        try:
+            root = Path(raw_root).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise SystemExit(
+                f"{REHEARSAL_TEMP_ROOT_ENV} is unavailable: {raw_root}"
+            ) from exc
+        if not root.is_dir():
+            raise SystemExit(
+                f"{REHEARSAL_TEMP_ROOT_ENV} is not a directory: {root}"
+            )
+    return tempfile.TemporaryDirectory(
+        prefix=prefix,
+        dir=str(root) if root is not None else None,
+    )
 
 
 def _run(
@@ -187,7 +286,7 @@ def _build_image(
     harness_sha: str,
     docker_platform: str,
 ) -> None:
-    with tempfile.TemporaryDirectory(prefix="leadpoet-restart-image-") as raw:
+    with _temporary_directory(prefix="leadpoet-restart-image-") as raw:
         context = Path(raw)
         (context / "requirements.txt").write_bytes(
             _git_file(harness_sha, "requirements.txt")
@@ -243,9 +342,7 @@ def _isolated_source_snapshot(
 ) -> Iterator[Path]:
     """Copy frozen Git objects so sequential containers cannot share mutations."""
 
-    with tempfile.TemporaryDirectory(
-        prefix="leadpoet-restart-source-"
-    ) as raw:
+    with _temporary_directory(prefix="leadpoet-restart-source-") as raw:
         source = Path(raw) / "source"
         _run(
             [
@@ -410,13 +507,13 @@ def _run_component(
     evidence_root: Path,
     drand_artifact_root: Path,
     profile: str,
+    limits: dict[str, Any],
     weight_readiness_scenario: str = "production_success",
     docker_platform: str,
     fixture_seed_root: Path,
     run_ordinal: int,
     gateway_worker_fleet_mode: str,
 ) -> None:
-    limits = PROFILE_LIMITS[profile]
     command = [
         "docker",
         "run",
@@ -436,17 +533,17 @@ def _run_component(
         "--tmpfs",
         "/tmp:rw,exec,nosuid,size=2g",
         "--mount",
-        f"type=bind,src={source_root},dst=/source,readonly",
+        f"type=bind,src={_docker_bind_source(source_root)},dst=/source,readonly",
         "--mount",
-        f"type=bind,src={evidence_root},dst=/evidence",
+        f"type=bind,src={_docker_bind_source(evidence_root)},dst=/evidence",
         "--mount",
         (
-            f"type=bind,src={drand_artifact_root},"
+            f"type=bind,src={_docker_bind_source(drand_artifact_root)},"
             "dst=/opt/leadpoet/drand-cabi-v2,readonly"
         ),
         "--mount",
         (
-            f"type=bind,src={fixture_seed_root},"
+            f"type=bind,src={_docker_bind_source(fixture_seed_root)},"
             "dst=/rehearsal-fixture-seed,readonly"
         ),
         "--env",
@@ -584,12 +681,11 @@ def _prepared_fixture_seed(
     candidate_sha: str,
     drand_artifact_root: Path,
     docker_platform: str,
-    profile: str,
+    limits: dict[str, Any],
 ) -> Iterator[Path]:
     """Build immutable sanitized release fixtures once per target SHA."""
 
-    limits = PROFILE_LIMITS[profile]
-    with tempfile.TemporaryDirectory(
+    with _temporary_directory(
         prefix=f"leadpoet-rehearsal-fixture-{candidate_sha[:12]}-"
     ) as raw:
         root = Path(raw)
@@ -619,20 +715,24 @@ def _prepared_fixture_seed(
                 "--tmpfs",
                 "/tmp:rw,exec,nosuid,size=2g",
                 "--mount",
-                f"type=bind,src={source_root},dst=/source,readonly",
+                (
+                    "type=bind,"
+                    f"src={_docker_bind_source(source_root)},"
+                    "dst=/source,readonly"
+                ),
                 "--mount",
                 (
-                    f"type=bind,src={drand_artifact_root},"
+                    f"type=bind,src={_docker_bind_source(drand_artifact_root)},"
                     "dst=/opt/leadpoet/drand-cabi-v2,readonly"
                 ),
                 "--mount",
                 (
-                    f"type=bind,src={generated_state},"
+                    f"type=bind,src={_docker_bind_source(generated_state)},"
                     "dst=/rehearsal-state"
                 ),
                 "--mount",
                 (
-                    f"type=bind,src={generated_config},"
+                    f"type=bind,src={_docker_bind_source(generated_config)},"
                     "dst=/fixture-config"
                 ),
                 "--env",
@@ -706,9 +806,9 @@ def _run_workflow(
     evidence_root: Path,
     candidate_sha: str,
     profile: str,
+    limits: dict[str, Any],
     docker_platform: str,
 ) -> None:
-    limits = PROFILE_LIMITS[profile]
     command = [
         "docker",
         "run",
@@ -728,9 +828,9 @@ def _run_workflow(
         "--tmpfs",
         "/tmp:rw,exec,nosuid,size=2g",
         "--mount",
-        f"type=bind,src={source_root},dst=/source,readonly",
+        f"type=bind,src={_docker_bind_source(source_root)},dst=/source,readonly",
         "--mount",
-        f"type=bind,src={evidence_root},dst=/evidence",
+        f"type=bind,src={_docker_bind_source(evidence_root)},dst=/evidence",
         "--env",
         "REHEARSAL_COMPONENT=workflow",
         "--env",
@@ -790,9 +890,13 @@ def _join_evidence(
             "--security-opt",
             "no-new-privileges",
             "--mount",
-            f"type=bind,src={source_root},dst=/source,readonly",
+            (
+                "type=bind,"
+                f"src={_docker_bind_source(source_root)},"
+                "dst=/source,readonly"
+            ),
             "--mount",
-            f"type=bind,src={evidence_root},dst=/evidence",
+            f"type=bind,src={_docker_bind_source(evidence_root)},dst=/evidence",
             "--entrypoint",
             "/usr/bin/python3.11",
             tag,
@@ -846,7 +950,11 @@ def _run_python37_finalization_probe(source_root: Path) -> None:
             "--security-opt",
             "no-new-privileges",
             "--mount",
-            f"type=bind,src={source_root},dst=/source,readonly",
+            (
+                "type=bind,"
+                f"src={_docker_bind_source(source_root)},"
+                "dst=/source,readonly"
+            ),
             "--env",
             "PYTHONPATH=/source",
             "--workdir",
@@ -878,6 +986,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="prepush is the bounded developer gate; release runs the full matrix",
     )
     parser.add_argument(
+        "--scope",
+        choices=("exact",),
+        default="exact",
+        help="only the exact repository-owned rehearsal is supported",
+    )
+    parser.add_argument(
+        "--component",
+        choices=("all",),
+        default="all",
+        help="the exact rehearsal always executes gateway and validator",
+    )
+    parser.add_argument(
+        "--outer-cpus",
+        help=(
+            "cap each primary outer Docker replica below the profile CPU limit; "
+            "does not alter the enforced production 16-vCPU contract"
+        ),
+    )
+    parser.add_argument(
+        "--outer-memory",
+        help=(
+            "cap each primary outer Docker replica below the profile memory "
+            "limit; does not alter the enforced production 128-GiB contract"
+        ),
+    )
+    parser.add_argument(
         "--gateway-worker-fleet-mode",
         choices=("active", "deferred"),
         default="active",
@@ -889,6 +1023,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--rebuild-image", action="store_true")
     args = parser.parse_args(argv)
+    limits = _effective_profile_limits(
+        args.profile,
+        outer_cpus=args.outer_cpus,
+        outer_memory=args.outer_memory,
+    )
 
     from_sha = _git_sha(args.from_sha)
     candidate_sha = _git_sha(args.candidate_sha)
@@ -905,6 +1044,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     harness_sha = candidate_sha
     _verify_driver_identity(harness_sha)
+    print(
+        "REHEARSAL_OUTER_LIMITS "
+        f"cpus={limits['cpus']} memory={limits['memory']} "
+        "production_capacity=16-vcpu/128-gib contract_enforced=true",
+        flush=True,
+    )
 
     docker_platform = _docker_platform(args.profile)
     tag = _image_tag(harness_sha, docker_platform=docker_platform)
@@ -919,7 +1064,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         harness_sha=harness_sha,
         required_shas=(from_sha, candidate_sha),
     ) as source_root:
-        with tempfile.TemporaryDirectory(
+        with _temporary_directory(
             prefix="leadpoet-restart-evidence-"
         ) as evidence_raw:
             evidence_root = Path(evidence_raw)
@@ -951,7 +1096,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             candidate_sha=target,
                             drand_artifact_root=drand_artifacts[target],
                             docker_platform=docker_platform,
-                            profile=args.profile,
+                            limits=limits,
                         )
                     )
                     for target in target_shas
@@ -984,6 +1129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                     run_candidate
                                 ],
                                 profile=args.profile,
+                                limits=limits,
                                 docker_platform=docker_platform,
                                 fixture_seed_root=fixture_seeds[run_candidate],
                                 run_ordinal=ordinal + 1,
@@ -1019,6 +1165,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     candidate_sha=candidate_sha,
                     evidence_root=evidence_root,
                     profile=args.profile,
+                    limits=limits,
                     docker_platform=docker_platform,
                 )
             except subprocess.CalledProcessError as exc:

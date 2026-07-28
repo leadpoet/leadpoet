@@ -567,7 +567,7 @@
       "symbol": "ensure_chain_realized_settlements_v1"
     },
     {
-      "ast_sha256": "sha256:a0d93725c6a6ff3f9b2499d40a80513cefaaa55755ee278e3d1bb44a62ed4919",
+      "ast_sha256": "sha256:96eef6bedb27ee6887aa36d66127408a0ac32a5fe1ec94dae604290f5c016498",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "settle_chain_realized_epoch_v1"
     },
@@ -1227,7 +1227,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:3e60274d8ee28be047ad79a357c4fffa56e730a3c5b757cd24f9b4288a56a900",
+  "manifest_hash": "sha256:50231cad22d5b9eef87a76f57615ab73e39d577cde52c582f9619772a30607c9",
   "protected_source_commit": "e8e8ce98892053325f25beb8f801dfd2e42b4d40",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -388,8 +388,9 @@ def test_source_add_registration_diff_must_match_approved_attestation():
     good = """diff --git a/sourcing_model/routing/runtime.py b/sourcing_model/routing/runtime.py
 --- a/sourcing_model/routing/runtime.py
 +++ b/sourcing_model/routing/runtime.py
-@@ -1,2 +1,8 @@
- SOURCE_ADD_ROUTING_REGISTRATIONS = (
+@@ -1 +1,16 @@
+-SOURCE_ADD_ROUTING_REGISTRATIONS = ()
++SOURCE_ADD_ROUTING_REGISTRATIONS = (
 +    SourceAddRoutingRegistration(
 +        provider_id="community_accounts",
 +        stage="candidate_acquisition",
@@ -405,7 +406,7 @@ def test_source_add_registration_diff_must_match_approved_attestation():
 +        timeout_seconds=60.0,
 +        evidence_types=("provider_database",),
 +    ),
- )
++)
 """
     assert validate_source_add_registration_diff(good, context) == []
 
@@ -413,7 +414,10 @@ def test_source_add_registration_diff_must_match_approved_attestation():
     assert validate_source_add_registration_diff(
         wrong_manifest,
         context,
-    ) == ["source_add_registration_missing_approved_request"]
+    ) == [
+        "source_add_registration_missing_approved_request",
+        "source_add_registration_unapproved_registration",
+    ]
 
     unapproved_provider = good.replace(
         "community_accounts",
@@ -514,7 +518,10 @@ def test_source_add_registration_diff_requires_every_stage_and_exact_bounds():
     assert validate_source_add_registration_diff(
         altered_timeout,
         candidate_context,
-    ) == ["source_add_registration_missing_approved_request"]
+    ) == [
+        "source_add_registration_missing_approved_request",
+        "source_add_registration_unapproved_registration",
+    ]
 
     direct_extra_tool = candidate_only.replace(
         " )\n",
@@ -526,6 +533,44 @@ def test_source_add_registration_diff_requires_every_stage_and_exact_bounds():
     )
     assert "source_add_registration_unapproved_tool" in errors
     assert "source_add_registration_direct_definition_forbidden" in errors
+
+    extra_registration = candidate_only.replace(
+        " )\n",
+        """+    SourceAddRoutingRegistration(
++        provider_id="community_source",
++        stage="intent_evidence",
++        revision="source-add-aaaaaaaaaaaa",
++        manifest_sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
++        priority=35,
++        capabilities=("intent.provider_evidence",),
++        idempotency="idempotent",
++        cost_class="metered",
++        unit_cost=0.005,
++        max_calls=1,
++        max_results=1,
++        timeout_seconds=30.0,
++        evidence_types=("external",),
++    ),
+ )
+""",
+    )
+    assert "source_add_registration_unapproved_registration" in (
+        validate_source_add_registration_diff(
+            extra_registration,
+            candidate_context,
+        )
+    )
+
+    computed_registration = candidate_only.replace(
+        " )\n",
+        "+    SourceAddRoutingRegistration(**untrusted_registration),\n )\n",
+    )
+    assert "source_add_registration_unparseable" in (
+        validate_source_add_registration_diff(
+            computed_registration,
+            candidate_context,
+        )
+    )
 
 
 def test_source_add_registration_diff_without_approved_request_fails_closed():

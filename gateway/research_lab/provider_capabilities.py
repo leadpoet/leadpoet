@@ -612,7 +612,6 @@ def validate_source_add_registration_diff(
     )
     removes_source_add_structure = (
         "SourceAddRoutingRegistration" in removed
-        or "SOURCE_ADD_ROUTING_REGISTRATIONS" in removed
         or bool(
             re.search(
                 r"['\"](?:candidate|intent)\.source_add\.",
@@ -699,6 +698,12 @@ def validate_source_add_registration_diff(
     }
     if missing_registrations:
         errors.append("source_add_registration_missing_approved_request")
+    if added_normalized - expected_registrations:
+        errors.append("source_add_registration_unapproved_registration")
+    if len(added_registrations) != added.count(
+        "SourceAddRoutingRegistration("
+    ):
+        errors.append("source_add_registration_unparseable")
     if not registrations_already_present and not targets_runtime:
         errors.append("source_add_registration_wrong_model_target")
 
@@ -720,7 +725,20 @@ def validate_source_add_registration_diff(
     }
     if added_tool_ids - approved_tool_ids:
         errors.append("source_add_registration_unapproved_tool")
-    if "ORIGIN_SOURCE_ADD" in added:
+    adds_direct_source_definition = (
+        "ToolDefinition(" in added
+        and (
+            "ORIGIN_SOURCE_ADD" in added
+            or bool(
+                re.search(
+                    r"origin\s*=\s*['\"]source_add['\"]",
+                    added,
+                )
+            )
+            or bool(added_tool_ids)
+        )
+    )
+    if adds_direct_source_definition:
         errors.append("source_add_registration_direct_definition_forbidden")
     return sorted(set(errors))
 

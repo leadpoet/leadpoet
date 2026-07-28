@@ -227,7 +227,7 @@
       "symbol": "validate_legacy_settlement_migrations_v2"
     },
     {
-      "ast_sha256": "sha256:00bfa7ff965a063cd47fd3f46a80a1934da5b0f047793d344dbd5f75fd1edcd4",
+      "ast_sha256": "sha256:225c6e0b97fbf125175a9d2e6f32e15649160a68c71e0fc633471c79cc85bd91",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "CodeEditLoopEngine"
     },
@@ -410,6 +410,56 @@
       "ast_sha256": "sha256:0a4de723e21de2d8de36e594266335d187722d8383cef1a8fff7bac9b3515110",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "confirmation_min_delta"
+    },
+    {
+      "ast_sha256": "sha256:5b51a3d9dee53aafc8fc92e179438d8575d66ca48e55bddd7153031099001aa7",
+      "path": "gateway/research_lab/provider_capabilities.py",
+      "symbol": "EffectiveProviderCapabilities"
+    },
+    {
+      "ast_sha256": "sha256:10900c4200f32a7b1043ef7fdd2bb04679b760b8cdb6d3a8a64fa2f69f319d87",
+      "path": "gateway/research_lab/provider_capabilities.py",
+      "symbol": "_credential_ready"
+    },
+    {
+      "ast_sha256": "sha256:1981a4b88af7cb7cd42224266163ebc528bf548d4bf5af192d3b9040429fba25",
+      "path": "gateway/research_lab/provider_capabilities.py",
+      "symbol": "_mentioned_source_add_providers"
+    },
+    {
+      "ast_sha256": "sha256:d1423b73478171910751d87f5ebcd1087afc7b05e7b1c46efa6e5f66f2ad83eb",
+      "path": "gateway/research_lab/provider_capabilities.py",
+      "symbol": "_normalized_words"
+    },
+    {
+      "ast_sha256": "sha256:9e863a858f8802947c63a56c9f028bbcf232dfec4c0540e22fa13690621fac80",
+      "path": "gateway/research_lab/provider_capabilities.py",
+      "symbol": "_provider_doc_from_source_row"
+    },
+    {
+      "ast_sha256": "sha256:5af378015da61306fb975e3b9fec2563a823de5f36a78a20bb67de0e2c7887e8",
+      "path": "gateway/research_lab/provider_capabilities.py",
+      "symbol": "_resolved_credential_ready"
+    },
+    {
+      "ast_sha256": "sha256:ddaabd185c75d0f91834a1185b8d64bac825fd986c4219887f26fdb5785f8803",
+      "path": "gateway/research_lab/provider_capabilities.py",
+      "symbol": "_source_mention_forms"
+    },
+    {
+      "ast_sha256": "sha256:f6e1e1036d46613ae6b33e3c85abd628868274333f5dbf05d9620161d9e4c303",
+      "path": "gateway/research_lab/provider_capabilities.py",
+      "symbol": "approved_source_router_suggestions"
+    },
+    {
+      "ast_sha256": "sha256:38c331cd4b7f15e794d8711685fa3a47494e453846788032060e63bb067f1b6d",
+      "path": "gateway/research_lab/provider_capabilities.py",
+      "symbol": "load_effective_provider_capabilities_sync"
+    },
+    {
+      "ast_sha256": "sha256:5ad2de07650b556eec6c3b9916e609da1e5f8cbcab5a5adf1b2a4ac3f92296de",
+      "path": "gateway/research_lab/provider_capabilities.py",
+      "symbol": "validate_source_add_registration_diff"
     },
     {
       "ast_sha256": "sha256:3294cc6af696a786a40633268aca4c7758a896e5ab3b82fe77cdae3c32f7544a",
@@ -907,7 +957,7 @@
       "symbol": "compute_reimbursement_award"
     },
     {
-      "ast_sha256": "sha256:6666632c4eba50e22241ac5ca2f523691220c5f9f48cbe40a42a0c21d42b53a4",
+      "ast_sha256": "sha256:1116b69bf1eb87a266e117690e5b02b2a3093000e017ed72eabeaffaa6793f40",
       "path": "research_lab/code_editing.py",
       "symbol": "build_code_edit_auto_research_messages"
     },
@@ -922,12 +972,12 @@
       "symbol": "build_code_edit_repair_messages"
     },
     {
-      "ast_sha256": "sha256:dfdfb40816021e2a6ae9f0914b4894ea00dfa24d1af403bca78b5e4c7b15e933",
+      "ast_sha256": "sha256:53ec91ec3c8b097aa4e0707646f16ce88c87fb7842742321948f14154cfbf961",
       "path": "research_lab/code_editing.py",
       "symbol": "build_code_edit_source_inspection_messages"
     },
     {
-      "ast_sha256": "sha256:e41dd2f390a5fed4380ba4e6d230e8d20fc4bd8d3f4ab5a6a56eb27d19eb3181",
+      "ast_sha256": "sha256:6853c7e6994a329caa07df5f3f372fe079781b498389bfe56982246fa3c86c28",
       "path": "research_lab/code_editing.py",
       "symbol": "build_loop_direction_planner_messages"
     },
@@ -1177,7 +1227,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:7ad2f7049145e24666929ac45b9468bd3a882b03d6a88fd657330eab9612b3f2",
-  "protected_source_commit": "2fa46db80d7999b019a473ae1041950047a51fca",
+  "manifest_hash": "sha256:322970d6d389f4b7b84cb11266de1bf6907703c5fea2f944da189f07a123c5a7",
+  "protected_source_commit": "f204bd2ead1e05134abfb3f55ffb96f824e5b384",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

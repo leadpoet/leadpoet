@@ -40,6 +40,11 @@ CHAIN_UNATTRIBUTED_SQL = (
     / "scripts"
     / "127-research-lab-chain-unattributed-settlement.sql"
 ).read_text(encoding="utf-8")
+CHAIN_TRANSPORT_PURPOSE_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "128-research-lab-chain-settlement-transport-purposes.sql"
+).read_text(encoding="utf-8")
 
 
 def test_finalized_allocation_view_requires_bundle_publication_and_finalization():
@@ -244,6 +249,29 @@ def test_chain_realized_receipt_allowlist_matches_canonical_contract_exactly():
         assert match is not None, role
         migrated_purposes = set(re.findall(r"'([^']+)'", match.group(1)))
         assert migrated_purposes == set(expected_purposes), role
+
+
+def test_chain_settlement_transport_purposes_are_explicitly_admitted():
+    assert (
+        "research_lab_attested_transport_attempts_v2_purpose_check"
+        in CHAIN_TRANSPORT_PURPOSE_SQL
+    )
+    assert "purpose ~ '\\.v2$'" in CHAIN_TRANSPORT_PURPOSE_SQL
+    for purpose in (
+        "research_lab.chain_weight_observation.v1",
+        "research_lab.chain_realized_epoch_settlement.v1",
+    ):
+        assert purpose in CHAIN_TRANSPORT_PURPOSE_SQL
+    assert (
+        "research_lab_attested_transport_purpose_contract_v2"
+        in CHAIN_TRANSPORT_PURPOSE_SQL
+    )
+    assert "constraint_row.convalidated" in CHAIN_TRANSPORT_PURPOSE_SQL
+    assert "pg_catalog.pg_get_constraintdef" in CHAIN_TRANSPORT_PURPOSE_SQL
+    assert "FROM PUBLIC, anon, authenticated" in CHAIN_TRANSPORT_PURPOSE_SQL
+    assert "TO service_role" in CHAIN_TRANSPORT_PURPOSE_SQL
+    assert "UPDATE public." not in CHAIN_TRANSPORT_PURPOSE_SQL
+    assert "DELETE FROM public." not in CHAIN_TRANSPORT_PURPOSE_SQL
 
 
 def test_chain_realized_credit_rows_require_complete_epoch_marker():

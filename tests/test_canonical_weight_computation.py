@@ -76,6 +76,15 @@ def test_full_two_host_allocation_matches_current_order_and_totals():
     assert len(result["weights_hash"]) == 64
 
 
+def test_empty_leaderboard_burns_reserved_share_without_expanding_fulfillment():
+    result = compute_final_weights(_snapshot(leaderboard_entries=[]))
+    assert result["uids"] == [0, 1, 2]
+    assert result["weights"] == pytest.approx([0.245, 0.705, 0.05], abs=1e-15)
+    assert result["components"]["fulfillment_pool_share"] == pytest.approx(0.705)
+    assert result["components"]["fulfillment_share"] == pytest.approx(0.705)
+    assert result["components"]["leaderboard_burn"] == pytest.approx(0.095)
+
+
 def test_disabled_tracks_resolve_to_exact_full_burn():
     snapshot = _snapshot(
         ff_enabled=False,

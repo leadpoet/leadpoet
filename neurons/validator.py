@@ -109,6 +109,9 @@ from leadpoet_canonical.weight_computation import (
     research_lab_uid_weights_from_allocation as canonical_research_lab_uid_weights_from_allocation,
     weight_config_hash as canonical_weight_config_hash,
 )
+from leadpoet_canonical.hotkey_authority_v2 import (
+    DISABLED_LEADERBOARD_WINDOW_V1,
+)
 from leadpoet_canonical.constants import (
     ALLOCATION_PREPARATION_BLOCK,
     WEIGHT_SUBMISSION_BLOCK,
@@ -4773,6 +4776,10 @@ class Validator(BaseValidatorNeuron):
             # broke once sourcing emissions were dropped to 0% (no incentive
             # → no rolling_scores → 100% burn even with active fulfillment).
             ff_enabled = os.environ.get("ENABLE_FULFILLMENT", "false").lower() == "true"
+            leaderboard_emissions_enabled = _env_flag(
+                "FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED",
+                True,
+            )
 
             # ═══════════════════════════════════════════════════════════════════
             # SOURCING EMISSIONS SYSTEM (Threshold-Based)
@@ -4811,9 +4818,10 @@ class Validator(BaseValidatorNeuron):
             CHAMPION_SHARE = 0.0           # 0% — model competition retired 2026-06-23; its 10% folded into the fulfillment pool
             # FULFILLMENT-FLAVORED TOTAL is the residual after Research Lab.
             # That residual is split into a per-epoch fulfillment pool and a top-3
-            # rolling-window leaderboard bonus.  The leaderboard is a permanent
-            # feature of the fulfillment track — it is NEVER toggled off; only
-            # the split ratio between per-epoch and weekly is tunable here.
+            # rolling-window leaderboard bonus. Operators may disable paying the
+            # leaderboard bucket with FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED=false,
+            # but the 9.5% reservation remains carved out and burns instead of
+            # inflating per-request fulfillment rewards.
             RESEARCH_LAB_FALLBACK_SHARE = _env_percent_share(
                 "RESEARCH_LAB_EMISSION_PERCENT",
                 float(DEFAULT_RESEARCH_LAB_EMISSION_PERCENT),
@@ -4944,31 +4952,34 @@ class Validator(BaseValidatorNeuron):
                     "min_total_rep_for_distribution": MIN_TOTAL_REP_FOR_DISTRIBUTION,
                 })
 
-            try:
-                from Leadpoet.utils.cloud_db import (
-                    gateway_get_fulfillment_leaderboard_snapshot,
-                )
+            if ff_enabled and leaderboard_emissions_enabled:
+                try:
+                    from Leadpoet.utils.cloud_db import (
+                        gateway_get_fulfillment_leaderboard_snapshot,
+                    )
 
-                leaderboard_snapshot = await asyncio.to_thread(
-                    gateway_get_fulfillment_leaderboard_snapshot,
-                    self.wallet,
-                    3,
-                )
-                leaderboard_window_start = str(
-                    leaderboard_snapshot["period_start"]
-                )
-                leaderboard_window_end = str(leaderboard_snapshot["period_end"])
-                observed_leaders = (
-                    list(leaderboard_snapshot["leaderboard"])
-                    if ff_enabled
-                    else []
-                )
-            except Exception as exc:
-                print(
-                    "   ❌ Authoritative V2 leaderboard snapshot failed; "
-                    f"refusing weight publication: {exc}"
-                )
-                return False
+                    leaderboard_snapshot = await asyncio.to_thread(
+                        gateway_get_fulfillment_leaderboard_snapshot,
+                        self.wallet,
+                        3,
+                    )
+                    leaderboard_window_start = str(
+                        leaderboard_snapshot["period_start"]
+                    )
+                    leaderboard_window_end = str(
+                        leaderboard_snapshot["period_end"]
+                    )
+                    observed_leaders = list(leaderboard_snapshot["leaderboard"])
+                except Exception as exc:
+                    print(
+                        "   ❌ Authoritative V2 leaderboard snapshot failed; "
+                        f"refusing weight publication: {exc}"
+                    )
+                    return False
+            else:
+                leaderboard_window_start = DISABLED_LEADERBOARD_WINDOW_V1
+                leaderboard_window_end = DISABLED_LEADERBOARD_WINDOW_V1
+                observed_leaders = []
             
             # ═══════════════════════════════════════════════════════════════════
             # Check if we have ANYTHING to submit (current OR rolling)
@@ -5088,7 +5099,11 @@ class Validator(BaseValidatorNeuron):
                 - LEADERBOARD_BONUS_SHARE,
             )
             effective_fulfillment_pool = FULFILLMENT_POOL_SHARE
-            effective_leaderboard_share = LEADERBOARD_BONUS_SHARE if ff_enabled else 0.0
+            effective_leaderboard_share = (
+                LEADERBOARD_BONUS_SHARE
+                if ff_enabled and leaderboard_emissions_enabled
+                else 0.0
+            )
             print(
                 f"\n   📊 SPLIT: Sourcing={MAX_SOURCING_SHARE*100:.0f}%, "
                 f"Champion={effective_champion_share*100:.0f}%, "
@@ -5240,12 +5255,22 @@ class Validator(BaseValidatorNeuron):
             leaderboard_fetch_ok = True
             # When ff is disabled, the entire LEADERBOARD_BONUS_SHARE flows to
             # burn (mirroring how the fulfillment pool burns when disabled).
-            # When ff is enabled, the burn starts at 0 and grows for any
-            # rank slot that falls through (deregistered top-N or fewer than
-            # 3 weekly winners).
-            leaderboard_burn = 0.0 if ff_enabled else LEADERBOARD_BONUS_SHARE
+            # When leaderboard emissions are disabled, that same reservation
+            # burns while the per-request fulfillment pool remains active.
+            # When both are enabled, burn starts at 0 and grows for any rank
+            # slot that falls through (deregistered top-N or fewer than 3
+            # weekly winners).
+            leaderboard_burn = (
+                0.0
+                if ff_enabled and leaderboard_emissions_enabled
+                else LEADERBOARD_BONUS_SHARE
+            )
             try:
-                if ff_enabled and effective_leaderboard_share > 0:
+                if (
+                    ff_enabled
+                    and leaderboard_emissions_enabled
+                    and effective_leaderboard_share > 0
+                ):
                     leaders = observed_leaders
                     leaderboard_entries = [
                         {

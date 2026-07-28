@@ -111,6 +111,11 @@ def test_validator_restart_and_container_are_v2_only():
     assert "verify_legacy_v1_enclave" not in script
     assert "APPROVED_LEGACY_V1_PCR0=" not in script
     assert '-e VALIDATOR_WEIGHT_PROTOCOL=authoritative_v2' in deploy
+    assert (
+        '-e FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED='
+        '"$FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED"'
+        in deploy
+    )
     assert 'VALIDATOR_DEPLOY_SHA="$(git -C "$REPO_DIR" rev-parse HEAD)"' in deploy
     assert '-e GIT_COMMIT_HASH="$VALIDATOR_DEPLOY_SHA"' in deploy
     assert '-e EXPECTED_CHAIN="$EXPECTED_CHAIN"' in deploy

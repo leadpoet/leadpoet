@@ -12,6 +12,9 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
     validate_signed_execution_receipt,
 )
+from leadpoet_canonical.hotkey_authority_v2 import (
+    DISABLED_LEADERBOARD_WINDOW_V1,
+)
 from leadpoet_canonical.weight_authority_v2 import (
     WEIGHT_INPUT_PURPOSES,
     gateway_weight_input_value_documents_v2,
@@ -430,6 +433,27 @@ class CoordinatorWeightSourceV2:
         window_end: str,
         context: ExecutionContextV2,
     ) -> Dict[str, Any]:
+        disabled_start = window_start == DISABLED_LEADERBOARD_WINDOW_V1
+        disabled_end = window_end == DISABLED_LEADERBOARD_WINDOW_V1
+        if disabled_start != disabled_end:
+            raise CoordinatorWeightSourceV2Error(
+                "disabled leaderboard window is incomplete"
+            )
+        if not bool(calculation["ff_enabled"]) or disabled_start:
+            return {
+                **{key: proposed[key] for key in proposed if key != "value"},
+                "value": {
+                    "leaderboard_bonus_share": calculation[
+                        "leaderboard_bonus_share"
+                    ],
+                    "leaderboard_rank_shares": list(
+                        calculation["leaderboard_rank_shares"]
+                    ),
+                    "leaderboard_entries": [],
+                    "leaderboard_fetch_ok": True,
+                },
+            }
+
         winner_rows = self._read(
             "fulfillment_leaderboard_winners",
             {"window_start": window_start, "window_end": window_end},

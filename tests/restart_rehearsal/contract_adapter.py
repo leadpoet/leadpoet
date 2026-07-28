@@ -481,6 +481,7 @@ def _gateway_secret() -> dict[str, str]:
 def _validator_secret() -> dict[str, str]:
     values = {
         "ENABLE_FULFILLMENT": "true",
+        "FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED": "false",
         "ENABLE_QUALIFICATION_EVALUATION": "true",
         "LEADPOET_WRAPPER_ACTIVE": "1",
         "GATEWAY_URL": "http://gateway.invalid:8000",
@@ -1060,6 +1061,10 @@ def command_docker(argv: list[str]) -> int:
                     or environment.get("LEADPOET_WRAPPER_ACTIVE") != "1"
                     or environment.get("VALIDATOR_WEIGHT_PROTOCOL")
                     != "authoritative_v2"
+                    or environment.get(
+                        "FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED"
+                    )
+                    != "false"
                 ):
                     return _fail(
                         "docker",

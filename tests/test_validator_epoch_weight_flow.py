@@ -72,6 +72,25 @@ def test_research_lab_fallback_uses_shared_allocation_default():
     assert "20.0" not in snippet
 
 
+def test_leaderboard_disable_uses_canonical_window_without_changing_snapshot_schema():
+    source = VALIDATOR_SOURCE.read_text(encoding="utf-8")
+    submission = _between(
+        source,
+        "async def _submit_weights_at_epoch_end_locked(self):",
+        "def archive_weights_to_history(",
+    )
+    snapshot = _between(
+        submission,
+        "def _weight_snapshot(",
+        "if ff_enabled and leaderboard_emissions_enabled:",
+    )
+
+    assert "FULFILLMENT_LEADERBOARD_EMISSIONS_ENABLED" in submission
+    assert "DISABLED_LEADERBOARD_WINDOW_V1" in submission
+    assert '"leaderboard_emissions_enabled"' not in snapshot
+    assert "datetime.now(timezone.utc).isoformat()" not in submission
+
+
 def test_epoch_debug_line_includes_absolute_and_within_epoch_blocks():
     source = VALIDATOR_SOURCE.read_text(encoding="utf-8")
     snippet = _between(

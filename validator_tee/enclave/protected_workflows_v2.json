@@ -217,7 +217,7 @@
       "symbol": "Validator._set_weights_until_epoch_end"
     },
     {
-      "ast_sha256": "sha256:d5e3288b530c3f6596df7253a83981e97a3cc868d270f0911108ea54286b8610",
+      "ast_sha256": "sha256:e7ddcae6cf92dcdb34062c5807fb11cc16a01c374c4e8dc7a61b4c9ff0a0e07e",
       "path": "neurons/validator.py",
       "symbol": "Validator._submit_weights_at_epoch_end_locked"
     },
@@ -327,7 +327,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:6b7dd8f90821464ff7f0b0f7590d3f367a591554a388d605ace9402bffb8dc17",
+  "manifest_hash": "sha256:c1e106665960848bf5e1c1f911d0591b722cc84fc94d491720186652cbe55f40",
   "protected_source_commit": "978c7677db00c416f1aaf1f9e7f66ffc9395b46d",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

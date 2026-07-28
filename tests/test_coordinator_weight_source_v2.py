@@ -19,6 +19,9 @@ from leadpoet_canonical.attested_v2 import (
     create_signed_execution_receipt,
     sha256_json,
 )
+from leadpoet_canonical.hotkey_authority_v2 import (
+    DISABLED_LEADERBOARD_WINDOW_V1,
+)
 from leadpoet_canonical.sourcing_history_v2 import (
     build_sourcing_decision_v2,
     build_sourcing_epoch_v2,
@@ -225,6 +228,48 @@ def test_leaderboard_reconstructs_wins_tiebreak_and_ban_filter():
     ]
 
 
+def test_disabled_leaderboard_window_commits_empty_input_without_db_read():
+    reader = FakeReader(
+        {
+            "fulfillment_leaderboard_winners": [
+                {"miner_hotkey": "miner", "reward_pct": 0.5},
+            ],
+            "banned_hotkeys": [],
+        }
+    )
+    source = CoordinatorWeightSourceV2(reader)
+    document = source.resolve(
+        payload=_payload(
+            "leaderboard",
+            leaderboard_window_start=DISABLED_LEADERBOARD_WINDOW_V1,
+            leaderboard_window_end=DISABLED_LEADERBOARD_WINDOW_V1,
+        ),
+        context=_context("research_lab.leaderboard_input.v2"),
+    )
+    assert document["value"] == {
+        "leaderboard_bonus_share": 0.095,
+        "leaderboard_rank_shares": [0.05, 0.03, 0.015],
+        "leaderboard_entries": [],
+        "leaderboard_fetch_ok": True,
+    }
+    assert reader.calls == []
+
+
+def test_disabled_leaderboard_window_must_be_complete():
+    source = CoordinatorWeightSourceV2(FakeReader({}))
+    with pytest.raises(
+        CoordinatorWeightSourceV2Error,
+        match="disabled leaderboard window is incomplete",
+    ):
+        source.resolve(
+            payload=_payload(
+                "leaderboard",
+                leaderboard_window_start=DISABLED_LEADERBOARD_WINDOW_V1,
+            ),
+            context=_context("research_lab.leaderboard_input.v2"),
+        )
+
+
 def test_disabled_fulfillment_commits_empty_leaderboard_without_paying_rows():
     reader = FakeReader(
         {
@@ -246,13 +291,7 @@ def test_disabled_fulfillment_commits_empty_leaderboard_without_paying_rows():
         context=_context("research_lab.leaderboard_input.v2"),
     )
     assert document["value"]["leaderboard_entries"] == []
-    assert reader.calls[0] == (
-        "fulfillment_leaderboard_winners",
-        {
-            "window_start": "2026-07-03T20:00:00Z",
-            "window_end": "2026-07-10T20:00:00Z",
-        },
-    )
+    assert reader.calls == []
 
 
 def test_sourcing_history_is_rebuilt_only_from_signed_epoch_receipts():

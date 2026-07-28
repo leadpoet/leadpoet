@@ -137,6 +137,48 @@ failure, and success branch needs parity coverage in the same change. Mark
 each production stage `passed`, `failed`, or `unexercised`; an unexercised
 critical stage blocks a safe-to-restart claim.
 
+When an attested operation is wrapped by artifact persistence, the exact
+gateway readiness path must exercise both layers. It must pair
+`execution_receipt` only with `execution_receipt_graph`, pair the outer
+lineage `receipt` only with the outer `receipt_graph`, and reject either
+cross-pairing. A generic receipt-ancestry fixture that collapses both layers
+does not cover this production contract.
+
+### Mandatory migration-backed durable-state rehearsal
+
+The exact-launcher rehearsal must not infer the durable database contract from
+Python constants or accept arbitrary JSON in an in-memory substitute. Before
+either launcher proceeds, the pinned Amazon Linux replica must start a
+disposable PostgreSQL instance and apply the candidate's settlement-critical
+SQL migrations verbatim in production order.
+
+That stage must:
+
+- Exercise real PostgreSQL constraints, foreign keys, functions, RPC return
+  documents, and view projections using nonempty sanitized production-shaped
+  bundle, publication, finalization, and chain-settlement rows.
+- Run the production settlement authority parser against the exact row
+  returned by `research_lab_finalized_allocation_epochs_v2`; adapters may not
+  invent a missing selected column as JSON `null`.
+- Prove the pre-migration failure and post-migration success for every
+  constraint-widening regression. In particular, V1 chain-observation and
+  realized-settlement transport evidence must fail before migration 128 and
+  persist after it.
+- Export a candidate-SHA-bound relation/column/RPC contract. The local
+  PostgREST adapter must consume that contract and reject unknown selected,
+  filtered, ordered, or inserted columns instead of silently accepting them.
+- Fail before any simulated shutdown with a structured diagnostic containing
+  the candidate SHA, stage, migration, relation/RPC, constraint or projection,
+  and underlying PostgreSQL error.
+
+The independent canonical workflow runner remains mandatory, but it cannot
+substitute for this gate. A primary/auditor bundle test beside the restart does
+not prove that the gateway can reconstruct the same authority from its durable
+production-shaped state. Any change to a V2 migration, required schema/RPC
+preflight, durable row shape, settlement parser, bundle/publication/finalization
+store, or PostgREST query must update this database rehearsal and its
+regression evidence in the same change.
+
 ## Full-path incident standard
 
 Never stop at the first observed blocker. For every restart, weight, auditor,

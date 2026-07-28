@@ -14,6 +14,7 @@ RUN dnf install -y \
       libffi-devel \
       make \
       openssl-devel \
+      postgresql15-server \
       procps-ng \
       python3.11 \
       python3.11-devel \
@@ -65,6 +66,7 @@ RUN chmod 755 \
       /harness/local_services.py \
       /harness/prepare_external_artifacts.py \
       /harness/prepare_host_fixtures.py \
+      /harness/postgres_v2_contract_probe.py \
       /harness/production_workflow_runner.py \
       /harness/tls_connect_proxy_service.py \
       /harness/validator_enclave_service.py

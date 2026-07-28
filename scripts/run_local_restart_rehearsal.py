@@ -59,6 +59,7 @@ COMMITTED_HARNESS_PATHS = (
     "tests/restart_rehearsal/local_services.py",
     "tests/restart_rehearsal/prepare_external_artifacts.py",
     "tests/restart_rehearsal/prepare_host_fixtures.py",
+    "tests/restart_rehearsal/postgres_v2_contract_probe.py",
     "tests/restart_rehearsal/production_workflow_runner.py",
     "tests/restart_rehearsal/sanitized_weight_fixture.py",
     "tests/restart_rehearsal/sitecustomize.py",

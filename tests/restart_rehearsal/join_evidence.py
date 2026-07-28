@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any, Sequence
 
 
@@ -32,9 +33,7 @@ def _launcher_path(
     transition: str,
     candidate_sha: str,
 ) -> Path:
-    return root / (
-        f"{ordinal}-{component}-{transition}-{candidate_sha}.json"
-    )
+    return root / (f"{ordinal}-{component}-{transition}-{candidate_sha}.json")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -86,10 +85,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if (
             value.get("status") != "passed"
             or value.get("scope") != "exact"
-            or value.get("candidate_sha") not in {
+            or value.get("candidate_sha")
+            not in {
                 args.candidate_sha,
                 args.from_sha,
             }
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(value.get("postgres_contract_sha256") or ""),
+            )
         ):
             raise SystemExit(f"launcher evidence did not pass exactly: {path}")
         launcher_rows.append(
@@ -100,9 +104,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "from_sha": value.get("from_sha"),
                 "event_count": value.get("event_count"),
                 "pcr0": value.get("pcr0"),
+                "postgres_contract_sha256": value.get("postgres_contract_sha256"),
                 "evidence_hash": _sha256(path),
             }
         )
+
+    postgres_contracts_by_candidate: dict[str, set[str]] = {}
+    for row in launcher_rows:
+        postgres_contracts_by_candidate.setdefault(
+            str(row["candidate_sha"]),
+            set(),
+        ).add(str(row["postgres_contract_sha256"]))
+    if any(
+        len(contract_hashes) != 1
+        for contract_hashes in postgres_contracts_by_candidate.values()
+    ):
+        raise SystemExit("gateway and validator migration-backed contracts differ")
+    candidate_postgres_contract_sha256 = next(
+        iter(postgres_contracts_by_candidate[args.candidate_sha])
+    )
 
     workflow = _load(workflow_path)
     expected_epochs = 1 if args.profile == "prepush" else 100
@@ -163,12 +183,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "bundle_hash": last_epoch["bundle_hash"],
         "receipt_ancestry": {
             "root_receipt_hash": last_epoch["root_receipt_hash"],
-            "publication_receipt_hash": last_epoch[
-                "publication_receipt_hash"
-            ],
-            "finalization_receipt_hash": last_epoch[
-                "finalization_receipt_hash"
-            ],
+            "publication_receipt_hash": last_epoch["publication_receipt_hash"],
+            "finalization_receipt_hash": last_epoch["finalization_receipt_hash"],
             "verified": True,
         },
         "canonical_vector": {
@@ -180,16 +196,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "submission_finalized": True,
         },
         "signed_extrinsic": {
-            "authorization_hash": last_epoch[
-                "extrinsic_authorization_hash"
-            ],
+            "authorization_hash": last_epoch["extrinsic_authorization_hash"],
             "extrinsic_hash": last_epoch["signed_extrinsic_hash"],
-            "sdk_commit_request_hash": last_epoch[
-                "sdk_commit_request_hash"
-            ],
-            "sdk_extrinsic_request_hash": last_epoch[
-                "sdk_extrinsic_request_hash"
-            ],
+            "sdk_commit_request_hash": last_epoch["sdk_commit_request_hash"],
+            "sdk_extrinsic_request_hash": last_epoch["sdk_extrinsic_request_hash"],
         },
         "finalization": {
             "block": last_epoch["finalized_block"],
@@ -198,6 +208,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "reveal": {"vector_hash": last_epoch["reveal_vector_hash"]},
         "epoch_count": expected_epochs,
         "launcher_evidence": launcher_rows,
+        "postgres_contract_sha256": candidate_postgres_contract_sha256,
         "workflow_evidence_hash": _sha256(workflow_path),
         "fault_matrix_count": len(workflow.get("fault_matrix") or []),
         "concurrent_write_count": workflow.get("concurrent_write_count"),

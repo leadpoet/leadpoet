@@ -55,6 +55,11 @@ preserve_rehearsal_evidence() {
       "/evidence/${RUN_ORDINAL}-gateway-${TRANSITION}-${CANDIDATE_SHA}.log" \
       2>/dev/null || true
   fi
+  if [ -f "$REHEARSAL_STATE_ROOT/postgres-v2-schema-contract.json" ]; then
+    cp "$REHEARSAL_STATE_ROOT/postgres-v2-schema-contract.json" \
+      "/evidence/${RUN_ORDINAL}-${COMPONENT}-${TRANSITION}-${CANDIDATE_SHA}-postgres-v2-schema-contract.json" \
+      2>/dev/null || true
+  fi
 }
 cleanup_boundary_service() {
   if [ -n "$GATEWAY_ENCLAVE_SERVICE_PIDS" ]; then
@@ -233,12 +238,26 @@ for name, value in (
 PY
 
 if [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; then
+  echo "Validating migration-backed V2 settlement persistence"
+  SUPABASE_URL="http://127.0.0.1:54321" \
+  SUPABASE_SERVICE_ROLE_KEY="rehearsal-secret" \
+  AWS_ACCESS_KEY_ID="rehearsal-access" \
+  AWS_SECRET_ACCESS_KEY="rehearsal-secret" \
+  PYTHONPATH="/source:/harness" /usr/bin/python3.11 \
+    /harness/postgres_v2_contract_probe.py \
+    --source-root /source \
+    --state-root "$REHEARSAL_STATE_ROOT" \
+    --candidate-sha "$CANDIDATE_SHA" \
+    --output "$REHEARSAL_STATE_ROOT/postgres-v2-schema-contract.json"
   /usr/bin/python3.11 /harness/gateway_boundary_service.py \
     --host 127.0.0.1 \
     --port 54321 \
     --fixture /harness/fixtures/production_shaped_v2.json \
     --source-root /source \
-    --state-root "$REHEARSAL_STATE_ROOT" &
+    --state-root "$REHEARSAL_STATE_ROOT" \
+    --schema-contract \
+      "$REHEARSAL_STATE_ROOT/postgres-v2-schema-contract.json" \
+    --candidate-sha "$CANDIDATE_SHA" &
   BOUNDARY_SERVICE_PID=$!
   for _attempt in $(seq 1 100); do
     [ -f "$REHEARSAL_STATE_ROOT/local-postgrest.ready" ] && break

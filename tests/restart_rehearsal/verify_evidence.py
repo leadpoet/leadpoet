@@ -312,6 +312,45 @@ def verify_rehearsal_integrity(
             )
 
 
+def verify_migration_backed_database_contract(candidate_sha: str) -> str:
+    path = Path("/rehearsal-state/postgres-v2-schema-contract.json")
+    if not path.is_file():
+        raise SystemExit(
+            "migration-backed PostgreSQL contract evidence is missing"
+        )
+    document = json.loads(path.read_text(encoding="utf-8"))
+    required_checks = {
+        "pre_128_transport_rejected",
+        "post_128_transport_persisted",
+        "transport_contract_valid",
+        "finalized_view_projection_exact",
+        "settlement_authority_parsed",
+        "tampered_weight_receipt_rejected",
+        "required_schema_migrations_declared",
+    }
+    checks = document.get("checks")
+    if (
+        document.get("schema_version")
+        != "leadpoet.restart_rehearsal.postgres_contract.v1"
+        or document.get("candidate_sha") != candidate_sha
+        or not isinstance(checks, dict)
+        or set(checks) != required_checks
+        or any(checks[name] is not True for name in required_checks)
+    ):
+        raise SystemExit(
+            "migration-backed PostgreSQL contract evidence is incomplete"
+        )
+    relations = document.get("relations")
+    if (
+        not isinstance(relations, dict)
+        or "research_lab_finalized_allocation_epochs_v2" not in relations
+    ):
+        raise SystemExit(
+            "migration-backed finalized allocation view evidence is missing"
+        )
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def verify_gateway_private_model_environment(rows: list[dict]) -> None:
     gateway_processes = [
         row
@@ -481,6 +520,9 @@ def main() -> int:
         candidate_sha=candidate_sha,
         scope=scope,
     )
+    postgres_contract_sha256 = verify_migration_backed_database_contract(
+        candidate_sha
+    )
     if transition == "forward":
         verify_restart_epoch_transient_recovery(rows)
 
@@ -599,6 +641,7 @@ def main() -> int:
                 "transition": transition,
                 "event_count": len(rows),
                 "pcr0": next(iter(pcr0_values)),
+                "postgres_contract_sha256": postgres_contract_sha256,
             },
             sort_keys=True,
         )

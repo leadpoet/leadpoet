@@ -112,8 +112,19 @@ def _matches_filter(row: dict[str, Any], column: str, expression: str) -> bool:
 def _apply_table_query(
     rows: list[dict[str, Any]],
     query: str,
+    *,
+    allowed_columns: frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     pairs = parse_qsl(query, keep_blank_values=True)
+    referenced_columns = {
+        name for name, _value in pairs if name not in CONTROL_QUERY_FIELDS
+    }
+    if allowed_columns is not None and not referenced_columns <= allowed_columns:
+        unknown = sorted(referenced_columns - allowed_columns)
+        raise ValueError(
+            "PostgREST filter references unknown columns: %s"
+            % ",".join(unknown)
+        )
     filtered = [dict(row) for row in rows]
     for name, expression in pairs:
         if name in CONTROL_QUERY_FIELDS:
@@ -139,6 +150,13 @@ def _apply_table_query(
             ):
                 raise ValueError("PostgREST order term is invalid")
             column = parts[0]
+            if (
+                allowed_columns is not None
+                and column not in allowed_columns
+            ):
+                raise ValueError(
+                    "PostgREST order references unknown column: %s" % column
+                )
             descending = len(parts) >= 2 and parts[1] == "desc"
             nulls_first = (
                 (len(parts) == 3 and parts[2] == "nullsfirst")
@@ -171,6 +189,12 @@ def _apply_table_query(
         columns = selections[0].split(",")
         if not columns or any(not TABLE_RE.fullmatch(name) for name in columns):
             raise ValueError("PostgREST selection is outside rehearsal contract")
+        if allowed_columns is not None and not set(columns) <= allowed_columns:
+            unknown = sorted(set(columns) - allowed_columns)
+            raise ValueError(
+                "PostgREST selection references unknown columns: %s"
+                % ",".join(unknown)
+            )
         filtered = [
             {column: row.get(column) for column in columns}
             for row in filtered
@@ -308,6 +332,85 @@ def _schema_contract(source_root: Path) -> tuple[set[str], set[str]]:
     )
 
 
+def _migration_schema_contract(
+    path: Path,
+    *,
+    candidate_sha: str,
+) -> tuple[dict[str, frozenset[str]], set[str]]:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        document.get("schema_version")
+        != "leadpoet.restart_rehearsal.postgres_contract.v1"
+        or document.get("candidate_sha") != candidate_sha
+    ):
+        raise RuntimeError(
+            "migration-backed schema contract differs from candidate"
+        )
+    checks = document.get("checks")
+    if (
+        not isinstance(checks, dict)
+        or not checks
+        or any(value is not True for value in checks.values())
+    ):
+        raise RuntimeError(
+            "migration-backed schema contract checks are incomplete"
+        )
+    raw_relations = document.get("relations")
+    if not isinstance(raw_relations, dict) or not raw_relations:
+        raise RuntimeError(
+            "migration-backed schema contract has no relations"
+        )
+    relations: dict[str, frozenset[str]] = {}
+    for name, relation in raw_relations.items():
+        columns = relation.get("columns") if isinstance(relation, dict) else None
+        if (
+            not isinstance(name, str)
+            or not TABLE_RE.fullmatch(name)
+            or not isinstance(columns, list)
+            or not columns
+            or any(
+                not isinstance(column, str)
+                or not TABLE_RE.fullmatch(column)
+                for column in columns
+            )
+        ):
+            raise RuntimeError(
+                "migration-backed relation contract is invalid"
+            )
+        relations[name] = frozenset(columns)
+    raw_rpcs = document.get("rpcs")
+    if (
+        not isinstance(raw_rpcs, list)
+        or any(
+            not isinstance(name, str) or not TABLE_RE.fullmatch(name)
+            for name in raw_rpcs
+        )
+    ):
+        raise RuntimeError("migration-backed RPC contract is invalid")
+    required_relations = {
+        "research_lab_attested_transport_attempts_v2",
+        "research_lab_attested_execution_receipts_v2",
+        "research_lab_attested_weight_bundles_v2",
+        "research_lab_attested_publication_events_v2",
+        "research_lab_attested_weight_finalizations_v2",
+        "research_lab_finalized_allocation_epochs_v2",
+        "research_lab_chain_realized_epoch_settlements_v1",
+        "research_lab_chain_realized_settlement_activation_v1",
+        "research_lab_chain_realized_obligation_credits_v1",
+    }
+    if not required_relations <= set(relations):
+        raise RuntimeError(
+            "migration-backed settlement relations are incomplete: %s"
+            % ",".join(sorted(required_relations - set(relations)))
+        )
+    required_rpc = "research_lab_attested_transport_purpose_contract_v2"
+    if required_rpc not in raw_rpcs:
+        raise RuntimeError(
+            "migration-backed transport contract RPC is unavailable"
+        )
+    return relations, set(raw_rpcs)
+
+
 class LocalPostgRESTState:
     def __init__(
         self,
@@ -317,11 +420,13 @@ class LocalPostgRESTState:
         source_root: Path,
         tables: set[str],
         rpcs: set[str],
+        relation_columns: dict[str, frozenset[str]] | None = None,
     ):
         self.state_root = state_root
         self.fixture = fixture
         self.tables = tables
         self.rpcs = rpcs
+        self.relation_columns = dict(relation_columns or {})
         self.lock = threading.Lock()
         self.rows: dict[str, list[dict[str, Any]]] = {
             name: [] for name in tables
@@ -528,12 +633,33 @@ class Handler(BaseHTTPRequestHandler):
                 rows = list(self.server.state.rows[target])
             operation = "select"
             status = 200
-            response = _apply_table_query(rows, parsed.query)
+            response = _apply_table_query(
+                rows,
+                parsed.query,
+                allowed_columns=self.server.state.relation_columns.get(
+                    target
+                ),
+            )
         elif self.command == "POST":
             body = self._body()
             incoming = body if isinstance(body, list) else [body]
             if any(not isinstance(row, dict) for row in incoming):
                 raise ValueError("local PostgREST rows must be objects")
+            allowed_columns = self.server.state.relation_columns.get(target)
+            if allowed_columns is not None:
+                unknown = sorted(
+                    {
+                        column
+                        for row in incoming
+                        for column in row
+                        if column not in allowed_columns
+                    }
+                )
+                if unknown:
+                    raise ValueError(
+                        "PostgREST insert references unknown columns: %s"
+                        % ",".join(unknown)
+                    )
             with self.server.state.lock:
                 self.server.state.rows[target].extend(incoming)
             operation = "insert"
@@ -542,7 +668,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.headers.get("prefer", "")
             ) else []
         elif self.command == "PATCH":
-            self._body()
+            body = self._body()
+            if not isinstance(body, dict):
+                raise ValueError("local PostgREST patch must be an object")
+            allowed_columns = self.server.state.relation_columns.get(target)
+            if allowed_columns is not None:
+                unknown = sorted(set(body) - allowed_columns)
+                if unknown:
+                    raise ValueError(
+                        "PostgREST patch references unknown columns: %s"
+                        % ",".join(unknown)
+                    )
             operation = "insert"
             status = 200
             response = []
@@ -559,13 +695,33 @@ class Handler(BaseHTTPRequestHandler):
         self._json_response(status, response)
 
     def do_GET(self) -> None:
-        self._dispatch()
+        self._handle()
 
     def do_POST(self) -> None:
-        self._dispatch()
+        self._handle()
 
     def do_PATCH(self) -> None:
-        self._dispatch()
+        self._handle()
+
+    def _handle(self) -> None:
+        try:
+            self._dispatch()
+        except (KeyError, TypeError, ValueError) as exc:
+            self.server.state.record(
+                status="rejected",
+                operation="request_validation",
+                method=self.command,
+                path=self.path,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            self._json_response(
+                400,
+                {
+                    "code": "PGRST204",
+                    "message": str(exc),
+                },
+            )
 
 
 class LocalPostgRESTServer(ThreadingHTTPServer):
@@ -581,11 +737,19 @@ def main() -> int:
     parser.add_argument("--fixture", type=Path, required=True)
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--state-root", type=Path, required=True)
+    parser.add_argument("--schema-contract", type=Path, required=True)
+    parser.add_argument("--candidate-sha", required=True)
     args = parser.parse_args()
     fixture = json.loads(args.fixture.read_text(encoding="utf-8"))
     if fixture.get("sanitization", {}).get("contains_production_credentials"):
         raise RuntimeError("local PostgREST fixture contains credentials")
     tables, rpcs = _schema_contract(args.source_root)
+    relation_columns, migration_rpcs = _migration_schema_contract(
+        args.schema_contract,
+        candidate_sha=args.candidate_sha,
+    )
+    tables.update(relation_columns)
+    rpcs.update(migration_rpcs)
     args.state_root.mkdir(parents=True, exist_ok=True)
     state = LocalPostgRESTState(
         state_root=args.state_root,
@@ -593,6 +757,7 @@ def main() -> int:
         source_root=args.source_root,
         tables=tables,
         rpcs=rpcs,
+        relation_columns=relation_columns,
     )
     server = LocalPostgRESTServer((args.host, args.port), state)
     (args.state_root / "local-postgrest.ready").write_text(
@@ -603,6 +768,7 @@ def main() -> int:
                 "port": args.port,
                 "tables": len(tables),
                 "rpcs": len(rpcs),
+                "migration_backed_relations": len(relation_columns),
             },
             sort_keys=True,
         )

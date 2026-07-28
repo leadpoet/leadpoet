@@ -18,6 +18,7 @@ import urllib.request
 import pytest
 
 from scripts import run_local_restart_rehearsal as rehearsal
+from tests.restart_rehearsal import postgres_v2_contract_probe as postgres_probe
 from tests.restart_rehearsal.artifact_identity import (
     ALL_ROLES,
     docker_save_archive,
@@ -34,13 +35,23 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     _attested_store_tables,
     _direct_provider_store_tables,
     _measured_query_tables,
+    _migration_schema_contract,
     _schema_contract,
+)
+from tests.restart_rehearsal.postgres_v2_contract_probe import (
+    DisposablePostgres,
+    EXPECTED_FINALIZED_VIEW_COLUMNS,
+    MIGRATIONS_BEFORE_TRANSPORT_FIX,
+    TRANSPORT_FIX_MIGRATION,
+    _json_insert_sql,
+    _validate_required_migration_declarations,
 )
 from tests.restart_rehearsal.local_services import LocalBoundaryServices
 from tests.restart_rehearsal.verify_evidence import (
     EXPECTED_GATEWAY_PRIVATE_MODEL_ENV,
     selected_weight_storage_preflight_capability,
     verify_gateway_private_model_environment,
+    verify_migration_backed_database_contract,
     verify_gateway_weight_readiness_invocations,
     verify_rehearsal_integrity,
     verify_restart_epoch_transient_recovery,
@@ -162,6 +173,179 @@ def test_gateway_rehearsal_applies_production_postgrest_query_semantics() -> Non
         rows,
         'receipt_hash=in.("sha256:%s")' % ("1" * 64),
     ) == [rows[0]]
+
+
+def test_gateway_rehearsal_rejects_columns_absent_from_migration_schema() -> None:
+    columns = frozenset({"bundle_hash", "finalization_doc"})
+    with pytest.raises(ValueError, match="selection references unknown"):
+        _apply_table_query(
+            [],
+            "select=bundle_hash,weight_receipt_hash",
+            allowed_columns=columns,
+        )
+    with pytest.raises(ValueError, match="filter references unknown"):
+        _apply_table_query(
+            [],
+            "weight_receipt_hash=eq.sha256:test",
+            allowed_columns=columns,
+        )
+
+
+def test_migration_backed_contract_is_candidate_bound_and_complete(
+    tmp_path,
+) -> None:
+    relations = {
+        name: {"kind": "r", "columns": ["schema_version"]}
+        for name in {
+            "research_lab_attested_transport_attempts_v2",
+            "research_lab_attested_execution_receipts_v2",
+            "research_lab_attested_weight_bundles_v2",
+            "research_lab_attested_publication_events_v2",
+            "research_lab_attested_weight_finalizations_v2",
+            "research_lab_finalized_allocation_epochs_v2",
+            "research_lab_chain_realized_epoch_settlements_v1",
+            "research_lab_chain_realized_settlement_activation_v1",
+            "research_lab_chain_realized_obligation_credits_v1",
+        }
+    }
+    relations["research_lab_finalized_allocation_epochs_v2"] = {
+        "kind": "v",
+        "columns": list(EXPECTED_FINALIZED_VIEW_COLUMNS),
+    }
+    contract = {
+        "schema_version": "leadpoet.restart_rehearsal.postgres_contract.v1",
+        "candidate_sha": COMMIT,
+        "applied_migrations": [
+            *MIGRATIONS_BEFORE_TRANSPORT_FIX,
+            TRANSPORT_FIX_MIGRATION,
+        ],
+        "relations": relations,
+        "rpcs": [
+            "research_lab_attested_transport_purpose_contract_v2",
+        ],
+        "checks": {
+            "pre_128_transport_rejected": True,
+            "post_128_transport_persisted": True,
+        },
+    }
+    path = tmp_path / "postgres-contract.json"
+    path.write_text(json.dumps(contract), encoding="utf-8")
+
+    relation_columns, rpcs = _migration_schema_contract(
+        path,
+        candidate_sha=COMMIT,
+    )
+
+    assert relation_columns[
+        "research_lab_finalized_allocation_epochs_v2"
+    ] == frozenset(EXPECTED_FINALIZED_VIEW_COLUMNS)
+    assert "research_lab_attested_transport_purpose_contract_v2" in rpcs
+    with pytest.raises(RuntimeError, match="differs from candidate"):
+        _migration_schema_contract(path, candidate_sha="2" * 40)
+
+
+def test_rehearsal_evidence_requires_all_postgres_contract_checks(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    state_root = tmp_path / "rehearsal-state"
+    state_root.mkdir()
+    contract_path = state_root / "postgres-v2-schema-contract.json"
+    contract = {
+        "schema_version": "leadpoet.restart_rehearsal.postgres_contract.v1",
+        "candidate_sha": COMMIT,
+        "relations": {
+            "research_lab_finalized_allocation_epochs_v2": {
+                "kind": "v",
+                "columns": list(EXPECTED_FINALIZED_VIEW_COLUMNS),
+            }
+        },
+        "checks": {
+            "pre_128_transport_rejected": True,
+            "post_128_transport_persisted": True,
+            "transport_contract_valid": True,
+            "finalized_view_projection_exact": True,
+            "settlement_authority_parsed": True,
+            "tampered_weight_receipt_rejected": True,
+            "required_schema_migrations_declared": True,
+        },
+    }
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    original_is_file = Path.is_file
+    monkeypatch.setattr(
+        Path,
+        "is_file",
+        lambda self: (
+            original_is_file(contract_path)
+            if str(self)
+            == "/rehearsal-state/postgres-v2-schema-contract.json"
+            else original_is_file(self)
+        ),
+    )
+
+    original_read_text = Path.read_text
+    original_read_bytes = Path.read_bytes
+
+    def read_text(path: Path, *args, **kwargs):
+        if str(path) == "/rehearsal-state/postgres-v2-schema-contract.json":
+            return original_read_text(contract_path, *args, **kwargs)
+        return original_read_text(path, *args, **kwargs)
+
+    def read_bytes(path: Path):
+        if str(path) == "/rehearsal-state/postgres-v2-schema-contract.json":
+            return original_read_bytes(contract_path)
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+    assert verify_migration_backed_database_contract(COMMIT) == (
+        hashlib.sha256(contract_path.read_bytes()).hexdigest()
+    )
+    contract["checks"]["settlement_authority_parsed"] = False
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    with pytest.raises(SystemExit, match="evidence is incomplete"):
+        verify_migration_backed_database_contract(COMMIT)
+
+
+def test_postgres_fixture_insert_names_explicit_columns() -> None:
+    statement = _json_insert_sql(
+        "research_lab_attested_transport_attempts_v2",
+        {"attempt_hash": "sha256:" + "1" * 64, "purpose": "example.v2"},
+    )
+    assert (
+        "research_lab_attested_transport_attempts_v2 "
+        "(attempt_hash,purpose)" in statement
+    )
+    assert "json_populate_record" in statement
+
+
+def test_postgres_probe_resolves_system_binary_outside_launcher_path(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    system_dir = tmp_path / "usr" / "sbin"
+    system_dir.mkdir(parents=True)
+    runuser = system_dir / "runuser"
+    runuser.write_text("#!/bin/sh\n", encoding="utf-8")
+    runuser.chmod(0o755)
+    monkeypatch.setattr(postgres_probe, "SYSTEM_BINARY_DIRS", (system_dir,))
+    monkeypatch.setattr(postgres_probe.shutil, "which", lambda _name: None)
+
+    assert DisposablePostgres._binary("runuser") == str(runuser)
+    with pytest.raises(
+        postgres_probe.PostgresContractProbeError,
+        match="postgres binary is unavailable",
+    ):
+        DisposablePostgres._binary("missing")
+
+
+def test_required_schema_preflight_is_backed_by_candidate_migrations() -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    counts = _validate_required_migration_declarations(source_root)
+    assert counts["relation_probe_count"] > 20
+    assert counts["rpc_probe_count"] > 10
+    assert counts["migration_count"] > 10
 
 
 def test_gateway_rehearsal_signing_identity_uses_its_real_private_key() -> None:
@@ -1574,10 +1758,17 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "/harness/validator_enclave_service.py &" in run_inside
     assert "/harness/gateway_enclave_service.py &" in run_inside
     assert "/harness/tls_connect_proxy_service.py &" in run_inside
+    assert "/harness/postgres_v2_contract_probe.py \\" in run_inside
     assert "/harness/gateway_enclave_service.py \\" in dockerfile
     assert "/harness/tls_connect_proxy_service.py \\" in dockerfile
+    assert "postgresql15-server" in dockerfile
+    assert "/harness/postgres_v2_contract_probe.py \\" in dockerfile
     assert (
         "tests/restart_rehearsal/gateway_enclave_service.py"
+        in rehearsal.COMMITTED_HARNESS_PATHS
+    )
+    assert (
+        "tests/restart_rehearsal/postgres_v2_contract_probe.py"
         in rehearsal.COMMITTED_HARNESS_PATHS
     )
     assert (
@@ -1849,6 +2040,7 @@ def test_joined_manifest_requires_every_authority_field(
                     "from_sha": "2" * 40,
                     "event_count": 10,
                     "pcr0": "3" * 96,
+                    "postgres_contract_sha256": "e" * 64,
                 }
             ),
             encoding="utf-8",
@@ -1869,10 +2061,10 @@ def test_joined_manifest_requires_every_authority_field(
         "sdk_extrinsic_request_hash": "sha256:" + "d" * 64,
         "finalized_block": 1000,
         "last_update": 1000,
-            "reveal_vector_hash": "sha256:" + "b" * 64,
-            "auditor_verified": True,
-            "auditor_runtime_verified": True,
-        }
+        "reveal_vector_hash": "sha256:" + "b" * 64,
+        "auditor_verified": True,
+        "auditor_runtime_verified": True,
+    }
     workflow_path = tmp_path / "workflow.json"
     workflow = {
         "status": "passed",
@@ -1907,7 +2099,33 @@ def test_joined_manifest_requires_every_authority_field(
         )
         == 0
     )
-    assert json.loads(output.read_text())["status"] == "passed"
+    joined = json.loads(output.read_text())
+    assert joined["status"] == "passed"
+    assert joined["postgres_contract_sha256"] == "e" * 64
+
+    validator_path = (
+        tmp_path / f"1-validator-forward-{COMMIT}.json"
+    )
+    validator = json.loads(validator_path.read_text(encoding="utf-8"))
+    validator["postgres_contract_sha256"] = "f" * 64
+    validator_path.write_text(json.dumps(validator), encoding="utf-8")
+    with pytest.raises(SystemExit, match="migration-backed contracts differ"):
+        join_evidence.main(
+            [
+                "--evidence-root",
+                str(tmp_path),
+                "--from-sha",
+                "2" * 40,
+                "--candidate-sha",
+                COMMIT,
+                "--profile",
+                "prepush",
+                "--output",
+                str(output),
+            ]
+        )
+    validator["postgres_contract_sha256"] = "e" * 64
+    validator_path.write_text(json.dumps(validator), encoding="utf-8")
 
     workflow["epochs"][0]["canonical_vector_equal"] = False
     workflow_path.write_text(json.dumps(workflow), encoding="utf-8")

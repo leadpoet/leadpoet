@@ -51,6 +51,11 @@ This is the mandatory 5–10 minute developer gate. It runs in Docker without
 production credentials, executes both installed N-1 launchers and the candidate
 Git handoff, then runs one complete gateway/validator/auditor publication
 against strict local chain and durable-database services.
+Before either launcher can proceed, each replica starts disposable PostgreSQL,
+applies the candidate settlement-critical migrations in production order, and
+executes nonempty bundle/publication/finalization state through the production
+settlement authority parser. The resulting relation/column/RPC contract binds
+the strict local PostgREST service to the candidate SHA.
 On ARM developer machines the outer `prepush` container uses native ARM64 to
 avoid QEMU overhead; the unchanged launchers still issue and validate the exact
 production `linux/amd64` Docker/Nitro contracts. The `release` profile always
@@ -107,6 +112,15 @@ console output must prove all of the following:
   newer installed launcher. A second rollback invocation must still reach the
   exact-commit compatibility gate.
 - [ ] Every contract stage passes.
+- [ ] `REHEARSAL_POSTGRES_CONTRACT_OK` appears for both exact launchers.
+- [ ] The migration-backed contract proves the pre-128 V1 transport rejection,
+  post-128 persistence, exact finalized-allocation view projection, production
+  settlement-authority parsing, tampered weight-receipt rejection, and
+  declaration coverage for every migration referenced by the required
+  schema/RPC preflight.
+- [ ] The local PostgREST service reports nonzero
+  `migration_backed_relations` and rejects any selected, filtered, ordered, or
+  inserted column absent from the PostgreSQL catalog.
 - [ ] Zero rejected contract events.
 - [ ] Zero `internal_substitution` events. An adapted repository module,
   repository script, or long-lived application process invalidates the
@@ -116,6 +130,10 @@ console output must prove all of the following:
   environment names, schemas, hashes, ordering, and failure behavior.
 - [ ] Release SHA and PCR0 are identical across launcher and workflow evidence.
 - [ ] Bundle, publication, and finalization receipts form one verified ancestry.
+- [ ] Artifact-wrapped attested operations preserve both receipt layers:
+  `execution_receipt` verifies against `execution_receipt_graph`, the outer
+  lineage `receipt` verifies against the outer `receipt_graph`, and a
+  cross-paired receipt/graph is rejected.
 - [ ] Primary and auditor canonical vectors are byte-for-byte equal.
 - [ ] The signed SDK extrinsic is the one finalized by the local chain.
 - [ ] `LastUpdate` equals the finalized block and reveal readback equals the

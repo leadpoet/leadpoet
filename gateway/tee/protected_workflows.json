@@ -157,7 +157,7 @@
       "symbol": "build_chain_realized_settlement_package_v1"
     },
     {
-      "ast_sha256": "sha256:e212dfcafa5ab0304932198badb7b7041b9a51989a8ca3a7a8216f56e0812b5f",
+      "ast_sha256": "sha256:8af5c4be1f90e29a48b3798844690d2f6534f9dd457b07f584e25af5b9eaac53",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "champion_v2_cutover_readiness"
     },
@@ -177,7 +177,7 @@
       "symbol": "load_legacy_allocation_nonfinalizations_v2"
     },
     {
-      "ast_sha256": "sha256:23e36a6a17ccb6af2a5b2aa538c92133cc0f1fdb5561ab9634790c03be15b3d0",
+      "ast_sha256": "sha256:b99ee9f708d4ea5ed9609316bb3bd421d8170afacc57634bbe41b531b7ba97dd",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "load_settled_allocation_history_v2"
     },
@@ -1232,7 +1232,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:709a500c867c4265bfa0b62316c1738b6b320bc3fbf2b587d060c5fd177e05da",
+  "manifest_hash": "sha256:964a497a73d9aff2106a5331def79eb193cfeb9f62755946ae050e64a3157c48",
   "protected_source_commit": "243db83f115f4f1497b9640f5ebaf7d97e483b84",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

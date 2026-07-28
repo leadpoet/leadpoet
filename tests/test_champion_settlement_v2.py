@@ -1139,6 +1139,44 @@ def test_chain_realized_history_replaces_finalized_weight_intent(monkeypatch):
     assert allocation["lab_attributed_alpha_percent"] == pytest.approx(5.0)
 
 
+@pytest.mark.asyncio
+async def test_settled_history_fails_before_expensive_finalized_scan(monkeypatch):
+    calls: list[str] = []
+
+    async def incomplete_chain_history(**_kwargs):
+        calls.append("chain")
+        raise settlement.ChampionSettlementV2Error(
+            "chain realized settlement history is incomplete"
+        )
+
+    async def unexpected_finalized_history(**_kwargs):
+        calls.append("finalized")
+        raise AssertionError("finalized history must not start")
+
+    monkeypatch.setattr(
+        settlement,
+        "load_chain_realized_allocation_history_v1",
+        incomplete_chain_history,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "load_finalized_allocation_history_v2",
+        unexpected_finalized_history,
+    )
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="chain realized settlement history is incomplete",
+    ):
+        await settlement.load_settled_allocation_history_v2(
+            netuid=71,
+            start_epoch=100,
+            end_epoch=101,
+        )
+
+    assert calls == ["chain"]
+
+
 def test_unattributed_chain_history_remains_zero_credit_v2_authority(
     monkeypatch,
 ):
@@ -2339,6 +2377,110 @@ async def test_cutover_does_not_reclassify_complete_chain_realized_epoch(
     ] == reward_id
     assert readiness["missing_historical_settlements"] == []
     assert readiness["unproven_historical_allocations"] == []
+
+
+@pytest.mark.asyncio
+async def test_cutover_does_not_reclassify_unattributed_chain_realized_epoch(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store, store
+
+    reward_id = "champion_reward:sha256:" + "f" * 64
+    reward = {
+        "champion_reward_id": reward_id,
+        "start_epoch": 100,
+        "epoch_count": 1,
+        "desired_alpha_percent": 0.0,
+        "current_reward_status": "active",
+    }
+    settlement_hash = "sha256:" + "e" * 64
+    chain_history = [
+        {
+            "epoch": 100,
+            "netuid": 71,
+            "allocation_hash": settlement_hash,
+            "allocation_doc": {
+                "schema_version": (
+                    settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2
+                ),
+                "epoch": 100,
+                "netuid": 71,
+                "settlement_hash": settlement_hash,
+                "authority_type": (
+                    settlement.CHAIN_REALIZED_UNATTRIBUTED_AUTHORITY_TYPE_V1
+                ),
+                "source": "chain_realized_obligation_credits",
+                "champion_allocations": [],
+                "queued_champion_allocations": [],
+                "source_add_allocations": [],
+                "reimbursement_allocations": [],
+            },
+            "authority_types": [
+                settlement.CHAIN_REALIZED_UNATTRIBUTED_AUTHORITY_TYPE_V1
+            ],
+        }
+    ]
+
+    async def select_all(table, *, filters=(), **_kwargs):
+        if table == "research_lab_champion_reward_current":
+            status = next(
+                (
+                    value
+                    for field, value in filters
+                    if field == "current_reward_status"
+                ),
+                "",
+            )
+            return [reward] if status == "active" else []
+        if table in {
+            "research_lab_source_add_reward_current",
+            "research_lab_emission_allocation_current",
+            "research_lab_arweave_epoch_audit_anchor_current",
+            "published_weight_bundles",
+            "research_lab_emission_allocation_snapshots",
+        }:
+            return []
+        raise AssertionError(table)
+
+    async def load_history(**_kwargs):
+        return chain_history
+
+    async def no_nonfinalizations(**_kwargs):
+        return []
+
+    async def unexpected_graph(**_kwargs):
+        raise AssertionError("unattributed authority must not require a graph")
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(
+        settlement,
+        "load_settled_allocation_history_v2",
+        load_history,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "load_legacy_allocation_nonfinalizations_v2",
+        no_nonfinalizations,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_by_ref_v2",
+        unexpected_graph,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_by_ref_v2",
+        unexpected_graph,
+    )
+
+    readiness = await settlement.champion_v2_cutover_readiness(
+        epoch=101,
+        netuid=71,
+    )
+
+    assert readiness["ready"] is True
+    assert readiness["missing_historical_classifications"] == []
+    assert readiness["missing_historical_settlements"] == []
 
 
 @pytest.mark.asyncio

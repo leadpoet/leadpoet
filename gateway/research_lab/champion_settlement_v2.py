@@ -2297,17 +2297,17 @@ async def load_settled_allocation_history_v2(
 
     if int(end_epoch) < int(start_epoch):
         return []
-    finalized, chain_realized = await asyncio.gather(
-        load_finalized_allocation_history_v2(
-            netuid=int(netuid),
-            start_epoch=int(start_epoch),
-            end_epoch=int(end_epoch),
-        ),
-        load_chain_realized_allocation_history_v1(
-            netuid=int(netuid),
-            start_epoch=int(start_epoch),
-            end_epoch=int(end_epoch),
-        ),
+    # Validate the small contiguous chain history first. If it is incomplete,
+    # do not launch the substantially larger finalized-allocation graph scan.
+    chain_realized = await load_chain_realized_allocation_history_v1(
+        netuid=int(netuid),
+        start_epoch=int(start_epoch),
+        end_epoch=int(end_epoch),
+    )
+    finalized = await load_finalized_allocation_history_v2(
+        netuid=int(netuid),
+        start_epoch=int(start_epoch),
+        end_epoch=int(end_epoch),
     )
     return merge_settled_allocation_histories_v2(finalized, chain_realized)
 
@@ -2638,11 +2638,15 @@ async def champion_v2_cutover_readiness(
     finalized_by_epoch = {
         int(item["epoch"]): item for item in finalized
     }
+    chain_realized_authority_types = {
+        CHAIN_REALIZED_AUTHORITY_TYPE_V1,
+        CHAIN_REALIZED_UNATTRIBUTED_AUTHORITY_TYPE_V1,
+    }
     chain_realized_epochs = {
         epoch_id
         for epoch_id, item in finalized_by_epoch.items()
-        if CHAIN_REALIZED_AUTHORITY_TYPE_V1
-        in set(item.get("authority_types") or ())
+        if chain_realized_authority_types
+        & set(item.get("authority_types") or ())
     }
     nonfinalized_by_epoch = {
         int(item["epoch"]): item for item in nonfinalized

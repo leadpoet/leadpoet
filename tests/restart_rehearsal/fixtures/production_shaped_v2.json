@@ -10,6 +10,8 @@
     "network": "finney",
     "netuid": 71,
     "tempo": 360,
+    "current_block": 8700040,
+    "subnet_epoch_index": 24166,
     "subnet_reveal_period_epochs": 1,
     "block_time_millis": 12000,
     "spec_version": 432,

@@ -358,7 +358,22 @@ class LocalPostgRESTState:
                 }
             ]
         if chain_activation_table in self.rows:
-            first_epoch = int(cutover["first_settlement_epoch_id"])
+            network = fixture.get("network")
+            if not isinstance(network, dict):
+                raise ValueError("local PostgREST network fixture is invalid")
+            subnet_epoch_index = int(network["subnet_epoch_index"])
+            current_block = int(network["current_block"])
+            first_subnet_epoch = int(cutover["first_subnet_epoch_index"])
+            if (
+                subnet_epoch_index < first_subnet_epoch
+                or current_block <= int(cutover["cutover_block"])
+            ):
+                raise ValueError(
+                    "local PostgREST chain activation fixture predates cutover"
+                )
+            first_epoch = int(cutover["first_settlement_epoch_id"]) + (
+                subnet_epoch_index - first_subnet_epoch
+            )
             self.rows[chain_activation_table] = [
                 {
                     "netuid": int(cutover["netuid"]),
@@ -368,7 +383,7 @@ class LocalPostgRESTState:
                     "first_epoch_id": first_epoch,
                     "source_bundle_hash": "sha256:" + "a" * 64,
                     "source_bundle_epoch_id": first_epoch,
-                    "source_finalized_block": 8666279,
+                    "source_finalized_block": current_block - 1,
                 }
             ]
         self.cutover_state = list(self.rows.get(state_table, []))

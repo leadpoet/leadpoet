@@ -57,6 +57,20 @@ def _block_hash(block: int) -> str:
     return "0x" + hashlib.sha256(f"leadpoet-local-block:{block}".encode()).hexdigest()
 
 
+def _current_settlement_epoch_id() -> int:
+    cutover = json.loads(
+        (
+            SOURCE_ROOT / "config/stateful-epoch-cutover-sn71.json"
+        ).read_text(encoding="utf-8")
+    )
+    first_subnet_epoch = int(cutover["first_subnet_epoch_index"])
+    if SUBNET_EPOCH_INDEX < first_subnet_epoch:
+        raise ValueError("local chain settlement fixture predates cutover")
+    return int(cutover["first_settlement_epoch_id"]) + (
+        SUBNET_EPOCH_INDEX - first_subnet_epoch
+    )
+
+
 def _external_event(
     boundary: str,
     operation: str,
@@ -3016,6 +3030,7 @@ def _local_urlopen(
         == "/rest/v1/research_lab_chain_realized_settlement_activation_v1"
         and "limit=2" in parsed.query
     ):
+        activation_epoch = _current_settlement_epoch_id()
         body = json.dumps(
             [
                 {
@@ -3023,10 +3038,10 @@ def _local_urlopen(
                     "schema_version": (
                         "leadpoet.research_lab_chain_realized_settlement_activation.v1"
                     ),
-                    "first_epoch_id": 24073,
+                    "first_epoch_id": activation_epoch,
                     "source_bundle_hash": "sha256:" + "a" * 64,
-                    "source_bundle_epoch_id": 24073,
-                    "source_finalized_block": 8666279,
+                    "source_bundle_epoch_id": activation_epoch,
+                    "source_finalized_block": CURRENT_BLOCK - 1,
                 }
             ],
             sort_keys=True,

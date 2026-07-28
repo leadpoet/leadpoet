@@ -27,6 +27,7 @@ from tests.restart_rehearsal.artifact_identity import (
 from tests.restart_rehearsal import join_evidence
 from tests.restart_rehearsal import sitecustomize as rehearsal_sitecustomize
 from tests.restart_rehearsal.gateway_boundary_service import (
+    LocalPostgRESTState,
     RUNTIME_TABLES,
     _apply_table_query,
     _attested_store_tables,
@@ -46,6 +47,69 @@ from tests.restart_rehearsal.verify_evidence import (
 
 COMMIT = "1" * 40
 VALIDATOR_HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
+
+
+def test_chain_settlement_activation_fixture_tracks_current_epoch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "SOURCE_ROOT",
+        source_root,
+    )
+    fixture = json.loads(
+        (
+            source_root
+            / "tests/restart_rehearsal/fixtures/production_shaped_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+    cutover = json.loads(
+        (
+            source_root / "config/stateful-epoch-cutover-sn71.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert fixture["network"]["current_block"] == (
+        rehearsal_sitecustomize.CURRENT_BLOCK
+    )
+    assert fixture["network"]["subnet_epoch_index"] == (
+        rehearsal_sitecustomize.SUBNET_EPOCH_INDEX
+    )
+    expected_epoch = int(cutover["first_settlement_epoch_id"]) + (
+        int(fixture["network"]["subnet_epoch_index"])
+        - int(cutover["first_subnet_epoch_index"])
+    )
+    state = LocalPostgRESTState(
+        state_root=tmp_path,
+        fixture=fixture,
+        source_root=source_root,
+        tables={
+            "research_lab_chain_realized_settlement_activation_v1",
+            "research_lab_stateful_subnet_epoch_cutover_state_v1",
+            "research_lab_stateful_subnet_epoch_cutovers_v1",
+        },
+        rpcs=set(),
+    )
+    assert state.rows[
+        "research_lab_chain_realized_settlement_activation_v1"
+    ] == [
+        {
+            "netuid": 71,
+            "schema_version": (
+                "leadpoet.research_lab_chain_realized_settlement_activation.v1"
+            ),
+            "first_epoch_id": expected_epoch,
+            "source_bundle_hash": "sha256:" + "a" * 64,
+            "source_bundle_epoch_id": expected_epoch,
+            "source_finalized_block": (
+                int(fixture["network"]["current_block"]) - 1
+            ),
+        }
+    ]
+    assert rehearsal_sitecustomize._current_settlement_epoch_id() == (
+        expected_epoch
+    )
 
 
 def test_gateway_rehearsal_discovers_candidate_direct_provider_tables() -> None:

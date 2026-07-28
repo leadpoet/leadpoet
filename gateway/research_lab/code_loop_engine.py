@@ -96,6 +96,7 @@ from gateway.research_lab.provider_evidence_proxy import (
 from gateway.research_lab.provider_capabilities import (
     summary_mentions_private_capability,
     validate_candidate_provider_diff,
+    validate_source_add_registration_diff,
 )
 from gateway.research_lab.provider_probe import (
     ProbeBudgetState,
@@ -218,6 +219,24 @@ def _is_editable_test_path(path: str) -> bool:
         or basename.startswith("test_") and basename.endswith(".py")
         or basename.endswith("_test.py")
     )
+
+
+def _source_add_runtime_source_text(source_context: Any) -> str:
+    relative = "sourcing_model/routing/runtime.py"
+    editable = {
+        str(item)
+        for item in getattr(source_context, "editable_files", ())
+        if item
+    }
+    if relative not in editable:
+        return ""
+    try:
+        return (
+            Path(getattr(source_context, "source_root"))
+            / relative
+        ).read_text(encoding="utf-8", errors="replace")
+    except (OSError, TypeError, ValueError):
+        return ""
 
 
 def _candidate_edit_constraints(
@@ -2161,6 +2180,7 @@ class CodeEditLoopEngine:
         finalization_reserve_reached = False
         provider_capabilities = None
         provider_capability_summary: dict[str, Any] | None = None
+        source_incorporation_context: dict[str, Any] | None = None
         effective_provider_entries: list[Any] = []
         if bool(getattr(self.builder.config, "provider_capability_catalog_enabled", True)):
             try:
@@ -2171,8 +2191,21 @@ class CodeEditLoopEngine:
                 effective_provider_entries, provider_capabilities = (
                     await asyncio.to_thread(registry_loader)
                 )
-                if provider_capabilities.private_snapshot_loaded:
-                    provider_capability_summary = provider_capabilities.prompt_summary()
+                if (
+                    provider_capabilities.private_snapshot_loaded
+                    or provider_capabilities.source_add_provider_count > 0
+                ):
+                    provider_capability_summary = provider_capabilities.prompt_summary(
+                        miner_focus=str(
+                            _ticket_doc_value(ticket, "brief_public_summary")
+                            or ""
+                        )
+                    )
+                    raw_source_context = provider_capability_summary.get(
+                        "routerverse_source_incorporation"
+                    )
+                    if isinstance(raw_source_context, Mapping):
+                        source_incorporation_context = dict(raw_source_context)
             except Exception as exc:
                 logger.warning(
                     "research_lab_provider_capability_loop_load_failed run_id=%s error=%s",
@@ -5510,7 +5543,6 @@ class CodeEditLoopEngine:
             for draft in drafts[:1]:
                 if (
                     provider_capabilities is not None
-                    and provider_capabilities.private_snapshot_loaded
                     and (
                         str(draft.lane or "")
                         in {"source_routing", "provider_fallback", "openrouter_model_selection"}
@@ -5558,13 +5590,22 @@ class CodeEditLoopEngine:
                     read_paths=tuple(sorted(read_paths)),
                     require_read=True,
                 )
-                if provider_capabilities is not None and provider_capabilities.private_snapshot_loaded:
+                if provider_capabilities is not None:
                     source_errors.extend(
                         validate_candidate_provider_diff(
                             draft.unified_diff,
                             provider_capabilities,
                         )
                     )
+                source_errors.extend(
+                    validate_source_add_registration_diff(
+                        draft.unified_diff,
+                        source_incorporation_context,
+                        existing_runtime_source=(
+                            _source_add_runtime_source_text(source_context)
+                        ),
+                    )
+                )
                 if source_errors:
                     await self.event_sink(
                         AutoResearchLoopEvent(

@@ -224,8 +224,8 @@ def _conforming_tree(root: Path) -> None:
     """)
     _write(root, "sourcing_model/routing/policy.py", "POLICY = True\n")
     _write(root, "sourcing_model/routing/runtime.py", """
-        RUNTIME_CATALOG_VERSION = "sourcing-model-runtime-tools:v1"
-        RUNTIME_POLICY_VERSION = "sourcing-model-runtime-routing:v1"
+        RUNTIME_CATALOG_VERSION = "sourcing-model-runtime-tools:v2"
+        RUNTIME_POLICY_VERSION = "sourcing-model-runtime-routing:v2"
 
         def runtime_tool_definitions():
             return ()

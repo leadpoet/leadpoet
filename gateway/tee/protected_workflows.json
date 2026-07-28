@@ -372,7 +372,7 @@
       "symbol": "backfill_champion_reward_v2_authority"
     },
     {
-      "ast_sha256": "sha256:a085c532555b1e08af54ca0f8e3f3ea4e59da077849593f22643ad4221ed1ded",
+      "ast_sha256": "sha256:203b643f38bd1d1dca43119d90c39589b624c513d59c6dfca51b8a5a9f90243a",
       "path": "gateway/research_lab/maintenance.py",
       "symbol": "backfill_champion_settlement_v2_authority"
     },
@@ -1232,7 +1232,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:4a93cea414ac674fbda201b7d55b78e95dae4c8363d42c0c82548bc4a795b403",
-  "protected_source_commit": "2e0c9f950c29bf651603206876472e88dff0ba95",
+  "manifest_hash": "sha256:709a500c867c4265bfa0b62316c1738b6b320bc3fbf2b587d060c5fd177e05da",
+  "protected_source_commit": "243db83f115f4f1497b9640f5ebaf7d97e483b84",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

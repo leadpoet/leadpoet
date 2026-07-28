@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
@@ -1465,6 +1466,98 @@ def test_rehearsal_help_exposes_constrained_host_options() -> None:
     assert "--component {all}" in result.stdout
     assert "--outer-cpus" in result.stdout
     assert "--outer-memory" in result.stdout
+
+
+def test_rehearsal_base_images_are_immutable_platform_children() -> None:
+    expected = {
+        "linux/amd64": (
+            "public.ecr.aws/amazonlinux/amazonlinux@sha256:"
+            "7dfb72e165c7b2f5fd2ee050c202160ee0cced24991f14736b831221f2004eee"
+        ),
+        "linux/arm64": (
+            "public.ecr.aws/amazonlinux/amazonlinux@sha256:"
+            "d23b77c815875a32165bc160248a6fcaf932dbbcdb7adc157680c39e4d254b38"
+        ),
+    }
+    assert rehearsal.REHEARSAL_BASE_IMAGES == expected
+    for docker_platform, image in expected.items():
+        assert rehearsal._rehearsal_base_image(docker_platform) == image
+
+    with pytest.raises(
+        SystemExit,
+        match="unsupported rehearsal Docker platform",
+    ):
+        rehearsal._rehearsal_base_image("linux/unknown")
+
+
+def test_rehearsal_dockerfile_requires_explicit_platform_image() -> None:
+    dockerfile = (
+        Path(__file__).resolve().parent / "Dockerfile"
+    ).read_text(encoding="utf-8")
+    assert dockerfile.startswith(
+        "ARG REHEARSAL_BASE_IMAGE\nFROM ${REHEARSAL_BASE_IMAGE}\n"
+    )
+    assert (
+        "7942e2a958a238057cdf3304cba7e75f4056d15f75112b8d8e7c1d21a17f2d6c"
+        not in dockerfile
+    )
+
+
+def test_rehearsal_build_binds_the_platform_specific_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @contextmanager
+    def temporary_directory(*, prefix: str):
+        assert prefix == "leadpoet-restart-image-"
+        yield str(tmp_path)
+
+    commands = []
+    monkeypatch.setattr(
+        rehearsal,
+        "_temporary_directory",
+        temporary_directory,
+    )
+    monkeypatch.setattr(
+        rehearsal,
+        "_git_file",
+        lambda _sha, path: (
+            (Path(__file__).resolve().parent / "Dockerfile").read_bytes()
+            if path == "tests/restart_rehearsal/Dockerfile"
+            else b""
+        ),
+    )
+    monkeypatch.setattr(
+        rehearsal,
+        "_run",
+        lambda argv, *, cwd=None, **_kwargs: commands.append(
+            (list(argv), cwd)
+        ),
+    )
+
+    rehearsal._build_image(
+        "leadpoet-test:platform",
+        harness_sha="a" * 40,
+        docker_platform="linux/amd64",
+    )
+
+    assert commands == [
+        (
+            [
+                "docker",
+                "build",
+                "--platform",
+                "linux/amd64",
+                "--build-arg",
+                "REHEARSAL_BASE_IMAGE="
+                + rehearsal.REHEARSAL_BASE_IMAGES["linux/amd64"],
+                "--tag",
+                "leadpoet-test:platform",
+                ".",
+            ],
+            tmp_path,
+        )
+    ]
 
 
 @pytest.mark.parametrize(

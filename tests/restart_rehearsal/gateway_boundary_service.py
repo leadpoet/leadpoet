@@ -335,6 +335,9 @@ class LocalPostgRESTState:
             "research_lab_stateful_subnet_epoch_cutover_state_v1"
         )
         ledger_table = "research_lab_stateful_subnet_epoch_cutovers_v1"
+        chain_activation_table = (
+            "research_lab_chain_realized_settlement_activation_v1"
+        )
         if state_table in self.rows:
             self.rows[state_table] = [
                 {
@@ -352,6 +355,20 @@ class LocalPostgRESTState:
                 {
                     "mapping_hash": cutover["mapping_hash"],
                     "manifest_doc": cutover,
+                }
+            ]
+        if chain_activation_table in self.rows:
+            first_epoch = int(cutover["first_settlement_epoch_id"])
+            self.rows[chain_activation_table] = [
+                {
+                    "netuid": int(cutover["netuid"]),
+                    "schema_version": (
+                        "leadpoet.research_lab_chain_realized_settlement_activation.v1"
+                    ),
+                    "first_epoch_id": first_epoch,
+                    "source_bundle_hash": "sha256:" + "a" * 64,
+                    "source_bundle_epoch_id": first_epoch,
+                    "source_finalized_block": 8666279,
                 }
             ]
         self.cutover_state = list(self.rows.get(state_table, []))

@@ -91,6 +91,9 @@ def test_receipt_allowlist_retains_canonical_contract_and_adds_epoch_authorities
         if role == "gateway_coordinator":
             expected_purposes.add("research_lab.subnet_epoch_cutover.v2")
             expected_purposes.discard(
+                "research_lab.chain_weight_observation.v1"
+            )
+            expected_purposes.discard(
                 "research_lab.chain_realized_epoch_settlement.v1"
             )
             expected_purposes.discard(

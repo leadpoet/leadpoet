@@ -156,21 +156,77 @@ def test_chain_realized_settlement_tables_are_append_only_and_service_role_only(
         CHAIN_REALIZED_SQL
     )
     assert "PRIMARY KEY (netuid, epoch_id)" in CHAIN_REALIZED_SQL
-    assert (
-        "PRIMARY KEY (netuid, epoch_id, obligation_kind, obligation_source_id)"
-        in CHAIN_REALIZED_SQL
+    assert re.search(
+        r"PRIMARY KEY\s*\(\s*netuid,\s*epoch_id,\s*"
+        r"obligation_kind,\s*obligation_source_id\s*\)",
+        CHAIN_REALIZED_SQL,
     )
     assert "prevent_research_lab_attested_v2_mutation" in CHAIN_REALIZED_SQL
     assert "ENABLE ROW LEVEL SECURITY" in CHAIN_REALIZED_SQL
     assert "FROM PUBLIC, anon, authenticated" in CHAIN_REALIZED_SQL
-    assert "GRANT SELECT, INSERT" in CHAIN_REALIZED_SQL
+    assert "GRANT SELECT, INSERT" not in CHAIN_REALIZED_SQL
+    assert "persist_research_lab_chain_realized_settlement_v1" in (
+        CHAIN_REALIZED_SQL
+    )
+    assert "GRANT EXECUTE" in CHAIN_REALIZED_SQL
+
+
+def test_chain_realized_migration_extends_replay_contract_exactly():
+    assert re.search(
+        r"pg_get_constraintdef\(oid\)\s*~\s*'\\moperation\\M'",
+        CHAIN_REALIZED_SQL,
+    )
+    assert re.search(
+        r"pg_get_constraintdef\(oid\)\s*~\s*'\\mpurpose\\M'",
+        CHAIN_REALIZED_SQL,
+    )
+    for value in (
+        "observe_chain_realized_weights_v1",
+        "attest_chain_realized_settlement_v1",
+        "research_lab.chain_weight_observation.v1",
+        "research_lab.chain_realized_epoch_settlement.v1",
+    ):
+        assert value in CHAIN_REALIZED_SQL
+    for constraint in (
+        "research_lab_attested_execution_results_v2_operation_check",
+        "research_lab_attested_execution_results_v2_purpose_check",
+        "research_lab_attested_execution_results_v2_operation_purpose_check",
+    ):
+        assert f"VALIDATE CONSTRAINT\n        {constraint}" in (
+            CHAIN_REALIZED_SQL
+        )
+    assert re.search(
+        r"operation\s*=\s*'observe_chain_realized_weights_v1'\s*"
+        r"AND purpose\s*=\s*"
+        r"'research_lab\.chain_weight_observation\.v1'",
+        CHAIN_REALIZED_SQL,
+    )
+    assert re.search(
+        r"operation\s*=\s*'attest_chain_realized_settlement_v1'\s*"
+        r"AND purpose\s*=\s*"
+        r"'research_lab\.chain_realized_epoch_settlement\.v1'",
+        CHAIN_REALIZED_SQL,
+    )
+
+
+def test_chain_realized_receipt_allowlist_matches_canonical_contract_exactly():
+    for role, expected_purposes in ROLE_PURPOSES.items():
+        match = re.search(
+            rf"role = '{re.escape(role)}' AND purpose IN \((.*?)\n\s*\)\)",
+            CHAIN_REALIZED_SQL,
+            re.DOTALL,
+        )
+        assert match is not None, role
+        migrated_purposes = set(re.findall(r"'([^']+)'", match.group(1)))
+        assert migrated_purposes == set(expected_purposes), role
 
 
 def test_chain_realized_credit_rows_require_complete_epoch_marker():
     assert "settlement_hash" in CHAIN_REALIZED_SQL
-    assert (
-        "REFERENCES public.research_lab_chain_realized_epoch_settlements_v1"
-        in CHAIN_REALIZED_SQL
+    assert re.search(
+        r"REFERENCES\s+"
+        r"public\.research_lab_chain_realized_epoch_settlements_v1\s*\(",
+        CHAIN_REALIZED_SQL,
     )
     assert "jsonb_typeof(settlement_doc->'credit_hashes') = 'array'" in (
         CHAIN_REALIZED_SQL
@@ -180,6 +236,38 @@ def test_chain_realized_credit_rows_require_complete_epoch_marker():
     )
     assert "lab_attributed_alpha_percent <= observed_chain_alpha_percent" in (
         CHAIN_REALIZED_SQL
+    )
+
+
+def test_chain_realized_rpc_enforces_activation_contiguity_and_receipt():
+    assert (
+        "chain_realized_settlement_activation_invalid"
+        in CHAIN_REALIZED_SQL
+    )
+    assert (
+        "chain_realized_settlement_predecessor_missing"
+        in CHAIN_REALIZED_SQL
+    )
+    assert "predecessor.epoch_id = settlement_epoch - 1" in (
+        CHAIN_REALIZED_SQL
+    )
+    assert "chain_realized_settlement_receipt_invalid" in (
+        CHAIN_REALIZED_SQL
+    )
+    for receipt_contract in (
+        "receipt.role = 'gateway_coordinator'",
+        "receipt.purpose =",
+        "'research_lab.chain_realized_epoch_settlement.v1'",
+        "receipt.epoch_id = settlement_epoch",
+        "receipt.output_root = requested_settlement_hash",
+        "receipt.receipt_status = 'succeeded'",
+    ):
+        assert receipt_contract in CHAIN_REALIZED_SQL
+    assert re.search(
+        r"pg_advisory_xact_lock\s*\(\s*"
+        r"pg_catalog\.hashtext\('chain_realized_settlement_v1'\),\s*"
+        r"settlement_netuid\s*\)",
+        CHAIN_REALIZED_SQL,
     )
 
 
@@ -200,6 +288,9 @@ def test_migration_99_allowlist_matches_canonical_contract_before_migration_101(
             )
             expected_at_99.discard(
                 "research_lab.chain_realized_obligation_credit.v1"
+            )
+            expected_at_99.discard(
+                "research_lab.chain_weight_observation.v1"
             )
         if role == "validator_weights":
             expected_at_99.discard("validator.subnet_epoch_snapshot.v2")

@@ -11,11 +11,13 @@ from leadpoet_canonical.chain_source_v2 import (
     CHAIN_RPC_METHOD,
     ChainSourceV2Error,
     chain_source_policy_hash,
+    decode_last_update_storage,
     decode_weights_storage,
     decode_timelocked_weight_commits,
     decode_selective_metagraph_result,
     encode_selective_metagraph_params,
     json_rpc_request,
+    last_update_storage_key,
     parse_finalized_header,
     parse_json_rpc_response,
     ss58_encode_account_id,
@@ -123,6 +125,23 @@ def test_json_rpc_contract_is_exact_and_method_limited():
 def test_chain_policy_hash_is_stable_and_typed():
     assert chain_source_policy_hash().startswith("sha256:")
     assert len(chain_source_policy_hash()) == 71
+
+
+def test_last_update_codec_matches_live_finney_metadata_and_scale_shape():
+    assert last_update_storage_key(netuid=71) == (
+        "0x658faa385070e074c85bf6b568cf0555"
+        "696e262a16e52255a69d8acd793541464700"
+    )
+    encoded = (
+        b"\x08"
+        + (1_345).to_bytes(8, "little")
+        + (1_200).to_bytes(8, "little")
+    )
+    assert decode_last_update_storage("0x" + encoded.hex()) == [1_345, 1_200]
+    with pytest.raises(ChainSourceV2Error, match="truncated"):
+        decode_last_update_storage("0x" + encoded[:-1].hex())
+    with pytest.raises(ChainSourceV2Error, match="trailing"):
+        decode_last_update_storage("0x" + (encoded + b"\x00").hex())
 
 
 def test_timelocked_commit_storage_key_matches_live_finney_metadata():

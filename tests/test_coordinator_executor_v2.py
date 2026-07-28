@@ -4,19 +4,23 @@ from gateway.tee.artifact_vault_v2 import (
     ARTIFACT_PERSISTENCE_MAX_ATTEMPTS_PER_METHOD,
 )
 from gateway.tee.coordinator_executor_v2 import (
+    OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
     OP_ATTEST_ARTIFACT_PERSISTENCE,
     OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2,
     OP_ATTEST_WEIGHT_INPUT,
     OP_ATTEST_WEIGHT_PUBLICATION,
+    OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1,
     OP_PROVIDER_OUTCOME_SNAPSHOT_V2,
     OP_RESEARCH_LAB_ALLOCATION,
     CoordinatorExecutorV2,
+    coordinator_receipt_output_v2,
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.provider_outcome_v2 import ProviderOutcomeLedgerV2
 from gateway.tee.scoring_executor import ScoringExecutionResult
 from leadpoet_canonical.attested_v2 import (
     build_transport_attempt,
+    sha256_json,
     transport_root,
 )
 from leadpoet_canonical.weight_computation import (
@@ -136,6 +140,73 @@ def _weight_snapshot():
     }
     value["config_hash"] = weight_config_hash(value)
     return value
+
+
+@pytest.mark.asyncio
+async def test_coordinator_chain_realized_authorities_are_measured_and_bound():
+    observation = {
+        "schema_version": "leadpoet.chain_realized_weight_observation.v1",
+        "epoch_id": 100,
+    }
+    settlement = {
+        "schema_version": (
+            "leadpoet.research_lab_chain_realized_epoch_settlement.v1"
+        ),
+        "netuid": 71,
+        "epoch_id": 100,
+    }
+    settlement_hash = "sha256:" + "1" * 64
+    credit_hash = "sha256:" + "2" * 64
+    calls = []
+
+    def observe(payload, context):
+        calls.append(("observe", dict(payload), context.job_id))
+        return observation
+
+    def settle(payload, context):
+        calls.append(("settle", dict(payload), context.job_id))
+        return {
+            "settlement_doc": settlement,
+            "settlement_hash": settlement_hash,
+            "credits": [{"credit_hash": credit_hash}],
+        }
+
+    executor = CoordinatorExecutorV2(
+        chain_weight_observation_resolver=observe,
+        chain_realized_settlement_resolver=settle,
+    )
+    context = ExecutionContextV2(
+        job_id="chain-realized:test",
+        purpose="research_lab.chain_weight_observation.v1",
+        epoch_id=100,
+    )
+    observation_result = await executor(
+        OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1,
+        {"epoch_id": 100},
+        context,
+    )
+    settlement_result = await executor(
+        OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
+        {"epoch_id": 100},
+        ExecutionContextV2(
+            job_id="chain-realized:settlement",
+            purpose="research_lab.chain_realized_epoch_settlement.v1",
+            epoch_id=100,
+        ),
+    )
+
+    assert observation_result.output == observation
+    assert observation_result.artifact_hashes == (sha256_json(observation),)
+    assert settlement_result.output["settlement_hash"] == settlement_hash
+    assert coordinator_receipt_output_v2(
+        OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
+        settlement_result.output,
+    ) == settlement
+    assert settlement_result.artifact_hashes == (
+        settlement_hash,
+        credit_hash,
+    )
+    assert [item[0] for item in calls] == ["observe", "settle"]
 
 
 @pytest.mark.asyncio

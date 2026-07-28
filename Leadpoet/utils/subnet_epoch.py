@@ -299,6 +299,14 @@ class SubnetEpochCutover:
             index - self.first_subnet_epoch_index
         )
 
+    def subnet_epoch_index(self, settlement_epoch_id: int) -> int:
+        epoch_id = _integer(settlement_epoch_id, "settlement_epoch_id")
+        if epoch_id < self.first_settlement_epoch_id:
+            raise SubnetEpochError("settlement epoch predates the configured cutover")
+        return self.first_subnet_epoch_index + (
+            epoch_id - self.first_settlement_epoch_id
+        )
+
 
 @dataclass(frozen=True)
 class SubnetEpochSnapshot:

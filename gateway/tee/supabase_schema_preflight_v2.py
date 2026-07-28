@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, Mapping
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -143,6 +144,56 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         "research_lab_provider_outcome_checkpoints_v2",
         ("artifact_master_key_ref_hash",),
     ),
+    (
+        "scripts/126-research-lab-chain-realized-settlement.sql",
+        "research_lab_finalized_weight_vector_candidates_v1",
+        (
+            "netuid",
+            "epoch_id",
+            "validator_hotkey",
+            "bundle_hash",
+            "finalized_block",
+            "uids",
+            "weights_u16",
+        ),
+    ),
+    (
+        "scripts/126-research-lab-chain-realized-settlement.sql",
+        "research_lab_chain_realized_epoch_settlements_v1",
+        (
+            "netuid",
+            "epoch_id",
+            "settlement_hash",
+            "settlement_receipt_hash",
+            "settlement_doc",
+        ),
+    ),
+    (
+        "scripts/126-research-lab-chain-realized-settlement.sql",
+        "research_lab_chain_realized_settlement_activation_v1",
+        (
+            "netuid",
+            "schema_version",
+            "first_epoch_id",
+            "source_bundle_hash",
+            "source_bundle_epoch_id",
+            "source_finalized_block",
+        ),
+    ),
+    (
+        "scripts/126-research-lab-chain-realized-settlement.sql",
+        "research_lab_chain_realized_obligation_credits_v1",
+        (
+            "netuid",
+            "epoch_id",
+            "settlement_hash",
+            "obligation_kind",
+            "obligation_source_id",
+            "credit_hash",
+            "credit_receipt_hash",
+            "credit_doc",
+        ),
+    ),
 )
 
 REQUIRED_SUPABASE_V2_RPCS = (
@@ -186,11 +237,122 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "scripts/123-research-lab-corpus-completeness.sql",
         "research_lab_terminal_runs_needing_corpus",
     ),
+    (
+        "scripts/126-research-lab-chain-realized-settlement.sql",
+        "persist_research_lab_chain_realized_settlement_v1",
+    ),
 )
 
 
 class SupabaseSchemaPreflightV2Error(RuntimeError):
     """The selected V2 release cannot use the live PostgREST schema."""
+
+
+def _verify_chain_realized_activation_v1(
+    parent_environment: Mapping[str, str],
+    *,
+    headers: Mapping[str, str],
+    supabase_url: str,
+    opener: Any,
+    timeout_seconds: float,
+) -> Dict[str, Any]:
+    try:
+        netuid = int(parent_environment.get("BITTENSOR_NETUID") or 71)
+    except (TypeError, ValueError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "BITTENSOR_NETUID is invalid for chain-realized settlement"
+        ) from exc
+    if netuid <= 0:
+        raise SupabaseSchemaPreflightV2Error(
+            "BITTENSOR_NETUID is invalid for chain-realized settlement"
+        )
+    columns = (
+        "netuid,schema_version,first_epoch_id,source_bundle_hash,"
+        "source_bundle_epoch_id,source_finalized_block"
+    )
+    query = urlencode(
+        {
+            "select": columns,
+            "netuid": f"eq.{netuid}",
+            "limit": "2",
+        }
+    )
+    request = Request(
+        (
+            f"{supabase_url}/rest/v1/"
+            "research_lab_chain_realized_settlement_activation_v1"
+            f"?{query}"
+        ),
+        headers=dict(headers),
+    )
+    try:
+        with opener(request, timeout=timeout_seconds) as response:
+            status = int(response.getcode())
+            encoded = response.read()
+    except HTTPError as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "chain-realized settlement activation is unavailable; apply "
+            "scripts/126-research-lab-chain-realized-settlement.sql after "
+            f"at least one finalized V2 bundle exists (HTTP {exc.code})"
+        ) from exc
+    except Exception as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "chain-realized settlement activation probe failed"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise SupabaseSchemaPreflightV2Error(
+            "chain-realized settlement activation is unavailable; apply "
+            "scripts/126-research-lab-chain-realized-settlement.sql after "
+            f"at least one finalized V2 bundle exists (HTTP {status})"
+        )
+    try:
+        rows = json.loads(encoded.decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "chain-realized settlement activation response is invalid"
+        ) from exc
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise SupabaseSchemaPreflightV2Error(
+            "chain-realized settlement activation is missing or ambiguous; "
+            "apply scripts/126-research-lab-chain-realized-settlement.sql "
+            "after at least one finalized V2 bundle exists"
+        )
+    row = rows[0]
+    if not isinstance(row, Mapping) or set(row) != set(columns.split(",")):
+        raise SupabaseSchemaPreflightV2Error(
+            "chain-realized settlement activation response is invalid"
+        )
+    try:
+        row_netuid = int(row["netuid"])
+        first_epoch = int(row["first_epoch_id"])
+        source_epoch = int(row["source_bundle_epoch_id"])
+        finalized_block = int(row["source_finalized_block"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SupabaseSchemaPreflightV2Error(
+            "chain-realized settlement activation response is invalid"
+        ) from exc
+    if (
+        row_netuid != netuid
+        or row.get("schema_version")
+        != "leadpoet.research_lab_chain_realized_settlement_activation.v1"
+        or first_epoch < 0
+        or source_epoch != first_epoch
+        or finalized_block < 0
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(row.get("source_bundle_hash") or ""),
+        )
+        is None
+    ):
+        raise SupabaseSchemaPreflightV2Error(
+            "chain-realized settlement activation response is invalid"
+        )
+    return {
+        "netuid": netuid,
+        "first_epoch_id": first_epoch,
+        "source_bundle_hash": str(row["source_bundle_hash"]),
+        "source_finalized_block": finalized_block,
+    }
 
 
 def verify_required_supabase_v2_schema(
@@ -236,6 +398,16 @@ def verify_required_supabase_v2_schema(
                 f"{table}; apply {migration} before restart (HTTP {status})"
             )
         migrations.add(migration)
+    activation = _verify_chain_realized_activation_v1(
+        parent_environment,
+        headers=headers,
+        supabase_url=supabase_url,
+        opener=opener,
+        timeout_seconds=timeout_seconds,
+    )
+    migrations.add(
+        "scripts/126-research-lab-chain-realized-settlement.sql"
+    )
     # PostgREST returns 200 to OPTIONS even for a nonexistent /rpc path, so an
     # OPTIONS probe cannot prove function availability. The service-role OpenAPI
     # document lists only functions present in the active schema cache and
@@ -279,9 +451,12 @@ def verify_required_supabase_v2_schema(
     return {
         "status": "ready",
         "probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA)
-        + len(REQUIRED_SUPABASE_V2_RPCS),
+        + len(REQUIRED_SUPABASE_V2_RPCS)
+        + 1,
         "table_probe_count": len(REQUIRED_SUPABASE_V2_SCHEMA),
         "rpc_probe_count": len(REQUIRED_SUPABASE_V2_RPCS),
+        "data_probe_count": 1,
         "schema_document_probe_count": 1,
+        "chain_realized_settlement_activation": activation,
         "migration_files": sorted(migrations),
     }

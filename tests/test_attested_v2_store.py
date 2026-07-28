@@ -33,6 +33,178 @@ NOW = "2026-07-10T20:00:00Z"
 LATER = "2026-07-10T20:01:00Z"
 
 
+def test_chain_settlement_replay_uses_the_live_signed_projection():
+    from gateway.tee.coordinator_executor_v2 import (
+        coordinator_receipt_output_v2,
+    )
+
+    settlement_doc = {
+        "schema_version": (
+            "leadpoet.research_lab_chain_realized_epoch_settlement.v1"
+        ),
+        "netuid": 71,
+        "epoch_id": 100,
+        "credit_hashes": [],
+        "observation_summary": {},
+    }
+    result = {
+        "settlement_doc": settlement_doc,
+        "settlement_hash": attested_v2_store.sha256_json(settlement_doc),
+        "credits": [],
+    }
+
+    assert attested_v2_store._execution_result_projection_v2(
+        operation="attest_chain_realized_settlement_v1",
+        result=result,
+    ) == coordinator_receipt_output_v2(
+        "attest_chain_realized_settlement_v1",
+        result,
+    )
+
+
+def _chain_settlement_package(credit_count):
+    settlement_doc = {
+        "schema_version": (
+            "leadpoet.research_lab_chain_realized_epoch_settlement.v1"
+        ),
+        "netuid": 71,
+        "epoch_id": 100,
+        "credit_hashes": [],
+    }
+    credits = []
+    for index in range(credit_count):
+        credit_doc = {
+            "schema_version": (
+                "leadpoet.research_lab_chain_realized_obligation_credit.v1"
+            ),
+            "netuid": 71,
+            "epoch_id": 100,
+            "obligation_kind": "champion_reward",
+            "obligation_source_id": f"reward-{index}",
+            "miner_hotkey": f"miner-{index}",
+            "miner_uid": index + 1,
+            "observed_chain_alpha_percent": "1",
+            "lab_attributed_alpha_percent": "1",
+            "scheduled_alpha_percent": "1",
+            "credited_alpha_percent": "1",
+            "attribution_doc": {},
+            "observation_doc": {},
+        }
+        credit_hash = attested_v2_store.sha256_json(credit_doc)
+        credits.append(
+            {"credit_hash": credit_hash, "credit_doc": credit_doc}
+        )
+        settlement_doc["credit_hashes"].append(credit_hash)
+    settlement_doc["credit_hashes"].sort()
+    return {
+        "settlement_doc": settlement_doc,
+        "settlement_hash": attested_v2_store.sha256_json(settlement_doc),
+        "credits": credits,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("credit_count", [0, 2])
+async def test_chain_settlement_atomic_retry_and_complete_readback(
+    monkeypatch,
+    credit_count,
+):
+    from gateway.research_lab import champion_settlement_v2
+
+    package = _chain_settlement_package(credit_count)
+    settlement_hash = package["settlement_hash"]
+    calls = []
+
+    async def load_graphs(receipt_hashes):
+        assert receipt_hashes == {HASH}
+        return {HASH: {"root_receipt_hash": HASH}}
+
+    def validate_settlements(rows, **_kwargs):
+        row = rows[0]
+        return [
+            {
+                "netuid": row["netuid"],
+                "epoch": row["epoch_id"],
+                "settlement_hash": row["settlement_hash"],
+                "settlement_doc": row["settlement_doc"],
+                "settlement_receipt_hash": row[
+                    "settlement_receipt_hash"
+                ],
+                "credit_hashes": list(
+                    row["settlement_doc"]["credit_hashes"]
+                ),
+            }
+        ]
+
+    def validate_credits(rows, **_kwargs):
+        return [
+            {"credit_hash": row["credit_hash"]}
+            for row in rows
+        ]
+
+    async def call_rpc(_name, parameters):
+        calls.append(parameters)
+        if len(calls) == 1:
+            raise TimeoutError("transient edge timeout")
+        return {
+            "schema_version": (
+                "leadpoet.research_lab_chain_realized_"
+                "settlement_persistence.v1"
+            ),
+            "netuid": 71,
+            "epoch_id": 100,
+            "settlement_hash": settlement_hash,
+            "settlement_receipt_hash": HASH,
+            "credit_count": credit_count,
+            "credit_hashes": sorted(
+                item["credit_hash"] for item in package["credits"]
+            ),
+        }
+
+    async def select_one(_table, **_kwargs):
+        return {
+            "netuid": 71,
+            "epoch_id": 100,
+            "schema_version": package["settlement_doc"]["schema_version"],
+            "settlement_hash": settlement_hash,
+            "settlement_receipt_hash": HASH,
+            "settlement_doc": package["settlement_doc"],
+        }
+
+    async def select_all(_table, **_kwargs):
+        return list(calls[-1]["requested_credits"])
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(
+        attested_v2_store, "load_receipt_graphs_v2", load_graphs
+    )
+    monkeypatch.setattr(attested_v2_store, "call_rpc", call_rpc)
+    monkeypatch.setattr(attested_v2_store, "select_one", select_one)
+    monkeypatch.setattr(attested_v2_store, "select_all", select_all)
+    monkeypatch.setattr(attested_v2_store.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "validate_chain_realized_epoch_settlements_v1",
+        validate_settlements,
+    )
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "validate_chain_realized_obligation_credits_v1",
+        validate_credits,
+    )
+
+    result = await attested_v2_store.persist_chain_realized_settlement_v1(
+        package=package,
+        receipt_hash=HASH,
+    )
+
+    assert len(calls) == 2
+    assert result["credit_count"] == credit_count
+    assert result["durable_readback_hash"].startswith("sha256:")
+
+
 def _graph(with_transport=False, with_parent=False):
     private_key = Ed25519PrivateKey.generate()
     public_key = private_key.public_key().public_bytes(

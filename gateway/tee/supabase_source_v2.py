@@ -391,6 +391,48 @@ QUERY_POLICIES = {
         page_size=2,
         order="epoch_id.asc,validator_hotkey.asc",
     ),
+    "latest_finalized_allocation_authority": SupabaseQueryV2(
+        policy_id="latest_finalized_allocation_authority",
+        table="research_lab_finalized_allocation_epochs_v2",
+        select=(
+            "bundle_hash,schema_version,netuid,epoch_id,block,validator_hotkey,"
+            "root_receipt_hash,weights_hash,snapshot_hash,bundle_doc,"
+            "weight_submission_event_hash,publication_receipt_hash,"
+            "transparency_event_hash,durable_readback_hash,publication_doc,"
+            "weight_finalization_event_hash,finalization_receipt_hash,"
+            "extrinsic_authorization_hash,extrinsic_hash,finalized_block,"
+            "finalized_block_hash,state_transition_hash,finalization_doc"
+        ),
+        parameter_names=("netuid",),
+        max_pages=1,
+        order="finalized_block.desc,bundle_hash.asc",
+        limit=2,
+    ),
+    "finalized_authority_by_chain_vector": SupabaseQueryV2(
+        policy_id="finalized_authority_by_chain_vector",
+        table="research_lab_finalized_weight_vector_candidates_v1",
+        select=(
+            "bundle_hash,schema_version,netuid,epoch_id,block,validator_hotkey,"
+            "root_receipt_hash,weights_hash,snapshot_hash,bundle_doc,"
+            "weight_submission_event_hash,publication_receipt_hash,"
+            "transparency_event_hash,durable_readback_hash,publication_doc,"
+            "weight_finalization_event_hash,finalization_receipt_hash,"
+            "extrinsic_authorization_hash,extrinsic_hash,finalized_block,"
+            "finalized_block_hash,state_transition_hash,finalization_doc"
+        ),
+        parameter_names=(
+            "netuid",
+            "uids",
+            "weights_u16",
+            "source_epoch_id",
+            "validator_hotkey",
+            "finalized_block",
+            "finalized_block_hash",
+        ),
+        max_pages=1,
+        order="finalized_block.desc,bundle_hash.asc",
+        limit=100,
+    ),
     "legacy_finalized_allocation_migrations": SupabaseQueryV2(
         policy_id="legacy_finalized_allocation_migrations",
         table="research_lab_legacy_finalized_allocation_migrations_v2",
@@ -412,6 +454,18 @@ QUERY_POLICIES = {
         parameter_names=("netuid", "start_epoch", "end_epoch"),
         max_pages=100,
         order="epoch_id.asc",
+    ),
+    "chain_realized_settlement_activation": SupabaseQueryV2(
+        policy_id="chain_realized_settlement_activation",
+        table="research_lab_chain_realized_settlement_activation_v1",
+        select=(
+            "netuid,schema_version,first_epoch_id,source_bundle_hash,"
+            "source_bundle_epoch_id,source_finalized_block"
+        ),
+        parameter_names=("netuid",),
+        max_pages=1,
+        order="first_epoch_id.asc",
+        limit=1,
     ),
     "chain_realized_obligation_credits": SupabaseQueryV2(
         policy_id="chain_realized_obligation_credits",
@@ -529,6 +583,13 @@ def _identifier(value: Any, field: str) -> str:
     if not normalized or len(normalized) > 512 or any(
         character in normalized for character in ("\x00", "\r", "\n")
     ):
+        raise SupabaseSourceV2Error("%s is invalid" % field)
+    return normalized
+
+
+def _raw_hash(value: Any, field: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", normalized):
         raise SupabaseSourceV2Error("%s is invalid" % field)
     return normalized
 
@@ -776,6 +837,102 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
             ("netuid", "eq.%d" % _non_negative_int(parameters["netuid"], "netuid")),
             ("epoch_id", "gte.%d" % start_epoch),
             ("epoch_id", "lte.%d" % end_epoch),
+        )
+    if policy.policy_id == "latest_finalized_allocation_authority":
+        return (
+            (
+                "netuid",
+                "eq.%d"
+                % _non_negative_int(parameters["netuid"], "netuid"),
+            ),
+        )
+    if policy.policy_id == "chain_realized_settlement_activation":
+        return (
+            (
+                "netuid",
+                "eq.%d"
+                % _non_negative_int(parameters["netuid"], "netuid"),
+            ),
+        )
+    if policy.policy_id == "finalized_authority_by_chain_vector":
+        raw_uids = parameters["uids"]
+        raw_weights = parameters["weights_u16"]
+        if (
+            not isinstance(raw_uids, list)
+            or not isinstance(raw_weights, list)
+            or len(raw_uids) != len(raw_weights)
+            or not raw_uids
+        ):
+            raise SupabaseSourceV2Error(
+                "finalized authority vector is invalid"
+            )
+        uids: list[int] = []
+        weights: list[int] = []
+        for raw_uid, raw_weight in zip(raw_uids, raw_weights):
+            if isinstance(raw_uid, bool) or isinstance(raw_weight, bool):
+                raise SupabaseSourceV2Error(
+                    "finalized authority vector is invalid"
+                )
+            try:
+                uid = int(raw_uid)
+                weight = int(raw_weight)
+            except (TypeError, ValueError) as exc:
+                raise SupabaseSourceV2Error(
+                    "finalized authority vector is invalid"
+                ) from exc
+            if uid < 0 or not 1 <= weight <= 65535:
+                raise SupabaseSourceV2Error(
+                    "finalized authority vector is invalid"
+                )
+            uids.append(uid)
+            weights.append(weight)
+        if uids != sorted(set(uids)):
+            raise SupabaseSourceV2Error(
+                "finalized authority vector is not canonical"
+            )
+        return (
+            (
+                "netuid",
+                "eq.%d"
+                % _non_negative_int(parameters["netuid"], "netuid"),
+            ),
+            (
+                "epoch_id",
+                "eq.%d"
+                % _non_negative_int(
+                    parameters["source_epoch_id"],
+                    "source_epoch_id",
+                ),
+            ),
+            (
+                "validator_hotkey",
+                "eq.%s"
+                % _identifier(
+                    parameters["validator_hotkey"],
+                    "validator_hotkey",
+                ),
+            ),
+            (
+                "finalized_block",
+                "eq.%d"
+                % _non_negative_int(
+                    parameters["finalized_block"],
+                    "finalized_block",
+                ),
+            ),
+            (
+                "finalized_block_hash",
+                "eq.%s"
+                % _raw_hash(
+                    parameters["finalized_block_hash"],
+                    "finalized_block_hash",
+                ),
+            ),
+            ("uids", "eq.%s" % json.dumps(uids, separators=(",", ":"))),
+            (
+                "weights_u16",
+                "eq.%s" % json.dumps(weights, separators=(",", ":")),
+            ),
         )
     if policy.policy_id in {
         "legacy_weight_bundles_by_epoch",

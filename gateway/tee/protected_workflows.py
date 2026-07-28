@@ -103,6 +103,9 @@ PROTECTED_SYMBOLS = {
         "AttestedReplayDevEvaluatorV2",
     ),
     "gateway/research_lab/champion_settlement_v2.py": (
+        "validate_chain_weight_observation_v1",
+        "select_chain_realized_bundle_candidate_v1",
+        "build_chain_realized_settlement_package_v1",
         "validate_finalized_allocation_authorities_v2",
         "validate_legacy_settlement_migrations_v2",
         "validate_legacy_allocation_nonfinalizations_v2",
@@ -125,6 +128,7 @@ PROTECTED_SYMBOLS = {
         "load_business_artifact_graph_by_ref_v2",
         "load_business_artifact_graphs_by_ref_v2",
         "persist_legacy_finalized_allocation_migration_v2",
+        "persist_chain_realized_settlement_v1",
         "persist_legacy_allocation_nonfinalization_v2",
     ),
     "gateway/research_lab/autoresearch_authority_v2.py": (
@@ -238,6 +242,8 @@ PROTECTED_SYMBOLS = {
         "attest_historical_source_add_reward_v2",
         "classify_historical_champion_allocation_v2",
         "build_allocation_v2",
+        "settle_chain_realized_epoch_v1",
+        "ensure_chain_realized_settlements_v1",
         "_load_allocation_parent_graphs_v2",
     ),
     "gateway/research_lab/promotion.py": (
@@ -264,6 +270,8 @@ PROTECTED_SYMBOLS = {
     "leadpoet_canonical/chain_source_v2.py": (
         "weights_storage_key",
         "decode_weights_storage",
+        "last_update_storage_key",
+        "decode_last_update_storage",
         "validate_arweave_checkpoint_event",
     ),
     "leadpoet_canonical/legacy_settlement_v2.py": (
@@ -305,6 +313,9 @@ PROTECTED_SYMBOLS = {
     ),
     "gateway/tee/coordinator_chain_source_v2.py": (
         "CoordinatorChainSourceV2",
+    ),
+    "gateway/tee/coordinator_chain_realized_settlement_v1.py": (
+        "CoordinatorChainRealizedSettlementV1",
     ),
     "gateway/tee/coordinator_source_add_v2.py": (
         "CoordinatorSourceAddProvenanceV2",

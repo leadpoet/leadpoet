@@ -12,6 +12,7 @@ from typing import Any, Iterable, Mapping, Optional
 
 from gateway.research_lab.store import (
     _is_transient_store_error,
+    call_rpc,
     insert_row,
     select_all,
     select_one,
@@ -53,13 +54,32 @@ LEGACY_SETTLEMENT_TABLE = "research_lab_legacy_finalized_allocation_migrations_v
 LEGACY_NONFINALIZATION_TABLE = (
     "research_lab_legacy_allocation_nonfinalizations_v2"
 )
+CHAIN_REALIZED_SETTLEMENT_TABLE = (
+    "research_lab_chain_realized_epoch_settlements_v1"
+)
+CHAIN_REALIZED_CREDIT_TABLE = (
+    "research_lab_chain_realized_obligation_credits_v1"
+)
+CHAIN_REALIZED_SETTLEMENT_RPC = (
+    "persist_research_lab_chain_realized_settlement_v1"
+)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GRAPH_QUERY_CHUNK = 50
 _MAX_GRAPH_ROWS = 10000
 _EXACT_INSERT_ATTEMPTS = 4
 _EXACT_INSERT_BACKOFF_SECONDS = (0.25, 0.75, 1.5)
 _REPLAYABLE_EXECUTION_PAIRS = frozenset(
-    {("research_lab_allocation", "research_lab.allocation.v2")}
+    {
+        ("research_lab_allocation", "research_lab.allocation.v2"),
+        (
+            "observe_chain_realized_weights_v1",
+            "research_lab.chain_weight_observation.v1",
+        ),
+        (
+            "attest_chain_realized_settlement_v1",
+            "research_lab.chain_realized_epoch_settlement.v1",
+        ),
+    }
     | {
         ("attest_weight_input", purpose)
         for role, purpose in WEIGHT_INPUT_PURPOSES.values()
@@ -904,6 +924,19 @@ def _execution_result_projection_v2(
                 "replayable allocation result is invalid"
             )
         return {"allocation": dict(allocation)}
+    if str(operation) == "attest_chain_realized_settlement_v1":
+        settlement = result.get("settlement_doc")
+        if (
+            set(result) != {"settlement_doc", "settlement_hash", "credits"}
+            or not isinstance(settlement, Mapping)
+            or result.get("settlement_hash")
+            != sha256_json(dict(settlement))
+            or not isinstance(result.get("credits"), list)
+        ):
+            raise AttestedV2StoreError(
+                "replayable chain-realized settlement result is invalid"
+            )
+        return dict(settlement)
     return dict(result)
 
 
@@ -1662,6 +1695,236 @@ async def persist_legacy_finalized_allocation_migration_v2(
         "settlement_receipt_hash": normalized_receipt_hash,
         "durable_readback_hash": sha256_json(
             {key: stored[key] for key in row}
+        ),
+    }
+
+
+async def persist_chain_realized_settlement_v1(
+    *,
+    package: Mapping[str, Any],
+    receipt_hash: str,
+) -> dict[str, Any]:
+    """Atomically persist one complete coordinator-attested settlement."""
+
+    from gateway.research_lab.champion_settlement_v2 import (
+        CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+        CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
+        validate_chain_realized_epoch_settlements_v1,
+        validate_chain_realized_obligation_credits_v1,
+    )
+
+    if not isinstance(package, Mapping) or set(package) != {
+        "settlement_doc",
+        "settlement_hash",
+        "credits",
+    }:
+        raise AttestedV2StoreError(
+            "chain-realized settlement package fields are invalid"
+        )
+    settlement_doc = package.get("settlement_doc")
+    credits = package.get("credits")
+    settlement_hash = str(package.get("settlement_hash") or "").lower()
+    normalized_receipt_hash = str(receipt_hash or "").lower()
+    if (
+        not isinstance(settlement_doc, Mapping)
+        or not isinstance(credits, list)
+        or settlement_hash != sha256_json(dict(settlement_doc))
+        or not _HASH_RE.fullmatch(settlement_hash)
+        or not _HASH_RE.fullmatch(normalized_receipt_hash)
+    ):
+        raise AttestedV2StoreError(
+            "chain-realized settlement package is invalid"
+        )
+    try:
+        netuid = int(settlement_doc["netuid"])
+        epoch_id = int(settlement_doc["epoch_id"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AttestedV2StoreError(
+            "chain-realized settlement scope is invalid"
+        ) from exc
+
+    loaded_graphs = await load_receipt_graphs_v2({normalized_receipt_hash})
+    graph = loaded_graphs.get(normalized_receipt_hash)
+    if not isinstance(graph, Mapping):
+        raise AttestedV2StoreError(
+            "chain-realized settlement receipt graph is not durable"
+        )
+    graph_by_root = {normalized_receipt_hash: dict(graph)}
+    settlement_row = {
+        "netuid": netuid,
+        "epoch_id": epoch_id,
+        "schema_version": str(settlement_doc.get("schema_version") or ""),
+        "settlement_hash": settlement_hash,
+        "settlement_receipt_hash": normalized_receipt_hash,
+        "settlement_doc": dict(settlement_doc),
+    }
+    credit_rows: list[dict[str, Any]] = []
+    for raw_credit in credits:
+        if not isinstance(raw_credit, Mapping) or set(raw_credit) != {
+            "credit_hash",
+            "credit_doc",
+        }:
+            raise AttestedV2StoreError(
+                "chain-realized credit package fields are invalid"
+            )
+        document = raw_credit.get("credit_doc")
+        credit_hash = str(raw_credit.get("credit_hash") or "").lower()
+        if (
+            not isinstance(document, Mapping)
+            or credit_hash != sha256_json(dict(document))
+            or not _HASH_RE.fullmatch(credit_hash)
+        ):
+            raise AttestedV2StoreError(
+                "chain-realized credit package is invalid"
+            )
+        credit_rows.append(
+            {
+                "netuid": int(document["netuid"]),
+                "epoch_id": int(document["epoch_id"]),
+                "settlement_hash": settlement_hash,
+                "schema_version": str(document["schema_version"]),
+                "obligation_kind": str(document["obligation_kind"]),
+                "obligation_source_id": str(
+                    document["obligation_source_id"]
+                ),
+                "miner_hotkey": str(document["miner_hotkey"]),
+                "miner_uid": int(document["miner_uid"]),
+                "observed_chain_alpha_percent": str(
+                    document["observed_chain_alpha_percent"]
+                ),
+                "lab_attributed_alpha_percent": str(
+                    document["lab_attributed_alpha_percent"]
+                ),
+                "scheduled_alpha_percent": str(
+                    document["scheduled_alpha_percent"]
+                ),
+                "credited_alpha_percent": str(
+                    document["credited_alpha_percent"]
+                ),
+                "credit_hash": credit_hash,
+                "credit_receipt_hash": normalized_receipt_hash,
+                "credit_doc": dict(document),
+            }
+        )
+    credit_rows.sort(key=lambda row: str(row["credit_hash"]))
+
+    settlements = validate_chain_realized_epoch_settlements_v1(
+        [settlement_row],
+        receipt_graphs=graph_by_root,
+    )
+    validate_chain_realized_obligation_credits_v1(
+        credit_rows,
+        settlement_rows=settlements,
+        receipt_graphs=graph_by_root,
+    )
+    if (
+        settlement_row["schema_version"]
+        != CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1
+        or any(
+            row["schema_version"]
+            != CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1
+            for row in credit_rows
+        )
+    ):
+        raise AttestedV2StoreError(
+            "chain-realized settlement schema differs"
+        )
+
+    result: Any = None
+    for attempt in range(_EXACT_INSERT_ATTEMPTS):
+        try:
+            result = await call_rpc(
+                CHAIN_REALIZED_SETTLEMENT_RPC,
+                {
+                    "requested_settlement": settlement_row,
+                    "requested_credits": credit_rows,
+                },
+            )
+            break
+        except Exception as exc:
+            if (
+                not _is_transient_store_error(exc)
+                or attempt == _EXACT_INSERT_ATTEMPTS - 1
+            ):
+                raise
+            backoff = _EXACT_INSERT_BACKOFF_SECONDS[
+                min(attempt, len(_EXACT_INSERT_BACKOFF_SECONDS) - 1)
+            ]
+            logger.warning(
+                "chain_realized_settlement_retry epoch=%s attempt=%s/%s "
+                "type=%s error=%s",
+                epoch_id,
+                attempt + 1,
+                _EXACT_INSERT_ATTEMPTS,
+                type(exc).__name__,
+                str(exc)[:160],
+            )
+            await asyncio.sleep(backoff)
+    if not isinstance(result, Mapping):
+        raise AttestedV2StoreError(
+            "chain-realized settlement RPC response is invalid"
+        )
+    expected_result = {
+        "schema_version": (
+            "leadpoet.research_lab_chain_realized_settlement_persistence.v1"
+        ),
+        "netuid": netuid,
+        "epoch_id": epoch_id,
+        "settlement_hash": settlement_hash,
+        "settlement_receipt_hash": normalized_receipt_hash,
+        "credit_count": len(credit_rows),
+        "credit_hashes": [
+            str(row["credit_hash"]) for row in credit_rows
+        ],
+    }
+    if dict(result) != expected_result:
+        raise AttestedV2StoreError(
+            "chain-realized settlement RPC response differs"
+        )
+
+    stored_settlement = await select_one(
+        CHAIN_REALIZED_SETTLEMENT_TABLE,
+        filters=(("netuid", netuid), ("epoch_id", epoch_id)),
+    )
+    if not isinstance(stored_settlement, Mapping):
+        raise AttestedV2StoreError(
+            "chain-realized settlement durable readback is missing"
+        )
+    stored_credits = await select_all(
+        CHAIN_REALIZED_CREDIT_TABLE,
+        filters=(("netuid", netuid), ("epoch_id", epoch_id)),
+        order_by=(("credit_hash", False),),
+        max_rows=max(1, len(credit_rows) + 1),
+        allow_partial=False,
+    )
+    durable_settlements = validate_chain_realized_epoch_settlements_v1(
+        [stored_settlement],
+        receipt_graphs=graph_by_root,
+    )
+    durable_credits = validate_chain_realized_obligation_credits_v1(
+        stored_credits,
+        settlement_rows=durable_settlements,
+        receipt_graphs=graph_by_root,
+    )
+    if (
+        len(durable_settlements) != 1
+        or len(durable_credits) != len(credit_rows)
+        or sorted(
+            str(item["credit_hash"])
+            for item in durable_credits
+        )
+        != [str(row["credit_hash"]) for row in credit_rows]
+    ):
+        raise AttestedV2StoreError(
+            "chain-realized settlement durable readback differs"
+        )
+    return {
+        **expected_result,
+        "durable_readback_hash": sha256_json(
+            {
+                "settlement": dict(stored_settlement),
+                "credits": [dict(row) for row in stored_credits],
+            }
         ),
     }
 

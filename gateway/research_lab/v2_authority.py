@@ -24,6 +24,12 @@ from gateway.tee.coordinator_executor_v2 import (
     OP_PROMOTION_IMPROVEMENT,
     OP_RESEARCH_LAB_ALLOCATION,
 )
+from gateway.tee.coordinator_chain_realized_settlement_v1 import (
+    CHAIN_REALIZED_SETTLEMENT_PURPOSE_V1,
+    CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
+    OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
+    OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1,
+)
 from gateway.tee.scoring_executor import (
     OP_BUILD_BASELINE_SCORE_SUMMARY,
     OP_BUILD_SCORE_BUNDLE,
@@ -1389,6 +1395,12 @@ async def build_allocation_v2(
         tuple[str, str], dict[str, Any]
     ] = {}
     if using_default_parent_loader:
+        if execute is execute_coordinator_v2:
+            await ensure_chain_realized_settlements_v1(
+                epoch_id=int(epoch_id),
+                netuid=int(netuid),
+                execute=execute,
+            )
         from gateway.research_lab.champion_settlement_v2 import (
             champion_v2_cutover_readiness,
         )
@@ -1506,6 +1518,363 @@ async def build_allocation_v2(
         "missing_lineage_score_bundle_ids": [],
         "artifact_link_status": link,
     }
+
+
+async def settle_chain_realized_epoch_v1(
+    *,
+    epoch_id: int,
+    netuid: int,
+    execute: Any = execute_coordinator_v2,
+    persist_settlement: Any = None,
+    select_candidates: Any = None,
+    load_graph: Any = None,
+) -> dict[str, Any]:
+    """Prove and atomically persist one epoch's realized primary vector."""
+
+    from gateway.research_lab.champion_settlement_v2 import (
+        CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+        select_chain_realized_bundle_candidate_v1,
+        validate_chain_realized_epoch_settlements_v1,
+        validate_chain_realized_obligation_credits_v1,
+        validate_chain_weight_observation_v1,
+    )
+    from gateway.research_lab.store import select_many
+
+    normalized_epoch = int(epoch_id)
+    normalized_netuid = int(netuid)
+    if normalized_epoch < 0 or normalized_netuid <= 0:
+        raise ResearchLabV2AuthorityError(
+            "chain-realized settlement scope is invalid"
+        )
+    observation_outcome = await execute(
+        operation=OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1,
+        purpose=CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
+        epoch_id=normalized_epoch,
+        sequence=0,
+        payload={
+            "schema_version": (
+                "leadpoet.chain_realized_weight_observation_request.v1"
+            ),
+            "netuid": normalized_netuid,
+            "epoch_id": normalized_epoch,
+        },
+        parent_graphs=(),
+    )
+    observation_result = observation_outcome.get("result")
+    observation_receipt = (
+        observation_outcome.get("execution_receipt")
+        or observation_outcome.get("receipt")
+    )
+    observation_graph = observation_outcome.get("receipt_graph")
+    if (
+        not isinstance(observation_result, Mapping)
+        or not isinstance(observation_receipt, Mapping)
+        or not isinstance(observation_graph, Mapping)
+    ):
+        raise ResearchLabV2AuthorityError(
+            "chain weight observation authority is incomplete"
+        )
+    observation = validate_chain_weight_observation_v1(
+        observation_result
+    )
+    observation_hash = sha256_json(observation)
+    observation_receipt_hash = str(
+        observation_receipt.get("receipt_hash") or ""
+    )
+    if (
+        observation_receipt.get("role") != "gateway_coordinator"
+        or observation_receipt.get("purpose")
+        != CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1
+        or observation_receipt.get("status") != "succeeded"
+        or int(observation_receipt.get("epoch_id", -1))
+        != normalized_epoch
+        or observation_receipt.get("output_root") != observation_hash
+        or observation_graph.get("root_receipt_hash")
+        != observation_receipt_hash
+    ):
+        raise ResearchLabV2AuthorityError(
+            "chain weight observation receipt differs"
+        )
+    validate_receipt_graph(
+        observation_graph,
+        required_purposes={CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1},
+    )
+
+    if select_candidates is None:
+        select_candidates = select_many
+    candidate_rows = await select_candidates(
+        "research_lab_finalized_weight_vector_candidates_v1",
+        filters=(
+            ("netuid", normalized_netuid),
+            ("epoch_id", int(observation["active_source_epoch_id"])),
+            ("validator_hotkey", str(observation["validator_hotkey"])),
+            ("finalized_block", int(observation["last_update_block"])),
+            (
+                "finalized_block_hash",
+                str(observation["last_update_block_hash"]),
+            ),
+            ("uids", [int(item[0]) for item in observation["weights"]]),
+            (
+                "weights_u16",
+                [int(item[1]) for item in observation["weights"]],
+            ),
+        ),
+        order_by=(("finalized_block", True), ("bundle_hash", False)),
+        limit=100,
+    )
+    candidate = select_chain_realized_bundle_candidate_v1(
+        candidate_rows,
+        observation=observation,
+    )
+    finalization_receipt_hash = str(
+        candidate["finalization_receipt_hash"]
+    )
+    finalization_graphs = await _graphs_for_roots(
+        {finalization_receipt_hash},
+        load_graph=load_graph,
+    )
+    if len(finalization_graphs) != 1:
+        raise ResearchLabV2AuthorityError(
+            "chain settlement finalization graph is ambiguous"
+        )
+
+    settlement_outcome = await execute(
+        operation=OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
+        purpose=CHAIN_REALIZED_SETTLEMENT_PURPOSE_V1,
+        epoch_id=normalized_epoch,
+        sequence=1,
+        payload={
+            "schema_version": "leadpoet.chain_realized_settlement_request.v1",
+            "netuid": normalized_netuid,
+            "epoch_id": normalized_epoch,
+            "observation": observation,
+            "observation_receipt_hash": observation_receipt_hash,
+            "bundle_hash": str(candidate["bundle_hash"]),
+        },
+        parent_graphs=(
+            dict(observation_graph),
+            dict(finalization_graphs[0]),
+        ),
+    )
+    package = settlement_outcome.get("result")
+    settlement_receipt = (
+        settlement_outcome.get("execution_receipt")
+        or settlement_outcome.get("receipt")
+    )
+    settlement_graph = settlement_outcome.get("receipt_graph")
+    if (
+        not isinstance(package, Mapping)
+        or not isinstance(settlement_receipt, Mapping)
+        or not isinstance(settlement_graph, Mapping)
+    ):
+        raise ResearchLabV2AuthorityError(
+            "chain-realized settlement authority is incomplete"
+        )
+    settlement_doc = package.get("settlement_doc")
+    credits = package.get("credits")
+    settlement_hash = str(package.get("settlement_hash") or "")
+    settlement_receipt_hash = str(
+        settlement_receipt.get("receipt_hash") or ""
+    )
+    if (
+        set(package) != {"settlement_doc", "settlement_hash", "credits"}
+        or not isinstance(settlement_doc, Mapping)
+        or not isinstance(credits, list)
+        or settlement_hash != sha256_json(dict(settlement_doc))
+        or settlement_doc.get("schema_version")
+        != CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1
+        or settlement_receipt.get("role") != "gateway_coordinator"
+        or settlement_receipt.get("purpose")
+        != CHAIN_REALIZED_SETTLEMENT_PURPOSE_V1
+        or settlement_receipt.get("status") != "succeeded"
+        or int(settlement_receipt.get("epoch_id", -1))
+        != normalized_epoch
+        or settlement_receipt.get("output_root") != settlement_hash
+        or settlement_graph.get("root_receipt_hash")
+        != settlement_receipt_hash
+    ):
+        raise ResearchLabV2AuthorityError(
+            "chain-realized settlement receipt differs"
+        )
+    validate_receipt_graph(
+        settlement_graph,
+        required_purposes={
+            CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
+            CHAIN_REALIZED_SETTLEMENT_PURPOSE_V1,
+        },
+    )
+    settlement_row = {
+        "netuid": normalized_netuid,
+        "epoch_id": normalized_epoch,
+        "schema_version": str(settlement_doc["schema_version"]),
+        "settlement_hash": settlement_hash,
+        "settlement_receipt_hash": settlement_receipt_hash,
+        "settlement_doc": dict(settlement_doc),
+    }
+    graph_by_root = {settlement_receipt_hash: dict(settlement_graph)}
+    normalized_settlements = validate_chain_realized_epoch_settlements_v1(
+        [settlement_row],
+        receipt_graphs=graph_by_root,
+    )
+    credit_rows = [
+        {
+            "netuid": normalized_netuid,
+            "epoch_id": normalized_epoch,
+            "settlement_hash": settlement_hash,
+            "schema_version": str(item["credit_doc"]["schema_version"]),
+            "obligation_kind": str(
+                item["credit_doc"]["obligation_kind"]
+            ),
+            "obligation_source_id": str(
+                item["credit_doc"]["obligation_source_id"]
+            ),
+            "miner_hotkey": str(item["credit_doc"]["miner_hotkey"]),
+            "miner_uid": int(item["credit_doc"]["miner_uid"]),
+            "observed_chain_alpha_percent": str(
+                item["credit_doc"]["observed_chain_alpha_percent"]
+            ),
+            "lab_attributed_alpha_percent": str(
+                item["credit_doc"]["lab_attributed_alpha_percent"]
+            ),
+            "scheduled_alpha_percent": str(
+                item["credit_doc"]["scheduled_alpha_percent"]
+            ),
+            "credited_alpha_percent": str(
+                item["credit_doc"]["credited_alpha_percent"]
+            ),
+            "credit_hash": str(item["credit_hash"]),
+            "credit_receipt_hash": settlement_receipt_hash,
+            "credit_doc": dict(item["credit_doc"]),
+        }
+        for item in credits
+        if isinstance(item, Mapping)
+        and isinstance(item.get("credit_doc"), Mapping)
+    ]
+    if len(credit_rows) != len(credits):
+        raise ResearchLabV2AuthorityError(
+            "chain-realized settlement credit package is invalid"
+        )
+    validate_chain_realized_obligation_credits_v1(
+        credit_rows,
+        settlement_rows=normalized_settlements,
+        receipt_graphs=graph_by_root,
+    )
+    if persist_settlement is None:
+        from gateway.research_lab.attested_v2_store import (
+            persist_chain_realized_settlement_v1,
+        )
+
+        persist_settlement = persist_chain_realized_settlement_v1
+    durable = await persist_settlement(
+        package=package,
+        receipt_hash=settlement_receipt_hash,
+    )
+    return {
+        **dict(settlement_outcome),
+        "status": "settled",
+        "observation": observation,
+        "durable_settlement": durable,
+    }
+
+
+async def ensure_chain_realized_settlements_v1(
+    *,
+    epoch_id: int,
+    netuid: int,
+    execute: Any = execute_coordinator_v2,
+    settle: Any = settle_chain_realized_epoch_v1,
+    load_latest: Any = None,
+    maximum_backlog: int = 100,
+) -> list[dict[str, Any]]:
+    """Fill every post-activation settlement through the prior epoch."""
+
+    from gateway.research_lab.champion_settlement_v2 import (
+        CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1,
+        CHAIN_REALIZED_SETTLEMENT_ACTIVATION_TABLE_V1,
+    )
+    from gateway.research_lab.store import select_many
+
+    current_epoch = int(epoch_id)
+    normalized_netuid = int(netuid)
+    target_epoch = current_epoch - 1
+    if target_epoch < 0:
+        return []
+    if load_latest is None:
+        load_latest = select_many
+    activation_rows = await load_latest(
+        CHAIN_REALIZED_SETTLEMENT_ACTIVATION_TABLE_V1,
+        filters=(("netuid", normalized_netuid),),
+        order_by=(("first_epoch_id", False),),
+        limit=2,
+    )
+    if len(activation_rows) != 1:
+        raise ResearchLabV2AuthorityError(
+            "chain-realized settlement activation is unavailable or ambiguous"
+        )
+    activation = activation_rows[0]
+    try:
+        activation_netuid = int(activation["netuid"])
+        activation_epoch = int(activation["first_epoch_id"])
+        source_epoch = int(activation["source_bundle_epoch_id"])
+        source_finalized_block = int(activation["source_finalized_block"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ResearchLabV2AuthorityError(
+            "chain-realized settlement activation is invalid"
+        ) from exc
+    if (
+        activation.get("schema_version")
+        != "leadpoet.research_lab_chain_realized_settlement_activation.v1"
+        or activation_netuid != normalized_netuid
+        or activation_epoch < 0
+        or source_epoch != activation_epoch
+        or source_finalized_block < 0
+        or not _HASH_RE.fullmatch(
+            str(activation.get("source_bundle_hash") or "")
+        )
+    ):
+        raise ResearchLabV2AuthorityError(
+            "chain-realized settlement activation is invalid"
+        )
+    rows = await load_latest(
+        CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1,
+        filters=(("netuid", normalized_netuid),),
+        order_by=(("epoch_id", True),),
+        limit=2,
+    )
+    if len(rows) > 1 and int(rows[0]["epoch_id"]) == int(rows[1]["epoch_id"]):
+        raise ResearchLabV2AuthorityError(
+            "chain-realized settlement latest epoch is ambiguous"
+        )
+    if rows:
+        latest_epoch = int(rows[0]["epoch_id"])
+        if latest_epoch > target_epoch:
+            raise ResearchLabV2AuthorityError(
+                "chain-realized settlement is ahead of allocation epoch"
+            )
+        if latest_epoch < activation_epoch:
+            raise ResearchLabV2AuthorityError(
+                "chain-realized settlement predates its activation"
+            )
+        first_epoch = latest_epoch + 1
+    else:
+        first_epoch = activation_epoch
+    if first_epoch > target_epoch:
+        return []
+    backlog = target_epoch - first_epoch + 1
+    if backlog > int(maximum_backlog):
+        raise ResearchLabV2AuthorityError(
+            "chain-realized settlement backlog exceeds policy"
+        )
+    results = []
+    for settlement_epoch in range(first_epoch, target_epoch + 1):
+        results.append(
+            await settle(
+                epoch_id=settlement_epoch,
+                netuid=normalized_netuid,
+                execute=execute,
+            )
+        )
+    return results
 
 
 async def compare_allocation_v2(

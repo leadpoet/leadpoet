@@ -239,6 +239,9 @@ def test_migration_96_receipt_allowlist_matches_pre_stateful_epoch_contract():
         if role == "gateway_coordinator":
             expected_at_96.discard("research_lab.subnet_epoch_cutover.v2")
             expected_at_96.discard(
+                "research_lab.chain_weight_observation.v1"
+            )
+            expected_at_96.discard(
                 "research_lab.chain_realized_epoch_settlement.v1"
             )
             expected_at_96.discard(

@@ -1971,6 +1971,16 @@ def get_v2_coordinator_job_manager():
             execute_provider=get_v2_provider_broker().execute,
             retry_policy_hash=retry_hashes["arweave"],
         )
+        from gateway.tee.coordinator_chain_realized_settlement_v1 import (
+            CoordinatorChainRealizedSettlementV1,
+        )
+
+        chain_realized_settlement_source = (
+            CoordinatorChainRealizedSettlementV1(
+                reader=source_reader,
+                chain_source=chain_source,
+            )
+        )
         allocation_source = CoordinatorAllocationSourceV2(
             reader=source_reader,
             chain_source=chain_source,
@@ -2056,6 +2066,22 @@ def get_v2_coordinator_job_manager():
                 legacy_allocation_classification_resolver=(
                     lambda payload, context: (
                         legacy_settlement_source.resolve_classification(
+                            payload=payload,
+                            context=context,
+                        )
+                    )
+                ),
+                chain_weight_observation_resolver=(
+                    lambda payload, context: (
+                        chain_realized_settlement_source.observe(
+                            payload=payload,
+                            context=context,
+                        )
+                    )
+                ),
+                chain_realized_settlement_resolver=(
+                    lambda payload, context: (
+                        chain_realized_settlement_source.settle(
                             payload=payload,
                             context=context,
                         )

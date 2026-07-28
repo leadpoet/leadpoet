@@ -429,6 +429,37 @@ def test_historical_settlement_queries_are_fixed_and_epoch_bound():
     assert "order=epoch_id.asc%2Cobligation_kind.asc%2Cobligation_source_id.asc" in url
 
     provider = FakeProvider([{"rows": []}])
+    block_hash = "a" * 64
+    hotkey = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
+    _read(
+        provider,
+        policy_id="finalized_authority_by_chain_vector",
+        parameters={
+            "netuid": 71,
+            "uids": [0, 17, 255],
+            "weights_u16": [32768, 16384, 16383],
+            "source_epoch_id": 24197,
+            "validator_hotkey": hotkey,
+            "finalized_block": 8715584,
+            "finalized_block_hash": block_hash,
+        },
+    )
+    parsed_url = urlsplit(provider.requests[0]["url"])
+    assert parsed_url.path.endswith(
+        "/rest/v1/research_lab_finalized_weight_vector_candidates_v1"
+    )
+    query = dict(parse_qsl(parsed_url.query, keep_blank_values=True))
+    assert query["netuid"] == "eq.71"
+    assert query["epoch_id"] == "eq.24197"
+    assert query["validator_hotkey"] == "eq." + hotkey
+    assert query["finalized_block"] == "eq.8715584"
+    assert query["finalized_block_hash"] == "eq." + block_hash
+    assert query["uids"] == "eq.[0,17,255]"
+    assert query["weights_u16"] == "eq.[32768,16384,16383]"
+    assert query["order"] == "finalized_block.desc,bundle_hash.asc"
+    assert query["limit"] == "100"
+
+    provider = FakeProvider([{"rows": []}])
     _read(
         provider,
         policy_id="legacy_weight_bundles_by_epoch",
@@ -466,6 +497,45 @@ def test_historical_settlement_queries_are_fixed_and_epoch_bound():
             provider,
             policy_id="legacy_transparency_event_by_hash",
             parameters={"event_hash": "a" * 64 + "&select=secret"},
+        )
+    assert provider.requests == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("uids", [17, 0]),
+        ("uids", [0, 0]),
+        ("uids", [False]),
+        ("weights_u16", [0, 1, 2]),
+        ("weights_u16", [65536, 1, 2]),
+        ("weights_u16", [False]),
+        ("finalized_block_hash", "0x" + "a" * 64),
+        ("finalized_block_hash", "a" * 63 + "&"),
+        ("validator_hotkey", "5FNV\ninjected"),
+    ),
+)
+def test_finalized_chain_vector_query_rejects_noncanonical_parameters(
+    field,
+    value,
+):
+    parameters = {
+        "netuid": 71,
+        "uids": [0, 17, 255],
+        "weights_u16": [32768, 16384, 16383],
+        "source_epoch_id": 24197,
+        "validator_hotkey": "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
+        "finalized_block": 8715584,
+        "finalized_block_hash": "a" * 64,
+    }
+    parameters[field] = value
+    provider = FakeProvider([{"rows": []}])
+
+    with pytest.raises(SupabaseSourceV2Error):
+        _read(
+            provider,
+            policy_id="finalized_authority_by_chain_vector",
+            parameters=parameters,
         )
     assert provider.requests == []
 

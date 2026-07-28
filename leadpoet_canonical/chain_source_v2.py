@@ -333,6 +333,50 @@ def weights_storage_key(*, netuid: int, validator_uid: int) -> str:
     return "0x" + key.hex()
 
 
+def last_update_storage_key(*, netuid: int) -> str:
+    """Build the exact ``SubtensorModule.LastUpdate`` map key."""
+
+    normalized_netuid = int(netuid)
+    if not 0 <= normalized_netuid <= 0xFFFF:
+        raise ChainSourceV2Error("last-update storage netuid is invalid")
+    key = b"".join(
+        (
+            _twox128(b"SubtensorModule"),
+            _twox128(b"LastUpdate"),
+            normalized_netuid.to_bytes(2, "little"),
+        )
+    )
+    return "0x" + key.hex()
+
+
+def decode_last_update_storage(value: Any) -> Sequence[int]:
+    """Decode a SCALE ``Vec<u64>`` from exact historical chain state."""
+
+    text = str(value or "")
+    if not text.startswith("0x"):
+        raise ChainSourceV2Error("last-update storage value is invalid")
+    try:
+        data = bytes.fromhex(text[2:])
+    except ValueError as exc:
+        raise ChainSourceV2Error(
+            "last-update storage value is invalid hex"
+        ) from exc
+    if not data:
+        raise ChainSourceV2Error("last-update storage value is empty")
+    count, offset = _compact_decode(data, 0)
+    if count > CHAIN_MAX_HOTKEYS:
+        raise ChainSourceV2Error("last-update storage count exceeds policy")
+    expected_end = offset + count * 8
+    if expected_end != len(data):
+        message = "truncated" if expected_end > len(data) else "trailing bytes"
+        raise ChainSourceV2Error("last-update storage has %s" % message)
+    result = []
+    for _index in range(count):
+        result.append(int.from_bytes(data[offset : offset + 8], "little"))
+        offset += 8
+    return result
+
+
 def decode_weights_storage(value: Any) -> Sequence[Tuple[int, int]]:
     """Decode a SCALE ``Vec<(u16, u16)>`` from historical chain state."""
 

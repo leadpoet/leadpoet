@@ -46,6 +46,12 @@ from gateway.tee.coordinator_epoch_cutover_v2 import (
     OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2,
     attest_subnet_epoch_cutover_v2,
 )
+from gateway.tee.coordinator_chain_realized_settlement_v1 import (
+    CHAIN_REALIZED_SETTLEMENT_PURPOSE_V1,
+    CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1,
+    OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
+    OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1,
+)
 
 
 OP_ATTEST_ARTIFACT_PERSISTENCE = "attest_artifact_persistence"
@@ -174,6 +180,12 @@ COORDINATOR_OPERATIONS_V2 = {
     OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2: frozenset(
         {"research_lab.legacy_finalized_allocation.v2"}
     ),
+    OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1: frozenset(
+        {CHAIN_WEIGHT_OBSERVATION_PURPOSE_V1}
+    ),
+    OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1: frozenset(
+        {CHAIN_REALIZED_SETTLEMENT_PURPOSE_V1}
+    ),
     OP_CLASSIFY_LEGACY_ALLOCATION_V2: frozenset(
         {"research_lab.legacy_finalized_allocation.v2"}
     ),
@@ -229,6 +241,11 @@ def coordinator_receipt_output_v2(
         if not isinstance(allocation, Mapping):
             raise ValueError("allocation receipt output is invalid")
         return {"allocation": dict(allocation)}
+    if operation == OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1:
+        settlement = output.get("settlement_doc")
+        if not isinstance(settlement, Mapping):
+            raise ValueError("chain-realized settlement receipt output is invalid")
+        return dict(settlement)
     return dict(output)
 
 
@@ -321,6 +338,12 @@ class CoordinatorExecutorV2:
         legacy_allocation_classification_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
+        chain_weight_observation_resolver: Optional[
+            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
+        ] = None,
+        chain_realized_settlement_resolver: Optional[
+            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
+        ] = None,
         source_add_catalog_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
@@ -358,6 +381,12 @@ class CoordinatorExecutorV2:
         )
         self._legacy_allocation_classification_resolver = (
             legacy_allocation_classification_resolver
+        )
+        self._chain_weight_observation_resolver = (
+            chain_weight_observation_resolver
+        )
+        self._chain_realized_settlement_resolver = (
+            chain_realized_settlement_resolver
         )
         self._source_add_catalog_resolver = source_add_catalog_resolver
         self._provider_outcome_supplier = provider_outcome_supplier
@@ -444,6 +473,38 @@ class CoordinatorExecutorV2:
             return ExecutionResultV2(
                 output=document,
                 artifact_hashes=artifacts,
+            )
+        if operation == OP_OBSERVE_CHAIN_REALIZED_WEIGHTS_V1:
+            if self._chain_weight_observation_resolver is None:
+                raise ValueError(
+                    "measured chain weight observation source is unavailable"
+                )
+            document = dict(
+                self._chain_weight_observation_resolver(payload, context)
+            )
+            return ExecutionResultV2(
+                output=document,
+                artifact_hashes=(sha256_json(document),),
+            )
+        if operation == OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1:
+            if self._chain_realized_settlement_resolver is None:
+                raise ValueError(
+                    "measured chain-realized settlement source is unavailable"
+                )
+            document = dict(
+                self._chain_realized_settlement_resolver(payload, context)
+            )
+            credit_hashes = [
+                str(item["credit_hash"])
+                for item in document.get("credits") or ()
+                if isinstance(item, Mapping)
+            ]
+            return ExecutionResultV2(
+                output=document,
+                artifact_hashes=(
+                    str(document["settlement_hash"]),
+                    *credit_hashes,
+                ),
             )
         if operation == OP_ATTEST_SUBNET_EPOCH_CUTOVER_V2:
             document = attest_subnet_epoch_cutover_v2(payload, context)

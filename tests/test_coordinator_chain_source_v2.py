@@ -18,8 +18,10 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
 )
 from leadpoet_canonical.chain_source_v2 import (
+    last_update_storage_key,
     ss58_encode_account_id,
     subnet_epoch_storage_key,
+    weights_storage_key,
 )
 
 
@@ -344,6 +346,102 @@ def test_stateful_coordinator_rejects_skipped_cutover_index():
         match="not an official transition",
     ):
         source.read_finalized_metagraph(netuid=71, context=context)
+
+
+def test_stateful_epoch_close_is_live_finalized_and_exact_archive_state(
+    monkeypatch,
+):
+    cutover = _stateful_cutover()
+    source = _stateful_source(FakeBroker(1_400, cutover=cutover), cutover)
+    calls = []
+
+    def block_hash(block):
+        return "%064x" % int(block)
+
+    def header(block):
+        return {
+            "number": hex(int(block)),
+            "stateRoot": "0x" + ("%064x" % (int(block) + 10_000)),
+            "parentHash": "0x" + block_hash(int(block) - 1),
+            "extrinsicsRoot": "0x" + "e" * 64,
+            "digest": {"logs": []},
+        }
+
+    def live_call(**kwargs):
+        calls.append(("live", kwargs["method"], tuple(kwargs["params"])))
+        if kwargs["method"] == "chain_getFinalizedHead":
+            return "0x" + block_hash(1_400)
+        if kwargs["method"] == "chain_getHeader":
+            return header(1_400)
+        raise AssertionError(kwargs)
+
+    def archive_call(**kwargs):
+        method = kwargs["method"]
+        params = tuple(kwargs["params"])
+        calls.append(("archive", method, params))
+        if method == "chain_getBlockHash":
+            return "0x" + block_hash(int(params[0]))
+        if method == "chain_getHeader":
+            return header(int(str(params[0]), 16))
+        if method == "state_call":
+            return _selective_fixture(1_359)
+        if method == "state_getStorage":
+            storage_key, at_hash = params
+            block = int(str(at_hash), 16)
+            if storage_key == subnet_epoch_storage_key(
+                storage_name="SubnetEpochIndex",
+                netuid=71,
+            ):
+                epoch_index = 9 if block < 1_000 else (10 if block < 1_360 else 11)
+                return "0x" + epoch_index.to_bytes(8, "little").hex()
+            if storage_key == weights_storage_key(
+                netuid=71,
+                validator_uid=0,
+            ):
+                return "0x" + (
+                    b"\x08"
+                    + (0).to_bytes(2, "little")
+                    + (65_535).to_bytes(2, "little")
+                    + (1).to_bytes(2, "little")
+                    + (16_384).to_bytes(2, "little")
+                ).hex()
+            if storage_key == last_update_storage_key(netuid=71):
+                return "0x" + (
+                    b"\x08"
+                    + (1_345).to_bytes(8, "little")
+                    + (1_200).to_bytes(8, "little")
+                ).hex()
+        raise AssertionError(kwargs)
+
+    monkeypatch.setattr(source, "_chain_call", live_call)
+    monkeypatch.setattr(source, "_archive_call", archive_call)
+    context = ExecutionContextV2(
+        job_id="chain-realized:101",
+        purpose="research_lab.chain_weight_observation.v1",
+        epoch_id=101,
+    )
+
+    result = source.read_stateful_epoch_close_weights(
+        netuid=71,
+        epoch_id=101,
+        validator_hotkey=ss58_encode_account_id(OWNER),
+        context=context,
+    )
+
+    assert result["close_block"] == 1_359
+    assert result["next_epoch_block"] == 1_360
+    assert result["official_subnet_epoch_id"] == 10
+    assert result["last_update_block"] == 1_345
+    assert result["active_source_epoch_id"] == 101
+    assert result["weights"] == [[0, 65_535], [1, 16_384]]
+    assert [item[1] for item in calls if item[0] == "live"] == [
+        "chain_getFinalizedHead",
+        "chain_getHeader",
+    ]
+    assert not any(
+        source_kind == "archive" and method == "chain_getFinalizedHead"
+        for source_kind, method, _params in calls
+    )
 
 
 class HistoricalBroker:

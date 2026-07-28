@@ -3011,6 +3011,28 @@ def _local_urlopen(
             separators=(",", ":"),
         ).encode()
         operation = "rpc"
+    elif (
+        parsed.path
+        == "/rest/v1/research_lab_chain_realized_settlement_activation_v1"
+        and "limit=2" in parsed.query
+    ):
+        body = json.dumps(
+            [
+                {
+                    "netuid": 71,
+                    "schema_version": (
+                        "leadpoet.research_lab_chain_realized_settlement_activation.v1"
+                    ),
+                    "first_epoch_id": 24073,
+                    "source_bundle_hash": "sha256:" + "a" * 64,
+                    "source_bundle_epoch_id": 24073,
+                    "source_finalized_block": 8666279,
+                }
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        operation = "select"
     elif parsed.path.startswith("/rest/v1/") and "limit=0" in parsed.query:
         body = b"[]"
         operation = "select"

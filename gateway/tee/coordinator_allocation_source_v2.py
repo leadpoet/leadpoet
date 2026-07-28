@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Callable, Dict, Mapping, Sequence, Set, Tuple
 
 from gateway.research_lab.allocations import (
@@ -563,6 +564,47 @@ class CoordinatorAllocationSourceV2:
             },
             context,
         )
+        activation_rows = self._read(
+            "chain_realized_settlement_activation",
+            {"netuid": netuid},
+            context,
+        )
+        if len(activation_rows) != 1:
+            raise CoordinatorAllocationSourceV2Error(
+                "chain realized settlement activation is unavailable or ambiguous"
+            )
+        activation = activation_rows[0]
+        try:
+            activation_epoch = int(activation["first_epoch_id"])
+            source_epoch = int(activation["source_bundle_epoch_id"])
+            activation_netuid = int(activation["netuid"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CoordinatorAllocationSourceV2Error(
+                "chain realized settlement activation is invalid"
+            ) from exc
+        if (
+            activation.get("schema_version")
+            != "leadpoet.research_lab_chain_realized_settlement_activation.v1"
+            or activation_netuid != netuid
+            or source_epoch != activation_epoch
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(activation.get("source_bundle_hash") or "")
+            )
+        ):
+            raise CoordinatorAllocationSourceV2Error(
+                "chain realized settlement activation is invalid"
+            )
+        expected_epochs = set(
+            range(max(min(starts), activation_epoch), epoch)
+        )
+        observed_epochs = {
+            int(row["epoch_id"]) for row in chain_settlement_rows
+        }
+        if observed_epochs != expected_epochs:
+            raise CoordinatorAllocationSourceV2Error(
+                "chain realized settlement history is incomplete"
+            )
         chain_credit_rows = self._read(
             "chain_realized_obligation_credits",
             {

@@ -71,12 +71,26 @@ def _chain_realized_fixture(
         "scheduled_alpha_percent": scheduled,
         "credited_alpha_percent": credited,
         "attribution_doc": {
-            "source": "latest_active_lab_allocation",
-            "lab_only": True,
+            "schema_version": "leadpoet.chain_realized_lab_attribution.v1",
+            "source_bundle_hash": "sha256:" + "1" * 64,
+            "source_bundle_epoch_id": epoch,
+            "source_allocation_hash": "sha256:" + "2" * 64,
+            "source_allocation_receipt_hash": "sha256:" + "3" * 64,
+            "allocation_section": {
+                "champion": "champion_allocations",
+                "queued_champion": "queued_champion_allocations",
+                "source_add": "source_add_allocations",
+                "reimbursement": "reimbursement_allocations",
+            }[kind],
         },
         "observation_doc": {
-            "source": "finalized_metagraph",
-            "block_hash": "0x" + "a" * 64,
+            "schema_version": (
+                "leadpoet.chain_realized_weight_observation_ref.v1"
+            ),
+            "observation_hash": "sha256:" + "4" * 64,
+            "close_block": 1000,
+            "close_block_hash": "a" * 64,
+            "weights_vector_hash": "sha256:" + "5" * 64,
         },
     }
     credit_hash = sha256_json(credit_doc)
@@ -86,13 +100,26 @@ def _chain_realized_fixture(
         "epoch_id": epoch,
         "credit_hashes": [credit_hash],
         "observation_summary": {
-            "source": "finalized_chain_emission",
+            "schema_version": "leadpoet.chain_realized_observation_summary.v1",
+            "observation_hash": "sha256:" + "4" * 64,
+            "weights_vector_hash": "sha256:" + "5" * 64,
+            "close_block": 1000,
+            "close_block_hash": "a" * 64,
+            "official_subnet_epoch_id": epoch,
+            "validator_hotkey": "validator-hotkey",
+            "validator_uid": 0,
+            "source_bundle_hash": "sha256:" + "1" * 64,
+            "source_bundle_epoch_id": epoch,
+            "source_bundle_finalized_block": 990,
+            "source_bundle_finalized_block_hash": "b" * 64,
+            "last_update_block": 990,
+            "last_update_block_hash": "b" * 64,
+            "active_source_epoch_id": epoch,
             "complete": True,
         },
     }
     settlement_hash = sha256_json(settlement_doc)
     settlement_receipt = "sha256:" + "7" * 64
-    credit_receipt = "sha256:" + "8" * 64
     settlement_row = {
         "netuid": 71,
         "epoch_id": epoch,
@@ -115,19 +142,14 @@ def _chain_realized_fixture(
         "scheduled_alpha_percent": Decimal(scheduled),
         "credited_alpha_percent": Decimal(credited),
         "credit_hash": credit_hash,
-        "credit_receipt_hash": credit_receipt,
+        "credit_receipt_hash": settlement_receipt,
         "credit_doc": credit_doc,
     }
     graphs = {
         settlement_receipt: _minimal_receipt_graph(
             settlement_receipt,
-            purpose=settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+            purpose=settlement.CHAIN_REALIZED_SETTLEMENT_RECEIPT_PURPOSE_V1,
             output_root=settlement_hash,
-        ),
-        credit_receipt: _minimal_receipt_graph(
-            credit_receipt,
-            purpose=settlement.CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
-            output_root=credit_hash,
         ),
     }
     return settlement_row, credit_row, settlement_doc, graphs
@@ -378,6 +400,310 @@ def _install_validators(monkeypatch, validations: dict[str, dict]) -> None:
     )
 
 
+def _chain_observation(
+    *,
+    epoch_id: int,
+    source_epoch_id: int = 100,
+    miner_hotkey: str = "miner-hotkey",
+) -> dict:
+    close_block = 1_000 + ((epoch_id - source_epoch_id + 1) * 360) - 1
+    weights = [[0, 65535], [7, 3449]]
+    hotkeys = ["validator-hotkey"] + [
+        "unused-%d" % uid for uid in range(1, 7)
+    ] + [miner_hotkey]
+    return {
+        "schema_version": settlement.CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1,
+        "netuid": 71,
+        "epoch_id": epoch_id,
+        "official_subnet_epoch_id": epoch_id,
+        "cutover_mapping_hash": "sha256:" + "a" * 64,
+        "close_block": close_block,
+        "close_block_hash": ("%064x" % close_block),
+        "close_state_root": "b" * 64,
+        "next_epoch_block": close_block + 1,
+        "next_epoch_block_hash": ("%064x" % (close_block + 1)),
+        "validator_hotkey": "validator-hotkey",
+        "validator_uid": 0,
+        "metagraph_hotkeys": hotkeys,
+        "weights": weights,
+        "weights_storage_key": "0x1234",
+        "last_update_storage_key": "0x5678",
+        "last_update_block": 1_000,
+        "last_update_block_hash": "c" * 64,
+        "last_update_official_subnet_epoch_id": source_epoch_id,
+        "active_source_epoch_id": source_epoch_id,
+        "weights_vector_hash": sha256_json(
+            {
+                "uids": [item[0] for item in weights],
+                "weights_u16": [item[1] for item in weights],
+            }
+        ),
+    }
+
+
+def _chain_package_authority(
+    *,
+    source_epoch_id: int = 100,
+    allocations: list[dict] | None = None,
+    queued_allocations: list[dict] | None = None,
+) -> tuple[dict, dict]:
+    allocation_body = {
+        "schema_version": "leadpoet.research_lab_allocation.v2",
+        "epoch": source_epoch_id,
+        "champion_allocations": list(
+            allocations
+            if allocations is not None
+            else [
+                {
+                    "source_id": "champion_reward:test",
+                    "miner_hotkey": "miner-hotkey",
+                    "uid": 7,
+                    "paid_alpha_percent": 5.0,
+                    "base_desired_alpha_percent": 5.0,
+                }
+            ]
+        ),
+        "queued_champion_allocations": list(queued_allocations or []),
+        "source_add_allocations": [],
+        "reimbursement_allocations": [],
+    }
+    allocation = {
+        **allocation_body,
+        "allocation_hash": sha256_json(allocation_body),
+    }
+    bundle_hash = "sha256:" + "1" * 64
+    bundle_doc = {
+        "weight_result": {
+            "uids": [0, 7],
+            "weights": [0.95, 0.05],
+        },
+        "weight_snapshot": {
+            "calculation_snapshot": {
+                "research_lab_allocation_doc": allocation,
+            },
+            "input_receipt_hashes": {
+                "research_lab_allocation": "sha256:" + "2" * 64,
+            },
+        },
+    }
+    authority = {
+        "bundle_hash": bundle_hash,
+        "bundle_doc": bundle_doc,
+        "finalized_block": 1_000,
+        "finalized_block_hash": "c" * 64,
+        "finalization_receipt_hash": "sha256:" + "3" * 64,
+    }
+    verified_bundle = {
+        "bundle_hash": bundle_hash,
+        "epoch_id": source_epoch_id,
+        "netuid": 71,
+        "validator_hotkey": "validator-hotkey",
+        "uids": [0, 7],
+        "weights_u16": [65535, 3449],
+    }
+    return authority, verified_bundle
+
+
+def test_chain_realized_bundle_selection_requires_exact_finalized_source(
+    monkeypatch,
+):
+    observation = _chain_observation(epoch_id=101)
+    authority, _verified = _chain_package_authority()
+    exact = {
+        **authority,
+        "netuid": 71,
+        "epoch_id": 100,
+        "validator_hotkey": "validator-hotkey",
+        "uids": [0, 7],
+        "weights_u16": [65535, 3449],
+    }
+    monkeypatch.setattr(
+        settlement,
+        "_preliminary_finalized_bundle_authority_v1",
+        lambda row: dict(row),
+    )
+
+    selected = settlement.select_chain_realized_bundle_candidate_v1(
+        [
+            {**exact, "epoch_id": 99},
+            {**exact, "finalized_block_hash": "d" * 64},
+            exact,
+        ],
+        observation=observation,
+    )
+
+    assert selected["bundle_hash"] == exact["bundle_hash"]
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="no finalized canonical bundle",
+    ):
+        settlement.select_chain_realized_bundle_candidate_v1(
+            [{**exact, "finalized_block": 999}],
+            observation=observation,
+        )
+
+
+def test_chain_realized_stale_vector_credits_each_epoch_exactly(
+    monkeypatch,
+):
+    authority, verified = _chain_package_authority()
+    monkeypatch.setattr(
+        settlement,
+        "validate_published_weight_bundle_v2",
+        lambda _document: verified,
+    )
+
+    first = settlement.build_chain_realized_settlement_package_v1(
+        observation=_chain_observation(epoch_id=101),
+        authority=authority,
+    )
+    second = settlement.build_chain_realized_settlement_package_v1(
+        observation=_chain_observation(epoch_id=102),
+        authority=authority,
+    )
+
+    assert first["settlement_hash"] != second["settlement_hash"]
+    assert first["credits"][0]["credit_hash"] != second["credits"][0]["credit_hash"]
+    for epoch_id, package in ((101, first), (102, second)):
+        credit = package["credits"][0]["credit_doc"]
+        assert package["settlement_doc"]["epoch_id"] == epoch_id
+        assert credit["epoch_id"] == epoch_id
+        assert credit["credited_alpha_percent"] == "4.999710077699"
+        assert credit["attribution_doc"]["source_bundle_epoch_id"] == 100
+
+
+def test_chain_realized_u16_rounding_is_distributed_without_overcredit(
+    monkeypatch,
+):
+    authority, verified = _chain_package_authority(
+        allocations=[
+            {
+                "source_id": "champion_reward:first",
+                "miner_hotkey": "miner-hotkey",
+                "uid": 7,
+                "paid_alpha_percent": 3.0,
+                "base_desired_alpha_percent": 3.0,
+            },
+            {
+                "source_id": "champion_reward:second",
+                "miner_hotkey": "miner-hotkey",
+                "uid": 7,
+                "paid_alpha_percent": 2.0,
+                "base_desired_alpha_percent": 2.0,
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_published_weight_bundle_v2",
+        lambda _document: verified,
+    )
+
+    package = settlement.build_chain_realized_settlement_package_v1(
+        observation=_chain_observation(epoch_id=101),
+        authority=authority,
+    )
+
+    credits = [
+        Decimal(item["credit_doc"]["credited_alpha_percent"])
+        for item in package["credits"]
+    ]
+    assert sum(credits) == Decimal("4.999710077699")
+    assert sorted(credits) == [
+        Decimal("1.999884031080"),
+        Decimal("2.999826046619"),
+    ]
+
+
+def test_chain_realized_uid_reassignment_does_not_credit_old_hotkey(
+    monkeypatch,
+):
+    authority, verified = _chain_package_authority()
+    monkeypatch.setattr(
+        settlement,
+        "validate_published_weight_bundle_v2",
+        lambda _document: verified,
+    )
+
+    package = settlement.build_chain_realized_settlement_package_v1(
+        observation=_chain_observation(
+            epoch_id=101,
+            miner_hotkey="replacement-hotkey",
+        ),
+        authority=authority,
+    )
+
+    assert package["credits"] == []
+    assert package["settlement_doc"]["credit_hashes"] == []
+
+
+def test_chain_realized_allocation_cannot_exceed_canonical_uid_weight(
+    monkeypatch,
+):
+    authority, verified = _chain_package_authority(
+        allocations=[
+            {
+                "source_id": "champion_reward:first",
+                "miner_hotkey": "miner-hotkey",
+                "uid": 7,
+                "paid_alpha_percent": 4.0,
+                "base_desired_alpha_percent": 4.0,
+            },
+            {
+                "source_id": "champion_reward:second",
+                "miner_hotkey": "miner-hotkey",
+                "uid": 7,
+                "paid_alpha_percent": 4.0,
+                "base_desired_alpha_percent": 4.0,
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_published_weight_bundle_v2",
+        lambda _document: verified,
+    )
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="exceeds canonical weight",
+    ):
+        settlement.build_chain_realized_settlement_package_v1(
+            observation=_chain_observation(epoch_id=101),
+            authority=authority,
+        )
+
+
+def test_chain_realized_allocation_rejects_active_and_queued_duplicate(
+    monkeypatch,
+):
+    duplicate = {
+        "source_id": "champion_reward:test",
+        "miner_hotkey": "miner-hotkey",
+        "uid": 7,
+        "paid_alpha_percent": 2.5,
+        "base_desired_alpha_percent": 2.5,
+    }
+    authority, verified = _chain_package_authority(
+        allocations=[duplicate],
+        queued_allocations=[duplicate],
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_published_weight_bundle_v2",
+        lambda _document: verified,
+    )
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="allocation identity is invalid",
+    ):
+        settlement.build_chain_realized_settlement_package_v1(
+            observation=_chain_observation(epoch_id=101),
+            authority=authority,
+        )
+
+
 def test_finalized_allocation_authority_collapses_validator_duplicates(monkeypatch):
     allocation = _allocation()
     first, first_graph, first_verified = _authority_row(
@@ -603,7 +929,7 @@ def test_chain_realized_credit_sets_must_be_epoch_complete(monkeypatch):
     settlement_receipt = settlement_row["settlement_receipt_hash"]
     graphs[settlement_receipt] = _minimal_receipt_graph(
         settlement_receipt,
-        purpose=settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+        purpose=settlement.CHAIN_REALIZED_SETTLEMENT_RECEIPT_PURPOSE_V1,
         output_root=settlement_row["settlement_hash"],
     )
 
@@ -665,6 +991,117 @@ def test_chain_realized_credits_cannot_overcredit_obligations(
     with pytest.raises(settlement.ChampionSettlementV2Error, match=message):
         settlement.validate_chain_realized_obligation_credits_v1(
             [credit_row],
+            settlement_rows=chain_epochs,
+            receipt_graphs=graphs,
+        )
+
+
+def test_chain_realized_credit_set_cannot_overattribute_one_uid(monkeypatch):
+    monkeypatch.setattr(settlement, "validate_receipt_graph", lambda _graph: ())
+    settlement_row, first, _doc, graphs = _chain_realized_fixture(
+        reward_id="champion_reward:first",
+        observed="5.000000",
+        attributed="3.000000",
+        scheduled="3.000000",
+        credited="3.000000",
+    )
+    _second_settlement, second, _doc, _graphs = _chain_realized_fixture(
+        reward_id="champion_reward:second",
+        observed="5.000000",
+        attributed="3.000000",
+        scheduled="3.000000",
+        credited="3.000000",
+    )
+    credit_hashes = sorted([first["credit_hash"], second["credit_hash"]])
+    settlement_doc = {
+        **settlement_row["settlement_doc"],
+        "credit_hashes": credit_hashes,
+    }
+    settlement_hash = sha256_json(settlement_doc)
+    settlement_row = {
+        **settlement_row,
+        "settlement_doc": settlement_doc,
+        "settlement_hash": settlement_hash,
+    }
+    first = {**first, "settlement_hash": settlement_hash}
+    second = {
+        **second,
+        "settlement_hash": settlement_hash,
+        "credit_receipt_hash": first["credit_receipt_hash"],
+    }
+    receipt_hash = settlement_row["settlement_receipt_hash"]
+    graphs[receipt_hash] = _minimal_receipt_graph(
+        receipt_hash,
+        purpose=settlement.CHAIN_REALIZED_SETTLEMENT_RECEIPT_PURPOSE_V1,
+        output_root=settlement_hash,
+    )
+    chain_epochs = settlement.validate_chain_realized_epoch_settlements_v1(
+        [settlement_row],
+        receipt_graphs=graphs,
+    )
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="UID attribution exceeds observed weight",
+    ):
+        settlement.validate_chain_realized_obligation_credits_v1(
+            [first, second],
+            settlement_rows=chain_epochs,
+            receipt_graphs=graphs,
+        )
+
+
+def test_chain_realized_credit_rejects_active_and_queued_duplicate(monkeypatch):
+    monkeypatch.setattr(settlement, "validate_receipt_graph", lambda _graph: ())
+    settlement_row, first, _doc, graphs = _chain_realized_fixture(
+        reward_id="champion_reward:duplicate",
+        observed="5.000000",
+        attributed="2.500000",
+        scheduled="2.500000",
+        credited="2.500000",
+    )
+    _second_settlement, second, _doc, _graphs = _chain_realized_fixture(
+        reward_id="champion_reward:duplicate",
+        observed="5.000000",
+        attributed="2.500000",
+        scheduled="2.500000",
+        credited="2.500000",
+        kind="queued_champion",
+    )
+    credit_hashes = sorted([first["credit_hash"], second["credit_hash"]])
+    settlement_doc = {
+        **settlement_row["settlement_doc"],
+        "credit_hashes": credit_hashes,
+    }
+    settlement_hash = sha256_json(settlement_doc)
+    settlement_row = {
+        **settlement_row,
+        "settlement_doc": settlement_doc,
+        "settlement_hash": settlement_hash,
+    }
+    first = {**first, "settlement_hash": settlement_hash}
+    second = {
+        **second,
+        "settlement_hash": settlement_hash,
+        "credit_receipt_hash": first["credit_receipt_hash"],
+    }
+    receipt_hash = settlement_row["settlement_receipt_hash"]
+    graphs[receipt_hash] = _minimal_receipt_graph(
+        receipt_hash,
+        purpose=settlement.CHAIN_REALIZED_SETTLEMENT_RECEIPT_PURPOSE_V1,
+        output_root=settlement_hash,
+    )
+    chain_epochs = settlement.validate_chain_realized_epoch_settlements_v1(
+        [settlement_row],
+        receipt_graphs=graphs,
+    )
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="obligation credit is duplicated",
+    ):
+        settlement.validate_chain_realized_obligation_credits_v1(
+            [first, second],
             settlement_rows=chain_epochs,
             receipt_graphs=graphs,
         )
@@ -774,7 +1211,7 @@ async def test_cutover_requires_receipts_for_every_positive_balance(
     monkeypatch.setattr(store, "select_all", select_all)
     monkeypatch.setattr(
         settlement,
-        "load_finalized_allocation_history_v2",
+        "load_settled_allocation_history_v2",
         load_finalized,
     )
     monkeypatch.setattr(
@@ -875,7 +1312,7 @@ async def test_cutover_does_not_trust_paid_status_when_chain_balance_remains(
     monkeypatch.setattr(store, "select_all", select_all)
     monkeypatch.setattr(
         settlement,
-        "load_finalized_allocation_history_v2",
+        "load_settled_allocation_history_v2",
         no_finalized_payments,
     )
     monkeypatch.setattr(
@@ -1020,7 +1457,7 @@ async def test_cutover_blocks_until_every_historical_payment_epoch_is_attested(
     monkeypatch.setattr(store, "select_all", select_all)
     monkeypatch.setattr(
         settlement,
-        "load_finalized_allocation_history_v2",
+        "load_settled_allocation_history_v2",
         load_finalized,
     )
     monkeypatch.setattr(
@@ -1240,7 +1677,7 @@ async def test_cutover_uses_anchor_bound_snapshot_not_later_current_view(
     monkeypatch.setattr(store, "select_all", select_all)
     monkeypatch.setattr(
         settlement,
-        "load_finalized_allocation_history_v2",
+        "load_settled_allocation_history_v2",
         load_finalized,
     )
     monkeypatch.setattr(
@@ -1389,7 +1826,7 @@ async def test_cutover_does_not_credit_unsubmitted_historical_allocation(
     monkeypatch.setattr(store, "select_all", select_all)
     monkeypatch.setattr(
         settlement,
-        "load_finalized_allocation_history_v2",
+        "load_settled_allocation_history_v2",
         no_finalized_payments,
     )
     monkeypatch.setattr(
@@ -1420,6 +1857,132 @@ async def test_cutover_does_not_credit_unsubmitted_historical_allocation(
             "reason": "no_checkpointed_audit_anchor",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_cutover_does_not_reclassify_complete_chain_realized_epoch(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store, store
+
+    reward_id = "champion_reward:sha256:" + "d" * 64
+    reward = {
+        "champion_reward_id": reward_id,
+        "start_epoch": 100,
+        "epoch_count": 1,
+        "desired_alpha_percent": 5.0,
+        "current_reward_status": "active",
+    }
+    current_allocation = _allocation(paid=5.0)
+    current_allocation["champion_allocations"][0]["source_id"] = reward_id
+    current_body = {
+        key: value
+        for key, value in current_allocation.items()
+        if key != "allocation_hash"
+    }
+    current_allocation["allocation_hash"] = sha256_json(current_body)
+    settlement_hash = "sha256:" + "e" * 64
+    chain_history = [
+        {
+            "epoch": 100,
+            "netuid": 71,
+            "allocation_hash": settlement_hash,
+            "allocation_doc": {
+                "schema_version": (
+                    settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1
+                ),
+                "epoch": 100,
+                "netuid": 71,
+                "settlement_hash": settlement_hash,
+                "authority_type": (
+                    settlement.CHAIN_REALIZED_AUTHORITY_TYPE_V1
+                ),
+                "source": "chain_realized_obligation_credits",
+                "champion_allocations": [
+                    {
+                        "source_id": reward_id,
+                        "champion_reward_id": reward_id,
+                        "paid_alpha_percent": 5.0,
+                        "base_desired_alpha_percent": 5.0,
+                    }
+                ],
+                "queued_champion_allocations": [],
+                "source_add_allocations": [],
+                "reimbursement_allocations": [],
+            },
+            "authority_types": [
+                settlement.CHAIN_REALIZED_AUTHORITY_TYPE_V1
+            ],
+        }
+    ]
+
+    async def select_all(table, *, filters=(), **_kwargs):
+        if table == "research_lab_champion_reward_current":
+            status = next(
+                (
+                    value
+                    for field, value in filters
+                    if field == "current_reward_status"
+                ),
+                "",
+            )
+            return [reward] if status == "active" else []
+        if table == "research_lab_source_add_reward_current":
+            return []
+        if table == "research_lab_emission_allocation_current":
+            return [
+                {
+                    "epoch": 100,
+                    "netuid": 71,
+                    "allocation_hash": current_allocation["allocation_hash"],
+                    "allocation_doc": current_allocation,
+                }
+            ]
+        if table in {
+            "research_lab_arweave_epoch_audit_anchor_current",
+            "published_weight_bundles",
+            "research_lab_emission_allocation_snapshots",
+        }:
+            return []
+        raise AssertionError(table)
+
+    async def load_history(**_kwargs):
+        return chain_history
+
+    async def no_nonfinalizations(**_kwargs):
+        return []
+
+    async def unexpected_graph(**_kwargs):
+        raise AssertionError("settled reward must not require another graph")
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(
+        settlement,
+        "load_settled_allocation_history_v2",
+        load_history,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "load_legacy_allocation_nonfinalizations_v2",
+        no_nonfinalizations,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_by_ref_v2",
+        unexpected_graph,
+    )
+
+    readiness = await settlement.champion_v2_cutover_readiness(
+        epoch=101,
+        netuid=71,
+    )
+
+    assert readiness["ready"] is True
+    assert readiness["zero_balance_active_rows"][0][
+        "champion_reward_id"
+    ] == reward_id
+    assert readiness["missing_historical_settlements"] == []
+    assert readiness["unproven_historical_allocations"] == []
 
 
 @pytest.mark.asyncio
@@ -1512,6 +2075,14 @@ async def test_default_v2_allocation_path_blocks_incomplete_champion_coverage(
         settlement,
         "champion_v2_cutover_readiness",
         not_ready,
+    )
+    async def settle_history(**_kwargs):
+        return []
+
+    monkeypatch.setattr(
+        v2_authority,
+        "ensure_chain_realized_settlements_v1",
+        settle_history,
     )
 
     with pytest.raises(

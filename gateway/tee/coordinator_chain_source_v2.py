@@ -22,11 +22,13 @@ from leadpoet_canonical.chain_source_v2 import (
     CHAIN_RPC_RETRY_BACKOFF_SECONDS,
     CHAIN_RPC_TIMEOUT_MS,
     ChainSourceV2Error,
+    decode_last_update_storage,
     decode_subnet_epoch_storage,
     decode_weights_storage,
     decode_selective_metagraph_result,
     encode_selective_metagraph_params,
     json_rpc_request,
+    last_update_storage_key,
     normalize_raw_hash,
     parse_finalized_header,
     parse_json_rpc_response,
@@ -600,6 +602,309 @@ class CoordinatorChainSourceV2:
             "validator_hotkey": str(validator_hotkey),
             "validator_uid": validator_uid,
             "weights_storage_key": storage_key,
+            "weights": [[int(uid), int(weight)] for uid, weight in weights],
+        }
+
+    def read_stateful_epoch_close_weights(
+        self,
+        *,
+        netuid: int,
+        epoch_id: int,
+        validator_hotkey: str,
+        context: Any,
+    ) -> Dict[str, Any]:
+        """Read the active validator vector at one exact stateful epoch close."""
+
+        cutover = self._epoch_cutover
+        normalized_netuid = int(netuid)
+        normalized_epoch = int(epoch_id)
+        normalized_hotkey = str(validator_hotkey or "")
+        if (
+            cutover is None
+            or cutover.netuid != normalized_netuid
+            or normalized_epoch < cutover.first_settlement_epoch_id
+            or not normalized_hotkey
+        ):
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch weight request is invalid"
+            )
+        try:
+            official_epoch = cutover.subnet_epoch_index(normalized_epoch)
+        except SubnetEpochError as exc:
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch weight request predates the cutover"
+            ) from exc
+        target_next_official = official_epoch + 1
+
+        request_id = 200
+
+        def live_call(
+            method: str,
+            params: Sequence[Any],
+            operation: str,
+        ) -> Any:
+            nonlocal request_id
+            request_id += 1
+            return self._chain_call(
+                method=method,
+                params=params,
+                request_id=request_id,
+                logical_operation_id=(
+                    "%s:chain-realized:%d:%s"
+                    % (context.job_id, normalized_epoch, operation)
+                ),
+                attempt_number=0,
+                context=context,
+            )
+
+        def archive_call(
+            method: str,
+            params: Sequence[Any],
+            operation: str,
+        ) -> Any:
+            nonlocal request_id
+            request_id += 1
+            return self._archive_call(
+                method=method,
+                params=params,
+                request_id=request_id,
+                logical_operation_id=(
+                    "%s:chain-realized:%d:%s"
+                    % (context.job_id, normalized_epoch, operation)
+                ),
+                context=context,
+            )
+
+        def block_hash(block: int, operation: str) -> str:
+            return normalize_raw_hash(
+                archive_call(
+                    "chain_getBlockHash",
+                    (int(block),),
+                    operation,
+                ),
+                "stateful epoch block hash",
+            )
+
+        def epoch_index_at(block: int, operation: str) -> tuple[str, int]:
+            observed_hash = block_hash(block, "%s-hash" % operation)
+            try:
+                observed_index = decode_subnet_epoch_storage(
+                    archive_call(
+                        "state_getStorage",
+                        (
+                            subnet_epoch_storage_key(
+                                storage_name="SubnetEpochIndex",
+                                netuid=normalized_netuid,
+                            ),
+                            "0x" + observed_hash,
+                        ),
+                        "%s-index" % operation,
+                    ),
+                    storage_name="SubnetEpochIndex",
+                )
+            except ChainSourceV2Error as exc:
+                raise CoordinatorChainSourceV2Error(
+                    "stateful epoch index storage is invalid"
+                ) from exc
+            return observed_hash, observed_index
+
+        finalized_hash = normalize_raw_hash(
+            live_call(
+                "chain_getFinalizedHead",
+                (),
+                "finalized-head",
+            ),
+            "live finalized head",
+        )
+        finalized_header = parse_finalized_header(
+            live_call(
+                "chain_getHeader",
+                ("0x" + finalized_hash,),
+                "finalized-header",
+            )
+        )
+        high_block = int(finalized_header["block"])
+        _high_hash, high_index = epoch_index_at(
+            high_block,
+            "search-high",
+        )
+        if high_index < target_next_official:
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch close is not finalized"
+            )
+
+        low_block = cutover.cutover_block - 1
+        _low_hash, low_index = epoch_index_at(
+            low_block,
+            "search-low",
+        )
+        if low_index >= target_next_official:
+            raise CoordinatorChainSourceV2Error(
+                "stateful transition search low block is invalid"
+            )
+
+        while high_block - low_block > 1:
+            midpoint = low_block + ((high_block - low_block) // 2)
+            _mid_hash, mid_index = epoch_index_at(
+                midpoint,
+                "search-%d" % midpoint,
+            )
+            if mid_index >= target_next_official:
+                high_block = midpoint
+            else:
+                low_block = midpoint
+
+        boundary_hash, boundary_index = epoch_index_at(
+            high_block,
+            "boundary",
+        )
+        close_block = high_block - 1
+        close_hash, close_index = epoch_index_at(
+            close_block,
+            "close",
+        )
+        if (
+            boundary_index != target_next_official
+            or close_index != official_epoch
+            or close_block < cutover.cutover_block
+        ):
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch close boundary is inconsistent"
+            )
+        boundary_header = parse_finalized_header(
+            archive_call(
+                "chain_getHeader",
+                ("0x" + boundary_hash,),
+                "boundary-header",
+            )
+        )
+        close_header = parse_finalized_header(
+            archive_call(
+                "chain_getHeader",
+                ("0x" + close_hash,),
+                "close-header",
+            )
+        )
+        if (
+            int(boundary_header["block"]) != high_block
+            or int(close_header["block"]) != close_block
+            or boundary_header["parent_hash"] != close_hash
+        ):
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch close headers are inconsistent"
+            )
+
+        metagraph = decode_selective_metagraph_result(
+            archive_call(
+                "state_call",
+                (
+                    CHAIN_RPC_METHOD,
+                    encode_selective_metagraph_params(
+                        netuid=normalized_netuid
+                    ),
+                    "0x" + close_hash,
+                ),
+                "close-metagraph",
+            )
+        )
+        if (
+            int(metagraph["netuid"]) != normalized_netuid
+            or int(metagraph["block"]) != close_block
+        ):
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch close metagraph differs"
+            )
+        matching_uids = [
+            uid
+            for uid, hotkey in enumerate(metagraph["hotkeys"])
+            if hotkey == normalized_hotkey
+        ]
+        if len(matching_uids) != 1:
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch validator UID is absent or ambiguous"
+            )
+        validator_uid = matching_uids[0]
+        storage_key = weights_storage_key(
+            netuid=normalized_netuid,
+            validator_uid=validator_uid,
+        )
+        try:
+            weights = decode_weights_storage(
+                archive_call(
+                    "state_getStorage",
+                    (storage_key, "0x" + close_hash),
+                    "close-weights",
+                )
+            )
+        except ChainSourceV2Error as exc:
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch close weights are invalid"
+            ) from exc
+        last_update_key = last_update_storage_key(netuid=normalized_netuid)
+        try:
+            last_updates = decode_last_update_storage(
+                archive_call(
+                    "state_getStorage",
+                    (last_update_key, "0x" + close_hash),
+                    "close-last-update",
+                )
+            )
+        except ChainSourceV2Error as exc:
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch close LastUpdate is invalid"
+            ) from exc
+        if validator_uid >= len(last_updates):
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch validator LastUpdate is absent"
+            )
+        last_update_block = int(last_updates[validator_uid])
+        if (
+            last_update_block < cutover.cutover_block
+            or last_update_block > close_block
+        ):
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch validator LastUpdate is outside the cutover"
+            )
+        last_update_hash, last_update_official_epoch = epoch_index_at(
+            last_update_block,
+            "last-update",
+        )
+        try:
+            active_source_epoch_id = cutover.settlement_epoch_id(
+                last_update_official_epoch
+            )
+        except SubnetEpochError as exc:
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch validator LastUpdate predates the cutover"
+            ) from exc
+        if active_source_epoch_id > normalized_epoch:
+            raise CoordinatorChainSourceV2Error(
+                "stateful epoch active source epoch is in the future"
+            )
+        return {
+            "schema_version": "leadpoet.stateful_epoch_close_weights.v1",
+            "netuid": normalized_netuid,
+            "epoch_id": normalized_epoch,
+            "official_subnet_epoch_id": official_epoch,
+            "cutover_mapping_hash": str(cutover.mapping_hash),
+            "close_block": close_block,
+            "close_block_hash": close_hash,
+            "close_header": close_header,
+            "next_epoch_block": high_block,
+            "next_epoch_block_hash": boundary_hash,
+            "finalized_head_block": int(finalized_header["block"]),
+            "finalized_head_hash": finalized_hash,
+            "validator_hotkey": normalized_hotkey,
+            "validator_uid": validator_uid,
+            "metagraph_hotkeys": list(metagraph["hotkeys"]),
+            "weights_storage_key": storage_key,
+            "last_update_storage_key": last_update_key,
+            "last_update_block": last_update_block,
+            "last_update_block_hash": last_update_hash,
+            "last_update_official_subnet_epoch_id": (
+                last_update_official_epoch
+            ),
+            "active_source_epoch_id": active_source_epoch_id,
             "weights": [[int(uid), int(weight)] for uid, weight in weights],
         }
 

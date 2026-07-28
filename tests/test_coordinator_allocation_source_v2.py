@@ -85,6 +85,19 @@ def _context(parents=()):
     )
 
 
+def _chain_realized_activation(*, first_epoch_id=100):
+    return {
+        "schema_version": (
+            "leadpoet.research_lab_chain_realized_settlement_activation.v1"
+        ),
+        "netuid": 71,
+        "first_epoch_id": first_epoch_id,
+        "source_bundle_epoch_id": first_epoch_id,
+        "source_bundle_hash": "sha256:" + "a" * 64,
+        "source_finalized_block": first_epoch_id * 360,
+    }
+
+
 def test_allocation_is_built_from_measured_empty_sources():
     reader = FakeReader()
     resolver = CoordinatorAllocationSourceV2(
@@ -137,6 +150,9 @@ def test_unreceipted_source_add_reward_fails_closed():
     resolver = CoordinatorAllocationSourceV2(
         reader=FakeReader(
             {
+                "chain_realized_settlement_activation": [
+                    _chain_realized_activation()
+                ],
                 "allocation_source_add_rewards": [
                     {
                         "reward_ref": "source_add_reward:" + "1" * 16,
@@ -354,7 +370,20 @@ def test_finalized_champion_history_requires_declared_chain_roots(monkeypatch):
         {
             "finalized_allocation_authorities": [
                 {"finalization_receipt_hash": finalization_root}
-            ]
+            ],
+            "chain_realized_settlement_activation": [
+                {
+                    "netuid": 71,
+                    "schema_version": (
+                        "leadpoet.research_lab_chain_realized_"
+                        "settlement_activation.v1"
+                    ),
+                    "first_epoch_id": 100,
+                    "source_bundle_hash": "sha256:" + "8" * 64,
+                    "source_bundle_epoch_id": 100,
+                    "source_finalized_block": 1000,
+                }
+            ],
         }
     )
     resolver = CoordinatorAllocationSourceV2(
@@ -432,11 +461,15 @@ def test_finalized_champion_history_requires_declared_chain_roots(monkeypatch):
             "chain_realized_epoch_settlements",
             {"netuid": 71, "start_epoch": 99, "end_epoch": 99},
         ),
-        (
-            "chain_realized_obligation_credits",
-            {"netuid": 71, "start_epoch": 99, "end_epoch": 99},
-        ),
-    ]
+            (
+                "chain_realized_settlement_activation",
+                {"netuid": 71},
+            ),
+            (
+                "chain_realized_obligation_credits",
+                {"netuid": 71, "start_epoch": 99, "end_epoch": 99},
+            ),
+        ]
 
     monkeypatch.setattr(
         resolver,
@@ -485,6 +518,9 @@ def test_legacy_finalized_champion_history_requires_migration_receipt(
     }
     reader = FakeReader(
         {
+            "chain_realized_settlement_activation": [
+                _chain_realized_activation()
+            ],
             "legacy_finalized_allocation_migrations": [
                 {"settlement_receipt_hash": settlement_receipt}
             ]

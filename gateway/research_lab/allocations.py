@@ -551,17 +551,14 @@ async def _source_add_paid_alpha_to_date(
     if not start_epochs:
         return {}
     start_floor = min(start_epochs)
-    snapshot_rows = await select_all(
-        "research_lab_emission_allocation_current",
-        columns="epoch,allocation_doc",
-        filters=(
-            ("netuid", int(netuid)),
-            ("epoch", "gte", int(start_floor)),
-            ("epoch", "lt", int(epoch)),
-        ),
-        order_by=(("epoch", False),),
-        max_rows=max(10000, int(epoch) - int(start_floor) + 100),
-        allow_partial=True,
+    from gateway.research_lab.champion_settlement_v2 import (
+        load_settled_allocation_history_v2,
+    )
+
+    snapshot_rows = await load_settled_allocation_history_v2(
+        netuid=int(netuid),
+        start_epoch=int(start_floor),
+        end_epoch=int(epoch) - 1,
     )
     return _source_add_paid_alpha_to_date_from_snapshots(snapshot_rows)
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_EVEN
 import logging
 import re
 from typing import Any, Mapping, Sequence
@@ -39,6 +39,9 @@ LEGACY_NONFINALIZATION_TABLE_V2 = (
 CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1 = (
     "research_lab_chain_realized_epoch_settlements_v1"
 )
+CHAIN_REALIZED_SETTLEMENT_ACTIVATION_TABLE_V1 = (
+    "research_lab_chain_realized_settlement_activation_v1"
+)
 CHAIN_REALIZED_OBLIGATION_CREDIT_TABLE_V1 = (
     "research_lab_chain_realized_obligation_credits_v1"
 )
@@ -49,10 +52,21 @@ CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1 = (
     "leadpoet.research_lab_chain_realized_obligation_credit.v1"
 )
 CHAIN_REALIZED_AUTHORITY_TYPE_V1 = "chain_realized_emission_v1"
-_CHAIN_CREDIT_PURPOSES_V1 = {
-    CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
-    CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
-}
+CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1 = (
+    "leadpoet.chain_realized_weight_observation.v1"
+)
+CHAIN_WEIGHT_OBSERVATION_REQUEST_SCHEMA_VERSION_V1 = (
+    "leadpoet.chain_realized_weight_observation_request.v1"
+)
+CHAIN_REALIZED_SETTLEMENT_REQUEST_SCHEMA_VERSION_V1 = (
+    "leadpoet.chain_realized_settlement_request.v1"
+)
+CHAIN_WEIGHT_OBSERVATION_RECEIPT_PURPOSE_V1 = (
+    "research_lab.chain_weight_observation.v1"
+)
+CHAIN_REALIZED_SETTLEMENT_RECEIPT_PURPOSE_V1 = (
+    "research_lab.chain_realized_epoch_settlement.v1"
+)
 _CHAIN_CREDIT_SECTION_BY_KIND_V1 = {
     "champion": "champion_allocations",
     "queued_champion": "queued_champion_allocations",
@@ -60,10 +74,607 @@ _CHAIN_CREDIT_SECTION_BY_KIND_V1 = {
     "reimbursement": "reimbursement_allocations",
 }
 logger = logging.getLogger(__name__)
+_CHAIN_DECIMAL_QUANTUM_V1 = Decimal("0.000000000001")
 
 
 class ChampionSettlementV2Error(RuntimeError):
     """Finalized weight evidence is missing, inconsistent, or tampered."""
+
+
+def _chain_decimal_text_v1(value: Any, field: str) -> str:
+    normalized = _non_negative_decimal_v1(value, field).quantize(
+        _CHAIN_DECIMAL_QUANTUM_V1,
+        rounding=ROUND_HALF_EVEN,
+    )
+    return format(normalized, "f")
+
+
+def validate_chain_weight_observation_v1(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_version",
+        "netuid",
+        "epoch_id",
+        "official_subnet_epoch_id",
+        "cutover_mapping_hash",
+        "close_block",
+        "close_block_hash",
+        "close_state_root",
+        "next_epoch_block",
+        "next_epoch_block_hash",
+        "validator_hotkey",
+        "validator_uid",
+        "metagraph_hotkeys",
+        "weights",
+        "weights_storage_key",
+        "last_update_storage_key",
+        "last_update_block",
+        "last_update_block_hash",
+        "last_update_official_subnet_epoch_id",
+        "active_source_epoch_id",
+        "weights_vector_hash",
+    }:
+        raise ChampionSettlementV2Error(
+            "chain weight observation fields are invalid"
+        )
+    if value.get("schema_version") != CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1:
+        raise ChampionSettlementV2Error(
+            "chain weight observation schema is invalid"
+        )
+    try:
+        netuid = int(value["netuid"])
+        epoch_id = int(value["epoch_id"])
+        official_epoch = int(value["official_subnet_epoch_id"])
+        close_block = int(value["close_block"])
+        next_epoch_block = int(value["next_epoch_block"])
+        validator_uid = int(value["validator_uid"])
+        last_update_block = int(value["last_update_block"])
+        last_update_official_epoch = int(
+            value["last_update_official_subnet_epoch_id"]
+        )
+        active_source_epoch_id = int(value["active_source_epoch_id"])
+    except (TypeError, ValueError) as exc:
+        raise ChampionSettlementV2Error(
+            "chain weight observation scope is invalid"
+        ) from exc
+    if (
+        any(
+            isinstance(value[field], bool)
+            for field in (
+                "netuid",
+                "epoch_id",
+                "official_subnet_epoch_id",
+                "close_block",
+                "next_epoch_block",
+                "validator_uid",
+                "last_update_block",
+                "last_update_official_subnet_epoch_id",
+                "active_source_epoch_id",
+            )
+        )
+        or netuid <= 0
+        or min(
+            epoch_id,
+            official_epoch,
+            close_block,
+            validator_uid,
+            last_update_block,
+            last_update_official_epoch,
+            active_source_epoch_id,
+        )
+        < 0
+        or next_epoch_block != close_block + 1
+        or last_update_block > close_block
+        or last_update_official_epoch > official_epoch
+        or active_source_epoch_id > epoch_id
+    ):
+        raise ChampionSettlementV2Error(
+            "chain weight observation scope is invalid"
+        )
+    for field in (
+        "cutover_mapping_hash",
+        "weights_vector_hash",
+    ):
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(value.get(field) or "")):
+            raise ChampionSettlementV2Error(
+                "chain weight observation %s is invalid" % field
+            )
+    for field in (
+        "close_block_hash",
+        "close_state_root",
+        "next_epoch_block_hash",
+        "last_update_block_hash",
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(value.get(field) or "")):
+            raise ChampionSettlementV2Error(
+                "chain weight observation %s is invalid" % field
+            )
+    validator_hotkey = str(value.get("validator_hotkey") or "")
+    storage_key = str(value.get("weights_storage_key") or "")
+    last_update_key = str(value.get("last_update_storage_key") or "")
+    hotkeys = value.get("metagraph_hotkeys")
+    weights = value.get("weights")
+    if (
+        not validator_hotkey
+        or not storage_key.startswith("0x")
+        or not last_update_key.startswith("0x")
+        or not isinstance(hotkeys, list)
+        or validator_uid >= len(hotkeys)
+        or hotkeys[validator_uid] != validator_hotkey
+        or any(not isinstance(item, str) or not item for item in hotkeys)
+        or not isinstance(weights, list)
+    ):
+        raise ChampionSettlementV2Error(
+            "chain weight observation identities are invalid"
+        )
+    normalized_weights: list[list[int]] = []
+    seen_uids: set[int] = set()
+    for pair in weights:
+        if not isinstance(pair, list) or len(pair) != 2:
+            raise ChampionSettlementV2Error(
+                "chain weight observation vector is invalid"
+            )
+        try:
+            uid, weight = int(pair[0]), int(pair[1])
+        except (TypeError, ValueError) as exc:
+            raise ChampionSettlementV2Error(
+                "chain weight observation vector is invalid"
+            ) from exc
+        if (
+            isinstance(pair[0], bool)
+            or isinstance(pair[1], bool)
+            or uid < 0
+            or uid >= len(hotkeys)
+            or not 1 <= weight <= 65535
+            or uid in seen_uids
+        ):
+            raise ChampionSettlementV2Error(
+                "chain weight observation vector is invalid"
+            )
+        seen_uids.add(uid)
+        normalized_weights.append([uid, weight])
+    normalized_weights.sort()
+    if normalized_weights != weights:
+        raise ChampionSettlementV2Error(
+            "chain weight observation vector is not canonical"
+        )
+    expected_vector_hash = sha256_json(
+        {"uids": [item[0] for item in weights], "weights_u16": [item[1] for item in weights]}
+    )
+    if value.get("weights_vector_hash") != expected_vector_hash:
+        raise ChampionSettlementV2Error(
+            "chain weight observation vector hash differs"
+        )
+    return dict(value)
+
+
+def _preliminary_finalized_bundle_authority_v1(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    bundle_doc = row.get("bundle_doc")
+    finalization_doc = row.get("finalization_doc")
+    if not isinstance(bundle_doc, Mapping) or not isinstance(
+        finalization_doc, Mapping
+    ):
+        raise ChampionSettlementV2Error(
+            "chain settlement bundle authority documents are missing"
+        )
+    bundle = validate_published_weight_bundle_v2(bundle_doc)
+    expected_bundle_fields = {
+        "bundle_hash": bundle["bundle_hash"],
+        "schema_version": str(bundle_doc["schema_version"]),
+        "netuid": bundle["netuid"],
+        "epoch_id": bundle["epoch_id"],
+        "block": bundle["block"],
+        "validator_hotkey": bundle["validator_hotkey"],
+        "root_receipt_hash": bundle["root_receipt_hash"],
+        "weights_hash": bundle["weights_hash"],
+        "snapshot_hash": bundle["snapshot_hash"],
+        "bundle_doc": dict(bundle_doc),
+    }
+    for field, expected in expected_bundle_fields.items():
+        if row.get(field) != expected:
+            raise ChampionSettlementV2Error(
+                "chain settlement bundle row differs at %s" % field
+            )
+    try:
+        finalized_block = int(finalization_doc["finalized_block"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ChampionSettlementV2Error(
+            "chain settlement finalization block is invalid"
+        ) from exc
+    for field, expected in (
+        ("validator_hotkey", bundle["validator_hotkey"]),
+        ("netuid", bundle["netuid"]),
+        ("epoch_id", bundle["epoch_id"]),
+        ("weights_hash", bundle["weights_hash"]),
+        ("weight_receipt_hash", bundle["weight_receipt_hash"]),
+        ("finalized_block", finalized_block),
+    ):
+        if finalization_doc.get(field) != expected or row.get(field) != expected:
+            raise ChampionSettlementV2Error(
+                "chain settlement finalization differs at %s" % field
+            )
+    return {
+        **bundle,
+        "bundle_doc": dict(bundle_doc),
+        "finalized_block": finalized_block,
+        "finalized_block_hash": str(
+            finalization_doc.get("finalized_block_hash") or ""
+        ),
+        "finalization_receipt_hash": str(
+            row.get("finalization_receipt_hash") or ""
+        ),
+    }
+
+
+def select_chain_realized_bundle_candidate_v1(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    observation: Mapping[str, Any],
+) -> dict[str, Any]:
+    observed = validate_chain_weight_observation_v1(observation)
+    observed_pairs = [list(item) for item in observed["weights"]]
+    candidates = []
+    for row in rows:
+        authority = _preliminary_finalized_bundle_authority_v1(row)
+        if (
+            int(authority["netuid"]) == int(observed["netuid"])
+            and int(authority["epoch_id"])
+            == int(observed["active_source_epoch_id"])
+            and authority["validator_hotkey"]
+            == observed["validator_hotkey"]
+            and int(authority["finalized_block"])
+            == int(observed["last_update_block"])
+            and authority["finalized_block_hash"]
+            == observed["last_update_block_hash"]
+            and [
+                [int(uid), int(weight)]
+                for uid, weight in zip(
+                    authority["uids"],
+                    authority["weights_u16"],
+                )
+            ]
+            == observed_pairs
+        ):
+            candidates.append(authority)
+    if not candidates:
+        raise ChampionSettlementV2Error(
+            "no finalized canonical bundle matches the active chain vector"
+        )
+    latest_block = max(int(item["finalized_block"]) for item in candidates)
+    latest = [
+        item for item in candidates if int(item["finalized_block"]) == latest_block
+    ]
+    identities = {
+        (
+            str(item["bundle_hash"]),
+            str(item["finalization_receipt_hash"]),
+        )
+        for item in latest
+    }
+    if len(identities) != 1:
+        raise ChampionSettlementV2Error(
+            "active chain vector has ambiguous finalized bundle authority"
+        )
+    return dict(latest[0])
+
+
+def build_chain_realized_settlement_package_v1(
+    *,
+    observation: Mapping[str, Any],
+    authority: Mapping[str, Any],
+) -> dict[str, Any]:
+    observed = validate_chain_weight_observation_v1(observation)
+    bundle_doc = authority.get("bundle_doc")
+    if not isinstance(bundle_doc, Mapping):
+        raise ChampionSettlementV2Error(
+            "chain settlement bundle document is missing"
+        )
+    bundle = validate_published_weight_bundle_v2(bundle_doc)
+    if (
+        str(authority.get("bundle_hash") or "") != bundle["bundle_hash"]
+        or int(bundle["netuid"]) != int(observed["netuid"])
+        or [
+            [int(uid), int(weight)]
+            for uid, weight in zip(bundle["uids"], bundle["weights_u16"])
+        ]
+        != observed["weights"]
+    ):
+        raise ChampionSettlementV2Error(
+            "chain settlement bundle differs from active weights"
+        )
+    weight_result = bundle_doc["weight_result"]
+    planned_uid_weight_percent = {
+        int(uid): Decimal(str(weight)) * Decimal("100")
+        for uid, weight in zip(
+            weight_result["uids"],
+            weight_result["weights"],
+        )
+    }
+    total_observed_weight = sum(
+        int(weight) for _uid, weight in observed["weights"]
+    )
+    if total_observed_weight <= 0:
+        raise ChampionSettlementV2Error(
+            "chain settlement active weight vector is empty"
+        )
+    observed_uid_weight_percent = {
+        int(uid): (
+            Decimal(int(weight))
+            * Decimal("100")
+            / Decimal(total_observed_weight)
+        ).quantize(_CHAIN_DECIMAL_QUANTUM_V1, rounding=ROUND_HALF_EVEN)
+        for uid, weight in observed["weights"]
+    }
+    snapshot = bundle_doc["weight_snapshot"]
+    calculation = snapshot["calculation_snapshot"]
+    allocation = calculation.get("research_lab_allocation_doc")
+    input_receipts = snapshot.get("input_receipt_hashes")
+    if not isinstance(allocation, Mapping) or not isinstance(
+        input_receipts, Mapping
+    ):
+        raise ChampionSettlementV2Error(
+            "chain settlement allocation evidence is missing"
+        )
+    allocation_hash = str(allocation.get("allocation_hash") or "")
+    if allocation_hash != sha256_json(
+        {key: value for key, value in allocation.items() if key != "allocation_hash"}
+    ):
+        raise ChampionSettlementV2Error(
+            "chain settlement allocation hash is invalid"
+        )
+    allocation_receipt_hash = str(
+        input_receipts.get("research_lab_allocation") or ""
+    )
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", allocation_receipt_hash):
+        raise ChampionSettlementV2Error(
+            "chain settlement allocation receipt is invalid"
+        )
+
+    section_specs = (
+        ("champion_allocations", "champion", ("champion_reward_id", "source_id")),
+        (
+            "queued_champion_allocations",
+            "queued_champion",
+            ("champion_reward_id", "source_id"),
+        ),
+        ("source_add_allocations", "source_add", ("source_add_reward_id", "source_id")),
+        ("reimbursement_allocations", "reimbursement", ("schedule_id", "source_id")),
+    )
+    close_hotkeys = list(observed["metagraph_hotkeys"])
+    credits: list[dict[str, Any]] = []
+    eligible_allocations: list[dict[str, Any]] = []
+    planned_lab_by_uid: dict[int, Decimal] = defaultdict(Decimal)
+    seen_obligations: set[tuple[str, str]] = set()
+    observation_hash = sha256_json(observed)
+    for section, kind, source_fields in section_specs:
+        rows = allocation.get(section) or []
+        if not isinstance(rows, list):
+            raise ChampionSettlementV2Error(
+                "chain settlement allocation section is invalid"
+            )
+        for raw_item in rows:
+            if not isinstance(raw_item, Mapping):
+                raise ChampionSettlementV2Error(
+                    "chain settlement allocation item is invalid"
+                )
+            item = dict(raw_item)
+            source_id = next(
+                (
+                    str(item.get(field) or "")
+                    for field in source_fields
+                    if str(item.get(field) or "")
+                ),
+                "",
+            )
+            try:
+                uid = int(item.get("uid", item.get("miner_uid")))
+            except (TypeError, ValueError) as exc:
+                raise ChampionSettlementV2Error(
+                    "chain settlement allocation UID is invalid"
+                ) from exc
+            hotkey = str(item.get("miner_hotkey") or "")
+            paid = _non_negative_decimal_v1(
+                item.get("paid_alpha_percent"),
+                "paid_alpha_percent",
+            )
+            if paid <= 0:
+                continue
+            obligation_identity_kind = (
+                "champion"
+                if kind in {"champion", "queued_champion"}
+                else kind
+            )
+            obligation_key = (obligation_identity_kind, source_id)
+            if (
+                not source_id
+                or obligation_key in seen_obligations
+                or uid < 0
+                or uid >= len(close_hotkeys)
+                or not hotkey
+            ):
+                raise ChampionSettlementV2Error(
+                    "chain settlement allocation identity is invalid"
+                )
+            seen_obligations.add(obligation_key)
+            if close_hotkeys[uid] != hotkey:
+                continue
+            planned_lab_by_uid[uid] += paid
+            scheduled_value = item.get("base_desired_alpha_percent")
+            eligible_allocations.append(
+                {
+                    "section": section,
+                    "kind": kind,
+                    "source_id": source_id,
+                    "uid": uid,
+                    "hotkey": hotkey,
+                    "paid": paid,
+                    "scheduled": _non_negative_decimal_v1(
+                        (
+                            paid
+                            if scheduled_value in (None, "")
+                            else scheduled_value
+                        ),
+                        "scheduled_alpha_percent",
+                    ),
+                }
+            )
+
+    for uid, planned_lab in planned_lab_by_uid.items():
+        planned_percent = planned_uid_weight_percent.get(uid, Decimal("0"))
+        if (
+            planned_percent <= 0
+            or planned_lab > planned_percent + Decimal("0.000000001")
+        ):
+            raise ChampionSettlementV2Error(
+                "chain settlement Lab attribution exceeds canonical weight"
+            )
+
+    allocations_by_uid: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for item in eligible_allocations:
+        allocations_by_uid[int(item["uid"])].append(item)
+    for uid in sorted(allocations_by_uid):
+        items = sorted(
+            allocations_by_uid[uid],
+            key=lambda item: (str(item["kind"]), str(item["source_id"])),
+        )
+        planned_lab = planned_lab_by_uid[uid]
+        observed_percent = observed_uid_weight_percent.get(
+            uid, Decimal("0")
+        )
+        realized_total = min(planned_lab, observed_percent).quantize(
+            _CHAIN_DECIMAL_QUANTUM_V1,
+            rounding=ROUND_HALF_EVEN,
+        )
+        realized_values = [
+            min(
+                Decimal(
+                    _chain_decimal_text_v1(
+                        item["paid"],
+                        "paid_alpha_percent",
+                    )
+                ),
+                (
+                    realized_total * Decimal(item["paid"]) / planned_lab
+                ).quantize(
+                    _CHAIN_DECIMAL_QUANTUM_V1,
+                    rounding=ROUND_HALF_EVEN,
+                ),
+            )
+            for item in items
+        ]
+        delta = realized_total - sum(realized_values)
+        for ordinal, item in enumerate(items):
+            if delta == 0:
+                break
+            if delta > 0:
+                maximum = Decimal(
+                    _chain_decimal_text_v1(
+                        item["paid"],
+                        "paid_alpha_percent",
+                    )
+                )
+                adjustment = min(delta, maximum - realized_values[ordinal])
+            else:
+                adjustment = -min(-delta, realized_values[ordinal])
+            realized_values[ordinal] += adjustment
+            delta -= adjustment
+        if delta != 0 or sum(realized_values) != realized_total:
+            raise ChampionSettlementV2Error(
+                "chain settlement realized allocation is inconsistent"
+            )
+
+        for item, realized in zip(items, realized_values):
+            scheduled = Decimal(item["scheduled"])
+            credited = (
+                min(realized, scheduled) if scheduled > 0 else realized
+            )
+            credit_doc = {
+                "schema_version": CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
+                "netuid": int(observed["netuid"]),
+                "epoch_id": int(observed["epoch_id"]),
+                "obligation_kind": str(item["kind"]),
+                "obligation_source_id": str(item["source_id"]),
+                "miner_hotkey": str(item["hotkey"]),
+                "miner_uid": uid,
+                "observed_chain_alpha_percent": _chain_decimal_text_v1(
+                    observed_percent,
+                    "observed_chain_alpha_percent",
+                ),
+                "lab_attributed_alpha_percent": _chain_decimal_text_v1(
+                    realized,
+                    "lab_attributed_alpha_percent",
+                ),
+                "scheduled_alpha_percent": _chain_decimal_text_v1(
+                    scheduled,
+                    "scheduled_alpha_percent",
+                ),
+                "credited_alpha_percent": _chain_decimal_text_v1(
+                    credited,
+                    "credited_alpha_percent",
+                ),
+                "attribution_doc": {
+                    "schema_version": "leadpoet.chain_realized_lab_attribution.v1",
+                    "source_bundle_hash": bundle["bundle_hash"],
+                    "source_bundle_epoch_id": int(bundle["epoch_id"]),
+                    "source_allocation_hash": allocation_hash,
+                    "source_allocation_receipt_hash": allocation_receipt_hash,
+                    "allocation_section": str(item["section"]),
+                },
+                "observation_doc": {
+                    "schema_version": "leadpoet.chain_realized_weight_observation_ref.v1",
+                    "observation_hash": observation_hash,
+                    "close_block": int(observed["close_block"]),
+                    "close_block_hash": str(observed["close_block_hash"]),
+                    "weights_vector_hash": str(observed["weights_vector_hash"]),
+                },
+            }
+            credits.append(
+                {
+                    "credit_hash": sha256_json(credit_doc),
+                    "credit_doc": credit_doc,
+                }
+            )
+    credits.sort(key=lambda item: str(item["credit_hash"]))
+    settlement_doc = {
+        "schema_version": CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+        "netuid": int(observed["netuid"]),
+        "epoch_id": int(observed["epoch_id"]),
+        "credit_hashes": [str(item["credit_hash"]) for item in credits],
+        "observation_summary": {
+            "schema_version": "leadpoet.chain_realized_observation_summary.v1",
+            "observation_hash": observation_hash,
+            "weights_vector_hash": str(observed["weights_vector_hash"]),
+            "close_block": int(observed["close_block"]),
+            "close_block_hash": str(observed["close_block_hash"]),
+            "official_subnet_epoch_id": int(
+                observed["official_subnet_epoch_id"]
+            ),
+            "validator_hotkey": str(observed["validator_hotkey"]),
+            "validator_uid": int(observed["validator_uid"]),
+            "source_bundle_hash": bundle["bundle_hash"],
+            "source_bundle_epoch_id": int(bundle["epoch_id"]),
+            "source_bundle_finalized_block": int(authority["finalized_block"]),
+            "source_bundle_finalized_block_hash": str(
+                authority["finalized_block_hash"]
+            ),
+            "last_update_block": int(observed["last_update_block"]),
+            "last_update_block_hash": str(
+                observed["last_update_block_hash"]
+            ),
+            "active_source_epoch_id": int(
+                observed["active_source_epoch_id"]
+            ),
+            "complete": True,
+        },
+    }
+    return {
+        "settlement_doc": settlement_doc,
+        "settlement_hash": sha256_json(settlement_doc),
+        "credits": credits,
+    }
 
 
 def _allocation_authority_receipt_hash_v2(
@@ -626,7 +1237,111 @@ def validate_chain_realized_epoch_settlements_v1(
             raise ChampionSettlementV2Error(
                 "chain realized settlement credit hashes are invalid"
             )
-        if not isinstance(document.get("observation_summary"), Mapping):
+        observation_summary = document.get("observation_summary")
+        if (
+            not isinstance(observation_summary, Mapping)
+            or set(observation_summary)
+            != {
+                "schema_version",
+                "observation_hash",
+                "weights_vector_hash",
+                "close_block",
+                "close_block_hash",
+                "official_subnet_epoch_id",
+                "validator_hotkey",
+                "validator_uid",
+                "source_bundle_hash",
+                "source_bundle_epoch_id",
+                "source_bundle_finalized_block",
+                "source_bundle_finalized_block_hash",
+                "last_update_block",
+                "last_update_block_hash",
+                "active_source_epoch_id",
+                "complete",
+            }
+            or observation_summary.get("schema_version")
+            != "leadpoet.chain_realized_observation_summary.v1"
+            or observation_summary.get("complete") is not True
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement observation summary is invalid"
+            )
+        for field in (
+            "observation_hash",
+            "weights_vector_hash",
+            "source_bundle_hash",
+        ):
+            if not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(observation_summary.get(field) or ""),
+            ):
+                raise ChampionSettlementV2Error(
+                    "chain realized settlement observation summary is invalid"
+                )
+        if not re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(observation_summary.get("close_block_hash") or ""),
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement observation summary is invalid"
+            )
+        if not re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(observation_summary.get("last_update_block_hash") or ""),
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement observation summary is invalid"
+            )
+        if not re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(
+                observation_summary.get(
+                    "source_bundle_finalized_block_hash"
+                )
+                or ""
+            ),
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement observation summary is invalid"
+            )
+        try:
+            summary_epoch = int(
+                observation_summary["official_subnet_epoch_id"]
+            )
+            source_epoch = int(observation_summary["source_bundle_epoch_id"])
+            active_source_epoch = int(
+                observation_summary["active_source_epoch_id"]
+            )
+            close_block = int(observation_summary["close_block"])
+            finalized_block = int(
+                observation_summary["source_bundle_finalized_block"]
+            )
+            last_update_block = int(
+                observation_summary["last_update_block"]
+            )
+            validator_uid = int(observation_summary["validator_uid"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ChampionSettlementV2Error(
+                "chain realized settlement observation summary is invalid"
+            ) from exc
+        if (
+            min(
+                summary_epoch,
+                source_epoch,
+                active_source_epoch,
+                close_block,
+                finalized_block,
+                last_update_block,
+                validator_uid,
+            )
+            < 0
+            or source_epoch != active_source_epoch
+            or finalized_block != last_update_block
+            or observation_summary["source_bundle_finalized_block_hash"]
+            != observation_summary["last_update_block_hash"]
+            or last_update_block > close_block
+            or active_source_epoch > epoch_id
+        ):
             raise ChampionSettlementV2Error(
                 "chain realized settlement observation summary is invalid"
             )
@@ -653,7 +1368,7 @@ def validate_chain_realized_epoch_settlements_v1(
         _chain_realized_receipt_root_v1(
             receipt_hash=receipt_hash,
             receipt_graphs=receipt_graphs,
-            purpose=CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+            purpose=CHAIN_REALIZED_SETTLEMENT_RECEIPT_PURPOSE_V1,
             output_root=settlement_hash,
         )
         settled.append(
@@ -689,6 +1404,12 @@ def validate_chain_realized_obligation_credits_v1(
     credits_by_settlement: dict[tuple[int, int, str], list[dict[str, Any]]] = defaultdict(list)
     seen_credit_hashes: set[str] = set()
     seen_obligations: set[tuple[int, int, str, str]] = set()
+    attributed_by_uid: dict[
+        tuple[tuple[int, int, str], int], Decimal
+    ] = defaultdict(Decimal)
+    observed_by_uid: dict[
+        tuple[tuple[int, int, str], int], tuple[str, Decimal]
+    ] = {}
     for raw_row in credit_rows:
         row = dict(raw_row)
         document = row.get("credit_doc")
@@ -766,12 +1487,62 @@ def validate_chain_realized_obligation_credits_v1(
             raise ChampionSettlementV2Error(
                 "chain realized credit exceeds scheduled epoch amount"
             )
-        if not isinstance(document.get("attribution_doc"), Mapping) or not isinstance(
-            document.get("observation_doc"), Mapping
+        attribution_doc = document.get("attribution_doc")
+        observation_doc = document.get("observation_doc")
+        if (
+            not isinstance(attribution_doc, Mapping)
+            or set(attribution_doc)
+            != {
+                "schema_version",
+                "source_bundle_hash",
+                "source_bundle_epoch_id",
+                "source_allocation_hash",
+                "source_allocation_receipt_hash",
+                "allocation_section",
+            }
+            or attribution_doc.get("schema_version")
+            != "leadpoet.chain_realized_lab_attribution.v1"
+            or attribution_doc.get("allocation_section")
+            != _CHAIN_CREDIT_SECTION_BY_KIND_V1[kind]
+            or not isinstance(observation_doc, Mapping)
+            or set(observation_doc)
+            != {
+                "schema_version",
+                "observation_hash",
+                "close_block",
+                "close_block_hash",
+                "weights_vector_hash",
+            }
+            or observation_doc.get("schema_version")
+            != "leadpoet.chain_realized_weight_observation_ref.v1"
         ):
             raise ChampionSettlementV2Error(
                 "chain realized credit evidence documents are invalid"
             )
+        for evidence, fields in (
+            (
+                attribution_doc,
+                (
+                    "source_bundle_hash",
+                    "source_allocation_hash",
+                    "source_allocation_receipt_hash",
+                ),
+            ),
+            (
+                observation_doc,
+                ("observation_hash", "weights_vector_hash"),
+            ),
+        ):
+            if any(
+                not re.fullmatch(
+                    r"sha256:[0-9a-f]{64}",
+                    str(evidence.get(field) or ""),
+                )
+                for field in fields
+            ):
+                raise ChampionSettlementV2Error(
+                    "chain realized credit evidence documents are invalid"
+                )
         credit_hash = sha256_json(dict(document))
         settlement_hash = str(row.get("settlement_hash") or "")
         settlement_key = (netuid, epoch_id, settlement_hash)
@@ -810,18 +1581,43 @@ def validate_chain_realized_obligation_credits_v1(
                 "chain realized credit hash is duplicated"
             )
         seen_credit_hashes.add(credit_hash)
-        obligation_key = (netuid, epoch_id, kind, source_id)
+        obligation_identity_kind = (
+            "champion"
+            if kind in {"champion", "queued_champion"}
+            else kind
+        )
+        obligation_key = (
+            netuid,
+            epoch_id,
+            obligation_identity_kind,
+            source_id,
+        )
         if obligation_key in seen_obligations:
             raise ChampionSettlementV2Error(
                 "chain realized obligation credit is duplicated"
             )
         seen_obligations.add(obligation_key)
+        uid_key = (settlement_key, miner_uid)
+        existing_observation = observed_by_uid.get(uid_key)
+        if existing_observation is not None and existing_observation != (
+            hotkey,
+            observed,
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized UID observation is inconsistent"
+            )
+        observed_by_uid[uid_key] = (hotkey, observed)
+        attributed_by_uid[uid_key] += attributed
+        if attributed_by_uid[uid_key] > observed:
+            raise ChampionSettlementV2Error(
+                "chain realized UID attribution exceeds observed weight"
+            )
         receipt_hash = str(row.get("credit_receipt_hash") or "")
         _chain_realized_receipt_root_v1(
             receipt_hash=receipt_hash,
             receipt_graphs=receipt_graphs,
-            purpose=CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
-            output_root=credit_hash,
+            purpose=CHAIN_REALIZED_SETTLEMENT_RECEIPT_PURPOSE_V1,
+            output_root=settlement_hash,
         )
         credits_by_settlement[settlement_key].append(
             {
@@ -1090,7 +1886,22 @@ async def load_chain_realized_allocation_history_v1(
     if int(end_epoch) < int(start_epoch):
         return []
     from gateway.research_lab.attested_v2_store import load_receipt_graphs_v2
-    from gateway.research_lab.store import select_all
+    from gateway.research_lab.store import select_all, select_many
+
+    activation_rows = await select_many(
+        CHAIN_REALIZED_SETTLEMENT_ACTIVATION_TABLE_V1,
+        columns=(
+            "netuid,schema_version,first_epoch_id,source_bundle_hash,"
+            "source_bundle_epoch_id,source_finalized_block"
+        ),
+        filters=(("netuid", int(netuid)),),
+        order_by=(("first_epoch_id", False),),
+        limit=1,
+    )
+    if len(activation_rows) != 1:
+        raise ChampionSettlementV2Error(
+            "chain realized settlement activation is unavailable"
+        )
 
     settlement_rows = await select_all(
         CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1,
@@ -1103,6 +1914,42 @@ async def load_chain_realized_allocation_history_v1(
         max_rows=max(1000, int(end_epoch) - int(start_epoch) + 1),
         allow_partial=False,
     )
+    activation = activation_rows[0]
+    try:
+        activation_netuid = int(activation["netuid"])
+        activation_epoch = int(activation["first_epoch_id"])
+        source_epoch = int(activation["source_bundle_epoch_id"])
+        source_finalized_block = int(activation["source_finalized_block"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ChampionSettlementV2Error(
+            "chain realized settlement activation is invalid"
+        ) from exc
+    if (
+        activation.get("schema_version")
+        != "leadpoet.research_lab_chain_realized_settlement_activation.v1"
+        or activation_netuid != int(netuid)
+        or activation_epoch < 0
+        or source_epoch != activation_epoch
+        or source_finalized_block < 0
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(activation.get("source_bundle_hash") or ""),
+        )
+    ):
+        raise ChampionSettlementV2Error(
+            "chain realized settlement activation is invalid"
+        )
+    expected_epochs = set(
+        range(
+            max(int(start_epoch), activation_epoch),
+            int(end_epoch) + 1,
+        )
+    )
+    observed_epochs = {int(row["epoch_id"]) for row in settlement_rows}
+    if observed_epochs != expected_epochs:
+        raise ChampionSettlementV2Error(
+            "chain realized settlement history is incomplete"
+        )
     if not settlement_rows:
         return []
     settlement_roots = {
@@ -1354,7 +2201,7 @@ async def champion_v2_cutover_readiness(
         if int(row.get("start_epoch") or 0) <= int(epoch)
     ]
     finalized = (
-        await load_finalized_allocation_history_v2(
+        await load_settled_allocation_history_v2(
             netuid=int(netuid),
             start_epoch=min(starts),
             end_epoch=int(epoch) - 1,
@@ -1502,11 +2349,21 @@ async def champion_v2_cutover_readiness(
     finalized_by_epoch = {
         int(item["epoch"]): item for item in finalized
     }
+    chain_realized_epochs = {
+        epoch_id
+        for epoch_id, item in finalized_by_epoch.items()
+        if CHAIN_REALIZED_AUTHORITY_TYPE_V1
+        in set(item.get("authority_types") or ())
+    }
     nonfinalized_by_epoch = {
         int(item["epoch"]): item for item in nonfinalized
     }
     conflicting_classification_epochs = sorted(
-        set(finalized_by_epoch) & set(nonfinalized_by_epoch)
+        (
+            set(finalized_by_epoch)
+            & set(nonfinalized_by_epoch)
+        )
+        - chain_realized_epochs
     )
     invalid_settlements: list[dict[str, Any]] = []
     for conflict_epoch in conflicting_classification_epochs:
@@ -1638,6 +2495,13 @@ async def champion_v2_cutover_readiness(
         )
 
     for settlement_epoch, authority in sorted(finalized_by_epoch.items()):
+        if settlement_epoch in chain_realized_epochs:
+            # The normalized chain-realized row is already validated against
+            # its complete coordinator receipt and credit set. It deliberately
+            # uses the settlement hash rather than the legacy allocation hash,
+            # so it must not be reclassified by the pre-activation snapshot
+            # path below.
+            continue
         try:
             authority_epoch, allocation_hash, pays_active = (
                 _legacy_allocation_active_champion_payment_v2(
@@ -1665,7 +2529,11 @@ async def champion_v2_cutover_readiness(
             )
 
     candidate_epochs = sorted(
-        set(current_payment_allocations) | set(anchors_by_epoch)
+        (
+            set(current_payment_allocations)
+            | set(anchors_by_epoch)
+        )
+        - chain_realized_epochs
     )
     for settlement_epoch in candidate_epochs:
         current_hash = current_payment_allocations.get(settlement_epoch)

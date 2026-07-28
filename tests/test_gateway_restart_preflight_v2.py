@@ -392,6 +392,23 @@ class _SchemaResponse:
         return self.body if _size < 0 else self.body[:_size]
 
 
+def _chain_realized_activation_response() -> bytes:
+    return json.dumps(
+        [
+            {
+                "netuid": 71,
+                "schema_version": (
+                    "leadpoet.research_lab_chain_realized_settlement_activation.v1"
+                ),
+                "first_epoch_id": 24196,
+                "source_bundle_hash": "sha256:" + "a" * 64,
+                "source_bundle_epoch_id": 24196,
+                "source_finalized_block": 8715224,
+            }
+        ]
+    ).encode()
+
+
 def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     requests = []
 
@@ -403,6 +420,12 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
                 for _migration, function_name in schema_preflight.REQUIRED_SUPABASE_V2_RPCS
             }
             return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
+        if (
+            "research_lab_chain_realized_settlement_activation_v1"
+            in request.full_url
+            and "limit=2" in request.full_url
+        ):
+            return _SchemaResponse(body=_chain_realized_activation_response())
         return _SchemaResponse()
 
     result = schema_preflight.verify_required_supabase_v2_schema(
@@ -416,15 +439,22 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert result["status"] == "ready"
     assert result["probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
-    ) + len(schema_preflight.REQUIRED_SUPABASE_V2_RPCS)
+    ) + len(schema_preflight.REQUIRED_SUPABASE_V2_RPCS) + 1
     assert result["table_probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
     )
     assert result["rpc_probe_count"] == len(
         schema_preflight.REQUIRED_SUPABASE_V2_RPCS
     )
+    assert result["data_probe_count"] == 1
     assert result["schema_document_probe_count"] == 1
-    assert len(requests) == result["table_probe_count"] + 1
+    assert result["chain_realized_settlement_activation"] == {
+        "netuid": 71,
+        "first_epoch_id": 24196,
+        "source_bundle_hash": "sha256:" + "a" * 64,
+        "source_finalized_block": 8715224,
+    }
+    assert len(requests) == result["table_probe_count"] + 2
     assert all("/rest/v1/" in request.full_url for request, _timeout in requests)
     table_requests = [
         request
@@ -436,7 +466,20 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         for request, _timeout in requests
         if request.full_url.endswith("/rest/v1/")
     ]
-    assert all("limit=0" in request.full_url for request in table_requests)
+    activation_requests = [
+        request
+        for request in table_requests
+        if "research_lab_chain_realized_settlement_activation_v1"
+        in request.full_url
+        and "limit=2" in request.full_url
+    ]
+    schema_table_requests = [
+        request for request in table_requests if request not in activation_requests
+    ]
+    assert all(
+        "limit=0" in request.full_url for request in schema_table_requests
+    )
+    assert len(activation_requests) == 1
     assert len(schema_requests) == 1
     assert schema_requests[0].headers["Accept"] == "application/openapi+json"
     assert {
@@ -447,6 +490,7 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/121-research-lab-atomic-candidate-claim.sql",
         "scripts/122-research-lab-atomic-run-claim.sql",
         "scripts/123-research-lab-corpus-completeness.sql",
+        "scripts/126-research-lab-chain-realized-settlement.sql",
     }.issubset(set(result["migration_files"]))
     assert "service-role-value" not in str(result)
 
@@ -480,11 +524,43 @@ def test_required_supabase_v2_schema_names_missing_rpc_migration() -> None:
         del timeout
         if request.full_url.endswith("/rest/v1/"):
             return _SchemaResponse(body=b'{"paths":{}}')
+        if (
+            "research_lab_chain_realized_settlement_activation_v1"
+            in request.full_url
+            and "limit=2" in request.full_url
+        ):
+            return _SchemaResponse(body=_chain_realized_activation_response())
         return _SchemaResponse()
 
     with pytest.raises(
         schema_preflight.SupabaseSchemaPreflightV2Error,
         match=r"research_lab_missing_trajectory_ids.*117-research-lab-trajectory",
+    ):
+        schema_preflight.verify_required_supabase_v2_schema(
+            {
+                "SUPABASE_URL": "https://project.supabase.co",
+                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
+            },
+            opener=opener,
+        )
+
+
+def test_required_supabase_v2_schema_requires_chain_realized_activation() -> None:
+    def opener(request, *, timeout):
+        del timeout
+        if request.full_url.endswith("/rest/v1/"):
+            paths = {
+                f"/rpc/{function_name}": {"post": {}}
+                for _migration, function_name in (
+                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+                )
+            }
+            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
+        return _SchemaResponse(body=b"[]")
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match="activation is missing or ambiguous",
     ):
         schema_preflight.verify_required_supabase_v2_schema(
             {

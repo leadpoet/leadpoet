@@ -25,6 +25,7 @@ from leadpoet_canonical.sourcing_history_v2 import (
 )
 from leadpoet_canonical.weight_computation import (
     WEIGHT_SNAPSHOT_SCHEMA_VERSION,
+    WeightComputationError,
     weight_config_hash,
 )
 from leadpoet_canonical.weight_authority_v2 import (
@@ -78,6 +79,7 @@ def _snapshot(**overrides):
             "queued_champion_allocations": [],
         },
         "leaderboard_bonus_share": 0.095,
+        "leaderboard_emissions_enabled": True,
         "leaderboard_rank_shares": [0.05, 0.03, 0.015],
         "leaderboard_entries": [],
         "leaderboard_fetch_ok": True,
@@ -225,6 +227,47 @@ def test_leaderboard_reconstructs_wins_tiebreak_and_ban_filter():
     ]
 
 
+def test_disabled_leaderboard_emissions_commits_empty_leaderboard_without_db_read():
+    reader = FakeReader(
+        {
+            "fulfillment_leaderboard_winners": [
+                {"miner_hotkey": "miner", "reward_pct": 0.5},
+            ],
+            "banned_hotkeys": [],
+        }
+    )
+    snapshot = _snapshot(
+        leaderboard_emissions_enabled=False,
+        leaderboard_entries=[],
+    )
+    source = CoordinatorWeightSourceV2(reader)
+    document = source.resolve(
+        payload=_payload("leaderboard", snapshot=snapshot),
+        context=_context("research_lab.leaderboard_input.v2"),
+    )
+    assert document["value"] == {
+        "leaderboard_bonus_share": 0.095,
+        "leaderboard_emissions_enabled": False,
+        "leaderboard_rank_shares": [0.05, 0.03, 0.015],
+        "leaderboard_entries": [],
+        "leaderboard_fetch_ok": True,
+    }
+    assert reader.calls == []
+
+
+def test_leaderboard_emissions_flag_rejects_non_boolean_values():
+    source = CoordinatorWeightSourceV2(FakeReader({}))
+    snapshot = _snapshot(
+        leaderboard_emissions_enabled="false",
+        leaderboard_entries=[],
+    )
+    with pytest.raises(WeightComputationError, match="must be boolean"):
+        source.resolve(
+            payload=_payload("leaderboard", snapshot=snapshot),
+            context=_context("research_lab.leaderboard_input.v2"),
+        )
+
+
 def test_disabled_fulfillment_commits_empty_leaderboard_without_paying_rows():
     reader = FakeReader(
         {
@@ -246,13 +289,7 @@ def test_disabled_fulfillment_commits_empty_leaderboard_without_paying_rows():
         context=_context("research_lab.leaderboard_input.v2"),
     )
     assert document["value"]["leaderboard_entries"] == []
-    assert reader.calls[0] == (
-        "fulfillment_leaderboard_winners",
-        {
-            "window_start": "2026-07-03T20:00:00Z",
-            "window_end": "2026-07-10T20:00:00Z",
-        },
-    )
+    assert reader.calls == []
 
 
 def test_sourcing_history_is_rebuilt_only_from_signed_epoch_receipts():

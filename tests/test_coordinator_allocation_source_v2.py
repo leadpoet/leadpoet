@@ -59,7 +59,6 @@ def _policy():
         "research_lab_emission_percent": 20.0,
         "reward_epochs": 20,
         "reimbursement_epochs": 20,
-        "reimbursement_allow_overpay_without_champions": True,
         "reimbursement_max_cost_multiplier_with_champions": 1.0,
         "champion_placeholder_alpha_percent": 0.0001,
         "champion_queue_trigger_ratio": 0.5,

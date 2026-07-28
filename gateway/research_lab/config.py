@@ -672,7 +672,9 @@ class ResearchLabGatewayConfig:
     fulfillment_emission_percent: float = 60.5
     fulfillment_leaderboard_emission_percent: float = 9.5
     lab_reward_epochs: int = 20
-    lab_reimbursement_allow_overpay_without_champions: bool = True
+    # Deprecated, inert compatibility field retained for the sealed V2 config
+    # schema. The allocator no longer has an overpayment path.
+    lab_reimbursement_allow_overpay_without_champions: bool = False
     lab_reimbursement_max_cost_multiplier_with_champions: float = 1.0
     lab_reimbursement_min_alpha_percent: float = 0.0
     lab_champion_min_alpha_percent: float = 7.0
@@ -1225,10 +1227,6 @@ class ResearchLabGatewayConfig:
                 _float("RESEARCH_LAB_FULFILLMENT_LEADERBOARD_EMISSION_PERCENT", 9.5),
             ),
             lab_reward_epochs=max(1, _int("RESEARCH_LAB_REWARD_EPOCHS", 20)),
-            lab_reimbursement_allow_overpay_without_champions=_truthy(
-                "RESEARCH_LAB_REIMBURSEMENT_ALLOW_OVERPAY_WITHOUT_CHAMPIONS",
-                "true",
-            ),
             lab_reimbursement_max_cost_multiplier_with_champions=max(
                 0.0,
                 _float("RESEARCH_LAB_REIMBURSEMENT_MAX_COST_MULTIPLIER_WITH_CHAMPIONS", 1.0),
@@ -1645,9 +1643,7 @@ class ResearchLabGatewayConfig:
             "fulfillment_emission_percent": self.fulfillment_emission_percent,
             "fulfillment_leaderboard_emission_percent": self.fulfillment_leaderboard_emission_percent,
             "reward_epochs": self.lab_reward_epochs,
-            "reimbursement_allow_overpay_without_champions": (
-                self.lab_reimbursement_allow_overpay_without_champions
-            ),
+            "reimbursement_allow_overpay_without_champions": False,
             "reimbursement_max_cost_multiplier_with_champions": (
                 self.lab_reimbursement_max_cost_multiplier_with_champions
             ),
@@ -1799,7 +1795,7 @@ class ResearchLabGatewayConfig:
                 "fulfillment_emission_percent": self.fulfillment_emission_percent,
                 "fulfillment_leaderboard_emission_percent": self.fulfillment_leaderboard_emission_percent,
                 "reward_epochs": self.lab_reward_epochs,
-                "allow_overpay_without_champions": self.lab_reimbursement_allow_overpay_without_champions,
+                "allow_overpay_without_champions": False,
                 "max_cost_multiplier_with_champions": self.lab_reimbursement_max_cost_multiplier_with_champions,
                 "champion_min_alpha_percent": self.lab_champion_min_alpha_percent,
                 "champion_extra_alpha_percent_per_point": self.lab_champion_extra_alpha_percent_per_point,

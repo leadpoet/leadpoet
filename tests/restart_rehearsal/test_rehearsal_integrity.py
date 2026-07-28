@@ -266,6 +266,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "transport_contract_valid": True,
             "finalized_view_projection_exact": True,
             "settlement_authority_parsed": True,
+            "measured_settlement_receipt_projection_exact": True,
             "tampered_weight_receipt_rejected": True,
             "required_schema_migrations_declared": True,
         },
@@ -302,7 +303,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
     assert verify_migration_backed_database_contract(COMMIT) == (
         hashlib.sha256(contract_path.read_bytes()).hexdigest()
     )
-    contract["checks"]["settlement_authority_parsed"] = False
+    contract["checks"]["measured_settlement_receipt_projection_exact"] = False
     contract_path.write_text(json.dumps(contract), encoding="utf-8")
     with pytest.raises(SystemExit, match="evidence is incomplete"):
         verify_migration_backed_database_contract(COMMIT)

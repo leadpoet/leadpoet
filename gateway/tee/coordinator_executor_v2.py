@@ -501,6 +501,10 @@ class CoordinatorExecutorV2:
             ]
             return ExecutionResultV2(
                 output=document,
+                receipt_output=coordinator_receipt_output_v2(
+                    operation,
+                    document,
+                ),
                 artifact_hashes=(
                     str(document["settlement_hash"]),
                     *credit_hashes,

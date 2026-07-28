@@ -325,6 +325,7 @@ def verify_migration_backed_database_contract(candidate_sha: str) -> str:
         "transport_contract_valid",
         "finalized_view_projection_exact",
         "settlement_authority_parsed",
+        "measured_settlement_receipt_projection_exact",
         "tampered_weight_receipt_rejected",
         "required_schema_migrations_declared",
     }

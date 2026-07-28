@@ -202,6 +202,10 @@ async def test_coordinator_chain_realized_authorities_are_measured_and_bound():
         OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
         settlement_result.output,
     ) == settlement
+    assert settlement_result.receipt_output == settlement
+    assert sha256_json(settlement_result.receipt_output) == sha256_json(
+        settlement
+    )
     assert settlement_result.artifact_hashes == (
         settlement_hash,
         credit_hash,

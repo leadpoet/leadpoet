@@ -209,6 +209,23 @@ class SanitizedWeightFixture:
         parent_hashes: list[str],
         allocation_hash: str,
     ) -> dict[str, Any]:
+        allocation_doc = {
+            "lab_cap_percent": 20.0,
+            "unallocated_percent": 15.0,
+            "reimbursement_allocations": [],
+            "champion_allocations": [
+                {
+                    "champion_reward_id": (
+                        f"rehearsal-champion-{self.epoch_id}"
+                    ),
+                    "uid": 2,
+                    "miner_hotkey": "lab-hotkey",
+                    "paid_alpha_percent": 5.0,
+                }
+            ],
+            "queued_champion_allocations": [],
+        }
+        allocation_doc["allocation_hash"] = sha256_json(allocation_doc)
         snapshot = {
             "schema_version": WEIGHT_SNAPSHOT_SCHEMA_VERSION,
             "netuid": 71,
@@ -234,19 +251,7 @@ class SanitizedWeightFixture:
             "champion_uid": None,
             "effective_champion_share": 0.0,
             "research_lab_fallback_share": 0.2,
-            "research_lab_allocation_doc": {
-                "lab_cap_percent": 20.0,
-                "unallocated_percent": 15.0,
-                "reimbursement_allocations": [],
-                "champion_allocations": [
-                    {
-                        "uid": 2,
-                        "miner_hotkey": "lab-hotkey",
-                        "paid_alpha_percent": 5.0,
-                    }
-                ],
-                "queued_champion_allocations": [],
-            },
+            "research_lab_allocation_doc": allocation_doc,
             "leaderboard_bonus_share": 0.095,
             "leaderboard_rank_shares": [0.05, 0.03, 0.015],
             "leaderboard_entries": [

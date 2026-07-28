@@ -255,7 +255,7 @@ class _Client:
 
 
 class _CoordinatorClient(_Client):
-    def __init__(self, release):
+    def __init__(self, release, *, executor=None):
         super().__init__(release)
         role = "gateway_coordinator"
         summary = release["roles"][role]
@@ -286,10 +286,13 @@ class _CoordinatorClient(_Client):
             boot_identity_supplier=lambda: self.boot,
             sign_digest=self.key.sign,
             operations=COORDINATOR_OPERATIONS_V2,
-            executor=lambda operation, payload, context: {
-                "operation": operation,
-                "echo": payload,
-            },
+            executor=executor
+            or (
+                lambda operation, payload, context: {
+                    "operation": operation,
+                    "echo": payload,
+                }
+            ),
             worker_count=1,
             configured_worker_count=0,
         )
@@ -433,6 +436,71 @@ async def test_v2_bridge_accepts_measured_coordinator_internal_worker_capacity()
     assert result["status"] == "succeeded"
     assert result["physical_role"] == "gateway_coordinator"
     assert client.manager.health()["configured_worker_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_accepts_chain_settlement_projected_receipt():
+    release = _release()
+    settlement_doc = {
+        "schema_version": (
+            "leadpoet.research_lab_chain_realized_epoch_settlement.v1"
+        ),
+        "netuid": 71,
+        "epoch_id": 12,
+        "credit_hashes": [],
+        "observation_summary": {
+            "schema_version": "leadpoet.chain_realized_observation_summary.v1",
+            "complete": True,
+        },
+    }
+    settlement_hash = sha256_json(settlement_doc)
+    executor = CoordinatorExecutorV2(
+        chain_realized_settlement_resolver=lambda _payload, _context: {
+            "settlement_doc": settlement_doc,
+            "settlement_hash": settlement_hash,
+            "credits": [],
+        }
+    )
+    client = _CoordinatorClient(release, executor=executor)
+
+    async def load_missing(**_kwargs):
+        return None
+
+    async def persist(graph):
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    async def persist_result(**kwargs):
+        return _execution_result_storage_row_v2(**kwargs)
+
+    result = await execute_scoring_v2(
+        operation="attest_chain_realized_settlement_v1",
+        purpose="research_lab.chain_realized_epoch_settlement.v1",
+        epoch_id=12,
+        sequence=1,
+        payload={"epoch_id": 12},
+        worker_index=0,
+        provider_profile_loader=lambda *args, **kwargs: {
+            "profile": "default",
+            "credential_ref_hashes": {},
+            "envelopes": [],
+        },
+        release_manifest=release,
+        client=client,
+        persist_graph=persist,
+        load_replayable_result=load_missing,
+        persist_replayable_result=persist_result,
+        boot_verifier=lambda identity: identity,
+        poll_seconds=0.001,
+        operation_registry=COORDINATOR_OPERATIONS_V2,
+        physical_role_override="gateway_coordinator",
+        expected_service_role="gateway_coordinator",
+        rpc_namespace="coordinator_v2",
+        receipt_output_projector=coordinator_receipt_output_v2,
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["result"]["settlement_hash"] == settlement_hash
+    assert result["receipt"]["output_root"] == settlement_hash
 
 
 @pytest.mark.asyncio

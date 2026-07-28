@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import copy
 import json
 import os
@@ -16,8 +17,10 @@ import tempfile
 from typing import Any, Mapping, Sequence
 
 from gateway.research_lab.champion_settlement_v2 import (
+    CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1,
     ChampionSettlementV2Error,
     _preliminary_finalized_bundle_authority_v1,
+    build_chain_realized_settlement_package_v1,
 )
 from gateway.research_lab.attested_v2_store import (
     boot_storage_row,
@@ -28,6 +31,11 @@ from gateway.tee.supabase_schema_preflight_v2 import (
     REQUIRED_SUPABASE_V2_RPCS,
     REQUIRED_SUPABASE_V2_SCHEMA,
 )
+from gateway.tee.coordinator_chain_realized_settlement_v1 import (
+    OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
+)
+from gateway.tee.coordinator_executor_v2 import CoordinatorExecutorV2
+from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from leadpoet_canonical.attested_v2 import sha256_json
 from leadpoet_canonical.weight_authority_v2 import (
     validate_published_weight_bundle_v2,
@@ -522,6 +530,98 @@ def _relation_contract(database: DisposablePostgres) -> dict[str, Any]:
     return json.loads(result.stdout.strip())
 
 
+def _measured_settlement_receipt_contract(
+    *,
+    authority: Mapping[str, Any],
+    verified_bundle: Mapping[str, Any],
+) -> dict[str, Any]:
+    calculation = authority["bundle_doc"]["weight_snapshot"][
+        "calculation_snapshot"
+    ]
+    hotkeys = list(calculation["metagraph_hotkeys"])
+    hotkeys[0] = str(verified_bundle["validator_hotkey"])
+    finalized_block = int(authority["finalized_block"])
+    weights = [
+        [int(uid), int(weight)]
+        for uid, weight in zip(
+            verified_bundle["uids"],
+            verified_bundle["weights_u16"],
+        )
+    ]
+    observation = {
+        "schema_version": CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1,
+        "netuid": int(verified_bundle["netuid"]),
+        "epoch_id": int(verified_bundle["epoch_id"]),
+        "official_subnet_epoch_id": int(verified_bundle["epoch_id"]),
+        "cutover_mapping_hash": sha256_json({"cutover": "rehearsal"}),
+        "close_block": finalized_block + 50,
+        "close_block_hash": "3" * 64,
+        "close_state_root": "4" * 64,
+        "next_epoch_block": finalized_block + 51,
+        "next_epoch_block_hash": "5" * 64,
+        "validator_hotkey": str(verified_bundle["validator_hotkey"]),
+        "validator_uid": 0,
+        "metagraph_hotkeys": hotkeys,
+        "weights": weights,
+        "weights_storage_key": "0x01",
+        "last_update_storage_key": "0x02",
+        "last_update_block": finalized_block,
+        "last_update_block_hash": str(authority["finalized_block_hash"]),
+        "last_update_official_subnet_epoch_id": int(
+            verified_bundle["epoch_id"]
+        ),
+        "active_source_epoch_id": int(verified_bundle["epoch_id"]),
+        "weights_vector_hash": sha256_json(
+            {
+                "uids": [item[0] for item in weights],
+                "weights_u16": [item[1] for item in weights],
+            }
+        ),
+    }
+    package = build_chain_realized_settlement_package_v1(
+        observation=observation,
+        authority=authority,
+    )
+    executor = CoordinatorExecutorV2(
+        chain_realized_settlement_resolver=lambda _payload, _context: package
+    )
+
+    async def execute() -> Any:
+        return await executor(
+            OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
+            {
+                "schema_version": (
+                    "leadpoet.chain_realized_settlement_request.v1"
+                ),
+                "netuid": int(verified_bundle["netuid"]),
+                "epoch_id": int(verified_bundle["epoch_id"]),
+            },
+            ExecutionContextV2(
+                job_id="restart-rehearsal-chain-settlement",
+                purpose="research_lab.chain_realized_epoch_settlement.v1",
+                epoch_id=int(verified_bundle["epoch_id"]),
+            ),
+        )
+
+    measured = asyncio.run(execute())
+    if measured.output != package:
+        raise PostgresContractProbeError(
+            "measured chain settlement output differs"
+        )
+    if measured.receipt_output != package["settlement_doc"]:
+        raise PostgresContractProbeError(
+            "measured chain settlement receipt projection differs"
+        )
+    if sha256_json(measured.receipt_output) != package["settlement_hash"]:
+        raise PostgresContractProbeError(
+            "measured chain settlement receipt root differs"
+        )
+    return {
+        "settlement_hash": package["settlement_hash"],
+        "credit_count": len(package["credits"]),
+    }
+
+
 def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
     declaration_counts = _validate_required_migration_declarations(args.source_root)
     database = DisposablePostgres(state_root=args.state_root)
@@ -619,6 +719,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "settlement authority weight receipt differs"
             )
+        measured_settlement = _measured_settlement_receipt_contract(
+            authority=authority,
+            verified_bundle=verified,
+        )
         tampered = copy.deepcopy(view_row)
         tampered["finalization_doc"]["weight_receipt_hash"] = "sha256:" + "0" * 64
         try:
@@ -653,9 +757,11 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "transport_contract_valid": True,
                 "finalized_view_projection_exact": True,
                 "settlement_authority_parsed": True,
+                "measured_settlement_receipt_projection_exact": True,
                 "tampered_weight_receipt_rejected": True,
                 "required_schema_migrations_declared": True,
             },
+            "measured_settlement": measured_settlement,
             "required_schema_declarations": declaration_counts,
         }
     finally:

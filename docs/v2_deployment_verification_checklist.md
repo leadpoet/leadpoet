@@ -61,6 +61,15 @@ avoid QEMU overhead; the unchanged launchers still issue and validate the exact
 production `linux/amd64` Docker/Nitro contracts. The `release` profile always
 runs its outer replica as pinned `linux/amd64` for the final ABI check.
 
+Failure behavior is part of this gate. Both profiles must continue through all
+independent stages after an earlier failure and write one complete
+`leadpoet-restart-rehearsal-<sha>-<profile>-stages.json` ledger. A failed
+gateway launcher must not suppress the validator launcher or independent
+canonical workflow. A failed release fault case or epoch must not suppress
+later fault cases or epochs. Dependency-blocked stages must be recorded as
+`unexercised` with their exact prerequisites; they are never inferred to pass.
+The controller exits nonzero after collecting the full blocker set.
+
 Before an attested release, run the release profile:
 
 ```bash
@@ -101,6 +110,13 @@ console output must prove all of the following:
 - [ ] `PYTHON37_FINALIZATION_PROBE_SUCCESS`
 - [ ] `REHEARSAL_SUCCESS component=gateway`
 - [ ] `REHEARSAL_SUCCESS component=validator`
+- [ ] `REHEARSAL_STAGE_EVIDENCE` points to the exact candidate's stage ledger.
+- [ ] Every declared stage is present exactly once and has status `passed`.
+- [ ] Zero `failed` and zero `unexercised` production-critical stages.
+- [ ] The multi-failure regression proves gateway, validator, and canonical
+  workflow diagnostics are aggregated in one invocation.
+- [ ] The release fault matrix and all 100 epochs continue after independent
+  injected failures and report every resulting blocker together.
 - [ ] Exact rollback succeeds when the change affects restart or release
   selection.
 - [ ] Exact roll-forward succeeds again from the rollback target.

@@ -127,6 +127,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     workflow = _load(workflow_path)
     expected_epochs = 1 if args.profile == "prepush" else 100
     epochs = workflow.get("epochs")
+    workflow_stages = workflow.get("stages")
     if (
         workflow.get("status") != "passed"
         or workflow.get("profile") != args.profile
@@ -134,8 +135,51 @@ def main(argv: Sequence[str] | None = None) -> int:
         or workflow.get("epoch_count") != expected_epochs
         or not isinstance(epochs, list)
         or len(epochs) != expected_epochs
+        or not isinstance(workflow_stages, list)
+        or not workflow_stages
     ):
         raise SystemExit("production workflow evidence is incomplete")
+    stage_status = {
+        str(item.get("stage")): item.get("status")
+        for item in workflow_stages
+        if isinstance(item, dict)
+    }
+    required_workflow_stages = {
+        "input-contract",
+        "diagnostic:candidate-bundle-generation",
+        "diagnostic:host-bundle-composition",
+        "diagnostic:primary-bundle-verification",
+        "diagnostic:auditor-bundle-verification",
+        "diagnostic:primary-auditor-vector-equality",
+        "diagnostic:sdk-signing-bridge",
+        "boundary-start",
+        "boundary-cleanup",
+        "workflow-evidence-validation",
+        *{
+            f"epoch-{30_000 + ordinal}"
+            for ordinal in range(expected_epochs)
+        },
+    }
+    source_stage_count = sum(
+        stage.startswith("source-identity:") for stage in stage_status
+    )
+    fault_stage_count = sum(
+        stage.startswith("fault:") for stage in stage_status
+    )
+    if (
+        len(stage_status) != len(workflow_stages)
+        or any(status != "passed" for status in stage_status.values())
+        or not required_workflow_stages.issubset(stage_status)
+        or source_stage_count != 9
+        or (
+            args.profile == "release"
+            and (
+                stage_status.get("concurrency") != "passed"
+                or fault_stage_count < 15
+            )
+        )
+    ):
+        raise SystemExit("production workflow stage evidence is incomplete")
     pcr0s = {str(epoch.get("pcr0")) for epoch in epochs}
     forward_pcr0s = {
         str(row.get("pcr0"))

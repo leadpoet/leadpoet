@@ -16,8 +16,9 @@ import json
 import os
 from pathlib import Path
 import sys
+import traceback
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -75,12 +76,84 @@ NOW = "2026-07-25T00:00:00Z"
 GENESIS_HASH = (
     "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
 )
+PRODUCTION_SOURCE_PATHS = (
+    "leadpoet_canonical/attested_v2.py",
+    "leadpoet_canonical/auditor_v2.py",
+    "leadpoet_canonical/hotkey_authority_v2.py",
+    "leadpoet_canonical/weight_authority_v2.py",
+    "leadpoet_canonical/weight_computation.py",
+    "neurons/auditor_validator.py",
+    "validator_tee/enclave/hotkey_authority_v2.py",
+    "validator_tee/host/enclave_hotkey_v2.py",
+    "validator_tee/host/weight_authority_v2.py",
+)
 
 
 def _canonical(value: Any) -> bytes:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
     ).encode("utf-8")
+
+
+def _run_workflow_stage(
+    *,
+    stage: str,
+    action: Callable[[], Any],
+    stages: list[dict[str, Any]],
+) -> tuple[bool, Any]:
+    """Fail one stage while allowing independent downstream probes to run."""
+
+    try:
+        value = action()
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:
+        result = {
+            "error": str(exc)[:2000],
+            "error_type": type(exc).__name__,
+            "stage": stage,
+            "status": "failed",
+            "traceback": traceback.format_exc(limit=20)[-12000:],
+        }
+        stages.append(result)
+        print(
+            "PRODUCTION_WORKFLOW_STAGE_FAILED_CONTINUING "
+            f"stage={stage} error_type={result['error_type']} "
+            f"error={result['error']!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False, None
+    stages.append({"stage": stage, "status": "passed"})
+    print(f"PRODUCTION_WORKFLOW_STAGE_PASSED stage={stage}", flush=True)
+    return True, value
+
+
+def _mark_workflow_stage_unexercised(
+    *,
+    stage: str,
+    blocked_by: list[str],
+    stages: list[dict[str, Any]],
+) -> None:
+    stages.append(
+        {
+            "blocked_by": list(blocked_by),
+            "stage": stage,
+            "status": "unexercised",
+        }
+    )
+    print(
+        "PRODUCTION_WORKFLOW_STAGE_UNEXERCISED "
+        f"stage={stage} blocked_by={','.join(blocked_by)}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _require_equal(left: Any, right: Any, message: str) -> Any:
+    if left != right:
+        raise RuntimeError(message)
+    return left
 
 
 class _AuditorScaleValue:
@@ -429,20 +502,12 @@ def _exercise_sdk_bridge(
     }
 
 
-def _run_epoch(
+def _recompose_candidate_bundle(
     *,
-    services: LocalBoundaryServices,
-    fixture: Mapping[str, Any],
-    candidate_sha: str,
+    epoch_fixture: SanitizedWeightFixture,
+    bundle: Mapping[str, Any],
     epoch_id: int,
 ) -> dict[str, Any]:
-    epoch_fixture = SanitizedWeightFixture(
-        candidate_sha=candidate_sha,
-        epoch_id=epoch_id,
-    )
-    coordinator_key = epoch_fixture.coordinator_key
-    weight_key = epoch_fixture.weight_key
-    bundle = epoch_fixture.bundle()
     binding_receipt = next(
         receipt
         for receipt in bundle["receipt_graph"]["receipts"]
@@ -464,7 +529,7 @@ def _run_epoch(
         transport_attempts=bundle["receipt_graph"]["transport_attempts"],
         host_operations=bundle["receipt_graph"]["host_operations"],
     )
-    assembled_bundle = build_authoritative_weight_bundle_v2(
+    return build_authoritative_weight_bundle_v2(
         enclave_response={
             "weight_snapshot": bundle["weight_snapshot"],
             "weight_result": bundle["weight_result"],
@@ -484,6 +549,138 @@ def _run_epoch(
             "signature": bundle["validator_hotkey_signature"],
             "receipt": binding_receipt,
         },
+    )
+
+
+def _run_independent_epoch_diagnostics(
+    *,
+    candidate_sha: str,
+    epoch_id: int,
+    stages: list[dict[str, Any]],
+) -> None:
+    """Exercise independent downstream contracts before the joined epoch."""
+
+    epoch_fixture = SanitizedWeightFixture(
+        candidate_sha=candidate_sha,
+        epoch_id=epoch_id,
+    )
+    bundle_passed, bundle = _run_workflow_stage(
+        stage="diagnostic:candidate-bundle-generation",
+        action=epoch_fixture.bundle,
+        stages=stages,
+    )
+    dependent_stages = (
+        "diagnostic:host-bundle-composition",
+        "diagnostic:primary-bundle-verification",
+        "diagnostic:auditor-bundle-verification",
+        "diagnostic:primary-auditor-vector-equality",
+        "diagnostic:sdk-signing-bridge",
+    )
+    if not bundle_passed:
+        for stage in dependent_stages:
+            _mark_workflow_stage_unexercised(
+                stage=stage,
+                blocked_by=["diagnostic:candidate-bundle-generation"],
+                stages=stages,
+            )
+        return
+
+    _run_workflow_stage(
+        stage="diagnostic:host-bundle-composition",
+        action=lambda: _require_equal(
+            _recompose_candidate_bundle(
+                epoch_fixture=epoch_fixture,
+                bundle=bundle,
+                epoch_id=epoch_id,
+            ),
+            bundle,
+            "production host bundle composition differs from canonical fixture",
+        ),
+        stages=stages,
+    )
+    primary_passed, primary = _run_workflow_stage(
+        stage="diagnostic:primary-bundle-verification",
+        action=lambda: validate_published_weight_bundle_v2(bundle),
+        stages=stages,
+    )
+    auditor_passed, auditor = _run_workflow_stage(
+        stage="diagnostic:auditor-bundle-verification",
+        action=lambda: verify_attested_weight_bundle_v2(
+            bundle,
+            identity_cache=epoch_fixture.identity_cache(bundle),
+            boot_verifier=lambda _boot, expected_pcr0=None: {
+                "verified": True,
+                "pcr0": expected_pcr0,
+                "boundary": "local_nitro_attestation",
+            },
+        ),
+        stages=stages,
+    )
+    if primary_passed and auditor_passed:
+        _run_workflow_stage(
+            stage="diagnostic:primary-auditor-vector-equality",
+            action=lambda: _require_equal(
+                {
+                    "uids": list(primary["uids"]),
+                    "weights_u16": list(primary["weights_u16"]),
+                },
+                {
+                    "uids": list(auditor["uids"]),
+                    "weights_u16": list(auditor["weights_u16"]),
+                },
+                "primary and auditor canonical vectors differ",
+            ),
+            stages=stages,
+        )
+    else:
+        blocked_by = []
+        if not primary_passed:
+            blocked_by.append("diagnostic:primary-bundle-verification")
+        if not auditor_passed:
+            blocked_by.append("diagnostic:auditor-bundle-verification")
+        _mark_workflow_stage_unexercised(
+            stage="diagnostic:primary-auditor-vector-equality",
+            blocked_by=blocked_by,
+            stages=stages,
+        )
+    _run_workflow_stage(
+        stage="diagnostic:sdk-signing-bridge",
+        action=lambda: _exercise_sdk_bridge(
+            epoch_id=epoch_id,
+            uids=[
+                int(value)
+                for value in bundle["weight_result"]["sparse_uids"]
+            ],
+            weights_u16=[
+                int(value)
+                for value in bundle["weight_result"]["sparse_weights_u16"]
+            ],
+            submission_event_hash=sha256_json(
+                {"epoch_id": epoch_id, "kind": "diagnostic-publication"}
+            ),
+        ),
+        stages=stages,
+    )
+
+
+def _run_epoch(
+    *,
+    services: LocalBoundaryServices,
+    fixture: Mapping[str, Any],
+    candidate_sha: str,
+    epoch_id: int,
+) -> dict[str, Any]:
+    epoch_fixture = SanitizedWeightFixture(
+        candidate_sha=candidate_sha,
+        epoch_id=epoch_id,
+    )
+    coordinator_key = epoch_fixture.coordinator_key
+    weight_key = epoch_fixture.weight_key
+    bundle = epoch_fixture.bundle()
+    assembled_bundle = _recompose_candidate_bundle(
+        epoch_fixture=epoch_fixture,
+        bundle=bundle,
+        epoch_id=epoch_id,
     )
     if assembled_bundle != bundle:
         raise RuntimeError(
@@ -838,37 +1035,37 @@ def _run_epoch(
     }
 
 
-def _exercise_fault_matrix(
-    services: LocalBoundaryServices, faults: list[str]
-) -> list[dict[str, Any]]:
-    results = []
-    for ordinal, fault in enumerate(faults):
-        services.inject(fault)
-        status = {
-            "http_400": 400,
-            "http_403": 403,
-            "http_429": 429,
-            "http_500": 500,
-            "duplicate_response": 409,
-            "malformed_json": 502,
-            "partial_body": 502,
-            "unexpected_eof": 502,
-            "timeout": 504,
-        }.get(fault, 503)
-        response = services.request(
-            "POST",
-            "/database/insert",
-            {
-                "kind": "fault_probe",
-                "epoch_id": -1,
-                "body": {"fault": fault, "ordinal": ordinal},
-            },
-            expected_status=status,
-        )
-        if response.get("fault") != fault:
-            raise RuntimeError(f"fault response differs for {fault}")
-        results.append({"fault": fault, "status": "fail_closed"})
-    return results
+def _exercise_fault(
+    services: LocalBoundaryServices,
+    *,
+    fault: str,
+    ordinal: int,
+) -> dict[str, Any]:
+    services.inject(fault)
+    status = {
+        "http_400": 400,
+        "http_403": 403,
+        "http_429": 429,
+        "http_500": 500,
+        "duplicate_response": 409,
+        "malformed_json": 502,
+        "partial_body": 502,
+        "unexpected_eof": 502,
+        "timeout": 504,
+    }.get(fault, 503)
+    response = services.request(
+        "POST",
+        "/database/insert",
+        {
+            "kind": "fault_probe",
+            "epoch_id": -1,
+            "body": {"fault": fault, "ordinal": ordinal},
+        },
+        expected_status=status,
+    )
+    if response.get("fault") != fault:
+        raise RuntimeError(f"fault response differs for {fault}")
+    return {"fault": fault, "status": "fail_closed"}
 
 
 def _exercise_concurrency(services: LocalBoundaryServices) -> int:
@@ -908,75 +1105,242 @@ def main() -> int:
     if args.epochs != expected_epochs:
         parser.error(f"{args.profile} requires exactly {expected_epochs} epochs")
 
-    fixture = json.loads(args.fixture.read_text(encoding="utf-8"))
-    contract = json.loads(args.boundary_contract.read_text(encoding="utf-8"))
-    if fixture["sanitization"]["contains_production_credentials"]:
-        raise RuntimeError("rehearsal fixture contains production credentials")
-    if set(contract["forbidden_substitutions"]) != {
-        "gateway",
-        "validator",
-        "auditor",
-        "canonical_bundle",
-        "receipt_graph",
-        "signature",
-        "sdk_extrinsic",
-        "verification",
-    }:
-        raise RuntimeError("rehearsal substitution policy is incomplete")
+    stages: list[dict[str, Any]] = []
+    fixture: dict[str, Any] | None = None
+    contract: dict[str, Any] | None = None
 
-    identities = [
-        _file_identity(path, args.candidate_sha)
-        for path in (
-            "leadpoet_canonical/attested_v2.py",
-            "leadpoet_canonical/auditor_v2.py",
-            "leadpoet_canonical/hotkey_authority_v2.py",
-            "leadpoet_canonical/weight_authority_v2.py",
-            "leadpoet_canonical/weight_computation.py",
-            "neurons/auditor_validator.py",
-            "validator_tee/enclave/hotkey_authority_v2.py",
-            "validator_tee/host/enclave_hotkey_v2.py",
-            "validator_tee/host/weight_authority_v2.py",
+    def load_inputs() -> tuple[dict[str, Any], dict[str, Any]]:
+        loaded_fixture = json.loads(args.fixture.read_text(encoding="utf-8"))
+        loaded_contract = json.loads(
+            args.boundary_contract.read_text(encoding="utf-8")
         )
-    ]
+        if loaded_fixture["sanitization"]["contains_production_credentials"]:
+            raise RuntimeError("rehearsal fixture contains production credentials")
+        if set(loaded_contract["forbidden_substitutions"]) != {
+            "gateway",
+            "validator",
+            "auditor",
+            "canonical_bundle",
+            "receipt_graph",
+            "signature",
+            "sdk_extrinsic",
+            "verification",
+        }:
+            raise RuntimeError("rehearsal substitution policy is incomplete")
+        return loaded_fixture, loaded_contract
+
+    inputs_passed, inputs = _run_workflow_stage(
+        stage="input-contract",
+        action=load_inputs,
+        stages=stages,
+    )
+    if inputs_passed:
+        fixture, contract = inputs
+
+    identities: list[dict[str, str]] = []
+    for path in PRODUCTION_SOURCE_PATHS:
+        passed, identity = _run_workflow_stage(
+            stage=f"source-identity:{path}",
+            action=lambda path=path: _file_identity(path, args.candidate_sha),
+            stages=stages,
+        )
+        if passed:
+            identities.append(identity)
+
+    _run_independent_epoch_diagnostics(
+        candidate_sha=args.candidate_sha,
+        epoch_id=30_000,
+        stages=stages,
+    )
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     service_root = args.output.parent / "local-services"
-    with LocalBoundaryServices(root=service_root, fixture=fixture) as services:
-        faults = (
-            _exercise_fault_matrix(
-                services, list(fixture["fault_matrix"])
-            )
-            if args.profile == "release"
-            else []
-        )
-        concurrent_writes = (
-            _exercise_concurrency(services) if args.profile == "release" else 0
-        )
-        first_epoch = 30_000
-        epochs = [
-            _run_epoch(
-                services=services,
-                fixture=fixture,
-                candidate_sha=args.candidate_sha,
-                epoch_id=first_epoch + ordinal,
-            )
-            for ordinal in range(args.epochs)
-        ]
-        boundary_events = list(services.state.events)
-        cleanup = {
-            "pending_faults": len(services.state.faults),
-            "boundary_thread_alive_before_close": services.thread.is_alive(),
-        }
+    faults: list[dict[str, Any]] = []
+    concurrent_writes = 0
+    epochs: list[dict[str, Any]] = []
+    boundary_events: list[dict[str, Any]] = []
+    cleanup = {
+        "pending_faults": 0,
+        "boundary_thread_alive_before_close": False,
+        "boundary_thread_alive_after_close": False,
+        "local_chain_epochs": 0,
+    }
 
-    cleanup["boundary_thread_alive_after_close"] = services.thread.is_alive()
-    cleanup["local_chain_epochs"] = len(services.state.chain)
-    status = "passed"
+    if fixture is None:
+        if args.profile == "release":
+            _mark_workflow_stage_unexercised(
+                stage="fault-matrix",
+                blocked_by=["input-contract"],
+                stages=stages,
+            )
+            _mark_workflow_stage_unexercised(
+                stage="concurrency",
+                blocked_by=["input-contract"],
+                stages=stages,
+            )
+        for ordinal in range(args.epochs):
+            _mark_workflow_stage_unexercised(
+                stage=f"epoch-{30_000 + ordinal}",
+                blocked_by=["input-contract"],
+                stages=stages,
+            )
+        _mark_workflow_stage_unexercised(
+            stage="boundary-cleanup",
+            blocked_by=["input-contract"],
+            stages=stages,
+        )
+    else:
+        if args.profile == "release":
+            for ordinal, fault in enumerate(fixture["fault_matrix"]):
+                def run_fault(
+                    *,
+                    ordinal: int = ordinal,
+                    fault: str = str(fault),
+                ) -> dict[str, Any]:
+                    with LocalBoundaryServices(
+                        root=service_root / f"fault-{ordinal:02d}",
+                        fixture=fixture,
+                    ) as fault_services:
+                        return _exercise_fault(
+                            fault_services,
+                            fault=fault,
+                            ordinal=ordinal,
+                        )
+
+                passed, result = _run_workflow_stage(
+                    stage=f"fault:{ordinal}:{fault}",
+                    action=run_fault,
+                    stages=stages,
+                )
+                if passed:
+                    faults.append(result)
+
+            def run_concurrency() -> int:
+                with LocalBoundaryServices(
+                    root=service_root / "concurrency",
+                    fixture=fixture,
+                ) as concurrency_services:
+                    return _exercise_concurrency(concurrency_services)
+
+            passed, result = _run_workflow_stage(
+                stage="concurrency",
+                action=run_concurrency,
+                stages=stages,
+            )
+            if passed:
+                concurrent_writes = result
+
+        services = LocalBoundaryServices(
+            root=service_root / "epochs",
+            fixture=fixture,
+        )
+        services_started, _ = _run_workflow_stage(
+            stage="boundary-start",
+            action=services.__enter__,
+            stages=stages,
+        )
+        if services_started:
+            try:
+                first_epoch = 30_000
+                for ordinal in range(args.epochs):
+                    epoch_id = first_epoch + ordinal
+                    passed, epoch = _run_workflow_stage(
+                        stage=f"epoch-{epoch_id}",
+                        action=lambda epoch_id=epoch_id: _run_epoch(
+                            services=services,
+                            fixture=fixture,
+                            candidate_sha=args.candidate_sha,
+                            epoch_id=epoch_id,
+                        ),
+                        stages=stages,
+                    )
+                    if passed:
+                        epochs.append(epoch)
+                boundary_events = list(services.state.events)
+                cleanup = {
+                    "pending_faults": len(services.state.faults),
+                    "boundary_thread_alive_before_close": (
+                        services.thread.is_alive()
+                    ),
+                    "boundary_thread_alive_after_close": True,
+                    "local_chain_epochs": len(services.state.chain),
+                }
+            finally:
+                cleanup_passed, _ = _run_workflow_stage(
+                    stage="boundary-cleanup",
+                    action=lambda: services.__exit__(None, None, None),
+                    stages=stages,
+                )
+                cleanup["boundary_thread_alive_after_close"] = (
+                    services.thread.is_alive()
+                )
+                cleanup["local_chain_epochs"] = len(services.state.chain)
+                if not cleanup_passed:
+                    cleanup["cleanup_failed"] = True
+        else:
+            for ordinal in range(args.epochs):
+                _mark_workflow_stage_unexercised(
+                    stage=f"epoch-{30_000 + ordinal}",
+                    blocked_by=["boundary-start"],
+                    stages=stages,
+                )
+            _mark_workflow_stage_unexercised(
+                stage="boundary-cleanup",
+                blocked_by=["boundary-start"],
+                stages=stages,
+            )
+
+    validation_dependencies = [
+        item["stage"] for item in stages if item.get("status") != "passed"
+    ]
+
+    def validate_workflow_evidence() -> None:
+        if (
+            cleanup["pending_faults"] != 0
+            or cleanup["boundary_thread_alive_after_close"]
+            or len(epochs) != expected_epochs
+            or any(
+                not epoch["canonical_vector_equal"]
+                or not epoch["receipt_ancestry_verified"]
+                or not epoch["auditor_verified"]
+                or not epoch["auditor_runtime_verified"]
+                or epoch["last_update"] != epoch["finalized_block"]
+                for epoch in epochs
+            )
+        ):
+            raise RuntimeError("joined V2 workflow evidence is incomplete")
+        if args.profile == "release" and (
+            len(faults) < 15 or concurrent_writes != 32
+        ):
+            raise RuntimeError("release fault or concurrency evidence is incomplete")
+
+    if validation_dependencies:
+        _mark_workflow_stage_unexercised(
+            stage="workflow-evidence-validation",
+            blocked_by=validation_dependencies,
+            stages=stages,
+        )
+    else:
+        _run_workflow_stage(
+            stage="workflow-evidence-validation",
+            action=validate_workflow_evidence,
+            stages=stages,
+        )
+
+    status = (
+        "passed"
+        if all(item.get("status") == "passed" for item in stages)
+        else "failed"
+    )
     manifest = {
         "schema_version": "leadpoet.local_v2_workflow_evidence.v1",
         "status": status,
         "profile": args.profile,
         "release_sha": args.candidate_sha,
-        "fixture_hash": sha256_json(fixture),
-        "boundary_contract_hash": sha256_json(contract),
+        "fixture_hash": sha256_json(fixture) if fixture is not None else None,
+        "boundary_contract_hash": (
+            sha256_json(contract) if contract is not None else None
+        ),
         "production_source_identities": identities,
         "epoch_count": len(epochs),
         "epochs": epochs,
@@ -984,23 +1348,23 @@ def main() -> int:
         "concurrent_write_count": concurrent_writes,
         "boundary_event_count": len(boundary_events),
         "cleanup": cleanup,
+        "stages": stages,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
-    if (
-        cleanup["pending_faults"] != 0
-        or cleanup["boundary_thread_alive_after_close"]
-        or len(epochs) != expected_epochs
-        or any(
-            not epoch["canonical_vector_equal"]
-            or not epoch["receipt_ancestry_verified"]
-            or not epoch["auditor_verified"]
-            or not epoch["auditor_runtime_verified"]
-            or epoch["last_update"] != epoch["finalized_block"]
-            for epoch in epochs
-        )
-    ):
-        raise RuntimeError("joined V2 workflow evidence is incomplete")
     args.output.write_bytes(_canonical(manifest) + b"\n")
+    if status != "passed":
+        failed = sum(item.get("status") == "failed" for item in stages)
+        unexercised = sum(
+            item.get("status") == "unexercised" for item in stages
+        )
+        print(
+            "PRODUCTION_WORKFLOW_REHEARSAL_FAILED "
+            f"profile={args.profile} failed={failed} "
+            f"unexercised={unexercised} evidence={args.output}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
     print(
         f"PRODUCTION_WORKFLOW_REHEARSAL_SUCCESS profile={args.profile} "
         f"epochs={len(epochs)}",

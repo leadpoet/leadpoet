@@ -27,6 +27,7 @@ from tests.restart_rehearsal.artifact_identity import (
     pcr0,
 )
 from tests.restart_rehearsal import join_evidence
+from tests.restart_rehearsal import production_workflow_runner
 from tests.restart_rehearsal import sitecustomize as rehearsal_sitecustomize
 from tests.restart_rehearsal.gateway_boundary_service import (
     LocalPostgRESTState,
@@ -2080,6 +2081,34 @@ def test_joined_manifest_requires_every_authority_field(
             "boundary_thread_alive_after_close": False,
             "local_chain_epochs": 1,
         },
+        "stages": [
+            {"stage": "input-contract", "status": "passed"},
+            *[
+                {
+                    "stage": f"source-identity:production-{index}.py",
+                    "status": "passed",
+                }
+                for index in range(9)
+            ],
+            *[
+                {"stage": stage, "status": "passed"}
+                for stage in (
+                    "diagnostic:candidate-bundle-generation",
+                    "diagnostic:host-bundle-composition",
+                    "diagnostic:primary-bundle-verification",
+                    "diagnostic:auditor-bundle-verification",
+                    "diagnostic:primary-auditor-vector-equality",
+                    "diagnostic:sdk-signing-bridge",
+                )
+            ],
+            {"stage": "boundary-start", "status": "passed"},
+            {"stage": "epoch-30000", "status": "passed"},
+            {"stage": "boundary-cleanup", "status": "passed"},
+            {
+                "stage": "workflow-evidence-validation",
+                "status": "passed",
+            },
+        ],
     }
     workflow_path.write_text(json.dumps(workflow), encoding="utf-8")
     output = tmp_path / "joined.json"
@@ -2127,6 +2156,28 @@ def test_joined_manifest_requires_every_authority_field(
         )
     validator["postgres_contract_sha256"] = "e" * 64
     validator_path.write_text(json.dumps(validator), encoding="utf-8")
+
+    workflow["stages"][-1]["status"] = "unexercised"
+    workflow_path.write_text(json.dumps(workflow), encoding="utf-8")
+    with pytest.raises(
+        SystemExit,
+        match="workflow stage evidence is incomplete",
+    ):
+        join_evidence.main(
+            [
+                "--evidence-root",
+                str(tmp_path),
+                "--from-sha",
+                "2" * 40,
+                "--candidate-sha",
+                COMMIT,
+                "--profile",
+                "prepush",
+                "--output",
+                str(output),
+            ]
+        )
+    workflow["stages"][-1]["status"] = "passed"
 
     workflow["epochs"][0]["canonical_vector_equal"] = False
     workflow_path.write_text(json.dumps(workflow), encoding="utf-8")
@@ -2234,30 +2285,41 @@ def test_rehearsal_preserves_exact_failure_evidence(tmp_path) -> None:
     }
 
 
-def test_rehearsal_preserves_all_batched_release_failures(tmp_path) -> None:
+def test_rehearsal_preserves_complete_full_path_stage_ledger(tmp_path) -> None:
     evidence = tmp_path / "ephemeral"
     evidence.mkdir()
     (evidence / "validator-main.log").write_text(
         "rollback failed before coordinator readiness\n",
         encoding="utf-8",
     )
-    failures = [
+    stages = [
+        {
+            "stage": "gateway-forward-1",
+            "status": "passed",
+        },
         {
             "command": ["docker", "run", "rollback"],
             "returncode": 1,
             "stage": "validator-rollback-2",
+            "status": "failed",
         },
         {
             "command": ["docker", "run", "workflow"],
             "returncode": 2,
             "stage": "workflow-release",
+            "status": "failed",
+        },
+        {
+            "blocked_by": ["workflow-release"],
+            "stage": "evidence-join-release",
+            "status": "unexercised",
         },
     ]
 
     durable = rehearsal._preserve_batched_failure_evidence(
         evidence_root=evidence,
         candidate_sha=COMMIT,
-        failures=failures,
+        stages=stages,
     )
 
     assert (
@@ -2268,8 +2330,11 @@ def test_rehearsal_preserves_all_batched_release_failures(tmp_path) -> None:
     ) == {
         "candidate_sha": COMMIT,
         "failure_count": 2,
-        "failures": failures,
+        "failures": stages[1:3],
+        "stage_count": 4,
+        "stages": stages,
         "status": "failed",
+        "unexercised_count": 1,
     }
 
 
@@ -2284,6 +2349,234 @@ def test_rehearsal_serializes_subprocess_stage_failure() -> None:
         "returncode": 17,
         "stage": "gateway-forward-1",
     }
+
+
+def test_prepush_runs_validator_and_workflow_after_gateway_failure(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from_sha = "2" * 40
+    candidate_sha = "3" * 40
+    calls: list[str] = []
+    captured: dict[str, Any] = {}
+
+    @contextmanager
+    def source_snapshot(**_kwargs):
+        yield tmp_path
+
+    @contextmanager
+    def fixture_seed(*_args, **_kwargs):
+        yield tmp_path
+
+    monkeypatch.setattr(
+        rehearsal,
+        "_git_sha",
+        lambda value: from_sha if value == "FROM" else candidate_sha,
+    )
+    monkeypatch.setattr(
+        rehearsal,
+        "_resolve_transition",
+        lambda *_args: "forward",
+    )
+    monkeypatch.setattr(rehearsal, "_verify_driver_identity", lambda _sha: None)
+    monkeypatch.setattr(rehearsal, "_docker_platform", lambda _profile: "linux/amd64")
+    monkeypatch.setattr(rehearsal, "_image_tag", lambda *_args, **_kwargs: "image")
+    monkeypatch.setattr(rehearsal, "_image_exists", lambda _tag: True)
+    monkeypatch.setattr(
+        rehearsal,
+        "_isolated_source_snapshot",
+        source_snapshot,
+    )
+    monkeypatch.setattr(
+        rehearsal,
+        "_run_python37_finalization_probe",
+        lambda _root: None,
+    )
+    monkeypatch.setattr(
+        rehearsal,
+        "_prepare_drand_artifact",
+        lambda **_kwargs: tmp_path,
+    )
+    monkeypatch.setattr(rehearsal, "_prepared_fixture_seed", fixture_seed)
+
+    def run_component(_tag, *, component, **_kwargs):
+        calls.append(component)
+        if component == "gateway":
+            raise subprocess.CalledProcessError(17, ["gateway-restart"])
+
+    def run_workflow(*_args, **_kwargs):
+        calls.append("workflow")
+        raise subprocess.CalledProcessError(23, ["workflow"])
+
+    def preserve(*, stages, **_kwargs):
+        captured["stages"] = stages
+        return tmp_path
+
+    monkeypatch.setattr(rehearsal, "_run_component", run_component)
+    monkeypatch.setattr(rehearsal, "_run_workflow", run_workflow)
+    monkeypatch.setattr(
+        rehearsal,
+        "_join_evidence",
+        lambda *_args, **_kwargs: pytest.fail("join must be dependency-blocked"),
+    )
+    monkeypatch.setattr(
+        rehearsal,
+        "_preserve_batched_failure_evidence",
+        preserve,
+    )
+
+    with pytest.raises(
+        SystemExit,
+        match="prepush rehearsal failed after completing independent stages",
+    ):
+        rehearsal.main(
+            [
+                "--from-sha",
+                "FROM",
+                "--candidate-sha",
+                "CANDIDATE",
+                "--profile",
+                "prepush",
+            ]
+        )
+
+    assert calls == ["gateway", "validator", "workflow"]
+    by_stage = {
+        item["stage"]: item for item in captured["stages"]
+    }
+    assert by_stage["gateway-forward-1"]["status"] == "failed"
+    assert by_stage["validator-forward-1"]["status"] == "passed"
+    assert by_stage["workflow-prepush"]["status"] == "failed"
+    assert by_stage["evidence-join-prepush"] == {
+        "blocked_by": ["gateway-forward-1", "workflow-prepush"],
+        "stage": "evidence-join-prepush",
+        "status": "unexercised",
+    }
+
+
+def test_workflow_runner_continues_across_failed_release_epochs(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    fixture = tmp_path / "fixture.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "sanitization": {"contains_production_credentials": False},
+                "fault_matrix": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    contract = tmp_path / "contract.json"
+    contract.write_text(
+        json.dumps(
+            {
+                "forbidden_substitutions": [
+                    "gateway",
+                    "validator",
+                    "auditor",
+                    "canonical_bundle",
+                    "receipt_graph",
+                    "signature",
+                    "sdk_extrinsic",
+                    "verification",
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "workflow.json"
+    epoch_calls: list[int] = []
+
+    class Thread:
+        alive = False
+
+        def is_alive(self):
+            return self.alive
+
+    class Services:
+        def __init__(self, **_kwargs):
+            self.thread = Thread()
+            self.state = type(
+                "State",
+                (),
+                {"events": [], "faults": [], "chain": {}},
+            )()
+
+        def __enter__(self):
+            self.thread.alive = True
+            return self
+
+        def __exit__(self, *_args):
+            self.thread.alive = False
+
+    def run_epoch(*, epoch_id, **_kwargs):
+        epoch_calls.append(epoch_id)
+        if epoch_id in {30_000, 30_001}:
+            raise RuntimeError(f"blocked epoch {epoch_id}")
+        return {
+            "epoch_id": epoch_id,
+            "canonical_vector_equal": True,
+            "receipt_ancestry_verified": True,
+            "auditor_verified": True,
+            "auditor_runtime_verified": True,
+            "last_update": epoch_id + 1,
+            "finalized_block": epoch_id + 1,
+        }
+
+    monkeypatch.setattr(
+        production_workflow_runner,
+        "_file_identity",
+        lambda path, candidate_sha: {
+            "path": path,
+            "commit_sha": candidate_sha,
+        },
+    )
+    monkeypatch.setattr(
+        production_workflow_runner,
+        "LocalBoundaryServices",
+        Services,
+    )
+    monkeypatch.setattr(
+        production_workflow_runner,
+        "_exercise_concurrency",
+        lambda _services: 32,
+    )
+    monkeypatch.setattr(
+        production_workflow_runner,
+        "_run_epoch",
+        run_epoch,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "production_workflow_runner.py",
+            "--profile",
+            "release",
+            "--candidate-sha",
+            COMMIT,
+            "--epochs",
+            "100",
+            "--fixture",
+            str(fixture),
+            "--boundary-contract",
+            str(contract),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert production_workflow_runner.main() == 1
+    assert epoch_calls == list(range(30_000, 30_100))
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+    stages = {item["stage"]: item for item in manifest["stages"]}
+    assert stages["epoch-30000"]["status"] == "failed"
+    assert stages["epoch-30001"]["status"] == "failed"
+    assert stages["epoch-30002"]["status"] == "passed"
+    assert stages["boundary-cleanup"]["status"] == "passed"
+    assert stages["workflow-evidence-validation"]["status"] == "unexercised"
 
 
 def test_rehearsal_source_snapshot_is_independent_and_complete(

@@ -195,6 +195,42 @@ attestation, cutover, or Research Lab incident:
 - Report every known/likely blocker and every unexercised stage before another
   push or restart recommendation.
 
+### Mandatory aggregate rehearsal result
+
+The `prepush` and `release` rehearsal controllers must finish every independent
+stage in one invocation even after an earlier stage fails. A stage itself
+should fail immediately with its root-cause diagnostic; that failure must not
+terminate the controller or suppress another independently executable stage.
+At minimum, the same run must attempt the CPython 3.7 proof, candidate artifact
+and fixture preparation, the exact installed N-1 gateway launcher, the exact
+installed N-1 validator launcher, the independent canonical
+gateway/primary/auditor workflow, signing, publication, finalization,
+`LastUpdate`/reveal readback, cleanup, and final evidence join.
+
+Every run, including a failed run, must write one candidate-SHA-bound stage
+ledger. Each declared stage is exactly one of `passed`, `failed`, or
+`unexercised`. `failed` entries include the command or production exception and
+root-cause evidence; `unexercised` entries name the exact failed prerequisite.
+Only a genuine data or process dependency may make a stage unexercised.
+Gateway failure never skips the validator or independent canonical workflow,
+and validator failure never skips the gateway or independent canonical
+workflow. Release fault cases and accelerated epochs are isolated sufficiently
+that one failed case cannot poison or hide the remaining cases.
+
+Any failed or unexercised production-critical stage fails the complete gate.
+The successful joined manifest is valid only when the stage ledger is complete,
+contains no duplicate stage names, and every entry passed. Regressions for the
+rehearsal controller must inject at least two independent simultaneous failures
+and prove that both are reported while later stages still execute. A test that
+only proves the first exception is not rehearsal coverage.
+
+When a production or rehearsal change adds, removes, reorders, or changes a
+restart/downstream stage, update the aggregate stage inventory, evidence join,
+failure regression, `AGENTS.md`/`CLAUDE.md`, and the deployment checklist in
+the same change. Except for the exact emergency push-now workflow above, do not
+push from a run that stopped at its first error or omitted its complete stage
+ledger.
+
 Permanent regression families include: dirty/detached checkouts and stale
 launchers; restart-window and release-channel races; env hydration and proxy
 normalization; Docker daemon/lock/tmpfs/disk/memory cleanup; artifact, PCR0,

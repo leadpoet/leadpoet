@@ -27,7 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any, Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence
 from urllib.request import urlopen
 
 
@@ -555,25 +555,32 @@ def _preserve_batched_failure_evidence(
     *,
     evidence_root: Path,
     candidate_sha: str,
-    failures: Sequence[dict[str, Any]],
+    stages: Sequence[dict[str, Any]],
 ) -> Path:
-    """Preserve all independent release-stage failures after batch execution."""
+    """Preserve the complete full-path stage ledger after a failed run."""
 
     durable_root = Path(
         tempfile.mkdtemp(
             prefix=(
                 "leadpoet-rehearsal-failure-"
-                f"{candidate_sha[:12]}-release-batch-"
+                f"{candidate_sha[:12]}-full-path-"
             )
         )
     )
     copied_evidence = durable_root / "evidence"
     shutil.copytree(evidence_root, copied_evidence)
+    failures = [item for item in stages if item.get("status") == "failed"]
+    unexercised = [
+        item for item in stages if item.get("status") == "unexercised"
+    ]
     report = {
         "candidate_sha": candidate_sha,
         "failure_count": len(failures),
-        "failures": list(failures),
+        "failures": failures,
+        "stage_count": len(stages),
+        "stages": list(stages),
         "status": "failed",
+        "unexercised_count": len(unexercised),
     }
     (durable_root / "failure-summary.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n",
@@ -597,6 +604,140 @@ def _stage_failure(
         "returncode": int(exc.returncode),
         "stage": stage,
     }
+
+
+def _stage_result_from_exception(
+    *,
+    stage: str,
+    exc: BaseException,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "error": str(exc)[:2000],
+        "error_type": type(exc).__name__,
+        "stage": stage,
+        "status": "failed",
+    }
+    if isinstance(exc, subprocess.CalledProcessError):
+        result.update(_stage_failure(stage=stage, exc=exc))
+        result["status"] = "failed"
+    return result
+
+
+def _run_independent_stage(
+    *,
+    stage: str,
+    action: Callable[[], Any],
+    stages: list[dict[str, Any]],
+) -> tuple[bool, Any]:
+    """Run one stage without suppressing later independent diagnostics."""
+
+    try:
+        value = action()
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:
+        result = _stage_result_from_exception(stage=stage, exc=exc)
+        stages.append(result)
+        print(
+            "REHEARSAL_STAGE_FAILED_CONTINUING "
+            f"stage={stage} error_type={result['error_type']} "
+            f"error={result['error']!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False, None
+    stages.append({"stage": stage, "status": "passed"})
+    print(f"REHEARSAL_STAGE_PASSED stage={stage}", flush=True)
+    return True, value
+
+
+def _mark_stage_unexercised(
+    *,
+    stage: str,
+    blocked_by: Sequence[str],
+    stages: list[dict[str, Any]],
+) -> None:
+    result = {
+        "blocked_by": list(blocked_by),
+        "stage": stage,
+        "status": "unexercised",
+    }
+    stages.append(result)
+    print(
+        "REHEARSAL_STAGE_UNEXERCISED "
+        f"stage={stage} blocked_by={','.join(blocked_by)}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _write_stage_summary(
+    *,
+    evidence_root: Path,
+    candidate_sha: str,
+    profile: str,
+    stages: Sequence[dict[str, Any]],
+) -> Path:
+    failed = sum(item.get("status") == "failed" for item in stages)
+    unexercised = sum(
+        item.get("status") == "unexercised" for item in stages
+    )
+    output = evidence_root / (
+        f"leadpoet-restart-rehearsal-{candidate_sha}-{profile}-stages.json"
+    )
+    output.write_text(
+        json.dumps(
+            {
+                "candidate_sha": candidate_sha,
+                "failure_count": failed,
+                "profile": profile,
+                "schema_version": (
+                    "leadpoet.local_restart_rehearsal_stage_summary.v1"
+                ),
+                "stage_count": len(stages),
+                "stages": list(stages),
+                "status": (
+                    "passed" if failed == 0 and unexercised == 0 else "failed"
+                ),
+                "unexercised_count": unexercised,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return output
+
+
+@contextmanager
+def _recording_fixture_stack(
+    stages: list[dict[str, Any]],
+) -> Iterator[ExitStack]:
+    stack = ExitStack()
+    try:
+        yield stack
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:
+        result = _stage_result_from_exception(
+            stage="fixture-orchestration",
+            exc=exc,
+        )
+        stages.append(result)
+        print(
+            "REHEARSAL_STAGE_FAILED_CONTINUING "
+            "stage=fixture-orchestration "
+            f"error_type={result['error_type']} error={result['error']!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+    finally:
+        _run_independent_stage(
+            stage="fixture-cleanup",
+            action=stack.close,
+            stages=stages,
+        )
 
 
 @contextmanager
@@ -946,11 +1087,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             prefix="leadpoet-restart-evidence-"
         ) as evidence_raw:
             evidence_root = Path(evidence_raw)
+            stage_results: list[dict[str, Any]] = []
             print(
                 "Running validator enclave finalization proof under CPython 3.7",
                 flush=True,
             )
-            _run_python37_finalization_probe(source_root)
+            _run_independent_stage(
+                stage="python37-finalization",
+                action=lambda: _run_python37_finalization_probe(source_root),
+                stages=stage_results,
+            )
             transitions = (transition,)
             if args.profile == "release" and transition == "forward":
                 transitions = ("forward", "rollback", "forward")
@@ -958,28 +1104,47 @@ def main(argv: Sequence[str] | None = None) -> int:
                 candidate_sha if run_transition != "rollback" else from_sha
                 for run_transition in transitions
             }
-            with ExitStack() as fixture_stack:
-                drand_artifacts = {
-                    target: _prepare_drand_artifact(
-                        source_root=source_root,
-                        candidate_sha=target,
-                    )
-                    for target in target_shas
-                }
-                fixture_seeds = {
-                    target: fixture_stack.enter_context(
-                        _prepared_fixture_seed(
-                            tag,
+            with _recording_fixture_stack(stage_results) as fixture_stack:
+                drand_artifacts: dict[str, Path] = {}
+                fixture_seeds: dict[str, Path] = {}
+                for target in sorted(target_shas):
+                    stage = f"drand-artifact-{target[:12]}"
+                    passed, artifact = _run_independent_stage(
+                        stage=stage,
+                        action=lambda target=target: _prepare_drand_artifact(
                             source_root=source_root,
                             candidate_sha=target,
-                            drand_artifact_root=drand_artifacts[target],
-                            docker_platform=docker_platform,
-                            profile=args.profile,
-                        )
+                        ),
+                        stages=stage_results,
                     )
-                    for target in target_shas
-                }
-                release_failures = []  # type: list[dict[str, Any]]
+                    if passed:
+                        drand_artifacts[target] = artifact
+                for target in sorted(target_shas):
+                    stage = f"fixture-seed-{target[:12]}"
+                    dependency = f"drand-artifact-{target[:12]}"
+                    if target not in drand_artifacts:
+                        _mark_stage_unexercised(
+                            stage=stage,
+                            blocked_by=[dependency],
+                            stages=stage_results,
+                        )
+                        continue
+                    passed, seed = _run_independent_stage(
+                        stage=stage,
+                        action=lambda target=target: fixture_stack.enter_context(
+                            _prepared_fixture_seed(
+                                tag,
+                                source_root=source_root,
+                                candidate_sha=target,
+                                drand_artifact_root=drand_artifacts[target],
+                                docker_platform=docker_platform,
+                                profile=args.profile,
+                            )
+                        ),
+                        stages=stage_results,
+                    )
+                    if passed:
+                        fixture_seeds[target] = seed
                 for ordinal, run_transition in enumerate(transitions):
                     run_from = from_sha
                     run_candidate = candidate_sha
@@ -994,8 +1159,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                             f"transition={run_transition} profile={args.profile}",
                             flush=True,
                         )
-                        try:
-                            _run_component(
+                        stage = (
+                            f"{component}-{run_transition}-{ordinal + 1}"
+                        )
+                        blocked_by = []
+                        if run_candidate not in drand_artifacts:
+                            blocked_by.append(
+                                f"drand-artifact-{run_candidate[:12]}"
+                            )
+                        if run_candidate not in fixture_seeds:
+                            blocked_by.append(
+                                f"fixture-seed-{run_candidate[:12]}"
+                            )
+                        if blocked_by:
+                            _mark_stage_unexercised(
+                                stage=stage,
+                                blocked_by=blocked_by,
+                                stages=stage_results,
+                            )
+                            continue
+                        _run_independent_stage(
+                            stage=stage,
+                            action=lambda component=component,
+                            run_from=run_from,
+                            run_candidate=run_candidate,
+                            run_transition=run_transition,
+                            ordinal=ordinal: _run_component(
                                 tag,
                                 source_root=source_root,
                                 component=component,
@@ -1013,75 +1202,99 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 gateway_worker_fleet_mode=(
                                     args.gateway_worker_fleet_mode
                                 ),
-                            )
-                        except subprocess.CalledProcessError as exc:
-                            if args.profile != "release":
-                                raise
-                            stage = (
-                                f"{component}-{run_transition}-"
-                                f"{ordinal + 1}"
-                            )
-                            release_failures.append(
-                                _stage_failure(stage=stage, exc=exc)
-                            )
-                            print(
-                                "REHEARSAL_STAGE_FAILED_CONTINUING "
-                                f"stage={stage} returncode={exc.returncode}",
-                                file=sys.stderr,
-                                flush=True,
-                            )
+                            ),
+                            stages=stage_results,
+                        )
             print(
                 "Running production V2 workflow against strict local "
                 f"boundaries ({args.profile})",
                 flush=True,
             )
-            try:
-                _run_workflow(
+            workflow_stage = f"workflow-{args.profile}"
+            _run_independent_stage(
+                stage=workflow_stage,
+                action=lambda: _run_workflow(
                     tag,
                     source_root=source_root,
                     candidate_sha=candidate_sha,
                     evidence_root=evidence_root,
                     profile=args.profile,
                     docker_platform=docker_platform,
+                ),
+                stages=stage_results,
+            )
+            required_join_stages = [
+                item["stage"]
+                for item in stage_results
+                if (
+                    item["stage"].startswith(("gateway-", "validator-"))
+                    or item["stage"] == workflow_stage
                 )
-            except subprocess.CalledProcessError as exc:
-                if args.profile != "release":
-                    raise
-                release_failures.append(
-                    _stage_failure(
-                        stage=f"workflow-{args.profile}",
-                        exc=exc,
-                    )
+            ]
+            stage_status = {
+                item["stage"]: item["status"] for item in stage_results
+            }
+            evidence: Path | None = None
+            join_stage = f"evidence-join-{args.profile}"
+            blocked_join_stages = [
+                stage
+                for stage in required_join_stages
+                if stage_status.get(stage) != "passed"
+            ]
+            if blocked_join_stages:
+                _mark_stage_unexercised(
+                    stage=join_stage,
+                    blocked_by=blocked_join_stages,
+                    stages=stage_results,
                 )
-                print(
-                    "REHEARSAL_STAGE_FAILED_CONTINUING "
-                    f"stage=workflow-{args.profile} "
-                    f"returncode={exc.returncode}",
-                    file=sys.stderr,
-                    flush=True,
+            else:
+                _, evidence = _run_independent_stage(
+                    stage=join_stage,
+                    action=lambda: _join_evidence(
+                        tag,
+                        source_root=source_root,
+                        evidence_root=evidence_root,
+                        from_sha=from_sha,
+                        candidate_sha=candidate_sha,
+                        profile=args.profile,
+                        docker_platform=docker_platform,
+                    ),
+                    stages=stage_results,
                 )
-            if release_failures:
+            stage_summary = _write_stage_summary(
+                evidence_root=evidence_root,
+                candidate_sha=candidate_sha,
+                profile=args.profile,
+                stages=stage_results,
+            )
+            incomplete = [
+                item
+                for item in stage_results
+                if item.get("status") != "passed"
+            ]
+            if incomplete:
                 durable_failure = _preserve_batched_failure_evidence(
                     evidence_root=evidence_root,
                     candidate_sha=candidate_sha,
-                    failures=release_failures,
+                    stages=stage_results,
                 )
                 raise SystemExit(
-                    "release rehearsal failed after completing independent "
+                    f"{args.profile} rehearsal failed after completing independent "
                     f"stages; evidence={durable_failure}"
                 )
-            evidence = _join_evidence(
-                tag,
-                source_root=source_root,
-                evidence_root=evidence_root,
-                from_sha=from_sha,
-                candidate_sha=candidate_sha,
-                profile=args.profile,
-                docker_platform=docker_platform,
-            )
+            if evidence is None:
+                raise SystemExit("joined rehearsal evidence is unexpectedly absent")
             durable_output = Path(tempfile.gettempdir()) / evidence.name
             durable_output.write_bytes(evidence.read_bytes())
+            durable_stage_output = (
+                Path(tempfile.gettempdir()) / stage_summary.name
+            )
+            durable_stage_output.write_bytes(stage_summary.read_bytes())
             print(f"REHEARSAL_EVIDENCE {durable_output}", flush=True)
+            print(
+                f"REHEARSAL_STAGE_EVIDENCE {durable_stage_output}",
+                flush=True,
+            )
     return 0
 
 

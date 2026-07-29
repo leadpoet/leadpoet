@@ -18,7 +18,10 @@ from gateway.research_lab.provider_evidence_proxy import (
 )
 from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
 from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
-from gateway.tee.provider_semantics_v2 import ProviderSemanticsAuthorityV2
+from gateway.tee.provider_semantics_v2 import (
+    ProviderSemanticsAuthorityV2,
+    ProviderSemanticsV2Error,
+)
 from gateway.tee.source_add_runtime_v2 import (
     build_source_add_runtime_catalog_v2,
     source_add_dynamic_retry_policy_hash,
@@ -312,6 +315,7 @@ def _authority(
     outcome_store=None,
     artifact_transaction=None,
     clock=None,
+    sleeper=None,
 ):
     broker = broker or _Broker()
     cache = cache or _CacheStore()
@@ -333,7 +337,7 @@ def _authority(
         sign_digest=key.sign,
         artifact_transaction=artifact_transaction,
         clock=clock or (lambda: "2026-07-10T00:00:00Z"),
-        sleeper=lambda _seconds: None,
+        sleeper=sleeper or (lambda _seconds: None),
         outcome_store=outcome_store,
     )
     return authority, broker, cache, artifacts
@@ -623,6 +627,115 @@ def test_provider_outcome_conflict_rebases_onto_durable_head() -> None:
     assert outcome_store.persist_count == 2
     assert digest["providers"]["exa"]["call_count"] == 2
     assert digest["providers"]["exa"]["live_call_count"] == 2
+
+
+def test_provider_outcome_busy_empty_head_backs_off_and_retries() -> None:
+    class BusyOnceOutcomeStore(_OutcomeStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.busy = True
+            self.persist_attempts = 0
+
+        def persist(
+            self,
+            document,
+            *,
+            previous_checkpoint_hash,
+            job_id,
+            purpose,
+        ):
+            self.persist_attempts += 1
+            if self.busy:
+                self.busy = False
+                return {
+                    "status": "conflict",
+                    "transport_attempts": [],
+                    "evidence_artifact_hashes": [],
+                }
+            return super().persist(
+                document,
+                previous_checkpoint_hash=previous_checkpoint_hash,
+                job_id=job_id,
+                purpose=purpose,
+            )
+
+    sleeps = []
+    outcome_store = BusyOnceOutcomeStore()
+    authority, _broker, _cache, _artifacts = _authority(
+        outcome_store=outcome_store,
+        sleeper=sleeps.append,
+    )
+
+    authority.execute(_request(job_id="job-busy-empty-head"))
+
+    assert outcome_store.persist_attempts == 2
+    assert outcome_store.persist_count == 1
+    assert outcome_store.document["sequence"] == 1
+    assert len(sleeps) == 1
+    assert 0.01 <= sleeps[0] <= 0.02
+
+
+def test_provider_outcome_persistent_contention_is_bounded_and_fails_closed() -> None:
+    class AlwaysBusyOutcomeStore(_OutcomeStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.persist_attempts = 0
+            self.load_attempts = 0
+
+        def persist(
+            self,
+            document,
+            *,
+            previous_checkpoint_hash,
+            job_id,
+            purpose,
+        ):
+            del document, previous_checkpoint_hash, job_id, purpose
+            self.persist_attempts += 1
+            return {
+                "status": "conflict",
+                "transport_attempts": [],
+                "evidence_artifact_hashes": [],
+            }
+
+        def load_latest(
+            self,
+            *,
+            utc_day,
+            job_id,
+            purpose,
+            operation_suffix="restore",
+        ):
+            del utc_day, job_id, purpose, operation_suffix
+            self.load_attempts += 1
+            return {
+                "found": False,
+                "transport_attempts": [],
+                "evidence_artifact_hashes": [],
+            }
+
+    sleeps = []
+    outcome_store = AlwaysBusyOutcomeStore()
+    authority, _broker, _cache, _artifacts = _authority(
+        outcome_store=outcome_store,
+        sleeper=sleeps.append,
+    )
+
+    with pytest.raises(
+        ProviderSemanticsV2Error,
+        match="provider outcome checkpoint contention did not converge",
+    ):
+        authority.execute(_request(job_id="job-persistent-contention"))
+
+    assert outcome_store.persist_attempts == 64
+    assert outcome_store.load_attempts == 65  # one startup restore plus 64 retries
+    assert len(sleeps) == 64
+    assert (
+        authority.provider_outcome_snapshot()["provider_outcome_digest"].get(
+            "providers", {}
+        )
+        == {}
+    )
 
 
 def test_provider_outcome_contention_converges_across_25_writers() -> None:

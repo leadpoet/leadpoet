@@ -278,7 +278,8 @@ def test_outcome_checkpoint_chain_is_monotonic_and_collision_fails_closed() -> N
         purpose="research_lab.company_score.v2",
     )
     assert conflict["status"] == "conflict"
-    assert len(conflict["transport_attempts"]) == 2
+    assert len(conflict["transport_attempts"]) == 1
+    assert len(broker.calls) == 6
     assert vault.job_artifacts(
         job_id="job-3",
         purpose="research_lab.company_score.v2",

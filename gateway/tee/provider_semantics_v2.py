@@ -81,6 +81,8 @@ _OPTIONAL_REQUEST_FIELDS = {"dynamic_route"}
 _LOCAL_RESPONSE_SCHEMA_VERSION = "leadpoet.attested_local_provider_response.v2"
 _PROVIDER_PREFLIGHT_PURPOSE = "research_lab.provider_preflight.v2"
 _OUTCOME_APPEND_CONFLICT_ATTEMPTS = 64
+_OUTCOME_CONFLICT_BACKOFF_BASE_SECONDS = 0.01
+_OUTCOME_CONFLICT_BACKOFF_MAX_SECONDS = 0.25
 TREE_PROVIDER_CALL_CAP_HEADER = "X-Research-Lab-Tree-Provider-Call-Cap"
 _LEGACY_PROVIDER_IDS = {
     "openrouter": "or",
@@ -101,6 +103,24 @@ def _truthy(value: Any) -> bool:
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _outcome_conflict_backoff_seconds(
+    *,
+    job_id: str,
+    purpose: str,
+    conflict_attempt: int,
+) -> float:
+    exponential = min(
+        _OUTCOME_CONFLICT_BACKOFF_MAX_SECONDS,
+        _OUTCOME_CONFLICT_BACKOFF_BASE_SECONDS
+        * (2 ** min(max(0, int(conflict_attempt)), 8)),
+    )
+    digest = sha256_bytes(
+        ("%s:%s:%d" % (job_id, purpose, int(conflict_attempt))).encode("utf-8")
+    )
+    fraction = int(digest.split(":", 1)[1][:8], 16) / 0xFFFFFFFF
+    return exponential * (1.0 + fraction)
 
 
 def _header(headers: Mapping[str, Any], name: str) -> str:
@@ -593,6 +613,14 @@ class ProviderSemanticsAuthorityV2:
                     raise ProviderSemanticsV2Error(
                         "provider outcome checkpoint status is invalid"
                     )
+                self._outcome_ledger.restore(base_document)
+                self._sleep(
+                    _outcome_conflict_backoff_seconds(
+                        job_id=job_id,
+                        purpose=purpose,
+                        conflict_attempt=conflict_attempt,
+                    )
+                )
                 try:
                     restored = dict(
                         self._outcome_store.load_latest(
@@ -617,10 +645,7 @@ class ProviderSemanticsAuthorityV2:
                     for item in restored.get("evidence_artifact_hashes") or ()
                 )
                 if not restored.get("found"):
-                    self._outcome_ledger.restore(base_document)
-                    raise ProviderSemanticsV2Error(
-                        "provider outcome checkpoint conflict has no durable head"
-                    )
+                    continue
                 base_document = self._outcome_ledger.restore(
                     restored["state_document"]
                 )

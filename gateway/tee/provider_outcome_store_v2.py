@@ -150,6 +150,13 @@ class ProviderOutcomeStoreV2:
             purpose=purpose,
         )
         self._collect_evidence(result, attempts, transport_artifacts)
+        if self._append_conflicted(result):
+            self._vault.release_transient(str(descriptor["artifact_id"]))
+            return {
+                "status": "conflict",
+                "transport_attempts": attempts,
+                "evidence_artifact_hashes": sorted(transport_artifacts),
+            }
         rows, read_attempts, read_artifacts = self._read_rows(
             utc_day=utc_day,
             sequence=sequence,

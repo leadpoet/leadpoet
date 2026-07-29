@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from typing import Any, Mapping, Sequence
 
 from gateway.research_lab.champion_settlement_v2 import (
@@ -62,6 +63,9 @@ TRANSPORT_TERMINAL_MIGRATION = (
 )
 PROVIDER_OUTCOME_APPEND_MIGRATION = (
     "130-research-lab-provider-outcome-append.sql"
+)
+PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION = (
+    "131-research-lab-provider-outcome-backpressure.sql"
 )
 EXPECTED_FINALIZED_VIEW_COLUMNS = (
     "bundle_hash",
@@ -429,7 +433,13 @@ def _provider_outcome_append_contract(
         raise PostgresContractProbeError(
             "provider outcome concurrent append did not select one head"
         )
-    if "does not extend the current head" not in rejected[0].stderr:
+    if not any(
+        marker in rejected[0].stderr
+        for marker in (
+            "does not extend the current head",
+            "checkpoint append is busy",
+        )
+    ):
         raise PostgresContractProbeError(
             "provider outcome stale append failed for the wrong reason"
         )
@@ -449,6 +459,78 @@ def _provider_outcome_append_contract(
         raise PostgresContractProbeError(
             "provider outcome lineage contains an unexpected row count"
         )
+
+    accepted_hash = json.loads(accepted[0].stdout.strip())["checkpoint_hash"]
+    third_hash = "sha256:" + "2" * 64
+    third = row(
+        sequence=3,
+        checkpoint_hash=third_hash,
+        previous_checkpoint_hash=accepted_hash,
+        suffix="3",
+    )
+    lock_sql = """
+        BEGIN;
+        SELECT pg_catalog.pg_advisory_xact_lock(
+            pg_catalog.hashtext('research_lab_provider_outcome_checkpoint_v2'),
+            pg_catalog.hashtext(
+                'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+                || ':2026-07-10'
+            )
+        );
+        SELECT pg_catalog.pg_sleep(2);
+        ROLLBACK;
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        holder = executor.submit(database.psql, lock_sql)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            granted = int(
+                database.psql(
+                    """
+                    SELECT pg_catalog.count(*)
+                    FROM pg_catalog.pg_locks
+                    WHERE locktype = 'advisory' AND granted;
+                    """,
+                    tuples_only=True,
+                ).stdout.strip()
+            )
+            if granted:
+                break
+            time.sleep(0.02)
+        else:
+            raise PostgresContractProbeError(
+                "provider outcome contention fixture did not acquire its lock"
+            )
+        started = time.monotonic()
+        busy = database.psql(
+            _provider_outcome_append_sql(third),
+            check=False,
+            tuples_only=True,
+        )
+        busy_elapsed = time.monotonic() - started
+        if busy.returncode == 0 or "checkpoint append is busy" not in busy.stderr:
+            raise PostgresContractProbeError(
+                "provider outcome contention did not fail with the busy contract"
+            )
+        if busy_elapsed >= 1.0:
+            raise PostgresContractProbeError(
+                "provider outcome contention occupied a database session"
+            )
+        holder.result(timeout=3.0)
+
+    third_inserted = json.loads(
+        database.psql(
+            _provider_outcome_append_sql(third),
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    if third_inserted != {
+        "status": "inserted",
+        "checkpoint_hash": third_hash,
+    }:
+        raise PostgresContractProbeError(
+            "provider outcome append did not recover after contention"
+        )
     return {
         "first_checkpoint_hash": first_hash,
         "candidate_sibling_hashes": sorted(
@@ -456,7 +538,7 @@ def _provider_outcome_append_contract(
         ),
         "accepted_count": len(accepted),
         "rejected_count": len(rejected),
-        "row_count": row_count,
+        "row_count": row_count + 1,
     }
 
 
@@ -906,6 +988,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
 
         database.apply_migration(scripts / PROVIDER_OUTCOME_APPEND_MIGRATION)
         applied.append(PROVIDER_OUTCOME_APPEND_MIGRATION)
+        database.apply_migration(
+            scripts / PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION
+        )
+        applied.append(PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION)
         provider_outcome_append = _provider_outcome_append_contract(database)
 
         rows, verified = _settlement_fixture(

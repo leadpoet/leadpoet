@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 SQL = Path("scripts/90-research-lab-provider-outcome-checkpoints-v2.sql")
-APPEND_SQL = Path("scripts/130-research-lab-provider-outcome-append.sql")
+APPEND_SQL = Path("scripts/131-research-lab-provider-outcome-backpressure.sql")
 
 
 def test_provider_outcome_checkpoint_migration_is_append_only_and_private() -> None:
@@ -34,7 +34,9 @@ def test_provider_outcome_checkpoint_migration_stores_ciphertext_not_plaintext()
 def test_provider_outcome_checkpoint_append_is_atomic_and_private() -> None:
     text = APPEND_SQL.read_text()
     assert "append_research_lab_provider_outcome_checkpoint_v2" in text
-    assert "pg_advisory_xact_lock" in text
+    assert "pg_try_advisory_xact_lock" in text
+    assert "provider outcome checkpoint append is busy" in text
+    assert "pg_advisory_xact_lock(" not in text
     assert "ORDER BY c.sequence DESC" in text
     assert "checkpoint_sequence <> current_sequence + 1" in text
     assert "incoming_previous_hash <> current_checkpoint_hash" in text

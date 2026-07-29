@@ -1030,7 +1030,7 @@ async def execute_provider_preflight_v2(
     worker_index: int,
     settings: Mapping[str, Any],
     force: bool = False,
-    provider_credential_profile: str = "benchmark_model",
+    provider_credential_profile: str = "provider_preflight",
     execute: Any = execute_scoring_v2,
 ) -> dict[str, Any]:
     measurement_id = uuid.uuid4().hex

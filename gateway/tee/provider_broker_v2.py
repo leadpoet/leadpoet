@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -543,11 +544,63 @@ class ProviderBrokerV2:
         self._credentials = {}  # type: Dict[str, str]
         self._job_credentials = {}  # type: Dict[Tuple[str, str], Dict[str, str]]
         self._records = {}  # type: Dict[Tuple[str, int], Dict[str, Any]]
+        self._pending_records = {}  # type: Dict[Tuple[str, int], Dict[str, Any]]
         self._record_keys_by_job = {}  # type: Dict[str, set[Tuple[str, int]]]
         self._inflight = {}  # type: Dict[Tuple[str, int], Tuple[str, threading.Event, object]]
         self._released_terminal_count = 0
         self._expired_terminal_count = 0
         self._lock = threading.Lock()
+        self._transaction_state = threading.local()
+
+    @contextmanager
+    def transient_terminal_transaction(self):
+        """Publish terminal records only when surrounding artifact work commits."""
+
+        state = getattr(self._transaction_state, "current", None)
+        if state is None:
+            state = {
+                "token": object(),
+                "depth": 0,
+                "created": set(),
+                "failed": False,
+            }
+            self._transaction_state.current = state
+        state["depth"] += 1
+        try:
+            yield
+        except BaseException:
+            state["failed"] = True
+            raise
+        finally:
+            state["depth"] -= 1
+            if state["depth"] == 0:
+                wait_events = []
+                with self._lock:
+                    for key in state["created"]:
+                        pending = self._pending_records.get(key)
+                        if (
+                            pending is None
+                            or pending["transaction_token"] is not state["token"]
+                        ):
+                            continue
+                        self._pending_records.pop(key)
+                        if not state["failed"]:
+                            record = dict(pending["record"])
+                            self._records[key] = record
+                            self._record_keys_by_job.setdefault(
+                                str(record["job_id"]),
+                                set(),
+                            ).add(key)
+                        inflight = self._inflight.get(key)
+                        if (
+                            inflight is not None
+                            and inflight[2] is pending["owner_token"]
+                        ):
+                            self._inflight.pop(key)
+                            wait_events.append(inflight[1])
+                del self._transaction_state.current
+                for wait_event in wait_events:
+                    wait_event.set()
 
     def _purge_expired_records_locked(self, now: float) -> int:
         cutoff = float(now) - TERMINAL_RECORD_RETENTION_SECONDS
@@ -611,6 +664,10 @@ class ProviderBrokerV2:
                 (key, inflight[1])
                 for key, inflight in self._inflight.items()
                 if inflight[2] is owner_token
+                and (
+                    key not in self._pending_records
+                    or self._pending_records[key]["owner_token"] is not owner_token
+                )
             ]
             for key, _ in abandoned:
                 self._inflight.pop(key, None)
@@ -978,6 +1035,18 @@ class ProviderBrokerV2:
                         "logical provider attempt was reused with different request"
                     )
                 return dict(existing["result"])
+            pending = self._pending_records.get(deduplication_key)
+            transaction = getattr(self._transaction_state, "current", None)
+            if pending is not None:
+                if pending["record"]["request_fingerprint"] != request_fingerprint:
+                    raise ProviderBrokerV2Error(
+                        "logical provider attempt was reused with different request"
+                    )
+                if (
+                    transaction is not None
+                    and pending["transaction_token"] is transaction["token"]
+                ):
+                    return dict(pending["record"]["result"])
             inflight = self._inflight.get(deduplication_key)
             if inflight is not None:
                 if inflight[0] != request_fingerprint:
@@ -987,11 +1056,17 @@ class ProviderBrokerV2:
                 wait_event = inflight[1]
                 owns_attempt = False
             else:
-                if len(self._records) >= MAX_DEDUPLICATION_RECORDS:
+                if (
+                    len(self._records) + len(self._pending_records)
+                    >= MAX_DEDUPLICATION_RECORDS
+                ):
                     self._purge_expired_records_locked(
                         self._monotonic_clock()
                     )
-                    if len(self._records) >= MAX_DEDUPLICATION_RECORDS:
+                    if (
+                        len(self._records) + len(self._pending_records)
+                        >= MAX_DEDUPLICATION_RECORDS
+                    ):
                         raise ProviderBrokerV2Error(
                             "provider terminal ledger is full"
                         )
@@ -1288,19 +1363,29 @@ class ProviderBrokerV2:
                         "logical provider attempt raced with different request"
                     )
                 return dict(existing["result"])
-            self._records[deduplication_key] = {
+            record = {
                 "job_id": str(request["job_id"] or ""),
                 "request_fingerprint": request_fingerprint,
                 "result": dict(result),
                 "completed_monotonic": self._monotonic_clock(),
             }
-            self._record_keys_by_job.setdefault(
-                str(request["job_id"] or ""),
-                set(),
-            ).add(deduplication_key)
-            inflight = self._inflight.pop(deduplication_key, None)
-            if inflight is not None:
-                inflight[1].set()
+            transaction = getattr(self._transaction_state, "current", None)
+            if transaction is not None:
+                self._pending_records[deduplication_key] = {
+                    "record": record,
+                    "owner_token": owner_token,
+                    "transaction_token": transaction["token"],
+                }
+                transaction["created"].add(deduplication_key)
+            else:
+                self._records[deduplication_key] = record
+                self._record_keys_by_job.setdefault(
+                    str(request["job_id"] or ""),
+                    set(),
+                ).add(deduplication_key)
+                inflight = self._inflight.pop(deduplication_key, None)
+                if inflight is not None:
+                    inflight[1].set()
         return result
 
 

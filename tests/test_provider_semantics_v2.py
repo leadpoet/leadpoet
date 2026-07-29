@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
@@ -181,6 +182,7 @@ class _OutcomeStore:
 class _Broker:
     def __init__(self) -> None:
         self.calls = []
+        self.terminal_transaction_count = 0
         self.queued = {}
         self.available_credentials = {
             "openrouter",
@@ -199,6 +201,11 @@ class _Broker:
                 "deepline",
             )
         }
+
+    @contextmanager
+    def transient_terminal_transaction(self):
+        self.terminal_transaction_count += 1
+        yield
 
     def health(self):
         return {"status": "ready", "registry_hash": _hash("a")}
@@ -1143,6 +1150,44 @@ def test_failed_outcome_persistence_removes_uncommitted_job_artifacts():
         job_id="job-provider-semantics",
         purpose="research_lab.company_score.v2",
     ) == ()
+
+
+def test_terminal_record_commits_only_after_artifact_transaction_exit():
+    events = []
+
+    class OrderedBroker(_Broker):
+        @contextmanager
+        def transient_terminal_transaction(self):
+            events.append("terminal_enter")
+            try:
+                yield
+            except BaseException:
+                events.append("terminal_rollback")
+                raise
+            else:
+                events.append("terminal_commit")
+
+    @contextmanager
+    def failing_artifact_transaction():
+        events.append("artifact_enter")
+        yield
+        events.append("artifact_commit_failed")
+        raise RuntimeError("artifact commit failed")
+
+    authority, _broker, _cache, _artifacts = _authority(
+        broker=OrderedBroker(),
+        artifact_transaction=failing_artifact_transaction,
+    )
+
+    with pytest.raises(RuntimeError, match="artifact commit failed"):
+        authority.execute(_request())
+
+    assert events == [
+        "terminal_enter",
+        "artifact_enter",
+        "artifact_commit_failed",
+        "terminal_rollback",
+    ]
 
 
 def test_replay_only_miss_and_budget_modes_do_not_call_provider():

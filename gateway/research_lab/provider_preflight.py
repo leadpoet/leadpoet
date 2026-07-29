@@ -33,6 +33,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
+from gateway.research_lab.provider_profiles_v2 import PROVIDER_PREFLIGHT_PROFILE
 from gateway.research_lab.tee_protocol import legacy_v1_enabled
 
 logger = logging.getLogger(__name__)
@@ -341,7 +342,7 @@ async def _cached_attested_preflight(
         worker_index=int(worker_index),
         settings=dict(settings),
         force=False,
-        provider_credential_profile="benchmark_model",
+        provider_credential_profile=PROVIDER_PREFLIGHT_PROFILE,
     )
     if hasattr(result, "__await__"):
         result = await result

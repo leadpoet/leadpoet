@@ -215,8 +215,10 @@ class ScoringExecutorV2:
         if credential_profile != context.provider_credential_profile:
             raise ValueError("V2 provider credential profile differs from job manifest")
         allowed_profiles = {"default"}
-        if operation in {OP_RUN_MODEL_SANDBOX_V2, OP_PROVIDER_PREFLIGHT_V2}:
+        if operation == OP_RUN_MODEL_SANDBOX_V2:
             allowed_profiles.add("benchmark_model")
+        elif operation == OP_PROVIDER_PREFLIGHT_V2:
+            allowed_profiles.add("provider_preflight")
         elif operation == OP_QUALIFICATION_COMPANY_SCORES:
             allowed_profiles.add("benchmark_scorer")
         elif operation == OP_SOURCE_ADD_LEG2_JUDGE_V2:

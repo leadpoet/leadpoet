@@ -168,10 +168,20 @@ class ProviderSemanticsAuthorityV2:
     ) -> None:
         if cache_store is None:
             raise ProviderSemanticsV2Error("provider semantics cache is required")
+        terminal_transaction = getattr(
+            broker,
+            "transient_terminal_transaction",
+            None,
+        )
+        if not callable(terminal_transaction):
+            raise ProviderSemanticsV2Error(
+                "provider broker terminal transaction is required"
+            )
         self._broker = broker
         self._cache_store = cache_store
         self._artifact_sink = artifact_sink
         self._artifact_transaction = artifact_transaction or nullcontext
+        self._terminal_transaction = terminal_transaction
         self._boot_identity_supplier = boot_identity_supplier
         self._sign_digest = sign_digest
         self._clock = clock
@@ -230,7 +240,7 @@ class ProviderSemanticsAuthorityV2:
             }
 
     def execute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
-        with self._artifact_transaction():
+        with self._terminal_transaction(), self._artifact_transaction():
             result = dict(self._execute(request))
             persistence = self._record_provider_outcome(request, result)
             if persistence:

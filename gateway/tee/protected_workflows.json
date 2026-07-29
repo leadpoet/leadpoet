@@ -667,7 +667,7 @@
       "symbol": "HTTPXProviderTransport"
     },
     {
-      "ast_sha256": "sha256:6b14579515693133e1b1f0aa2626c203a6ff17735cd07faf0793ed2cc09d133e",
+      "ast_sha256": "sha256:f5bbae23e30abe6307b27325dd95f054273b9393c97a4ecfb3471a82e4e7db4e",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "ProviderBrokerV2"
     },
@@ -682,7 +682,7 @@
       "symbol": "provider_registry_document"
     },
     {
-      "ast_sha256": "sha256:b8492b13540c29b750ddd35e67ef5de29e9b04f514f23cdc66adc60829405328",
+      "ast_sha256": "sha256:49161d1933f6dd4032c24d8dff0bb0ad2d91334d50534f8f7a3206714d7ad757",
       "path": "gateway/tee/provider_semantics_v2.py",
       "symbol": "ProviderSemanticsAuthorityV2"
     },
@@ -737,7 +737,7 @@
       "symbol": "rpc_method_allowed"
     },
     {
-      "ast_sha256": "sha256:e2be987b9c8bab274330bd873a5dc1c008d8e09dc7e5c16fec718b6ffc01f252",
+      "ast_sha256": "sha256:742331ecfc61ae84ac4bbf23a34f149b572246c174561cbf8b36f06ce9cff56c",
       "path": "gateway/tee/scoring_executor_v2.py",
       "symbol": "ScoringExecutorV2"
     },
@@ -1262,7 +1262,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:d64c041d76d52537249222a6c09bb3b9ea10cbef83c69ae0523b09c95d8db0eb",
+  "manifest_hash": "sha256:b2c596e9a3e311eea37b63c1898ec1734a8690d0e74a97d277f1edc122d8f7e5",
   "protected_source_commit": "243db83f115f4f1497b9640f5ebaf7d97e483b84",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

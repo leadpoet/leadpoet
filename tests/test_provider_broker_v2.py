@@ -815,6 +815,103 @@ def test_completed_job_release_removes_only_its_terminal_records():
     assert health["released_terminal_count"] == 1
 
 
+def test_failed_artifact_transaction_removes_terminal_record_before_retry():
+    transport = FakeTransport()
+    broker = _broker(transport)
+    request = _request()
+
+    with pytest.raises(RuntimeError, match="checkpoint failed"):
+        with broker.transient_terminal_transaction():
+            broker.execute(request)
+            raise RuntimeError("checkpoint failed")
+
+    assert broker.health()["terminal_count"] == 0
+
+    result = broker.execute(request)
+
+    assert result["terminal_status"] == "authenticated_response"
+    assert len(transport.calls) == 2
+    assert broker.health()["terminal_count"] == 1
+
+
+@pytest.mark.parametrize("commit", [False, True])
+def test_concurrent_duplicate_cannot_read_uncommitted_terminal_record(commit):
+    transport = FakeTransport()
+    broker = _broker(transport)
+    request = _request()
+    owner_ready = threading.Event()
+    release_owner = threading.Event()
+    waiter_entered = threading.Event()
+    owner_results = []
+    waiter_results = []
+    waiter_errors = []
+
+    class ObservedWaitEvent:
+        def __init__(self):
+            self._event = threading.Event()
+
+        def wait(self, timeout):
+            waiter_entered.set()
+            return self._event.wait(timeout)
+
+        def set(self):
+            self._event.set()
+
+    def _owner():
+        try:
+            with broker.transient_terminal_transaction():
+                owner_results.append(broker.execute(request))
+                owner_ready.set()
+                assert release_owner.wait(2)
+                if not commit:
+                    raise RuntimeError("checkpoint failed")
+        except RuntimeError:
+            if commit:
+                raise
+
+    def _waiter():
+        try:
+            waiter_results.append(broker.execute(request))
+        except Exception as exc:
+            waiter_errors.append(exc)
+
+    owner = threading.Thread(target=_owner)
+    owner.start()
+    assert owner_ready.wait(2)
+    with broker._lock:
+        inflight = broker._inflight[("operation-1", 0)]
+        broker._inflight[("operation-1", 0)] = (
+            inflight[0],
+            ObservedWaitEvent(),
+            inflight[2],
+        )
+
+    waiter = threading.Thread(target=_waiter)
+    waiter.start()
+    assert waiter_entered.wait(2)
+    assert not waiter_results
+    release_owner.set()
+    owner.join(2)
+    waiter.join(2)
+
+    assert not owner.is_alive()
+    assert not waiter.is_alive()
+    assert len(owner_results) == 1
+    if commit:
+        assert len(waiter_results) == 1
+        assert waiter_errors == []
+        assert len(transport.calls) == 1
+        assert broker.health()["terminal_count"] == 1
+    else:
+        assert waiter_results == []
+        assert [str(exc) for exc in waiter_errors] == [
+            "duplicate provider attempt did not terminate"
+        ]
+        assert broker.health()["terminal_count"] == 0
+        assert broker.execute(request)["terminal_status"] == "authenticated_response"
+        assert len(transport.calls) == 2
+
+
 def test_terminal_record_cleanup_prevents_completed_jobs_exhausting_capacity(
     monkeypatch,
 ):

@@ -7,6 +7,7 @@ import pytest
 
 from gateway.research_lab.provider_profiles_v2 import (
     BENCHMARK_MODEL_PROFILE,
+    PROVIDER_PREFLIGHT_PROFILE,
     bind_provider_profile_envelopes_v2,
     load_provider_profile_v2,
     provision_provider_profile_v2,
@@ -71,6 +72,27 @@ def test_benchmark_profile_is_optional_and_binds_only_encrypted_commitments(tmp_
     ]["exa"]
     assert "ciphertext_blob" not in bound[0]
     assert validate_job_provider_envelope(bound[0]) == bound[0]
+
+
+def test_provider_preflight_profile_binds_exact_probe_credentials(tmp_path):
+    for provider_id, filename in (
+        ("exa", "benchmark_exa.json"),
+        ("scrapingdog", "benchmark_scrapingdog.json"),
+    ):
+        (tmp_path / filename).write_text(
+            json.dumps(_envelope(provider_id, provider_id + "-secret")),
+            encoding="utf-8",
+        )
+
+    profile = load_provider_profile_v2(
+        PROVIDER_PREFLIGHT_PROFILE,
+        config_dir=tmp_path,
+    )
+
+    assert set(profile["credential_ref_hashes"]) == {"exa", "scrapingdog"}
+    assert {
+        item["provider_id"] for item in profile["envelopes"]
+    } == {"exa", "scrapingdog"}
 
 
 @pytest.mark.asyncio

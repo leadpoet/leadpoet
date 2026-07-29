@@ -20,6 +20,7 @@ from leadpoet_canonical.attested_v2 import sha256_json
 DEFAULT_PROFILE = "default"
 BENCHMARK_MODEL_PROFILE = "benchmark_model"
 BENCHMARK_SCORER_PROFILE = "benchmark_scorer"
+PROVIDER_PREFLIGHT_PROFILE = "provider_preflight"
 STALE_PARENT_REPAIR_PROFILE = "stale_parent_repair"
 SOURCE_ADD_JUDGE_PROFILE = "source_add_judge"
 DEFAULT_CONFIG_DIR = Path("/home/ec2-user/.config/leadpoet/v2")
@@ -29,6 +30,10 @@ _PROFILE_FILES = {
     BENCHMARK_MODEL_PROFILE: (("exa", "benchmark_exa.json"),),
     BENCHMARK_SCORER_PROFILE: (
         ("openrouter", "benchmark_openrouter.json"),
+        ("scrapingdog", "benchmark_scrapingdog.json"),
+    ),
+    PROVIDER_PREFLIGHT_PROFILE: (
+        ("exa", "benchmark_exa.json"),
         ("scrapingdog", "benchmark_scrapingdog.json"),
     ),
     STALE_PARENT_REPAIR_PROFILE: (
@@ -295,6 +300,7 @@ def verify_required_worker_proxy_profiles_v2(
     required_profiles = {
         BENCHMARK_MODEL_PROFILE: frozenset({"exa"}),
         BENCHMARK_SCORER_PROFILE: frozenset({"openrouter", "scrapingdog"}),
+        PROVIDER_PREFLIGHT_PROFILE: frozenset({"exa", "scrapingdog"}),
         STALE_PARENT_REPAIR_PROFILE: frozenset({"openrouter"}),
         SOURCE_ADD_JUDGE_PROFILE: frozenset({"openrouter"}),
     }

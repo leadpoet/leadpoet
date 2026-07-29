@@ -36,7 +36,7 @@ def test_malformed_allocation_schedule_fails_closed():
 
 
 @pytest.mark.asyncio
-async def test_provider_preflight_uses_unique_measured_jobs_and_benchmark_profile(
+async def test_provider_preflight_uses_unique_measured_jobs_and_dedicated_profile(
     monkeypatch,
 ):
     calls = []
@@ -90,7 +90,7 @@ async def test_provider_preflight_uses_unique_measured_jobs_and_benchmark_profil
     assert len(set(job_ids)) == 2
     assert all(call["worker_index"] == 4 for call in calls)
     assert all(
-        call["provider_credential_profile"] == "benchmark_model"
+        call["provider_credential_profile"] == "provider_preflight"
         for call in calls
     )
 

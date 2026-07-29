@@ -5,8 +5,18 @@ set -euo pipefail
 
 MIN_FREE_BYTES="${VALIDATOR_DOCKER_MIN_FREE_BYTES:-30000000000}"
 ALLOW_DATA_ROOT_RESET="${VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET:-0}"
+PRUNE_ATTEMPTS="${VALIDATOR_DOCKER_PRUNE_ATTEMPTS:-5}"
+SETTLE_ATTEMPTS="${VALIDATOR_DOCKER_SETTLE_ATTEMPTS:-30}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+for setting in PRUNE_ATTEMPTS SETTLE_ATTEMPTS; do
+  value="${!setting}"
+  if ! [[ "$value" =~ ^[1-9][0-9]*$ ]] || [ "$value" -gt 300 ]; then
+    echo "ERROR: $setting must be between 1 and 300" >&2
+    exit 2
+  fi
+done
 
 . "$SCRIPT_DIR/docker_operation_lock_v2.sh"
 leadpoet_acquire_docker_operation_lock_v2
@@ -39,9 +49,74 @@ if ! docker info >/dev/null 2>&1; then
   fi
 fi
 
-docker image prune --all --force >/dev/null
-docker builder prune --all --force >/dev/null
-docker system prune --all --force >/dev/null
+run_prune_with_retry() {
+  local label="$1"
+  shift
+  local attempt
+  for attempt in $(seq 1 "$PRUNE_ATTEMPTS"); do
+    if "$@" >/dev/null; then
+      return 0
+    fi
+    if [ "$attempt" -lt "$PRUNE_ATTEMPTS" ]; then
+      echo "Docker $label prune did not settle; retrying ($attempt/$PRUNE_ATTEMPTS)" >&2
+      sleep 2
+    fi
+  done
+  echo "ERROR: Docker $label prune failed after $PRUNE_ATTEMPTS attempts" >&2
+  return 1
+}
+
+run_prune_with_retry image docker image prune --all --force
+run_prune_with_retry builder docker builder prune --all --force
+run_prune_with_retry system docker system prune --all --force
+
+# Docker removes the named containers synchronously, but containerd task and
+# shim cleanup can lag briefly. Do not classify that normal teardown lag as an
+# unsafe active runtime or continue to data-root recovery until it settles.
+TEARDOWN_SETTLED=0
+TEARDOWN_PROBE_FAILED=0
+CONTAINER_COUNT=-1
+CONTAINERD_RUNNING_TASK_COUNT=-1
+for attempt in $(seq 1 "$SETTLE_ATTEMPTS"); do
+  TEARDOWN_PROBE_FAILED=0
+  if ! CONTAINER_IDS="$(docker ps -aq 2>/dev/null)"; then
+    TEARDOWN_PROBE_FAILED=1
+  elif ! CONTAINERD_TASKS="$(sudo ctr -n moby tasks list 2>/dev/null)"; then
+    TEARDOWN_PROBE_FAILED=1
+  else
+    CONTAINER_COUNT="$(printf '%s\n' "$CONTAINER_IDS" | awk 'NF { count += 1 } END { print count + 0 }')"
+    CONTAINERD_RUNNING_TASK_COUNT="$(
+      printf '%s\n' "$CONTAINERD_TASKS" \
+        | awk 'NR > 1 && $3 == "RUNNING" { count += 1 } END { print count + 0 }'
+    )"
+  fi
+  if [ "$TEARDOWN_PROBE_FAILED" -eq 0 ] \
+      && [ "$CONTAINER_COUNT" -eq 0 ] \
+      && [ "$CONTAINERD_RUNNING_TASK_COUNT" -eq 0 ]; then
+    TEARDOWN_SETTLED=1
+    break
+  fi
+  if [ "$attempt" -lt "$SETTLE_ATTEMPTS" ]; then
+    if [ "$attempt" -eq 1 ] || [ $((attempt % 10)) -eq 0 ]; then
+      if [ "$TEARDOWN_PROBE_FAILED" -eq 1 ]; then
+        echo "Waiting for Docker teardown state to become readable ($attempt/$SETTLE_ATTEMPTS)" >&2
+      else
+        echo "Waiting for Docker teardown to settle: containers=$CONTAINER_COUNT containerd_running_tasks=$CONTAINERD_RUNNING_TASK_COUNT ($attempt/$SETTLE_ATTEMPTS)" >&2
+      fi
+    fi
+    sleep 1
+  fi
+done
+if [ "$TEARDOWN_SETTLED" -ne 1 ]; then
+  if [ "$TEARDOWN_PROBE_FAILED" -eq 1 ]; then
+    echo "ERROR: Docker teardown state remained unreadable after $SETTLE_ATTEMPTS settle attempts" >&2
+  elif [ "$CONTAINER_COUNT" -ne 0 ]; then
+    echo "ERROR: refusing Docker recovery while $CONTAINER_COUNT container(s) remain after $SETTLE_ATTEMPTS settle attempts" >&2
+  else
+    echo "ERROR: refusing containerd reset while $CONTAINERD_RUNNING_TASK_COUNT moby task(s) are running after $SETTLE_ATTEMPTS settle attempts" >&2
+  fi
+  exit 1
+fi
 
 AVAILABLE="$(available_bytes)"
 CONTAINER_COUNT="$(docker ps -aq | wc -l | tr -d '[:space:]')"

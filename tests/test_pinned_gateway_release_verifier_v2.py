@@ -56,6 +56,7 @@ def _run(
     returned_commit: str = COMMIT,
     coordination_file: Path | None = None,
     coordination_max_attempts: int | None = None,
+    max_attempts: int | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], int]:
     bin_dir, state = _fake_commands(
         tmp_path,
@@ -76,6 +77,8 @@ def _run(
         env["VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS"] = str(
             coordination_max_attempts
         )
+    if max_attempts is not None:
+        env["VALIDATOR_PINNED_GATEWAY_MAX_ATTEMPTS"] = str(max_attempts)
     result = subprocess.run(
         ["bash", str(VERIFIER), "http://gateway.invalid:8000", COMMIT],
         check=False,
@@ -117,6 +120,21 @@ def test_pinned_gateway_verifier_fails_closed_after_bounded_mismatch(
     assert requests == 36
 
 
+def test_pinned_gateway_verifier_honors_restart_wait_budget(
+    tmp_path: Path,
+) -> None:
+    result, requests = _run(
+        tmp_path,
+        transient_first=False,
+        returned_commit="b" * 40,
+        max_attempts=2,
+    )
+
+    assert result.returncode == 1
+    assert "did not align after 2 attempts" in result.stderr
+    assert requests == 6
+
+
 def test_pinned_gateway_verifier_rejects_unbounded_wait(
     tmp_path: Path,
 ) -> None:
@@ -136,6 +154,27 @@ def test_pinned_gateway_verifier_rejects_unbounded_wait(
 
     assert result.returncode == 2
     assert "must be between 1 and 1200" in result.stderr
+
+
+def test_pinned_gateway_verifier_rejects_unbounded_release_attempts(
+    tmp_path: Path,
+) -> None:
+    bin_dir, _ = _fake_commands(tmp_path, transient_first=False)
+    result = subprocess.run(
+        ["bash", str(VERIFIER), "http://gateway.invalid:8000", COMMIT],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "VALIDATOR_PINNED_GATEWAY_MAX_ATTEMPTS": "1201",
+        },
+        timeout=10,
+    )
+
+    assert result.returncode == 2
+    assert "VALIDATOR_PINNED_GATEWAY_MAX_ATTEMPTS" in result.stderr
 
 
 def test_pinned_gateway_verifier_requires_coordinator_completion(

@@ -24,6 +24,9 @@ def _run_recovery(
     containerd_containers: int = 0,
     containerd_tasks: int = 0,
     containerd_running_tasks: int = 0,
+    running_tasks_clear_after: int = -1,
+    task_probe_failures: int = 0,
+    system_prune_failures: int = 0,
     non_moby_namespaces: int = 0,
     moby_shims: int = 0,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
@@ -54,7 +57,19 @@ case "${1:-}:${2:-}" in
   info:)
     exit 0
     ;;
-  image:prune|builder:prune|system:prune)
+  image:prune|builder:prune)
+    exit 0
+    ;;
+  system:prune)
+    attempt=0
+    if [ -f "$FAKE_SYSTEM_PRUNE_STATE" ]; then
+      attempt="$(cat "$FAKE_SYSTEM_PRUNE_STATE")"
+    fi
+    attempt=$((attempt + 1))
+    printf '%s\\n' "$attempt" > "$FAKE_SYSTEM_PRUNE_STATE"
+    if [ "$attempt" -le "$FAKE_SYSTEM_PRUNE_FAILURES" ]; then
+      exit 1
+    fi
     exit 0
     ;;
   ps:-aq)
@@ -87,6 +102,12 @@ exit 2
         """#!/bin/bash
 # No stale mounts under the fake docker/containerd roots (hermetic on CI and
 # macOS, which lacks findmnt entirely).
+exit 0
+""",
+    )
+    _write_executable(
+        bin_dir / "sleep",
+        """#!/bin/bash
 exit 0
 """,
     )
@@ -141,9 +162,23 @@ case "$command" in
         if [ "${5:-}" = "-q" ]; then
           emit_rows "$FAKE_CONTAINERD_TASKS"
         else
+          probe=0
+          if [ -f "$FAKE_RUNNING_TASK_PROBE_STATE" ]; then
+            probe="$(cat "$FAKE_RUNNING_TASK_PROBE_STATE")"
+          fi
+          probe=$((probe + 1))
+          printf '%s\\n' "$probe" > "$FAKE_RUNNING_TASK_PROBE_STATE"
+          if [ "$probe" -le "$FAKE_TASK_PROBE_FAILURES" ]; then
+            exit 1
+          fi
           printf 'TASK PID STATUS\\n'
           index=0
-          while [ "$index" -lt "$FAKE_CONTAINERD_RUNNING_TASKS" ]; do
+          running="$FAKE_CONTAINERD_RUNNING_TASKS"
+          if [ "$FAKE_RUNNING_TASKS_CLEAR_AFTER" -ge 0 ] \
+              && [ "$probe" -gt "$FAKE_RUNNING_TASKS_CLEAR_AFTER" ]; then
+            running=0
+          fi
+          while [ "$index" -lt "$running" ]; do
             printf 'task-%s 100 RUNNING\\n' "$index"
             index=$((index + 1))
           done
@@ -197,11 +232,24 @@ fi
         "FAKE_CONTAINERD_CONTAINERS": str(containerd_containers),
         "FAKE_CONTAINERD_TASKS": str(containerd_tasks),
         "FAKE_CONTAINERD_RUNNING_TASKS": str(containerd_running_tasks),
+        "FAKE_RUNNING_TASKS_CLEAR_AFTER": str(running_tasks_clear_after),
+        "FAKE_RUNNING_TASK_PROBE_STATE": str(tmp_path / "running-task-probes"),
+        "FAKE_TASK_PROBE_FAILURES": str(task_probe_failures),
+        "FAKE_SYSTEM_PRUNE_FAILURES": str(system_prune_failures),
+        "FAKE_SYSTEM_PRUNE_STATE": str(tmp_path / "system-prune-attempts"),
         "FAKE_NON_MOBY_NAMESPACES": str(non_moby_namespaces),
         "FAKE_MOBY_SHIMS": str(moby_shims),
         "FAKE_CONTAINERD_RESET_MARKER": str(tmp_path / "containerd-reset"),
         "FAKE_DOCKER_ROOT_BYTES": "229720371200",
         "FAKE_SUDO_LOG": str(sudo_log),
+        "VALIDATOR_DOCKER_PRUNE_ATTEMPTS": str(system_prune_failures + 1),
+        "VALIDATOR_DOCKER_SETTLE_ATTEMPTS": str(
+            max(
+                1,
+                task_probe_failures + 1,
+                3 if running_tasks_clear_after >= 0 else 1,
+            )
+        ),
     }
     result = subprocess.run(
         ["bash", str(ROOT / "validator_tee/scripts/reclaim_docker_storage_v2.sh")],
@@ -322,6 +370,49 @@ def test_validator_docker_recovery_refuses_running_containerd_task(
 
     assert result.returncode == 1
     assert "refusing containerd reset while 1 moby task(s) are running" in result.stderr
+    assert "systemctl stop" not in sudo_log
+
+
+def test_validator_docker_recovery_waits_for_transient_containerd_task(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        containerd_running_tasks=1,
+        running_tasks_clear_after=1,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Waiting for Docker teardown to settle" in result.stderr
+    assert "systemctl stop" not in sudo_log
+
+
+def test_validator_docker_recovery_retries_transient_system_prune(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        system_prune_failures=1,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Docker system prune did not settle; retrying (1/2)" in result.stderr
+    assert "systemctl stop" not in sudo_log
+
+
+def test_validator_docker_recovery_retries_unreadable_teardown_state(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        task_probe_failures=1,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Waiting for Docker teardown state to become readable" in result.stderr
     assert "systemctl stop" not in sudo_log
 
 

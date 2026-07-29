@@ -78,7 +78,7 @@ def test_exact_restart_preserves_newer_validator_restart_controller():
     assert "VALIDATOR_EXACT_COMMIT_HELPER_SOURCE" in script
 
 
-def test_pinned_restart_requires_same_gateway_release_before_shutdown():
+def test_every_restart_requires_same_gateway_release_before_shutdown():
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
     deploy = Path(
         "validator_models/containerizing/deploy_dynamic.sh"
@@ -99,8 +99,14 @@ def test_pinned_restart_requires_same_gateway_release_before_shutdown():
         'echo "Rechecking same-SHA gateway alignment after validator startup"'
     )
     assert release_ready < prestart_verify < shutdown < start < poststart_verify
-    assert "\n  verify_pinned_gateway_release\n" in script
-    assert "\n  if ! verify_pinned_gateway_release; then\n" in script
+    assert (
+        "\nverify_pinned_gateway_release \\\n"
+        '  "${VALIDATOR_PINNED_GATEWAY_PRESTART_MAX_ATTEMPTS:-600}"\n'
+    ) in script
+    assert (
+        "\nif ! verify_pinned_gateway_release \\\n"
+        '    "${VALIDATOR_PINNED_GATEWAY_POSTSTART_MAX_ATTEMPTS:-12}"; then\n'
+    ) in script
     for endpoint in (
         "/health/v2-authority",
         "/build-info",
@@ -108,9 +114,11 @@ def test_pinned_restart_requires_same_gateway_release_before_shutdown():
     ):
         assert endpoint in verifier
     assert 'export VALIDATOR_EXACT_RELEASE_PINNED=1' in script
+    assert "VALIDATOR_EXACT_RELEASE_PINNED=0" not in script
+    assert "VALIDATOR_PINNED_GATEWAY_PRESTART_MAX_ATTEMPTS:-600" in script
+    assert "VALIDATOR_PINNED_GATEWAY_POSTSTART_MAX_ATTEMPTS:-12" in script
     assert "verify_pinned_gateway_release_v2.sh" in script
     assert "stop_pinned_validator_after_alignment_failure" in script
-    assert "if ! verify_pinned_gateway_release; then" in script
     assert (
         '-e VALIDATOR_EXACT_RELEASE_PINNED="${VALIDATOR_EXACT_RELEASE_PINNED:-0}"'
         in deploy

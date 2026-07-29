@@ -83,8 +83,10 @@ if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
 fi
 
 verify_pinned_gateway_release() {
+  local max_attempts="${1:-12}"
   echo "Verifying the pinned gateway release is active on ${VALIDATOR_DEPLOY_SHA}"
-  bash "$VALIDATOR_PINNED_GATEWAY_VERIFIER" \
+  VALIDATOR_PINNED_GATEWAY_MAX_ATTEMPTS="$max_attempts" \
+    bash "$VALIDATOR_PINNED_GATEWAY_VERIFIER" \
     "$VALIDATOR_V2_GATEWAY_URL" \
     "$VALIDATOR_DEPLOY_SHA"
 }
@@ -217,6 +219,16 @@ fi
 if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
   VALIDATOR_EXACT_COMMIT_HELPER_SOURCE="$VALIDATOR_ROOT/Leadpoet/utils/exact_commit_restart_v2.py"
   VALIDATOR_PINNED_GATEWAY_VERIFIER_SOURCE="$VALIDATOR_ROOT/validator_tee/scripts/verify_pinned_gateway_release_v2.sh"
+  if [ ! -r "$VALIDATOR_PINNED_GATEWAY_VERIFIER_SOURCE" ]; then
+    echo "ERROR: pinned gateway release verifier is unavailable" >&2
+    exit 1
+  fi
+  VALIDATOR_PINNED_GATEWAY_VERIFIER="$(
+    mktemp /tmp/verify_pinned_gateway_release_v2.XXXXXX
+  )"
+  cp "$VALIDATOR_PINNED_GATEWAY_VERIFIER_SOURCE" \
+    "$VALIDATOR_PINNED_GATEWAY_VERIFIER"
+  chmod 700 "$VALIDATOR_PINNED_GATEWAY_VERIFIER"
 fi
 capture_validator_restart_controller
 
@@ -411,11 +423,7 @@ export VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_DEPLOY_SHA"
 export GITHUB_SHA="$VALIDATOR_DEPLOY_SHA"
 export GIT_COMMIT="$VALIDATOR_DEPLOY_SHA"
 export LEADPOET_WRAPPER_ACTIVE=1
-if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
-  export VALIDATOR_EXACT_RELEASE_PINNED=1
-else
-  export VALIDATOR_EXACT_RELEASE_PINNED=0
-fi
+export VALIDATOR_EXACT_RELEASE_PINNED=1
 
 case "$VALIDATOR_USE_CAPTURED_RESTART_START" in
   0|1) ;;
@@ -504,10 +512,9 @@ PY
   exit 75
 fi
 
-if [ "$VALIDATOR_EXACT_RELEASE_PINNED" = "1" ]; then
-  echo "Checking same-SHA gateway alignment before stopping validator"
-  verify_pinned_gateway_release
-fi
+echo "Checking same-SHA gateway alignment before stopping validator"
+verify_pinned_gateway_release \
+  "${VALIDATOR_PINNED_GATEWAY_PRESTART_MAX_ATTEMPTS:-600}"
 
 echo "Refreshing public validator hotkey measurements for the selected release"
 python3 -m validator_tee.host.refresh_hotkey_config_v2 \
@@ -719,12 +726,11 @@ if [ "$(docker inspect -f '{{.State.Running}}' leadpoet-validator-main)" != "tru
   docker logs --tail 160 leadpoet-validator-main >&2 || true
   exit 1
 fi
-if [ "$VALIDATOR_EXACT_RELEASE_PINNED" = "1" ]; then
-  echo "Rechecking same-SHA gateway alignment after validator startup"
-  if ! verify_pinned_gateway_release; then
-    stop_pinned_validator_after_alignment_failure
-    exit 1
-  fi
+echo "Rechecking same-SHA gateway alignment after validator startup"
+if ! verify_pinned_gateway_release \
+    "${VALIDATOR_PINNED_GATEWAY_POSTSTART_MAX_ATTEMPTS:-12}"; then
+  stop_pinned_validator_after_alignment_failure
+  exit 1
 fi
 install_validator_restart_controller
 leadpoet_release_docker_operation_lock_v2

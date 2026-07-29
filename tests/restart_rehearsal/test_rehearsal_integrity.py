@@ -1063,6 +1063,8 @@ def test_gateway_boundary_registers_background_startup_schema_contracts() -> Non
     repository_root = Path(__file__).resolve().parents[2]
     tables, rpcs = _schema_contract(repository_root)
     assert {
+        "research_lab_candidate_evaluation_current",
+        "research_lab_candidate_promotion_events",
         "research_lab_gateway_control_current",
         "research_lab_public_benchmark_report_current",
     } <= tables
@@ -1073,6 +1075,14 @@ def test_gateway_boundary_registers_background_startup_schema_contracts() -> Non
     assert "research_lab_public_benchmark_report_current" in (
         repository_root
         / "scripts/53-research-lab-benchmark-quality-current-views.sql"
+    ).read_text(encoding="utf-8")
+    assert "research_lab_candidate_evaluation_current" in (
+        repository_root
+        / "scripts/52-research-lab-image-build-candidate-current-view.sql"
+    ).read_text(encoding="utf-8")
+    assert "research_lab_candidate_promotion_events" in (
+        repository_root
+        / "scripts/37-research-lab-promotion-and-public-benchmarks.sql"
     ).read_text(encoding="utf-8")
     assert "research_lab_source_add_claim_work" in (
         repository_root

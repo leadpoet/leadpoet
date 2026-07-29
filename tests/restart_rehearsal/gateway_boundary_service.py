@@ -29,6 +29,8 @@ RUNTIME_TABLES = frozenset(
         "qualification_baselines",
         "qualification_private_icp_sets",
         "research_lab_champion_reward_current",
+        "research_lab_candidate_evaluation_current",
+        "research_lab_candidate_promotion_events",
         "research_lab_gateway_control_current",
         "research_lab_public_benchmark_report_current",
         "research_lab_source_add_reward_current",

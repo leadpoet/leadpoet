@@ -715,14 +715,28 @@ def _champion_lifetime_credit_ledger_from_snapshots(
         cap_applies = row_epoch >= cap_start_epoch
         seen_marked_rewards: set[str] = set()
         for section in ("champion_allocations", "queued_champion_allocations"):
-            allocations = allocation_doc.get(section) or []
+            allocations = allocation_doc.get(section)
+            if allocations is None and not lifetime_policy:
+                allocations = []
             if not isinstance(allocations, list):
+                if lifetime_policy:
+                    raise ValueError(
+                        "champion lifetime credit allocation section is invalid"
+                    )
                 continue
             for allocation in allocations:
                 if not isinstance(allocation, Mapping):
+                    if lifetime_policy:
+                        raise ValueError(
+                            "champion lifetime credit allocation is invalid"
+                        )
                     continue
                 source_id = str(allocation.get("source_id") or allocation.get("champion_reward_id") or "")
                 if not source_id:
+                    if lifetime_policy:
+                        raise ValueError(
+                            "champion lifetime credit source is invalid"
+                        )
                     continue
                 item_policy = allocation.get("champion_credit_policy")
                 if item_policy not in (None, policy_marker):
@@ -735,7 +749,20 @@ def _champion_lifetime_credit_ledger_from_snapshots(
                             "champion lifetime credit is duplicated within epoch"
                         )
                     seen_marked_rewards.add(source_id)
-                paid = _decimal(allocation.get("paid_alpha_percent") or 0)
+                try:
+                    paid = _decimal(
+                        allocation.get("paid_alpha_percent") or 0
+                    )
+                except Exception as exc:
+                    if lifetime_policy:
+                        raise ValueError(
+                            "champion lifetime credit amount is invalid"
+                        ) from exc
+                    raise
+                if lifetime_policy and (not paid.is_finite() or paid < 0):
+                    raise ValueError(
+                        "champion lifetime credit amount is invalid"
+                    )
                 credit = paid
                 if not lifetime_policy and cap_applies:
                     scheduled_raw = (

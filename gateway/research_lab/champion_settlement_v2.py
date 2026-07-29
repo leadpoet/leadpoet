@@ -1272,9 +1272,9 @@ def _non_negative_decimal_v1(value: Any, field: str) -> Decimal:
         raise ChampionSettlementV2Error(
             "chain realized %s is invalid" % field
         ) from exc
-    if result < 0:
+    if not result.is_finite() or result < 0:
         raise ChampionSettlementV2Error(
-            "chain realized %s is negative" % field
+            "chain realized %s is invalid" % field
         )
     return result
 

@@ -37,7 +37,7 @@
       "symbol": "_champion_finalized_paid_alpha_to_date"
     },
     {
-      "ast_sha256": "sha256:f13152d18c35f340ab44998c65d3e4c1f4761ad4da75457e697094bcd770c074",
+      "ast_sha256": "sha256:e9c91f8c0523136ee199b45f057f6e1bfdad7c6d571f64ebb594a766e06aeb39",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "_champion_lifetime_credit_ledger_from_snapshots"
     },
@@ -1262,7 +1262,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:51e95656a2a1887c1d562cefaf272a9db90243e4988003ef8dab0eca340492b8",
+  "manifest_hash": "sha256:183f661cfe103f019e887d7b20db1165f3ecf9273e89601c1497b3258066afa5",
   "protected_source_commit": "243db83f115f4f1497b9640f5ebaf7d97e483b84",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

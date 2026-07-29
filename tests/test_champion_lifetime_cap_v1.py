@@ -14,6 +14,7 @@ from leadpoet_canonical.weight_computation import (
 )
 from leadpoet_verifier.economics import (
     CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1,
+    _champion_allocation,
     allocate_research_lab_epoch,
 )
 
@@ -226,6 +227,18 @@ def test_six_decimal_rounding_conserves_pool_and_emits_valid_u16():
     unallocated = Decimal(str(allocation["unallocated_percent"]))
 
     assert paid + unallocated == Decimal("1.000001")
+    for row in rows:
+        total_due = Decimal(str(row["total_due_alpha_percent"]))
+        paid_to_date = Decimal(str(row["paid_alpha_percent_to_date"]))
+        remaining_before = Decimal(
+            str(row["remaining_alpha_percent_before_epoch"])
+        )
+        paid_now = Decimal(str(row["paid_alpha_percent"]))
+        remaining_after = Decimal(
+            str(row["remaining_alpha_percent_after_epoch"])
+        )
+        assert paid_to_date + remaining_before == total_due
+        assert paid_now + remaining_after == remaining_before
     uid_weights, burn_share, _breakdown = (
         research_lab_uid_weights_from_allocation(
             allocation,
@@ -247,6 +260,38 @@ def test_six_decimal_rounding_conserves_pool_and_emits_valid_u16():
     assert sparse_uids == [0, 1, 2, 3]
     assert all(0 < value <= 65535 for value in sparse_weights)
     assert max(sparse_weights) == 65535
+
+
+def test_fractional_surplus_serializes_an_exact_lifetime_balance():
+    row = _champion_allocation(
+        {
+            "uid": 7,
+            "miner_hotkey": "champion-hotkey-7",
+            "source_id": "champion_reward:7",
+            "island": "generalist",
+            "desired_alpha_percent": Decimal("1.016320"),
+            "improvement_points": Decimal("0.642591"),
+            "base_desired_alpha_percent": Decimal("1.016320"),
+            "total_due_alpha_percent": Decimal("20.326400"),
+            "paid_alpha_percent_to_date": Decimal("0.6133504"),
+            "remaining_alpha_percent": Decimal("19.7130496"),
+            "nominal_end_epoch": 120,
+        },
+        Decimal("1.0914784"),
+    )
+
+    total_due = Decimal(str(row["total_due_alpha_percent"]))
+    paid_to_date = Decimal(str(row["paid_alpha_percent_to_date"]))
+    remaining_before = Decimal(
+        str(row["remaining_alpha_percent_before_epoch"])
+    )
+    paid = Decimal(str(row["paid_alpha_percent"]))
+    remaining_after = Decimal(
+        str(row["remaining_alpha_percent_after_epoch"])
+    )
+
+    assert paid_to_date + remaining_before == total_due
+    assert paid + remaining_after == remaining_before
 
 
 def test_exhausted_champion_remains_zero_for_100_epochs():
@@ -433,6 +478,55 @@ def test_unknown_or_mixed_policy_evidence_fails_closed(allocation_doc):
     with pytest.raises(ValueError, match="policy"):
         _champion_lifetime_credit_ledger_from_snapshots(
             [{"epoch": 24100, "allocation_doc": allocation_doc}],
+            obligation_caps={"champion_reward:7": 146.0},
+        )
+
+
+@pytest.mark.parametrize(
+    "champion_allocations",
+    (
+        "not-a-list",
+        {},
+        ["not-an-object"],
+        [{"paid_alpha_percent": 1.0}],
+        [
+            {
+                "source_id": "champion_reward:7",
+                "paid_alpha_percent": -1.0,
+            }
+        ],
+        [
+            {
+                "source_id": "champion_reward:7",
+                "paid_alpha_percent": "NaN",
+            }
+        ],
+        [
+            {
+                "source_id": "champion_reward:7",
+                "paid_alpha_percent": "not-a-number",
+            }
+        ],
+    ),
+)
+def test_marked_malformed_lifetime_credit_fails_closed(
+    champion_allocations,
+):
+    with pytest.raises(ValueError, match="lifetime credit"):
+        _champion_lifetime_credit_ledger_from_snapshots(
+            [
+                {
+                    "epoch": 24100,
+                    "allocation_doc": {
+                        "epoch": 24100,
+                        "champion_credit_policy": (
+                            CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+                        ),
+                        "champion_allocations": champion_allocations,
+                        "queued_champion_allocations": [],
+                    },
+                }
+            ],
             obligation_caps={"champion_reward:7": 146.0},
         )
 

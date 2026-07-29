@@ -1356,6 +1356,13 @@ def _cap_allocation_sections_to_pool(
             intended = _decimal(row.get("intended_alpha_percent", 0))
             if "deferred_alpha_percent" in row:
                 row["deferred_alpha_percent"] = _rate_float(max(Decimal("0"), intended - new_paid))
+            if "remaining_alpha_percent_before_epoch" in row:
+                remaining_before = _decimal(
+                    row["remaining_alpha_percent_before_epoch"]
+                )
+                row["remaining_alpha_percent_after_epoch"] = _rate_float(
+                    max(Decimal("0"), remaining_before - new_paid)
+                )
             if "overpaid_alpha_percent" in row:
                 row["overpaid_alpha_percent"] = _rate_float(max(Decimal("0"), new_paid - intended))
             overflow -= reduction
@@ -1532,26 +1539,57 @@ def _reimbursement_allocation(item: Mapping[str, Any], paid: Decimal, reason: st
 
 
 def _champion_allocation(item: Mapping[str, Any], paid: Decimal) -> Dict[str, Any]:
-    intended = _decimal(item["desired_alpha_percent"])
+    intended = _decimal(item["desired_alpha_percent"]).quantize(
+        RATE_QUANT,
+        rounding=ROUND_HALF_UP,
+    )
+    paid = max(Decimal("0"), paid).quantize(
+        RATE_QUANT,
+        rounding=ROUND_HALF_UP,
+    )
     allocation: Dict[str, Any] = {
         "uid": int(item["uid"]),
         "miner_hotkey": str(item["miner_hotkey"]),
         "source_id": str(item["source_id"]),
         "island": str(item["island"]),
-        "intended_alpha_percent": _rate_float(intended),
-        "paid_alpha_percent": _rate_float(paid),
-        "deferred_alpha_percent": _rate_float(max(Decimal("0"), intended - paid)),
+        "intended_alpha_percent": float(intended),
+        "paid_alpha_percent": float(paid),
+        "deferred_alpha_percent": _rate_float(
+            max(Decimal("0"), intended - paid)
+        ),
         "improvement_points": _rate_float(_decimal(item["improvement_points"])),
     }
     if "base_desired_alpha_percent" in item:
-        remaining_before = _decimal(item.get("remaining_alpha_percent", 0))
+        total_due = _decimal(item["total_due_alpha_percent"]).quantize(
+            RATE_QUANT,
+            rounding=ROUND_HALF_UP,
+        )
+        paid_to_date = _decimal(
+            item["paid_alpha_percent_to_date"]
+        ).quantize(
+            RATE_QUANT,
+            rounding=ROUND_HALF_UP,
+        )
+        remaining_before = max(
+            Decimal("0"),
+            total_due - paid_to_date,
+        ).quantize(RATE_QUANT, rounding=ROUND_HALF_UP)
+        paid = min(paid, remaining_before)
+        remaining_after = (remaining_before - paid).quantize(
+            RATE_QUANT,
+            rounding=ROUND_HALF_UP,
+        )
+        allocation["paid_alpha_percent"] = float(paid)
+        allocation["deferred_alpha_percent"] = _rate_float(
+            max(Decimal("0"), intended - paid)
+        )
         allocation.update(
             {
                 "base_desired_alpha_percent": _rate_float(_decimal(item["base_desired_alpha_percent"])),
-                "total_due_alpha_percent": _rate_float(_decimal(item["total_due_alpha_percent"])),
-                "paid_alpha_percent_to_date": _rate_float(_decimal(item["paid_alpha_percent_to_date"])),
-                "remaining_alpha_percent_before_epoch": _rate_float(remaining_before),
-                "remaining_alpha_percent_after_epoch": _rate_float(max(Decimal("0"), remaining_before - paid)),
+                "total_due_alpha_percent": float(total_due),
+                "paid_alpha_percent_to_date": float(paid_to_date),
+                "remaining_alpha_percent_before_epoch": float(remaining_before),
+                "remaining_alpha_percent_after_epoch": float(remaining_after),
                 "nominal_end_epoch": int(item.get("nominal_end_epoch", 0)),
             }
         )

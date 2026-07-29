@@ -416,6 +416,28 @@ def test_validator_docker_recovery_retries_unreadable_teardown_state(
     assert "systemctl stop" not in sudo_log
 
 
+def test_validator_docker_recovery_preserves_healthy_live_runtime(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        containers=11,
+        containerd_containers=11,
+        containerd_tasks=11,
+        containerd_running_tasks=11,
+        moby_shims=11,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "containers=11" in result.stdout
+    assert "containerd_running_tasks=11" in result.stdout
+    assert "orphaned=0" in result.stdout
+    assert "Waiting for Docker teardown" not in result.stderr
+    assert "systemctl stop" not in sudo_log
+    assert "rm -rf" not in sudo_log
+
+
 def test_validator_docker_recovery_leaves_clean_root_above_floor_untouched(
     tmp_path: Path,
 ) -> None:

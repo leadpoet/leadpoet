@@ -45,6 +45,11 @@ CHAIN_TRANSPORT_PURPOSE_SQL = (
     / "scripts"
     / "128-research-lab-chain-settlement-transport-purposes.sql"
 ).read_text(encoding="utf-8")
+CHAMPION_LIFETIME_CREDIT_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "132-research-lab-champion-lifetime-credit.sql"
+).read_text(encoding="utf-8")
 
 
 def test_finalized_allocation_view_requires_bundle_publication_and_finalization():
@@ -347,6 +352,61 @@ def test_chain_realized_rpc_enforces_activation_contiguity_and_receipt():
         r"settlement_netuid\s*\)",
         CHAIN_REALIZED_SQL,
     )
+
+
+def test_champion_lifetime_credit_migration_is_additive_and_fail_closed():
+    assert "UPDATE public." not in CHAMPION_LIFETIME_CREDIT_SQL
+    assert "DELETE FROM public." not in CHAMPION_LIFETIME_CREDIT_SQL
+    assert "champion_credit_policy TEXT" in CHAMPION_LIFETIME_CREDIT_SQL
+    assert "accelerated_lifetime_cap_v1" in CHAMPION_LIFETIME_CREDIT_SQL
+    assert "scheduled_bonus_v1" in CHAMPION_LIFETIME_CREDIT_SQL
+    assert (
+        "leadpoet.research_lab_chain_realized_epoch_settlement.v3"
+        in CHAMPION_LIFETIME_CREDIT_SQL
+    )
+    assert (
+        "leadpoet.research_lab_chain_realized_obligation_credit.v2"
+        in CHAMPION_LIFETIME_CREDIT_SQL
+    )
+    for constraint in (
+        "research_lab_chain_settlement_schema_check",
+        "research_lab_chain_settlement_champion_policy_check",
+        "research_lab_chain_credit_schema_policy_check",
+        "research_lab_chain_credit_policy_amount_check",
+    ):
+        assert f"VALIDATE CONSTRAINT {constraint}" in (
+            " ".join(CHAMPION_LIFETIME_CREDIT_SQL.split())
+        )
+
+
+def test_champion_lifetime_credit_rpc_is_atomic_idempotent_and_receipt_backed():
+    rpc = "persist_research_lab_chain_realized_lifetime_settlement_v2"
+    assert rpc in CHAMPION_LIFETIME_CREDIT_SQL
+    assert "pg_advisory_xact_lock" in CHAMPION_LIFETIME_CREDIT_SQL
+    assert "ON CONFLICT DO NOTHING" in CHAMPION_LIFETIME_CREDIT_SQL
+    assert "chain_realized_lifetime_credit_conflict" in (
+        CHAMPION_LIFETIME_CREDIT_SQL
+    )
+    assert "chain_realized_lifetime_credit_set_conflict" in (
+        CHAMPION_LIFETIME_CREDIT_SQL
+    )
+    assert "research_lab_attested_execution_receipts_v2" in (
+        CHAMPION_LIFETIME_CREDIT_SQL
+    )
+    assert "receipt_status = 'succeeded'" in CHAMPION_LIFETIME_CREDIT_SQL
+    assert "GRANT EXECUTE" in CHAMPION_LIFETIME_CREDIT_SQL
+    assert "TO service_role" in CHAMPION_LIFETIME_CREDIT_SQL
+
+
+def test_champion_lifetime_credit_contract_exposes_validated_schema():
+    assert "research_lab_champion_lifetime_credit_contract_v1" in (
+        CHAMPION_LIFETIME_CREDIT_SQL
+    )
+    assert "convalidated" in CHAMPION_LIFETIME_CREDIT_SQL
+    assert "pg_catalog.pg_get_constraintdef" in (
+        CHAMPION_LIFETIME_CREDIT_SQL
+    )
+    assert "NOTIFY pgrst, 'reload schema'" in CHAMPION_LIFETIME_CREDIT_SQL
 
 
 def test_migration_99_allowlist_matches_canonical_contract_before_migration_101():

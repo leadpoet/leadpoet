@@ -474,7 +474,8 @@ QUERY_POLICIES = {
             "netuid,epoch_id,settlement_hash,schema_version,obligation_kind,"
             "obligation_source_id,miner_hotkey,miner_uid,"
             "observed_chain_alpha_percent,lab_attributed_alpha_percent,"
-            "scheduled_alpha_percent,credited_alpha_percent,credit_hash,"
+            "scheduled_alpha_percent,credited_alpha_percent,"
+            "champion_credit_policy,credit_hash,"
             "credit_receipt_hash,credit_doc"
         ),
         parameter_names=("netuid", "start_epoch", "end_epoch"),

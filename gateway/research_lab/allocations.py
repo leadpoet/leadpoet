@@ -20,7 +20,10 @@ from gateway.research_lab.bundles import contains_secret_material, sha256_json
 from gateway.research_lab.chain import resolve_hotkey_uids
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.store import create_research_lab_emission_allocation_snapshot, select_all
-from leadpoet_verifier.economics import allocate_research_lab_epoch
+from leadpoet_verifier.economics import (
+    CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1,
+    allocate_research_lab_epoch,
+)
 
 
 ACTIVE_REIMBURSEMENT_STATUSES = {"awarded"}
@@ -635,32 +638,82 @@ def _champion_paid_alpha_to_date_from_snapshots(
     *,
     obligation_caps: Mapping[str, Any] | None = None,
 ) -> dict[str, float]:
-    """Sum per-epoch obligation credit from pre-validated settlement rows.
+    ledger = _champion_lifetime_credit_ledger_from_snapshots(
+        snapshot_rows,
+        obligation_caps=obligation_caps,
+    )
+    for reward_id, excess in ledger["excess_by_reward"].items():
+        if excess > 0:
+            logger.warning(
+                "champion_lifetime_excess reward_id=%s "
+                "realized_excess_alpha_percent=%.6f",
+                reward_id,
+                excess,
+            )
+    return dict(ledger["applied_by_reward"])
 
-    Champions earn the scheduled rate for the full reward window; a
-    single-champion epoch can pay far above schedule from the remaining Lab
-    pool, and that surplus is a bonus — it must not retire the scheduled
-    obligation early (a sole champion once hit its 20-epoch lifetime target
-    in 8 epochs and lost the remaining 12). From the policy cutoff epoch
-    onward, each epoch credits at most the entry's scheduled rate against
-    the obligation; earlier epochs and entries without a recorded schedule
-    credit their full paid amount.
+
+def _champion_lifetime_credit_ledger_from_snapshots(
+    snapshot_rows: list[Mapping[str, Any]],
+    *,
+    obligation_caps: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, float]]:
+    """Return deterministic applied, raw-realized, and excess champion credit.
+
+    Historical unmarked snapshots retain the existing scheduled-credit rule.
+    Marked snapshots apply actual chain-realized champion attribution to the
+    lifetime entitlement. Raw realized credit beyond that entitlement is
+    retained as excess evidence but never reopens or overdraws the obligation.
     """
     cap_start_epoch = _champion_schedule_cap_start_epoch()
-    paid_by_reward: dict[str, Decimal] = {}
+    applied_by_reward: dict[str, Decimal] = {}
+    realized_by_reward: dict[str, Decimal] = {}
+    excess_by_reward: dict[str, Decimal] = {}
     normalized_caps = {
         str(reward_id): max(Decimal("0"), _decimal(value))
         for reward_id, value in (obligation_caps or {}).items()
     }
+    seen_lifetime_policy_epochs: set[int] = set()
     for row in sorted(snapshot_rows, key=lambda item: int(item.get("epoch") or 0)):
         allocation_doc = row.get("allocation_doc") or {}
         if not isinstance(allocation_doc, Mapping):
             continue
+        policy_marker = allocation_doc.get("champion_credit_policy")
+        if policy_marker not in (
+            None,
+            CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1,
+        ):
+            raise ValueError("champion credit policy marker is invalid")
+        lifetime_policy = (
+            policy_marker
+            == CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+        )
         try:
-            row_epoch = int(row.get("epoch") or 0)
-        except (TypeError, ValueError):
+            row_epoch = int(row["epoch"])
+        except (KeyError, TypeError, ValueError) as exc:
+            if lifetime_policy:
+                raise ValueError(
+                    "champion lifetime credit epoch is invalid"
+                ) from exc
             row_epoch = 0
+        if lifetime_policy:
+            try:
+                allocation_epoch = int(allocation_doc["epoch"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "champion lifetime credit allocation epoch is invalid"
+                ) from exc
+            if allocation_epoch != row_epoch:
+                raise ValueError(
+                    "champion lifetime credit allocation epoch differs"
+                )
+            if row_epoch < 0 or row_epoch in seen_lifetime_policy_epochs:
+                raise ValueError(
+                    "champion lifetime credit epoch is duplicated or invalid"
+                )
+            seen_lifetime_policy_epochs.add(row_epoch)
         cap_applies = row_epoch >= cap_start_epoch
+        seen_marked_rewards: set[str] = set()
         for section in ("champion_allocations", "queued_champion_allocations"):
             allocations = allocation_doc.get(section) or []
             if not isinstance(allocations, list):
@@ -671,9 +724,20 @@ def _champion_paid_alpha_to_date_from_snapshots(
                 source_id = str(allocation.get("source_id") or allocation.get("champion_reward_id") or "")
                 if not source_id:
                     continue
+                item_policy = allocation.get("champion_credit_policy")
+                if item_policy not in (None, policy_marker):
+                    raise ValueError(
+                        "champion credit policy evidence is mixed"
+                    )
+                if lifetime_policy:
+                    if source_id in seen_marked_rewards:
+                        raise ValueError(
+                            "champion lifetime credit is duplicated within epoch"
+                        )
+                    seen_marked_rewards.add(source_id)
                 paid = _decimal(allocation.get("paid_alpha_percent") or 0)
                 credit = paid
-                if cap_applies:
+                if not lifetime_policy and cap_applies:
                     scheduled_raw = (
                         allocation.get("base_desired_alpha_percent")
                         if allocation.get("base_desired_alpha_percent") is not None
@@ -683,12 +747,41 @@ def _champion_paid_alpha_to_date_from_snapshots(
                         scheduled = _decimal(scheduled_raw)
                         if scheduled > 0:
                             credit = min(paid, scheduled)
-                already_credited = paid_by_reward.get(source_id, Decimal("0"))
+                realized_by_reward[source_id] = (
+                    realized_by_reward.get(source_id, Decimal("0")) + credit
+                )
+                already_credited = applied_by_reward.get(
+                    source_id,
+                    Decimal("0"),
+                )
                 total_cap = normalized_caps.get(source_id)
+                applied_credit = credit
                 if total_cap is not None:
-                    credit = min(credit, max(Decimal("0"), total_cap - already_credited))
-                paid_by_reward[source_id] = already_credited + credit
-    return {reward_id: _rate_float(paid) for reward_id, paid in paid_by_reward.items()}
+                    applied_credit = min(
+                        credit,
+                        max(Decimal("0"), total_cap - already_credited),
+                    )
+                applied_by_reward[source_id] = (
+                    already_credited + applied_credit
+                )
+                excess_by_reward[source_id] = (
+                    excess_by_reward.get(source_id, Decimal("0"))
+                    + max(Decimal("0"), credit - applied_credit)
+                )
+    return {
+        "applied_by_reward": {
+            reward_id: _rate_float(value)
+            for reward_id, value in applied_by_reward.items()
+        },
+        "realized_by_reward": {
+            reward_id: _rate_float(value)
+            for reward_id, value in realized_by_reward.items()
+        },
+        "excess_by_reward": {
+            reward_id: _rate_float(value)
+            for reward_id, value in excess_by_reward.items()
+        },
+    }
 
 
 def _champion_replay_obligation(

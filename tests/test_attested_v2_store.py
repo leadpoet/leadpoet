@@ -213,6 +213,119 @@ async def test_chain_settlement_atomic_retry_and_complete_readback(
     assert result["durable_readback_hash"].startswith("sha256:")
 
 
+@pytest.mark.asyncio
+async def test_lifetime_settlement_uses_versioned_persistence_rpc(monkeypatch):
+    from gateway.research_lab import champion_settlement_v2
+
+    settlement_doc = {
+        "schema_version": (
+            champion_settlement_v2
+            .CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3
+        ),
+        "netuid": 71,
+        "epoch_id": 100,
+        "champion_credit_policy": (
+            champion_settlement_v2
+            .CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+        ),
+        "credit_hashes": [],
+    }
+    package = {
+        "settlement_doc": settlement_doc,
+        "settlement_hash": attested_v2_store.sha256_json(settlement_doc),
+        "credits": [],
+    }
+    called: list[str] = []
+
+    async def load_graphs(_receipt_hashes):
+        return {HASH: {"root_receipt_hash": HASH}}
+
+    def validate_settlements(rows, **_kwargs):
+        row = rows[0]
+        return [
+            {
+                "netuid": row["netuid"],
+                "epoch": row["epoch_id"],
+                "settlement_hash": row["settlement_hash"],
+                "settlement_doc": row["settlement_doc"],
+                "settlement_receipt_hash": row[
+                    "settlement_receipt_hash"
+                ],
+                "credit_hashes": [],
+            }
+        ]
+
+    def validate_credits(rows, **_kwargs):
+        return [
+            {
+                "epoch": 100,
+                "netuid": 71,
+                "allocation_hash": package["settlement_hash"],
+                "chain_realized_settlement_hash": package[
+                    "settlement_hash"
+                ],
+                "chain_realized_settlement_receipt_hash": HASH,
+                "chain_realized_credit_hashes": sorted(
+                    row["credit_hash"] for row in rows
+                ),
+            }
+        ]
+
+    async def call_rpc(name, parameters):
+        called.append(name)
+        return {
+            "schema_version": (
+                "leadpoet.research_lab_chain_realized_"
+                "settlement_persistence.v1"
+            ),
+            "netuid": 71,
+            "epoch_id": 100,
+            "settlement_hash": package["settlement_hash"],
+            "settlement_receipt_hash": HASH,
+            "credit_count": 0,
+            "credit_hashes": [],
+        }
+
+    async def select_one(_table, **_kwargs):
+        return {
+            "netuid": 71,
+            "epoch_id": 100,
+            "schema_version": settlement_doc["schema_version"],
+            "settlement_hash": package["settlement_hash"],
+            "settlement_receipt_hash": HASH,
+            "settlement_doc": settlement_doc,
+        }
+
+    async def select_all(_table, **_kwargs):
+        return []
+
+    monkeypatch.setattr(
+        attested_v2_store, "load_receipt_graphs_v2", load_graphs
+    )
+    monkeypatch.setattr(attested_v2_store, "call_rpc", call_rpc)
+    monkeypatch.setattr(attested_v2_store, "select_one", select_one)
+    monkeypatch.setattr(attested_v2_store, "select_all", select_all)
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "validate_chain_realized_epoch_settlements_v1",
+        validate_settlements,
+    )
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "validate_chain_realized_obligation_credits_v1",
+        validate_credits,
+    )
+
+    await attested_v2_store.persist_chain_realized_settlement_v1(
+        package=package,
+        receipt_hash=HASH,
+    )
+
+    assert called == [
+        attested_v2_store.CHAIN_REALIZED_LIFETIME_SETTLEMENT_RPC
+    ]
+
+
 def _graph(with_transport=False, with_parent=False):
     private_key = Ed25519PrivateKey.generate()
     public_key = private_key.public_key().public_bytes(

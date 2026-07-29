@@ -494,7 +494,9 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/127-research-lab-chain-unattributed-settlement.sql",
         "scripts/128-research-lab-chain-settlement-transport-purposes.sql",
         "scripts/129-research-lab-attested-local-transport.sql",
+        "scripts/130-research-lab-provider-outcome-append.sql",
         "scripts/131-research-lab-provider-outcome-backpressure.sql",
+        "scripts/132-research-lab-champion-lifetime-credit.sql",
     }.issubset(set(result["migration_files"]))
     assert "service-role-value" not in str(result)
 

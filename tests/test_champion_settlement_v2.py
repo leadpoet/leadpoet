@@ -474,27 +474,47 @@ def _chain_package_authority(
     source_epoch_id: int = 100,
     allocations: list[dict] | None = None,
     queued_allocations: list[dict] | None = None,
+    lifetime_policy: bool = False,
 ) -> tuple[dict, dict]:
+    champion_rows = list(
+        allocations
+        if allocations is not None
+        else [
+            {
+                "source_id": "champion_reward:test",
+                "miner_hotkey": "miner-hotkey",
+                "uid": 7,
+                "paid_alpha_percent": 5.0,
+                "base_desired_alpha_percent": 5.0,
+            }
+        ]
+    )
+    queued_rows = list(queued_allocations or [])
+    if lifetime_policy:
+        for item in (*champion_rows, *queued_rows):
+            desired = float(item["base_desired_alpha_percent"])
+            total_due = desired * 20
+            paid = float(item["paid_alpha_percent"])
+            item.update(
+                {
+                    "total_due_alpha_percent": total_due,
+                    "paid_alpha_percent_to_date": 0.0,
+                    "remaining_alpha_percent_before_epoch": total_due,
+                    "remaining_alpha_percent_after_epoch": total_due - paid,
+                }
+            )
     allocation_body = {
         "schema_version": "leadpoet.research_lab_allocation.v2",
         "epoch": source_epoch_id,
-        "champion_allocations": list(
-            allocations
-            if allocations is not None
-            else [
-                {
-                    "source_id": "champion_reward:test",
-                    "miner_hotkey": "miner-hotkey",
-                    "uid": 7,
-                    "paid_alpha_percent": 5.0,
-                    "base_desired_alpha_percent": 5.0,
-                }
-            ]
-        ),
-        "queued_champion_allocations": list(queued_allocations or []),
+        "champion_allocations": champion_rows,
+        "queued_champion_allocations": queued_rows,
         "source_add_allocations": [],
         "reimbursement_allocations": [],
     }
+    if lifetime_policy:
+        allocation_body["champion_credit_policy"] = (
+            settlement.CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+        )
     allocation = {
         **allocation_body,
         "allocation_hash": sha256_json(allocation_body),
@@ -598,6 +618,112 @@ def test_chain_realized_stale_vector_credits_each_epoch_exactly(
         assert credit["epoch_id"] == epoch_id
         assert credit["credited_alpha_percent"] == "4.999710077699"
         assert credit["attribution_doc"]["source_bundle_epoch_id"] == 100
+
+
+def test_chain_realized_lifetime_policy_credits_actual_attribution(
+    monkeypatch,
+):
+    authority, verified = _chain_package_authority(
+        allocations=[
+            {
+                "source_id": "champion_reward:test",
+                "miner_hotkey": "miner-hotkey",
+                "uid": 7,
+                "paid_alpha_percent": 5.0,
+                "base_desired_alpha_percent": 1.0,
+            }
+        ],
+        lifetime_policy=True,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_published_weight_bundle_v2",
+        lambda _document: verified,
+    )
+
+    package = settlement.build_chain_realized_settlement_package_v1(
+        observation=_chain_observation(epoch_id=101),
+        authority=authority,
+    )
+
+    assert package["settlement_doc"]["schema_version"] == (
+        settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3
+    )
+    assert package["settlement_doc"]["champion_credit_policy"] == (
+        settlement.CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+    )
+    credit = package["credits"][0]["credit_doc"]
+    assert credit["schema_version"] == (
+        settlement.CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V2
+    )
+    assert Decimal(credit["credited_alpha_percent"]) == Decimal(
+        credit["lab_attributed_alpha_percent"]
+    )
+    assert Decimal(credit["credited_alpha_percent"]) > Decimal(
+        credit["scheduled_alpha_percent"]
+    )
+
+
+def test_chain_realized_lifetime_policy_rejects_incomplete_balance(
+    monkeypatch,
+):
+    authority, verified = _chain_package_authority(lifetime_policy=True)
+    allocation = authority["bundle_doc"]["weight_snapshot"][
+        "calculation_snapshot"
+    ]["research_lab_allocation_doc"]
+    allocation["champion_allocations"][0].pop(
+        "remaining_alpha_percent_after_epoch"
+    )
+    allocation["allocation_hash"] = sha256_json(
+        {
+            key: value
+            for key, value in allocation.items()
+            if key != "allocation_hash"
+        }
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_published_weight_bundle_v2",
+        lambda _document: verified,
+    )
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="lifetime evidence is incomplete",
+    ):
+        settlement.build_chain_realized_settlement_package_v1(
+            observation=_chain_observation(epoch_id=101),
+            authority=authority,
+        )
+
+
+def test_chain_realized_unknown_lifetime_policy_fails_closed(monkeypatch):
+    authority, verified = _chain_package_authority()
+    allocation = authority["bundle_doc"]["weight_snapshot"][
+        "calculation_snapshot"
+    ]["research_lab_allocation_doc"]
+    allocation["champion_credit_policy"] = "unknown_policy"
+    allocation["allocation_hash"] = sha256_json(
+        {
+            key: value
+            for key, value in allocation.items()
+            if key != "allocation_hash"
+        }
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_published_weight_bundle_v2",
+        lambda _document: verified,
+    )
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="champion credit policy is invalid",
+    ):
+        settlement.build_chain_realized_settlement_package_v1(
+            observation=_chain_observation(epoch_id=101),
+            authority=authority,
+        )
 
 
 def test_chain_realized_u16_rounding_is_distributed_without_overcredit(

@@ -408,6 +408,8 @@ def _migration_schema_contract(
         "research_lab_attested_transport_purpose_contract_v2",
         "research_lab_attested_transport_terminal_contract_v2",
         "append_research_lab_provider_outcome_checkpoint_v2",
+        "persist_research_lab_chain_realized_lifetime_settlement_v2",
+        "research_lab_champion_lifetime_credit_contract_v1",
     }
     if not required_rpcs <= set(raw_rpcs):
         raise RuntimeError(
@@ -579,12 +581,19 @@ class LocalPostgRESTState:
         netuid = int(settlement["netuid"])
         epoch_id = int(settlement["epoch_id"])
         schema_version = str(settlement["schema_version"])
-        expected_schema = (
-            "leadpoet.research_lab_chain_realized_epoch_settlement.v2"
-            if rpc_name
-            == "persist_research_lab_chain_realized_unattributed_v2"
-            else "leadpoet.research_lab_chain_realized_epoch_settlement.v1"
-        )
+        expected_schema = {
+            "persist_research_lab_chain_realized_settlement_v1": (
+                "leadpoet.research_lab_chain_realized_epoch_settlement.v1"
+            ),
+            "persist_research_lab_chain_realized_unattributed_v2": (
+                "leadpoet.research_lab_chain_realized_epoch_settlement.v2"
+            ),
+            "persist_research_lab_chain_realized_lifetime_settlement_v2": (
+                "leadpoet.research_lab_chain_realized_epoch_settlement.v3"
+            ),
+        }.get(rpc_name)
+        if expected_schema is None:
+            raise ValueError("unknown chain settlement persistence RPC")
         if schema_version != expected_schema:
             raise ValueError("chain settlement RPC schema differs")
         if expected_schema.endswith(".v2") and credits:
@@ -597,6 +606,19 @@ class LocalPostgRESTState:
             or int(settlement_doc.get("epoch_id", -1)) != epoch_id
         ):
             raise ValueError("chain settlement document differs")
+        lifetime_policy = "accelerated_lifetime_cap_v1"
+        if expected_schema.endswith(".v3"):
+            if (
+                settlement_doc.get("champion_credit_policy")
+                != lifetime_policy
+            ):
+                raise ValueError(
+                    "lifetime chain settlement policy differs"
+                )
+        elif "champion_credit_policy" in settlement_doc:
+            raise ValueError(
+                "legacy chain settlement contains a lifetime policy"
+            )
         expected_hashes = sorted(
             str(item)
             for item in (settlement_doc.get("credit_hashes") or ())
@@ -662,6 +684,49 @@ class LocalPostgRESTState:
             for credit in credits:
                 if not isinstance(credit, dict):
                     raise ValueError("chain settlement credit row is invalid")
+                credit_doc = credit.get("credit_doc")
+                if (
+                    not isinstance(credit_doc, dict)
+                    or credit_doc.get("schema_version")
+                    != credit.get("schema_version")
+                ):
+                    raise ValueError(
+                        "chain settlement credit document differs"
+                    )
+                if expected_schema.endswith(".v3"):
+                    if (
+                        credit.get("schema_version")
+                        != (
+                            "leadpoet.research_lab_chain_realized_"
+                            "obligation_credit.v2"
+                        )
+                        or credit.get("champion_credit_policy")
+                        != lifetime_policy
+                        or credit_doc.get("champion_credit_policy")
+                        != lifetime_policy
+                        or (
+                            credit.get("obligation_kind")
+                            in {"champion", "queued_champion"}
+                            and credit.get("credited_alpha_percent")
+                            != credit.get("lab_attributed_alpha_percent")
+                        )
+                    ):
+                        raise ValueError(
+                            "lifetime chain settlement credit differs"
+                        )
+                elif (
+                    credit.get("schema_version")
+                    != (
+                        "leadpoet.research_lab_chain_realized_"
+                        "obligation_credit.v1"
+                    )
+                    or credit.get("champion_credit_policy")
+                    != "scheduled_bonus_v1"
+                    or "champion_credit_policy" in credit_doc
+                ):
+                    raise ValueError(
+                        "legacy chain settlement credit differs"
+                    )
                 existing_credit = next(
                     (
                         row
@@ -837,6 +902,7 @@ class Handler(BaseHTTPRequestHandler):
             elif name in {
                 "persist_research_lab_chain_realized_settlement_v1",
                 "persist_research_lab_chain_realized_unattributed_v2",
+                "persist_research_lab_chain_realized_lifetime_settlement_v2",
             }:
                 response = self.server.state.persist_chain_realized_settlement(
                     rpc_name=name,

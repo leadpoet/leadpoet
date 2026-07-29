@@ -27,6 +27,9 @@ from leadpoet_canonical.weight_authority_v2 import (
     validate_published_weight_bundle_v2,
     validate_weight_finalization_submission_v2,
 )
+from leadpoet_verifier.economics import (
+    CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1,
+)
 
 
 FINALIZED_ALLOCATION_VIEW_V2 = "research_lab_finalized_allocation_epochs_v2"
@@ -51,9 +54,16 @@ CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1 = (
 CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2 = (
     "leadpoet.research_lab_chain_realized_epoch_settlement.v2"
 )
+CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3 = (
+    "leadpoet.research_lab_chain_realized_epoch_settlement.v3"
+)
 CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1 = (
     "leadpoet.research_lab_chain_realized_obligation_credit.v1"
 )
+CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V2 = (
+    "leadpoet.research_lab_chain_realized_obligation_credit.v2"
+)
+CHAIN_REALIZED_CHAMPION_CREDIT_POLICY_LEGACY_V1 = "scheduled_bonus_v1"
 CHAIN_REALIZED_AUTHORITY_TYPE_V1 = "chain_realized_emission_v1"
 CHAIN_REALIZED_UNATTRIBUTED_AUTHORITY_TYPE_V1 = (
     "chain_realized_unattributed_v1"
@@ -437,6 +447,18 @@ def build_chain_realized_settlement_package_v1(
         raise ChampionSettlementV2Error(
             "chain settlement allocation hash is invalid"
         )
+    champion_credit_policy = allocation.get("champion_credit_policy")
+    if champion_credit_policy not in (
+        None,
+        CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1,
+    ):
+        raise ChampionSettlementV2Error(
+            "chain settlement champion credit policy is invalid"
+        )
+    lifetime_cap_policy = (
+        champion_credit_policy
+        == CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+    )
     allocation_receipt_hash = str(
         input_receipts.get("research_lab_allocation") or ""
     )
@@ -515,6 +537,44 @@ def build_chain_realized_settlement_package_v1(
                 continue
             planned_lab_by_uid[uid] += paid
             scheduled_value = item.get("base_desired_alpha_percent")
+            if lifetime_cap_policy and kind in {
+                "champion",
+                "queued_champion",
+            }:
+                required_lifetime_fields = {
+                    "total_due_alpha_percent",
+                    "paid_alpha_percent_to_date",
+                    "remaining_alpha_percent_before_epoch",
+                    "remaining_alpha_percent_after_epoch",
+                }
+                if not required_lifetime_fields.issubset(item):
+                    raise ChampionSettlementV2Error(
+                        "chain settlement champion lifetime evidence is incomplete"
+                    )
+                total_due = _non_negative_decimal_v1(
+                    item["total_due_alpha_percent"],
+                    "total_due_alpha_percent",
+                )
+                paid_to_date = _non_negative_decimal_v1(
+                    item["paid_alpha_percent_to_date"],
+                    "paid_alpha_percent_to_date",
+                )
+                remaining_before = _non_negative_decimal_v1(
+                    item["remaining_alpha_percent_before_epoch"],
+                    "remaining_alpha_percent_before_epoch",
+                )
+                remaining_after = _non_negative_decimal_v1(
+                    item["remaining_alpha_percent_after_epoch"],
+                    "remaining_alpha_percent_after_epoch",
+                )
+                if (
+                    paid_to_date + remaining_before != total_due
+                    or paid > remaining_before
+                    or remaining_after != remaining_before - paid
+                ):
+                    raise ChampionSettlementV2Error(
+                        "chain settlement champion lifetime evidence is inconsistent"
+                    )
             eligible_allocations.append(
                 {
                     "section": section,
@@ -601,10 +661,19 @@ def build_chain_realized_settlement_package_v1(
         for item, realized in zip(items, realized_values):
             scheduled = Decimal(item["scheduled"])
             credited = (
-                min(realized, scheduled) if scheduled > 0 else realized
+                realized
+                if lifetime_cap_policy
+                and item["kind"] in {"champion", "queued_champion"}
+                else min(realized, scheduled)
+                if scheduled > 0
+                else realized
             )
             credit_doc = {
-                "schema_version": CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
+                "schema_version": (
+                    CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V2
+                    if lifetime_cap_policy
+                    else CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1
+                ),
                 "netuid": int(observed["netuid"]),
                 "epoch_id": int(observed["epoch_id"]),
                 "obligation_kind": str(item["kind"]),
@@ -643,6 +712,10 @@ def build_chain_realized_settlement_package_v1(
                     "weights_vector_hash": str(observed["weights_vector_hash"]),
                 },
             }
+            if lifetime_cap_policy:
+                credit_doc["champion_credit_policy"] = (
+                    CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+                )
             credits.append(
                 {
                     "credit_hash": sha256_json(credit_doc),
@@ -651,7 +724,11 @@ def build_chain_realized_settlement_package_v1(
             )
     credits.sort(key=lambda item: str(item["credit_hash"]))
     settlement_doc = {
-        "schema_version": CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+        "schema_version": (
+            CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3
+            if lifetime_cap_policy
+            else CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1
+        ),
         "netuid": int(observed["netuid"]),
         "epoch_id": int(observed["epoch_id"]),
         "credit_hashes": [str(item["credit_hash"]) for item in credits],
@@ -682,6 +759,10 @@ def build_chain_realized_settlement_package_v1(
             "complete": True,
         },
     }
+    if lifetime_cap_policy:
+        settlement_doc["champion_credit_policy"] = (
+            CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+        )
     return {
         "settlement_doc": settlement_doc,
         "settlement_hash": sha256_json(settlement_doc),
@@ -1260,18 +1341,35 @@ def validate_chain_realized_epoch_settlements_v1(
                 "chain realized settlement document is missing"
             )
         schema_version = str(document.get("schema_version") or "")
-        if set(document) != {
+        base_settlement_fields = {
             "schema_version",
             "netuid",
             "epoch_id",
             "credit_hashes",
             "observation_summary",
-        } or schema_version not in {
+        }
+        expected_settlement_fields = (
+            base_settlement_fields | {"champion_credit_policy"}
+            if schema_version
+            == CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3
+            else base_settlement_fields
+        )
+        if set(document) != expected_settlement_fields or schema_version not in {
             CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
             CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2,
+            CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3,
         }:
             raise ChampionSettlementV2Error(
                 "chain realized settlement document is invalid"
+            )
+        if (
+            schema_version
+            == CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3
+            and document.get("champion_credit_policy")
+            != CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement champion credit policy is invalid"
             )
         try:
             netuid = int(document["netuid"])
@@ -1330,10 +1428,10 @@ def validate_chain_realized_epoch_settlements_v1(
             "active_source_epoch_id",
             "complete",
         }
-        finalized_authority = (
-            schema_version
-            == CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1
-        )
+        finalized_authority = schema_version in {
+            CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
+            CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3,
+        }
         if not isinstance(observation_summary, Mapping) or (
             finalized_authority
             and (
@@ -1524,28 +1622,55 @@ def validate_chain_realized_obligation_credits_v1(
             raise ChampionSettlementV2Error(
                 "chain realized credit document is missing"
             )
+        credit_schema_version = str(
+            document.get("schema_version") or ""
+        )
+        base_credit_fields = {
+            "schema_version",
+            "netuid",
+            "epoch_id",
+            "obligation_kind",
+            "obligation_source_id",
+            "miner_hotkey",
+            "miner_uid",
+            "observed_chain_alpha_percent",
+            "lab_attributed_alpha_percent",
+            "scheduled_alpha_percent",
+            "credited_alpha_percent",
+            "attribution_doc",
+            "observation_doc",
+        }
+        expected_credit_fields = (
+            base_credit_fields | {"champion_credit_policy"}
+            if credit_schema_version
+            == CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V2
+            else base_credit_fields
+        )
         if (
-            set(document)
-            != {
-                "schema_version",
-                "netuid",
-                "epoch_id",
-                "obligation_kind",
-                "obligation_source_id",
-                "miner_hotkey",
-                "miner_uid",
-                "observed_chain_alpha_percent",
-                "lab_attributed_alpha_percent",
-                "scheduled_alpha_percent",
-                "credited_alpha_percent",
-                "attribution_doc",
-                "observation_doc",
+            set(document) != expected_credit_fields
+            or credit_schema_version
+            not in {
+                CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
+                CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V2,
             }
-            or document.get("schema_version")
-            != CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1
         ):
             raise ChampionSettlementV2Error(
                 "chain realized credit document is invalid"
+            )
+        champion_credit_policy = (
+            str(document.get("champion_credit_policy") or "")
+            if credit_schema_version
+            == CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V2
+            else CHAIN_REALIZED_CHAMPION_CREDIT_POLICY_LEGACY_V1
+        )
+        if (
+            credit_schema_version
+            == CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V2
+            and champion_credit_policy
+            != CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized credit champion policy is invalid"
             )
         try:
             netuid = int(document["netuid"])
@@ -1590,7 +1715,20 @@ def validate_chain_realized_obligation_credits_v1(
             raise ChampionSettlementV2Error(
                 "chain realized credit exceeds observed attribution"
             )
-        if scheduled > 0 and credited > scheduled:
+        lifetime_champion_credit = (
+            credit_schema_version
+            == CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V2
+            and kind in {"champion", "queued_champion"}
+        )
+        if lifetime_champion_credit and credited != attributed:
+            raise ChampionSettlementV2Error(
+                "chain realized lifetime champion credit differs from attribution"
+            )
+        if (
+            not lifetime_champion_credit
+            and scheduled > 0
+            and credited > scheduled
+        ):
             raise ChampionSettlementV2Error(
                 "chain realized credit exceeds scheduled epoch amount"
             )
@@ -1660,7 +1798,7 @@ def validate_chain_realized_obligation_credits_v1(
         expected = {
             "netuid": netuid,
             "epoch_id": epoch_id,
-            "schema_version": CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
+            "schema_version": credit_schema_version,
             "obligation_kind": kind,
             "obligation_source_id": source_id,
             "miner_hotkey": hotkey,
@@ -1673,6 +1811,23 @@ def validate_chain_realized_obligation_credits_v1(
                 raise ChampionSettlementV2Error(
                     "chain realized credit row differs at %s" % field
                 )
+        row_credit_policy = row.get("champion_credit_policy")
+        if (
+            credit_schema_version
+            == CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V2
+            and row_credit_policy != champion_credit_policy
+        ) or (
+            credit_schema_version
+            == CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1
+            and row_credit_policy
+            not in (
+                None,
+                CHAIN_REALIZED_CHAMPION_CREDIT_POLICY_LEGACY_V1,
+            )
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized credit row champion policy differs"
+            )
         for field, value in (
             ("observed_chain_alpha_percent", observed),
             ("lab_attributed_alpha_percent", attributed),
@@ -1730,6 +1885,7 @@ def validate_chain_realized_obligation_credits_v1(
             {
                 "epoch": epoch_id,
                 "netuid": netuid,
+                "schema_version": credit_schema_version,
                 "settlement_hash": settlement_hash,
                 "credit_hash": credit_hash,
                 "credit_receipt_hash": receipt_hash,
@@ -1741,6 +1897,7 @@ def validate_chain_realized_obligation_credits_v1(
                 "lab_attributed_alpha_percent": attributed,
                 "scheduled_alpha_percent": scheduled,
                 "credited_alpha_percent": credited,
+                "champion_credit_policy": champion_credit_policy,
                 "attribution_doc": dict(document["attribution_doc"]),
                 "observation_doc": dict(document["observation_doc"]),
             }
@@ -1767,6 +1924,27 @@ def validate_chain_realized_obligation_credits_v1(
                 "chain realized settlement authority type is invalid"
             )
         authority_type = authority_types[0]
+        expected_credit_schema = (
+            CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V2
+            if settlement_schema_version
+            == CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3
+            else CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1
+        )
+        expected_credit_policy = (
+            CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+            if settlement_schema_version
+            == CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3
+            else CHAIN_REALIZED_CHAMPION_CREDIT_POLICY_LEGACY_V1
+        )
+        if any(
+            credit["schema_version"] != expected_credit_schema
+            or credit["champion_credit_policy"]
+            != expected_credit_policy
+            for credit in credits
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement mixes champion credit policies"
+            )
         allocation_doc: dict[str, Any] = {
             "schema_version": settlement_schema_version,
             "epoch": int(settlement["epoch"]),
@@ -1779,6 +1957,13 @@ def validate_chain_realized_obligation_credits_v1(
             "champion_allocations": [],
             "queued_champion_allocations": [],
         }
+        if (
+            settlement_schema_version
+            == CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3
+        ):
+            allocation_doc["champion_credit_policy"] = (
+                CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+            )
         for credit in sorted(
             credits,
             key=lambda item: (
@@ -1809,6 +1994,13 @@ def validate_chain_realized_obligation_credits_v1(
                 "settlement_hash": str(credit["settlement_hash"]),
                 "reason": CHAIN_REALIZED_AUTHORITY_TYPE_V1,
             }
+            if (
+                credit["champion_credit_policy"]
+                == CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+            ):
+                item["champion_credit_policy"] = (
+                    CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+                )
             if section in {"champion_allocations", "queued_champion_allocations"}:
                 item["champion_reward_id"] = str(credit["obligation_source_id"])
             if section == "source_add_allocations":

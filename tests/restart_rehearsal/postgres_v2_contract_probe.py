@@ -67,6 +67,9 @@ PROVIDER_OUTCOME_APPEND_MIGRATION = (
 PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION = (
     "131-research-lab-provider-outcome-backpressure.sql"
 )
+CHAMPION_LIFETIME_CREDIT_MIGRATION = (
+    "132-research-lab-champion-lifetime-credit.sql"
+)
 EXPECTED_FINALIZED_VIEW_COLUMNS = (
     "bundle_hash",
     "schema_version",
@@ -546,7 +549,11 @@ def _settlement_fixture(
     *,
     candidate_sha: str,
     epoch_id: int,
-) -> tuple[list[tuple[str, dict[str, Any]]], dict[str, Any]]:
+) -> tuple[
+    list[tuple[str, dict[str, Any]]],
+    dict[str, Any],
+    SanitizedWeightFixture,
+]:
     fixture = SanitizedWeightFixture(
         candidate_sha=candidate_sha,
         epoch_id=epoch_id,
@@ -694,7 +701,7 @@ def _settlement_fixture(
         ("research_lab_attested_publication_events_v2", publication_row),
         ("research_lab_attested_weight_finalizations_v2", finalization_row),
     ]
-    return rows, verified
+    return rows, verified, fixture
 
 
 def _relation_contract(database: DisposablePostgres) -> dict[str, Any]:
@@ -755,6 +762,7 @@ def _measured_settlement_receipt_contract(
     *,
     authority: Mapping[str, Any],
     verified_bundle: Mapping[str, Any],
+    fixture: SanitizedWeightFixture,
 ) -> dict[str, Any]:
     calculation = authority["bundle_doc"]["weight_snapshot"][
         "calculation_snapshot"
@@ -837,10 +845,198 @@ def _measured_settlement_receipt_contract(
         raise PostgresContractProbeError(
             "measured chain settlement receipt root differs"
         )
+    coordinator_boot = next(
+        identity
+        for identity in authority["bundle_doc"]["receipt_graph"][
+            "boot_identities"
+        ]
+        if identity["physical_role"] == "gateway_coordinator"
+    )
+    receipt = fixture.receipt(
+        role="gateway_coordinator",
+        purpose="research_lab.chain_realized_epoch_settlement.v1",
+        job_id="restart-rehearsal-chain-settlement",
+        key=fixture.coordinator_key,
+        boot=coordinator_boot,
+        config_hash=str(coordinator_boot["config_hash"]),
+        input_root=sha256_json(
+            {
+                "schema_version": (
+                    "leadpoet.chain_realized_settlement_request.v1"
+                ),
+                "netuid": int(verified_bundle["netuid"]),
+                "epoch_id": int(verified_bundle["epoch_id"]),
+            }
+        ),
+        output_root=package["settlement_hash"],
+        parents=[verified_bundle["root_receipt_hash"]],
+        sequence=802,
+    )
     return {
         "settlement_hash": package["settlement_hash"],
         "credit_count": len(package["credits"]),
+        "package": package,
+        "receipt": receipt,
     }
+
+
+def _settlement_persistence_rows(
+    *,
+    package: Mapping[str, Any],
+    receipt_hash: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    settlement_doc = dict(package["settlement_doc"])
+    settlement_hash = str(package["settlement_hash"])
+    settlement_row = {
+        "netuid": int(settlement_doc["netuid"]),
+        "epoch_id": int(settlement_doc["epoch_id"]),
+        "schema_version": str(settlement_doc["schema_version"]),
+        "settlement_hash": settlement_hash,
+        "settlement_receipt_hash": receipt_hash,
+        "settlement_doc": settlement_doc,
+    }
+    credit_rows = []
+    for item in package["credits"]:
+        document = dict(item["credit_doc"])
+        credit_rows.append(
+            {
+                "netuid": int(document["netuid"]),
+                "epoch_id": int(document["epoch_id"]),
+                "settlement_hash": settlement_hash,
+                "schema_version": str(document["schema_version"]),
+                "obligation_kind": str(document["obligation_kind"]),
+                "obligation_source_id": str(
+                    document["obligation_source_id"]
+                ),
+                "miner_hotkey": str(document["miner_hotkey"]),
+                "miner_uid": int(document["miner_uid"]),
+                "observed_chain_alpha_percent": str(
+                    document["observed_chain_alpha_percent"]
+                ),
+                "lab_attributed_alpha_percent": str(
+                    document["lab_attributed_alpha_percent"]
+                ),
+                "scheduled_alpha_percent": str(
+                    document["scheduled_alpha_percent"]
+                ),
+                "credited_alpha_percent": str(
+                    document["credited_alpha_percent"]
+                ),
+                "champion_credit_policy": str(
+                    document["champion_credit_policy"]
+                ),
+                "credit_hash": str(item["credit_hash"]),
+                "credit_receipt_hash": receipt_hash,
+                "credit_doc": document,
+            }
+        )
+    credit_rows.sort(key=lambda row: str(row["credit_hash"]))
+    return settlement_row, credit_rows
+
+
+def _json_rpc_sql(
+    function_name: str,
+    first: Mapping[str, Any],
+    second: Sequence[Mapping[str, Any]],
+) -> str:
+    if not IDENTIFIER_RE.fullmatch(function_name):
+        raise PostgresContractProbeError("fixture RPC identifier is invalid")
+    first_json = json.dumps(dict(first), sort_keys=True, separators=(",", ":"))
+    second_json = json.dumps(
+        [dict(item) for item in second],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if "$leadpoet$" in first_json or "$leadpoet$" in second_json:
+        raise PostgresContractProbeError("fixture RPC JSON delimiter collision")
+    return (
+        "SELECT public.%s("
+        "$leadpoet$%s$leadpoet$::jsonb,"
+        "$leadpoet$%s$leadpoet$::jsonb"
+        ")::text;\n"
+        % (function_name, first_json, second_json)
+    )
+
+
+def _historical_v1_settlement_rows(
+    *,
+    fixture: SanitizedWeightFixture,
+    coordinator_boot: Mapping[str, Any],
+    netuid: int,
+    epoch_id: int,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    credit_doc = {
+        "schema_version": (
+            "leadpoet.research_lab_chain_realized_obligation_credit.v1"
+        ),
+        "netuid": netuid,
+        "epoch_id": epoch_id,
+        "obligation_kind": "champion",
+        "obligation_source_id": "grandfathered-champion",
+        "miner_hotkey": "lab-hotkey",
+        "miner_uid": 2,
+        "observed_chain_alpha_percent": "5",
+        "lab_attributed_alpha_percent": "5",
+        "scheduled_alpha_percent": "5",
+        "credited_alpha_percent": "5",
+        "attribution_doc": {"fixture": "grandfathered"},
+        "observation_doc": {"fixture": "grandfathered"},
+    }
+    credit_hash = sha256_json(credit_doc)
+    settlement_doc = {
+        "schema_version": (
+            "leadpoet.research_lab_chain_realized_epoch_settlement.v1"
+        ),
+        "netuid": netuid,
+        "epoch_id": epoch_id,
+        "credit_hashes": [credit_hash],
+        "observation_summary": {"fixture": "grandfathered"},
+    }
+    settlement_hash = sha256_json(settlement_doc)
+    receipt = fixture.receipt(
+        role="gateway_coordinator",
+        purpose="research_lab.chain_realized_epoch_settlement.v1",
+        job_id="restart-rehearsal-grandfathered-settlement",
+        key=fixture.coordinator_key,
+        boot=coordinator_boot,
+        config_hash=str(coordinator_boot["config_hash"]),
+        input_root=sha256_json(
+            {"kind": "grandfathered-settlement", "epoch_id": epoch_id}
+        ),
+        output_root=settlement_hash,
+        parents=[],
+        sequence=803,
+    )
+    settlement_row = {
+        "netuid": netuid,
+        "epoch_id": epoch_id,
+        "schema_version": settlement_doc["schema_version"],
+        "settlement_hash": settlement_hash,
+        "settlement_receipt_hash": receipt["receipt_hash"],
+        "settlement_doc": settlement_doc,
+    }
+    credit_row = {
+        "netuid": netuid,
+        "epoch_id": epoch_id,
+        "settlement_hash": settlement_hash,
+        "schema_version": credit_doc["schema_version"],
+        "obligation_kind": credit_doc["obligation_kind"],
+        "obligation_source_id": credit_doc["obligation_source_id"],
+        "miner_hotkey": credit_doc["miner_hotkey"],
+        "miner_uid": credit_doc["miner_uid"],
+        "observed_chain_alpha_percent": (
+            credit_doc["observed_chain_alpha_percent"]
+        ),
+        "lab_attributed_alpha_percent": (
+            credit_doc["lab_attributed_alpha_percent"]
+        ),
+        "scheduled_alpha_percent": credit_doc["scheduled_alpha_percent"],
+        "credited_alpha_percent": credit_doc["credited_alpha_percent"],
+        "credit_hash": credit_hash,
+        "credit_receipt_hash": receipt["receipt_hash"],
+        "credit_doc": credit_doc,
+    }
+    return receipt_storage_row(receipt), settlement_row, credit_row
 
 
 def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
@@ -994,7 +1190,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         applied.append(PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION)
         provider_outcome_append = _provider_outcome_append_contract(database)
 
-        rows, verified = _settlement_fixture(
+        rows, verified, fixture = _settlement_fixture(
             candidate_sha=args.candidate_sha,
             epoch_id=args.epoch_id,
         )
@@ -1030,7 +1226,199 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         measured_settlement = _measured_settlement_receipt_contract(
             authority=authority,
             verified_bundle=verified,
+            fixture=fixture,
         )
+        package = measured_settlement.pop("package")
+        settlement_receipt = measured_settlement.pop("receipt")
+        if (
+            package["settlement_doc"]["schema_version"]
+            != "leadpoet.research_lab_chain_realized_epoch_settlement.v3"
+            or not package["credits"]
+        ):
+            raise PostgresContractProbeError(
+                "marked lifetime settlement fixture is incomplete"
+            )
+        coordinator_boot = next(
+            identity
+            for identity in authority["bundle_doc"]["receipt_graph"][
+                "boot_identities"
+            ]
+            if identity["physical_role"] == "gateway_coordinator"
+        )
+        historical_receipt, historical_settlement, historical_credit = (
+            _historical_v1_settlement_rows(
+                fixture=fixture,
+                coordinator_boot=coordinator_boot,
+                netuid=int(verified["netuid"]),
+                epoch_id=int(verified["epoch_id"]) - 1,
+            )
+        )
+        activation_row = {
+            "netuid": int(verified["netuid"]),
+            "schema_version": (
+                "leadpoet.research_lab_chain_realized_"
+                "settlement_activation.v1"
+            ),
+            "first_epoch_id": int(verified["epoch_id"]) - 1,
+            "source_bundle_hash": str(verified["bundle_hash"]),
+            "source_bundle_epoch_id": int(verified["epoch_id"]) - 1,
+            "source_finalized_block": int(authority["finalized_block"]) - 1,
+        }
+        database.psql(
+            "".join(
+                (
+                    _json_insert_sql(
+                        "research_lab_attested_execution_receipts_v2",
+                        historical_receipt,
+                    ),
+                    _json_insert_sql(
+                        "research_lab_chain_realized_settlement_activation_v1",
+                        activation_row,
+                    ),
+                    _json_insert_sql(
+                        "research_lab_chain_realized_epoch_settlements_v1",
+                        historical_settlement,
+                    ),
+                    _json_insert_sql(
+                        "research_lab_chain_realized_obligation_credits_v1",
+                        historical_credit,
+                    ),
+                )
+            )
+        )
+
+        settlement_row, credit_rows = _settlement_persistence_rows(
+            package=package,
+            receipt_hash=str(settlement_receipt["receipt_hash"]),
+        )
+        lifetime_rpc = (
+            "persist_research_lab_chain_realized_lifetime_settlement_v2"
+        )
+        persistence_sql = _json_rpc_sql(
+            lifetime_rpc,
+            settlement_row,
+            credit_rows,
+        )
+        pre_lifetime = database.psql(persistence_sql, check=False)
+        if pre_lifetime.returncode == 0 or (
+            lifetime_rpc not in pre_lifetime.stderr
+            or "does not exist" not in pre_lifetime.stderr
+        ):
+            raise PostgresContractProbeError(
+                "pre-132 lifetime persistence did not fail closed: %s"
+                % pre_lifetime.stderr.strip()
+            )
+
+        database.apply_migration(scripts / CHAMPION_LIFETIME_CREDIT_MIGRATION)
+        applied.append(CHAMPION_LIFETIME_CREDIT_MIGRATION)
+        historical_result = database.psql(
+            """
+            SELECT pg_catalog.json_build_object(
+                'schema_version', schema_version,
+                'champion_credit_policy', champion_credit_policy,
+                'document_has_policy', credit_doc ? 'champion_credit_policy',
+                'credited_alpha_percent', credited_alpha_percent::TEXT
+            )::text
+            FROM public.research_lab_chain_realized_obligation_credits_v1
+            WHERE netuid = 71
+              AND epoch_id = %d
+              AND obligation_source_id = 'grandfathered-champion';
+            """
+            % (int(verified["epoch_id"]) - 1),
+            tuples_only=True,
+        )
+        historical_contract = json.loads(historical_result.stdout.strip())
+        if historical_contract != {
+            "schema_version": (
+                "leadpoet.research_lab_chain_realized_obligation_credit.v1"
+            ),
+            "champion_credit_policy": "scheduled_bonus_v1",
+            "document_has_policy": False,
+            "credited_alpha_percent": "5.000000000000",
+        }:
+            raise PostgresContractProbeError(
+                "migration 132 changed grandfathered settlement credit"
+            )
+
+        database.psql(
+            _json_insert_sql(
+                "research_lab_attested_execution_receipts_v2",
+                receipt_storage_row(settlement_receipt),
+            )
+        )
+        first_persistence = json.loads(
+            database.psql(
+                persistence_sql,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        repeated_persistence = json.loads(
+            database.psql(
+                persistence_sql,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        expected_credit_hashes = sorted(
+            str(row["credit_hash"]) for row in credit_rows
+        )
+        expected_persistence = {
+            "schema_version": (
+                "leadpoet.research_lab_chain_realized_"
+                "settlement_persistence.v1"
+            ),
+            "netuid": int(verified["netuid"]),
+            "epoch_id": int(verified["epoch_id"]),
+            "settlement_hash": str(package["settlement_hash"]),
+            "settlement_receipt_hash": str(
+                settlement_receipt["receipt_hash"]
+            ),
+            "credit_count": len(credit_rows),
+            "credit_hashes": expected_credit_hashes,
+        }
+        if (
+            first_persistence != expected_persistence
+            or repeated_persistence != expected_persistence
+        ):
+            raise PostgresContractProbeError(
+                "lifetime settlement persistence is not exact and idempotent"
+            )
+        lifetime_contract_result = database.psql(
+            """
+            SELECT
+                public.research_lab_champion_lifetime_credit_contract_v1()
+                ::text;
+            """,
+            tuples_only=True,
+        )
+        lifetime_contract = json.loads(
+            lifetime_contract_result.stdout.strip()
+        )
+        lifetime_constraints = lifetime_contract.get("constraints")
+        if (
+            lifetime_contract.get("schema_version")
+            != (
+                "leadpoet.research_lab_champion_"
+                "lifetime_credit_contract.v1"
+            )
+            or lifetime_contract.get("champion_credit_policy")
+            != "accelerated_lifetime_cap_v1"
+            or lifetime_contract.get("credit_policy_column") is not True
+            or not isinstance(lifetime_constraints, Mapping)
+            or set(lifetime_constraints)
+            != {
+                "research_lab_chain_settlement_schema_check",
+                "research_lab_chain_settlement_champion_policy_check",
+                "research_lab_chain_credit_schema_policy_check",
+                "research_lab_chain_credit_policy_amount_check",
+            }
+            or any(
+                constraint.get("validated") is not True
+                for constraint in lifetime_constraints.values()
+            )
+        ):
+            raise PostgresContractProbeError(
+                "post-131 lifetime credit contract is incomplete"
+            )
         tampered = copy.deepcopy(view_row)
         tampered["finalization_doc"]["weight_receipt_hash"] = "sha256:" + "0" * 64
         try:
@@ -1067,6 +1455,11 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post_129_attested_local_transport_persisted": True,
                 "transport_terminal_contract_valid": True,
                 "provider_outcome_append_atomic": True,
+                "pre_132_lifetime_credit_rejected": True,
+                "post_132_lifetime_credit_persisted": True,
+                "lifetime_credit_rpc_idempotent": True,
+                "grandfathered_credit_unchanged": True,
+                "lifetime_credit_contract_valid": True,
                 "finalized_view_projection_exact": True,
                 "finalized_view_seed_available": True,
                 "settlement_authority_parsed": True,
@@ -1078,6 +1471,13 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "research_lab_finalized_allocation_epochs_v2": [view_row],
             },
             "measured_settlement": measured_settlement,
+            "champion_lifetime_credit": {
+                "policy": "accelerated_lifetime_cap_v1",
+                "credit_count": len(credit_rows),
+                "credit_hashes": expected_credit_hashes,
+                "historical_contract": historical_contract,
+                "persistence": first_persistence,
+            },
             "provider_outcome_append": provider_outcome_append,
             "required_schema_declarations": declaration_counts,
         }

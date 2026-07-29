@@ -205,7 +205,7 @@ def test_source_add_replay_does_not_settle_legacy_champion_rail_rows():
     assert paid == {}
 
 
-def test_replay_tracked_champion_final_epoch_due_capped_surplus_still_flows():
+def test_replay_tracked_champion_final_epoch_caps_surplus_at_lifetime_balance():
     champions = [
         _champion(1, start_epoch=10, desired=5.0, remaining=1.0),
         _champion(2, start_epoch=11, desired=5.0, remaining=5.0),
@@ -213,12 +213,9 @@ def test_replay_tracked_champion_final_epoch_due_capped_surplus_still_flows():
 
     allocation = allocate_research_lab_epoch(50, _policy(lab_cap=20.0), [], champions)
 
-    # Dues stay capped by each reward's remaining balance (1.0 and 5.0), and
-    # the 14.0 surplus splits across active champions by improvement points
-    # (equal here) instead of burning as unallocated emission.
-    assert _paid_for_uid(allocation, 1) == pytest.approx(8.0)
-    assert _paid_for_uid(allocation, 2) == pytest.approx(12.0)
-    assert allocation["unallocated_percent"] == pytest.approx(0.0)
+    assert _paid_for_uid(allocation, 1) == pytest.approx(1.0)
+    assert _paid_for_uid(allocation, 2) == pytest.approx(5.0)
+    assert allocation["unallocated_percent"] == pytest.approx(14.0)
     first = allocation["champion_allocations"][0]
     assert first["remaining_alpha_percent_before_epoch"] == pytest.approx(1.0)
     assert first["remaining_alpha_percent_after_epoch"] == pytest.approx(0.0)

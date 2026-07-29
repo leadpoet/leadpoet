@@ -63,6 +63,9 @@ CHAIN_REALIZED_CREDIT_TABLE = (
 CHAIN_REALIZED_SETTLEMENT_RPC = (
     "persist_research_lab_chain_realized_settlement_v1"
 )
+CHAIN_REALIZED_LIFETIME_SETTLEMENT_RPC = (
+    "persist_research_lab_chain_realized_lifetime_settlement_v2"
+)
 CHAIN_REALIZED_UNATTRIBUTED_SETTLEMENT_RPC = (
     "persist_research_lab_chain_realized_unattributed_v2"
 )
@@ -1712,7 +1715,10 @@ async def persist_chain_realized_settlement_v1(
     from gateway.research_lab.champion_settlement_v2 import (
         CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
         CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2,
+        CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3,
+        CHAIN_REALIZED_CHAMPION_CREDIT_POLICY_LEGACY_V1,
         CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
+        CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V2,
         validate_chain_realized_epoch_settlements_v1,
         validate_chain_realized_obligation_credits_v1,
     )
@@ -1805,6 +1811,10 @@ async def persist_chain_realized_settlement_v1(
                 "credited_alpha_percent": str(
                     document["credited_alpha_percent"]
                 ),
+                "champion_credit_policy": str(
+                    document.get("champion_credit_policy")
+                    or CHAIN_REALIZED_CHAMPION_CREDIT_POLICY_LEGACY_V1
+                ),
                 "credit_hash": credit_hash,
                 "credit_receipt_hash": normalized_receipt_hash,
                 "credit_doc": dict(document),
@@ -1826,6 +1836,7 @@ async def persist_chain_realized_settlement_v1(
         not in {
             CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
             CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2,
+            CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3,
         }
         or (
             settlement_row["schema_version"]
@@ -1834,8 +1845,29 @@ async def persist_chain_realized_settlement_v1(
         )
         or any(
             row["schema_version"]
-            != CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1
+            not in {
+                CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1,
+                CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V2,
+            }
             for row in credit_rows
+        )
+        or (
+            settlement_row["schema_version"]
+            == CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3
+            and any(
+                row["schema_version"]
+                != CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V2
+                for row in credit_rows
+            )
+        )
+        or (
+            settlement_row["schema_version"]
+            == CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1
+            and any(
+                row["schema_version"]
+                != CHAIN_REALIZED_OBLIGATION_CREDIT_SCHEMA_VERSION_V1
+                for row in credit_rows
+            )
         )
     ):
         raise AttestedV2StoreError(
@@ -1843,12 +1875,17 @@ async def persist_chain_realized_settlement_v1(
         )
 
     result: Any = None
-    persistence_rpc = (
-        CHAIN_REALIZED_UNATTRIBUTED_SETTLEMENT_RPC
-        if settlement_row["schema_version"]
-        == CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2
-        else CHAIN_REALIZED_SETTLEMENT_RPC
-    )
+    persistence_rpc = {
+        CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1: (
+            CHAIN_REALIZED_SETTLEMENT_RPC
+        ),
+        CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2: (
+            CHAIN_REALIZED_UNATTRIBUTED_SETTLEMENT_RPC
+        ),
+        CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3: (
+            CHAIN_REALIZED_LIFETIME_SETTLEMENT_RPC
+        ),
+    }[settlement_row["schema_version"]]
     for attempt in range(_EXACT_INSERT_ATTEMPTS):
         try:
             result = await call_rpc(

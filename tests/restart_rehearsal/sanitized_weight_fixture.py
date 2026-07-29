@@ -210,8 +210,10 @@ class SanitizedWeightFixture:
         allocation_hash: str,
     ) -> dict[str, Any]:
         allocation_doc = {
+            "epoch": self.epoch_id,
             "lab_cap_percent": 20.0,
             "unallocated_percent": 15.0,
+            "champion_credit_policy": "accelerated_lifetime_cap_v1",
             "reimbursement_allocations": [],
             "champion_allocations": [
                 {
@@ -221,6 +223,11 @@ class SanitizedWeightFixture:
                     "uid": 2,
                     "miner_hotkey": "lab-hotkey",
                     "paid_alpha_percent": 5.0,
+                    "base_desired_alpha_percent": 7.3,
+                    "total_due_alpha_percent": 146.0,
+                    "paid_alpha_percent_to_date": 30.0,
+                    "remaining_alpha_percent_before_epoch": 116.0,
+                    "remaining_alpha_percent_after_epoch": 111.0,
                 }
             ],
             "queued_champion_allocations": [],

@@ -37,12 +37,17 @@
       "symbol": "_champion_finalized_paid_alpha_to_date"
     },
     {
+      "ast_sha256": "sha256:f13152d18c35f340ab44998c65d3e4c1f4761ad4da75457e697094bcd770c074",
+      "path": "gateway/research_lab/allocations.py",
+      "symbol": "_champion_lifetime_credit_ledger_from_snapshots"
+    },
+    {
       "ast_sha256": "sha256:c1c387a55f18d997c55462ed3e2777cd728f3135025b9b907841acfb4ef19628",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "_champion_obligation_caps"
     },
     {
-      "ast_sha256": "sha256:63221ee4c3b078e9ecb45714d96b552bf2d4278b46806cb7163fdc680c08b21c",
+      "ast_sha256": "sha256:457f49e91f1815414b9c66f7982daf4eeb4f4178f5410235eb4e9ddcfe22f4ab",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "_champion_paid_alpha_to_date_from_snapshots"
     },
@@ -117,7 +122,7 @@
       "symbol": "load_receipt_graphs_v2"
     },
     {
-      "ast_sha256": "sha256:28809962ac027321371e96ba7307697496eaf2d1c933695eed464adbf9ea2bcf",
+      "ast_sha256": "sha256:b79be8c29b6fa9c663231a5463f6a8905be1191e4df024de9dbd01317e20993c",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "persist_chain_realized_settlement_v1"
     },
@@ -152,7 +157,7 @@
       "symbol": "would_exceed_budget"
     },
     {
-      "ast_sha256": "sha256:1771412c0eff8a368fd7f887d0b9f93e688398cae4f689022312fe012e2d6bda",
+      "ast_sha256": "sha256:d0b41d61369eee0858a1baf07b25a4932829c01f57f42c23786e7d5501445701",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "build_chain_realized_settlement_package_v1"
     },
@@ -197,12 +202,12 @@
       "symbol": "select_chain_realized_bundle_candidate_v1"
     },
     {
-      "ast_sha256": "sha256:a5040f47abca39490aa9b1195107b7be914e920475e2c51888e0e67d402b98c8",
+      "ast_sha256": "sha256:36905226b915fb69e4f6435378a91b30538d4d8ad5b848b7ad42113d664b8e00",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "validate_chain_realized_epoch_settlements_v1"
     },
     {
-      "ast_sha256": "sha256:e9195e0b89958164c829a5203846a3a425de35d636f2d5e15a56410ee47751f1",
+      "ast_sha256": "sha256:3baaec2b0efc3c9a45645d80d5e487532b23ea3795b8732efa7c28f7608eb29e",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "validate_chain_realized_obligation_credits_v1"
     },
@@ -572,7 +577,7 @@
       "symbol": "ensure_chain_realized_settlements_v1"
     },
     {
-      "ast_sha256": "sha256:96eef6bedb27ee6887aa36d66127408a0ac32a5fe1ec94dae604290f5c016498",
+      "ast_sha256": "sha256:5db1e63414d54a6ef407e9412c7659dcebe462f45d2be7098efc6cdccb987270",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "settle_chain_realized_epoch_v1"
     },
@@ -912,7 +917,7 @@
       "symbol": "_allocate_capped_pro_rata"
     },
     {
-      "ast_sha256": "sha256:d965445ce918d16ff04cf03bc3ebe760eeb1edab8ed98b293a913de968ef7adf",
+      "ast_sha256": "sha256:38d5a14bd6ffa8f1d3d7297bb1506af9f8d47acd4c69162ca85afa16e2197f15",
       "path": "leadpoet_verifier/economics.py",
       "symbol": "_allocate_champions"
     },
@@ -922,7 +927,7 @@
       "symbol": "_allocate_reimbursements_at_set_rate"
     },
     {
-      "ast_sha256": "sha256:ced28025a3c4198d93e9b61628156ad2bff56fef442eec0937105f2de82fc918",
+      "ast_sha256": "sha256:e2b4b74035e49879a0c2810b674e7e84b41a5ea7fc22cec328b2a85c690654c0",
       "path": "leadpoet_verifier/economics.py",
       "symbol": "_allocate_research_lab_epoch_existing"
     },
@@ -932,7 +937,32 @@
       "symbol": "_allocate_source_add"
     },
     {
-      "ast_sha256": "sha256:8aabc858f8b2bee079db97b346d2980ab9c455a091b781825a81572c338c79c7",
+      "ast_sha256": "sha256:ff2a7f25d2190d2ffbe96c88b6ff527756546ea781c7f058e7fae89cd48ae139",
+      "path": "leadpoet_verifier/economics.py",
+      "symbol": "_champion_desired_alpha_percent"
+    },
+    {
+      "ast_sha256": "sha256:73ab30f2ecba2774cd61fe7b1032ee5a6af0c5a3717ff8f2e0af8c3fc43d3cfc",
+      "path": "leadpoet_verifier/economics.py",
+      "symbol": "_champion_paid_alpha_percent_to_date"
+    },
+    {
+      "ast_sha256": "sha256:10f5193b8323105a07584ad56dd5c408c86796dd9c90d4014564c7cc4dec557f",
+      "path": "leadpoet_verifier/economics.py",
+      "symbol": "_champion_remaining_alpha_percent"
+    },
+    {
+      "ast_sha256": "sha256:730da6bd09d10cc141757d0b30b23ad15914cc5086358077302e971ab5ce1174",
+      "path": "leadpoet_verifier/economics.py",
+      "symbol": "_champion_total_due_alpha_percent"
+    },
+    {
+      "ast_sha256": "sha256:027ad9326d92b754398f002e6c06371a4a82a2d7316688ef2fbbde20ed3d8fe7",
+      "path": "leadpoet_verifier/economics.py",
+      "symbol": "_normalize_champion_obligation"
+    },
+    {
+      "ast_sha256": "sha256:1c40d374d9841cf602b060d630c92d86b7fe040da8f5760d5fb6ade7f8c11e85",
       "path": "leadpoet_verifier/economics.py",
       "symbol": "allocate_research_lab_epoch"
     },
@@ -1232,7 +1262,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:66516c0006740cf6fe87c8d10f3c781616b69a59cdc065755488517c81e0cf5c",
+  "manifest_hash": "sha256:51e95656a2a1887c1d562cefaf272a9db90243e4988003ef8dab0eca340492b8",
   "protected_source_commit": "243db83f115f4f1497b9640f5ebaf7d97e483b84",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -37,6 +37,9 @@ DEFAULT_RESEARCH_LAB_CHAMPION_EVAL_DAYS = 10
 DEFAULT_RESEARCH_LAB_CHAMPION_ICPS_PER_DAY = 6
 DEFAULT_USD_PER_0_1_PERCENT_EPOCH = Decimal("0.162")
 SOURCE_ADD_REWARD_KINDS = frozenset({"source_acceptance", "source_implementation"})
+CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1 = (
+    "accelerated_lifetime_cap_v1"
+)
 
 
 def canonical_json(data: Any) -> str:
@@ -389,6 +392,9 @@ def allocate_research_lab_epoch(
 
     input_payload = {
         "epoch": epoch,
+        "champion_credit_policy": (
+            CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+        ),
         "policy": _sorted_public(policy),
         "source_add_obligations": _sorted_public(active_source_add_obligations),
         "reimbursement_obligations": _sorted_public(active_reimbursement_obligations),
@@ -402,6 +408,9 @@ def allocate_research_lab_epoch(
     result.update(
         {
             "epoch": epoch,
+            "champion_credit_policy": (
+                CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+            ),
             "lab_cap_percent": _rate_float(lab_cap),
             "source_add_allocations": source_add_allocations,
             "source_add_alpha_percent": _rate_float(source_add_paid),
@@ -431,6 +440,9 @@ def _allocate_research_lab_epoch_existing(
 
     input_payload = {
         "epoch": epoch,
+        "champion_credit_policy": (
+            CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+        ),
         "policy": _sorted_public(policy),
         "reimbursement_obligations": _sorted_public(active_reimbursement_obligations),
         "champion_obligations": _sorted_public(active_champion_obligations),
@@ -459,6 +471,9 @@ def _allocate_research_lab_epoch_existing(
     if not reimbursements and not champions:
         result = {
             "epoch": epoch,
+            "champion_credit_policy": (
+                CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+            ),
             "lab_cap_percent": _rate_float(lab_cap),
             "reimbursement_allocations": [],
             "champion_allocations": [],
@@ -508,6 +523,9 @@ def _allocate_research_lab_epoch_existing(
     unallocated = max(Decimal("0"), lab_cap - total_paid)
     result = {
         "epoch": epoch,
+        "champion_credit_policy": (
+            CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+        ),
         "lab_cap_percent": _rate_float(lab_cap),
         "reimbursement_allocations": reimbursement_allocations,
         "champion_allocations": champion_allocations,
@@ -1072,12 +1090,25 @@ def _normalize_champion_obligation(
         )
     )
     base_desired = _champion_desired_alpha_percent(obligation, policy)
-    replay_keys = {"remaining_alpha_percent", "paid_alpha_percent_to_date", "total_due_alpha_percent"}
-    replay_enabled = bool(replay_keys.intersection(obligation.keys()))
     remaining = _champion_remaining_alpha_percent(obligation, policy=policy, default_epoch_count=reward_epochs)
-    desired = min(base_desired, remaining) if replay_enabled else base_desired
+    desired = min(base_desired, remaining)
     total_due = _champion_total_due_alpha_percent(obligation, base_desired=base_desired, epoch_count=epoch_count)
     paid_to_date = _champion_paid_alpha_percent_to_date(obligation, total_due=total_due, remaining=remaining)
+    expected_total_due = base_desired * Decimal(max(0, epoch_count))
+    if total_due.quantize(RATE_QUANT, rounding=ROUND_HALF_UP) != (
+        expected_total_due.quantize(RATE_QUANT, rounding=ROUND_HALF_UP)
+    ):
+        raise ValueError(
+            "champion total_due_alpha_percent differs from lifetime entitlement"
+        )
+    if (
+        paid_to_date > total_due
+        or (
+            paid_to_date + remaining
+        ).quantize(RATE_QUANT, rounding=ROUND_HALF_UP)
+        != total_due.quantize(RATE_QUANT, rounding=ROUND_HALF_UP)
+    ):
+        raise ValueError("champion lifetime balance is inconsistent")
     normalized: Dict[str, Any] = {
         "uid": int(obligation.get("uid", obligation.get("miner_uid", -1))),
         "miner_hotkey": str(obligation.get("miner_hotkey", "")),
@@ -1095,19 +1126,14 @@ def _normalize_champion_obligation(
         "improvement_points": improvement_points,
         "intended_alpha_percent": desired,
         "desired_alpha_percent": desired,
+        "base_desired_alpha_percent": base_desired,
+        "total_due_alpha_percent": total_due,
+        "paid_alpha_percent_to_date": paid_to_date,
+        "remaining_alpha_percent": remaining,
+        "nominal_end_epoch": start_epoch + epoch_count,
     }
-    if replay_enabled:
-        normalized.update(
-            {
-                "base_desired_alpha_percent": base_desired,
-                "total_due_alpha_percent": total_due,
-                "paid_alpha_percent_to_date": paid_to_date,
-                "remaining_alpha_percent": remaining,
-                "nominal_end_epoch": start_epoch + epoch_count,
-            }
-        )
-        if obligation.get("replay_status") is not None:
-            normalized["replay_status"] = str(obligation.get("replay_status") or "")
+    if obligation.get("replay_status") is not None:
+        normalized["replay_status"] = str(obligation.get("replay_status") or "")
     # Preserve legacy labeled champion rows without changing classic champion
     # output shape. New SOURCE_ADD obligations use their own normalizer.
     if obligation.get("reward_kind") not in (None, "", "champion"):
@@ -1365,16 +1391,10 @@ def _allocate_champions(
         else:
             queued_indices.append(index)
 
-    # Surplus lab emissions always flow to active champions instead of
-    # burning: once every champion's per-epoch due is funded (chronologically,
-    # so capacity-starved queued rewards drain the pool before any surplus
-    # exists), the remainder splits across active champions by improvement
-    # points. Replay tracking still caps each champion's *due* at its
-    # remaining balance; the surplus split deliberately pays beyond it, which
-    # retires obligations early. Once no active champion remains, future
-    # capacity not needed for set-rate reimbursements stays unallocated.
-    # SOURCE_ADD legs and other labeled grants ride these rails with fixed
-    # owner-set sizes; only genuine champion rewards share the surplus.
+    # Once chronological per-epoch dues are funded, genuine champions share
+    # surplus by improvement points. Each share remains capped by the
+    # champion's verified lifetime balance; capacity released by one capped
+    # champion is redistributed among the other eligible champions.
     surplus_indices = [
         index
         for index in active_indices
@@ -1391,10 +1411,22 @@ def _allocate_champions(
             weight_sum = sum(weights, Decimal("0"))
         if weight_sum <= 0:
             weights = [Decimal("1") for _ in surplus_indices]
-            weight_sum = Decimal(len(surplus_indices))
-        for index, weight in zip(surplus_indices, weights):
-            paid[index] += remaining_pool * weight / weight_sum
-        remaining_pool = Decimal("0")
+        caps = [
+            max(
+                Decimal("0"),
+                _decimal(champions[index]["remaining_alpha_percent"])
+                - paid[index],
+            )
+            for index in surplus_indices
+        ]
+        surplus_paid = _allocate_capped_pro_rata(
+            remaining_pool,
+            weights,
+            caps,
+        )
+        for index, amount in zip(surplus_indices, surplus_paid):
+            paid[index] += amount
+        remaining_pool -= sum(surplus_paid, Decimal("0"))
 
     active: list[Dict[str, Any]] = []
     queued: list[Dict[str, Any]] = []

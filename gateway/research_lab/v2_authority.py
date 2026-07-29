@@ -1534,6 +1534,8 @@ async def settle_chain_realized_epoch_v1(
     from gateway.research_lab.champion_settlement_v2 import (
         CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
         CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2,
+        CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3,
+        CHAIN_REALIZED_CHAMPION_CREDIT_POLICY_LEGACY_V1,
         ChampionSettlementV2Error,
         select_chain_realized_bundle_candidate_v1,
         validate_chain_realized_epoch_settlements_v1,
@@ -1707,6 +1709,7 @@ async def settle_chain_realized_epoch_v1(
         not in {
             CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V1,
             CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V2,
+            CHAIN_REALIZED_EPOCH_SETTLEMENT_SCHEMA_VERSION_V3,
         }
         or settlement_receipt.get("role") != "gateway_coordinator"
         or settlement_receipt.get("purpose")
@@ -1766,6 +1769,10 @@ async def settle_chain_realized_epoch_v1(
             ),
             "credited_alpha_percent": str(
                 item["credit_doc"]["credited_alpha_percent"]
+            ),
+            "champion_credit_policy": str(
+                item["credit_doc"].get("champion_credit_policy")
+                or CHAIN_REALIZED_CHAMPION_CREDIT_POLICY_LEGACY_V1
             ),
             "credit_hash": str(item["credit_hash"]),
             "credit_receipt_hash": settlement_receipt_hash,

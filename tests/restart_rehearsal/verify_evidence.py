@@ -334,6 +334,11 @@ def verify_migration_backed_database_contract(candidate_sha: str) -> str:
         "post_129_attested_local_transport_persisted",
         "transport_terminal_contract_valid",
         "provider_outcome_append_atomic",
+        "pre_132_lifetime_credit_rejected",
+        "post_132_lifetime_credit_persisted",
+        "lifetime_credit_rpc_idempotent",
+        "grandfathered_credit_unchanged",
+        "lifetime_credit_contract_valid",
         "finalized_view_projection_exact",
         "finalized_view_seed_available",
         "settlement_authority_parsed",
@@ -417,6 +422,7 @@ def verify_chain_settlement_durable_readback(rows: list[dict]) -> None:
         in {
             "persist_research_lab_chain_realized_settlement_v1",
             "persist_research_lab_chain_realized_unattributed_v2",
+            "persist_research_lab_chain_realized_lifetime_settlement_v2",
         }
     ]
     if not persistence_ordinals:

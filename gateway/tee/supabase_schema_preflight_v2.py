@@ -181,7 +181,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
-        "scripts/126-research-lab-chain-realized-settlement.sql",
+        "scripts/132-research-lab-champion-lifetime-credit.sql",
         "research_lab_chain_realized_obligation_credits_v1",
         (
             "netuid",
@@ -189,6 +189,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
             "settlement_hash",
             "obligation_kind",
             "obligation_source_id",
+            "champion_credit_policy",
             "credit_hash",
             "credit_receipt_hash",
             "credit_doc",
@@ -256,6 +257,14 @@ REQUIRED_SUPABASE_V2_RPCS = (
     (
         "scripts/131-research-lab-provider-outcome-backpressure.sql",
         "append_research_lab_provider_outcome_checkpoint_v2",
+    ),
+    (
+        "scripts/132-research-lab-champion-lifetime-credit.sql",
+        "persist_research_lab_chain_realized_lifetime_settlement_v2",
+    ),
+    (
+        "scripts/132-research-lab-champion-lifetime-credit.sql",
+        "research_lab_champion_lifetime_credit_contract_v1",
     ),
 )
 

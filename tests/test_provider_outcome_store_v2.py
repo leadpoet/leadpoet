@@ -241,6 +241,34 @@ class _Broker:
         }
 
 
+class _TerminalCachingBroker(_Broker):
+    """Match the production broker's logical-operation replay contract."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.terminals = {}
+
+    def execute(self, request):
+        key = (
+            str(request["logical_operation_id"]),
+            int(request["attempt_number"]),
+        )
+        fingerprint = sha256_json(request)
+        existing = self.terminals.get(key)
+        if existing is not None:
+            if existing["fingerprint"] != fingerprint:
+                raise RuntimeError(
+                    "logical provider attempt was reused with different request"
+                )
+            return existing["result"]
+        result = super().execute(request)
+        self.terminals[key] = {
+            "fingerprint": fingerprint,
+            "result": result,
+        }
+        return result
+
+
 def _vault(boot_hash=HASH):
     return EncryptedArtifactVaultV2(
         master_key=MASTER_KEY,
@@ -348,6 +376,44 @@ def test_outcome_checkpoint_chain_is_monotonic_and_collision_fails_closed() -> N
         job_id="job-3",
         purpose="research_lab.company_score.v2",
     ) == ()
+
+
+def test_sequential_checkpoint_readbacks_have_request_bound_operation_ids() -> None:
+    broker = _TerminalCachingBroker()
+    store = ProviderOutcomeStoreV2(broker=broker, vault=_vault())
+    first_document = _document()
+    first = store.persist(
+        first_document,
+        previous_checkpoint_hash="",
+        job_id="shared-provider-preflight",
+        purpose="research_lab.provider_preflight.v2",
+    )
+    ledger = ProviderOutcomeLedgerV2(
+        clock=lambda: "2026-07-10T12:00:01Z",
+        initial_document=first_document,
+    )
+    second_document = ledger.record(
+        provider_id="scrapingdog",
+        endpoint_class="/account",
+        evidence="recorded",
+        status=200,
+        live_call=True,
+        cost_event={},
+    )
+
+    second = store.persist(
+        second_document,
+        previous_checkpoint_hash=first["checkpoint_hash"],
+        job_id="shared-provider-preflight",
+        purpose="research_lab.provider_preflight.v2",
+    )
+
+    assert second["status"] == "persisted"
+    read_calls = [call for call in broker.calls if call["method"] == "GET"]
+    assert len(read_calls) == 2
+    assert len({call["logical_operation_id"] for call in read_calls}) == 2
+    assert "sequence=eq.1" in read_calls[0]["url"]
+    assert "sequence=eq.2" in read_calls[1]["url"]
 
 
 def test_outcome_checkpoint_restores_authenticated_embedded_conflict_head() -> None:

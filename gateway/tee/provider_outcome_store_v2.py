@@ -584,13 +584,22 @@ class ProviderOutcomeStoreV2:
         if order_latest:
             query_items.append(("order", "sequence.desc"))
         query_items.append(("limit", "1" if order_latest else "2"))
+        request_url = "%s/rest/v1/%s?%s" % (
+            CHECKPOINT_ORIGIN,
+            CHECKPOINT_TABLE,
+            urlencode(query_items),
+        )
         result = self._execute(
             method="GET",
-            url="%s/rest/v1/%s?%s"
-            % (CHECKPOINT_ORIGIN, CHECKPOINT_TABLE, urlencode(query_items)),
+            url=request_url,
             headers={"accept": "application/json"},
             body=b"",
-            logical_operation_id="%s:provider-outcome:%s" % (job_id, operation_suffix),
+            logical_operation_id="%s:provider-outcome:%s:%s"
+            % (
+                job_id,
+                operation_suffix,
+                sha256_bytes(request_url.encode("utf-8")),
+            ),
             job_id=job_id,
             purpose=purpose,
         )

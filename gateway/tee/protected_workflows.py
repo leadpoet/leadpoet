@@ -306,6 +306,7 @@ PROTECTED_SYMBOLS = {
         "cap_reimbursement_schedules_by_epoch",
         "compose_final_weight_vector",
         "_allocate_reimbursements_at_set_rate",
+        "_distribute_reimbursement_surplus",
         "_allocate_champions",
         "_allocate_source_add",
         "_allocate_capped_pro_rata",

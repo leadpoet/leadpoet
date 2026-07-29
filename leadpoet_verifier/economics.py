@@ -7,7 +7,7 @@ weight submission. All inputs are anchored/public records or golden fixtures.
 
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 import hashlib
 import json
 from typing import Any, Dict, Iterable, Mapping, Sequence
@@ -510,6 +510,28 @@ def _allocate_research_lab_epoch_existing(
             remaining_for_champions,
             policy,
             reimbursement_paid=reimbursement_paid,
+        )
+
+    champion_paid = sum(
+        (_decimal(item["paid_alpha_percent"]) for item in champion_allocations),
+        Decimal("0"),
+    )
+    queued_paid = sum(
+        (_decimal(item["paid_alpha_percent"]) for item in queued_champion_allocations),
+        Decimal("0"),
+    )
+    reimbursement_surplus = max(
+        Decimal("0"),
+        lab_cap.quantize(RATE_QUANT, rounding=ROUND_HALF_UP)
+        - reimbursement_paid
+        - champion_paid
+        - queued_paid,
+    )
+    if reimbursement_surplus > 0 and reimbursement_allocations:
+        _distribute_reimbursement_surplus(
+            reimbursements,
+            reimbursement_allocations,
+            reimbursement_surplus,
         )
 
     _cap_allocation_sections_to_pool(
@@ -1330,6 +1352,73 @@ def _allocate_reimbursements_at_set_rate(
         )
         for item, amount in zip(reimbursements, paid)
     ]
+
+
+def _distribute_reimbursement_surplus(
+    reimbursements: Sequence[Mapping[str, Any]],
+    allocations: list[Dict[str, Any]],
+    pool: Decimal,
+) -> Decimal:
+    """Give otherwise-unused Lab capacity to active compute reimbursements."""
+    if len(reimbursements) != len(allocations):
+        raise ValueError("reimbursement inputs and allocations must align")
+
+    target = max(Decimal("0"), pool).quantize(
+        RATE_QUANT,
+        rounding=ROUND_HALF_UP,
+    )
+    weights = [
+        max(Decimal("0"), _decimal(item["pro_rata_weight"]))
+        for item in reimbursements
+    ]
+    active_indices = [index for index, weight in enumerate(weights) if weight > 0]
+    weight_sum = sum((weights[index] for index in active_indices), Decimal("0"))
+    if target <= 0 or weight_sum <= 0:
+        return Decimal("0")
+
+    raw_shares = [
+        target * weights[index] / weight_sum
+        for index in active_indices
+    ]
+    shares = [
+        share.quantize(RATE_QUANT, rounding=ROUND_DOWN)
+        for share in raw_shares
+    ]
+    distributed = sum(shares, Decimal("0"))
+    residual_units = int(
+        ((target - distributed) / RATE_QUANT).to_integral_value(
+            rounding=ROUND_HALF_UP
+        )
+    )
+    remainder_order = sorted(
+        range(len(active_indices)),
+        key=lambda offset: (
+            raw_shares[offset] - shares[offset],
+            -active_indices[offset],
+        ),
+        reverse=True,
+    )
+    for offset in remainder_order[:residual_units]:
+        shares[offset] += RATE_QUANT
+
+    for index, extra in zip(active_indices, shares):
+        if extra <= 0:
+            continue
+        row = allocations[index]
+        intended = _decimal(row["intended_alpha_percent"])
+        paid = (
+            _decimal(row["paid_alpha_percent"]) + extra
+        ).quantize(RATE_QUANT, rounding=ROUND_HALF_UP)
+        row["paid_alpha_percent"] = _rate_float(paid)
+        row["deferred_alpha_percent"] = _rate_float(
+            max(Decimal("0"), intended - paid)
+        )
+        row["overpaid_alpha_percent"] = _rate_float(
+            max(Decimal("0"), paid - intended)
+        )
+        row["reason"] = "surplus_reimbursement_no_burn"
+
+    return sum(shares, Decimal("0"))
 
 
 def _cap_allocation_sections_to_pool(

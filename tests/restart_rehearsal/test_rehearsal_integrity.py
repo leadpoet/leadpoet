@@ -41,10 +41,12 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     _schema_contract,
 )
 from tests.restart_rehearsal.postgres_v2_contract_probe import (
+    CHAMPION_LIFETIME_CREDIT_MIGRATION,
     DisposablePostgres,
     EXPECTED_FINALIZED_VIEW_COLUMNS,
     MIGRATIONS_BEFORE_TRANSPORT_FIX,
     PROVIDER_OUTCOME_APPEND_MIGRATION,
+    PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
     TRANSPORT_FIX_MIGRATION,
     TRANSPORT_TERMINAL_MIGRATION,
     _json_insert_sql,
@@ -364,12 +366,16 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             TRANSPORT_FIX_MIGRATION,
             TRANSPORT_TERMINAL_MIGRATION,
             PROVIDER_OUTCOME_APPEND_MIGRATION,
+            PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
+            CHAMPION_LIFETIME_CREDIT_MIGRATION,
         ],
         "relations": relations,
         "rpcs": [
             "research_lab_attested_transport_purpose_contract_v2",
             "research_lab_attested_transport_terminal_contract_v2",
             "append_research_lab_provider_outcome_checkpoint_v2",
+            "persist_research_lab_chain_realized_lifetime_settlement_v2",
+            "research_lab_champion_lifetime_credit_contract_v1",
         ],
         "checks": {
             "pre_128_transport_rejected": True,
@@ -378,6 +384,11 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "post_129_attested_local_transport_persisted": True,
             "transport_terminal_contract_valid": True,
             "provider_outcome_append_atomic": True,
+            "pre_132_lifetime_credit_rejected": True,
+            "post_132_lifetime_credit_persisted": True,
+            "lifetime_credit_rpc_idempotent": True,
+            "grandfathered_credit_unchanged": True,
+            "lifetime_credit_contract_valid": True,
         },
         "seed_rows": {
             "research_lab_finalized_allocation_epochs_v2": [
@@ -402,6 +413,11 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     assert "research_lab_attested_transport_purpose_contract_v2" in rpcs
     assert "research_lab_attested_transport_terminal_contract_v2" in rpcs
     assert "append_research_lab_provider_outcome_checkpoint_v2" in rpcs
+    assert (
+        "persist_research_lab_chain_realized_lifetime_settlement_v2"
+        in rpcs
+    )
+    assert "research_lab_champion_lifetime_credit_contract_v1" in rpcs
     assert _migration_seed_rows(
         path,
         candidate_sha=COMMIT,
@@ -435,6 +451,11 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "post_129_attested_local_transport_persisted": True,
             "transport_terminal_contract_valid": True,
             "provider_outcome_append_atomic": True,
+            "pre_132_lifetime_credit_rejected": True,
+            "post_132_lifetime_credit_persisted": True,
+            "lifetime_credit_rpc_idempotent": True,
+            "grandfathered_credit_unchanged": True,
+            "lifetime_credit_contract_valid": True,
             "finalized_view_projection_exact": True,
             "finalized_view_seed_available": True,
             "settlement_authority_parsed": True,
@@ -2066,7 +2087,7 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     )
     assert "for _attempt in $(seq 1 600)" in run_inside
     assert (
-        'REHEARSAL_GATEWAY_CANDIDATE_ROOT="/source/gateway" \\'
+        'REHEARSAL_GATEWAY_CANDIDATE_ROOT="$SELECTED_GATEWAY_SOURCE_ROOT/gateway" \\'
         in run_inside
     )
     assert "gateway-enclave-build-identities" in run_inside

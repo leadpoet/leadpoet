@@ -80,6 +80,7 @@ _REQUEST_FIELDS = {
 _OPTIONAL_REQUEST_FIELDS = {"dynamic_route"}
 _LOCAL_RESPONSE_SCHEMA_VERSION = "leadpoet.attested_local_provider_response.v2"
 _PROVIDER_PREFLIGHT_PURPOSE = "research_lab.provider_preflight.v2"
+_OUTCOME_APPEND_CONFLICT_ATTEMPTS = 64
 TREE_PROVIDER_CALL_CAP_HEADER = "X-Research-Lab-Tree-Provider-Call-Cap"
 _LEGACY_PROVIDER_IDS = {
     "openrouter": "or",
@@ -518,37 +519,119 @@ class ProviderSemanticsAuthorityV2:
                     "provider outcome cost event is not an object"
                 )
             cost_event = dict(parsed_cost)
+        record_arguments = {
+            "provider_id": provider,
+            "endpoint_class": redacted_endpoint(
+                provider,
+                str(request.get("url") or ""),
+            ),
+            "evidence": evidence,
+            "status": normalized_status,
+            "live_call": (
+                terminal_status in {"authenticated_response", "transport_failure"}
+                and evidence
+                not in {
+                    "hit",
+                    "blocked",
+                    "budget_soft_stop",
+                    "quota_exhausted",
+                    "replay_miss",
+                }
+            ),
+            "cost_event": cost_event,
+        }
         with self._outcome_persist_lock:
-            document = self._outcome_ledger.record(
-                provider_id=provider,
-                endpoint_class=redacted_endpoint(provider, str(request.get("url") or "")),
-                evidence=evidence,
-                status=normalized_status,
-                live_call=(
-                    terminal_status in {"authenticated_response", "transport_failure"}
-                    and evidence not in {"hit", "blocked", "budget_soft_stop", "quota_exhausted", "replay_miss"}
-                ),
-                cost_event=cost_event,
-            )
             if self._outcome_store is None:
+                self._outcome_ledger.record(**record_arguments)
                 return None
-            utc_day = str(document["utc_day"])
-            previous = (
-                self._outcome_checkpoint_hash
-                if self._outcome_checkpoint_day == utc_day
-                else ""
-            )
-            persisted = dict(
-                self._outcome_store.persist(
-                    document,
-                    previous_checkpoint_hash=previous,
-                    job_id=str(request.get("job_id") or ""),
-                    purpose=str(request.get("purpose") or ""),
+            job_id = str(request.get("job_id") or "")
+            purpose = str(request.get("purpose") or "")
+            attempts: list[Dict[str, Any]] = []
+            artifacts: set[str] = set()
+            base_document = self._outcome_ledger.state_document()
+            for conflict_attempt in range(_OUTCOME_APPEND_CONFLICT_ATTEMPTS):
+                document = self._outcome_ledger.record(**record_arguments)
+                utc_day = str(document["utc_day"])
+                previous = (
+                    self._outcome_checkpoint_hash
+                    if self._outcome_checkpoint_day == utc_day
+                    else ""
                 )
+                try:
+                    persisted = dict(
+                        self._outcome_store.persist(
+                            document,
+                            previous_checkpoint_hash=previous,
+                            job_id=job_id,
+                            purpose=purpose,
+                        )
+                    )
+                except Exception:
+                    self._outcome_ledger.restore(base_document)
+                    raise
+                attempts.extend(
+                    dict(item)
+                    for item in persisted.get("transport_attempts") or ()
+                )
+                artifacts.update(
+                    str(item)
+                    for item in persisted.get("evidence_artifact_hashes") or ()
+                )
+                status = str(persisted.get("status") or "persisted")
+                if status == "persisted":
+                    self._outcome_checkpoint_hash = str(
+                        persisted["checkpoint_hash"]
+                    )
+                    self._outcome_checkpoint_day = utc_day
+                    return {
+                        **persisted,
+                        "transport_attempts": attempts,
+                        "evidence_artifact_hashes": sorted(artifacts),
+                    }
+                if status != "conflict":
+                    self._outcome_ledger.restore(base_document)
+                    raise ProviderSemanticsV2Error(
+                        "provider outcome checkpoint status is invalid"
+                    )
+                try:
+                    restored = dict(
+                        self._outcome_store.load_latest(
+                            utc_day=utc_day,
+                            job_id=job_id,
+                            purpose=purpose,
+                            operation_suffix=(
+                                "reconcile-%d-%d"
+                                % (int(document["sequence"]), conflict_attempt)
+                            ),
+                        )
+                    )
+                except Exception:
+                    self._outcome_ledger.restore(base_document)
+                    raise
+                attempts.extend(
+                    dict(item)
+                    for item in restored.get("transport_attempts") or ()
+                )
+                artifacts.update(
+                    str(item)
+                    for item in restored.get("evidence_artifact_hashes") or ()
+                )
+                if not restored.get("found"):
+                    self._outcome_ledger.restore(base_document)
+                    raise ProviderSemanticsV2Error(
+                        "provider outcome checkpoint conflict has no durable head"
+                    )
+                base_document = self._outcome_ledger.restore(
+                    restored["state_document"]
+                )
+                self._outcome_checkpoint_hash = str(
+                    restored["checkpoint_hash"]
+                )
+                self._outcome_checkpoint_day = utc_day
+            self._outcome_ledger.restore(base_document)
+            raise ProviderSemanticsV2Error(
+                "provider outcome checkpoint contention did not converge"
             )
-            self._outcome_checkpoint_hash = str(persisted["checkpoint_hash"])
-            self._outcome_checkpoint_day = utc_day
-            return persisted
 
     def _live(
         self,

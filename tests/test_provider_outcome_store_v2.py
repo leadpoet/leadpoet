@@ -32,22 +32,82 @@ class _Broker:
         self.rows = {}
         self.calls = []
         self.fail_reads = False
+        self.fail_committed_appends = 0
 
     def execute(self, request):
         self.calls.append(dict(request))
         assert request["provider_id"] == "supabase"
         if request["method"] == "POST":
-            row = json.loads(base64.b64decode(request["body_b64"]))
-            self.rows.setdefault((row["utc_day"], int(row["sequence"])), row)
-            return self._result(request, status=201, body=b"")
+            payload = json.loads(base64.b64decode(request["body_b64"]))
+            row = payload["checkpoint_row"]
+            lineage = (
+                row["artifact_master_key_ref_hash"],
+                row["utc_day"],
+            )
+            existing = next(
+                (
+                    item
+                    for item in self.rows.values()
+                    if item["checkpoint_hash"] == row["checkpoint_hash"]
+                ),
+                None,
+            )
+            if existing is not None:
+                if existing != row:
+                    return self._result(
+                        request,
+                        status=409,
+                        body=b'{"code":"23505"}',
+                    )
+                return self._result(
+                    request,
+                    status=200,
+                    body=b'{"status":"existing"}',
+                )
+            current = sorted(
+                (
+                    item
+                    for (key_hash, day, _sequence), item in self.rows.items()
+                    if (key_hash, day) == lineage
+                ),
+                key=lambda item: int(item["sequence"]),
+                reverse=True,
+            )
+            expected_sequence = int(current[0]["sequence"]) + 1 if current else 1
+            expected_previous = current[0]["checkpoint_hash"] if current else ""
+            if (
+                int(row["sequence"]) != expected_sequence
+                or row["previous_checkpoint_hash"] != expected_previous
+            ):
+                return self._result(
+                    request,
+                    status=409,
+                    body=b'{"code":"40001"}',
+                )
+            self.rows[
+                (
+                    row["artifact_master_key_ref_hash"],
+                    row["utc_day"],
+                    int(row["sequence"]),
+                )
+            ] = row
+            if self.fail_committed_appends > 0:
+                self.fail_committed_appends -= 1
+                return self._failure(request, failure_code="unexpected_eof")
+            return self._result(
+                request,
+                status=200,
+                body=b'{"status":"inserted"}',
+            )
         if self.fail_reads:
             return self._failure(request)
         query = parse_qs(urlsplit(request["url"]).query)
         day = query["utc_day"][0].split("eq.", 1)[1]
+        key_hash = query["artifact_master_key_ref_hash"][0].split("eq.", 1)[1]
         rows = [
             row
-            for (row_day, _sequence), row in self.rows.items()
-            if row_day == day
+            for (row_key_hash, row_day, _sequence), row in self.rows.items()
+            if row_key_hash == key_hash and row_day == day
         ]
         if "sequence" in query:
             sequence = int(query["sequence"][0].split("eq.", 1)[1])
@@ -103,7 +163,7 @@ class _Broker:
             "encrypted_artifact_id": response_artifact,
         }
 
-    def _failure(self, request):
+    def _failure(self, request, *, failure_code="timeout"):
         return {
             "terminal_status": "transport_failure",
             "failure_stage": "provider_transport",
@@ -112,7 +172,7 @@ class _Broker:
                 "attempt_hash": "sha256:" + "f" * 64,
                 "terminal_status": "transport_failure",
                 "response_hash": None,
-                "failure_code": "timeout",
+                "failure_code": failure_code,
             },
         }
 
@@ -211,17 +271,36 @@ def test_outcome_checkpoint_chain_is_monotonic_and_collision_fails_closed() -> N
     from gateway.research_lab.provider_outcome_digest import _sidecar_document_hash
 
     conflicting["document_hash"] = _sidecar_document_hash(conflicting)
-    with pytest.raises(ProviderOutcomeStoreV2Error, match="readback differs"):
-        store.persist(
-            conflicting,
-            previous_checkpoint_hash=first["checkpoint_hash"],
-            job_id="job-3",
-            purpose="research_lab.company_score.v2",
-        )
+    conflict = store.persist(
+        conflicting,
+        previous_checkpoint_hash=first["checkpoint_hash"],
+        job_id="job-3",
+        purpose="research_lab.company_score.v2",
+    )
+    assert conflict["status"] == "conflict"
+    assert len(conflict["transport_attempts"]) == 2
     assert vault.job_artifacts(
         job_id="job-3",
         purpose="research_lab.company_score.v2",
     ) == ()
+
+
+def test_outcome_checkpoint_accepts_ambiguous_committed_append() -> None:
+    broker = _Broker()
+    broker.fail_committed_appends = 1
+    store = ProviderOutcomeStoreV2(broker=broker, vault=_vault())
+
+    persisted = store.persist(
+        _document(),
+        previous_checkpoint_hash="",
+        job_id="job",
+        purpose="research_lab.company_score.v2",
+    )
+
+    assert persisted["status"] == "persisted"
+    assert persisted["transport_attempts"][0]["terminal_status"] == "transport_failure"
+    assert persisted["transport_attempts"][0]["failure_code"] == "unexpected_eof"
+    assert persisted["transport_attempts"][1]["terminal_status"] == "authenticated_response"
 
 
 def test_outcome_checkpoint_rejects_tampering_and_transport_failure() -> None:
@@ -233,7 +312,7 @@ def test_outcome_checkpoint_rejects_tampering_and_transport_failure() -> None:
         job_id="job",
         purpose="research_lab.company_score.v2",
     )
-    row = broker.rows[("2026-07-10", 1)]
+    row = broker.rows[(_vault().master_key_ref_hash, "2026-07-10", 1)]
     row["encrypted_checkpoint_doc"] = {
         **row["encrypted_checkpoint_doc"],
         "ciphertext_b64": base64.b64encode(b"tampered").decode("ascii"),

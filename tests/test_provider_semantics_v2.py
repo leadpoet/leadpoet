@@ -107,7 +107,14 @@ class _OutcomeStore:
         self.persist_count = 0
         self.fail_persist = False
 
-    def load_latest(self, *, utc_day, job_id, purpose):
+    def load_latest(
+        self,
+        *,
+        utc_day,
+        job_id,
+        purpose,
+        operation_suffix="restore",
+    ):
         return {
             "found": self.document is not None,
             "state_document": dict(self.document or {}),
@@ -119,8 +126,20 @@ class _OutcomeStore:
     def persist(self, document, *, previous_checkpoint_hash, job_id, purpose):
         if self.fail_persist:
             raise RuntimeError("outcome persistence failed")
-        if previous_checkpoint_hash != self.checkpoint_hash:
-            raise RuntimeError("outcome checkpoint ancestry differs")
+        expected_sequence = (
+            int(self.document["sequence"]) + 1
+            if self.document is not None
+            else 1
+        )
+        if (
+            previous_checkpoint_hash != self.checkpoint_hash
+            or int(document["sequence"]) != expected_sequence
+        ):
+            return {
+                "status": "conflict",
+                "transport_attempts": [],
+                "evidence_artifact_hashes": [],
+            }
         self.persist_count += 1
         self.document = dict(document)
         self.checkpoint_hash = sha256_json(
@@ -131,6 +150,7 @@ class _OutcomeStore:
             }
         )
         return {
+            "status": "persisted",
             "checkpoint_hash": self.checkpoint_hash,
             "state_document_hash": document["document_hash"],
             "transport_attempts": [],
@@ -291,6 +311,7 @@ def _authority(
     artifacts=None,
     outcome_store=None,
     artifact_transaction=None,
+    clock=None,
 ):
     broker = broker or _Broker()
     cache = cache or _CacheStore()
@@ -311,7 +332,7 @@ def _authority(
         boot_identity_supplier=lambda: boot,
         sign_digest=key.sign,
         artifact_transaction=artifact_transaction,
-        clock=lambda: "2026-07-10T00:00:00Z",
+        clock=clock or (lambda: "2026-07-10T00:00:00Z"),
         sleeper=lambda _seconds: None,
         outcome_store=outcome_store,
     )
@@ -567,6 +588,7 @@ def test_provider_outcome_state_survives_restart_and_persistence_is_fail_closed(
     assert digest["providers"]["exa"]["cache_hit_count"] == 1
     assert outcome_store.persist_count == 2
 
+    before_failure = restarted.provider_outcome_snapshot()
     outcome_store.fail_persist = True
     with pytest.raises(RuntimeError, match="persistence failed"):
         restarted.execute(
@@ -575,6 +597,170 @@ def test_provider_outcome_state_survives_restart_and_persistence_is_fail_closed(
                 body=b'{"query":"new"}',
             )
         )
+    assert restarted.provider_outcome_snapshot() == before_failure
+
+
+def test_provider_outcome_conflict_rebases_onto_durable_head() -> None:
+    outcome_store = _OutcomeStore()
+    first, _broker, _cache, _artifacts = _authority(
+        outcome_store=outcome_store
+    )
+    stale, _broker, _cache, _artifacts = _authority(
+        outcome_store=outcome_store
+    )
+
+    first.execute(_request(job_id="job-first"))
+    stale.execute(
+        _request(
+            job_id="job-stale",
+            logical_operation_id="provider-operation-stale",
+            body=b'{"query":"second"}',
+        )
+    )
+
+    digest = stale.provider_outcome_snapshot()["provider_outcome_digest"]
+    assert outcome_store.document["sequence"] == 2
+    assert outcome_store.persist_count == 2
+    assert digest["providers"]["exa"]["call_count"] == 2
+    assert digest["providers"]["exa"]["live_call_count"] == 2
+
+
+def test_provider_outcome_contention_converges_across_25_writers() -> None:
+    writer_count = 25
+
+    class RoundContentionOutcomeStore(_OutcomeStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self._condition = threading.Condition()
+            self._arrivals = {}
+            self._round_results = {}
+
+        def load_latest(
+            self,
+            *,
+            utc_day,
+            job_id,
+            purpose,
+            operation_suffix="restore",
+        ):
+            with self._condition:
+                return super().load_latest(
+                    utc_day=utc_day,
+                    job_id=job_id,
+                    purpose=purpose,
+                    operation_suffix=operation_suffix,
+                )
+
+        def persist(
+            self,
+            document,
+            *,
+            previous_checkpoint_hash,
+            job_id,
+            purpose,
+        ):
+            sequence = int(document["sequence"])
+            with self._condition:
+                expected_sequence = (
+                    int(self.document["sequence"]) + 1
+                    if self.document is not None
+                    else 1
+                )
+                if (
+                    sequence != expected_sequence
+                    or previous_checkpoint_hash != self.checkpoint_hash
+                ):
+                    return {
+                        "status": "conflict",
+                        "transport_attempts": [],
+                        "evidence_artifact_hashes": [],
+                    }
+                arrivals = self._arrivals.setdefault(sequence, {})
+                arrivals[job_id] = dict(document)
+                expected_arrivals = writer_count - (sequence - 1)
+                if len(arrivals) == expected_arrivals:
+                    winner = sorted(arrivals)[0]
+                    self.persist_count += 1
+                    self.document = dict(arrivals[winner])
+                    self.checkpoint_hash = sha256_json(
+                        {
+                            "sequence": sequence,
+                            "state": self.document["document_hash"],
+                            "previous": previous_checkpoint_hash,
+                        }
+                    )
+                    self._round_results[sequence] = (
+                        winner,
+                        self.checkpoint_hash,
+                    )
+                    self._condition.notify_all()
+                assert self._condition.wait_for(
+                    lambda: sequence in self._round_results,
+                    timeout=5.0,
+                )
+                winner, checkpoint_hash = self._round_results[sequence]
+                if job_id != winner:
+                    return {
+                        "status": "conflict",
+                        "transport_attempts": [],
+                        "evidence_artifact_hashes": [],
+                    }
+                return {
+                    "status": "persisted",
+                    "checkpoint_hash": checkpoint_hash,
+                    "state_document_hash": document["document_hash"],
+                    "transport_attempts": [],
+                    "evidence_artifact_hashes": [checkpoint_hash],
+                }
+
+    outcome_store = RoundContentionOutcomeStore()
+    authorities = [
+        _authority(outcome_store=outcome_store)[0]
+        for _index in range(writer_count)
+    ]
+    start = threading.Barrier(writer_count)
+
+    def execute(index):
+        start.wait(timeout=5.0)
+        return authorities[index].execute(
+            _request(
+                job_id="job-contention-%02d" % index,
+                logical_operation_id="provider-contention-%02d" % index,
+                body=('{"query":"contention-%02d"}' % index).encode(),
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=writer_count) as executor:
+        results = list(executor.map(execute, range(writer_count)))
+
+    assert len(results) == writer_count
+    assert outcome_store.persist_count == writer_count
+    assert outcome_store.document["sequence"] == writer_count
+    assert outcome_store.document["totals"]["call_count"] == writer_count
+
+
+def test_provider_outcome_rollback_preserves_original_error_across_midnight() -> None:
+    timestamps = ["2026-07-10T23:59:59Z"]
+    outcome_store = _OutcomeStore()
+    authority, _broker, _cache, _artifacts = _authority(
+        outcome_store=outcome_store,
+        clock=lambda: timestamps[0],
+    )
+    authority.execute(_request())
+
+    timestamps[0] = "2026-07-11T00:00:01Z"
+    outcome_store.fail_persist = True
+    with pytest.raises(RuntimeError, match="outcome persistence failed"):
+        authority.execute(
+            _request(
+                logical_operation_id="provider-operation-next-day",
+                body=b'{"query":"next-day"}',
+            )
+        )
+
+    restored = authority._outcome_ledger.state_document()
+    assert restored["utc_day"] == "2026-07-10"
+    assert restored["sequence"] == 1
 
 
 def test_failed_outcome_persistence_removes_uncommitted_job_artifacts():

@@ -397,6 +397,7 @@ def _migration_schema_contract(
         "research_lab_chain_realized_epoch_settlements_v1",
         "research_lab_chain_realized_settlement_activation_v1",
         "research_lab_chain_realized_obligation_credits_v1",
+        "research_lab_provider_outcome_checkpoints_v2",
     }
     if not required_relations <= set(relations):
         raise RuntimeError(
@@ -406,6 +407,7 @@ def _migration_schema_contract(
     required_rpcs = {
         "research_lab_attested_transport_purpose_contract_v2",
         "research_lab_attested_transport_terminal_contract_v2",
+        "append_research_lab_provider_outcome_checkpoint_v2",
     }
     if not required_rpcs <= set(raw_rpcs):
         raise RuntimeError(

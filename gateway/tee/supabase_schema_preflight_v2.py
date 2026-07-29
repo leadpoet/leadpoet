@@ -253,6 +253,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "scripts/129-research-lab-attested-local-transport.sql",
         "research_lab_attested_transport_terminal_contract_v2",
     ),
+    (
+        "scripts/130-research-lab-provider-outcome-append.sql",
+        "append_research_lab_provider_outcome_checkpoint_v2",
+    ),
 )
 
 

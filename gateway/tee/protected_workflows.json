@@ -677,7 +677,7 @@
       "symbol": "provider_registry_document"
     },
     {
-      "ast_sha256": "sha256:9650a25efa21b3fdd4557a6acca190e4f08e7d22f722eec0d9fed1f8e17df3a3",
+      "ast_sha256": "sha256:e6442452b0559f4994e52bf3f6faecb561af6b63c30d5248a46d00ce6158b8ce",
       "path": "gateway/tee/provider_semantics_v2.py",
       "symbol": "ProviderSemanticsAuthorityV2"
     },
@@ -1232,7 +1232,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:f53558d8d51b96ecfd7d0782abf5e594b12fd368fc844d9c048df28aba25aeef",
+  "manifest_hash": "sha256:5f1dc5fa0e82cf8587353833ab87d5ed5d452af16e340b3420e3e201f030eb3c",
   "protected_source_commit": "243db83f115f4f1497b9640f5ebaf7d97e483b84",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

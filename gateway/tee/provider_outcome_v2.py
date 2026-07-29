@@ -327,6 +327,18 @@ class ProviderOutcomeLedgerV2:
         with self._lock:
             return deepcopy(self._doc)
 
+    def restore(self, document: Mapping[str, Any]) -> Dict[str, Any]:
+        """Replace local state with one authenticated durable checkpoint."""
+
+        utc_day = str(document.get("utc_day") or "")
+        normalized = validate_provider_outcome_state_document_v2(
+            document,
+            expected_utc_day=utc_day,
+        )
+        with self._lock:
+            self._doc = normalized
+            return deepcopy(self._doc)
+
     def snapshot(self) -> Dict[str, Any]:
         timestamp = str(self._clock() or "")
         epoch = _timestamp_epoch(timestamp)

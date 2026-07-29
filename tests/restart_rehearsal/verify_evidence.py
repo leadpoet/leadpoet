@@ -333,6 +333,7 @@ def verify_migration_backed_database_contract(candidate_sha: str) -> str:
         "pre_129_attested_local_transport_rejected",
         "post_129_attested_local_transport_persisted",
         "transport_terminal_contract_valid",
+        "provider_outcome_append_atomic",
         "finalized_view_projection_exact",
         "finalized_view_seed_available",
         "settlement_authority_parsed",

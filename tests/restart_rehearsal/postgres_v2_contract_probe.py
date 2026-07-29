@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import copy
 import json
 import os
@@ -47,14 +48,20 @@ from tests.restart_rehearsal.sanitized_weight_fixture import (
 
 MIGRATIONS_BEFORE_TRANSPORT_FIX = (
     "86-research-lab-attested-v2-authority.sql",
+    "89-research-lab-provider-evidence-cache-v2.sql",
+    "90-research-lab-provider-outcome-checkpoints-v2.sql",
     "99-research-lab-v2-champion-settlement.sql",
     "104-research-lab-attested-result-replay-v2.sql",
+    "125-research-lab-artifact-key-lineage.sql",
     "126-research-lab-chain-realized-settlement.sql",
     "127-research-lab-chain-unattributed-settlement.sql",
 )
 TRANSPORT_FIX_MIGRATION = "128-research-lab-chain-settlement-transport-purposes.sql"
 TRANSPORT_TERMINAL_MIGRATION = (
     "129-research-lab-attested-local-transport.sql"
+)
+PROVIDER_OUTCOME_APPEND_MIGRATION = (
+    "130-research-lab-provider-outcome-append.sql"
 )
 EXPECTED_FINALIZED_VIEW_COLUMNS = (
     "bundle_hash",
@@ -322,6 +329,135 @@ def _json_insert_sql(table: str, row: Mapping[str, Any]) -> str:
         "NULL::public.%s, $leadpoet$%s$leadpoet$::json);\n"
         % (table, selected, selected, table, payload)
     )
+
+
+def _provider_outcome_append_sql(row: Mapping[str, Any]) -> str:
+    payload = json.dumps(dict(row), sort_keys=True, separators=(",", ":"))
+    if "$leadpoet$" in payload:
+        raise PostgresContractProbeError(
+            "provider outcome checkpoint JSON delimiter collision"
+        )
+    return (
+        "SELECT public.append_research_lab_provider_outcome_checkpoint_v2("
+        "$leadpoet$%s$leadpoet$::jsonb)::text;\n" % payload
+    )
+
+
+def _provider_outcome_append_contract(
+    database: DisposablePostgres,
+) -> dict[str, Any]:
+    key_hash = "sha256:" + "a" * 64
+
+    def row(
+        *,
+        sequence: int,
+        checkpoint_hash: str,
+        previous_checkpoint_hash: str,
+        suffix: str,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": "leadpoet.provider_outcome_checkpoint_row.v2",
+            "artifact_master_key_ref_hash": key_hash,
+            "utc_day": "2026-07-10",
+            "sequence": sequence,
+            "checkpoint_hash": checkpoint_hash,
+            "previous_checkpoint_hash": previous_checkpoint_hash,
+            "state_document_hash": "sha256:" + suffix * 64,
+            "checkpoint_artifact_id": "sha256:" + suffix.upper().lower() * 64,
+            "encrypted_checkpoint_doc": {
+                "schema_version": "leadpoet.encrypted_artifact.v2",
+                "fixture": suffix,
+            },
+        }
+
+    first_hash = "sha256:" + "b" * 64
+    first = row(
+        sequence=1,
+        checkpoint_hash=first_hash,
+        previous_checkpoint_hash="",
+        suffix="c",
+    )
+    inserted = json.loads(
+        database.psql(
+            _provider_outcome_append_sql(first),
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    if inserted != {"status": "inserted", "checkpoint_hash": first_hash}:
+        raise PostgresContractProbeError(
+            "provider outcome first append result differs"
+        )
+    existing = json.loads(
+        database.psql(
+            _provider_outcome_append_sql(first),
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    if existing != {"status": "existing", "checkpoint_hash": first_hash}:
+        raise PostgresContractProbeError(
+            "provider outcome idempotent append result differs"
+        )
+
+    siblings = (
+        row(
+            sequence=2,
+            checkpoint_hash="sha256:" + "d" * 64,
+            previous_checkpoint_hash=first_hash,
+            suffix="e",
+        ),
+        row(
+            sequence=2,
+            checkpoint_hash="sha256:" + "f" * 64,
+            previous_checkpoint_hash=first_hash,
+            suffix="1",
+        ),
+    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(
+            executor.map(
+                lambda value: database.psql(
+                    _provider_outcome_append_sql(value),
+                    check=False,
+                    tuples_only=True,
+                ),
+                siblings,
+            )
+        )
+    accepted = [result for result in results if result.returncode == 0]
+    rejected = [result for result in results if result.returncode != 0]
+    if len(accepted) != 1 or len(rejected) != 1:
+        raise PostgresContractProbeError(
+            "provider outcome concurrent append did not select one head"
+        )
+    if "does not extend the current head" not in rejected[0].stderr:
+        raise PostgresContractProbeError(
+            "provider outcome stale append failed for the wrong reason"
+        )
+    row_count = int(
+        database.psql(
+            """
+            SELECT pg_catalog.count(*)
+            FROM public.research_lab_provider_outcome_checkpoints_v2
+            WHERE artifact_master_key_ref_hash =
+                  'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+              AND utc_day = DATE '2026-07-10';
+            """,
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    if row_count != 2:
+        raise PostgresContractProbeError(
+            "provider outcome lineage contains an unexpected row count"
+        )
+    return {
+        "first_checkpoint_hash": first_hash,
+        "candidate_sibling_hashes": sorted(
+            item["checkpoint_hash"] for item in siblings
+        ),
+        "accepted_count": len(accepted),
+        "rejected_count": len(rejected),
+        "row_count": row_count,
+    }
 
 
 def _settlement_fixture(
@@ -768,6 +904,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                     "post-129 transport terminal constraint is invalid"
                 )
 
+        database.apply_migration(scripts / PROVIDER_OUTCOME_APPEND_MIGRATION)
+        applied.append(PROVIDER_OUTCOME_APPEND_MIGRATION)
+        provider_outcome_append = _provider_outcome_append_contract(database)
+
         rows, verified = _settlement_fixture(
             candidate_sha=args.candidate_sha,
             epoch_id=args.epoch_id,
@@ -840,6 +980,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "pre_129_attested_local_transport_rejected": True,
                 "post_129_attested_local_transport_persisted": True,
                 "transport_terminal_contract_valid": True,
+                "provider_outcome_append_atomic": True,
                 "finalized_view_projection_exact": True,
                 "finalized_view_seed_available": True,
                 "settlement_authority_parsed": True,
@@ -851,6 +992,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "research_lab_finalized_allocation_epochs_v2": [view_row],
             },
             "measured_settlement": measured_settlement,
+            "provider_outcome_append": provider_outcome_append,
             "required_schema_declarations": declaration_counts,
         }
     finally:

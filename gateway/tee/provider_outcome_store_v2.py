@@ -22,6 +22,7 @@ from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_
 CHECKPOINT_SCHEMA_VERSION = "leadpoet.provider_outcome_checkpoint.v2"
 CHECKPOINT_ROW_SCHEMA_VERSION = "leadpoet.provider_outcome_checkpoint_row.v2"
 CHECKPOINT_TABLE = "research_lab_provider_outcome_checkpoints_v2"
+CHECKPOINT_APPEND_RPC = "append_research_lab_provider_outcome_checkpoint_v2"
 CHECKPOINT_ORIGIN = "https://qplwoislplkcegvdmbim.supabase.co"
 CHECKPOINT_TIMEOUT_MS = 45_000
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -128,7 +129,8 @@ class ProviderOutcomeStoreV2:
             storage_document=exported["storage_document"],
         )
         attempts: list[Dict[str, Any]] = []
-        artifacts = {
+        transport_artifacts: set[str] = set()
+        committed_artifacts = {
             payload["checkpoint_hash"],
             normalized_document["document_hash"],
             str(descriptor["artifact_id"]),
@@ -136,19 +138,18 @@ class ProviderOutcomeStoreV2:
         }
         result = self._execute(
             method="POST",
-            url="%s/rest/v1/%s" % (CHECKPOINT_ORIGIN, CHECKPOINT_TABLE),
+            url="%s/rest/v1/rpc/%s" % (CHECKPOINT_ORIGIN, CHECKPOINT_APPEND_RPC),
             headers={
                 "accept": "application/json",
                 "content-type": "application/json",
-                "prefer": "resolution=ignore-duplicates,return=minimal",
             },
-            body=canonical_json(row).encode("utf-8"),
-            logical_operation_id="%s:provider-outcome:%d:insert"
+            body=canonical_json({"checkpoint_row": row}).encode("utf-8"),
+            logical_operation_id="%s:provider-outcome:%d:append"
             % (job_id, sequence),
             job_id=job_id,
             purpose=purpose,
         )
-        self._collect_evidence(result, attempts, artifacts)
+        self._collect_evidence(result, attempts, transport_artifacts)
         rows, read_attempts, read_artifacts = self._read_rows(
             utc_day=utc_day,
             sequence=sequence,
@@ -158,17 +159,27 @@ class ProviderOutcomeStoreV2:
             operation_suffix="readback",
         )
         attempts.extend(read_attempts)
-        artifacts.update(read_artifacts)
+        transport_artifacts.update(read_artifacts)
         if len(rows) != 1 or rows[0] != row:
+            if rows or self._append_conflicted(result):
+                self._vault.release_transient(str(descriptor["artifact_id"]))
+                return {
+                    "status": "conflict",
+                    "transport_attempts": attempts,
+                    "evidence_artifact_hashes": sorted(transport_artifacts),
+                }
             raise ProviderOutcomeStoreV2Error(
                 "provider outcome checkpoint durable readback differs"
             )
         self._vault.release_transient(str(descriptor["artifact_id"]))
         return {
+            "status": "persisted",
             "checkpoint_hash": payload["checkpoint_hash"],
             "state_document_hash": normalized_document["document_hash"],
             "transport_attempts": attempts,
-            "evidence_artifact_hashes": sorted(artifacts),
+            "evidence_artifact_hashes": sorted(
+                transport_artifacts | committed_artifacts
+            ),
         }
 
     def load_latest(
@@ -177,12 +188,14 @@ class ProviderOutcomeStoreV2:
         utc_day: str,
         job_id: str,
         purpose: str,
+        operation_suffix: str = "restore",
     ) -> Dict[str, Any]:
         with self._vault.transient_artifact_transaction():
             return self._load_latest(
                 utc_day=utc_day,
                 job_id=job_id,
                 purpose=purpose,
+                operation_suffix=operation_suffix,
             )
 
     def _load_latest(
@@ -191,6 +204,7 @@ class ProviderOutcomeStoreV2:
         utc_day: str,
         job_id: str,
         purpose: str,
+        operation_suffix: str,
     ) -> Dict[str, Any]:
         normalized_day = _day(utc_day)
         rows, attempts, artifacts = self._read_rows(
@@ -199,7 +213,7 @@ class ProviderOutcomeStoreV2:
             order_latest=True,
             job_id=job_id,
             purpose=purpose,
-            operation_suffix="restore",
+            operation_suffix=operation_suffix,
         )
         if not rows:
             return {
@@ -262,6 +276,20 @@ class ProviderOutcomeStoreV2:
             "transport_attempts": attempts,
             "evidence_artifact_hashes": sorted(artifacts),
         }
+
+    @staticmethod
+    def _append_conflicted(result: Mapping[str, Any]) -> bool:
+        if result.get("terminal_status") != "authenticated_response":
+            return False
+        try:
+            body = base64.b64decode(
+                str(result.get("body_b64") or ""),
+                validate=True,
+            )
+            parsed = json.loads(body.decode("utf-8"))
+        except Exception:
+            return False
+        return isinstance(parsed, Mapping) and str(parsed.get("code") or "") == "40001"
 
     def _validate_payload(self, value: Mapping[str, Any]) -> Dict[str, Any]:
         fields = {

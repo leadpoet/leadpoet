@@ -118,7 +118,13 @@ class ExecutionContextV2:
             and attempt.get("credential_ref_hash") != expected_credential
         ):
             raise ExecutionJobV2Error(
-                "transport credential differs from the attested job profile"
+                "transport credential differs from the attested job profile "
+                "for provider %s (expected=%s observed=%s)"
+                % (
+                    str(attempt.get("provider_id") or ""),
+                    str(expected_credential)[:15],
+                    str(attempt.get("credential_ref_hash") or "")[:15],
+                )
             )
         expected_proxy = self.provider_credential_ref_hashes.get("egress_proxy")
         if (
@@ -126,7 +132,12 @@ class ExecutionContextV2:
             and attempt.get("egress_proxy_ref_hash") != expected_proxy
         ):
             raise ExecutionJobV2Error(
-                "transport proxy differs from the attested job profile"
+                "transport proxy differs from the attested job profile "
+                "(expected=%s observed=%s)"
+                % (
+                    str(expected_proxy)[:15],
+                    str(attempt.get("egress_proxy_ref_hash") or "")[:15],
+                )
             )
         with self._transport_lock:
             if any(

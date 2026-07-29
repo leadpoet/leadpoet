@@ -60,6 +60,7 @@ from tests.restart_rehearsal.verify_evidence import (
     events,
     selected_weight_storage_preflight_capability,
     verify_gateway_private_model_environment,
+    verify_gateway_provider_preflight,
     verify_migration_backed_database_contract,
     verify_gateway_weight_readiness_invocations,
     verify_chain_settlement_durable_readback,
@@ -2687,6 +2688,100 @@ def test_gateway_rehearsal_requires_canonical_private_model_environment() -> Non
 
     with pytest.raises(SystemExit, match="exactly one gateway.main"):
         verify_gateway_private_model_environment([])
+
+
+def test_gateway_rehearsal_requires_both_paid_provider_preflights() -> None:
+    rows = [
+        {
+            "operation": "provider_transport",
+            "host": "api.exa.ai",
+            "path": "/search",
+            "status": 200,
+        },
+        {
+            "operation": "provider_transport",
+            "host": "api.scrapingdog.com",
+            "path": "/account",
+            "status": 200,
+        },
+    ]
+    verify_gateway_provider_preflight(rows, transition="forward")
+    verify_gateway_provider_preflight([], transition="rollback")
+
+    with pytest.raises(SystemExit, match="both authenticated provider"):
+        verify_gateway_provider_preflight(rows[:1], transition="forward")
+
+    failed = [dict(rows[0]), dict(rows[1], status=503)]
+    with pytest.raises(SystemExit, match="both authenticated provider"):
+        verify_gateway_provider_preflight(failed, transition="forward")
+
+
+def test_rehearsal_provider_boundaries_require_job_credentials_and_tls_proxy(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    proxy = (
+        "https://rehearsal-scoring:rehearsal-scoring-password@"
+        "93.184.216.34:443"
+    )
+    exa = rehearsal_sitecustomize._local_provider_transport(
+        method="POST",
+        url="https://api.exa.ai/search",
+        headers={
+            "x-api-key": "rehearsal-exa",
+            "content-type": "application/json",
+        },
+        body=b'{"numResults":1,"query":"provider preflight"}',
+        timeout_ms=12_000,
+        upstream_proxy_url=proxy,
+    )
+    scrapingdog = rehearsal_sitecustomize._local_provider_transport(
+        method="GET",
+        url=(
+            "https://api.scrapingdog.com/account?"
+            "api_key=rehearsal-scrapingdog"
+        ),
+        headers={},
+        body=b"",
+        timeout_ms=12_000,
+        upstream_proxy_url=proxy,
+    )
+
+    assert exa["http_status"] == scrapingdog["http_status"] == 200
+    with pytest.raises(ValueError, match="job-scoped TLS proxy"):
+        rehearsal_sitecustomize._local_provider_transport(
+            method="POST",
+            url="https://api.exa.ai/search",
+            headers={"x-api-key": "rehearsal-exa"},
+            body=b'{"numResults":1,"query":"provider preflight"}',
+            timeout_ms=12_000,
+        )
+
+
+def test_rehearsal_scoring_provider_calls_cross_the_coordinator_process() -> None:
+    source = Path(rehearsal_sitecustomize.__file__).read_text(
+        encoding="utf-8"
+    )
+    runtime = source[
+        source.index("def _gateway_runtime_objects(") :
+        source.index("def _unwrap_candidate_rpc(")
+    ]
+    handler = source[
+        source.index("def _handle_gateway_enclave_rpc(") :
+        source.index("class _LocalVsock:")
+    ]
+
+    assert "rehearsal_inter_enclave_provider_execute" in runtime
+    assert "rehearsal_inter_enclave_provider_probe_resolve" in runtime
+    assert "handle_inter_enclave_rpc(" in handler
+    assert '"provider_execute"' in handler
+    assert '"provider_probe_resolve"' in handler
 
 
 def test_rehearsal_driver_must_match_frozen_harness_commit(

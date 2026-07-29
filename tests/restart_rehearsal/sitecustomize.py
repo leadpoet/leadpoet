@@ -24,7 +24,7 @@ import threading
 import time
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Optional
-from urllib.parse import urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlparse, urlsplit, urlunsplit
 
 
 STATE_ROOT = Path(os.environ.get("REHEARSAL_STATE_ROOT", "/rehearsal-state"))
@@ -844,6 +844,91 @@ def _gateway_enclave_socket_path(role: str) -> Path:
     return root / ("gateway-enclave-%s.sock" % role)
 
 
+def _call_persistent_gateway_enclave(
+    role: str,
+    method: str,
+    params: Mapping[str, Any],
+) -> Any:
+    """Cross one strict process boundary into a persistent role enclave."""
+
+    if method not in {
+        "rehearsal_inter_enclave_provider_execute",
+        "rehearsal_inter_enclave_provider_probe_resolve",
+    }:
+        raise ValueError("persistent inter-enclave method is not authorized")
+    if not isinstance(params, Mapping):
+        raise ValueError("persistent inter-enclave params are invalid")
+    socket_path = _gateway_enclave_socket_path(role)
+    if not socket_path.is_socket():
+        raise ValueError("persistent target enclave service is unavailable")
+    body = json.dumps(
+        {"method": method, "params": dict(params)},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    connection = _ORIGINAL_SOCKET(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        connection.settimeout(120)
+        connection.connect(str(socket_path))
+        connection.sendall(len(body).to_bytes(4, "big") + body)
+
+        prefix = bytearray()
+        while len(prefix) < 4:
+            chunk = connection.recv(4 - len(prefix))
+            if not chunk:
+                break
+            prefix.extend(chunk)
+        if len(prefix) != 4:
+            raise ValueError("persistent inter-enclave response is incomplete")
+        response_size = int.from_bytes(prefix, "big")
+        if response_size < 2 or response_size > 128 * 1024 * 1024:
+            raise ValueError("persistent inter-enclave response size differs")
+        frame = bytearray()
+        while len(frame) < response_size:
+            chunk = connection.recv(
+                min(64 * 1024, response_size - len(frame))
+            )
+            if not chunk:
+                break
+            frame.extend(chunk)
+        if len(frame) != response_size:
+            raise ValueError(
+                "persistent inter-enclave response body is incomplete"
+            )
+    finally:
+        connection.close()
+
+    outer = json.loads(frame)
+    if (
+        not isinstance(outer, dict)
+        or set(outer) != {"diagnostic", "response"}
+        or not isinstance(outer["diagnostic"], dict)
+        or not isinstance(outer["response"], dict)
+    ):
+        raise ValueError("persistent inter-enclave response envelope differs")
+    response = outer["response"]
+    diagnostic = outer["diagnostic"]
+    if set(diagnostic) != {"error_hash", "error_type", "status"}:
+        raise ValueError("persistent inter-enclave diagnostic fields differ")
+    if response.get("status") == "error":
+        if (
+            set(response) != {"status", "error"}
+            or diagnostic.get("status") != "rejected"
+        ):
+            raise ValueError("persistent inter-enclave error envelope differs")
+        raise ValueError(
+            "persistent coordinator RPC failed: %s" % response["error"]
+        )
+    if (
+        set(response) != {"status", "result"}
+        or response.get("status") != "success"
+        or diagnostic
+        != {"status": "ok", "error_type": "", "error_hash": ""}
+    ):
+        raise ValueError("persistent inter-enclave success envelope differs")
+    return response["result"]
+
+
 def _local_transport_certificate(role: str) -> bytes:
     body = base64.b64encode(
         hashlib.sha256(
@@ -1415,7 +1500,6 @@ def _local_provider_transport(
     upstream_proxy_url: Optional[str] = None,
     max_response_bytes: int = 8 * 1024 * 1024,
 ) -> dict[str, Any]:
-    del upstream_proxy_url
     parsed = urlsplit(url)
     if parsed.scheme != "https" or parsed.port not in {None, 443}:
         raise ValueError("local provider boundary requires production HTTPS")
@@ -1464,8 +1548,53 @@ def _local_provider_transport(
         response_body = b'{"bittensor":{"usd":201.25}}'
         status = 200
         boundary = "coingecko"
+    elif host == "api.exa.ai":
+        if (
+            normalized_method != "POST"
+            or parsed.path != "/search"
+            or parsed.query
+            or headers.get("x-api-key") != "rehearsal-exa"
+        ):
+            raise ValueError("local Exa provider route differs")
+        payload = json.loads(body)
+        if (
+            not isinstance(payload, dict)
+            or payload.get("query") != "provider preflight"
+            or payload.get("numResults") != 1
+        ):
+            raise ValueError("local Exa provider preflight payload differs")
+        response_body = b'{"results":[]}'
+        status = 200
+        boundary = "exa"
+    elif host == "api.scrapingdog.com":
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        if (
+            normalized_method != "GET"
+            or parsed.path != "/account"
+            or bytes(body)
+            or query != {"api_key": "rehearsal-scrapingdog"}
+        ):
+            raise ValueError("local ScrapingDog provider route differs")
+        response_body = b'{"status":"active"}'
+        status = 200
+        boundary = "scrapingdog"
     else:
         raise ValueError("local provider boundary rejected unknown host")
+    if boundary in {"exa", "scrapingdog"}:
+        permitted_proxies = {
+            (
+                "https://rehearsal-auto:rehearsal-auto-password@"
+                "93.184.216.34:443"
+            ),
+            (
+                "https://rehearsal-scoring:rehearsal-scoring-password@"
+                "93.184.216.34:443"
+            ),
+        }
+        if upstream_proxy_url not in permitted_proxies:
+            raise ValueError(
+                "local paid-provider request lacks its job-scoped TLS proxy"
+            )
     if len(response_body) > int(max_response_bytes):
         raise ValueError("local provider response exceeds requested ceiling")
     _external_event(
@@ -1660,11 +1789,28 @@ def _gateway_runtime_objects(
         tee_service.sign_data = lambda data: _local_signing_private_key(
             role
         ).sign(bytes(data))
-        # The candidate job managers still execute unchanged. Only their
-        # privileged inter-enclave transport is replaced with the strict local
-        # coordinator/provider boundary in this role-isolated process.
-        tee_service.execute_v2_provider_request = broker.execute
-        tee_service.execute_v2_provider_probe_request = broker.execute
+        # Candidate job managers still execute unchanged. Scoring and
+        # autoresearch cross the same coordinator-owned provider authority
+        # boundary as production; the coordinator is the only process that
+        # receives the measured job credential lease.
+        if role == "gateway_coordinator":
+            tee_service.execute_v2_provider_request = broker.execute
+            tee_service.execute_v2_provider_probe_request = broker.execute
+        else:
+            tee_service.execute_v2_provider_request = (
+                lambda request: _call_persistent_gateway_enclave(
+                    "gateway_coordinator",
+                    "rehearsal_inter_enclave_provider_execute",
+                    {"peer_role": role, "request": dict(request)},
+                )
+            )
+            tee_service.execute_v2_provider_probe_request = (
+                lambda request: _call_persistent_gateway_enclave(
+                    "gateway_coordinator",
+                    "rehearsal_inter_enclave_provider_probe_resolve",
+                    {"peer_role": role, "request": dict(request)},
+                )
+            )
         tee_service.seal_v2_inter_enclave_artifact = (
             lambda *, plaintext, job_id, purpose, artifact_kind: vault.seal(
                 bytes(plaintext),
@@ -1883,6 +2029,33 @@ def _handle_gateway_enclave_rpc(
     if method.startswith("v2_") and role_state is None:
         raise ValueError("local enclave runtime is not configured")
     config_hash = str((role_state or {}).get("config_hash") or "")
+    if role == "gateway_coordinator" and method in {
+        "rehearsal_inter_enclave_provider_execute",
+        "rehearsal_inter_enclave_provider_probe_resolve",
+    }:
+        if set(params) != {"peer_role", "request"}:
+            raise ValueError("local inter-enclave provider fields differ")
+        peer_role = str(params.get("peer_role") or "")
+        request = params.get("request")
+        target_method = {
+            "rehearsal_inter_enclave_provider_execute": "provider_execute",
+            "rehearsal_inter_enclave_provider_probe_resolve": (
+                "provider_probe_resolve"
+            ),
+        }[method]
+        allowed_peers = (
+            {"gateway_scoring", "gateway_autoresearch"}
+            if target_method == "provider_execute"
+            else {"gateway_autoresearch"}
+        )
+        if peer_role not in allowed_peers or not isinstance(request, Mapping):
+            raise ValueError("local inter-enclave provider peer differs")
+        objects = _gateway_runtime_objects(role, role_state)
+        return objects["tee_service"].handle_inter_enclave_rpc(
+            target_method,
+            dict(request),
+            {"physical_role": peer_role},
+        )
     execution_prefix = {
         "gateway_coordinator": "coordinator_v2_",
         "gateway_scoring": "scoring_v2_",

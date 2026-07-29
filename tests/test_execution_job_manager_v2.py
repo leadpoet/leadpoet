@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from gateway.tee.execution_job_manager_v2 import (
     JOB_SCHEMA_VERSION,
     PARENT_RECEIPT_GRAPHS_FIELD,
+    ExecutionContextV2,
     ExecutionJobManagerV2,
     ExecutionJobV2Error,
     ExecutionResultV2,
@@ -82,6 +83,56 @@ def _payload():
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def test_transport_profile_mismatch_identifies_provider_and_hash_prefixes():
+    context = ExecutionContextV2(
+        job_id="score-job-1",
+        purpose="research_lab.candidate_score.v2",
+        epoch_id=24_000,
+        provider_credential_profile="provider_preflight",
+        provider_credential_ref_hashes={
+            "exa": HASH,
+            "egress_proxy": HASH,
+        },
+    )
+    attempt = build_transport_attempt(
+        request_id="1" * 32,
+        logical_operation_id="provider-op-1",
+        job_id=context.job_id,
+        purpose=context.purpose,
+        provider_id="exa",
+        attempt_number=0,
+        method="POST",
+        destination_host="api.exa.ai",
+        destination_port=443,
+        path_hash=HASH,
+        nonsecret_headers_hash=HASH,
+        body_hash=HASH_B,
+        credential_ref_hash=HASH_B,
+        retry_policy_hash=HASH_B,
+        timeout_ms=30_000,
+        started_at=NOW,
+        terminal_status="authenticated_response",
+        http_status=200,
+        response_hash=HASH,
+        request_artifact_hash=HASH,
+        response_artifact_hash=HASH_B,
+        tls_peer_chain_hash=HASH,
+        tls_protocol="TLSv1.3",
+        failure_code=None,
+        completed_at=NOW,
+        egress_proxy_ref_hash=HASH,
+    )
+
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match=(
+            r"provider exa "
+            r"\(expected=sha256:aaaaaaaa observed=sha256:bbbbbbbb\)"
+        ),
+    ):
+        context.record_transport(attempt)
 
 
 def _manifest(payload, **overrides):

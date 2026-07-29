@@ -427,6 +427,30 @@ def verify_gateway_private_model_environment(rows: list[dict]) -> None:
         )
 
 
+def verify_gateway_provider_preflight(
+    rows: list[dict],
+    *,
+    transition: str,
+) -> None:
+    if transition != "forward":
+        return
+    expected = {
+        ("api.exa.ai", "/search"),
+        ("api.scrapingdog.com", "/account"),
+    }
+    observed = {
+        (str(row.get("host") or ""), str(row.get("path") or ""))
+        for row in rows
+        if row.get("operation") == "provider_transport"
+        and row.get("status") == 200
+    }
+    if not expected <= observed:
+        raise SystemExit(
+            "gateway provider preflight did not complete through both "
+            "authenticated provider boundaries"
+        )
+
+
 def verify_chain_settlement_durable_readback(rows: list[dict]) -> None:
     persistence_ordinals = [
         ordinal
@@ -704,6 +728,7 @@ def main() -> int:
         )
         require_order(labels, required_gateway_order)
         verify_gateway_private_model_environment(rows)
+        verify_gateway_provider_preflight(rows, transition=transition)
         state = json.loads(
             Path("/rehearsal-state/state.json").read_text(encoding="utf-8")
         )

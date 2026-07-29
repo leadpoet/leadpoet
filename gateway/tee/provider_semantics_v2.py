@@ -584,6 +584,7 @@ class ProviderSemanticsAuthorityV2:
                             previous_checkpoint_hash=previous,
                             job_id=job_id,
                             purpose=purpose,
+                            attempt_number=conflict_attempt,
                         )
                     )
                 except Exception:
@@ -608,7 +609,7 @@ class ProviderSemanticsAuthorityV2:
                         "transport_attempts": attempts,
                         "evidence_artifact_hashes": sorted(artifacts),
                     }
-                if status != "conflict":
+                if status not in {"busy", "conflict"}:
                     self._outcome_ledger.restore(base_document)
                     raise ProviderSemanticsV2Error(
                         "provider outcome checkpoint status is invalid"
@@ -621,6 +622,8 @@ class ProviderSemanticsAuthorityV2:
                         conflict_attempt=conflict_attempt,
                     )
                 )
+                if status == "busy":
+                    continue
                 try:
                     restored = dict(
                         self._outcome_store.load_latest(

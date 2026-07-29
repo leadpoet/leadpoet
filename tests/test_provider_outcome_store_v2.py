@@ -33,11 +33,23 @@ class _Broker:
         self.calls = []
         self.fail_reads = False
         self.fail_committed_appends = 0
+        self.busy_appends = 0
 
     def execute(self, request):
         self.calls.append(dict(request))
         assert request["provider_id"] == "supabase"
         if request["method"] == "POST":
+            if self.busy_appends > 0:
+                self.busy_appends -= 1
+                return self._result(
+                    request,
+                    status=200,
+                    body=(
+                        b'{"checkpoint_hash":"sha256:'
+                        + b"a" * 64
+                        + b'","status":"busy"}'
+                    ),
+                )
             payload = json.loads(base64.b64decode(request["body_b64"]))
             row = payload["checkpoint_row"]
             lineage = (
@@ -133,7 +145,7 @@ class _Broker:
             job_id=request["job_id"],
             purpose=request["purpose"],
             provider_id="supabase",
-            attempt_number=0,
+            attempt_number=request["attempt_number"],
             method=request["method"],
             destination_host=parsed.hostname,
             destination_port=443,
@@ -302,6 +314,36 @@ def test_outcome_checkpoint_accepts_ambiguous_committed_append() -> None:
     assert persisted["transport_attempts"][0]["terminal_status"] == "transport_failure"
     assert persisted["transport_attempts"][0]["failure_code"] == "unexpected_eof"
     assert persisted["transport_attempts"][1]["terminal_status"] == "authenticated_response"
+
+
+def test_outcome_checkpoint_busy_append_is_retryable_without_readback() -> None:
+    broker = _Broker()
+    broker.busy_appends = 1
+    store = ProviderOutcomeStoreV2(broker=broker, vault=_vault())
+
+    busy = store.persist(
+        _document(),
+        previous_checkpoint_hash="",
+        job_id="job",
+        purpose="research_lab.company_score.v2",
+        attempt_number=7,
+    )
+
+    assert busy["status"] == "busy"
+    assert len(broker.calls) == 1
+    assert broker.calls[0]["attempt_number"] == 7
+
+
+def test_outcome_checkpoint_recognizes_legacy_busy_sqlstate_response() -> None:
+    result = {
+        "terminal_status": "authenticated_response",
+        "body_b64": base64.b64encode(
+            b'{"code":"40001","message":'
+            b'"provider outcome checkpoint append is busy"}'
+        ).decode("ascii"),
+    }
+
+    assert ProviderOutcomeStoreV2._append_status(result) == "busy"
 
 
 def test_outcome_checkpoint_rejects_tampering_and_transport_failure() -> None:

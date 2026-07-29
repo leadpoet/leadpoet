@@ -72,6 +72,7 @@ class ProviderOutcomeStoreV2:
         previous_checkpoint_hash: str,
         job_id: str,
         purpose: str,
+        attempt_number: int = 0,
     ) -> Dict[str, Any]:
         with self._vault.transient_artifact_transaction():
             return self._persist(
@@ -79,6 +80,7 @@ class ProviderOutcomeStoreV2:
                 previous_checkpoint_hash=previous_checkpoint_hash,
                 job_id=job_id,
                 purpose=purpose,
+                attempt_number=attempt_number,
             )
 
     def _persist(
@@ -88,6 +90,7 @@ class ProviderOutcomeStoreV2:
         previous_checkpoint_hash: str,
         job_id: str,
         purpose: str,
+        attempt_number: int,
     ) -> Dict[str, Any]:
         utc_day = _day(document.get("utc_day"))
         normalized_document = validate_provider_outcome_state_document_v2(
@@ -104,6 +107,14 @@ class ProviderOutcomeStoreV2:
             "previous provider outcome checkpoint hash",
             optional=True,
         )
+        if (
+            isinstance(attempt_number, bool)
+            or not isinstance(attempt_number, int)
+            or attempt_number < 0
+        ):
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint attempt number is invalid"
+            )
         payload_body = {
             "schema_version": CHECKPOINT_SCHEMA_VERSION,
             "utc_day": utc_day,
@@ -148,12 +159,14 @@ class ProviderOutcomeStoreV2:
             % (job_id, sequence),
             job_id=job_id,
             purpose=purpose,
+            attempt_number=attempt_number,
         )
         self._collect_evidence(result, attempts, transport_artifacts)
-        if self._append_conflicted(result):
+        append_status = self._append_status(result)
+        if append_status in {"busy", "conflict"}:
             self._vault.release_transient(str(descriptor["artifact_id"]))
             return {
-                "status": "conflict",
+                "status": append_status,
                 "transport_attempts": attempts,
                 "evidence_artifact_hashes": sorted(transport_artifacts),
             }
@@ -168,7 +181,7 @@ class ProviderOutcomeStoreV2:
         attempts.extend(read_attempts)
         transport_artifacts.update(read_artifacts)
         if len(rows) != 1 or rows[0] != row:
-            if rows or self._append_conflicted(result):
+            if rows:
                 self._vault.release_transient(str(descriptor["artifact_id"]))
                 return {
                     "status": "conflict",
@@ -285,9 +298,9 @@ class ProviderOutcomeStoreV2:
         }
 
     @staticmethod
-    def _append_conflicted(result: Mapping[str, Any]) -> bool:
+    def _append_status(result: Mapping[str, Any]) -> str:
         if result.get("terminal_status") != "authenticated_response":
-            return False
+            return "unknown"
         try:
             body = base64.b64decode(
                 str(result.get("body_b64") or ""),
@@ -295,8 +308,18 @@ class ProviderOutcomeStoreV2:
             )
             parsed = json.loads(body.decode("utf-8"))
         except Exception:
-            return False
-        return isinstance(parsed, Mapping) and str(parsed.get("code") or "") == "40001"
+            return "unknown"
+        if not isinstance(parsed, Mapping):
+            return "unknown"
+        measured_status = str(parsed.get("status") or "").strip().lower()
+        if measured_status in {"busy", "conflict"}:
+            return measured_status
+        if str(parsed.get("code") or "") != "40001":
+            return "accepted"
+        message = str(parsed.get("message") or "").strip().lower()
+        if message == "provider outcome checkpoint append is busy":
+            return "busy"
+        return "conflict"
 
     def _validate_payload(self, value: Mapping[str, Any]) -> Dict[str, Any]:
         fields = {
@@ -524,6 +547,7 @@ class ProviderOutcomeStoreV2:
         logical_operation_id: str,
         job_id: str,
         purpose: str,
+        attempt_number: int = 0,
     ) -> Dict[str, Any]:
         return dict(
             self._broker.execute(
@@ -533,7 +557,7 @@ class ProviderOutcomeStoreV2:
                     "job_id": str(job_id),
                     "purpose": str(purpose),
                     "provider_id": "supabase",
-                    "attempt_number": 0,
+                    "attempt_number": attempt_number,
                     "method": method,
                     "url": url,
                     "headers": dict(headers),

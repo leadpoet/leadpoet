@@ -329,7 +329,7 @@ class FakeTransport:
         }
 
 
-def _broker(transport):
+def _broker(transport, **broker_kwargs):
     credentials = {
         "openrouter": "openrouter-secret",
         "exa": "exa-secret",
@@ -350,6 +350,7 @@ def _broker(transport):
             "plaintext_hash": sha256_bytes(body),
         },
         clock=lambda: NOW,
+        **broker_kwargs,
     )
     broker.provision_credentials(credentials)
     return broker
@@ -788,6 +789,78 @@ def test_job_credential_lease_overrides_boot_key_for_only_that_job():
         )
     )
     assert transport.calls[1]["headers"]["Authorization"] == "Bearer openrouter-secret"
+
+
+def test_completed_job_release_removes_only_its_terminal_records():
+    transport = FakeTransport()
+    broker = _broker(transport)
+    first_request = _request()
+    broker.execute(first_request)
+    broker.execute(first_request)
+    broker.execute(
+        _request(
+            job_id="job-2",
+            logical_operation_id="operation-2",
+        )
+    )
+
+    assert len(transport.calls) == 2
+    assert broker.health()["terminal_count"] == 2
+
+    released = broker.release_job_credentials("job-1")
+
+    assert released["released_terminal_count"] == 1
+    health = broker.health()
+    assert health["terminal_count"] == 1
+    assert health["released_terminal_count"] == 1
+
+
+def test_terminal_record_cleanup_prevents_completed_jobs_exhausting_capacity(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "gateway.tee.provider_broker_v2.MAX_DEDUPLICATION_RECORDS",
+        2,
+    )
+    transport = FakeTransport()
+    broker = _broker(transport)
+
+    for index in range(5):
+        job_id = "job-%d" % index
+        broker.execute(
+            _request(
+                job_id=job_id,
+                logical_operation_id="operation-%d" % index,
+            )
+        )
+        released = broker.release_job_credentials(job_id)
+        assert released["released_terminal_count"] == 1
+
+    assert len(transport.calls) == 5
+    assert broker.health()["terminal_count"] == 0
+
+
+def test_abandoned_terminal_records_expire_before_capacity_is_reused(monkeypatch):
+    monkeypatch.setattr(
+        "gateway.tee.provider_broker_v2.MAX_DEDUPLICATION_RECORDS",
+        1,
+    )
+    now = [100.0]
+    transport = FakeTransport()
+    broker = _broker(transport, monotonic_clock=lambda: now[0])
+    broker.execute(_request())
+
+    now[0] += 3601.0
+    broker.execute(
+        _request(
+            job_id="job-2",
+            logical_operation_id="operation-2",
+        )
+    )
+
+    health = broker.health()
+    assert health["terminal_count"] == 1
+    assert health["expired_terminal_count"] == 1
 
 
 @pytest.mark.parametrize(

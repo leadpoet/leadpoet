@@ -408,6 +408,7 @@ def _migration_schema_contract(
         "research_lab_attested_transport_purpose_contract_v2",
         "research_lab_attested_transport_terminal_contract_v2",
         "append_research_lab_provider_outcome_checkpoint_v2",
+        "research_lab_provider_outcome_contention_contract_v2",
         "persist_research_lab_chain_realized_lifetime_settlement_v2",
         "research_lab_champion_lifetime_credit_contract_v1",
     }

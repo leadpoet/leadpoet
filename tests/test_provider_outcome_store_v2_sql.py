@@ -3,6 +3,9 @@ from pathlib import Path
 
 SQL = Path("scripts/90-research-lab-provider-outcome-checkpoints-v2.sql")
 APPEND_SQL = Path("scripts/131-research-lab-provider-outcome-backpressure.sql")
+CONTENTION_STATUS_SQL = Path(
+    "scripts/133-research-lab-provider-outcome-contention-status.sql"
+)
 
 
 def test_provider_outcome_checkpoint_migration_is_append_only_and_private() -> None:
@@ -44,5 +47,22 @@ def test_provider_outcome_checkpoint_append_is_atomic_and_private() -> None:
     assert "GRANT EXECUTE" in text
     assert "TO service_role" in text
     assert "FROM PUBLIC, anon, authenticated" in text
+    assert "UPDATE public.research_lab_provider_outcome_checkpoints_v2" not in text
+    assert "DELETE FROM public.research_lab_provider_outcome_checkpoints_v2" not in text
+
+
+def test_provider_outcome_expected_contention_returns_measured_statuses() -> None:
+    text = CONTENTION_STATUS_SQL.read_text()
+    assert "pg_try_advisory_xact_lock" in text
+    assert "'status', 'busy'" in text
+    assert "'status', 'conflict'" in text
+    assert "research_lab_provider_outcome_contention_contract_v2" in text
+    assert "leadpoet.provider_outcome_contention_contract.v2" in text
+    assert "GRANT EXECUTE" in text
+    assert "TO service_role" in text
+    assert "FROM PUBLIC, anon, authenticated" in text
+    assert "RAISE EXCEPTION 'provider outcome checkpoint fields are invalid'" in text
+    assert "RAISE EXCEPTION 'provider outcome checkpoint identity is invalid'" in text
+    assert "RAISE EXCEPTION 'provider outcome checkpoint durable insert differs'" in text
     assert "UPDATE public.research_lab_provider_outcome_checkpoints_v2" not in text
     assert "DELETE FROM public.research_lab_provider_outcome_checkpoints_v2" not in text

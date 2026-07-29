@@ -13,6 +13,7 @@ import secrets
 import socket
 import ssl
 import threading
+import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -39,6 +40,7 @@ MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
 MAX_RESPONSE_BODY_BYTES = 64 * 1024 * 1024
 MAX_TRANSPORT_RESPONSE_BODY_BYTES = 96 * 1024 * 1024
 MAX_DEDUPLICATION_RECORDS = 10000
+TERMINAL_RECORD_RETENTION_SECONDS = 3600.0
 MAX_JOB_CREDENTIAL_LEASES = 1024
 EGRESS_PROXY_CREDENTIAL_SLOT = "egress_proxy"
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -504,6 +506,7 @@ class ProviderBrokerV2:
         artifact_sink: Optional[Callable[..., Mapping[str, Any]]] = None,
         job_credential_slot_ref_hashes: Optional[Mapping[str, str]] = None,
         clock: Callable[[], str] = _timestamp,
+        monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.routes = dict(routes)
         self.credential_ref_hashes = {
@@ -536,11 +539,33 @@ class ProviderBrokerV2:
             )
         self._artifact_sink = artifact_sink
         self._clock = clock
+        self._monotonic_clock = monotonic_clock
         self._credentials = {}  # type: Dict[str, str]
         self._job_credentials = {}  # type: Dict[Tuple[str, str], Dict[str, str]]
         self._records = {}  # type: Dict[Tuple[str, int], Dict[str, Any]]
+        self._record_keys_by_job = {}  # type: Dict[str, set[Tuple[str, int]]]
         self._inflight = {}  # type: Dict[Tuple[str, int], Tuple[str, threading.Event, object]]
+        self._released_terminal_count = 0
+        self._expired_terminal_count = 0
         self._lock = threading.Lock()
+
+    def _purge_expired_records_locked(self, now: float) -> int:
+        cutoff = float(now) - TERMINAL_RECORD_RETENTION_SECONDS
+        expired = [
+            key
+            for key, record in self._records.items()
+            if float(record["completed_monotonic"]) <= cutoff
+        ]
+        for key in expired:
+            record = self._records.pop(key)
+            job_id = str(record["job_id"])
+            job_keys = self._record_keys_by_job.get(job_id)
+            if job_keys is not None:
+                job_keys.discard(key)
+                if not job_keys:
+                    self._record_keys_by_job.pop(job_id, None)
+        self._expired_terminal_count += len(expired)
+        return len(expired)
 
     def health(self) -> Dict[str, Any]:
         expected_slots = set(expected_provider_credential_slots())
@@ -549,6 +574,8 @@ class ProviderBrokerV2:
             inflight_count = len(self._inflight)
             terminal_count = len(self._records)
             job_lease_count = len(self._job_credentials)
+            released_terminal_count = self._released_terminal_count
+            expired_terminal_count = self._expired_terminal_count
         missing = sorted(expected_slots - configured_slots)
         return {
             "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
@@ -557,6 +584,8 @@ class ProviderBrokerV2:
             "missing_credential_slots": missing,
             "inflight_count": inflight_count,
             "terminal_count": terminal_count,
+            "released_terminal_count": released_terminal_count,
+            "expired_terminal_count": expired_terminal_count,
             "job_credential_lease_count": job_lease_count,
             "registry_hash": provider_registry_hash(),
             "job_credential_slot_ref_hashes": dict(
@@ -689,15 +718,22 @@ class ProviderBrokerV2:
     def release_job_credentials(self, job_id: str) -> Dict[str, Any]:
         normalized_job_id = str(job_id or "")
         with self._lock:
-            keys = [
+            credential_keys = [
                 key for key in self._job_credentials if key[0] == normalized_job_id
             ]
-            for key in keys:
+            for key in credential_keys:
                 del self._job_credentials[key]
+            terminal_keys = tuple(
+                self._record_keys_by_job.pop(normalized_job_id, ())
+            )
+            for key in terminal_keys:
+                self._records.pop(key, None)
+            self._released_terminal_count += len(terminal_keys)
         return {
             "status": "released",
             "job_id": normalized_job_id,
-            "released_slot_count": len(keys),
+            "released_slot_count": len(credential_keys),
+            "released_terminal_count": len(terminal_keys),
         }
 
     def credential_available(self, *, job_id: str, slot: str) -> bool:
@@ -952,7 +988,13 @@ class ProviderBrokerV2:
                 owns_attempt = False
             else:
                 if len(self._records) >= MAX_DEDUPLICATION_RECORDS:
-                    raise ProviderBrokerV2Error("provider terminal ledger is full")
+                    self._purge_expired_records_locked(
+                        self._monotonic_clock()
+                    )
+                    if len(self._records) >= MAX_DEDUPLICATION_RECORDS:
+                        raise ProviderBrokerV2Error(
+                            "provider terminal ledger is full"
+                        )
                 job_credential_key = (
                     str(request["job_id"] or ""),
                     route.credential_slot,
@@ -1247,9 +1289,15 @@ class ProviderBrokerV2:
                     )
                 return dict(existing["result"])
             self._records[deduplication_key] = {
+                "job_id": str(request["job_id"] or ""),
                 "request_fingerprint": request_fingerprint,
                 "result": dict(result),
+                "completed_monotonic": self._monotonic_clock(),
             }
+            self._record_keys_by_job.setdefault(
+                str(request["job_id"] or ""),
+                set(),
+            ).add(deduplication_key)
             inflight = self._inflight.pop(deduplication_key, None)
             if inflight is not None:
                 inflight[1].set()

@@ -67,6 +67,9 @@ PROVIDER_OUTCOME_APPEND_MIGRATION = (
 PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION = (
     "131-research-lab-provider-outcome-backpressure.sql"
 )
+PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION = (
+    "133-research-lab-provider-outcome-contention-status.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -430,21 +433,22 @@ def _provider_outcome_append_contract(
                 siblings,
             )
         )
-    accepted = [result for result in results if result.returncode == 0]
-    rejected = [result for result in results if result.returncode != 0]
+    if any(result.returncode != 0 for result in results):
+        raise PostgresContractProbeError(
+            "provider outcome expected contention surfaced as a SQL error"
+        )
+    outcomes = [json.loads(result.stdout.strip()) for result in results]
+    accepted = [
+        outcome for outcome in outcomes if outcome.get("status") == "inserted"
+    ]
+    rejected = [
+        outcome
+        for outcome in outcomes
+        if outcome.get("status") in {"busy", "conflict"}
+    ]
     if len(accepted) != 1 or len(rejected) != 1:
         raise PostgresContractProbeError(
             "provider outcome concurrent append did not select one head"
-        )
-    if not any(
-        marker in rejected[0].stderr
-        for marker in (
-            "does not extend the current head",
-            "checkpoint append is busy",
-        )
-    ):
-        raise PostgresContractProbeError(
-            "provider outcome stale append failed for the wrong reason"
         )
     row_count = int(
         database.psql(
@@ -463,7 +467,7 @@ def _provider_outcome_append_contract(
             "provider outcome lineage contains an unexpected row count"
         )
 
-    accepted_hash = json.loads(accepted[0].stdout.strip())["checkpoint_hash"]
+    accepted_hash = accepted[0]["checkpoint_hash"]
     third_hash = "sha256:" + "2" * 64
     third = row(
         sequence=3,
@@ -511,9 +515,14 @@ def _provider_outcome_append_contract(
             tuples_only=True,
         )
         busy_elapsed = time.monotonic() - started
-        if busy.returncode == 0 or "checkpoint append is busy" not in busy.stderr:
+        busy_result = (
+            json.loads(busy.stdout.strip())
+            if busy.returncode == 0 and busy.stdout.strip()
+            else {}
+        )
+        if busy.returncode != 0 or busy_result.get("status") != "busy":
             raise PostgresContractProbeError(
-                "provider outcome contention did not fail with the busy contract"
+                "provider outcome contention did not return the busy contract"
             )
         if busy_elapsed >= 1.0:
             raise PostgresContractProbeError(
@@ -1188,6 +1197,29 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             scripts / PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION
         )
         applied.append(PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION)
+        database.apply_migration(
+            scripts / PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION
+        )
+        applied.append(PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION)
+        contention_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_provider_outcome_contention_contract_v2()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if contention_contract != {
+            "schema_version": (
+                "leadpoet.provider_outcome_contention_contract.v2"
+            ),
+            "lock_contention_status": "busy",
+            "stale_lineage_status": "conflict",
+        }:
+            raise PostgresContractProbeError(
+                "provider outcome contention contract differs"
+            )
         provider_outcome_append = _provider_outcome_append_contract(database)
 
         rows, verified, fixture = _settlement_fixture(

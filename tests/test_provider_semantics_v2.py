@@ -126,7 +126,16 @@ class _OutcomeStore:
             "evidence_artifact_hashes": [],
         }
 
-    def persist(self, document, *, previous_checkpoint_hash, job_id, purpose):
+    def persist(
+        self,
+        document,
+        *,
+        previous_checkpoint_hash,
+        job_id,
+        purpose,
+        attempt_number=0,
+    ):
+        del attempt_number
         if self.fail_persist:
             raise RuntimeError("outcome persistence failed")
         expected_sequence = (
@@ -635,6 +644,7 @@ def test_provider_outcome_busy_empty_head_backs_off_and_retries() -> None:
             super().__init__()
             self.busy = True
             self.persist_attempts = 0
+            self.attempt_numbers = []
 
         def persist(
             self,
@@ -643,12 +653,14 @@ def test_provider_outcome_busy_empty_head_backs_off_and_retries() -> None:
             previous_checkpoint_hash,
             job_id,
             purpose,
+            attempt_number=0,
         ):
             self.persist_attempts += 1
+            self.attempt_numbers.append(attempt_number)
             if self.busy:
                 self.busy = False
                 return {
-                    "status": "conflict",
+                    "status": "busy",
                     "transport_attempts": [],
                     "evidence_artifact_hashes": [],
                 }
@@ -657,6 +669,7 @@ def test_provider_outcome_busy_empty_head_backs_off_and_retries() -> None:
                 previous_checkpoint_hash=previous_checkpoint_hash,
                 job_id=job_id,
                 purpose=purpose,
+                attempt_number=attempt_number,
             )
 
     sleeps = []
@@ -671,6 +684,7 @@ def test_provider_outcome_busy_empty_head_backs_off_and_retries() -> None:
     assert outcome_store.persist_attempts == 2
     assert outcome_store.persist_count == 1
     assert outcome_store.document["sequence"] == 1
+    assert outcome_store.attempt_numbers == [0, 1]
     assert len(sleeps) == 1
     assert 0.01 <= sleeps[0] <= 0.02
 
@@ -689,11 +703,12 @@ def test_provider_outcome_persistent_contention_is_bounded_and_fails_closed() ->
             previous_checkpoint_hash,
             job_id,
             purpose,
+            attempt_number=0,
         ):
-            del document, previous_checkpoint_hash, job_id, purpose
+            del document, previous_checkpoint_hash, job_id, purpose, attempt_number
             self.persist_attempts += 1
             return {
-                "status": "conflict",
+                "status": "busy",
                 "transport_attempts": [],
                 "evidence_artifact_hashes": [],
             }
@@ -728,7 +743,7 @@ def test_provider_outcome_persistent_contention_is_bounded_and_fails_closed() ->
         authority.execute(_request(job_id="job-persistent-contention"))
 
     assert outcome_store.persist_attempts == 64
-    assert outcome_store.load_attempts == 65  # one startup restore plus 64 retries
+    assert outcome_store.load_attempts == 1  # startup restore only
     assert len(sleeps) == 64
     assert (
         authority.provider_outcome_snapshot()["provider_outcome_digest"].get(
@@ -771,7 +786,9 @@ def test_provider_outcome_contention_converges_across_25_writers() -> None:
             previous_checkpoint_hash,
             job_id,
             purpose,
+            attempt_number=0,
         ):
+            del attempt_number
             sequence = int(document["sequence"])
             with self._condition:
                 expected_sequence = (
@@ -885,7 +902,16 @@ def test_failed_outcome_persistence_removes_uncommitted_job_artifacts():
     )
 
     class FailingOutcomeStore(_OutcomeStore):
-        def persist(self, document, *, previous_checkpoint_hash, job_id, purpose):
+        def persist(
+            self,
+            document,
+            *,
+            previous_checkpoint_hash,
+            job_id,
+            purpose,
+            attempt_number=0,
+        ):
+            del document, previous_checkpoint_hash, attempt_number
             vault.seal(
                 b"uncommitted provider outcome checkpoint",
                 job_id=job_id,

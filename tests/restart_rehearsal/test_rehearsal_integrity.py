@@ -47,6 +47,7 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
     MIGRATIONS_BEFORE_TRANSPORT_FIX,
     PROVIDER_OUTCOME_APPEND_MIGRATION,
     PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
+    PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
     TRANSPORT_FIX_MIGRATION,
     TRANSPORT_TERMINAL_MIGRATION,
     _json_insert_sql,
@@ -367,6 +368,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             TRANSPORT_TERMINAL_MIGRATION,
             PROVIDER_OUTCOME_APPEND_MIGRATION,
             PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
+            PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
             CHAMPION_LIFETIME_CREDIT_MIGRATION,
         ],
         "relations": relations,
@@ -374,6 +376,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_attested_transport_purpose_contract_v2",
             "research_lab_attested_transport_terminal_contract_v2",
             "append_research_lab_provider_outcome_checkpoint_v2",
+            "research_lab_provider_outcome_contention_contract_v2",
             "persist_research_lab_chain_realized_lifetime_settlement_v2",
             "research_lab_champion_lifetime_credit_contract_v1",
         ],
@@ -413,6 +416,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     assert "research_lab_attested_transport_purpose_contract_v2" in rpcs
     assert "research_lab_attested_transport_terminal_contract_v2" in rpcs
     assert "append_research_lab_provider_outcome_checkpoint_v2" in rpcs
+    assert "research_lab_provider_outcome_contention_contract_v2" in rpcs
     assert (
         "persist_research_lab_chain_realized_lifetime_settlement_v2"
         in rpcs

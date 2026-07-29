@@ -667,7 +667,7 @@
       "symbol": "HTTPXProviderTransport"
     },
     {
-      "ast_sha256": "sha256:52241e010ac22b23299d09ac6bc3a6b91933f29ae0e0376b0c779147db101434",
+      "ast_sha256": "sha256:6b14579515693133e1b1f0aa2626c203a6ff17735cd07faf0793ed2cc09d133e",
       "path": "gateway/tee/provider_broker_v2.py",
       "symbol": "ProviderBrokerV2"
     },
@@ -682,7 +682,7 @@
       "symbol": "provider_registry_document"
     },
     {
-      "ast_sha256": "sha256:ce39b42e2bc49b89e22d37cee1189d2ec8749c03abd4ee9c0b6afc62f8544a78",
+      "ast_sha256": "sha256:d32f0d4b8482b587c91e72437fba16184ec5d8d91d4b7fb9d8e5b1acc43159fa",
       "path": "gateway/tee/provider_semantics_v2.py",
       "symbol": "ProviderSemanticsAuthorityV2"
     },
@@ -1262,7 +1262,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:82fe12a10bab6682a446e501bb5064786740637d70a65d766e60c807be66dad7",
+  "manifest_hash": "sha256:85adabf85a344a9c58348ab75010ca1660f15c8106f7a16ac92fcac4421e9383",
   "protected_source_commit": "243db83f115f4f1497b9640f5ebaf7d97e483b84",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

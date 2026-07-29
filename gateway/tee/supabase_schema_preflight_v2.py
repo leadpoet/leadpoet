@@ -249,6 +249,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "scripts/128-research-lab-chain-settlement-transport-purposes.sql",
         "research_lab_attested_transport_purpose_contract_v2",
     ),
+    (
+        "scripts/129-research-lab-attested-local-transport.sql",
+        "research_lab_attested_transport_terminal_contract_v2",
+    ),
 )
 
 

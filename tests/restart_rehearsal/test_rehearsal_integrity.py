@@ -45,6 +45,7 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
     EXPECTED_FINALIZED_VIEW_COLUMNS,
     MIGRATIONS_BEFORE_TRANSPORT_FIX,
     TRANSPORT_FIX_MIGRATION,
+    TRANSPORT_TERMINAL_MIGRATION,
     _json_insert_sql,
     _validate_required_migration_declarations,
 )
@@ -359,14 +360,19 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
         "applied_migrations": [
             *MIGRATIONS_BEFORE_TRANSPORT_FIX,
             TRANSPORT_FIX_MIGRATION,
+            TRANSPORT_TERMINAL_MIGRATION,
         ],
         "relations": relations,
         "rpcs": [
             "research_lab_attested_transport_purpose_contract_v2",
+            "research_lab_attested_transport_terminal_contract_v2",
         ],
         "checks": {
             "pre_128_transport_rejected": True,
             "post_128_transport_persisted": True,
+            "pre_129_attested_local_transport_rejected": True,
+            "post_129_attested_local_transport_persisted": True,
+            "transport_terminal_contract_valid": True,
         },
         "seed_rows": {
             "research_lab_finalized_allocation_epochs_v2": [
@@ -389,6 +395,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
         "research_lab_finalized_allocation_epochs_v2"
     ] == frozenset(EXPECTED_FINALIZED_VIEW_COLUMNS)
     assert "research_lab_attested_transport_purpose_contract_v2" in rpcs
+    assert "research_lab_attested_transport_terminal_contract_v2" in rpcs
     assert _migration_seed_rows(
         path,
         candidate_sha=COMMIT,
@@ -418,6 +425,9 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "pre_128_transport_rejected": True,
             "post_128_transport_persisted": True,
             "transport_contract_valid": True,
+            "pre_129_attested_local_transport_rejected": True,
+            "post_129_attested_local_transport_persisted": True,
+            "transport_terminal_contract_valid": True,
             "finalized_view_projection_exact": True,
             "finalized_view_seed_available": True,
             "settlement_authority_parsed": True,

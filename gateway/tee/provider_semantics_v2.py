@@ -79,6 +79,7 @@ _REQUEST_FIELDS = {
 }
 _OPTIONAL_REQUEST_FIELDS = {"dynamic_route"}
 _LOCAL_RESPONSE_SCHEMA_VERSION = "leadpoet.attested_local_provider_response.v2"
+_PROVIDER_PREFLIGHT_PURPOSE = "research_lab.provider_preflight.v2"
 TREE_PROVIDER_CALL_CAP_HEADER = "X-Research-Lab-Tree-Provider-Call-Cap"
 _LEGACY_PROVIDER_IDS = {
     "openrouter": "or",
@@ -186,8 +187,8 @@ class ProviderSemanticsAuthorityV2:
             )
         else:
             self._outcome_ledger = ProviderOutcomeLedgerV2(clock=clock)
-        self._cache: Dict[tuple[str, str], Dict[str, Any]] = {}
-        self._inflight: Dict[tuple[str, str], threading.Event] = {}
+        self._cache: Dict[tuple[str, ...], Dict[str, Any]] = {}
+        self._inflight: Dict[tuple[str, ...], threading.Event] = {}
         self._cost_ledgers: Dict[tuple[str, str], ProviderCostLedger] = {}
         self._live_calls: Dict[tuple[str, str], int] = {}
         self._tree_live_calls: Dict[tuple[str, str], int] = {}
@@ -236,12 +237,17 @@ class ProviderSemanticsAuthorityV2:
     def _execute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
         normalized, original_body, parsed, fingerprint = self._request(request)
         day = self._utc_day()
-        cache_key = (day, fingerprint)
+        bypass_cache = normalized["purpose"] == _PROVIDER_PREFLIGHT_PURPOSE
+        cache_key = (
+            (day, fingerprint, normalized["job_id"])
+            if bypass_cache
+            else (day, fingerprint)
+        )
         timeout_seconds = max(1.0, normalized["timeout_ms"] / 1000.0 + 5.0)
         while True:
             with self._lock:
                 self._roll_day(day)
-                cached = self._cache.get(cache_key)
+                cached = None if bypass_cache else self._cache.get(cache_key)
                 if cached is not None:
                     return self._cache_hit(
                         normalized,
@@ -261,11 +267,20 @@ class ProviderSemanticsAuthorityV2:
                 )
 
         try:
-            lookup = self._cache_store.load(
-                utc_day=day,
-                request_fingerprint=fingerprint,
-                job_id=normalized["job_id"],
-                purpose=normalized["purpose"],
+            lookup = (
+                {
+                    "found": False,
+                    "payload": {},
+                    "transport_attempts": [],
+                    "evidence_artifact_hashes": [],
+                }
+                if bypass_cache
+                else self._cache_store.load(
+                    utc_day=day,
+                    request_fingerprint=fingerprint,
+                    job_id=normalized["job_id"],
+                    purpose=normalized["purpose"],
+                )
             )
             lookup_attempts = list(lookup["transport_attempts"])
             lookup_artifacts = list(lookup["evidence_artifact_hashes"])
@@ -284,7 +299,13 @@ class ProviderSemanticsAuthorityV2:
                 )
 
             headers = normalized["headers"]
-            ledger = self._cost_ledger(day, headers)
+            ledger = self._cost_ledger(
+                day,
+                headers,
+                default_scope=(
+                    normalized["job_id"] if bypass_cache else "unscoped"
+                ),
+            )
             dynamic_route = normalized.get("dynamic_route")
             provider = _LEGACY_PROVIDER_IDS.get(normalized["provider_id"])
             if provider is None and isinstance(dynamic_route, Mapping):
@@ -302,6 +323,7 @@ class ProviderSemanticsAuthorityV2:
                     lookup_attempts=lookup_attempts,
                     lookup_artifacts=lookup_artifacts,
                     day=day,
+                    cache_recording_enabled=not bypass_cache,
                 )
             if isinstance(dynamic_route, Mapping):
                 quota = int(dynamic_route["per_day_quota"])
@@ -429,6 +451,7 @@ class ProviderSemanticsAuthorityV2:
                 lookup_attempts=lookup_attempts,
                 lookup_artifacts=lookup_artifacts,
                 day=day,
+                cache_recording_enabled=not bypass_cache,
             )
         finally:
             with self._lock:
@@ -539,6 +562,7 @@ class ProviderSemanticsAuthorityV2:
         lookup_attempts: list[Mapping[str, Any]],
         lookup_artifacts: list[str],
         day: str,
+        cache_recording_enabled: bool,
     ) -> Dict[str, Any]:
         request = dict(normalized)
         request["headers"] = {
@@ -568,11 +592,14 @@ class ProviderSemanticsAuthorityV2:
         evidence = "live_unrecorded"
         cost_event = None
         if provider is not None and ledger is not None:
-            recordable = _response_is_recordable(
-                provider,
-                normalized["url"],
-                status,
-                body,
+            recordable = (
+                cache_recording_enabled
+                and _response_is_recordable(
+                    provider,
+                    normalized["url"],
+                    status,
+                    body,
+                )
             )
             evidence = "recorded" if recordable else "live_unrecorded"
             estimate = estimate_provider_cost(
@@ -1039,8 +1066,13 @@ class ProviderSemanticsAuthorityV2:
         self,
         day: str,
         headers: Mapping[str, Any],
+        *,
+        default_scope: str = "unscoped",
     ) -> ProviderCostLedger:
-        scope = _header(headers, "X-Research-Lab-Cost-Scope").strip() or "unscoped"
+        scope = (
+            _header(headers, "X-Research-Lab-Cost-Scope").strip()
+            or default_scope
+        )
         cap = decimal_from_env(
             "RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP",
             DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP,

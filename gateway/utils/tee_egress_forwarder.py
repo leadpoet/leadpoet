@@ -155,7 +155,12 @@ def _relay_bidirectional(
         if not readable:
             continue
         for source in readable:
-            data = source.recv(RELAY_CHUNK_BYTES)
+            try:
+                data = source.recv(RELAY_CHUNK_BYTES)
+            except OSError as exc:
+                if exc.errno not in _PEER_CLOSE_ERRNOS:
+                    raise
+                data = b""
             destination = peers[source]
             if not data:
                 if not first_closed:

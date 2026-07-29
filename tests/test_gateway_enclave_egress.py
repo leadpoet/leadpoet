@@ -4,6 +4,7 @@ import ast
 import asyncio
 import base64
 from datetime import datetime, timedelta, timezone
+import errno
 import http.client
 import json
 from pathlib import Path
@@ -399,6 +400,64 @@ def test_parent_relay_tolerates_late_tls_write_after_provider_full_close():
     enclave.close()
     parent.close()
     upstream.close()
+
+
+@pytest.mark.parametrize(
+    ("relay", "expected_first"),
+    (
+        (_relay_bidirectional, "provider"),
+        (_relay_enclave_bidirectional, "parent"),
+    ),
+)
+def test_relays_treat_peer_close_recv_error_as_directional_eof(
+    relay,
+    expected_first,
+):
+    left_peer, left = socket.socketpair()
+    right, right_peer = socket.socketpair()
+
+    class _PeerCloseRecv:
+        def fileno(self):
+            return right.fileno()
+
+        def recv(self, _size):
+            raise OSError(errno.ENOTCONN, "peer is no longer connected")
+
+        def sendall(self, data):
+            return right.sendall(data)
+
+        def shutdown(self, how):
+            return right.shutdown(how)
+
+    wrapped_right = _PeerCloseRecv()
+    observed = {}
+    errors = []
+
+    def run():
+        try:
+            observed.update(
+                relay(
+                    left,
+                    wrapped_right,
+                    idle_timeout_seconds=2,
+                )
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    right_peer.close()
+    assert left_peer.recv(1) == b""
+    left_peer.shutdown(socket.SHUT_WR)
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert observed["first_closed"] == expected_first
+    left_peer.close()
+    left.close()
+    right.close()
 
 
 def test_parent_relay_does_not_turn_incomplete_provider_body_into_success():

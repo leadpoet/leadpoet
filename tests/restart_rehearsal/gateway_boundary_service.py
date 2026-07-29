@@ -403,10 +403,14 @@ def _migration_schema_contract(
             "migration-backed settlement relations are incomplete: %s"
             % ",".join(sorted(required_relations - set(relations)))
         )
-    required_rpc = "research_lab_attested_transport_purpose_contract_v2"
-    if required_rpc not in raw_rpcs:
+    required_rpcs = {
+        "research_lab_attested_transport_purpose_contract_v2",
+        "research_lab_attested_transport_terminal_contract_v2",
+    }
+    if not required_rpcs <= set(raw_rpcs):
         raise RuntimeError(
-            "migration-backed transport contract RPC is unavailable"
+            "migration-backed transport contract RPCs are unavailable: %s"
+            % ",".join(sorted(required_rpcs - set(raw_rpcs)))
         )
     return relations, set(raw_rpcs)
 

@@ -65,9 +65,11 @@ class _Artifacts:
 class _CacheStore:
     def __init__(self) -> None:
         self.payloads = {}
+        self.load_count = 0
         self.persist_count = 0
 
     def load(self, *, utc_day, request_fingerprint, job_id, purpose):
+        self.load_count += 1
         payload = self.payloads.get((utc_day, request_fingerprint))
         return {
             "found": payload is not None,
@@ -324,6 +326,8 @@ def _request(
     headers=None,
     logical_operation_id="provider-operation",
     dynamic_route=None,
+    job_id="job-provider-semantics",
+    purpose="research_lab.company_score.v2",
 ):
     retry = (
         source_add_dynamic_retry_policy_hash(dynamic_route)
@@ -333,8 +337,8 @@ def _request(
     request = {
         "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
         "logical_operation_id": logical_operation_id,
-        "job_id": "job-provider-semantics",
-        "purpose": "research_lab.company_score.v2",
+        "job_id": job_id,
+        "purpose": purpose,
         "provider_id": provider,
         "attempt_number": 0,
         "method": "POST",
@@ -472,6 +476,58 @@ def test_concurrent_identical_requests_single_flight_one_paid_call(monkeypatch):
     assert sum(bool(event["billable"]) for event in cost_events) == 1
     assert sum(float(event["cost_usd"]) for event in cost_events) == 0.005
     assert {result["evidence"] for result in results} == {"recorded", "hit"}
+
+
+def test_concurrent_preflights_measure_each_worker_profile_without_cache_replay(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP",
+        "0.001",
+    )
+    broker = _Broker()
+    both_live_calls_entered = threading.Barrier(2)
+    original_execute = broker.execute
+    block_preflight = False
+
+    def blocking_execute(request):
+        if block_preflight:
+            both_live_calls_entered.wait(timeout=2.0)
+        return original_execute(request)
+
+    broker.execute = blocking_execute
+    authority, _broker, cache, _artifacts = _authority(broker=broker)
+    seeded = authority.execute(
+        _request(headers={"Content-Type": "application/json"})
+    )
+    assert seeded["evidence"] == "recorded"
+    broker.calls.clear()
+    load_count_before_preflight = cache.load_count
+    persist_count_before_preflight = cache.persist_count
+    block_preflight = True
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                authority.execute,
+                _request(
+                    logical_operation_id=f"provider-preflight-{index}",
+                    job_id=f"job-provider-preflight-{index}",
+                    purpose="research_lab.provider_preflight.v2",
+                    headers={"Content-Type": "application/json"},
+                ),
+            )
+            for index in range(2)
+        ]
+        results = [future.result(timeout=3.0) for future in futures]
+
+    assert len(broker.calls) == 2
+    assert cache.load_count == load_count_before_preflight
+    assert cache.persist_count == persist_count_before_preflight
+    assert {result["terminal_status"] for result in results} == {
+        "authenticated_response"
+    }
+    assert {result["evidence"] for result in results} == {"live_unrecorded"}
 
 
 def test_persistent_cache_survives_authority_restart_without_live_call():

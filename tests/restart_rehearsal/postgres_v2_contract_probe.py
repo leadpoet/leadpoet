@@ -36,7 +36,7 @@ from gateway.tee.coordinator_chain_realized_settlement_v1 import (
 )
 from gateway.tee.coordinator_executor_v2 import CoordinatorExecutorV2
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
-from leadpoet_canonical.attested_v2 import sha256_json
+from leadpoet_canonical.attested_v2 import build_transport_attempt, sha256_json
 from leadpoet_canonical.weight_authority_v2 import (
     validate_published_weight_bundle_v2,
 )
@@ -53,6 +53,9 @@ MIGRATIONS_BEFORE_TRANSPORT_FIX = (
     "127-research-lab-chain-unattributed-settlement.sql",
 )
 TRANSPORT_FIX_MIGRATION = "128-research-lab-chain-settlement-transport-purposes.sql"
+TRANSPORT_TERMINAL_MIGRATION = (
+    "129-research-lab-attested-local-transport.sql"
+)
 EXPECTED_FINALIZED_VIEW_COLUMNS = (
     "bundle_hash",
     "schema_version",
@@ -686,6 +689,85 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post-128 transport purpose contract is incomplete"
             )
 
+        local_attempt = build_transport_attempt(
+            request_id="f" * 32,
+            logical_operation_id="provider-preflight-local-cache",
+            job_id="postgres-contract-local-transport",
+            purpose="research_lab.provider_preflight.v2",
+            provider_id="exa",
+            attempt_number=0,
+            method="POST",
+            destination_host="api.exa.ai",
+            destination_port=443,
+            path_hash=sha256_json({"path": "/search"}),
+            nonsecret_headers_hash=sha256_json({"accept": "application/json"}),
+            body_hash=sha256_json({"query": "rehearsal"}),
+            credential_ref_hash=sha256_json({"credential": "attested-local"}),
+            retry_policy_hash=sha256_json({"retry": "provider-preflight"}),
+            timeout_ms=30000,
+            started_at="2026-07-10T00:00:00Z",
+            terminal_status="attested_local_response",
+            http_status=200,
+            response_hash=sha256_json({"response": "cached"}),
+            request_artifact_hash=sha256_json({"artifact": "local-request"}),
+            response_artifact_hash=sha256_json({"artifact": "local-response"}),
+            tls_peer_chain_hash=None,
+            tls_protocol=None,
+            failure_code=None,
+            completed_at="2026-07-10T00:00:01Z",
+        )
+        local_attempt_sql = _json_insert_sql(
+            "research_lab_attested_transport_attempts_v2",
+            transport_storage_row(local_attempt),
+        )
+        local_rejected = database.psql(local_attempt_sql, check=False)
+        if local_rejected.returncode == 0:
+            raise PostgresContractProbeError(
+                "pre-129 attested local transport unexpectedly persisted"
+            )
+        if (
+            "check constraint" not in local_rejected.stderr.lower()
+            or "transport_attempts" not in local_rejected.stderr
+        ):
+            raise PostgresContractProbeError(
+                "pre-129 attested local rejection differed: %s"
+                % local_rejected.stderr.strip()
+            )
+
+        database.apply_migration(scripts / TRANSPORT_TERMINAL_MIGRATION)
+        applied.append(TRANSPORT_TERMINAL_MIGRATION)
+        database.psql(local_attempt_sql)
+        terminal_contract_result = database.psql(
+            """
+            SELECT
+                public.research_lab_attested_transport_terminal_contract_v2()
+                ::text;
+            """,
+            tuples_only=True,
+        )
+        terminal_contract = json.loads(
+            terminal_contract_result.stdout.strip()
+        )
+        terminal_constraints = terminal_contract.get("constraints")
+        if not isinstance(terminal_constraints, Mapping) or set(
+            terminal_constraints
+        ) != {
+            "research_lab_transport_terminal_status_v2_check",
+            "research_lab_transport_terminal_shape_v2_check",
+        }:
+            raise PostgresContractProbeError(
+                "post-129 transport terminal contract is incomplete"
+            )
+        for constraint in terminal_constraints.values():
+            definition = str(constraint.get("constraint_definition") or "")
+            if (
+                constraint.get("constraint_valid") is not True
+                or "attested_local_response" not in definition
+            ):
+                raise PostgresContractProbeError(
+                    "post-129 transport terminal constraint is invalid"
+                )
+
         rows, verified = _settlement_fixture(
             candidate_sha=args.candidate_sha,
             epoch_id=args.epoch_id,
@@ -755,6 +837,9 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "pre_128_transport_rejected": True,
                 "post_128_transport_persisted": True,
                 "transport_contract_valid": True,
+                "pre_129_attested_local_transport_rejected": True,
+                "post_129_attested_local_transport_persisted": True,
+                "transport_terminal_contract_valid": True,
                 "finalized_view_projection_exact": True,
                 "finalized_view_seed_available": True,
                 "settlement_authority_parsed": True,

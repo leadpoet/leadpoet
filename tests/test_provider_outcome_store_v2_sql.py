@@ -3,6 +3,9 @@ from pathlib import Path
 
 SQL = Path("scripts/90-research-lab-provider-outcome-checkpoints-v2.sql")
 APPEND_SQL = Path("scripts/131-research-lab-provider-outcome-backpressure.sql")
+CONTENTION_SQL = Path(
+    "scripts/133-research-lab-provider-outcome-contention-contract.sql"
+)
 
 
 def test_provider_outcome_checkpoint_migration_is_append_only_and_private() -> None:
@@ -41,6 +44,23 @@ def test_provider_outcome_checkpoint_append_is_atomic_and_private() -> None:
     assert "checkpoint_sequence <> current_sequence + 1" in text
     assert "incoming_previous_hash <> current_checkpoint_hash" in text
     assert "ERRCODE = '40001'" in text
+    assert "GRANT EXECUTE" in text
+    assert "TO service_role" in text
+    assert "FROM PUBLIC, anon, authenticated" in text
+    assert "UPDATE public.research_lab_provider_outcome_checkpoints_v2" not in text
+    assert "DELETE FROM public.research_lab_provider_outcome_checkpoints_v2" not in text
+
+
+def test_provider_outcome_contention_is_a_nonexceptional_authenticated_contract() -> None:
+    text = CONTENTION_SQL.read_text()
+    assert "append_research_lab_provider_outcome_checkpoint_v2" in text
+    assert "pg_try_advisory_xact_lock" in text
+    assert "jsonb_build_object('status', 'busy')" in text
+    assert "'status', 'conflict'" in text
+    assert "'head_checkpoint_row', current_row" in text
+    assert "provider outcome checkpoint append is busy" not in text
+    assert "ERRCODE = '40001'" not in text
+    assert "pg_advisory_xact_lock(" not in text
     assert "GRANT EXECUTE" in text
     assert "TO service_role" in text
     assert "FROM PUBLIC, anon, authenticated" in text

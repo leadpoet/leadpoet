@@ -80,9 +80,9 @@ _REQUEST_FIELDS = {
 _OPTIONAL_REQUEST_FIELDS = {"dynamic_route"}
 _LOCAL_RESPONSE_SCHEMA_VERSION = "leadpoet.attested_local_provider_response.v2"
 _PROVIDER_PREFLIGHT_PURPOSE = "research_lab.provider_preflight.v2"
-_OUTCOME_APPEND_CONFLICT_ATTEMPTS = 64
-_OUTCOME_CONFLICT_BACKOFF_BASE_SECONDS = 0.01
-_OUTCOME_CONFLICT_BACKOFF_MAX_SECONDS = 0.25
+_OUTCOME_APPEND_CONFLICT_ATTEMPTS = 32
+_OUTCOME_CONFLICT_BACKOFF_BASE_SECONDS = 0.02
+_OUTCOME_CONFLICT_BACKOFF_MAX_SECONDS = 0.5
 TREE_PROVIDER_CALL_CAP_HEADER = "X-Research-Lab-Tree-Provider-Call-Cap"
 _LEGACY_PROVIDER_IDS = {
     "openrouter": "or",
@@ -608,12 +608,14 @@ class ProviderSemanticsAuthorityV2:
                         "transport_attempts": attempts,
                         "evidence_artifact_hashes": sorted(artifacts),
                     }
-                if status != "conflict":
+                if status not in {"busy", "conflict"}:
                     self._outcome_ledger.restore(base_document)
                     raise ProviderSemanticsV2Error(
                         "provider outcome checkpoint status is invalid"
                     )
                 self._outcome_ledger.restore(base_document)
+                if conflict_attempt + 1 >= _OUTCOME_APPEND_CONFLICT_ATTEMPTS:
+                    break
                 self._sleep(
                     _outcome_conflict_backoff_seconds(
                         job_id=job_id,
@@ -621,6 +623,17 @@ class ProviderSemanticsAuthorityV2:
                         conflict_attempt=conflict_attempt,
                     )
                 )
+                if status == "busy":
+                    continue
+                head_document = persisted.get("head_state_document")
+                head_checkpoint_hash = str(
+                    persisted.get("head_checkpoint_hash") or ""
+                )
+                if isinstance(head_document, Mapping) and head_checkpoint_hash:
+                    base_document = self._outcome_ledger.restore(head_document)
+                    self._outcome_checkpoint_hash = head_checkpoint_hash
+                    self._outcome_checkpoint_day = utc_day
+                    continue
                 try:
                     restored = dict(
                         self._outcome_store.load_latest(

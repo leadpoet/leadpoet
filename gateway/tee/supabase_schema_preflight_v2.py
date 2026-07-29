@@ -255,7 +255,7 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_attested_transport_terminal_contract_v2",
     ),
     (
-        "scripts/131-research-lab-provider-outcome-backpressure.sql",
+        "scripts/133-research-lab-provider-outcome-contention-contract.sql",
         "append_research_lab_provider_outcome_checkpoint_v2",
     ),
     (

@@ -648,7 +648,7 @@ def test_provider_outcome_busy_empty_head_backs_off_and_retries() -> None:
             if self.busy:
                 self.busy = False
                 return {
-                    "status": "conflict",
+                    "status": "busy",
                     "transport_attempts": [],
                     "evidence_artifact_hashes": [],
                 }
@@ -672,7 +672,7 @@ def test_provider_outcome_busy_empty_head_backs_off_and_retries() -> None:
     assert outcome_store.persist_count == 1
     assert outcome_store.document["sequence"] == 1
     assert len(sleeps) == 1
-    assert 0.01 <= sleeps[0] <= 0.02
+    assert 0.02 <= sleeps[0] <= 0.04
 
 
 def test_provider_outcome_persistent_contention_is_bounded_and_fails_closed() -> None:
@@ -693,7 +693,7 @@ def test_provider_outcome_persistent_contention_is_bounded_and_fails_closed() ->
             del document, previous_checkpoint_hash, job_id, purpose
             self.persist_attempts += 1
             return {
-                "status": "conflict",
+                "status": "busy",
                 "transport_attempts": [],
                 "evidence_artifact_hashes": [],
             }
@@ -727,9 +727,9 @@ def test_provider_outcome_persistent_contention_is_bounded_and_fails_closed() ->
     ):
         authority.execute(_request(job_id="job-persistent-contention"))
 
-    assert outcome_store.persist_attempts == 64
-    assert outcome_store.load_attempts == 65  # one startup restore plus 64 retries
-    assert len(sleeps) == 64
+    assert outcome_store.persist_attempts == 32
+    assert outcome_store.load_attempts == 1  # startup restore only
+    assert len(sleeps) == 31
     assert (
         authority.provider_outcome_snapshot()["provider_outcome_digest"].get(
             "providers", {}
@@ -850,6 +850,78 @@ def test_provider_outcome_contention_converges_across_25_writers() -> None:
     assert outcome_store.persist_count == writer_count
     assert outcome_store.document["sequence"] == writer_count
     assert outcome_store.document["totals"]["call_count"] == writer_count
+
+
+def test_provider_outcome_structured_conflict_rebases_without_head_read() -> None:
+    class EmbeddedHeadOutcomeStore(_OutcomeStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.load_attempts = 0
+
+        def load_latest(
+            self,
+            *,
+            utc_day,
+            job_id,
+            purpose,
+            operation_suffix="restore",
+        ):
+            self.load_attempts += 1
+            return super().load_latest(
+                utc_day=utc_day,
+                job_id=job_id,
+                purpose=purpose,
+                operation_suffix=operation_suffix,
+            )
+
+        def persist(
+            self,
+            document,
+            *,
+            previous_checkpoint_hash,
+            job_id,
+            purpose,
+        ):
+            result = super().persist(
+                document,
+                previous_checkpoint_hash=previous_checkpoint_hash,
+                job_id=job_id,
+                purpose=purpose,
+            )
+            if result["status"] == "conflict":
+                return {
+                    **result,
+                    "head_checkpoint_hash": self.checkpoint_hash,
+                    "head_state_document": dict(self.document),
+                }
+            return result
+
+    outcome_store = EmbeddedHeadOutcomeStore()
+    first, _broker, _cache, _artifacts = _authority(
+        outcome_store=outcome_store
+    )
+    stale, _broker, _cache, _artifacts = _authority(
+        outcome_store=outcome_store
+    )
+    assert outcome_store.load_attempts == 2
+
+    first.execute(_request(job_id="job-embedded-first"))
+    stale.execute(
+        _request(
+            job_id="job-embedded-stale",
+            logical_operation_id="provider-operation-embedded-stale",
+            body=b'{"query":"embedded-second"}',
+        )
+    )
+
+    assert outcome_store.load_attempts == 2
+    assert outcome_store.document["sequence"] == 2
+    assert (
+        stale.provider_outcome_snapshot()["provider_outcome_digest"]["providers"][
+            "exa"
+        ]["call_count"]
+        == 2
+    )
 
 
 def test_provider_outcome_rollback_preserves_original_error_across_midnight() -> None:

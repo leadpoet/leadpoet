@@ -150,13 +150,43 @@ class ProviderOutcomeStoreV2:
             purpose=purpose,
         )
         self._collect_evidence(result, attempts, transport_artifacts)
-        if self._append_conflicted(result):
+        append_result = self._append_result(
+            result,
+            expected_checkpoint_hash=payload["checkpoint_hash"],
+        )
+        append_status = str(append_result["status"])
+        if append_status == "busy":
             self._vault.release_transient(str(descriptor["artifact_id"]))
             return {
+                "status": "busy",
+                "transport_attempts": attempts,
+                "evidence_artifact_hashes": sorted(transport_artifacts),
+            }
+        if append_status == "conflict":
+            conflict_result: Dict[str, Any] = {
                 "status": "conflict",
                 "transport_attempts": attempts,
                 "evidence_artifact_hashes": sorted(transport_artifacts),
             }
+            head_row = append_result.get("head_checkpoint_row")
+            if isinstance(head_row, Mapping):
+                restored = self._restore_row(
+                    head_row,
+                    expected_utc_day=utc_day,
+                    attempts=attempts,
+                    artifacts=transport_artifacts,
+                )
+                conflict_result.update(
+                    {
+                        "head_checkpoint_hash": restored["checkpoint_hash"],
+                        "head_state_document": restored["state_document"],
+                        "evidence_artifact_hashes": restored[
+                            "evidence_artifact_hashes"
+                        ],
+                    }
+                )
+            self._vault.release_transient(str(descriptor["artifact_id"]))
+            return conflict_result
         rows, read_attempts, read_artifacts = self._read_rows(
             utc_day=utc_day,
             sequence=sequence,
@@ -168,7 +198,7 @@ class ProviderOutcomeStoreV2:
         attempts.extend(read_attempts)
         transport_artifacts.update(read_artifacts)
         if len(rows) != 1 or rows[0] != row:
-            if rows or self._append_conflicted(result):
+            if rows:
                 self._vault.release_transient(str(descriptor["artifact_id"]))
                 return {
                     "status": "conflict",
@@ -232,7 +262,22 @@ class ProviderOutcomeStoreV2:
             raise ProviderOutcomeStoreV2Error(
                 "provider outcome latest checkpoint is ambiguous"
             )
-        row = self._validate_row(rows[0])
+        return self._restore_row(
+            rows[0],
+            expected_utc_day=normalized_day,
+            attempts=attempts,
+            artifacts=artifacts,
+        )
+
+    def _restore_row(
+        self,
+        value: Mapping[str, Any],
+        *,
+        expected_utc_day: str,
+        attempts: list[Dict[str, Any]],
+        artifacts: set[str],
+    ) -> Dict[str, Any]:
+        row = self._validate_row(value)
         plaintext = self._vault.decrypt_storage_document(
             row["encrypted_checkpoint_doc"]
         )
@@ -248,7 +293,7 @@ class ProviderOutcomeStoreV2:
             )
         normalized_payload = self._validate_payload(payload)
         if (
-            normalized_payload["utc_day"] != normalized_day
+            normalized_payload["utc_day"] != expected_utc_day
             or normalized_payload["sequence"] != row["sequence"]
             or normalized_payload["checkpoint_hash"] != row["checkpoint_hash"]
             or normalized_payload["previous_checkpoint_hash"]
@@ -285,18 +330,69 @@ class ProviderOutcomeStoreV2:
         }
 
     @staticmethod
-    def _append_conflicted(result: Mapping[str, Any]) -> bool:
+    def _append_result(
+        result: Mapping[str, Any],
+        *,
+        expected_checkpoint_hash: str,
+    ) -> Dict[str, Any]:
         if result.get("terminal_status") != "authenticated_response":
-            return False
+            return {"status": "ambiguous"}
+        attempt = result.get("transport_attempt")
         try:
             body = base64.b64decode(
                 str(result.get("body_b64") or ""),
                 validate=True,
             )
             parsed = json.loads(body.decode("utf-8"))
-        except Exception:
-            return False
-        return isinstance(parsed, Mapping) and str(parsed.get("code") or "") == "40001"
+        except Exception as exc:
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint append response is invalid"
+            ) from exc
+        if (
+            not isinstance(attempt, Mapping)
+            or sha256_bytes(body) != str(attempt.get("response_hash") or "")
+            or not isinstance(parsed, Mapping)
+        ):
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint append response commitments differ"
+            )
+        http_status = int(result.get("http_status") or 0)
+        if not 200 <= http_status < 300:
+            if str(parsed.get("code") or "") == "40001":
+                return {"status": "conflict"}
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint authenticated append failed "
+                "(http_status=%d code=%s)"
+                % (http_status, str(parsed.get("code") or "none"))
+            )
+        status = str(parsed.get("status") or "")
+        if status in {"inserted", "existing"}:
+            if (
+                set(parsed) != {"status", "checkpoint_hash"}
+                or _hash(parsed.get("checkpoint_hash"), "append checkpoint hash")
+                != expected_checkpoint_hash
+            ):
+                raise ProviderOutcomeStoreV2Error(
+                    "provider outcome checkpoint append result differs"
+                )
+            return {"status": status}
+        if status == "busy" and set(parsed) == {"status"}:
+            return {"status": "busy"}
+        if (
+            status == "conflict"
+            and set(parsed) == {"status", "head_checkpoint_row"}
+            and (
+                parsed.get("head_checkpoint_row") is None
+                or isinstance(parsed.get("head_checkpoint_row"), Mapping)
+            )
+        ):
+            return {
+                "status": "conflict",
+                "head_checkpoint_row": parsed.get("head_checkpoint_row"),
+            }
+        raise ProviderOutcomeStoreV2Error(
+            "provider outcome checkpoint append status is invalid"
+        )
 
     def _validate_payload(self, value: Mapping[str, Any]) -> Dict[str, Any]:
         fields = {

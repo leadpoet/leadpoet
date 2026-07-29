@@ -368,6 +368,14 @@ else
 fi
 
 if [ "$COMPONENT" = "gateway" ]; then
+  SELECTED_GATEWAY_SOURCE_ROOT="$REHEARSAL_STATE_ROOT/selected-gateway-source"
+  rm -rf "$SELECTED_GATEWAY_SOURCE_ROOT"
+  mkdir -p "$SELECTED_GATEWAY_SOURCE_ROOT"
+  git --git-dir=/srv/origin.git cat-file -e "${CANDIDATE_SHA}^{commit}"
+  git --git-dir=/srv/origin.git archive "$CANDIDATE_SHA" gateway \
+    | tar -xf - -C "$SELECTED_GATEWAY_SOURCE_ROOT"
+  test -f "$SELECTED_GATEWAY_SOURCE_ROOT/gateway/tee/Dockerfile.enclave"
+
   PYTHONPATH="" /usr/bin/python3.11 \
     /harness/tls_connect_proxy_service.py &
   TLS_PROXY_SERVICE_PID=$!
@@ -391,7 +399,7 @@ if [ "$COMPONENT" = "gateway" ]; then
   echo "Materializing the exact measured gateway-enclave filesystem"
   rm -rf /app/gateway
   mkdir -p /app
-  cp -a /source/gateway /app/gateway
+  cp -a "$SELECTED_GATEWAY_SOURCE_ROOT/gateway" /app/gateway
   rm -rf /app/gateway/_attested_runtime
   cp -a "$REHEARSAL_STATE_ROOT/gateway-attested-runtime" \
     /app/gateway/_attested_runtime
@@ -411,11 +419,11 @@ PY
   install -m 0555 \
     "/opt/leadpoet/external-artifacts/$RUNSC_ARTIFACT_NAME" \
     /usr/local/bin/runsc
-  PYTHONPATH=/source /usr/bin/python3.11 \
+  PYTHONPATH=/app:/app/gateway/_attested_runtime /usr/bin/python3.11 \
     /app/gateway/tee/sandbox_runtime_artifact.py verify \
       --lock /app/gateway/tee/runsc-runtime.lock.json \
       --artifact /usr/local/bin/runsc
-  PYTHONPATH=/source /usr/bin/python3.11 \
+  PYTHONPATH=/app:/app/gateway/_attested_runtime /usr/bin/python3.11 \
     /app/gateway/tee/sandbox_runtime_artifact.py write-rootfs-manifest \
       --lock /app/gateway/tee/runsc-runtime.lock.json \
       --requirements-lock \
@@ -425,7 +433,7 @@ PY
 
   for role in gateway_coordinator gateway_scoring gateway_autoresearch; do
     REHEARSAL_GATEWAY_ENCLAVE_ROLE="$role" \
-      REHEARSAL_GATEWAY_CANDIDATE_ROOT="/source/gateway" \
+      REHEARSAL_GATEWAY_CANDIDATE_ROOT="$SELECTED_GATEWAY_SOURCE_ROOT/gateway" \
       REHEARSAL_GATEWAY_CANONICAL_APP_ROOT="/app/gateway" \
       PYTHONPATH="/source:/harness" \
       /usr/bin/python3.11 /harness/gateway_enclave_service.py &

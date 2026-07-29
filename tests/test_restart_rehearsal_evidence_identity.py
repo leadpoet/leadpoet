@@ -12,6 +12,7 @@ from tests.restart_rehearsal.verify_evidence import (
 
 
 SOURCE_PATH = Path("scripts/gateway_git_deploy.py")
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -101,3 +102,25 @@ def test_candidate_checkout_tampering_is_still_rejected(
             candidate_sha,
             (repo,),
         )
+
+
+def test_gateway_enclave_uses_the_exact_transition_target_tree() -> None:
+    launcher = (
+        ROOT / "tests/restart_rehearsal/run_inside.sh"
+    ).read_text(encoding="utf-8")
+    service = (
+        ROOT / "tests/restart_rehearsal/gateway_enclave_service.py"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        'git --git-dir=/srv/origin.git archive "$CANDIDATE_SHA" gateway'
+        in launcher
+    )
+    assert (
+        'REHEARSAL_GATEWAY_CANDIDATE_ROOT='
+        '"$SELECTED_GATEWAY_SOURCE_ROOT/gateway"'
+        in launcher
+    )
+    assert 'REHEARSAL_GATEWAY_CANDIDATE_ROOT="/source/gateway"' not in launcher
+    assert 'controller_source = Path("/source").resolve()' in service
+    assert '"/source/gateway"' not in service

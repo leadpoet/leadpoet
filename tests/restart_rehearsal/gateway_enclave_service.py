@@ -88,12 +88,10 @@ def _prepare_candidate_role_root(role: str) -> Path:
             "gateway modules loaded before candidate role isolation"
         )
     candidate = str(os.environ.get("REHEARSAL_CANDIDATE_SHA") or "")
-    source = Path(
-        os.environ.get(
-            "REHEARSAL_GATEWAY_CANDIDATE_ROOT",
-            "/source/gateway",
-        )
-    ).resolve()
+    configured_source = os.environ.get("REHEARSAL_GATEWAY_CANDIDATE_ROOT")
+    if not configured_source:
+        raise ValueError("persistent gateway enclave source is unavailable")
+    source = Path(configured_source).resolve()
     state_root = Path(
         os.environ.get("REHEARSAL_STATE_ROOT", "/rehearsal-state")
     )
@@ -142,10 +140,12 @@ def _prepare_candidate_role_root(role: str) -> Path:
     os.environ["GATEWAY_ROOT"] = str(gateway_root)
     if attested_runtime_source.is_dir():
         source_parent = source.parent
+        controller_source = Path("/source").resolve()
         sys.path[:] = [
             item
             for item in sys.path
-            if not item or Path(item).resolve() != source_parent
+            if item
+            and Path(item).resolve() not in {source_parent, controller_source}
         ]
         sys.path.insert(0, str(gateway_root / "_attested_runtime"))
     sys.path.insert(0, str(role_parent))

@@ -102,6 +102,46 @@ data.
 - A healthy process or one HTTP 200 is not workflow proof. Require joined logs,
   durable evidence, bundle hashes, and chain readback as applicable.
 
+### Mandatory local/main synchronization
+
+The tracked local checkout must use the latest merged `origin/main` as its
+source of truth. Never reconstruct `main` from an unmerged pull-request branch,
+an old worktree, copied files, or local-only artifacts.
+
+Before every edit and again immediately before every commit or push:
+
+1. Run `git fetch origin`, `git status --short --untracked-files=all`,
+   `git log origin/main..HEAD --oneline`, and
+   `git log HEAD..origin/main --oneline`.
+2. If there is no local-only tracked work, fast-forward local `main` to
+   `origin/main` and verify that `git diff --name-status origin/main --` is
+   empty before starting the task. Confirm that every path tracked by
+   `origin/main` exists locally.
+3. If local tracked, staged, untracked, or unpushed work may belong to another
+   engineer or Codex chat, preserve it exactly and use a clean synchronized
+   worktree. Never overwrite, reset, stash, rebase, delete, or silently include
+   that work.
+4. Treat untracked and ignored files as local-only by default. Do not add or
+   push one merely because it exists locally. A local-only file may become
+   tracked only when it is explicitly in scope, reviewed as required for the
+   production workflow, and intentionally approved for the task.
+5. After creating the task commit, the only permitted difference from the
+   freshly fetched `origin/main` is the reviewed task commit itself. List every
+   path in `origin/main..HEAD`, verify that no unrelated file is present, and
+   verify that the worktree and index contain no additional tracked changes.
+6. If `origin/main` advances before the push, integrate the new commits safely,
+   re-read overlapping files, and rerun affected checks. Never force-push or
+   replace a remote file with a stale local copy.
+7. After a successful push, fetch again and require local `HEAD` and
+   `origin/main` to resolve to the same SHA, with no tracked worktree diff and
+   no local-only commit left on `main`. Preserve non-overlapping local-only
+   files without committing them.
+
+This is compatible with an intentional task change: the checkout must match
+`origin/main` exactly before work begins; immediately before push, it may differ
+only by the reviewed commit being pushed; immediately after push, it must match
+`origin/main` exactly again.
+
 The gateway and validator are separate runtimes and must activate one exact
 release SHA. Gateway code and imported top-level packages come from the
 canonical gateway checkout; validator code runs in its containerized runtime.

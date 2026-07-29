@@ -99,6 +99,10 @@ data.
 - Never perform production writes, restarts, process kills, Supabase mutations,
   or chain submissions. Read-only SSH diagnosis is allowed; give the operator
   exact commands for mutating actions.
+- For read-only SSH to both production hosts, use the current July 28 identity:
+  `/Users/pranav/Downloads/leadpoet-2026-07-28.pem`. Gateway:
+  `ec2-user@52.91.135.79`; validator: `ec2-user@100.59.201.156`. Do not use the
+  older `leadpoet-gateway-tee-main.pem` or `leadpoet-validator.pem` identities.
 - A healthy process or one HTTP 200 is not workflow proof. Require joined logs,
   durable evidence, bundle hashes, and chain readback as applicable.
 
@@ -107,6 +111,18 @@ data.
 The tracked local checkout must use the latest merged `origin/main` as its
 source of truth. Never reconstruct `main` from an unmerged pull-request branch,
 an old worktree, copied files, or local-only artifacts.
+
+The canonical checkout at
+`/Users/pranav/Downloads/Election_Analysis/Bittensor-subnet` must itself be
+synchronized; using or pushing from a secondary worktree does not satisfy this
+rule. After any push from any checkout, return to the canonical checkout, fetch
+`origin/main`, fast-forward it without disturbing preserved local-only files,
+and verify `HEAD`, `origin/main`, and every Git-tracked worktree file agree.
+Before telling the operator to run any migration, script, or other repository
+path, additionally prove that the path is tracked by the latest
+`origin/main`, exists in the canonical checkout, and has the same Git blob.
+Open pull-request heads and unmerged branch files are never authoritative for
+this check.
 
 Before every edit and again immediately before every commit or push:
 

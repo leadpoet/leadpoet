@@ -1262,7 +1262,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:183f661cfe103f019e887d7b20db1165f3ecf9273e89601c1497b3258066afa5",
+  "manifest_hash": "sha256:82fe12a10bab6682a446e501bb5064786740637d70a65d766e60c807be66dad7",
   "protected_source_commit": "243db83f115f4f1497b9640f5ebaf7d97e483b84",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

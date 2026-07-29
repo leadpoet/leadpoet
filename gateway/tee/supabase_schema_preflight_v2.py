@@ -263,6 +263,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_provider_outcome_contention_contract_v2",
     ),
     (
+        "scripts/134-research-lab-provider-outcome-head-contention.sql",
+        "research_lab_provider_outcome_contention_contract_v3",
+    ),
+    (
         "scripts/132-research-lab-champion-lifetime-credit.sql",
         "persist_research_lab_chain_realized_lifetime_settlement_v2",
     ),

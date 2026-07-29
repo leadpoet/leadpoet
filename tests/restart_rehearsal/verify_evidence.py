@@ -333,7 +333,13 @@ def verify_migration_backed_database_contract(candidate_sha: str) -> str:
         "pre_129_attested_local_transport_rejected",
         "post_129_attested_local_transport_persisted",
         "transport_terminal_contract_valid",
+        "pre_133_provider_outcome_contract_rejected",
+        "post_133_provider_outcome_contract_valid",
+        "pre_134_provider_outcome_head_contract_rejected",
+        "post_134_provider_outcome_head_contract_valid",
         "provider_outcome_append_atomic",
+        "provider_outcome_contention_zero_rollback",
+        "provider_outcome_conflict_head_exact",
         "pre_132_lifetime_credit_rejected",
         "post_132_lifetime_credit_persisted",
         "lifetime_credit_rpc_idempotent",
@@ -347,6 +353,14 @@ def verify_migration_backed_database_contract(candidate_sha: str) -> str:
         "required_schema_migrations_declared",
     }
     checks = document.get("checks")
+    expected_provider_outcome_migrations = [
+        "130-research-lab-provider-outcome-append.sql",
+        "131-research-lab-provider-outcome-backpressure.sql",
+        "132-research-lab-champion-lifetime-credit.sql",
+        "133-research-lab-provider-outcome-contention-status.sql",
+        "134-research-lab-provider-outcome-head-contention.sql",
+    ]
+    applied_migrations = document.get("applied_migrations")
     if (
         document.get("schema_version")
         != "leadpoet.restart_rehearsal.postgres_contract.v1"
@@ -354,6 +368,8 @@ def verify_migration_backed_database_contract(candidate_sha: str) -> str:
         or not isinstance(checks, dict)
         or set(checks) != required_checks
         or any(checks[name] is not True for name in required_checks)
+        or not isinstance(applied_migrations, list)
+        or applied_migrations[-5:] != expected_provider_outcome_migrations
     ):
         raise SystemExit(
             "migration-backed PostgreSQL contract evidence is incomplete"

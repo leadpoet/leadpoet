@@ -48,6 +48,7 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
     PROVIDER_OUTCOME_APPEND_MIGRATION,
     PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
     PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
+    PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
     TRANSPORT_FIX_MIGRATION,
     TRANSPORT_TERMINAL_MIGRATION,
     _json_insert_sql,
@@ -368,8 +369,9 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             TRANSPORT_TERMINAL_MIGRATION,
             PROVIDER_OUTCOME_APPEND_MIGRATION,
             PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
-            PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
             CHAMPION_LIFETIME_CREDIT_MIGRATION,
+            PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
+            PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
         ],
         "relations": relations,
         "rpcs": [
@@ -377,6 +379,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_attested_transport_terminal_contract_v2",
             "append_research_lab_provider_outcome_checkpoint_v2",
             "research_lab_provider_outcome_contention_contract_v2",
+            "research_lab_provider_outcome_contention_contract_v3",
             "persist_research_lab_chain_realized_lifetime_settlement_v2",
             "research_lab_champion_lifetime_credit_contract_v1",
         ],
@@ -386,7 +389,13 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "pre_129_attested_local_transport_rejected": True,
             "post_129_attested_local_transport_persisted": True,
             "transport_terminal_contract_valid": True,
+            "pre_133_provider_outcome_contract_rejected": True,
+            "post_133_provider_outcome_contract_valid": True,
+            "pre_134_provider_outcome_head_contract_rejected": True,
+            "post_134_provider_outcome_head_contract_valid": True,
             "provider_outcome_append_atomic": True,
+            "provider_outcome_contention_zero_rollback": True,
+            "provider_outcome_conflict_head_exact": True,
             "pre_132_lifetime_credit_rejected": True,
             "post_132_lifetime_credit_persisted": True,
             "lifetime_credit_rpc_idempotent": True,
@@ -417,6 +426,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     assert "research_lab_attested_transport_terminal_contract_v2" in rpcs
     assert "append_research_lab_provider_outcome_checkpoint_v2" in rpcs
     assert "research_lab_provider_outcome_contention_contract_v2" in rpcs
+    assert "research_lab_provider_outcome_contention_contract_v3" in rpcs
     assert (
         "persist_research_lab_chain_realized_lifetime_settlement_v2"
         in rpcs
@@ -441,6 +451,16 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
     contract = {
         "schema_version": "leadpoet.restart_rehearsal.postgres_contract.v1",
         "candidate_sha": COMMIT,
+        "applied_migrations": [
+            *MIGRATIONS_BEFORE_TRANSPORT_FIX,
+            TRANSPORT_FIX_MIGRATION,
+            TRANSPORT_TERMINAL_MIGRATION,
+            PROVIDER_OUTCOME_APPEND_MIGRATION,
+            PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
+            CHAMPION_LIFETIME_CREDIT_MIGRATION,
+            PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
+            PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
+        ],
         "relations": {
             "research_lab_finalized_allocation_epochs_v2": {
                 "kind": "v",
@@ -454,7 +474,13 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "pre_129_attested_local_transport_rejected": True,
             "post_129_attested_local_transport_persisted": True,
             "transport_terminal_contract_valid": True,
+            "pre_133_provider_outcome_contract_rejected": True,
+            "post_133_provider_outcome_contract_valid": True,
+            "pre_134_provider_outcome_head_contract_rejected": True,
+            "post_134_provider_outcome_head_contract_valid": True,
             "provider_outcome_append_atomic": True,
+            "provider_outcome_contention_zero_rollback": True,
+            "provider_outcome_conflict_head_exact": True,
             "pre_132_lifetime_credit_rejected": True,
             "post_132_lifetime_credit_persisted": True,
             "lifetime_credit_rpc_idempotent": True,

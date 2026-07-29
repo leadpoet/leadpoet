@@ -70,6 +70,9 @@ PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION = (
 PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION = (
     "133-research-lab-provider-outcome-contention-status.sql"
 )
+PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION = (
+    "134-research-lab-provider-outcome-head-contention.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -358,6 +361,19 @@ def _provider_outcome_append_contract(
 ) -> dict[str, Any]:
     key_hash = "sha256:" + "a" * 64
 
+    def rollback_count() -> int:
+        database.psql("SELECT pg_catalog.pg_stat_clear_snapshot();")
+        return int(
+            database.psql(
+                """
+                SELECT xact_rollback
+                FROM pg_catalog.pg_stat_database
+                WHERE datname = pg_catalog.current_database();
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+
     def row(
         *,
         sequence: int,
@@ -407,6 +423,7 @@ def _provider_outcome_append_contract(
         raise PostgresContractProbeError(
             "provider outcome idempotent append result differs"
         )
+    rollback_count_before_contention = rollback_count()
 
     siblings = (
         row(
@@ -450,6 +467,48 @@ def _provider_outcome_append_contract(
         raise PostgresContractProbeError(
             "provider outcome concurrent append did not select one head"
         )
+    accepted_hash = accepted[0].get("checkpoint_hash")
+    accepted_row = next(
+        (
+            dict(candidate)
+            for candidate in siblings
+            if candidate["checkpoint_hash"] == accepted_hash
+        ),
+        None,
+    )
+    if accepted_row is None:
+        raise PostgresContractProbeError(
+            "provider outcome append accepted an unknown candidate"
+        )
+    rejected_outcome = rejected[0]
+    if set(rejected_outcome) not in (
+        {"status", "checkpoint_hash"},
+        {"status", "checkpoint_hash", "head_checkpoint_row"},
+    ):
+        raise PostgresContractProbeError(
+            "provider outcome contention response fields differ"
+        )
+    rejected_hash = rejected_outcome.get("checkpoint_hash")
+    if (
+        rejected_hash not in {candidate["checkpoint_hash"] for candidate in siblings}
+        or rejected_hash == accepted_hash
+    ):
+        raise PostgresContractProbeError(
+            "provider outcome contention response lost candidate identity"
+        )
+    if rejected_outcome["status"] == "busy":
+        if set(rejected_outcome) != {"status", "checkpoint_hash"}:
+            raise PostgresContractProbeError(
+                "provider outcome busy response fields differ"
+            )
+    elif (
+        set(rejected_outcome)
+        != {"status", "checkpoint_hash", "head_checkpoint_row"}
+        or rejected_outcome.get("head_checkpoint_row") != accepted_row
+    ):
+        raise PostgresContractProbeError(
+            "provider outcome concurrent conflict omitted its durable head"
+        )
     row_count = int(
         database.psql(
             """
@@ -467,7 +526,48 @@ def _provider_outcome_append_contract(
             "provider outcome lineage contains an unexpected row count"
         )
 
-    accepted_hash = accepted[0]["checkpoint_hash"]
+    stale_row = next(
+        dict(candidate)
+        for candidate in siblings
+        if candidate["checkpoint_hash"] != accepted_hash
+    )
+    stale = json.loads(
+        database.psql(
+            _provider_outcome_append_sql(stale_row),
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    if stale != {
+        "status": "conflict",
+        "checkpoint_hash": stale_row["checkpoint_hash"],
+        "head_checkpoint_row": accepted_row,
+    }:
+        raise PostgresContractProbeError(
+            "provider outcome stale append did not return the exact durable head"
+        )
+
+    empty_conflict_row = row(
+        sequence=2,
+        checkpoint_hash="sha256:" + "4" * 64,
+        previous_checkpoint_hash="sha256:" + "5" * 64,
+        suffix="6",
+    )
+    empty_conflict_row["artifact_master_key_ref_hash"] = "sha256:" + "9" * 64
+    empty_conflict = json.loads(
+        database.psql(
+            _provider_outcome_append_sql(empty_conflict_row),
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    if empty_conflict != {
+        "status": "conflict",
+        "checkpoint_hash": empty_conflict_row["checkpoint_hash"],
+        "head_checkpoint_row": None,
+    }:
+        raise PostgresContractProbeError(
+            "provider outcome empty-lineage conflict response differs"
+        )
+
     third_hash = "sha256:" + "2" * 64
     third = row(
         sequence=3,
@@ -485,7 +585,7 @@ def _provider_outcome_append_contract(
             )
         );
         SELECT pg_catalog.pg_sleep(2);
-        ROLLBACK;
+        COMMIT;
     """
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         holder = executor.submit(database.psql, lock_sql)
@@ -520,7 +620,10 @@ def _provider_outcome_append_contract(
             if busy.returncode == 0 and busy.stdout.strip()
             else {}
         )
-        if busy.returncode != 0 or busy_result.get("status") != "busy":
+        if busy.returncode != 0 or busy_result != {
+            "status": "busy",
+            "checkpoint_hash": third_hash,
+        }:
             raise PostgresContractProbeError(
                 "provider outcome contention did not return the busy contract"
             )
@@ -543,6 +646,11 @@ def _provider_outcome_append_contract(
         raise PostgresContractProbeError(
             "provider outcome append did not recover after contention"
         )
+    rollback_count_after_contention = rollback_count()
+    if rollback_count_after_contention != rollback_count_before_contention:
+        raise PostgresContractProbeError(
+            "provider outcome expected contention rolled back a transaction"
+        )
     return {
         "first_checkpoint_hash": first_hash,
         "candidate_sibling_hashes": sorted(
@@ -551,6 +659,12 @@ def _provider_outcome_append_contract(
         "accepted_count": len(accepted),
         "rejected_count": len(rejected),
         "row_count": row_count + 1,
+        "contention_rollback_delta": (
+            rollback_count_after_contention
+            - rollback_count_before_contention
+        ),
+        "durable_head_conflict_verified": True,
+        "empty_head_conflict_verified": True,
     }
 
 
@@ -1197,30 +1311,38 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             scripts / PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION
         )
         applied.append(PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION)
-        database.apply_migration(
-            scripts / PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION
+        pre_contention_contract = database.psql(
+            """
+            SELECT public.research_lab_provider_outcome_contention_contract_v2()
+                   ::text;
+            """,
+            check=False,
         )
-        applied.append(PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION)
-        contention_contract = json.loads(
-            database.psql(
-                """
-                SELECT public.research_lab_provider_outcome_contention_contract_v2()
-                       ::text;
-                """,
-                tuples_only=True,
-            ).stdout.strip()
-        )
-        if contention_contract != {
-            "schema_version": (
-                "leadpoet.provider_outcome_contention_contract.v2"
-            ),
-            "lock_contention_status": "busy",
-            "stale_lineage_status": "conflict",
-        }:
+        if (
+            pre_contention_contract.returncode == 0
+            or "research_lab_provider_outcome_contention_contract_v2"
+            not in pre_contention_contract.stderr
+            or "does not exist" not in pre_contention_contract.stderr
+        ):
             raise PostgresContractProbeError(
-                "provider outcome contention contract differs"
+                "pre-133 provider outcome contention contract did not fail closed"
             )
-        provider_outcome_append = _provider_outcome_append_contract(database)
+        pre_head_contract = database.psql(
+            """
+            SELECT public.research_lab_provider_outcome_contention_contract_v3()
+                   ::text;
+            """,
+            check=False,
+        )
+        if (
+            pre_head_contract.returncode == 0
+            or "research_lab_provider_outcome_contention_contract_v3"
+            not in pre_head_contract.stderr
+            or "does not exist" not in pre_head_contract.stderr
+        ):
+            raise PostgresContractProbeError(
+                "pre-134 provider outcome head contract did not fail closed"
+            )
 
         rows, verified, fixture = _settlement_fixture(
             candidate_sha=args.candidate_sha,
@@ -1451,6 +1573,74 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-131 lifetime credit contract is incomplete"
             )
+
+        database.apply_migration(
+            scripts / PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION
+        )
+        applied.append(PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION)
+        contention_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_provider_outcome_contention_contract_v2()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if contention_contract != {
+            "schema_version": (
+                "leadpoet.provider_outcome_contention_contract.v2"
+            ),
+            "lock_contention_status": "busy",
+            "stale_lineage_status": "conflict",
+        }:
+            raise PostgresContractProbeError(
+                "post-133 provider outcome contention contract differs"
+            )
+        pre_head_contract = database.psql(
+            """
+            SELECT public.research_lab_provider_outcome_contention_contract_v3()
+                   ::text;
+            """,
+            check=False,
+        )
+        if (
+            pre_head_contract.returncode == 0
+            or "research_lab_provider_outcome_contention_contract_v3"
+            not in pre_head_contract.stderr
+            or "does not exist" not in pre_head_contract.stderr
+        ):
+            raise PostgresContractProbeError(
+                "pre-134 provider outcome head contract did not fail closed"
+            )
+
+        database.apply_migration(
+            scripts / PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION
+        )
+        applied.append(PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION)
+        head_contention_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_provider_outcome_contention_contract_v3()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if head_contention_contract != {
+            "schema_version": (
+                "leadpoet.provider_outcome_contention_contract.v3"
+            ),
+            "lock_contention_status": "busy",
+            "stale_lineage_status": "conflict",
+            "candidate_checkpoint_hash": True,
+            "conflict_head_checkpoint_row": "encrypted_or_null",
+        }:
+            raise PostgresContractProbeError(
+                "post-134 provider outcome head contract differs"
+            )
+        provider_outcome_append = _provider_outcome_append_contract(database)
+
         tampered = copy.deepcopy(view_row)
         tampered["finalization_doc"]["weight_receipt_hash"] = "sha256:" + "0" * 64
         try:
@@ -1486,7 +1676,13 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "pre_129_attested_local_transport_rejected": True,
                 "post_129_attested_local_transport_persisted": True,
                 "transport_terminal_contract_valid": True,
+                "pre_133_provider_outcome_contract_rejected": True,
+                "post_133_provider_outcome_contract_valid": True,
+                "pre_134_provider_outcome_head_contract_rejected": True,
+                "post_134_provider_outcome_head_contract_valid": True,
                 "provider_outcome_append_atomic": True,
+                "provider_outcome_contention_zero_rollback": True,
+                "provider_outcome_conflict_head_exact": True,
                 "pre_132_lifetime_credit_rejected": True,
                 "post_132_lifetime_credit_persisted": True,
                 "lifetime_credit_rpc_idempotent": True,

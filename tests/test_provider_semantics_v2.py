@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
 import threading
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -16,8 +17,15 @@ from gateway.research_lab.provider_evidence_proxy import (
     BUDGET_SOFT_STOP_RESPONSE_HEADER,
     REPLAY_ONLY_HEADER,
 )
-from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
+from gateway.tee.provider_broker_v2 import (
+    BUILTIN_PROVIDER_ROUTES,
+    PROVIDER_BROKER_SCHEMA_VERSION,
+    ProviderBrokerV2,
+    credential_reference_hash,
+    expected_provider_credential_slots,
+)
 from gateway.tee.artifact_vault_v2 import EncryptedArtifactVaultV2
+from gateway.tee.provider_outcome_store_v2 import ProviderOutcomeStoreV2
 from gateway.tee.provider_semantics_v2 import (
     ProviderSemanticsAuthorityV2,
     ProviderSemanticsV2Error,
@@ -744,7 +752,7 @@ def test_provider_outcome_persistent_contention_is_bounded_and_fails_closed() ->
 
     assert outcome_store.persist_attempts == 64
     assert outcome_store.load_attempts == 1  # startup restore only
-    assert len(sleeps) == 64
+    assert len(sleeps) == 63
     assert (
         authority.provider_outcome_snapshot()["provider_outcome_digest"].get(
             "providers", {}
@@ -867,6 +875,209 @@ def test_provider_outcome_contention_converges_across_25_writers() -> None:
     assert outcome_store.persist_count == writer_count
     assert outcome_store.document["sequence"] == writer_count
     assert outcome_store.document["totals"]["call_count"] == writer_count
+
+
+def test_provider_outcome_structured_conflict_rebases_without_head_read() -> None:
+    class EmbeddedHeadOutcomeStore(_OutcomeStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.load_attempts = 0
+
+        def load_latest(
+            self,
+            *,
+            utc_day,
+            job_id,
+            purpose,
+            operation_suffix="restore",
+        ):
+            self.load_attempts += 1
+            return super().load_latest(
+                utc_day=utc_day,
+                job_id=job_id,
+                purpose=purpose,
+                operation_suffix=operation_suffix,
+            )
+
+        def persist(
+            self,
+            document,
+            *,
+            previous_checkpoint_hash,
+            job_id,
+            purpose,
+            attempt_number=0,
+        ):
+            result = super().persist(
+                document,
+                previous_checkpoint_hash=previous_checkpoint_hash,
+                job_id=job_id,
+                purpose=purpose,
+                attempt_number=attempt_number,
+            )
+            if result["status"] == "conflict":
+                return {
+                    **result,
+                    "head_checkpoint_hash": self.checkpoint_hash,
+                    "head_state_document": dict(self.document),
+                }
+            return result
+
+    outcome_store = EmbeddedHeadOutcomeStore()
+    first, _broker, _cache, _artifacts = _authority(
+        outcome_store=outcome_store
+    )
+    stale, _broker, _cache, _artifacts = _authority(
+        outcome_store=outcome_store
+    )
+    assert outcome_store.load_attempts == 2
+
+    first.execute(_request(job_id="job-embedded-first"))
+    stale.execute(
+        _request(
+            job_id="job-embedded-stale",
+            logical_operation_id="provider-operation-embedded-stale",
+            body=b'{"query":"embedded-second"}',
+        )
+    )
+
+    assert outcome_store.load_attempts == 2
+    assert outcome_store.document["sequence"] == 2
+    assert (
+        stale.provider_outcome_snapshot()["provider_outcome_digest"]["providers"][
+            "exa"
+        ]["call_count"]
+        == 2
+    )
+
+
+def test_real_outcome_store_busy_retry_uses_distinct_broker_attempts() -> None:
+    class LocalProviderTransport:
+        def __init__(self) -> None:
+            self.calls = []
+            self.rows = {}
+            self.append_count = 0
+
+        def __call__(self, **request):
+            self.calls.append(dict(request))
+            parsed = urlsplit(request["url"])
+            if parsed.hostname == "api.exa.ai":
+                body = b'{"costDollars":0.005,"results":[]}'
+            elif parsed.hostname == "qplwoislplkcegvdmbim.supabase.co":
+                if request["method"] == "POST":
+                    self.append_count += 1
+                    row = json.loads(request["body"].decode("utf-8"))[
+                        "checkpoint_row"
+                    ]
+                    if self.append_count == 1:
+                        body = json.dumps(
+                            {
+                                "status": "busy",
+                                "checkpoint_hash": row["checkpoint_hash"],
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode()
+                    else:
+                        self.rows[
+                            (
+                                row["artifact_master_key_ref_hash"],
+                                row["utc_day"],
+                                int(row["sequence"]),
+                            )
+                        ] = row
+                        body = json.dumps(
+                            {
+                                "status": "inserted",
+                                "checkpoint_hash": row["checkpoint_hash"],
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode()
+                else:
+                    query = parse_qs(parsed.query)
+                    day = query["utc_day"][0].split("eq.", 1)[1]
+                    key_hash = query["artifact_master_key_ref_hash"][0].split(
+                        "eq.", 1
+                    )[1]
+                    rows = [
+                        row
+                        for (row_key_hash, row_day, _sequence), row in self.rows.items()
+                        if row_key_hash == key_hash and row_day == day
+                    ]
+                    if "sequence" in query:
+                        sequence = int(query["sequence"][0].split("eq.", 1)[1])
+                        rows = [
+                            row
+                            for row in rows
+                            if int(row["sequence"]) == sequence
+                        ]
+                    if query.get("order") == ["sequence.desc"]:
+                        rows.sort(
+                            key=lambda row: int(row["sequence"]),
+                            reverse=True,
+                        )
+                    rows = rows[: int(query.get("limit", ["2"])[0])]
+                    body = json.dumps(
+                        rows,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+            else:
+                raise AssertionError("unexpected local provider destination")
+            return {
+                "http_status": 200,
+                "headers": {"content-type": "application/json"},
+                "body": body,
+                "tls_peer_chain_hash": _hash("c"),
+                "tls_protocol": "TLSv1.3",
+            }
+
+    vault = EncryptedArtifactVaultV2(
+        master_key=bytes(range(32)),
+        boot_identity_hash=_hash("b"),
+        retention_days=30,
+        clock=lambda: datetime(2026, 7, 10, tzinfo=timezone.utc),
+    )
+    credentials = {
+        slot: "%s-secret" % slot for slot in expected_provider_credential_slots()
+    }
+    transport = LocalProviderTransport()
+    broker = ProviderBrokerV2(
+        credential_ref_hashes={
+            slot: credential_reference_hash(secret)
+            for slot, secret in credentials.items()
+        },
+        retry_policy_hashes={
+            provider_id: sha256_json({"retry": provider_id})
+            for provider_id in BUILTIN_PROVIDER_ROUTES
+        },
+        transport=transport,
+        artifact_sink=vault.seal,
+        clock=lambda: "2026-07-10T00:00:00Z",
+    )
+    broker.provision_credentials(credentials)
+    outcome_store = ProviderOutcomeStoreV2(broker=broker, vault=vault)
+    authority, _broker, _cache, _artifacts = _authority(
+        broker=broker,
+        artifacts=SimpleNamespace(seal=vault.seal),
+        outcome_store=outcome_store,
+        artifact_transaction=vault.transient_artifact_transaction,
+    )
+
+    result = authority.execute(_request(job_id="job-real-busy-retry"))
+
+    append_attempts = [
+        attempt
+        for attempt in result["additional_transport_attempts"]
+        if str(attempt["logical_operation_id"]).endswith(":append")
+    ]
+    assert [attempt["attempt_number"] for attempt in append_attempts] == [0, 1]
+    assert transport.append_count == 2
+    assert len(transport.rows) == 1
+    assert authority.provider_outcome_snapshot()["provider_outcome_digest"][
+        "sidecar_sequence"
+    ] == 1
 
 
 def test_provider_outcome_rollback_preserves_original_error_across_midnight() -> None:

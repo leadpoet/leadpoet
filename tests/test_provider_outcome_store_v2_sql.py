@@ -6,6 +6,9 @@ APPEND_SQL = Path("scripts/131-research-lab-provider-outcome-backpressure.sql")
 CONTENTION_STATUS_SQL = Path(
     "scripts/133-research-lab-provider-outcome-contention-status.sql"
 )
+HEAD_CONTENTION_SQL = Path(
+    "scripts/134-research-lab-provider-outcome-head-contention.sql"
+)
 
 
 def test_provider_outcome_checkpoint_migration_is_append_only_and_private() -> None:
@@ -58,6 +61,29 @@ def test_provider_outcome_expected_contention_returns_measured_statuses() -> Non
     assert "'status', 'conflict'" in text
     assert "research_lab_provider_outcome_contention_contract_v2" in text
     assert "leadpoet.provider_outcome_contention_contract.v2" in text
+    assert "GRANT EXECUTE" in text
+    assert "TO service_role" in text
+    assert "FROM PUBLIC, anon, authenticated" in text
+    assert "RAISE EXCEPTION 'provider outcome checkpoint fields are invalid'" in text
+    assert "RAISE EXCEPTION 'provider outcome checkpoint identity is invalid'" in text
+    assert "RAISE EXCEPTION 'provider outcome checkpoint durable insert differs'" in text
+    assert "UPDATE public.research_lab_provider_outcome_checkpoints_v2" not in text
+    assert "DELETE FROM public.research_lab_provider_outcome_checkpoints_v2" not in text
+
+
+def test_provider_outcome_conflict_returns_authenticated_encrypted_head() -> None:
+    text = HEAD_CONTENTION_SQL.read_text()
+    assert "pg_try_advisory_xact_lock" in text
+    assert "'status', 'busy'" in text
+    assert "'status', 'conflict'" in text
+    assert text.count("'checkpoint_hash', incoming_checkpoint_hash") == 5
+    assert "'head_checkpoint_row', current_row" in text
+    assert "'head_checkpoint_row', NULL" in text
+    assert "pg_catalog.to_jsonb(c) - 'created_at'" in text
+    assert "research_lab_provider_outcome_contention_contract_v3" in text
+    assert "leadpoet.provider_outcome_contention_contract.v3" in text
+    assert "'candidate_checkpoint_hash', TRUE" in text
+    assert "'conflict_head_checkpoint_row', 'encrypted_or_null'" in text
     assert "GRANT EXECUTE" in text
     assert "TO service_role" in text
     assert "FROM PUBLIC, anon, authenticated" in text

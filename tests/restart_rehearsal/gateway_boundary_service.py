@@ -346,6 +346,21 @@ def _migration_schema_contract(
         raise RuntimeError(
             "migration-backed schema contract differs from candidate"
         )
+    expected_provider_outcome_migrations = [
+        "130-research-lab-provider-outcome-append.sql",
+        "131-research-lab-provider-outcome-backpressure.sql",
+        "132-research-lab-champion-lifetime-credit.sql",
+        "133-research-lab-provider-outcome-contention-status.sql",
+        "134-research-lab-provider-outcome-head-contention.sql",
+    ]
+    applied_migrations = document.get("applied_migrations")
+    if (
+        not isinstance(applied_migrations, list)
+        or applied_migrations[-5:] != expected_provider_outcome_migrations
+    ):
+        raise RuntimeError(
+            "migration-backed provider outcome order differs from production"
+        )
     checks = document.get("checks")
     if (
         not isinstance(checks, dict)
@@ -409,6 +424,7 @@ def _migration_schema_contract(
         "research_lab_attested_transport_terminal_contract_v2",
         "append_research_lab_provider_outcome_checkpoint_v2",
         "research_lab_provider_outcome_contention_contract_v2",
+        "research_lab_provider_outcome_contention_contract_v3",
         "persist_research_lab_chain_realized_lifetime_settlement_v2",
         "research_lab_champion_lifetime_credit_contract_v1",
     }

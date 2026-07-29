@@ -35,11 +35,15 @@ class _Broker:
         self.fail_committed_appends = 0
         self.busy_appends = 0
         self.append_http_failure = None
+        self.contention_contract = "current"
+        self.tamper_next_response_hash = False
 
     def execute(self, request):
         self.calls.append(dict(request))
         assert request["provider_id"] == "supabase"
         if request["method"] == "POST":
+            payload = json.loads(base64.b64decode(request["body_b64"]))
+            row = payload["checkpoint_row"]
             if self.append_http_failure is not None:
                 status, code = self.append_http_failure
                 return self._result(
@@ -52,14 +56,15 @@ class _Broker:
                 return self._result(
                     request,
                     status=200,
-                    body=(
-                        b'{"checkpoint_hash":"sha256:'
-                        + b"a" * 64
-                        + b'","status":"busy"}'
-                    ),
+                    body=json.dumps(
+                        {
+                            "checkpoint_hash": row["checkpoint_hash"],
+                            "status": "busy",
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode(),
                 )
-            payload = json.loads(base64.b64decode(request["body_b64"]))
-            row = payload["checkpoint_row"]
             lineage = (
                 row["artifact_master_key_ref_hash"],
                 row["utc_day"],
@@ -82,7 +87,14 @@ class _Broker:
                 return self._result(
                     request,
                     status=200,
-                    body=b'{"status":"existing"}',
+                    body=json.dumps(
+                        {
+                            "status": "existing",
+                            "checkpoint_hash": row["checkpoint_hash"],
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode(),
                 )
             current = sorted(
                 (
@@ -99,6 +111,24 @@ class _Broker:
                 int(row["sequence"]) != expected_sequence
                 or row["previous_checkpoint_hash"] != expected_previous
             ):
+                if self.contention_contract != "legacy":
+                    response = {
+                        "status": "conflict",
+                        "checkpoint_hash": row["checkpoint_hash"],
+                    }
+                    if self.contention_contract == "embedded":
+                        response["head_checkpoint_row"] = (
+                            current[0] if current else None
+                        )
+                    return self._result(
+                        request,
+                        status=200,
+                        body=json.dumps(
+                            response,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode(),
+                    )
                 return self._result(
                     request,
                     status=409,
@@ -117,7 +147,14 @@ class _Broker:
             return self._result(
                 request,
                 status=200,
-                body=b'{"status":"inserted"}',
+                body=json.dumps(
+                    {
+                        "status": "inserted",
+                        "checkpoint_hash": row["checkpoint_hash"],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode(),
             )
         if self.fail_reads:
             return self._failure(request)
@@ -174,7 +211,7 @@ class _Broker:
             failure_code=None,
             completed_at="2026-07-10T12:00:01Z",
         )
-        return {
+        result = {
             "terminal_status": "authenticated_response",
             "http_status": status,
             "body_b64": base64.b64encode(body).decode("ascii"),
@@ -182,6 +219,13 @@ class _Broker:
             "encrypted_request_artifact_id": request_artifact,
             "encrypted_artifact_id": response_artifact,
         }
+        if self.tamper_next_response_hash:
+            self.tamper_next_response_hash = False
+            result["transport_attempt"] = {
+                **result["transport_attempt"],
+                "response_hash": "sha256:" + "f" * 64,
+            }
+        return result
 
     def _failure(self, request, *, failure_code="timeout"):
         return {
@@ -306,6 +350,62 @@ def test_outcome_checkpoint_chain_is_monotonic_and_collision_fails_closed() -> N
     ) == ()
 
 
+def test_outcome_checkpoint_restores_authenticated_embedded_conflict_head() -> None:
+    broker = _Broker()
+    broker.contention_contract = "embedded"
+    store = ProviderOutcomeStoreV2(broker=broker, vault=_vault())
+    first = store.persist(
+        _document(),
+        previous_checkpoint_hash="",
+        job_id="job-first",
+        purpose="research_lab.company_score.v2",
+    )
+    calls_before_conflict = len(broker.calls)
+
+    conflict = store.persist(
+        _document("2026-07-10T12:00:01Z"),
+        previous_checkpoint_hash=first["checkpoint_hash"],
+        job_id="job-conflict",
+        purpose="research_lab.company_score.v2",
+    )
+
+    assert conflict["status"] == "conflict"
+    assert conflict["head_checkpoint_hash"] == first["checkpoint_hash"]
+    assert conflict["head_state_document"]["sequence"] == 1
+    assert len(broker.calls) == calls_before_conflict + 1
+    assert broker.calls[-1]["method"] == "POST"
+
+
+def test_outcome_checkpoint_rejects_embedded_head_from_another_key_lineage() -> None:
+    broker = _Broker()
+    broker.contention_contract = "embedded"
+    vault = _vault()
+    store = ProviderOutcomeStoreV2(broker=broker, vault=vault)
+    first = store.persist(
+        _document(),
+        previous_checkpoint_hash="",
+        job_id="job-first",
+        purpose="research_lab.company_score.v2",
+    )
+    stored = broker.rows[(vault.master_key_ref_hash, "2026-07-10", 1)]
+    stored["artifact_master_key_ref_hash"] = "sha256:" + "b" * 64
+    calls_before_conflict = len(broker.calls)
+
+    with pytest.raises(
+        ProviderOutcomeStoreV2Error,
+        match="provider outcome checkpoint key lineage differs",
+    ):
+        store.persist(
+            _document("2026-07-10T12:00:01Z"),
+            previous_checkpoint_hash=first["checkpoint_hash"],
+            job_id="job-conflict",
+            purpose="research_lab.company_score.v2",
+        )
+
+    assert len(broker.calls) == calls_before_conflict + 1
+    assert broker.calls[-1]["method"] == "POST"
+
+
 def test_outcome_checkpoint_accepts_ambiguous_committed_append() -> None:
     broker = _Broker()
     broker.fail_committed_appends = 1
@@ -374,16 +474,48 @@ def test_outcome_checkpoint_authenticated_append_failure_does_not_read_back(
     assert [call["method"] for call in broker.calls] == ["POST"]
 
 
-def test_outcome_checkpoint_recognizes_legacy_busy_sqlstate_response() -> None:
+@pytest.mark.parametrize(
+    ("message", "expected_status"),
+    (
+        ("provider outcome checkpoint append is busy", "busy"),
+        ("provider outcome checkpoint does not extend the current head", "conflict"),
+    ),
+)
+def test_outcome_checkpoint_recognizes_legacy_sqlstate_responses(
+    message: str,
+    expected_status: str,
+) -> None:
+    body = json.dumps({"code": "40001", "message": message}).encode()
     result = {
         "terminal_status": "authenticated_response",
-        "body_b64": base64.b64encode(
-            b'{"code":"40001","message":'
-            b'"provider outcome checkpoint append is busy"}'
-        ).decode("ascii"),
+        "http_status": 409,
+        "body_b64": base64.b64encode(body).decode("ascii"),
+        "transport_attempt": {"response_hash": sha256_bytes(body)},
     }
 
-    assert ProviderOutcomeStoreV2._append_status(result) == "busy"
+    assert ProviderOutcomeStoreV2._append_result(
+        result,
+        expected_checkpoint_hash=HASH,
+    ) == {"status": expected_status}
+
+
+def test_outcome_checkpoint_rejects_uncommitted_append_response_bytes() -> None:
+    broker = _Broker()
+    broker.tamper_next_response_hash = True
+    store = ProviderOutcomeStoreV2(broker=broker, vault=_vault())
+
+    with pytest.raises(
+        ProviderOutcomeStoreV2Error,
+        match="provider outcome checkpoint append response commitments differ",
+    ):
+        store.persist(
+            _document(),
+            previous_checkpoint_hash="",
+            job_id="job",
+            purpose="research_lab.company_score.v2",
+        )
+
+    assert [call["method"] for call in broker.calls] == ["POST"]
 
 
 def test_outcome_checkpoint_rejects_tampering_and_transport_failure() -> None:

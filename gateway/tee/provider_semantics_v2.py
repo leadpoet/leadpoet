@@ -615,6 +615,8 @@ class ProviderSemanticsAuthorityV2:
                         "provider outcome checkpoint status is invalid"
                     )
                 self._outcome_ledger.restore(base_document)
+                if conflict_attempt + 1 >= _OUTCOME_APPEND_CONFLICT_ATTEMPTS:
+                    break
                 self._sleep(
                     _outcome_conflict_backoff_seconds(
                         job_id=job_id,
@@ -623,6 +625,15 @@ class ProviderSemanticsAuthorityV2:
                     )
                 )
                 if status == "busy":
+                    continue
+                head_document = persisted.get("head_state_document")
+                head_checkpoint_hash = str(
+                    persisted.get("head_checkpoint_hash") or ""
+                )
+                if isinstance(head_document, Mapping) and head_checkpoint_hash:
+                    base_document = self._outcome_ledger.restore(head_document)
+                    self._outcome_checkpoint_hash = head_checkpoint_hash
+                    self._outcome_checkpoint_day = utc_day
                     continue
                 try:
                     restored = dict(

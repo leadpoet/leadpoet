@@ -34,11 +34,19 @@ class _Broker:
         self.fail_reads = False
         self.fail_committed_appends = 0
         self.busy_appends = 0
+        self.append_http_failure = None
 
     def execute(self, request):
         self.calls.append(dict(request))
         assert request["provider_id"] == "supabase"
         if request["method"] == "POST":
+            if self.append_http_failure is not None:
+                status, code = self.append_http_failure
+                return self._result(
+                    request,
+                    status=status,
+                    body=json.dumps({"code": code}).encode(),
+                )
             if self.busy_appends > 0:
                 self.busy_appends -= 1
                 return self._result(
@@ -332,6 +340,38 @@ def test_outcome_checkpoint_busy_append_is_retryable_without_readback() -> None:
     assert busy["status"] == "busy"
     assert len(broker.calls) == 1
     assert broker.calls[0]["attempt_number"] == 7
+
+
+@pytest.mark.parametrize(
+    ("http_status", "code"),
+    (
+        (503, "PGRST002"),
+        (504, "PGRST003"),
+    ),
+)
+def test_outcome_checkpoint_authenticated_append_failure_does_not_read_back(
+    http_status: int,
+    code: str,
+) -> None:
+    broker = _Broker()
+    broker.append_http_failure = (http_status, code)
+    store = ProviderOutcomeStoreV2(broker=broker, vault=_vault())
+
+    with pytest.raises(
+        ProviderOutcomeStoreV2Error,
+        match=(
+            "provider outcome checkpoint authenticated append failed "
+            rf"\(http_status={http_status} code={code}\)"
+        ),
+    ):
+        store.persist(
+            _document(),
+            previous_checkpoint_hash="",
+            job_id="job",
+            purpose="research_lab.company_score.v2",
+        )
+
+    assert [call["method"] for call in broker.calls] == ["POST"]
 
 
 def test_outcome_checkpoint_recognizes_legacy_busy_sqlstate_response() -> None:

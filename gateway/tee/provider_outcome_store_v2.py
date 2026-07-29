@@ -302,24 +302,46 @@ class ProviderOutcomeStoreV2:
         if result.get("terminal_status") != "authenticated_response":
             return "unknown"
         try:
+            http_status = int(result.get("http_status") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint append HTTP status is invalid"
+            ) from exc
+        try:
             body = base64.b64decode(
                 str(result.get("body_b64") or ""),
                 validate=True,
             )
             parsed = json.loads(body.decode("utf-8"))
-        except Exception:
+        except Exception as exc:
+            if not 200 <= http_status < 300:
+                raise ProviderOutcomeStoreV2Error(
+                    "provider outcome checkpoint authenticated append failed "
+                    "(http_status=%d code=invalid_response)" % http_status
+                ) from exc
             return "unknown"
         if not isinstance(parsed, Mapping):
+            if not 200 <= http_status < 300:
+                raise ProviderOutcomeStoreV2Error(
+                    "provider outcome checkpoint authenticated append failed "
+                    "(http_status=%d code=invalid_response)" % http_status
+                )
             return "unknown"
+        if not 200 <= http_status < 300:
+            code = str(parsed.get("code") or "none")
+            if code == "40001":
+                message = str(parsed.get("message") or "").strip().lower()
+                if message == "provider outcome checkpoint append is busy":
+                    return "busy"
+                return "conflict"
+            raise ProviderOutcomeStoreV2Error(
+                "provider outcome checkpoint authenticated append failed "
+                "(http_status=%d code=%s)" % (http_status, code)
+            )
         measured_status = str(parsed.get("status") or "").strip().lower()
         if measured_status in {"busy", "conflict"}:
             return measured_status
-        if str(parsed.get("code") or "") != "40001":
-            return "accepted"
-        message = str(parsed.get("message") or "").strip().lower()
-        if message == "provider outcome checkpoint append is busy":
-            return "busy"
-        return "conflict"
+        return "accepted"
 
     def _validate_payload(self, value: Mapping[str, Any]) -> Dict[str, Any]:
         fields = {

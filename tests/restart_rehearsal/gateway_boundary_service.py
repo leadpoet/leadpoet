@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ast
 import csv
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import io
@@ -44,6 +45,8 @@ RUNTIME_RPCS = frozenset(
     }
 )
 TABLE_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
+HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 CONTROL_QUERY_FIELDS = frozenset(
     {"columns", "limit", "offset", "on_conflict", "order", "select"}
 )
@@ -436,6 +439,38 @@ def _migration_schema_contract(
     return relations, set(raw_rpcs)
 
 
+def _migration_provider_outcome_contract(
+    path: Path,
+    *,
+    candidate_sha: str,
+) -> dict[str, Any]:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    contract = document.get("provider_outcome_contention_contract")
+    append_evidence = document.get("provider_outcome_append")
+    expected_contract = {
+        "schema_version": "leadpoet.provider_outcome_contention_contract.v3",
+        "lock_contention_status": "busy",
+        "stale_lineage_status": "conflict",
+        "candidate_checkpoint_hash": True,
+        "conflict_head_checkpoint_row": "encrypted_or_null",
+    }
+    if (
+        document.get("candidate_sha") != candidate_sha
+        or contract != expected_contract
+        or not isinstance(append_evidence, dict)
+        or append_evidence.get("accepted_count") != 1
+        or append_evidence.get("rejected_count") != 1
+        or append_evidence.get("row_count") != 3
+        or append_evidence.get("contention_rollback_delta") != 0
+        or append_evidence.get("durable_head_conflict_verified") is not True
+        or append_evidence.get("empty_head_conflict_verified") is not True
+    ):
+        raise RuntimeError(
+            "migration-backed provider outcome contract is incomplete"
+        )
+    return dict(contract)
+
+
 def _migration_seed_rows(
     path: Path,
     *,
@@ -476,6 +511,7 @@ class LocalPostgRESTState:
         rpcs: set[str],
         relation_columns: dict[str, frozenset[str]] | None = None,
         seed_rows: dict[str, list[dict[str, Any]]] | None = None,
+        provider_outcome_contract: dict[str, Any] | None = None,
     ):
         self.state_root = state_root
         self.fixture = fixture
@@ -483,6 +519,12 @@ class LocalPostgRESTState:
         self.rpcs = rpcs
         self.relation_columns = dict(relation_columns or {})
         self.lock = threading.Lock()
+        self.provider_outcome_contract = dict(
+            provider_outcome_contract or {}
+        )
+        self._provider_outcome_locks: dict[
+            tuple[str, str], threading.Lock
+        ] = {}
         self.rows: dict[str, list[dict[str, Any]]] = {
             name: [] for name in tables
         }
@@ -569,6 +611,189 @@ class LocalPostgRESTState:
             ]
         self.cutover_state = list(self.rows.get(state_table, []))
         self.events = state_root / "local-postgrest-events.jsonl"
+
+    def _provider_outcome_lock(
+        self,
+        key_ref_hash: str,
+        utc_day: str,
+    ) -> threading.Lock:
+        identity = (key_ref_hash, utc_day)
+        with self.lock:
+            lock = self._provider_outcome_locks.get(identity)
+            if lock is None:
+                lock = threading.Lock()
+                self._provider_outcome_locks[identity] = lock
+            return lock
+
+    def append_provider_outcome_checkpoint(
+        self,
+        body: Any,
+    ) -> dict[str, Any]:
+        if self.provider_outcome_contract.get("schema_version") != (
+            "leadpoet.provider_outcome_contention_contract.v3"
+        ):
+            raise ValueError(
+                "provider outcome migration contract is unavailable"
+            )
+        if not isinstance(body, dict) or set(body) != {"checkpoint_row"}:
+            raise ValueError("provider outcome checkpoint RPC body is invalid")
+        row = body.get("checkpoint_row")
+        table = "research_lab_provider_outcome_checkpoints_v2"
+        relation_columns = self.relation_columns.get(table)
+        expected_columns = (
+            relation_columns - {"created_at"}
+            if relation_columns is not None
+            else None
+        )
+        if (
+            not isinstance(row, dict)
+            or expected_columns is None
+            or set(row) != set(expected_columns)
+            or row.get("schema_version")
+            != "leadpoet.provider_outcome_checkpoint_row.v2"
+            or not isinstance(row.get("sequence"), int)
+            or isinstance(row.get("sequence"), bool)
+            or int(row["sequence"]) <= 0
+            or not isinstance(row.get("encrypted_checkpoint_doc"), dict)
+        ):
+            raise ValueError(
+                "provider outcome checkpoint fields are invalid"
+            )
+        key_ref_hash = str(row.get("artifact_master_key_ref_hash") or "")
+        utc_day = str(row.get("utc_day") or "")
+        checkpoint_hash = str(row.get("checkpoint_hash") or "")
+        previous_hash = str(row.get("previous_checkpoint_hash") or "")
+        hash_fields = {
+            "artifact_master_key_ref_hash",
+            "checkpoint_hash",
+            "state_document_hash",
+            "checkpoint_artifact_id",
+        }
+        try:
+            parsed_day = date.fromisoformat(utc_day)
+        except ValueError as exc:
+            raise ValueError(
+                "provider outcome checkpoint identity is invalid"
+            ) from exc
+        if (
+            not HASH_RE.fullmatch(key_ref_hash)
+            or not DAY_RE.fullmatch(utc_day)
+            or parsed_day.isoformat() != utc_day
+            or not HASH_RE.fullmatch(checkpoint_hash)
+            or (
+                previous_hash
+                and not HASH_RE.fullmatch(previous_hash)
+            )
+            or any(
+                not HASH_RE.fullmatch(str(row.get(field) or ""))
+                for field in hash_fields
+            )
+        ):
+            raise ValueError(
+                "provider outcome checkpoint identity is invalid"
+            )
+
+        lineage_lock = self._provider_outcome_lock(key_ref_hash, utc_day)
+        if not lineage_lock.acquire(blocking=False):
+            return {
+                "status": str(
+                    self.provider_outcome_contract[
+                        "lock_contention_status"
+                    ]
+                ),
+                "checkpoint_hash": checkpoint_hash,
+            }
+        try:
+            with self.lock:
+                rows = self.rows[table]
+                existing = next(
+                    (
+                        stored
+                        for stored in rows
+                        if stored.get("checkpoint_hash") == checkpoint_hash
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    durable = {
+                        field: value
+                        for field, value in existing.items()
+                        if field != "created_at"
+                    }
+                    if durable != row:
+                        raise ValueError(
+                            "provider outcome checkpoint hash already "
+                            "identifies another row"
+                        )
+                    return {
+                        "status": "existing",
+                        "checkpoint_hash": checkpoint_hash,
+                    }
+                lineage = [
+                    stored
+                    for stored in rows
+                    if (
+                        stored.get("artifact_master_key_ref_hash")
+                        == key_ref_hash
+                        and stored.get("utc_day") == utc_day
+                    )
+                ]
+                current = (
+                    max(lineage, key=lambda stored: int(stored["sequence"]))
+                    if lineage
+                    else None
+                )
+                current_row = (
+                    {
+                        field: value
+                        for field, value in current.items()
+                        if field != "created_at"
+                    }
+                    if current is not None
+                    else None
+                )
+                sequence = int(row["sequence"])
+                expected_sequence = (
+                    int(current["sequence"]) + 1
+                    if current is not None
+                    else 1
+                )
+                expected_previous = (
+                    str(current["checkpoint_hash"])
+                    if current is not None
+                    else ""
+                )
+                if (
+                    sequence != expected_sequence
+                    or previous_hash != expected_previous
+                ):
+                    return {
+                        "status": str(
+                            self.provider_outcome_contract[
+                                "stale_lineage_status"
+                            ]
+                        ),
+                        "checkpoint_hash": checkpoint_hash,
+                        "head_checkpoint_row": current_row,
+                    }
+                stored = dict(row)
+                stored["created_at"] = "2026-07-25T00:00:00+00:00"
+                rows.append(stored)
+                durable = {
+                    field: value
+                    for field, value in stored.items()
+                    if field != "created_at"
+                }
+                if durable != row:
+                    raise ValueError(
+                        "provider outcome checkpoint durable insert differs"
+                    )
+            return {
+                "status": "inserted",
+                "checkpoint_hash": checkpoint_hash,
+            }
+        finally:
+            lineage_lock.release()
 
     def persist_chain_realized_settlement(
         self,
@@ -935,6 +1160,28 @@ class Handler(BaseHTTPRequestHandler):
                     settlement_hash=response["settlement_hash"],
                     credit_count=response["credit_count"],
                 )
+            elif name == "append_research_lab_provider_outcome_checkpoint_v2":
+                response = (
+                    self.server.state.append_provider_outcome_checkpoint(body)
+                )
+                checkpoint_row = (
+                    body.get("checkpoint_row")
+                    if isinstance(body, dict)
+                    else None
+                )
+                self.server.state.record(
+                    status="ok",
+                    operation="provider_outcome_checkpoint_appended",
+                    method=self.command,
+                    target=name,
+                    result_status=response["status"],
+                    checkpoint_hash=response["checkpoint_hash"],
+                    sequence=(
+                        checkpoint_row.get("sequence")
+                        if isinstance(checkpoint_row, dict)
+                        else None
+                    ),
+                )
             self._json_response(200, response)
             return
         if (
@@ -961,6 +1208,22 @@ class Handler(BaseHTTPRequestHandler):
                     target
                 ),
             )
+            if target == "research_lab_provider_outcome_checkpoints_v2":
+                self.server.state.record(
+                    status="ok",
+                    operation="provider_outcome_checkpoint_readback",
+                    method=self.command,
+                    target=target,
+                    row_count=len(response),
+                    checkpoint_hashes=[
+                        str(row.get("checkpoint_hash") or "")
+                        for row in response
+                    ],
+                    sequences=[
+                        int(row.get("sequence") or 0)
+                        for row in response
+                    ],
+                )
         elif self.command == "POST":
             body = self._body()
             incoming = body if isinstance(body, list) else [body]
@@ -1069,6 +1332,10 @@ def main() -> int:
         args.schema_contract,
         candidate_sha=args.candidate_sha,
     )
+    provider_outcome_contract = _migration_provider_outcome_contract(
+        args.schema_contract,
+        candidate_sha=args.candidate_sha,
+    )
     seed_rows = _migration_seed_rows(
         args.schema_contract,
         candidate_sha=args.candidate_sha,
@@ -1085,6 +1352,7 @@ def main() -> int:
         rpcs=rpcs,
         relation_columns=relation_columns,
         seed_rows=seed_rows,
+        provider_outcome_contract=provider_outcome_contract,
     )
     server = LocalPostgRESTServer((args.host, args.port), state)
     (args.state_root / "local-postgrest.ready").write_text(

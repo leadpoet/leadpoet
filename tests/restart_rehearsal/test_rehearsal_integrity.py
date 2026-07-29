@@ -37,6 +37,7 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     _direct_provider_store_tables,
     _measured_query_tables,
     _migration_seed_rows,
+    _migration_provider_outcome_contract,
     _migration_schema_contract,
     _schema_contract,
 )
@@ -403,6 +404,23 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "grandfathered_credit_unchanged": True,
             "lifetime_credit_contract_valid": True,
         },
+        "provider_outcome_contention_contract": {
+            "schema_version": (
+                "leadpoet.provider_outcome_contention_contract.v3"
+            ),
+            "lock_contention_status": "busy",
+            "stale_lineage_status": "conflict",
+            "candidate_checkpoint_hash": True,
+            "conflict_head_checkpoint_row": "encrypted_or_null",
+        },
+        "provider_outcome_append": {
+            "accepted_count": 1,
+            "rejected_count": 1,
+            "row_count": 3,
+            "contention_rollback_delta": 0,
+            "durable_head_conflict_verified": True,
+            "empty_head_conflict_verified": True,
+        },
         "seed_rows": {
             "research_lab_finalized_allocation_epochs_v2": [
                 {
@@ -438,6 +456,10 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
         candidate_sha=COMMIT,
         relation_columns=relation_columns,
     ) == contract["seed_rows"]
+    assert _migration_provider_outcome_contract(
+        path,
+        candidate_sha=COMMIT,
+    ) == contract["provider_outcome_contention_contract"]
     with pytest.raises(RuntimeError, match="differs from candidate"):
         _migration_schema_contract(path, candidate_sha="2" * 40)
 
@@ -493,6 +515,23 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "measured_settlement_receipt_projection_exact": True,
             "tampered_weight_receipt_rejected": True,
             "required_schema_migrations_declared": True,
+        },
+        "provider_outcome_contention_contract": {
+            "schema_version": (
+                "leadpoet.provider_outcome_contention_contract.v3"
+            ),
+            "lock_contention_status": "busy",
+            "stale_lineage_status": "conflict",
+            "candidate_checkpoint_hash": True,
+            "conflict_head_checkpoint_row": "encrypted_or_null",
+        },
+        "provider_outcome_append": {
+            "accepted_count": 1,
+            "rejected_count": 1,
+            "row_count": 3,
+            "contention_rollback_delta": 0,
+            "durable_head_conflict_verified": True,
+            "empty_head_conflict_verified": True,
         },
         "seed_rows": {
             "research_lab_finalized_allocation_epochs_v2": [
@@ -2704,16 +2743,166 @@ def test_gateway_rehearsal_requires_both_paid_provider_preflights() -> None:
             "path": "/account",
             "status": 200,
         },
+        {
+            "kind": "local-postgrest",
+            "operation": "provider_outcome_checkpoint_appended",
+            "status": "ok",
+            "result_status": "inserted",
+            "checkpoint_hash": "sha256:" + "1" * 64,
+        },
+        {
+            "kind": "local-postgrest",
+            "operation": "provider_outcome_checkpoint_readback",
+            "status": "ok",
+            "row_count": 1,
+            "checkpoint_hashes": ["sha256:" + "1" * 64],
+        },
+        {
+            "kind": "local-postgrest",
+            "operation": "provider_outcome_checkpoint_appended",
+            "status": "ok",
+            "result_status": "inserted",
+            "checkpoint_hash": "sha256:" + "2" * 64,
+        },
+        {
+            "kind": "local-postgrest",
+            "operation": "provider_outcome_checkpoint_readback",
+            "status": "ok",
+            "row_count": 1,
+            "checkpoint_hashes": ["sha256:" + "2" * 64],
+        },
     ]
     verify_gateway_provider_preflight(rows, transition="forward")
     verify_gateway_provider_preflight([], transition="rollback")
 
     with pytest.raises(SystemExit, match="both authenticated provider"):
-        verify_gateway_provider_preflight(rows[:1], transition="forward")
+        verify_gateway_provider_preflight(rows[1:], transition="forward")
 
-    failed = [dict(rows[0]), dict(rows[1], status=503)]
+    failed = [dict(row) for row in rows]
+    failed[1]["status"] = 503
     with pytest.raises(SystemExit, match="both authenticated provider"):
         verify_gateway_provider_preflight(failed, transition="forward")
+    with pytest.raises(SystemExit, match="durably append both"):
+        verify_gateway_provider_preflight(rows[:2], transition="forward")
+    with pytest.raises(SystemExit, match="lacks exact durable readback"):
+        verify_gateway_provider_preflight(
+            [*rows[:3], *rows[4:]],
+            transition="forward",
+        )
+    rejected = [
+        *rows,
+        {
+            "kind": "local-postgrest",
+            "operation": "request_validation",
+            "status": "rejected",
+            "path": (
+                "/rest/v1/rpc/"
+                "append_research_lab_provider_outcome_checkpoint_v2"
+            ),
+        },
+    ]
+    with pytest.raises(SystemExit, match="rejected checkpoint"):
+        verify_gateway_provider_preflight(rejected, transition="forward")
+
+
+def test_gateway_rehearsal_provider_checkpoint_rpc_matches_migration_134(
+    tmp_path,
+) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    fixture = json.loads(
+        (
+            source_root
+            / "tests/restart_rehearsal/fixtures/production_shaped_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+    table = "research_lab_provider_outcome_checkpoints_v2"
+    columns = frozenset(
+        {
+            "schema_version",
+            "artifact_master_key_ref_hash",
+            "utc_day",
+            "sequence",
+            "checkpoint_hash",
+            "previous_checkpoint_hash",
+            "state_document_hash",
+            "checkpoint_artifact_id",
+            "encrypted_checkpoint_doc",
+            "created_at",
+        }
+    )
+    contract = {
+        "schema_version": "leadpoet.provider_outcome_contention_contract.v3",
+        "lock_contention_status": "busy",
+        "stale_lineage_status": "conflict",
+        "candidate_checkpoint_hash": True,
+        "conflict_head_checkpoint_row": "encrypted_or_null",
+    }
+    state = LocalPostgRESTState(
+        state_root=tmp_path,
+        fixture=fixture,
+        source_root=source_root,
+        tables={table},
+        rpcs={"append_research_lab_provider_outcome_checkpoint_v2"},
+        relation_columns={table: columns},
+        provider_outcome_contract=contract,
+    )
+
+    def checkpoint(
+        sequence: int,
+        checkpoint_hash: str,
+        previous_hash: str,
+        suffix: str,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": "leadpoet.provider_outcome_checkpoint_row.v2",
+            "artifact_master_key_ref_hash": "sha256:" + "a" * 64,
+            "utc_day": "2026-07-29",
+            "sequence": sequence,
+            "checkpoint_hash": checkpoint_hash,
+            "previous_checkpoint_hash": previous_hash,
+            "state_document_hash": "sha256:" + suffix * 64,
+            "checkpoint_artifact_id": "sha256:" + suffix * 64,
+            "encrypted_checkpoint_doc": {"fixture": suffix},
+        }
+
+    first_hash = "sha256:" + "1" * 64
+    first = checkpoint(1, first_hash, "", "2")
+    assert state.append_provider_outcome_checkpoint(
+        {"checkpoint_row": first}
+    ) == {"status": "inserted", "checkpoint_hash": first_hash}
+    assert state.append_provider_outcome_checkpoint(
+        {"checkpoint_row": first}
+    ) == {"status": "existing", "checkpoint_hash": first_hash}
+
+    stale_hash = "sha256:" + "3" * 64
+    stale = checkpoint(1, stale_hash, "", "4")
+    assert state.append_provider_outcome_checkpoint(
+        {"checkpoint_row": stale}
+    ) == {
+        "status": "conflict",
+        "checkpoint_hash": stale_hash,
+        "head_checkpoint_row": first,
+    }
+
+    second_hash = "sha256:" + "5" * 64
+    second = checkpoint(2, second_hash, first_hash, "6")
+    lock = state._provider_outcome_lock(
+        second["artifact_master_key_ref_hash"],
+        second["utc_day"],
+    )
+    lock.acquire()
+    try:
+        assert state.append_provider_outcome_checkpoint(
+            {"checkpoint_row": second}
+        ) == {"status": "busy", "checkpoint_hash": second_hash}
+    finally:
+        lock.release()
+    assert state.append_provider_outcome_checkpoint(
+        {"checkpoint_row": second}
+    ) == {"status": "inserted", "checkpoint_hash": second_hash}
+    assert [
+        int(row["sequence"]) for row in state.rows[table]
+    ] == [1, 2]
 
 
 def test_rehearsal_provider_boundaries_require_job_credentials_and_tls_proxy(

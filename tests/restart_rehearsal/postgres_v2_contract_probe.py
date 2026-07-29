@@ -1707,6 +1707,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "persistence": first_persistence,
             },
             "provider_outcome_append": provider_outcome_append,
+            "provider_outcome_contention_contract": head_contention_contract,
             "required_schema_declarations": declaration_counts,
         }
     finally:

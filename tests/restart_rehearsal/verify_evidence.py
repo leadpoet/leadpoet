@@ -374,6 +374,29 @@ def verify_migration_backed_database_contract(candidate_sha: str) -> str:
         raise SystemExit(
             "migration-backed PostgreSQL contract evidence is incomplete"
         )
+    if document.get("provider_outcome_contention_contract") != {
+        "schema_version": "leadpoet.provider_outcome_contention_contract.v3",
+        "lock_contention_status": "busy",
+        "stale_lineage_status": "conflict",
+        "candidate_checkpoint_hash": True,
+        "conflict_head_checkpoint_row": "encrypted_or_null",
+    }:
+        raise SystemExit(
+            "migration-backed provider outcome contract evidence is missing"
+        )
+    provider_append = document.get("provider_outcome_append")
+    if (
+        not isinstance(provider_append, dict)
+        or provider_append.get("accepted_count") != 1
+        or provider_append.get("rejected_count") != 1
+        or provider_append.get("row_count") != 3
+        or provider_append.get("contention_rollback_delta") != 0
+        or provider_append.get("durable_head_conflict_verified") is not True
+        or provider_append.get("empty_head_conflict_verified") is not True
+    ):
+        raise SystemExit(
+            "migration-backed provider outcome append evidence is missing"
+        )
     relations = document.get("relations")
     if (
         not isinstance(relations, dict)
@@ -448,6 +471,53 @@ def verify_gateway_provider_preflight(
         raise SystemExit(
             "gateway provider preflight did not complete through both "
             "authenticated provider boundaries"
+        )
+    append_rows = [
+        (ordinal, row)
+        for ordinal, row in enumerate(rows)
+        if row.get("kind") == "local-postgrest"
+        and row.get("operation")
+        == "provider_outcome_checkpoint_appended"
+        and row.get("status") == "ok"
+        and row.get("result_status") in {"inserted", "existing"}
+    ]
+    checkpoint_hashes = {
+        str(row.get("checkpoint_hash") or "")
+        for _ordinal, row in append_rows
+    }
+    if len(append_rows) < 2 or len(checkpoint_hashes) < 2:
+        raise SystemExit(
+            "gateway provider preflight did not durably append both "
+            "provider outcomes"
+        )
+    for append_ordinal, append_row in append_rows:
+        checkpoint_hash = str(append_row.get("checkpoint_hash") or "")
+        if not any(
+            read_ordinal > append_ordinal
+            and read_row.get("kind") == "local-postgrest"
+            and read_row.get("operation")
+            == "provider_outcome_checkpoint_readback"
+            and read_row.get("status") == "ok"
+            and read_row.get("row_count") == 1
+            and read_row.get("checkpoint_hashes") == [checkpoint_hash]
+            for read_ordinal, read_row in enumerate(rows)
+        ):
+            raise SystemExit(
+                "gateway provider preflight checkpoint lacks exact durable "
+                "readback"
+            )
+    if any(
+        row.get("kind") == "local-postgrest"
+        and row.get("status") == "rejected"
+        and (
+            "provider_outcome" in str(row.get("target") or "")
+            or "provider_outcome" in str(row.get("path") or "")
+        )
+        for row in rows
+    ):
+        raise SystemExit(
+            "gateway provider preflight encountered a rejected checkpoint "
+            "operation"
         )
 
 

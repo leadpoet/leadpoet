@@ -38,11 +38,8 @@ _sync_subtensor = None
 _epoch_snapshot_lock = threading.Lock()
 _validated_cutover_anchor_key = None
 _validated_cutover_authority_hash = None
-_validated_cutover_authority_at = 0.0
-# A verified activation is re-checked on this cadence so an operator
-# re-fencing or rolling the lifecycle back is honored by long-running
-# processes instead of being masked by a never-expiring success cache.
-_CUTOVER_AUTHORITY_REVALIDATE_SECONDS = 300.0
+_validated_terminal_cutover_state = None
+_validated_terminal_cutover_state_lock = threading.Lock()
 _cutover_state_cache = None
 _cutover_state_cache_lock = threading.Lock()
 
@@ -250,6 +247,7 @@ def validate_epoch_runtime_lifecycle(
 ) -> dict:
     """Validate runtime authority against the durable cutover singleton."""
 
+    global _validated_terminal_cutover_state
     resolved_cutover = cutover or _load_cutover()
     if not (
         _configured_cutover_service_authority_enabled()
@@ -268,19 +266,38 @@ def validate_epoch_runtime_lifecycle(
                 resolved_cutover.first_settlement_epoch_id
             ),
         }
-    state = get_cutover_state(
-        force_refresh=force_refresh,
-        network=network,
-        netuid=netuid,
+    authority_key = (
+        _cutover_authority_cache_scope(
+            network=network,
+            netuid=netuid,
+        ),
+        resolved_cutover.mapping_hash,
     )
-    if (
-        state.get("lifecycle_state") != "stateful_active"
-        or state.get("mapping_hash") != resolved_cutover.mapping_hash
-    ):
-        raise SubnetEpochError(
-            "stateful runtime does not match the active durable cutover"
+    with _validated_terminal_cutover_state_lock:
+        if (
+            _validated_terminal_cutover_state is not None
+            and _validated_terminal_cutover_state[0] == authority_key
+        ):
+            return dict(_validated_terminal_cutover_state[1])
+        state = get_cutover_state(
+            force_refresh=force_refresh,
+            network=network,
+            netuid=netuid,
         )
-    return state
+        if (
+            state.get("lifecycle_state") != "stateful_active"
+            or state.get("mapping_hash") != resolved_cutover.mapping_hash
+        ):
+            raise SubnetEpochError(
+                "stateful runtime does not match the active durable cutover"
+            )
+        # Migration 101 makes stateful_active terminal: service_role has
+        # SELECT-only table access and every SECURITY DEFINER transition
+        # accepts only a pre-active state. Cache only after the exact mapping
+        # has passed, so a transient PostgREST outage cannot revoke a proven
+        # namespace while a mismatched row never becomes trusted.
+        _validated_terminal_cutover_state = (authority_key, dict(state))
+        return dict(state)
 
 
 async def validate_epoch_runtime_lifecycle_async(
@@ -307,17 +324,13 @@ def _validate_cutover_authority_sync(
 ) -> None:
     """Require the configured mapping to exist in the receipt-backed ledger."""
 
-    global _validated_cutover_authority_hash, _validated_cutover_authority_at
+    global _validated_cutover_authority_hash
     authority_scope = _cutover_authority_cache_scope(
         network=network,
         netuid=netuid,
     )
     authority_key = (authority_scope, cutover.mapping_hash)
-    if (
-        _validated_cutover_authority_hash == authority_key
-        and time.monotonic() - _validated_cutover_authority_at
-        <= _CUTOVER_AUTHORITY_REVALIDATE_SECONDS
-    ):
+    if _validated_cutover_authority_hash == authority_key:
         return
     if not (
         _configured_cutover_service_authority_enabled()
@@ -353,7 +366,6 @@ def _validate_cutover_authority_sync(
         # startup binding. Gateway processes with service authority additionally
         # prove the exact immutable ledger row below.
         _validated_cutover_authority_hash = authority_key
-        _validated_cutover_authority_at = time.monotonic()
         return
 
     from gateway.db.client import create_http1_sync_client
@@ -372,7 +384,6 @@ def _validate_cutover_authority_sync(
             "configured cutover is absent from the receipt-backed authority ledger"
         )
     _validated_cutover_authority_hash = authority_key
-    _validated_cutover_authority_at = time.monotonic()
 
 
 def validate_stateful_cutover_authority(

@@ -524,6 +524,70 @@ def test_primary_finney_sn71_always_checks_durable_cutover_singleton(monkeypatch
     ]
 
 
+def test_primary_and_auditor_terminal_lifecycle_survives_100_epoch_outage(
+    monkeypatch,
+):
+    from Leadpoet.utils.subnet_epoch import SubnetEpochCutover
+    from gateway.utils import epoch as epoch_utils
+
+    cutover = SubnetEpochCutover(
+        network_genesis_hash="0x" + "1" * 64,
+        netuid=71,
+        cutover_block=36_396,
+        cutover_block_hash="0x" + "2" * 64,
+        first_subnet_epoch_index=23_928,
+        first_settlement_epoch_id=101,
+        last_legacy_epoch_id=100,
+    )
+    active = {
+        "lifecycle_state": "stateful_active",
+        "mapping_hash": cutover.mapping_hash,
+        "last_legacy_epoch_id": cutover.last_legacy_epoch_id,
+        "first_settlement_epoch_id": cutover.first_settlement_epoch_id,
+    }
+    public_reads = {"n": 0}
+
+    def active_then_unavailable(*_args, **_kwargs):
+        public_reads["n"] += 1
+        if public_reads["n"] in {1, 2}:
+            return [dict(active)]
+        raise TimeoutError("PostgREST timed out")
+
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.setattr(epoch_utils, "call_public_rpc", active_then_unavailable)
+
+    validator = validator_module.Validator.__new__(validator_module.Validator)
+    validator.config = SimpleNamespace(
+        netuid=71,
+        subtensor=SimpleNamespace(network="finney"),
+    )
+    validator._epoch_cutover = cutover
+    monkeypatch.setattr(epoch_utils, "_cutover_state_cache", None)
+    monkeypatch.setattr(epoch_utils, "_validated_terminal_cutover_state", None)
+    for _ in range(100):
+        assert validator._validate_durable_epoch_runtime_lifecycle(
+            force_refresh=True,
+        ) == active
+
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.config = SimpleNamespace(
+        netuid=71,
+        subtensor=SimpleNamespace(network="finney"),
+    )
+    auditor.epoch_cutover = cutover
+    monkeypatch.setattr(epoch_utils, "_cutover_state_cache", None)
+    monkeypatch.setattr(epoch_utils, "_validated_terminal_cutover_state", None)
+    for _ in range(100):
+        assert auditor._validate_durable_epoch_runtime_lifecycle(
+            force_refresh=True,
+        ) == active
+
+    assert public_reads["n"] == 2
+
+
 def test_primary_lifecycle_transition_after_signing_blocks_sdk(monkeypatch):
     validator = _primary([(True, "must-not-submit")])
     authority_checks = []

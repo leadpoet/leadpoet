@@ -1598,6 +1598,22 @@ def test_postgres_15_happy_adversarial_rerun_and_locking_contract():
             f"stateful_active|{mapping_hash}|{genesis_hash}|71|40|41|t|t|t"
             in public_active.stdout
         )
+        repeated_fence = psql(
+            "SELECT lifecycle_state, network_genesis_hash, netuid, "
+            "last_legacy_epoch_id, first_settlement_epoch_id FROM "
+            "public.research_lab_stateful_subnet_epoch_cutover_fence_v1("
+            f"'{genesis_hash}', 71, 40, 41);"
+        )
+        assert (
+            f"stateful_active|{genesis_hash}|71|40|41"
+            in repeated_fence.stdout
+        )
+        still_active = psql(
+            "SELECT lifecycle_state, mapping_hash, "
+            "activated_at IS NOT NULL "
+            "FROM public.research_lab_stateful_subnet_epoch_cutover_state_v1;"
+        )
+        assert f"stateful_active|{mapping_hash}|t" in still_active.stdout
 
         # Activation does not reopen legacy authority. Durable lifecycle rows
         # must carry exact settlement semantics/mapping, and a V2 bundle must

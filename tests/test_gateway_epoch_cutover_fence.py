@@ -102,6 +102,7 @@ def test_runtime_lifecycle_requires_active_exact_mapping(monkeypatch):
     monkeypatch.setenv("BITTENSOR_NETWORK", "finney")
     monkeypatch.setenv("BITTENSOR_NETUID", "71")
     monkeypatch.setattr(epoch, "_cutover_state_cache", None)
+    monkeypatch.setattr(epoch, "_validated_terminal_cutover_state", None)
     monkeypatch.setattr(
         epoch,
         "_read_cutover_state_from_db_sync",
@@ -134,14 +135,52 @@ def test_runtime_lifecycle_requires_active_exact_mapping(monkeypatch):
     )["mapping_hash"] == cutover.mapping_hash
 
 
-def test_forced_refresh_never_uses_stale_active_mapping(monkeypatch):
+def test_forced_refresh_reuses_terminal_active_mapping_during_outage(monkeypatch):
     from gateway.utils import epoch
 
     cutover = _cutover()
+    monkeypatch.setenv("SUPABASE_URL", "https://test")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role")
+    monkeypatch.setattr(
+        epoch,
+        "_validated_terminal_cutover_state",
+        (
+            (
+                ("configured_service", "https://test"),
+                cutover.mapping_hash,
+            ),
+            _active_state(cutover),
+        ),
+    )
+
+    def unavailable():
+        raise SubnetEpochError("database unavailable")
+
+    monkeypatch.setattr(epoch, "_read_cutover_state_from_db_sync", unavailable)
+    assert epoch.validate_epoch_runtime_lifecycle(
+        cutover=cutover,
+        force_refresh=True,
+    ) == _active_state(cutover)
+
+
+def test_forced_refresh_never_uses_stale_preactive_mapping(monkeypatch):
+    from gateway.utils import epoch
+
+    cutover = _cutover()
+    monkeypatch.setenv("SUPABASE_URL", "https://test")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role")
+    monkeypatch.setattr(epoch, "_validated_terminal_cutover_state", None)
     monkeypatch.setattr(
         epoch,
         "_cutover_state_cache",
-        (("configured_service", "test"), 10**12, _active_state(cutover)),
+        (
+            ("configured_service", "https://test"),
+            10**12,
+            {
+                **_active_state(cutover),
+                "lifecycle_state": "stateful_staged",
+            },
+        ),
     )
 
     def unavailable():

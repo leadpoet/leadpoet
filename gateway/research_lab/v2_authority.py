@@ -1495,6 +1495,13 @@ async def build_allocation_v2(
         expected_inputs["active_source_add_obligations"] = list(
             source_state.get("source_add_obligations") or []
         )
+    fallback_obligations = list(
+        source_state.get("fallback_reimbursement_obligations") or []
+    )
+    if fallback_obligations:
+        expected_inputs["fallback_reimbursement_obligations"] = (
+            fallback_obligations
+        )
     _assert_equal(allocation_inputs, expected_inputs, "allocation source projection")
     link = await _persist_business_links(
         outcome,

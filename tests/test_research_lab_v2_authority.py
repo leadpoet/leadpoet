@@ -245,6 +245,13 @@ async def test_promotion_decision_requires_metric_graph(monkeypatch):
 async def test_allocation_binds_every_reward_parent(monkeypatch):
     loop_thread = threading.get_ident()
     validation_threads = []
+    fallback_obligations = [
+        {
+            "source_id": "historical_compute_fallback:" + "c" * 64,
+            "uid": 2,
+            "miner_hotkey": "compute-hotkey",
+        }
+    ]
 
     def validate_receipt_graph(*_args, **_kwargs):
         validation_threads.append(threading.get_ident())
@@ -260,12 +267,14 @@ async def test_allocation_binds_every_reward_parent(monkeypatch):
         "policy": {},
         "active_reimbursement_obligations": [],
         "active_champion_obligations": [],
+        "fallback_reimbursement_obligations": fallback_obligations,
     }
     source_state = {
         "epoch": 10,
         "policy": {},
         "reimbursement_obligations": [],
         "champion_obligations": [],
+        "fallback_reimbursement_obligations": fallback_obligations,
     }
 
     async def load_parent_graphs(**kwargs):
@@ -311,6 +320,69 @@ async def test_allocation_binds_every_reward_parent(monkeypatch):
     assert validation_threads
     assert set(validation_threads) == {validation_threads[0]}
     assert validation_threads[0] != loop_thread
+
+
+@pytest.mark.asyncio
+async def test_allocation_fallback_projection_mismatch_fails_closed(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        v2_authority,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+    allocation = {"allocation_hash": HASH_A}
+    source_state = {
+        "epoch": 10,
+        "policy": {},
+        "reimbursement_obligations": [],
+        "champion_obligations": [],
+        "fallback_reimbursement_obligations": [
+            {
+                "source_id": "historical_compute_fallback:" + "c" * 64,
+                "uid": 2,
+            }
+        ],
+    }
+
+    async def load_parent_graphs(**_kwargs):
+        return []
+
+    async def execute(**_kwargs):
+        return _outcome(
+            {
+                "allocation": allocation,
+                "allocation_inputs": {
+                    "epoch": 10,
+                    "policy": {},
+                    "active_reimbursement_obligations": [],
+                    "active_champion_obligations": [],
+                    "fallback_reimbursement_obligations": [
+                        {
+                            "source_id": (
+                                "historical_compute_fallback:" + "d" * 64
+                            ),
+                            "uid": 3,
+                        }
+                    ],
+                },
+                "source_state": source_state,
+                "source_state_hash": v2_authority.sha256_json(source_state),
+            }
+        )
+
+    with pytest.raises(
+        v2_authority.ResearchLabV2AuthorityError,
+        match="allocation source projection",
+    ):
+        await v2_authority.compare_allocation_v2(
+            epoch_id=10,
+            netuid=71,
+            payload={},
+            expected_allocation=allocation,
+            execute=execute,
+            load_allocation_parent_graphs=load_parent_graphs,
+        )
 
 
 @pytest.mark.asyncio

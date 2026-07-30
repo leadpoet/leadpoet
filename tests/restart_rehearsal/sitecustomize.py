@@ -1917,6 +1917,58 @@ def _handle_gateway_enclave_rpc(
         if not empty_params:
             raise ValueError("local event signer identity params differ")
         return tee_service._event_signing_identity()
+    if role == "gateway_coordinator" and method in {
+        "append_event",
+        "sign_transparency_event",
+        "get_buffer",
+        "clear_buffer",
+        "acknowledge_checkpoint",
+        "get_buffer_size",
+        "get_buffer_stats",
+        "build_checkpoint",
+    }:
+        _, tee_service = _gateway_enclave_runtime_modules()
+        if method == "append_event":
+            if set(params) != {"event"} or not isinstance(
+                params.get("event"), Mapping
+            ):
+                raise ValueError("local event append fields differ")
+            return tee_service.append_event(dict(params["event"]))
+        if method == "sign_transparency_event":
+            if set(params) != {
+                "event_type",
+                "payload",
+                "payload_hash",
+            } or not isinstance(params.get("payload"), Mapping):
+                raise ValueError("local transparency event fields differ")
+            return tee_service.sign_transparency_event(
+                event_type=params["event_type"],
+                payload=dict(params["payload"]),
+                payload_hash=params["payload_hash"],
+            )
+        if method == "acknowledge_checkpoint":
+            if set(params) != {
+                "checkpoint_number",
+                "merkle_root",
+                "sequence_range",
+            } or not isinstance(params.get("sequence_range"), Mapping):
+                raise ValueError(
+                    "local checkpoint acknowledgement fields differ"
+                )
+            return tee_service.acknowledge_checkpoint(
+                checkpoint_number=params["checkpoint_number"],
+                merkle_root=params["merkle_root"],
+                sequence_range=dict(params["sequence_range"]),
+            )
+        if not empty_params:
+            raise ValueError("local event buffer RPC params differ")
+        return {
+            "get_buffer": tee_service.get_buffer,
+            "clear_buffer": tee_service.clear_buffer,
+            "get_buffer_size": tee_service.get_buffer_size,
+            "get_buffer_stats": tee_service.get_buffer_stats,
+            "build_checkpoint": tee_service.build_checkpoint,
+        }[method]()
     if method == "role_health" and empty_params:
         return {
             "status": "healthy",

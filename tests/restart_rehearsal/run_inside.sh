@@ -326,29 +326,92 @@ manifest = json.loads(
 release = json.loads(
     (root / "release-build-input.json").read_text(encoding="utf-8")
 )
-if (
-    manifest
-    != {
-        "schema_version": "leadpoet.local_fixture_seed.v1",
-        "candidate_sha": candidate,
-    }
-    or release.get("commit_sha") != candidate
-    or not (root / "config-v2/acceptance-corpus-v2.json").is_file()
-    or not (root / "validator-app").is_dir()
-    or not (
-        root / "gateway-attested-runtime/scoring_import_closure.json"
-    ).is_file()
-    or {
-        path.name
-        for path in (root / "gateway-enclave-build-identities").glob("*.json")
-    }
-    != {
-        "gateway_autoresearch.json",
-        "gateway_coordinator.json",
-        "gateway_scoring.json",
-    }
+expected_manifest = {
+    "schema_version": "leadpoet.local_fixture_seed.v1",
+    "candidate_sha": candidate,
+}
+expected_identities = {
+    "gateway_autoresearch.json",
+    "gateway_coordinator.json",
+    "gateway_scoring.json",
+}
+observed_identities = {
+    path.name
+    for path in (root / "gateway-enclave-build-identities").glob("*.json")
+}
+mismatches = []
+if manifest != expected_manifest:
+    mismatches.append(
+        {
+            "field": "fixture_seed_manifest",
+            "expected": expected_manifest,
+            "observed": manifest,
+        }
+    )
+if release.get("commit_sha") != candidate:
+    mismatches.append(
+        {
+            "field": "release_commit_sha",
+            "expected": candidate,
+            "observed": release.get("commit_sha"),
+        }
+    )
+for relative_path, expected_kind in (
+    ("config-v2/acceptance-corpus-v2.json", "file"),
+    ("validator-app", "directory"),
+    ("gateway-attested-runtime/scoring_import_closure.json", "file"),
 ):
+    path = root / relative_path
+    if (
+        (expected_kind == "file" and not path.is_file())
+        or (expected_kind == "directory" and not path.is_dir())
+    ):
+        mismatches.append(
+            {
+                "field": "required_path",
+                "expected": {
+                    "path": relative_path,
+                    "kind": expected_kind,
+                },
+                "observed": {
+                    "exists": path.exists(),
+                    "is_file": path.is_file(),
+                    "is_directory": path.is_dir(),
+                },
+            }
+        )
+if observed_identities != expected_identities:
+    mismatches.append(
+        {
+            "field": "gateway_enclave_build_identities",
+            "expected": sorted(expected_identities),
+            "observed": sorted(observed_identities),
+        }
+    )
+if mismatches:
+    print(
+        json.dumps(
+            {
+                "schema_version": "leadpoet.fixture_seed_validation.v1",
+                "candidate_sha": candidate,
+                "mismatches": mismatches,
+                "status": "failed",
+            },
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+    )
     raise SystemExit("sanitized fixture seed differs from the target release")
+print(
+    json.dumps(
+        {
+            "schema_version": "leadpoet.fixture_seed_validation.v1",
+            "candidate_sha": candidate,
+            "status": "passed",
+        },
+        sort_keys=True,
+    )
+)
 PY
   cp -a "$FIXTURE_SEED_ROOT/config-v2/." \
     /home/ec2-user/.config/leadpoet/v2/

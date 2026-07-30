@@ -1152,6 +1152,94 @@ def test_failed_outcome_persistence_removes_uncommitted_job_artifacts():
     ) == ()
 
 
+def test_preflight_retry_recreates_terminal_record_and_encrypted_artifacts():
+    class CountingTransport:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def __call__(self, **request):
+            self.calls.append(dict(request))
+            return {
+                "http_status": 200,
+                "headers": {"content-type": "application/json"},
+                "body": b'{"costDollars":0.005,"results":[]}',
+                "tls_peer_chain_hash": _hash("c"),
+                "tls_protocol": "TLSv1.3",
+            }
+
+    class FailOnceOutcomeStore(_OutcomeStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed_once = False
+
+        def persist(self, *args, **kwargs):
+            if not self.failed_once:
+                self.failed_once = True
+                self.fail_persist = True
+                try:
+                    return super().persist(*args, **kwargs)
+                finally:
+                    self.fail_persist = False
+            return super().persist(*args, **kwargs)
+
+    vault = EncryptedArtifactVaultV2(
+        master_key=bytes(range(32)),
+        boot_identity_hash=_hash("b"),
+        retention_days=30,
+        clock=lambda: datetime(2026, 7, 10, tzinfo=timezone.utc),
+    )
+    credentials = {
+        slot: "%s-secret" % slot for slot in expected_provider_credential_slots()
+    }
+    transport = CountingTransport()
+    broker = ProviderBrokerV2(
+        credential_ref_hashes={
+            slot: credential_reference_hash(secret)
+            for slot, secret in credentials.items()
+        },
+        retry_policy_hashes={
+            provider_id: sha256_json({"retry": provider_id})
+            for provider_id in BUILTIN_PROVIDER_ROUTES
+        },
+        transport=transport,
+        artifact_sink=vault.seal,
+        clock=lambda: "2026-07-10T00:00:00Z",
+    )
+    broker.provision_credentials(credentials)
+    outcome_store = FailOnceOutcomeStore()
+    authority, _broker, _cache, _artifacts = _authority(
+        broker=broker,
+        artifacts=SimpleNamespace(seal=vault.seal),
+        outcome_store=outcome_store,
+        artifact_transaction=vault.transient_artifact_transaction,
+    )
+    request = _request(
+        job_id="job-preflight-artifact-retry",
+        purpose="research_lab.provider_preflight.v2",
+    )
+
+    with pytest.raises(RuntimeError, match="outcome persistence failed"):
+        authority.execute(request)
+
+    assert broker.health()["terminal_count"] == 0
+    assert vault.job_artifacts(
+        job_id=request["job_id"],
+        purpose=request["purpose"],
+    ) == ()
+
+    result = authority.execute(request)
+
+    assert result["terminal_status"] == "authenticated_response"
+    assert len(transport.calls) == 2
+    assert broker.health()["terminal_count"] == 1
+    assert len(
+        vault.job_artifacts(
+            job_id=request["job_id"],
+            purpose=request["purpose"],
+        )
+    ) == 2
+
+
 def test_terminal_record_commits_only_after_artifact_transaction_exit():
     events = []
 

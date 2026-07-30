@@ -19,6 +19,17 @@ import time
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
+try:
+    from fixture_contract import (
+        load_rehearsal_current_settlement_epoch_id,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "fixture_contract":
+        raise
+    from tests.restart_rehearsal.fixture_contract import (
+        load_rehearsal_current_settlement_epoch_id,
+    )
+
 
 RUNTIME_TABLES = frozenset(
     {
@@ -651,20 +662,11 @@ class LocalPostgRESTState:
             network = fixture.get("network")
             if not isinstance(network, dict):
                 raise ValueError("local PostgREST network fixture is invalid")
-            subnet_epoch_index = int(network["subnet_epoch_index"])
             current_block = int(network["current_block"])
-            first_subnet_epoch = int(cutover["first_subnet_epoch_index"])
-            if (
-                subnet_epoch_index < first_subnet_epoch
-                or current_block <= int(cutover["cutover_block"])
-            ):
-                raise ValueError(
-                    "local PostgREST chain activation fixture predates cutover"
+            current_settlement_epoch = (
+                load_rehearsal_current_settlement_epoch_id(
+                    source_root
                 )
-            current_settlement_epoch = int(
-                cutover["first_settlement_epoch_id"]
-            ) + (
-                subnet_epoch_index - first_subnet_epoch
             )
             first_epoch = current_settlement_epoch - 1
             if first_epoch < int(cutover["first_settlement_epoch_id"]):

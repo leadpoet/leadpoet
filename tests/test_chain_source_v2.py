@@ -35,7 +35,7 @@ SECOND_ACCOUNT = bytes.fromhex(
 )
 
 
-def _selective_fixture() -> bytes:
+def _selective_fixture(*, last_field: int = 76) -> bytes:
     # Option<SelectiveMetagraphInfo>::Some, compact netuid 71.
     encoded = bytearray((1, 0x1D, 0x01))
     encoded.extend(b"\x00" * 4)  # fields 1..4 omitted
@@ -44,15 +44,18 @@ def _selective_fixture() -> bytes:
     encoded.extend(b"\x01" + ((8_597_161 << 2) | 2).to_bytes(4, "little"))
     encoded.extend(b"\x00" * 44)  # fields 8..51 omitted
     encoded.extend(b"\x01\x08" + OWNER_ACCOUNT + SECOND_ACCOUNT)
-    encoded.extend(b"\x00" * 24)  # fields 53..76 omitted
+    encoded.extend(b"\x00" * (last_field - 52))
     return bytes(encoded)
 
 
-def test_selective_metagraph_codec_matches_live_sdk_shape():
+@pytest.mark.parametrize("last_field", [73, 76])
+def test_selective_metagraph_codec_matches_supported_sdk_shapes(last_field):
     assert encode_selective_metagraph_params(netuid=71) == (
         "0x470000100000050007003400"
     )
-    decoded = decode_selective_metagraph_result(_selective_fixture())
+    decoded = decode_selective_metagraph_result(
+        _selective_fixture(last_field=last_field)
+    )
     assert decoded == {
         "netuid": 71,
         "block": 8_597_161,
@@ -76,6 +79,14 @@ def test_selective_metagraph_codec_rejects_unrequested_or_trailing_fields():
             decode_selective_metagraph_result(bytes(fixture))
     with pytest.raises(ChainSourceV2Error, match="trailing"):
         decode_selective_metagraph_result(_selective_fixture() + b"\x00")
+
+
+@pytest.mark.parametrize("last_field", [72, 74, 75])
+def test_selective_metagraph_codec_rejects_unknown_sdk_shapes(last_field):
+    with pytest.raises(ChainSourceV2Error, match="layout is unsupported"):
+        decode_selective_metagraph_result(
+            _selective_fixture(last_field=last_field)
+        )
 
 
 def test_finalized_header_commits_real_chain_root_without_mislabeling_algorithm():

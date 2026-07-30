@@ -53,6 +53,7 @@ from leadpoet_canonical.weight_authority_v2 import (
 )
 from leadpoet_verifier.economics import allocate_research_lab_epoch
 from tests.restart_rehearsal.fixture_contract import (
+    load_rehearsal_current_settlement_epoch_id,
     load_rehearsal_metagraph_hotkeys,
 )
 from tests.restart_rehearsal.sanitized_weight_fixture import (
@@ -2152,11 +2153,15 @@ def main() -> int:
     parser.add_argument("--state-root", type=Path, required=True)
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--release-build-input", type=Path, required=True)
-    parser.add_argument("--epoch-id", type=int, default=24208)
+    parser.add_argument("--epoch-id", type=int)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{40}", args.candidate_sha):
         raise SystemExit("candidate SHA must be lowercase full-length hex")
+    if args.epoch_id is None:
+        args.epoch_id = load_rehearsal_current_settlement_epoch_id(
+            args.source_root
+        )
     args.state_root.mkdir(parents=True, exist_ok=True)
     try:
         result = _run_probe(args)

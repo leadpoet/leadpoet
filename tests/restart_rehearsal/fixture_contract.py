@@ -11,10 +11,10 @@ FIXTURE_PATH = Path(
 )
 
 
-def _load_rehearsal_metagraph(
+def _load_rehearsal_fixture(
     source_root: Path,
 ) -> dict[str, object]:
-    """Return the candidate-declared exact-launcher metagraph contract."""
+    """Return the candidate-declared exact-launcher fixture."""
 
     fixture_path = Path(source_root) / FIXTURE_PATH
     try:
@@ -27,10 +27,59 @@ def _load_rehearsal_metagraph(
         "leadpoet.restart_rehearsal_fixture.v1"
     ):
         raise ValueError("candidate rehearsal fixture schema differs")
+    return fixture
+
+
+def _load_rehearsal_metagraph(
+    source_root: Path,
+) -> dict[str, object]:
+    """Return the candidate-declared exact-launcher metagraph contract."""
+
+    fixture = _load_rehearsal_fixture(source_root)
     metagraph = fixture.get("metagraph")
     if not isinstance(metagraph, dict):
         raise ValueError("candidate rehearsal metagraph differs")
     return metagraph
+
+
+def load_rehearsal_current_settlement_epoch_id(
+    source_root: Path,
+) -> int:
+    """Resolve the fixture's current settlement epoch from candidate policy."""
+
+    root = Path(source_root)
+    fixture = _load_rehearsal_fixture(root)
+    network = fixture.get("network")
+    if not isinstance(network, dict):
+        raise ValueError("candidate rehearsal network differs")
+    try:
+        cutover = json.loads(
+            (
+                root / "config" / "stateful-epoch-cutover-sn71.json"
+            ).read_text(encoding="utf-8")
+        )
+        netuid = int(network["netuid"])
+        subnet_epoch_index = int(network["subnet_epoch_index"])
+        current_block = int(network["current_block"])
+        first_subnet_epoch = int(cutover["first_subnet_epoch_index"])
+        first_settlement_epoch = int(cutover["first_settlement_epoch_id"])
+        cutover_block = int(cutover["cutover_block"])
+        cutover_netuid = int(cutover["netuid"])
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "candidate rehearsal settlement policy differs"
+        ) from exc
+    if (
+        netuid != cutover_netuid
+        or subnet_epoch_index < first_subnet_epoch
+        or current_block <= cutover_block
+    ):
+        raise ValueError(
+            "candidate rehearsal settlement fixture predates cutover"
+        )
+    return first_settlement_epoch + (
+        subnet_epoch_index - first_subnet_epoch
+    )
 
 
 def load_rehearsal_metagraph_hotkeys(

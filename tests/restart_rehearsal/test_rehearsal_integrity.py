@@ -30,6 +30,7 @@ from tests.restart_rehearsal import join_evidence
 from tests.restart_rehearsal import production_workflow_runner
 from tests.restart_rehearsal import sitecustomize as rehearsal_sitecustomize
 from tests.restart_rehearsal.fixture_contract import (
+    load_rehearsal_current_settlement_epoch_id,
     load_rehearsal_metagraph_account_ids,
     load_rehearsal_metagraph_hotkeys,
 )
@@ -267,12 +268,16 @@ def test_chain_settlement_activation_fixture_creates_one_epoch_backlog(
     assert rehearsal_sitecustomize._current_settlement_epoch_id() == (
         current_epoch
     )
+    assert load_rehearsal_current_settlement_epoch_id(source_root) == (
+        current_epoch
+    )
 
 
 def test_historical_compute_seed_matches_exact_metagraph_recipients(
     monkeypatch,
 ) -> None:
     from leadpoet_canonical.chain_source_v2 import (
+        CHAIN_SELECTIVE_RESULT_LAST_FIELDS,
         decode_selective_metagraph_result,
         ss58_encode_account_id,
     )
@@ -285,9 +290,15 @@ def test_historical_compute_seed_matches_exact_metagraph_recipients(
     )
     fixture_hotkeys = load_rehearsal_metagraph_hotkeys(source_root)
     account_ids = load_rehearsal_metagraph_account_ids(source_root)
-    chain_metagraph = decode_selective_metagraph_result(
-        rehearsal_sitecustomize._selective_metagraph_fixture(8_700_040)
-    )
+    chain_metagraphs = [
+        decode_selective_metagraph_result(
+            rehearsal_sitecustomize._selective_metagraph_fixture(
+                8_700_040,
+                last_field=last_field,
+            )
+        )
+        for last_field in CHAIN_SELECTIVE_RESULT_LAST_FIELDS
+    ]
     exact_hotkeys = rehearsal_sitecustomize._local_metagraph_hotkeys()
     reimbursements = postgres_probe._historical_compute_reimbursements(
         source_root=source_root,
@@ -295,7 +306,10 @@ def test_historical_compute_seed_matches_exact_metagraph_recipients(
     )
 
     assert exact_hotkeys[2:] == fixture_hotkeys[2:]
-    assert tuple(chain_metagraph["hotkeys"]) == fixture_hotkeys
+    assert {
+        tuple(chain_metagraph["hotkeys"])
+        for chain_metagraph in chain_metagraphs
+    } == {fixture_hotkeys}
     assert tuple(
         ss58_encode_account_id(account_id) for account_id in account_ids
     ) == fixture_hotkeys
@@ -1053,6 +1067,22 @@ def test_gateway_rehearsal_chain_adapter_supports_exact_epoch_close_search(
     assert result["validator_uid"] == 0
     assert result["active_source_epoch_id"] == settlement_epoch
     assert result["weights"] == [[0, 65_535], [1, 16_384]]
+
+    legacy_epoch = int(cutover["last_legacy_epoch_id"])
+    historical = source.read_historical_finalized_weights(
+        netuid=71,
+        epoch_id=legacy_epoch,
+        validator_hotkey=VALIDATOR_HOTKEY,
+        context=ExecutionContextV2(
+            job_id="rehearsal-historical-layout",
+            purpose="research_lab.legacy_finalized_allocation.v2",
+            epoch_id=legacy_epoch,
+        ),
+    )
+    assert historical["epoch_id"] == legacy_epoch
+    assert historical["target_block"] == (legacy_epoch + 1) * 360 - 1
+    assert historical["validator_uid"] == 0
+    assert historical["weights"] == [[0, 65_535], [1, 16_384]]
 
 
 def test_restart_rehearsal_injects_and_proves_transient_epoch_read_recovery(
@@ -3053,6 +3083,12 @@ def test_joined_manifest_requires_every_authority_field(
 def test_behavior_contract_tracks_candidate_runtime_policies(
     monkeypatch,
 ) -> None:
+    import leadpoet_canonical.chain_source_v2 as chain_source
+    from leadpoet_canonical.chain_source_v2 import (
+        chain_source_policy_document,
+        chain_source_policy_hash,
+    )
+
     source_root = Path(__file__).resolve().parents[2]
     baseline = build_rehearsal_behavior_contract_v2(
         source_root=source_root,
@@ -3081,12 +3117,43 @@ def test_behavior_contract_tracks_candidate_runtime_policies(
         == baseline["policy_commitments"]["conditional_icp"]["total_icps"] - 2
     )
     assert changed["policy_commitments"]["git_tree"]["max_nodes"] == 8
+    assert changed["policy_commitments"]["chain_source"] == {
+        "policy": chain_source_policy_document(),
+        "policy_hash": chain_source_policy_hash(),
+    }
     assert changed["contract_hash"] != baseline["contract_hash"]
+
+    monkeypatch.setattr(
+        chain_source,
+        "CHAIN_SELECTIVE_RESULT_LAST_FIELDS",
+        (73, 76, 80),
+    )
+    layout_changed = build_rehearsal_behavior_contract_v2(
+        source_root=source_root,
+        candidate_sha=COMMIT,
+        profile="prepush",
+        epoch_count=1,
+    )
+    assert layout_changed["policy_commitments"]["chain_source"][
+        "policy"
+    ]["selective_result_last_fields"] == [73, 76, 80]
+    assert layout_changed["contract_hash"] != changed["contract_hash"]
 
 
 def test_candidate_behavior_scenarios_follow_nondefault_policy(
     monkeypatch,
 ) -> None:
+    from leadpoet_canonical.chain_source_v2 import (
+        chain_source_policy_document,
+        chain_source_policy_hash,
+    )
+
+    source_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setattr(
+        production_workflow_runner,
+        "SOURCE_ROOT",
+        source_root,
+    )
     monkeypatch.setenv(
         "RESEARCH_LAB_CONDITIONAL_HOLDOUT_TOTAL_ICPS",
         "18",
@@ -3105,12 +3172,48 @@ def test_candidate_behavior_scenarios_follow_nondefault_policy(
     replacement = (
         production_workflow_runner._exercise_git_tree_replacement()
     )
+    historical_layouts = (
+        production_workflow_runner._exercise_historical_metagraph_layouts()
+    )
 
     assert assignment["category_counts"]["conditional"] == 18
     assert candidate_gate["initial_count"] == 20
     assert candidate_gate["conditional_count"] == 18
     assert candidate_gate["final_count"] == 38
     assert replacement["max_nodes"] == 8
+    assert historical_layouts["policy_hash"] == chain_source_policy_hash()
+    assert historical_layouts["accepted_layouts"] == (
+        chain_source_policy_document()["selective_result_last_fields"]
+    )
+    assert historical_layouts["rpc_call_counts"] == {
+        str(last_field): 6
+        for last_field in historical_layouts["accepted_layouts"]
+    }
+
+
+def test_historical_layout_scenario_follows_candidate_policy(
+    monkeypatch,
+) -> None:
+    import leadpoet_canonical.chain_source_v2 as chain_source
+
+    source_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setattr(
+        production_workflow_runner,
+        "SOURCE_ROOT",
+        source_root,
+    )
+    monkeypatch.setattr(
+        chain_source,
+        "CHAIN_SELECTIVE_RESULT_LAST_FIELDS",
+        (73, 76, 80),
+    )
+
+    evidence = (
+        production_workflow_runner._exercise_historical_metagraph_layouts()
+    )
+
+    assert evidence["accepted_layouts"] == [73, 76, 80]
+    assert evidence["rpc_call_counts"] == {"73": 6, "76": 6, "80": 6}
 
 
 def test_weight_storage_preflight_capability_tracks_selected_release(

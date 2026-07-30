@@ -33,6 +33,7 @@ BEHAVIOR_SCENARIOS = (
     "conditional-icp-policy",
     "conditional-candidate-gate",
     "git-tree-replacement",
+    "historical-metagraph-layouts",
     "research-lab-allocation-conservation",
 )
 
@@ -52,6 +53,7 @@ BEHAVIORAL_INVARIANTS = (
     "conditional_icp_policy_config_bound",
     "conditional_candidate_advancement_exact",
     "git_tree_replacement_deterministic",
+    "historical_metagraph_layouts_policy_bound",
     "research_lab_allocation_policy_config_bound",
     "research_lab_allocation_conserved",
     "canonical_vector_primary_auditor_equal",
@@ -78,6 +80,8 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "gateway/research_lab/scoring_worker.py",
     "gateway/research_lab/worker.py",
     "gateway/api/weights.py",
+    "gateway/tee/coordinator_chain_source_v2.py",
+    "leadpoet_canonical/chain_source_v2.py",
     "leadpoet_verifier/economics.py",
     "neurons/validator.py",
     "neurons/auditor_validator.py",
@@ -161,6 +165,10 @@ def _policy_commitments() -> dict[str, Any]:
     # that only need its schema constants.
     from gateway.research_lab.config import ResearchLabGatewayConfig
     from gateway.research_lab.git_tree_models import TreePolicy
+    from leadpoet_canonical.chain_source_v2 import (
+        chain_source_policy_document,
+        chain_source_policy_hash,
+    )
 
     conditional_policy = (
         ResearchLabGatewayConfig.from_env()
@@ -171,7 +179,12 @@ def _policy_commitments() -> dict[str, Any]:
         enabled=True
     )
     tree_policy = TreePolicy.from_env(os.environ).to_dict()
+    chain_source_policy = chain_source_policy_document()
     return {
+        "chain_source": {
+            "policy": chain_source_policy,
+            "policy_hash": chain_source_policy_hash(),
+        },
         "conditional_icp": conditional_policy,
         "research_lab_allocation": {
             "policy": allocation_policy,

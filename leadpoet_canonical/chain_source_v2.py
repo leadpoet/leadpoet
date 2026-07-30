@@ -25,6 +25,7 @@ CHAIN_ENDPOINT_PORT = 443
 CHAIN_ENDPOINT_PATH = "/"
 CHAIN_RPC_METHOD = "SubnetInfoRuntimeApi_get_selective_mechagraph"
 CHAIN_SELECTIVE_FIELDS = (0, 5, 7, 52)
+CHAIN_SELECTIVE_RESULT_LAST_FIELDS = (73, 76)
 CHAIN_SS58_FORMAT = 42
 CHAIN_FINALIZATION_EPOCH_BLOCKS = 360
 CHAIN_SUBTENSOR_MAX_TEMPO = 50_400
@@ -66,6 +67,9 @@ def chain_source_policy_document() -> Dict[str, Any]:
         ],
         "runtime_method": CHAIN_RPC_METHOD,
         "selective_fields": list(CHAIN_SELECTIVE_FIELDS),
+        "selective_result_last_fields": list(
+            CHAIN_SELECTIVE_RESULT_LAST_FIELDS
+        ),
         "ss58_format": CHAIN_SS58_FORMAT,
         "max_hotkeys": CHAIN_MAX_HOTKEYS,
         "max_response_bytes": CHAIN_MAX_RPC_RESPONSE_BYTES,
@@ -652,7 +656,18 @@ def decode_selective_metagraph_result(encoded: Any) -> Dict[str, Any]:
         for index in range(offset, end, 32)
     ]
     offset = end
-    offset = _require_unselected(data, offset, 53, 76)
+    tail_field_count = len(data) - offset
+    max_tail_field_count = max(CHAIN_SELECTIVE_RESULT_LAST_FIELDS) - 52
+    if tail_field_count > max_tail_field_count:
+        raise ChainSourceV2Error(
+            "selective metagraph result has trailing bytes"
+        )
+    last_field = 52 + tail_field_count
+    if last_field not in CHAIN_SELECTIVE_RESULT_LAST_FIELDS:
+        raise ChainSourceV2Error(
+            "selective metagraph result layout is unsupported"
+        )
+    offset = _require_unselected(data, offset, 53, last_field)
     if offset != len(data):
         raise ChainSourceV2Error("selective metagraph result has trailing bytes")
     return {

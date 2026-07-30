@@ -28,6 +28,7 @@ from urllib.parse import parse_qsl, urlparse, urlsplit, urlunsplit
 
 try:
     from fixture_contract import (
+        load_rehearsal_current_settlement_epoch_id,
         load_rehearsal_metagraph_account_ids,
         load_rehearsal_metagraph_hotkeys,
     )
@@ -35,6 +36,7 @@ except ModuleNotFoundError as exc:
     if exc.name != "fixture_contract":
         raise
     from tests.restart_rehearsal.fixture_contract import (
+        load_rehearsal_current_settlement_epoch_id,
         load_rehearsal_metagraph_account_ids,
         load_rehearsal_metagraph_hotkeys,
     )
@@ -102,16 +104,8 @@ def _subnet_epoch_index_at(block: int) -> int:
 
 
 def _current_settlement_epoch_id() -> int:
-    cutover = json.loads(
-        (
-            SOURCE_ROOT / "config/stateful-epoch-cutover-sn71.json"
-        ).read_text(encoding="utf-8")
-    )
-    first_subnet_epoch = int(cutover["first_subnet_epoch_index"])
-    if SUBNET_EPOCH_INDEX < first_subnet_epoch:
-        raise ValueError("local chain settlement fixture predates cutover")
-    return int(cutover["first_settlement_epoch_id"]) + (
-        SUBNET_EPOCH_INDEX - first_subnet_epoch
+    return load_rehearsal_current_settlement_epoch_id(
+        SOURCE_ROOT
     )
 
 
@@ -1333,7 +1327,25 @@ class _LocalRuntimeIdentity:
         )
 
 
-def _selective_metagraph_fixture(block: int) -> str:
+def _selective_metagraph_fixture(
+    block: int,
+    *,
+    last_field: int | None = None,
+) -> str:
+    from leadpoet_canonical.chain_source_v2 import (
+        CHAIN_SELECTIVE_RESULT_LAST_FIELDS,
+    )
+
+    supported_last_fields = tuple(CHAIN_SELECTIVE_RESULT_LAST_FIELDS)
+    selected_last_field = (
+        max(supported_last_fields)
+        if last_field is None
+        else int(last_field)
+    )
+    if selected_last_field not in supported_last_fields:
+        raise ValueError(
+            "local selective metagraph layout is outside candidate policy"
+        )
     account_ids = load_rehearsal_metagraph_account_ids(SOURCE_ROOT)
     owner = account_ids[0]
     encoded = bytearray((1, 0x1D, 0x01))
@@ -1344,7 +1356,7 @@ def _selective_metagraph_fixture(block: int) -> str:
     encoded.extend(b"\x00" * 44)
     encoded.extend(b"\x01" + bytes((len(account_ids) << 2,)))
     encoded.extend(b"".join(account_ids))
-    encoded.extend(b"\x00" * 24)
+    encoded.extend(b"\x00" * (selected_last_field - 52))
     return "0x" + bytes(encoded).hex()
 
 
@@ -1410,7 +1422,18 @@ def _local_chain_rpc(body: bytes, *, archive: bool) -> bytes:
         at_hash = str(params[2])
         block = _block_number(at_hash)
         if runtime_method == "SubnetInfoRuntimeApi_get_selective_mechagraph":
-            result = _selective_metagraph_fixture(block)
+            from leadpoet_canonical.chain_source_v2 import (
+                CHAIN_SELECTIVE_RESULT_LAST_FIELDS,
+            )
+
+            result = _selective_metagraph_fixture(
+                block,
+                last_field=(
+                    min(CHAIN_SELECTIVE_RESULT_LAST_FIELDS)
+                    if archive
+                    else max(CHAIN_SELECTIVE_RESULT_LAST_FIELDS)
+                ),
+            )
         elif runtime_method == "SwapRuntimeApi_current_alpha_price":
             if at_hash != current_hash:
                 raise ValueError(

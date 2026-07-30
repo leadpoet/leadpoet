@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -1628,6 +1629,311 @@ def _exercise_git_tree_replacement() -> dict[str, Any]:
     }
 
 
+def _exercise_historical_metagraph_layouts() -> dict[str, Any]:
+    """Exercise every candidate-declared archive layout through production."""
+
+    from fixture_contract import (
+        load_rehearsal_metagraph_account_ids,
+        load_rehearsal_metagraph_hotkeys,
+    )
+    from gateway.tee.coordinator_chain_source_v2 import (
+        CHAIN_ARCHIVE_ENDPOINT_URL,
+        CoordinatorChainSourceV2,
+    )
+    from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+    from leadpoet_canonical.attested_v2 import (
+        build_transport_attempt,
+        sha256_bytes,
+    )
+    from leadpoet_canonical.chain_source_v2 import (
+        CHAIN_ARCHIVE_ENDPOINT_HOST,
+        CHAIN_RPC_METHOD,
+        ChainSourceV2Error,
+        chain_source_policy_document,
+        chain_source_policy_hash,
+        encode_selective_metagraph_params,
+        weights_storage_key,
+    )
+
+    policy = chain_source_policy_document()
+    layouts = tuple(
+        int(value) for value in policy["selective_result_last_fields"]
+    )
+    if (
+        not layouts
+        or tuple(sorted(set(layouts))) != layouts
+        or any(value <= 52 for value in layouts)
+    ):
+        raise RuntimeError(
+            "candidate chain-source result layouts are invalid"
+        )
+    account_ids = load_rehearsal_metagraph_account_ids(SOURCE_ROOT)
+    hotkeys = load_rehearsal_metagraph_hotkeys(SOURCE_ROOT)
+    validator_hotkey = hotkeys[0]
+    cutover = json.loads(
+        (
+            SOURCE_ROOT
+            / "config"
+            / "stateful-epoch-cutover-sn71.json"
+        ).read_text(encoding="utf-8")
+    )
+    netuid = int(cutover["netuid"])
+    epoch_id = int(cutover["last_legacy_epoch_id"])
+    target_block = (epoch_id + 1) * 360 - 1
+    retry_hashes = {
+        "bittensor_chain": sha256_json({"retry": "chain"}),
+        "bittensor_archive": sha256_json({"retry": "archive"}),
+        "coingecko": sha256_json({"retry": "coingecko"}),
+    }
+    def selective_fixture(last_field: int) -> str:
+        if netuid < 1 << 6:
+            compact_netuid = bytes((netuid << 2,))
+        elif netuid < 1 << 14:
+            compact_netuid = ((netuid << 2) | 1).to_bytes(2, "little")
+        else:
+            compact_netuid = ((netuid << 2) | 2).to_bytes(4, "little")
+        encoded = bytearray(b"\x01" + compact_netuid)
+        encoded.extend(b"\x00" * 4)
+        encoded.extend(b"\x01" + account_ids[0])
+        encoded.extend(b"\x00")
+        encoded.extend(
+            b"\x01"
+            + ((target_block << 2) | 2).to_bytes(4, "little")
+        )
+        encoded.extend(b"\x00" * 44)
+        encoded.extend(
+            b"\x01"
+            + bytes((len(account_ids) << 2,))
+            + b"".join(account_ids)
+        )
+        encoded.extend(b"\x00" * (int(last_field) - 52))
+        return "0x" + bytes(encoded).hex()
+
+    class StrictArchiveBoundary:
+        def __init__(self, *, last_field: int) -> None:
+            self.last_field = int(last_field)
+            self.calls: list[dict[str, Any]] = []
+
+        def execute(
+            self,
+            request: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            if (
+                request.get("provider_id") != "bittensor_archive"
+                or request.get("method") != "POST"
+                or request.get("url") != CHAIN_ARCHIVE_ENDPOINT_URL
+                or request.get("retry_policy_hash")
+                != retry_hashes["bittensor_archive"]
+            ):
+                raise RuntimeError(
+                    "historical layout probe crossed an undeclared boundary"
+                )
+            request_body = base64.b64decode(
+                str(request["body_b64"]),
+                validate=True,
+            )
+            rpc = json.loads(request_body)
+            if set(rpc) != {"jsonrpc", "id", "method", "params"} or (
+                rpc.get("jsonrpc") != "2.0"
+            ):
+                raise RuntimeError(
+                    "historical layout probe received malformed JSON-RPC"
+                )
+            method = rpc.get("method")
+            call_number = len(self.calls) + 1
+            self.calls.append(
+                {
+                    "method": method,
+                    "params": rpc.get("params"),
+                }
+            )
+            if method == "chain_getFinalizedHead":
+                if rpc.get("params") != []:
+                    raise RuntimeError(
+                        "historical finalized-head request differs"
+                    )
+                value: Any = "0x" + "a" * 64
+            elif method == "chain_getBlockHash":
+                if rpc.get("params") != [target_block]:
+                    raise RuntimeError(
+                        "historical layout probe requested another block"
+                    )
+                value = "0x" + "b" * 64
+            elif method == "chain_getHeader":
+                at_hash = str((rpc.get("params") or [""])[0])
+                is_target = at_hash == "0x" + "b" * 64
+                if at_hash not in {
+                    "0x" + "a" * 64,
+                    "0x" + "b" * 64,
+                }:
+                    raise RuntimeError(
+                        "historical layout probe requested another hash"
+                    )
+                value = {
+                    "number": hex(
+                        target_block if is_target else target_block + 20
+                    ),
+                    "stateRoot": "0x" + "c" * 64,
+                    "parentHash": "0x" + "d" * 64,
+                    "extrinsicsRoot": "0x" + "e" * 64,
+                    "digest": {"logs": []},
+                }
+            elif method == "state_call":
+                if rpc.get("params") != [
+                    CHAIN_RPC_METHOD,
+                    encode_selective_metagraph_params(netuid=netuid),
+                    "0x" + "b" * 64,
+                ]:
+                    raise RuntimeError(
+                        "historical selective metagraph request differs"
+                    )
+                value = selective_fixture(self.last_field)
+            elif method == "state_getStorage":
+                if rpc.get("params") != [
+                    weights_storage_key(
+                        netuid=netuid,
+                        validator_uid=0,
+                    ),
+                    "0x" + "b" * 64,
+                ]:
+                    raise RuntimeError(
+                        "historical weight-storage request differs"
+                    )
+                value = "0x" + (
+                    b"\x08"
+                    + (1).to_bytes(2, "little")
+                    + (1000).to_bytes(2, "little")
+                    + (4).to_bytes(2, "little")
+                    + (2000).to_bytes(2, "little")
+                ).hex()
+            else:
+                raise RuntimeError(
+                    "historical layout probe received an unknown RPC"
+                )
+            response_body = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": rpc.get("id"),
+                    "result": value,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            artifact_hash = sha256_json(
+                {
+                    "call": call_number,
+                    "layout": self.last_field,
+                    "method": method,
+                }
+            )
+            attempt = build_transport_attempt(
+                request_id=("%032x" % call_number),
+                logical_operation_id=str(
+                    request["logical_operation_id"]
+                ),
+                job_id=str(request["job_id"]),
+                purpose=str(request["purpose"]),
+                provider_id="bittensor_archive",
+                attempt_number=int(request["attempt_number"]),
+                method="POST",
+                destination_host=CHAIN_ARCHIVE_ENDPOINT_HOST,
+                destination_port=443,
+                path_hash=sha256_json({"path": "/"}),
+                nonsecret_headers_hash=sha256_json(
+                    {"headers": "application/json"}
+                ),
+                body_hash=sha256_bytes(request_body),
+                credential_ref_hash=sha256_json(
+                    {"credential": "public-archive"}
+                ),
+                retry_policy_hash=str(request["retry_policy_hash"]),
+                timeout_ms=int(request["timeout_ms"]),
+                started_at=NOW,
+                terminal_status="authenticated_response",
+                http_status=200,
+                response_hash=sha256_bytes(response_body),
+                request_artifact_hash=artifact_hash,
+                response_artifact_hash=sha256_bytes(response_body),
+                tls_peer_chain_hash=sha256_json(
+                    {"tls": "archive-rehearsal"}
+                ),
+                tls_protocol="TLSv1.3",
+                failure_code=None,
+                completed_at=NOW,
+            )
+            return {
+                "terminal_status": "authenticated_response",
+                "http_status": 200,
+                "body_b64": base64.b64encode(response_body).decode(
+                    "ascii"
+                ),
+                "transport_attempt": attempt,
+            }
+
+    def execute_layout(last_field: int) -> tuple[dict[str, Any], int]:
+        boundary = StrictArchiveBoundary(last_field=last_field)
+        source = CoordinatorChainSourceV2(
+            execute_provider=boundary.execute,
+            retry_policy_hashes=retry_hashes,
+            epoch_authority={
+                "mode": "stateful_v1",
+                "cutover": cutover,
+            },
+            sleep=lambda _seconds: None,
+        )
+        context = ExecutionContextV2(
+            job_id=f"rehearsal:historical-layout:{last_field}",
+            purpose="research_lab.legacy_finalized_allocation.v2",
+            epoch_id=epoch_id,
+        )
+        result = source.read_historical_finalized_weights(
+            netuid=netuid,
+            epoch_id=epoch_id,
+            validator_hotkey=validator_hotkey,
+            context=context,
+        )
+        return result, len(boundary.calls)
+
+    accepted: list[int] = []
+    call_counts: dict[str, int] = {}
+    for last_field in layouts:
+        result, call_count = execute_layout(last_field)
+        if (
+            result["target_block"] != target_block
+            or result["validator_uid"] != 0
+            or result["weights"] != [[1, 1000], [4, 2000]]
+            or call_count != 6
+        ):
+            raise RuntimeError(
+                "historical archive layout produced different authority"
+            )
+        accepted.append(last_field)
+        call_counts[str(last_field)] = call_count
+
+    rejected_layout = next(
+        (
+            value
+            for value in range(53, max(layouts) + 1)
+            if value not in layouts
+        ),
+        max(layouts) + 1,
+    )
+    try:
+        execute_layout(rejected_layout)
+    except ChainSourceV2Error:
+        pass
+    else:
+        raise RuntimeError(
+            "undeclared historical archive layout did not fail closed"
+        )
+    return {
+        "policy_hash": chain_source_policy_hash(),
+        "accepted_layouts": accepted,
+        "rejected_layout": rejected_layout,
+        "rpc_call_counts": call_counts,
+    }
+
+
 def _exercise_research_lab_allocation_conservation() -> dict[str, Any]:
     """Exercise the configured no-burn and compatibility allocation modes."""
 
@@ -1858,6 +2164,7 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "conditional-icp-policy": _exercise_conditional_icp_policy,
     "conditional-candidate-gate": _exercise_conditional_candidate_gate,
     "git-tree-replacement": _exercise_git_tree_replacement,
+    "historical-metagraph-layouts": _exercise_historical_metagraph_layouts,
     "research-lab-allocation-conservation": (
         _exercise_research_lab_allocation_conservation
     ),
@@ -2210,6 +2517,22 @@ def main() -> int:
             == behavior_contract["policy_commitments"]["git_tree"].get(
                 "policy_hash"
             )
+        ),
+        "historical_metagraph_layouts_policy_bound": (
+            "historical-metagraph-layouts" in behavior_evidence
+            and behavior_contract is not None
+            and behavior_evidence["historical-metagraph-layouts"].get(
+                "policy_hash"
+            )
+            == behavior_contract["policy_commitments"]["chain_source"].get(
+                "policy_hash"
+            )
+            and behavior_evidence["historical-metagraph-layouts"].get(
+                "accepted_layouts"
+            )
+            == behavior_contract["policy_commitments"]["chain_source"][
+                "policy"
+            ].get("selective_result_last_fields")
         ),
         "research_lab_allocation_policy_config_bound": (
             "research-lab-allocation-conservation" in behavior_evidence

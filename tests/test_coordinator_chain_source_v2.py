@@ -30,7 +30,7 @@ OWNER = bytes.fromhex("924620afb270acb1ee27bd034aa9e97108ef276da5079db982883cd70
 MINER = bytes.fromhex("74adb27b7edd7126a81f5bac79e9bda1a4c8ec94d2c4f2ce795e0c56932a5383")
 
 
-def _selective_fixture(block):
+def _selective_fixture(block, *, last_field=76):
     encoded = bytearray((1, 0x1D, 0x01))
     encoded.extend(b"\x00" * 4)
     encoded.extend(b"\x01" + OWNER)
@@ -38,7 +38,7 @@ def _selective_fixture(block):
     encoded.extend(b"\x01" + ((int(block) << 2) | 2).to_bytes(4, "little"))
     encoded.extend(b"\x00" * 44)
     encoded.extend(b"\x01\x08" + OWNER + MINER)
-    encoded.extend(b"\x00" * 24)
+    encoded.extend(b"\x00" * (int(last_field) - 52))
     return "0x" + bytes(encoded).hex()
 
 
@@ -445,10 +445,11 @@ def test_stateful_epoch_close_is_live_finalized_and_exact_archive_state(
 
 
 class HistoricalBroker:
-    def __init__(self, *, epoch=100, fail_first=False):
+    def __init__(self, *, epoch=100, fail_first=False, last_field=73):
         self.epoch = int(epoch)
         self.target = (self.epoch + 1) * 360 - 1
         self.fail_first = bool(fail_first)
+        self.last_field = int(last_field)
         self.calls = []
 
     def execute(self, request):
@@ -473,7 +474,10 @@ class HistoricalBroker:
                     "digest": {"logs": []},
                 }
             elif rpc["method"] == "state_call":
-                value = _selective_fixture(self.target)
+                value = _selective_fixture(
+                    self.target,
+                    last_field=self.last_field,
+                )
             else:
                 value = "0x" + (
                     b"\x08"

@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack, contextmanager
+import fcntl
 import hashlib
 import json
+import os
 import platform
 from pathlib import Path
 import shutil
@@ -33,6 +35,12 @@ from urllib.request import urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IMAGE_REPOSITORY = "leadpoet-local-restart-rehearsal"
+REHEARSAL_LOCK_PATH = (
+    Path.home()
+    / ".cache"
+    / "leadpoet-local-restart-rehearsal"
+    / "controller.lock"
+)
 REHEARSAL_BASE_IMAGES = {
     "linux/amd64": (
         "public.ecr.aws/amazonlinux/amazonlinux@sha256:"
@@ -90,6 +98,41 @@ PROFILE_LIMITS = {
         "fault_matrix": True,
     },
 }
+
+
+@contextmanager
+def _exclusive_rehearsal_lock() -> Iterator[None]:
+    REHEARSAL_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with REHEARSAL_LOCK_PATH.open("a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            handle.seek(0)
+            owner = handle.read().strip() or "owner metadata unavailable"
+            raise SystemExit(
+                "another exact local restart rehearsal is already running; "
+                f"lock={REHEARSAL_LOCK_PATH} owner={owner}"
+            ) from exc
+        handle.seek(0)
+        handle.truncate()
+        handle.write(
+            json.dumps(
+                {
+                    "cwd": str(Path.cwd()),
+                    "pid": os.getpid(),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        handle.flush()
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            handle.truncate()
+            handle.flush()
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _run(
@@ -1086,6 +1129,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--rebuild-image", action="store_true")
     args = parser.parse_args(argv)
 
+    with _exclusive_rehearsal_lock():
+        return _run_profile(args)
+
+
+def _run_profile(args: argparse.Namespace) -> int:
     from_sha = _git_sha(args.from_sha)
     candidate_sha = _git_sha(args.candidate_sha)
     transition = _resolve_transition(

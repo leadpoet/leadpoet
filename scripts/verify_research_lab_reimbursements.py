@@ -205,16 +205,21 @@ def _run_lab_allocator_simulations() -> None:
     high = _paid_for_uid(allocation["reimbursement_allocations"], 1)
     low = _paid_for_uid(allocation["reimbursement_allocations"], 6)
     _assert_close(high, low * 2, "no-champion reimbursement should be spend-proportional")
+    _assert_close(
+        allocation["reimbursement_alpha_percent"],
+        20.0,
+        "active reimbursements should consume otherwise-unused lab capacity",
+    )
     for item in allocation["reimbursement_allocations"]:
-        _assert_close(
-            item["paid_alpha_percent"],
-            item["intended_alpha_percent"],
-            "no-champion reimbursement should stop at its set rate",
-        )
-        if item["overpaid_alpha_percent"] > 0:
-            raise AssertionError("no-champion reimbursement must not overpay")
-    if allocation["unallocated_percent"] <= 0:
-        raise AssertionError("unused no-champion lab capacity should remain unallocated")
+        if item["paid_alpha_percent"] <= item["intended_alpha_percent"]:
+            raise AssertionError("no-champion reimbursement should receive proportional surplus")
+        if item["reason"] != "surplus_reimbursement_no_burn":
+            raise AssertionError("no-champion reimbursement should identify no-burn surplus")
+    _assert_close(
+        allocation["unallocated_percent"],
+        0.0,
+        "active reimbursements should eliminate research-lab burn",
+    )
 
     two_champions = [
         _champion_obligation(101, start_epoch=100, improvement_points=4.0),

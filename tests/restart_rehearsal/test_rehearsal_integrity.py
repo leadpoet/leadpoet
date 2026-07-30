@@ -2885,6 +2885,12 @@ def test_joined_manifest_requires_every_authority_field(
     tmp_path,
 ) -> None:
     for component in ("gateway", "validator"):
+        start_revision = 0 if component == "gateway" else 1
+        end_revision = 1
+        start_hash = (
+            "sha256:" + ("a" if component == "gateway" else "b") * 64
+        )
+        end_hash = "sha256:" + "b" * 64
         (tmp_path / f"1-{component}-forward-{COMMIT}.json").write_text(
             json.dumps(
                 {
@@ -2896,6 +2902,18 @@ def test_joined_manifest_requires_every_authority_field(
                     "event_count": 10,
                     "pcr0": "3" * 96,
                     "postgres_contract_sha256": "e" * 64,
+                    "durable_schema_sha": COMMIT,
+                    "durable_boundary_state": {
+                        "schema_version": (
+                            "leadpoet.restart_rehearsal."
+                            "durable_boundary_state.v1"
+                        ),
+                        "durable_schema_sha": COMMIT,
+                        "start_revision": start_revision,
+                        "start_state_hash": start_hash,
+                        "end_revision": end_revision,
+                        "end_state_hash": end_hash,
+                    },
                     "restart_invariants": (
                         {
                             "validator_activation_requires_exact_gateway_release": (
@@ -2995,6 +3013,7 @@ def test_joined_manifest_requires_every_authority_field(
     joined = json.loads(output.read_text())
     assert joined["status"] == "passed"
     assert joined["postgres_contract_sha256"] == "e" * 64
+    assert joined["durable_boundary_state_continuity"] is True
     assert (
         joined["behavior_contract_hash"]
         == behavior_contract["contract_hash"]
@@ -3104,6 +3123,33 @@ def test_joined_manifest_requires_every_authority_field(
             ]
         )
     validator["postgres_contract_sha256"] = "e" * 64
+    validator_path.write_text(json.dumps(validator), encoding="utf-8")
+
+    validator["durable_boundary_state"]["start_state_hash"] = (
+        "sha256:" + "c" * 64
+    )
+    validator_path.write_text(json.dumps(validator), encoding="utf-8")
+    with pytest.raises(
+        SystemExit,
+        match="durable boundary state did not survive activation",
+    ):
+        join_evidence.main(
+            [
+                "--evidence-root",
+                str(tmp_path),
+                "--from-sha",
+                "2" * 40,
+                "--candidate-sha",
+                COMMIT,
+                "--profile",
+                "prepush",
+                "--output",
+                str(output),
+            ]
+        )
+    validator["durable_boundary_state"]["start_state_hash"] = (
+        "sha256:" + "b" * 64
+    )
     validator_path.write_text(json.dumps(validator), encoding="utf-8")
 
     workflow["stages"][-1]["status"] = "unexercised"

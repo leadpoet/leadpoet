@@ -480,6 +480,9 @@ def _run_component(
     weight_readiness_scenario: str = "production_success",
     docker_platform: str,
     fixture_seed_root: Path,
+    durable_fixture_seed_root: Path,
+    durable_state_root: Path,
+    durable_schema_sha: str,
     run_ordinal: int,
     gateway_worker_fleet_mode: str,
 ) -> None:
@@ -519,6 +522,16 @@ def _run_component(
             f"type=bind,src={fixture_seed_root},"
             "dst=/rehearsal-fixture-seed,readonly"
         ),
+        "--mount",
+        (
+            f"type=bind,src={durable_fixture_seed_root},"
+            "dst=/rehearsal-durable-schema-seed,readonly"
+        ),
+        "--mount",
+        (
+            f"type=bind,src={durable_state_root},"
+            "dst=/rehearsal-durable-state"
+        ),
         "--env",
         f"REHEARSAL_COMPONENT={component}",
         "--env",
@@ -538,6 +551,8 @@ def _run_component(
         f"REHEARSAL_PROFILE={profile}",
         "--env",
         f"REHEARSAL_RUN_ORDINAL={run_ordinal}",
+        "--env",
+        f"REHEARSAL_DURABLE_SCHEMA_SHA={durable_schema_sha}",
         "--env",
         f"REHEARSAL_GATEWAY_WORKER_FLEET_MODE={gateway_worker_fleet_mode}",
         tag,
@@ -1226,6 +1241,8 @@ def _run_profile(args: argparse.Namespace) -> int:
                     )
                     if passed:
                         fixture_seeds[target] = seed
+                durable_state_root = evidence_root / "durable-boundary-state"
+                durable_state_root.mkdir(mode=0o700)
                 for ordinal, run_transition in enumerate(transitions):
                     run_from = from_sha
                     run_candidate = candidate_sha
@@ -1251,6 +1268,13 @@ def _run_profile(args: argparse.Namespace) -> int:
                         if run_candidate not in fixture_seeds:
                             blocked_by.append(
                                 f"fixture-seed-{run_candidate[:12]}"
+                            )
+                        if (
+                            candidate_sha != run_candidate
+                            and candidate_sha not in fixture_seeds
+                        ):
+                            blocked_by.append(
+                                f"fixture-seed-{candidate_sha[:12]}"
                             )
                         if blocked_by:
                             _mark_stage_unexercised(
@@ -1279,6 +1303,11 @@ def _run_profile(args: argparse.Namespace) -> int:
                                 profile=args.profile,
                                 docker_platform=docker_platform,
                                 fixture_seed_root=fixture_seeds[run_candidate],
+                                durable_fixture_seed_root=fixture_seeds[
+                                    candidate_sha
+                                ],
+                                durable_state_root=durable_state_root,
+                                durable_schema_sha=candidate_sha,
                                 run_ordinal=ordinal + 1,
                                 gateway_worker_fleet_mode=(
                                     args.gateway_worker_fleet_mode

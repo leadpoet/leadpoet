@@ -124,3 +124,34 @@ def test_gateway_enclave_uses_the_exact_transition_target_tree() -> None:
     assert 'REHEARSAL_GATEWAY_CANDIDATE_ROOT="/source/gateway"' not in launcher
     assert 'controller_source = Path("/source").resolve()' in service
     assert '"/source/gateway"' not in service
+
+
+def test_release_reuses_candidate_migrated_durable_boundary_state() -> None:
+    controller = (
+        ROOT / "scripts/run_local_restart_rehearsal.py"
+    ).read_text(encoding="utf-8")
+    launcher = (
+        ROOT / "tests/restart_rehearsal/run_inside.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'dst=/rehearsal-durable-state"' in controller
+    assert "durable_state_root=durable_state_root" in controller
+    assert (
+        "durable_fixture_seed_root=fixture_seeds[\n"
+        "                                    candidate_sha\n"
+        "                                ]"
+        in controller
+    )
+    assert (
+        'REHEARSAL_DURABLE_SCHEMA_SHA:?'
+        "REHEARSAL_DURABLE_SCHEMA_SHA is required"
+        in launcher
+    )
+    assert (
+        '"$REHEARSAL_DURABLE_STATE_ROOT/postgrest-state.json"'
+        in launcher
+    )
+    assert (
+        '"$DURABLE_SCHEMA_SEED_ROOT/release-build-input.json"'
+        in launcher
+    )

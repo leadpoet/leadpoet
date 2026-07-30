@@ -110,6 +110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 r"[0-9a-f]{64}",
                 str(value.get("postgres_contract_sha256") or ""),
             )
+            or value.get("durable_schema_sha") != args.candidate_sha
         ):
             raise SystemExit(f"launcher evidence did not pass exactly: {path}")
         launcher_rows.append(
@@ -121,25 +122,83 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "event_count": value.get("event_count"),
                 "pcr0": value.get("pcr0"),
                 "postgres_contract_sha256": value.get("postgres_contract_sha256"),
+                "durable_schema_sha": value.get("durable_schema_sha"),
+                "durable_boundary_state": value.get(
+                    "durable_boundary_state"
+                ),
                 "restart_invariants": value.get("restart_invariants"),
                 "evidence_hash": _sha256(path),
             }
         )
 
-    postgres_contracts_by_candidate: dict[str, set[str]] = {}
+    postgres_contracts_by_schema: dict[str, set[str]] = {}
     for row in launcher_rows:
-        postgres_contracts_by_candidate.setdefault(
-            str(row["candidate_sha"]),
+        postgres_contracts_by_schema.setdefault(
+            str(row["durable_schema_sha"]),
             set(),
         ).add(str(row["postgres_contract_sha256"]))
     if any(
         len(contract_hashes) != 1
-        for contract_hashes in postgres_contracts_by_candidate.values()
+        for contract_hashes in postgres_contracts_by_schema.values()
     ):
         raise SystemExit("gateway and validator migration-backed contracts differ")
     candidate_postgres_contract_sha256 = next(
-        iter(postgres_contracts_by_candidate[args.candidate_sha])
+        iter(postgres_contracts_by_schema[args.candidate_sha])
     )
+    previous_durable_end: tuple[int, str] | None = None
+    durable_mutation_observed = False
+    for index, row in enumerate(launcher_rows):
+        durable = row.get("durable_boundary_state")
+        if (
+            not isinstance(durable, dict)
+            or durable.get("schema_version")
+            != "leadpoet.restart_rehearsal.durable_boundary_state.v1"
+            or durable.get("durable_schema_sha") != args.candidate_sha
+            or not isinstance(durable.get("start_revision"), int)
+            or not isinstance(durable.get("end_revision"), int)
+            or int(durable["start_revision"]) < 0
+            or int(durable["end_revision"])
+            < int(durable["start_revision"])
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(durable.get("start_state_hash") or ""),
+            )
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(durable.get("end_state_hash") or ""),
+            )
+        ):
+            raise SystemExit(
+                "launcher durable boundary evidence is invalid"
+            )
+        current_start = (
+            int(durable["start_revision"]),
+            str(durable["start_state_hash"]),
+        )
+        if index == 0 and current_start[0] != 0:
+            raise SystemExit(
+                "durable boundary state did not start cleanly"
+            )
+        if (
+            previous_durable_end is not None
+            and current_start != previous_durable_end
+        ):
+            raise SystemExit(
+                "durable boundary state did not survive activation"
+            )
+        current_end = (
+            int(durable["end_revision"]),
+            str(durable["end_state_hash"]),
+        )
+        durable_mutation_observed = (
+            durable_mutation_observed
+            or current_end != current_start
+        )
+        previous_durable_end = current_end
+    if not durable_mutation_observed:
+        raise SystemExit(
+            "durable boundary state was not exercised"
+        )
 
     workflow = _load(workflow_path)
     expected_epochs = 1 if args.profile == "prepush" else 100
@@ -335,6 +394,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "epoch_count": expected_epochs,
         "launcher_evidence": launcher_rows,
         "postgres_contract_sha256": candidate_postgres_contract_sha256,
+        "durable_boundary_state_continuity": True,
         "behavior_contract_hash": expected_contract["contract_hash"],
         "behavioral_invariants": invariants,
         "restart_invariants": {

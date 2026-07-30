@@ -7,6 +7,7 @@ import argparse
 import ast
 import csv
 from datetime import date
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import io
@@ -613,6 +614,8 @@ class LocalPostgRESTState:
         relation_columns: dict[str, frozenset[str]] | None = None,
         seed_rows: dict[str, list[dict[str, Any]]] | None = None,
         provider_outcome_contract: dict[str, Any] | None = None,
+        durable_state_path: Path | None = None,
+        durable_schema_sha: str = "",
     ):
         self.state_root = state_root
         self.fixture = fixture
@@ -623,6 +626,9 @@ class LocalPostgRESTState:
         self.provider_outcome_contract = dict(
             provider_outcome_contract or {}
         )
+        self.durable_state_path = durable_state_path
+        self.durable_schema_sha = durable_schema_sha
+        self.durable_revision = 0
         self._provider_outcome_locks: dict[
             tuple[str, str], threading.Lock
         ] = {}
@@ -701,8 +707,121 @@ class LocalPostgRESTState:
                     "source_finalized_block": current_block - 1,
                 }
             ]
+        self._restore_durable_state()
         self.cutover_state = list(self.rows.get(state_table, []))
         self.events = state_root / "local-postgrest-events.jsonl"
+        with self.lock:
+            self._write_durable_state_locked()
+
+    def _restore_durable_state(self) -> None:
+        path = self.durable_state_path
+        if path is None or not path.exists():
+            return
+        document = json.loads(path.read_text(encoding="utf-8"))
+        state = {
+            "schema_version": document.get("schema_version"),
+            "durable_schema_sha": document.get("durable_schema_sha"),
+            "revision": document.get("revision"),
+            "rows": document.get("rows"),
+        }
+        expected_hash = "sha256:" + hashlib.sha256(
+            json.dumps(
+                state,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        rows = state["rows"]
+        if (
+            state["schema_version"]
+            != "leadpoet.local_postgrest_durable_state.v1"
+            or state["durable_schema_sha"] != self.durable_schema_sha
+            or not isinstance(state["revision"], int)
+            or state["revision"] < 0
+            or not isinstance(rows, dict)
+            or set(rows) != set(self.rows)
+            or document.get("state_hash") != expected_hash
+        ):
+            raise ValueError("durable PostgREST state identity differs")
+        restored: dict[str, list[dict[str, Any]]] = {}
+        for table, table_rows in rows.items():
+            if (
+                not isinstance(table_rows, list)
+                or any(not isinstance(row, dict) for row in table_rows)
+            ):
+                raise ValueError("durable PostgREST rows are invalid")
+            allowed = self.relation_columns.get(table)
+            if allowed is not None and any(
+                not set(row).issubset(allowed) for row in table_rows
+            ):
+                raise ValueError(
+                    "durable PostgREST row columns differ from schema"
+                )
+            restored[table] = [dict(row) for row in table_rows]
+        self.rows = restored
+        self.durable_revision = int(state["revision"])
+
+    def _write_durable_state_locked(self, *, mutated: bool = False) -> None:
+        path = self.durable_state_path
+        if path is None:
+            return
+        if mutated:
+            self.durable_revision += 1
+        state = {
+            "schema_version": "leadpoet.local_postgrest_durable_state.v1",
+            "durable_schema_sha": self.durable_schema_sha,
+            "revision": self.durable_revision,
+            "rows": self.rows,
+        }
+        document = {
+            **state,
+            "state_hash": "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    state,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(
+            f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        temporary.write_text(
+            json.dumps(
+                document,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+
+    def durable_state_identity(self) -> dict[str, Any]:
+        path = self.durable_state_path
+        if path is None or not path.is_file():
+            raise ValueError("durable PostgREST state is unavailable")
+        document = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            document.get("schema_version")
+            != "leadpoet.local_postgrest_durable_state.v1"
+            or document.get("durable_schema_sha")
+            != self.durable_schema_sha
+            or not isinstance(document.get("revision"), int)
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(document.get("state_hash") or ""),
+            )
+        ):
+            raise ValueError("durable PostgREST state identity is invalid")
+        return {
+            "durable_schema_sha": document["durable_schema_sha"],
+            "revision": document["revision"],
+            "state_hash": document["state_hash"],
+        }
 
     def _provider_outcome_lock(
         self,
@@ -871,6 +990,7 @@ class LocalPostgRESTState:
                 stored = dict(row)
                 stored["created_at"] = "2026-07-25T00:00:00+00:00"
                 rows.append(stored)
+                self._write_durable_state_locked(mutated=True)
                 durable = {
                     field: value
                     for field, value in stored.items()
@@ -977,6 +1097,7 @@ class LocalPostgRESTState:
             "research_lab_chain_realized_settlement_activation_v1"
         )
         with self.lock:
+            mutated = False
             activation = [
                 row
                 for row in self.rows[activation_table]
@@ -1009,6 +1130,7 @@ class LocalPostgRESTState:
                     "2026-07-25T00:00:00+00:00"
                 )
                 self.rows[settlement_table].append(exact_settlement)
+                mutated = True
             elif any(
                 existing.get(field) != settlement.get(field)
                 for field in required_settlement_fields
@@ -1080,6 +1202,7 @@ class LocalPostgRESTState:
                         "2026-07-25T00:00:00+00:00"
                     )
                     self.rows[credit_table].append(stored_credit)
+                    mutated = True
                 elif any(
                     existing_credit.get(field) != value
                     for field, value in credit.items()
@@ -1097,6 +1220,7 @@ class LocalPostgRESTState:
             )
             if durable_hashes != expected_hashes:
                 raise ValueError("durable chain settlement credit set differs")
+            self._write_durable_state_locked(mutated=mutated)
 
         return {
             "schema_version": (
@@ -1338,6 +1462,9 @@ class Handler(BaseHTTPRequestHandler):
                     )
             with self.server.state.lock:
                 self.server.state.rows[target].extend(incoming)
+                self.server.state._write_durable_state_locked(
+                    mutated=bool(incoming)
+                )
             operation = "insert"
             status = 201
             response = incoming if "return=representation" in (
@@ -1415,6 +1542,7 @@ def main() -> int:
     parser.add_argument("--state-root", type=Path, required=True)
     parser.add_argument("--schema-contract", type=Path, required=True)
     parser.add_argument("--candidate-sha", required=True)
+    parser.add_argument("--durable-state", type=Path)
     args = parser.parse_args()
     fixture = json.loads(args.fixture.read_text(encoding="utf-8"))
     if fixture.get("sanitization", {}).get("contains_production_credentials"):
@@ -1445,7 +1573,10 @@ def main() -> int:
         relation_columns=relation_columns,
         seed_rows=seed_rows,
         provider_outcome_contract=provider_outcome_contract,
+        durable_state_path=args.durable_state,
+        durable_schema_sha=args.candidate_sha,
     )
+    durable_identity = state.durable_state_identity()
     server = LocalPostgRESTServer((args.host, args.port), state)
     (args.state_root / "local-postgrest.ready").write_text(
         json.dumps(
@@ -1456,6 +1587,9 @@ def main() -> int:
                 "tables": len(tables),
                 "rpcs": len(rpcs),
                 "migration_backed_relations": len(relation_columns),
+                "durable_schema_sha": args.candidate_sha,
+                "durable_revision": durable_identity["revision"],
+                "durable_state_hash": durable_identity["state_hash"],
             },
             sort_keys=True,
         )

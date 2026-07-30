@@ -94,7 +94,12 @@ python3 scripts/run_local_restart_rehearsal.py \
 The release profile runs forward, rollback, and roll-forward with the unchanged
 installed launchers, then the full boundary fault matrix, concurrency checks,
 and 100 accelerated stateful subnet epochs. The three transitions use one
-unchanged candidate SHA. The rollback target must also pass
+unchanged candidate SHA. They also share one candidate-migrated strict
+PostgREST durable state: application processes, filesystems, and enclaves are
+rebuilt for each exact target commit, while the database schema and rows
+survive every activation exactly as they do in production. The final join
+requires each launcher's starting durable revision and content hash to match
+the prior launcher's ending identity. The rollback target must also pass
 `Leadpoet/utils/exact_commit_restart_v2.py` against current `origin/main`;
 the helper rejects actual public auditor protocol incompatibility but does not
 reject an attested release merely because its implementation predates later
@@ -192,6 +197,10 @@ console output must prove all of the following:
 - [ ] The local PostgREST service reports nonzero
   `migration_backed_relations` and rejects any selected, filtered, ordered, or
   inserted column absent from the PostgreSQL catalog.
+- [ ] Candidate forward, historical rollback, and candidate roll-forward use
+  one candidate-migrated durable database state; every launcher begins at the
+  preceding launcher's exact revision and content hash, at least one durable
+  mutation is exercised, and schema/hash tampering is rejected.
 - [ ] Zero rejected contract events.
 - [ ] Zero `internal_substitution` events. An adapted repository module,
   repository script, or long-lived application process invalidates the

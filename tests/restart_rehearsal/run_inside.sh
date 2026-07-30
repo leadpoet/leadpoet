@@ -9,6 +9,7 @@ WEIGHT_READINESS_SCENARIO="${REHEARSAL_WEIGHT_READINESS_SCENARIO:-production_suc
 REHEARSAL_SCOPE="${REHEARSAL_SCOPE:-exact}"
 REHEARSAL_PROFILE="${REHEARSAL_PROFILE:-prepush}"
 RUN_ORDINAL="${REHEARSAL_RUN_ORDINAL:-1}"
+DURABLE_SCHEMA_SHA="${REHEARSAL_DURABLE_SCHEMA_SHA:?REHEARSAL_DURABLE_SCHEMA_SHA is required}"
 GATEWAY_WORKER_FLEET_MODE="${REHEARSAL_GATEWAY_WORKER_FLEET_MODE:-active}"
 case "$GATEWAY_WORKER_FLEET_MODE" in
   active)
@@ -37,7 +38,14 @@ case "$COMPONENT" in
 esac
 
 export REHEARSAL_STATE_ROOT=/rehearsal-state
-mkdir -p "$REHEARSAL_STATE_ROOT" /harness/bin /home/ec2-user /evidence
+export REHEARSAL_DURABLE_STATE_ROOT=/rehearsal-durable-state
+DURABLE_SCHEMA_SEED_ROOT=/rehearsal-durable-schema-seed
+mkdir -p \
+  "$REHEARSAL_STATE_ROOT" \
+  "$REHEARSAL_DURABLE_STATE_ROOT" \
+  /harness/bin \
+  /home/ec2-user \
+  /evidence
 
 BOUNDARY_SERVICE_PID=""
 GATEWAY_ENCLAVE_SERVICE_PIDS=""
@@ -252,9 +260,9 @@ if [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; then
     /harness/postgres_v2_contract_probe.py \
     --source-root /source \
     --state-root "$REHEARSAL_STATE_ROOT" \
-    --candidate-sha "$CANDIDATE_SHA" \
+    --candidate-sha "$DURABLE_SCHEMA_SHA" \
     --release-build-input \
-      /rehearsal-fixture-seed/release-build-input.json \
+      "$DURABLE_SCHEMA_SEED_ROOT/release-build-input.json" \
     --output "$REHEARSAL_STATE_ROOT/postgres-v2-schema-contract.json"
   /usr/bin/python3.11 /harness/gateway_boundary_service.py \
     --host 127.0.0.1 \
@@ -264,7 +272,9 @@ if [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; then
     --state-root "$REHEARSAL_STATE_ROOT" \
     --schema-contract \
       "$REHEARSAL_STATE_ROOT/postgres-v2-schema-contract.json" \
-    --candidate-sha "$CANDIDATE_SHA" &
+    --candidate-sha "$DURABLE_SCHEMA_SHA" \
+    --durable-state \
+      "$REHEARSAL_DURABLE_STATE_ROOT/postgrest-state.json" &
   BOUNDARY_SERVICE_PID=$!
   for _attempt in $(seq 1 100); do
     [ -f "$REHEARSAL_STATE_ROOT/local-postgrest.ready" ] && break

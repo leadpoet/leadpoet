@@ -239,6 +239,17 @@ That stage must:
 - Exercise real PostgreSQL constraints, foreign keys, functions, RPC return
   documents, and view projections using nonempty sanitized production-shaped
   bundle, publication, finalization, and chain-settlement rows.
+- Apply the candidate migration schema once and preserve the strict
+  PostgREST-backed durable rows across candidate forward, historical rollback,
+  and candidate roll-forward. Process, filesystem, and enclave state remain
+  isolated per launcher, but database state must not be reseeded between
+  activations because production migrations and rows are not rolled back with
+  application code.
+- Record the durable database schema SHA, starting and ending revision, and
+  content hash for every exact launcher. The final join must prove each
+  launcher's starting identity exactly equals the preceding launcher's ending
+  identity, at least one real mutation occurred, and tampering or schema drift
+  fails closed.
 - Run the production settlement authority parser against the exact row
   returned by `research_lab_finalized_allocation_epochs_v2`; adapters may not
   invent a missing selected column as JSON `null`.

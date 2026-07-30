@@ -6,7 +6,9 @@ from __future__ import annotations
 import ast
 import json
 import hashlib
+import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -614,7 +616,9 @@ def verify_rehearsal_integrity(
             )
 
 
-def verify_migration_backed_database_contract(candidate_sha: str) -> str:
+def verify_migration_backed_database_contract(
+    durable_schema_sha: str,
+) -> str:
     path = Path("/rehearsal-state/postgres-v2-schema-contract.json")
     if not path.is_file():
         raise SystemExit(
@@ -663,7 +667,7 @@ def verify_migration_backed_database_contract(candidate_sha: str) -> str:
     if (
         document.get("schema_version")
         != "leadpoet.restart_rehearsal.postgres_contract.v1"
-        or document.get("candidate_sha") != candidate_sha
+        or document.get("candidate_sha") != durable_schema_sha
         or not isinstance(checks, dict)
         or set(checks) != required_checks
         or any(checks[name] is not True for name in required_checks)
@@ -733,6 +737,70 @@ def verify_migration_backed_database_contract(candidate_sha: str) -> str:
                 + relation
             )
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def verify_durable_boundary_state(
+    durable_schema_sha: str,
+) -> dict[str, object]:
+    ready_path = Path("/rehearsal-state/local-postgrest.ready")
+    state_path = Path(
+        "/rehearsal-durable-state/postgrest-state.json"
+    )
+    try:
+        ready = json.loads(ready_path.read_text(encoding="utf-8"))
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(
+            "durable PostgREST transition evidence is unreadable"
+        ) from exc
+    start_revision = ready.get("durable_revision")
+    end_revision = state.get("revision")
+    start_hash = ready.get("durable_state_hash")
+    end_hash = state.get("state_hash")
+    if (
+        ready.get("durable_schema_sha") != durable_schema_sha
+        or state.get("durable_schema_sha") != durable_schema_sha
+        or state.get("schema_version")
+        != "leadpoet.local_postgrest_durable_state.v1"
+        or not isinstance(start_revision, int)
+        or start_revision < 0
+        or not isinstance(end_revision, int)
+        or end_revision < start_revision
+        or not isinstance(start_hash, str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", start_hash)
+        or not isinstance(end_hash, str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", end_hash)
+    ):
+        raise SystemExit(
+            "durable PostgREST transition evidence differs"
+        )
+    canonical_state = {
+        "schema_version": state.get("schema_version"),
+        "durable_schema_sha": state.get("durable_schema_sha"),
+        "revision": end_revision,
+        "rows": state.get("rows"),
+    }
+    calculated_hash = "sha256:" + hashlib.sha256(
+        json.dumps(
+            canonical_state,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if end_hash != calculated_hash:
+        raise SystemExit(
+            "durable PostgREST transition hash differs"
+        )
+    return {
+        "schema_version": (
+            "leadpoet.restart_rehearsal.durable_boundary_state.v1"
+        ),
+        "durable_schema_sha": durable_schema_sha,
+        "start_revision": start_revision,
+        "start_state_hash": start_hash,
+        "end_revision": end_revision,
+        "end_state_hash": end_hash,
+    }
 
 
 def verify_gateway_private_model_environment(rows: list[dict]) -> None:
@@ -1028,6 +1096,10 @@ def main() -> int:
     )
     scope = sys.argv[5] if len(sys.argv) > 5 else "exact"
     transition = sys.argv[6] if len(sys.argv) > 6 else "forward"
+    durable_schema_sha = os.environ.get(
+        "REHEARSAL_DURABLE_SCHEMA_SHA",
+        candidate_sha,
+    )
     if transition not in {"forward", "rollback"}:
         raise SystemExit("unknown rehearsal transition: %s" % transition)
     rows = events()
@@ -1041,7 +1113,10 @@ def main() -> int:
         scope=scope,
     )
     postgres_contract_sha256 = verify_migration_backed_database_contract(
-        candidate_sha
+        durable_schema_sha
+    )
+    durable_boundary_state = verify_durable_boundary_state(
+        durable_schema_sha
     )
     if transition == "forward":
         verify_restart_epoch_transient_recovery(rows)
@@ -1178,6 +1253,8 @@ def main() -> int:
                 "event_count": len(rows),
                 "pcr0": next(iter(pcr0_values)),
                 "postgres_contract_sha256": postgres_contract_sha256,
+                "durable_schema_sha": durable_schema_sha,
+                "durable_boundary_state": durable_boundary_state,
                 "restart_invariants": restart_invariants,
             },
             sort_keys=True,

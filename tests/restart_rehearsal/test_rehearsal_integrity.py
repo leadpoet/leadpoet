@@ -836,6 +836,17 @@ def test_postgres_fixture_insert_names_explicit_columns() -> None:
     assert "json_populate_record" in statement
 
 
+def test_postgres_fixture_seed_rows_pin_created_at() -> None:
+    row = postgres_probe._deterministic_seed_row(
+        {"value": "fixture", "created_at": "runtime-default"}
+    )
+
+    assert row == {
+        "value": "fixture",
+        "created_at": postgres_probe.NOW,
+    }
+
+
 def test_postgres_probe_resolves_system_binary_outside_launcher_path(
     tmp_path,
     monkeypatch,

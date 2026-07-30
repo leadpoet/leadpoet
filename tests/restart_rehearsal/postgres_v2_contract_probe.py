@@ -56,6 +56,7 @@ from tests.restart_rehearsal.fixture_contract import (
     load_rehearsal_metagraph_hotkeys,
 )
 from tests.restart_rehearsal.sanitized_weight_fixture import (
+    NOW,
     SanitizedWeightFixture,
 )
 
@@ -388,6 +389,10 @@ def _json_insert_sql(table: str, row: Mapping[str, Any]) -> str:
         "NULL::public.%s, $leadpoet$%s$leadpoet$::json);\n"
         % (table, selected, selected, table, payload)
     )
+
+
+def _deterministic_seed_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {**dict(row), "created_at": NOW}
 
 
 def _provider_outcome_append_sql(row: Mapping[str, Any]) -> str:
@@ -1497,19 +1502,23 @@ def _historical_compute_allocation_seed_rows(
             (
                 _json_insert_sql(
                     "research_lab_emission_allocation_snapshots",
-                    snapshot_row,
+                    _deterministic_seed_row(snapshot_row),
                 ),
                 _json_insert_sql(
                     "research_lab_attested_boot_identities_v2",
-                    boot_storage_row(coordinator_boot),
+                    _deterministic_seed_row(
+                        boot_storage_row(coordinator_boot)
+                    ),
                 ),
                 _json_insert_sql(
                     "research_lab_attested_execution_receipts_v2",
-                    receipt_storage_row(settlement_receipt),
+                    _deterministic_seed_row(
+                        receipt_storage_row(settlement_receipt)
+                    ),
                 ),
                 _json_insert_sql(
                     "research_lab_legacy_finalized_allocation_migrations_v2",
-                    migration_row,
+                    _deterministic_seed_row(migration_row),
                 ),
             )
         )

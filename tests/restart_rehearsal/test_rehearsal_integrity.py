@@ -30,6 +30,7 @@ from tests.restart_rehearsal import join_evidence
 from tests.restart_rehearsal import production_workflow_runner
 from tests.restart_rehearsal import sitecustomize as rehearsal_sitecustomize
 from tests.restart_rehearsal.fixture_contract import (
+    load_rehearsal_metagraph_account_ids,
     load_rehearsal_metagraph_hotkeys,
 )
 from tests.restart_rehearsal.gateway_boundary_service import (
@@ -271,6 +272,11 @@ def test_chain_settlement_activation_fixture_creates_one_epoch_backlog(
 def test_historical_compute_seed_matches_exact_metagraph_recipients(
     monkeypatch,
 ) -> None:
+    from leadpoet_canonical.chain_source_v2 import (
+        decode_selective_metagraph_result,
+        ss58_encode_account_id,
+    )
+
     source_root = Path(__file__).resolve().parents[2]
     monkeypatch.setattr(
         rehearsal_sitecustomize,
@@ -278,6 +284,10 @@ def test_historical_compute_seed_matches_exact_metagraph_recipients(
         source_root,
     )
     fixture_hotkeys = load_rehearsal_metagraph_hotkeys(source_root)
+    account_ids = load_rehearsal_metagraph_account_ids(source_root)
+    chain_metagraph = decode_selective_metagraph_result(
+        rehearsal_sitecustomize._selective_metagraph_fixture(8_700_040)
+    )
     exact_hotkeys = rehearsal_sitecustomize._local_metagraph_hotkeys()
     reimbursements = postgres_probe._historical_compute_reimbursements(
         source_root=source_root,
@@ -285,6 +295,10 @@ def test_historical_compute_seed_matches_exact_metagraph_recipients(
     )
 
     assert exact_hotkeys[2:] == fixture_hotkeys[2:]
+    assert tuple(chain_metagraph["hotkeys"]) == fixture_hotkeys
+    assert tuple(
+        ss58_encode_account_id(account_id) for account_id in account_ids
+    ) == fixture_hotkeys
     assert tuple(
         row["miner_hotkey"] for row in reimbursements
     ) == exact_hotkeys[2:]
@@ -296,6 +310,7 @@ def test_sitecustomize_loads_from_staged_harness_without_candidate_package(
 ) -> None:
     source_root = Path(__file__).resolve().parents[2]
     harness_root = Path(__file__).resolve().parent
+    expected_hotkeys = load_rehearsal_metagraph_hotkeys(source_root)[2:]
     environment = {
         **os.environ,
         "PYTHONPATH": str(harness_root),
@@ -309,7 +324,7 @@ def test_sitecustomize_loads_from_staged_harness_without_candidate_package(
             (
                 "import sitecustomize;"
                 "assert sitecustomize._local_metagraph_hotkeys()[2:] == "
-                "('research-lab-hotkey', 'source-add-hotkey')"
+                + repr(expected_hotkeys)
             ),
         ],
         cwd=tmp_path,

@@ -27,11 +27,15 @@ from typing import Any, Callable, Mapping, Optional
 from urllib.parse import parse_qsl, urlparse, urlsplit, urlunsplit
 
 try:
-    from fixture_contract import load_rehearsal_metagraph_hotkeys
+    from fixture_contract import (
+        load_rehearsal_metagraph_account_ids,
+        load_rehearsal_metagraph_hotkeys,
+    )
 except ModuleNotFoundError as exc:
     if exc.name != "fixture_contract":
         raise
     from tests.restart_rehearsal.fixture_contract import (
+        load_rehearsal_metagraph_account_ids,
         load_rehearsal_metagraph_hotkeys,
     )
 
@@ -1330,19 +1334,16 @@ class _LocalRuntimeIdentity:
 
 
 def _selective_metagraph_fixture(block: int) -> str:
-    owner = bytes.fromhex(
-        "a6bfe69c29bf9e4db65c63ac6f6d1e23c252ca871744afb6edc5623d9bc39004"
-    )
-    miner = bytes.fromhex(
-        "74adb27b7edd7126a81f5bac79e9bda1a4c8ec94d2c4f2ce795e0c56932a5383"
-    )
+    account_ids = load_rehearsal_metagraph_account_ids(SOURCE_ROOT)
+    owner = account_ids[0]
     encoded = bytearray((1, 0x1D, 0x01))
     encoded.extend(b"\x00" * 4)
     encoded.extend(b"\x01" + owner)
     encoded.extend(b"\x00")
     encoded.extend(b"\x01" + ((int(block) << 2) | 2).to_bytes(4, "little"))
     encoded.extend(b"\x00" * 44)
-    encoded.extend(b"\x01\x08" + owner + miner)
+    encoded.extend(b"\x01" + bytes((len(account_ids) << 2,)))
+    encoded.extend(b"".join(account_ids))
     encoded.extend(b"\x00" * 24)
     return "0x" + bytes(encoded).hex()
 

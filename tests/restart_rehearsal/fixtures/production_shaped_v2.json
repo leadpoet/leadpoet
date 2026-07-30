@@ -31,6 +31,18 @@
   "metagraph": {
     "burn_target_uid": 0,
     "burn_target_hotkey": "burn-hotkey",
+    "runtime_account_ids_hex": [
+      "a6bfe69c29bf9e4db65c63ac6f6d1e23c252ca871744afb6edc5623d9bc39004",
+      "74adb27b7edd7126a81f5bac79e9bda1a4c8ec94d2c4f2ce795e0c56932a5383",
+      "fbb43e5c71c35b8320fcc3983096abbd8bbbc5df419f2d39be89c7e360efaac0",
+      "3340ba65790d38787cdc77bd33c9753a81749e4e207e4d0789d95a6bf7df9449"
+    ],
+    "runtime_hotkeys": [
+      "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK",
+      "5Ehh1a1yjADCG1JZu5ex8aAWUFEeVddq5GPJqkNADQUhbdDd",
+      "5HkjRJJgbP8nFiHxXeK6RCcgZawWEQh8JB6BZRNBchR29kp7",
+      "5DDuXYv8iWyDFZoBS1ruq6GhnhQambE6nm2QiTjG2ebMmY3F"
+    ],
     "hotkeys": [
       "burn-hotkey",
       "fulfillment-hotkey",

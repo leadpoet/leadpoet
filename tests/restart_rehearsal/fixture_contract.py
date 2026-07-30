@@ -11,10 +11,10 @@ FIXTURE_PATH = Path(
 )
 
 
-def load_rehearsal_metagraph_hotkeys(
+def _load_rehearsal_metagraph(
     source_root: Path,
-) -> tuple[str, ...]:
-    """Return the ordered metagraph identities declared by the candidate."""
+) -> dict[str, object]:
+    """Return the candidate-declared exact-launcher metagraph contract."""
 
     fixture_path = Path(source_root) / FIXTURE_PATH
     try:
@@ -28,7 +28,18 @@ def load_rehearsal_metagraph_hotkeys(
     ):
         raise ValueError("candidate rehearsal fixture schema differs")
     metagraph = fixture.get("metagraph")
-    hotkeys = metagraph.get("hotkeys") if isinstance(metagraph, dict) else None
+    if not isinstance(metagraph, dict):
+        raise ValueError("candidate rehearsal metagraph differs")
+    return metagraph
+
+
+def load_rehearsal_metagraph_hotkeys(
+    source_root: Path,
+) -> tuple[str, ...]:
+    """Return the ordered runtime metagraph identities declared by the candidate."""
+
+    metagraph = _load_rehearsal_metagraph(source_root)
+    hotkeys = metagraph.get("runtime_hotkeys")
     if not isinstance(hotkeys, list):
         raise ValueError("candidate rehearsal metagraph hotkeys differ")
     normalized = tuple(
@@ -42,3 +53,30 @@ def load_rehearsal_metagraph_hotkeys(
     ):
         raise ValueError("candidate rehearsal metagraph hotkeys differ")
     return normalized
+
+
+def load_rehearsal_metagraph_account_ids(
+    source_root: Path,
+) -> tuple[bytes, ...]:
+    """Return account IDs used to encode the authenticated chain response."""
+
+    metagraph = _load_rehearsal_metagraph(source_root)
+    values = metagraph.get("runtime_account_ids_hex")
+    if not isinstance(values, list):
+        raise ValueError("candidate rehearsal metagraph account IDs differ")
+    try:
+        account_ids = tuple(
+            bytes.fromhex(value) if isinstance(value, str) else b""
+            for value in values
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "candidate rehearsal metagraph account IDs differ"
+        ) from exc
+    if (
+        len(account_ids) != 4
+        or any(len(value) != 32 for value in account_ids)
+        or len(set(account_ids)) != len(account_ids)
+    ):
+        raise ValueError("candidate rehearsal metagraph account IDs differ")
+    return account_ids

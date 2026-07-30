@@ -164,6 +164,26 @@ canonical gateway checkout; validator code runs in its containerized runtime.
 Never restore a gateway-only rsync deployment or mix files from different
 commits.
 
+Coordinated restart should overlap gateway work with validator preparation,
+but it must preserve one hard activation boundary. Git/release verification,
+artifact staging, old-runtime shutdown, EIF/Nitro/relay/runtime/hotkey setup,
+and exact validator application-image build may run while the gateway
+restarts. No validator coordinator or worker may start until the image commit
+label and immutable image ID are verified, the selected SHA's coordination
+marker is present, and gateway V2 authority health, build-info, and immutable
+release evidence all report that exact SHA. Recheck the image ID after the
+wait and repeat the full gateway check after startup. A gateway failure must
+publish a commit-bound failure marker, and every failed or interrupted late
+activation must clean validator containers, host validator/relay processes,
+Nitro enclave, and Docker lock. Historical deployers without this late barrier
+must keep the fail-closed check immediately before their deployer is invoked.
+A retry after an N-1-to-N Git handoff may use only the selected SHA's clean
+candidate launcher blob, must reject a later branch advance before restart
+preparation or shutdown, and must signal the remote validator immediately on
+coordinated cancellation rather than treating a replaced marker as sufficient
+revocation. The operator-owned coordination path and bounded wait policy must
+survive candidate re-execution and may not be replaced by hydrated secrets.
+
 ## Mandatory V2 release gate
 
 Production must never be the first full execution of a restart candidate.

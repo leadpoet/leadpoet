@@ -121,6 +121,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "event_count": value.get("event_count"),
                 "pcr0": value.get("pcr0"),
                 "postgres_contract_sha256": value.get("postgres_contract_sha256"),
+                "restart_invariants": value.get("restart_invariants"),
                 "evidence_hash": _sha256(path),
             }
         )
@@ -169,6 +170,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         != expected_contract["contract_hash"]
     ):
         raise SystemExit("candidate behavior contract differs from source")
+    required_restart_invariants = set(
+        expected_contract["required_restart_invariant_ids"]
+    )
+    for launcher_row in launcher_rows:
+        restart_invariants = launcher_row.get("restart_invariants")
+        if launcher_row.get("component") == "validator":
+            if (
+                not isinstance(restart_invariants, dict)
+                or set(restart_invariants) != required_restart_invariants
+                or any(
+                    value is not True
+                    for value in restart_invariants.values()
+                )
+            ):
+                raise SystemExit(
+                    "validator restart invariant evidence is incomplete"
+                )
+        elif restart_invariants != {}:
+            raise SystemExit(
+                "gateway launcher emitted undeclared validator restart "
+                "invariants"
+            )
     if (
         workflow.get("status") != "passed"
         or workflow.get("profile") != args.profile
@@ -314,6 +337,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "postgres_contract_sha256": candidate_postgres_contract_sha256,
         "behavior_contract_hash": expected_contract["contract_hash"],
         "behavioral_invariants": invariants,
+        "restart_invariants": {
+            invariant: True
+            for invariant in sorted(required_restart_invariants)
+        },
         "workflow_evidence_hash": _sha256(workflow_path),
         "fault_matrix_count": len(faults),
         "concurrent_write_count": workflow.get("concurrent_write_count"),

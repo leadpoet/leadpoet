@@ -343,6 +343,7 @@ def _record_external_boundary(
     boundary: str,
     operation: str,
     status: str = "ok",
+    **details: Any,
 ) -> None:
     contract_path = Path("/harness/boundary_contract.json")
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
@@ -364,6 +365,7 @@ def _record_external_boundary(
         implementation="external_boundary",
         fixture_authenticity="production_shaped_sanitized",
         reject_unknown=bool(definition.get("reject_unknown")),
+        **details,
     )
 
 
@@ -1403,25 +1405,53 @@ def command_curl(argv: list[str]) -> int:
             operation="download",
         )
         return 0
+    response_details: dict[str, Any] = {"url": url}
     if url.endswith("/build-info"):
-        print(json.dumps({"git_commit": _candidate_sha()}, sort_keys=True))
+        served_commit = _candidate_sha()
+        response_details["served_commit"] = served_commit
+        print(json.dumps({"git_commit": served_commit}, sort_keys=True))
     elif url.endswith("/health/v2-authority"):
+        handle, state = _locked_state()
+        health_probe_attempt = int(
+            state.get("gateway_v2_authority_health_probe_attempts", 0)
+        ) + 1
+        state["gateway_v2_authority_health_probe_attempts"] = (
+            health_probe_attempt
+        )
+        _save_state(handle, state)
+        candidate_sha = _candidate_sha()
+        from_sha = os.environ.get("REHEARSAL_FROM_SHA", "").strip()
+        served_commit = (
+            from_sha
+            if health_probe_attempt == 1
+            and re.fullmatch(r"[0-9a-f]{40}", from_sha)
+            and from_sha != candidate_sha
+            else candidate_sha
+        )
+        response_details.update(
+            {
+                "gateway_probe_attempt": health_probe_attempt,
+                "served_commit": served_commit,
+            }
+        )
         print(
             json.dumps(
                 {
                     "schema_version": "leadpoet.gateway_v2_authority_health.v2",
                     "status": "ready",
-                    "commit_sha": _candidate_sha(),
+                    "commit_sha": served_commit,
                 },
                 sort_keys=True,
             )
         )
     elif re.search(r"/weights/v2/release-evidence/[0-9a-f]{40}$", url):
+        served_commit = _candidate_sha()
+        response_details["served_commit"] = served_commit
         print(
             json.dumps(
                 {
                     "schema_version": "leadpoet.auditor_release_evidence.v2",
-                    "commit_sha": _candidate_sha(),
+                    "commit_sha": served_commit,
                     "release_channel_version_id": "rehearsal-version",
                     "release_channel_get_url": "https://release.invalid/get",
                     "release_channel_head_url": "https://release.invalid/head",
@@ -1438,6 +1468,7 @@ def command_curl(argv: list[str]) -> int:
         argv=argv,
         boundary="http_service",
         operation="gateway_request",
+        **response_details,
     )
     return 0
 

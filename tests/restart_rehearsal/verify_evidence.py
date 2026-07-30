@@ -12,6 +12,9 @@ import sys
 
 
 TARGETED_REGRESSION_SCOPE = "weight_readiness_regression"
+VALIDATOR_GATEWAY_ACTIVATION_INVARIANT = (
+    "validator_activation_requires_exact_gateway_release"
+)
 EXPECTED_GATEWAY_PRIVATE_MODEL_ENV = {
     "RESEARCH_LAB_PRIVATE_REPO_BRANCH": "leadpoet-lab",
     "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI": (
@@ -105,6 +108,298 @@ def require_order(values: list[str], required: list[str]) -> None:
             raise SystemExit(
                 f"required rehearsal event is missing or out of order: {expected}"
             ) from exc
+
+
+def _first_event(
+    rows: list[dict],
+    predicate,
+    *,
+    after: int = -1,
+    before: int | None = None,
+    description: str,
+) -> int:
+    upper_bound = len(rows) if before is None else before
+    for ordinal in range(after + 1, upper_bound):
+        if predicate(rows[ordinal]):
+            return ordinal
+    raise SystemExit(
+        "required validator activation-barrier evidence is missing or out "
+        f"of order: {description}"
+    )
+
+
+def _is_gateway_request(
+    row: dict,
+    *,
+    endpoint_suffix: str,
+    served_commit: str,
+) -> bool:
+    return (
+        row.get("kind") == "curl"
+        and row.get("boundary") == "http_service"
+        and row.get("operation") == "gateway_request"
+        and str(row.get("url") or "").endswith(endpoint_suffix)
+        and row.get("served_commit") == served_commit
+    )
+
+
+def selected_validator_late_activation_capability(
+    candidate_roots: tuple[Path, ...],
+) -> bool:
+    relative = Path("validator_models/containerizing/deploy_dynamic.sh")
+    for root in candidate_roots:
+        source = root / relative
+        if source.is_file():
+            return (
+                "VALIDATOR_GATEWAY_ACTIVATION_BARRIER_V2=1"
+                in source.read_text(encoding="utf-8")
+            )
+    raise SystemExit(
+        "candidate validator deployment source is unavailable for "
+        "activation-barrier capability proof"
+    )
+
+
+def verify_validator_gateway_activation_barrier(
+    rows: list[dict],
+    *,
+    from_sha: str,
+    candidate_sha: str,
+    late_activation_supported: bool,
+) -> dict[str, bool]:
+    """Prove preparation overlap without permitting pre-alignment activation."""
+
+    validator_processes = [
+        ordinal
+        for ordinal, row in enumerate(rows)
+        if row.get("kind") == "validator-process"
+        and row.get("process") == "validator.coordinator"
+        and row.get("status") == "started"
+    ]
+    if len(validator_processes) != 1:
+        raise SystemExit(
+            "validator activation barrier did not produce exactly one "
+            "coordinator process"
+        )
+    process_ordinal = validator_processes[0]
+
+    health_ordinals = [
+        ordinal
+        for ordinal, row in enumerate(rows)
+        if row.get("kind") == "curl"
+        and row.get("boundary") == "http_service"
+        and row.get("operation") == "gateway_request"
+        and str(row.get("url") or "").endswith("/health/v2-authority")
+    ]
+    if len(health_ordinals) < 3:
+        raise SystemExit(
+            "validator activation barrier did not exercise stale, aligned, "
+            "and poststart gateway authority probes"
+        )
+    first_health = rows[health_ordinals[0]]
+    if (
+        from_sha != candidate_sha
+        and (
+            first_health.get("served_commit") != from_sha
+            or first_health.get("gateway_probe_attempt") != 1
+        )
+    ):
+        raise SystemExit(
+            "validator activation barrier did not reject the installed "
+            "gateway release before candidate alignment"
+        )
+
+    aligned_health = _first_event(
+        rows,
+        lambda row: _is_gateway_request(
+            row,
+            endpoint_suffix="/health/v2-authority",
+            served_commit=candidate_sha,
+        ),
+        before=process_ordinal,
+        description="candidate authority health before activation",
+    )
+    aligned_build = _first_event(
+        rows,
+        lambda row: _is_gateway_request(
+            row,
+            endpoint_suffix="/build-info",
+            served_commit=candidate_sha,
+        ),
+        after=aligned_health,
+        before=process_ordinal,
+        description="candidate build identity before activation",
+    )
+    aligned_release = _first_event(
+        rows,
+        lambda row: (
+            _is_gateway_request(
+                row,
+                endpoint_suffix=candidate_sha,
+                served_commit=candidate_sha,
+            )
+            and "/weights/v2/release-evidence/" in str(row.get("url") or "")
+        ),
+        after=aligned_build,
+        before=process_ordinal,
+        description="candidate release evidence before activation",
+    )
+
+    application_build = _first_event(
+        rows,
+        lambda row: (
+            row.get("kind") == "docker"
+            and row.get("operation") == "build"
+            and "leadpoet-validator:latest" in (row.get("argv") or [])
+        ),
+        before=process_ordinal,
+        description="candidate validator application image build",
+    )
+    revision_inspect = _first_event(
+        rows,
+        lambda row: (
+            row.get("kind") == "docker"
+            and row.get("operation") == "inspect"
+            and "leadpoet-validator:latest" in (row.get("argv") or [])
+            and any(
+                "org.opencontainers.image.revision" in str(value)
+                for value in (row.get("argv") or [])
+            )
+        ),
+        after=application_build,
+        before=process_ordinal,
+        description="candidate validator application commit verification",
+    )
+    if late_activation_supported:
+        prepared_id = _first_event(
+            rows,
+            lambda row: (
+                row.get("kind") == "docker"
+                and row.get("operation") == "inspect"
+                and "leadpoet-validator:latest" in (row.get("argv") or [])
+                and "{{.Id}}" in (row.get("argv") or [])
+            ),
+            after=revision_inspect,
+            before=process_ordinal,
+            description="prepared validator application image identity",
+        )
+        preparation_predicates = (
+            (
+                "validator hotkey refresh",
+                lambda row: row.get("module")
+                == "validator_tee.host.refresh_hotkey_config_v2",
+            ),
+            (
+                "validator restart preflight",
+                lambda row: row.get("module")
+                == "validator_tee.host.restart_preflight_v2",
+            ),
+            (
+                "validator enclave build",
+                lambda row: row.get("kind") == "nitro"
+                and row.get("operation") == "build_enclave",
+            ),
+            (
+                "validator enclave launch",
+                lambda row: row.get("kind") == "nitro"
+                and row.get("operation") == "run_enclave",
+            ),
+            (
+                "validator chain relay",
+                lambda row: row.get("kind") == "process"
+                and row.get("process") == "validator.chain_relay",
+            ),
+            (
+                "validator runtime bootstrap",
+                lambda row: row.get("module")
+                == "validator_tee.host.runtime_v2_bootstrap",
+            ),
+            (
+                "validator hotkey bootstrap",
+                lambda row: row.get("module")
+                == "validator_tee.host.hotkey_bootstrap_v2",
+            ),
+        )
+        for description, predicate in preparation_predicates:
+            _first_event(
+                rows,
+                predicate,
+                before=health_ordinals[0],
+                description=f"{description} before gateway alignment wait",
+            )
+        if not (
+            application_build
+            < revision_inspect
+            < prepared_id
+            < health_ordinals[0]
+            < aligned_health
+            < aligned_build
+            < aligned_release
+        ):
+            raise SystemExit(
+                "candidate validator preparation did not complete before "
+                "the late gateway activation barrier"
+            )
+        _first_event(
+            rows,
+            lambda row: (
+                row.get("kind") == "docker"
+                and row.get("operation") == "inspect"
+                and "leadpoet-validator:latest" in (row.get("argv") or [])
+                and "{{.Id}}" in (row.get("argv") or [])
+            ),
+            after=aligned_release,
+            before=process_ordinal,
+            description="unchanged validator image identity after alignment",
+        )
+    elif not (
+        aligned_health
+        < aligned_build
+        < aligned_release
+        < application_build
+        < revision_inspect
+        < process_ordinal
+    ):
+        raise SystemExit(
+            "legacy validator deployer did not remain behind the exact "
+            "gateway release fallback barrier"
+        )
+
+    poststart_health = _first_event(
+        rows,
+        lambda row: _is_gateway_request(
+            row,
+            endpoint_suffix="/health/v2-authority",
+            served_commit=candidate_sha,
+        ),
+        after=process_ordinal,
+        description="poststart candidate authority health",
+    )
+    poststart_build = _first_event(
+        rows,
+        lambda row: _is_gateway_request(
+            row,
+            endpoint_suffix="/build-info",
+            served_commit=candidate_sha,
+        ),
+        after=poststart_health,
+        description="poststart candidate build identity",
+    )
+    _first_event(
+        rows,
+        lambda row: (
+            _is_gateway_request(
+                row,
+                endpoint_suffix=candidate_sha,
+                served_commit=candidate_sha,
+            )
+            and "/weights/v2/release-evidence/" in str(row.get("url") or "")
+        ),
+        after=poststart_build,
+        description="poststart candidate release evidence",
+    )
+
+    return {VALIDATOR_GATEWAY_ACTIVATION_INVARIANT: True}
 
 
 def _substitution_identity(row: dict) -> str:
@@ -756,6 +1051,7 @@ def main() -> int:
             labels.append(f"process:{process}")
 
     if component == "gateway":
+        restart_invariants: dict[str, bool] = {}
         if scenario != "production_success":
             raise SystemExit(
                 "targeted fault scenario cannot satisfy exact restart evidence"
@@ -805,6 +1101,19 @@ def main() -> int:
         if len(state.get("enclaves", [])) != 3:
             raise SystemExit("gateway did not start the exact three-enclave topology")
     else:
+        restart_invariants = verify_validator_gateway_activation_barrier(
+            rows,
+            from_sha=from_sha,
+            candidate_sha=candidate_sha,
+            late_activation_supported=(
+                selected_validator_late_activation_capability(
+                    (
+                        Path("/home/ec2-user/leadpoet_repo"),
+                        Path("/home/ec2-user/leadpoet/leadpoet"),
+                    )
+                )
+            ),
+        )
         require_order(
             labels,
             [
@@ -857,6 +1166,7 @@ def main() -> int:
                 "event_count": len(rows),
                 "pcr0": next(iter(pcr0_values)),
                 "postgres_contract_sha256": postgres_contract_sha256,
+                "restart_invariants": restart_invariants,
             },
             sort_keys=True,
         )

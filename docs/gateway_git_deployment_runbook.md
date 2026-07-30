@@ -11,9 +11,10 @@ bash /home/ec2-user/gw_restart.sh
 The restart selects one commit from `GITHUB_REPO_URL` and `GITHUB_BRANCH`,
 stops the existing processes, fast-forwards the checkout to that exact commit,
 and then runs the existing cleanup, PCR0, enclave, dependency, process launch,
-and health workflow. Normal unpinned gateway and validator restarts remain
-independent; an explicit exact-commit validator restart adds the paired
-same-release gate described below.
+and health workflow. Gateway and validator controllers may run concurrently,
+but validator activation is not independent: preparation may overlap the
+gateway restart, while every exact-release validator waits at the
+application-image boundary for the same gateway release described below.
 
 `--commit <full-sha>` is the canonical operator-only, one-invocation release
 selector. The host keeps selector-aware restart controllers and their
@@ -165,16 +166,15 @@ hashes or require later reliability fixes. Those differences inform the
 operator's rollback choice but do not make an otherwise attested,
 auditor-protocol-compatible release categorically ineligible.
 
-When invoking the two lower-level controllers manually, complete the gateway
-with `gw_restart.sh --commit <full-sha>` first. Require its normal build-info,
-V2 authority, attestation, and authenticated allocation handoff checks to pass.
-Only then invoke
-`/home/ec2-user/validator_restart.sh --commit <the-same-full-sha>`. The host
-validator controller is installed by every successful current release and
-remains outside the detached runtime checkout, so the same command remains
-available after rollback. Prefer the coordinated command below: it captures the
-validator restart window first but does not stop the running validator until
-the gateway has completed.
+When invoking the two lower-level controllers manually, pass the same full SHA
+to both. They may be launched concurrently: the validator can complete its
+release checks, rebuild, Nitro/runtime/hotkey preparation, and exact
+application-image build while `gw_restart.sh --commit <full-sha>` is still
+running. The host validator controller is installed by every successful
+current release and remains outside the detached runtime checkout, so the same
+command remains available after rollback. Prefer the coordinated command
+below, which owns the exact-SHA success/failure marker and cleanup contract
+rather than relying on two independent terminals.
 
 The canonical operator command coordinates both restarts while preserving one
 restart-start decision and one selected release:
@@ -188,19 +188,43 @@ Use `--component gateway` or `--component validator` only when the other
 component is already running that exact commit. A mismatch fails before the
 requested component restarts and instructs the operator to use the default
 paired mode. In paired mode the validator captures its official restart start
-first but remains running behind a unique coordination barrier until the
-gateway restart has completed its authenticated handoff and final deployment
-record. The coordinator does not approve a release itself: both installed
-restart controllers still independently require the immutable attested release
-channel, exact manifests and artifacts, PCR0 verification, current-auditor
-workflow compatibility, and their normal readiness checks.
+first, then prepares in parallel with the gateway. The validator may select and
+verify Git/release inputs, stop the old runtime, rebuild its EIF, launch and
+provision Nitro, start the opaque chain relay, and build the exact application
+image before gateway completion. It may not start a validator coordinator or
+worker until all of these conditions hold:
 
-The pinned validator restart fails before shutdown unless the public gateway
-reports the same commit through V2 authority health, build-info, and immutable
-release evidence. These same-SHA checks retry bounded transient failures but
-remain fail closed; a persistent post-start mismatch stops the pinned validator.
-A normal unpinned validator restart retains its independent gateway-startup
-behavior.
+- The application image commit label equals the selected full SHA.
+- Its immutable image ID has been captured and remains unchanged across the
+  wait.
+- The unique coordination marker contains that exact SHA.
+- Public gateway V2 authority health, build-info, and immutable release
+  evidence all report that exact SHA.
+
+The coordinator does not approve a release itself: both installed restart
+controllers still independently require the immutable attested release
+channel, exact manifests and artifacts, PCR0 verification, current-auditor
+workflow compatibility, and their normal readiness checks. The validator
+wrapper repeats the three live gateway checks after coordinator startup.
+If a failed attempt already completed the N-1-to-N Git handoff, a retry may
+invoke the repository launcher only after proving that its checkout and
+launcher blob equal the selected SHA. The coordinated expected SHA is checked
+again after the remote pull, before release preparation or shutdown, so a
+concurrent branch advance fails while the existing validator is still running.
+
+If the gateway restart fails, the coordinator immediately terminates the
+validator SSH job and publishes a commit-bound failure marker concurrently
+through a bounded write, so slow marker transport cannot delay signal cleanup
+even if the validator already consumed a prior success marker. Candidate
+re-execution and secret hydration cannot replace the paired operator's
+coordination path or bounded wait policy. The waiting validator exits without
+starting a coordinator or worker and removes prepared validator containers,
+host validator/relay processes, Nitro enclave, and Docker lock. A
+selected historical deployer that predates the image-prepared barrier falls
+back to the same exact-SHA gateway check immediately before invoking that
+deployer. Because old-runtime shutdown is one of the overlapped preparation
+stages, a late gateway failure may leave the validator safely stopped; rerun
+the paired command after fixing the gateway.
 
 Rollback runs the same enclave rebuild and restart workflow. It does not reuse
 newer EIFs or bypass PCR0, attestation, import, or health checks. A commit from

@@ -40,12 +40,21 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert "trap cleanup EXIT" in source
     assert "trap 'exit 130' INT" in source
     assert "trap 'exit 143' TERM" in source
-    assert source.index("run_gateway_restart") < source.index(
-        "Gateway exact release is ready; waiting for the paired validator restart"
+    assert 'if [ "$commit" != "$branch_commit" ]; then' in source
+    assert 'restart_arguments="--commit \'$commit\'"' in source
+    assert "VALIDATOR_COORDINATED_EXPECTED_COMMIT" in source
+    assert "selected validator launcher is not the exact candidate Git blob" in source
+    assert "git -C '$VALIDATOR_REPO_ROOT' diff --quiet" in source
+    assert source.index("    run_gateway_restart\n") < source.index(
+        '    publish_coordination_value "$commit"\n'
     )
-    assert source.index("run_gateway_restart") < source.index(
-        "printf '%s\\\\n' '$commit'"
+    assert source.index('kill -TERM "$validator_job"') < source.index(
+        'coordination_remote_command "failed:$commit"'
     )
+    assert source.index('kill -TERM "$validator_job"') < source.index(
+        'for _ in $(seq 1 "$VALIDATOR_FAILURE_CLEANUP_ATTEMPTS")'
+    )
+    assert "VALIDATOR_FAILURE_MARKER_ATTEMPTS" in source
 
 
 def test_attested_release_restart_operator_rejects_invalid_input() -> None:
@@ -83,6 +92,7 @@ def _fake_operator_commands(tmp_path: Path, commit: str) -> tuple[Path, Path]:
     bin_dir.mkdir()
     events = tmp_path / "events"
     barrier = tmp_path / "barrier"
+    gateway_started = tmp_path / "gateway-started"
     gateway_complete = tmp_path / "gateway-complete"
 
     real_git = shutil.which("git")
@@ -115,18 +125,47 @@ record() {
 }
 case "$command" in
   *validator_restart.sh*)
+    bash -n -c "$command"
+    record validator_command_syntax
     record validator_start
+    trap 'record validator_cancelled; record validator_cleanup; exit 143' HUP INT TERM
+    if [[ "$command" == *" --commit "* ]]; then
+      record validator_exact_commit_handoff
+    else
+      record validator_forward_handoff
+    fi
+    record validator_prepare_started
     printf '%s\\n' "Capturing the official subnet restart start before release acquisition"
     printf '%s\\n' "Acquiring the independently built V2 release channel"
     record validator_captured
     if [[ "$command" == *"VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE=''"* ]]; then
+      record validator_image_prepared
+      record validator_activation
       record validator_complete
       exit 0
     fi
     for _ in $(seq 1 500); do
+      if [ -e "$FAKE_OPERATOR_GATEWAY_STARTED" ]; then
+        record validator_image_prepared
+        break
+      fi
+      sleep 0.01
+    done
+    for _ in $(seq 1 500); do
       if [ -e "$FAKE_OPERATOR_BARRIER" ]; then
-        record validator_complete
-        exit 0
+        marker="$(cat "$FAKE_OPERATOR_BARRIER")"
+        if [ "$marker" = "$FAKE_VALIDATOR_COMMIT" ]; then
+          record validator_activation
+          record validator_complete
+          exit 0
+        fi
+        if [ "$marker" = "failed:$FAKE_VALIDATOR_COMMIT" ]; then
+          record validator_alignment_failed
+          record validator_cleanup
+          exit 76
+        fi
+        record validator_invalid_barrier
+        exit 77
       fi
       sleep 0.01
     done
@@ -135,7 +174,8 @@ case "$command" in
     ;;
   *gw_restart.sh*)
     record gateway_start
-    sleep 0.05
+    touch "$FAKE_OPERATOR_GATEWAY_STARTED"
+    sleep 0.10
     if [ "${FAKE_GATEWAY_RESTART_FAIL:-0}" = "1" ]; then
       record gateway_failed
       exit 73
@@ -144,12 +184,20 @@ case "$command" in
     record gateway_complete
     ;;
   *"mv -f --"*)
-    if [ ! -e "$FAKE_OPERATOR_GATEWAY_COMPLETE" ]; then
+    if [[ "$command" == *"failed:"* ]]; then
+      record failure_barrier_publish_started
+      if [ -n "${FAKE_FAILURE_MARKER_DELAY_SECONDS:-}" ]; then
+        sleep "$FAKE_FAILURE_MARKER_DELAY_SECONDS"
+      fi
+      printf '%s\\n' "failed:$FAKE_VALIDATOR_COMMIT" > "$FAKE_OPERATOR_BARRIER"
+      record failure_barrier_released
+    elif [ ! -e "$FAKE_OPERATOR_GATEWAY_COMPLETE" ]; then
       record barrier_before_gateway
       exit 71
+    else
+      printf '%s\\n' "$FAKE_VALIDATOR_COMMIT" > "$FAKE_OPERATOR_BARRIER"
+      record barrier_released
     fi
-    touch "$FAKE_OPERATOR_BARRIER"
-    record barrier_released
     ;;
   *gateway_exact_release_ready*)
     record gateway_verified
@@ -199,6 +247,7 @@ esac
             (
                 f"FAKE_OPERATOR_EVENTS={events}",
                 f"FAKE_OPERATOR_BARRIER={barrier}",
+                f"FAKE_OPERATOR_GATEWAY_STARTED={gateway_started}",
                 f"FAKE_OPERATOR_GATEWAY_COMPLETE={gateway_complete}",
                 f"FAKE_GATEWAY_COMMIT={commit}",
                 f"FAKE_VALIDATOR_COMMIT={commit}",
@@ -228,7 +277,7 @@ def _operator_env(tmp_path: Path, bin_dir: Path, commit: str) -> dict[str, str]:
     return values
 
 
-def test_paired_operator_waits_for_full_gateway_success_before_validator(
+def test_paired_operator_overlaps_preparation_and_gates_validator_activation(
     tmp_path: Path,
 ) -> None:
     commit = subprocess.check_output(
@@ -249,39 +298,37 @@ def test_paired_operator_waits_for_full_gateway_success_before_validator(
     assert result.returncode == 0, result.stderr
     observed = events.read_text(encoding="utf-8").splitlines()
     required = [
-        "validator_start",
+        "validator_forward_handoff",
+        "validator_command_syntax",
+        "validator_prepare_started",
         "validator_captured",
         "gateway_start",
+        "validator_image_prepared",
         "gateway_complete",
         "barrier_released",
+        "validator_activation",
         "validator_complete",
         "gateway_verified",
         "validator_verified",
     ]
     positions = {event: observed.index(event) for event in required}
     assert (
-        positions["validator_start"]
+        positions["validator_prepare_started"]
         < positions["validator_captured"]
         < positions["gateway_start"]
+        < positions["validator_image_prepared"]
         < positions["gateway_complete"]
     )
-    # The validator may observe the atomically published coordination marker
-    # before the parent SSH process records its post-move diagnostic event.
-    # Both events must remain gateway-gated and precede release verification,
-    # but their relative log order is intentionally unconstrained.
     assert (
         positions["gateway_complete"]
         < positions["barrier_released"]
-        < positions["gateway_verified"]
-        < positions["validator_verified"]
-    )
-    assert (
-        positions["gateway_complete"]
+        < positions["validator_activation"]
         < positions["validator_complete"]
         < positions["gateway_verified"]
         < positions["validator_verified"]
     )
     assert "barrier_before_gateway" not in observed
+    assert "validator_exact_commit_handoff" not in observed
     assert "SUCCESS: gateway and validator are aligned" in result.stdout
 
 
@@ -497,7 +544,7 @@ def test_validator_only_operator_rejects_unhealthy_matching_gateway(
     assert "validator_start" not in observed
 
 
-def test_paired_operator_does_not_release_validator_after_gateway_failure(
+def test_paired_operator_failure_marker_cleans_prepared_validator(
     tmp_path: Path,
 ) -> None:
     commit = subprocess.check_output(
@@ -507,6 +554,7 @@ def test_paired_operator_does_not_release_validator_after_gateway_failure(
     bin_dir, events = _fake_operator_commands(tmp_path, commit)
     environment = _operator_env(tmp_path, bin_dir, commit)
     environment["FAKE_GATEWAY_RESTART_FAIL"] = "1"
+    environment["FAKE_FAILURE_MARKER_DELAY_SECONDS"] = "0.5"
 
     result = subprocess.run(
         ["bash", str(SCRIPT), "--commit", commit],
@@ -519,10 +567,29 @@ def test_paired_operator_does_not_release_validator_after_gateway_failure(
 
     assert result.returncode == 73
     observed = events.read_text(encoding="utf-8").splitlines()
-    assert "validator_captured" in observed
-    assert "gateway_failed" in observed
+    required = [
+        "validator_forward_handoff",
+        "validator_prepare_started",
+        "validator_captured",
+        "gateway_start",
+        "validator_image_prepared",
+        "gateway_failed",
+        "validator_cancelled",
+        "validator_cleanup",
+        "failure_barrier_released",
+    ]
+    positions = [observed.index(event) for event in required]
+    assert positions == sorted(positions)
+    assert observed.index("gateway_failed") < observed.index(
+        "failure_barrier_publish_started"
+    )
+    assert observed.index("validator_cleanup") < observed.index(
+        "failure_barrier_released"
+    )
+    assert "validator_alignment_failed" not in observed
     assert "barrier_released" not in observed
+    assert "validator_activation" not in observed
     assert "validator_complete" not in observed
     assert "gateway_verified" not in observed
     assert "validator_verified" not in observed
-    assert observed[-1] == "barrier_cleanup"
+    assert "barrier_cleanup" in observed

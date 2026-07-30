@@ -347,6 +347,11 @@ def test_validator_restart_is_fail_closed_and_postflight_verified() -> None:
     assert "/health/v2-authority" in deploy
     assert "read_subnet_epoch_snapshot" in deploy
     assert "RestartCount" in deploy
+    assert "VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1" in restart
+    assert "VALIDATOR_RESTART_COMPLETED=1" in restart
+    assert "Cleaning incomplete validator activation" in restart
+    assert "stop_pinned_validator_after_alignment_failure" in restart
+    assert "Rechecking same-SHA gateway alignment after validator startup" in restart
 
 
 def test_validator_cutover_preparation_keeps_normal_activation_guard() -> None:
@@ -366,15 +371,43 @@ def test_validator_cutover_preparation_keeps_normal_activation_guard() -> None:
     assert "configured cutover has not been explicitly activated" in epoch_runtime
 
 
-def test_validator_restart_does_not_require_a_live_gateway() -> None:
+def test_validator_prepares_without_live_gateway_but_requires_it_for_activation() -> None:
     deploy = (
         ROOT / "validator_models" / "containerizing" / "deploy_dynamic.sh"
     ).read_text(encoding="utf-8")
 
+    build = deploy.index("if docker_build_validator_image; then")
+    commit_label = deploy.index('IMAGE_COMMIT="$(', build)
+    prepared_image = deploy.index('PREPARED_IMAGE_ID="$(', commit_label)
+    activation_barrier = deploy.index(
+        'if [ "$VALIDATOR_EXACT_RELEASE_PINNED" = "1" ]; then',
+        prepared_image,
+    )
+    gateway_verify = deploy.index(
+        'bash "$ACTIVATION_VERIFIER"',
+        activation_barrier,
+    )
+    image_recheck = deploy.index('ACTIVE_IMAGE_ID="$(', gateway_verify)
+    coordinator = deploy.index(
+        '\nstart_container "leadpoet-validator-main"',
+        image_recheck,
+    )
+
+    assert (
+        build
+        < commit_label
+        < prepared_image
+        < activation_barrier
+        < gateway_verify
+        < image_recheck
+        < coordinator
+    )
+    assert "VALIDATOR_GATEWAY_ACTIVATION_BARRIER_V2=1" in deploy
+    assert "VALIDATOR_V2_GATEWAY_URL is required for pinned activation" in deploy
+    assert 'if [ "$ACTIVE_IMAGE_ID" != "$PREPARED_IMAGE_ID" ]; then' in deploy
     assert 'gateway_authority_status = "deferred"' in deploy
     assert 'gateway_authority_status = "not_aligned"' in deploy
     assert '"gateway_authority_status": gateway_authority_status' in deploy
-    assert 'raise SystemExit("VALIDATOR_V2_GATEWAY_URL is missing")' not in deploy
     assert (
         'os.environ.get("VALIDATOR_EXACT_RELEASE_PINNED") == "1"'
         in deploy

@@ -52,6 +52,9 @@ from leadpoet_canonical.weight_authority_v2 import (
     validate_published_weight_bundle_v2,
 )
 from leadpoet_verifier.economics import allocate_research_lab_epoch
+from tests.restart_rehearsal.fixture_contract import (
+    load_rehearsal_metagraph_hotkeys,
+)
 from tests.restart_rehearsal.sanitized_weight_fixture import (
     SanitizedWeightFixture,
 )
@@ -1272,9 +1275,42 @@ def _load_coordinator_release_identity(
     return dict(identity)
 
 
+def _historical_compute_reimbursements(
+    *,
+    source_root: Path,
+    source_epoch: int,
+) -> list[dict[str, Any]]:
+    metagraph_hotkeys = load_rehearsal_metagraph_hotkeys(source_root)
+    return [
+        {
+            "uid": 2,
+            "miner_hotkey": metagraph_hotkeys[2],
+            "source_id": "reimbursement_schedule:restart-rehearsal-compute-2",
+            "island": "generalist",
+            "status": "active",
+            "start_epoch": source_epoch,
+            "epoch_count": 20,
+            "target_reimbursement_microusd": 1_000_000,
+            "eligible_compute_microusd": 1_000_000,
+        },
+        {
+            "uid": 3,
+            "miner_hotkey": metagraph_hotkeys[3],
+            "source_id": "reimbursement_schedule:restart-rehearsal-compute-3",
+            "island": "generalist",
+            "status": "active",
+            "start_epoch": source_epoch,
+            "epoch_count": 20,
+            "target_reimbursement_microusd": 3_000_000,
+            "eligible_compute_microusd": 3_000_000,
+        },
+    ]
+
+
 def _historical_compute_allocation_seed_rows(
     *,
     database: DisposablePostgres,
+    source_root: Path,
     candidate_sha: str,
     current_epoch: int,
     netuid: int,
@@ -1304,30 +1340,10 @@ def _historical_compute_allocation_seed_rows(
         "enable_conservative": False,
         "enable_champ_cap": False,
     }
-    reimbursements = [
-        {
-            "uid": 2,
-            "miner_hotkey": "research-lab-hotkey",
-            "source_id": "reimbursement_schedule:restart-rehearsal-compute-2",
-            "island": "generalist",
-            "status": "active",
-            "start_epoch": source_epoch,
-            "epoch_count": 20,
-            "target_reimbursement_microusd": 1_000_000,
-            "eligible_compute_microusd": 1_000_000,
-        },
-        {
-            "uid": 3,
-            "miner_hotkey": "source-add-hotkey",
-            "source_id": "reimbursement_schedule:restart-rehearsal-compute-3",
-            "island": "generalist",
-            "status": "active",
-            "start_epoch": source_epoch,
-            "epoch_count": 20,
-            "target_reimbursement_microusd": 3_000_000,
-            "eligible_compute_microusd": 3_000_000,
-        },
-    ]
+    reimbursements = _historical_compute_reimbursements(
+        source_root=source_root,
+        source_epoch=source_epoch,
+    )
     allocation = allocate_research_lab_epoch(
         source_epoch,
         policy,
@@ -2035,6 +2051,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         historical_compute_seed_rows = (
             _historical_compute_allocation_seed_rows(
                 database=database,
+                source_root=args.source_root,
                 candidate_sha=args.candidate_sha,
                 current_epoch=args.epoch_id,
                 netuid=int(verified["netuid"]),

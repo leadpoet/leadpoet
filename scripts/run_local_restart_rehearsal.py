@@ -60,6 +60,7 @@ COMMITTED_HARNESS_PATHS = (
     "tests/restart_rehearsal/artifact_identity.py",
     "tests/restart_rehearsal/boundary_contract.json",
     "tests/restart_rehearsal/contract_adapter.py",
+    "tests/restart_rehearsal/fixture_contract.py",
     "tests/restart_rehearsal/fixtures/production_shaped_v2.json",
     "tests/restart_rehearsal/gateway_boundary_service.py",
     "tests/restart_rehearsal/gateway_enclave_service.py",

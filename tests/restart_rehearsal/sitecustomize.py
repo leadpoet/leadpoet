@@ -26,6 +26,10 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Optional
 from urllib.parse import parse_qsl, urlparse, urlsplit, urlunsplit
 
+from tests.restart_rehearsal.fixture_contract import (
+    load_rehearsal_metagraph_hotkeys,
+)
+
 
 STATE_ROOT = Path(os.environ.get("REHEARSAL_STATE_ROOT", "/rehearsal-state"))
 SOURCE_ROOT = Path(os.environ.get("REHEARSAL_SOURCE_ROOT", "/source"))
@@ -742,6 +746,15 @@ class _LocalAxonInfo:
         self.port = 8091 + uid
 
 
+def _local_metagraph_hotkeys() -> tuple[str, ...]:
+    fixture_hotkeys = load_rehearsal_metagraph_hotkeys(SOURCE_ROOT)
+    return (
+        "5CUxhqZ2ewLA61PtdKYzdnLXq1jyFxsvjMg8mRsim4Ni8T3p",
+        "5DLocalFulfillment111111111111111111111111111111",
+        *fixture_hotkeys[2:],
+    )
+
+
 class _LocalMetagraph:
     def __init__(self, *, netuid: int, subtensor: Any):
         import numpy as np
@@ -749,12 +762,7 @@ class _LocalMetagraph:
         if int(netuid) != 71 or not isinstance(subtensor, _LocalSubtensor):
             raise ValueError("local metagraph contract differs")
         self.netuid = int(netuid)
-        self.hotkeys = [
-            "5CUxhqZ2ewLA61PtdKYzdnLXq1jyFxsvjMg8mRsim4Ni8T3p",
-            "5DLocalFulfillment111111111111111111111111111111",
-            "5ELocalResearchLab11111111111111111111111111111",
-            "5FLocalSourceAdd1111111111111111111111111111111",
-        ]
+        self.hotkeys = list(_local_metagraph_hotkeys())
         self.n = len(self.hotkeys)
         self.uids = np.arange(self.n, dtype=np.int64)
         self.validator_trust = np.asarray(

@@ -29,6 +29,9 @@ from tests.restart_rehearsal.artifact_identity import (
 from tests.restart_rehearsal import join_evidence
 from tests.restart_rehearsal import production_workflow_runner
 from tests.restart_rehearsal import sitecustomize as rehearsal_sitecustomize
+from tests.restart_rehearsal.fixture_contract import (
+    load_rehearsal_metagraph_hotkeys,
+)
 from tests.restart_rehearsal.gateway_boundary_service import (
     LocalPostgRESTState,
     RUNTIME_TABLES,
@@ -263,6 +266,29 @@ def test_chain_settlement_activation_fixture_creates_one_epoch_backlog(
     assert rehearsal_sitecustomize._current_settlement_epoch_id() == (
         current_epoch
     )
+
+
+def test_historical_compute_seed_matches_exact_metagraph_recipients(
+    monkeypatch,
+) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "SOURCE_ROOT",
+        source_root,
+    )
+    fixture_hotkeys = load_rehearsal_metagraph_hotkeys(source_root)
+    exact_hotkeys = rehearsal_sitecustomize._local_metagraph_hotkeys()
+    reimbursements = postgres_probe._historical_compute_reimbursements(
+        source_root=source_root,
+        source_epoch=24207,
+    )
+
+    assert exact_hotkeys[2:] == fixture_hotkeys[2:]
+    assert tuple(
+        row["miner_hotkey"] for row in reimbursements
+    ) == exact_hotkeys[2:]
+    assert tuple(row["uid"] for row in reimbursements) == (2, 3)
 
 
 def test_chain_settlement_boundary_persists_zero_credit_readback(
@@ -2439,6 +2465,10 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     )
     assert (
         "tests/restart_rehearsal/postgres_v2_contract_probe.py"
+        in rehearsal.COMMITTED_HARNESS_PATHS
+    )
+    assert (
+        "tests/restart_rehearsal/fixture_contract.py"
         in rehearsal.COMMITTED_HARNESS_PATHS
     )
     assert (

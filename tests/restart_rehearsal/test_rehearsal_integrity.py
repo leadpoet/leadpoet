@@ -291,6 +291,38 @@ def test_historical_compute_seed_matches_exact_metagraph_recipients(
     assert tuple(row["uid"] for row in reimbursements) == (2, 3)
 
 
+def test_sitecustomize_loads_from_staged_harness_without_candidate_package(
+    tmp_path,
+) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    harness_root = Path(__file__).resolve().parent
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(harness_root),
+        "REHEARSAL_SOURCE_ROOT": str(source_root),
+        "REHEARSAL_STATE_ROOT": str(tmp_path / "state"),
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sitecustomize;"
+                "assert sitecustomize._local_metagraph_hotkeys()[2:] == "
+                "('research-lab-hotkey', 'source-add-hotkey')"
+            ),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Error in sitecustomize" not in result.stderr
+
+
 def test_chain_settlement_boundary_persists_zero_credit_readback(
     tmp_path,
 ) -> None:

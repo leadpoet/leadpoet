@@ -26,9 +26,14 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Optional
 from urllib.parse import parse_qsl, urlparse, urlsplit, urlunsplit
 
-from tests.restart_rehearsal.fixture_contract import (
-    load_rehearsal_metagraph_hotkeys,
-)
+try:
+    from fixture_contract import load_rehearsal_metagraph_hotkeys
+except ModuleNotFoundError as exc:
+    if exc.name != "fixture_contract":
+        raise
+    from tests.restart_rehearsal.fixture_contract import (
+        load_rehearsal_metagraph_hotkeys,
+    )
 
 
 STATE_ROOT = Path(os.environ.get("REHEARSAL_STATE_ROOT", "/rehearsal-state"))

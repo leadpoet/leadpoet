@@ -1849,6 +1849,31 @@ def _unwrap_candidate_rpc(response: Mapping[str, Any]) -> Any:
     return response["result"]
 
 
+def _install_allocation_resolver_diagnostic() -> None:
+    from gateway.tee.coordinator_allocation_source_v2 import (
+        CoordinatorAllocationSourceV2,
+    )
+
+    original = CoordinatorAllocationSourceV2.resolve
+    if getattr(original, "_rehearsal_diagnostic", False):
+        return
+
+    def resolve_with_diagnostic(self: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return original(self, *args, **kwargs)
+        except Exception as exc:
+            _external_event(
+                "candidate_gateway",
+                "allocation_resolver_exception",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise
+
+    resolve_with_diagnostic._rehearsal_diagnostic = True  # type: ignore[attr-defined]
+    CoordinatorAllocationSourceV2.resolve = resolve_with_diagnostic
+
+
 def _handle_gateway_enclave_rpc(
     role: str,
     method: str,
@@ -2114,6 +2139,8 @@ def _handle_gateway_enclave_rpc(
         "gateway_autoresearch": "autoresearch_v2_",
     }[role]
     if method.startswith(execution_prefix):
+        if role == "gateway_coordinator":
+            _install_allocation_resolver_diagnostic()
         objects = _gateway_runtime_objects(role, role_state)
         return _unwrap_candidate_rpc(
             objects["tee_service"].handle_v2_execution_rpc(

@@ -3120,6 +3120,11 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
     )
     monkeypatch.setattr(
         rehearsal,
+        "REHEARSAL_LOCK_PATH",
+        tmp_path / "controller.lock",
+    )
+    monkeypatch.setattr(
+        rehearsal,
         "_resolve_transition",
         lambda *_args: "forward",
     )

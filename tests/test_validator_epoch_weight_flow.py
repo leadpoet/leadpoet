@@ -744,3 +744,135 @@ def test_shared_epoch_file_is_bound_to_runtime_generation(
         cutover=cutover,
         expected_runtime_generation="generation-current",
     ) == snapshot
+
+
+def test_shared_epoch_writer_does_not_regress_finalized_block(
+    monkeypatch,
+    tmp_path,
+):
+    cutover = _cutover()
+    newer = validator_module._ValidatorEpochState.from_snapshot(
+        _snapshot(
+            block=719,
+            last_epoch_block=360,
+            index=10,
+            head="finalized",
+        ),
+        cutover,
+    )
+    older = validator_module._ValidatorEpochState.from_snapshot(
+        _snapshot(
+            block=718,
+            last_epoch_block=360,
+            index=10,
+            head="finalized",
+        ),
+        cutover,
+    )
+    monkeypatch.setattr(
+        validator_module,
+        "load_subnet_epoch_cutover",
+        lambda: cutover,
+    )
+    monkeypatch.setenv("VALIDATOR_RUNTIME_GENERATION", "generation-current")
+    monkeypatch.chdir(tmp_path)
+    validator = validator_module.Validator.__new__(validator_module.Validator)
+
+    assert validator._write_shared_block_file(newer) is True
+    assert validator._write_shared_block_file(older) is False
+
+    document = json.loads(
+        (tmp_path / "validator_weights" / "current_block.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert document["block"] == 719
+
+
+def test_shared_epoch_updater_uses_independent_source_and_survives_main_block(
+    monkeypatch,
+):
+    state = object()
+
+    class Source:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    source = Source()
+    written = []
+    stop = threading.Event()
+    validator = validator_module.Validator.__new__(validator_module.Validator)
+    validator.should_exit = False
+    validator._read_epoch_state_sync = lambda observed: (
+        state if observed is source else pytest.fail("unexpected chain source")
+    )
+
+    def write(observed):
+        written.append(observed)
+        if len(written) >= 2:
+            stop.set()
+        return True
+
+    validator._write_shared_block_file = write
+    updater = threading.Thread(
+        target=validator._run_shared_epoch_file_updater,
+        args=(stop,),
+        kwargs={
+            "interval_seconds": 0.01,
+            "subtensor_factory": lambda: source,
+        },
+    )
+    updater.start()
+
+    # Simulate a blocking operation on the caller's thread.
+    time.sleep(0.05)
+    updater.join(timeout=1)
+
+    assert written == [state, state]
+    assert source.closed is True
+    assert updater.is_alive() is False
+
+
+def test_shared_epoch_updater_reconnects_after_read_failure():
+    state = object()
+
+    class Source:
+        def __init__(self, *, failing=False):
+            self.failing = failing
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    failed = Source(failing=True)
+    recovered = Source()
+    sources = iter((failed, recovered))
+    written = []
+    stop = threading.Event()
+    validator = validator_module.Validator.__new__(validator_module.Validator)
+    validator.should_exit = False
+
+    def read(source):
+        if source.failing:
+            raise ConnectionError("chain websocket closed")
+        return state
+
+    def write(observed):
+        written.append(observed)
+        stop.set()
+        return True
+
+    validator._read_epoch_state_sync = read
+    validator._write_shared_block_file = write
+    validator._run_shared_epoch_file_updater(
+        stop,
+        interval_seconds=0.01,
+        subtensor_factory=lambda: next(sources),
+    )
+
+    assert failed.closed is True
+    assert recovered.closed is True
+    assert written == [state]

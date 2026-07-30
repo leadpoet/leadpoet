@@ -523,6 +523,7 @@ QUALIFICATION_WORK_FILE_RE = re.compile(r"^qual_worker_(\d+)_work_(\d+)$")
 
 _TRUTHY_ENV_VALUES = {"true", "1", "yes", "y", "on"}
 _SHARED_EPOCH_SCHEMA_VERSION = VALIDATOR_SHARED_EPOCH_SCHEMA_VERSION
+_SHARED_EPOCH_FILE_WRITE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -1589,29 +1590,80 @@ class Validator(BaseValidatorNeuron):
     def _write_shared_block_file(self, state: _ValidatorEpochState):
         """
         Atomically write the complete epoch authority for worker containers.
-        
-        This allows workers to check block/epoch without connecting to Bittensor.
-        Only coordinator calls this (every 12 seconds).
+
+        Concurrent coordinator paths may refresh the same file. A delayed
+        caller must never replace a newer finalized block from this runtime.
         """
         if not isinstance(state, _ValidatorEpochState):
             raise TypeError("shared block writer requires one epoch state")
         block_file = Path("validator_weights") / "current_block.json"
-        block_file.parent.mkdir(parents=True, exist_ok=True)
-        temporary = block_file.with_name(
-            f".{block_file.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-        )
+        document = state.to_shared_document()
         try:
-            with open(temporary, "w", encoding="utf-8") as file_handle:
-                json.dump(state.to_shared_document(), file_handle, indent=2)
-                file_handle.flush()
-                os.fsync(file_handle.fileno())
-            os.replace(temporary, block_file)
+            with _SHARED_EPOCH_FILE_WRITE_LOCK:
+                try:
+                    existing = json.loads(block_file.read_text(encoding="utf-8"))
+                except (FileNotFoundError, json.JSONDecodeError, OSError):
+                    existing = {}
+                try:
+                    existing_block = int(existing.get("block", -1))
+                except (TypeError, ValueError):
+                    existing_block = -1
+                if (
+                    existing.get("runtime_generation")
+                    == document["runtime_generation"]
+                    and existing_block > state.current_block
+                ):
+                    bt.logging.warning(
+                        "shared_epoch_write_ignored_older_block "
+                        f"existing={existing_block} incoming={state.current_block}"
+                    )
+                    return False
+                _atomic_write_json_file(block_file, document)
+            return True
         except Exception as e:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
             bt.logging.warning(f"Failed to write shared block file: {e}")
+            return False
+
+    def _run_shared_epoch_file_updater(
+        self,
+        stop_event: threading.Event,
+        *,
+        interval_seconds: float = 10.0,
+        subtensor_factory=None,
+    ) -> None:
+        """Keep worker epoch authority fresh independently of the main loop."""
+
+        interval = float(interval_seconds)
+        if interval <= 0:
+            raise ValueError("shared epoch update interval must be positive")
+        factory = subtensor_factory or (lambda: bt.Subtensor(config=self.config))
+        source = None
+        try:
+            while not self.should_exit and not stop_event.is_set():
+                try:
+                    if source is None:
+                        source = factory()
+                    state = self._read_epoch_state_sync(source)
+                    self._write_shared_block_file(state)
+                except Exception as exc:
+                    if source is not None:
+                        _close_subtensor_connection(
+                            source,
+                            source="shared_epoch_writer_failed",
+                        )
+                        source = None
+                    bt.logging.warning(
+                        "shared_epoch_writer_retry "
+                        f"type={type(exc).__name__} error={str(exc)[:200]}"
+                    )
+                if stop_event.wait(interval):
+                    break
+        finally:
+            if source is not None:
+                _close_subtensor_connection(
+                    source,
+                    source="shared_epoch_writer_shutdown",
+                )
 
     def _read_shared_epoch_state(self) -> _ValidatorEpochState:
         return _read_shared_epoch_state_file(max_age_seconds=30)
@@ -1636,10 +1688,6 @@ class Validator(BaseValidatorNeuron):
             )
         except Exception as e:
             raise Exception(f"Failed to read shared block file: {e}")
-    
-    # _start_block_file_updater() removed - no longer needed
-    # Block file is now updated inline in process_gateway_validation_workflow()
-    # This eliminates the separate background thread and prevents websocket concurrency issues
     
     async def cleanup_async_subtensor(self):
         """Clean up async subtensor on shutdown."""
@@ -2481,10 +2529,25 @@ class Validator(BaseValidatorNeuron):
             bt.logging.info("✅ Block subscription started (WebSocket will stay alive)")
             
             # ════════════════════════════════════════════════════════════
-            # SHARED BLOCK FILE UPDATER: For worker containers
+            # SHARED EPOCH FILE UPDATER: For worker containers
             # ════════════════════════════════════════════════════════════
-            # Block file is now updated inline in process_gateway_validation_workflow()
-            # (No separate background thread needed - eliminates websocket concurrency)
+            # Weight finalization is a blocking SDK operation. Keep the shared
+            # worker authority fresh on its own OS thread and chain client so
+            # that finalization cannot starve fulfillment workers.
+            shared_epoch_writer_stop = threading.Event()
+            shared_epoch_writer_thread = None
+            container_mode = getattr(self.config.neuron, "mode", None)
+            if container_mode != "worker":
+                shared_epoch_writer_thread = threading.Thread(
+                    target=self._run_shared_epoch_file_updater,
+                    args=(shared_epoch_writer_stop,),
+                    daemon=True,
+                    name="SharedEpochWriter",
+                )
+                shared_epoch_writer_thread.start()
+                bt.logging.info(
+                    "shared_epoch_writer_started interval_seconds=10"
+                )
 
             # ════════════════════════════════════════════════════════════
             # FULFILLMENT POLLING THREAD (dedicated OS thread)
@@ -2758,6 +2821,19 @@ class Validator(BaseValidatorNeuron):
                 # Continue running instead of crashing
                 await asyncio.sleep(10)  # Wait longer before retrying main loop
             finally:
+                shared_epoch_writer_stop.set()
+                if (
+                    shared_epoch_writer_thread is not None
+                    and shared_epoch_writer_thread.is_alive()
+                ):
+                    shared_epoch_writer_thread.join(timeout=10)
+                    if shared_epoch_writer_thread.is_alive():
+                        bt.logging.warning(
+                            "shared_epoch_writer_shutdown_timeout"
+                        )
+                    else:
+                        bt.logging.info("shared_epoch_writer_stopped")
+
                 # Fulfillment polling is a daemon OS thread; it sees
                 # self.should_exit=True (set on shutdown) and exits its
                 # own event loop cleanly.  As a daemon it would also die

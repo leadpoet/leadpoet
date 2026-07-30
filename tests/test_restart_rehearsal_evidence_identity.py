@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import subprocess
 
@@ -142,11 +143,8 @@ def test_release_reuses_candidate_migrated_durable_boundary_state() -> None:
         "                                ]"
         in controller
     )
-    assert (
-        'REHEARSAL_DURABLE_SCHEMA_SHA:?'
-        "REHEARSAL_DURABLE_SCHEMA_SHA is required"
-        in launcher
-    )
+    assert 'REHEARSAL_DURABLE_SCHEMA_SHA:-' in launcher
+    assert "REHEARSAL_DURABLE_SCHEMA_SHA is required" in launcher
     assert (
         '"$REHEARSAL_DURABLE_STATE_ROOT/postgrest-state.json"'
         in launcher
@@ -155,3 +153,69 @@ def test_release_reuses_candidate_migrated_durable_boundary_state() -> None:
         '"$DURABLE_SCHEMA_SEED_ROOT/release-build-input.json"'
         in launcher
     )
+
+
+def test_exact_launcher_evaluates_durable_schema_identity() -> None:
+    launcher = ROOT / "tests/restart_rehearsal/run_inside.sh"
+    result = subprocess.run(
+        ["bash", str(launcher)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "REHEARSAL_FROM_SHA": "a" * 40,
+            "REHEARSAL_CANDIDATE_SHA": "b" * 40,
+            "REHEARSAL_TRANSITION": "forward",
+            "REHEARSAL_COMPONENT": "invalid",
+            "REHEARSAL_DURABLE_SCHEMA_SHA": "b" * 40,
+        },
+    )
+
+    assert result.returncode == 2
+    assert (
+        "REHEARSAL_COMPONENT must be gateway, validator, or workflow"
+        in result.stderr
+    )
+
+
+def test_workflow_does_not_require_launcher_durable_schema_identity() -> None:
+    launcher = ROOT / "tests/restart_rehearsal/run_inside.sh"
+    result = subprocess.run(
+        ["bash", str(launcher)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "REHEARSAL_FROM_SHA": "a" * 40,
+            "REHEARSAL_CANDIDATE_SHA": "b" * 40,
+            "REHEARSAL_TRANSITION": "forward",
+            "REHEARSAL_COMPONENT": "workflow",
+            "REHEARSAL_PROFILE": "invalid",
+        },
+    )
+
+    assert result.returncode == 2
+    assert "REHEARSAL_PROFILE must be prepush or release" in result.stderr
+    assert "REHEARSAL_DURABLE_SCHEMA_SHA is required" not in result.stderr
+
+
+def test_exact_launcher_requires_durable_schema_identity() -> None:
+    launcher = ROOT / "tests/restart_rehearsal/run_inside.sh"
+    result = subprocess.run(
+        ["bash", str(launcher)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "REHEARSAL_FROM_SHA": "a" * 40,
+            "REHEARSAL_CANDIDATE_SHA": "b" * 40,
+            "REHEARSAL_TRANSITION": "forward",
+            "REHEARSAL_COMPONENT": "gateway",
+        },
+    )
+
+    assert result.returncode == 2
+    assert "REHEARSAL_DURABLE_SCHEMA_SHA is required" in result.stderr

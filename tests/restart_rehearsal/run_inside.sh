@@ -9,7 +9,7 @@ WEIGHT_READINESS_SCENARIO="${REHEARSAL_WEIGHT_READINESS_SCENARIO:-production_suc
 REHEARSAL_SCOPE="${REHEARSAL_SCOPE:-exact}"
 REHEARSAL_PROFILE="${REHEARSAL_PROFILE:-prepush}"
 RUN_ORDINAL="${REHEARSAL_RUN_ORDINAL:-1}"
-DURABLE_SCHEMA_SHA="${REHEARSAL_DURABLE_SCHEMA_SHA:?REHEARSAL_DURABLE_SCHEMA_SHA is required}"
+DURABLE_SCHEMA_SHA="${REHEARSAL_DURABLE_SCHEMA_SHA:-}"
 GATEWAY_WORKER_FLEET_MODE="${REHEARSAL_GATEWAY_WORKER_FLEET_MODE:-active}"
 case "$GATEWAY_WORKER_FLEET_MODE" in
   active)
@@ -36,6 +36,27 @@ case "$COMPONENT" in
     exit 2
     ;;
 esac
+if { [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; } \
+  && [ -z "$DURABLE_SCHEMA_SHA" ]; then
+  echo "ERROR: REHEARSAL_DURABLE_SCHEMA_SHA is required" >&2
+  exit 2
+fi
+if [ "$COMPONENT" = "workflow" ]; then
+  case "$REHEARSAL_PROFILE" in
+    prepush|release) ;;
+    *)
+      echo "ERROR: REHEARSAL_PROFILE must be prepush or release" >&2
+      exit 2
+      ;;
+  esac
+  exec /usr/bin/python3.11 /harness/production_workflow_runner.py \
+    --profile "$REHEARSAL_PROFILE" \
+    --candidate-sha "$CANDIDATE_SHA" \
+    --epochs "${REHEARSAL_EPOCHS:?REHEARSAL_EPOCHS is required}" \
+    --fixture /harness/fixtures/production_shaped_v2.json \
+    --boundary-contract /harness/boundary_contract.json \
+    --output /evidence/workflow.json
+fi
 
 export REHEARSAL_STATE_ROOT=/rehearsal-state
 export REHEARSAL_DURABLE_STATE_ROOT=/rehearsal-durable-state
@@ -107,23 +128,6 @@ finalize_rehearsal() {
 trap finalize_rehearsal EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-
-if [ "$COMPONENT" = "workflow" ]; then
-  case "$REHEARSAL_PROFILE" in
-    prepush|release) ;;
-    *)
-      echo "ERROR: REHEARSAL_PROFILE must be prepush or release" >&2
-      exit 2
-      ;;
-  esac
-  exec /usr/bin/python3.11 /harness/production_workflow_runner.py \
-    --profile "$REHEARSAL_PROFILE" \
-    --candidate-sha "$CANDIDATE_SHA" \
-    --epochs "${REHEARSAL_EPOCHS:?REHEARSAL_EPOCHS is required}" \
-    --fixture /harness/fixtures/production_shaped_v2.json \
-    --boundary-contract /harness/boundary_contract.json \
-    --output /evidence/workflow.json
-fi
 
 make_adapter() {
   local command="$1"

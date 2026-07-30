@@ -32,6 +32,12 @@ ACTIVE_CHAMPION_STATUSES = {"active", "queued", "partially_paid"}
 SETTLEMENT_TRACKED_CHAMPION_STATUSES = ACTIVE_CHAMPION_STATUSES | {"paid"}
 RATE_QUANT = Decimal("0.000001")
 POSTGREST_IN_FILTER_CHUNK = 50
+LATEST_NATIVE_COMPUTE_AUTHORITY_TABLE = (
+    "research_lab_finalized_allocation_epochs_v2"
+)
+LATEST_LEGACY_COMPUTE_AUTHORITY_TABLE = (
+    "research_lab_legacy_finalized_allocation_migrations_v2"
+)
 logger = logging.getLogger(__name__)
 _ALLOCATION_V2_INFLIGHT: dict[
     tuple[int, int, int, str],
@@ -414,33 +420,20 @@ async def _historical_compute_fallback_obligations(
     netuid: int,
     policy: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
-    """Load the latest non-fallback compute allocation for no-burn replay."""
+    """Load the latest finalized compute allocation for no-burn replay."""
 
-    rows = await select_all(
-        "research_lab_emission_allocation_current",
-        columns="epoch,netuid,allocation_hash,allocation_doc",
-        filters=(
-            ("netuid", int(netuid)),
-            ("epoch", "lt", int(epoch)),
-            ("allocation_doc->reimbursement_allocations", "neq", []),
-            (
-                "allocation_doc->>historical_compute_fallback_source_epoch",
-                "is",
-                "null",
-            ),
-        ),
-        order_by=(("epoch", True),),
-        batch_size=1,
-        max_rows=1,
-        allow_partial=True,
+    resolved = await _load_latest_finalized_compute_snapshot_v2(
+        epoch=epoch,
+        netuid=netuid,
     )
-    if not rows:
+    if resolved is None:
         return (
             [],
             [{"reason": "historical_compute_allocation_unavailable"}],
             {},
         )
-    allocation_doc = rows[0].get("allocation_doc")
+    row, _authority = resolved
+    allocation_doc = row.get("allocation_doc")
     hotkeys = []
     if isinstance(allocation_doc, Mapping):
         for item in allocation_doc.get("reimbursement_allocations") or ():
@@ -448,7 +441,7 @@ async def _historical_compute_fallback_obligations(
                 hotkeys.append(str(item["miner_hotkey"]))
     hotkey_uids = await resolve_hotkey_uids(hotkeys)
     return _historical_compute_fallback_from_snapshot(
-        rows[0],
+        row,
         hotkey_uids=hotkey_uids,
         reward_epochs=max(
             1,
@@ -459,6 +452,123 @@ async def _historical_compute_fallback_obligations(
             ),
         ),
         expected_netuid=int(netuid),
+    )
+
+
+async def _load_latest_finalized_compute_snapshot_v2(
+    *,
+    epoch: int,
+    netuid: int,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Resolve the newest non-recursive compute snapshot with final authority."""
+
+    from gateway.research_lab.champion_settlement_v2 import (
+        load_finalized_allocation_history_v2,
+    )
+
+    native = await select_all(
+        LATEST_NATIVE_COMPUTE_AUTHORITY_TABLE,
+        columns="epoch_id,netuid",
+        filters=(
+            ("netuid", int(netuid)),
+            ("epoch_id", "lt", int(epoch)),
+            (
+                "bundle_doc->weight_snapshot->calculation_snapshot"
+                "->research_lab_allocation_doc->reimbursement_allocations",
+                "neq",
+                [],
+            ),
+            (
+                "bundle_doc->weight_snapshot->calculation_snapshot"
+                "->research_lab_allocation_doc"
+                "->>historical_compute_fallback_source_epoch",
+                "is",
+                "null",
+            ),
+        ),
+        order_by=(("epoch_id", True),),
+        batch_size=1,
+        max_rows=1,
+        allow_partial=True,
+    )
+    legacy = await select_all(
+        LATEST_LEGACY_COMPUTE_AUTHORITY_TABLE,
+        columns="netuid,epoch_id,allocation_hash,allocation_doc",
+        filters=(
+            ("netuid", int(netuid)),
+            ("epoch_id", "lt", int(epoch)),
+            ("allocation_doc->reimbursement_allocations", "neq", []),
+            (
+                "allocation_doc->>historical_compute_fallback_source_epoch",
+                "is",
+                "null",
+            ),
+        ),
+        order_by=(("epoch_id", True),),
+        batch_size=1,
+        max_rows=1,
+        allow_partial=True,
+    )
+    candidates: list[tuple[int, str, Mapping[str, Any]]] = []
+    if native:
+        candidates.append((int(native[0]["epoch_id"]), "native", native[0]))
+    if legacy:
+        candidates.append((int(legacy[0]["epoch_id"]), "legacy", legacy[0]))
+    if not candidates:
+        return None
+    selected_epoch, selected_kind, selected_identity = max(
+        candidates,
+        key=lambda item: (item[0], item[1] == "native"),
+    )
+    history = await load_finalized_allocation_history_v2(
+        netuid=int(netuid),
+        start_epoch=selected_epoch,
+        end_epoch=selected_epoch,
+    )
+    matches = []
+    for authority in history:
+        allocation_doc = authority.get("allocation_doc")
+        authority_types = set(authority.get("authority_types") or ())
+        if (
+            int(authority.get("epoch", -1)) != selected_epoch
+            or int(authority.get("netuid", -1)) != int(netuid)
+            or not isinstance(allocation_doc, Mapping)
+            or not allocation_doc.get("reimbursement_allocations")
+            or allocation_doc.get(
+                "historical_compute_fallback_source_epoch"
+            )
+            is not None
+            or (
+                selected_kind == "native"
+                and "native_v2_finalization" not in authority_types
+            )
+            or (
+                selected_kind == "legacy"
+                and "legacy_finalized_chain_migration_v2"
+                not in authority_types
+            )
+        ):
+            continue
+        if selected_kind == "legacy" and (
+            str(authority.get("allocation_hash") or "")
+            != str(selected_identity.get("allocation_hash") or "")
+            or allocation_doc != selected_identity.get("allocation_doc")
+        ):
+            continue
+        matches.append(dict(authority))
+    if len(matches) != 1:
+        raise ValueError(
+            "historical compute fallback lacks finalized allocation authority"
+        )
+    authority = matches[0]
+    return (
+        {
+            "epoch": int(authority["epoch"]),
+            "netuid": int(authority["netuid"]),
+            "allocation_hash": str(authority["allocation_hash"]),
+            "allocation_doc": dict(authority["allocation_doc"]),
+        },
+        authority,
     )
 
 

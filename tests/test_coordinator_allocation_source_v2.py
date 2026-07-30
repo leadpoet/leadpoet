@@ -191,7 +191,14 @@ def test_measured_no_burn_allocation_uses_prior_compute_snapshot(monkeypatch):
         },
     }
     reader = FakeReader(
-        {"allocation_latest_compute_snapshot": [source_row]}
+        {
+            "latest_legacy_compute_allocation_authority": [
+                {
+                    **source_row,
+                    "epoch_id": source_row["epoch"],
+                }
+            ]
+        }
     )
     resolver = CoordinatorAllocationSourceV2(
         reader=reader,
@@ -200,13 +207,14 @@ def test_measured_no_burn_allocation_uses_prior_compute_snapshot(monkeypatch):
         network_supplier=lambda: "finney",
     )
 
-    def require_authority(*, required_parents, **_kwargs):
+    def load_authority(*, required_parents, **_kwargs):
         required_parents.add(settlement_receipt)
+        return source_row
 
     monkeypatch.setattr(
         resolver,
-        "_require_historical_compute_authority",
-        require_authority,
+        "_load_historical_compute_authority",
+        load_authority,
     )
 
     result = resolver.resolve(
@@ -215,7 +223,11 @@ def test_measured_no_burn_allocation_uses_prior_compute_snapshot(monkeypatch):
     )
 
     assert (
-        "allocation_latest_compute_snapshot",
+        "latest_native_compute_allocation_authority",
+        {"epoch_id": 100, "netuid": 71},
+    ) in reader.calls
+    assert (
+        "latest_legacy_compute_allocation_authority",
         {"epoch_id": 100, "netuid": 71},
     ) in reader.calls
     assert (
@@ -232,6 +244,95 @@ def test_measured_no_burn_allocation_uses_prior_compute_snapshot(monkeypatch):
     assert result["source_state"][
         "historical_compute_fallback_source"
     ]["source_allocation_epoch"] == 99
+
+
+def test_measured_no_burn_source_requires_finalized_authority(monkeypatch):
+    settlement_receipt = "sha256:" + "8" * 64
+    allocation_payload = {
+        "epoch": 99,
+        "reimbursement_allocations": [
+            {
+                "uid": 77,
+                "miner_hotkey": "miner",
+                "source_id": "reimbursement_schedule:source",
+                "spend_microusd": 1_000_000,
+                "eligible_compute_microusd": 3_000_000,
+                "reason": "full_reimbursement",
+            }
+        ],
+    }
+    allocation_hash = sha256_json(allocation_payload)
+    source_row = {
+        "epoch": 99,
+        "netuid": 71,
+        "allocation_hash": allocation_hash,
+        "allocation_doc": {
+            **allocation_payload,
+            "allocation_hash": allocation_hash,
+        },
+    }
+    authority = {
+        **source_row,
+        "authority_types": ["legacy_finalized_chain_migration_v2"],
+        "legacy_settlement_receipt_hash": settlement_receipt,
+    }
+    reader = FakeReader(
+        {
+            "latest_legacy_compute_allocation_authority": [
+                {
+                    **source_row,
+                    "epoch_id": 99,
+                }
+            ],
+            "legacy_finalized_allocation_migrations": [
+                {"settlement_receipt_hash": settlement_receipt}
+            ],
+        }
+    )
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=FakeChainSource(),
+        config_supplier=_no_burn_config,
+        network_supplier=lambda: "finney",
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_finalized_allocation_authorities_v2",
+        lambda _rows, *, finalization_graphs: [],
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_legacy_settlement_migrations_v2",
+        lambda _rows, *, receipt_graphs: [authority],
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "_receipt_graphs_by_declared_root",
+        lambda _graphs, _parents: {
+            settlement_receipt: {
+                "root_receipt_hash": settlement_receipt,
+                "receipts": [{"receipt_hash": settlement_receipt}],
+            }
+        },
+    )
+    context = _context((settlement_receipt,))
+
+    result = resolver.resolve(
+        payload={"epoch": 100, "netuid": 71},
+        context=context,
+    )
+
+    assert result["source_state"][
+        "historical_compute_fallback_source"
+    ]["source_allocation_epoch"] == 99
+    assert (
+        "latest_legacy_compute_allocation_authority",
+        {"epoch_id": 100, "netuid": 71},
+    ) in reader.calls
+    assert (
+        "legacy_finalized_allocation_migrations",
+        {"netuid": 71, "start_epoch": 99, "end_epoch": 99},
+    ) in reader.calls
 
 
 def test_unreceipted_source_add_reward_fails_closed():

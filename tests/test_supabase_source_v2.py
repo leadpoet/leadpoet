@@ -157,30 +157,48 @@ def test_uncapped_champion_query_includes_paid_projection():
     )
 
 
-def test_historical_compute_query_is_strictly_before_target_epoch():
+@pytest.mark.parametrize(
+    ("policy_id", "table", "epoch_field"),
+    [
+        (
+            "latest_native_compute_allocation_authority",
+            "research_lab_finalized_allocation_epochs_v2",
+            "epoch_id",
+        ),
+        (
+            "latest_legacy_compute_allocation_authority",
+            "research_lab_legacy_finalized_allocation_migrations_v2",
+            "epoch_id",
+        ),
+    ],
+)
+def test_historical_compute_queries_are_strictly_before_target_epoch(
+    policy_id,
+    table,
+    epoch_field,
+):
     provider = FakeProvider([{"rows": []}])
     _read(
         provider,
-        policy_id="allocation_latest_compute_snapshot",
+        policy_id=policy_id,
         parameters={"epoch_id": 24030, "netuid": 71},
     )
 
     url = urlsplit(provider.requests[0]["url"])
     query = parse_qsl(url.query, keep_blank_values=True)
-    assert url.path.endswith(
-        "/rest/v1/research_lab_emission_allocation_current"
-    )
-    assert ("epoch", "lt.24030") in query
+    assert url.path.endswith("/rest/v1/" + table)
+    assert (epoch_field, "lt.24030") in query
     assert ("netuid", "eq.71") in query
-    assert (
-        "allocation_doc->reimbursement_allocations",
-        "not.eq.[]",
-    ) in query
-    assert (
-        "allocation_doc->>historical_compute_fallback_source_epoch",
-        "is.null",
-    ) in query
-    assert ("order", "epoch.desc") in query
+    assert any(
+        key.endswith("reimbursement_allocations") and value == "not.eq.[]"
+        for key, value in query
+    )
+    assert any(
+        key.endswith("historical_compute_fallback_source_epoch")
+        and value == "is.null"
+        for key, value in query
+    )
+    assert ("order", "epoch_id.desc") in query
     assert ("limit", "1") in query
 
 

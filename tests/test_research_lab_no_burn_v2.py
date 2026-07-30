@@ -489,6 +489,104 @@ def _snapshot_row() -> dict[str, object]:
     }
 
 
+@pytest.mark.asyncio
+async def test_latest_compute_fallback_is_selected_from_finalized_authority(
+    monkeypatch,
+):
+    from gateway.research_lab import allocations, champion_settlement_v2
+
+    row = _snapshot_row()
+    authority = {
+        **row,
+        "authority_types": ["legacy_finalized_chain_migration_v2"],
+        "legacy_settlement_receipt_hash": "sha256:" + "9" * 64,
+    }
+    queried_tables = []
+
+    async def select_authority(table, **_kwargs):
+        queried_tables.append(table)
+        if table == allocations.LATEST_LEGACY_COMPUTE_AUTHORITY_TABLE:
+            return [{**row, "epoch_id": row["epoch"]}]
+        return []
+
+    async def load_history(**kwargs):
+        assert kwargs == {
+            "netuid": 71,
+            "start_epoch": 100,
+            "end_epoch": 100,
+        }
+        return [authority]
+
+    monkeypatch.setattr(allocations, "select_all", select_authority)
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "load_finalized_allocation_history_v2",
+        load_history,
+    )
+
+    resolved = await allocations._load_latest_finalized_compute_snapshot_v2(
+        epoch=101,
+        netuid=71,
+    )
+
+    assert resolved == (row, authority)
+    assert "research_lab_emission_allocation_current" not in queried_tables
+
+
+@pytest.mark.asyncio
+async def test_readiness_uses_existing_compute_authority_without_classifying(
+    monkeypatch,
+):
+    from gateway.research_lab import allocations, v2_authority
+
+    row = _snapshot_row()
+    authority = {
+        **row,
+        "authority_types": ["legacy_finalized_chain_migration_v2"],
+    }
+
+    async def resolve_epoch(_epoch):
+        return 101
+
+    async def load_finalized(**_kwargs):
+        return row, authority
+
+    async def classify(**_kwargs):
+        raise AssertionError("existing authority must not be reclassified")
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve_epoch)
+    monkeypatch.setattr(
+        ResearchLabGatewayConfig,
+        "from_env",
+        classmethod(
+            lambda cls: ResearchLabGatewayConfig(enable_conservative=False)
+        ),
+    )
+    monkeypatch.setattr(
+        allocations,
+        "_load_latest_finalized_compute_snapshot_v2",
+        load_finalized,
+    )
+    monkeypatch.setattr(
+        v2_authority,
+        "classify_historical_champion_allocation_v2",
+        classify,
+    )
+
+    result = (
+        await maintenance.backfill_historical_compute_fallback_v2_authority(
+            epoch=101,
+            netuid=71,
+            dry_run=False,
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "already_classified"
+    assert result["source_allocation_epoch"] == 100
+    assert result["classified_count"] == 0
+
+
 def test_historical_snapshot_uses_compute_amount_and_current_uid_mapping():
     obligations, skipped, source = _historical_compute_fallback_from_snapshot(
         _snapshot_row(),
@@ -538,7 +636,11 @@ def test_historical_snapshot_rejects_recursive_fallback():
 async def test_readiness_backfill_classifies_and_reads_back_exact_source(
     monkeypatch,
 ):
-    from gateway.research_lab import champion_settlement_v2, v2_authority
+    from gateway.research_lab import (
+        allocations,
+        champion_settlement_v2,
+        v2_authority,
+    )
 
     row = _snapshot_row()
     observed_filters = []
@@ -554,6 +656,11 @@ async def test_readiness_backfill_classifies_and_reads_back_exact_source(
 
     async def load_history(**_kwargs):
         return list(authorities)
+
+    async def load_finalized_source(**_kwargs):
+        if not authorities:
+            return None
+        return row, authorities[0]
 
     async def classify(**kwargs):
         assert kwargs == {
@@ -587,6 +694,11 @@ async def test_readiness_backfill_classifies_and_reads_back_exact_source(
         champion_settlement_v2,
         "load_finalized_allocation_history_v2",
         load_history,
+    )
+    monkeypatch.setattr(
+        allocations,
+        "_load_latest_finalized_compute_snapshot_v2",
+        load_finalized_source,
     )
     monkeypatch.setattr(
         v2_authority,
@@ -624,7 +736,11 @@ async def test_readiness_backfill_classifies_and_reads_back_exact_source(
 
 @pytest.mark.asyncio
 async def test_readiness_backfill_rejects_nonfinalized_source(monkeypatch):
-    from gateway.research_lab import champion_settlement_v2, v2_authority
+    from gateway.research_lab import (
+        allocations,
+        champion_settlement_v2,
+        v2_authority,
+    )
 
     async def resolve_epoch(_epoch):
         return 101
@@ -634,6 +750,9 @@ async def test_readiness_backfill_rejects_nonfinalized_source(monkeypatch):
 
     async def no_history(**_kwargs):
         return []
+
+    async def no_finalized_source(**_kwargs):
+        return None
 
     async def not_finalized(**_kwargs):
         return {"status": "not_finalized"}
@@ -651,6 +770,11 @@ async def test_readiness_backfill_rejects_nonfinalized_source(monkeypatch):
         champion_settlement_v2,
         "load_finalized_allocation_history_v2",
         no_history,
+    )
+    monkeypatch.setattr(
+        allocations,
+        "_load_latest_finalized_compute_snapshot_v2",
+        no_finalized_source,
     )
     monkeypatch.setattr(
         v2_authority,

@@ -535,6 +535,73 @@ def test_gateway_rehearsal_applies_production_postgrest_query_semantics() -> Non
     ) == [rows[0]]
 
 
+def test_gateway_rehearsal_applies_nested_postgrest_json_filters() -> None:
+    allocation_path = (
+        "bundle_doc->weight_snapshot->calculation_snapshot"
+        "->research_lab_allocation_doc"
+    )
+    rows = [
+        {
+            "epoch_id": 24218,
+            "bundle_doc": {
+                "weight_snapshot": {
+                    "calculation_snapshot": {
+                        "research_lab_allocation_doc": {
+                            "reimbursement_allocations": [
+                                {"miner_hotkey": "5eligible"}
+                            ]
+                        }
+                    }
+                }
+            },
+        },
+        {
+            "epoch_id": 24217,
+            "bundle_doc": {
+                "weight_snapshot": {
+                    "calculation_snapshot": {
+                        "research_lab_allocation_doc": {
+                            "historical_compute_fallback_source_epoch": 24216,
+                            "reimbursement_allocations": [
+                                {"miner_hotkey": "5recursive"}
+                            ],
+                        }
+                    }
+                }
+            },
+        },
+        {
+            "epoch_id": 24216,
+            "bundle_doc": {
+                "weight_snapshot": {
+                    "calculation_snapshot": {
+                        "research_lab_allocation_doc": {
+                            "reimbursement_allocations": []
+                        }
+                    }
+                }
+            },
+        },
+    ]
+
+    assert _apply_table_query(
+        rows,
+        "select=epoch_id"
+        f"&{allocation_path}->reimbursement_allocations=not.eq.[]"
+        f"&{allocation_path}"
+        "->>historical_compute_fallback_source_epoch=is.null"
+        "&order=epoch_id.desc"
+        "&limit=1",
+        allowed_columns=frozenset({"bundle_doc", "epoch_id"}),
+    ) == [{"epoch_id": 24218}]
+    with pytest.raises(ValueError, match="filter column is invalid"):
+        _apply_table_query(
+            rows,
+            "bundle_doc->>weight_snapshot->calculation_snapshot=eq.invalid",
+            allowed_columns=frozenset({"bundle_doc", "epoch_id"}),
+        )
+
+
 def test_gateway_rehearsal_rejects_columns_absent_from_migration_schema() -> None:
     columns = frozenset({"bundle_hash", "finalization_doc"})
     with pytest.raises(ValueError, match="selection references unknown"):

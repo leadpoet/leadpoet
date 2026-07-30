@@ -60,8 +60,10 @@ RUNTIME_RPCS = frozenset(
 TABLE_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 JSON_FILTER_RE = re.compile(
     r"^(?P<column>[a-z][a-z0-9_]{0,127})"
-    r"(?P<operator>->>|->)"
-    r"(?P<key>[A-Za-z_][A-Za-z0-9_]{0,127})$"
+    r"(?P<path>(?:(?:->>|->)[A-Za-z_][A-Za-z0-9_]{0,127})+)$"
+)
+JSON_FILTER_TOKEN_RE = re.compile(
+    r"(?P<operator>->>|->)(?P<key>[A-Za-z_][A-Za-z0-9_]{0,127})"
 )
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -105,34 +107,48 @@ def _in_values(raw: str, existing: Any) -> list[Any]:
     return [_filter_scalar(value, existing) for value in values]
 
 
-def _filter_value(row: dict[str, Any], reference: str) -> Any:
-    if TABLE_RE.fullmatch(reference):
-        return row.get(reference)
+def _json_filter_parts(
+    reference: str,
+) -> tuple[str, list[tuple[str, str]]]:
     match = JSON_FILTER_RE.fullmatch(reference)
     if match is None:
         raise ValueError("PostgREST filter column is invalid")
-    value = row.get(match.group("column"))
-    if not isinstance(value, dict):
-        return None
-    nested = value.get(match.group("key"))
-    if match.group("operator") == "->>" and nested is not None:
-        if not isinstance(nested, str):
-            return json.dumps(
-                nested,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        return nested
-    return nested
+    tokens = [
+        (token.group("operator"), token.group("key"))
+        for token in JSON_FILTER_TOKEN_RE.finditer(match.group("path"))
+    ]
+    if (
+        not tokens
+        or any(operator == "->>" for operator, _key in tokens[:-1])
+    ):
+        raise ValueError("PostgREST filter column is invalid")
+    return match.group("column"), tokens
+
+
+def _filter_value(row: dict[str, Any], reference: str) -> Any:
+    if TABLE_RE.fullmatch(reference):
+        return row.get(reference)
+    column, tokens = _json_filter_parts(reference)
+    value = row.get(column)
+    for operator, key in tokens:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+        if operator == "->>" and value is not None:
+            if not isinstance(value, str):
+                return json.dumps(
+                    value,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+    return value
 
 
 def _filter_root(reference: str) -> str:
     if TABLE_RE.fullmatch(reference):
         return reference
-    match = JSON_FILTER_RE.fullmatch(reference)
-    if match is None:
-        raise ValueError("PostgREST filter column is invalid")
-    return match.group("column")
+    column, _tokens = _json_filter_parts(reference)
+    return column
 
 
 def _matches_filter(row: dict[str, Any], column: str, expression: str) -> bool:

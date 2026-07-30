@@ -1966,7 +1966,7 @@ async def _load_allocation_parent_graphs_v2(
         _champion_obligation_caps,
         _champion_paid_alpha_to_date_from_snapshots,
         _champion_replay_obligation,
-        _historical_compute_fallback_from_snapshot,
+        _load_latest_finalized_compute_snapshot_v2,
         _source_add_paid_alpha_to_date_from_snapshots,
     )
     from gateway.research_lab.champion_settlement_v2 import (
@@ -2063,66 +2063,17 @@ async def _load_allocation_parent_graphs_v2(
         add("reimbursement_decision", award_id)
 
     if policy.get("enable_conservative", True) is False:
-        fallback_rows = await select_all(
-            "research_lab_emission_allocation_current",
-            columns="epoch,netuid,allocation_hash,allocation_doc",
-            filters=(
-                ("netuid", int(netuid)),
-                ("epoch", "lt", int(epoch_id)),
-                ("allocation_doc->reimbursement_allocations", "neq", []),
-                (
-                    "allocation_doc->>historical_compute_fallback_source_epoch",
-                    "is",
-                    "null",
-                ),
-            ),
-            order_by=(("epoch", True),),
-            batch_size=1,
-            max_rows=1,
-            allow_partial=True,
-        )
-        if fallback_rows:
-            fallback_row = fallback_rows[0]
-            allocation_doc = fallback_row.get("allocation_doc")
-            snapshot_hotkey_uids = {}
-            if isinstance(allocation_doc, Mapping):
-                for item in allocation_doc.get("reimbursement_allocations") or ():
-                    if isinstance(item, Mapping) and item.get("miner_hotkey"):
-                        snapshot_hotkey_uids[str(item["miner_hotkey"])] = int(
-                            item.get("uid") or 0
-                        )
-            _historical_compute_fallback_from_snapshot(
-                fallback_row,
-                hotkey_uids=snapshot_hotkey_uids,
-                reward_epochs=max(
-                    1,
-                    int(
-                        policy.get("reimbursement_epochs")
-                        or policy.get("reward_epochs")
-                        or 20
-                    ),
-                ),
-                expected_netuid=int(netuid),
-            )
-            fallback_epoch = int(fallback_row["epoch"])
-            fallback_hash = str(fallback_row["allocation_hash"])
-            fallback_history = await load_settled_allocation_history_v2(
+        try:
+            fallback = await _load_latest_finalized_compute_snapshot_v2(
+                epoch=int(epoch_id),
                 netuid=int(netuid),
-                start_epoch=fallback_epoch,
-                end_epoch=fallback_epoch,
             )
-            matching_fallback = [
-                item
-                for item in fallback_history
-                if int(item.get("epoch") or -1) == fallback_epoch
-                and str(item.get("allocation_hash") or "") == fallback_hash
-                and item.get("allocation_doc") == allocation_doc
-            ]
-            if len(matching_fallback) != 1:
-                raise ResearchLabV2AuthorityError(
-                    "historical compute fallback lacks finalized allocation authority"
-                )
-            fallback_authority = matching_fallback[0]
+        except ValueError as exc:
+            raise ResearchLabV2AuthorityError(str(exc)) from exc
+        if fallback is not None:
+            _fallback_row, fallback_authority = fallback
+            fallback_epoch = int(fallback_authority["epoch"])
+            fallback_hash = str(fallback_authority["allocation_hash"])
             fallback_types = set(
                 fallback_authority.get("authority_types") or ()
             )

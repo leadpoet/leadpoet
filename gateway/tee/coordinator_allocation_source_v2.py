@@ -255,18 +255,52 @@ class CoordinatorAllocationSourceV2:
         fallback_reimbursement_skipped: list[Dict[str, Any]] = []
         fallback_source: Dict[str, Any] = {}
         if policy.get("enable_conservative", True) is False:
-            fallback_snapshots = self._read(
-                "allocation_latest_compute_snapshot",
+            native_compute = self._read(
+                "latest_native_compute_allocation_authority",
                 {"epoch_id": epoch, "netuid": netuid},
                 context,
             )
-            if len(fallback_snapshots) > 1:
+            legacy_compute = self._read(
+                "latest_legacy_compute_allocation_authority",
+                {"epoch_id": epoch, "netuid": netuid},
+                context,
+            )
+            if len(native_compute) > 1 or len(legacy_compute) > 1:
                 raise CoordinatorAllocationSourceV2Error(
-                    "historical compute fallback snapshot is ambiguous"
+                    "historical compute fallback authority is ambiguous"
                 )
-            if fallback_snapshots:
-                self._require_historical_compute_authority(
-                    row=fallback_snapshots[0],
+            identities = []
+            if native_compute:
+                identities.append(
+                    (
+                        self._non_negative_int(
+                            native_compute[0].get("epoch_id"),
+                            "native compute authority epoch",
+                        ),
+                        "native",
+                        native_compute[0],
+                    )
+                )
+            if legacy_compute:
+                identities.append(
+                    (
+                        self._non_negative_int(
+                            legacy_compute[0].get("epoch_id"),
+                            "legacy compute authority epoch",
+                        ),
+                        "legacy",
+                        legacy_compute[0],
+                    )
+                )
+            if identities:
+                source_epoch, source_kind, source_identity = max(
+                    identities,
+                    key=lambda item: (item[0], item[1] == "native"),
+                )
+                fallback_snapshot = self._load_historical_compute_authority(
+                    source_epoch=source_epoch,
+                    source_kind=source_kind,
+                    source_identity=source_identity,
                     netuid=netuid,
                     context=context,
                     required_parents=required_parent_hashes,
@@ -276,7 +310,7 @@ class CoordinatorAllocationSourceV2:
                     fallback_reimbursement_skipped,
                     fallback_source,
                 ) = _historical_compute_fallback_from_snapshot(
-                    fallback_snapshots[0],
+                    fallback_snapshot,
                     hotkey_uids=hotkey_uids,
                     reward_epochs=max(
                         1,
@@ -531,25 +565,23 @@ class CoordinatorAllocationSourceV2:
             )
         return obligations, skipped
 
-    def _require_historical_compute_authority(
+    def _load_historical_compute_authority(
         self,
         *,
-        row: Mapping[str, Any],
+        source_epoch: int,
+        source_kind: str,
+        source_identity: Mapping[str, Any],
         netuid: int,
         context: ExecutionContextV2,
         required_parents: Set[str],
-    ) -> None:
-        try:
-            source_epoch = int(row["epoch"])
-        except (KeyError, TypeError, ValueError) as exc:
+    ) -> Dict[str, Any]:
+        if (
+            source_kind not in {"native", "legacy"}
+            or int(source_identity.get("epoch_id", -1)) != int(source_epoch)
+            or int(source_identity.get("netuid", -1)) != int(netuid)
+        ):
             raise CoordinatorAllocationSourceV2Error(
-                "historical compute fallback epoch is invalid"
-            ) from exc
-        allocation = row.get("allocation_doc")
-        allocation_hash = str(row.get("allocation_hash") or "")
-        if not isinstance(allocation, Mapping):
-            raise CoordinatorAllocationSourceV2Error(
-                "historical compute fallback allocation is invalid"
+                "historical compute fallback identity is invalid"
             )
         native_rows = self._read(
             "finalized_allocation_authorities",
@@ -588,17 +620,44 @@ class CoordinatorAllocationSourceV2:
         matches = [
             authority
             for authority in authorities
-            if int(authority.get("epoch") or -1) == source_epoch
-            and int(authority.get("netuid") or -1) == netuid
-            and str(authority.get("allocation_hash") or "")
-            == allocation_hash
-            and _same(authority.get("allocation_doc"), allocation)
+            if int(authority.get("epoch", -1)) == source_epoch
+            and int(authority.get("netuid", -1)) == netuid
+            and isinstance(authority.get("allocation_doc"), Mapping)
+            and bool(
+                authority["allocation_doc"].get(
+                    "reimbursement_allocations"
+                )
+            )
+            and authority["allocation_doc"].get(
+                "historical_compute_fallback_source_epoch"
+            )
+            is None
+            and (
+                source_kind != "native"
+                or "native_v2_finalization"
+                in set(authority.get("authority_types") or ())
+            )
+            and (
+                source_kind != "legacy"
+                or (
+                    "legacy_finalized_chain_migration_v2"
+                    in set(authority.get("authority_types") or ())
+                    and str(authority.get("allocation_hash") or "")
+                    == str(source_identity.get("allocation_hash") or "")
+                    and _same(
+                        authority.get("allocation_doc"),
+                        source_identity.get("allocation_doc"),
+                    )
+                )
+            )
         ]
         if len(matches) != 1:
             raise CoordinatorAllocationSourceV2Error(
                 "historical compute fallback lacks finalized allocation authority"
             )
         authority = matches[0]
+        allocation = authority["allocation_doc"]
+        allocation_hash = str(authority.get("allocation_hash") or "")
         authority_types = set(authority.get("authority_types") or ())
         if "native_v2_finalization" in authority_types:
             receipt_hash = self._require_allocation_receipt(
@@ -643,6 +702,12 @@ class CoordinatorAllocationSourceV2:
             raise CoordinatorAllocationSourceV2Error(
                 "historical compute fallback authority type is unsupported"
             )
+        return {
+            "epoch": int(source_epoch),
+            "netuid": int(netuid),
+            "allocation_hash": allocation_hash,
+            "allocation_doc": dict(allocation),
+        }
 
     def _champions(
         self,

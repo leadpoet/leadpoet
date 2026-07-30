@@ -100,13 +100,22 @@ QUERY_POLICIES = {
         order="created_at.desc",
         limit=1,
     ),
-    "allocation_latest_compute_snapshot": SupabaseQueryV2(
-        policy_id="allocation_latest_compute_snapshot",
-        table="research_lab_emission_allocation_current",
-        select="epoch,netuid,allocation_hash,allocation_doc",
+    "latest_native_compute_allocation_authority": SupabaseQueryV2(
+        policy_id="latest_native_compute_allocation_authority",
+        table="research_lab_finalized_allocation_epochs_v2",
+        select="epoch_id,netuid",
         parameter_names=("epoch_id", "netuid"),
         max_pages=1,
-        order="epoch.desc",
+        order="epoch_id.desc",
+        limit=1,
+    ),
+    "latest_legacy_compute_allocation_authority": SupabaseQueryV2(
+        policy_id="latest_legacy_compute_allocation_authority",
+        table="research_lab_legacy_finalized_allocation_migrations_v2",
+        select="netuid,epoch_id,allocation_hash,allocation_doc",
+        parameter_names=("epoch_id", "netuid"),
+        max_pages=1,
+        order="epoch_id.desc",
         limit=1,
     ),
     "legacy_allocation_by_hash": SupabaseQueryV2(
@@ -676,10 +685,33 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
             ("epoch", "eq.%d" % _non_negative_int(parameters["epoch_id"], "epoch_id")),
             ("netuid", "eq.%d" % _non_negative_int(parameters["netuid"], "netuid")),
         )
-    if policy.policy_id == "allocation_latest_compute_snapshot":
+    if policy.policy_id == "latest_native_compute_allocation_authority":
         return (
             (
-                "epoch",
+                "epoch_id",
+                "lt.%d"
+                % _non_negative_int(parameters["epoch_id"], "epoch_id"),
+            ),
+            (
+                "netuid",
+                "eq.%d" % _non_negative_int(parameters["netuid"], "netuid"),
+            ),
+            (
+                "bundle_doc->weight_snapshot->calculation_snapshot"
+                "->research_lab_allocation_doc->reimbursement_allocations",
+                "not.eq.[]",
+            ),
+            (
+                "bundle_doc->weight_snapshot->calculation_snapshot"
+                "->research_lab_allocation_doc"
+                "->>historical_compute_fallback_source_epoch",
+                "is.null",
+            ),
+        )
+    if policy.policy_id == "latest_legacy_compute_allocation_authority":
+        return (
+            (
+                "epoch_id",
                 "lt.%d"
                 % _non_negative_int(parameters["epoch_id"], "epoch_id"),
             ),

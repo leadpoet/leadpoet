@@ -1054,6 +1054,7 @@ async def test_allocation_parent_loader_binds_prior_compute_fallback_authority(
     monkeypatch,
 ):
     from gateway.research_lab import (
+        allocations,
         attested_v2_store,
         champion_settlement_v2,
         store,
@@ -1087,9 +1088,14 @@ async def test_allocation_parent_loader_binds_prior_compute_fallback_authority(
     observed_fallback_filters = []
 
     async def select_all(table, **kwargs):
-        if table == "research_lab_emission_allocation_current":
+        if table == allocations.LATEST_LEGACY_COMPUTE_AUTHORITY_TABLE:
             observed_fallback_filters.extend(kwargs["filters"])
-            return [source_row]
+            return [
+                {
+                    **source_row,
+                    "epoch_id": source_row["epoch"],
+                }
+            ]
         return []
 
     async def load_history(**kwargs):
@@ -1120,10 +1126,11 @@ async def test_allocation_parent_loader_binds_prior_compute_fallback_authority(
             }
         }
 
+    monkeypatch.setattr(allocations, "select_all", select_all)
     monkeypatch.setattr(store, "select_all", select_all)
     monkeypatch.setattr(
         champion_settlement_v2,
-        "load_settled_allocation_history_v2",
+        "load_finalized_allocation_history_v2",
         load_history,
     )
     monkeypatch.setattr(
@@ -1147,7 +1154,7 @@ async def test_allocation_parent_loader_binds_prior_compute_fallback_authority(
         },
     )
 
-    assert ("epoch", "lt", 100) in observed_fallback_filters
+    assert ("epoch_id", "lt", 100) in observed_fallback_filters
     assert [graph["root_receipt_hash"] for graph in graphs] == [
         settlement_receipt
     ]
@@ -1157,7 +1164,11 @@ async def test_allocation_parent_loader_binds_prior_compute_fallback_authority(
 async def test_allocation_parent_loader_rejects_unsettled_compute_fallback(
     monkeypatch,
 ):
-    from gateway.research_lab import champion_settlement_v2, store
+    from gateway.research_lab import (
+        allocations,
+        champion_settlement_v2,
+        store,
+    )
 
     allocation_payload = {
         "epoch": 99,
@@ -1173,10 +1184,10 @@ async def test_allocation_parent_loader_rejects_unsettled_compute_fallback(
     allocation_hash = v2_authority.sha256_json(allocation_payload)
 
     async def select_all(table, **_kwargs):
-        if table == "research_lab_emission_allocation_current":
+        if table == allocations.LATEST_LEGACY_COMPUTE_AUTHORITY_TABLE:
             return [
                 {
-                    "epoch": 99,
+                    "epoch_id": 99,
                     "netuid": 71,
                     "allocation_hash": allocation_hash,
                     "allocation_doc": {
@@ -1190,10 +1201,11 @@ async def test_allocation_parent_loader_rejects_unsettled_compute_fallback(
     async def no_history(**_kwargs):
         return []
 
+    monkeypatch.setattr(allocations, "select_all", select_all)
     monkeypatch.setattr(store, "select_all", select_all)
     monkeypatch.setattr(
         champion_settlement_v2,
-        "load_settled_allocation_history_v2",
+        "load_finalized_allocation_history_v2",
         no_history,
     )
 

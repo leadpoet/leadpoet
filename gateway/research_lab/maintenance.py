@@ -2531,6 +2531,7 @@ async def backfill_historical_compute_fallback_v2_authority(
     from gateway.config import BITTENSOR_NETUID
     from gateway.research_lab.allocations import (
         _historical_compute_fallback_from_snapshot,
+        _load_latest_finalized_compute_snapshot_v2,
     )
     from gateway.research_lab.champion_settlement_v2 import (
         load_finalized_allocation_history_v2,
@@ -2552,6 +2553,26 @@ async def backfill_historical_compute_fallback_v2_authority(
             "epoch": effective_epoch,
             "netuid": effective_netuid,
             "status": "conservative_mode_enabled",
+            "classified_count": 0,
+        }
+
+    finalized = await _load_latest_finalized_compute_snapshot_v2(
+        epoch=effective_epoch,
+        netuid=effective_netuid,
+    )
+    if finalized is not None:
+        finalized_row, _authority = finalized
+        return {
+            "ok": True,
+            "dry_run": bool(dry_run),
+            "action": "backfill-historical-compute-fallback-v2-authority",
+            "epoch": effective_epoch,
+            "netuid": effective_netuid,
+            "status": "already_classified",
+            "source_allocation_epoch": int(finalized_row["epoch"]),
+            "source_allocation_hash": str(
+                finalized_row["allocation_hash"]
+            ),
             "classified_count": 0,
         }
 

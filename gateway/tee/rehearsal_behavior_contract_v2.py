@@ -33,6 +33,7 @@ BEHAVIOR_SCENARIOS = (
     "conditional-icp-policy",
     "conditional-candidate-gate",
     "git-tree-replacement",
+    "research-lab-allocation-conservation",
 )
 
 AUTHORITY_DIAGNOSTICS = (
@@ -51,6 +52,8 @@ BEHAVIORAL_INVARIANTS = (
     "conditional_icp_policy_config_bound",
     "conditional_candidate_advancement_exact",
     "git_tree_replacement_deterministic",
+    "research_lab_allocation_policy_config_bound",
+    "research_lab_allocation_conserved",
     "canonical_vector_primary_auditor_equal",
     "receipt_ancestry_verified",
     "sdk_signing_bridge_verified",
@@ -71,9 +74,11 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "gateway/tee/rehearsal_behavior_contract_v2.py",
     "gateway/tee/verify_weight_submission_ready_v2.py",
     "gateway/research_lab/champion_settlement_v2.py",
+    "gateway/research_lab/allocations.py",
     "gateway/research_lab/scoring_worker.py",
     "gateway/research_lab/worker.py",
     "gateway/api/weights.py",
+    "leadpoet_verifier/economics.py",
     "neurons/validator.py",
     "neurons/auditor_validator.py",
     "validator_models/containerizing/deploy_dynamic.sh",
@@ -162,9 +167,16 @@ def _policy_commitments() -> dict[str, Any]:
         .conditional_validation_policy()
         .to_dict()
     )
+    allocation_policy = ResearchLabGatewayConfig.from_env().reimbursement_policy_doc(
+        enabled=True
+    )
     tree_policy = TreePolicy.from_env(os.environ).to_dict()
     return {
         "conditional_icp": conditional_policy,
+        "research_lab_allocation": {
+            "policy": allocation_policy,
+            "policy_hash": _sha256_json(allocation_policy),
+        },
         "git_tree": {
             **tree_policy,
             "policy_hash": TreePolicy.from_mapping(tree_policy).policy_hash,

@@ -31,6 +31,7 @@ _RETRYABLE_AUTHENTICATED_HTTP_FAILURE_MARKERS = tuple(
 )
 _REPAIRABLE_AUTHORITY_FAILURE_MARKERS = (
     "champion v2 cutover blocked:",
+    "historical compute fallback lacks finalized allocation authority",
 )
 
 
@@ -177,6 +178,7 @@ async def verify_weight_submission_ready_v2(
         _resolve_maintenance_epoch,
         backfill_champion_reward_v2_authority,
         backfill_champion_settlement_v2_authority,
+        backfill_historical_compute_fallback_v2_authority,
         backfill_source_add_reward_v2_authority,
     )
 
@@ -203,6 +205,7 @@ async def verify_weight_submission_ready_v2(
             "source_add_reward_receipts_created": 0,
             "champion_reward_receipts_created": 0,
             "historical_allocations_classified": 0,
+            "historical_compute_fallbacks_classified": 0,
         }
         if repair
         else {}
@@ -237,6 +240,17 @@ async def verify_weight_submission_ready_v2(
             raise WeightSubmissionReadinessV2Error(
                 "champion settlement classification backfill failed"
             )
+        fallback_result = (
+            await backfill_historical_compute_fallback_v2_authority(
+                epoch=effective_epoch,
+                netuid=effective_netuid,
+                dry_run=False,
+            )
+        )
+        if fallback_result.get("ok") is not True:
+            raise WeightSubmissionReadinessV2Error(
+                "historical compute fallback classification failed"
+            )
         return {
             "source_add_reward_receipts_created": int(
                 source_reward_result.get("migrated_count") or 0
@@ -248,6 +262,9 @@ async def verify_weight_submission_ready_v2(
                 settlement_result.get("classified_count")
                 or settlement_result.get("migrated_count")
                 or 0
+            ),
+            "historical_compute_fallbacks_classified": int(
+                fallback_result.get("classified_count") or 0
             ),
         }
 

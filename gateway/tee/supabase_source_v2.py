@@ -100,6 +100,15 @@ QUERY_POLICIES = {
         order="created_at.desc",
         limit=1,
     ),
+    "allocation_latest_compute_snapshot": SupabaseQueryV2(
+        policy_id="allocation_latest_compute_snapshot",
+        table="research_lab_emission_allocation_current",
+        select="epoch,netuid,allocation_hash,allocation_doc",
+        parameter_names=("epoch_id", "netuid"),
+        max_pages=1,
+        order="epoch.desc",
+        limit=1,
+    ),
     "legacy_allocation_by_hash": SupabaseQueryV2(
         policy_id="legacy_allocation_by_hash",
         table="research_lab_emission_allocation_snapshots",
@@ -171,7 +180,7 @@ QUERY_POLICIES = {
             "epoch_count,improvement_points,threshold_points,"
             "desired_alpha_percent,input_hash,anchored_hash"
         ),
-        parameter_names=("epoch_id",),
+        parameter_names=("epoch_id", "include_paid"),
         max_pages=50,
         order="champion_reward_id.asc",
     ),
@@ -667,6 +676,23 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
             ("epoch", "eq.%d" % _non_negative_int(parameters["epoch_id"], "epoch_id")),
             ("netuid", "eq.%d" % _non_negative_int(parameters["netuid"], "netuid")),
         )
+    if policy.policy_id == "allocation_latest_compute_snapshot":
+        return (
+            (
+                "epoch",
+                "lt.%d"
+                % _non_negative_int(parameters["epoch_id"], "epoch_id"),
+            ),
+            (
+                "netuid",
+                "eq.%d" % _non_negative_int(parameters["netuid"], "netuid"),
+            ),
+            ("allocation_doc->reimbursement_allocations", "not.eq.[]"),
+            (
+                "allocation_doc->>historical_compute_fallback_source_epoch",
+                "is.null",
+            ),
+        )
     if policy.policy_id == "legacy_allocation_by_hash":
         allocation_hash = str(parameters["allocation_hash"] or "").strip().lower()
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", allocation_hash):
@@ -715,8 +741,16 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
         )
     if policy.policy_id == "allocation_champion_rewards":
         epoch_id = _non_negative_int(parameters["epoch_id"], "epoch_id")
+        include_paid = parameters["include_paid"]
+        if not isinstance(include_paid, bool):
+            raise SupabaseSourceV2Error("include_paid must be boolean")
+        statuses = (
+            "active,queued,partially_paid,paid"
+            if include_paid
+            else "active,queued,partially_paid"
+        )
         return (
-            ("current_reward_status", "in.(active,queued,partially_paid)"),
+            ("current_reward_status", "in.(%s)" % statuses),
             ("start_epoch", "lte.%d" % epoch_id),
         )
     if policy.policy_id == "champion_reward_by_id":

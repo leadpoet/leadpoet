@@ -176,3 +176,33 @@ def test_select_one_rebuilds_retry_with_generator_filters(monkeypatch):
 
     assert row == {"id": 7}
     assert observed_filters == [(0, "id", 7), (1, "id", 7)]
+
+
+def test_json_null_filter_uses_postgrest_is_operator():
+    calls = []
+
+    class _Query:
+        def is_(self, field, value):
+            calls.append((field, value))
+            return self
+
+    query = _Query()
+    assert (
+        store._apply_filters(
+            query,
+            (
+                (
+                    "allocation_doc->>historical_compute_fallback_source_epoch",
+                    "is",
+                    "null",
+                ),
+            ),
+        )
+        is query
+    )
+    assert calls == [
+        (
+            "allocation_doc->>historical_compute_fallback_source_epoch",
+            "null",
+        )
+    ]

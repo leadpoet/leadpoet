@@ -642,6 +642,10 @@ def verify_migration_backed_database_contract(candidate_sha: str) -> str:
         "lifetime_credit_contract_valid",
         "finalized_view_projection_exact",
         "finalized_view_seed_available",
+        "historical_compute_schema_migrations_applied",
+        "historical_compute_finalized_authority_seed_available",
+        "historical_compute_allocation_conserved",
+        "historical_compute_release_identity_bound",
         "settlement_authority_parsed",
         "measured_settlement_receipt_projection_exact",
         "tampered_weight_receipt_rejected",
@@ -701,25 +705,33 @@ def verify_migration_backed_database_contract(candidate_sha: str) -> str:
             "migration-backed finalized allocation view evidence is missing"
         )
     seed_rows = document.get("seed_rows")
-    finalized_rows = (
-        seed_rows.get("research_lab_finalized_allocation_epochs_v2")
-        if isinstance(seed_rows, dict)
-        else None
-    )
+    required_seed_relations = {
+        "research_lab_finalized_allocation_epochs_v2",
+        "research_lab_emission_allocation_current",
+        "research_lab_legacy_finalized_allocation_migrations_v2",
+        "research_lab_attested_boot_identities_v2",
+        "research_lab_attested_execution_receipts_v2",
+    }
     if (
-        not isinstance(finalized_rows, list)
-        or len(finalized_rows) != 1
-        or not isinstance(finalized_rows[0], dict)
-        or set(finalized_rows[0])
-        != set(
-            relations["research_lab_finalized_allocation_epochs_v2"][
-                "columns"
-            ]
-        )
+        not isinstance(seed_rows, dict)
+        or set(seed_rows) != required_seed_relations
     ):
         raise SystemExit(
-            "migration-backed finalized authority seed is missing"
+            "migration-backed allocation authority seeds are missing"
         )
+    for relation in sorted(required_seed_relations):
+        rows = seed_rows.get(relation)
+        if (
+            relation not in relations
+            or not isinstance(rows, list)
+            or len(rows) != 1
+            or not isinstance(rows[0], dict)
+            or set(rows[0]) != set(relations[relation]["columns"])
+        ):
+            raise SystemExit(
+                "migration-backed allocation authority seed differs: "
+                + relation
+            )
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 

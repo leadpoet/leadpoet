@@ -253,6 +253,8 @@ if [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; then
     --source-root /source \
     --state-root "$REHEARSAL_STATE_ROOT" \
     --candidate-sha "$CANDIDATE_SHA" \
+    --release-build-input \
+      /rehearsal-fixture-seed/release-build-input.json \
     --output "$REHEARSAL_STATE_ROOT/postgres-v2-schema-contract.json"
   /usr/bin/python3.11 /harness/gateway_boundary_service.py \
     --host 127.0.0.1 \

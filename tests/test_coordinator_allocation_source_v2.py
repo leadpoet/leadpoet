@@ -76,6 +76,22 @@ def _config():
     )
 
 
+def _no_burn_config():
+    return SimpleNamespace(
+        reimbursement_dynamic_alpha_price_enabled=False,
+        reimbursement_require_live_alpha_price=False,
+        reimbursement_miner_alpha_per_epoch=100.0,
+        reimbursement_usd_per_0_1_percent_epoch=0.666667,
+        reimbursement_policy_doc=lambda enabled: {
+            **_policy(),
+            "enabled": bool(enabled),
+            "enable_conservative": False,
+            "enable_champ_cap": False,
+            "reimbursement_max_cost_multiplier_with_champions": 2.0,
+        },
+    )
+
+
 def _context(parents=()):
     return ExecutionContextV2(
         job_id="allocation-v2:test",
@@ -124,7 +140,10 @@ def test_allocation_is_built_from_measured_empty_sources():
     assert result["source_state"]["reimbursement_obligations"] == []
     assert result["source_state"]["champion_obligations"] == []
     assert result["source_state_hash"] == sha256_json(result["source_state"])
-    assert ("allocation_champion_rewards", {"epoch_id": 100}) in reader.calls
+    assert (
+        "allocation_champion_rewards",
+        {"epoch_id": 100, "include_paid": False},
+    ) in reader.calls
     assert ("allocation_source_add_rewards", {"epoch_id": 100}) in reader.calls
 
 
@@ -144,6 +163,75 @@ def test_allocation_never_falls_back_to_finalized_block_modulo():
             payload={"epoch": 100, "netuid": 71},
             context=_context(),
         )
+
+
+def test_measured_no_burn_allocation_uses_prior_compute_snapshot(monkeypatch):
+    settlement_receipt = "sha256:" + "9" * 64
+    allocation_payload = {
+        "epoch": 99,
+        "reimbursement_allocations": [
+            {
+                "uid": 77,
+                "miner_hotkey": "miner",
+                "source_id": "reimbursement_schedule:source",
+                "spend_microusd": 1_000_000,
+                "eligible_compute_microusd": 3_000_000,
+                "reason": "full_reimbursement",
+            }
+        ],
+    }
+    allocation_hash = sha256_json(allocation_payload)
+    source_row = {
+        "epoch": 99,
+        "netuid": 71,
+        "allocation_hash": allocation_hash,
+        "allocation_doc": {
+            **allocation_payload,
+            "allocation_hash": allocation_hash,
+        },
+    }
+    reader = FakeReader(
+        {"allocation_latest_compute_snapshot": [source_row]}
+    )
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=FakeChainSource(),
+        config_supplier=_no_burn_config,
+        network_supplier=lambda: "finney",
+    )
+
+    def require_authority(*, required_parents, **_kwargs):
+        required_parents.add(settlement_receipt)
+
+    monkeypatch.setattr(
+        resolver,
+        "_require_historical_compute_authority",
+        require_authority,
+    )
+
+    result = resolver.resolve(
+        payload={"epoch": 100, "netuid": 71},
+        context=_context((settlement_receipt,)),
+    )
+
+    assert (
+        "allocation_latest_compute_snapshot",
+        {"epoch_id": 100, "netuid": 71},
+    ) in reader.calls
+    assert (
+        "allocation_champion_rewards",
+        {"epoch_id": 100, "include_paid": True},
+    ) in reader.calls
+    assert result["allocation"]["unallocated_percent"] == pytest.approx(0.0)
+    assert result["allocation"]["reimbursement_allocations"][0][
+        "uid"
+    ] == 1
+    assert result["allocation"]["reimbursement_allocations"][0][
+        "paid_alpha_percent"
+    ] == pytest.approx(20.0)
+    assert result["source_state"][
+        "historical_compute_fallback_source"
+    ]["source_allocation_epoch"] == 99
 
 
 def test_unreceipted_source_add_reward_fails_closed():

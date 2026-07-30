@@ -118,7 +118,7 @@ def test_champion_allocation_query_matches_live_reward_view_contract():
     rows, attempts, _artifacts, _sleeps = _read(
         provider,
         policy_id="allocation_champion_rewards",
-        parameters={"epoch_id": 23991},
+        parameters={"epoch_id": 23991, "include_paid": False},
     )
 
     assert rows == []
@@ -139,6 +139,49 @@ def test_champion_allocation_query_matches_live_reward_view_contract():
     assert ("start_epoch", "lte.23991") in query
     assert "reward_status" not in dict(query)["select"].split(",")
     assert "reward_kind" not in dict(query)["select"].split(",")
+
+
+def test_uncapped_champion_query_includes_paid_projection():
+    provider = FakeProvider([{"rows": []}])
+    _read(
+        provider,
+        policy_id="allocation_champion_rewards",
+        parameters={"epoch_id": 23991, "include_paid": True},
+    )
+
+    query = dict(
+        parse_qsl(urlsplit(provider.requests[0]["url"]).query)
+    )
+    assert query["current_reward_status"] == (
+        "in.(active,queued,partially_paid,paid)"
+    )
+
+
+def test_historical_compute_query_is_strictly_before_target_epoch():
+    provider = FakeProvider([{"rows": []}])
+    _read(
+        provider,
+        policy_id="allocation_latest_compute_snapshot",
+        parameters={"epoch_id": 24030, "netuid": 71},
+    )
+
+    url = urlsplit(provider.requests[0]["url"])
+    query = parse_qsl(url.query, keep_blank_values=True)
+    assert url.path.endswith(
+        "/rest/v1/research_lab_emission_allocation_current"
+    )
+    assert ("epoch", "lt.24030") in query
+    assert ("netuid", "eq.71") in query
+    assert (
+        "allocation_doc->reimbursement_allocations",
+        "not.eq.[]",
+    ) in query
+    assert (
+        "allocation_doc->>historical_compute_fallback_source_epoch",
+        "is.null",
+    ) in query
+    assert ("order", "epoch.desc") in query
+    assert ("limit", "1") in query
 
 
 def test_transient_failures_are_terminally_recorded_before_existing_retries():

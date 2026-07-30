@@ -2683,6 +2683,70 @@ async def test_status_reconciler_only_closes_finalized_chain_balances(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_uncapped_status_reconciler_reactivates_early_paid_projection(
+    monkeypatch,
+):
+    from gateway.research_lab import allocations, maintenance, store
+    from gateway.research_lab.config import ResearchLabGatewayConfig
+
+    reward_id = "champion_reward:sha256:" + "6" * 64
+    reward = {
+        "champion_reward_id": reward_id,
+        "miner_uid": 7,
+        "desired_alpha_percent": 7.0,
+        "epoch_count": 20,
+        "start_epoch": 100,
+        "current_reward_status": "paid",
+    }
+
+    async def select_all(_table, *, filters=(), **_kwargs):
+        status = next(
+            (
+                value
+                for field, value in filters
+                if field == "current_reward_status"
+            ),
+            "",
+        )
+        return [reward] if status == "paid" else []
+
+    async def fully_settled(**_kwargs):
+        return {reward_id: 140.0}
+
+    writes = []
+
+    async def create_event(**kwargs):
+        writes.append(kwargs)
+        return {"seq": 3, "anchored_hash": "sha256:" + "5" * 64}
+
+    monkeypatch.setattr(maintenance, "select_all", select_all)
+    monkeypatch.setattr(
+        allocations,
+        "_champion_finalized_paid_alpha_to_date",
+        fully_settled,
+    )
+    monkeypatch.setattr(store, "create_champion_reward_event", create_event)
+    monkeypatch.setattr(
+        ResearchLabGatewayConfig,
+        "from_env",
+        classmethod(
+            lambda cls: ResearchLabGatewayConfig(enable_champ_cap=False)
+        ),
+    )
+
+    result = await maintenance.reconcile_champion_reward_statuses(
+        epoch=110,
+        netuid=71,
+        dry_run=False,
+    )
+
+    assert result["repaired_count"] == 1
+    assert writes[0]["event_type"] == "active"
+    assert writes[0]["reward_status"] == "active"
+    assert writes[0]["event_doc"]["enable_champ_cap"] is False
+
+
+@pytest.mark.asyncio
 async def test_default_v2_allocation_path_blocks_incomplete_champion_coverage(
     monkeypatch,
 ):

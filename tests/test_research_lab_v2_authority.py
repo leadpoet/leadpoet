@@ -975,3 +975,166 @@ async def test_allocation_parent_loader_rejects_ambiguous_reimbursement_award(
             netuid=71,
             policy={"reimbursement_epochs": 20},
         )
+
+
+@pytest.mark.asyncio
+async def test_allocation_parent_loader_binds_prior_compute_fallback_authority(
+    monkeypatch,
+):
+    from gateway.research_lab import (
+        attested_v2_store,
+        champion_settlement_v2,
+        store,
+    )
+
+    settlement_receipt = "sha256:" + "c" * 64
+    allocation_payload = {
+        "epoch": 99,
+        "reimbursement_allocations": [
+            {
+                "uid": 7,
+                "miner_hotkey": "compute-hotkey",
+                "source_id": "reimbursement_schedule:source",
+                "spend_microusd": 1_000_000,
+                "eligible_compute_microusd": 2_000_000,
+                "reason": "full_reimbursement",
+            }
+        ],
+    }
+    allocation_hash = v2_authority.sha256_json(allocation_payload)
+    allocation = {
+        **allocation_payload,
+        "allocation_hash": allocation_hash,
+    }
+    source_row = {
+        "epoch": 99,
+        "netuid": 71,
+        "allocation_hash": allocation_hash,
+        "allocation_doc": allocation,
+    }
+    observed_fallback_filters = []
+
+    async def select_all(table, **kwargs):
+        if table == "research_lab_emission_allocation_current":
+            observed_fallback_filters.extend(kwargs["filters"])
+            return [source_row]
+        return []
+
+    async def load_history(**kwargs):
+        assert kwargs == {
+            "netuid": 71,
+            "start_epoch": 99,
+            "end_epoch": 99,
+        }
+        return [
+            {
+                **source_row,
+                "authority_types": [
+                    "legacy_finalized_chain_migration_v2"
+                ],
+                "legacy_settlement_receipt_hash": settlement_receipt,
+            }
+        ]
+
+    async def load_business(_artifacts):
+        return {}
+
+    async def load_receipts(receipt_hashes):
+        assert set(receipt_hashes) == {settlement_receipt}
+        return {
+            settlement_receipt: {
+                "root_receipt_hash": settlement_receipt,
+                "receipts": [{"receipt_hash": settlement_receipt}],
+            }
+        }
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "load_settled_allocation_history_v2",
+        load_history,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_by_ref_v2",
+        load_business,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_receipt_graphs_v2",
+        load_receipts,
+    )
+
+    graphs = await v2_authority._load_allocation_parent_graphs_v2(
+        epoch_id=100,
+        netuid=71,
+        policy={
+            "enable_conservative": False,
+            "enable_champ_cap": False,
+            "reimbursement_epochs": 20,
+        },
+    )
+
+    assert ("epoch", "lt", 100) in observed_fallback_filters
+    assert [graph["root_receipt_hash"] for graph in graphs] == [
+        settlement_receipt
+    ]
+
+
+@pytest.mark.asyncio
+async def test_allocation_parent_loader_rejects_unsettled_compute_fallback(
+    monkeypatch,
+):
+    from gateway.research_lab import champion_settlement_v2, store
+
+    allocation_payload = {
+        "epoch": 99,
+        "reimbursement_allocations": [
+            {
+                "uid": 7,
+                "miner_hotkey": "compute-hotkey",
+                "source_id": "reimbursement_schedule:source",
+                "spend_microusd": 1_000_000,
+            }
+        ],
+    }
+    allocation_hash = v2_authority.sha256_json(allocation_payload)
+
+    async def select_all(table, **_kwargs):
+        if table == "research_lab_emission_allocation_current":
+            return [
+                {
+                    "epoch": 99,
+                    "netuid": 71,
+                    "allocation_hash": allocation_hash,
+                    "allocation_doc": {
+                        **allocation_payload,
+                        "allocation_hash": allocation_hash,
+                    },
+                }
+            ]
+        return []
+
+    async def no_history(**_kwargs):
+        return []
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "load_settled_allocation_history_v2",
+        no_history,
+    )
+
+    with pytest.raises(
+        v2_authority.ResearchLabV2AuthorityError,
+        match="lacks finalized allocation authority",
+    ):
+        await v2_authority._load_allocation_parent_graphs_v2(
+            epoch_id=100,
+            netuid=71,
+            policy={
+                "enable_conservative": False,
+                "enable_champ_cap": False,
+                "reimbursement_epochs": 20,
+            },
+        )

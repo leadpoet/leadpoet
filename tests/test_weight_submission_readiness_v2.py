@@ -9,6 +9,18 @@ from gateway.utils.tee_artifact_store_v2 import TEEArtifactStoreV2Error
 from research_lab import validator_integration
 
 
+@pytest.fixture(autouse=True)
+def _default_historical_compute_fallback_backfill(monkeypatch):
+    async def covered(**_kwargs):
+        return {"ok": True, "classified_count": 0}
+
+    monkeypatch.setattr(
+        maintenance,
+        "backfill_historical_compute_fallback_v2_authority",
+        covered,
+    )
+
+
 @pytest.mark.asyncio
 async def test_standalone_maintenance_epoch_uses_direct_capable_resolver(
     monkeypatch,
@@ -217,6 +229,10 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
         calls.append(("settlements", kwargs))
         return {"ok": True, "classified_count": 149}
 
+    async def fallback(**kwargs):
+        calls.append(("fallback", kwargs))
+        return {"ok": True, "classified_count": 1}
+
     async def unexpected_report(**_kwargs):
         raise AssertionError(
             "the authoritative allocation build owns the cutover gate"
@@ -262,6 +278,11 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
     )
     monkeypatch.setattr(
         maintenance,
+        "backfill_historical_compute_fallback_v2_authority",
+        fallback,
+    )
+    monkeypatch.setattr(
+        maintenance,
         "champion_v2_cutover_readiness_report",
         unexpected_report,
     )
@@ -285,11 +306,13 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
     assert result["source_add_reward_receipts_created"] == 1
     assert result["champion_reward_receipts_created"] == 23
     assert result["historical_allocations_classified"] == 149
+    assert result["historical_compute_fallbacks_classified"] == 1
     assert [name for name, _kwargs in calls] == [
         "handoff",
         "source_rewards",
         "rewards",
         "settlements",
+        "fallback",
         "handoff",
     ]
     assert calls[1][1] == {
@@ -308,7 +331,12 @@ async def test_weight_readiness_repairs_then_validates_exact_handoff(
         "limit": 10000,
         "dry_run": False,
     }
-    assert calls[0][1] == calls[4][1] == {
+    assert calls[4][1] == {
+        "epoch": 24032,
+        "netuid": 71,
+        "dry_run": False,
+    }
+    assert calls[0][1] == calls[5][1] == {
         "epoch": 24032,
         "current_epoch": 24032,
         "internal_key": "validator-secret",

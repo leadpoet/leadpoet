@@ -10,7 +10,7 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 import hashlib
 import json
-from typing import Any, Dict, Iterable, Mapping, Sequence
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from .aggregation import u16_weights_from_scores
 
@@ -36,6 +36,7 @@ DEFAULT_RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS = Decimal("1.0")
 DEFAULT_RESEARCH_LAB_CHAMPION_EVAL_DAYS = 10
 DEFAULT_RESEARCH_LAB_CHAMPION_ICPS_PER_DAY = 6
 DEFAULT_USD_PER_0_1_PERCENT_EPOCH = Decimal("0.162")
+DEFAULT_REIMBURSEMENT_MAX_COST_MULTIPLIER_WITH_CHAMPIONS = Decimal("2.0")
 SOURCE_ADD_REWARD_KINDS = frozenset({"source_acceptance", "source_implementation"})
 CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1 = (
     "accelerated_lifetime_cap_v1"
@@ -331,6 +332,7 @@ def allocate_research_lab_epoch(
     active_champion_obligations: Sequence[Mapping[str, Any]],
     *,
     active_source_add_obligations: Sequence[Mapping[str, Any]] = (),
+    fallback_reimbursement_obligations: Sequence[Mapping[str, Any]] = (),
 ) -> Dict[str, Any]:
     """Allocate the Research Lab emission slice for one epoch.
 
@@ -348,6 +350,7 @@ def allocate_research_lab_epoch(
             policy,
             active_reimbursement_obligations,
             active_champion_obligations,
+            fallback_reimbursement_obligations=fallback_reimbursement_obligations,
         )
 
     epoch = int(epoch)
@@ -388,18 +391,23 @@ def allocate_research_lab_epoch(
         remaining_policy,
         active_reimbursement_obligations,
         active_champion_obligations,
+        fallback_reimbursement_obligations=fallback_reimbursement_obligations,
     )
 
+    champion_credit_policy = _champion_credit_policy(policy)
     input_payload = {
         "epoch": epoch,
-        "champion_credit_policy": (
-            CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
-        ),
         "policy": _sorted_public(policy),
         "source_add_obligations": _sorted_public(active_source_add_obligations),
         "reimbursement_obligations": _sorted_public(active_reimbursement_obligations),
         "champion_obligations": _sorted_public(active_champion_obligations),
     }
+    if champion_credit_policy is not None:
+        input_payload["champion_credit_policy"] = champion_credit_policy
+    if fallback_reimbursement_obligations:
+        input_payload["fallback_reimbursement_obligations"] = _sorted_public(
+            fallback_reimbursement_obligations
+        )
     result = {
         key: value
         for key, value in existing.items()
@@ -408,9 +416,6 @@ def allocate_research_lab_epoch(
     result.update(
         {
             "epoch": epoch,
-            "champion_credit_policy": (
-                CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
-            ),
             "lab_cap_percent": _rate_float(lab_cap),
             "source_add_allocations": source_add_allocations,
             "source_add_alpha_percent": _rate_float(source_add_paid),
@@ -419,6 +424,9 @@ def allocate_research_lab_epoch(
             "input_hash": sha256_json(input_payload),
         }
     )
+    if champion_credit_policy is not None:
+        result["champion_credit_policy"] = champion_credit_policy
+    _add_explicit_policy_modes(result, policy)
     return {**result, "allocation_hash": sha256_json(result)}
 
 
@@ -427,6 +435,8 @@ def _allocate_research_lab_epoch_existing(
     policy: Mapping[str, Any],
     active_reimbursement_obligations: Sequence[Mapping[str, Any]],
     active_champion_obligations: Sequence[Mapping[str, Any]],
+    *,
+    fallback_reimbursement_obligations: Sequence[Mapping[str, Any]] = (),
 ) -> Dict[str, Any]:
     """The pre-SOURCE_ADD allocator, kept intact as the compatibility core."""
     epoch = int(epoch)
@@ -438,23 +448,20 @@ def _allocate_research_lab_epoch_existing(
     if reward_epochs <= 0:
         raise ValueError("reward_epochs must be positive")
 
-    input_payload = {
+    champion_credit_policy = _champion_credit_policy(policy)
+    input_payload: Dict[str, Any] = {
         "epoch": epoch,
-        "champion_credit_policy": (
-            CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
-        ),
         "policy": _sorted_public(policy),
         "reimbursement_obligations": _sorted_public(active_reimbursement_obligations),
         "champion_obligations": _sorted_public(active_champion_obligations),
     }
+    if champion_credit_policy is not None:
+        input_payload["champion_credit_policy"] = champion_credit_policy
+    if fallback_reimbursement_obligations:
+        input_payload["fallback_reimbursement_obligations"] = _sorted_public(
+            fallback_reimbursement_obligations
+        )
     input_hash = sha256_json(input_payload)
-
-    reimbursements = [
-        _normalize_reimbursement_obligation(item, epoch=epoch, policy=policy)
-        for item in active_reimbursement_obligations
-        if _obligation_active(item, epoch, default_epoch_count=reward_epochs)
-    ]
-    reimbursements = [item for item in reimbursements if item["spend_microusd"] > 0 and item["uid"] >= 0]
 
     champions = [
         _normalize_champion_obligation(item, epoch=epoch, policy=policy)
@@ -464,16 +471,59 @@ def _allocate_research_lab_epoch_existing(
     champions = [item for item in champions if item["desired_alpha_percent"] > 0 and item["uid"] >= 0]
     champions.sort(key=lambda item: (item["start_epoch"], -item["improvement_points"], item["source_id"]))
 
+    reimbursements = [
+        _normalize_reimbursement_obligation(
+            item,
+            epoch=epoch,
+            policy=policy,
+            champions_active=bool(champions),
+        )
+        for item in active_reimbursement_obligations
+        if _obligation_active(item, epoch, default_epoch_count=reward_epochs)
+    ]
+    reimbursements = [
+        item
+        for item in reimbursements
+        if item["spend_microusd"] > 0 and item["uid"] >= 0
+    ]
+    fallback_reimbursements = [
+        _normalize_fallback_reimbursement_obligation(item)
+        for item in fallback_reimbursement_obligations
+    ]
+    fallback_reimbursements = [
+        item
+        for item in fallback_reimbursements
+        if item["spend_microusd"] > 0 and item["uid"] >= 0
+    ]
+    fallback_sources = {
+        (
+            int(item["source_allocation_epoch"]),
+            str(item["source_allocation_hash"]),
+            int(item["fallback_window_start_epoch"]),
+            int(item["fallback_window_end_epoch"]),
+        )
+        for item in fallback_reimbursements
+    }
+    if len(fallback_sources) > 1:
+        raise ValueError(
+            "historical compute fallback obligations use different authorities"
+        )
+    conservative = _conservative_enabled(policy)
     reimbursement_allocations: list[Dict[str, Any]] = []
     champion_allocations: list[Dict[str, Any]] = []
     queued_champion_allocations: list[Dict[str, Any]] = []
 
-    if not reimbursements and not champions:
+    if (
+        not reimbursements
+        and not champions
+        and (conservative or not fallback_reimbursements)
+    ):
+        if not conservative and lab_cap > 0:
+            raise ValueError(
+                "non-conservative allocation requires historical compute fallback"
+            )
         result = {
             "epoch": epoch,
-            "champion_credit_policy": (
-                CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
-            ),
             "lab_cap_percent": _rate_float(lab_cap),
             "reimbursement_allocations": [],
             "champion_allocations": [],
@@ -484,6 +534,9 @@ def _allocate_research_lab_epoch_existing(
             "unallocated_percent": _rate_float(lab_cap),
             "input_hash": input_hash,
         }
+        if champion_credit_policy is not None:
+            result["champion_credit_policy"] = champion_credit_policy
+        _add_explicit_policy_modes(result, policy)
         return {**result, "allocation_hash": sha256_json(result)}
 
     reimbursement_paid = Decimal("0")
@@ -527,11 +580,26 @@ def _allocate_research_lab_epoch_existing(
         - champion_paid
         - queued_paid,
     )
-    if reimbursement_surplus > 0 and reimbursement_allocations:
+    if (
+        reimbursement_surplus > 0
+        and reimbursement_allocations
+        and (not champions or conservative)
+    ):
         _distribute_reimbursement_surplus(
             reimbursements,
             reimbursement_allocations,
             reimbursement_surplus,
+        )
+    elif (
+        reimbursement_surplus > 0
+        and not conservative
+        and fallback_reimbursements
+    ):
+        reimbursement_allocations.extend(
+            _allocate_fallback_reimbursements(
+                fallback_reimbursements,
+                reimbursement_surplus,
+            )
         )
 
     _cap_allocation_sections_to_pool(
@@ -542,12 +610,18 @@ def _allocate_research_lab_epoch_existing(
     champion_paid = sum((_decimal(item["paid_alpha_percent"]) for item in champion_allocations), Decimal("0"))
     queued_paid = sum((_decimal(item["paid_alpha_percent"]) for item in queued_champion_allocations), Decimal("0"))
     total_paid = reimbursement_paid + champion_paid + queued_paid
-    unallocated = max(Decimal("0"), lab_cap - total_paid)
+    allocation_cap = (
+        lab_cap.quantize(RATE_QUANT, rounding=ROUND_HALF_UP)
+        if not conservative
+        else lab_cap
+    )
+    unallocated = max(Decimal("0"), allocation_cap - total_paid)
+    if not conservative and unallocated > 0:
+        raise ValueError(
+            "non-conservative allocation left Research Lab emissions unallocated"
+        )
     result = {
         "epoch": epoch,
-        "champion_credit_policy": (
-            CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
-        ),
         "lab_cap_percent": _rate_float(lab_cap),
         "reimbursement_allocations": reimbursement_allocations,
         "champion_allocations": champion_allocations,
@@ -558,6 +632,27 @@ def _allocate_research_lab_epoch_existing(
         "unallocated_percent": _rate_float(unallocated),
         "input_hash": input_hash,
     }
+    if champion_credit_policy is not None:
+        result["champion_credit_policy"] = champion_credit_policy
+    if any(
+        item.get("reason") == "historical_compute_fallback_no_burn"
+        for item in reimbursement_allocations
+    ):
+        (
+            source_epoch,
+            source_hash,
+            window_start,
+            window_end,
+        ) = next(iter(fallback_sources))
+        result.update(
+            {
+                "historical_compute_fallback_source_epoch": source_epoch,
+                "historical_compute_fallback_source_allocation_hash": source_hash,
+                "historical_compute_fallback_window_start_epoch": window_start,
+                "historical_compute_fallback_window_end_epoch": window_end,
+            }
+        )
+    _add_explicit_policy_modes(result, policy)
     return {**result, "allocation_hash": sha256_json(result)}
 
 
@@ -1006,6 +1101,57 @@ def _daily_icp_counts(candidate: Mapping[str, Any]) -> Dict[str, int]:
     return counts
 
 
+def _policy_boolean(
+    policy: Mapping[str, Any],
+    key: str,
+    *,
+    historical_default: bool,
+) -> bool:
+    if key not in policy:
+        return historical_default
+    value = policy[key]
+    if not isinstance(value, bool):
+        raise ValueError("%s must be a boolean" % key)
+    return value
+
+
+def _conservative_enabled(policy: Mapping[str, Any]) -> bool:
+    # Old signed bundles predate this flag and must continue to replay with
+    # their original burn-permitting behavior.
+    return _policy_boolean(
+        policy,
+        "enable_conservative",
+        historical_default=True,
+    )
+
+
+def _champ_cap_enabled(policy: Mapping[str, Any]) -> bool:
+    # Historical allocations used accelerated lifetime retirement. New config
+    # documents explicitly disable it so a champion remains eligible for its
+    # full nominal window.
+    return _policy_boolean(
+        policy,
+        "enable_champ_cap",
+        historical_default=True,
+    )
+
+
+def _champion_credit_policy(policy: Mapping[str, Any]) -> Optional[str]:
+    if _champ_cap_enabled(policy):
+        return CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1
+    return None
+
+
+def _add_explicit_policy_modes(
+    output: Dict[str, Any],
+    policy: Mapping[str, Any],
+) -> None:
+    if "enable_conservative" in policy:
+        output["conservative_mode"] = _conservative_enabled(policy)
+    if "enable_champ_cap" in policy:
+        output["champion_cap_enabled"] = _champ_cap_enabled(policy)
+
+
 def _obligation_active(obligation: Mapping[str, Any], epoch: int, *, default_epoch_count: int) -> bool:
     status = str(obligation.get("status", obligation.get("schedule_status", "active")))
     if status in {"empty", "disabled", "ineligible", "blocked", "voided", "tombstoned", "completed"}:
@@ -1029,6 +1175,18 @@ def _champion_obligation_active(obligation: Mapping[str, Any], epoch: int, *, de
         return False
     replay_keys = {"remaining_alpha_percent", "paid_alpha_percent_to_date", "total_due_alpha_percent"}
     if replay_keys.intersection(obligation.keys()):
+        epoch_count = int(
+            obligation.get(
+                "epoch_count",
+                obligation.get("reward_epochs", default_epoch_count),
+            )
+        )
+        if (
+            obligation.get("champ_cap_enabled") is False
+            and epoch_count > 0
+            and int(epoch) < start_epoch + epoch_count
+        ):
+            return True
         remaining = _champion_remaining_alpha_percent(obligation, policy=None, default_epoch_count=default_epoch_count)
         return remaining > 0
     epoch_count = int(obligation.get("epoch_count", obligation.get("reward_epochs", default_epoch_count)))
@@ -1040,20 +1198,56 @@ def _normalize_reimbursement_obligation(
     *,
     epoch: int,
     policy: Mapping[str, Any],
+    champions_active: bool,
 ) -> Dict[str, Any]:
     reward_epochs = int(policy.get("reward_epochs", policy.get("reimbursement_epochs", DEFAULT_RESEARCH_LAB_REWARD_EPOCHS)))
     start_epoch = int(obligation.get("start_epoch", epoch))
     epoch_count = int(obligation.get("epoch_count", obligation.get("reimbursement_epochs", reward_epochs)))
     spend = _obligation_spend_microusd(obligation)
-    max_multiplier = _decimal(policy.get("reimbursement_max_cost_multiplier_with_champions", "1.0"))
+    eligible_compute_explicit = (
+        "eligible_compute_microusd" in obligation
+        or "eligible_cost_microusd" in obligation
+    )
+    eligible_compute = int(
+        obligation.get("eligible_compute_microusd")
+        or obligation.get("eligible_cost_microusd")
+        or spend
+    )
+    if eligible_compute < 0:
+        raise ValueError("eligible_compute_microusd must be non-negative")
+    max_multiplier = _decimal(
+        policy.get(
+            "reimbursement_max_cost_multiplier_with_champions",
+            "1.0",
+        )
+    )
     if max_multiplier < 0:
         raise ValueError("reimbursement_max_cost_multiplier_with_champions must be non-negative")
-    intended = _alpha_percent_for_microusd(_round_microusd(Decimal(spend) / Decimal(max(1, epoch_count))), policy)
-    capped_intended = intended * min(max_multiplier, Decimal("1.0"))
-    weight = Decimal(max(spend, 0)) * _decimal(
+    intended = _alpha_percent_for_microusd(
+        _round_microusd(
+            Decimal(spend) / Decimal(max(1, epoch_count))
+        ),
+        policy,
+    )
+    applied_multiplier = (
+        min(
+            max_multiplier,
+            DEFAULT_REIMBURSEMENT_MAX_COST_MULTIPLIER_WITH_CHAMPIONS,
+        )
+        if champions_active
+        else Decimal("1.0")
+    )
+    compute_cap = _alpha_percent_for_microusd(
+        _round_microusd(
+            Decimal(eligible_compute) / Decimal(max(1, epoch_count))
+        ),
+        policy,
+    ) * applied_multiplier
+    capped_intended = min(intended * applied_multiplier, compute_cap)
+    weight = Decimal(max(eligible_compute, 0)) * _decimal(
         obligation.get("island_weight", obligation.get("participation_weight", obligation.get("reimbursement_weight", 1)))
     )
-    return {
+    normalized = {
         "uid": int(obligation.get("uid", obligation.get("miner_uid", -1))),
         "miner_hotkey": str(obligation.get("miner_hotkey", "")),
         "source_id": str(
@@ -1071,6 +1265,44 @@ def _normalize_reimbursement_obligation(
         "island_weight": _rate_float(_decimal(obligation.get("island_weight", obligation.get("participation_weight", 1)))),
         "intended_alpha_percent": capped_intended,
         "pro_rata_weight": max(Decimal("0"), weight),
+    }
+    if eligible_compute_explicit:
+        normalized.update(
+            {
+                "eligible_compute_microusd": eligible_compute,
+                "eligible_compute_usd": microusd_to_usd(eligible_compute),
+            }
+        )
+    return normalized
+
+
+def _normalize_fallback_reimbursement_obligation(
+    obligation: Mapping[str, Any],
+) -> Dict[str, Any]:
+    spend = _obligation_spend_microusd(obligation)
+    return {
+        "uid": int(obligation.get("uid", obligation.get("miner_uid", -1))),
+        "miner_hotkey": str(obligation.get("miner_hotkey", "")),
+        "source_id": str(obligation.get("source_id") or ""),
+        "island": str(obligation.get("island", "historical_compute")),
+        "spend_microusd": spend,
+        "spend_usd": microusd_to_usd(spend),
+        "island_weight": 1.0,
+        "pro_rata_weight": Decimal(max(spend, 0)),
+        "fallback_window_start_epoch": int(
+            obligation.get("fallback_window_start_epoch", 0)
+        ),
+        "fallback_window_end_epoch": int(
+            obligation.get("fallback_window_end_epoch", 0)
+        ),
+        "contribution_count": int(obligation.get("contribution_count", 0)),
+        "contribution_hash": str(obligation.get("contribution_hash") or ""),
+        "source_allocation_epoch": int(
+            obligation.get("source_allocation_epoch", 0)
+        ),
+        "source_allocation_hash": str(
+            obligation.get("source_allocation_hash") or ""
+        ),
     }
 
 
@@ -1113,7 +1345,13 @@ def _normalize_champion_obligation(
     )
     base_desired = _champion_desired_alpha_percent(obligation, policy)
     remaining = _champion_remaining_alpha_percent(obligation, policy=policy, default_epoch_count=reward_epochs)
-    desired = min(base_desired, remaining)
+    champ_cap_enabled = _champ_cap_enabled(policy)
+    nominal_end_epoch = start_epoch + epoch_count
+    desired = (
+        min(base_desired, remaining)
+        if champ_cap_enabled
+        else base_desired
+    )
     total_due = _champion_total_due_alpha_percent(obligation, base_desired=base_desired, epoch_count=epoch_count)
     paid_to_date = _champion_paid_alpha_percent_to_date(obligation, total_due=total_due, remaining=remaining)
     expected_total_due = base_desired * Decimal(max(0, epoch_count))
@@ -1152,7 +1390,9 @@ def _normalize_champion_obligation(
         "total_due_alpha_percent": total_due,
         "paid_alpha_percent_to_date": paid_to_date,
         "remaining_alpha_percent": remaining,
-        "nominal_end_epoch": start_epoch + epoch_count,
+        "nominal_end_epoch": nominal_end_epoch,
+        "champ_cap_enabled": champ_cap_enabled,
+        "champ_cap_policy_explicit": "enable_champ_cap" in policy,
     }
     if obligation.get("replay_status") is not None:
         normalized["replay_status"] = str(obligation.get("replay_status") or "")
@@ -1354,30 +1594,28 @@ def _allocate_reimbursements_at_set_rate(
     ]
 
 
-def _distribute_reimbursement_surplus(
-    reimbursements: Sequence[Mapping[str, Any]],
-    allocations: list[Dict[str, Any]],
+def _allocate_pro_rata_exact(
     pool: Decimal,
-) -> Decimal:
-    """Give otherwise-unused Lab capacity to active compute reimbursements."""
-    if len(reimbursements) != len(allocations):
-        raise ValueError("reimbursement inputs and allocations must align")
-
+    weights: Sequence[Decimal],
+) -> list[Decimal]:
     target = max(Decimal("0"), pool).quantize(
         RATE_QUANT,
         rounding=ROUND_HALF_UP,
     )
-    weights = [
-        max(Decimal("0"), _decimal(item["pro_rata_weight"]))
-        for item in reimbursements
+    normalized = [max(Decimal("0"), _decimal(weight)) for weight in weights]
+    active_indices = [
+        index for index, weight in enumerate(normalized) if weight > 0
     ]
-    active_indices = [index for index, weight in enumerate(weights) if weight > 0]
-    weight_sum = sum((weights[index] for index in active_indices), Decimal("0"))
+    weight_sum = sum(
+        (normalized[index] for index in active_indices),
+        Decimal("0"),
+    )
+    paid = [Decimal("0") for _ in normalized]
     if target <= 0 or weight_sum <= 0:
-        return Decimal("0")
+        return paid
 
     raw_shares = [
-        target * weights[index] / weight_sum
+        target * normalized[index] / weight_sum
         for index in active_indices
     ]
     shares = [
@@ -1400,8 +1638,68 @@ def _distribute_reimbursement_surplus(
     )
     for offset in remainder_order[:residual_units]:
         shares[offset] += RATE_QUANT
+    for index, share in zip(active_indices, shares):
+        paid[index] = share
+    if sum(paid, Decimal("0")) != target:
+        raise ValueError("pro-rata allocation does not conserve its pool")
+    return paid
 
-    for index, extra in zip(active_indices, shares):
+
+def _allocate_fallback_reimbursements(
+    reimbursements: Sequence[Mapping[str, Any]],
+    pool: Decimal,
+) -> list[Dict[str, Any]]:
+    weights = [
+        max(Decimal("0"), _decimal(item["pro_rata_weight"]))
+        for item in reimbursements
+    ]
+    paid = _allocate_pro_rata_exact(pool, weights)
+    allocations: list[Dict[str, Any]] = []
+    for item, amount in zip(reimbursements, paid):
+        if amount <= 0:
+            continue
+        allocation = _reimbursement_allocation(
+            {**dict(item), "intended_alpha_percent": amount},
+            amount,
+            "historical_compute_fallback_no_burn",
+        )
+        allocation.update(
+            {
+                "fallback_window_start_epoch": int(
+                    item["fallback_window_start_epoch"]
+                ),
+                "fallback_window_end_epoch": int(
+                    item["fallback_window_end_epoch"]
+                ),
+                "contribution_count": int(item["contribution_count"]),
+                "contribution_hash": str(item["contribution_hash"]),
+                "source_allocation_epoch": int(
+                    item["source_allocation_epoch"]
+                ),
+                "source_allocation_hash": str(
+                    item["source_allocation_hash"]
+                ),
+            }
+        )
+        allocations.append(allocation)
+    return allocations
+
+
+def _distribute_reimbursement_surplus(
+    reimbursements: Sequence[Mapping[str, Any]],
+    allocations: list[Dict[str, Any]],
+    pool: Decimal,
+) -> Decimal:
+    """Give otherwise-unused Lab capacity to active compute reimbursements."""
+    if len(reimbursements) != len(allocations):
+        raise ValueError("reimbursement inputs and allocations must align")
+
+    weights = [
+        max(Decimal("0"), _decimal(item["pro_rata_weight"]))
+        for item in reimbursements
+    ]
+    shares = _allocate_pro_rata_exact(pool, weights)
+    for index, extra in enumerate(shares):
         if extra <= 0:
             continue
         row = allocations[index]
@@ -1466,6 +1764,9 @@ def _allocate_champions(
     *,
     reimbursement_paid: Decimal = Decimal("0"),
 ) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
+    if not _champ_cap_enabled(policy):
+        return _allocate_champions_minimum_window(champions, pool, policy)
+
     placeholder = _decimal(
         policy.get("champion_placeholder_alpha_percent", DEFAULT_RESEARCH_LAB_CHAMPION_PLACEHOLDER_ALPHA_PERCENT)
     )
@@ -1532,6 +1833,49 @@ def _allocate_champions(
             active.append({**allocation, "reason": "active_champion_reward"})
         elif amount > 0:
             reason = "queued_with_placeholder" if amount <= placeholder else "queued_with_partial_capacity"
+            queued.append({**allocation, "reason": reason})
+        else:
+            queued.append({**allocation, "reason": "queued_no_capacity"})
+    return active, queued
+
+
+def _allocate_champions_minimum_window(
+    champions: Sequence[Mapping[str, Any]],
+    pool: Decimal,
+    policy: Mapping[str, Any],
+) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
+    placeholder = _decimal(
+        policy.get(
+            "champion_placeholder_alpha_percent",
+            DEFAULT_RESEARCH_LAB_CHAMPION_PLACEHOLDER_ALPHA_PERCENT,
+        )
+    )
+    weights = [
+        max(
+            Decimal("0"),
+            _decimal(
+                champion.get(
+                    "base_desired_alpha_percent",
+                    champion.get("desired_alpha_percent", 0),
+                )
+            ),
+        )
+        for champion in champions
+    ]
+    paid = _allocate_pro_rata_exact(pool, weights)
+    active: list[Dict[str, Any]] = []
+    queued: list[Dict[str, Any]] = []
+    for champion, amount in zip(champions, paid):
+        allocation = _champion_allocation(champion, amount)
+        desired = _decimal(champion["desired_alpha_percent"])
+        if amount >= desired:
+            active.append({**allocation, "reason": "active_champion_reward"})
+        elif amount > 0:
+            reason = (
+                "queued_with_placeholder"
+                if amount <= placeholder
+                else "queued_with_partial_capacity"
+            )
             queued.append({**allocation, "reason": reason})
         else:
             queued.append({**allocation, "reason": "queued_no_capacity"})
@@ -1611,7 +1955,7 @@ def _reimbursement_allocation(item: Mapping[str, Any], paid: Decimal, reason: st
     intended = _decimal(item["intended_alpha_percent"])
     deferred = max(Decimal("0"), intended - paid)
     overpaid = max(Decimal("0"), paid - intended)
-    return {
+    allocation = {
         "uid": int(item["uid"]),
         "miner_hotkey": str(item["miner_hotkey"]),
         "source_id": str(item["source_id"]),
@@ -1625,6 +1969,15 @@ def _reimbursement_allocation(item: Mapping[str, Any], paid: Decimal, reason: st
         "island_weight": item["island_weight"],
         "reason": reason,
     }
+    if "eligible_compute_microusd" in item:
+        eligible_compute = int(item["eligible_compute_microusd"])
+        allocation.update(
+            {
+                "eligible_compute_microusd": eligible_compute,
+                "eligible_compute_usd": microusd_to_usd(eligible_compute),
+            }
+        )
+    return allocation
 
 
 def _champion_allocation(item: Mapping[str, Any], paid: Decimal) -> Dict[str, Any]:
@@ -1663,8 +2016,10 @@ def _champion_allocation(item: Mapping[str, Any], paid: Decimal) -> Dict[str, An
             Decimal("0"),
             total_due - paid_to_date,
         ).quantize(RATE_QUANT, rounding=ROUND_HALF_UP)
-        paid = min(paid, remaining_before)
-        remaining_after = (remaining_before - paid).quantize(
+        credited = min(paid, remaining_before)
+        if bool(item.get("champ_cap_enabled", True)):
+            paid = credited
+        remaining_after = (remaining_before - credited).quantize(
             RATE_QUANT,
             rounding=ROUND_HALF_UP,
         )
@@ -1682,6 +2037,10 @@ def _champion_allocation(item: Mapping[str, Any], paid: Decimal) -> Dict[str, An
                 "nominal_end_epoch": int(item.get("nominal_end_epoch", 0)),
             }
         )
+        if item.get("champ_cap_policy_explicit"):
+            allocation["champion_cap_enabled"] = bool(
+                item.get("champ_cap_enabled")
+            )
         if item.get("replay_status") is not None:
             allocation["replay_status"] = str(item.get("replay_status") or "")
     # SOURCE_ADD legs on the champion rails keep their reward_kind label in the

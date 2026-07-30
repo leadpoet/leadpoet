@@ -13,6 +13,7 @@ from gateway.research_lab.allocations import (
     _champion_obligation_caps,
     _champion_replay_obligation,
     _epoch_active,
+    _historical_compute_fallback_from_snapshot,
     _source_add_paid_alpha_to_date_from_snapshots,
 )
 from gateway.research_lab.champion_settlement_v2 import (
@@ -214,7 +215,14 @@ class CoordinatorAllocationSourceV2:
             required_parents=required_parent_hashes,
         )
         champion_source_rows = self._read(
-            "allocation_champion_rewards", {"epoch_id": epoch}, context
+            "allocation_champion_rewards",
+            {
+                "epoch_id": epoch,
+                "include_paid": not bool(
+                    policy.get("enable_champ_cap", True)
+                ),
+            },
+            context,
         )
         source_add_rows = self._read(
             "allocation_source_add_rewards", {"epoch_id": epoch}, context
@@ -231,6 +239,7 @@ class CoordinatorAllocationSourceV2:
             rows=champion_source_rows,
             history=finalized_reward_history,
             hotkey_uids=hotkey_uids,
+            enable_champ_cap=bool(policy.get("enable_champ_cap", True)),
             context=context,
             required_parents=required_parent_hashes,
         )
@@ -242,6 +251,43 @@ class CoordinatorAllocationSourceV2:
             context=context,
             required_parents=required_parent_hashes,
         )
+        fallback_reimbursement_rows: list[Dict[str, Any]] = []
+        fallback_reimbursement_skipped: list[Dict[str, Any]] = []
+        fallback_source: Dict[str, Any] = {}
+        if policy.get("enable_conservative", True) is False:
+            fallback_snapshots = self._read(
+                "allocation_latest_compute_snapshot",
+                {"epoch_id": epoch, "netuid": netuid},
+                context,
+            )
+            if len(fallback_snapshots) > 1:
+                raise CoordinatorAllocationSourceV2Error(
+                    "historical compute fallback snapshot is ambiguous"
+                )
+            if fallback_snapshots:
+                self._require_historical_compute_authority(
+                    row=fallback_snapshots[0],
+                    netuid=netuid,
+                    context=context,
+                    required_parents=required_parent_hashes,
+                )
+                (
+                    fallback_reimbursement_rows,
+                    fallback_reimbursement_skipped,
+                    fallback_source,
+                ) = _historical_compute_fallback_from_snapshot(
+                    fallback_snapshots[0],
+                    hotkey_uids=hotkey_uids,
+                    reward_epochs=max(
+                        1,
+                        int(
+                            policy.get("reimbursement_epochs")
+                            or policy.get("reward_epochs")
+                            or 20
+                        ),
+                    ),
+                    expected_netuid=netuid,
+                )
         required_parent_hash_list = sorted(required_parent_hashes)
         observed_parent_hashes = sorted(set(context.parent_receipt_hashes))
         if required_parent_hash_list != observed_parent_hashes:
@@ -258,12 +304,17 @@ class CoordinatorAllocationSourceV2:
         }
         if source_add_present:
             allocation_inputs["active_source_add_obligations"] = source_add_obligations
+        if fallback_reimbursement_rows:
+            allocation_inputs["fallback_reimbursement_obligations"] = (
+                fallback_reimbursement_rows
+            )
         allocation = allocate_research_lab_epoch(
             epoch,
             policy,
             reimbursement_rows,
             champion_rows,
             active_source_add_obligations=source_add_obligations,
+            fallback_reimbursement_obligations=fallback_reimbursement_rows,
         )
         source_state: Dict[str, Any] = {
             "epoch": epoch,
@@ -285,6 +336,21 @@ class CoordinatorAllocationSourceV2:
             )
             source_state["source_add_obligations"] = source_add_obligations
             source_state["skipped"]["source_add"] = source_add_skipped
+        if fallback_reimbursement_rows or fallback_reimbursement_skipped:
+            source_state.update(
+                {
+                    "fallback_reimbursement_obligation_count": len(
+                        fallback_reimbursement_rows
+                    ),
+                    "fallback_reimbursement_obligations": (
+                        fallback_reimbursement_rows
+                    ),
+                    "historical_compute_fallback_source": fallback_source,
+                }
+            )
+            source_state["skipped"]["fallback_reimbursements"] = (
+                fallback_reimbursement_skipped
+            )
         if contains_secret_material(source_state) or contains_secret_material(allocation):
             raise CoordinatorAllocationSourceV2Error(
                 "allocation authority output contains secret material"
@@ -453,12 +519,130 @@ class CoordinatorAllocationSourceV2:
                         or award.get("target_reimbursement_microusd")
                         or 0
                     ),
+                    "eligible_compute_microusd": int(
+                        award.get("eligible_cost_microusd")
+                        or award.get("target_reimbursement_microusd")
+                        or 0
+                    ),
                     "participation_score": float(
                         award.get("participation_score") or 0.0
                     ),
                 }
             )
         return obligations, skipped
+
+    def _require_historical_compute_authority(
+        self,
+        *,
+        row: Mapping[str, Any],
+        netuid: int,
+        context: ExecutionContextV2,
+        required_parents: Set[str],
+    ) -> None:
+        try:
+            source_epoch = int(row["epoch"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CoordinatorAllocationSourceV2Error(
+                "historical compute fallback epoch is invalid"
+            ) from exc
+        allocation = row.get("allocation_doc")
+        allocation_hash = str(row.get("allocation_hash") or "")
+        if not isinstance(allocation, Mapping):
+            raise CoordinatorAllocationSourceV2Error(
+                "historical compute fallback allocation is invalid"
+            )
+        native_rows = self._read(
+            "finalized_allocation_authorities",
+            {
+                "netuid": netuid,
+                "start_epoch": source_epoch,
+                "end_epoch": source_epoch,
+            },
+            context,
+        )
+        legacy_rows = self._read(
+            "legacy_finalized_allocation_migrations",
+            {
+                "netuid": netuid,
+                "start_epoch": source_epoch,
+                "end_epoch": source_epoch,
+            },
+            context,
+        )
+        graph_by_root = _receipt_graphs_by_declared_root(
+            context.external_receipt_graphs,
+            context.parent_receipt_hashes,
+        )
+        native = validate_finalized_allocation_authorities_v2(
+            native_rows,
+            finalization_graphs=graph_by_root,
+        )
+        migrated = validate_legacy_settlement_migrations_v2(
+            legacy_rows,
+            receipt_graphs=graph_by_root,
+        )
+        authorities = merge_finalized_allocation_histories_v2(
+            native,
+            migrated,
+        )
+        matches = [
+            authority
+            for authority in authorities
+            if int(authority.get("epoch") or -1) == source_epoch
+            and int(authority.get("netuid") or -1) == netuid
+            and str(authority.get("allocation_hash") or "")
+            == allocation_hash
+            and _same(authority.get("allocation_doc"), allocation)
+        ]
+        if len(matches) != 1:
+            raise CoordinatorAllocationSourceV2Error(
+                "historical compute fallback lacks finalized allocation authority"
+            )
+        authority = matches[0]
+        authority_types = set(authority.get("authority_types") or ())
+        if "native_v2_finalization" in authority_types:
+            receipt_hash = self._require_allocation_receipt(
+                epoch=source_epoch,
+                allocation=dict(allocation),
+                allocation_hash=allocation_hash,
+                context=context,
+                required_parents=required_parents,
+            )
+            if receipt_hash != str(
+                authority.get("allocation_authority_receipt_hash") or ""
+            ):
+                raise CoordinatorAllocationSourceV2Error(
+                    "historical compute fallback used another allocation receipt"
+                )
+            for native_row in native_rows:
+                root = str(native_row.get("finalization_receipt_hash") or "")
+                if not root or root not in graph_by_root:
+                    raise CoordinatorAllocationSourceV2Error(
+                        "historical compute finalization graph is not declared"
+                    )
+                required_parents.add(root)
+        if "legacy_finalized_chain_migration_v2" in authority_types:
+            root = str(
+                authority.get("legacy_settlement_receipt_hash") or ""
+            )
+            if (
+                not root
+                or root not in graph_by_root
+                or root not in context.parent_receipt_hashes
+            ):
+                raise CoordinatorAllocationSourceV2Error(
+                    "historical compute legacy settlement is not declared"
+                )
+            required_parents.add(root)
+        if not authority_types.intersection(
+            {
+                "native_v2_finalization",
+                "legacy_finalized_chain_migration_v2",
+            }
+        ):
+            raise CoordinatorAllocationSourceV2Error(
+                "historical compute fallback authority type is unsupported"
+            )
 
     def _champions(
         self,
@@ -467,6 +651,7 @@ class CoordinatorAllocationSourceV2:
         rows: Sequence[Mapping[str, Any]],
         history: Sequence[Mapping[str, Any]],
         hotkey_uids: Mapping[str, int],
+        enable_champ_cap: bool,
         context: ExecutionContextV2,
         required_parents: Set[str],
     ) -> Tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
@@ -476,12 +661,22 @@ class CoordinatorAllocationSourceV2:
         )
         obligations = []
         skipped = []
+        accepted_statuses = (
+            ACTIVE_CHAMPION_STATUSES
+            if enable_champ_cap
+            else ACTIVE_CHAMPION_STATUSES | {"paid"}
+        )
         for row in rows:
             status = str(row.get("current_reward_status") or row.get("reward_status") or "")
-            if status not in ACTIVE_CHAMPION_STATUSES:
+            if status not in accepted_statuses:
                 continue
             reward_id = str(row.get("champion_reward_id") or "")
-            replay = _champion_replay_obligation(row, paid_by_reward=paid, epoch=epoch)
+            replay = _champion_replay_obligation(
+                row,
+                paid_by_reward=paid,
+                epoch=epoch,
+                enable_champ_cap=bool(enable_champ_cap),
+            )
             if replay is None:
                 continue
             self._require_reward_receipt(

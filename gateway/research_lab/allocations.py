@@ -100,18 +100,39 @@ async def build_research_lab_allocation_bundle(
             await _active_reimbursement_obligations(int(epoch), policy=policy)
         )
         champion_obligations, champion_skipped = (
-            await _active_champion_obligations(int(epoch), netuid=int(netuid))
+            await _active_champion_obligations(
+                int(epoch),
+                netuid=int(netuid),
+                enable_champ_cap=bool(config.enable_champ_cap),
+            )
         )
         source_add_obligations, source_add_skipped = (
             await _active_source_add_obligations(int(epoch), netuid=int(netuid))
         )
         source_add_present = bool(source_add_obligations or source_add_skipped)
+        fallback_reimbursement_obligations: list[dict[str, Any]] = []
+        fallback_reimbursement_skipped: list[dict[str, Any]] = []
+        fallback_source: dict[str, Any] = {}
+        if not bool(config.enable_conservative):
+            (
+                fallback_reimbursement_obligations,
+                fallback_reimbursement_skipped,
+                fallback_source,
+            ) = await _historical_compute_fallback_obligations(
+                epoch=int(epoch),
+                netuid=int(netuid),
+                policy=policy,
+            )
         allocation_inputs = {
             "epoch": int(epoch),
             "policy": policy,
             "active_reimbursement_obligations": reimbursement_obligations,
             "active_champion_obligations": champion_obligations,
         }
+        if fallback_reimbursement_obligations:
+            allocation_inputs["fallback_reimbursement_obligations"] = (
+                fallback_reimbursement_obligations
+            )
         if source_add_present:
             allocation_inputs["active_source_add_obligations"] = source_add_obligations
         allocation = allocate_research_lab_epoch(
@@ -121,6 +142,9 @@ async def build_research_lab_allocation_bundle(
             allocation_inputs["active_champion_obligations"],
             active_source_add_obligations=allocation_inputs.get(
                 "active_source_add_obligations", []
+            ),
+            fallback_reimbursement_obligations=allocation_inputs.get(
+                "fallback_reimbursement_obligations", []
             ),
         )
         source_state = {
@@ -137,6 +161,21 @@ async def build_research_lab_allocation_bundle(
                 "champions": champion_skipped,
             },
         }
+        if fallback_reimbursement_obligations or fallback_reimbursement_skipped:
+            source_state.update(
+                {
+                    "fallback_reimbursement_obligation_count": len(
+                        fallback_reimbursement_obligations
+                    ),
+                    "fallback_reimbursement_obligations": (
+                        fallback_reimbursement_obligations
+                    ),
+                    "historical_compute_fallback_source": fallback_source,
+                }
+            )
+            source_state["skipped"]["fallback_reimbursements"] = (
+                fallback_reimbursement_skipped
+            )
         if source_add_present:
             source_state["source_add_obligation_count"] = len(source_add_obligations)
             source_state["source_add_obligations"] = source_add_obligations
@@ -172,6 +211,9 @@ async def build_research_lab_allocation_bundle(
         champion_obligations = list(
             allocation_inputs.get("active_champion_obligations") or []
         )
+        fallback_reimbursement_obligations = list(
+            allocation_inputs.get("fallback_reimbursement_obligations") or []
+        )
         source_add_present = "active_source_add_obligations" in allocation_inputs
         source_add_obligations = list(
             allocation_inputs.get("active_source_add_obligations") or []
@@ -182,6 +224,9 @@ async def build_research_lab_allocation_bundle(
         reimbursement_skipped = list(skipped.get("reimbursements") or [])
         champion_skipped = list(skipped.get("champions") or [])
         source_add_skipped = list(skipped.get("source_add") or [])
+        fallback_reimbursement_skipped = list(
+            skipped.get("fallback_reimbursements") or []
+        )
         source_state_hash = str(authority.get("source_state_hash") or "")
     if attestation_out is not None:
         attestation_out.clear()
@@ -225,6 +270,9 @@ async def build_research_lab_allocation_bundle(
             "champion_allocation_count": len(allocation.get("champion_allocations") or []),
             "queued_champion_allocation_count": len(allocation.get("queued_champion_allocations") or []),
             "skipped_reimbursement_count": len(reimbursement_skipped),
+            "skipped_fallback_reimbursement_count": len(
+                fallback_reimbursement_skipped
+            ),
             "skipped_champion_count": len(champion_skipped),
         },
         "verifier_contract": {
@@ -349,15 +397,240 @@ async def _active_reimbursement_obligations(
                 "epoch_count": int(schedule.get("epoch_count") or 0),
                 "target_reimbursement_microusd": int(award.get("target_reimbursement_microusd") or 0),
                 "total_microusd": int(schedule.get("total_microusd") or award.get("target_reimbursement_microusd") or 0),
+                "eligible_compute_microusd": int(
+                    award.get("eligible_cost_microusd")
+                    or award.get("target_reimbursement_microusd")
+                    or 0
+                ),
                 "participation_score": float(award.get("participation_score") or 0.0),
             }
         )
     return obligations, skipped
 
 
-async def _active_champion_obligations(epoch: int, *, netuid: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+async def _historical_compute_fallback_obligations(
+    *,
+    epoch: int,
+    netuid: int,
+    policy: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Load the latest non-fallback compute allocation for no-burn replay."""
+
+    rows = await select_all(
+        "research_lab_emission_allocation_current",
+        columns="epoch,netuid,allocation_hash,allocation_doc",
+        filters=(
+            ("netuid", int(netuid)),
+            ("epoch", "lt", int(epoch)),
+            ("allocation_doc->reimbursement_allocations", "neq", []),
+            (
+                "allocation_doc->>historical_compute_fallback_source_epoch",
+                "is",
+                "null",
+            ),
+        ),
+        order_by=(("epoch", True),),
+        batch_size=1,
+        max_rows=1,
+        allow_partial=True,
+    )
+    if not rows:
+        return (
+            [],
+            [{"reason": "historical_compute_allocation_unavailable"}],
+            {},
+        )
+    allocation_doc = rows[0].get("allocation_doc")
+    hotkeys = []
+    if isinstance(allocation_doc, Mapping):
+        for item in allocation_doc.get("reimbursement_allocations") or ():
+            if isinstance(item, Mapping) and item.get("miner_hotkey"):
+                hotkeys.append(str(item["miner_hotkey"]))
+    hotkey_uids = await resolve_hotkey_uids(hotkeys)
+    return _historical_compute_fallback_from_snapshot(
+        rows[0],
+        hotkey_uids=hotkey_uids,
+        reward_epochs=max(
+            1,
+            int(
+                policy.get("reimbursement_epochs")
+                or policy.get("reward_epochs")
+                or 20
+            ),
+        ),
+        expected_netuid=int(netuid),
+    )
+
+
+def _historical_compute_fallback_from_snapshot(
+    row: Mapping[str, Any],
+    *,
+    hotkey_uids: Mapping[str, int],
+    reward_epochs: int,
+    expected_netuid: int | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Aggregate one finalized compute-active allocation by current hotkey."""
+
+    allocation_doc = row.get("allocation_doc")
+    allocation_hash = str(row.get("allocation_hash") or "")
+    if not isinstance(allocation_doc, Mapping):
+        raise ValueError("historical compute allocation document is invalid")
+    expected_hash = sha256_json(
+        {
+            key: value
+            for key, value in allocation_doc.items()
+            if key != "allocation_hash"
+        }
+    )
+    try:
+        source_epoch = int(row["epoch"])
+        allocation_epoch = int(allocation_doc["epoch"])
+        row_netuid = int(row.get("netuid", expected_netuid))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("historical compute allocation scope is invalid") from exc
+    if (
+        allocation_hash != expected_hash
+        or allocation_doc.get("allocation_hash") != allocation_hash
+        or allocation_epoch != source_epoch
+        or (
+            expected_netuid is not None
+            and row_netuid != int(expected_netuid)
+        )
+        or allocation_doc.get("historical_compute_fallback_source_epoch")
+        is not None
+    ):
+        raise ValueError("historical compute allocation authority differs")
+    allocations = allocation_doc.get("reimbursement_allocations")
+    if not isinstance(allocations, list) or not allocations:
+        raise ValueError("historical compute allocation has no reimbursements")
+
+    grouped: dict[str, dict[str, Any]] = {}
+    skipped: list[dict[str, Any]] = []
+    seen_sources: set[str] = set()
+    for item in allocations:
+        if not isinstance(item, Mapping):
+            raise ValueError("historical compute reimbursement row is invalid")
+        source_id = str(item.get("source_id") or "")
+        if (
+            not source_id.startswith("reimbursement_schedule:")
+            or item.get("reason") == "historical_compute_fallback_no_burn"
+            or source_id in seen_sources
+        ):
+            raise ValueError(
+                "historical compute reimbursement source is invalid or duplicated"
+            )
+        seen_sources.add(source_id)
+        hotkey = str(item.get("miner_hotkey") or "")
+        try:
+            compute_microusd = int(
+                item.get("eligible_compute_microusd")
+                or item.get("spend_microusd")
+                or 0
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "historical compute reimbursement amount is invalid"
+            ) from exc
+        if compute_microusd <= 0 or not hotkey:
+            raise ValueError(
+                "historical compute reimbursement amount or hotkey is invalid"
+            )
+        uid = hotkey_uids.get(hotkey)
+        if uid is None:
+            skipped.append(
+                {
+                    "source_id": source_id,
+                    "miner_hotkey": hotkey,
+                    "reason": "miner_hotkey_not_registered",
+                }
+            )
+            continue
+        group = grouped.setdefault(
+            hotkey,
+            {
+                "uid": int(uid),
+                "miner_hotkey": hotkey,
+                "spend_microusd": 0,
+                "contributions": [],
+            },
+        )
+        if int(group["uid"]) != int(uid):
+            raise ValueError("historical compute hotkey UID mapping differs")
+        group["spend_microusd"] += compute_microusd
+        group["contributions"].append(
+            {
+                "source_id": source_id,
+                "compute_microusd": compute_microusd,
+            }
+        )
+
+    window_end = source_epoch
+    window_start = max(0, source_epoch - max(1, int(reward_epochs)) + 1)
+    obligations: list[dict[str, Any]] = []
+    for hotkey in sorted(grouped):
+        group = grouped[hotkey]
+        contributions = sorted(
+            group["contributions"],
+            key=lambda item: str(item["source_id"]),
+        )
+        contribution_hash = sha256_json(contributions)
+        source_hash = sha256_json(
+            {
+                "schema_version": (
+                    "leadpoet.historical_compute_fallback_source.v1"
+                ),
+                "source_allocation_hash": allocation_hash,
+                "miner_hotkey": hotkey,
+                "contribution_hash": contribution_hash,
+            }
+        )
+        obligations.append(
+            {
+                "uid": int(group["uid"]),
+                "miner_uid": int(group["uid"]),
+                "miner_hotkey": hotkey,
+                "source_id": (
+                    "historical_compute_fallback:"
+                    + source_hash.split(":", 1)[1]
+                ),
+                "island": "historical_compute",
+                "status": "active",
+                "target_reimbursement_microusd": int(
+                    group["spend_microusd"]
+                ),
+                "fallback_window_start_epoch": window_start,
+                "fallback_window_end_epoch": window_end,
+                "source_allocation_epoch": source_epoch,
+                "source_allocation_hash": allocation_hash,
+                "contribution_count": len(contributions),
+                "contribution_hash": contribution_hash,
+            }
+        )
+    source = {
+        "schema_version": "leadpoet.historical_compute_fallback_authority.v1",
+        "source_allocation_epoch": source_epoch,
+        "source_allocation_hash": allocation_hash,
+        "window_start_epoch": window_start,
+        "window_end_epoch": window_end,
+        "source_reimbursement_count": len(allocations),
+        "eligible_miner_count": len(obligations),
+    }
+    return obligations, skipped, source
+
+
+async def _active_champion_obligations(
+    epoch: int,
+    *,
+    netuid: int,
+    enable_champ_cap: bool = True,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     champion_rows: list[dict[str, Any]] = []
-    for status in sorted(ACTIVE_CHAMPION_STATUSES):
+    accepted_statuses = (
+        ACTIVE_CHAMPION_STATUSES
+        if enable_champ_cap
+        else SETTLEMENT_TRACKED_CHAMPION_STATUSES
+    )
+    for status in sorted(accepted_statuses):
         champion_rows.extend(
             await select_all(
                 "research_lab_champion_reward_current",
@@ -370,14 +643,19 @@ async def _active_champion_obligations(epoch: int, *, netuid: int) -> tuple[list
     skipped: list[dict[str, Any]] = []
     for row in champion_rows:
         status = str(row.get("current_reward_status") or row.get("reward_status") or "")
-        if status not in ACTIVE_CHAMPION_STATUSES:
+        if status not in accepted_statuses:
             continue
         miner_hotkey = str(row.get("miner_hotkey") or "")
         uid = hotkey_uids.get(miner_hotkey)
         if uid is None:
             skipped.append({"champion_reward_id": str(row.get("champion_reward_id") or ""), "reason": "miner_hotkey_not_registered"})
             continue
-        replay_obligation = _champion_replay_obligation(row, paid_by_reward=paid_by_reward, epoch=int(epoch))
+        replay_obligation = _champion_replay_obligation(
+            row,
+            paid_by_reward=paid_by_reward,
+            epoch=int(epoch),
+            enable_champ_cap=bool(enable_champ_cap),
+        )
         if replay_obligation is None:
             continue
         obligations.append(
@@ -816,6 +1094,7 @@ def _champion_replay_obligation(
     *,
     paid_by_reward: Mapping[str, float],
     epoch: int,
+    enable_champ_cap: bool = True,
 ) -> dict[str, Any] | None:
     start_epoch = int(row.get("start_epoch") or 0)
     epoch_count = int(row.get("epoch_count") or 0)
@@ -826,9 +1105,21 @@ def _champion_replay_obligation(
     total_due = desired * Decimal(epoch_count)
     paid_to_date = min(total_due, _decimal(paid_by_reward.get(champion_reward_id, 0)))
     remaining = max(Decimal("0"), total_due - paid_to_date)
-    if desired <= 0 or remaining <= 0:
-        return None
     nominal_end_epoch = start_epoch + epoch_count
+    nominal_window_active = int(epoch) < nominal_end_epoch
+    if (
+        desired <= 0
+        or (
+            remaining <= 0
+            and (bool(enable_champ_cap) or not nominal_window_active)
+        )
+    ):
+        return None
+    current_desired = (
+        min(desired, remaining)
+        if bool(enable_champ_cap)
+        else desired
+    )
     return {
         "start_epoch": start_epoch,
         "epoch_count": epoch_count,
@@ -839,7 +1130,8 @@ def _champion_replay_obligation(
         "total_due_alpha_percent": _rate_float(total_due),
         "paid_alpha_percent_to_date": _rate_float(paid_to_date),
         "remaining_alpha_percent": _rate_float(remaining),
-        "current_epoch_desired_alpha_percent": _rate_float(min(desired, remaining)),
+        "current_epoch_desired_alpha_percent": _rate_float(current_desired),
+        "champ_cap_enabled": bool(enable_champ_cap),
         "replay_status": "extended_replay" if int(epoch) >= nominal_end_epoch else "nominal_window",
     }
 

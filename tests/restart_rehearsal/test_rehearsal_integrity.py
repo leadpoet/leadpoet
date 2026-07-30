@@ -56,6 +56,9 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
     _validate_required_migration_declarations,
 )
 from tests.restart_rehearsal.local_services import LocalBoundaryServices
+from tests.restart_rehearsal.sanitized_weight_fixture import (
+    SanitizedWeightFixture,
+)
 from tests.restart_rehearsal.verify_evidence import (
     EXPECTED_GATEWAY_PRIVATE_MODEL_ENV,
     events,
@@ -75,6 +78,127 @@ from gateway.tee.rehearsal_behavior_contract_v2 import (
 
 COMMIT = "1" * 40
 VALIDATOR_HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
+
+
+def test_historical_receipt_fixture_binds_candidate_release_identity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from leadpoet_canonical.attested_v2 import (
+        BOOT_ATTESTATION_PURPOSE,
+        build_boot_attestation_user_data,
+    )
+
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    release_identity = {
+        "commit_sha": COMMIT,
+        "dependency_lock_hash": "sha256:" + "2" * 64,
+        "execution_manifest_hash": "sha256:" + "3" * 64,
+        "pcr0": "4" * 96,
+    }
+    release_path = tmp_path / "release-build-input.json"
+    release_path.write_text(
+        json.dumps(
+            {
+                "commit_sha": COMMIT,
+                "gateway_roles": {
+                    "gateway_coordinator": release_identity,
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    loaded = postgres_probe._load_coordinator_release_identity(
+        release_path,
+        candidate_sha=COMMIT,
+    )
+    fixture = SanitizedWeightFixture(candidate_sha=COMMIT, epoch_id=24207)
+    config_hash = "sha256:" + "5" * 64
+    boot = fixture._boot(
+        role="gateway_coordinator",
+        key=fixture.coordinator_key,
+        config_hash=config_hash,
+        release_identity=loaded,
+    )
+    receipt = fixture.receipt(
+        role="gateway_coordinator",
+        purpose="research_lab.legacy_finalized_allocation.v2",
+        job_id="historical-release-binding",
+        key=fixture.coordinator_key,
+        boot=boot,
+        config_hash=config_hash,
+    )
+    verified, extracted = (
+        rehearsal_sitecustomize._local_verify_nitro_attestation_full(
+            attestation_b64=boot["attestation_document_b64"],
+            expected_pcr0=release_identity["pcr0"],
+            expected_pubkey=boot["signing_pubkey"],
+            expected_purpose=BOOT_ATTESTATION_PURPOSE,
+            role="gateway",
+            certificate_validity_at_attestation_time=True,
+        )
+    )
+    assert verified is True
+    assert extracted == {
+        "pcr0": release_identity["pcr0"],
+        "enclave_pubkey": boot["signing_pubkey"],
+        "user_data": build_boot_attestation_user_data(boot),
+    }
+    assert {
+        field: boot[field]
+        for field in (
+            "commit_sha",
+            "pcr0",
+            "build_manifest_hash",
+            "dependency_lock_hash",
+        )
+    } == {
+        "commit_sha": COMMIT,
+        "pcr0": release_identity["pcr0"],
+        "build_manifest_hash": release_identity["execution_manifest_hash"],
+        "dependency_lock_hash": release_identity["dependency_lock_hash"],
+    }
+    assert {
+        field: receipt[field]
+        for field in (
+            "commit_sha",
+            "pcr0",
+            "build_manifest_hash",
+            "dependency_lock_hash",
+        )
+    } == {
+        "commit_sha": COMMIT,
+        "pcr0": release_identity["pcr0"],
+        "build_manifest_hash": release_identity["execution_manifest_hash"],
+        "dependency_lock_hash": release_identity["dependency_lock_hash"],
+    }
+
+    release_path.write_text(
+        json.dumps(
+            {
+                "commit_sha": "6" * 40,
+                "gateway_roles": {
+                    "gateway_coordinator": release_identity,
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        postgres_probe.PostgresContractProbeError,
+        match="commit differs",
+    ):
+        postgres_probe._load_coordinator_release_identity(
+            release_path,
+            candidate_sha=COMMIT,
+        )
 
 
 def test_chain_settlement_activation_fixture_creates_one_epoch_backlog(
@@ -347,11 +471,14 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
         name: {"kind": "r", "columns": ["schema_version"]}
         for name in {
             "research_lab_attested_transport_attempts_v2",
+            "research_lab_attested_boot_identities_v2",
             "research_lab_attested_execution_receipts_v2",
             "research_lab_attested_weight_bundles_v2",
             "research_lab_attested_publication_events_v2",
             "research_lab_attested_weight_finalizations_v2",
             "research_lab_finalized_allocation_epochs_v2",
+            "research_lab_emission_allocation_current",
+            "research_lab_legacy_finalized_allocation_migrations_v2",
             "research_lab_chain_realized_epoch_settlements_v1",
             "research_lab_chain_realized_settlement_activation_v1",
             "research_lab_chain_realized_obligation_credits_v1",
@@ -428,6 +555,18 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
                     for column in EXPECTED_FINALIZED_VIEW_COLUMNS
                 }
             ],
+            "research_lab_emission_allocation_current": [
+                {"schema_version": None},
+            ],
+            "research_lab_legacy_finalized_allocation_migrations_v2": [
+                {"schema_version": None},
+            ],
+            "research_lab_attested_boot_identities_v2": [
+                {"schema_version": None},
+            ],
+            "research_lab_attested_execution_receipts_v2": [
+                {"schema_version": None},
+            ],
         },
     }
     path = tmp_path / "postgres-contract.json"
@@ -488,7 +627,23 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "research_lab_finalized_allocation_epochs_v2": {
                 "kind": "v",
                 "columns": list(EXPECTED_FINALIZED_VIEW_COLUMNS),
-            }
+            },
+            "research_lab_emission_allocation_current": {
+                "kind": "v",
+                "columns": ["epoch"],
+            },
+            "research_lab_legacy_finalized_allocation_migrations_v2": {
+                "kind": "r",
+                "columns": ["epoch_id"],
+            },
+            "research_lab_attested_boot_identities_v2": {
+                "kind": "r",
+                "columns": ["boot_identity_hash"],
+            },
+            "research_lab_attested_execution_receipts_v2": {
+                "kind": "r",
+                "columns": ["receipt_hash"],
+            },
         },
         "checks": {
             "pre_128_transport_rejected": True,
@@ -511,6 +666,10 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "lifetime_credit_contract_valid": True,
             "finalized_view_projection_exact": True,
             "finalized_view_seed_available": True,
+            "historical_compute_schema_migrations_applied": True,
+            "historical_compute_finalized_authority_seed_available": True,
+            "historical_compute_allocation_conserved": True,
+            "historical_compute_release_identity_bound": True,
             "settlement_authority_parsed": True,
             "measured_settlement_receipt_projection_exact": True,
             "tampered_weight_receipt_rejected": True,
@@ -539,6 +698,18 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
                     column: None
                     for column in EXPECTED_FINALIZED_VIEW_COLUMNS
                 }
+            ],
+            "research_lab_emission_allocation_current": [
+                {"epoch": None},
+            ],
+            "research_lab_legacy_finalized_allocation_migrations_v2": [
+                {"epoch_id": None},
+            ],
+            "research_lab_attested_boot_identities_v2": [
+                {"boot_identity_hash": None},
+            ],
+            "research_lab_attested_execution_receipts_v2": [
+                {"receipt_hash": None},
             ],
         },
     }
@@ -1930,24 +2101,36 @@ def test_local_vsock_listener_enforces_the_production_contract(
     with pytest.raises(OSError, match="listener closed"):
         listener.accept()
 
+    monkeypatch.setenv("REHEARSAL_COMPONENT", "validator")
+    validator_listener = rehearsal_sitecustomize._LocalVsock(
+        40,
+        socket.SOCK_STREAM,
+    )
+    validator_listener.bind((0xFFFFFFFF, 5002))
+    with pytest.raises(ValueError, match="listener backlog"):
+        validator_listener.listen(64)
+    validator_listener.listen(8)
+    validator_listener.close()
+
     events = [
         json.loads(line)
         for line in (tmp_path / "events.jsonl").read_text(
             encoding="utf-8"
         ).splitlines()
     ]
-    assert len(events) == 1
-    assert events[0] == {
-        "at_ns": events[0]["at_ns"],
-        "boundary": "nitro_enclaves",
-        "fixture_authenticity": "production_shaped_sanitized",
-        "implementation": "external_boundary",
-        "kind": "local-chain-boundary",
-        "operation": "enclave_listener",
-        "port": 5001,
-        "reject_unknown": True,
-        "status": "bound",
-    }
+    assert len(events) == 2
+    for event, port in zip(events, (5001, 5002)):
+        assert event == {
+            "at_ns": event["at_ns"],
+            "boundary": "nitro_enclaves",
+            "fixture_authenticity": "production_shaped_sanitized",
+            "implementation": "external_boundary",
+            "kind": "local-chain-boundary",
+            "operation": "enclave_listener",
+            "port": port,
+            "reject_unknown": True,
+            "status": "bound",
+        }
 
 
 def test_local_gateway_attestation_boundary_matches_public_rpc_contract(

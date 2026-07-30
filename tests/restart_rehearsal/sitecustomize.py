@@ -2280,7 +2280,13 @@ class _LocalVsock:
         )
 
     def listen(self, backlog: int) -> None:
-        if not self._listener or int(backlog) != 64:
+        expected_backlog = (
+            8
+            if os.environ.get("REHEARSAL_COMPONENT") == "validator"
+            and self._listener_port == 5002
+            else 64
+        )
+        if not self._listener or int(backlog) != expected_backlog:
             raise ValueError("local enclave listener backlog differs")
 
     def accept(self) -> tuple[Any, tuple[int, int]]:

@@ -159,6 +159,8 @@ def _apply_filters(query: Any, filters: Iterable[tuple[Any, ...]]) -> Any:
             query = query.gte(field, value)
         elif operator == "in":
             query = query.in_(field, value)
+        elif operator == "is":
+            query = query.is_(field, value)
         else:
             raise ValueError(f"unsupported PostgREST filter operator: {operator}")
     return query

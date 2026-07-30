@@ -761,12 +761,24 @@ def verify_research_lab_allocation_bundle(
     policy = source_state.get("policy") if isinstance(source_state, Mapping) else None
     source_add = source_state.get("source_add_obligations") if isinstance(source_state, Mapping) else None
     reimbursements = source_state.get("reimbursement_obligations") if isinstance(source_state, Mapping) else None
+    fallback_reimbursements = (
+        source_state.get("fallback_reimbursement_obligations")
+        if isinstance(source_state, Mapping)
+        else None
+    )
     champions = source_state.get("champion_obligations") if isinstance(source_state, Mapping) else None
     if not isinstance(policy, Mapping):
         errors.append("allocation_policy_required")
     if not isinstance(reimbursements, list):
         errors.append("allocation_reimbursement_obligations_must_be_array")
         reimbursements = []
+    if fallback_reimbursements is None:
+        fallback_reimbursements = []
+    elif not isinstance(fallback_reimbursements, list):
+        errors.append(
+            "allocation_fallback_reimbursement_obligations_must_be_array"
+        )
+        fallback_reimbursements = []
     if source_add is None:
         source_add = []
     elif not isinstance(source_add, list):
@@ -796,6 +808,7 @@ def verify_research_lab_allocation_bundle(
                 reimbursements,
                 champions,
                 active_source_add_obligations=source_add,
+                fallback_reimbursement_obligations=fallback_reimbursements,
             )
             recomputed_allocation_hash = str(recomputed.get("allocation_hash") or "")
             if allocation_hash and recomputed_allocation_hash != str(allocation_hash):

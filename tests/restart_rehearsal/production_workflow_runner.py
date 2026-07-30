@@ -12,6 +12,7 @@ import argparse
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -1627,11 +1628,239 @@ def _exercise_git_tree_replacement() -> dict[str, Any]:
     }
 
 
+def _exercise_research_lab_allocation_conservation() -> dict[str, Any]:
+    """Exercise the configured no-burn and compatibility allocation modes."""
+
+    from gateway.research_lab.config import ResearchLabGatewayConfig
+    from leadpoet_verifier.economics import allocate_research_lab_epoch
+
+    policy = ResearchLabGatewayConfig.from_env().reimbursement_policy_doc(
+        enabled=True
+    )
+    policy_hash = sha256_json(policy)
+    epoch = 30_000
+    cap = Decimal(str(policy["research_lab_emission_percent"]))
+    if (
+        cap <= 0
+        or policy.get("enable_conservative") is not False
+        or policy.get("enable_champ_cap") is not False
+        or Decimal(
+            str(
+                policy[
+                    "reimbursement_max_cost_multiplier_with_champions"
+                ]
+            )
+        )
+        != Decimal("2")
+    ):
+        raise RuntimeError(
+            "Research Lab default allocation policy differs from no-burn V2"
+        )
+
+    def reimbursement(
+        uid: int,
+        compute_microusd: int,
+    ) -> dict[str, Any]:
+        return {
+            "uid": uid,
+            "miner_hotkey": "reimbursement-%d" % uid,
+            "source_id": "reimbursement_schedule:rehearsal-%d" % uid,
+            "island": "generalist",
+            "status": "active",
+            "start_epoch": epoch,
+            "epoch_count": int(policy["reimbursement_epochs"]),
+            "target_reimbursement_microusd": compute_microusd,
+            "eligible_compute_microusd": compute_microusd,
+        }
+
+    current = allocate_research_lab_epoch(
+        epoch,
+        policy,
+        [reimbursement(1, 1_000_000), reimbursement(2, 3_000_000)],
+        [],
+    )
+    current_paid = {
+        int(row["uid"]): Decimal(str(row["paid_alpha_percent"]))
+        for row in current["reimbursement_allocations"]
+    }
+    if (
+        sum(current_paid.values()) != cap
+        or current_paid[2] != current_paid[1] * Decimal("3")
+        or Decimal(str(current["unallocated_percent"])) != 0
+    ):
+        raise RuntimeError(
+            "current reimbursements did not conserve the Lab cap by compute"
+        )
+
+    source_hash = sha256_json({"fixture": "historical-compute"})
+
+    def fallback(uid: int, compute_microusd: int) -> dict[str, Any]:
+        return {
+            "uid": uid,
+            "miner_hotkey": "fallback-%d" % uid,
+            "source_id": "historical_compute_fallback:%064d" % uid,
+            "island": "historical_compute",
+            "status": "active",
+            "target_reimbursement_microusd": compute_microusd,
+            "fallback_window_start_epoch": epoch - 20,
+            "fallback_window_end_epoch": epoch - 1,
+            "source_allocation_epoch": epoch - 1,
+            "source_allocation_hash": source_hash,
+            "contribution_count": 1,
+            "contribution_hash": sha256_json(
+                {"uid": uid, "compute_microusd": compute_microusd}
+            ),
+        }
+
+    historical = allocate_research_lab_epoch(
+        epoch,
+        policy,
+        [],
+        [],
+        fallback_reimbursement_obligations=[
+            fallback(3, 1_000_000),
+            fallback(4, 3_000_000),
+        ],
+    )
+    historical_paid = {
+        int(row["uid"]): Decimal(str(row["paid_alpha_percent"]))
+        for row in historical["reimbursement_allocations"]
+    }
+    if (
+        sum(historical_paid.values()) != cap
+        or historical_paid[4] != historical_paid[3] * Decimal("3")
+        or historical.get("historical_compute_fallback_source_epoch")
+        != epoch - 1
+        or Decimal(str(historical["unallocated_percent"])) != 0
+    ):
+        raise RuntimeError(
+            "historical compute fallback did not conserve the Lab cap"
+        )
+
+    champions = [
+        {
+            "uid": 5,
+            "miner_hotkey": "champion-5",
+            "source_id": "champion_reward:rehearsal-5",
+            "champion_reward_id": "champion_reward:rehearsal-5",
+            "island": "generalist",
+            "status": "active",
+            "start_epoch": epoch,
+            "epoch_count": int(policy["reward_epochs"]),
+            "improvement_points": 1.0,
+            "desired_alpha_percent": 7.0,
+        },
+        {
+            "uid": 6,
+            "miner_hotkey": "champion-6",
+            "source_id": "champion_reward:rehearsal-6",
+            "champion_reward_id": "champion_reward:rehearsal-6",
+            "island": "generalist",
+            "status": "active",
+            "start_epoch": epoch,
+            "epoch_count": int(policy["reward_epochs"]),
+            "improvement_points": 2.0,
+            "desired_alpha_percent": 14.0,
+        },
+    ]
+    champion_allocation = allocate_research_lab_epoch(
+        epoch,
+        policy,
+        [],
+        champions,
+    )
+    champion_paid = {
+        int(row["uid"]): Decimal(str(row["paid_alpha_percent"]))
+        for row in [
+            *champion_allocation["champion_allocations"],
+            *champion_allocation["queued_champion_allocations"],
+        ]
+    }
+    if (
+        sum(champion_paid.values()) != cap
+        or champion_paid[6] != champion_paid[5] * Decimal("2")
+        or Decimal(str(champion_allocation["unallocated_percent"])) != 0
+    ):
+        raise RuntimeError(
+            "champions did not split the remaining Lab cap by configured reward"
+        )
+
+    valuation_microusd = int(
+        (
+            Decimal(str(policy["usd_per_0_1_percent_epoch"]))
+            * Decimal(1_000_000)
+        ).to_integral_value()
+    )
+    capped = allocate_research_lab_epoch(
+        epoch,
+        policy,
+        [
+            reimbursement(
+                7,
+                valuation_microusd * int(policy["reimbursement_epochs"]),
+            )
+        ],
+        [champions[0]],
+    )
+    capped_reimbursement = Decimal(
+        str(capped["reimbursement_allocations"][0]["paid_alpha_percent"])
+    )
+    if (
+        capped_reimbursement != Decimal("0.2")
+        or Decimal(str(capped["champion_alpha_percent"]))
+        != cap - capped_reimbursement
+        or Decimal(str(capped["unallocated_percent"])) != 0
+    ):
+        raise RuntimeError(
+            "active-champion reimbursement cap or remainder differs"
+        )
+
+    conservative_policy = dict(policy)
+    conservative_policy["enable_conservative"] = True
+    conservative = allocate_research_lab_epoch(
+        epoch,
+        conservative_policy,
+        [],
+        [],
+    )
+    if (
+        Decimal(str(conservative["unallocated_percent"])) != cap
+        or conservative["reimbursement_allocations"]
+        or conservative["champion_allocations"]
+    ):
+        raise RuntimeError(
+            "conservative compatibility mode no longer preserves burn"
+        )
+    return {
+        "policy_hash": policy_hash,
+        "lab_cap_percent": float(cap),
+        "current_reimbursement_alpha_percent": float(
+            current["reimbursement_alpha_percent"]
+        ),
+        "historical_reimbursement_alpha_percent": float(
+            historical["reimbursement_alpha_percent"]
+        ),
+        "champion_alpha_percent": float(
+            champion_allocation["champion_alpha_percent"]
+        ),
+        "active_champion_reimbursement_alpha_percent": float(
+            capped["reimbursement_alpha_percent"]
+        ),
+        "conservative_unallocated_percent": float(
+            conservative["unallocated_percent"]
+        ),
+        "conserved": True,
+    }
+
+
 BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "chain-settlement-state-space": _exercise_chain_settlement_state_space,
     "conditional-icp-policy": _exercise_conditional_icp_policy,
     "conditional-candidate-gate": _exercise_conditional_candidate_gate,
     "git-tree-replacement": _exercise_git_tree_replacement,
+    "research-lab-allocation-conservation": (
+        _exercise_research_lab_allocation_conservation
+    ),
 }
 
 
@@ -1981,6 +2210,23 @@ def main() -> int:
             == behavior_contract["policy_commitments"]["git_tree"].get(
                 "policy_hash"
             )
+        ),
+        "research_lab_allocation_policy_config_bound": (
+            "research-lab-allocation-conservation" in behavior_evidence
+            and behavior_contract is not None
+            and behavior_evidence[
+                "research-lab-allocation-conservation"
+            ].get("policy_hash")
+            == behavior_contract["policy_commitments"][
+                "research_lab_allocation"
+            ].get("policy_hash")
+        ),
+        "research_lab_allocation_conserved": (
+            behavior_evidence.get(
+                "research-lab-allocation-conservation",
+                {},
+            ).get("conserved")
+            is True
         ),
         "canonical_vector_primary_auditor_equal": (
             epoch_authority_complete

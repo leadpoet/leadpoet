@@ -2004,16 +2004,26 @@ async def reconcile_champion_reward_statuses(
     from gateway.config import BITTENSOR_NETUID
     from gateway.research_lab.allocations import (
         ACTIVE_CHAMPION_STATUSES,
+        SETTLEMENT_TRACKED_CHAMPION_STATUSES,
         _champion_finalized_paid_alpha_to_date,
         _decimal,
         _rate_float,
     )
+    from gateway.research_lab.config import ResearchLabGatewayConfig
     from .store import create_champion_reward_event
 
     effective_epoch = await _resolve_maintenance_epoch(epoch)
     effective_netuid = int(netuid) if netuid is not None else int(BITTENSOR_NETUID)
+    enable_champ_cap = bool(
+        ResearchLabGatewayConfig.from_env().enable_champ_cap
+    )
     reward_rows: list[dict[str, Any]] = []
-    for status in sorted(ACTIVE_CHAMPION_STATUSES):
+    statuses = (
+        ACTIVE_CHAMPION_STATUSES
+        if enable_champ_cap
+        else SETTLEMENT_TRACKED_CHAMPION_STATUSES
+    )
+    for status in sorted(statuses):
         reward_rows.extend(
             await select_all(
                 "research_lab_champion_reward_current",
@@ -2036,14 +2046,35 @@ async def reconcile_champion_reward_statuses(
         total_due = desired * epoch_count
         paid = min(total_due, _decimal(paid_by_reward.get(reward_id, 0)))
         remaining = total_due - paid
-        if desired <= 0 or epoch_count <= 0 or remaining > 0:
+        start_epoch = int(row.get("start_epoch") or 0)
+        nominal_end_epoch = start_epoch + epoch_count
+        current_status = str(row.get("current_reward_status") or "")
+        if desired <= 0 or epoch_count <= 0:
+            continue
+        if (
+            not enable_champ_cap
+            and current_status == "paid"
+            and effective_epoch < nominal_end_epoch
+        ):
+            event_type = "active"
+            status_target = "active"
+        elif remaining <= 0 and (
+            enable_champ_cap or effective_epoch >= nominal_end_epoch
+        ):
+            if current_status == "paid":
+                continue
+            event_type = "paid"
+            status_target = "paid"
+        else:
             continue
         planned.append(
             {
                 "champion_reward_id": reward_id,
                 "miner_uid": row.get("miner_uid"),
-                "current_reward_status": str(row.get("current_reward_status") or ""),
-                "reward_status_target": "paid",
+                "current_reward_status": current_status,
+                "event_type": event_type,
+                "reward_status_target": status_target,
+                "nominal_end_epoch": nominal_end_epoch,
                 "total_due_alpha_percent": _rate_float(total_due),
                 "paid_alpha_percent_to_date": _rate_float(paid),
             }
@@ -2065,8 +2096,8 @@ async def reconcile_champion_reward_statuses(
         try:
             event = await create_champion_reward_event(
                 champion_reward_id=str(plan["champion_reward_id"]),
-                event_type="paid",
-                reward_status="paid",
+                event_type=str(plan["event_type"]),
+                reward_status=str(plan["reward_status_target"]),
                 reason=reason,
                 event_doc={
                     "schema_version": "1.0",
@@ -2074,6 +2105,8 @@ async def reconcile_champion_reward_statuses(
                     "settlement_authority": "finalized_v2_weight_extrinsics",
                     "actor_ref": actor_ref or default_actor_ref(),
                     "epoch": effective_epoch,
+                    "enable_champ_cap": enable_champ_cap,
+                    "nominal_end_epoch": plan["nominal_end_epoch"],
                     "previous_reward_status": plan["current_reward_status"],
                     "total_due_alpha_percent": plan["total_due_alpha_percent"],
                     "paid_alpha_percent_to_date": plan["paid_alpha_percent_to_date"],
@@ -2484,6 +2517,178 @@ async def backfill_champion_reward_v2_authority(
         "migrated_count": len(migrated),
         "migrated": migrated,
         "failed": failed,
+    }
+
+
+async def backfill_historical_compute_fallback_v2_authority(
+    *,
+    epoch: int | None = None,
+    netuid: int | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Classify the exact prior compute snapshot required by no-burn V2."""
+
+    from gateway.config import BITTENSOR_NETUID
+    from gateway.research_lab.allocations import (
+        _historical_compute_fallback_from_snapshot,
+    )
+    from gateway.research_lab.champion_settlement_v2 import (
+        load_finalized_allocation_history_v2,
+    )
+    from gateway.research_lab.v2_authority import (
+        classify_historical_champion_allocation_v2,
+    )
+
+    effective_epoch = await _resolve_maintenance_epoch(epoch)
+    effective_netuid = (
+        int(netuid) if netuid is not None else int(BITTENSOR_NETUID)
+    )
+    config = ResearchLabGatewayConfig.from_env()
+    if bool(config.enable_conservative):
+        return {
+            "ok": True,
+            "dry_run": bool(dry_run),
+            "action": "backfill-historical-compute-fallback-v2-authority",
+            "epoch": effective_epoch,
+            "netuid": effective_netuid,
+            "status": "conservative_mode_enabled",
+            "classified_count": 0,
+        }
+
+    rows = await select_all(
+        "research_lab_emission_allocation_current",
+        columns="epoch,netuid,allocation_hash,allocation_doc",
+        filters=(
+            ("netuid", effective_netuid),
+            ("epoch", "lt", effective_epoch),
+            ("allocation_doc->reimbursement_allocations", "neq", []),
+            (
+                "allocation_doc->>historical_compute_fallback_source_epoch",
+                "is",
+                "null",
+            ),
+        ),
+        order_by=(("epoch", True),),
+        batch_size=1,
+        max_rows=1,
+        allow_partial=True,
+    )
+    if not rows:
+        return {
+            "ok": True,
+            "dry_run": bool(dry_run),
+            "action": "backfill-historical-compute-fallback-v2-authority",
+            "epoch": effective_epoch,
+            "netuid": effective_netuid,
+            "status": "no_prior_compute_snapshot",
+            "classified_count": 0,
+        }
+
+    source_row = rows[0]
+    allocation_doc = source_row.get("allocation_doc")
+    snapshot_hotkey_uids: dict[str, int] = {}
+    if isinstance(allocation_doc, Mapping):
+        for item in allocation_doc.get("reimbursement_allocations") or ():
+            if isinstance(item, Mapping) and item.get("miner_hotkey"):
+                snapshot_hotkey_uids[str(item["miner_hotkey"])] = int(
+                    item.get("uid") or 0
+                )
+    _, _, source = _historical_compute_fallback_from_snapshot(
+        source_row,
+        hotkey_uids=snapshot_hotkey_uids,
+        reward_epochs=max(
+            1,
+            int(config.reimbursement_epochs or 20),
+        ),
+        expected_netuid=effective_netuid,
+    )
+    source_epoch = int(source["source_allocation_epoch"])
+    source_hash = str(source["source_allocation_hash"])
+
+    async def load_matching_authority() -> list[dict[str, Any]]:
+        history = await load_finalized_allocation_history_v2(
+            netuid=effective_netuid,
+            start_epoch=source_epoch,
+            end_epoch=source_epoch,
+        )
+        return [
+            dict(item)
+            for item in history
+            if int(item.get("epoch") or -1) == source_epoch
+            and int(item.get("netuid") or -1) == effective_netuid
+            and str(item.get("allocation_hash") or "") == source_hash
+            and item.get("allocation_doc") == allocation_doc
+            and set(item.get("authority_types") or ()).intersection(
+                {
+                    "native_v2_finalization",
+                    "legacy_finalized_chain_migration_v2",
+                }
+            )
+        ]
+
+    matching = await load_matching_authority()
+    if len(matching) > 1:
+        raise RuntimeError(
+            "historical compute fallback finalized authority is ambiguous"
+        )
+    if matching:
+        return {
+            "ok": True,
+            "dry_run": bool(dry_run),
+            "action": "backfill-historical-compute-fallback-v2-authority",
+            "epoch": effective_epoch,
+            "netuid": effective_netuid,
+            "status": "already_classified",
+            "source_allocation_epoch": source_epoch,
+            "source_allocation_hash": source_hash,
+            "classified_count": 0,
+        }
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "action": "backfill-historical-compute-fallback-v2-authority",
+            "epoch": effective_epoch,
+            "netuid": effective_netuid,
+            "status": "classification_required",
+            "source_allocation_epoch": source_epoch,
+            "source_allocation_hash": source_hash,
+            "classified_count": 0,
+        }
+
+    outcome = await classify_historical_champion_allocation_v2(
+        epoch_id=effective_epoch,
+        netuid=effective_netuid,
+        settlement_epoch_id=source_epoch,
+    )
+    classification = str(outcome.get("status") or "")
+    if classification != "finalized":
+        return {
+            "ok": False,
+            "dry_run": False,
+            "action": "backfill-historical-compute-fallback-v2-authority",
+            "epoch": effective_epoch,
+            "netuid": effective_netuid,
+            "status": classification or "classification_failed",
+            "source_allocation_epoch": source_epoch,
+            "source_allocation_hash": source_hash,
+            "classified_count": 1,
+        }
+    matching = await load_matching_authority()
+    if len(matching) != 1:
+        raise RuntimeError(
+            "historical compute fallback finalized authority readback differs"
+        )
+    return {
+        "ok": True,
+        "dry_run": False,
+        "action": "backfill-historical-compute-fallback-v2-authority",
+        "epoch": effective_epoch,
+        "netuid": effective_netuid,
+        "status": "finalized",
+        "source_allocation_epoch": source_epoch,
+        "source_allocation_hash": source_hash,
+        "classified_count": 1,
     }
 
 

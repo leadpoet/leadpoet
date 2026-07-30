@@ -47,6 +47,11 @@ RUNTIME_RPCS = frozenset(
     }
 )
 TABLE_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
+JSON_FILTER_RE = re.compile(
+    r"^(?P<column>[a-z][a-z0-9_]{0,127})"
+    r"(?P<operator>->>|->)"
+    r"(?P<key>[A-Za-z_][A-Za-z0-9_]{0,127})$"
+)
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 CONTROL_QUERY_FIELDS = frozenset(
@@ -67,6 +72,11 @@ def _filter_scalar(raw: str, existing: Any) -> Any:
         return int(raw)
     if isinstance(existing, float):
         return float(raw)
+    if isinstance(existing, (dict, list)):
+        value = json.loads(raw)
+        if not isinstance(value, type(existing)):
+            raise ValueError("PostgREST JSON filter type differs")
+        return value
     return raw
 
 
@@ -84,34 +94,75 @@ def _in_values(raw: str, existing: Any) -> list[Any]:
     return [_filter_scalar(value, existing) for value in values]
 
 
-def _matches_filter(row: dict[str, Any], column: str, expression: str) -> bool:
-    if not TABLE_RE.fullmatch(column):
+def _filter_value(row: dict[str, Any], reference: str) -> Any:
+    if TABLE_RE.fullmatch(reference):
+        return row.get(reference)
+    match = JSON_FILTER_RE.fullmatch(reference)
+    if match is None:
         raise ValueError("PostgREST filter column is invalid")
+    value = row.get(match.group("column"))
+    if not isinstance(value, dict):
+        return None
+    nested = value.get(match.group("key"))
+    if match.group("operator") == "->>" and nested is not None:
+        if not isinstance(nested, str):
+            return json.dumps(
+                nested,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        return nested
+    return nested
+
+
+def _filter_root(reference: str) -> str:
+    if TABLE_RE.fullmatch(reference):
+        return reference
+    match = JSON_FILTER_RE.fullmatch(reference)
+    if match is None:
+        raise ValueError("PostgREST filter column is invalid")
+    return match.group("column")
+
+
+def _matches_filter(row: dict[str, Any], column: str, expression: str) -> bool:
+    _filter_root(column)
     if "." not in expression:
         raise ValueError("PostgREST filter operator is missing")
+    negate = expression.startswith("not.")
+    if negate:
+        expression = expression[4:]
     operator, raw = expression.split(".", 1)
-    existing = row.get(column)
+    existing = _filter_value(row, column)
     if operator == "is":
         expected = {"null": None, "true": True, "false": False}.get(raw.lower())
         if raw.lower() not in {"null", "true", "false"}:
             raise ValueError("PostgREST is filter is invalid")
-        return existing is expected if expected is None else existing == expected
-    if operator == "in":
-        return existing in _in_values(raw, existing)
-    expected = _filter_scalar(raw, existing)
-    if operator == "eq":
-        return existing == expected
-    if operator == "neq":
-        return existing != expected
-    if operator == "lt":
-        return existing is not None and existing < expected
-    if operator == "lte":
-        return existing is not None and existing <= expected
-    if operator == "gt":
-        return existing is not None and existing > expected
-    if operator == "gte":
-        return existing is not None and existing >= expected
-    raise ValueError("unsupported PostgREST filter operator: %s" % operator)
+        matched = (
+            existing is expected
+            if expected is None
+            else existing == expected
+        )
+    elif operator == "in":
+        matched = existing in _in_values(raw, existing)
+    else:
+        expected = _filter_scalar(raw, existing)
+        if operator == "eq":
+            matched = existing == expected
+        elif operator == "neq":
+            matched = existing != expected
+        elif operator == "lt":
+            matched = existing is not None and existing < expected
+        elif operator == "lte":
+            matched = existing is not None and existing <= expected
+        elif operator == "gt":
+            matched = existing is not None and existing > expected
+        elif operator == "gte":
+            matched = existing is not None and existing >= expected
+        else:
+            raise ValueError(
+                "unsupported PostgREST filter operator: %s" % operator
+            )
+    return not matched if negate else matched
 
 
 def _apply_table_query(
@@ -122,7 +173,9 @@ def _apply_table_query(
 ) -> list[dict[str, Any]]:
     pairs = parse_qsl(query, keep_blank_values=True)
     referenced_columns = {
-        name for name, _value in pairs if name not in CONTROL_QUERY_FIELDS
+        _filter_root(name)
+        for name, _value in pairs
+        if name not in CONTROL_QUERY_FIELDS
     }
     if allowed_columns is not None and not referenced_columns <= allowed_columns:
         unknown = sorted(referenced_columns - allowed_columns)
@@ -414,6 +467,8 @@ def _migration_schema_contract(
         "research_lab_attested_publication_events_v2",
         "research_lab_attested_weight_finalizations_v2",
         "research_lab_finalized_allocation_epochs_v2",
+        "research_lab_emission_allocation_current",
+        "research_lab_legacy_finalized_allocation_migrations_v2",
         "research_lab_chain_realized_epoch_settlements_v1",
         "research_lab_chain_realized_settlement_activation_v1",
         "research_lab_chain_realized_obligation_credits_v1",
@@ -481,25 +536,42 @@ def _migration_seed_rows(
 ) -> dict[str, list[dict[str, Any]]]:
     document = json.loads(path.read_text(encoding="utf-8"))
     raw = document.get("seed_rows")
-    target = "research_lab_finalized_allocation_epochs_v2"
+    expected = {
+        "research_lab_finalized_allocation_epochs_v2",
+        "research_lab_emission_allocation_current",
+        "research_lab_legacy_finalized_allocation_migrations_v2",
+        "research_lab_attested_boot_identities_v2",
+        "research_lab_attested_execution_receipts_v2",
+    }
     if (
         document.get("candidate_sha") != candidate_sha
         or not isinstance(raw, dict)
-        or set(raw) != {target}
-        or not isinstance(raw[target], list)
-        or len(raw[target]) != 1
-        or not isinstance(raw[target][0], dict)
+        or set(raw) != expected
     ):
         raise RuntimeError(
-            "migration-backed finalized authority seed is invalid"
+            "migration-backed allocation authority seeds are invalid"
         )
-    row = dict(raw[target][0])
-    expected_columns = relation_columns.get(target)
-    if expected_columns is None or set(row) != set(expected_columns):
-        raise RuntimeError(
-            "migration-backed finalized authority seed columns differ"
-        )
-    return {target: [row]}
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    for target in sorted(expected):
+        rows = raw[target]
+        if (
+            not isinstance(rows, list)
+            or len(rows) != 1
+            or not isinstance(rows[0], dict)
+        ):
+            raise RuntimeError(
+                "migration-backed allocation authority seed is invalid: %s"
+                % target
+            )
+        row = dict(rows[0])
+        expected_columns = relation_columns.get(target)
+        if expected_columns is None or set(row) != set(expected_columns):
+            raise RuntimeError(
+                "migration-backed allocation authority seed columns differ: %s"
+                % target
+            )
+        normalized[target] = [row]
+    return normalized
 
 
 class LocalPostgRESTState:

@@ -23,6 +23,7 @@ from gateway.research_lab.champion_settlement_v2 import (
     ChampionSettlementV2Error,
     _preliminary_finalized_bundle_authority_v1,
     build_chain_realized_settlement_package_v1,
+    validate_legacy_settlement_migrations_v2,
 )
 from gateway.research_lab.attested_v2_store import (
     boot_storage_row,
@@ -38,15 +39,31 @@ from gateway.tee.coordinator_chain_realized_settlement_v1 import (
 )
 from gateway.tee.coordinator_executor_v2 import CoordinatorExecutorV2
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
-from leadpoet_canonical.attested_v2 import build_transport_attempt, sha256_json
+from leadpoet_canonical.attested_v2 import (
+    build_receipt_graph,
+    build_transport_attempt,
+    sha256_json,
+)
+from leadpoet_canonical.legacy_settlement_v2 import (
+    LEGACY_SETTLEMENT_SCHEMA_VERSION,
+    validate_legacy_settlement_document_v2,
+)
 from leadpoet_canonical.weight_authority_v2 import (
     validate_published_weight_bundle_v2,
 )
+from leadpoet_verifier.economics import allocate_research_lab_epoch
 from tests.restart_rehearsal.sanitized_weight_fixture import (
     SanitizedWeightFixture,
 )
 
 
+ALLOCATION_CANDIDATE_MIGRATION = (
+    "33-research-lab-candidate-evaluation-queue.sql"
+)
+ALLOCATION_SCHEMA_MIGRATION = "35-research-lab-emission-allocator.sql"
+ALLOCATION_CONTAINMENT_MIGRATION = (
+    "87-research-lab-source-add-allocation-containment.sql"
+)
 MIGRATIONS_BEFORE_TRANSPORT_FIX = (
     "86-research-lab-attested-v2-authority.sql",
     "89-research-lab-provider-evidence-cache-v2.sql",
@@ -106,6 +123,32 @@ SYSTEM_BINARY_DIRS = tuple(
     Path(value)
     for value in ("/usr/local/sbin", "/usr/sbin", "/sbin", "/usr/bin", "/bin")
 )
+ALLOCATION_MIGRATION_PREREQUISITES_SQL = """
+CREATE SCHEMA auth;
+CREATE FUNCTION auth.role()
+RETURNS TEXT
+LANGUAGE SQL
+STABLE
+AS $$ SELECT current_user::TEXT $$;
+CREATE TABLE public.research_evaluation_score_bundles (
+    score_bundle_id TEXT PRIMARY KEY,
+    score_bundle_doc JSONB NOT NULL DEFAULT '{}'::JSONB
+);
+CREATE TABLE public.research_loop_tickets (
+    ticket_id UUID PRIMARY KEY
+);
+CREATE TABLE public.research_loop_receipts (
+    receipt_id UUID PRIMARY KEY
+);
+"""
+GIT_TREE_CANDIDATE_PREREQUISITES_SQL = """
+ALTER TABLE public.research_lab_candidate_artifacts
+    ADD COLUMN git_tree_id TEXT NULL,
+    ADD COLUMN git_tree_node_id TEXT NULL,
+    ADD COLUMN git_tree_root_commit TEXT NULL,
+    ADD COLUMN git_tree_node_commit TEXT NULL,
+    ADD COLUMN git_tree_lineage_hash TEXT NULL;
+"""
 
 
 class PostgresContractProbeError(RuntimeError):
@@ -1162,16 +1205,365 @@ def _historical_v1_settlement_rows(
     return receipt_storage_row(receipt), settlement_row, credit_row
 
 
+def _single_relation_row(
+    database: DisposablePostgres,
+    *,
+    relation: str,
+    where_sql: str,
+) -> dict[str, Any]:
+    if not IDENTIFIER_RE.fullmatch(relation):
+        raise PostgresContractProbeError(
+            "fixture relation identifier is invalid: %s" % relation
+        )
+    result = database.psql(
+        """
+        SELECT pg_catalog.row_to_json(row_value)::TEXT
+        FROM public.%s row_value
+        WHERE %s;
+        """
+        % (relation, where_sql),
+        tuples_only=True,
+    )
+    rows = [
+        json.loads(line)
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+    if len(rows) != 1 or not isinstance(rows[0], dict):
+        raise PostgresContractProbeError(
+            "fixture relation returned %d rows: %s" % (len(rows), relation)
+        )
+    return rows[0]
+
+
+def _load_coordinator_release_identity(
+    path: Path,
+    *,
+    candidate_sha: str,
+) -> dict[str, Any]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        roles = document["gateway_roles"]
+        identity = roles["gateway_coordinator"]
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise PostgresContractProbeError(
+            "candidate coordinator release identity is unavailable"
+        ) from exc
+    if (
+        not isinstance(document, dict)
+        or document.get("commit_sha") != candidate_sha
+        or not isinstance(roles, dict)
+        or not isinstance(identity, dict)
+        or identity.get("commit_sha") != candidate_sha
+    ):
+        raise PostgresContractProbeError(
+            "candidate coordinator release identity commit differs"
+        )
+    required = {
+        "commit_sha",
+        "dependency_lock_hash",
+        "execution_manifest_hash",
+        "pcr0",
+    }
+    if required - set(identity):
+        raise PostgresContractProbeError(
+            "candidate coordinator release identity fields are incomplete"
+        )
+    return dict(identity)
+
+
+def _historical_compute_allocation_seed_rows(
+    *,
+    database: DisposablePostgres,
+    candidate_sha: str,
+    current_epoch: int,
+    netuid: int,
+    coordinator_release_identity: Mapping[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    """Persist and read back one finalized prior compute allocation."""
+
+    source_epoch = int(current_epoch) - 1
+    if source_epoch < 0:
+        raise PostgresContractProbeError(
+            "historical compute source epoch is unavailable"
+        )
+    policy = {
+        "policy_id": "restart-rehearsal-no-burn-v2",
+        "enabled": True,
+        "research_lab_emission_percent": 20.0,
+        "reward_epochs": 20,
+        "reimbursement_epochs": 20,
+        "reimbursement_max_cost_multiplier_with_champions": 2.0,
+        "champion_threshold_points": 1.0,
+        "champion_min_alpha_percent": 7.0,
+        "champion_extra_alpha_percent_per_point": 0.3,
+        "champion_max_alpha_percent": 30.0,
+        "champion_placeholder_alpha_percent": 0.0001,
+        "champion_queue_trigger_ratio": 0.5,
+        "usd_per_0_1_percent_epoch": 1.0,
+        "enable_conservative": False,
+        "enable_champ_cap": False,
+    }
+    reimbursements = [
+        {
+            "uid": 2,
+            "miner_hotkey": "research-lab-hotkey",
+            "source_id": "reimbursement_schedule:restart-rehearsal-compute-2",
+            "island": "generalist",
+            "status": "active",
+            "start_epoch": source_epoch,
+            "epoch_count": 20,
+            "target_reimbursement_microusd": 1_000_000,
+            "eligible_compute_microusd": 1_000_000,
+        },
+        {
+            "uid": 3,
+            "miner_hotkey": "source-add-hotkey",
+            "source_id": "reimbursement_schedule:restart-rehearsal-compute-3",
+            "island": "generalist",
+            "status": "active",
+            "start_epoch": source_epoch,
+            "epoch_count": 20,
+            "target_reimbursement_microusd": 3_000_000,
+            "eligible_compute_microusd": 3_000_000,
+        },
+    ]
+    allocation = allocate_research_lab_epoch(
+        source_epoch,
+        policy,
+        reimbursements,
+        [],
+    )
+    if (
+        allocation.get("allocation_hash") != sha256_json(
+            {
+                key: value
+                for key, value in allocation.items()
+                if key != "allocation_hash"
+            }
+        )
+        or float(allocation.get("reimbursement_alpha_percent") or 0) != 20.0
+        or float(allocation.get("unallocated_percent") or 0) != 0.0
+    ):
+        raise PostgresContractProbeError(
+            "historical compute allocation did not conserve the Lab cap"
+        )
+
+    allocation_hash = str(allocation["allocation_hash"])
+    snapshot_row = {
+        "allocation_id": "lab_allocation:" + allocation_hash,
+        "schema_version": "1.0",
+        "epoch": source_epoch,
+        "netuid": int(netuid),
+        "policy_id": str(policy["policy_id"]),
+        "snapshot_status": "active",
+        "lab_cap_alpha_percent": allocation["lab_cap_percent"],
+        "reimbursement_alpha_percent": allocation[
+            "reimbursement_alpha_percent"
+        ],
+        "champion_alpha_percent": allocation["champion_alpha_percent"],
+        "queued_champion_alpha_percent": allocation[
+            "queued_champion_alpha_percent"
+        ],
+        "unallocated_alpha_percent": allocation["unallocated_percent"],
+        "input_hash": allocation["input_hash"],
+        "allocation_hash": allocation_hash,
+        "allocation_doc": allocation,
+        "source_add_alpha_percent": allocation.get(
+            "source_add_alpha_percent",
+            0,
+        ),
+    }
+
+    def hash_ref(label: str) -> str:
+        return sha256_json({"fixture": label, "epoch": source_epoch})
+
+    settlement_body = {
+        "schema_version": LEGACY_SETTLEMENT_SCHEMA_VERSION,
+        "netuid": int(netuid),
+        "epoch_id": source_epoch,
+        "allocation_hash": allocation_hash,
+        "allocation_doc": allocation,
+        "validator_hotkey": (
+            "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
+        ),
+        "legacy_bundle_weights_hash": hash_ref("legacy-weights").split(
+            ":", 1
+        )[1],
+        "legacy_bundle_block": source_epoch * 360 + 99,
+        "chain_compare_hash": hash_ref("chain-compare"),
+        "chain_vector_tolerance_u16": 1,
+        "chain_target_block": (source_epoch + 1) * 360 - 1,
+        "chain_target_block_hash": hash_ref("chain-target-block"),
+        "chain_finalized_head_block": (source_epoch + 1) * 360,
+        "validator_uid": 0,
+        "weights_storage_key_hash": hash_ref("weights-storage-key"),
+        "audit_event_hash": hash_ref("audit-event"),
+        "audit_payload_hash": hash_ref("audit-payload"),
+        "checkpoint_merkle_root": hash_ref("checkpoint-merkle-root"),
+        "checkpoint_number": 1,
+        "checkpoint_event_sequence": 1,
+        "arweave_tx_id": "R" * 43,
+    }
+    settlement_doc = validate_legacy_settlement_document_v2(
+        {
+            **settlement_body,
+            "settlement_hash": sha256_json(settlement_body),
+        }
+    )
+
+    fixture = SanitizedWeightFixture(
+        candidate_sha=candidate_sha,
+        epoch_id=source_epoch,
+    )
+    coordinator_config_hash = sha256_json(
+        {
+            "candidate_sha": candidate_sha,
+            "fixture": "historical-compute-coordinator-config",
+        }
+    )
+    coordinator_boot = fixture._boot(
+        role="gateway_coordinator",
+        key=fixture.coordinator_key,
+        config_hash=coordinator_config_hash,
+        release_identity=coordinator_release_identity,
+    )
+    settlement_receipt = fixture.receipt(
+        role="gateway_coordinator",
+        purpose="research_lab.legacy_finalized_allocation.v2",
+        job_id="restart-rehearsal-historical-compute-settlement",
+        key=fixture.coordinator_key,
+        boot=coordinator_boot,
+        config_hash=coordinator_config_hash,
+        input_root=sha256_json(
+            {
+                "kind": "historical-compute-allocation",
+                "allocation_hash": allocation_hash,
+            }
+        ),
+        output_root=sha256_json(settlement_doc),
+        parents=[],
+        sequence=804,
+    )
+    settlement_receipt_hash = str(settlement_receipt["receipt_hash"])
+    migration_row = {
+        "netuid": int(netuid),
+        "epoch_id": source_epoch,
+        "schema_version": LEGACY_SETTLEMENT_SCHEMA_VERSION,
+        "allocation_hash": allocation_hash,
+        "settlement_hash": settlement_doc["settlement_hash"],
+        "settlement_receipt_hash": settlement_receipt_hash,
+        "allocation_doc": allocation,
+        "settlement_doc": settlement_doc,
+    }
+    graph = build_receipt_graph(
+        root_receipt_hash=settlement_receipt_hash,
+        boot_identities=[coordinator_boot],
+        receipts=[settlement_receipt],
+        transport_attempts=[],
+        host_operations=[],
+    )
+    validated = validate_legacy_settlement_migrations_v2(
+        [migration_row],
+        receipt_graphs={settlement_receipt_hash: graph},
+    )
+    if (
+        len(validated) != 1
+        or validated[0].get("allocation_hash") != allocation_hash
+        or validated[0].get("allocation_doc") != allocation
+    ):
+        raise PostgresContractProbeError(
+            "historical compute finalized authority did not validate"
+        )
+
+    database.psql(
+        "".join(
+            (
+                _json_insert_sql(
+                    "research_lab_emission_allocation_snapshots",
+                    snapshot_row,
+                ),
+                _json_insert_sql(
+                    "research_lab_attested_boot_identities_v2",
+                    boot_storage_row(coordinator_boot),
+                ),
+                _json_insert_sql(
+                    "research_lab_attested_execution_receipts_v2",
+                    receipt_storage_row(settlement_receipt),
+                ),
+                _json_insert_sql(
+                    "research_lab_legacy_finalized_allocation_migrations_v2",
+                    migration_row,
+                ),
+            )
+        )
+    )
+
+    rows = {
+        "research_lab_emission_allocation_current": [
+            _single_relation_row(
+                database,
+                relation="research_lab_emission_allocation_current",
+                where_sql="epoch = %d AND netuid = %d"
+                % (source_epoch, int(netuid)),
+            )
+        ],
+        "research_lab_legacy_finalized_allocation_migrations_v2": [
+            _single_relation_row(
+                database,
+                relation=(
+                    "research_lab_legacy_finalized_allocation_migrations_v2"
+                ),
+                where_sql="epoch_id = %d AND netuid = %d"
+                % (source_epoch, int(netuid)),
+            )
+        ],
+        "research_lab_attested_boot_identities_v2": [
+            _single_relation_row(
+                database,
+                relation="research_lab_attested_boot_identities_v2",
+                where_sql="boot_identity_hash = '%s'"
+                % coordinator_boot["boot_identity_hash"],
+            )
+        ],
+        "research_lab_attested_execution_receipts_v2": [
+            _single_relation_row(
+                database,
+                relation="research_lab_attested_execution_receipts_v2",
+                where_sql="receipt_hash = '%s'" % settlement_receipt_hash,
+            )
+        ],
+    }
+    return rows
+
+
 def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
     declaration_counts = _validate_required_migration_declarations(args.source_root)
+    coordinator_release_identity = _load_coordinator_release_identity(
+        args.release_build_input,
+        candidate_sha=args.candidate_sha,
+    )
     database = DisposablePostgres(state_root=args.state_root)
     try:
         database.start()
         scripts = args.source_root / "scripts"
         applied = []
+        database.psql(ALLOCATION_MIGRATION_PREREQUISITES_SQL)
+        database.apply_migration(
+            scripts / ALLOCATION_CANDIDATE_MIGRATION
+        )
+        applied.append(ALLOCATION_CANDIDATE_MIGRATION)
+        database.psql(GIT_TREE_CANDIDATE_PREREQUISITES_SQL)
+        database.apply_migration(scripts / ALLOCATION_SCHEMA_MIGRATION)
+        applied.append(ALLOCATION_SCHEMA_MIGRATION)
         for name in MIGRATIONS_BEFORE_TRANSPORT_FIX:
             database.apply_migration(scripts / name)
             applied.append(name)
+            if name == "86-research-lab-attested-v2-authority.sql":
+                database.apply_migration(
+                    scripts / ALLOCATION_CONTAINMENT_MIGRATION
+                )
+                applied.append(ALLOCATION_CONTAINMENT_MIGRATION)
 
         fixture = SanitizedWeightFixture(
             candidate_sha=args.candidate_sha,
@@ -1640,6 +2032,15 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post-134 provider outcome head contract differs"
             )
         provider_outcome_append = _provider_outcome_append_contract(database)
+        historical_compute_seed_rows = (
+            _historical_compute_allocation_seed_rows(
+                database=database,
+                candidate_sha=args.candidate_sha,
+                current_epoch=args.epoch_id,
+                netuid=int(verified["netuid"]),
+                coordinator_release_identity=coordinator_release_identity,
+            )
+        )
 
         tampered = copy.deepcopy(view_row)
         tampered["finalization_doc"]["weight_receipt_hash"] = "sha256:" + "0" * 64
@@ -1690,6 +2091,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "lifetime_credit_contract_valid": True,
                 "finalized_view_projection_exact": True,
                 "finalized_view_seed_available": True,
+                "historical_compute_schema_migrations_applied": True,
+                "historical_compute_finalized_authority_seed_available": True,
+                "historical_compute_allocation_conserved": True,
+                "historical_compute_release_identity_bound": True,
                 "settlement_authority_parsed": True,
                 "measured_settlement_receipt_projection_exact": True,
                 "tampered_weight_receipt_rejected": True,
@@ -1697,6 +2102,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             },
             "seed_rows": {
                 "research_lab_finalized_allocation_epochs_v2": [view_row],
+                **historical_compute_seed_rows,
             },
             "measured_settlement": measured_settlement,
             "champion_lifetime_credit": {
@@ -1719,6 +2125,7 @@ def main() -> int:
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--state-root", type=Path, required=True)
     parser.add_argument("--candidate-sha", required=True)
+    parser.add_argument("--release-build-input", type=Path, required=True)
     parser.add_argument("--epoch-id", type=int, default=24208)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()

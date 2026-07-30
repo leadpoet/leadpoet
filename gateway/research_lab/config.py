@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from leadpoet_verifier.economics import (
+    DEFAULT_REIMBURSEMENT_MAX_COST_MULTIPLIER_WITH_CHAMPIONS,
     DEFAULT_RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO,
     DEFAULT_RESEARCH_LAB_EMISSION_PERCENT,
 )
@@ -672,10 +673,14 @@ class ResearchLabGatewayConfig:
     fulfillment_emission_percent: float = 60.5
     fulfillment_leaderboard_emission_percent: float = 9.5
     lab_reward_epochs: int = 20
+    enable_conservative: bool = False
+    enable_champ_cap: bool = False
     # Deprecated, inert compatibility field retained for the sealed V2 config
     # schema. The allocator no longer has an overpayment path.
     lab_reimbursement_allow_overpay_without_champions: bool = False
-    lab_reimbursement_max_cost_multiplier_with_champions: float = 1.0
+    lab_reimbursement_max_cost_multiplier_with_champions: float = float(
+        DEFAULT_REIMBURSEMENT_MAX_COST_MULTIPLIER_WITH_CHAMPIONS
+    )
     lab_reimbursement_min_alpha_percent: float = 0.0
     lab_champion_min_alpha_percent: float = 7.0
     lab_champion_extra_alpha_percent_per_point: float = 0.3
@@ -1227,9 +1232,16 @@ class ResearchLabGatewayConfig:
                 _float("RESEARCH_LAB_FULFILLMENT_LEADERBOARD_EMISSION_PERCENT", 9.5),
             ),
             lab_reward_epochs=max(1, _int("RESEARCH_LAB_REWARD_EPOCHS", 20)),
+            enable_conservative=_truthy("ENABLE_CONSERVATIVE", "false"),
+            enable_champ_cap=_truthy("ENABLE_CHAMP_CAP", "false"),
             lab_reimbursement_max_cost_multiplier_with_champions=max(
                 0.0,
-                _float("RESEARCH_LAB_REIMBURSEMENT_MAX_COST_MULTIPLIER_WITH_CHAMPIONS", 1.0),
+                _float(
+                    "RESEARCH_LAB_REIMBURSEMENT_MAX_COST_MULTIPLIER_WITH_CHAMPIONS",
+                    float(
+                        DEFAULT_REIMBURSEMENT_MAX_COST_MULTIPLIER_WITH_CHAMPIONS
+                    ),
+                ),
             ),
             lab_reimbursement_min_alpha_percent=max(
                 0.0,
@@ -1643,6 +1655,8 @@ class ResearchLabGatewayConfig:
             "fulfillment_emission_percent": self.fulfillment_emission_percent,
             "fulfillment_leaderboard_emission_percent": self.fulfillment_leaderboard_emission_percent,
             "reward_epochs": self.lab_reward_epochs,
+            "enable_conservative": self.enable_conservative,
+            "enable_champ_cap": self.enable_champ_cap,
             "reimbursement_allow_overpay_without_champions": False,
             "reimbursement_max_cost_multiplier_with_champions": (
                 self.lab_reimbursement_max_cost_multiplier_with_champions
@@ -1795,6 +1809,8 @@ class ResearchLabGatewayConfig:
                 "fulfillment_emission_percent": self.fulfillment_emission_percent,
                 "fulfillment_leaderboard_emission_percent": self.fulfillment_leaderboard_emission_percent,
                 "reward_epochs": self.lab_reward_epochs,
+                "enable_conservative": self.enable_conservative,
+                "enable_champ_cap": self.enable_champ_cap,
                 "allow_overpay_without_champions": False,
                 "max_cost_multiplier_with_champions": self.lab_reimbursement_max_cost_multiplier_with_champions,
                 "champion_min_alpha_percent": self.lab_champion_min_alpha_percent,

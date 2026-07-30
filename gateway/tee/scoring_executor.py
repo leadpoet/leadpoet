@@ -396,9 +396,18 @@ async def execute_scoring_operation(operation: str, payload: Mapping[str, Any]) 
     reimbursements = payload.get("active_reimbursement_obligations")
     champions = payload.get("active_champion_obligations")
     source_add = payload.get("active_source_add_obligations", [])
+    fallback_reimbursements = payload.get(
+        "fallback_reimbursement_obligations",
+        [],
+    )
     if not isinstance(policy, Mapping):
         raise ScoringExecutorError("policy must be an object")
-    if not isinstance(reimbursements, list) or not isinstance(champions, list) or not isinstance(source_add, list):
+    if (
+        not isinstance(reimbursements, list)
+        or not isinstance(champions, list)
+        or not isinstance(source_add, list)
+        or not isinstance(fallback_reimbursements, list)
+    ):
         raise ScoringExecutorError("allocation obligations must be lists")
     allocation = allocate_research_lab_epoch(
         int(payload.get("epoch", -1)),
@@ -406,6 +415,7 @@ async def execute_scoring_operation(operation: str, payload: Mapping[str, Any]) 
         reimbursements,
         champions,
         active_source_add_obligations=source_add,
+        fallback_reimbursement_obligations=fallback_reimbursements,
     )
     allocation_hash = str(allocation.get("allocation_hash") or "")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", allocation_hash):

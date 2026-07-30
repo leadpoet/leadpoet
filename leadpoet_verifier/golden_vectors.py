@@ -263,6 +263,10 @@ def run_golden_vectors(
                 case["policy"],
                 case.get("reimbursement_obligations", []),
                 case.get("champion_obligations", []),
+                fallback_reimbursement_obligations=case.get(
+                    "fallback_reimbursement_obligations",
+                    [],
+                ),
             )
         elif case["kind"] == "compose_final_weight_vector":
             actual = compose_final_weight_vector(

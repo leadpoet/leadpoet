@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
-from typing import Any
+from typing import Any, Mapping
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -20,10 +20,12 @@ from leadpoet_canonical.attested_v2 import (
     EMPTY_HOST_OPERATION_ROOT,
     EMPTY_TRANSPORT_ROOT,
     WEIGHT_ROLE,
+    build_boot_attestation_user_data,
     build_boot_identity_body,
     build_execution_receipt_body,
     build_receipt_graph,
     build_transport_attempt,
+    canonical_json,
     create_boot_identity,
     create_signed_execution_receipt,
     merkle_root,
@@ -83,35 +85,92 @@ class SanitizedWeightFixture:
         role: str,
         key: Ed25519PrivateKey,
         config_hash: str,
+        release_identity: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         physical_role = (
             "gateway_coordinator"
             if role == COORDINATOR_ROLE
             else "validator_weights"
         )
-        body = build_boot_identity_body(
-            role=role,
-            physical_role=physical_role,
-            commit_sha=self.candidate_sha,
-            pcr0=self.pcr0,
-            build_manifest_hash=HASH,
-            dependency_lock_hash=HASH_B,
-            config_hash=config_hash,
-            boot_nonce=hashlib.sha256(
+        pcr0 = self.pcr0
+        build_manifest_hash = HASH
+        dependency_lock_hash = HASH_B
+        if release_identity is not None:
+            if physical_role != "gateway_coordinator":
+                raise ValueError(
+                    "release identity override is only valid for the coordinator"
+                )
+            if (
+                str(release_identity.get("commit_sha") or "").lower()
+                != self.candidate_sha
+            ):
+                raise ValueError("coordinator release identity commit differs")
+            pcr0 = str(release_identity.get("pcr0") or "").lower()
+            build_manifest_hash = str(
+                release_identity.get("execution_manifest_hash") or ""
+            ).lower()
+            dependency_lock_hash = str(
+                release_identity.get("dependency_lock_hash") or ""
+            ).lower()
+            if (
+                len(pcr0) != 96
+                or any(character not in "0123456789abcdef" for character in pcr0)
+                or any(
+                    len(value) != 71
+                    or not value.startswith("sha256:")
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in value[7:]
+                    )
+                    for value in (
+                        build_manifest_hash,
+                        dependency_lock_hash,
+                    )
+                )
+            ):
+                raise ValueError("coordinator release identity hashes are invalid")
+        provisional = {
+            "role": role,
+            "physical_role": physical_role,
+            "commit_sha": self.candidate_sha,
+            "pcr0": pcr0,
+            "build_manifest_hash": build_manifest_hash,
+            "dependency_lock_hash": dependency_lock_hash,
+            "config_hash": config_hash,
+            "boot_nonce": hashlib.sha256(
                 f"{physical_role}:{self.epoch_id}".encode()
             ).hexdigest()[:32],
-            signing_pubkey=self._public_key(key),
-            transport_pubkey=hashlib.sha256(
+            "signing_pubkey": self._public_key(key),
+            "transport_pubkey": hashlib.sha256(
                 f"transport:{physical_role}".encode()
             ).hexdigest(),
-            transport_certificate_hash=HASH_B,
-            attestation_user_data_hash=HASH,
-            issued_at=NOW,
+            "transport_certificate_hash": HASH_B,
+            "issued_at": NOW,
+        }
+        if release_identity is None:
+            attestation_user_data_hash = HASH
+            attestation_document = (
+                f"sanitized-attestation:{physical_role}".encode()
+            )
+        else:
+            user_data = build_boot_attestation_user_data(provisional)
+            attestation_user_data_hash = sha256_json(user_data)
+            attestation_document = canonical_json(
+                {
+                    "schema_version": "leadpoet.local_nitro_attestation.v1",
+                    "pcr0": pcr0,
+                    "enclave_pubkey": provisional["signing_pubkey"],
+                    "user_data": user_data,
+                }
+            ).encode("utf-8")
+        body = build_boot_identity_body(
+            **provisional,
+            attestation_user_data_hash=attestation_user_data_hash,
         )
         return create_boot_identity(
             body=body,
             attestation_document_b64=base64.b64encode(
-                f"sanitized-attestation:{physical_role}".encode()
+                attestation_document
             ).decode("ascii"),
         )
 
@@ -131,16 +190,18 @@ class SanitizedWeightFixture:
         transport_root: str = EMPTY_TRANSPORT_ROOT,
         artifact_root: str = EMPTY_ARTIFACT_ROOT,
     ) -> dict[str, Any]:
+        if boot.get("commit_sha") != self.candidate_sha:
+            raise ValueError("receipt boot commit differs from fixture candidate")
         body = build_execution_receipt_body(
             role=role,
             purpose=purpose,
             job_id=job_id,
             epoch_id=self.epoch_id,
             sequence=sequence,
-            commit_sha=self.candidate_sha,
-            pcr0=self.pcr0,
-            build_manifest_hash=HASH,
-            dependency_lock_hash=HASH_B,
+            commit_sha=str(boot["commit_sha"]),
+            pcr0=str(boot["pcr0"]),
+            build_manifest_hash=str(boot["build_manifest_hash"]),
+            dependency_lock_hash=str(boot["dependency_lock_hash"]),
             config_hash=config_hash,
             boot_identity_hash=boot["boot_identity_hash"],
             input_root=input_root,

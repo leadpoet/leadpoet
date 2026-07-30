@@ -224,8 +224,8 @@ def _conforming_tree(root: Path) -> None:
     """)
     _write(root, "sourcing_model/routing/policy.py", "POLICY = True\n")
     _write(root, "sourcing_model/routing/runtime.py", """
-        RUNTIME_CATALOG_VERSION = "sourcing-model-runtime-tools:v1"
-        RUNTIME_POLICY_VERSION = "sourcing-model-runtime-routing:v1"
+        RUNTIME_CATALOG_VERSION = "sourcing-model-runtime-tools:v4"
+        RUNTIME_POLICY_VERSION = "sourcing-model-runtime-routing:v4"
 
         def runtime_tool_definitions():
             return ()
@@ -278,6 +278,21 @@ def _conforming_tree(root: Path) -> None:
         def register(name, implementation):
             pass
     """)
+    _write(root, "sourcing_model/scrapingdog_intent.py", """
+        def compile_scrapingdog_intent_request(
+            tool_id, *, company_name, company_domain, signal, category,
+            max_age_days, country="us", language="en"
+        ):
+            return {}
+
+        def normalized_provider_date(value, *, today):
+            return ""
+
+        def select_scrapingdog_intent_evidence(
+            request, candidates, *, today=None
+        ):
+            return None
+    """)
     _write(root, "sourcing_model/validation.py", """
         def bonus_requirements(icp):
             pass
@@ -295,7 +310,7 @@ def _conforming_tree(root: Path) -> None:
 
 def test_contract_loads_and_declares_frozen_surface() -> None:
     contract = load_wrapper_contract()
-    assert contract["contract_id"] == "leadpoet-sourcing-wrapper-contract-v3"
+    assert contract["contract_id"] == "leadpoet-sourcing-wrapper-contract-v5"
     assert "research_lab_adapter.py" in contract["functions"]
     assert contract["functions"]["research_lab_adapter.py"]["run_icp"] == [
         "icp",

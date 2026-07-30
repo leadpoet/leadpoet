@@ -1,10 +1,10 @@
 """The SDK era period must match the measured chain profile.
 
-The enclave rebuilds the weight-extrinsic signature payload from the
-measured chain signing profile, whose ``extrinsic_period`` fixes the mortal
-era bytes. bittensor's ``set_weights`` default period (``DEFAULT_PERIOD``)
-differs from the profile, so any call site that omits ``period=`` produces a
-payload the enclave refuses to sign on every attempt.
+The enclave rebuilds the weight-extrinsic signature payload from the measured
+chain signing profile, whose ``extrinsic_period`` fixes the mortal era bytes.
+The SDK default may happen to match that profile, but it is not authority:
+every call site must pass the measured period explicitly so an SDK default
+change cannot silently alter the payload.
 """
 
 import inspect
@@ -30,14 +30,17 @@ def _profile() -> dict:
     return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
 
 
-def test_sdk_default_period_diverges_from_profile_payload():
-    profile = _profile()
-    from bittensor.core.settings import DEFAULT_PERIOD
+def test_signature_payload_is_bound_to_the_measured_period():
+    import bittensor as bt
 
-    assert DEFAULT_PERIOD != profile["extrinsic_period"], (
-        "if the SDK default ever equals the profile period, this pin and the "
-        "explicit period= argument can be revisited together"
-    )
+    profile = _profile()
+    period_parameter = inspect.signature(bt.Subtensor.set_weights).parameters[
+        "period"
+    ]
+    assert period_parameter.default is not inspect.Parameter.empty
+    sdk_default_period = int(period_parameter.default)
+
+    assert sdk_default_period > 0
     call = encode_commit_timelocked_call(
         profile=profile,
         netuid=71,
@@ -51,15 +54,23 @@ def test_sdk_default_period_diverges_from_profile_payload():
         nonce=5,
         block_hash="ab" * 32,
     )
-    sdk_default_profile = dict(profile, extrinsic_period=int(DEFAULT_PERIOD))
-    _, signed_sdk_default = encode_weight_signature_payload(
-        profile=sdk_default_profile,
+    different_period = (
+        sdk_default_period
+        if sdk_default_period != profile["extrinsic_period"]
+        else sdk_default_period * 2
+    )
+    unmeasured_profile = dict(
+        profile,
+        extrinsic_period=different_period,
+    )
+    _, signed_unmeasured = encode_weight_signature_payload(
+        profile=unmeasured_profile,
         call_bytes=call,
         era_current=8_600_000,
         nonce=5,
         block_hash="ab" * 32,
     )
-    assert signed_profile != signed_sdk_default
+    assert signed_profile != signed_unmeasured
 
 
 def test_set_weights_call_pins_profile_period():

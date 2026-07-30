@@ -1671,6 +1671,11 @@ def test_gateway_event_signer_uses_local_nitro_boundary(
     enclave_signer._reset_for_testing()
     tee_service.event_signer_initialization = None
     tee_service.event_buffer.clear()
+    tee_service.pending_checkpoint = None
+    tee_service.sequence_counter = 0
+    tee_service.checkpoint_count = 0
+    tee_service.prev_checkpoint_root = None
+    tee_service.checkpoint_start_time = datetime.utcnow()
     try:
         response = rehearsal_sitecustomize._handle_gateway_enclave_rpc(
             role,
@@ -1690,10 +1695,102 @@ def test_gateway_event_signer_uses_local_nitro_boundary(
         assert response["restart_log_entry"]["signed_event"]["event_type"] == (
             "ENCLAVE_RESTART"
         )
+        stats = rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+            role,
+            "get_buffer_stats",
+            {},
+        )
+        assert stats["size"] == 1
+        assert rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+            role,
+            "get_buffer_size",
+            {},
+        ) == 1
+        checkpoint = rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+            role,
+            "build_checkpoint",
+            {},
+        )
+        assert checkpoint["status"] == "success"
+        assert checkpoint["header"]["event_count"] == 1
+        acknowledged = rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+            role,
+            "acknowledge_checkpoint",
+            {
+                "checkpoint_number": checkpoint["header"][
+                    "checkpoint_number"
+                ],
+                "merkle_root": checkpoint["header"]["merkle_root"],
+                "sequence_range": checkpoint["header"]["sequence_range"],
+            },
+        )
+        assert acknowledged["status"] == "acknowledged"
+        assert acknowledged["remaining_count"] == 0
+        appended = rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+            role,
+            "append_event",
+            {"event": {"event_type": "REHEARSAL_EVENT"}},
+        )
+        assert appended["status"] == "buffered"
+        assert len(
+            rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+                role,
+                "get_buffer",
+                {},
+            )
+        ) == 1
+        payload = {"candidate_sha": COMMIT}
+        signed = rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+            role,
+            "sign_transparency_event",
+            {
+                "event_type": "REHEARSAL_SIGNED_EVENT",
+                "payload": payload,
+                "payload_hash": hashlib.sha256(
+                    json.dumps(
+                        payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            },
+        )
+        assert signed["buffer"]["status"] == "buffered"
+        rejected_clear = (
+            rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+                role,
+                "clear_buffer",
+                {},
+            )
+        )
+        assert rejected_clear == {
+            "status": "rejected",
+            "reason": "checkpoint_acknowledgement_required",
+            "cleared_count": 0,
+        }
+        assert rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+            role,
+            "get_buffer_size",
+            {},
+        ) == 2
+        with pytest.raises(
+            ValueError,
+            match="local event buffer RPC params differ",
+        ):
+            rehearsal_sitecustomize._handle_gateway_enclave_rpc(
+                role,
+                "get_buffer_stats",
+                {"unexpected": True},
+            )
     finally:
         enclave_signer._reset_for_testing()
         tee_service.event_signer_initialization = None
         tee_service.event_buffer.clear()
+        tee_service.pending_checkpoint = None
+        tee_service.sequence_counter = 0
+        tee_service.checkpoint_count = 0
+        tee_service.prev_checkpoint_root = None
+        tee_service.checkpoint_start_time = datetime.utcnow()
 
 
 def test_gateway_runtime_identity_uses_the_installed_local_nsm_boundary(

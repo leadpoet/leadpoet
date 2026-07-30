@@ -16,6 +16,11 @@
 
 set -eo pipefail
 
+# Capability marker consumed by the exact restart controller. The application
+# image may be built while the gateway restarts, but no validator container may
+# start until the selected gateway release is live and exact-SHA aligned.
+VALIDATOR_GATEWAY_ACTIVATION_BARRIER_V2=1
+
 echo "============================================================"
 echo "🐳 DYNAMIC CONTAINERIZED VALIDATOR DEPLOYMENT"
 echo "============================================================"
@@ -329,7 +334,48 @@ if [ "$IMAGE_COMMIT" != "$VALIDATOR_V2_DEPLOY_COMMIT" ]; then
     exit 1
 fi
 echo "✅ Validator Docker image commit verified: $IMAGE_COMMIT"
+PREPARED_IMAGE_ID="$(
+    docker image inspect leadpoet-validator:latest --format '{{.Id}}'
+)"
+if ! [[ "$PREPARED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "❌ ERROR: prepared validator Docker image ID is invalid" >&2
+    exit 1
+fi
+echo "✅ Prepared validator Docker image ID: $PREPARED_IMAGE_ID"
 echo ""
+
+if [ "$VALIDATOR_EXACT_RELEASE_PINNED" = "1" ]; then
+    ACTIVATION_VERIFIER="${VALIDATOR_GATEWAY_ACTIVATION_VERIFIER:-$REPO_ROOT/validator_tee/scripts/verify_pinned_gateway_release_v2.sh}"
+    if [[ "$ACTIVATION_VERIFIER" != /* ]] || [ ! -r "$ACTIVATION_VERIFIER" ]; then
+        echo "❌ ERROR: pinned gateway activation verifier is unavailable" >&2
+        exit 1
+    fi
+    if [ -z "${VALIDATOR_V2_GATEWAY_URL:-}" ]; then
+        echo "❌ ERROR: VALIDATOR_V2_GATEWAY_URL is required for pinned activation" >&2
+        exit 1
+    fi
+    ACTIVATION_MAX_ATTEMPTS="$(
+        printf '%s' "${VALIDATOR_PINNED_GATEWAY_PRESTART_MAX_ATTEMPTS:-600}"
+    )"
+    echo "🔒 Waiting for exact-SHA gateway authority before validator activation..."
+    if ! env \
+        VALIDATOR_PINNED_GATEWAY_MAX_ATTEMPTS="$ACTIVATION_MAX_ATTEMPTS" \
+        bash "$ACTIVATION_VERIFIER" \
+            "$VALIDATOR_V2_GATEWAY_URL" \
+            "$VALIDATOR_V2_DEPLOY_COMMIT"; then
+        echo "❌ ERROR: exact-SHA gateway activation barrier failed" >&2
+        exit 1
+    fi
+    ACTIVE_IMAGE_ID="$(
+        docker image inspect leadpoet-validator:latest --format '{{.Id}}'
+    )"
+    if [ "$ACTIVE_IMAGE_ID" != "$PREPARED_IMAGE_ID" ]; then
+        echo "❌ ERROR: prepared validator Docker image changed during gateway alignment" >&2
+        exit 1
+    fi
+    echo "✅ Exact-SHA gateway authority aligned; validator activation released"
+    echo ""
+fi
 
 # Stop and remove existing containers (sourcing + qualification + fulfillment)
 echo "🛑 Stopping existing containers (if any)..."

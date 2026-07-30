@@ -24,10 +24,13 @@ def test_validator_restart_preserves_build_order_and_starts_chain_relay():
     relay = script.index("python3 -m validator_tee.host.chain_relay_v2")
     runtime = script.index("python3 -m validator_tee.host.runtime_v2_bootstrap")
     hotkey = script.index("python3 -m validator_tee.host.hotkey_bootstrap_v2")
+    activation_handoff = script.index(
+        "VALIDATOR_GATEWAY_ACTIVATION_BARRIER_V2=1"
+    )
     validator = script.index('echo "Starting validator"')
     assert config_refresh < artifact_prepare < preflight < shutdown
     assert shutdown < build < release_gate < release_archive < enclave
-    assert enclave < relay < runtime < hotkey < validator
+    assert enclave < relay < runtime < hotkey < activation_handoff < validator
     assert script.index("--allow-download") < shutdown
     build_script = (
         ROOT / "validator_tee" / "scripts" / "build_enclave.sh"
@@ -62,6 +65,18 @@ def test_validator_restart_preserves_build_order_and_starts_chain_relay():
     assert '-e VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT"' in deploy
     assert "ENABLE_TEE_SUBMISSION" not in deploy
     assert "VALIDATOR_REQUIRE_GATEWAY_WEIGHT_SUBMISSION" not in deploy
+    app_build = deploy.index("if docker_build_validator_image; then")
+    image_label = deploy.index('IMAGE_COMMIT="$(', app_build)
+    image_id = deploy.index('PREPARED_IMAGE_ID="$(', image_label)
+    gateway_barrier = deploy.index(
+        'if [ "$VALIDATOR_EXACT_RELEASE_PINNED" = "1" ]; then',
+        image_id,
+    )
+    coordinator = deploy.index(
+        '\nstart_container "leadpoet-validator-main"',
+        gateway_barrier,
+    )
+    assert app_build < image_label < image_id < gateway_barrier < coordinator
     subprocess.run(["bash", "-n", str(ROOT / "validator_restart.sh")], check=True)
     subprocess.run(
         [

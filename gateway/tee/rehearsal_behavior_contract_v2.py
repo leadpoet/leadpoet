@@ -18,7 +18,7 @@ import re
 from typing import Any, Mapping
 
 
-SCHEMA_VERSION = "leadpoet.v2_rehearsal_behavior_contract.v1"
+SCHEMA_VERSION = "leadpoet.v2_rehearsal_behavior_contract.v2"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 _PROFILE_EPOCH_COUNTS = {
@@ -60,9 +60,14 @@ BEHAVIORAL_INVARIANTS = (
     "unknown_boundaries_rejected",
 )
 
+RESTART_INVARIANTS = (
+    "validator_activation_requires_exact_gateway_release",
+)
+
 EXACT_PRODUCTION_ENTRYPOINTS = (
     "gw_restart.sh",
     "validator_restart.sh",
+    "scripts/restart_attested_release_local.sh",
     "gateway/tee/rehearsal_behavior_contract_v2.py",
     "gateway/tee/verify_weight_submission_ready_v2.py",
     "gateway/research_lab/champion_settlement_v2.py",
@@ -71,6 +76,8 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "gateway/api/weights.py",
     "neurons/validator.py",
     "neurons/auditor_validator.py",
+    "validator_models/containerizing/deploy_dynamic.sh",
+    "validator_tee/scripts/verify_pinned_gateway_release_v2.sh",
 )
 
 
@@ -285,6 +292,7 @@ def build_rehearsal_behavior_contract_v2(
         "fault_ids": normalized_faults,
         "required_stage_ids": required_stages,
         "required_invariant_ids": list(BEHAVIORAL_INVARIANTS),
+        "required_restart_invariant_ids": list(RESTART_INVARIANTS),
         "policy_commitments": _policy_commitments(),
     }
     return {**body, "contract_hash": _sha256_json(body)}
@@ -315,6 +323,7 @@ def validate_rehearsal_behavior_contract_v2(
         "fault_ids",
         "required_stage_ids",
         "required_invariant_ids",
+        "required_restart_invariant_ids",
     ):
         values = document.get(field)
         if (
@@ -342,6 +351,7 @@ __all__ = [
     "BEHAVIORAL_INVARIANTS",
     "BEHAVIOR_SCENARIOS",
     "EXACT_PRODUCTION_ENTRYPOINTS",
+    "RESTART_INVARIANTS",
     "RehearsalBehaviorContractV2Error",
     "SCHEMA_VERSION",
     "build_rehearsal_behavior_contract_v2",

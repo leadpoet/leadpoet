@@ -28,7 +28,7 @@ def test_gateway_holds_shared_docker_lock_through_authority_repair() -> None:
     assert script.count("< /dev/null 7>&- 9>&- &") == 2
 
 
-def test_validator_waits_for_shared_host_before_shutdown_and_retries_only_build_transport() -> None:
+def test_validator_holds_shared_host_lock_through_late_activation_barrier() -> None:
     restart = (ROOT / "validator_restart.sh").read_text(encoding="utf-8")
     deploy = (
         ROOT / "validator_models" / "containerizing" / "deploy_dynamic.sh"
@@ -40,9 +40,36 @@ def test_validator_waits_for_shared_host_before_shutdown_and_retries_only_build_
     final_check = restart.index(
         "validator coordinator failed its final restart-wrapper check"
     )
-    release = restart.index("leadpoet_release_docker_operation_lock_v2")
+    release = restart.index(
+        "leadpoet_release_docker_operation_lock_v2",
+        final_check,
+    )
+    app_lock = deploy.index("leadpoet_acquire_docker_operation_lock_v2")
+    app_build = deploy.index("if docker_build_validator_image; then")
+    image_id = deploy.index('PREPARED_IMAGE_ID="$(', app_build)
+    activation_barrier = deploy.index(
+        'if [ "$VALIDATOR_EXACT_RELEASE_PINNED" = "1" ]; then',
+        image_id,
+    )
+    active_image_id = deploy.index('ACTIVE_IMAGE_ID="$(', activation_barrier)
+    coordinator = deploy.index(
+        '\nstart_container "leadpoet-validator-main"',
+        active_image_id,
+    )
 
     assert gate < acquire < shutdown < final_check < release
+    assert (
+        app_lock
+        < app_build
+        < image_id
+        < activation_barrier
+        < active_image_id
+        < coordinator
+    )
+    assert "VALIDATOR_DOCKER_LOCK_ACQUIRED=1" in restart
+    assert "VALIDATOR_DOCKER_LOCK_ACQUIRED=0" in restart
+    assert "Cleaning incomplete validator activation" in restart
+    assert "leadpoet_release_docker_operation_lock_v2 || true" in restart
     assert "docker_operation_guard_v2" in restart
     assert "7>&- &" in restart
     assert "leadpoet_run_docker_build_with_retry_v2" in deploy

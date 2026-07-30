@@ -109,10 +109,31 @@ bash scripts/restart_attested_release_local.sh \
 
 Use a single-component mode only when the other runtime is already verified on
 that exact SHA. The paired command must capture the validator restart start,
-keep the existing validator running until the gateway finishes its complete
-authenticated restart, and release the validator only through the exact-SHA
-coordination marker. A failed gateway restart must leave the marker absent,
-terminate the waiting SSH process, and preserve the existing validator.
+then run gateway restart and validator preparation concurrently. Validator Git
+selection, release verification, artifact staging, old-runtime shutdown, EIF
+build, Nitro launch, chain relay, runtime/hotkey bootstrap, and exact
+application-image build may overlap the gateway restart. No validator
+coordinator or worker may start until the application image's commit label and
+immutable image ID are verified, the exact-SHA coordination marker is
+published, and gateway V2 authority health, build-info, and immutable release
+evidence all report that same SHA. The image ID must be unchanged after the
+wait, and the wrapper must repeat the full same-SHA check after startup.
+
+A failed gateway restart must signal the validator SSH job immediately and
+publish a commit-bound failure marker concurrently, with a bounded marker
+write, so slow coordination transport cannot delay signal cleanup. The
+operator-owned coordination path and wait bound must survive candidate
+re-execution and secret hydration. The validator must fail closed without
+starting any coordinator or worker and clean every resource prepared after
+old-runtime shutdown: validator containers, host validator/relay processes,
+Nitro enclave, and Docker lock. A retry after an earlier N-1-to-N Git handoff
+may invoke only the selected SHA's clean launcher blob; the coordinated
+expected SHA must be rechecked after pull and before release preparation or
+shutdown. A historical rollback deployer without the image-prepared barrier
+must retain the safe fallback check immediately before that deployer is
+invoked. This parallel flow intentionally does not promise that the old
+validator remains running through a late gateway failure; it minimizes elapsed
+restart time while preserving the authority boundary.
 
 Both profiles must produce a joined
 `leadpoet-restart-rehearsal-<sha>-<profile>.json` manifest. The manifest and
@@ -140,9 +161,23 @@ console output must prove all of the following:
 - [ ] Exact rollback succeeds when the change affects restart or release
   selection.
 - [ ] Exact roll-forward succeeds again from the rollback target.
-- [ ] The paired operator coordinator completes gateway before validator,
-  rejects single-component SHA mismatches, and does not release the validator
-  after a gateway failure.
+- [ ] The paired operator coordinator overlaps gateway restart with validator
+  preparation, rejects single-component SHA mismatches, and proves that no
+  validator coordinator or worker starts before the exact-SHA marker plus
+  gateway health/build/release evidence.
+- [ ] The validator application image commit label and immutable image ID are
+  verified before the activation wait, the same image ID is rechecked after
+  alignment, and the full same-SHA gateway check passes again after startup.
+- [ ] A gateway failure immediately signals the validator and concurrently
+  publishes the selected SHA's failure marker through a bounded write; the
+  validator starts no coordinator or worker and cleans containers,
+  relay/validator processes, enclave, and Docker lock even if it previously
+  consumed a success marker.
+- [ ] Candidate re-execution and secret hydration cannot replace the paired
+  operator's coordination path, coordination retry bound, or overall timeout.
+- [ ] A retry whose checkout already equals the candidate runs only that
+  candidate's clean launcher blob; an `origin/main` advance after operator
+  selection fails before release preparation and old-runtime shutdown.
 - [ ] The rollback runtime checkout resolves to the selected historical SHA,
   while both installed host restart controllers remain byte-identical to the
   newer installed launcher. A second rollback invocation must still reach the

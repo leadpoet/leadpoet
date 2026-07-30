@@ -27,6 +27,9 @@ fi
 VALIDATOR_DOCKER_OPERATION_LOCK_HELPER="$VALIDATOR_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
 VALIDATOR_PINNED_GATEWAY_VERIFIER=""
 VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR=""
+VALIDATOR_DESTRUCTIVE_PHASE_STARTED=0
+VALIDATOR_RESTART_COMPLETED=0
+VALIDATOR_DOCKER_LOCK_ACQUIRED=0
 VALIDATOR_V2_RELEASE_BUCKET="${VALIDATOR_V2_RELEASE_BUCKET:-leadpoet-attested-v2-artifacts-493765492819}"
 VALIDATOR_V2_RELEASE_PREFIX="${VALIDATOR_V2_RELEASE_PREFIX:-attested-v2/releases}"
 VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
@@ -40,6 +43,8 @@ VALIDATOR_WALLET_NAME="${VALIDATOR_WALLET_NAME:-validator_72}"
 VALIDATOR_WALLET_HOTKEY="${VALIDATOR_WALLET_HOTKEY:-default}"
 REQUESTED_VALIDATOR_DEPLOY_COMMIT="${VALIDATOR_DEPLOY_COMMIT:-}"
 unset VALIDATOR_DEPLOY_COMMIT
+REQUESTED_COORDINATED_EXPECTED_COMMIT="${VALIDATOR_COORDINATED_EXPECTED_COMMIT:-}"
+unset VALIDATOR_COORDINATED_EXPECTED_COMMIT
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -81,6 +86,16 @@ if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
   echo "ERROR: --commit must be a lowercase full 40-character SHA" >&2
   exit 2
 fi
+if [ -n "$REQUESTED_COORDINATED_EXPECTED_COMMIT" ] \
+    && ! [[ "$REQUESTED_COORDINATED_EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "ERROR: VALIDATOR_COORDINATED_EXPECTED_COMMIT must be a lowercase full 40-character SHA" >&2
+  exit 2
+fi
+if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
+    && [ -n "$REQUESTED_COORDINATED_EXPECTED_COMMIT" ]; then
+  echo "ERROR: coordinated forward commit conflicts with exact-commit rollback" >&2
+  exit 2
+fi
 
 verify_pinned_gateway_release() {
   local max_attempts="${1:-12}"
@@ -93,12 +108,20 @@ verify_pinned_gateway_release() {
 
 stop_pinned_validator_after_alignment_failure() {
   echo "Stopping pinned validator after persistent gateway release mismatch" >&2
+  sudo pkill -TERM -f ".auto_update_wrapper.sh" 2>/dev/null || true
+  sudo pkill -TERM -f "neurons/validator.py" 2>/dev/null || true
+  sudo pkill -TERM -f "docker logs -f leadpoet-validator-main" 2>/dev/null || true
+  sudo pkill -TERM -f "validator_tee.host.chain_relay_v2" 2>/dev/null || true
   docker ps -aq \
     --filter "name=leadpoet-validator" \
     --filter "name=leadpoet-qual-worker" \
     --filter "name=leadpoet-ff-worker" \
     | xargs -r docker stop >/dev/null 2>&1 || true
-  sudo pkill -TERM -f "validator_tee.host.chain_relay_v2" 2>/dev/null || true
+  sleep 2
+  sudo pkill -KILL -f ".auto_update_wrapper.sh" 2>/dev/null || true
+  sudo pkill -KILL -f "neurons/validator.py" 2>/dev/null || true
+  sudo pkill -KILL -f "docker logs -f leadpoet-validator-main" 2>/dev/null || true
+  sudo pkill -KILL -f "validator_tee.host.chain_relay_v2" 2>/dev/null || true
   sudo nitro-cli terminate-enclave --all >/dev/null 2>&1 || true
 }
 
@@ -155,6 +178,18 @@ VALIDATOR_ENV_EXPORT="$(mktemp /tmp/validator_env_export.XXXXXX)"
 SECRET_TMP="$(mktemp /tmp/validator_secret_env.XXXXXX)"
 
 cleanup() {
+  local status="$?"
+  set +e
+  if [ "$VALIDATOR_DESTRUCTIVE_PHASE_STARTED" = "1" ] \
+      && [ "$VALIDATOR_RESTART_COMPLETED" != "1" ]; then
+    echo "Cleaning incomplete validator activation" >&2
+    stop_pinned_validator_after_alignment_failure
+    if [ "$VALIDATOR_DOCKER_LOCK_ACQUIRED" = "1" ] \
+        && declare -F leadpoet_release_docker_operation_lock_v2 >/dev/null 2>&1; then
+      leadpoet_release_docker_operation_lock_v2 || true
+    fi
+    VALIDATOR_DOCKER_LOCK_ACQUIRED=0
+  fi
   rm -f "$VALIDATOR_ENV_EXPORT" "$SECRET_TMP"
   if [ -n "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR" ]; then
     rm -rf "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR"
@@ -162,8 +197,12 @@ cleanup() {
   if [ -n "$VALIDATOR_PINNED_GATEWAY_VERIFIER" ]; then
     rm -f "$VALIDATOR_PINNED_GATEWAY_VERIFIER"
   fi
+  return "$status"
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cd "$VALIDATOR_ROOT"
 
@@ -210,11 +249,32 @@ else
   git pull --ff-only origin main
 fi
 after_head="$(git rev-parse HEAD)"
+if [ -n "$REQUESTED_COORDINATED_EXPECTED_COMMIT" ] \
+    && [ "$after_head" != "$REQUESTED_COORDINATED_EXPECTED_COMMIT" ]; then
+  echo "ERROR: coordinated validator candidate moved before restart preparation" >&2
+  echo "       expected=$REQUESTED_COORDINATED_EXPECTED_COMMIT observed=$after_head" >&2
+  exit 1
+fi
+current_restart_script="$(readlink -f "${BASH_SOURCE[0]}")"
+candidate_restart_script="$(readlink -f "$VALIDATOR_ROOT/validator_restart.sh")"
+restart_script_differs=0
+if ! cmp -s "$current_restart_script" "$candidate_restart_script"; then
+  restart_script_differs=1
+fi
 if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
-   && [ "$before_head" != "$after_head" ] \
+   && { [ "$before_head" != "$after_head" ] \
+        || [ "$restart_script_differs" = "1" ]; } \
    && [ "${VALIDATOR_RESTART_REEXECED:-0}" != "1" ]; then
   echo "Restart wrapper updated from GitHub; re-executing latest validator_restart.sh"
-  exec env VALIDATOR_RESTART_REEXECED=1 bash "$VALIDATOR_ROOT/validator_restart.sh" "$@"
+  exec env \
+    VALIDATOR_RESTART_REEXECED=1 \
+    VALIDATOR_COORDINATED_EXPECTED_COMMIT="$REQUESTED_COORDINATED_EXPECTED_COMMIT" \
+    bash "$VALIDATOR_ROOT/validator_restart.sh" "$@"
+fi
+if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
+    && [ "$restart_script_differs" = "1" ]; then
+  echo "ERROR: re-executed validator restart controller differs from the selected candidate" >&2
+  exit 1
 fi
 if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
   VALIDATOR_EXACT_COMMIT_HELPER_SOURCE="$VALIDATOR_ROOT/Leadpoet/utils/exact_commit_restart_v2.py"
@@ -285,8 +345,12 @@ skip_keys = {
     "AWS_SESSION_TOKEN",
     "AWS_SECURITY_TOKEN",
     "AWS_PROFILE",
+    "VALIDATOR_COORDINATED_EXPECTED_COMMIT",
     "VALIDATOR_DEPLOY_COMMIT",
     "VALIDATOR_EXACT_RELEASE_PINNED",
+    "VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE",
+    "VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS",
+    "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS",
 }
 exports = []
 for raw_line in raw.replace("\x00", "\n").splitlines():
@@ -512,10 +576,6 @@ PY
   exit 75
 fi
 
-echo "Checking same-SHA gateway alignment before stopping validator"
-verify_pinned_gateway_release \
-  "${VALIDATOR_PINNED_GATEWAY_PRESTART_MAX_ATTEMPTS:-600}"
-
 echo "Refreshing public validator hotkey measurements for the selected release"
 python3 -m validator_tee.host.refresh_hotkey_config_v2 \
   --config "$VALIDATOR_V2_HOTKEY_CONFIG" \
@@ -583,12 +643,14 @@ if [ ! -r "$VALIDATOR_DOCKER_OPERATION_LOCK_HELPER" ]; then
 fi
 . "$VALIDATOR_DOCKER_OPERATION_LOCK_HELPER"
 leadpoet_acquire_docker_operation_lock_v2
+VALIDATOR_DOCKER_LOCK_ACQUIRED=1
 PYTHONPATH="$VALIDATOR_ROOT" "$VALIDATOR_PYTHON_BIN" \
   -m validator_tee.host.docker_operation_guard_v2 \
   --wait \
   --timeout-seconds 1800 \
   --interval-seconds 3
 
+VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1
 echo "Stopping validator processes and containers"
 sudo pkill -TERM -f ".auto_update_wrapper.sh" 2>/dev/null || true
 sudo pkill -TERM -f "neurons/validator.py" 2>/dev/null || true
@@ -704,8 +766,30 @@ python3 -m validator_tee.host.hotkey_bootstrap_v2 \
 
 if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" = "1" ]; then
   install_validator_restart_controller
+  leadpoet_release_docker_operation_lock_v2
+  VALIDATOR_DOCKER_LOCK_ACQUIRED=0
+  VALIDATOR_RESTART_COMPLETED=1
   echo "SUCCESS: exact attested validator enclave is prepared for stateful cutover boundary capture"
   exit 0
+fi
+
+VALIDATOR_CONTAINER_DEPLOY_SCRIPT="$(
+  printf '%s/%s' \
+    "$VALIDATOR_ROOT" \
+    "validator_models/containerizing/deploy_dynamic.sh"
+)"
+if grep -Fq \
+    "VALIDATOR_GATEWAY_ACTIVATION_BARRIER_V2=1" \
+    "$VALIDATOR_CONTAINER_DEPLOY_SCRIPT"; then
+  echo "Deferring same-SHA gateway alignment until the exact validator application image is verified"
+  export VALIDATOR_GATEWAY_ACTIVATION_VERIFIER="$VALIDATOR_PINNED_GATEWAY_VERIFIER"
+else
+  echo "Selected rollback deployer lacks the image-prepared gateway activation barrier"
+  echo "Checking same-SHA gateway alignment before invoking the legacy deployer"
+  if ! verify_pinned_gateway_release \
+      "${VALIDATOR_PINNED_GATEWAY_PRESTART_MAX_ATTEMPTS:-600}"; then
+    exit 1
+  fi
 fi
 
 echo "Starting validator"
@@ -714,11 +798,14 @@ export PYTHONPATH="${PYTHONPATH:-$VALIDATOR_ROOT}"
 export VALIDATOR_FORCE_CONTAINER_DEPLOY=1
 export VALIDATOR_AUTO_CONTAINER_FOLLOW_LOGS=0
 
-"$VALIDATOR_PYTHON_BIN" neurons/validator.py \
-  --netuid "${VALIDATOR_NETUID:-71}" \
-  --subtensor_network "${VALIDATOR_SUBTENSOR_NETWORK:-finney}" \
-  --wallet_name "$VALIDATOR_WALLET_NAME" \
-  --wallet_hotkey "$VALIDATOR_WALLET_HOTKEY"
+if ! "$VALIDATOR_PYTHON_BIN" neurons/validator.py \
+    --netuid "${VALIDATOR_NETUID:-71}" \
+    --subtensor_network "${VALIDATOR_SUBTENSOR_NETWORK:-finney}" \
+    --wallet_name "$VALIDATOR_WALLET_NAME" \
+    --wallet_hotkey "$VALIDATOR_WALLET_HOTKEY"; then
+  echo "ERROR: validator container preparation or activation failed" >&2
+  exit 1
+fi
 
 if [ "$(docker inspect -f '{{.State.Running}}' leadpoet-validator-main)" != "true" ] \
     || [ "$(docker inspect -f '{{.RestartCount}}' leadpoet-validator-main)" != "0" ]; then
@@ -734,7 +821,9 @@ if ! verify_pinned_gateway_release \
 fi
 install_validator_restart_controller
 leadpoet_release_docker_operation_lock_v2
+VALIDATOR_DOCKER_LOCK_ACQUIRED=0
 if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ]; then
   rm -f "$VALIDATOR_RESTART_START_PATH"
 fi
+VALIDATOR_RESTART_COMPLETED=1
 echo "SUCCESS: authoritative V2 validator restart completed and verified"

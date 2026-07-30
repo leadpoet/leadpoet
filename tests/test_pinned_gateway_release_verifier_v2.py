@@ -26,8 +26,14 @@ if [ -f "$FAKE_CURL_STATE" ]; then
 fi
 count=$((count + 1))
 printf '%s\\n' "$count" > "$FAKE_CURL_STATE"
+if [ "${FAKE_CURL_DELAY_SECONDS:-0}" != "0" ]; then
+  /bin/sleep "$FAKE_CURL_DELAY_SECONDS"
+fi
 if [ "${TRANSIENT_FIRST:-0}" = "1" ] && [ "$count" -eq 1 ]; then
   exit 7
+fi
+if [ "${FAKE_REVOKE_AFTER_REQUESTS:-0}" = "$count" ]; then
+  printf 'failed:%s\\n' "$FAKE_COMMIT" > "$FAKE_COORDINATION_FILE"
 fi
 url="${!#}"
 if [[ "$url" == */health/v2-authority ]]; then
@@ -57,6 +63,9 @@ def _run(
     coordination_file: Path | None = None,
     coordination_max_attempts: int | None = None,
     max_attempts: int | None = None,
+    timeout_seconds: int | None = None,
+    curl_delay_seconds: int = 0,
+    revoke_after_requests: int = 0,
 ) -> tuple[subprocess.CompletedProcess[str], int]:
     bin_dir, state = _fake_commands(
         tmp_path,
@@ -67,6 +76,9 @@ def _run(
         "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
         "FAKE_CURL_STATE": str(state),
         "FAKE_COMMIT": returned_commit,
+        "FAKE_CURL_DELAY_SECONDS": str(curl_delay_seconds),
+        "FAKE_COORDINATION_FILE": str(coordination_file or ""),
+        "FAKE_REVOKE_AFTER_REQUESTS": str(revoke_after_requests),
         "TRANSIENT_FIRST": "1" if transient_first else "0",
     }
     if coordination_file is not None:
@@ -79,6 +91,8 @@ def _run(
         )
     if max_attempts is not None:
         env["VALIDATOR_PINNED_GATEWAY_MAX_ATTEMPTS"] = str(max_attempts)
+    if timeout_seconds is not None:
+        env["VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS"] = str(timeout_seconds)
     result = subprocess.run(
         ["bash", str(VERIFIER), "http://gateway.invalid:8000", COMMIT],
         check=False,
@@ -177,7 +191,7 @@ def test_pinned_gateway_verifier_rejects_unbounded_release_attempts(
     assert "VALIDATOR_PINNED_GATEWAY_MAX_ATTEMPTS" in result.stderr
 
 
-def test_pinned_gateway_verifier_requires_coordinator_completion(
+def test_pinned_gateway_verifier_rejects_foreign_success_marker(
     tmp_path: Path,
 ) -> None:
     barrier = tmp_path / "gateway-restart-complete"
@@ -190,9 +204,7 @@ def test_pinned_gateway_verifier_requires_coordinator_completion(
     )
 
     assert result.returncode == 1
-    assert "coordinated gateway restart did not complete after 2 attempts" in (
-        result.stderr
-    )
+    assert "success marker differs from the selected commit" in result.stderr
     assert requests == 0
 
 
@@ -210,3 +222,89 @@ def test_pinned_gateway_verifier_accepts_matching_coordinator_completion(
     assert result.returncode == 0
     assert "pinned_gateway_release_aligned" in result.stdout
     assert requests == 3
+
+
+def test_pinned_gateway_verifier_rechecks_marker_after_live_contract(
+    tmp_path: Path,
+) -> None:
+    barrier = tmp_path / "gateway-restart-complete"
+    barrier.write_text(COMMIT + "\n", encoding="utf-8")
+    result, requests = _run(
+        tmp_path,
+        transient_first=False,
+        coordination_file=barrier,
+        revoke_after_requests=3,
+    )
+
+    assert result.returncode == 1
+    assert "restart failed for the selected commit" in result.stderr
+    assert "pinned_gateway_release_aligned" not in result.stdout
+    assert requests == 3
+
+
+def test_pinned_gateway_verifier_rejects_matching_failure_marker_without_http(
+    tmp_path: Path,
+) -> None:
+    barrier = tmp_path / "gateway-restart-complete"
+    barrier.write_text(f"failed:{COMMIT}\n", encoding="utf-8")
+    result, requests = _run(
+        tmp_path,
+        transient_first=False,
+        coordination_file=barrier,
+    )
+
+    assert result.returncode == 1
+    assert "restart failed for the selected commit" in result.stderr
+    assert requests == 0
+
+
+def test_pinned_gateway_verifier_rejects_foreign_failure_marker_without_http(
+    tmp_path: Path,
+) -> None:
+    barrier = tmp_path / "gateway-restart-complete"
+    barrier.write_text(f"failed:{'b' * 40}\n", encoding="utf-8")
+    result, requests = _run(
+        tmp_path,
+        transient_first=False,
+        coordination_file=barrier,
+    )
+
+    assert result.returncode == 1
+    assert "failure marker differs from the selected commit" in result.stderr
+    assert requests == 0
+
+
+def test_pinned_gateway_verifier_rejects_unbounded_total_timeout(
+    tmp_path: Path,
+) -> None:
+    bin_dir, _ = _fake_commands(tmp_path, transient_first=False)
+    result = subprocess.run(
+        ["bash", str(VERIFIER), "http://gateway.invalid:8000", COMMIT],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS": "7201",
+        },
+        timeout=10,
+    )
+
+    assert result.returncode == 2
+    assert "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS" in result.stderr
+
+
+def test_pinned_gateway_verifier_outer_timeout_kills_slow_request(
+    tmp_path: Path,
+) -> None:
+    result, requests = _run(
+        tmp_path,
+        transient_first=False,
+        timeout_seconds=1,
+        curl_delay_seconds=5,
+    )
+
+    assert result.returncode == 124
+    assert "verification exceeded 1s" in result.stderr
+    assert requests == 1

@@ -2381,6 +2381,15 @@ def test_joined_manifest_requires_every_authority_field(
                     "event_count": 10,
                     "pcr0": "3" * 96,
                     "postgres_contract_sha256": "e" * 64,
+                    "restart_invariants": (
+                        {
+                            "validator_activation_requires_exact_gateway_release": (
+                                True
+                            )
+                        }
+                        if component == "validator"
+                        else {}
+                    ),
                 }
             ),
             encoding="utf-8",
@@ -2474,6 +2483,43 @@ def test_joined_manifest_requires_every_authority_field(
     assert (
         joined["behavior_contract_hash"]
         == behavior_contract["contract_hash"]
+    )
+
+    validator_launcher_path = (
+        tmp_path / f"1-validator-forward-{COMMIT}.json"
+    )
+    validator_launcher = json.loads(
+        validator_launcher_path.read_text(encoding="utf-8")
+    )
+    validator_launcher["restart_invariants"] = {}
+    validator_launcher_path.write_text(
+        json.dumps(validator_launcher),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        SystemExit,
+        match="validator restart invariant evidence is incomplete",
+    ):
+        join_evidence.main(
+            [
+                "--evidence-root",
+                str(tmp_path),
+                "--from-sha",
+                "2" * 40,
+                "--candidate-sha",
+                COMMIT,
+                "--profile",
+                "prepush",
+                "--output",
+                str(output),
+            ]
+        )
+    validator_launcher["restart_invariants"] = {
+        "validator_activation_requires_exact_gateway_release": True
+    }
+    validator_launcher_path.write_text(
+        json.dumps(validator_launcher),
+        encoding="utf-8",
     )
 
     missing_stage = workflow["stages"].pop(1)

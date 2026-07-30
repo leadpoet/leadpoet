@@ -8,11 +8,15 @@ GATEWAY_HOST="${LEADPOET_GATEWAY_SSH_HOST:-ec2-user@52.91.135.79}"
 VALIDATOR_HOST="${LEADPOET_VALIDATOR_SSH_HOST:-ec2-user@100.59.201.156}"
 GATEWAY_RESTART="${LEADPOET_GATEWAY_RESTART_PATH:-/home/ec2-user/gw_restart.sh}"
 VALIDATOR_RESTART="${LEADPOET_VALIDATOR_RESTART_PATH:-/home/ec2-user/validator_restart.sh}"
+VALIDATOR_REPO_ROOT="${LEADPOET_VALIDATOR_REPO_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
 VALIDATOR_COORDINATION_ATTEMPTS=600
+VALIDATOR_FAILURE_CLEANUP_ATTEMPTS=60
+VALIDATOR_FAILURE_MARKER_ATTEMPTS=20
 
 commit=""
 component="all"
 validator_job=""
+failure_marker_job=""
 temporary_root=""
 coordination_file=""
 
@@ -31,9 +35,49 @@ EOF
 
 cleanup() {
   local status="$?"
+  local failure_marker_command=""
+  set +e
   if [ -n "$validator_job" ] && kill -0 "$validator_job" 2>/dev/null; then
+    # Cancellation is the authority revocation. Signal the remote validator
+    # before attempting the durable failure marker so a slow SSH connection
+    # cannot delay cleanup past the late activation boundary.
     kill -TERM "$validator_job" 2>/dev/null || true
+    if [ -n "$coordination_file" ]; then
+      echo "Signaling the paired validator to clean up after restart failure" >&2
+      failure_marker_command="$(
+        coordination_remote_command "failed:$commit"
+      )"
+      ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
+        "$failure_marker_command" >/dev/null 2>&1 &
+      failure_marker_job="$!"
+    fi
+    for _ in $(seq 1 "$VALIDATOR_FAILURE_CLEANUP_ATTEMPTS"); do
+      if ! kill -0 "$validator_job" 2>/dev/null; then
+        break
+      fi
+      sleep 1
+    done
+    if kill -0 "$validator_job" 2>/dev/null; then
+      kill -KILL "$validator_job" 2>/dev/null || true
+    fi
     wait "$validator_job" 2>/dev/null || true
+  fi
+  if [ -n "$failure_marker_job" ]; then
+    for _ in $(seq 1 "$VALIDATOR_FAILURE_MARKER_ATTEMPTS"); do
+      if ! kill -0 "$failure_marker_job" 2>/dev/null; then
+        break
+      fi
+      sleep 1
+    done
+    if kill -0 "$failure_marker_job" 2>/dev/null; then
+      kill -TERM "$failure_marker_job" 2>/dev/null || true
+      sleep 1
+    fi
+    if kill -0 "$failure_marker_job" 2>/dev/null; then
+      kill -KILL "$failure_marker_job" 2>/dev/null || true
+    fi
+    wait "$failure_marker_job" 2>/dev/null || true
+    failure_marker_job=""
   fi
   if [ -n "$coordination_file" ]; then
     ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
@@ -128,6 +172,30 @@ ssh_common=(
   -o ServerAliveCountMax=20
 )
 
+coordination_remote_command() {
+  local value="$1"
+  case "$value" in
+    "$commit"|"failed:$commit") ;;
+    *)
+      echo "ERROR: invalid coordinated restart marker value" >&2
+      return 2
+      ;;
+  esac
+  printf '%s\n' \
+    "set -Eeuo pipefail
+     umask 077
+     marker='$coordination_file.tmp'
+     printf '%s\\n' '$value' > \"\$marker\"
+     mv -f -- \"\$marker\" '$coordination_file'"
+}
+
+publish_coordination_value() {
+  local remote_command
+  remote_command="$(coordination_remote_command "$1")"
+  ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
+    "$remote_command"
+}
+
 gateway_active_commit() {
   ssh "${ssh_common[@]}" -i "$GATEWAY_KEY" "$GATEWAY_HOST" \
     "curl -fsS --connect-timeout 5 --max-time 15 \
@@ -149,16 +217,48 @@ run_gateway_restart() {
 
 run_validator_restart() {
   local coordination_environment=""
+  local expected_forward_commit=""
+  local launcher_command=""
+  local launcher_command_quoted=""
+  local restart_arguments=""
   local command=()
   if [ -n "$coordination_file" ]; then
     coordination_environment="$coordination_file"
   fi
+  if [ "$commit" != "$branch_commit" ]; then
+    # Historical rollback releases retain the installed controller and use
+    # its exact-commit compatibility handoff. A forward release at the frozen
+    # public tip uses the normal N-1 -> N pull/re-exec path so the candidate
+    # launcher can prepare in parallel and install itself after success.
+    restart_arguments="--commit '$commit'"
+    launcher_command="exec bash '$VALIDATOR_RESTART' $restart_arguments"
+  else
+    expected_forward_commit="$commit"
+    # On the first N-1 -> N attempt, the installed launcher owns the Git
+    # handoff. If a prior attempt already completed that handoff but failed
+    # before installing N, retry the exact candidate launcher from its clean
+    # Git blob instead of silently falling back to the stale installed copy.
+    launcher_command="
+      candidate_launcher='$VALIDATOR_REPO_ROOT/validator_restart.sh'
+      observed_head=\$(git -C '$VALIDATOR_REPO_ROOT' rev-parse --verify HEAD)
+      if [ \"\$observed_head\" = '$commit' ]; then
+        if [ ! -r \"\$candidate_launcher\" ] \
+            || ! git -C '$VALIDATOR_REPO_ROOT' diff --quiet '$commit' -- validator_restart.sh; then
+          echo 'ERROR: selected validator launcher is not the exact candidate Git blob' >&2
+          exit 1
+        fi
+        exec bash \"\$candidate_launcher\"
+      fi
+      exec bash '$VALIDATOR_RESTART'"
+  fi
+  printf -v launcher_command_quoted '%q' "$launcher_command"
   command=(
     ssh -tt "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST"
     "exec env \
       VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE='$coordination_environment' \
       VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS='$VALIDATOR_COORDINATION_ATTEMPTS' \
-      bash '$VALIDATOR_RESTART' --commit '$commit'"
+      VALIDATOR_COORDINATED_EXPECTED_COMMIT='$expected_forward_commit' \
+      bash -c $launcher_command_quoted"
   )
   if [ "${VALIDATOR_RESTART_EXEC_SSH:-0}" = "1" ]; then
     exec "${command[@]}"
@@ -273,7 +373,7 @@ case "$component" in
     coordination_file="/tmp/leadpoet-coordinated-restart.$(basename "$temporary_root").ready"
     ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
       "rm -f -- '$coordination_file'"
-    echo "Starting validator restart so it captures the official window before waiting for the gateway"
+    echo "Starting validator preparation in parallel with the paired gateway restart"
     (
       VALIDATOR_RESTART_EXEC_SSH=1 run_validator_restart
     ) > >(tee "$validator_log") 2>&1 &
@@ -298,15 +398,10 @@ case "$component" in
       exit 1
     fi
 
-    echo "Validator restart start captured; restarting the gateway on the same release"
+    echo "Validator restart start captured; restarting the gateway while validator preparation continues"
     run_gateway_restart
-    ssh "${ssh_common[@]}" -i "$VALIDATOR_KEY" "$VALIDATOR_HOST" \
-      "set -Eeuo pipefail
-       umask 077
-       marker='$coordination_file.tmp'
-       printf '%s\\n' '$commit' > \"\$marker\"
-       mv -f -- \"\$marker\" '$coordination_file'"
-    echo "Gateway exact release is ready; waiting for the paired validator restart"
+    publish_coordination_value "$commit"
+    echo "Gateway restart completed; releasing exact-SHA validator activation"
     wait "$validator_job"
     validator_job=""
     ;;

@@ -368,6 +368,7 @@ async def append_event_with_seq(
     build_payload: Any,
     *,
     attempts: int = 5,
+    event_id: str | None = None,
 ) -> dict[str, Any]:
     """Allocate the next event seq and insert atomically against concurrent appends.
 
@@ -377,13 +378,15 @@ async def append_event_with_seq(
     instead of one crashing. The row is built identically to the legacy inline form
     (``event_id`` + ``schema_version`` + payload + ``anchored_hash`` over the payload),
     so audit hashes are unchanged. ``build_payload(seq)`` returns the payload dict.
+    Callers may supply a deterministic ``event_id`` when the logical event itself
+    must remain idempotent across a committed insert whose response was lost.
     """
     last_exc: BaseException | None = None
     for attempt in range(1, max(1, int(attempts)) + 1):
         seq = await next_event_seq(table, key_field, key_value)
         payload = build_payload(seq)
         row = {
-            "event_id": str(uuid4()),
+            "event_id": event_id or str(uuid4()),
             "schema_version": "1.0",
             **payload,
             "anchored_hash": canonical_hash(payload),
@@ -1192,6 +1195,7 @@ async def create_auto_research_loop_event(
     provider_usage: list[dict[str, Any]] | None = None,
     cost_ledger: dict[str, Any] | None = None,
     event_doc: dict[str, Any] | None = None,
+    event_id: str | None = None,
 ) -> dict[str, Any]:
     return await append_event_with_seq(
         "research_lab_auto_research_loop_events",
@@ -1213,7 +1217,156 @@ async def create_auto_research_loop_event(
             "cost_ledger": cost_ledger or {},
             "event_doc": event_doc or {},
         },
+        event_id=event_id,
     )
+
+
+async def ensure_auto_research_loop_transition_event(
+    *,
+    run_id: str,
+    ticket_id: str,
+    event_type: str,
+    loop_status: str,
+    worker_ref: str,
+    expected_queue_status: str,
+    queue_event_hash: str,
+    receipt_id: str | None = None,
+    node_id: str | None = None,
+    elapsed_seconds: float = 0.0,
+    candidate_artifact_hash: str | None = None,
+    candidate_patch_hash: str | None = None,
+    provider_usage: list[dict[str, Any]] | None = None,
+    cost_ledger: dict[str, Any] | None = None,
+    event_doc: dict[str, Any] | None = None,
+    coalesce_current_status: bool = False,
+) -> dict[str, Any]:
+    """Append one crash-idempotent loop transition bound to a queue event."""
+
+    if not queue_event_hash:
+        raise ValueError("loop transition requires queue_event_hash")
+    transition_event_id = deterministic_uuid(
+        "research_lab_auto_research_loop_transition",
+        run_id,
+        event_type,
+        queue_event_hash,
+    )
+    transition_doc = {
+        **dict(event_doc or {}),
+        "loop_transition_id": transition_event_id,
+        "queue_status": expected_queue_status,
+        "queue_event_hash": queue_event_hash,
+    }
+
+    async def _existing_transition() -> dict[str, Any] | None:
+        existing = await select_one(
+            "research_lab_auto_research_loop_events",
+            filters=(("event_id", transition_event_id),),
+        )
+        if not existing:
+            return None
+        expected = {
+            "run_id": run_id,
+            "ticket_id": ticket_id,
+            "event_type": event_type,
+            "loop_status": loop_status,
+        }
+        mismatched = [
+            field
+            for field, value in expected.items()
+            if existing.get(field) != value
+        ]
+        existing_doc = existing.get("event_doc")
+        if not isinstance(existing_doc, Mapping):
+            mismatched.append("event_doc")
+        else:
+            for field, value in (
+                ("loop_transition_id", transition_event_id),
+                ("queue_status", expected_queue_status),
+                ("queue_event_hash", queue_event_hash),
+            ):
+                if existing_doc.get(field) != value:
+                    mismatched.append(f"event_doc.{field}")
+        if mismatched:
+            raise RuntimeError(
+                "loop transition idempotency collision for fields: "
+                + ",".join(sorted(mismatched))
+            )
+        return existing
+
+    existing = await _existing_transition()
+    if existing:
+        return existing
+
+    current_queue = await select_one(
+        "research_loop_run_queue_current",
+        columns=(
+            "run_id,current_queue_status,current_event_hash,current_event_seq,"
+            "current_reason,worker_ref"
+        ),
+        filters=(("run_id", run_id),),
+    )
+    if (
+        not current_queue
+        or str(current_queue.get("current_queue_status") or "")
+        != expected_queue_status
+        or str(current_queue.get("current_event_hash") or "") != queue_event_hash
+    ):
+        raise RuntimeError(
+            "loop transition queue authority was superseded "
+            f"(expected {expected_queue_status}:{queue_event_hash})"
+        )
+
+    current_loop = await select_one(
+        "research_lab_auto_research_loop_current",
+        columns=(
+            "run_id,current_loop_status,current_event_type,current_event_seq,"
+            "current_event_hash"
+        ),
+        filters=(("run_id", run_id),),
+    )
+    current_loop_status = (
+        str(current_loop.get("current_loop_status") or "") if current_loop else ""
+    )
+    if coalesce_current_status and current_loop_status == loop_status:
+        return {
+            "event_id": None,
+            "seq": current_loop.get("current_event_seq") if current_loop else None,
+            "event_type": current_loop.get("current_event_type") if current_loop else None,
+            "loop_status": current_loop_status,
+            "anchored_hash": current_loop.get("current_event_hash") if current_loop else None,
+            "already_projected": True,
+        }
+    if current_loop_status in {"completed", "failed"} and loop_status not in {
+        "completed",
+        "failed",
+    }:
+        raise RuntimeError(
+            f"cannot append {event_type} after terminal loop status "
+            f"{current_loop_status}"
+        )
+
+    try:
+        return await create_auto_research_loop_event(
+            run_id=run_id,
+            ticket_id=ticket_id,
+            receipt_id=receipt_id,
+            event_type=event_type,
+            loop_status=loop_status,
+            worker_ref=worker_ref,
+            node_id=node_id,
+            elapsed_seconds=elapsed_seconds,
+            candidate_artifact_hash=candidate_artifact_hash,
+            candidate_patch_hash=candidate_patch_hash,
+            provider_usage=provider_usage,
+            cost_ledger=cost_ledger,
+            event_doc=transition_doc,
+            event_id=transition_event_id,
+        )
+    except Exception:
+        existing = await _existing_transition()
+        if existing:
+            return existing
+        raise
 
 
 async def latest_auto_research_checkpoint(run_id: str) -> dict[str, Any] | None:

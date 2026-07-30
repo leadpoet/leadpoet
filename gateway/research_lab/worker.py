@@ -130,6 +130,7 @@ from gateway.research_lab.store import (
     create_reimbursement_schedule,
     create_ticket_event,
     create_openrouter_privacy_proof_event_sync,
+    ensure_auto_research_loop_transition_event,
     find_queued_receipt_for_run,
     latest_auto_research_checkpoint,
     record_candidate_tree_handoff,
@@ -3113,20 +3114,11 @@ class ResearchLabHostedWorker:
                         "elapsed_seconds": event.elapsed_seconds,
                     }
                 )
-                loop_event_row = await create_auto_research_loop_event(
-                    run_id=context.run_id,
-                    ticket_id=context.ticket_id,
-                    receipt_id=context.receipt_id,
-                    event_type=event.event_type,
-                    loop_status=event.loop_status,
-                    worker_ref=self.worker_ref,
-                    node_id=event.node_id,
-                    elapsed_seconds=event.elapsed_seconds,
-                    candidate_artifact_hash=event.candidate_artifact_hash,
-                    candidate_patch_hash=event.candidate_patch_hash,
-                    provider_usage=event_provider_usage,
-                    cost_ledger=event.cost_ledger,
+                loop_event_row = await self._persist_loop_event(
+                    context=context,
+                    event=event,
                     event_doc=event_doc,
+                    event_provider_usage=event_provider_usage,
                 )
                 recorded_loop_events.append(
                     {
@@ -3939,18 +3931,17 @@ class ResearchLabHostedWorker:
             )
 
     async def _reconcile_stale_loop_projections(self, *, limit: int = 200) -> int:
-        """Finalize loop projections left ``running`` while their queue row is terminal.
+        """Align ``running`` loop projections with paused or terminal queue rows.
 
         The loop ``*_current`` view is just the latest loop event; nothing forces it
-        terminal when the run's queue row reaches completed/failed/cancelled. That
-        decoupling produces zombie ``running`` loops. This sweep appends the matching
-        terminal loop event so the projection reflects reality. Idempotent: once the
-        terminal loop event is appended the row is no longer ``running`` and re-runs
-        skip it.
+        to follow the queue when the run pauses or terminates. That decoupling produces
+        zombie ``running`` loops. This sweep appends the matching loop event so the
+        projection reflects reality. Idempotent: once appended, the row is no longer
+        ``running`` and subsequent sweeps skip it.
         """
         loop_rows = await select_many(
             "research_lab_auto_research_loop_current",
-            columns="run_id,ticket_id,current_loop_status",
+            columns="run_id,ticket_id,receipt_id,current_loop_status",
             filters=(("current_loop_status", "running"),),
             limit=limit,
         )
@@ -3961,16 +3952,57 @@ class ResearchLabHostedWorker:
                 continue
             queue = await select_one(
                 "research_loop_run_queue_current",
-                columns="run_id,ticket_id,current_queue_status",
+                columns=(
+                    "run_id,ticket_id,current_queue_status,current_reason,"
+                    "current_event_hash,current_event_seq,worker_ref"
+                ),
                 filters=(("run_id", run_id),),
             )
             if not queue:
                 continue
             queue_status = str(queue.get("current_queue_status") or "")
-            if queue_status not in {"completed", "failed", "cancelled", "tombstoned"}:
-                continue
             ticket_id = str(queue.get("ticket_id") or row.get("ticket_id") or "")
             if not ticket_id:
+                continue
+            if queue_status == "paused":
+                queue_event_hash = str(queue.get("current_event_hash") or "")
+                receipt_id = str(row.get("receipt_id") or "") or None
+                queue_reason = str(queue.get("current_reason") or "")
+
+                async def _append_paused_projection() -> dict[str, Any]:
+                    return await ensure_auto_research_loop_transition_event(
+                        run_id=run_id,
+                        ticket_id=ticket_id,
+                        receipt_id=receipt_id,
+                        event_type="loop_paused",
+                        loop_status="paused",
+                        worker_ref=self.worker_ref,
+                        expected_queue_status="paused",
+                        queue_event_hash=queue_event_hash,
+                        event_doc={
+                            "schema_version": "1.0",
+                            "reason": "stale_loop_projection_reconciled",
+                            "source": "hosted_worker_loop_reconciler",
+                            "queue_reason": queue_reason,
+                            "previous_loop_status": "running",
+                        },
+                        coalesce_current_status=True,
+                    )
+
+                try:
+                    await self._store_write_with_retry(
+                        f"reconcile_loop_projection:{compact_ref(run_id)}",
+                        _append_paused_projection,
+                    )
+                    reconciled.append(run_id)
+                except Exception as exc:
+                    logger.warning(
+                        "research_lab_stale_loop_projection_reconcile_failed run_id=%s error=%s",
+                        compact_ref(run_id),
+                        str(exc)[:240],
+                    )
+                continue
+            if queue_status not in {"completed", "failed", "cancelled", "tombstoned"}:
                 continue
             event_type = "loop_completed" if queue_status == "completed" else "loop_failed"
             loop_status = "completed" if queue_status == "completed" else "failed"
@@ -4455,6 +4487,10 @@ class ResearchLabHostedWorker:
         }
         if checkpoint_doc:
             event_doc["checkpoint"] = dict(checkpoint_doc)
+        provider_usage = (
+            list(getattr(loop_result, "provider_usage", ()) or [])
+            or self._provider_usage(context)
+        )
         await create_receipt_event(
             receipt_id=receipt_id,
             ticket_id=context.ticket_id,
@@ -4463,10 +4499,10 @@ class ResearchLabHostedWorker:
             event_doc={
                 **event_doc,
                 "cost_ledger": cost_ledger,
-                "provider_usage": list(getattr(loop_result, "provider_usage", ()) or []) or self._provider_usage(context),
+                "provider_usage": provider_usage,
             },
         )
-        await create_queue_event(
+        paused_queue_event = await create_queue_event(
             run_id=context.run_id,
             ticket_id=context.ticket_id,
             event_type="paused",
@@ -4474,6 +4510,32 @@ class ResearchLabHostedWorker:
             worker_ref=self.worker_ref,
             reason=reason,
             event_doc=event_doc,
+        )
+        queue_event_hash = str(paused_queue_event.get("anchored_hash") or "")
+        await self._store_write_with_retry(
+            "hosted_loop_paused_transition",
+            lambda: ensure_auto_research_loop_transition_event(
+                run_id=context.run_id,
+                ticket_id=context.ticket_id,
+                receipt_id=receipt_id,
+                event_type="loop_paused",
+                loop_status="paused",
+                worker_ref=self.worker_ref,
+                expected_queue_status="paused",
+                queue_event_hash=queue_event_hash,
+                elapsed_seconds=round(
+                    float(getattr(loop_result, "elapsed_seconds", 0.0) or 0.0),
+                    3,
+                ),
+                provider_usage=provider_usage,
+                cost_ledger=dict(cost_ledger),
+                event_doc={
+                    **event_doc,
+                    "source": "hosted_worker_pause_transition",
+                    "reason": reason,
+                },
+                coalesce_current_status=True,
+            ),
         )
         await create_ticket_event(
             ticket_id=context.ticket_id,
@@ -4547,7 +4609,7 @@ class ResearchLabHostedWorker:
             receipt_status="queued",
             event_doc=event_doc,
         )
-        await create_queue_event(
+        paused_queue_event = await create_queue_event(
             run_id=context.run_id,
             ticket_id=context.ticket_id,
             event_type="paused",
@@ -4555,6 +4617,26 @@ class ResearchLabHostedWorker:
             worker_ref=self.worker_ref,
             reason="blocked_for_credit",
             event_doc=event_doc,
+        )
+        queue_event_hash = str(paused_queue_event.get("anchored_hash") or "")
+        await self._store_write_with_retry(
+            "blocked_for_credit_loop_paused_transition",
+            lambda: ensure_auto_research_loop_transition_event(
+                run_id=context.run_id,
+                ticket_id=context.ticket_id,
+                receipt_id=receipt_id,
+                event_type="loop_paused",
+                loop_status="paused",
+                worker_ref=self.worker_ref,
+                expected_queue_status="paused",
+                queue_event_hash=queue_event_hash,
+                event_doc={
+                    **event_doc,
+                    "source": "hosted_worker_credit_block_transition",
+                    "reason": "blocked_for_credit",
+                },
+                coalesce_current_status=True,
+            ),
         )
         await create_ticket_event(
             ticket_id=context.ticket_id,
@@ -5365,6 +5447,83 @@ class ResearchLabHostedWorker:
             reason="hosted_worker_started",
             config=self.config,
         )
+
+    async def _persist_loop_event(
+        self,
+        *,
+        context: HostedRunContext,
+        event: AutoResearchLoopEvent,
+        event_doc: dict[str, Any],
+        event_provider_usage: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if event.event_type != "loop_resumed":
+            return await create_auto_research_loop_event(
+                run_id=context.run_id,
+                ticket_id=context.ticket_id,
+                receipt_id=context.receipt_id,
+                event_type=event.event_type,
+                loop_status=event.loop_status,
+                worker_ref=self.worker_ref,
+                node_id=event.node_id,
+                elapsed_seconds=event.elapsed_seconds,
+                candidate_artifact_hash=event.candidate_artifact_hash,
+                candidate_patch_hash=event.candidate_patch_hash,
+                provider_usage=event_provider_usage,
+                cost_ledger=event.cost_ledger,
+                event_doc=event_doc,
+            )
+
+        resume_queue_event_hash = await self._current_started_queue_event_hash(context)
+        return await self._store_write_with_retry(
+            "loop_resumed_transition",
+            lambda: ensure_auto_research_loop_transition_event(
+                run_id=context.run_id,
+                ticket_id=context.ticket_id,
+                receipt_id=context.receipt_id,
+                event_type=event.event_type,
+                loop_status=event.loop_status,
+                worker_ref=self.worker_ref,
+                expected_queue_status="started",
+                queue_event_hash=resume_queue_event_hash,
+                node_id=event.node_id,
+                elapsed_seconds=event.elapsed_seconds,
+                candidate_artifact_hash=event.candidate_artifact_hash,
+                candidate_patch_hash=event.candidate_patch_hash,
+                provider_usage=event_provider_usage,
+                cost_ledger=event.cost_ledger,
+                event_doc=event_doc,
+            ),
+        )
+
+    async def _current_started_queue_event_hash(
+        self,
+        context: HostedRunContext,
+    ) -> str:
+        """Return the exact live queue head that authorizes loop execution."""
+
+        current = await select_one(
+            "research_loop_run_queue_current",
+            columns=(
+                "run_id,current_queue_status,worker_ref,current_event_hash,"
+                "current_event_seq"
+            ),
+            filters=(("run_id", context.run_id),),
+        )
+        if (
+            not current
+            or current.get("current_queue_status") != "started"
+            or current.get("worker_ref") != self.worker_ref
+        ):
+            context.claim_lost = True
+            raise HostedResearchLabClaimLost(
+                "hosted run queue authority was superseded before loop resume"
+            )
+        queue_event_hash = str(current.get("current_event_hash") or "")
+        if not queue_event_hash:
+            raise HostedResearchLabWorkerError(
+                "loop resume queue authority is missing its event hash"
+            )
+        return queue_event_hash
 
     async def _append_queue_heartbeat(
         self,

@@ -35,6 +35,7 @@ from .store import (
     create_gateway_control_event,
     create_queue_event,
     create_ticket_event,
+    ensure_auto_research_loop_transition_event,
     select_all,
     select_many,
     select_one,
@@ -1926,6 +1927,7 @@ async def reconcile_paused_loop_projections(
                 "loop_status_target": "paused",
                 "queue_event_hash": qrow.get("current_event_hash"),
                 "loop_event_hash": loop.get("current_event_hash") if loop else None,
+                "receipt_id": loop.get("receipt_id") if loop else None,
             }
         )
         if len(planned) >= max(1, int(limit or 50)):
@@ -1948,15 +1950,20 @@ async def reconcile_paused_loop_projections(
             "previous_loop_event_hash": plan["loop_event_hash"],
         }
         try:
-            event = await create_auto_research_loop_event(
+            event = await ensure_auto_research_loop_transition_event(
                 run_id=str(plan["run_id"]),
                 ticket_id=str(plan["ticket_id"]),
-                receipt_id=None,
+                receipt_id=(
+                    str(plan["receipt_id"]) if plan.get("receipt_id") else None
+                ),
                 event_type="loop_paused",
                 loop_status="paused",
                 worker_ref=actor_ref or default_actor_ref(),
+                expected_queue_status="paused",
+                queue_event_hash=str(plan["queue_event_hash"] or ""),
                 provider_usage=[],
                 event_doc=event_doc,
+                coalesce_current_status=True,
             )
         except Exception as exc:  # noqa: BLE001 - report per-run, keep sweeping
             failed.append({**plan, "error": str(exc)[:200]})

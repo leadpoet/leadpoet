@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "contract_id": "leadpoet-sourcing-wrapper-contract-v3",
+  "contract_id": "leadpoet-sourcing-wrapper-contract-v5",
   "canonical_path": "sourcing_model/consumer_contract.json",
   "parity_fixture_path": "sourcing_model/consumer_parity_fixtures.json",
   "required_files": [
@@ -26,6 +26,7 @@
     "sourcing_model/routing/runtime.py",
     "sourcing_model/runtime_capabilities.py",
     "sourcing_model/scoring.py",
+    "sourcing_model/scrapingdog_intent.py",
     "sourcing_model/validation.py"
   ],
   "functions": {
@@ -209,6 +210,18 @@
         "implementation"
       ]
     },
+    "sourcing_model/scrapingdog_intent.py": {
+      "compile_scrapingdog_intent_request": [
+        "tool_id"
+      ],
+      "normalized_provider_date": [
+        "value"
+      ],
+      "select_scrapingdog_intent_evidence": [
+        "request",
+        "candidates"
+      ]
+    },
     "sourcing_model/validation.py": {
       "bonus_requirements": [
         "icp"
@@ -348,6 +361,25 @@
       "additional_tools",
       "additional_states",
       "catalog_version"
+    ],
+    "sourcing_model/scrapingdog_intent.py:compile_scrapingdog_intent_request": [
+      "tool_id",
+      "company_name",
+      "company_domain",
+      "signal",
+      "category",
+      "max_age_days",
+      "country",
+      "language"
+    ],
+    "sourcing_model/scrapingdog_intent.py:normalized_provider_date": [
+      "value",
+      "today"
+    ],
+    "sourcing_model/scrapingdog_intent.py:select_scrapingdog_intent_evidence": [
+      "request",
+      "candidates",
+      "today"
     ]
   },
   "required_keyword_only": {
@@ -388,6 +420,16 @@
       "remaining_seconds",
       "remaining_calls",
       "credit_cap"
+    ],
+    "sourcing_model/scrapingdog_intent.py:compile_scrapingdog_intent_request": [
+      "company_name",
+      "company_domain",
+      "signal",
+      "category",
+      "max_age_days"
+    ],
+    "sourcing_model/scrapingdog_intent.py:normalized_provider_date": [
+      "today"
     ]
   },
   "frozen_asyncness": {
@@ -412,6 +454,9 @@
     "sourcing_model/consumer_parity.py:sha256_file": false,
     "sourcing_model/consumer_parity.py:verify_expected_projections": false,
     "sourcing_model/normalized_icp_discovery_plan.py:compile_normalized_icp_discovery_plan": false,
+    "sourcing_model/scrapingdog_intent.py:compile_scrapingdog_intent_request": false,
+    "sourcing_model/scrapingdog_intent.py:normalized_provider_date": false,
+    "sourcing_model/scrapingdog_intent.py:select_scrapingdog_intent_evidence": false,
     "sourcing_model/validation.py:bonus_requirements": false,
     "sourcing_model/validation.py:make_deps": false,
     "sourcing_model/validation.py:validate_candidate": true
@@ -440,8 +485,8 @@
       "DEFAULT_POLICY_VERSION": "sourcing-model-routing:v1"
     },
     "sourcing_model/routing/runtime.py": {
-      "RUNTIME_CATALOG_VERSION": "sourcing-model-runtime-tools:v1",
-      "RUNTIME_POLICY_VERSION": "sourcing-model-runtime-routing:v1"
+      "RUNTIME_CATALOG_VERSION": "sourcing-model-runtime-tools:v4",
+      "RUNTIME_POLICY_VERSION": "sourcing-model-runtime-routing:v4"
     },
     "sourcing_model/normalized_icp_discovery_plan.py": {
       "CONTACT_PERSONA_SENIORITY_LEVELS": [

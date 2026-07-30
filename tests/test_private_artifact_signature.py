@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,11 @@ class FakeKms:
 
 
 RESEARCH_LAB_ROOT = Path(__file__).resolve().parents[1] / "research_lab"
+CONSUMER_CONTRACT_ID = json.loads(
+    (RESEARCH_LAB_ROOT / "sourcing_model_contract.json").read_text(
+        encoding="utf-8"
+    )
+)["contract_id"]
 
 
 def artifact_mapping(**overrides: Any) -> dict[str, Any]:
@@ -59,7 +65,7 @@ def artifact_mapping(**overrides: Any) -> dict[str, Any]:
         "component_registry_version": "components:v1",
         "scoring_adapter_version": "scorer:v1",
         "compatibility_contract": {
-            "contract_id": "leadpoet-sourcing-wrapper-contract-v3",
+            "contract_id": CONSUMER_CONTRACT_ID,
             "path": "sourcing_model/consumer_contract.json",
             "sha256": sha256_bytes(
                 (

@@ -627,7 +627,7 @@
       "symbol": "CoordinatorAllocationSourceV2"
     },
     {
-      "ast_sha256": "sha256:df988bc23162410eac7f50324dea2b360d4264f86e40c9a4ee884fbbd62ddba7",
+      "ast_sha256": "sha256:dd209d7e85614f0810ad68130a6df0baf2c9175999d6092a85799ae73e854878",
       "path": "gateway/tee/coordinator_chain_realized_settlement_v1.py",
       "symbol": "CoordinatorChainRealizedSettlementV1"
     },
@@ -1312,7 +1312,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:3162cbb8b49c7c102af1c406a94dc5d56938e5f1185864641b98512511ffc506",
-  "protected_source_commit": "c350c43674d5bd470808e542278b5c05bd3f3534",
+  "manifest_hash": "sha256:805d382e5f40772e36b47cefc0befe1a2564d82c90b62202d0e8ffa9d0908a03",
+  "protected_source_commit": "f190248b2454f208f6cc4b92d85e78afbc8ffd63",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

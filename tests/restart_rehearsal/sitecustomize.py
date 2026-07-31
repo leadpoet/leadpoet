@@ -44,6 +44,8 @@ except ModuleNotFoundError as exc:
 
 STATE_ROOT = Path(os.environ.get("REHEARSAL_STATE_ROOT", "/rehearsal-state"))
 SOURCE_ROOT = Path(os.environ.get("REHEARSAL_SOURCE_ROOT", "/source"))
+FROM_FIXTURE_SEED_ROOT = Path("/rehearsal-from-fixture-seed")
+DURABLE_SCHEMA_SEED_ROOT = Path("/rehearsal-durable-schema-seed")
 EVENT_PATH = STATE_ROOT / "events.jsonl"
 CURRENT_BLOCK = 8_700_040
 LAST_EPOCH_BLOCK = 8_700_000
@@ -2625,6 +2627,33 @@ class _LocalVsock:
         self._offset = 0
 
 
+def _release_build_input_for_commit(commit: str) -> dict[str, Any]:
+    requested = str(commit)
+    if not re.fullmatch(r"[0-9a-f]{40}", requested):
+        raise ValueError("local release build input commit is invalid")
+    documents: list[dict[str, Any]] = []
+    for path in (
+        STATE_ROOT / "release-build-input.json",
+        FROM_FIXTURE_SEED_ROOT / "release-build-input.json",
+        DURABLE_SCHEMA_SEED_ROOT / "release-build-input.json",
+    ):
+        if not path.is_file():
+            continue
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict) or not re.fullmatch(
+            r"[0-9a-f]{40}",
+            str(loaded.get("commit_sha") or ""),
+        ):
+            raise ValueError("local release build input document is invalid")
+        if loaded["commit_sha"] == requested:
+            documents.append(loaded)
+    if not documents:
+        raise ValueError("local release build input commit is unavailable")
+    if any(document != documents[0] for document in documents[1:]):
+        raise ValueError("local release build inputs conflict")
+    return documents[0]
+
+
 def _release_channel(commit: str) -> dict[str, Any]:
     from artifact_identity import (
         eif_hash,
@@ -2652,13 +2681,7 @@ def _release_channel(commit: str) -> dict[str, Any]:
     base_dockerfile_hash = "sha256:" + hashlib.sha256(
         (validator_root / "Dockerfile.base").read_bytes()
     ).hexdigest()
-    release_build_input = json.loads(
-        (STATE_ROOT / "release-build-input.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    if release_build_input.get("commit_sha") != commit:
-        raise ValueError("local release build input commit differs")
+    release_build_input = _release_build_input_for_commit(commit)
     expected_roles = release_build_input.get("gateway_roles")
     if not isinstance(expected_roles, dict):
         raise ValueError("local release build input roles are unavailable")

@@ -136,7 +136,14 @@ def test_release_reuses_candidate_migrated_durable_boundary_state() -> None:
     ).read_text(encoding="utf-8")
 
     assert 'dst=/rehearsal-durable-state"' in controller
+    assert 'dst=/rehearsal-from-fixture-seed,readonly"' in controller
     assert "durable_state_root=durable_state_root" in controller
+    assert (
+        "from_fixture_seed_root=fixture_seeds[\n"
+        "                                    run_from\n"
+        "                                ]"
+        in controller
+    )
     assert (
         "durable_fixture_seed_root=fixture_seeds[\n"
         "                                    candidate_sha\n"

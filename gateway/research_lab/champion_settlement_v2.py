@@ -2576,8 +2576,25 @@ async def load_settled_allocation_history_v2(
     chain_realized = await load_chain_realized_allocation_history_v1(
         **chain_kwargs
     )
-    finalized = await load_finalized_allocation_history_v2(
-        **finalized_kwargs
+    finalized_end_epoch = int(end_epoch)
+    if chain_realized:
+        # Realized chain settlement replaces submitted-weight intent from its
+        # first covered epoch onward.
+        first_chain_realized_epoch = min(
+            int(row["epoch"]) for row in chain_realized
+        )
+        if not int(start_epoch) <= first_chain_realized_epoch <= int(end_epoch):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement history is outside the requested range"
+            )
+        finalized_end_epoch = first_chain_realized_epoch - 1
+    finalized_kwargs["end_epoch"] = finalized_end_epoch
+    finalized = (
+        await load_finalized_allocation_history_v2(
+            **finalized_kwargs
+        )
+        if finalized_end_epoch >= int(start_epoch)
+        else []
     )
     return merge_settled_allocation_histories_v2(finalized, chain_realized)
 

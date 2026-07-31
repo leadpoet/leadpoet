@@ -2081,6 +2081,67 @@ def test_release_channel_uses_the_same_commit_bound_external_artifacts(
     assert validator["eif_hash"] == eif_hash(COMMIT, "validator_weights")
 
 
+def test_release_channel_resolves_both_transition_release_inputs(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    historical_commit = "2" * 40
+    state_root = tmp_path / "state"
+    from_seed_root = tmp_path / "from"
+    durable_seed_root = tmp_path / "durable"
+    for path in (state_root, from_seed_root, durable_seed_root):
+        path.mkdir()
+    current = {"commit_sha": COMMIT, "gateway_roles": {"current": {}}}
+    historical = {
+        "commit_sha": historical_commit,
+        "gateway_roles": {"historical": {}},
+    }
+    (state_root / "release-build-input.json").write_text(
+        json.dumps(current, sort_keys=True),
+        encoding="utf-8",
+    )
+    (durable_seed_root / "release-build-input.json").write_text(
+        json.dumps(current, sort_keys=True),
+        encoding="utf-8",
+    )
+    (from_seed_root / "release-build-input.json").write_text(
+        json.dumps(historical, sort_keys=True),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", state_root)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "FROM_FIXTURE_SEED_ROOT",
+        from_seed_root,
+    )
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "DURABLE_SCHEMA_SEED_ROOT",
+        durable_seed_root,
+    )
+
+    assert (
+        rehearsal_sitecustomize._release_build_input_for_commit(COMMIT)
+        == current
+    )
+    assert (
+        rehearsal_sitecustomize._release_build_input_for_commit(
+            historical_commit
+        )
+        == historical
+    )
+    with pytest.raises(ValueError, match="commit is unavailable"):
+        rehearsal_sitecustomize._release_build_input_for_commit("3" * 40)
+
+    conflicting = {**current, "gateway_roles": {"different": {}}}
+    (durable_seed_root / "release-build-input.json").write_text(
+        json.dumps(conflicting, sort_keys=True),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="inputs conflict"):
+        rehearsal_sitecustomize._release_build_input_for_commit(COMMIT)
+
+
 def test_local_vsock_runs_real_framing_and_rejects_unknown_rpc(
     monkeypatch,
     tmp_path,

@@ -468,12 +468,24 @@ def test_loop_direction_planner_binds_approved_source_to_model_registration():
             }
         ],
         "routerverse_source_incorporation": {
-            "schema_version": "leadpoet.routerverse_source_suggestions.v1",
+            "schema_version": "leadpoet.routerverse_source_suggestions.v2",
             "requests": [
                 {
+                    "schema_version": (
+                        "leadpoet.routerverse_source_incorporation.v2"
+                    ),
                     "provider_id": "community_accounts",
                     "stage": "candidate_acquisition",
                     "manifest_sha256": "a" * 64,
+                    "intent_categories": [],
+                    "best_for": ["icp.structured_eligible"],
+                    "avoid_when": [],
+                    "best_for_description": (
+                        "Approved company-discovery provider for structured ICPs."
+                    ),
+                    "avoid_when_description": (
+                        "Avoid when the runtime binding is unavailable."
+                    ),
                     "registration_symbol": (
                         "sourcing_model/routing/runtime.py::"
                         "SOURCE_ADD_ROUTING_REGISTRATIONS"
@@ -507,6 +519,9 @@ def test_loop_direction_planner_binds_approved_source_to_model_registration():
     ]["requests"][0]["provider_id"] == "community_accounts"
     assert "select source_routing" in content
     assert "exact SourceAddRoutingRegistration" in content
+    assert "best_for_description" in content
+    assert "avoid_when_description" in content
+    assert "intent_categories" in content
     assert "Never register a provider merely because its name appears" in content
 
 
@@ -576,6 +591,9 @@ def test_code_edit_prompt_requires_source_add_registration_not_host_wiring():
     content = messages[-1]["content"]
 
     assert "add the exact SourceAddRoutingRegistration" in content
+    assert "best_for_description" in content
+    assert "avoid_when_description" in content
+    assert "intent_categories" in content
     assert "hard-coded provider branch" in content
     assert "consumer separately binds and activates" in content
 

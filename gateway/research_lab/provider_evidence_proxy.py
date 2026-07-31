@@ -1226,13 +1226,17 @@ class _CapabilityAwareHTTPServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
     def server_close(self) -> None:
-        self.registry_state.stop()
+        registry_state = getattr(self, "registry_state", None)
+        if registry_state is not None:
+            registry_state.stop()
         try:
             super().server_close()
         finally:
             # ThreadingHTTPServer waits for active handlers in server_close;
             # flush only after no request can append another outcome.
-            self.usage_ledger.close()
+            usage_ledger = getattr(self, "usage_ledger", None)
+            if usage_ledger is not None:
+                usage_ledger.close()
 
 
 _HOP_HEADERS = {"connection", "keep-alive", "transfer-encoding", "host", "content-length", "authorization", "x-api-key"}

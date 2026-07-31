@@ -442,7 +442,7 @@
       "symbol": "confirmation_min_delta"
     },
     {
-      "ast_sha256": "sha256:5b51a3d9dee53aafc8fc92e179438d8575d66ca48e55bddd7153031099001aa7",
+      "ast_sha256": "sha256:03b1baa220bc0315d269f417cfd29e133259b7ef040331578ad0c84669e98eb9",
       "path": "gateway/research_lab/provider_capabilities.py",
       "symbol": "EffectiveProviderCapabilities"
     },
@@ -477,7 +477,7 @@
       "symbol": "_source_mention_forms"
     },
     {
-      "ast_sha256": "sha256:f6e1e1036d46613ae6b33e3c85abd628868274333f5dbf05d9620161d9e4c303",
+      "ast_sha256": "sha256:cbc44e36fce78d2181ea1c614a97085d021b353f17953451b05159fab7bf151a",
       "path": "gateway/research_lab/provider_capabilities.py",
       "symbol": "approved_source_router_suggestions"
     },
@@ -487,7 +487,7 @@
       "symbol": "load_effective_provider_capabilities_sync"
     },
     {
-      "ast_sha256": "sha256:5ad2de07650b556eec6c3b9916e609da1e5f8cbcab5a5adf1b2a4ac3f92296de",
+      "ast_sha256": "sha256:d506d9423640e219bf9da130ce682022709b1a1011f3c54a8b177ffca3a63a38",
       "path": "gateway/research_lab/provider_capabilities.py",
       "symbol": "validate_source_add_registration_diff"
     },
@@ -1042,7 +1042,7 @@
       "symbol": "compute_reimbursement_award"
     },
     {
-      "ast_sha256": "sha256:1116b69bf1eb87a266e117690e5b02b2a3093000e017ed72eabeaffaa6793f40",
+      "ast_sha256": "sha256:31e9a3426ec11174e4e166bdaedd3913f08d83ec43d8170d64bfd21a3ecd9b33",
       "path": "research_lab/code_editing.py",
       "symbol": "build_code_edit_auto_research_messages"
     },
@@ -1062,7 +1062,7 @@
       "symbol": "build_code_edit_source_inspection_messages"
     },
     {
-      "ast_sha256": "sha256:6853c7e6994a329caa07df5f3f372fe079781b498389bfe56982246fa3c86c28",
+      "ast_sha256": "sha256:b83900403c7ac2e310802defa9360c9061e80f176908f0670d985463646be881",
       "path": "research_lab/code_editing.py",
       "symbol": "build_loop_direction_planner_messages"
     },
@@ -1312,7 +1312,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:ec0472e5d450cb5a1cdade2d25189f85461422b79c3dd03f1bd89334afae7860",
+  "manifest_hash": "sha256:3162cbb8b49c7c102af1c406a94dc5d56938e5f1185864641b98512511ffc506",
   "protected_source_commit": "c350c43674d5bd470808e542278b5c05bd3f3534",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

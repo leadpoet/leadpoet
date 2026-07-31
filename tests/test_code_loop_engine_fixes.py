@@ -225,7 +225,12 @@ def _source_add_runtime_diff(*, provider_id: str, manifest: str) -> str:
         "        max_calls=1,\n"
         "        max_results=100,\n"
         "        timeout_seconds=60.0,\n"
+        "        intent_categories=(),\n"
         "        evidence_types=('provider_database',),\n"
+        "        best_for=('icp.structured_eligible',),\n"
+        "        avoid_when=(),\n"
+        "        best_for_description='Approved SOURCE_ADD company-discovery provider for structured ICP acquisition.',\n"
+        "        avoid_when_description='Avoid when the consumer binding is unavailable, unhealthy, outside its approved categories, or over budget.',\n"
         "    ),\n"
         ")\n"
     )

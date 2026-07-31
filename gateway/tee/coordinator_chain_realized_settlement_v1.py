@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Mapping, Optional, Sequence, Set
 
 from gateway.research_lab.champion_settlement_v2 import (
@@ -38,6 +39,64 @@ CHAIN_REALIZED_SETTLEMENT_PURPOSE_V1 = (
 
 class CoordinatorChainRealizedSettlementV1Error(RuntimeError):
     """A chain-realized settlement could not be proven inside the coordinator."""
+
+
+def _finalized_authority_summary_v1(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the bounded fields used only to locate one full authority."""
+
+    required = {
+        "bundle_hash",
+        "netuid",
+        "epoch_id",
+        "validator_hotkey",
+        "finalized_block",
+        "finalized_block_hash",
+        "finalization_receipt_hash",
+    }
+    if not isinstance(row, Mapping) or set(row) != required:
+        raise CoordinatorChainRealizedSettlementV1Error(
+            "finalized allocation authority summary fields are invalid"
+        )
+    try:
+        netuid = int(row["netuid"])
+        epoch_id = int(row["epoch_id"])
+        finalized_block = int(row["finalized_block"])
+    except (TypeError, ValueError) as exc:
+        raise CoordinatorChainRealizedSettlementV1Error(
+            "finalized allocation authority summary scope is invalid"
+        ) from exc
+    bundle_hash = str(row["bundle_hash"] or "").lower()
+    finalization_receipt_hash = str(
+        row["finalization_receipt_hash"] or ""
+    ).lower()
+    finalized_block_hash = str(row["finalized_block_hash"] or "").lower()
+    validator_hotkey = str(row["validator_hotkey"] or "")
+    if (
+        isinstance(row["netuid"], bool)
+        or isinstance(row["epoch_id"], bool)
+        or isinstance(row["finalized_block"], bool)
+        or netuid <= 0
+        or epoch_id < 0
+        or finalized_block < 0
+        or not validator_hotkey
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", bundle_hash)
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", finalization_receipt_hash
+        )
+        or not re.fullmatch(r"[0-9a-f]{64}", finalized_block_hash)
+    ):
+        raise CoordinatorChainRealizedSettlementV1Error(
+            "finalized allocation authority summary is invalid"
+        )
+    return {
+        "bundle_hash": bundle_hash,
+        "netuid": netuid,
+        "epoch_id": epoch_id,
+        "validator_hotkey": validator_hotkey,
+        "finalized_block": finalized_block,
+        "finalized_block_hash": finalized_block_hash,
+        "finalization_receipt_hash": finalization_receipt_hash,
+    }
 
 
 def _receipt_by_root(
@@ -83,32 +142,66 @@ class CoordinatorChainRealizedSettlementV1:
             context=context,
             schema_version=CHAIN_WEIGHT_OBSERVATION_REQUEST_SCHEMA_VERSION_V1,
         )
-        rows = self._read(
-            "latest_finalized_allocation_authority",
+        summary_rows = self._read(
+            "latest_finalized_allocation_authority_summaries",
             {"netuid": netuid},
             context,
         )
-        preliminary = [
-            _preliminary_finalized_bundle_authority_v1(row) for row in rows
+        summaries = [
+            _finalized_authority_summary_v1(row) for row in summary_rows
         ]
-        if not preliminary:
+        if not summaries:
             raise CoordinatorChainRealizedSettlementV1Error(
                 "no finalized canonical bundle identifies the primary validator"
             )
-        latest_block = max(int(item["finalized_block"]) for item in preliminary)
+        latest_block = max(int(item["finalized_block"]) for item in summaries)
+        latest = [
+            item
+            for item in summaries
+            if int(item["finalized_block"]) == latest_block
+        ]
         latest_hotkeys = {
             str(item["validator_hotkey"])
-            for item in preliminary
-            if int(item["finalized_block"]) == latest_block
+            for item in latest
         }
         if len(latest_hotkeys) != 1:
             raise CoordinatorChainRealizedSettlementV1Error(
                 "primary validator identity is ambiguous"
             )
+        selected_summary = min(latest, key=lambda item: item["bundle_hash"])
+        authority_rows = self._read(
+            "finalized_allocation_authority_by_bundle_hash",
+            {
+                "netuid": netuid,
+                "bundle_hash": selected_summary["bundle_hash"],
+            },
+            context,
+        )
+        if len(authority_rows) != 1:
+            raise CoordinatorChainRealizedSettlementV1Error(
+                "latest finalized allocation authority is unavailable"
+            )
+        authority = _preliminary_finalized_bundle_authority_v1(
+            authority_rows[0]
+        )
+        for field in (
+            "bundle_hash",
+            "netuid",
+            "epoch_id",
+            "validator_hotkey",
+            "finalized_block",
+            "finalized_block_hash",
+            "finalization_receipt_hash",
+        ):
+            if authority.get(field) != selected_summary[field]:
+                raise CoordinatorChainRealizedSettlementV1Error(
+                    "finalized allocation authority summary differs at %s"
+                    % field
+                )
         chain_state = self._chain_source.read_stateful_epoch_close_weights(
             netuid=netuid,
             epoch_id=epoch_id,
-            validator_hotkey=next(iter(latest_hotkeys)),
+            validator_hotkey=str(authority["validator_hotkey"]),
             context=context,
         )
         observation = {

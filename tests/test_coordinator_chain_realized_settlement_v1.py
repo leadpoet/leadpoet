@@ -81,16 +81,39 @@ def _observation():
     }
 
 
+def _authority_summary(
+    *,
+    bundle_hash=HASH_B,
+    validator_hotkey="validator-hotkey",
+    finalized_block=1_000,
+):
+    return {
+        "bundle_hash": bundle_hash,
+        "netuid": 71,
+        "epoch_id": 100,
+        "validator_hotkey": validator_hotkey,
+        "finalized_block": finalized_block,
+        "finalized_block_hash": "5" * 64,
+        "finalization_receipt_hash": HASH_C,
+    }
+
+
 def test_observation_uses_latest_finalized_primary_identity(monkeypatch):
+    old_summary = _authority_summary(
+        bundle_hash=HASH_A,
+        validator_hotkey="old",
+        finalized_block=900,
+    )
+    latest_summary = _authority_summary()
     reader = _Reader(
         {
-            "latest_finalized_allocation_authority": [
-                {"validator_hotkey": "old", "finalized_block": 900},
-                {
-                    "validator_hotkey": "validator-hotkey",
-                    "finalized_block": 1_000,
-                },
-            ]
+            "latest_finalized_allocation_authority_summaries": [
+                latest_summary,
+                old_summary,
+            ],
+            "finalized_allocation_authority_by_bundle_hash": [
+                {**latest_summary, "full": True}
+            ],
         }
     )
     chain = _Chain(_chain_state())
@@ -118,16 +141,26 @@ def test_observation_uses_latest_finalized_primary_identity(monkeypatch):
     assert observed == _observation()
     assert chain.calls[0]["validator_hotkey"] == "validator-hotkey"
     assert reader.calls[0]["policy_id"] == (
-        "latest_finalized_allocation_authority"
+        "latest_finalized_allocation_authority_summaries"
     )
+    assert reader.calls[1]["policy_id"] == (
+        "finalized_allocation_authority_by_bundle_hash"
+    )
+    assert reader.calls[1]["parameters"] == {
+        "netuid": 71,
+        "bundle_hash": HASH_B,
+    }
 
 
 def test_observation_rejects_ambiguous_latest_primary_identity(monkeypatch):
     reader = _Reader(
         {
-            "latest_finalized_allocation_authority": [
-                {"validator_hotkey": "first", "finalized_block": 1_000},
-                {"validator_hotkey": "second", "finalized_block": 1_000},
+            "latest_finalized_allocation_authority_summaries": [
+                _authority_summary(validator_hotkey="first"),
+                _authority_summary(
+                    bundle_hash=HASH_A,
+                    validator_hotkey="second",
+                ),
             ]
         }
     )
@@ -136,14 +169,85 @@ def test_observation_rejects_ambiguous_latest_primary_identity(monkeypatch):
         "_preliminary_finalized_bundle_authority_v1",
         lambda row: dict(row),
     )
+    chain = _Chain(_chain_state())
     source = authority.CoordinatorChainRealizedSettlementV1(
         reader=reader,
-        chain_source=_Chain(_chain_state()),
+        chain_source=chain,
     )
 
     with pytest.raises(
         authority.CoordinatorChainRealizedSettlementV1Error,
         match="identity is ambiguous",
+    ):
+        source.observe(
+            payload={
+                "schema_version": (
+                    authority.CHAIN_WEIGHT_OBSERVATION_REQUEST_SCHEMA_VERSION_V1
+                ),
+                "netuid": 71,
+                "epoch_id": 101,
+            },
+            context=_context(),
+        )
+
+
+def test_observation_rejects_full_authority_that_differs_from_summary(
+    monkeypatch,
+):
+    summary = _authority_summary()
+    reader = _Reader(
+        {
+            "latest_finalized_allocation_authority_summaries": [summary],
+            "finalized_allocation_authority_by_bundle_hash": [
+                {**summary, "full": True}
+            ],
+        }
+    )
+    monkeypatch.setattr(
+        authority,
+        "_preliminary_finalized_bundle_authority_v1",
+        lambda row: {**dict(row), "validator_hotkey": "substituted"},
+    )
+    chain = _Chain(_chain_state())
+    source = authority.CoordinatorChainRealizedSettlementV1(
+        reader=reader,
+        chain_source=chain,
+    )
+
+    with pytest.raises(
+        authority.CoordinatorChainRealizedSettlementV1Error,
+        match="summary differs at validator_hotkey",
+    ):
+        source.observe(
+            payload={
+                "schema_version": (
+                    authority.CHAIN_WEIGHT_OBSERVATION_REQUEST_SCHEMA_VERSION_V1
+                ),
+                "netuid": 71,
+                "epoch_id": 101,
+            },
+            context=_context(),
+        )
+    assert chain.calls == []
+
+
+def test_observation_rejects_malformed_authority_summary():
+    malformed = _authority_summary()
+    malformed["bundle_hash"] = HASH_B + "&select=secret"
+    source = authority.CoordinatorChainRealizedSettlementV1(
+        reader=_Reader(
+            {
+                "latest_finalized_allocation_authority_summaries": [
+                    malformed
+                ]
+            }
+        ),
+        chain_source=_Chain(_chain_state()),
+    )
+
+    with pytest.raises(
+        authority.CoordinatorChainRealizedSettlementV1Error,
+        match="summary is invalid",
     ):
         source.observe(
             payload={

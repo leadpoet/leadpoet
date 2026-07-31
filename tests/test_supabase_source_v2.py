@@ -601,6 +601,56 @@ def test_finalized_chain_vector_query_rejects_noncanonical_parameters(
     assert provider.requests == []
 
 
+def test_latest_finalized_authority_reads_bounded_summaries_then_one_exact_row():
+    provider = FakeProvider([{"rows": []}])
+    _read(
+        provider,
+        policy_id="latest_finalized_allocation_authority_summaries",
+        parameters={"netuid": 71},
+    )
+    summary_query = dict(
+        parse_qsl(urlsplit(provider.requests[0]["url"]).query)
+    )
+    assert summary_query == {
+        "select": (
+            "bundle_hash,netuid,epoch_id,validator_hotkey,finalized_block,"
+            "finalized_block_hash,finalization_receipt_hash"
+        ),
+        "netuid": "eq.71",
+        "order": "finalized_block.desc,bundle_hash.asc",
+        "limit": "2",
+    }
+    assert "bundle_doc" not in summary_query["select"]
+    assert "finalization_doc" not in summary_query["select"]
+
+    provider = FakeProvider([{"rows": []}])
+    _read(
+        provider,
+        policy_id="finalized_allocation_authority_by_bundle_hash",
+        parameters={"netuid": 71, "bundle_hash": HASH},
+    )
+    full_query = dict(parse_qsl(urlsplit(provider.requests[0]["url"]).query))
+    assert full_query["netuid"] == "eq.71"
+    assert full_query["bundle_hash"] == "eq." + HASH
+    assert full_query["limit"] == "1"
+    assert "bundle_doc" in full_query["select"].split(",")
+    assert "finalization_doc" in full_query["select"].split(",")
+
+
+def test_exact_finalized_authority_query_rejects_bundle_hash_injection():
+    provider = FakeProvider([{"rows": []}])
+    with pytest.raises(SupabaseSourceV2Error, match="bundle_hash"):
+        _read(
+            provider,
+            policy_id="finalized_allocation_authority_by_bundle_hash",
+            parameters={
+                "netuid": 71,
+                "bundle_hash": HASH + "&select=secret",
+            },
+        )
+    assert provider.requests == []
+
+
 @pytest.mark.parametrize(
     ("policy_id", "parameter_name"),
     (

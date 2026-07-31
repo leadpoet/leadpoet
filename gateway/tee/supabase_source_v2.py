@@ -409,8 +409,20 @@ QUERY_POLICIES = {
         page_size=2,
         order="epoch_id.asc,validator_hotkey.asc",
     ),
-    "latest_finalized_allocation_authority": SupabaseQueryV2(
-        policy_id="latest_finalized_allocation_authority",
+    "latest_finalized_allocation_authority_summaries": SupabaseQueryV2(
+        policy_id="latest_finalized_allocation_authority_summaries",
+        table="research_lab_finalized_allocation_epochs_v2",
+        select=(
+            "bundle_hash,netuid,epoch_id,validator_hotkey,finalized_block,"
+            "finalized_block_hash,finalization_receipt_hash"
+        ),
+        parameter_names=("netuid",),
+        max_pages=1,
+        order="finalized_block.desc,bundle_hash.asc",
+        limit=2,
+    ),
+    "finalized_allocation_authority_by_bundle_hash": SupabaseQueryV2(
+        policy_id="finalized_allocation_authority_by_bundle_hash",
         table="research_lab_finalized_allocation_epochs_v2",
         select=(
             "bundle_hash,schema_version,netuid,epoch_id,block,validator_hotkey,"
@@ -421,10 +433,9 @@ QUERY_POLICIES = {
             "extrinsic_authorization_hash,extrinsic_hash,finalized_block,"
             "finalized_block_hash,state_transition_hash,finalization_doc"
         ),
-        parameter_names=("netuid",),
+        parameter_names=("netuid", "bundle_hash"),
         max_pages=1,
-        order="finalized_block.desc,bundle_hash.asc",
-        limit=2,
+        limit=1,
     ),
     "finalized_authority_by_chain_vector": SupabaseQueryV2(
         policy_id="finalized_authority_by_chain_vector",
@@ -609,6 +620,13 @@ def _identifier(value: Any, field: str) -> str:
 def _raw_hash(value: Any, field: str) -> str:
     normalized = str(value or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", normalized):
+        raise SupabaseSourceV2Error("%s is invalid" % field)
+    return normalized
+
+
+def _content_hash(value: Any, field: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", normalized):
         raise SupabaseSourceV2Error("%s is invalid" % field)
     return normalized
 
@@ -905,12 +923,25 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
             ("epoch_id", "gte.%d" % start_epoch),
             ("epoch_id", "lte.%d" % end_epoch),
         )
-    if policy.policy_id == "latest_finalized_allocation_authority":
+    if policy.policy_id == "latest_finalized_allocation_authority_summaries":
         return (
             (
                 "netuid",
                 "eq.%d"
                 % _non_negative_int(parameters["netuid"], "netuid"),
+            ),
+        )
+    if policy.policy_id == "finalized_allocation_authority_by_bundle_hash":
+        return (
+            (
+                "netuid",
+                "eq.%d"
+                % _non_negative_int(parameters["netuid"], "netuid"),
+            ),
+            (
+                "bundle_hash",
+                "eq.%s"
+                % _content_hash(parameters["bundle_hash"], "bundle_hash"),
             ),
         )
     if policy.policy_id == "chain_realized_settlement_activation":

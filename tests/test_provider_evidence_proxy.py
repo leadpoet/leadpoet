@@ -27,6 +27,24 @@ from research_lab.eval.provider_evidence_cache import canonical_request_fingerpr
 
 
 class TestRegistryValidation:
+    def test_server_close_preserves_bind_failure_before_runtime_state_exists(
+        self,
+        monkeypatch,
+    ):
+        def fail_bind(_server):
+            raise PermissionError("bind denied")
+
+        monkeypatch.setattr(
+            proxy_module._CapabilityAwareHTTPServer,
+            "server_bind",
+            fail_bind,
+        )
+        with pytest.raises(PermissionError, match="bind denied"):
+            proxy_module._CapabilityAwareHTTPServer(
+                ("127.0.0.1", 0),
+                proxy_module._ProxyHandler,
+            )
+
     def test_seed_registry_is_valid_and_covers_legacy_providers(self):
         entries = seed_provider_registry()
         assert validate_provider_registry_entries(entries) == []

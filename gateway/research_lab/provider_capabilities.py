@@ -64,6 +64,7 @@ _CREDENTIAL_NAME_RE = re.compile(r"\b(?:api[_-]?key|access[_-]?token|credential|
 _URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
 _ENV_REF_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _SOURCE_ADD_MANIFEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_ROUTING_FEATURE_RE = re.compile(r"^[a-z][a-z0-9_.:-]{1,95}$")
 _SOURCE_ADD_RUNTIME_PATH = "sourcing_model/routing/runtime.py"
 _SOURCE_ADD_REGISTRATION_FIELDS = (
     "provider_id",
@@ -79,6 +80,21 @@ _SOURCE_ADD_REGISTRATION_FIELDS = (
     "max_results",
     "timeout_seconds",
     "evidence_types",
+    "best_for",
+    "avoid_when",
+    "best_for_description",
+    "avoid_when_description",
+)
+_SOURCE_ADD_LEGACY_REGISTRATION_FIELDS = tuple(
+    field
+    for field in _SOURCE_ADD_REGISTRATION_FIELDS
+    if field
+    not in {
+        "best_for",
+        "avoid_when",
+        "best_for_description",
+        "avoid_when_description",
+    }
 )
 _COMPANY_DISCOVERY_PATTERNS = (
     re.compile(r"\b(?:company|candidate|account)\s+(?:discovery|sourcing|acquisition)\b"),
@@ -297,6 +313,30 @@ class EffectiveProviderCapabilities:
                 "endpoint_families": list(planner.get("endpoint_families") or [])[:40],
                 "model_policy": str(planner.get("model_policy") or "")[:500],
                 "probe_metadata": list(planner.get("probe_metadata") or [])[:40],
+                "best_for": str(planner.get("best_for") or "")[:500],
+                "avoid_when": str(planner.get("avoid_when") or "")[:500],
+                "best_for_features": [
+                    str(item)
+                    for item in (
+                        planner.get("best_for_features")
+                        if isinstance(
+                            planner.get("best_for_features"), (list, tuple)
+                        )
+                        else ()
+                    )
+                    if _ROUTING_FEATURE_RE.fullmatch(str(item))
+                ][:16],
+                "avoid_when_features": [
+                    str(item)
+                    for item in (
+                        planner.get("avoid_when_features")
+                        if isinstance(
+                            planner.get("avoid_when_features"), (list, tuple)
+                        )
+                        else ()
+                    )
+                    if _ROUTING_FEATURE_RE.fullmatch(str(item))
+                ][:16],
             }
             provider_id = str(provider.get("id") or "")
             if provider_id in live_ids:
@@ -408,7 +448,7 @@ def approved_source_router_suggestions(
         providers_mentioned = directly_named
     elif len(providers_mentioned) > 1:
         return {
-            "schema_version": "leadpoet.routerverse_source_suggestions.v1",
+            "schema_version": "leadpoet.routerverse_source_suggestions.v2",
             "requests": [],
             "clarifications": [
                 {
@@ -433,6 +473,24 @@ def approved_source_router_suggestions(
             if isinstance(provider.get("planner_summary"), Mapping)
             else {}
         )
+        best_for = [
+            str(item).strip()
+            for item in (
+                planner.get("best_for_features")
+                if isinstance(planner.get("best_for_features"), (list, tuple))
+                else ()
+            )
+            if _ROUTING_FEATURE_RE.fullmatch(str(item).strip())
+        ][:16]
+        avoid_when = [
+            str(item).strip()
+            for item in (
+                planner.get("avoid_when_features")
+                if isinstance(planner.get("avoid_when_features"), (list, tuple))
+                else ()
+            )
+            if _ROUTING_FEATURE_RE.fullmatch(str(item).strip())
+        ][:16]
         provider_alias = str(
             planner.get("provider_alias") or provider_id
         )[:80]
@@ -463,7 +521,7 @@ def approved_source_router_suggestions(
             requests.append(
                 {
                     "schema_version": (
-                        "leadpoet.routerverse_source_incorporation.v1"
+                        "leadpoet.routerverse_source_incorporation.v2"
                     ),
                     "provider_id": provider_id,
                     "provider_alias": provider_alias,
@@ -503,11 +561,36 @@ def approved_source_router_suggestions(
                         if candidate_stage
                         else ["external"]
                     ),
+                    "best_for": (
+                        best_for
+                        or (
+                            ["icp.structured_eligible"]
+                            if candidate_stage
+                            else ["intent.general"]
+                        )
+                    ),
+                    "avoid_when": avoid_when,
+                    "best_for_description": str(
+                        planner.get("best_for")
+                        or (
+                            "Approved SOURCE_ADD company-discovery provider "
+                            "for structured ICP acquisition."
+                            if candidate_stage
+                            else "Approved SOURCE_ADD provider for "
+                            "company-scoped intent-evidence discovery."
+                        )
+                    )[:500],
+                    "avoid_when_description": str(
+                        planner.get("avoid_when")
+                        or "Avoid when the consumer binding is unavailable, "
+                        "unhealthy, outside its approved categories, or over "
+                        "budget."
+                    )[:500],
                     "runtime_binding_id": provider_id,
                 }
             )
     return {
-        "schema_version": "leadpoet.routerverse_source_suggestions.v1",
+        "schema_version": "leadpoet.routerverse_source_suggestions.v2",
         "requests": requests,
         "clarifications": clarifications,
         "rules": {
@@ -558,7 +641,7 @@ def validate_source_add_registration_diff(
             or revision != f"source-add-{manifest[:12]}"
         ):
             raise ValueError("registration revision is not manifest-bound")
-        for name in ("capabilities", "evidence_types"):
+        for name in ("capabilities", "evidence_types", "best_for"):
             field_value = normalized.get(name)
             if (
                 not isinstance(field_value, (list, tuple))
@@ -570,6 +653,32 @@ def validate_source_add_registration_diff(
             ):
                 raise ValueError(f"{name} must be a literal sequence")
             normalized[name] = tuple(field_value)
+        avoid_when = normalized.get("avoid_when")
+        if (
+            not isinstance(avoid_when, (list, tuple))
+            or any(
+                not isinstance(item, str)
+                or not _ROUTING_FEATURE_RE.fullmatch(item)
+                for item in avoid_when
+            )
+        ):
+            raise ValueError("avoid_when must be a literal feature sequence")
+        normalized["avoid_when"] = tuple(avoid_when)
+        for name in ("best_for",):
+            if any(
+                not _ROUTING_FEATURE_RE.fullmatch(item)
+                for item in normalized[name]
+            ):
+                raise ValueError(f"{name} contains an invalid routing feature")
+        for name in ("best_for_description", "avoid_when_description"):
+            field_value = normalized.get(name)
+            if (
+                not isinstance(field_value, str)
+                or not field_value.strip()
+                or len(field_value) > 500
+            ):
+                raise ValueError(f"{name} must contain 1-500 characters")
+            normalized[name] = " ".join(field_value.split())
         for name in ("priority", "max_calls", "max_results"):
             field_value = normalized.get(name)
             if isinstance(field_value, bool) or not isinstance(field_value, int):
@@ -629,7 +738,7 @@ def validate_source_add_registration_diff(
         )
         if (
             request.get("schema_version")
-            != "leadpoet.routerverse_source_incorporation.v1"
+            != "leadpoet.routerverse_source_incorporation.v2"
             or request.get("registration_symbol")
             != (
                 "sourcing_model/routing/runtime.py::"
@@ -650,15 +759,22 @@ def validate_source_add_registration_diff(
             }
         )
 
-    def registration_from_call(node: ast.Call) -> dict[str, Any]:
+    def registration_from_call(
+        node: ast.Call,
+    ) -> tuple[dict[str, Any], bool]:
         if function_name(node) != "SourceAddRoutingRegistration":
             raise ValueError("registry contains a non-registration value")
         if node.args or any(keyword.arg is None for keyword in node.keywords):
             raise ValueError("registration must use explicit keyword literals")
         keyword_names = [str(keyword.arg) for keyword in node.keywords]
+        keyword_set = set(keyword_names)
         if (
             len(keyword_names) != len(set(keyword_names))
-            or set(keyword_names) != set(_SOURCE_ADD_REGISTRATION_FIELDS)
+            or keyword_set
+            not in (
+                set(_SOURCE_ADD_REGISTRATION_FIELDS),
+                set(_SOURCE_ADD_LEGACY_REGISTRATION_FIELDS),
+            )
         ):
             raise ValueError("registration fields differ from the contract")
         values: dict[str, Any] = {}
@@ -669,9 +785,41 @@ def validate_source_add_registration_diff(
                 raise ValueError(
                     "registration fields must be literal"
                 ) from exc
-        return normalize_registration(values)
+        legacy_guidance = keyword_set == set(
+            _SOURCE_ADD_LEGACY_REGISTRATION_FIELDS
+        )
+        if legacy_guidance:
+            stage = values.get("stage")
+            values.update(
+                {
+                    "best_for": (
+                        ("icp.structured_eligible",)
+                        if stage == "candidate_acquisition"
+                        else ("intent.general",)
+                    ),
+                    "avoid_when": (),
+                    "best_for_description": (
+                        "Approved SOURCE_ADD company-discovery provider for "
+                        "structured ICP acquisition."
+                        if stage == "candidate_acquisition"
+                        else "Approved SOURCE_ADD provider for company-scoped "
+                        "intent-evidence discovery."
+                    ),
+                    "avoid_when_description": (
+                        "Avoid when the consumer binding is unavailable, "
+                        "unhealthy, outside its approved categories, or over "
+                        "budget."
+                    ),
+                }
+            )
+        return normalize_registration(values), legacy_guidance
 
-    def registrations_from_source(source: str) -> dict[tuple[str, str], dict[str, Any]]:
+    def registrations_from_source(
+        source: str,
+    ) -> tuple[
+        dict[tuple[str, str], dict[str, Any]],
+        set[tuple[str, str]],
+    ]:
         tree = ast.parse(source)
         assignments: list[ast.AST] = []
         for node in tree.body:
@@ -701,10 +849,11 @@ def validate_source_add_registration_diff(
         if len(registration_calls) != len(elements):
             raise ValueError("registration constructor exists outside the registry")
         registrations: dict[tuple[str, str], dict[str, Any]] = {}
+        legacy_guidance_keys: set[tuple[str, str]] = set()
         for element in elements:
             if not isinstance(element, ast.Call):
                 raise ValueError("registry contains a dynamic value")
-            registration = registration_from_call(element)
+            registration, legacy_guidance = registration_from_call(element)
             key = (
                 str(registration.get("provider_id") or ""),
                 str(registration.get("stage") or ""),
@@ -716,7 +865,9 @@ def validate_source_add_registration_diff(
             ):
                 raise ValueError("registration identity is invalid or duplicated")
             registrations[key] = registration
-        return registrations
+            if legacy_guidance:
+                legacy_guidance_keys.add(key)
+        return registrations, legacy_guidance_keys
 
     def diff_sections(diff_text: str) -> list[tuple[str, str, str]]:
         sections: list[tuple[str, str, str]] = []
@@ -836,7 +987,9 @@ def validate_source_add_registration_diff(
         errors.append("source_add_registration_source_unavailable")
         return sorted(set(errors))
     try:
-        existing = registrations_from_source(existing_runtime_source)
+        existing, existing_legacy_guidance = registrations_from_source(
+            existing_runtime_source
+        )
     except (SyntaxError, ValueError):
         errors.append("source_add_registration_existing_source_invalid")
         return sorted(set(errors))
@@ -855,8 +1008,18 @@ def validate_source_add_registration_diff(
             errors.append("source_add_registration_runtime_diff_unapplicable")
             return sorted(set(errors))
     try:
-        observed = registrations_from_source(patched_source)
+        observed, observed_legacy_guidance = registrations_from_source(
+            patched_source
+        )
     except (SyntaxError, ValueError):
+        errors.append("source_add_registration_patched_source_invalid")
+        return sorted(set(errors))
+    if any(
+        key not in existing
+        or key not in existing_legacy_guidance
+        or observed.get(key) != existing.get(key)
+        for key in observed_legacy_guidance
+    ):
         errors.append("source_add_registration_patched_source_invalid")
         return sorted(set(errors))
 

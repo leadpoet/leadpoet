@@ -35,6 +35,7 @@ BEHAVIOR_SCENARIOS = (
     "git-tree-replacement",
     "historical-metagraph-layouts",
     "receipt-graph-aggregate-pagination",
+    "receipt-graph-transport-deduplication",
     "research-lab-allocation-conservation",
 )
 
@@ -56,6 +57,7 @@ BEHAVIORAL_INVARIANTS = (
     "git_tree_replacement_deterministic",
     "historical_metagraph_layouts_policy_bound",
     "receipt_graph_aggregate_evidence_paged",
+    "receipt_graph_transport_deduplicated_and_verified",
     "research_lab_allocation_policy_config_bound",
     "research_lab_allocation_conserved",
     "canonical_vector_primary_auditor_equal",

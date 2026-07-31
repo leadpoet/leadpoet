@@ -10,12 +10,15 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from gateway.tee.execution_job_manager_v2 import (
     JOB_SCHEMA_VERSION,
+    PARENT_RECEIPT_GRAPH_SET_FIELD,
     PARENT_RECEIPT_GRAPHS_FIELD,
     ExecutionContextV2,
     ExecutionJobManagerV2,
     ExecutionJobV2Error,
     ExecutionResultV2,
     TransitionSpecV2,
+    pack_parent_receipt_graph_set_v2,
+    unpack_parent_receipt_graph_set_v2,
 )
 from gateway.tee import execution_job_manager_v2 as job_manager_v2
 from gateway.tee.host_operation_channel_v2 import HostOperationChannelV2
@@ -208,6 +211,115 @@ def _run(manager, payload, manifest=None):
             return status
         time.sleep(0.01)
     raise AssertionError("V2 job did not terminate")
+
+
+def test_parent_receipt_graph_set_preserves_membership_and_deduplicates():
+    boot = {"boot_identity_hash": HASH, "marker": "shared-boot"}
+    shared_receipt = {"receipt_hash": HASH, "marker": "shared-receipt"}
+    child_a = {"receipt_hash": "sha256:" + "1" * 64, "marker": "a"}
+    child_b = {"receipt_hash": "sha256:" + "2" * 64, "marker": "b"}
+    graphs = [
+        {
+            "schema_version": "leadpoet.attested_receipt_graph.v2",
+            "root_receipt_hash": child_a["receipt_hash"],
+            "boot_identities": [boot],
+            "receipts": [shared_receipt, child_a],
+            "transport_attempts": [],
+            "host_operations": [],
+        },
+        {
+            "schema_version": "leadpoet.attested_receipt_graph.v2",
+            "root_receipt_hash": child_b["receipt_hash"],
+            "boot_identities": [boot],
+            "receipts": [shared_receipt, child_b],
+            "transport_attempts": [],
+            "host_operations": [],
+        },
+    ]
+
+    packed = pack_parent_receipt_graph_set_v2(graphs)
+
+    assert len(packed["boot_identities"]) == 1
+    assert len(packed["receipts"]) == 3
+    assert unpack_parent_receipt_graph_set_v2(packed) == graphs
+
+
+def test_parent_receipt_graph_set_rejects_conflicts_and_unreferenced_evidence():
+    graph = {
+        "schema_version": "leadpoet.attested_receipt_graph.v2",
+        "root_receipt_hash": HASH,
+        "boot_identities": [],
+        "receipts": [{"receipt_hash": HASH, "marker": "first"}],
+        "transport_attempts": [],
+        "host_operations": [],
+    }
+    conflicting = {
+        **graph,
+        "root_receipt_hash": HASH_B,
+        "receipts": [{"receipt_hash": HASH, "marker": "second"}],
+    }
+    with pytest.raises(ExecutionJobV2Error, match="conflicts for hash"):
+        pack_parent_receipt_graph_set_v2((graph, conflicting))
+
+    packed = pack_parent_receipt_graph_set_v2((graph,))
+    packed["receipts"].append(
+        {"receipt_hash": HASH_B, "marker": "unreferenced"}
+    )
+    with pytest.raises(ExecutionJobV2Error, match="unreferenced evidence"):
+        unpack_parent_receipt_graph_set_v2(packed)
+
+
+def test_parent_receipt_graph_set_rejects_missing_and_unknown_evidence():
+    graph = {
+        "schema_version": "leadpoet.attested_receipt_graph.v2",
+        "root_receipt_hash": HASH,
+        "boot_identities": [],
+        "receipts": [{"receipt_hash": HASH}],
+        "transport_attempts": [],
+        "host_operations": [],
+    }
+    missing = pack_parent_receipt_graph_set_v2((graph,))
+    missing["graphs"][0]["receipt_hashes"] = [HASH_B]
+    with pytest.raises(ExecutionJobV2Error, match="reference is missing"):
+        unpack_parent_receipt_graph_set_v2(missing)
+
+    unknown = pack_parent_receipt_graph_set_v2((graph,))
+    unknown["unexpected"] = True
+    with pytest.raises(ExecutionJobV2Error, match="fields are invalid"):
+        unpack_parent_receipt_graph_set_v2(unknown)
+
+
+def test_job_rejects_multiple_parent_graph_encodings_before_execution():
+    executed = []
+    manager, _ = _manager(lambda *_args: executed.append(True) or {})
+    graph = {
+        "schema_version": "leadpoet.attested_receipt_graph.v2",
+        "root_receipt_hash": HASH,
+        "boot_identities": [],
+        "receipts": [{"receipt_hash": HASH}],
+        "transport_attempts": [],
+        "host_operations": [],
+    }
+    payload = json.dumps(
+        {
+            "input": 3,
+            PARENT_RECEIPT_GRAPHS_FIELD: [graph],
+            PARENT_RECEIPT_GRAPH_SET_FIELD: pack_parent_receipt_graph_set_v2(
+                (graph,)
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    status = _run(
+        manager,
+        payload,
+        _manifest(payload, parent_receipt_hashes=[HASH]),
+    )
+
+    assert status["state"] == "failed"
+    assert executed == []
 
 
 def test_large_input_exception_is_scoped_to_allocation_ancestry_consumers():
@@ -637,6 +749,29 @@ def test_nested_receipt_graph_is_bound_to_root_and_retained_for_graph_merge():
     )
     assert manager.external_receipt_graphs("score-job-1") == (nested_graph,)
     assert manager.status("score-job-1")["external_receipt_graph_count"] == 1
+
+    graph_set_manager, _ = _manager(_executor)
+    graph_set_payload = json.dumps(
+        {
+            "input": 3,
+            PARENT_RECEIPT_GRAPH_SET_FIELD: pack_parent_receipt_graph_set_v2(
+                (nested_graph,)
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    graph_set_manifest = _manifest(
+        graph_set_payload,
+        parent_receipt_hashes=[nested_receipt["receipt_hash"]],
+    )
+    assert (
+        _run(graph_set_manager, graph_set_payload, graph_set_manifest)["state"]
+        == "succeeded"
+    )
+    assert graph_set_manager.external_receipt_graphs("score-job-1") == (
+        nested_graph,
+    )
 
 
 def test_nested_graph_covers_multiple_declared_parent_receipts():

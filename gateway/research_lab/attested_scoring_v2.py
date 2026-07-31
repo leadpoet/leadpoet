@@ -22,7 +22,10 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from gateway.tee.execution_job_manager_v2 import (
     JOB_SCHEMA_VERSION,
+    MAX_INPUT_BYTES,
+    PARENT_RECEIPT_GRAPH_SET_FIELD,
     PARENT_RECEIPT_GRAPHS_FIELD,
+    pack_parent_receipt_graph_set_v2,
 )
 from gateway.tee.release_manifest_v2 import (
     role_expectation,
@@ -114,46 +117,135 @@ def _compact_parent_graphs_for_transport(
     if len(set(roots)) != len(roots):
         raise AttestedScoringV2Error("parent receipt graph is duplicated")
 
-    receipt_sets = []
+    declared_roots = set(roots)
+    root_coverage = []
     for graph in normalized:
         receipts = graph.get("receipts")
         if not isinstance(receipts, list):
             raise AttestedScoringV2Error("parent graph receipts are invalid")
-        receipt_hashes = {
-            str(receipt.get("receipt_hash") or "")
-            for receipt in receipts
-            if isinstance(receipt, Mapping)
-        }
-        if len(receipt_hashes) != len(receipts) or any(
-            not _HASH_RE.fullmatch(receipt_hash)
-            for receipt_hash in receipt_hashes
-        ):
-            raise AttestedScoringV2Error("parent graph receipt hashes are invalid")
-        receipt_sets.append(receipt_hashes)
+        seen: set[str] = set()
+        covered: set[str] = set()
+        for receipt in receipts:
+            if not isinstance(receipt, Mapping):
+                raise AttestedScoringV2Error(
+                    "parent graph receipt hashes are invalid"
+                )
+            receipt_hash = str(receipt.get("receipt_hash") or "")
+            if not _HASH_RE.fullmatch(receipt_hash) or receipt_hash in seen:
+                raise AttestedScoringV2Error(
+                    "parent graph receipt hashes are invalid"
+                )
+            seen.add(receipt_hash)
+            if receipt_hash in declared_roots:
+                covered.add(receipt_hash)
+        root_coverage.append(covered)
 
     retained = [
         graph
         for index, graph in enumerate(normalized)
         if not any(
-            roots[index] in receipt_hashes
-            for other, receipt_hashes in enumerate(receipt_sets)
+            roots[index] in covered_roots
+            for other, covered_roots in enumerate(root_coverage)
             if other != index
         )
     ]
-    retained_receipts = {
-        receipt_hash
-        for graph in retained
-        for receipt_hash in {
-            str(receipt.get("receipt_hash") or "")
-            for receipt in graph["receipts"]
-            if isinstance(receipt, Mapping)
-        }
+    retained_indexes = {
+        id(graph) for graph in retained
     }
-    if not set(roots).issubset(retained_receipts):
+    retained_root_coverage = set().union(
+        *(
+            root_coverage[index]
+            for index, graph in enumerate(normalized)
+            if id(graph) in retained_indexes
+        )
+    )
+    if not declared_roots.issubset(retained_root_coverage):
         raise AttestedScoringV2Error(
             "compacted parent graphs do not cover declared ancestry"
         )
     return retained
+
+
+def _canonical_array_document_size(
+    document: Mapping[str, Any],
+    *,
+    field: str,
+    values: Sequence[Mapping[str, Any]],
+) -> int:
+    """Return exact canonical size without joining a repeated large array."""
+
+    empty_document = dict(document)
+    empty_document[field] = []
+    return (
+        len(_canonical_bytes(empty_document))
+        + sum(len(_canonical_bytes(dict(value))) for value in values)
+        + max(0, len(values) - 1)
+    )
+
+
+def _build_transport_payload_document(
+    *,
+    payload: Mapping[str, Any],
+    parent_graphs: Sequence[Mapping[str, Any]],
+    provider_credential_profile: str = "default",
+    provider_credential_ref_hashes: Optional[Mapping[str, str]] = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Choose the exact or deduplicated graph encoding at the size boundary."""
+
+    document = dict(payload)
+    if provider_credential_profile != "default":
+        document["_v2_provider_credential_profile"] = str(
+            provider_credential_profile
+        )
+    credential_refs = dict(provider_credential_ref_hashes or {})
+    if credential_refs:
+        document["_v2_provider_credential_ref_hashes"] = dict(
+            sorted(credential_refs.items())
+        )
+
+    legacy_size = (
+        _canonical_array_document_size(
+            document,
+            field=PARENT_RECEIPT_GRAPHS_FIELD,
+            values=parent_graphs,
+        )
+        if parent_graphs
+        else len(_canonical_bytes(document))
+    )
+    metadata = {
+        "encoding": "receipt_graphs",
+        "legacy_size_bytes": legacy_size,
+        "transport_size_bytes": legacy_size,
+        "parent_graph_count": len(parent_graphs),
+    }
+    if not parent_graphs or legacy_size <= MAX_INPUT_BYTES:
+        if parent_graphs:
+            document[PARENT_RECEIPT_GRAPHS_FIELD] = [
+                dict(graph) for graph in parent_graphs
+            ]
+        return document, metadata
+
+    graph_set = pack_parent_receipt_graph_set_v2(parent_graphs)
+    graph_set_document = dict(document)
+    graph_set_document.pop(PARENT_RECEIPT_GRAPHS_FIELD, None)
+    graph_set_document[PARENT_RECEIPT_GRAPH_SET_FIELD] = graph_set
+    graph_set_size = len(_canonical_bytes(graph_set_document))
+    if graph_set_size >= legacy_size:
+        document[PARENT_RECEIPT_GRAPHS_FIELD] = [
+            dict(graph) for graph in parent_graphs
+        ]
+        return document, metadata
+    return graph_set_document, {
+        **metadata,
+        "encoding": "receipt_graph_set",
+        "transport_size_bytes": graph_set_size,
+        "unique_boot_identity_count": len(graph_set["boot_identities"]),
+        "unique_receipt_count": len(graph_set["receipts"]),
+        "unique_transport_attempt_count": len(
+            graph_set["transport_attempts"]
+        ),
+        "unique_host_operation_count": len(graph_set["host_operations"]),
+    }
 
 
 def _load_release(path: Path) -> Dict[str, Any]:
@@ -520,6 +612,7 @@ async def execute_scoring_v2(
         "_v2_provider_credential_ref_hashes" in payload
         or "_v2_provider_credential_profile" in payload
         or PARENT_RECEIPT_GRAPHS_FIELD in payload
+        or PARENT_RECEIPT_GRAPH_SET_FIELD in payload
     ):
         raise AttestedScoringV2Error("payload uses a reserved V2 authority field")
     artifact_hashes = sorted(
@@ -536,27 +629,44 @@ async def execute_scoring_v2(
     }
     if any(not _HASH_RE.fullmatch(item) for item in allowed_failed):
         raise AttestedScoringV2Error("allowed failed parent receipt is invalid")
-    parent_graph_receipt_hashes = {
-        str(item.get("receipt_hash") or "")
-        for graph in parent_graphs
-        for item in graph.get("receipts") or ()
-        if isinstance(item, Mapping)
-    }
-    if not allowed_failed.issubset(parent_graph_receipt_hashes):
+    missing_allowed_failed = set(allowed_failed)
+    for graph in parent_graphs:
+        for item in graph.get("receipts") or ():
+            if isinstance(item, Mapping):
+                missing_allowed_failed.discard(
+                    str(item.get("receipt_hash") or "")
+                )
+        if not missing_allowed_failed:
+            break
+    if missing_allowed_failed:
         raise AttestedScoringV2Error(
             "allowed failed receipts must be present in parent graphs"
         )
     transport_parent_graphs = _compact_parent_graphs_for_transport(parent_graphs)
-    payload_document = dict(payload)
-    if transport_parent_graphs:
-        payload_document[PARENT_RECEIPT_GRAPHS_FIELD] = transport_parent_graphs
-    if normalized_profile != "default":
-        payload_document["_v2_provider_credential_profile"] = normalized_profile
-    if credential_refs:
-        payload_document["_v2_provider_credential_ref_hashes"] = dict(
-            sorted(credential_refs.items())
-        )
+    payload_document, transport_metadata = _build_transport_payload_document(
+        payload=payload,
+        parent_graphs=transport_parent_graphs,
+        provider_credential_profile=normalized_profile,
+        provider_credential_ref_hashes=credential_refs,
+    )
     payload_bytes = _canonical_bytes(payload_document)
+    if transport_metadata["encoding"] == "receipt_graph_set":
+        logger.info(
+            "v2_parent_graph_transport_deduplicated "
+            "operation=%s purpose=%s epoch=%s graphs=%s "
+            "legacy_bytes=%s transport_bytes=%s receipts=%s boots=%s "
+            "attempts=%s host_operations=%s",
+            operation,
+            purpose,
+            epoch_id,
+            transport_metadata["parent_graph_count"],
+            transport_metadata["legacy_size_bytes"],
+            transport_metadata["transport_size_bytes"],
+            transport_metadata["unique_receipt_count"],
+            transport_metadata["unique_boot_identity_count"],
+            transport_metadata["unique_transport_attempt_count"],
+            transport_metadata["unique_host_operation_count"],
+        )
     payload_hash = sha256_bytes(payload_bytes)
     job_id = derive_execution_job_id_v2(
         operation=operation,
@@ -1165,10 +1275,12 @@ async def execute_scoring_v2(
             "artifact_ids": [item["artifact_id"] for item in artifacts],
             "artifact_plaintext_hashes": expected_artifact_hashes,
         }
-        lineage_payload_document = {
-            **lineage_payload,
-            PARENT_RECEIPT_GRAPHS_FIELD: [dict(graph)],
-        }
+        lineage_payload_document, _lineage_transport_metadata = (
+            _build_transport_payload_document(
+                payload=lineage_payload,
+                parent_graphs=(graph,),
+            )
+        )
         lineage_job_id = derive_execution_job_id_v2(
             operation=OP_ATTEST_ARTIFACT_PERSISTENCE,
             purpose="leadpoet.artifact_persistence.v2",

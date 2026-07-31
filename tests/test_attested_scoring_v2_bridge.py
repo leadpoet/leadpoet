@@ -8,6 +8,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from gateway.research_lab.attested_scoring_v2 import (
     AttestedScoringV2Error,
+    _build_transport_payload_document,
+    _canonical_array_document_size,
     _compact_parent_graphs_for_transport,
     execute_scoring_v2,
 )
@@ -19,6 +21,9 @@ from gateway.research_lab.attested_v2_store import (
 from gateway.tee.execution_job_manager_v2 import (
     ExecutionJobManagerV2,
     ExecutionResultV2,
+    PARENT_RECEIPT_GRAPH_SET_FIELD,
+    PARENT_RECEIPT_GRAPHS_FIELD,
+    unpack_parent_receipt_graph_set_v2,
 )
 from gateway.tee.coordinator_executor_v2 import (
     COORDINATOR_OPERATIONS_V2,
@@ -149,6 +154,118 @@ def test_parent_graph_transport_compacts_production_sized_declared_set():
     assert {
         receipt["receipt_hash"] for receipt in compacted[0]["receipts"]
     } == set(roots)
+
+
+def test_oversized_shared_ancestry_uses_exact_deduplicated_graph_set(
+    monkeypatch,
+):
+    monkeypatch.setattr(attested_scoring_v2, "MAX_INPUT_BYTES", 1)
+    shared = {
+        "receipt_hash": _hash("a"),
+        "marker": "shared" * 1024,
+    }
+    boot = {
+        "boot_identity_hash": _hash("b"),
+        "marker": "shared" * 1024,
+    }
+    graphs = [
+        {
+            "schema_version": "leadpoet.attested_receipt_graph.v2",
+            "root_receipt_hash": root,
+            "boot_identities": [boot],
+            "receipts": [shared, {"receipt_hash": root, "marker": root}],
+            "transport_attempts": [],
+            "host_operations": [],
+        }
+        for root in (_hash("c"), _hash("d"))
+    ]
+
+    document, evidence = _build_transport_payload_document(
+        payload={"epoch": 24_279},
+        parent_graphs=graphs,
+    )
+
+    assert PARENT_RECEIPT_GRAPHS_FIELD not in document
+    assert evidence["encoding"] == "receipt_graph_set"
+    assert evidence["transport_size_bytes"] < evidence["legacy_size_bytes"]
+    assert evidence["unique_receipt_count"] == 3
+    assert unpack_parent_receipt_graph_set_v2(
+        document[PARENT_RECEIPT_GRAPH_SET_FIELD]
+    ) == graphs
+
+
+def test_small_parent_graph_payload_keeps_legacy_encoding():
+    graph = {
+        "schema_version": "leadpoet.attested_receipt_graph.v2",
+        "root_receipt_hash": _hash("a"),
+        "boot_identities": [],
+        "receipts": [{"receipt_hash": _hash("a")}],
+        "transport_attempts": [],
+        "host_operations": [],
+    }
+
+    document, evidence = _build_transport_payload_document(
+        payload={"epoch": 24_279},
+        parent_graphs=(graph,),
+    )
+
+    assert document[PARENT_RECEIPT_GRAPHS_FIELD] == [graph]
+    assert PARENT_RECEIPT_GRAPH_SET_FIELD not in document
+    assert evidence["encoding"] == "receipt_graphs"
+    assert evidence["legacy_size_bytes"] == len(
+        attested_scoring_v2._canonical_bytes(document)
+    )
+
+
+def test_parent_graph_streaming_size_matches_exact_canonical_document():
+    graphs = [
+        {
+            "schema_version": "leadpoet.attested_receipt_graph.v2",
+            "root_receipt_hash": root,
+            "boot_identities": [],
+            "receipts": [{"receipt_hash": root}],
+            "transport_attempts": [],
+            "host_operations": [],
+        }
+        for root in (_hash("a"), _hash("b"), _hash("c"))
+    ]
+    document = {
+        "epoch": 24_279,
+        "_v2_provider_credential_profile": "benchmark_model",
+    }
+    exact = {
+        **document,
+        PARENT_RECEIPT_GRAPHS_FIELD: graphs,
+    }
+
+    assert _canonical_array_document_size(
+        document,
+        field=PARENT_RECEIPT_GRAPHS_FIELD,
+        values=graphs,
+    ) == len(attested_scoring_v2._canonical_bytes(exact))
+
+
+def test_oversized_graph_without_deduplication_benefit_keeps_ancestry(
+    monkeypatch,
+):
+    monkeypatch.setattr(attested_scoring_v2, "MAX_INPUT_BYTES", 1)
+    graph = {
+        "schema_version": "leadpoet.attested_receipt_graph.v2",
+        "root_receipt_hash": _hash("a"),
+        "boot_identities": [],
+        "receipts": [{"receipt_hash": _hash("a")}],
+        "transport_attempts": [],
+        "host_operations": [],
+    }
+
+    document, evidence = _build_transport_payload_document(
+        payload={"epoch": 24_279},
+        parent_graphs=(graph,),
+    )
+
+    assert evidence["encoding"] == "receipt_graphs"
+    assert document[PARENT_RECEIPT_GRAPHS_FIELD] == [graph]
+    assert PARENT_RECEIPT_GRAPH_SET_FIELD not in document
 
 
 def _release():

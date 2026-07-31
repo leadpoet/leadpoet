@@ -18,6 +18,7 @@ from leadpoet_canonical.attested_v2 import (
     EMPTY_ARTIFACT_ROOT,
     EMPTY_HOST_OPERATION_ROOT,
     EMPTY_TRANSPORT_ROOT,
+    RECEIPT_GRAPH_SCHEMA_VERSION,
     ROLE_PURPOSES,
     build_execution_receipt_body,
     build_transition_command_body,
@@ -36,6 +37,10 @@ from leadpoet_canonical.attested_v2 import (
 
 JOB_SCHEMA_VERSION = "leadpoet.enclave_execution_job.v2"
 PARENT_RECEIPT_GRAPHS_FIELD = "_v2_parent_receipt_graphs"
+PARENT_RECEIPT_GRAPH_SET_FIELD = "_v2_parent_receipt_graph_set"
+PARENT_RECEIPT_GRAPH_SET_SCHEMA_VERSION = (
+    "leadpoet.parent_receipt_graph_set.v2"
+)
 MAX_JOB_COUNT = 256
 MAX_QUEUED_JOBS = 64
 MIN_TERMINAL_EVICTION_AGE_SECONDS = 300
@@ -72,6 +77,35 @@ MAX_EXTERNAL_RECEIPT_GRAPH_BYTES = 64 * 1024 * 1024
 TERMINAL_STATES = frozenset({"cancelled", "failed", "succeeded"})
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$")
+_RECEIPT_GRAPH_FIELDS = frozenset(
+    {
+        "schema_version",
+        "root_receipt_hash",
+        "boot_identities",
+        "receipts",
+        "transport_attempts",
+        "host_operations",
+    }
+)
+_RECEIPT_GRAPH_SET_FIELDS = frozenset(
+    {
+        "schema_version",
+        "graphs",
+        "boot_identities",
+        "receipts",
+        "transport_attempts",
+        "host_operations",
+    }
+)
+_RECEIPT_GRAPH_DESCRIPTOR_FIELDS = frozenset(
+    {
+        "root_receipt_hash",
+        "boot_identity_hashes",
+        "receipt_hashes",
+        "transport_attempt_hashes",
+        "host_operation_request_hashes",
+    }
+)
 
 
 class ExecutionJobV2Error(RuntimeError):
@@ -291,6 +325,241 @@ def _identifier(value: Any, field: str) -> str:
     if not _IDENTIFIER_RE.fullmatch(normalized):
         raise ExecutionJobV2Error("%s is invalid" % field)
     return normalized
+
+
+def _normalized_transport_object(value: Any, field: str) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ExecutionJobV2Error("%s is not an object" % field)
+    try:
+        normalized = json.loads(_canonical_bytes(dict(value)).decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise ExecutionJobV2Error("%s is not canonical JSON" % field) from exc
+    if not isinstance(normalized, dict):
+        raise ExecutionJobV2Error("%s is not an object" % field)
+    return normalized
+
+
+def _host_operation_request_hash(value: Mapping[str, Any]) -> str:
+    request = value.get("request")
+    if not isinstance(request, Mapping):
+        raise ExecutionJobV2Error("host operation request is missing")
+    return _hash(request.get("request_hash"), "host operation request hash")
+
+
+def pack_parent_receipt_graph_set_v2(
+    graphs: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Deduplicate graph objects without changing any graph membership."""
+
+    if not isinstance(graphs, Sequence) or isinstance(
+        graphs, (str, bytes, bytearray)
+    ):
+        raise ExecutionJobV2Error("parent receipt graphs must be an array")
+    if len(graphs) > MAX_EXTERNAL_RECEIPT_GRAPHS:
+        raise ExecutionJobV2Error("external receipt graph count exceeds limit")
+
+    collections: Dict[str, list[Dict[str, Any]]] = {
+        "boot_identities": [],
+        "receipts": [],
+        "transport_attempts": [],
+        "host_operations": [],
+    }
+    indexes: Dict[str, Dict[str, Dict[str, Any]]] = {
+        field: {} for field in collections
+    }
+    key_fields = {
+        "boot_identities": "boot_identity_hash",
+        "receipts": "receipt_hash",
+        "transport_attempts": "attempt_hash",
+    }
+
+    def add_object(collection: str, value: Any) -> str:
+        if not isinstance(value, Mapping):
+            raise ExecutionJobV2Error(
+                "%s is not an object"
+                % collection.replace("_", " ").rstrip("s")
+            )
+        if collection == "host_operations":
+            object_hash = _host_operation_request_hash(value)
+        else:
+            key_field = key_fields[collection]
+            object_hash = _hash(value.get(key_field), key_field)
+        previous = indexes[collection].get(object_hash)
+        if previous is not None:
+            if previous == dict(value):
+                return object_hash
+            normalized = _normalized_transport_object(
+                value,
+                collection.replace("_", " ").rstrip("s"),
+            )
+            if previous != normalized:
+                raise ExecutionJobV2Error(
+                    "%s conflicts for hash" % collection.replace("_", " ")
+                )
+            return object_hash
+        normalized = _normalized_transport_object(
+            value,
+            collection.replace("_", " ").rstrip("s"),
+        )
+        indexes[collection][object_hash] = normalized
+        collections[collection].append(normalized)
+        return object_hash
+
+    descriptors: list[Dict[str, Any]] = []
+    roots: set[str] = set()
+    for graph in graphs:
+        if not isinstance(graph, Mapping):
+            raise ExecutionJobV2Error("parent receipt graph is not an object")
+        normalized_graph = dict(graph)
+        if set(normalized_graph) != _RECEIPT_GRAPH_FIELDS:
+            raise ExecutionJobV2Error("parent receipt graph fields are invalid")
+        if normalized_graph.get("schema_version") != RECEIPT_GRAPH_SCHEMA_VERSION:
+            raise ExecutionJobV2Error("parent receipt graph schema is invalid")
+        root = _hash(
+            normalized_graph.get("root_receipt_hash"),
+            "parent receipt graph root",
+        )
+        if root in roots:
+            raise ExecutionJobV2Error("parent receipt graph is duplicated")
+        roots.add(root)
+        for field in collections:
+            if not isinstance(normalized_graph.get(field), list):
+                raise ExecutionJobV2Error(
+                    "parent receipt graph %s must be an array" % field
+                )
+        descriptors.append(
+            {
+                "root_receipt_hash": root,
+                "boot_identity_hashes": [
+                    add_object("boot_identities", item)
+                    for item in normalized_graph["boot_identities"]
+                ],
+                "receipt_hashes": [
+                    add_object("receipts", item)
+                    for item in normalized_graph["receipts"]
+                ],
+                "transport_attempt_hashes": [
+                    add_object("transport_attempts", item)
+                    for item in normalized_graph["transport_attempts"]
+                ],
+                "host_operation_request_hashes": [
+                    add_object("host_operations", item)
+                    for item in normalized_graph["host_operations"]
+                ],
+            }
+        )
+    return {
+        "schema_version": PARENT_RECEIPT_GRAPH_SET_SCHEMA_VERSION,
+        "graphs": descriptors,
+        **collections,
+    }
+
+
+def unpack_parent_receipt_graph_set_v2(
+    value: Mapping[str, Any],
+) -> list[Dict[str, Any]]:
+    """Reconstruct exact graph memberships from a bounded deduplicated set."""
+
+    if not isinstance(value, Mapping) or set(value) != _RECEIPT_GRAPH_SET_FIELDS:
+        raise ExecutionJobV2Error("parent receipt graph set fields are invalid")
+    if value.get("schema_version") != PARENT_RECEIPT_GRAPH_SET_SCHEMA_VERSION:
+        raise ExecutionJobV2Error("parent receipt graph set schema is invalid")
+    descriptors = value.get("graphs")
+    if (
+        not isinstance(descriptors, list)
+        or len(descriptors) > MAX_EXTERNAL_RECEIPT_GRAPHS
+    ):
+        raise ExecutionJobV2Error("parent receipt graph set count is invalid")
+
+    collection_specs = {
+        "boot_identities": ("boot_identity_hash", None),
+        "receipts": ("receipt_hash", None),
+        "transport_attempts": ("attempt_hash", None),
+        "host_operations": (None, _host_operation_request_hash),
+    }
+    indexes: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for field, (key_field, key_loader) in collection_specs.items():
+        rows = value.get(field)
+        if not isinstance(rows, list):
+            raise ExecutionJobV2Error(
+                "parent receipt graph set %s must be an array" % field
+            )
+        index: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            normalized = _normalized_transport_object(
+                row,
+                field.replace("_", " ").rstrip("s"),
+            )
+            object_hash = (
+                key_loader(normalized)
+                if key_loader is not None
+                else _hash(normalized.get(key_field), str(key_field))
+            )
+            if object_hash in index:
+                raise ExecutionJobV2Error(
+                    "parent receipt graph set %s is duplicated" % field
+                )
+            index[object_hash] = normalized
+        indexes[field] = index
+
+    descriptor_fields = {
+        "boot_identity_hashes": "boot_identities",
+        "receipt_hashes": "receipts",
+        "transport_attempt_hashes": "transport_attempts",
+        "host_operation_request_hashes": "host_operations",
+    }
+    used = {field: set() for field in collection_specs}
+    roots: set[str] = set()
+    graphs: list[Dict[str, Any]] = []
+    for descriptor in descriptors:
+        if (
+            not isinstance(descriptor, Mapping)
+            or set(descriptor) != _RECEIPT_GRAPH_DESCRIPTOR_FIELDS
+        ):
+            raise ExecutionJobV2Error(
+                "parent receipt graph descriptor fields are invalid"
+            )
+        root = _hash(
+            descriptor.get("root_receipt_hash"),
+            "parent receipt graph descriptor root",
+        )
+        if root in roots:
+            raise ExecutionJobV2Error(
+                "parent receipt graph descriptor is duplicated"
+            )
+        roots.add(root)
+        graph: Dict[str, Any] = {
+            "schema_version": RECEIPT_GRAPH_SCHEMA_VERSION,
+            "root_receipt_hash": root,
+        }
+        for descriptor_field, collection in descriptor_fields.items():
+            hashes = descriptor.get(descriptor_field)
+            if not isinstance(hashes, list):
+                raise ExecutionJobV2Error(
+                    "parent receipt graph descriptor %s must be an array"
+                    % descriptor_field
+                )
+            normalized_hashes = [
+                _hash(item, descriptor_field) for item in hashes
+            ]
+            missing = [
+                item for item in normalized_hashes if item not in indexes[collection]
+            ]
+            if missing:
+                raise ExecutionJobV2Error(
+                    "parent receipt graph descriptor reference is missing"
+                )
+            graph[collection] = [
+                dict(indexes[collection][item]) for item in normalized_hashes
+            ]
+            used[collection].update(normalized_hashes)
+        graphs.append(graph)
+
+    if any(set(indexes[field]) != used[field] for field in collection_specs):
+        raise ExecutionJobV2Error(
+            "parent receipt graph set contains unreferenced evidence"
+        )
+    return graphs
 
 
 def _job_input_limit_bytes(*, operation: str, purpose: str) -> int:
@@ -765,7 +1034,16 @@ class ExecutionJobManagerV2:
         try:
             payload = json.loads(payload_bytes.decode("utf-8"))
             parent_graphs = payload.pop(PARENT_RECEIPT_GRAPHS_FIELD, None)
-            if parent_graphs is None:
+            parent_graph_set = payload.pop(PARENT_RECEIPT_GRAPH_SET_FIELD, None)
+            if parent_graphs is not None and parent_graph_set is not None:
+                raise ExecutionJobV2Error(
+                    "job supplies multiple parent receipt graph encodings"
+                )
+            if parent_graph_set is not None:
+                parent_graphs = unpack_parent_receipt_graph_set_v2(
+                    parent_graph_set
+                )
+            elif parent_graphs is None:
                 parent_graphs = []
             if not isinstance(parent_graphs, list) or any(
                 not isinstance(graph, Mapping) for graph in parent_graphs

@@ -19,6 +19,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 import traceback
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
@@ -2272,6 +2273,215 @@ def _exercise_receipt_graph_aggregate_pagination() -> dict[str, Any]:
     }
 
 
+def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
+    """Run shared ancestry through the exact job admission and decode path."""
+
+    import subprocess
+
+    from gateway.tee.execution_job_manager_v2 import (
+        JOB_SCHEMA_VERSION,
+        MAX_ALLOCATION_ANCESTRY_INPUT_BYTES,
+        MAX_EXTERNAL_RECEIPT_GRAPHS,
+        MAX_INPUT_BYTES,
+        PARENT_RECEIPT_GRAPH_SET_FIELD,
+        ExecutionJobManagerV2,
+        unpack_parent_receipt_graph_set_v2,
+    )
+    from gateway.research_lab.attested_scoring_v2 import (
+        _build_transport_payload_document,
+    )
+    from leadpoet_canonical.attested_v2 import (
+        RECEIPT_GRAPH_SCHEMA_VERSION,
+        sha256_bytes,
+    )
+
+    candidate_sha = subprocess.run(
+        ["git", "-C", str(SOURCE_ROOT), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    fixture = SanitizedWeightFixture(
+        candidate_sha=candidate_sha,
+        epoch_id=30_000,
+    )
+    config_hash = sha256_json({"rehearsal": "shared-receipt-ancestry"})
+    boot = fixture._boot(
+        role="gateway_coordinator",
+        key=fixture.coordinator_key,
+        config_hash=config_hash,
+    )
+    sample_receipt = fixture.receipt(
+        role="gateway_coordinator",
+        purpose="research_lab.allocation.v2",
+        job_id="rehearsal-shared-ancestry-sample",
+        key=fixture.coordinator_key,
+        boot=boot,
+        config_hash=config_hash,
+        sequence=0,
+    )
+    sample_receipt_bytes = len(_canonical(sample_receipt))
+    graph_count = MAX_EXTERNAL_RECEIPT_GRAPHS
+    legacy_reproduction_target = MAX_INPUT_BYTES * 2 + MAX_INPUT_BYTES // 32
+    shared_receipt_count = (
+        legacy_reproduction_target
+        + graph_count * sample_receipt_bytes
+        - 1
+    ) // (graph_count * sample_receipt_bytes)
+    shared_receipt_count += 8
+
+    shared_receipts: list[dict[str, Any]] = []
+    parents: list[str] = []
+    for index in range(shared_receipt_count):
+        receipt = fixture.receipt(
+            role="gateway_coordinator",
+            purpose="research_lab.allocation.v2",
+            job_id=f"rehearsal-shared-ancestry-{index}",
+            key=fixture.coordinator_key,
+            boot=boot,
+            config_hash=config_hash,
+            parents=parents,
+            sequence=index,
+        )
+        shared_receipts.append(receipt)
+        parents = [str(receipt["receipt_hash"])]
+
+    graphs: list[dict[str, Any]] = []
+    for index in range(graph_count):
+        child = fixture.receipt(
+            role="gateway_coordinator",
+            purpose="research_lab.allocation.v2",
+            job_id=f"rehearsal-independent-root-{index}",
+            key=fixture.coordinator_key,
+            boot=boot,
+            config_hash=config_hash,
+            parents=parents,
+            sequence=100 + index,
+        )
+        graph = {
+            "schema_version": RECEIPT_GRAPH_SCHEMA_VERSION,
+            "root_receipt_hash": str(child["receipt_hash"]),
+            "boot_identities": [boot],
+            "receipts": [*shared_receipts, child],
+            "transport_attempts": [],
+            "host_operations": [],
+        }
+        graphs.append(graph)
+
+    transport_document, transport_metadata = _build_transport_payload_document(
+        payload={"epoch": 30_000},
+        parent_graphs=graphs,
+    )
+    if transport_metadata.get("encoding") != "receipt_graph_set":
+        raise RuntimeError("oversized shared ancestry was not deduplicated")
+    legacy_size_bytes = int(transport_metadata["legacy_size_bytes"])
+    if legacy_size_bytes <= MAX_INPUT_BYTES * 2:
+        raise RuntimeError("legacy payload did not reproduce the old boundary")
+    graph_set = transport_document[PARENT_RECEIPT_GRAPH_SET_FIELD]
+    reconstructed = unpack_parent_receipt_graph_set_v2(graph_set)
+    if reconstructed != graphs:
+        raise RuntimeError("deduplicated receipt graph membership differs")
+    del reconstructed
+    transport_payload = _canonical(transport_document)
+    if len(transport_payload) >= legacy_size_bytes:
+        raise RuntimeError("shared receipt ancestry was not deduplicated")
+    projected_transport_bytes = (
+        MAX_ALLOCATION_ANCESTRY_INPUT_BYTES * len(transport_payload)
+        + legacy_size_bytes
+        - 1
+    ) // legacy_size_bytes
+    if projected_transport_bytes > MAX_INPUT_BYTES:
+        raise RuntimeError(
+            "candidate graph-set ratio lacks ordinary-input headroom"
+        )
+
+    observed: dict[str, Any] = {}
+
+    def executor(_operation, payload, context):
+        observed["payload"] = dict(payload)
+        observed["graphs"] = list(context.external_receipt_graphs)
+        return {"status": "verified"}
+
+    manager = ExecutionJobManagerV2(
+        boot_identity_supplier=lambda: boot,
+        sign_digest=fixture.coordinator_key.sign,
+        operations={
+            "research_lab_allocation": {"research_lab.allocation.v2"}
+        },
+        executor=executor,
+        worker_count=1,
+        configured_worker_count=0,
+    )
+    manifest = {
+        "schema_version": JOB_SCHEMA_VERSION,
+        "job_id": "rehearsal-shared-ancestry-job",
+        "operation": "research_lab_allocation",
+        "purpose": "research_lab.allocation.v2",
+        "epoch_id": 30_000,
+        "sequence": 0,
+        "payload_sha256": sha256_bytes(transport_payload),
+        "payload_size_bytes": len(transport_payload),
+        "parent_receipt_hashes": [
+            str(graph["root_receipt_hash"]) for graph in graphs
+        ],
+        "input_artifact_hashes": [],
+        "provider_credential_profile": "default",
+        "provider_credential_ref_hashes": {},
+    }
+    manager.submit(manifest)
+    for offset in range(0, len(transport_payload), 512 * 1024):
+        chunk = transport_payload[offset : offset + 512 * 1024]
+        manager.put_chunk(
+            job_id=manifest["job_id"],
+            offset=offset,
+            data_b64=base64.b64encode(chunk).decode("ascii"),
+            chunk_sha256=sha256_bytes(chunk),
+        )
+    manager.seal(manifest["job_id"])
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        status = manager.status(manifest["job_id"])
+        if status["state"] in {"succeeded", "failed", "cancelled"}:
+            break
+        time.sleep(0.01)
+    else:
+        raise RuntimeError("deduplicated receipt graph job did not terminate")
+    if (
+        status["state"] != "succeeded"
+        or observed.get("payload") != {"epoch": 30_000}
+        or observed.get("graphs") != graphs
+    ):
+        raise RuntimeError("deduplicated receipt graph job was not exact")
+
+    malformed = json.loads(json.dumps(graph_set))
+    malformed["receipts"].append(
+        {
+            **dict(malformed["receipts"][0]),
+            "receipt_hash": sha256_json({"unreferenced": True}),
+        }
+    )
+    try:
+        unpack_parent_receipt_graph_set_v2(malformed)
+    except Exception as exc:
+        if "unreferenced evidence" not in str(exc):
+            raise
+    else:
+        raise RuntimeError("unreferenced graph-set evidence did not fail closed")
+
+    return {
+        "graph_count": len(graphs),
+        "shared_receipt_count": len(shared_receipts),
+        "legacy_size_bytes": legacy_size_bytes,
+        "transport_size_bytes": len(transport_payload),
+        "projected_transport_bytes_at_scoped_limit": (
+            projected_transport_bytes
+        ),
+        "unique_receipt_count": len(graph_set["receipts"]),
+        "exact_job_path_verified": True,
+        "malformed_evidence_rejected": True,
+    }
+
+
 BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "chain-settlement-state-space": _exercise_chain_settlement_state_space,
     "conditional-icp-policy": _exercise_conditional_icp_policy,
@@ -2280,6 +2490,9 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "historical-metagraph-layouts": _exercise_historical_metagraph_layouts,
     "receipt-graph-aggregate-pagination": (
         _exercise_receipt_graph_aggregate_pagination
+    ),
+    "receipt-graph-transport-deduplication": (
+        _exercise_receipt_graph_transport_deduplication
     ),
     "research-lab-allocation-conservation": (
         _exercise_research_lab_allocation_conservation
@@ -2661,6 +2874,26 @@ def main() -> int:
                 {},
             ).get("structural_limit_enforced")
             is True
+        ),
+        "receipt_graph_transport_deduplicated_and_verified": (
+            behavior_evidence.get(
+                "receipt-graph-transport-deduplication",
+                {},
+            ).get("exact_job_path_verified")
+            is True
+            and behavior_evidence.get(
+                "receipt-graph-transport-deduplication",
+                {},
+            ).get("malformed_evidence_rejected")
+            is True
+            and behavior_evidence.get(
+                "receipt-graph-transport-deduplication",
+                {},
+            ).get("transport_size_bytes", 1)
+            < behavior_evidence.get(
+                "receipt-graph-transport-deduplication",
+                {},
+            ).get("legacy_size_bytes", 0)
         ),
         "research_lab_allocation_policy_config_bound": (
             "research-lab-allocation-conservation" in behavior_evidence

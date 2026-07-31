@@ -306,6 +306,99 @@ async def test_client_retries_gateway_500_with_same_authorization(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_client_attempt_budget_covers_slowest_observed_build(monkeypatch):
+    """Regression: 2026-07-31 epochs 24265-24266.
+
+    The gateway singleflight build took ~700s while each client attempt
+    timed out at 90s. The previous four-attempt budget (~374s of coverage)
+    exhausted mid-build, the caller restarted the flow, and every restart
+    forced a fresh build (24 receipts per epoch instead of 8). The budget
+    must keep re-attaching until the cached success is available.
+    """
+    monkeypatch.setattr(client_module, "validate_boot_identity", lambda _value: None)
+    monkeypatch.setattr(
+        client_module, "validate_signed_execution_receipt", lambda _value: None
+    )
+    monkeypatch.setattr(client_module, "validate_transport_attempt", lambda _value: None)
+    monkeypatch.setattr(
+        client_module, "validate_host_operation_record", lambda _value: None
+    )
+    payloads = []
+
+    async def post_json(_url, payload, _timeout):
+        payloads.append(payload)
+        if len(payloads) < 8:
+            raise TimeoutError()
+        return _response(payload["request"])
+
+    client = FakeClient()
+    result = await fetch_gateway_weight_inputs_v2(
+        gateway_url="https://gateway.example",
+        calculation_snapshot=_calculation(),
+        validator_hotkey=HOTKEY,
+        allocation_hash="sha256:" + "3" * 64,
+        leaderboard_window_start="2026-07-03T20:00:00Z",
+        leaderboard_window_end="2026-07-10T20:00:00Z",
+        client=client,
+        post_json=post_json,
+        retry_delay_seconds=0,
+    )
+
+    assert len(payloads) == 8
+    assert all(payload == payloads[0] for payload in payloads)
+    assert len(client.messages) == 1
+    assert result["gateway_authority_event_hash"] == "sha256:" + "4" * 64
+
+
+@pytest.mark.asyncio
+async def test_client_retry_delays_are_capped_for_singleflight_reattach(monkeypatch):
+    """A timed-out attempt must re-attach within seconds of build completion.
+
+    Uncapped exponential backoff (2, 4, 8, 16, 32, ...) leaves minute-long
+    gaps in which a completed, cached gateway result sits unread while the
+    submission window burns down.
+    """
+    monkeypatch.setattr(client_module, "validate_boot_identity", lambda _value: None)
+    monkeypatch.setattr(
+        client_module, "validate_signed_execution_receipt", lambda _value: None
+    )
+    monkeypatch.setattr(client_module, "validate_transport_attempt", lambda _value: None)
+    monkeypatch.setattr(
+        client_module, "validate_host_operation_record", lambda _value: None
+    )
+    real_sleep = client_module.asyncio.sleep
+    observed_delays = []
+
+    async def recording_sleep(delay, *args, **kwargs):
+        observed_delays.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(client_module.asyncio, "sleep", recording_sleep)
+    attempts = 0
+
+    async def post_json(_url, payload, _timeout):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 7:
+            raise TimeoutError()
+        return _response(payload["request"])
+
+    await fetch_gateway_weight_inputs_v2(
+        gateway_url="https://gateway.example",
+        calculation_snapshot=_calculation(),
+        validator_hotkey=HOTKEY,
+        allocation_hash="sha256:" + "3" * 64,
+        leaderboard_window_start="2026-07-03T20:00:00Z",
+        leaderboard_window_end="2026-07-10T20:00:00Z",
+        client=FakeClient(),
+        post_json=post_json,
+    )
+
+    assert observed_delays == [2.0, 4.0, 8.0, 8.0, 8.0, 8.0]
+    assert max(observed_delays) <= client_module._MAX_RETRY_DELAY_SECONDS
+
+
+@pytest.mark.asyncio
 async def test_client_does_not_retry_semantic_gateway_400():
     calls = 0
 

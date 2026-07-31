@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 _MAX_WEIGHT_INPUT_RESPONSE_FRAME_BYTES = 16 * 1024 * 1024
 _MAX_WEIGHT_INPUT_RESPONSE_BYTES = 64 * 1024 * 1024
+# Retry delays are capped so a timed-out attempt re-attaches to the gateway's
+# in-flight singleflight build (which caches its exact success) within seconds
+# of completion instead of drifting into minute-long exponential gaps.
+_MAX_RETRY_DELAY_SECONDS = 8.0
 
 
 class GatewayWeightInputsV2Error(RuntimeError):
@@ -224,7 +228,13 @@ async def fetch_gateway_weight_inputs_v2(
         [str, Mapping[str, Any], float], Awaitable[Mapping[str, Any]]
     ] = _post_json,
     timeout_seconds: float = 90.0,
-    max_attempts: int = 4,
+    # The gateway coalesces concurrent input requests into one singleflight
+    # build and caches the exact success, so a timed-out attempt re-attaches
+    # cheaply rather than triggering a rebuild. The attempt budget must cover
+    # the slowest observed production build (~700s, 2026-07-31 epochs
+    # 24265-24266): exhausting it makes the caller restart the whole flow,
+    # which does force a rebuild and compounds the delay.
+    max_attempts: int = 10,
     retry_delay_seconds: float = 2.0,
 ) -> Dict[str, Any]:
     """Request one exact, enclave-signed gateway input set and verify its shape."""
@@ -285,7 +295,10 @@ async def fetch_gateway_weight_inputs_v2(
         except Exception as exc:
             if attempt >= max_attempts or not _is_retryable_gateway_error(exc):
                 raise
-            delay = float(retry_delay_seconds) * (2 ** (attempt - 1))
+            delay = min(
+                float(retry_delay_seconds) * (2 ** (attempt - 1)),
+                _MAX_RETRY_DELAY_SECONDS,
+            )
             logger.warning(
                 "gateway_weight_inputs_v2_retry attempt=%d/%d "
                 "delay_seconds=%.1f type=%s error=%s",

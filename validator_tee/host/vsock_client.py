@@ -23,7 +23,7 @@ RPC_PORT = 5001  # Must match tee_service.py
 # Weight authority carries the complete measured gateway receipt graph. Keep
 # the wire envelope small; larger logical messages use the versioned compressed
 # frame below while retaining an explicit expanded-size ceiling.
-MAX_RPC_REQUEST_FRAME_BYTES = 8 * 1024 * 1024
+MAX_RPC_REQUEST_FRAME_BYTES = 16 * 1024 * 1024
 MAX_RPC_RESPONSE_FRAME_BYTES = 16 * 1024 * 1024
 MAX_RPC_REQUEST_BYTES = 64 * 1024 * 1024
 MAX_RPC_RESPONSE_BYTES = 64 * 1024 * 1024

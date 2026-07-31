@@ -561,8 +561,8 @@
     },
     "sourcing_model/scrapingdog_signal_contract.py": {
       "EVIDENCE_SCHEMA_VERSION": "v1",
-      "REQUEST_SCHEMA_VERSION": "v3",
-      "SCHEMA_VERSION": "scrapingdog-routing-v4"
+      "REQUEST_SCHEMA_VERSION": "v4",
+      "SCHEMA_VERSION": "scrapingdog-routing-v5"
     },
     "sourcing_model/normalized_icp_discovery_plan.py": {
       "CONTACT_PERSONA_SENIORITY_LEVELS": [

@@ -297,8 +297,8 @@ def _conforming_tree(root: Path) -> None:
             return None
     """)
     _write(root, "sourcing_model/scrapingdog_signal_contract.py", """
-        SCHEMA_VERSION = "scrapingdog-routing-v4"
-        REQUEST_SCHEMA_VERSION = "v3"
+        SCHEMA_VERSION = "scrapingdog-routing-v5"
+        REQUEST_SCHEMA_VERSION = "v4"
         EVIDENCE_SCHEMA_VERSION = "v1"
 
         def canonical_json(value):

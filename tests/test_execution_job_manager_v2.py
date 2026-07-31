@@ -210,21 +210,35 @@ def _run(manager, payload, manifest=None):
     raise AssertionError("V2 job did not terminate")
 
 
-def test_large_input_exception_is_scoped_to_allocation_authority():
+def test_large_input_exception_is_scoped_to_allocation_ancestry_consumers():
     oversized = 64 * 1024 * 1024 + 1
-    allocation_manifest = _manifest(
-        b"{}",
-        operation="allocation",
-        purpose="research_lab.allocation.v2",
-        payload_size_bytes=oversized,
-    )
-
-    normalized = job_manager_v2._manifest(
-        allocation_manifest,
-        role="gateway_coordinator",
-        operations={"allocation": {"research_lab.allocation.v2"}},
-    )
-    assert normalized["payload_size_bytes"] == oversized
+    allowed_scopes = {
+        "research_lab_allocation": {"research_lab.allocation.v2"},
+        "attest_artifact_persistence": {
+            "leadpoet.artifact_persistence.v2",
+        },
+        "attest_weight_input": {
+            "research_lab.allocation.v2",
+            "research_lab.champion_input.v2",
+            "research_lab.reimbursement_input.v2",
+            "research_lab.source_add_reward_input.v2",
+            "research_lab.anomaly_adjustment_input.v2",
+        },
+        "attest_weight_publication": {"gateway.weights.publication.v2"},
+    }
+    for operation, purposes in allowed_scopes.items():
+        for purpose in purposes:
+            normalized = job_manager_v2._manifest(
+                _manifest(
+                    b"{}",
+                    operation=operation,
+                    purpose=purpose,
+                    payload_size_bytes=oversized,
+                ),
+                role="gateway_coordinator",
+                operations=allowed_scopes,
+            )
+            assert normalized["payload_size_bytes"] == oversized
 
     with pytest.raises(
         ExecutionJobV2Error,
@@ -241,13 +255,81 @@ def test_large_input_exception_is_scoped_to_allocation_authority():
         match="payload size is outside limit",
     ):
         job_manager_v2._manifest(
+            _manifest(
+                b"{}",
+                operation="unrelated_operation",
+                purpose="research_lab.allocation.v2",
+                payload_size_bytes=oversized,
+            ),
+            role="gateway_coordinator",
+            operations={
+                "unrelated_operation": {"research_lab.allocation.v2"},
+            },
+        )
+
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="payload size is outside limit",
+    ):
+        job_manager_v2._manifest(
             {
-                **allocation_manifest,
+                **_manifest(
+                    b"{}",
+                    operation="research_lab_allocation",
+                    purpose="research_lab.allocation.v2",
+                ),
                 "payload_size_bytes": 128 * 1024 * 1024 + 1,
             },
             role="gateway_coordinator",
-            operations={"allocation": {"research_lab.allocation.v2"}},
+            operations={
+                "research_lab_allocation": {"research_lab.allocation.v2"},
+            },
         )
+
+
+def test_large_ancestry_scope_is_applied_to_external_parent_graphs(monkeypatch):
+    monkeypatch.setattr(
+        job_manager_v2,
+        "validate_receipt_graph",
+        lambda _graph, **_kwargs: (),
+    )
+    assert job_manager_v2._job_input_limit_bytes(
+        operation="attest_weight_publication",
+        purpose="gateway.weights.publication.v2",
+    ) == 128 * 1024 * 1024
+    assert job_manager_v2._job_input_limit_bytes(
+        operation="score",
+        purpose="research_lab.candidate_score.v2",
+    ) == 64 * 1024 * 1024
+
+    graph = {
+        "root_receipt_hash": HASH,
+        "receipts": [{"receipt_hash": HASH}],
+    }
+    constrained = ExecutionContextV2(
+        job_id="score-job",
+        purpose="research_lab.candidate_score.v2",
+        epoch_id=24_000,
+        max_external_receipt_graph_bytes=2,
+    )
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="external receipt graph exceeds size limit",
+    ):
+        constrained.record_external_receipt_graph(graph)
+
+    allocation_lineage = ExecutionContextV2(
+        job_id="allocation-lineage-job",
+        purpose="leadpoet.artifact_persistence.v2",
+        epoch_id=24_000,
+        max_external_receipt_graph_bytes=(
+            job_manager_v2._job_input_limit_bytes(
+                operation="attest_artifact_persistence",
+                purpose="leadpoet.artifact_persistence.v2",
+            )
+        ),
+    )
+    assert allocation_lineage.record_external_receipt_graph(graph) == HASH
 
 
 def test_success_receipt_binds_transport_artifacts_and_signed_transition():

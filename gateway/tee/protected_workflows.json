@@ -672,7 +672,7 @@
       "symbol": "CoordinatorWeightSourceV2"
     },
     {
-      "ast_sha256": "sha256:eb3b9f582aaf667b4f37043a724aeb5a85d25afd7fd0ffa6de1870db9a3911f5",
+      "ast_sha256": "sha256:ae6ec576fe8e22757b25e077de18f0fca5f265bc117d10f6993dcbdbff2c9703",
       "path": "gateway/tee/execution_job_manager_v2.py",
       "symbol": "ExecutionJobManagerV2"
     },
@@ -1312,7 +1312,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:805d382e5f40772e36b47cefc0befe1a2564d82c90b62202d0e8ffa9d0908a03",
+  "manifest_hash": "sha256:eef492677d8bb4e9526f746cff2f7039f91654186fd68897a47cb2a25e1e8f9d",
   "protected_source_commit": "f190248b2454f208f6cc4b92d85e78afbc8ffd63",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

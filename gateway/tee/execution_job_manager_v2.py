@@ -40,11 +40,23 @@ MAX_JOB_COUNT = 256
 MAX_QUEUED_JOBS = 64
 MIN_TERMINAL_EVICTION_AGE_SECONDS = 300
 MAX_INPUT_BYTES = 64 * 1024 * 1024
-# Allocation authority carries multiple independently validated receipt graphs.
-# Uploads are already chunked and each graph remains capped at 64 MiB; allow
-# only this measured coordinator purpose's bounded aggregate to exceed one
-# graph without discarding ancestry or widening every V2 execution boundary.
-MAX_ALLOCATION_INPUT_BYTES = 128 * 1024 * 1024
+# Allocation authority and its direct weight-publication consumers carry the
+# same complete, independently validated receipt ancestry. Uploads remain
+# chunked; allow only these exact coordinator operation/purpose pairs to exceed
+# the ordinary V2 input and parent-graph bounds without discarding ancestry.
+MAX_ALLOCATION_ANCESTRY_INPUT_BYTES = 128 * 1024 * 1024
+_ALLOCATION_ANCESTRY_JOB_SCOPES = frozenset(
+    {
+        ("research_lab_allocation", "research_lab.allocation.v2"),
+        ("attest_artifact_persistence", "leadpoet.artifact_persistence.v2"),
+        ("attest_weight_input", "research_lab.allocation.v2"),
+        ("attest_weight_input", "research_lab.champion_input.v2"),
+        ("attest_weight_input", "research_lab.reimbursement_input.v2"),
+        ("attest_weight_input", "research_lab.source_add_reward_input.v2"),
+        ("attest_weight_input", "research_lab.anomaly_adjustment_input.v2"),
+        ("attest_weight_publication", "gateway.weights.publication.v2"),
+    }
+)
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 MAX_CHUNK_BYTES = 1024 * 1024
 MAX_RESULT_CHUNK_BYTES = 4 * 1024 * 1024
@@ -105,6 +117,7 @@ class ExecutionContextV2:
     allowed_failed_receipt_hashes: set = field(default_factory=set)
     host_operation_channel: Any = None
     allowed_purposes: frozenset = frozenset()
+    max_external_receipt_graph_bytes: int = MAX_EXTERNAL_RECEIPT_GRAPH_BYTES
     _transport_lock: Any = field(
         default_factory=threading.RLock,
         repr=False,
@@ -178,7 +191,7 @@ class ExecutionContextV2:
             allowed_failed_receipt_hashes=allowed_failed,
         )
         encoded = _canonical_bytes(graph)
-        if len(encoded) > MAX_EXTERNAL_RECEIPT_GRAPH_BYTES:
+        if len(encoded) > self.max_external_receipt_graph_bytes:
             raise ExecutionJobV2Error("external receipt graph exceeds size limit")
         normalized = json.loads(encoded.decode("utf-8"))
         root_hash = _hash(
@@ -277,6 +290,12 @@ def _identifier(value: Any, field: str) -> str:
     return normalized
 
 
+def _job_input_limit_bytes(*, operation: str, purpose: str) -> int:
+    if (operation, purpose) in _ALLOCATION_ANCESTRY_JOB_SCOPES:
+        return MAX_ALLOCATION_ANCESTRY_INPUT_BYTES
+    return MAX_INPUT_BYTES
+
+
 def _manifest(
     value: Mapping[str, Any],
     *,
@@ -313,10 +332,9 @@ def _manifest(
         raise ExecutionJobV2Error("epoch_id must be non-negative")
     if not isinstance(sequence, int) or sequence < 0:
         raise ExecutionJobV2Error("sequence must be non-negative")
-    max_input_bytes = (
-        MAX_ALLOCATION_INPUT_BYTES
-        if purpose == "research_lab.allocation.v2"
-        else MAX_INPUT_BYTES
+    max_input_bytes = _job_input_limit_bytes(
+        operation=operation,
+        purpose=purpose,
     )
     if not isinstance(size, int) or size < 2 or size > max_input_bytes:
         raise ExecutionJobV2Error("payload size is outside limit")
@@ -727,6 +745,10 @@ class ExecutionJobManagerV2:
             ),
             artifact_hashes=list(manifest["input_artifact_hashes"]),
             allowed_purposes=frozenset(ROLE_PURPOSES[self.role]),
+            max_external_receipt_graph_bytes=_job_input_limit_bytes(
+                operation=manifest["operation"],
+                purpose=manifest["purpose"],
+            ),
         )
         if self._host_operation_channel_factory is not None:
             context.host_operation_channel = self._host_operation_channel_factory(

@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # abort the whole attempt sequence inside the submission window.
 _RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 _MAX_WEIGHT_INPUT_RESPONSE_FRAME_BYTES = 16 * 1024 * 1024
-_MAX_WEIGHT_INPUT_RESPONSE_BYTES = 64 * 1024 * 1024
+_MAX_WEIGHT_INPUT_RESPONSE_BYTES = 128 * 1024 * 1024
 # Retry delays are capped so a timed-out attempt re-attaches to the gateway's
 # in-flight singleflight build (which caches its exact success) within seconds
 # of completion instead of drifting into minute-long exponential gaps.

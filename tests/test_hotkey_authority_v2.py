@@ -9,6 +9,7 @@ from leadpoet_canonical.hotkey_authority_v2 import (
     APPLICATION_SIGNATURE_SCHEMA_VERSION,
     CHAIN_SIGNING_PROFILE_SCHEMA_VERSION,
     HotkeyAuthorityV2Error,
+    MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES,
     build_application_signature_request_v2,
     build_serve_axon_extrinsic_authorization_v2,
     build_weight_transport_authorization_v2,
@@ -585,7 +586,7 @@ def test_weight_transport_authorization_allows_only_v2_write_paths(path):
         ("/weights/submit/v2", 0, 200),
         ("/weights/submit/v2", 100, 0),
         ("/weights/submit/v2", 10 * 1024 * 1024 + 1, 200),
-        ("/weights/submit/v2", 100, 64 * 1024 * 1024 + 1),
+        ("/weights/submit/v2", 100, MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES + 1),
     ],
 )
 def test_weight_transport_authorization_rejects_open_paths_and_bad_sizes(

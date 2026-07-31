@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
+from gateway.build_info import get_build_info
 from gateway.deploy_readiness import (
     assert_resume_allowed,
     build_deploy_readiness,
@@ -47,6 +48,7 @@ from .maintenance import (
     requeue_failed_loop,
     requeue_stale_started_autoresearch_runs,
     requeue_paused_autoresearch_runs,
+    resume_gateway_restart_owned_maintenance,
     resume_credit_blocked_run,
     set_autoresearch_maintenance_paused,
     set_scoring_maintenance_paused,
@@ -129,6 +131,19 @@ def build_parser() -> argparse.ArgumentParser:
     resume_scoring = sub.add_parser("resume-scoring", help="Resume candidate scoring claims")
     resume_scoring.add_argument("--reason", default="maintenance complete")
     resume_scoring.add_argument("--actor-ref", default=default_actor_ref())
+
+    resume_restart = sub.add_parser(
+        "resume-restart-maintenance",
+        help=(
+            "Resume only restart-owned scoring/autoresearch pauses after "
+            "deployment readiness succeeds"
+        ),
+    )
+    resume_restart.add_argument(
+        "--expected-commit",
+        required=True,
+        help="exact deployed gateway commit already verified by the restart controller",
+    )
 
     deploy_readiness = sub.add_parser(
         "check-deploy-readiness",
@@ -1729,6 +1744,24 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "state": await get_scoring_maintenance_state(),
             "candidate_counts": await candidate_scoring_status_counts(),
         }
+    if args.command == "resume-restart-maintenance":
+        expected_commit = str(args.expected_commit or "").strip().lower()
+        actual_commit = str(get_build_info().get("git_commit") or "").strip().lower()
+        if (
+            len(expected_commit) != 40
+            or any(character not in "0123456789abcdef" for character in expected_commit)
+            or actual_commit != expected_commit
+        ):
+            return {
+                "ok": False,
+                "action": "resume-restart-maintenance",
+                "blocked_reason": "exact_commit_mismatch",
+                "expected_commit": expected_commit,
+                "actual_commit": actual_commit,
+            }
+        result = await resume_gateway_restart_owned_maintenance()
+        result["verified_commit"] = actual_commit
+        return result
     if args.command == "requeue-candidate":
         return await requeue_failed_candidate(
             candidate_id=args.candidate_id,

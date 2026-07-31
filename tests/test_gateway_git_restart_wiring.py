@@ -622,6 +622,20 @@ def test_gateway_restart_records_nonblocking_commit_bound_stage_timings() -> Non
     ) in script
 
 
+def test_gateway_restart_recovers_only_restart_owned_maintenance_after_readiness() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    v2_health = 'curl -fsS http://localhost:8000/health/v2-authority'
+    handoff = "-m gateway.tee.verify_weight_submission_ready_v2"
+    resume = (
+        "-m gateway.research_lab.admin resume-restart-maintenance \\\n"
+        '  --expected-commit "$GATEWAY_DEPLOY_SHA"'
+    )
+    completed = 'GATEWAY_DEPLOY_STAGE="completed"'
+
+    assert script.rindex(v2_health) < script.rindex(handoff)
+    assert script.rindex(handoff) < script.rindex(resume) < script.rindex(completed)
+
+
 def test_gateway_restart_uses_one_canonical_checkout_for_host_processes() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     assert 'LEADPOET_REPO_ROOT="${LEADPOET_REPO_ROOT:-/home/ec2-user/leadpoet_repo}"' in script

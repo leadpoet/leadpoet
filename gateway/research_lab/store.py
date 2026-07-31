@@ -668,12 +668,14 @@ async def create_gateway_control_event(
     reason: str,
     actor_ref: str | None = None,
     event_doc: dict[str, Any] | None = None,
+    expected_prior_seq: int | None = None,
 ) -> dict[str, Any]:
-    return await append_event_with_seq(
-        "research_lab_gateway_control_events",
-        "control_key",
-        control_key,
-        lambda seq: {
+    def _payload(seq: int) -> dict[str, Any]:
+        if expected_prior_seq is not None and seq != expected_prior_seq + 1:
+            raise RuntimeError(
+                "gateway control state changed before the requested transition"
+            )
+        return {
             "control_key": control_key,
             "seq": seq,
             "event_type": event_type,
@@ -681,7 +683,14 @@ async def create_gateway_control_event(
             "actor_ref": actor_ref,
             "reason": reason,
             "event_doc": event_doc or {},
-        },
+        }
+
+    return await append_event_with_seq(
+        "research_lab_gateway_control_events",
+        "control_key",
+        control_key,
+        _payload,
+        attempts=1 if expected_prior_seq is not None else 5,
     )
 
 

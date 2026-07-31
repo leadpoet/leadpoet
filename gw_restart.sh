@@ -2008,6 +2008,11 @@ VERIFY_BUILD_INFO
 timeout 30 curl -fsS http://localhost:8000/research-lab/status >/dev/null
 timeout 30 curl -fsS http://localhost:8000/attest >/dev/null
 
+echo "Resuming only restart-owned Research Lab maintenance after readiness"
+PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+  -m gateway.research_lab.admin resume-restart-maintenance \
+  --expected-commit "$GATEWAY_DEPLOY_SHA"
+
 GATEWAY_DEPLOY_STAGE="host_restart_script_install"
 export GATEWAY_DEPLOY_STAGE
 install_research_lab_admin_wrapper

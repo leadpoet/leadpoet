@@ -50,6 +50,9 @@ _POSTGREST_TIMESTAMP_RE = re.compile(
 
 AUTORESEARCH_MAINTENANCE_CONTROL_KEY = "autoresearch_maintenance"
 SCORING_MAINTENANCE_CONTROL_KEY = "scoring_maintenance"
+GATEWAY_RESTART_ACTOR_REF = "operator:gateway-restart"
+GATEWAY_RESTART_PAUSE_REASON = "gateway_restart"
+GATEWAY_RESTART_RESUME_REASON = "gateway_restart_complete"
 AUTORESEARCH_PROXY_PREFIXES = HOSTED_PROXY_PREFIXES
 TERMINAL_QUEUE_STATUSES = frozenset({"completed", "failed", "cancelled", "tombstoned"})
 ACTIVE_QUEUE_STATUSES = frozenset({"queued", "started", "paused"})
@@ -301,6 +304,7 @@ async def set_autoresearch_maintenance_paused(
     reason: str,
     actor_ref: str | None = None,
     event_doc: dict[str, Any] | None = None,
+    expected_prior_seq: int | None = None,
 ) -> dict[str, Any]:
     return await create_gateway_control_event(
         control_key=AUTORESEARCH_MAINTENANCE_CONTROL_KEY,
@@ -313,6 +317,7 @@ async def set_autoresearch_maintenance_paused(
             "maintenance_mode": "cooperative_checkpoint_pause",
             **(event_doc or {}),
         },
+        expected_prior_seq=expected_prior_seq,
     )
 
 
@@ -322,6 +327,7 @@ async def set_scoring_maintenance_paused(
     reason: str,
     actor_ref: str | None = None,
     event_doc: dict[str, Any] | None = None,
+    expected_prior_seq: int | None = None,
 ) -> dict[str, Any]:
     return await create_gateway_control_event(
         control_key=SCORING_MAINTENANCE_CONTROL_KEY,
@@ -334,7 +340,122 @@ async def set_scoring_maintenance_paused(
             "maintenance_mode": "cooperative_scoring_pause",
             **(event_doc or {}),
         },
+        expected_prior_seq=expected_prior_seq,
     )
+
+
+def is_gateway_restart_owned_pause(
+    state: Mapping[str, Any],
+    *,
+    operator_action: str,
+) -> bool:
+    event_doc = (
+        state.get("event_doc")
+        if isinstance(state.get("event_doc"), Mapping)
+        else {}
+    )
+    return bool(
+        state.get("paused") is True
+        and state.get("status") == "active"
+        and state.get("event_type") == "pause_requested"
+        and state.get("reason") == GATEWAY_RESTART_PAUSE_REASON
+        and state.get("actor_ref") == GATEWAY_RESTART_ACTOR_REF
+        and event_doc.get("operator_action") == operator_action
+    )
+
+
+async def resume_gateway_restart_owned_maintenance() -> dict[str, Any]:
+    """Resume only maintenance state created by the gateway restart operator."""
+
+    autoresearch_state = await get_autoresearch_maintenance_state()
+    scoring_state = await get_scoring_maintenance_state()
+    result: dict[str, Any] = {
+        "ok": True,
+        "action": "resume-restart-maintenance",
+        "autoresearch": {"status": "already_inactive"},
+        "scoring": {"status": "already_inactive"},
+    }
+
+    if autoresearch_state.get("paused"):
+        if not is_gateway_restart_owned_pause(
+            autoresearch_state,
+            operator_action="pause-autoresearch",
+        ):
+            result["autoresearch"] = {
+                "status": "preserved_non_restart_pause",
+                "state": autoresearch_state,
+            }
+        else:
+            prior_seq = autoresearch_state.get("event_seq")
+            if not isinstance(prior_seq, int) or isinstance(prior_seq, bool):
+                raise RuntimeError(
+                    "restart-owned autoresearch pause has no valid event sequence"
+                )
+            event = await set_autoresearch_maintenance_paused(
+                paused=False,
+                reason=GATEWAY_RESTART_RESUME_REASON,
+                actor_ref=GATEWAY_RESTART_ACTOR_REF,
+                event_doc={
+                    "operator_action": "resume-autoresearch",
+                    "resume_source": "gateway_restart_post_readiness",
+                    "previous_event_hash": autoresearch_state.get("event_hash"),
+                    "previous_event_seq": prior_seq,
+                },
+                expected_prior_seq=prior_seq,
+            )
+            requeue = await requeue_paused_autoresearch_runs(
+                actor_ref=GATEWAY_RESTART_ACTOR_REF,
+                reason=GATEWAY_RESTART_RESUME_REASON,
+            )
+            failed = int(requeue.get("failed") or 0)
+            capacity_limited = int(requeue.get("capacity_limited") or 0)
+            result["ok"] = not failed
+            result["autoresearch"] = {
+                "status": (
+                    "resumed_with_deferred_capacity"
+                    if capacity_limited
+                    else "resumed"
+                ),
+                "event_hash": event.get("anchored_hash"),
+                "event_seq": event.get("seq"),
+                "requeue": requeue,
+                "state": await get_autoresearch_maintenance_state(),
+            }
+
+    if scoring_state.get("paused"):
+        if not is_gateway_restart_owned_pause(
+            scoring_state,
+            operator_action="pause-scoring",
+        ):
+            result["scoring"] = {
+                "status": "preserved_non_restart_pause",
+                "state": scoring_state,
+            }
+        else:
+            prior_seq = scoring_state.get("event_seq")
+            if not isinstance(prior_seq, int) or isinstance(prior_seq, bool):
+                raise RuntimeError(
+                    "restart-owned scoring pause has no valid event sequence"
+                )
+            event = await set_scoring_maintenance_paused(
+                paused=False,
+                reason=GATEWAY_RESTART_RESUME_REASON,
+                actor_ref=GATEWAY_RESTART_ACTOR_REF,
+                event_doc={
+                    "operator_action": "resume-scoring",
+                    "resume_source": "gateway_restart_post_readiness",
+                    "previous_event_hash": scoring_state.get("event_hash"),
+                    "previous_event_seq": prior_seq,
+                },
+                expected_prior_seq=prior_seq,
+            )
+            result["scoring"] = {
+                "status": "resumed",
+                "event_hash": event.get("anchored_hash"),
+                "event_seq": event.get("seq"),
+                "state": await get_scoring_maintenance_state(),
+            }
+    return result
 
 
 async def autoresearch_queue_status_counts() -> dict[str, int]:
@@ -906,7 +1027,8 @@ async def requeue_paused_autoresearch_runs(
                     }
                 )
                 logger.info(
-                    "research_lab_maintenance_resume_capacity_limited run_id=%s error=%s",
+                    "research_lab_maintenance_resume_capacity_limited "
+                    "run_id=%s recovery=hosted_worker_stale_paused_reaper error=%s",
                     row.get("run_id"),
                     error,
                 )

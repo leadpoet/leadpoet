@@ -278,7 +278,9 @@ def test_large_input_exception_is_scoped_to_allocation_ancestry_consumers():
                     operation="research_lab_allocation",
                     purpose="research_lab.allocation.v2",
                 ),
-                "payload_size_bytes": 128 * 1024 * 1024 + 1,
+                "payload_size_bytes": (
+                    job_manager_v2.MAX_ALLOCATION_ANCESTRY_INPUT_BYTES + 1
+                ),
             },
             role="gateway_coordinator",
             operations={
@@ -296,7 +298,7 @@ def test_large_ancestry_scope_is_applied_to_external_parent_graphs(monkeypatch):
     assert job_manager_v2._job_input_limit_bytes(
         operation="attest_weight_publication",
         purpose="gateway.weights.publication.v2",
-    ) == 128 * 1024 * 1024
+    ) == job_manager_v2.MAX_ALLOCATION_ANCESTRY_INPUT_BYTES
     assert job_manager_v2._job_input_limit_bytes(
         operation="score",
         purpose="research_lab.candidate_score.v2",

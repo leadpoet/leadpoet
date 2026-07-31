@@ -44,7 +44,10 @@ MAX_INPUT_BYTES = 64 * 1024 * 1024
 # same complete, independently validated receipt ancestry. Uploads remain
 # chunked; allow only these exact coordinator operation/purpose pairs to exceed
 # the ordinary V2 input and parent-graph bounds without discarding ancestry.
-MAX_ALLOCATION_ANCESTRY_INPUT_BYTES = 128 * 1024 * 1024
+# The complete measured allocation ancestry is transported in one bounded
+# logical job.  Keep the larger ceiling scoped to the exact authority
+# operation/purpose allowlist below; ordinary V2 jobs remain at 64 MiB.
+MAX_ALLOCATION_ANCESTRY_INPUT_BYTES = 256 * 1024 * 1024
 _ALLOCATION_ANCESTRY_JOB_SCOPES = frozenset(
     {
         ("research_lab_allocation", "research_lab.allocation.v2"),

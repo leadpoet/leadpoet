@@ -84,10 +84,14 @@ unavailable, do not push.
 
 - Use `$bugs` only when explicitly requested for a reported Research Lab defect
   that should be reproduced, minimally fixed, regression-tested, and safely
-  pushed; expect 15–60+ minutes and never invoke it automatically.
+  pushed; expect 15–60+ minutes and never invoke it automatically. Route one
+  `gpt-5.6-sol` `xhigh` lead and require a fresh read-only Sol `xhigh` review;
+  allow `max` only for an evidence-backed reasoning bottleneck.
 - Use `$ship` only when explicitly requested for the full v1 plan/build/test,
   evidence-based v2 remediation, final verification, and pull-request workflow;
   expect 30–120+ minutes or longer for CI and never invoke it automatically.
+  Route fresh read-only Sol `xhigh` planning/review phases and one sequential
+  writable `gpt-5.6-terra` `max` implementation/verification agent.
 - Skill invocation is not the push-now override and does not bypass any
   repository, production-safety, test-profile, epoch, or attestation rule.
 

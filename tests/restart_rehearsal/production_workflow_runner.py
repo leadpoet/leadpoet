@@ -2159,12 +2159,128 @@ def _exercise_research_lab_allocation_conservation() -> dict[str, Any]:
     }
 
 
+def _exercise_receipt_graph_aggregate_pagination() -> dict[str, Any]:
+    """Exercise aggregate evidence paging through the candidate store helper."""
+
+    from gateway.research_lab import attested_v2_store
+
+    row_limit = int(attested_v2_store._MAX_GRAPH_ROWS)
+    query_chunk = int(attested_v2_store._GRAPH_QUERY_CHUNK)
+    if row_limit < 1 or query_chunk < 1 or query_chunk > row_limit:
+        raise RuntimeError("candidate V2 receipt graph limits are invalid")
+
+    row_count = row_limit + 1
+    width = len(str(row_count))
+    expected_rows = [
+        {
+            "attempt_hash": (
+                f"rehearsal-aggregate-attempt-{index:0{width}d}"
+            )
+        }
+        for index in range(row_count)
+    ]
+    expected_by_key = {
+        str(row["attempt_hash"]): dict(row) for row in expected_rows
+    }
+    expected_keys = set(expected_by_key)
+    observed_queries: list[dict[str, Any]] = []
+    original_select_all = attested_v2_store.select_all
+
+    async def strict_select_all(
+        table: str,
+        *,
+        filters: tuple[tuple[str, str, Any], ...],
+        order_by: tuple[tuple[str, bool], ...],
+        max_rows: int,
+        **_kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        if (
+            table != attested_v2_store.TRANSPORT_TABLE
+            or len(filters) != 1
+            or filters[0][0] != "attempt_hash"
+            or filters[0][1] != "in"
+            or order_by != (("attempt_hash", False),)
+            or int(max_rows) != row_limit
+        ):
+            raise RuntimeError(
+                "receipt graph rehearsal received an unknown store operation"
+            )
+        values = [str(value) for value in filters[0][2]]
+        if not values or len(values) > query_chunk:
+            raise RuntimeError(
+                "receipt graph rehearsal query exceeded candidate chunk limit"
+            )
+        unknown = sorted(set(values) - expected_keys)
+        if unknown:
+            raise RuntimeError(
+                "receipt graph rehearsal queried undeclared evidence"
+            )
+        observed_queries.append(
+            {
+                "count": len(values),
+                "first": values[0],
+                "last": values[-1],
+            }
+        )
+        return [dict(expected_by_key[value]) for value in values]
+
+    async def exercise() -> tuple[set[str], bool]:
+        attested_v2_store.select_all = strict_select_all
+        try:
+            existing = await attested_v2_store._existing_exact_rows(
+                attested_v2_store.TRANSPORT_TABLE,
+                key_field="attempt_hash",
+                expected_rows=expected_rows,
+            )
+            try:
+                await attested_v2_store._select_by_values(
+                    attested_v2_store.RECEIPT_TABLE,
+                    field="receipt_hash",
+                    values=(
+                        f"rehearsal-receipt-{index:0{width}d}"
+                        for index in range(row_count)
+                    ),
+                    key_fields=("receipt_hash",),
+                )
+            except attested_v2_store.AttestedV2StoreError as exc:
+                if str(exc) != "V2 receipt graph exceeds row limit":
+                    raise
+                structural_limit_enforced = True
+            else:
+                structural_limit_enforced = False
+            return existing, structural_limit_enforced
+        finally:
+            attested_v2_store.select_all = original_select_all
+
+    existing, structural_limit_enforced = asyncio.run(exercise())
+    if existing != expected_keys:
+        raise RuntimeError("aggregate V2 receipt evidence was not exact")
+    if len(observed_queries) < 2:
+        raise RuntimeError("aggregate V2 receipt evidence was not paged")
+    if (
+        max(int(query["count"]) for query in observed_queries) > query_chunk
+        or not structural_limit_enforced
+    ):
+        raise RuntimeError("V2 receipt graph safety bounds were weakened")
+    return {
+        "aggregate_rows": row_count,
+        "aggregate_evidence_paged": True,
+        "per_query_row_limit": row_limit,
+        "query_chunk": query_chunk,
+        "query_count": len(observed_queries),
+        "structural_limit_enforced": True,
+    }
+
+
 BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "chain-settlement-state-space": _exercise_chain_settlement_state_space,
     "conditional-icp-policy": _exercise_conditional_icp_policy,
     "conditional-candidate-gate": _exercise_conditional_candidate_gate,
     "git-tree-replacement": _exercise_git_tree_replacement,
     "historical-metagraph-layouts": _exercise_historical_metagraph_layouts,
+    "receipt-graph-aggregate-pagination": (
+        _exercise_receipt_graph_aggregate_pagination
+    ),
     "research-lab-allocation-conservation": (
         _exercise_research_lab_allocation_conservation
     ),
@@ -2533,6 +2649,18 @@ def main() -> int:
             == behavior_contract["policy_commitments"]["chain_source"][
                 "policy"
             ].get("selective_result_last_fields")
+        ),
+        "receipt_graph_aggregate_evidence_paged": (
+            behavior_evidence.get(
+                "receipt-graph-aggregate-pagination",
+                {},
+            ).get("aggregate_evidence_paged")
+            is True
+            and behavior_evidence.get(
+                "receipt-graph-aggregate-pagination",
+                {},
+            ).get("structural_limit_enforced")
+            is True
         ),
         "research_lab_allocation_policy_config_bound": (
             "research-lab-allocation-conservation" in behavior_evidence

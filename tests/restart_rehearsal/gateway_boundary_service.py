@@ -1488,12 +1488,17 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json_response(405, {"message": "method not allowed"})
             return
+        evidence = {
+            "status": "ok",
+            "operation": operation,
+            "method": self.command,
+            "target": target,
+            "query": parsed.query,
+        }
+        if operation == "select":
+            evidence["row_count"] = len(response)
         self.server.state.record(
-            status="ok",
-            operation=operation,
-            method=self.command,
-            target=target,
-            query=parsed.query,
+            **evidence,
         )
         self._json_response(status, response)
 

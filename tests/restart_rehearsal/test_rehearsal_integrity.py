@@ -438,16 +438,21 @@ def test_chain_settlement_evidence_requires_persistence_then_readback() -> None:
         "operation": "select",
         "status": "ok",
         "target": "research_lab_chain_realized_epoch_settlements_v1",
+        "row_count": 1,
     }
     credit_read = {
         "kind": "local-postgrest",
         "operation": "select",
         "status": "ok",
         "target": "research_lab_chain_realized_obligation_credits_v1",
+        "row_count": 0,
     }
-    with pytest.raises(SystemExit, match="did not persist"):
+    verify_chain_settlement_durable_readback(
+        [settlement_read, credit_read]
+    )
+    with pytest.raises(SystemExit, match="neither persisted nor read"):
         verify_chain_settlement_durable_readback(
-            [settlement_read, credit_read]
+            [{**settlement_read, "row_count": 0}, credit_read]
         )
     with pytest.raises(SystemExit, match="durable settlement$"):
         verify_chain_settlement_durable_readback(
@@ -3327,6 +3332,29 @@ def test_historical_layout_scenario_follows_candidate_policy(
 
     assert evidence["accepted_layouts"] == [73, 76, 80]
     assert evidence["rpc_call_counts"] == {"73": 6, "76": 6, "80": 6}
+
+
+def test_receipt_graph_aggregate_pagination_scenario_uses_candidate_bounds() -> None:
+    from gateway.research_lab import attested_v2_store
+
+    evidence = (
+        production_workflow_runner._exercise_receipt_graph_aggregate_pagination()
+    )
+
+    assert evidence == {
+        "aggregate_rows": attested_v2_store._MAX_GRAPH_ROWS + 1,
+        "aggregate_evidence_paged": True,
+        "per_query_row_limit": attested_v2_store._MAX_GRAPH_ROWS,
+        "query_chunk": attested_v2_store._GRAPH_QUERY_CHUNK,
+        "query_count": (
+            (
+                attested_v2_store._MAX_GRAPH_ROWS
+                + attested_v2_store._GRAPH_QUERY_CHUNK
+            )
+            // attested_v2_store._GRAPH_QUERY_CHUNK
+        ),
+        "structural_limit_enforced": True,
+    }
 
 
 def test_weight_storage_preflight_capability_tracks_selected_release(

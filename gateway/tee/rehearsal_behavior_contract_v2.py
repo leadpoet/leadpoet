@@ -34,6 +34,7 @@ BEHAVIOR_SCENARIOS = (
     "conditional-candidate-gate",
     "git-tree-replacement",
     "historical-metagraph-layouts",
+    "receipt-graph-aggregate-pagination",
     "research-lab-allocation-conservation",
 )
 
@@ -54,6 +55,7 @@ BEHAVIORAL_INVARIANTS = (
     "conditional_candidate_advancement_exact",
     "git_tree_replacement_deterministic",
     "historical_metagraph_layouts_policy_bound",
+    "receipt_graph_aggregate_evidence_paged",
     "research_lab_allocation_policy_config_bound",
     "research_lab_allocation_conserved",
     "canonical_vector_primary_auditor_equal",

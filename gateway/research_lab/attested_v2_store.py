@@ -329,26 +329,49 @@ async def _select_by_values(
     field: str,
     values: Iterable[str],
     key_fields: tuple[str, ...],
+    max_total_rows: int | None = _MAX_GRAPH_ROWS,
 ) -> list[dict[str, Any]]:
-    """Select bounded value chunks in one stable, unique row order."""
+    """Select bounded value chunks in one stable, unique row order.
+
+    Receipt ancestry is bounded by ``_MAX_GRAPH_ROWS``. Evidence attached to
+    that ancestry can legitimately exceed the same aggregate count, so callers
+    may disable only the aggregate bound while every individual query remains
+    bounded. Oversized owner batches are split until the offending owner is
+    isolated; one owner can never return more than ``_MAX_GRAPH_ROWS`` rows.
+    """
 
     normalized = sorted({str(value) for value in values})
-    if len(normalized) > _MAX_GRAPH_ROWS:
+    if max_total_rows is not None and len(normalized) > max_total_rows:
         raise AttestedV2StoreError("V2 receipt graph exceeds row limit")
     if not key_fields or len(set(key_fields)) != len(key_fields):
         raise AttestedV2StoreError("V2 durable row key fields are invalid")
-    rows = []
-    for offset in range(0, len(normalized), _GRAPH_QUERY_CHUNK):
-        chunk = normalized[offset : offset + _GRAPH_QUERY_CHUNK]
-        rows.extend(
-            await select_all(
+
+    async def select_chunk(chunk: list[str]) -> list[dict[str, Any]]:
+        try:
+            return await select_all(
                 table,
                 filters=((field, "in", chunk),),
                 order_by=tuple((key_field, False) for key_field in key_fields),
                 max_rows=_MAX_GRAPH_ROWS,
             )
-        )
-        if len(rows) > _MAX_GRAPH_ROWS:
+        except RuntimeError as exc:
+            if "paginated select exceeded max_rows=" not in str(exc):
+                raise
+            if len(chunk) == 1:
+                raise AttestedV2StoreError(
+                    "V2 receipt graph exceeds row limit"
+                ) from exc
+            midpoint = len(chunk) // 2
+            return (
+                await select_chunk(chunk[:midpoint])
+                + await select_chunk(chunk[midpoint:])
+            )
+
+    rows = []
+    for offset in range(0, len(normalized), _GRAPH_QUERY_CHUNK):
+        chunk = normalized[offset : offset + _GRAPH_QUERY_CHUNK]
+        rows.extend(await select_chunk(chunk))
+        if max_total_rows is not None and len(rows) > max_total_rows:
             raise AttestedV2StoreError("V2 receipt graph exceeds row limit")
     return rows
 
@@ -378,6 +401,7 @@ async def _existing_exact_rows(
         field=key_field,
         values=expected_by_key,
         key_fields=(key_field,),
+        max_total_rows=None,
     )
     existing: set[str] = set()
     for stored in stored_rows:
@@ -428,6 +452,7 @@ async def _existing_exact_relations(
         field=owner_field,
         values=owners,
         key_fields=key_fields,
+        max_total_rows=None,
     )
     existing: set[tuple[str, ...]] = set()
     for stored in stored_rows:
@@ -475,6 +500,12 @@ async def persist_receipt_graph_v2(
     for receipt in graph["receipts"]:
         if str(receipt["boot_identity_hash"]) not in boot_by_hash:
             raise AttestedV2StoreError("receipt boot identity is absent")
+        scope = (str(receipt["job_id"]), str(receipt["purpose"]))
+        if (
+            len(attempts_by_scope.get(scope, ())) > _MAX_GRAPH_ROWS
+            or len(host_operations_by_scope.get(scope, ())) > _MAX_GRAPH_ROWS
+        ):
+            raise AttestedV2StoreError("V2 receipt graph exceeds row limit")
 
     boot_rows = [
         boot_storage_row(identity) for identity in graph["boot_identities"]
@@ -487,6 +518,11 @@ async def persist_receipt_graph_v2(
         receipt_storage_row(receipt_by_hash[receipt_hash])
         for receipt_hash in ordered_receipts
     ]
+    if (
+        len(boot_rows) > _MAX_GRAPH_ROWS
+        or len(receipt_rows) > _MAX_GRAPH_ROWS
+    ):
+        raise AttestedV2StoreError("V2 receipt graph exceeds row limit")
     edge_rows = [
         {
             "child_receipt_hash": receipt_hash,
@@ -678,6 +714,7 @@ async def _load_receipt_graph_batch_v2(
             field="child_receipt_hash",
             values=requested,
             key_fields=("child_receipt_hash", "parent_receipt_hash"),
+            max_total_rows=None,
         )
         edge_pairs = set()
         for row in edge_rows:
@@ -746,6 +783,7 @@ async def _load_receipt_graph_batch_v2(
         field="receipt_hash",
         values=receipt_hashes,
         key_fields=("receipt_hash", "attempt_hash"),
+        max_total_rows=None,
     )
     link_pairs = set()
     attempt_hashes = set()
@@ -762,6 +800,7 @@ async def _load_receipt_graph_batch_v2(
         field="attempt_hash",
         values=attempt_hashes,
         key_fields=("attempt_hash",),
+        max_total_rows=None,
     )
     attempts = {}
     for row in attempt_rows:
@@ -782,6 +821,7 @@ async def _load_receipt_graph_batch_v2(
         field="receipt_hash",
         values=receipt_hashes,
         key_fields=("request_hash",),
+        max_total_rows=None,
     )
     host_operations_by_receipt: dict[str, list[dict[str, Any]]] = {}
     seen_requests = set()

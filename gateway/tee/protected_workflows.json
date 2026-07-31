@@ -92,9 +92,14 @@
       "symbol": "recover_research_lab_checkpointed_audit_epochs"
     },
     {
-      "ast_sha256": "sha256:b869eafb077aab1e52c25e0dc98de3ffa815cf13d43354750ea2b938e19490a5",
+      "ast_sha256": "sha256:6f4c80382e4fcfe3fa72c10cf5388cfec90143c912e227f1945e15af492de45f",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "_load_receipt_graph_batch_v2"
+    },
+    {
+      "ast_sha256": "sha256:36785139d1e37d2e20f1be8f1e21ab0e14c96067d81efda4d8b9c1518cf22a67",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "_select_by_values"
     },
     {
       "ast_sha256": "sha256:6ab6cb484c0bcebde82da98cd8523535d6ba1d32120c1759b4be95d5ae2aa254",
@@ -140,6 +145,11 @@
       "ast_sha256": "sha256:70a694e02690cee10693c514613f89a5a9b0aa47182046ac7ecdabb279ac86dc",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "persist_legacy_finalized_allocation_migration_v2"
+    },
+    {
+      "ast_sha256": "sha256:e9d17d0d1e12c2637e43672749c6652e386a6315aff31a9c70e8406c619d2617",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "persist_receipt_graph_v2"
     },
     {
       "ast_sha256": "sha256:37345988cb96134a1c1ecc941bfdb2db120309acdfc2e5061b9230ecb93f86d6",
@@ -1302,7 +1312,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:57a9daba7c1e2c0f6f65254c9694554749a5179949928aab4514549d66828645",
+  "manifest_hash": "sha256:51dcff7fc3d25222081be7021384d102dc6d5601d4169df57d74a7b6defdba8b",
   "protected_source_commit": "c350c43674d5bd470808e542278b5c05bd3f3534",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

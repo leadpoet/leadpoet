@@ -744,6 +744,103 @@ async def test_v2_edge_value_query_orders_multi_page_results_by_primary_key(
 
 
 @pytest.mark.asyncio
+async def test_v2_existing_exact_rows_pages_large_aggregate_history(
+    monkeypatch,
+):
+    expected_rows = [
+        {"attempt_hash": f"attempt-{index:05d}"}
+        for index in range(attested_v2_store._MAX_GRAPH_ROWS + 1)
+    ]
+    expected_by_key = {
+        row["attempt_hash"]: dict(row) for row in expected_rows
+    }
+    queried_chunks = []
+
+    async def _select_all(
+        table,
+        *,
+        filters,
+        order_by,
+        max_rows,
+        **_kwargs,
+    ):
+        assert table == attested_v2_store.TRANSPORT_TABLE
+        field, operator, values = filters[0]
+        assert field == "attempt_hash"
+        assert operator == "in"
+        assert order_by == (("attempt_hash", False),)
+        assert max_rows == attested_v2_store._MAX_GRAPH_ROWS
+        queried_chunks.append(tuple(values))
+        return [expected_by_key[value] for value in values]
+
+    monkeypatch.setattr(attested_v2_store, "select_all", _select_all)
+
+    existing = await attested_v2_store._existing_exact_rows(
+        attested_v2_store.TRANSPORT_TABLE,
+        key_field="attempt_hash",
+        expected_rows=expected_rows,
+    )
+
+    assert existing == set(expected_by_key)
+    assert len(queried_chunks) > 1
+    assert max(map(len, queried_chunks)) <= attested_v2_store._GRAPH_QUERY_CHUNK
+
+
+@pytest.mark.asyncio
+async def test_v2_value_query_splits_oversized_owner_batch(monkeypatch):
+    values = [f"receipt-{index:02d}" for index in range(9)]
+    queried_chunks = []
+
+    async def _select_all(_table, *, filters, **_kwargs):
+        chunk = tuple(filters[0][2])
+        queried_chunks.append(chunk)
+        if len(chunk) > 4:
+            raise RuntimeError(
+                "relation: paginated select exceeded max_rows=10000"
+            )
+        return [{"receipt_hash": value} for value in chunk]
+
+    monkeypatch.setattr(attested_v2_store, "select_all", _select_all)
+
+    rows = await attested_v2_store._select_by_values(
+        attested_v2_store.RECEIPT_TRANSPORT_TABLE,
+        field="receipt_hash",
+        values=values,
+        key_fields=("receipt_hash",),
+        max_total_rows=None,
+    )
+
+    assert [row["receipt_hash"] for row in rows] == values
+    assert [len(chunk) for chunk in queried_chunks] == [9, 4, 5, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_v2_value_query_keeps_receipt_ancestry_limit(monkeypatch):
+    async def _unexpected_select(*_args, **_kwargs):
+        raise AssertionError("oversized ancestry must fail before querying")
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "select_all",
+        _unexpected_select,
+    )
+
+    with pytest.raises(
+        attested_v2_store.AttestedV2StoreError,
+        match="V2 receipt graph exceeds row limit",
+    ):
+        await attested_v2_store._select_by_values(
+            attested_v2_store.RECEIPT_TABLE,
+            field="receipt_hash",
+            values=(
+                f"receipt-{index:05d}"
+                for index in range(attested_v2_store._MAX_GRAPH_ROWS + 1)
+            ),
+            key_fields=("receipt_hash",),
+        )
+
+
+@pytest.mark.asyncio
 async def test_v2_graph_persistence_batch_verifies_existing_ancestry(monkeypatch):
     graph = _graph(with_transport=True, with_parent=True)
     rows = _persisted_rows(graph)

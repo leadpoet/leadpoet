@@ -910,12 +910,8 @@ def verify_chain_settlement_durable_readback(rows: list[dict]) -> None:
             "persist_research_lab_chain_realized_lifetime_settlement_v2",
         }
     ]
-    if not persistence_ordinals:
-        raise SystemExit(
-            "gateway rehearsal did not persist a chain-realized settlement"
-        )
     settlement_reads = [
-        ordinal
+        (ordinal, int(row.get("row_count") or 0))
         for ordinal, row in enumerate(rows)
         if row.get("kind") == "local-postgrest"
         and row.get("operation") == "select"
@@ -924,7 +920,7 @@ def verify_chain_settlement_durable_readback(rows: list[dict]) -> None:
         == "research_lab_chain_realized_epoch_settlements_v1"
     ]
     credit_reads = [
-        ordinal
+        (ordinal, row.get("row_count"))
         for ordinal, row in enumerate(rows)
         if row.get("kind") == "local-postgrest"
         and row.get("operation") == "select"
@@ -932,12 +928,25 @@ def verify_chain_settlement_durable_readback(rows: list[dict]) -> None:
         and row.get("target")
         == "research_lab_chain_realized_obligation_credits_v1"
     ]
+    if not persistence_ordinals:
+        if any(row_count == 1 for _ordinal, row_count in settlement_reads):
+            return
+        raise SystemExit(
+            "gateway rehearsal neither persisted nor read an existing "
+            "chain-realized settlement"
+        )
     first_persistence = min(persistence_ordinals)
-    if not any(ordinal > first_persistence for ordinal in settlement_reads):
+    if not any(
+        ordinal > first_persistence and row_count == 1
+        for ordinal, row_count in settlement_reads
+    ):
         raise SystemExit(
             "gateway rehearsal did not read back its durable settlement"
         )
-    if not any(ordinal > first_persistence for ordinal in credit_reads):
+    if not any(
+        ordinal > first_persistence and row_count is not None
+        for ordinal, row_count in credit_reads
+    ):
         raise SystemExit(
             "gateway rehearsal did not read back durable settlement credits"
         )

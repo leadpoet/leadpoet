@@ -117,6 +117,7 @@ def test_pinned_gateway_verifier_recovers_from_transient_transport_failure(
     assert result.returncode == 0
     assert "pinned_gateway_release_aligned" in result.stdout
     assert "retrying (1/12)" in result.stderr
+    assert "endpoint=v2_authority curl_status=7" in result.stderr
     assert requests == 4
 
 

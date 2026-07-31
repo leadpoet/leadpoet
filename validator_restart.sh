@@ -708,6 +708,17 @@ if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" != "1" ]; then
   unset LEADPOET_USE_CAPTURED_RESTART_START
 fi
 
+if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" != "1" ]; then
+  echo "Checking same-SHA gateway readiness before stopping the running validator"
+  VALIDATOR_DEPLOY_STAGE="pre_shutdown_gateway_alignment"
+  if ! verify_pinned_gateway_release \
+      "${VALIDATOR_PINNED_GATEWAY_PRESTART_MAX_ATTEMPTS:-600}"; then
+    echo "Validator remains running; production shutdown has not started." >&2
+    exit 1
+  fi
+  record_validator_restart_timing "pre_shutdown_gateway_aligned"
+fi
+
 if [ ! -r "$VALIDATOR_DOCKER_OPERATION_LOCK_HELPER" ]; then
   echo "ERROR: validator Docker operation lock helper is unavailable" >&2
   exit 1

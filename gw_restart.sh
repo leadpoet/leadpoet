@@ -904,7 +904,12 @@ skip_keys = {
     "GATEWAY_TEE_EIF_ROOT",
     "GATEWAY_TEE_FALLBACK_LOG_DIR",
     "GATEWAY_GIT_HELPER",
+    "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
+    "GATEWAY_RESTART_STARTED_EPOCH",
+    "GATEWAY_RESTART_TIMING_DIR",
+    "GATEWAY_RESTART_TIMING_FILE",
+    "GATEWAY_RESTART_TIMING_INITIALIZED",
     "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
     "LEADPOET_RESTART_START_PATH",
     "GATEWAY_RESTART_LOCK_HELD",
@@ -985,7 +990,12 @@ skip_keys = {
     "GATEWAY_TEE_EIF_ROOT",
     "GATEWAY_TEE_FALLBACK_LOG_DIR",
     "GATEWAY_GIT_HELPER",
+    "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
+    "GATEWAY_RESTART_STARTED_EPOCH",
+    "GATEWAY_RESTART_TIMING_DIR",
+    "GATEWAY_RESTART_TIMING_FILE",
+    "GATEWAY_RESTART_TIMING_INITIALIZED",
     "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
     "LEADPOET_RESTART_START_PATH",
     "GATEWAY_RESTART_LOCK_HELD",
@@ -1658,6 +1668,7 @@ sudo rm -f "$GATEWAY_TEE_EIF_ROOT"/enclave-build-*.json
 rm -f "$GATEWAY_ROOT/tee/tee-enclave.eif"
 sudo docker rmi tee-enclave:latest 2>/dev/null || true
 bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"
+record_gateway_restart_timing "attested_runtime_staged"
 
 # Preflight: verify the worker import graph against the freshly staged
 # attested runtime BEFORE building the enclave or relaunching anything.
@@ -1736,6 +1747,7 @@ then
 fi
 echo "Building deterministic gateway role EIFs from the staged runtime"
   GATEWAY_TEE_SKIP_STAGE=1 bash "$GATEWAY_ROOT/tee/build_role_enclaves.sh"
+  record_gateway_restart_timing "gateway_role_eifs_built"
   echo "Cleaning temporary role Docker images/layers before gateway relaunch"
   for role in gateway_coordinator gateway_scoring gateway_autoresearch; do
     sudo docker rmi -f "tee-enclave:${role}" 2>/dev/null || true
@@ -1750,6 +1762,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     GATEWAY_ENV_FILE="$GATEWAY_ENV_FILE" \
     RESEARCH_LAB_TEE_PROTOCOL="$RESEARCH_LAB_TEE_PROTOCOL" \
     bash ./start_enclave.sh
+  record_gateway_restart_timing "gateway_enclaves_started"
 
   echo "Starting parent-side opaque enclave egress forwarder"
   cd "$LEADPOET_REPO_ROOT"
@@ -1806,12 +1819,14 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     --protected-workflow-manifest "$GATEWAY_ROOT/_attested_runtime/protected_workflows.json" \
     --encrypted-artifact-policy "$GATEWAY_V2_ARTIFACT_POLICY" \
     --config-dir "$GATEWAY_V2_CONFIG_DIR"
+  record_gateway_restart_timing "v2_runtime_bootstrapped"
 
   echo "Provisioning KMS ciphertext directly to the attested coordinator"
   GATEWAY_DEPLOY_STAGE="v2_kms_provision"
   export GATEWAY_DEPLOY_STAGE
   PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_kms_provision_v2 \
     "${V2_PROVISION_ARGS[@]}"
+  record_gateway_restart_timing "v2_kms_provisioned"
 
 echo "Verifying V2 provider and execution-manager readiness"
 GATEWAY_DEPLOY_STAGE="v2_runtime_readiness"

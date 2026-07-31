@@ -606,6 +606,11 @@ def test_gateway_restart_records_nonblocking_commit_bound_stage_timings() -> Non
         in script
     )
     assert 'record_gateway_restart_timing "candidate_activated"' in script
+    assert 'record_gateway_restart_timing "attested_runtime_staged"' in script
+    assert 'record_gateway_restart_timing "gateway_role_eifs_built"' in script
+    assert 'record_gateway_restart_timing "gateway_enclaves_started"' in script
+    assert 'record_gateway_restart_timing "v2_runtime_bootstrapped"' in script
+    assert 'record_gateway_restart_timing "v2_kms_provisioned"' in script
     assert 'record_gateway_restart_timing "v2_runtime_ready"' in script
     assert (
         'record_gateway_restart_timing "validator_weight_input_ready"'
@@ -620,6 +625,24 @@ def test_gateway_restart_records_nonblocking_commit_bound_stage_timings() -> Non
         'GATEWAY_RESTART_TIMING_INITIALIZED="'
         '$GATEWAY_RESTART_TIMING_INITIALIZED" \\'
     ) in script
+
+
+def test_gateway_runtime_env_cannot_replace_current_restart_controller_state() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    for key in (
+        "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
+        "GATEWAY_RESTART_STARTED_EPOCH",
+        "GATEWAY_RESTART_TIMING_DIR",
+        "GATEWAY_RESTART_TIMING_FILE",
+        "GATEWAY_RESTART_TIMING_INITIALIZED",
+    ):
+        assert script.count(f'    "{key}",') == 2
+
+    clone = script.index('echo "Cloning live gateway env before stopping processes"')
+    merge = script.index('cat "$ENV_SECRET" >> "$ENV_CLONE"')
+    first_reload = script.index('. "$ENV_CLONE"', merge)
+    assert clone < merge < first_reload
 
 
 def test_gateway_restart_recovers_only_restart_owned_maintenance_after_readiness() -> None:

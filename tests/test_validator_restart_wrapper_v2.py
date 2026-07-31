@@ -291,7 +291,7 @@ def test_exact_restart_preserves_newer_validator_restart_controller():
     assert "VALIDATOR_EXACT_COMMIT_HELPER_SOURCE" in script
 
 
-def test_exact_restart_prepares_before_same_gateway_release_activation():
+def test_exact_restart_requires_gateway_before_shutdown_and_rechecks_activation():
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
     deploy = Path(
         "validator_models/containerizing/deploy_dynamic.sh"
@@ -302,6 +302,13 @@ def test_exact_restart_prepares_before_same_gateway_release_activation():
 
     release_ready = script.index(
         'if [ "$VALIDATOR_V2_RELEASE_READY" != "1" ]'
+    )
+    pre_shutdown_alignment = script.index(
+        'echo "Checking same-SHA gateway readiness before stopping the running validator"'
+    )
+    pre_shutdown_verify = script.index(
+        "if ! verify_pinned_gateway_release",
+        pre_shutdown_alignment,
     )
     shutdown = script.index('echo "Stopping validator processes and containers"')
     enclave_build = script.index("bash validator_tee/scripts/build_enclave.sh")
@@ -324,6 +331,8 @@ def test_exact_restart_prepares_before_same_gateway_release_activation():
     )
     assert (
         release_ready
+        < pre_shutdown_alignment
+        < pre_shutdown_verify
         < shutdown
         < enclave_build
         < hotkey
@@ -333,7 +342,10 @@ def test_exact_restart_prepares_before_same_gateway_release_activation():
         < start
         < poststart_verify
     )
-    assert "Checking same-SHA gateway alignment before stopping validator" not in script
+    assert (
+        'echo "Validator remains running; production shutdown has not started." >&2'
+        in script[pre_shutdown_verify:shutdown]
+    )
     assert (
         "\nif ! verify_pinned_gateway_release \\\n"
         '    "${VALIDATOR_PINNED_GATEWAY_POSTSTART_MAX_ATTEMPTS:-12}"; then\n'

@@ -132,8 +132,9 @@ bounded_retry_sleep() {
 }
 
 bounded_gateway_request() {
-  local connect_timeout max_time remaining url
-  url="$1"
+  local connect_timeout label max_time remaining request_status url
+  label="$1"
+  url="$2"
   remaining="$(remaining_timeout_seconds)" || return 124
   max_time=35
   if [ "$remaining" -lt "$max_time" ]; then
@@ -143,9 +144,14 @@ bounded_gateway_request() {
   if [ "$max_time" -lt "$connect_timeout" ]; then
     connect_timeout="$max_time"
   fi
+  request_status=0
   curl --fail --silent --show-error \
     --connect-timeout "$connect_timeout" --max-time "$max_time" \
-    "$url"
+    "$url" || request_status=$?
+  if [ "$request_status" -ne 0 ]; then
+    echo "pinned_gateway_request_failed endpoint=${label} curl_status=${request_status}" >&2
+    return "$request_status"
+  fi
 }
 
 require_current_coordination_success() {
@@ -226,18 +232,21 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
 
   if ! gateway_health="$(
     bounded_gateway_request \
+      "v2_authority" \
       "$GATEWAY_URL/health/v2-authority"
   )"; then
     request_failed=1
   fi
   if [ "$request_failed" -eq 0 ] && ! gateway_build_info="$(
     bounded_gateway_request \
+      "build_info" \
       "$GATEWAY_URL/build-info"
   )"; then
     request_failed=1
   fi
   if [ "$request_failed" -eq 0 ] && ! gateway_release_evidence="$(
     bounded_gateway_request \
+      "release_evidence" \
       "$GATEWAY_URL/weights/v2/release-evidence/$EXPECTED_COMMIT"
   )"; then
     request_failed=1

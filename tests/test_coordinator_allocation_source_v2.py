@@ -639,6 +639,10 @@ def test_finalized_champion_history_requires_declared_chain_roots(monkeypatch):
     assert required == {finalization_root}
     assert reader.calls == [
         (
+            "chain_realized_settlement_activation",
+            {"netuid": 71},
+        ),
+        (
             "finalized_allocation_authorities",
             {"netuid": 71, "start_epoch": 99, "end_epoch": 99},
         ),
@@ -646,19 +650,7 @@ def test_finalized_champion_history_requires_declared_chain_roots(monkeypatch):
             "legacy_finalized_allocation_migrations",
             {"netuid": 71, "start_epoch": 99, "end_epoch": 99},
         ),
-        (
-            "chain_realized_epoch_settlements",
-            {"netuid": 71, "start_epoch": 99, "end_epoch": 99},
-        ),
-            (
-                "chain_realized_settlement_activation",
-                {"netuid": 71},
-            ),
-            (
-                "chain_realized_obligation_credits",
-                {"netuid": 71, "start_epoch": 99, "end_epoch": 99},
-            ),
-        ]
+    ]
 
     monkeypatch.setattr(
         resolver,
@@ -694,6 +686,124 @@ def test_finalized_champion_history_requires_declared_chain_roots(monkeypatch):
             context=context,
             required_parents=set(),
         )
+
+
+def test_finalized_history_ignores_superseded_native_authority_graphs(
+    monkeypatch,
+):
+    chain_root = "sha256:" + "9" * 64
+
+    class CutoverReader(FakeReader):
+        def read(self, *, policy_id, parameters, **_kwargs):
+            self.calls.append((policy_id, dict(parameters)))
+            if policy_id == "chain_realized_settlement_activation":
+                return [_chain_realized_activation(first_epoch_id=99)]
+            if policy_id == "chain_realized_epoch_settlements":
+                return [
+                    {
+                        "epoch_id": 99,
+                        "settlement_receipt_hash": chain_root,
+                    }
+                ]
+            if (
+                policy_id == "finalized_allocation_authorities"
+                and int(parameters["end_epoch"]) >= 99
+            ):
+                return [
+                    {
+                        "epoch_id": 99,
+                        "finalization_receipt_hash": "sha256:" + "8" * 64,
+                    }
+                ]
+            return []
+
+    reader = CutoverReader()
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=FakeChainSource(),
+        config_supplier=_config,
+        network_supplier=lambda: "finney",
+    )
+
+    def validate_native(rows, *, finalization_graphs):
+        if rows:
+            raise allocation_source.ChampionSettlementV2Error(
+                "finalized allocation receipt graph is missing"
+            )
+        return []
+
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_finalized_allocation_authorities_v2",
+        validate_native,
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_legacy_settlement_migrations_v2",
+        lambda rows, *, receipt_graphs: [],
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_chain_realized_epoch_settlements_v1",
+        lambda rows, *, receipt_graphs: [],
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_chain_realized_obligation_credits_v1",
+        lambda rows, *, settlement_rows, receipt_graphs: [],
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "_receipt_graphs_by_declared_root",
+        lambda _graphs, declared_roots: {
+            root: {
+                "root_receipt_hash": root,
+                "receipts": [{"receipt_hash": root}],
+            }
+            for root in declared_roots
+        },
+    )
+    context = _context((chain_root,))
+    context.external_receipt_graphs = [
+        {
+            "root_receipt_hash": chain_root,
+            "receipts": [{"receipt_hash": chain_root}],
+        }
+    ]
+    required = set()
+
+    history = resolver._finalized_champion_history(
+        epoch=100,
+        netuid=71,
+        champion_rows=[{"start_epoch": 98}],
+        context=context,
+        required_parents=required,
+    )
+
+    assert history == []
+    assert required == {chain_root}
+    assert reader.calls == [
+        (
+            "chain_realized_settlement_activation",
+            {"netuid": 71},
+        ),
+        (
+            "finalized_allocation_authorities",
+            {"netuid": 71, "start_epoch": 98, "end_epoch": 98},
+        ),
+        (
+            "legacy_finalized_allocation_migrations",
+            {"netuid": 71, "start_epoch": 98, "end_epoch": 98},
+        ),
+        (
+            "chain_realized_epoch_settlements",
+            {"netuid": 71, "start_epoch": 99, "end_epoch": 99},
+        ),
+        (
+            "chain_realized_obligation_credits",
+            {"netuid": 71, "start_epoch": 99, "end_epoch": 99},
+        ),
+    ]
 
 
 def test_finalized_history_requires_every_raw_authority_graph(monkeypatch):
@@ -776,7 +886,7 @@ def test_finalized_history_requires_every_raw_authority_graph(monkeypatch):
         resolver._finalized_champion_history(
             epoch=100,
             netuid=71,
-            champion_rows=[{"start_epoch": 99}],
+            champion_rows=[{"start_epoch": 98}],
             context=context,
             required_parents=required,
         )
@@ -792,7 +902,7 @@ def test_finalized_history_requires_every_raw_authority_graph(monkeypatch):
         resolver._finalized_champion_history(
             epoch=100,
             netuid=71,
-            champion_rows=[{"start_epoch": 99}],
+            champion_rows=[{"start_epoch": 98}],
             context=context,
             required_parents=set(),
         )

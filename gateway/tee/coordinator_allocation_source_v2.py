@@ -797,33 +797,8 @@ class CoordinatorAllocationSourceV2:
         ]
         if not starts or epoch <= 0:
             return []
-        native_rows = self._read(
-            "finalized_allocation_authorities",
-            {
-                "netuid": netuid,
-                "start_epoch": min(starts),
-                "end_epoch": epoch - 1,
-            },
-            context,
-        )
-        legacy_rows = self._read(
-            "legacy_finalized_allocation_migrations",
-            {
-                "netuid": netuid,
-                "start_epoch": min(starts),
-                "end_epoch": epoch - 1,
-            },
-            context,
-        )
-        chain_settlement_rows = self._read(
-            "chain_realized_epoch_settlements",
-            {
-                "netuid": netuid,
-                "start_epoch": min(starts),
-                "end_epoch": epoch - 1,
-            },
-            context,
-        )
+        history_start = min(starts)
+        history_end = epoch - 1
         activation_rows = self._read(
             "chain_realized_settlement_activation",
             {"netuid": netuid},
@@ -855,8 +830,52 @@ class CoordinatorAllocationSourceV2:
             raise CoordinatorAllocationSourceV2Error(
                 "chain realized settlement activation is invalid"
             )
+        # Chain-realized settlement supersedes submitted-weight intent at the
+        # activation epoch. Only request graphs for authorities the enclave
+        # will actually consume.
+        finalized_end = min(history_end, activation_epoch - 1)
+        native_rows = (
+            self._read(
+                "finalized_allocation_authorities",
+                {
+                    "netuid": netuid,
+                    "start_epoch": history_start,
+                    "end_epoch": finalized_end,
+                },
+                context,
+            )
+            if finalized_end >= history_start
+            else []
+        )
+        legacy_rows = (
+            self._read(
+                "legacy_finalized_allocation_migrations",
+                {
+                    "netuid": netuid,
+                    "start_epoch": history_start,
+                    "end_epoch": finalized_end,
+                },
+                context,
+            )
+            if finalized_end >= history_start
+            else []
+        )
+        chain_start = max(history_start, activation_epoch)
+        chain_settlement_rows = (
+            self._read(
+                "chain_realized_epoch_settlements",
+                {
+                    "netuid": netuid,
+                    "start_epoch": chain_start,
+                    "end_epoch": history_end,
+                },
+                context,
+            )
+            if chain_start <= history_end
+            else []
+        )
         expected_epochs = set(
-            range(max(min(starts), activation_epoch), epoch)
+            range(chain_start, epoch)
         )
         observed_epochs = {
             int(row["epoch_id"]) for row in chain_settlement_rows
@@ -865,14 +884,18 @@ class CoordinatorAllocationSourceV2:
             raise CoordinatorAllocationSourceV2Error(
                 "chain realized settlement history is incomplete"
             )
-        chain_credit_rows = self._read(
-            "chain_realized_obligation_credits",
-            {
-                "netuid": netuid,
-                "start_epoch": min(starts),
-                "end_epoch": epoch - 1,
-            },
-            context,
+        chain_credit_rows = (
+            self._read(
+                "chain_realized_obligation_credits",
+                {
+                    "netuid": netuid,
+                    "start_epoch": chain_start,
+                    "end_epoch": history_end,
+                },
+                context,
+            )
+            if chain_start <= history_end
+            else []
         )
         graph_by_root = _receipt_graphs_by_declared_root(
             context.external_receipt_graphs,

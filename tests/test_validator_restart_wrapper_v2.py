@@ -433,6 +433,38 @@ def test_incomplete_late_activation_cleans_every_prepared_resource():
         assert f"trap 'exit {status}' {signal}" in script
 
 
+def test_validator_restart_records_nonblocking_commit_bound_stage_timings():
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+
+    assert "leadpoet.validator_restart_timing.v1" in script
+    assert 'record_validator_restart_timing "invoked"' in script
+    assert 'record_validator_restart_timing "release_ready"' in script
+    assert (
+        'record_validator_restart_timing "pre_shutdown_checks_complete"'
+        in script
+    )
+    assert (
+        'record_validator_restart_timing "destructive_phase_started"'
+        in script
+    )
+    assert (
+        'record_validator_restart_timing "attested_enclave_ready"' in script
+    )
+    assert (
+        'record_validator_restart_timing "validator_application_ready"'
+        in script
+    )
+    assert 'record_validator_restart_timing "completed" "passed"' in script
+    assert (
+        "WARNING: validator restart timing event could not be recorded"
+        in script
+    )
+    assert (
+        'VALIDATOR_RESTART_TIMING_INITIALIZED="'
+        '$VALIDATOR_RESTART_TIMING_INITIALIZED" \\'
+    ) in script
+
+
 def test_exact_restart_checks_current_auditor_contract_before_checkout():
     gateway = Path("gw_restart.sh").read_text(encoding="utf-8")
     validator = Path("validator_restart.sh").read_text(encoding="utf-8")

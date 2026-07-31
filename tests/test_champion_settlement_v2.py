@@ -1428,6 +1428,149 @@ async def test_settled_history_fails_before_expensive_finalized_scan(monkeypatch
     assert calls == ["chain"]
 
 
+@pytest.mark.asyncio
+async def test_settled_history_bounds_finalized_authority_at_chain_cutover(
+    monkeypatch,
+):
+    calls: list[tuple[str, dict[str, int]]] = []
+
+    async def chain_history(**kwargs):
+        calls.append(
+            (
+                "chain",
+                {
+                    key: value
+                    for key, value in kwargs.items()
+                    if not key.startswith("_")
+                },
+            )
+        )
+        kwargs["_receipt_graph_records_out"]["chain-root"] = {
+            "epoch_id": 102,
+            "graph": {"root_receipt_hash": "chain-root"},
+        }
+        return [
+            {"epoch": epoch, "netuid": 71, "authority_types": ["chain"]}
+            for epoch in (102, 103)
+        ]
+
+    async def finalized_history(**kwargs):
+        calls.append(
+            (
+                "finalized",
+                {
+                    key: value
+                    for key, value in kwargs.items()
+                    if not key.startswith("_")
+                },
+            )
+        )
+        kwargs["_receipt_graph_records_out"]["native-root"] = {
+            "epoch_id": 101,
+            "graph": {"root_receipt_hash": "native-root"},
+        }
+        return [
+            {"epoch": epoch, "netuid": 71, "authority_types": ["native"]}
+            for epoch in (100, 101)
+        ]
+
+    monkeypatch.setattr(
+        settlement,
+        "load_chain_realized_allocation_history_v1",
+        chain_history,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "load_finalized_allocation_history_v2",
+        finalized_history,
+    )
+    graph_records: dict[str, dict] = {}
+
+    history = await settlement.load_settled_allocation_history_v2(
+        netuid=71,
+        start_epoch=100,
+        end_epoch=103,
+        _receipt_graph_records_out=graph_records,
+    )
+
+    assert [row["epoch"] for row in history] == [100, 101, 102, 103]
+    assert calls == [
+        (
+            "chain",
+            {"netuid": 71, "start_epoch": 100, "end_epoch": 103},
+        ),
+        (
+            "finalized",
+            {"netuid": 71, "start_epoch": 100, "end_epoch": 101},
+        ),
+    ]
+    assert set(graph_records) == {"chain-root", "native-root"}
+
+
+@pytest.mark.asyncio
+async def test_settled_history_skips_superseded_finalized_graph_scan(
+    monkeypatch,
+):
+    async def chain_history(**kwargs):
+        kwargs["_receipt_graph_records_out"]["chain-root"] = {
+            "epoch_id": 102,
+            "graph": {"root_receipt_hash": "chain-root"},
+        }
+        return [
+            {"epoch": epoch, "netuid": 71, "authority_types": ["chain"]}
+            for epoch in (102, 103)
+        ]
+
+    async def unexpected_finalized_history(**_kwargs):
+        raise AssertionError("superseded finalized history must not be loaded")
+
+    monkeypatch.setattr(
+        settlement,
+        "load_chain_realized_allocation_history_v1",
+        chain_history,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "load_finalized_allocation_history_v2",
+        unexpected_finalized_history,
+    )
+    graph_records: dict[str, dict] = {}
+
+    history = await settlement.load_settled_allocation_history_v2(
+        netuid=71,
+        start_epoch=102,
+        end_epoch=103,
+        _receipt_graph_records_out=graph_records,
+    )
+
+    assert [row["epoch"] for row in history] == [102, 103]
+    assert set(graph_records) == {"chain-root"}
+
+
+@pytest.mark.asyncio
+async def test_settled_history_rejects_chain_rows_outside_requested_range(
+    monkeypatch,
+):
+    async def chain_history(**_kwargs):
+        return [{"epoch": 99, "netuid": 71, "authority_types": ["chain"]}]
+
+    monkeypatch.setattr(
+        settlement,
+        "load_chain_realized_allocation_history_v1",
+        chain_history,
+    )
+
+    with pytest.raises(
+        settlement.ChampionSettlementV2Error,
+        match="outside the requested range",
+    ):
+        await settlement.load_settled_allocation_history_v2(
+            netuid=71,
+            start_epoch=100,
+            end_epoch=103,
+        )
+
+
 def test_unattributed_chain_history_remains_zero_credit_v2_authority(
     monkeypatch,
 ):

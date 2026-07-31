@@ -528,6 +528,7 @@ def _run_component(
     weight_readiness_scenario: str = "production_success",
     docker_platform: str,
     fixture_seed_root: Path,
+    from_fixture_seed_root: Path,
     durable_fixture_seed_root: Path,
     durable_state_root: Path,
     durable_schema_sha: str,
@@ -569,6 +570,11 @@ def _run_component(
         (
             f"type=bind,src={fixture_seed_root},"
             "dst=/rehearsal-fixture-seed,readonly"
+        ),
+        "--mount",
+        (
+            f"type=bind,src={from_fixture_seed_root},"
+            "dst=/rehearsal-from-fixture-seed,readonly"
         ),
         "--mount",
         (
@@ -1287,10 +1293,10 @@ def _run_profile(args: argparse.Namespace) -> int:
             transitions = (transition,)
             if args.profile == "release" and transition == "forward":
                 transitions = ("forward", "rollback", "forward")
-            target_shas = {
-                candidate_sha if run_transition != "rollback" else from_sha
-                for run_transition in transitions
-            }
+            # Candidate startup can reconstruct receipts issued by the
+            # deployed release, so both immutable release channels must be
+            # available even in the one-way prepush profile.
+            target_shas = {from_sha, candidate_sha}
             with _recording_fixture_stack(stage_results) as fixture_stack:
                 drand_artifacts: dict[str, Path] = {}
                 fixture_seeds: dict[str, Path] = {}
@@ -1360,6 +1366,10 @@ def _run_profile(args: argparse.Namespace) -> int:
                             blocked_by.append(
                                 f"fixture-seed-{run_candidate[:12]}"
                             )
+                        if run_from not in fixture_seeds:
+                            blocked_by.append(
+                                f"fixture-seed-{run_from[:12]}"
+                            )
                         if (
                             candidate_sha != run_candidate
                             and candidate_sha not in fixture_seeds
@@ -1394,6 +1404,9 @@ def _run_profile(args: argparse.Namespace) -> int:
                                 profile=args.profile,
                                 docker_platform=docker_platform,
                                 fixture_seed_root=fixture_seeds[run_candidate],
+                                from_fixture_seed_root=fixture_seeds[
+                                    run_from
+                                ],
                                 durable_fixture_seed_root=fixture_seeds[
                                     candidate_sha
                                 ],

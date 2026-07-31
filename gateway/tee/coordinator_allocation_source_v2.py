@@ -131,17 +131,25 @@ def _receipt_graphs_by_declared_root(
     graphs: Sequence[Mapping[str, Any]],
     declared_roots: Sequence[str],
 ) -> dict[str, dict[str, Any]]:
+    roots = tuple(dict.fromkeys(declared_roots))
+    requested_roots = set(roots)
+    matches_by_root: dict[str, list[Mapping[str, Any]]] = {
+        root: [] for root in roots
+    }
+    for graph in graphs:
+        graph_roots: set[str] = set()
+        for receipt in graph.get("receipts") or ():
+            if not isinstance(receipt, Mapping):
+                continue
+            receipt_hash = str(receipt.get("receipt_hash") or "")
+            if receipt_hash in requested_roots:
+                graph_roots.add(receipt_hash)
+        for root in graph_roots:
+            matches_by_root[root].append(graph)
+
     by_root: dict[str, dict[str, Any]] = {}
-    for root in declared_roots:
-        matches = [
-            graph
-            for graph in graphs
-            if any(
-                isinstance(receipt, Mapping)
-                and str(receipt.get("receipt_hash") or "") == root
-                for receipt in graph.get("receipts") or ()
-            )
-        ]
+    for root in roots:
+        matches = matches_by_root[root]
         if not matches:
             raise CoordinatorAllocationSourceV2Error(
                 "declared allocation parent is absent from receipt graphs"

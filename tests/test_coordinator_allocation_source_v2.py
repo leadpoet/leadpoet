@@ -546,6 +546,63 @@ def test_declared_roots_are_reconstructed_from_one_compact_graph(monkeypatch):
     assert graphs[child_hash] == compact_graph
 
 
+def test_declared_root_lookup_indexes_each_graph_once(monkeypatch):
+    class CountingGraph(dict):
+        receipt_lookups = 0
+
+        def get(self, key, default=None):
+            if key == "receipts":
+                self.receipt_lookups += 1
+            return super().get(key, default)
+
+    roots = ["sha256:" + f"{index:064x}" for index in range(128)]
+    compact_graphs = [
+        CountingGraph({"receipts": [{"receipt_hash": root}]})
+        for root in roots
+    ]
+    monkeypatch.setattr(
+        allocation_source,
+        "_receipt_subgraph",
+        lambda _graph, *, root_receipt_hash: {
+            "root_receipt_hash": root_receipt_hash
+        },
+    )
+
+    graphs = allocation_source._receipt_graphs_by_declared_root(
+        compact_graphs,
+        roots,
+    )
+
+    assert set(graphs) == set(roots)
+    assert sum(graph.receipt_lookups for graph in compact_graphs) == len(
+        compact_graphs
+    )
+
+
+def test_declared_root_lookup_still_rejects_conflicting_graphs(monkeypatch):
+    root = "sha256:" + "a" * 64
+    monkeypatch.setattr(
+        allocation_source,
+        "_receipt_subgraph",
+        lambda graph, *, root_receipt_hash: {
+            "root_receipt_hash": root_receipt_hash,
+            "marker": graph["marker"],
+        },
+    )
+
+    with pytest.raises(
+        CoordinatorAllocationSourceV2Error,
+        match="declared allocation parent graphs conflict",
+    ):
+        allocation_source._receipt_graphs_by_declared_root(
+            [
+                {"marker": "first", "receipts": [{"receipt_hash": root}]},
+                {"marker": "second", "receipts": [{"receipt_hash": root}]},
+            ],
+            [root],
+        )
+
+
 def test_finalized_champion_history_requires_declared_chain_roots(monkeypatch):
     finalization_root = "sha256:" + "1" * 64
     allocation_receipt = "sha256:" + "2" * 64

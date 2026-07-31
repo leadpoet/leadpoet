@@ -211,42 +211,6 @@ def verify_validator_gateway_activation_barrier(
             "gateway release before candidate alignment"
         )
 
-    aligned_health = _first_event(
-        rows,
-        lambda row: _is_gateway_request(
-            row,
-            endpoint_suffix="/health/v2-authority",
-            served_commit=candidate_sha,
-        ),
-        before=process_ordinal,
-        description="candidate authority health before activation",
-    )
-    aligned_build = _first_event(
-        rows,
-        lambda row: _is_gateway_request(
-            row,
-            endpoint_suffix="/build-info",
-            served_commit=candidate_sha,
-        ),
-        after=aligned_health,
-        before=process_ordinal,
-        description="candidate build identity before activation",
-    )
-    aligned_release = _first_event(
-        rows,
-        lambda row: (
-            _is_gateway_request(
-                row,
-                endpoint_suffix=candidate_sha,
-                served_commit=candidate_sha,
-            )
-            and "/weights/v2/release-evidence/" in str(row.get("url") or "")
-        ),
-        after=aligned_build,
-        before=process_ordinal,
-        description="candidate release evidence before activation",
-    )
-
     application_build = _first_event(
         rows,
         lambda row: (
@@ -273,6 +237,42 @@ def verify_validator_gateway_activation_barrier(
         description="candidate validator application commit verification",
     )
     if late_activation_supported:
+        preflight_health = _first_event(
+            rows,
+            lambda row: _is_gateway_request(
+                row,
+                endpoint_suffix="/health/v2-authority",
+                served_commit=candidate_sha,
+            ),
+            before=application_build,
+            description="candidate authority health during preflight",
+        )
+        preflight_build = _first_event(
+            rows,
+            lambda row: _is_gateway_request(
+                row,
+                endpoint_suffix="/build-info",
+                served_commit=candidate_sha,
+            ),
+            after=preflight_health,
+            before=application_build,
+            description="candidate build identity during preflight",
+        )
+        preflight_release = _first_event(
+            rows,
+            lambda row: (
+                _is_gateway_request(
+                    row,
+                    endpoint_suffix=candidate_sha,
+                    served_commit=candidate_sha,
+                )
+                and "/weights/v2/release-evidence/"
+                in str(row.get("url") or "")
+            ),
+            after=preflight_build,
+            before=application_build,
+            description="candidate release evidence during preflight",
+        )
         prepared_id = _first_event(
             rows,
             lambda row: (
@@ -326,14 +326,53 @@ def verify_validator_gateway_activation_barrier(
             _first_event(
                 rows,
                 predicate,
-                before=health_ordinals[0],
-                description=f"{description} before gateway alignment wait",
+                before=prepared_id,
+                description=f"{description} before prepared image identity",
             )
+        aligned_health = _first_event(
+            rows,
+            lambda row: _is_gateway_request(
+                row,
+                endpoint_suffix="/health/v2-authority",
+                served_commit=candidate_sha,
+            ),
+            after=prepared_id,
+            before=process_ordinal,
+            description="candidate authority health at activation barrier",
+        )
+        aligned_build = _first_event(
+            rows,
+            lambda row: _is_gateway_request(
+                row,
+                endpoint_suffix="/build-info",
+                served_commit=candidate_sha,
+            ),
+            after=aligned_health,
+            before=process_ordinal,
+            description="candidate build identity at activation barrier",
+        )
+        aligned_release = _first_event(
+            rows,
+            lambda row: (
+                _is_gateway_request(
+                    row,
+                    endpoint_suffix=candidate_sha,
+                    served_commit=candidate_sha,
+                )
+                and "/weights/v2/release-evidence/"
+                in str(row.get("url") or "")
+            ),
+            after=aligned_build,
+            before=process_ordinal,
+            description="candidate release evidence at activation barrier",
+        )
         if not (
-            application_build
+            preflight_health
+            < preflight_build
+            < preflight_release
+            < application_build
             < revision_inspect
             < prepared_id
-            < health_ordinals[0]
             < aligned_health
             < aligned_build
             < aligned_release
@@ -354,18 +393,55 @@ def verify_validator_gateway_activation_barrier(
             before=process_ordinal,
             description="unchanged validator image identity after alignment",
         )
-    elif not (
-        aligned_health
-        < aligned_build
-        < aligned_release
-        < application_build
-        < revision_inspect
-        < process_ordinal
-    ):
-        raise SystemExit(
-            "legacy validator deployer did not remain behind the exact "
-            "gateway release fallback barrier"
+    else:
+        aligned_health = _first_event(
+            rows,
+            lambda row: _is_gateway_request(
+                row,
+                endpoint_suffix="/health/v2-authority",
+                served_commit=candidate_sha,
+            ),
+            before=process_ordinal,
+            description="candidate authority health before activation",
         )
+        aligned_build = _first_event(
+            rows,
+            lambda row: _is_gateway_request(
+                row,
+                endpoint_suffix="/build-info",
+                served_commit=candidate_sha,
+            ),
+            after=aligned_health,
+            before=process_ordinal,
+            description="candidate build identity before activation",
+        )
+        aligned_release = _first_event(
+            rows,
+            lambda row: (
+                _is_gateway_request(
+                    row,
+                    endpoint_suffix=candidate_sha,
+                    served_commit=candidate_sha,
+                )
+                and "/weights/v2/release-evidence/"
+                in str(row.get("url") or "")
+            ),
+            after=aligned_build,
+            before=process_ordinal,
+            description="candidate release evidence before activation",
+        )
+        if not (
+            aligned_health
+            < aligned_build
+            < aligned_release
+            < application_build
+            < revision_inspect
+            < process_ordinal
+        ):
+            raise SystemExit(
+                "legacy validator deployer did not remain behind the exact "
+                "gateway release fallback barrier"
+            )
 
     poststart_health = _first_event(
         rows,

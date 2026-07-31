@@ -28,6 +28,102 @@ from leadpoet_canonical.sourcing_history_v2 import build_sourcing_epoch_v2
 
 HASH = "sha256:" + "a" * 64
 HASH_B = "sha256:" + "b" * 64
+
+
+@pytest.mark.asyncio
+async def test_exact_duplicate_retries_readback_without_reinserting(monkeypatch):
+    inserts = []
+    reads = []
+    sleeps = []
+    expected = {"receipt_hash": HASH, "purpose": "research_lab.allocation.v2"}
+
+    async def insert(_table, row):
+        inserts.append(dict(row))
+        raise RuntimeError("duplicate key value violates unique constraint 23505")
+
+    async def select(_table, *, filters):
+        reads.append(tuple(filters))
+        return dict(expected) if len(reads) == 3 else None
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(attested_v2_store, "insert_row", insert)
+    monkeypatch.setattr(attested_v2_store, "select_one", select)
+    monkeypatch.setattr(attested_v2_store.asyncio, "sleep", sleep)
+
+    stored = await attested_v2_store._insert_exact(
+        attested_v2_store.RECEIPT_TABLE,
+        expected,
+        key_filters=(("receipt_hash", HASH),),
+    )
+
+    assert stored == expected
+    assert inserts == [expected]
+    assert len(reads) == 3
+    assert sleeps == [0.1, 0.25]
+
+
+@pytest.mark.asyncio
+async def test_exact_duplicate_readback_conflict_still_fails_closed(monkeypatch):
+    expected = {"receipt_hash": HASH, "purpose": "research_lab.allocation.v2"}
+
+    async def insert(_table, _row):
+        raise RuntimeError("duplicate key value violates unique constraint 23505")
+
+    async def select(_table, *, filters):
+        assert filters == (("receipt_hash", HASH),)
+        return {**expected, "purpose": "research_lab.reward_decision.v2"}
+
+    monkeypatch.setattr(attested_v2_store, "insert_row", insert)
+    monkeypatch.setattr(attested_v2_store, "select_one", select)
+
+    with pytest.raises(
+        attested_v2_store.AttestedV2StoreError,
+        match="stored row conflicts at purpose",
+    ):
+        await attested_v2_store._insert_exact(
+            attested_v2_store.RECEIPT_TABLE,
+            expected,
+            key_filters=(("receipt_hash", HASH),),
+        )
+
+
+@pytest.mark.asyncio
+async def test_exact_duplicate_readback_retry_is_bounded(monkeypatch):
+    inserts = 0
+    reads = 0
+
+    async def insert(_table, _row):
+        nonlocal inserts
+        inserts += 1
+        raise RuntimeError("duplicate key value violates unique constraint 23505")
+
+    async def select(_table, *, filters):
+        nonlocal reads
+        reads += 1
+        assert filters == (("receipt_hash", HASH),)
+        return None
+
+    async def sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(attested_v2_store, "insert_row", insert)
+    monkeypatch.setattr(attested_v2_store, "select_one", select)
+    monkeypatch.setattr(attested_v2_store.asyncio, "sleep", sleep)
+
+    with pytest.raises(
+        attested_v2_store.AttestedV2StoreError,
+        match="duplicate could not be reloaded after bounded retry",
+    ):
+        await attested_v2_store._insert_exact(
+            attested_v2_store.RECEIPT_TABLE,
+            {"receipt_hash": HASH},
+            key_filters=(("receipt_hash", HASH),),
+        )
+
+    assert inserts == 1
+    assert reads == attested_v2_store._DUPLICATE_READBACK_ATTEMPTS
 HASH_C = "sha256:" + "c" * 64
 NOW = "2026-07-10T20:00:00Z"
 LATER = "2026-07-10T20:01:00Z"

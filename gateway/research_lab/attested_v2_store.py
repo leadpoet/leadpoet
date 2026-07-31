@@ -74,6 +74,8 @@ _GRAPH_QUERY_CHUNK = 50
 _MAX_GRAPH_ROWS = 10000
 _EXACT_INSERT_ATTEMPTS = 4
 _EXACT_INSERT_BACKOFF_SECONDS = (0.25, 0.75, 1.5)
+_DUPLICATE_READBACK_ATTEMPTS = 4
+_DUPLICATE_READBACK_BACKOFF_SECONDS = (0.1, 0.25, 0.5)
 _REPLAYABLE_EXECUTION_PAIRS = frozenset(
     {
         ("research_lab_allocation", "research_lab.allocation.v2"),
@@ -157,14 +159,36 @@ async def _insert_exact(
             if not duplicate and not transient:
                 raise
 
+            if duplicate:
+                for readback_attempt in range(_DUPLICATE_READBACK_ATTEMPTS):
+                    stored = await select_one(table, filters=key_filters)
+                    if isinstance(stored, Mapping):
+                        _assert_stored_row(table, stored, expected)
+                        return dict(stored)
+                    if readback_attempt == _DUPLICATE_READBACK_ATTEMPTS - 1:
+                        raise AttestedV2StoreError(
+                            "%s duplicate could not be reloaded after bounded retry"
+                            % table
+                        ) from exc
+                    backoff = _DUPLICATE_READBACK_BACKOFF_SECONDS[
+                        min(
+                            readback_attempt,
+                            len(_DUPLICATE_READBACK_BACKOFF_SECONDS) - 1,
+                        )
+                    ]
+                    logger.warning(
+                        "duplicate_exact_insert_readback_retry "
+                        "table=%s attempt=%s/%s",
+                        table,
+                        readback_attempt + 1,
+                        _DUPLICATE_READBACK_ATTEMPTS,
+                    )
+                    await asyncio.sleep(backoff)
+
             stored = await select_one(table, filters=key_filters)
             if isinstance(stored, Mapping):
                 _assert_stored_row(table, stored, expected)
                 return dict(stored)
-            if duplicate:
-                raise AttestedV2StoreError(
-                    "%s duplicate could not be reloaded" % table
-                ) from exc
             if attempt == _EXACT_INSERT_ATTEMPTS - 1:
                 raise
 

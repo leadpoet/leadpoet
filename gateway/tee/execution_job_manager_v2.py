@@ -31,6 +31,7 @@ from leadpoet_canonical.attested_v2 import (
     transport_root,
     validate_boot_identity,
     validate_receipt_graph,
+    validate_receipt_graphs,
     validate_transport_attempt,
 )
 
@@ -251,6 +252,86 @@ class ExecutionContextV2:
             self.external_receipt_graphs.append(normalized)
             self.allowed_failed_receipt_hashes.update(allowed_failed)
         return root_hash
+
+    def record_external_receipt_graphs(
+        self,
+        graphs: Sequence[Mapping[str, Any]],
+        *,
+        allowed_failed_receipt_hashes_by_graph: Optional[
+            Sequence[Iterable[str]]
+        ] = None,
+    ) -> tuple:
+        """Bind overlapping graphs after one fail-closed batch verification."""
+
+        graph_list = list(graphs)
+        if allowed_failed_receipt_hashes_by_graph is None:
+            failed_by_graph = [()] * len(graph_list)
+        else:
+            failed_by_graph = list(allowed_failed_receipt_hashes_by_graph)
+            if len(failed_by_graph) != len(graph_list):
+                raise ExecutionJobV2Error(
+                    "external receipt graph failure policies differ from graph count"
+                )
+        validate_receipt_graphs(
+            graph_list,
+            allowed_failed_receipt_hashes_by_graph=failed_by_graph,
+        )
+
+        normalized_graphs = []
+        allowed_failed_sets = []
+        roots = []
+        for graph, allowed_failed_values in zip(graph_list, failed_by_graph):
+            encoded = _canonical_bytes(graph)
+            if len(encoded) > self.max_external_receipt_graph_bytes:
+                raise ExecutionJobV2Error(
+                    "external receipt graph exceeds size limit"
+                )
+            normalized = json.loads(encoded.decode("utf-8"))
+            root_hash = _hash(
+                normalized.get("root_receipt_hash"),
+                "external root receipt hash",
+            )
+            if root_hash in roots:
+                raise ExecutionJobV2Error(
+                    "external receipt graph is duplicated"
+                )
+            roots.append(root_hash)
+            normalized_graphs.append(normalized)
+            allowed_failed_sets.append(
+                {
+                    _hash(value, "allowed failed receipt hash")
+                    for value in allowed_failed_values
+                }
+            )
+
+        with self._external_receipt_lock:
+            existing = {
+                str(item["root_receipt_hash"]): item
+                for item in self.external_receipt_graphs
+            }
+            for root_hash, normalized in zip(roots, normalized_graphs):
+                if root_hash in existing and existing[root_hash] != normalized:
+                    raise ExecutionJobV2Error(
+                        "external receipt graph conflicts with existing root"
+                    )
+            new_graph_count = sum(root not in existing for root in roots)
+            if (
+                len(self.external_receipt_graphs) + new_graph_count
+                > MAX_EXTERNAL_RECEIPT_GRAPHS
+            ):
+                raise ExecutionJobV2Error(
+                    "external receipt graph count exceeds limit"
+                )
+            for root_hash, normalized, allowed_failed in zip(
+                roots,
+                normalized_graphs,
+                allowed_failed_sets,
+            ):
+                if root_hash not in existing:
+                    self.external_receipt_graphs.append(normalized)
+                    existing[root_hash] = normalized
+                self.allowed_failed_receipt_hashes.update(allowed_failed)
+        return tuple(roots)
 
     def external_receipt_roots(self) -> tuple:
         with self._external_receipt_lock:
@@ -1049,23 +1130,24 @@ class ExecutionJobManagerV2:
                 not isinstance(graph, Mapping) for graph in parent_graphs
             ):
                 raise ExecutionJobV2Error("job parent receipt graphs are invalid")
-            parent_roots = []
-            parent_receipt_hashes = set()
+            allowed_failed_by_graph = []
             for graph in parent_graphs:
                 allowed_failed = ()
                 if self._failed_parent_graph_policy is not None:
                     allowed_failed = tuple(
                         self._failed_parent_graph_policy(manifest, payload, graph)
                     )
-                parent_root = context.record_external_receipt_graph(
-                    graph,
-                    allowed_failed_receipt_hashes=allowed_failed,
+                allowed_failed_by_graph.append(allowed_failed)
+            parent_roots = list(
+                context.record_external_receipt_graphs(
+                    parent_graphs,
+                    allowed_failed_receipt_hashes_by_graph=(
+                        allowed_failed_by_graph
+                    ),
                 )
-                if parent_root in parent_roots:
-                    raise ExecutionJobV2Error(
-                        "job parent receipt graph is duplicated"
-                    )
-                parent_roots.append(parent_root)
+            )
+            parent_receipt_hashes = set()
+            for graph in parent_graphs:
                 parent_receipt_hashes.update(
                     str(receipt.get("receipt_hash") or "")
                     for receipt in graph.get("receipts") or ()

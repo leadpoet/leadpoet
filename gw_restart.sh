@@ -202,10 +202,6 @@ repair_and_verify_gateway_weight_input() {
     else
       status=$?
     fi
-    if [ "$status" -ne 75 ]; then
-      echo "ERROR: authoritative V2 validator weight input failed terminally; not repeating an identical full rebuild" >&2
-      return "$status"
-    fi
     if [ "$attempt" -ge "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS" ]; then
       echo "ERROR: authoritative V2 validator weight input repair failed after ${attempt} attempt(s)" >&2
       return "$status"

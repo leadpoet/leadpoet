@@ -245,18 +245,7 @@ def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
         'sleep "$GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS"'
         in script
     )
-    terminal = script.index('if [ "$status" -ne 75 ]; then')
-    attempts_exhausted = script.index(
-        'if [ "$attempt" -ge "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS" ]'
-    )
-    retry_sleep = script.index(
-        'sleep "$GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS"'
-    )
-    assert terminal < attempts_exhausted < retry_sleep
-    assert (
-        "authoritative V2 validator weight input failed terminally; "
-        "not repeating an identical full rebuild"
-    ) in script
+    assert 'if [ "$status" -ne 75 ]; then' not in script
     assert (
         storage_preflight
         < shutdown

@@ -66,7 +66,7 @@ def test_validator_envelope_matches_gateway_receipt_graph_transport():
     assert (
         validator_client.MAX_RPC_REQUEST_FRAME_BYTES
         == validator_service.MAX_RPC_REQUEST_FRAME_BYTES
-        == 8 * 1024 * 1024
+        == 16 * 1024 * 1024
     )
     assert (
         validator_client.MAX_RPC_RESPONSE_FRAME_BYTES
@@ -81,17 +81,17 @@ def test_validator_envelope_matches_gateway_receipt_graph_transport():
 
 
 def test_validator_receives_production_sized_receipt_graph_request():
-    legacy_limit = 8 * 1024 * 1024
+    frame_limit = 16 * 1024 * 1024
     request = {
         "command": "compute_authoritative_weights_v2",
         "weight_request": {
             "upstream_receipt_set": {
-                "transport_attempts": ["x" * legacy_limit],
+                "transport_attempts": ["x" * frame_limit],
             },
         },
     }
     body = json.dumps(request).encode()
-    assert legacy_limit < len(body) < validator_service.MAX_RPC_REQUEST_BYTES
+    assert frame_limit < len(body) < validator_service.MAX_RPC_REQUEST_BYTES
     frame = validator_client._encode_rpc_payload(
         body,
         logical_limit=validator_client.MAX_RPC_REQUEST_BYTES,
@@ -137,7 +137,7 @@ def test_validator_client_sends_large_request_as_compressed_frame(monkeypatch):
     )
     request = {
         "command": "compute_authoritative_weights_v2",
-        "weight_request": {"receipt_graph": "x" * (9 * 1024 * 1024)},
+        "weight_request": {"receipt_graph": "x" * (17 * 1024 * 1024)},
     }
 
     observed = validator_client.ValidatorEnclaveClient(
@@ -228,7 +228,7 @@ def test_validator_rejects_incompressible_frame_above_wire_limit():
     ),
 )
 def test_validator_rejects_invalid_compressed_frames(mutate):
-    body = json.dumps({"payload": "x" * (9 * 1024 * 1024)}).encode()
+    body = json.dumps({"payload": "x" * (17 * 1024 * 1024)}).encode()
     frame = validator_client._encode_rpc_payload(
         body,
         logical_limit=validator_client.MAX_RPC_REQUEST_BYTES,

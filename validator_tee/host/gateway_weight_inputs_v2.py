@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # app-level 500 (e.g. a DB blip surfacing through the handler) used to
 # abort the whole attempt sequence inside the submission window.
 _RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
-_MAX_WEIGHT_INPUT_RESPONSE_FRAME_BYTES = 8 * 1024 * 1024
+_MAX_WEIGHT_INPUT_RESPONSE_FRAME_BYTES = 16 * 1024 * 1024
 _MAX_WEIGHT_INPUT_RESPONSE_BYTES = 64 * 1024 * 1024
 
 
@@ -129,7 +129,8 @@ async def _post_json(
                 wire_body.extend(chunk)
                 if len(wire_body) > wire_limit:
                     raise GatewayWeightInputsV2Error(
-                        "gateway V2 weight input response exceeds size limit"
+                        "gateway V2 weight input response frame exceeds size limit "
+                        "(encoding=%s limit=%d)" % (encoding or "identity", wire_limit)
                     )
             if response.status != 200:
                 raise GatewayWeightInputsV2Error(

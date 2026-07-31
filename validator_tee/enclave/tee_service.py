@@ -65,7 +65,7 @@ RPC_PORT = 5001  # Use different port from gateway (5001 vs 5000)
 # Authoritative weight requests and responses include the complete measured
 # receipt graph. Keep the wire envelope small and retain an explicit
 # expanded-size ceiling inside the memory-constrained enclave.
-MAX_RPC_REQUEST_FRAME_BYTES = 8 * 1024 * 1024
+MAX_RPC_REQUEST_FRAME_BYTES = 16 * 1024 * 1024
 MAX_RPC_RESPONSE_FRAME_BYTES = 16 * 1024 * 1024
 MAX_RPC_REQUEST_BYTES = 64 * 1024 * 1024
 MAX_RPC_RESPONSE_BYTES = 64 * 1024 * 1024

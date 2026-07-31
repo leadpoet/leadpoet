@@ -61,8 +61,15 @@ def test_validator_receives_length_prefixed_request():
 
 
 def test_validator_envelope_matches_gateway_receipt_graph_transport():
-    assert validator_client.MAX_RPC_REQUEST_BYTES == gateway_client.MAX_RPC_REQUEST_BYTES
-    assert validator_service.MAX_RPC_REQUEST_BYTES == gateway_service.MAX_RPC_REQUEST_BYTES
+    # Gateway jobs upload their large inputs in bounded chunks. The validator
+    # authoritative-weight RPC transports one complete authenticated graph.
+    assert gateway_client.MAX_RPC_REQUEST_BYTES == 64 * 1024 * 1024
+    assert gateway_service.MAX_RPC_REQUEST_BYTES == 64 * 1024 * 1024
+    assert (
+        validator_client.MAX_RPC_REQUEST_BYTES
+        == validator_service.MAX_RPC_REQUEST_BYTES
+        == 128 * 1024 * 1024
+    )
     assert (
         validator_client.MAX_RPC_REQUEST_FRAME_BYTES
         == validator_service.MAX_RPC_REQUEST_FRAME_BYTES
@@ -76,7 +83,7 @@ def test_validator_envelope_matches_gateway_receipt_graph_transport():
     assert (
         validator_client.MAX_RPC_RESPONSE_BYTES
         == validator_service.MAX_RPC_RESPONSE_BYTES
-        == 64 * 1024 * 1024
+        == 128 * 1024 * 1024
     )
 
 
@@ -86,7 +93,7 @@ def test_validator_receives_production_sized_receipt_graph_request():
         "command": "compute_authoritative_weights_v2",
         "weight_request": {
             "upstream_receipt_set": {
-                "transport_attempts": ["x" * frame_limit],
+                "transport_attempts": ["x" * (64 * 1024 * 1024 + 1)],
             },
         },
     }
@@ -109,7 +116,9 @@ def test_validator_receives_production_sized_receipt_graph_request():
 
 
 def test_validator_large_response_uses_same_bounded_compressed_frame():
-    body = json.dumps({"status": "ok", "receipt_graph": "x" * (17 * 1024 * 1024)}).encode()
+    body = json.dumps(
+        {"status": "ok", "receipt_graph": "x" * (64 * 1024 * 1024 + 1)}
+    ).encode()
     frame = validator_service._encode_rpc_payload(
         body,
         logical_limit=validator_service.MAX_RPC_RESPONSE_BYTES,

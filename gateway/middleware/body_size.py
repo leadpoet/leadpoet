@@ -97,7 +97,7 @@ class BodySizeLimitMiddleware:
                 return
             # The authorization check imports bittensor and runs an sr25519
             # verify; the body verification hashes up to 10 MiB compressed +
-            # 64 MiB logical and inflates the gzip. All of that is synchronous
+            # 128 MiB logical and inflates the gzip. All of that is synchronous
             # CPU that would otherwise stall the single gateway event loop
             # (every miner and validator request) for ~100ms+ right at the
             # weight-submission window. Offload to a worker thread; the check

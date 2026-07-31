@@ -47,8 +47,8 @@ def test_weight_input_response_gzip_is_bounded_and_exact():
 
 def test_weight_input_response_accepts_production_graph_above_legacy_frame_limit():
     # Receipt hashes and signatures are high-entropy. Exercise a compressed
-    # response above the former 8 MiB HTTP/vsock frame while retaining the
-    # existing 64 MiB expanded-message ceiling.
+    # response above the former 8 MiB HTTP/vsock frame while retaining a
+    # bounded expanded-message ceiling.
     body = b"".join(
         hashlib.sha256(index.to_bytes(8, "big")).digest()
         for index in range(9 * 1024 * 1024 // 32)
@@ -56,6 +56,17 @@ def test_weight_input_response_accepts_production_graph_above_legacy_frame_limit
     wire_body = gzip.compress(body, compresslevel=1, mtime=0)
 
     assert len(wire_body) > 8 * 1024 * 1024
+    assert len(wire_body) < client_module._MAX_WEIGHT_INPUT_RESPONSE_FRAME_BYTES
+    assert client_module._decode_response_body(
+        wire_body,
+        content_encoding="gzip",
+    ) == body
+
+
+def test_weight_input_response_accepts_allocation_ancestry_above_64_mib():
+    body = b"x" * (64 * 1024 * 1024 + 1)
+    wire_body = gzip.compress(body, compresslevel=1, mtime=0)
+
     assert len(wire_body) < client_module._MAX_WEIGHT_INPUT_RESPONSE_FRAME_BYTES
     assert client_module._decode_response_body(
         wire_body,

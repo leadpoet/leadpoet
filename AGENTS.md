@@ -80,6 +80,17 @@ push only a confirmed production-critical fix when waiting is more likely to
 break restart or weight submission. If block or attestation state is
 unavailable, do not push.
 
+## Explicit testing skills
+
+- Use `$bugs` only when explicitly requested for a reported Research Lab defect
+  that should be reproduced, minimally fixed, regression-tested, and safely
+  pushed; expect 15–60+ minutes and never invoke it automatically.
+- Use `$ship` only when explicitly requested for the full v1 plan/build/test,
+  evidence-based v2 remediation, final verification, and pull-request workflow;
+  expect 30–120+ minutes or longer for CI and never invoke it automatically.
+- Skill invocation is not the push-now override and does not bypass any
+  repository, production-safety, test-profile, epoch, or attestation rule.
+
 ## Default verification: 5-10 minutes
 
 The default release gate is the bounded `prepush` profile. Run the long profile

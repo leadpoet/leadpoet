@@ -225,6 +225,7 @@ def _source_add_runtime_diff(*, provider_id: str, manifest: str) -> str:
         "        max_calls=1,\n"
         "        max_results=100,\n"
         "        timeout_seconds=60.0,\n"
+        "        intent_categories=(),\n"
         "        evidence_types=('provider_database',),\n"
         "        best_for=('icp.structured_eligible',),\n"
         "        avoid_when=(),\n"

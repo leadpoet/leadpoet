@@ -79,6 +79,7 @@ _SOURCE_ADD_REGISTRATION_FIELDS = (
     "max_calls",
     "max_results",
     "timeout_seconds",
+    "intent_categories",
     "evidence_types",
     "best_for",
     "avoid_when",
@@ -95,6 +96,16 @@ _SOURCE_ADD_LEGACY_REGISTRATION_FIELDS = tuple(
         "best_for_description",
         "avoid_when_description",
     }
+)
+_SOURCE_ADD_ORIGINAL_REGISTRATION_FIELDS = tuple(
+    field
+    for field in _SOURCE_ADD_LEGACY_REGISTRATION_FIELDS
+    if field != "intent_categories"
+)
+_SOURCE_ADD_GUIDANCE_WITHOUT_CATEGORIES_FIELDS = tuple(
+    field
+    for field in _SOURCE_ADD_REGISTRATION_FIELDS
+    if field != "intent_categories"
 )
 _COMPANY_DISCOVERY_PATTERNS = (
     re.compile(r"\b(?:company|candidate|account)\s+(?:discovery|sourcing|acquisition)\b"),
@@ -491,6 +502,13 @@ def approved_source_router_suggestions(
             )
             if _ROUTING_FEATURE_RE.fullmatch(str(item).strip())
         ][:16]
+        intent_categories: list[str] = []
+        for feature in best_for:
+            if not feature.startswith("intent.") or feature == "intent.general":
+                continue
+            category = feature.split(".", 1)[1].upper()
+            if category and len(category) <= 80 and category not in intent_categories:
+                intent_categories.append(category)
         provider_alias = str(
             planner.get("provider_alias") or provider_id
         )[:80]
@@ -556,6 +574,9 @@ def approved_source_router_suggestions(
                     "max_calls": 1,
                     "max_results": 100 if candidate_stage else 1,
                     "timeout_seconds": 60.0 if candidate_stage else 30.0,
+                    "intent_categories": (
+                        [] if candidate_stage else intent_categories
+                    ),
                     "evidence_types": (
                         ["provider_database"]
                         if candidate_stage
@@ -653,6 +674,20 @@ def validate_source_add_registration_diff(
             ):
                 raise ValueError(f"{name} must be a literal sequence")
             normalized[name] = tuple(field_value)
+        intent_categories = normalized.get("intent_categories")
+        if (
+            not isinstance(intent_categories, (list, tuple))
+            or any(
+                not isinstance(item, str)
+                or not item.strip()
+                or len(item.strip()) > 80
+                for item in intent_categories
+            )
+        ):
+            raise ValueError("intent_categories must be a literal sequence")
+        normalized["intent_categories"] = tuple(
+            dict.fromkeys(item.strip().upper() for item in intent_categories)
+        )
         avoid_when = normalized.get("avoid_when")
         if (
             not isinstance(avoid_when, (list, tuple))
@@ -712,6 +747,10 @@ def validate_source_add_registration_diff(
         expected = expected_by_stage[str(stage)]
         if any(normalized.get(name) != expected_value for name, expected_value in expected.items()):
             raise ValueError("registration stage contract is invalid")
+        if stage == "candidate_acquisition" and normalized["intent_categories"]:
+            raise ValueError(
+                "candidate registrations must not declare intent categories"
+            )
         if (
             normalized.get("idempotency") != "idempotent"
             or normalized.get("cost_class") not in {"free", "metered"}
@@ -774,6 +813,8 @@ def validate_source_add_registration_diff(
             not in (
                 set(_SOURCE_ADD_REGISTRATION_FIELDS),
                 set(_SOURCE_ADD_LEGACY_REGISTRATION_FIELDS),
+                set(_SOURCE_ADD_ORIGINAL_REGISTRATION_FIELDS),
+                set(_SOURCE_ADD_GUIDANCE_WITHOUT_CATEGORIES_FIELDS),
             )
         ):
             raise ValueError("registration fields differ from the contract")
@@ -785,10 +826,12 @@ def validate_source_add_registration_diff(
                 raise ValueError(
                     "registration fields must be literal"
                 ) from exc
-        legacy_guidance = keyword_set == set(
-            _SOURCE_ADD_LEGACY_REGISTRATION_FIELDS
+        legacy_contract = keyword_set != set(
+            _SOURCE_ADD_REGISTRATION_FIELDS
         )
-        if legacy_guidance:
+        if "intent_categories" not in values:
+            values["intent_categories"] = ()
+        if "best_for" not in values:
             stage = values.get("stage")
             values.update(
                 {
@@ -812,7 +855,7 @@ def validate_source_add_registration_diff(
                     ),
                 }
             )
-        return normalize_registration(values), legacy_guidance
+        return normalize_registration(values), legacy_contract
 
     def registrations_from_source(
         source: str,

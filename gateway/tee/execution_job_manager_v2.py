@@ -39,10 +39,12 @@ PARENT_RECEIPT_GRAPHS_FIELD = "_v2_parent_receipt_graphs"
 MAX_JOB_COUNT = 256
 MAX_QUEUED_JOBS = 64
 MIN_TERMINAL_EVICTION_AGE_SECONDS = 300
+MAX_INPUT_BYTES = 64 * 1024 * 1024
 # Allocation authority carries multiple independently validated receipt graphs.
 # Uploads are already chunked and each graph remains capped at 64 MiB; allow
-# their bounded aggregate to exceed one graph without discarding ancestry.
-MAX_INPUT_BYTES = 128 * 1024 * 1024
+# only this measured coordinator purpose's bounded aggregate to exceed one
+# graph without discarding ancestry or widening every V2 execution boundary.
+MAX_ALLOCATION_INPUT_BYTES = 128 * 1024 * 1024
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 MAX_CHUNK_BYTES = 1024 * 1024
 MAX_RESULT_CHUNK_BYTES = 4 * 1024 * 1024
@@ -311,7 +313,12 @@ def _manifest(
         raise ExecutionJobV2Error("epoch_id must be non-negative")
     if not isinstance(sequence, int) or sequence < 0:
         raise ExecutionJobV2Error("sequence must be non-negative")
-    if not isinstance(size, int) or size < 2 or size > MAX_INPUT_BYTES:
+    max_input_bytes = (
+        MAX_ALLOCATION_INPUT_BYTES
+        if purpose == "research_lab.allocation.v2"
+        else MAX_INPUT_BYTES
+    )
+    if not isinstance(size, int) or size < 2 or size > max_input_bytes:
         raise ExecutionJobV2Error("payload size is outside limit")
     parents = value["parent_receipt_hashes"]
     artifacts = value["input_artifact_hashes"]

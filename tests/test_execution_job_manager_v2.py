@@ -210,6 +210,46 @@ def _run(manager, payload, manifest=None):
     raise AssertionError("V2 job did not terminate")
 
 
+def test_large_input_exception_is_scoped_to_allocation_authority():
+    oversized = 64 * 1024 * 1024 + 1
+    allocation_manifest = _manifest(
+        b"{}",
+        operation="allocation",
+        purpose="research_lab.allocation.v2",
+        payload_size_bytes=oversized,
+    )
+
+    normalized = job_manager_v2._manifest(
+        allocation_manifest,
+        role="gateway_coordinator",
+        operations={"allocation": {"research_lab.allocation.v2"}},
+    )
+    assert normalized["payload_size_bytes"] == oversized
+
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="payload size is outside limit",
+    ):
+        job_manager_v2._manifest(
+            _manifest(b"{}", payload_size_bytes=oversized),
+            role="gateway_scoring",
+            operations={"score": {"research_lab.candidate_score.v2"}},
+        )
+
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="payload size is outside limit",
+    ):
+        job_manager_v2._manifest(
+            {
+                **allocation_manifest,
+                "payload_size_bytes": 128 * 1024 * 1024 + 1,
+            },
+            role="gateway_coordinator",
+            operations={"allocation": {"research_lab.allocation.v2"}},
+        )
+
+
 def test_success_receipt_binds_transport_artifacts_and_signed_transition():
     attempt = build_transport_attempt(
         request_id="1" * 32,

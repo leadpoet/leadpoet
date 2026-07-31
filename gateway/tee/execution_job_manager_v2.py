@@ -39,7 +39,10 @@ PARENT_RECEIPT_GRAPHS_FIELD = "_v2_parent_receipt_graphs"
 MAX_JOB_COUNT = 256
 MAX_QUEUED_JOBS = 64
 MIN_TERMINAL_EVICTION_AGE_SECONDS = 300
-MAX_INPUT_BYTES = 64 * 1024 * 1024
+# Allocation authority carries multiple independently validated receipt graphs.
+# Uploads are already chunked and each graph remains capped at 64 MiB; allow
+# their bounded aggregate to exceed one graph without discarding ancestry.
+MAX_INPUT_BYTES = 128 * 1024 * 1024
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 MAX_CHUNK_BYTES = 1024 * 1024
 MAX_RESULT_CHUNK_BYTES = 4 * 1024 * 1024

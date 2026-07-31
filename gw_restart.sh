@@ -35,6 +35,11 @@ GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS=120
 GATEWAY_WEIGHT_INPUT_HTTP_TIMEOUT_SECONDS=360
 GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS="${GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS:-3}"
 GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS="${GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS:-5}"
+GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT="${GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT:-}"
+GATEWAY_RESTART_STARTED_EPOCH="${GATEWAY_RESTART_STARTED_EPOCH:-$(date -u +%s)}"
+GATEWAY_RESTART_TIMING_DIR="${GATEWAY_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
+GATEWAY_RESTART_TIMING_FILE="${GATEWAY_RESTART_TIMING_FILE:-$GATEWAY_RESTART_TIMING_DIR/gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$.jsonl}"
+GATEWAY_RESTART_TIMING_INITIALIZED="${GATEWAY_RESTART_TIMING_INITIALIZED:-0}"
 GATEWAY_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
 GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST="${GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
 GATEWAY_RESTART_START_PATH="/home/ec2-user/.config/leadpoet/restart-start-v1.json"
@@ -121,6 +126,60 @@ GATEWAY_HOST_EXTRA_PYTHON_PACKAGES=(
   awscli
 )
 
+record_gateway_restart_timing() {
+  local stage="$1"
+  local status="${2:-reached}"
+  if ! mkdir -p "$GATEWAY_RESTART_TIMING_DIR" \
+      || ! chmod 700 "$GATEWAY_RESTART_TIMING_DIR"; then
+    echo "WARNING: gateway restart timing directory is unavailable" >&2
+    return 0
+  fi
+  if ! python3 - \
+    "$GATEWAY_RESTART_TIMING_FILE" \
+    "$GATEWAY_RESTART_STARTED_EPOCH" \
+    "$stage" \
+    "$status" \
+    "${GATEWAY_DEPLOY_SHA:-${PREPARED_GATEWAY_SHA:-}}" <<'PY'
+import datetime
+import json
+import os
+import sys
+import time
+
+path, started, stage, status, commit = sys.argv[1:]
+now = time.time()
+record = {
+    "schema_version": "leadpoet.gateway_restart_timing.v1",
+    "stage": stage,
+    "status": status,
+    "observed_at": datetime.datetime.fromtimestamp(
+        now, datetime.timezone.utc
+    ).isoformat().replace("+00:00", "Z"),
+    "elapsed_seconds": round(now - int(started), 3),
+    "commit_sha": commit or None,
+}
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+os.chmod(path, 0o600)
+print(
+    "GATEWAY_RESTART_TIMING "
+    f"stage={stage} status={status} elapsed_seconds={record['elapsed_seconds']}"
+)
+PY
+  then
+    echo "WARNING: gateway restart timing event could not be recorded: $stage" >&2
+  fi
+  return 0
+}
+
+if [ "$GATEWAY_RESTART_TIMING_INITIALIZED" = "1" ]; then
+  record_gateway_restart_timing "controller_reexec"
+else
+  record_gateway_restart_timing "invoked"
+  GATEWAY_RESTART_TIMING_INITIALIZED=1
+  export GATEWAY_RESTART_TIMING_INITIALIZED
+fi
+
 repair_and_verify_gateway_weight_input() {
   local attempt status
   if ! [[ "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
@@ -143,6 +202,10 @@ repair_and_verify_gateway_weight_input() {
     else
       status=$?
     fi
+    if [ "$status" -ne 75 ]; then
+      echo "ERROR: authoritative V2 validator weight input failed terminally; not repeating an identical full rebuild" >&2
+      return "$status"
+    fi
     if [ "$attempt" -ge "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS" ]; then
       echo "ERROR: authoritative V2 validator weight input repair failed after ${attempt} attempt(s)" >&2
       return "$status"
@@ -154,7 +217,7 @@ repair_and_verify_gateway_weight_input() {
 }
 
 install_gateway_python_dependencies() {
-  local legacy_project_metadata pip_scope=() requirements_file
+  local dependency_fingerprint legacy_project_metadata pip_scope=() requirements_file
   if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ] \
       && [ -f "$GATEWAY_PREFLIGHT_TREE/requirements.txt" ]; then
     requirements_file="$GATEWAY_PREFLIGHT_TREE/requirements.txt"
@@ -174,18 +237,40 @@ install_gateway_python_dependencies() {
       'import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)'; then
     pip_scope=(--user)
   fi
+  dependency_fingerprint="$(
+    "$GATEWAY_PYTHON_BIN" - "$requirements_file" \
+      "${GATEWAY_HOST_EXTRA_PYTHON_PACKAGES[@]}" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+
+requirements = Path(sys.argv[1]).read_bytes()
+identity = "\0".join(
+    (
+        str(Path(sys.executable).resolve()),
+        sys.version,
+        *sys.argv[2:],
+    )
+).encode("utf-8")
+print(hashlib.sha256(requirements + b"\0" + identity).hexdigest())
+PY
+  )"
   export PATH="$HOME/.local/bin:$PATH"
-  # These legacy distributions install the same `scalecodec` import namespace
-  # as Cyscale and make Bittensor 10 fail at import time. The editable project
-  # metadata can also retain an obsolete Bittensor <10 requirement even though
-  # gateway modules load from the exact canonical checkout via PYTHONPATH.
-  "$GATEWAY_PYTHON_BIN" -m pip uninstall -y \
-    leadpoet-subnet substrate-interface py-scale-codec scalecodec \
-    >/dev/null 2>&1 || true
-  "$GATEWAY_PYTHON_BIN" -m pip install \
-    "${pip_scope[@]}" \
-    --requirement "$requirements_file" \
-    "${GATEWAY_HOST_EXTRA_PYTHON_PACKAGES[@]}"
+  if [ "$GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT" = "$dependency_fingerprint" ]; then
+    echo "Reusing exact candidate dependency installation from pre-shutdown validation"
+  else
+    # These legacy distributions install the same `scalecodec` import
+    # namespace as Cyscale and make Bittensor 10 fail at import time.
+    "$GATEWAY_PYTHON_BIN" -m pip uninstall -y \
+      leadpoet-subnet substrate-interface py-scale-codec scalecodec \
+      >/dev/null 2>&1 || true
+    "$GATEWAY_PYTHON_BIN" -m pip install \
+      "${pip_scope[@]}" \
+      --requirement "$requirements_file" \
+      "${GATEWAY_HOST_EXTRA_PYTHON_PACKAGES[@]}"
+    GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT="$dependency_fingerprint"
+    export GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT
+  fi
   legacy_project_metadata="$LEADPOET_REPO_ROOT/leadpoet_subnet.egg-info"
   if [ -d "$legacy_project_metadata" ]; then
     echo "Removing generated legacy project metadata before dependency validation"
@@ -274,6 +359,10 @@ finalize_deployment_record() {
 
 on_gateway_restart_exit() {
   local status="$?"
+  if [ "$status" -ne 0 ]; then
+    record_gateway_restart_timing "${GATEWAY_DEPLOY_STAGE:-unknown}" "failed" \
+      >/dev/null 2>&1 || true
+  fi
   if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ]; then
     rm -rf "$GATEWAY_PREFLIGHT_TREE"
   fi
@@ -1129,6 +1218,7 @@ if [ "$V2_RELEASE_READY" != "1" ]; then
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 75
 fi
+record_gateway_restart_timing "release_ready"
 
 echo "Preparing commit-bound KMS credential envelopes"
 GATEWAY_DEPLOY_STAGE="v2_credential_envelope_preparation"
@@ -1209,6 +1299,7 @@ if ! install_gateway_python_dependencies; then
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 1
 fi
+record_gateway_restart_timing "dependency_preflight_complete"
 
 echo "Preflighting durable V2 validator weight authority before production shutdown"
 GATEWAY_DEPLOY_STAGE="validator_weight_input_storage_preflight"
@@ -1379,6 +1470,7 @@ PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" \
   --interval-seconds 3
 wait_for_foreign_docker_builds
 wait_for_gateway_build_memory
+record_gateway_restart_timing "pre_shutdown_checks_complete"
 
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
@@ -1450,6 +1542,11 @@ exec env \
   LEADPOET_DOCKER_OPERATION_LOCK_HELD=1 \
   GATEWAY_TEE_EIF_ROOT="$GATEWAY_TEE_EIF_ROOT" \
   GATEWAY_PYTHON_BIN="$GATEWAY_PYTHON_BIN" \
+  GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT="$GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT" \
+  GATEWAY_RESTART_STARTED_EPOCH="$GATEWAY_RESTART_STARTED_EPOCH" \
+  GATEWAY_RESTART_TIMING_DIR="$GATEWAY_RESTART_TIMING_DIR" \
+  GATEWAY_RESTART_TIMING_FILE="$GATEWAY_RESTART_TIMING_FILE" \
+  GATEWAY_RESTART_TIMING_INITIALIZED="$GATEWAY_RESTART_TIMING_INITIALIZED" \
   RESEARCH_LAB_TEE_PROTOCOL="$RESEARCH_LAB_TEE_PROTOCOL" \
   GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
   GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
@@ -1464,6 +1561,7 @@ fi
 GATEWAY_DEPLOY_SHA="$(deployment_field target_sha)"
 GATEWAY_DEPLOY_BRANCH="$(deployment_field branch)"
 GATEWAY_DEPLOY_REMOTE="$(deployment_field remote_url)"
+record_gateway_restart_timing "candidate_activated"
 if [ "$(git -C "$LEADPOET_REPO_ROOT" rev-parse HEAD)" != "$GATEWAY_DEPLOY_SHA" ]; then
   echo "ERROR: canonical gateway checkout does not match activated deployment" >&2
   exit 1
@@ -1723,6 +1821,7 @@ echo "Verifying V2 provider and execution-manager readiness"
 GATEWAY_DEPLOY_STAGE="v2_runtime_readiness"
 export GATEWAY_DEPLOY_STAGE
 PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready
+record_gateway_restart_timing "v2_runtime_ready"
 
 if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
   echo "Executing the one-time receipt-backed stateful epoch cutover"
@@ -1827,6 +1926,7 @@ echo "Repairing and verifying the authoritative V2 validator weight input"
 GATEWAY_DEPLOY_STAGE="validator_weight_input_repair"
 export GATEWAY_DEPLOY_STAGE
 repair_and_verify_gateway_weight_input
+record_gateway_restart_timing "validator_weight_input_ready"
 
 # Keep attestation/PCR0 Docker builds off this host while the pre-launch
 # authority verifier is reconstructing the canonical allocation. The verifier
@@ -1880,11 +1980,13 @@ if [ "$GATEWAY_HEALTH_READY" != "1" ]; then
   echo "ERROR: gateway base health did not become ready within 10 minutes" >&2
   exit 1
 fi
+record_gateway_restart_timing "gateway_base_health_ready"
 if ! timeout 60 curl -fsS http://localhost:8000/health/v2-authority >/dev/null; then
   tail -160 "$GATEWAY_LOG_FILE"
   echo "ERROR: authoritative V2 enclave/worker readiness failed" >&2
   exit 1
 fi
+record_gateway_restart_timing "gateway_v2_health_ready"
 echo "Verifying the exact HTTP handoff consumed by automatic validator weights"
 GATEWAY_DEPLOY_STAGE="validator_weight_input_http_check"
 export GATEWAY_DEPLOY_STAGE
@@ -1892,6 +1994,7 @@ PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
   -m gateway.tee.verify_weight_submission_ready_v2 \
   --gateway-url http://localhost:8000 \
   --http-timeout-seconds "$GATEWAY_WEIGHT_INPUT_HTTP_TIMEOUT_SECONDS"
+record_gateway_restart_timing "validator_weight_http_handoff_ready"
 
 BUILD_INFO_RESPONSE="$(timeout 15 curl -fsS http://localhost:8000/build-info)"
 python3 - "$GATEWAY_DEPLOY_SHA" "$BUILD_INFO_RESPONSE" <<'VERIFY_BUILD_INFO'
@@ -1919,4 +2022,5 @@ export GATEWAY_DEPLOY_STAGE
 finalize_deployment_record succeeded "$GATEWAY_DEPLOY_STAGE" >/dev/null
 GATEWAY_DEPLOY_COMPLETED=1
 rm -f "$GATEWAY_DEPLOY_PLAN_FILE"
+record_gateway_restart_timing "completed" "passed"
 echo "Gateway restart command completed; tail logs with: tail -f $GATEWAY_LOG_FILE"

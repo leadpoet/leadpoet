@@ -245,6 +245,18 @@ def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
         'sleep "$GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS"'
         in script
     )
+    terminal = script.index('if [ "$status" -ne 75 ]; then')
+    attempts_exhausted = script.index(
+        'if [ "$attempt" -ge "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS" ]'
+    )
+    retry_sleep = script.index(
+        'sleep "$GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS"'
+    )
+    assert terminal < attempts_exhausted < retry_sleep
+    assert (
+        "authoritative V2 validator weight input failed terminally; "
+        "not repeating an identical full rebuild"
+    ) in script
     assert (
         storage_preflight
         < shutdown
@@ -574,11 +586,51 @@ def test_gateway_restart_installs_declared_host_dependencies_before_shutdown() -
     assert metadata_cleanup < dependency_check
     assert '"$GATEWAY_PYTHON_BIN" -m pip check' in script
     assert script.count("install_gateway_python_dependencies") == 3
+    assert "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT" in script
+    assert (
+        'if [ "$GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT" '
+        '= "$dependency_fingerprint" ]; then'
+    ) in script
+    assert (
+        "Reusing exact candidate dependency installation from "
+        "pre-shutdown validation"
+    ) in script
+    assert (
+        'GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT="'
+        '$GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT" \\'
+    ) in script
     assert dependency_preflight < shutdown < post_activate_install
     assert (
         'echo "Gateway remains running; production shutdown has not started." >&2'
         in script[dependency_preflight:shutdown]
     )
+
+
+def test_gateway_restart_records_nonblocking_commit_bound_stage_timings() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    assert "leadpoet.gateway_restart_timing.v1" in script
+    assert 'record_gateway_restart_timing "invoked"' in script
+    assert 'record_gateway_restart_timing "release_ready"' in script
+    assert (
+        'record_gateway_restart_timing "pre_shutdown_checks_complete"'
+        in script
+    )
+    assert 'record_gateway_restart_timing "candidate_activated"' in script
+    assert 'record_gateway_restart_timing "v2_runtime_ready"' in script
+    assert (
+        'record_gateway_restart_timing "validator_weight_input_ready"'
+        in script
+    )
+    assert 'record_gateway_restart_timing "completed" "passed"' in script
+    assert (
+        "WARNING: gateway restart timing event could not be recorded"
+        in script
+    )
+    assert (
+        'GATEWAY_RESTART_TIMING_INITIALIZED="'
+        '$GATEWAY_RESTART_TIMING_INITIALIZED" \\'
+    ) in script
 
 
 def test_gateway_restart_uses_one_canonical_checkout_for_host_processes() -> None:

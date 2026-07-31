@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import pytest
 from fastapi import HTTPException
 
@@ -7,6 +9,10 @@ from gateway.research_lab import api, chain, maintenance
 from gateway.tee import verify_weight_submission_ready_v2 as readiness
 from gateway.utils.tee_artifact_store_v2 import TEEArtifactStoreV2Error
 from research_lab import validator_integration
+
+
+class _TransientReadinessError(RuntimeError):
+    code = 503
 
 
 @pytest.fixture(autouse=True)
@@ -84,6 +90,44 @@ async def test_storage_read_preflight_exercises_full_authority_read_without_repa
         ("resolve", None),
         ("report", {"epoch": 24153, "netuid": 71}),
     ]
+
+
+def test_readiness_failure_exit_code_rejects_identical_terminal_rebuild() -> None:
+    error = RuntimeError(
+        "Research Lab attested allocation unavailable: "
+        "execution_championsettlementv2error"
+    )
+
+    assert readiness._failure_exit_code(error) == readiness._EXIT_DATA_ERROR
+
+
+def test_readiness_failure_exit_code_preserves_nested_transient_retry() -> None:
+    transient = _TransientReadinessError("upstream temporarily unavailable")
+    error = RuntimeError("allocation handoff failed")
+    error.__cause__ = transient
+
+    assert (
+        readiness._failure_exit_code(error)
+        == readiness._EXIT_TEMPORARY_FAILURE
+    )
+
+
+def test_readiness_cli_returns_terminal_exit_for_measured_failure(
+    monkeypatch,
+    capsys,
+) -> None:
+    async def fail(**_kwargs):
+        raise RuntimeError("execution_championsettlementv2error")
+
+    monkeypatch.setattr(readiness, "verify_weight_submission_ready_v2", fail)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["verify_weight_submission_ready_v2", "--repair"],
+    )
+
+    assert readiness.main() == readiness._EXIT_DATA_ERROR
+    assert "execution_championsettlementv2error" in capsys.readouterr().err
 
 
 @pytest.mark.asyncio

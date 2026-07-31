@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import traceback
 from collections.abc import Mapping
 from typing import Any
 
@@ -16,6 +17,8 @@ class WeightSubmissionReadinessV2Error(RuntimeError):
 
 
 logger = logging.getLogger(__name__)
+_EXIT_DATA_ERROR = 65
+_EXIT_TEMPORARY_FAILURE = 75
 _RETRYABLE_ALLOCATION_FAILURE_MARKERS = (
     "connection_refused",
     "connection_reset",
@@ -48,13 +51,43 @@ def _exception_chain_text(exc: BaseException) -> str:
 
 def _retryable_allocation_failure(exc: BaseException) -> bool:
     text = _exception_chain_text(exc)
-    return any(
+    if any(
         marker in text
         for marker in (
             *_RETRYABLE_ALLOCATION_FAILURE_MARKERS,
             *_RETRYABLE_AUTHENTICATED_HTTP_FAILURE_MARKERS,
         )
-    )
+    ):
+        return True
+    current: BaseException | None = exc
+    observed: set[int] = set()
+    while current is not None and id(current) not in observed:
+        observed.add(id(current))
+        code = str(getattr(current, "code", "") or "").strip()
+        if code in {
+            "408",
+            "429",
+            "500",
+            "502",
+            "503",
+            "504",
+            "520",
+            "521",
+            "522",
+            "523",
+            "524",
+        }:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _failure_exit_code(exc: BaseException) -> int:
+    """Tell the restart controller whether a complete rebuild can recover."""
+
+    if _retryable_allocation_failure(exc):
+        return _EXIT_TEMPORARY_FAILURE
+    return _EXIT_DATA_ERROR
 
 
 def _repairable_authority_failure(exc: BaseException) -> bool:
@@ -401,25 +434,47 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = _parser()
     args = parser.parse_args()
-    if args.storage_read_preflight:
-        if args.gateway_url:
-            parser.error("--storage-read-preflight cannot use --gateway-url")
-        result = asyncio.run(
-            verify_weight_submission_storage_readable_v2(
-                epoch=args.epoch,
-                netuid=args.netuid,
+    try:
+        if args.storage_read_preflight:
+            if args.gateway_url:
+                parser.error("--storage-read-preflight cannot use --gateway-url")
+            result = asyncio.run(
+                verify_weight_submission_storage_readable_v2(
+                    epoch=args.epoch,
+                    netuid=args.netuid,
+                )
             )
-        )
-    else:
-        result = asyncio.run(
-            verify_weight_submission_ready_v2(
-                repair=bool(args.repair),
-                gateway_url=args.gateway_url,
-                epoch=args.epoch,
-                netuid=args.netuid,
-                http_timeout_seconds=args.http_timeout_seconds,
+        else:
+            result = asyncio.run(
+                verify_weight_submission_ready_v2(
+                    repair=bool(args.repair),
+                    gateway_url=args.gateway_url,
+                    epoch=args.epoch,
+                    netuid=args.netuid,
+                    http_timeout_seconds=args.http_timeout_seconds,
+                )
             )
+    except Exception as exc:
+        # Keep the full production traceback while giving the shell a stable
+        # retry contract. A terminal measured receipt or policy failure cannot
+        # change on an identical second build; network/edge failures can.
+        traceback.print_exc()
+        if args.storage_read_preflight:
+            return _failure_exit_code(exc)
+        exit_code = _failure_exit_code(exc)
+        logger.error(
+            "weight_readiness_failed classification=%s exit_code=%s "
+            "error_type=%s error=%s",
+            (
+                "retryable_transient"
+                if exit_code == _EXIT_TEMPORARY_FAILURE
+                else "terminal"
+            ),
+            exit_code,
+            type(exc).__name__,
+            str(exc)[:240],
         )
+        return exit_code
     print(json.dumps(result, sort_keys=True))
     return 0
 

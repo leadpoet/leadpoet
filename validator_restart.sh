@@ -30,6 +30,11 @@ VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR=""
 VALIDATOR_DESTRUCTIVE_PHASE_STARTED=0
 VALIDATOR_RESTART_COMPLETED=0
 VALIDATOR_DOCKER_LOCK_ACQUIRED=0
+VALIDATOR_DEPLOY_STAGE="${VALIDATOR_DEPLOY_STAGE:-bootstrap}"
+VALIDATOR_RESTART_STARTED_EPOCH="${VALIDATOR_RESTART_STARTED_EPOCH:-$(date -u +%s)}"
+VALIDATOR_RESTART_TIMING_DIR="${VALIDATOR_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
+VALIDATOR_RESTART_TIMING_FILE="${VALIDATOR_RESTART_TIMING_FILE:-$VALIDATOR_RESTART_TIMING_DIR/validator-${VALIDATOR_RESTART_STARTED_EPOCH}-$$.jsonl}"
+VALIDATOR_RESTART_TIMING_INITIALIZED="${VALIDATOR_RESTART_TIMING_INITIALIZED:-0}"
 VALIDATOR_V2_RELEASE_BUCKET="${VALIDATOR_V2_RELEASE_BUCKET:-leadpoet-attested-v2-artifacts-493765492819}"
 VALIDATOR_V2_RELEASE_PREFIX="${VALIDATOR_V2_RELEASE_PREFIX:-attested-v2/releases}"
 VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
@@ -177,9 +182,67 @@ install_validator_restart_controller() {
 VALIDATOR_ENV_EXPORT="$(mktemp /tmp/validator_env_export.XXXXXX)"
 SECRET_TMP="$(mktemp /tmp/validator_secret_env.XXXXXX)"
 
+record_validator_restart_timing() {
+  local stage="$1"
+  local status="${2:-reached}"
+  if ! mkdir -p "$VALIDATOR_RESTART_TIMING_DIR" \
+      || ! chmod 700 "$VALIDATOR_RESTART_TIMING_DIR"; then
+    echo "WARNING: validator restart timing directory is unavailable" >&2
+    return 0
+  fi
+  if ! python3 - \
+    "$VALIDATOR_RESTART_TIMING_FILE" \
+    "$VALIDATOR_RESTART_STARTED_EPOCH" \
+    "$stage" \
+    "$status" \
+    "${VALIDATOR_DEPLOY_SHA:-}" <<'PY'
+import datetime
+import json
+import os
+import sys
+import time
+
+path, started, stage, status, commit = sys.argv[1:]
+now = time.time()
+record = {
+    "schema_version": "leadpoet.validator_restart_timing.v1",
+    "stage": stage,
+    "status": status,
+    "observed_at": datetime.datetime.fromtimestamp(
+        now, datetime.timezone.utc
+    ).isoformat().replace("+00:00", "Z"),
+    "elapsed_seconds": round(now - int(started), 3),
+    "commit_sha": commit or None,
+}
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+os.chmod(path, 0o600)
+print(
+    "VALIDATOR_RESTART_TIMING "
+    f"stage={stage} status={status} elapsed_seconds={record['elapsed_seconds']}"
+)
+PY
+  then
+    echo "WARNING: validator restart timing event could not be recorded: $stage" >&2
+  fi
+  return 0
+}
+
+if [ "$VALIDATOR_RESTART_TIMING_INITIALIZED" = "1" ]; then
+  record_validator_restart_timing "controller_reexec"
+else
+  record_validator_restart_timing "invoked"
+  VALIDATOR_RESTART_TIMING_INITIALIZED=1
+  export VALIDATOR_RESTART_TIMING_INITIALIZED
+fi
+
 cleanup() {
   local status="$?"
   set +e
+  if [ "$status" -ne 0 ]; then
+    record_validator_restart_timing "$VALIDATOR_DEPLOY_STAGE" "failed" \
+      >/dev/null 2>&1 || true
+  fi
   if [ "$VALIDATOR_DESTRUCTIVE_PHASE_STARTED" = "1" ] \
       && [ "$VALIDATOR_RESTART_COMPLETED" != "1" ]; then
     echo "Cleaning incomplete validator activation" >&2
@@ -269,6 +332,10 @@ if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
   exec env \
     VALIDATOR_RESTART_REEXECED=1 \
     VALIDATOR_COORDINATED_EXPECTED_COMMIT="$REQUESTED_COORDINATED_EXPECTED_COMMIT" \
+    VALIDATOR_RESTART_STARTED_EPOCH="$VALIDATOR_RESTART_STARTED_EPOCH" \
+    VALIDATOR_RESTART_TIMING_DIR="$VALIDATOR_RESTART_TIMING_DIR" \
+    VALIDATOR_RESTART_TIMING_FILE="$VALIDATOR_RESTART_TIMING_FILE" \
+    VALIDATOR_RESTART_TIMING_INITIALIZED="$VALIDATOR_RESTART_TIMING_INITIALIZED" \
     bash "$VALIDATOR_ROOT/validator_restart.sh" "$@"
 fi
 if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
@@ -524,6 +591,7 @@ else
 fi
 
 echo "Acquiring the independently built V2 release channel"
+VALIDATOR_DEPLOY_STAGE="release_acquisition"
 VALIDATOR_V2_RELEASE_READY=0
 for attempt in $(seq 1 300); do
   if python3 -m gateway.tee.release_channel_v2 \
@@ -546,6 +614,7 @@ if [ "$VALIDATOR_V2_RELEASE_READY" != "1" ]; then
   echo "Validator remains running; production shutdown has not started." >&2
   exit 75
 fi
+record_validator_restart_timing "release_ready"
 VALIDATOR_V2_MISSING_INPUTS=()
 for required_file in \
   "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
@@ -628,11 +697,13 @@ VALIDATOR_RESTART_GATE_ARGS=(
   --captured-report "$VALIDATOR_RESTART_START_PATH"
 )
 echo "Validating the official restart start captured at operator invocation"
+VALIDATOR_DEPLOY_STAGE="pre_shutdown_validation"
 if ! "$VALIDATOR_PYTHON_BIN" -m Leadpoet.utils.restart_epoch_gate \
     "${VALIDATOR_RESTART_GATE_ARGS[@]}"; then
   echo "Validator remains running; production shutdown has not started." >&2
   exit 75
 fi
+record_validator_restart_timing "pre_shutdown_checks_complete"
 if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" != "1" ]; then
   unset LEADPOET_USE_CAPTURED_RESTART_START
 fi
@@ -651,6 +722,8 @@ PYTHONPATH="$VALIDATOR_ROOT" "$VALIDATOR_PYTHON_BIN" \
   --interval-seconds 3
 
 VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1
+VALIDATOR_DEPLOY_STAGE="runtime_rebuild"
+record_validator_restart_timing "destructive_phase_started"
 echo "Stopping validator processes and containers"
 sudo pkill -TERM -f ".auto_update_wrapper.sh" 2>/dev/null || true
 sudo pkill -TERM -f "neurons/validator.py" 2>/dev/null || true
@@ -758,6 +831,7 @@ echo "Terminating existing validator Nitro enclaves"
     --gateway-release "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
     --gateway-release-lineage "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
     --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG"
+  record_validator_restart_timing "attested_enclave_ready"
 
   echo "Provisioning the validator hotkey directly into Nitro with KMS"
 python3 -m validator_tee.host.hotkey_bootstrap_v2 \
@@ -769,6 +843,8 @@ if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" = "1" ]; then
   leadpoet_release_docker_operation_lock_v2
   VALIDATOR_DOCKER_LOCK_ACQUIRED=0
   VALIDATOR_RESTART_COMPLETED=1
+  VALIDATOR_DEPLOY_STAGE="completed"
+  record_validator_restart_timing "cutover_prepare_complete" "passed"
   echo "SUCCESS: exact attested validator enclave is prepared for stateful cutover boundary capture"
   exit 0
 fi
@@ -793,6 +869,7 @@ else
 fi
 
 echo "Starting validator"
+VALIDATOR_DEPLOY_STAGE="validator_application_start"
 export PATH="$HOME/.local/bin:$PATH"
 export PYTHONPATH="${PYTHONPATH:-$VALIDATOR_ROOT}"
 export VALIDATOR_FORCE_CONTAINER_DEPLOY=1
@@ -813,7 +890,9 @@ if [ "$(docker inspect -f '{{.State.Running}}' leadpoet-validator-main)" != "tru
   docker logs --tail 160 leadpoet-validator-main >&2 || true
   exit 1
 fi
+record_validator_restart_timing "validator_application_ready"
 echo "Rechecking same-SHA gateway alignment after validator startup"
+VALIDATOR_DEPLOY_STAGE="gateway_alignment"
 if ! verify_pinned_gateway_release \
     "${VALIDATOR_PINNED_GATEWAY_POSTSTART_MAX_ATTEMPTS:-12}"; then
   stop_pinned_validator_after_alignment_failure
@@ -826,4 +905,6 @@ if [ "$VALIDATOR_USE_CAPTURED_RESTART_START" = "1" ]; then
   rm -f "$VALIDATOR_RESTART_START_PATH"
 fi
 VALIDATOR_RESTART_COMPLETED=1
+VALIDATOR_DEPLOY_STAGE="completed"
+record_validator_restart_timing "completed" "passed"
 echo "SUCCESS: authoritative V2 validator restart completed and verified"

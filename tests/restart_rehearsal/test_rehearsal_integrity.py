@@ -2487,12 +2487,14 @@ def test_profiles_are_fixed_and_fit_the_developer_docker_budget() -> None:
             "memory": "7g",
             "epochs": 1,
             "fault_matrix": False,
+            "target_seconds": 600,
         },
         "release": {
             "cpus": "6",
             "memory": "7g",
             "epochs": 100,
             "fault_matrix": True,
+            "target_seconds": None,
         },
     }
 

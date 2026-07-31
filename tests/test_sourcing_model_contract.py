@@ -166,14 +166,14 @@ def _conforming_tree(root: Path) -> None:
             return "0" * 64
     """)
     _write(root, "sourcing_model/routing/compiler.py", """
-        COMPILER_VERSION = "routing-compiler-v1"
+        COMPILER_VERSION = "routing-compiler-v2"
 
         def compile_route(catalog, policy, context):
             return None
     """)
     _write(root, "sourcing_model/routing/defaults.py", """
-        DEFAULT_CATALOG_VERSION = "sourcing-model-tools:v1"
-        DEFAULT_POLICY_VERSION = "sourcing-model-routing:v1"
+        DEFAULT_CATALOG_VERSION = "sourcing-model-tools:v2"
+        DEFAULT_POLICY_VERSION = "sourcing-model-routing:v2"
 
         def builtin_definitions():
             return ()
@@ -224,10 +224,13 @@ def _conforming_tree(root: Path) -> None:
     """)
     _write(root, "sourcing_model/routing/policy.py", "POLICY = True\n")
     _write(root, "sourcing_model/routing/runtime.py", """
-        RUNTIME_CATALOG_VERSION = "sourcing-model-runtime-tools:v4"
-        RUNTIME_POLICY_VERSION = "sourcing-model-runtime-routing:v4"
+        RUNTIME_CATALOG_VERSION = "sourcing-model-runtime-tools:v6"
+        RUNTIME_POLICY_VERSION = "sourcing-model-runtime-routing:v6"
 
         def runtime_tool_definitions():
+            return ()
+
+        def enhanced_scrapingdog_tool_definitions():
             return ()
 
         def runtime_policy():
@@ -293,6 +296,49 @@ def _conforming_tree(root: Path) -> None:
         ):
             return None
     """)
+    _write(root, "sourcing_model/scrapingdog_signal_contract.py", """
+        SCHEMA_VERSION = "scrapingdog-routing-v4"
+        REQUEST_SCHEMA_VERSION = "v3"
+        EVIDENCE_SCHEMA_VERSION = "v1"
+
+        def canonical_json(value):
+            return "{}"
+
+        def compile_request(
+            tool_id, *, company_name, company_domain, verified_aliases=(),
+            category, signal, subtype="active", signal_specific_terms=(),
+            country="US", language="en", maximum_age_days=365,
+            result_limit=20, call_budget=3, credit_budget=100,
+            identifiers=None, requested_url=""
+        ):
+            return {}
+
+        def contract_identity():
+            return {}
+
+        def route_for_signal(signal, *, available_tool_ids):
+            return None
+
+        def sha256_payload(value):
+            return "0" * 64
+    """)
+    _write(root, "verified_intent_event.py", """
+        VERIFIED_INTENT_EVENT_SCHEMA_VERSION = "verified-intent-event:v1"
+
+        def build_verified_intent_event(
+            *, company_domain, category, event_subject, summary,
+            supporting_urls
+        ):
+            return {}
+
+        def intent_event_key(
+            *, company_domain, category, event_subject
+        ):
+            return ""
+
+        def verified_intent_event_contract_identity():
+            return {}
+    """)
     _write(root, "sourcing_model/validation.py", """
         def bonus_requirements(icp):
             pass
@@ -310,7 +356,12 @@ def _conforming_tree(root: Path) -> None:
 
 def test_contract_loads_and_declares_frozen_surface() -> None:
     contract = load_wrapper_contract()
-    assert contract["contract_id"] == "leadpoet-sourcing-wrapper-contract-v5"
+    assert contract["contract_id"] == "leadpoet-sourcing-wrapper-contract-v7"
+    assert (
+        "sourcing_model/scrapingdog_signal_contract.py"
+        in contract["required_files"]
+    )
+    assert "verified_intent_event.py" in contract["required_files"]
     assert "research_lab_adapter.py" in contract["functions"]
     assert contract["functions"]["research_lab_adapter.py"]["run_icp"] == [
         "icp",
@@ -566,8 +617,8 @@ def test_exact_constants_accept_annotated_literal_assignment(
     defaults = tmp_path / "sourcing_model" / "routing" / "defaults.py"
     defaults.write_text(
         defaults.read_text(encoding="utf-8").replace(
-            'DEFAULT_POLICY_VERSION = "sourcing-model-routing:v1"',
-            'DEFAULT_POLICY_VERSION: str = "sourcing-model-routing:v1"',
+            'DEFAULT_POLICY_VERSION = "sourcing-model-routing:v2"',
+            'DEFAULT_POLICY_VERSION: str = "sourcing-model-routing:v2"',
         ),
         encoding="utf-8",
     )

@@ -136,18 +136,18 @@
         "capability_contract_version": "sourcing-model-runtime-capabilities:v2",
         "component_registry_version": "sourcing-model-components:v2",
         "resilience_policy_version": "sourcing-model-resilience:v1",
-        "routing_catalog_sha256": "733898474edf199507859cabd0215c401127de64b6044c237afaa9c235d1bc8f",
-        "routing_compiler_version": "routing-compiler-v1",
-        "routing_policy_sha256": "f82dc74fca23c7b7e173a93edd81b1820053bbac477b104adf0ae940dd576578",
+        "routing_catalog_sha256": "f91c7ca3e19f85514bb2f0bf0adeec8b41e7963651238a488aa6b42809b73e1b",
+        "routing_compiler_version": "routing-compiler-v2",
+        "routing_policy_sha256": "d98f5b54abcf349f433f927d1d03c1e14ee71ff263365e55967869809bd469f5",
         "taxonomy_content_hash": "sha256:a8ade1218bb78062f7af508489d32ca0ff00e24e0647f2afaf274c5a64a64619"
       },
       "candidate_route": {
-        "catalog_sha256": "733898474edf199507859cabd0215c401127de64b6044c237afaa9c235d1bc8f",
+        "catalog_sha256": "f91c7ca3e19f85514bb2f0bf0adeec8b41e7963651238a488aa6b42809b73e1b",
         "context_sha256": "bbd62ce79946c30085ec632da36703647f8857c4287a15097bad332c4a8fc33a",
         "exclusions": [],
-        "plan_sha256": "245c3737f89103f0b0f454f345c58d9eb60e2c10d47abd91d9252ab5dc64ce5b",
-        "policy_sha256": "f82dc74fca23c7b7e173a93edd81b1820053bbac477b104adf0ae940dd576578",
-        "policy_version": "sourcing-model-routing:v1+routing-compiler-v1",
+        "plan_sha256": "a8f506d8b9429e5f46ef96ea01e15ad44f3a5567f923e734808eeb42dc41382c",
+        "policy_sha256": "d98f5b54abcf349f433f927d1d03c1e14ee71ff263365e55967869809bd469f5",
+        "policy_version": "sourcing-model-routing:v2+routing-compiler-v2",
         "schema_version": 1,
         "stage": "candidate_acquisition",
         "steps": [
@@ -156,57 +156,73 @@
             "execution_mode": "invoke",
             "max_calls": 1,
             "max_results": 25,
-            "order": 10,
+            "order": 0,
             "policy_reason": "structured_free_first",
             "stop_on_success": true,
             "timeout_seconds": 120.0,
-            "tool_id": "candidate.deepline_free_corpus"
+            "tool_id": "candidate.deepline_free_corpus",
+            "guidance_score": 1,
+            "matched_best_for": [
+              "icp.structured_query"
+            ]
           },
           {
             "credit_cap": 0.05,
             "execution_mode": "invoke",
             "max_calls": 1,
             "max_results": 25,
-            "order": 20,
+            "order": 1,
             "policy_reason": "structured_paid_fallback",
             "stop_on_success": true,
             "timeout_seconds": 180.0,
-            "tool_id": "candidate.crustdata_companydb"
+            "tool_id": "candidate.crustdata_companydb",
+            "guidance_score": 2,
+            "matched_best_for": [
+              "icp.structured_query",
+              "runtime.allow_paid_escalation"
+            ]
           },
           {
             "credit_cap": 1.0,
             "execution_mode": "invoke",
             "max_calls": 1,
             "max_results": 25,
-            "order": 100,
+            "order": 2,
             "policy_reason": "semantic_residual",
             "stop_on_success": false,
             "timeout_seconds": 300.0,
-            "tool_id": "candidate.exa_semantic"
+            "tool_id": "candidate.exa_semantic",
+            "guidance_score": 1,
+            "matched_best_for": [
+              "runtime.semantic_available"
+            ]
           }
         ]
       },
       "fixture_id": "us-ai-sales-hiring-10-200",
       "intent_route": {
-        "catalog_sha256": "733898474edf199507859cabd0215c401127de64b6044c237afaa9c235d1bc8f",
+        "catalog_sha256": "f91c7ca3e19f85514bb2f0bf0adeec8b41e7963651238a488aa6b42809b73e1b",
         "context_sha256": "5635d4dfbc8f4e703a684f8bfe13d121b381b4a100c0853aaf8f408191609b5b",
         "exclusions": [
           {
             "reason_code": "required_feature_absent",
-            "tool_id": "intent.existing_evidence"
+            "tool_id": "intent.existing_evidence",
+            "matched_avoid_when": []
           },
           {
             "reason_code": "intent_category_unsupported",
-            "tool_id": "intent.podcast"
+            "tool_id": "intent.podcast",
+            "matched_avoid_when": []
           },
           {
             "reason_code": "intent_category_unsupported",
-            "tool_id": "intent.social"
+            "tool_id": "intent.social",
+            "matched_avoid_when": []
           }
         ],
-        "plan_sha256": "ce70b08fb6deaf082ed3460ed328b28ceece158ef03c2db372b8004dff723dcf",
-        "policy_sha256": "f82dc74fca23c7b7e173a93edd81b1820053bbac477b104adf0ae940dd576578",
-        "policy_version": "sourcing-model-routing:v1+routing-compiler-v1",
+        "plan_sha256": "8a151a622ab768455c1426aa20f164123e9bd4982908a38bddd57cb38856db5e",
+        "policy_sha256": "d98f5b54abcf349f433f927d1d03c1e14ee71ff263365e55967869809bd469f5",
+        "policy_version": "sourcing-model-routing:v2+routing-compiler-v2",
         "schema_version": 1,
         "stage": "intent_evidence",
         "steps": [
@@ -215,33 +231,45 @@
             "execution_mode": "invoke",
             "max_calls": 1,
             "max_results": 1,
-            "order": 10,
+            "order": 0,
             "policy_reason": "intent_native",
             "stop_on_success": true,
             "timeout_seconds": 60.0,
-            "tool_id": "intent.job_listing"
+            "tool_id": "intent.job_listing",
+            "guidance_score": 1,
+            "matched_best_for": [
+              "intent.hiring"
+            ]
           },
           {
             "credit_cap": 1.0,
             "execution_mode": "invoke",
             "max_calls": 1,
             "max_results": 1,
-            "order": 20,
+            "order": 1,
             "policy_reason": "company_scoped_search",
             "stop_on_success": true,
             "timeout_seconds": 60.0,
-            "tool_id": "intent.news"
+            "tool_id": "intent.news",
+            "guidance_score": 1,
+            "matched_best_for": [
+              "intent.general"
+            ]
           },
           {
             "credit_cap": 0.0,
             "execution_mode": "invoke",
             "max_calls": 1,
             "max_results": 1,
-            "order": 30,
+            "order": 2,
             "policy_reason": "first_party_fallback",
             "stop_on_success": true,
             "timeout_seconds": 45.0,
-            "tool_id": "intent.company_site"
+            "tool_id": "intent.company_site",
+            "guidance_score": 1,
+            "matched_best_for": [
+              "intent.general"
+            ]
           }
         ]
       },
@@ -373,27 +401,29 @@
         "capability_contract_version": "sourcing-model-runtime-capabilities:v2",
         "component_registry_version": "sourcing-model-components:v2",
         "resilience_policy_version": "sourcing-model-resilience:v1",
-        "routing_catalog_sha256": "733898474edf199507859cabd0215c401127de64b6044c237afaa9c235d1bc8f",
-        "routing_compiler_version": "routing-compiler-v1",
-        "routing_policy_sha256": "f82dc74fca23c7b7e173a93edd81b1820053bbac477b104adf0ae940dd576578",
+        "routing_catalog_sha256": "f91c7ca3e19f85514bb2f0bf0adeec8b41e7963651238a488aa6b42809b73e1b",
+        "routing_compiler_version": "routing-compiler-v2",
+        "routing_policy_sha256": "d98f5b54abcf349f433f927d1d03c1e14ee71ff263365e55967869809bd469f5",
         "taxonomy_content_hash": "sha256:a8ade1218bb78062f7af508489d32ca0ff00e24e0647f2afaf274c5a64a64619"
       },
       "candidate_route": {
-        "catalog_sha256": "343ab25e67561ec2899d6a87fc32c8b14511484eee349ab6675d8980e9aa53de",
+        "catalog_sha256": "1f5627a19317638a1364a2a0c6ecc68a7943dc73344e7aa2db2691e616369291",
         "context_sha256": "db96c3bea520c0c96817d8ccb1d7ea6d24def9654e97af2c2ab4160a81aab914",
         "exclusions": [
           {
             "reason_code": "tool_unavailable",
-            "tool_id": "candidate.crustdata_companydb"
+            "tool_id": "candidate.crustdata_companydb",
+            "matched_avoid_when": []
           },
           {
             "reason_code": "tool_unavailable",
-            "tool_id": "candidate.exa_semantic"
+            "tool_id": "candidate.exa_semantic",
+            "matched_avoid_when": []
           }
         ],
-        "plan_sha256": "bcd13bcda75e73ca4321635cad8f6096c9602b0794d0d05427ec57cfbde9d376",
-        "policy_sha256": "f82dc74fca23c7b7e173a93edd81b1820053bbac477b104adf0ae940dd576578",
-        "policy_version": "sourcing-model-routing:v1+routing-compiler-v1",
+        "plan_sha256": "4bd12a853b6221b9178f055c19aa54ded8826013730f87477638fe19c1bd2528",
+        "policy_sha256": "d98f5b54abcf349f433f927d1d03c1e14ee71ff263365e55967869809bd469f5",
+        "policy_version": "sourcing-model-routing:v2+routing-compiler-v2",
         "schema_version": 1,
         "stage": "candidate_acquisition",
         "steps": [
@@ -402,39 +432,47 @@
             "execution_mode": "invoke",
             "max_calls": 1,
             "max_results": 10,
-            "order": 10,
+            "order": 0,
             "policy_reason": "structured_free_first",
             "stop_on_success": true,
             "timeout_seconds": 120.0,
-            "tool_id": "candidate.deepline_free_corpus"
+            "tool_id": "candidate.deepline_free_corpus",
+            "guidance_score": 1,
+            "matched_best_for": [
+              "icp.structured_query"
+            ]
           }
         ]
       },
       "fixture_id": "us-ai-sales-hiring-existing-evidence",
       "intent_route": {
-        "catalog_sha256": "733898474edf199507859cabd0215c401127de64b6044c237afaa9c235d1bc8f",
+        "catalog_sha256": "f91c7ca3e19f85514bb2f0bf0adeec8b41e7963651238a488aa6b42809b73e1b",
         "context_sha256": "cdbc6b7d978b57dedb7e19b5f37623abfdecc5a8a32850e869d6181d0ab3f361",
         "exclusions": [
           {
             "reason_code": "credit_budget_exhausted",
-            "tool_id": "intent.job_listing"
+            "tool_id": "intent.job_listing",
+            "matched_avoid_when": []
           },
           {
             "reason_code": "credit_budget_exhausted",
-            "tool_id": "intent.news"
+            "tool_id": "intent.news",
+            "matched_avoid_when": []
           },
           {
             "reason_code": "intent_category_unsupported",
-            "tool_id": "intent.podcast"
+            "tool_id": "intent.podcast",
+            "matched_avoid_when": []
           },
           {
             "reason_code": "intent_category_unsupported",
-            "tool_id": "intent.social"
+            "tool_id": "intent.social",
+            "matched_avoid_when": []
           }
         ],
-        "plan_sha256": "e56ab0126d665be3104c1b8a25d2dfc0b8084091b18bc964cda7cf12ffeffadc",
-        "policy_sha256": "f82dc74fca23c7b7e173a93edd81b1820053bbac477b104adf0ae940dd576578",
-        "policy_version": "sourcing-model-routing:v1+routing-compiler-v1",
+        "plan_sha256": "070e1402ca16fd144c39fcf6ae4f79764ea38caca87945b5e6692cb6b919c595",
+        "policy_sha256": "d98f5b54abcf349f433f927d1d03c1e14ee71ff263365e55967869809bd469f5",
+        "policy_version": "sourcing-model-routing:v2+routing-compiler-v2",
         "schema_version": 1,
         "stage": "intent_evidence",
         "steps": [
@@ -443,22 +481,30 @@
             "execution_mode": "virtual",
             "max_calls": 0,
             "max_results": 1,
-            "order": 5,
+            "order": 0,
             "policy_reason": "existing_evidence",
             "stop_on_success": true,
             "timeout_seconds": 1.0,
-            "tool_id": "intent.existing_evidence"
+            "tool_id": "intent.existing_evidence",
+            "guidance_score": 1,
+            "matched_best_for": [
+              "candidate.existing_evidence"
+            ]
           },
           {
             "credit_cap": 0.0,
             "execution_mode": "invoke",
             "max_calls": 1,
             "max_results": 1,
-            "order": 30,
+            "order": 1,
             "policy_reason": "first_party_fallback",
             "stop_on_success": true,
             "timeout_seconds": 45.0,
-            "tool_id": "intent.company_site"
+            "tool_id": "intent.company_site",
+            "guidance_score": 1,
+            "matched_best_for": [
+              "intent.general"
+            ]
           }
         ]
       },

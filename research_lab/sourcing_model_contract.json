@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "contract_id": "leadpoet-sourcing-wrapper-contract-v5",
+  "contract_id": "leadpoet-sourcing-wrapper-contract-v7",
   "canonical_path": "sourcing_model/consumer_contract.json",
   "parity_fixture_path": "sourcing_model/consumer_parity_fixtures.json",
   "required_files": [
@@ -24,9 +24,11 @@
     "sourcing_model/routing/defaults.py",
     "sourcing_model/routing/policy.py",
     "sourcing_model/routing/runtime.py",
+    "verified_intent_event.py",
     "sourcing_model/runtime_capabilities.py",
     "sourcing_model/scoring.py",
     "sourcing_model/scrapingdog_intent.py",
+    "sourcing_model/scrapingdog_signal_contract.py",
     "sourcing_model/validation.py"
   ],
   "functions": {
@@ -200,7 +202,8 @@
       "runtime_catalog": [],
       "runtime_policy": [],
       "runtime_routing_metadata": [],
-      "runtime_tool_definitions": []
+      "runtime_tool_definitions": [],
+      "enhanced_scrapingdog_tool_definitions": []
     },
     "sourcing_model/runtime_capabilities.py": {
       "capability_metadata": [],
@@ -222,6 +225,21 @@
         "candidates"
       ]
     },
+    "sourcing_model/scrapingdog_signal_contract.py": {
+      "canonical_json": [
+        "value"
+      ],
+      "compile_request": [
+        "tool_id"
+      ],
+      "contract_identity": [],
+      "route_for_signal": [
+        "signal"
+      ],
+      "sha256_payload": [
+        "value"
+      ]
+    },
     "sourcing_model/validation.py": {
       "bonus_requirements": [
         "icp"
@@ -238,6 +256,11 @@
         "seen_domains",
         "today"
       ]
+    },
+    "verified_intent_event.py": {
+      "build_verified_intent_event": [],
+      "intent_event_key": [],
+      "verified_intent_event_contract_identity": []
     }
   },
   "exact_signatures": [
@@ -362,6 +385,28 @@
       "additional_states",
       "catalog_version"
     ],
+    "sourcing_model/scrapingdog_signal_contract.py:compile_request": [
+      "tool_id",
+      "company_name",
+      "company_domain",
+      "verified_aliases",
+      "category",
+      "signal",
+      "subtype",
+      "signal_specific_terms",
+      "country",
+      "language",
+      "maximum_age_days",
+      "result_limit",
+      "call_budget",
+      "credit_budget",
+      "identifiers",
+      "requested_url"
+    ],
+    "sourcing_model/scrapingdog_signal_contract.py:route_for_signal": [
+      "signal",
+      "available_tool_ids"
+    ],
     "sourcing_model/scrapingdog_intent.py:compile_scrapingdog_intent_request": [
       "tool_id",
       "company_name",
@@ -430,6 +475,27 @@
     ],
     "sourcing_model/scrapingdog_intent.py:normalized_provider_date": [
       "today"
+    ],
+    "sourcing_model/scrapingdog_signal_contract.py:compile_request": [
+      "company_name",
+      "company_domain",
+      "category",
+      "signal"
+    ],
+    "sourcing_model/scrapingdog_signal_contract.py:route_for_signal": [
+      "available_tool_ids"
+    ],
+    "verified_intent_event.py:build_verified_intent_event": [
+      "company_domain",
+      "category",
+      "event_subject",
+      "summary",
+      "supporting_urls"
+    ],
+    "verified_intent_event.py:intent_event_key": [
+      "company_domain",
+      "category",
+      "event_subject"
     ]
   },
   "frozen_asyncness": {
@@ -457,6 +523,11 @@
     "sourcing_model/scrapingdog_intent.py:compile_scrapingdog_intent_request": false,
     "sourcing_model/scrapingdog_intent.py:normalized_provider_date": false,
     "sourcing_model/scrapingdog_intent.py:select_scrapingdog_intent_evidence": false,
+    "sourcing_model/scrapingdog_signal_contract.py:canonical_json": false,
+    "sourcing_model/scrapingdog_signal_contract.py:compile_request": false,
+    "sourcing_model/scrapingdog_signal_contract.py:contract_identity": false,
+    "sourcing_model/scrapingdog_signal_contract.py:route_for_signal": false,
+    "sourcing_model/scrapingdog_signal_contract.py:sha256_payload": false,
     "sourcing_model/validation.py:bonus_requirements": false,
     "sourcing_model/validation.py:make_deps": false,
     "sourcing_model/validation.py:validate_candidate": true
@@ -478,15 +549,20 @@
       "COMPONENT_REGISTRY_VERSION": "sourcing-model-components:v2"
     },
     "sourcing_model/routing/compiler.py": {
-      "COMPILER_VERSION": "routing-compiler-v1"
+      "COMPILER_VERSION": "routing-compiler-v2"
     },
     "sourcing_model/routing/defaults.py": {
-      "DEFAULT_CATALOG_VERSION": "sourcing-model-tools:v1",
-      "DEFAULT_POLICY_VERSION": "sourcing-model-routing:v1"
+      "DEFAULT_CATALOG_VERSION": "sourcing-model-tools:v2",
+      "DEFAULT_POLICY_VERSION": "sourcing-model-routing:v2"
     },
     "sourcing_model/routing/runtime.py": {
-      "RUNTIME_CATALOG_VERSION": "sourcing-model-runtime-tools:v4",
-      "RUNTIME_POLICY_VERSION": "sourcing-model-runtime-routing:v4"
+      "RUNTIME_CATALOG_VERSION": "sourcing-model-runtime-tools:v6",
+      "RUNTIME_POLICY_VERSION": "sourcing-model-runtime-routing:v6"
+    },
+    "sourcing_model/scrapingdog_signal_contract.py": {
+      "EVIDENCE_SCHEMA_VERSION": "v1",
+      "REQUEST_SCHEMA_VERSION": "v3",
+      "SCHEMA_VERSION": "scrapingdog-routing-v4"
     },
     "sourcing_model/normalized_icp_discovery_plan.py": {
       "CONTACT_PERSONA_SENIORITY_LEVELS": [
@@ -499,6 +575,9 @@
       ],
       "DISCOVERY_PLAN_CONTRACT_ID": "normalized-icp-discovery-plan:v2",
       "DISCOVERY_PLAN_SCHEMA_VERSION": 2
+    },
+    "verified_intent_event.py": {
+      "VERIFIED_INTENT_EVENT_SCHEMA_VERSION": "verified-intent-event:v1"
     }
   }
 }

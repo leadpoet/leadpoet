@@ -468,12 +468,23 @@ def test_loop_direction_planner_binds_approved_source_to_model_registration():
             }
         ],
         "routerverse_source_incorporation": {
-            "schema_version": "leadpoet.routerverse_source_suggestions.v1",
+            "schema_version": "leadpoet.routerverse_source_suggestions.v2",
             "requests": [
                 {
+                    "schema_version": (
+                        "leadpoet.routerverse_source_incorporation.v2"
+                    ),
                     "provider_id": "community_accounts",
                     "stage": "candidate_acquisition",
                     "manifest_sha256": "a" * 64,
+                    "best_for": ["icp.structured_eligible"],
+                    "avoid_when": [],
+                    "best_for_description": (
+                        "Approved company-discovery provider for structured ICPs."
+                    ),
+                    "avoid_when_description": (
+                        "Avoid when the runtime binding is unavailable."
+                    ),
                     "registration_symbol": (
                         "sourcing_model/routing/runtime.py::"
                         "SOURCE_ADD_ROUTING_REGISTRATIONS"

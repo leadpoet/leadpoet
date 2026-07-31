@@ -47,6 +47,18 @@ def _router_registration_source(
     evidence_types = (
         ("provider_database",) if candidate_stage else ("external",)
     )
+    best_for = (
+        ("icp.structured_eligible",)
+        if candidate_stage
+        else ("intent.general",)
+    )
+    best_for_description = (
+        "Approved SOURCE_ADD company-discovery provider for structured ICP "
+        "acquisition."
+        if candidate_stage
+        else "Approved SOURCE_ADD provider for company-scoped intent-evidence "
+        "discovery."
+    )
     return f"""SOURCE_ADD_ROUTING_REGISTRATIONS = (
     SourceAddRoutingRegistration(
         provider_id={provider_id!r},
@@ -62,6 +74,10 @@ def _router_registration_source(
         max_results={100 if candidate_stage else 1},
         timeout_seconds={60.0 if candidate_stage else 30.0},
         evidence_types={evidence_types!r},
+        best_for={best_for!r},
+        avoid_when=(),
+        best_for_description={best_for_description!r},
+        avoid_when_description="Avoid when the consumer binding is unavailable, unhealthy, outside its approved categories, or over budget.",
 {unknown_field}    ),
 )
 {outside_registry}"""
@@ -354,6 +370,13 @@ def test_approved_source_mention_creates_company_router_registration_request():
     assert request["registration_symbol"].endswith(
         "::SOURCE_ADD_ROUTING_REGISTRATIONS"
     )
+    assert request["schema_version"] == (
+        "leadpoet.routerverse_source_incorporation.v2"
+    )
+    assert request["best_for"] == ["icp.structured_eligible"]
+    assert request["avoid_when"] == []
+    assert "company-discovery" in request["best_for_description"]
+    assert "consumer binding" in request["avoid_when_description"]
     assert incorporation["clarifications"] == []
 
 
@@ -372,6 +395,48 @@ def test_approved_source_mention_creates_intent_router_registration_request():
     ]
     assert context["requests"][0]["tool_id"] == (
         "intent.source_add.community_signals"
+    )
+    assert context["requests"][0]["best_for"] == ["intent.general"]
+
+
+def test_approved_source_guidance_uses_bounded_planner_metadata():
+    provider = _provider_doc(
+        "community_signals",
+        origin="source_add",
+    )
+    provider["planner_summary"].update(
+        {
+            "best_for": "Fresh funding and hiring evidence.",
+            "avoid_when": "The request requires first-party proof.",
+            "best_for_features": [
+                "intent.funding",
+                "intent.hiring",
+                "NOT VALID",
+            ],
+            "avoid_when_features": [
+                "evidence.first_party_required",
+                "also invalid",
+            ],
+        }
+    )
+
+    request = approved_source_router_suggestions(
+        "Use community signals for intent discovery.",
+        _capabilities(provider, private_loaded=False).providers,
+    )["requests"][0]
+
+    assert request["best_for"] == [
+        "intent.funding",
+        "intent.hiring",
+    ]
+    assert request["avoid_when"] == [
+        "evidence.first_party_required",
+    ]
+    assert request["best_for_description"] == (
+        "Fresh funding and hiring evidence."
+    )
+    assert request["avoid_when_description"] == (
+        "The request requires first-party proof."
     )
 
 
@@ -464,6 +529,10 @@ def test_source_add_registration_diff_must_match_approved_attestation():
 +        max_results=100,
 +        timeout_seconds=60.0,
 +        evidence_types=("provider_database",),
++        best_for=("icp.structured_eligible",),
++        avoid_when=(),
++        best_for_description="Approved SOURCE_ADD company-discovery provider for structured ICP acquisition.",
++        avoid_when_description="Avoid when the consumer binding is unavailable, unhealthy, outside its approved categories, or over budget.",
 +    ),
 +)
 """
@@ -508,6 +577,10 @@ SOURCE_ADD_ROUTING_REGISTRATIONS = (
         max_results=100,
         timeout_seconds=60.0,
         evidence_types=("provider_database",),
+        best_for=("icp.structured_eligible",),
+        avoid_when=(),
+        best_for_description="Approved SOURCE_ADD company-discovery provider for structured ICP acquisition.",
+        avoid_when_description="Avoid when the consumer binding is unavailable, unhealthy, outside its approved categories, or over budget.",
     ),
 )
 """
@@ -557,6 +630,10 @@ def test_source_add_registration_diff_requires_every_stage_and_exact_bounds():
 +        max_results=100,
 +        timeout_seconds=60.0,
 +        evidence_types=("provider_database",),
++        best_for=("icp.structured_eligible",),
++        avoid_when=(),
++        best_for_description="Approved SOURCE_ADD company-discovery provider for structured ICP acquisition.",
++        avoid_when_description="Avoid when the consumer binding is unavailable, unhealthy, outside its approved categories, or over budget.",
 +    ),
  )
 """
@@ -623,6 +700,10 @@ def test_source_add_registration_diff_requires_every_stage_and_exact_bounds():
 +        max_results=1,
 +        timeout_seconds=30.0,
 +        evidence_types=("external",),
++        best_for=("intent.general",),
++        avoid_when=(),
++        best_for_description="Approved SOURCE_ADD provider for company-scoped intent-evidence discovery.",
++        avoid_when_description="Avoid when the consumer binding is unavailable, unhealthy, outside its approved categories, or over budget.",
 +    ),
  )
 """,
@@ -783,6 +864,50 @@ def test_source_add_registration_diff_allows_only_exact_approved_replacement():
         malformed_context,
         existing_runtime_source=stale,
     ) == ["source_add_approved_request_invalid"]
+
+
+def test_source_add_registration_diff_migrates_unchanged_legacy_guidance_only():
+    provider = _provider_doc("community_accounts", origin="source_add")
+    context = approved_source_router_suggestions(
+        "Use community accounts for company discovery.",
+        _capabilities(provider, private_loaded=False).providers,
+    )
+    current = _router_registration_source()
+    legacy = "\n".join(
+        line
+        for line in current.splitlines()
+        if not any(
+            field in line
+            for field in (
+                "best_for=",
+                "avoid_when=",
+                "best_for_description=",
+                "avoid_when_description=",
+            )
+        )
+    ) + "\n"
+
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(
+            legacy,
+            legacy + "ROUTER_BATCH_SIZE = 20\n",
+        ),
+        None,
+        existing_runtime_source=legacy,
+    ) == []
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(
+            legacy,
+            legacy.replace("unit_cost=0.005", "unit_cost=0.006"),
+        ),
+        context,
+        existing_runtime_source=legacy,
+    ) == ["source_add_registration_patched_source_invalid"]
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(legacy, current),
+        context,
+        existing_runtime_source=legacy,
+    ) == []
 
 
 def test_source_add_registration_diff_rejects_wrong_target_and_unapplicable_patch():

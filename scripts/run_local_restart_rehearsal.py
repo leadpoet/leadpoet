@@ -4,9 +4,9 @@
 The driver has two deliberately fixed profiles:
 
 ``prepush``
-    One forward N-1 -> N restart and one complete V2 publication in a
-    resource-bounded Docker replica.
-``release``
+    The default 5-10 minute gate: one forward N-1 -> N restart and one
+    complete V2 publication in a resource-bounded Docker replica.
+``unaccelerated``
     Forward, rollback, roll-forward, the external-boundary fault matrix,
     concurrency checks, and 100 accelerated stateful subnet epochs.
 
@@ -25,11 +25,13 @@ import json
 import os
 import platform
 from pathlib import Path
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable, Iterator, Sequence
+import time
+from typing import Any, Callable, Iterator, Optional, Sequence
 from urllib.request import urlopen
 
 
@@ -91,14 +93,60 @@ PROFILE_LIMITS = {
         "memory": "7g",
         "epochs": 1,
         "fault_matrix": False,
+        "target_seconds": 600,
     },
     "release": {
         "cpus": "6",
         "memory": "7g",
         "epochs": 100,
         "fault_matrix": True,
+        "target_seconds": None,
     },
 }
+CLI_PROFILES = ("prepush", "unaccelerated")
+
+
+class RehearsalTimeBudgetExceeded(TimeoutError):
+    """The bounded prepush rehearsal exceeded its wall-clock budget."""
+
+
+def _runtime_profile(cli_profile: str) -> str:
+    if cli_profile == "unaccelerated":
+        return "release"
+    if cli_profile == "prepush":
+        return cli_profile
+    raise ValueError(f"unsupported rehearsal profile: {cli_profile}")
+
+
+@contextmanager
+def _profile_time_limit(seconds: Optional[int]) -> Iterator[None]:
+    if seconds is None:
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def raise_timeout(_signum: int, _frame: Any) -> None:
+        raise RehearsalTimeBudgetExceeded(
+            f"prepush rehearsal exceeded its {seconds}-second wall-clock budget"
+        )
+
+    signal.signal(signal.SIGALRM, raise_timeout)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, float(seconds))
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        previous_delay, previous_interval = previous_timer
+        if previous_delay > 0:
+            elapsed = time.monotonic() - started
+            signal.setitimer(
+                signal.ITIMER_REAL,
+                max(0.000001, previous_delay - elapsed),
+                previous_interval,
+            )
 
 
 @contextmanager
@@ -718,23 +766,39 @@ def _run_independent_stage(
 ) -> tuple[bool, Any]:
     """Run one stage without suppressing later independent diagnostics."""
 
+    started = time.monotonic()
     try:
         value = action()
     except KeyboardInterrupt:
         raise
+    except RehearsalTimeBudgetExceeded:
+        raise
     except BaseException as exc:
         result = _stage_result_from_exception(stage=stage, exc=exc)
+        result["duration_seconds"] = round(time.monotonic() - started, 3)
         stages.append(result)
         print(
             "REHEARSAL_STAGE_FAILED_CONTINUING "
             f"stage={stage} error_type={result['error_type']} "
+            f"duration_seconds={result['duration_seconds']} "
             f"error={result['error']!r}",
             file=sys.stderr,
             flush=True,
         )
         return False, None
-    stages.append({"stage": stage, "status": "passed"})
-    print(f"REHEARSAL_STAGE_PASSED stage={stage}", flush=True)
+    duration = round(time.monotonic() - started, 3)
+    stages.append(
+        {
+            "duration_seconds": duration,
+            "stage": stage,
+            "status": "passed",
+        }
+    )
+    print(
+        f"REHEARSAL_STAGE_PASSED stage={stage} "
+        f"duration_seconds={duration}",
+        flush=True,
+    )
     return True, value
 
 
@@ -762,6 +826,7 @@ def _write_stage_summary(
     *,
     evidence_root: Path,
     candidate_sha: str,
+    elapsed_seconds: float,
     profile: str,
     stages: Sequence[dict[str, Any]],
 ) -> Path:
@@ -776,6 +841,7 @@ def _write_stage_summary(
         json.dumps(
             {
                 "candidate_sha": candidate_sha,
+                "elapsed_seconds": round(elapsed_seconds, 3),
                 "failure_count": failed,
                 "profile": profile,
                 "schema_version": (
@@ -786,6 +852,7 @@ def _write_stage_summary(
                 "status": (
                     "passed" if failed == 0 and unexercised == 0 else "failed"
                 ),
+                "target_seconds": PROFILE_LIMITS[profile]["target_seconds"],
                 "unexercised_count": unexercised,
             },
             indent=2,
@@ -805,6 +872,8 @@ def _recording_fixture_stack(
     try:
         yield stack
     except KeyboardInterrupt:
+        raise
+    except RehearsalTimeBudgetExceeded:
         raise
     except BaseException as exc:
         result = _stage_result_from_exception(
@@ -1128,9 +1197,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--profile",
-        choices=tuple(PROFILE_LIMITS),
+        choices=CLI_PROFILES,
         default="prepush",
-        help="prepush is the bounded developer gate; release runs the full matrix",
+        help=(
+            "prepush is the default 5-10 minute gate; unaccelerated runs "
+            "forward/rollback/roll-forward, the full fault matrix, and 100 epochs"
+        ),
     )
     parser.add_argument(
         "--gateway-worker-fleet-mode",
@@ -1144,12 +1216,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--rebuild-image", action="store_true")
     args = parser.parse_args(argv)
+    args.profile = _runtime_profile(args.profile)
 
     with _exclusive_rehearsal_lock():
-        return _run_profile(args)
+        target_seconds = PROFILE_LIMITS[args.profile]["target_seconds"]
+        try:
+            with _profile_time_limit(target_seconds):
+                return _run_profile(args)
+        except RehearsalTimeBudgetExceeded as exc:
+            print(
+                "REHEARSAL_TIME_BUDGET_EXCEEDED "
+                f"profile={args.profile} error={str(exc)!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
 
 
 def _run_profile(args: argparse.Namespace) -> int:
+    profile_started = time.monotonic()
+    target_seconds = PROFILE_LIMITS[args.profile]["target_seconds"]
+    print(
+        "REHEARSAL_TIME_BUDGET "
+        f"profile={args.profile} target_seconds={target_seconds or 'unbounded'}",
+        flush=True,
+    )
     from_sha = _git_sha(args.from_sha)
     candidate_sha = _git_sha(args.candidate_sha)
     transition = _resolve_transition(
@@ -1160,7 +1251,7 @@ def _run_profile(args: argparse.Namespace) -> int:
     if transition != "forward":
         raise SystemExit(
             "profile rehearsals must start with the deployed N-1 commit and "
-            "a descendant candidate; the release profile performs its own "
+            "a descendant candidate; the unaccelerated profile performs its own "
             "rollback and roll-forward"
         )
     harness_sha = candidate_sha
@@ -1371,9 +1462,35 @@ def _run_profile(args: argparse.Namespace) -> int:
                     ),
                     stages=stage_results,
                 )
+            elapsed_seconds = time.monotonic() - profile_started
+            if target_seconds is not None:
+                budget_result = {
+                    "duration_seconds": round(elapsed_seconds, 3),
+                    "stage": "time-budget",
+                    "status": (
+                        "passed"
+                        if elapsed_seconds <= target_seconds
+                        else "failed"
+                    ),
+                    "target_seconds": target_seconds,
+                }
+                if elapsed_seconds > target_seconds:
+                    budget_result["error"] = (
+                        "prepush rehearsal exceeded its 10-minute budget"
+                    )
+                    budget_result["error_type"] = "RehearsalTimeBudgetExceeded"
+                stage_results.append(budget_result)
+                print(
+                    "REHEARSAL_TIME_BUDGET_RESULT "
+                    f"status={budget_result['status']} "
+                    f"elapsed_seconds={budget_result['duration_seconds']} "
+                    f"target_seconds={target_seconds}",
+                    flush=True,
+                )
             stage_summary = _write_stage_summary(
                 evidence_root=evidence_root,
                 candidate_sha=candidate_sha,
+                elapsed_seconds=elapsed_seconds,
                 profile=args.profile,
                 stages=stage_results,
             )

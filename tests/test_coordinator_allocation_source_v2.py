@@ -696,6 +696,108 @@ def test_finalized_champion_history_requires_declared_chain_roots(monkeypatch):
         )
 
 
+def test_finalized_history_requires_every_raw_authority_graph(monkeypatch):
+    native_root = "sha256:" + "1" * 64
+    legacy_root = "sha256:" + "2" * 64
+    settlement_root = "sha256:" + "3" * 64
+    credit_root = "sha256:" + "4" * 64
+    reader = FakeReader(
+        {
+            "finalized_allocation_authorities": [
+                {"finalization_receipt_hash": native_root}
+            ],
+            "legacy_finalized_allocation_migrations": [
+                {"settlement_receipt_hash": legacy_root}
+            ],
+            "chain_realized_epoch_settlements": [
+                {
+                    "epoch_id": 99,
+                    "settlement_receipt_hash": settlement_root,
+                }
+            ],
+            "chain_realized_obligation_credits": [
+                {"credit_receipt_hash": credit_root}
+            ],
+            "chain_realized_settlement_activation": [
+                _chain_realized_activation(first_epoch_id=99)
+            ],
+        }
+    )
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=FakeChainSource(),
+        config_supplier=_config,
+        network_supplier=lambda: "finney",
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_finalized_allocation_authorities_v2",
+        lambda _rows, *, finalization_graphs: [],
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_legacy_settlement_migrations_v2",
+        lambda _rows, *, receipt_graphs: [],
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_chain_realized_epoch_settlements_v1",
+        lambda _rows, *, receipt_graphs: [],
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_chain_realized_obligation_credits_v1",
+        lambda _rows, *, settlement_rows, receipt_graphs: [],
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "_receipt_graphs_by_declared_root",
+        lambda _graphs, declared_roots: {
+            root: {
+                "root_receipt_hash": root,
+                "receipts": [{"receipt_hash": root}],
+            }
+            for root in declared_roots
+        },
+    )
+
+    roots = (native_root, legacy_root, settlement_root, credit_root)
+    context = _context(roots)
+    context.external_receipt_graphs = [
+        {
+            "root_receipt_hash": root,
+            "receipts": [{"receipt_hash": root}],
+        }
+        for root in roots
+    ]
+    required = set()
+
+    assert (
+        resolver._finalized_champion_history(
+            epoch=100,
+            netuid=71,
+            champion_rows=[{"start_epoch": 99}],
+            context=context,
+            required_parents=required,
+        )
+        == []
+    )
+    assert required == set(roots)
+
+    context.parent_receipt_hashes = (native_root, legacy_root, credit_root)
+    with pytest.raises(
+        CoordinatorAllocationSourceV2Error,
+        match="settlement authority graph is not a declared source",
+    ):
+        resolver._finalized_champion_history(
+            epoch=100,
+            netuid=71,
+            champion_rows=[{"start_epoch": 99}],
+            context=context,
+            required_parents=set(),
+        )
+
+
 def test_legacy_finalized_champion_history_requires_migration_receipt(
     monkeypatch,
 ):

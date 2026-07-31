@@ -177,17 +177,17 @@
       "symbol": "build_chain_realized_settlement_package_v1"
     },
     {
-      "ast_sha256": "sha256:8af5c4be1f90e29a48b3798844690d2f6534f9dd457b07f584e25af5b9eaac53",
+      "ast_sha256": "sha256:5368082ffbcb6fd16be373861bb803acab474f4f650355e5d832f21608a011b9",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "champion_v2_cutover_readiness"
     },
     {
-      "ast_sha256": "sha256:f5083655a24cb899994e30378d4a2429bcbd2b95dbeb8908d235166f8348cfe8",
+      "ast_sha256": "sha256:4b0593239f1e3b8551285669402a06f93b1af3ce0a7dbae59992de074934519f",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "load_chain_realized_allocation_history_v1"
     },
     {
-      "ast_sha256": "sha256:df122ad8574fafef3d73dd8b5ac0211738e4528fbd2a8d1b0a32cd00ebf4808a",
+      "ast_sha256": "sha256:7b4c9736d3ed87e1785f5070c2936d8cceb9df12b2a1457e95d21b885ab8b749",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "load_finalized_allocation_history_v2"
     },
@@ -197,7 +197,7 @@
       "symbol": "load_legacy_allocation_nonfinalizations_v2"
     },
     {
-      "ast_sha256": "sha256:b99ee9f708d4ea5ed9609316bb3bd421d8170afacc57634bbe41b531b7ba97dd",
+      "ast_sha256": "sha256:b63d6a1e3bddba599d59f21d811e45bacbaa4de5aed2b35cc29430c52976e597",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "load_settled_allocation_history_v2"
     },
@@ -562,7 +562,7 @@
       "symbol": "normalize_tee_protocol"
     },
     {
-      "ast_sha256": "sha256:55757e05b2387a3b3b567a888429fb95bc46ba05d561e7c93be59f00c0c8d179",
+      "ast_sha256": "sha256:b568c8e584fb948f11d40a7daad561c4d6090d99ede474930405781b21045444",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "_load_allocation_parent_graphs_v2"
     },
@@ -582,7 +582,7 @@
       "symbol": "attest_historical_source_add_reward_v2"
     },
     {
-      "ast_sha256": "sha256:d4937d54a93c2b496ef55fa24427973ed3205f19374676010b87c6918a45a556",
+      "ast_sha256": "sha256:a6c42eed9c67009ff41741665ad7108bbdaccc938d7275469229f7cfda45241c",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "build_allocation_v2"
     },
@@ -622,7 +622,7 @@
       "symbol": "CoordinatorActiveModelSourceV2"
     },
     {
-      "ast_sha256": "sha256:7ce8f8a82613e015d732c459e29d3e5ba68b24f206ba2631ed6fbfc06a38cbf9",
+      "ast_sha256": "sha256:55dfc7725be90818b187362e815d85b1eacfc0ef96cd02c8843e22226ec0cdb7",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
@@ -1312,7 +1312,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:51dcff7fc3d25222081be7021384d102dc6d5601d4169df57d74a7b6defdba8b",
+  "manifest_hash": "sha256:ff3e803ca40e4c69fb698a4f4703f109ef1df62dab359d88fb856a3a8a73283a",
   "protected_source_commit": "c350c43674d5bd470808e542278b5c05bd3f3534",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

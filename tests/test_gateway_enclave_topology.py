@@ -170,7 +170,7 @@ def test_topology_health_rejects_running_pcr_not_in_release(monkeypatch):
         asyncio.run(verify_topology.verify_roles([role], release_manifest=release))
 
 
-def test_startup_allocates_largest_roles_first_and_verifies_every_release():
+def test_startup_allocates_largest_roles_first_before_aggregate_release_check():
     script = (ROOT / "gateway" / "tee" / "start_enclave.sh").read_text(
         encoding="utf-8"
     )
@@ -178,10 +178,26 @@ def test_startup_allocates_largest_roles_first_and_verifies_every_release():
         "FULL_LAUNCH_ORDER=(\n  gateway_scoring\n  gateway_autoresearch\n"
         "  gateway_coordinator"
     )
+    cleanup = script.index("sudo nitro-cli terminate-enclave --all")
     launch_loop = script.index('for role in "${FULL_LAUNCH_ORDER[@]}"')
-    per_role_health = script.index('wait_for_roles "$role"', launch_loop)
+    launch_all = script.index(
+        'for role in "${FULL_LAUNCH_ORDER[@]}"; do\n'
+        '    start_role "$role"\n'
+        "  done",
+        launch_loop,
+    )
     final_health = script.index('wait_for_roles "${ROLES[@]}"')
-    assert scoring_order < launch_loop < per_role_health < final_health
+    final_state = script.index("sudo nitro-cli describe-enclaves", final_health)
+    assert (
+        scoring_order
+        < cleanup
+        < launch_loop
+        == launch_all
+        < final_health
+        < final_state
+    )
+    assert 'wait_for_roles "$role"' not in script[launch_loop:final_health]
+    assert "set -euo pipefail" in script
     assert '--release-manifest "$RELEASE_MANIFEST"' in script
 
 

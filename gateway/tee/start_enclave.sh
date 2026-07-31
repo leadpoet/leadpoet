@@ -141,7 +141,6 @@ wait_for_roles() {
 if [ "$TOPOLOGY_MODE" = "full" ]; then
   for role in "${FULL_LAUNCH_ORDER[@]}"; do
     start_role "$role"
-    wait_for_roles "$role"
   done
   wait_for_roles "${ROLES[@]}"
 else

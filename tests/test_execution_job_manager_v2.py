@@ -17,6 +17,7 @@ from gateway.tee.execution_job_manager_v2 import (
     ExecutionResultV2,
     TransitionSpecV2,
 )
+from gateway.tee import execution_job_manager_v2 as job_manager_v2
 from gateway.tee.host_operation_channel_v2 import HostOperationChannelV2
 from leadpoet_canonical.attested_v2 import (
     build_boot_identity_body,
@@ -83,6 +84,42 @@ def _payload():
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def test_external_receipt_graph_count_remains_bounded_above_production_need(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        job_manager_v2,
+        "validate_receipt_graph",
+        lambda _graph, **_kwargs: (),
+    )
+    context = ExecutionContextV2(
+        job_id="allocation-job",
+        purpose="research_lab.allocation.v2",
+        epoch_id=24_262,
+    )
+
+    for index in range(128):
+        root = "sha256:" + format(index, "064x")
+        context.record_external_receipt_graph(
+            {
+                "root_receipt_hash": root,
+                "receipts": [{"receipt_hash": root}],
+            }
+        )
+
+    assert len(context.external_receipt_graphs) == 128
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="external receipt graph count exceeds limit",
+    ):
+        context.record_external_receipt_graph(
+            {
+                "root_receipt_hash": "sha256:" + "f" * 64,
+                "receipts": [{"receipt_hash": "sha256:" + "f" * 64}],
+            }
+        )
 
 
 def test_transport_profile_mismatch_identifies_provider_and_hash_prefixes():

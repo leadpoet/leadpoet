@@ -831,6 +831,209 @@ async def test_allocation_parent_loader_uses_finalized_allocation_hash(
 
 
 @pytest.mark.asyncio
+async def test_allocation_parent_loader_reuses_raw_authority_graphs(
+    monkeypatch,
+):
+    from gateway.research_lab import (
+        attested_v2_store,
+        champion_settlement_v2,
+        store,
+    )
+
+    native_root = "sha256:" + "1" * 64
+    unattributed_root = "sha256:" + "2" * 64
+    out_of_scope_root = "sha256:" + "4" * 64
+    loaded_receipt_roots = []
+
+    async def select_all(table, *, filters=(), **_kwargs):
+        if table == "research_lab_champion_reward_current":
+            status = next(
+                (
+                    value
+                    for field, value in filters
+                    if field == "current_reward_status"
+                ),
+                "",
+            )
+            if status == "active":
+                return [
+                    {
+                        "champion_reward_id": "champion:test",
+                        "current_reward_status": "active",
+                        "start_epoch": 99,
+                        "epoch_count": 1,
+                        "desired_alpha_percent": 0.0,
+                    }
+                ]
+        return []
+
+    async def load_empty_business(artifacts):
+        assert not list(artifacts)
+        return {}
+
+    async def load_receipts(receipt_hashes):
+        loaded_receipt_roots.extend(sorted(receipt_hashes))
+        return {}
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_v2",
+        load_empty_business,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_by_ref_v2",
+        load_empty_business,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_receipt_graphs_v2",
+        load_receipts,
+    )
+
+    raw_graph_records = {
+        root: {
+            "epoch_id": 99,
+            "graph": {
+                "root_receipt_hash": root,
+                "receipts": [{"receipt_hash": root}],
+            },
+        }
+        for root in (native_root, unattributed_root)
+    }
+    raw_graph_records[out_of_scope_root] = {
+        "epoch_id": 50,
+        "graph": {
+            "root_receipt_hash": out_of_scope_root,
+            "receipts": [{"receipt_hash": out_of_scope_root}],
+        },
+    }
+    graphs = await v2_authority._load_allocation_parent_graphs_v2(
+        epoch_id=100,
+        netuid=71,
+        policy={},
+        finalized_champion_history=(
+            {
+                "epoch": 99,
+                "netuid": 71,
+                "authority_types": [
+                    "chain_realized_unattributed_observation_v1"
+                ],
+                "allocation_doc": {
+                    "champion_allocations": [],
+                    "queued_champion_allocations": [],
+                },
+            },
+        ),
+        preloaded_receipt_graph_records=raw_graph_records,
+        preloaded_business_graphs={},
+    )
+
+    assert loaded_receipt_roots == []
+    assert {graph["root_receipt_hash"] for graph in graphs} == {
+        native_root,
+        unattributed_root,
+    }
+
+    async def load_history(**kwargs):
+        kwargs["_receipt_graph_records_out"].update(raw_graph_records)
+        return [
+            {
+                "epoch": 99,
+                "netuid": 71,
+                "authority_types": [
+                    "chain_realized_unattributed_observation_v1"
+                ],
+                "allocation_doc": {
+                    "champion_allocations": [],
+                    "queued_champion_allocations": [],
+                },
+            }
+        ]
+
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "load_settled_allocation_history_v2",
+        load_history,
+    )
+    direct_graphs = await v2_authority._load_allocation_parent_graphs_v2(
+        epoch_id=100,
+        netuid=71,
+        policy={},
+    )
+    assert {graph["root_receipt_hash"] for graph in direct_graphs} == {
+        native_root,
+        unattributed_root,
+    }
+
+
+@pytest.mark.asyncio
+async def test_default_allocation_threads_readiness_authority_graphs(
+    monkeypatch,
+):
+    from gateway.research_lab import champion_settlement_v2
+
+    authority_root = "sha256:" + "3" * 64
+    authority_graph = {
+        "root_receipt_hash": authority_root,
+        "receipts": [{"receipt_hash": authority_root}],
+    }
+    captured = {}
+
+    async def ready(**kwargs):
+        kwargs["_authority_graph_records_out"][authority_root] = {
+            "epoch_id": 99,
+            "graph": authority_graph,
+        }
+        return {
+            "ready": True,
+            "receipt_coverage": 1.0,
+            "historical_classification_coverage": 1.0,
+        }
+
+    async def no_settlement_repair(**_kwargs):
+        return {}
+
+    class ParentLoaderReached(RuntimeError):
+        pass
+
+    async def parent_loader(**kwargs):
+        captured.update(kwargs)
+        raise ParentLoaderReached
+
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "champion_v2_cutover_readiness",
+        ready,
+    )
+    monkeypatch.setattr(
+        v2_authority,
+        "ensure_chain_realized_settlements_v1",
+        no_settlement_repair,
+    )
+    monkeypatch.setattr(
+        v2_authority,
+        "_load_allocation_parent_graphs_v2",
+        parent_loader,
+    )
+
+    with pytest.raises(ParentLoaderReached):
+        await v2_authority.build_allocation_v2(
+            epoch_id=100,
+            netuid=71,
+            policy={},
+        )
+
+    assert captured["preloaded_receipt_graph_records"] == {
+        authority_root: {
+            "epoch_id": 99,
+            "graph": authority_graph,
+        }
+    }
+
+
+@pytest.mark.asyncio
 async def test_allocation_parent_loader_skips_fully_paid_legacy_source_receipt(
     monkeypatch,
 ):
@@ -847,6 +1050,7 @@ async def test_allocation_parent_loader_skips_fully_paid_legacy_source_receipt(
     }
     business_refs = []
     receipt_roots = []
+    source_statuses = []
 
     async def select_all(table, **kwargs):
         if table == "research_lab_source_add_reward_current":
@@ -855,7 +1059,12 @@ async def test_allocation_parent_loader_skips_fully_paid_legacy_source_receipt(
                 for item in kwargs.get("filters") or ()
                 if len(item) == 2
             )
-            return [source_row] if filters.get("current_reward_status") == "active" else []
+            source_statuses.append(filters.get("current_reward_status"))
+            return (
+                [source_row]
+                if filters.get("current_reward_status") == "active"
+                else []
+            )
         return []
 
     async def load_history(**_kwargs):
@@ -921,9 +1130,10 @@ async def test_allocation_parent_loader_skips_fully_paid_legacy_source_receipt(
     graphs = await v2_authority._load_allocation_parent_graphs_v2(
         epoch_id=100,
         netuid=71,
-        policy={},
+        policy={"enable_champ_cap": False},
     )
 
+    assert source_statuses == ["active", "queued", "partially_paid"]
     assert business_refs == []
     assert receipt_roots == [settlement_receipt]
     assert [graph["root_receipt_hash"] for graph in graphs] == [

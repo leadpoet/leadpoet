@@ -1391,6 +1391,7 @@ async def build_allocation_v2(
     if load_allocation_parent_graphs is None:
         load_allocation_parent_graphs = _load_allocation_parent_graphs_v2
     finalized_history: list[dict[str, Any]] = []
+    readiness_authority_graph_records: dict[str, dict[str, Any]] = {}
     readiness_business_graphs: dict[
         tuple[str, str], dict[str, Any]
     ] = {}
@@ -1409,6 +1410,7 @@ async def build_allocation_v2(
             epoch=int(epoch_id),
             netuid=int(netuid),
             _finalized_history_out=finalized_history,
+            _authority_graph_records_out=readiness_authority_graph_records,
             _business_graphs_out=readiness_business_graphs,
         )
         if (
@@ -1444,6 +1446,9 @@ async def build_allocation_v2(
         parent_loader_kwargs.update(
             {
                 "finalized_champion_history": finalized_history,
+                "preloaded_receipt_graph_records": (
+                    readiness_authority_graph_records
+                ),
                 "preloaded_business_graphs": readiness_business_graphs,
             }
         )
@@ -1950,6 +1955,9 @@ async def _load_allocation_parent_graphs_v2(
     netuid: int,
     policy: Mapping[str, Any],
     finalized_champion_history: Sequence[Mapping[str, Any]] | None = None,
+    preloaded_receipt_graph_records: (
+        Mapping[str, Mapping[str, Any]] | None
+    ) = None,
     preloaded_business_graphs: Mapping[
         tuple[str, str], Mapping[str, Any]
     ] | None = None,
@@ -1980,6 +1988,43 @@ async def _load_allocation_parent_graphs_v2(
     exact_artifact_refs: dict[tuple[str, str], str] = {}
     receipt_roots: set[str] = set()
     preloaded = dict(preloaded_business_graphs or {})
+    preloaded_receipts: dict[str, tuple[int, dict[str, Any]]] = {}
+
+    def add_preloaded_receipt_record(
+        declared_root: str,
+        raw_record: Mapping[str, Any],
+    ) -> None:
+        root = str(declared_root or "")
+        if not isinstance(raw_record, Mapping):
+            raise ResearchLabV2AuthorityError(
+                "allocation preloaded receipt graph record is invalid"
+            )
+        raw_graph = raw_record.get("graph")
+        try:
+            source_epoch = int(raw_record["epoch_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ResearchLabV2AuthorityError(
+                "allocation preloaded receipt graph epoch is invalid"
+            ) from exc
+        if not isinstance(raw_graph, Mapping):
+            raise ResearchLabV2AuthorityError(
+                "allocation preloaded receipt graph is invalid"
+            )
+        normalized = dict(raw_graph)
+        if (
+            source_epoch < 0
+            or not _HASH_RE.fullmatch(root)
+            or str(normalized.get("root_receipt_hash") or "") != root
+        ):
+            raise ResearchLabV2AuthorityError(
+                "allocation preloaded receipt graph root differs"
+            )
+        preloaded_receipts[root] = (source_epoch, normalized)
+
+    for declared_root, raw_record in dict(
+        preloaded_receipt_graph_records or {}
+    ).items():
+        add_preloaded_receipt_record(declared_root, raw_record)
 
     def add(kind: str, ref: str) -> None:
         key = (str(kind or ""), str(ref or ""))
@@ -2107,14 +2152,15 @@ async def _load_allocation_parent_graphs_v2(
                     "historical compute fallback authority type is unsupported"
                 )
 
-    active_statuses = (
+    champion_statuses = (
         ("active", "queued", "partially_paid")
         if bool(policy.get("enable_champ_cap", True))
         else ("active", "queued", "partially_paid", "paid")
     )
+    source_statuses = ("active", "queued", "partially_paid")
     champion_rows = []
     source_rows = []
-    for status in active_statuses:
+    for status in champion_statuses:
         champion_rows.extend(
             await select_all(
                 "research_lab_champion_reward_current",
@@ -2124,6 +2170,7 @@ async def _load_allocation_parent_graphs_v2(
                 ),
             )
         )
+    for status in source_statuses:
         source_rows.extend(
             await select_all(
                 "research_lab_source_add_reward_current",
@@ -2141,14 +2188,24 @@ async def _load_allocation_parent_graphs_v2(
     normalized_finalized_history: list[dict[str, Any]] = []
     if history_starts and int(epoch_id) > 0:
         history_start = min(history_starts)
+        for root, (source_epoch, graph) in preloaded_receipts.items():
+            if history_start <= source_epoch < int(epoch_id):
+                graphs[root] = graph
         if finalized_champion_history is None:
+            loaded_receipt_records: dict[str, dict[str, Any]] = {}
             normalized_finalized_history = (
                 await load_settled_allocation_history_v2(
                     netuid=int(netuid),
                     start_epoch=history_start,
                     end_epoch=int(epoch_id) - 1,
+                    _receipt_graph_records_out=loaded_receipt_records,
                 )
             )
+            for root, record in loaded_receipt_records.items():
+                add_preloaded_receipt_record(root, record)
+                source_epoch, graph = preloaded_receipts[root]
+                if history_start <= source_epoch < int(epoch_id):
+                    graphs[root] = graph
         else:
             normalized_finalized_history = [
                 dict(row)
@@ -2237,7 +2294,13 @@ async def _load_allocation_parent_graphs_v2(
     )
     for graph in loaded_business_graphs.values():
         graphs[str(graph["root_receipt_hash"])] = graph
-    loaded_receipt_graphs = await load_receipt_graphs_v2(receipt_roots)
+    for receipt_hash in receipt_roots:
+        preloaded_receipt = preloaded_receipts.get(receipt_hash)
+        if preloaded_receipt is not None:
+            graphs[receipt_hash] = preloaded_receipt[1]
+    loaded_receipt_graphs = await load_receipt_graphs_v2(
+        receipt_roots.difference(graphs)
+    )
     for receipt_hash, graph in loaded_receipt_graphs.items():
         if str(graph.get("root_receipt_hash") or "") != receipt_hash:
             raise ResearchLabV2AuthorityError(

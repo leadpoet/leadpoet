@@ -957,10 +957,32 @@ class CoordinatorAllocationSourceV2:
             str(row.get("finalization_receipt_hash") or "")
             for row in native_rows
         }
+        used_legacy_roots = {
+            str(row.get("settlement_receipt_hash") or "")
+            for row in legacy_rows
+        }
+        used_chain_settlement_roots = {
+            str(row.get("settlement_receipt_hash") or "")
+            for row in chain_settlement_rows
+        }
+        used_chain_credit_roots = {
+            str(row.get("credit_receipt_hash") or "")
+            for row in chain_credit_rows
+        }
         for root in used_finalization_roots:
             if not root or root not in graph_by_root:
                 raise CoordinatorAllocationSourceV2Error(
                     "finalized allocation graph is not a declared source"
+                )
+            required_parents.add(root)
+        for root in (
+            used_legacy_roots
+            | used_chain_settlement_roots
+            | used_chain_credit_roots
+        ):
+            if not root or root not in graph_by_root:
+                raise CoordinatorAllocationSourceV2Error(
+                    "settlement authority graph is not a declared source"
                 )
             required_parents.add(root)
         return finalized

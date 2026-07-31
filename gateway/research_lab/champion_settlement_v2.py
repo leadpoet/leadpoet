@@ -2115,11 +2115,48 @@ def merge_settled_allocation_histories_v2(
     return [merged[key] for key in sorted(merged)]
 
 
+def _export_validated_receipt_graph_records_v2(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    receipt_field: str,
+    loaded_graphs: Mapping[str, Mapping[str, Any]],
+    output: dict[str, dict[str, Any]],
+) -> None:
+    """Retain validated graphs with the source epoch used by the enclave."""
+
+    for row in rows:
+        root = str(row.get(receipt_field) or "")
+        if not root:
+            continue
+        graph = loaded_graphs.get(root)
+        try:
+            epoch_id = int(row["epoch_id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ChampionSettlementV2Error(
+                "validated settlement authority epoch is invalid"
+            ) from exc
+        if not isinstance(graph, Mapping):
+            raise ChampionSettlementV2Error(
+                "validated settlement authority graph is unavailable"
+            )
+        record = {
+            "epoch_id": epoch_id,
+            "graph": dict(graph),
+        }
+        existing = output.get(root)
+        if existing is not None and existing != record:
+            raise ChampionSettlementV2Error(
+                "validated settlement authority graph conflicts"
+            )
+        output[root] = record
+
+
 async def load_finalized_allocation_history_v2(
     *,
     netuid: int,
     start_epoch: int,
     end_epoch: int,
+    _receipt_graph_records_out: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Load and verify finalized allocation epochs from the durable V2 store."""
 
@@ -2183,6 +2220,19 @@ async def load_finalized_allocation_history_v2(
         legacy_rows,
         receipt_graphs=migration_graphs,
     )
+    if _receipt_graph_records_out is not None:
+        _export_validated_receipt_graph_records_v2(
+            rows=native_rows,
+            receipt_field="finalization_receipt_hash",
+            loaded_graphs=loaded_graphs,
+            output=_receipt_graph_records_out,
+        )
+        _export_validated_receipt_graph_records_v2(
+            rows=legacy_rows,
+            receipt_field="settlement_receipt_hash",
+            loaded_graphs=loaded_graphs,
+            output=_receipt_graph_records_out,
+        )
     return merge_finalized_allocation_histories_v2(native, migrated)
 
 
@@ -2361,6 +2411,7 @@ async def load_chain_realized_allocation_history_v1(
     netuid: int,
     start_epoch: int,
     end_epoch: int,
+    _receipt_graph_records_out: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Load complete realized-chain Lab settlement epochs."""
 
@@ -2471,12 +2522,26 @@ async def load_chain_realized_allocation_history_v1(
         for root in credit_roots
         if root in credit_graphs_loaded
     }
-    return await asyncio.to_thread(
+    credits = await asyncio.to_thread(
         validate_chain_realized_obligation_credits_v1,
         credit_rows,
         settlement_rows=settlements,
         receipt_graphs=credit_graphs,
     )
+    if _receipt_graph_records_out is not None:
+        _export_validated_receipt_graph_records_v2(
+            rows=settlement_rows,
+            receipt_field="settlement_receipt_hash",
+            loaded_graphs=settlement_graphs,
+            output=_receipt_graph_records_out,
+        )
+        _export_validated_receipt_graph_records_v2(
+            rows=credit_rows,
+            receipt_field="credit_receipt_hash",
+            loaded_graphs=credit_graphs,
+            output=_receipt_graph_records_out,
+        )
+    return credits
 
 
 async def load_settled_allocation_history_v2(
@@ -2484,6 +2549,7 @@ async def load_settled_allocation_history_v2(
     netuid: int,
     start_epoch: int,
     end_epoch: int,
+    _receipt_graph_records_out: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Load settlement history, preferring actual chain-realized credits."""
 
@@ -2491,15 +2557,27 @@ async def load_settled_allocation_history_v2(
         return []
     # Validate the small contiguous chain history first. If it is incomplete,
     # do not launch the substantially larger finalized-allocation graph scan.
+    if _receipt_graph_records_out is not None:
+        _receipt_graph_records_out.clear()
+    history_kwargs = {
+        "netuid": int(netuid),
+        "start_epoch": int(start_epoch),
+        "end_epoch": int(end_epoch),
+    }
+    chain_kwargs = dict(history_kwargs)
+    finalized_kwargs = dict(history_kwargs)
+    if _receipt_graph_records_out is not None:
+        chain_kwargs["_receipt_graph_records_out"] = (
+            _receipt_graph_records_out
+        )
+        finalized_kwargs["_receipt_graph_records_out"] = (
+            _receipt_graph_records_out
+        )
     chain_realized = await load_chain_realized_allocation_history_v1(
-        netuid=int(netuid),
-        start_epoch=int(start_epoch),
-        end_epoch=int(end_epoch),
+        **chain_kwargs
     )
     finalized = await load_finalized_allocation_history_v2(
-        netuid=int(netuid),
-        start_epoch=int(start_epoch),
-        end_epoch=int(end_epoch),
+        **finalized_kwargs
     )
     return merge_settled_allocation_histories_v2(finalized, chain_realized)
 
@@ -2636,6 +2714,7 @@ async def champion_v2_cutover_readiness(
     epoch: int,
     netuid: int,
     _finalized_history_out: list[dict[str, Any]] | None = None,
+    _authority_graph_records_out: dict[str, dict[str, Any]] | None = None,
     _business_graphs_out: dict[
         tuple[str, str], dict[str, Any]
     ] | None = None,
@@ -2681,12 +2760,18 @@ async def champion_v2_cutover_readiness(
         for row in rows + source_rows
         if int(row.get("start_epoch") or 0) <= int(epoch)
     ]
-    finalized = (
-        await load_settled_allocation_history_v2(
-            netuid=int(netuid),
-            start_epoch=min(starts),
-            end_epoch=int(epoch) - 1,
+    authority_graph_records: dict[str, dict[str, Any]] = {}
+    history_kwargs = {
+        "netuid": int(netuid),
+        "start_epoch": min(starts) if starts else 0,
+        "end_epoch": int(epoch) - 1,
+    }
+    if _authority_graph_records_out is not None:
+        history_kwargs["_receipt_graph_records_out"] = (
+            authority_graph_records
         )
+    finalized = (
+        await load_settled_allocation_history_v2(**history_kwargs)
         if starts and int(epoch) > 0
         else []
     )
@@ -2702,6 +2787,9 @@ async def champion_v2_cutover_readiness(
     if _finalized_history_out is not None:
         _finalized_history_out.clear()
         _finalized_history_out.extend(dict(item) for item in finalized)
+    if _authority_graph_records_out is not None:
+        _authority_graph_records_out.clear()
+        _authority_graph_records_out.update(authority_graph_records)
     legacy_allocations = (
         await select_all(
             "research_lab_emission_allocation_current",

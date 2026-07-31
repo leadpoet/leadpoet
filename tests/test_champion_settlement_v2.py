@@ -208,6 +208,131 @@ async def test_finalized_history_validation_does_not_block_event_loop(
     assert await asyncio.wait_for(task, timeout=1) == []
 
 
+@pytest.mark.asyncio
+async def test_history_loaders_expose_every_validated_raw_authority_graph(
+    monkeypatch,
+):
+    native_root = "sha256:" + "1" * 64
+    legacy_root = "sha256:" + "2" * 64
+    settlement_root = "sha256:" + "3" * 64
+    credit_root = "sha256:" + "4" * 64
+
+    async def select_all(table, **_kwargs):
+        if table == settlement.FINALIZED_ALLOCATION_VIEW_V2:
+            return [
+                {
+                    "epoch_id": 100,
+                    "finalization_receipt_hash": native_root,
+                }
+            ]
+        if table == settlement.LEGACY_SETTLEMENT_TABLE_V2:
+            return [
+                {
+                    "epoch_id": 100,
+                    "settlement_receipt_hash": legacy_root,
+                }
+            ]
+        if table == settlement.CHAIN_REALIZED_EPOCH_SETTLEMENT_TABLE_V1:
+            return [
+                {
+                    "epoch_id": 100,
+                    "settlement_receipt_hash": settlement_root,
+                }
+            ]
+        if table == settlement.CHAIN_REALIZED_OBLIGATION_CREDIT_TABLE_V1:
+            return [
+                {
+                    "epoch_id": 100,
+                    "credit_receipt_hash": credit_root,
+                }
+            ]
+        raise AssertionError(table)
+
+    async def select_many(table, **_kwargs):
+        assert (
+            table
+            == settlement.CHAIN_REALIZED_SETTLEMENT_ACTIVATION_TABLE_V1
+        )
+        return [
+            {
+                "netuid": 71,
+                "schema_version": (
+                    "leadpoet.research_lab_chain_realized_"
+                    "settlement_activation.v1"
+                ),
+                "first_epoch_id": 100,
+                "source_bundle_hash": "sha256:" + "5" * 64,
+                "source_bundle_epoch_id": 100,
+                "source_finalized_block": 1000,
+            }
+        ]
+
+    async def load_graphs(roots):
+        return {
+            root: {
+                "root_receipt_hash": root,
+                "receipts": [{"receipt_hash": root}],
+            }
+            for root in roots
+        }
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(store, "select_many", select_many)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_receipt_graphs_v2",
+        load_graphs,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_finalized_allocation_authorities_v2",
+        lambda _rows, *, finalization_graphs: [],
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_legacy_settlement_migrations_v2",
+        lambda _rows, *, receipt_graphs: [],
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_chain_realized_epoch_settlements_v1",
+        lambda _rows, *, receipt_graphs: [{"epoch": 100}],
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_chain_realized_obligation_credits_v1",
+        lambda _rows, *, settlement_rows, receipt_graphs: [],
+    )
+
+    authority_graphs = {}
+    assert (
+        await settlement.load_finalized_allocation_history_v2(
+            netuid=71,
+            start_epoch=100,
+            end_epoch=100,
+            _receipt_graph_records_out=authority_graphs,
+        )
+        == []
+    )
+    assert set(authority_graphs) == {native_root, legacy_root}
+
+    assert (
+        await settlement.load_chain_realized_allocation_history_v1(
+            netuid=71,
+            start_epoch=100,
+            end_epoch=100,
+            _receipt_graph_records_out=authority_graphs,
+        )
+        == []
+    )
+    assert set(authority_graphs) == {
+        native_root,
+        legacy_root,
+        settlement_root,
+        credit_root,
+    }
+
+
 def test_legacy_classification_detects_source_add_payments():
     payload = {
         "schema_version": "leadpoet.research_lab_allocation.v2",

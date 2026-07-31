@@ -130,6 +130,27 @@ def test_parent_graph_transport_compaction_preserves_all_declared_roots():
     assert {_hash("a"), _hash("b"), _hash("c")} <= covered
 
 
+def test_parent_graph_transport_compacts_production_sized_declared_set():
+    roots = ["sha256:" + format(index, "064x") for index in range(215)]
+    parent_graphs = [
+        {
+            "root_receipt_hash": root,
+            "receipts": [
+                {"receipt_hash": ancestor}
+                for ancestor in roots[: index + 1]
+            ],
+        }
+        for index, root in enumerate(roots)
+    ]
+
+    compacted = _compact_parent_graphs_for_transport(parent_graphs)
+
+    assert len(compacted) == 1
+    assert {
+        receipt["receipt_hash"] for receipt in compacted[0]["receipts"]
+    } == set(roots)
+
+
 def _release():
     rows = []
     for index, (role, spec) in enumerate(sorted(ROLE_SPECS.items())):

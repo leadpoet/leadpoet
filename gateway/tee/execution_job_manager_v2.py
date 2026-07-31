@@ -44,7 +44,10 @@ MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 MAX_CHUNK_BYTES = 1024 * 1024
 MAX_RESULT_CHUNK_BYTES = 4 * 1024 * 1024
 DEFAULT_RESULT_CHUNK_BYTES = 512 * 1024
-MAX_EXTERNAL_RECEIPT_GRAPHS = 64
+# Independent finalized/auditor authorities can remain separate after ancestry
+# compaction. Keep their object count bounded while the stricter aggregate
+# MAX_INPUT_BYTES limit continues to cap the authenticated request body.
+MAX_EXTERNAL_RECEIPT_GRAPHS = 128
 MAX_EXTERNAL_RECEIPT_GRAPH_BYTES = 64 * 1024 * 1024
 TERMINAL_STATES = frozenset({"cancelled", "failed", "succeeded"})
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")

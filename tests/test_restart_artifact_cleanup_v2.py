@@ -130,6 +130,33 @@ def test_cleanup_restores_workspace_if_it_becomes_open_after_quarantine(
     )
 
 
+def test_cleanup_restores_workspace_if_mount_appears_after_quarantine(
+    tmp_path: Path,
+) -> None:
+    stale = tmp_path / "leadpoet-docker-normalize-mount-race"
+    stale.mkdir()
+    (stale / "orig.tar").write_bytes(b"race")
+    _age(stale)
+    calls = 0
+
+    def mount_provider():
+        nonlocal calls
+        calls += 1
+        quarantined = list(tmp_path.glob(stale.name + ".cleanup-*"))
+        if calls >= 2 and quarantined:
+            return {quarantined[0] / "late-bind-mount"}
+        return set()
+
+    report = _run(tmp_path, mount_provider=mount_provider)
+
+    assert stale.exists()
+    assert not list(tmp_path.glob(stale.name + ".cleanup-*"))
+    assert any(
+        item["reason"] == "candidate gained a mount point during quarantine"
+        for item in report["skipped"]
+    )
+
+
 def test_emergency_eif_cleanup_requires_verified_last_good_rollback_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

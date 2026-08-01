@@ -220,6 +220,162 @@ def test_gateway_archive_retains_current_plus_two_predecessors(tmp_path):
     assert not (archive_root / releases[0]["release_hash"].split(":", 1)[1]).exists()
 
 
+def test_gateway_archive_pins_verified_last_good_across_failed_builds(tmp_path):
+    archive_root = tmp_path / "archive"
+    releases = []
+    marker = tmp_path / "gateway-last-good.json"
+    for character in ("a", "b", "c", "d"):
+        gateway_root, eif_root, release_path, release = _release_fixture(
+            tmp_path / ("build-" + character), character
+        )
+        if character == "b":
+            marker.write_text(
+                json.dumps(
+                    {
+                        "status": "succeeded",
+                        "target_sha": "a" * 40,
+                        "role_pcr0s": _role_pcr0s(releases[0]),
+                    }
+                ),
+                encoding="utf-8",
+            )
+        archive_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=eif_root,
+            archive_root=archive_root,
+            last_good_manifest_path=marker if marker.exists() else None,
+        )
+        releases.append(release)
+
+    index = verify_archive_index(
+        archive_root=archive_root,
+        required_commit_sha="a" * 40,
+        required_role_pcr0s=_role_pcr0s(releases[0]),
+        minimum_releases=3,
+        maximum_releases=3,
+    )
+    assert index["releases"][0]["release_hash"] == releases[-1]["release_hash"]
+    assert any(item["commit_sha"] == "a" * 40 for item in index["releases"])
+
+
+def test_gateway_archive_tolerates_legacy_missing_last_good(tmp_path):
+    archive_root = tmp_path / "archive"
+    releases = []
+    for character in ("a", "b", "c", "d"):
+        gateway_root, eif_root, release_path, release = _release_fixture(
+            tmp_path / ("build-" + character), character
+        )
+        archive_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=eif_root,
+            archive_root=archive_root,
+        )
+        releases.append(release)
+
+    marker = tmp_path / "gateway-last-good.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "status": "succeeded",
+                "target_sha": "a" * 40,
+                "role_pcr0s": _role_pcr0s(releases[0]),
+            }
+        ),
+        encoding="utf-8",
+    )
+    gateway_root, eif_root, release_path, newest = _release_fixture(
+        tmp_path / "build-e", "e"
+    )
+    archive_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=archive_root,
+        last_good_manifest_path=marker,
+    )
+    index = verify_archive_index(
+        archive_root=archive_root,
+        minimum_releases=3,
+        maximum_releases=3,
+    )
+    assert index["releases"][0]["release_hash"] == newest["release_hash"]
+    with pytest.raises(ReleaseArchiveV2Error, match="last-good commit"):
+        verify_archive_index(
+            archive_root=archive_root,
+            required_commit_sha="a" * 40,
+            required_role_pcr0s=_role_pcr0s(releases[0]),
+            minimum_releases=3,
+            maximum_releases=3,
+        )
+
+
+def test_gateway_archive_rejects_corrupt_present_last_good_before_index_change(
+    tmp_path,
+):
+    archive_root = tmp_path / "archive"
+    releases = []
+    for character in ("a", "b", "c"):
+        gateway_root, eif_root, release_path, release = _release_fixture(
+            tmp_path / ("build-" + character), character
+        )
+        archive_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=eif_root,
+            archive_root=archive_root,
+        )
+        releases.append(release)
+    marker = tmp_path / "gateway-last-good.json"
+    wrong_pcr0s = _role_pcr0s(releases[0])
+    wrong_pcr0s[sorted(ROLE_SPECS)[0]] = "f" * 96
+    marker.write_text(
+        json.dumps(
+            {
+                "status": "succeeded",
+                "target_sha": "a" * 40,
+                "role_pcr0s": wrong_pcr0s,
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_index = (archive_root / "index.json").read_bytes()
+    original_directories = {
+        path.name for path in archive_root.iterdir() if path.is_dir()
+    }
+    gateway_root, eif_root, release_path, _release = _release_fixture(
+        tmp_path / "build-d", "d"
+    )
+    with pytest.raises(ReleaseArchiveV2Error, match="role PCR0s"):
+        archive_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=eif_root,
+            archive_root=archive_root,
+            last_good_manifest_path=marker,
+        )
+    assert (archive_root / "index.json").read_bytes() == original_index
+    assert {
+        path.name for path in archive_root.iterdir() if path.is_dir()
+    } == original_directories
+
+
+def test_gateway_archive_tolerates_genuinely_absent_last_good_marker(tmp_path):
+    gateway_root, eif_root, release_path, release = _release_fixture(
+        tmp_path / "build", "a"
+    )
+    archive_root = tmp_path / "archive"
+    result = archive_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=archive_root,
+        last_good_manifest_path=tmp_path / "missing-last-good.json",
+    )
+    assert result["release_hash"] == release["release_hash"]
+
+
 def test_gateway_cleanup_verifier_binds_complete_last_good_identity(tmp_path):
     archive_root = tmp_path / "archive"
     releases = []

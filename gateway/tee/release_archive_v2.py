@@ -416,6 +416,7 @@ def archive_verified_release(
     gateway_root: Path,
     eif_root: Path,
     archive_root: Path,
+    last_good_manifest_path: Optional[Path] = None,
     retain_releases: int = DEFAULT_RETAIN_RELEASES,
     archived_at: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -447,8 +448,70 @@ def archive_verified_release(
     lock_path = root / ".archive.lock"
     with lock_path.open("a+", encoding="utf-8") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        index_path = root / "index.json"
+        if index_path.exists():
+            old_index = _load_json(index_path, "gateway release archive index")
+            if (
+                set(old_index)
+                != {"schema_version", "current_release_hash", "releases"}
+                or old_index.get("schema_version") != ARCHIVE_INDEX_SCHEMA_VERSION
+                or not isinstance(old_index.get("releases"), list)
+            ):
+                raise ReleaseArchiveV2Error(
+                    "gateway release archive index schema is invalid"
+                )
+            old_releases = list(old_index.get("releases") or [])
+        else:
+            old_releases = []
+
+        last_good: Optional[Dict[str, Any]] = None
+        if last_good_manifest_path is not None:
+            marker = Path(last_good_manifest_path)
+            try:
+                marker.lstat()
+            except FileNotFoundError:
+                # A first deployment has no successful predecessor yet.
+                pass
+            except OSError as exc:
+                raise ReleaseArchiveV2Error(
+                    "gateway last-good deployment cannot be inspected"
+                ) from exc
+            else:
+                last_good = load_last_good_release(marker)
+
         release_name = release["release_hash"].split(":", 1)[1]
         target = root / release_name
+
+        pinned_last_good: Optional[Dict[str, Any]] = None
+        if last_good is not None:
+            current_is_last_good = release["commit_sha"] == last_good["commit_sha"]
+            old_matching = [
+                item
+                for item in old_releases
+                if isinstance(item, Mapping)
+                and item.get("release_hash") != release["release_hash"]
+                and str(item.get("commit_sha") or "").lower()
+                == last_good["commit_sha"]
+            ]
+            if len(old_matching) + int(current_is_last_good) > 1:
+                raise ReleaseArchiveV2Error(
+                    "gateway last-good commit is not uniquely archived"
+                )
+            if current_is_last_good:
+                if _release_role_pcr0s(release) != last_good["role_pcr0s"]:
+                    raise ReleaseArchiveV2Error(
+                        "gateway last-good role PCR0s are not archived"
+                    )
+            elif old_matching:
+                pinned_last_good = _verify_index_entry(root, old_matching[0])
+                if (
+                    _archived_role_pcr0s(root, pinned_last_good)
+                    != last_good["role_pcr0s"]
+                ):
+                    raise ReleaseArchiveV2Error(
+                        "gateway last-good role PCR0s are not archived"
+                    )
+
         if target.exists():
             archived = verify_archive_directory(target)
         else:
@@ -481,35 +544,29 @@ def archive_verified_release(
                 if temporary.exists():
                     shutil.rmtree(temporary)
             archived = verify_archive_directory(target)
-
-        index_path = root / "index.json"
-        if index_path.exists():
-            old_index = _load_json(index_path, "gateway release archive index")
-            if (
-                set(old_index)
-                != {"schema_version", "current_release_hash", "releases"}
-                or old_index.get("schema_version") != ARCHIVE_INDEX_SCHEMA_VERSION
-                or not isinstance(old_index.get("releases"), list)
-            ):
-                raise ReleaseArchiveV2Error(
-                    "gateway release archive index schema is invalid"
-                )
-            old_releases = list(old_index.get("releases") or [])
-        else:
-            old_releases = []
         entry = {
             "release_hash": archived["release_hash"],
             "commit_sha": archived["commit_sha"],
             "archive_hash": archived["archive_hash"],
             "archived_at": archived["archived_at"],
         }
-        retained = [entry] + [
+        candidates = [entry] + [
             item
             for item in old_releases
             if isinstance(item, Mapping)
             and item.get("release_hash") != entry["release_hash"]
         ]
-        retained = retained[: int(retain_releases)]
+        retained = candidates[: int(retain_releases)]
+
+        # A successful release must remain independently roll-backable even
+        # after several later builds fail before activation.  Pin its complete,
+        # reverified archive inside the bounded retention set.  A missing
+        # archive is tolerated for legacy installations: in that state the
+        # cleanup helper preserves the older emergency EIF backup instead.
+        if last_good is not None and release["commit_sha"] == last_good["commit_sha"]:
+            pinned_last_good = entry
+        if pinned_last_good is not None and pinned_last_good not in retained:
+            retained[-1] = pinned_last_good
         index_body = {
             "schema_version": ARCHIVE_INDEX_SCHEMA_VERSION,
             "current_release_hash": entry["release_hash"],
@@ -557,6 +614,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--eif-root", type=Path)
     parser.add_argument("--archive-root", type=Path, required=True)
     parser.add_argument("--retain", type=int, default=DEFAULT_RETAIN_RELEASES)
+    parser.add_argument("--last-good-manifest", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     if args.archive:
@@ -569,6 +627,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             gateway_root=args.gateway_root,
             eif_root=args.eif_root,
             archive_root=args.archive_root,
+            last_good_manifest_path=args.last_good_manifest,
             retain_releases=args.retain,
         )
     elif args.verify:

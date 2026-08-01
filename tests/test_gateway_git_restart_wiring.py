@@ -756,12 +756,16 @@ def test_gateway_restart_does_not_clone_restart_control_state_into_runtime() -> 
     # stale per-restart /tmp plan path and the next rollout cannot finalize.
     for key in restart_only_keys:
         assert script.count(f'"{key}",') >= 2
-    assert (
-        'restart_only_keys = {\n'
-        '    "GATEWAY_DEPLOY_COMMIT",\n'
-        '    "GATEWAY_V2_DEFER_WORKER_FLEETS",\n'
-        "}"
-    ) in script
+    restart_only_block = script.split("restart_only_keys = {", 1)[1].split("}", 1)[0]
+    for key in (
+        "GATEWAY_DEPLOY_COMMIT",
+        "GATEWAY_V2_DEFER_WORKER_FLEETS",
+        "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
+        "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
+        "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
+        "GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES",
+    ):
+        assert f'"{key}",' in restart_only_block
     assert "unset GATEWAY_DEPLOY_COMMIT" in script
 
 

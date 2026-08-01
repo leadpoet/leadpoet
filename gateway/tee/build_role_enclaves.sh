@@ -9,6 +9,7 @@ REPO_ROOT="${GATEWAY_ROOT%/gateway}"
 EIF_ROOT="${GATEWAY_TEE_EIF_ROOT:-/home/ec2-user/tee}"
 RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$EIF_ROOT/gateway-v2-release-manifest.json}"
 RELEASE_ARCHIVE_ROOT="${GATEWAY_V2_RELEASE_ARCHIVE_ROOT:-$EIF_ROOT/releases-v2}"
+LAST_GOOD_MANIFEST="${GATEWAY_LAST_GOOD_MANIFEST:-/home/ec2-user/.config/leadpoet/deployments/gateway-last-good.json}"
 TOPOLOGY_MODE="${GATEWAY_TEE_TOPOLOGY_MODE:-full}"
 ROLES=(
   gateway_coordinator
@@ -70,6 +71,7 @@ if [ "$TOPOLOGY_MODE" = "full" ]; then
     --gateway-root "$GATEWAY_ROOT" \
     --eif-root "$EIF_ROOT" \
     --archive-root "$RELEASE_ARCHIVE_ROOT" \
+    --last-good-manifest "$LAST_GOOD_MANIFEST" \
     --retain 3
 fi
 

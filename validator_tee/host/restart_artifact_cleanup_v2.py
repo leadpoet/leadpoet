@@ -287,6 +287,7 @@ def _delete_candidate(
     now_epoch: float,
     allowed_owner_uids: set[int],
     usage_provider: Callable[[], Iterable[Path]],
+    mount_provider: Callable[[], Iterable[Path]],
 ) -> Optional[str]:
     try:
         refreshed = _measure_candidate(
@@ -309,6 +310,11 @@ def _delete_candidate(
             return "candidate is open or in use"
     except Exception as exc:
         return "process usage recheck failed: %s" % exc
+    try:
+        if _contains_nested_mount(candidate.path, mount_provider()):
+            return "candidate contains a mount point during deletion recheck"
+    except Exception as exc:
+        return "mount table deletion recheck failed: %s" % exc
 
     quarantine = candidate.path.with_name(
         "%s.cleanup-%s" % (candidate.path.name, uuid.uuid4().hex)
@@ -327,6 +333,13 @@ def _delete_candidate(
     except Exception as exc:
         _restore_quarantine(quarantine, candidate.path)
         return "process usage quarantine recheck failed: %s" % exc
+    try:
+        if _contains_nested_mount(quarantine, mount_provider()):
+            _restore_quarantine(quarantine, candidate.path)
+            return "candidate gained a mount point during quarantine"
+    except Exception as exc:
+        _restore_quarantine(quarantine, candidate.path)
+        return "mount table quarantine recheck failed: %s" % exc
     try:
         if candidate.expected_type == "directory":
             shutil.rmtree(quarantine)
@@ -467,6 +480,7 @@ def cleanup_restart_artifacts(
     proc_root: Path = Path("/proc"),
     mount_points: Optional[set[Path]] = None,
     mountinfo_path: Path = Path("/proc/self/mountinfo"),
+    mount_provider: Optional[Callable[[], Iterable[Path]]] = None,
 ) -> dict[str, object]:
     if temp_min_age_seconds < 1 or emergency_min_age_seconds < 1:
         raise RestartArtifactCleanupV2Error("cleanup ages must be positive")
@@ -614,6 +628,11 @@ def cleanup_restart_artifacts(
         report["eligible_count"] = 0
         return report
     provider = usage_provider or (lambda: _read_process_paths(proc_root))
+    live_mount_provider = mount_provider or (
+        (lambda: {_normalized_path(path) for path in mount_points})
+        if mount_points is not None
+        else (lambda: _read_mount_points(mountinfo_path))
+    )
     try:
         observed_usage = list(provider())
     except Exception as exc:
@@ -654,6 +673,7 @@ def cleanup_restart_artifacts(
                 now_epoch=now,
                 allowed_owner_uids=owners,
                 usage_provider=provider,
+                mount_provider=live_mount_provider,
             )
         except RestartArtifactCleanupV2Error as exc:
             reason = str(exc)

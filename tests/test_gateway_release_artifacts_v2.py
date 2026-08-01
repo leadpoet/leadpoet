@@ -166,5 +166,6 @@ def test_role_build_archives_only_after_local_release_verification():
     archive_offset = script.index("gateway.tee.release_archive_v2")
     assert verify_offset < archive_offset
     assert '--retain 3' in script
+    assert '--last-good-manifest "$LAST_GOOD_MANIFEST"' in script
     assert "docker_image_normalizer_v2" in script
     assert 'RELEASE_ARCHIVE_ROOT="${GATEWAY_V2_RELEASE_ARCHIVE_ROOT:-$EIF_ROOT/releases-v2}"' in script

@@ -135,8 +135,8 @@ def build_parser() -> argparse.ArgumentParser:
     resume_restart = sub.add_parser(
         "resume-restart-maintenance",
         help=(
-            "Resume only restart-owned scoring/autoresearch pauses after "
-            "deployment readiness succeeds"
+            "Recover restart-owned scoring pause after deployment readiness; "
+            "autoresearch remains operator-paused"
         ),
     )
     resume_restart.add_argument(

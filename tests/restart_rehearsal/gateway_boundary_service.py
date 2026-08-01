@@ -496,6 +496,7 @@ def _migration_schema_contract(
     ):
         raise RuntimeError("migration-backed RPC contract is invalid")
     required_relations = {
+        "research_lab_maintenance_lease",
         "research_lab_attested_transport_attempts_v2",
         "research_lab_attested_execution_receipts_v2",
         "research_lab_attested_weight_bundles_v2",
@@ -517,6 +518,7 @@ def _migration_schema_contract(
             % ",".join(sorted(required_relations - set(relations)))
         )
     required_rpcs = {
+        "research_lab_acquire_maintenance_lease",
         "research_lab_attested_transport_purpose_contract_v2",
         "research_lab_attested_transport_terminal_contract_v2",
         "append_research_lab_provider_outcome_checkpoint_v2",

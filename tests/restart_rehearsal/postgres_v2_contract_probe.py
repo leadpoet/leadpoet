@@ -69,12 +69,14 @@ ALLOCATION_SCHEMA_MIGRATION = "35-research-lab-emission-allocator.sql"
 ALLOCATION_CONTAINMENT_MIGRATION = (
     "87-research-lab-source-add-allocation-containment.sql"
 )
+MAINTENANCE_LEASE_MIGRATION = "118-research-lab-maintenance-lease.sql"
 MIGRATIONS_BEFORE_TRANSPORT_FIX = (
     "86-research-lab-attested-v2-authority.sql",
     "89-research-lab-provider-evidence-cache-v2.sql",
     "90-research-lab-provider-outcome-checkpoints-v2.sql",
     "99-research-lab-v2-champion-settlement.sql",
     "104-research-lab-attested-result-replay-v2.sql",
+    MAINTENANCE_LEASE_MIGRATION,
     "125-research-lab-artifact-key-lineage.sql",
     "126-research-lab-chain-realized-settlement.sql",
     "127-research-lab-chain-unattributed-settlement.sql",
@@ -939,6 +941,102 @@ def _relation_contract(database: DisposablePostgres) -> dict[str, Any]:
     return json.loads(result.stdout.strip())
 
 
+def _maintenance_lease_contract(
+    database: DisposablePostgres,
+) -> dict[str, Any]:
+    def acquire(holder_ref: str, ttl_seconds: int) -> dict[str, Any]:
+        result = database.psql(
+            """
+            SELECT public.research_lab_acquire_maintenance_lease(
+                'restart-rehearsal',
+                '%s',
+                %d
+            )::text;
+            """
+            % (holder_ref, ttl_seconds),
+            tuples_only=True,
+        )
+        document = json.loads(result.stdout.strip())
+        if set(document) != {"acquired", "holder_ref", "expires_at"}:
+            raise PostgresContractProbeError(
+                "maintenance lease RPC response shape differs"
+            )
+        return document
+
+    first = acquire("worker-a", 180)
+    contender = acquire("worker-b", 180)
+    renewal = acquire("worker-a", 180)
+    if (
+        first.get("acquired") is not True
+        or first.get("holder_ref") != "worker-a"
+        or contender.get("acquired") is not False
+        or contender.get("holder_ref") != "worker-a"
+        or renewal.get("acquired") is not True
+        or renewal.get("holder_ref") != "worker-a"
+    ):
+        raise PostgresContractProbeError(
+            "maintenance lease acquire, contention, or renewal differs"
+        )
+
+    database.psql(
+        """
+        UPDATE public.research_lab_maintenance_lease
+        SET expires_at = pg_catalog.now() - INTERVAL '1 second'
+        WHERE lease_name = 'restart-rehearsal';
+        """
+    )
+    takeover = acquire("worker-b", 180)
+    row = json.loads(
+        database.psql(
+            """
+            SELECT pg_catalog.json_build_object(
+                'row_count', pg_catalog.count(*),
+                'holder_ref', pg_catalog.min(holder_ref),
+                'timestamps_valid', pg_catalog.bool_and(
+                    acquired_at <= updated_at
+                    AND updated_at < expires_at
+                )
+            )::text
+            FROM public.research_lab_maintenance_lease
+            WHERE lease_name = 'restart-rehearsal';
+            """,
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    invalid = database.psql(
+        """
+        SELECT public.research_lab_acquire_maintenance_lease(
+            'restart-rehearsal-invalid',
+            'worker-a',
+            0
+        )::text;
+        """,
+        check=False,
+    )
+    if (
+        takeover.get("acquired") is not True
+        or takeover.get("holder_ref") != "worker-b"
+        or row != {
+            "row_count": 1,
+            "holder_ref": "worker-b",
+            "timestamps_valid": True,
+        }
+        or invalid.returncode == 0
+        or "maintenance lease arguments are invalid" not in invalid.stderr
+    ):
+        raise PostgresContractProbeError(
+            "maintenance lease expiry takeover or fail-closed validation differs"
+        )
+    return {
+        "schema_version": "leadpoet.maintenance_lease_contract.v1",
+        "atomic_acquire": True,
+        "live_contention_rejected": True,
+        "same_holder_renewed": True,
+        "expired_holder_replaced": True,
+        "invalid_ttl_rejected": True,
+    }
+
+
 def _measured_settlement_receipt_contract(
     *,
     authority: Mapping[str, Any],
@@ -1597,6 +1695,8 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 applied.append(ALLOCATION_CONTAINMENT_MIGRATION)
 
+        maintenance_lease = _maintenance_lease_contract(database)
+
         fixture = SanitizedWeightFixture(
             candidate_sha=args.candidate_sha,
             epoch_id=args.epoch_id,
@@ -2169,7 +2269,9 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             "applied_migrations": applied,
             "relations": contract["relations"],
             "rpcs": contract["rpcs"],
+            "maintenance_lease": maintenance_lease,
             "checks": {
+                "maintenance_lease_contract_valid": True,
                 "pre_128_transport_rejected": True,
                 "post_128_transport_persisted": True,
                 "transport_contract_valid": True,

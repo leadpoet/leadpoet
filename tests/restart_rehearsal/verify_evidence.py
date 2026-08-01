@@ -702,6 +702,7 @@ def verify_migration_backed_database_contract(
         )
     document = json.loads(path.read_text(encoding="utf-8"))
     required_checks = {
+        "maintenance_lease_contract_valid",
         "pre_128_transport_rejected",
         "post_128_transport_persisted",
         "transport_contract_valid",
@@ -766,6 +767,17 @@ def verify_migration_backed_database_contract(
     }:
         raise SystemExit(
             "migration-backed provider outcome contract evidence is missing"
+        )
+    if document.get("maintenance_lease") != {
+        "schema_version": "leadpoet.maintenance_lease_contract.v1",
+        "atomic_acquire": True,
+        "live_contention_rejected": True,
+        "same_holder_renewed": True,
+        "expired_holder_replaced": True,
+        "invalid_ttl_rejected": True,
+    }:
+        raise SystemExit(
+            "migration-backed maintenance lease evidence is missing"
         )
     provider_append = document.get("provider_outcome_append")
     if (

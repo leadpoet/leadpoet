@@ -23,7 +23,9 @@ from gateway.tee.execution_job_manager_v2 import (
 from gateway.tee import execution_job_manager_v2 as job_manager_v2
 from gateway.tee.host_operation_channel_v2 import HostOperationChannelV2
 from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     build_boot_identity_body,
+    build_checkpointed_receipt_graph,
     build_execution_receipt_body,
     build_receipt_graph,
     build_transport_attempt,
@@ -42,7 +44,7 @@ HASH_B = "sha256:" + "b" * 64
 NOW = "2026-07-10T20:00:00Z"
 
 
-def _manager(executor):
+def _manager(executor, *, checkpoint_lineage=False):
     key = Ed25519PrivateKey.generate()
     pubkey = key.public_key().public_bytes(
         serialization.Encoding.Raw,
@@ -66,6 +68,13 @@ def _manager(executor):
         ),
         attestation_document_b64=base64.b64encode(b"nitro").decode("ascii"),
     )
+    checkpoint_kwargs = {}
+    if checkpoint_lineage:
+        checkpoint_kwargs = {
+            "ancestry_lineage_id": HASH,
+            "ancestry_boot_attestation_verifier": lambda identity: identity,
+            "ancestry_allowed_issuer_roles": ("gateway_scoring",),
+        }
     manager = ExecutionJobManagerV2(
         boot_identity_supplier=lambda: boot,
         sign_digest=key.sign,
@@ -77,6 +86,7 @@ def _manager(executor):
         },
         executor=executor,
         worker_count=1,
+        **checkpoint_kwargs,
     )
     return manager, boot
 
@@ -774,6 +784,69 @@ def test_nested_receipt_graph_is_bound_to_root_and_retained_for_graph_merge():
     )
     assert graph_set_manager.external_receipt_graphs("score-job-1") == (
         nested_graph,
+    )
+
+
+def test_checkpointed_parent_remains_visible_and_extends_certificate_generation():
+    observed = []
+
+    def _executor(_operation, payload, context):
+        if payload["input"] == 4:
+            assert len(context.external_receipt_graphs) == 1
+            assert context.external_ancestry_proofs == []
+            parent_graph = context.external_receipt_graphs[0]
+            assert (
+                parent_graph["schema_version"]
+                == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+            )
+            assert parent_graph["root_receipt_hash"] in {
+                receipt["receipt_hash"]
+                for receipt in parent_graph["receipts"]
+            }
+            observed.append(parent_graph)
+        return {"score": payload["input"]}
+
+    manager, boot = _manager(_executor, checkpoint_lineage=True)
+    first_payload = _payload()
+    assert _run(manager, first_payload)["state"] == "succeeded"
+    first_receipt = manager.receipt("score-job-1")
+    first_proof = manager.ancestry_compact_proof("score-job-1")
+    first_graph = build_checkpointed_receipt_graph(
+        root_receipt_hash=first_receipt["receipt_hash"],
+        boot_identities=(boot,),
+        receipts=manager.receipts("score-job-1"),
+        transport_attempts=manager.transport_attempts("score-job-1"),
+        host_operations=manager.host_operations("score-job-1"),
+        ancestry_lineage_id=HASH,
+        ancestry_proof=first_proof,
+        boot_attestation_verifier=lambda identity: identity,
+        require_boot_attestation_verification=True,
+    )
+
+    second_payload = json.dumps(
+        {
+            "input": 4,
+            PARENT_RECEIPT_GRAPHS_FIELD: [first_graph],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    second_manifest = _manifest(
+        second_payload,
+        job_id="score-job-2",
+        parent_receipt_hashes=[first_receipt["receipt_hash"]],
+    )
+    assert _run(manager, second_payload, second_manifest)["state"] == "succeeded"
+
+    assert observed == [first_graph]
+    second_claim = manager.ancestry_compact_proof("score-job-2")["certificate"][
+        "claim"
+    ]
+    assert second_claim["certificate_sequence"] == 1
+    assert len(second_claim["parent_authorities"]) == 1
+    assert second_claim["parent_authorities"][0]["authority_kind"] == "certificate"
+    assert second_claim["parent_authorities"][0]["parent_receipt_hash"] == (
+        first_receipt["receipt_hash"]
     )
 
 

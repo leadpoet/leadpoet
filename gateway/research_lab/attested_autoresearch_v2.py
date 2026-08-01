@@ -35,6 +35,7 @@ from gateway.tee.release_lineage_v2 import (
 )
 from gateway.utils.tee_client import autoresearch_tee_client
 from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     EMPTY_ARTIFACT_ROOT,
     build_checkpointed_receipt_graph,
     build_receipt_graph,
@@ -194,11 +195,34 @@ async def _resolve_parent_ancestry_transport_v2(
                 )
             proof_by_root[root] = normalized
 
-    proof_transport = [proof_by_root[root] for root in sorted(proof_by_root)]
-    graph_transport = [
-        graph_by_root[root]
-        for root in sorted(set(graph_by_root) - set(proof_by_root))
-    ]
+    proof_transport = []
+    graph_transport = []
+    for root in sorted(graph_by_root):
+        graph = graph_by_root[root]
+        proof = proof_by_root.get(root)
+        if (
+            proof is not None
+            and graph.get("schema_version")
+            == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        ):
+            validate_receipt_graph(
+                graph,
+                boot_attestation_verifier=boot_attestation_verifier,
+                require_boot_attestation_verification=True,
+            )
+            if graph.get("ancestry_proof") != proof:
+                raise AttestedAutoresearchV2Error(
+                    "autoresearch checkpointed parent differs from its proof"
+                )
+            graph_transport.append(graph)
+        elif proof is not None:
+            proof_transport.append(proof)
+        else:
+            graph_transport.append(graph)
+    proof_transport.extend(
+        proof_by_root[root]
+        for root in sorted(set(proof_by_root) - set(graph_by_root))
+    )
     return proof_transport, graph_transport
 
 
@@ -249,11 +273,29 @@ def _trusted_parent_authorities_v2(
             )
         authorities[root] = str(descriptor["authority_hash"])
     for graph in parent_full_graphs:
-        parent = build_full_graph_parent_v2(graph)
-        descriptor = build_full_graph_parent_authority_v2(
-            parent,
-            boot_attestation_verifier=boot_attestation_verifier,
-        )
+        if (
+            graph.get("schema_version")
+            == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        ):
+            proof = validate_compact_ancestry_proof_v2(
+                graph.get("ancestry_proof"),
+                expected_lineage_id=expected_lineage_id,
+                boot_attestation_verifier=boot_attestation_verifier,
+                allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+                required_receipt_hashes=(graph.get("root_receipt_hash"),),
+            )
+            descriptor = build_certificate_parent_authority_v2(
+                proof["certificate"],
+                expected_lineage_id=expected_lineage_id,
+                boot_attestation_verifier=boot_attestation_verifier,
+                allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+            )
+        else:
+            parent = build_full_graph_parent_v2(graph)
+            descriptor = build_full_graph_parent_authority_v2(
+                parent,
+                boot_attestation_verifier=boot_attestation_verifier,
+            )
         root = str(descriptor["parent_receipt_hash"])
         if root in authorities:
             raise AttestedAutoresearchV2Error(

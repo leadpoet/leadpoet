@@ -25,7 +25,9 @@ from gateway.tee.release_manifest_v2 import (
 )
 from gateway.tee.topology import ROLE_SPECS, topology_hash
 from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     build_boot_identity_body,
+    build_checkpointed_receipt_graph,
     build_execution_receipt_body,
     build_receipt_graph,
     create_boot_identity,
@@ -178,6 +180,22 @@ def _nested_scoring_authority():
 
 def _nested_scoring_graph():
     return _nested_scoring_authority()[0]
+
+
+def _nested_scoring_checkpointed_authority():
+    graph, proof = _nested_scoring_authority()
+    checkpointed = build_checkpointed_receipt_graph(
+        root_receipt_hash=graph["root_receipt_hash"],
+        boot_identities=graph["boot_identities"],
+        receipts=graph["receipts"],
+        transport_attempts=graph["transport_attempts"],
+        host_operations=graph["host_operations"],
+        ancestry_lineage_id=_ANCESTRY_LINEAGE_ID,
+        ancestry_proof=proof,
+        boot_attestation_verifier=lambda identity: identity,
+        require_boot_attestation_verification=True,
+    )
+    return checkpointed, proof
 
 
 class _Client:
@@ -466,6 +484,50 @@ async def test_autoresearch_bridge_transports_and_persists_bounded_checkpoint_gr
     assert len(authorities) == 1
     assert authorities[0]["authority_kind"] == "certificate"
     assert authorities[0]["parent_receipt_hash"] == nested["root_receipt_hash"]
+
+
+@pytest.mark.asyncio
+async def test_autoresearch_bridge_retains_checkpoint_envelope_across_generation():
+    release = _release()
+    nested, nested_proof = _nested_scoring_checkpointed_authority()
+    client = _Client(release)
+
+    async def persist(graph):
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    result = await execute_autoresearch_v2(
+        operation="run_code_edit_loop",
+        purpose="research_lab.candidate_decision.v2",
+        epoch_id=13,
+        sequence=0,
+        payload={"value": 7},
+        host_operation_handlers={
+            "echo_state": lambda payload, _request: {"value": payload["value"]}
+        },
+        parent_graphs=(nested,),
+        parent_ancestry_proofs=(nested_proof,),
+        release_manifest=release,
+        client=client,
+        persist_graph=persist,
+        persist_ancestry_checkpoint=_persist_checkpoint,
+        ancestry_lineage_id=_ANCESTRY_LINEAGE_ID,
+        boot_verifier=lambda identity: identity,
+        poll_seconds=0.001,
+    )
+
+    uploaded = json.loads(bytes(next(iter(client.uploaded_payloads.values()))))
+    assert PARENT_RECEIPT_GRAPHS_FIELD in uploaded
+    assert PARENT_ANCESTRY_PROOFS_FIELD not in uploaded
+    assert uploaded[PARENT_RECEIPT_GRAPHS_FIELD][0]["schema_version"] == (
+        CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+    )
+    claim = result["ancestry_compact_proof"]["certificate"]["claim"]
+    assert claim["certificate_sequence"] == 1
+    assert len(claim["parent_authorities"]) == 1
+    assert claim["parent_authorities"][0]["authority_kind"] == "certificate"
+    assert claim["parent_authorities"][0]["parent_receipt_hash"] == (
+        nested["root_receipt_hash"]
+    )
 
 
 @pytest.mark.asyncio

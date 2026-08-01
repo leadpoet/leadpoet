@@ -251,7 +251,17 @@ async def _resolve_parent_ancestry_transport_v2(
                 allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
                 required_receipt_hashes=(root,),
             )
-            if graph is not None and graph.get("schema_version") != CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION:
+            if (
+                graph is not None
+                and graph.get("schema_version")
+                == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+            ):
+                if graph.get("ancestry_proof") != normalized:
+                    raise AttestedScoringV2Error(
+                        "checkpointed parent graph differs from its proof"
+                    )
+                transport_graphs.append(graph)
+            elif graph is not None:
                 graph_allowed_failed = _failed_receipts_in_graph(
                     graph, allowed_failed_receipt_hashes
                 )
@@ -267,7 +277,9 @@ async def _resolve_parent_ancestry_transport_v2(
                     raise AttestedScoringV2Error(
                         "parent ancestry proof differs from bootstrap graph"
                     )
-            transport_proofs.append(normalized)
+                transport_proofs.append(normalized)
+            else:
+                transport_proofs.append(normalized)
             authority = build_certificate_parent_authority_v2(
                 normalized["certificate"],
                 expected_lineage_id=expected_lineage_id,

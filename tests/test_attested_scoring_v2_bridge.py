@@ -40,6 +40,7 @@ from gateway.tee.release_manifest_v2 import (
 from gateway.tee.scoring_executor_v2 import SCORING_OPERATIONS_V2
 from gateway.tee.topology import ROLE_SPECS, topology_hash
 from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     build_boot_identity_body,
     build_transport_attempt,
     create_boot_identity,
@@ -560,6 +561,103 @@ async def test_v2_bridge_returns_only_durable_release_verified_result():
     assert result["status"] == "succeeded"
     assert result["physical_role"] == "gateway_scoring"
     assert persisted[0]["root_receipt_hash"] == result["receipt"]["receipt_hash"]
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_retains_checkpoint_parent_for_business_logic_and_extends_it():
+    release = _release()
+    observed_parent_graphs = []
+
+    def executor(_operation, payload, context):
+        if payload["generation"] == 1:
+            assert context.external_receipt_graphs == []
+            assert context.external_ancestry_proofs == []
+            return {"generation": 1}
+
+        parent_root = str(payload["parent_root"])
+        matching_receipts = [
+            dict(receipt)
+            for graph in context.external_receipt_graphs
+            for receipt in graph.get("receipts") or ()
+            if receipt.get("receipt_hash") == parent_root
+        ]
+        assert len(context.external_receipt_graphs) == 1
+        assert (
+            context.external_receipt_graphs[0]["schema_version"]
+            == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        )
+        assert context.external_ancestry_proofs == []
+        assert len(matching_receipts) == 1
+        assert matching_receipts[0]["status"] == "succeeded"
+        observed_parent_graphs.append(dict(context.external_receipt_graphs[0]))
+        return {"generation": 2, "observed_parent_root": parent_root}
+
+    client = _Client(release, executor=executor)
+
+    async def persist(graph, **_kwargs):
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    common = {
+        "operation": "benchmark_icp_score",
+        "purpose": "research_lab.benchmark.v2",
+        "worker_index": 0,
+        "release_manifest": release,
+        "client": client,
+        "persist_graph": persist,
+        "boot_verifier": lambda identity: identity,
+        "poll_seconds": 0.001,
+    }
+    first = await execute_scoring_v2(
+        **common,
+        epoch_id=12,
+        sequence=0,
+        payload={"generation": 1},
+    )
+    first_graph = first["receipt_graph"]
+    first_proof = first["ancestry_compact_proof"]
+    assert (
+        first_graph["schema_version"]
+        == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+    )
+
+    second = await execute_scoring_v2(
+        **common,
+        epoch_id=13,
+        sequence=0,
+        payload={
+            "generation": 2,
+            "parent_root": first_graph["root_receipt_hash"],
+        },
+        parent_graphs=(first_graph,),
+        parent_ancestry_proofs=(first_proof,),
+    )
+
+    assert observed_parent_graphs == [first_graph]
+    assert second["result"] == {
+        "generation": 2,
+        "observed_parent_root": first_graph["root_receipt_hash"],
+    }
+    first_claim = first_proof["certificate"]["claim"]
+    second_claim = second["ancestry_compact_proof"]["certificate"]["claim"]
+    assert second_claim["certificate_sequence"] == (
+        first_claim["certificate_sequence"] + 1
+    )
+    assert second_claim["parent_authorities"] == [
+        {
+            "schema_version": "leadpoet.attested_ancestry_parent_authority.v2",
+            "authority_kind": "certificate",
+            "parent_receipt_hash": first_graph["root_receipt_hash"],
+            "parent_epoch_id": first_claim["local_delta_projection"][
+                "root_epoch_id"
+            ],
+            "authority_hash": first_proof["certificate"]["certificate_hash"],
+            "authority_policy_hash": first_claim["policy"]["policy_hash"],
+            "authority_sequence": first_claim["certificate_sequence"],
+            "authority_purposes": first_claim["local_delta_projection"][
+                "ancestry_purposes"
+            ],
+        }
+    ]
 
 
 @pytest.mark.asyncio

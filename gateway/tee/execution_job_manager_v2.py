@@ -15,6 +15,7 @@ import time
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
 from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     EMPTY_ARTIFACT_ROOT,
     EMPTY_HOST_OPERATION_ROOT,
     EMPTY_TRANSPORT_ROOT,
@@ -294,6 +295,10 @@ class ExecutionContextV2:
         ] = None,
         _encoded_sizes: Optional[Sequence[int]] = None,
         _share_objects: bool = False,
+        boot_attestation_verifier: Optional[
+            Callable[[Mapping[str, Any]], Any]
+        ] = None,
+        require_boot_attestation_verification: bool = False,
     ) -> tuple:
         """Bind overlapping graphs after one fail-closed batch verification."""
 
@@ -313,6 +318,10 @@ class ExecutionContextV2:
         validate_receipt_graphs(
             graph_list,
             allowed_failed_receipt_hashes_by_graph=failed_by_graph,
+            boot_attestation_verifier=boot_attestation_verifier,
+            require_boot_attestation_verification=(
+                require_boot_attestation_verification
+            ),
         )
 
         normalized_graphs = []
@@ -1300,17 +1309,34 @@ class ExecutionJobManagerV2:
             dict(item["certificate"])
             for item in context.external_ancestry_proofs
         ]
-        parent_full_graphs = [
-            build_full_graph_parent_v2(
-                graph,
-                allowed_failed_receipt_hashes=(
-                    context.external_receipt_graph_policies.get(
-                        str(graph["root_receipt_hash"]), ()
-                    )
-                ),
+        parent_full_graphs = []
+        for graph in context.external_receipt_graphs:
+            root_hash = str(graph["root_receipt_hash"])
+            if (
+                graph.get("schema_version")
+                == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+            ):
+                proof = validate_compact_ancestry_proof_v2(
+                    graph.get("ancestry_proof"),
+                    expected_lineage_id=str(self._ancestry_lineage_id),
+                    boot_attestation_verifier=(
+                        self._ancestry_boot_attestation_verifier
+                    ),
+                    allowed_issuer_roles=self._ancestry_allowed_issuer_roles,
+                    required_receipt_hashes=(root_hash,),
+                )
+                parent_certificates.append(dict(proof["certificate"]))
+                continue
+            parent_full_graphs.append(
+                build_full_graph_parent_v2(
+                    graph,
+                    allowed_failed_receipt_hashes=(
+                        context.external_receipt_graph_policies.get(
+                            root_hash, ()
+                        )
+                    ),
+                )
             )
-            for graph in context.external_receipt_graphs
-        ]
         parent_sequences = [
             int(item["claim"]["certificate_sequence"])
             for item in parent_certificates
@@ -1416,6 +1442,18 @@ class ExecutionJobManagerV2:
             parent_roots = []
             parent_receipt_hashes = set()
             for graph in parent_graphs:
+                if (
+                    graph.get("schema_version")
+                    == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+                    and (
+                        self._ancestry_lineage_id is None
+                        or graph.get("ancestry_lineage_id")
+                        != self._ancestry_lineage_id
+                    )
+                ):
+                    raise ExecutionJobV2Error(
+                        "job checkpointed parent lineage differs"
+                    )
                 allowed_failed = ()
                 if self._failed_parent_graph_policy is not None:
                     allowed_failed = tuple(
@@ -1430,6 +1468,12 @@ class ExecutionJobManagerV2:
                     ),
                     _encoded_sizes=parent_graph_sizes,
                     _share_objects=shared_parent_graph_objects,
+                    boot_attestation_verifier=(
+                        self._ancestry_boot_attestation_verifier
+                    ),
+                    require_boot_attestation_verification=(
+                        self._ancestry_lineage_id is not None
+                    ),
                 )
             )
             parent_receipt_hashes = set()

@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
 
+from gateway.tee import release_archive_v2 as release_archive
 from gateway.tee import verify_release_artifacts_v2 as artifact_verifier
 from gateway.tee.release_archive_v2 import (
+    ReleaseArchiveCacheMiss,
     ReleaseArchiveV2Error,
     archive_verified_release,
     load_last_good_release,
+    main as archive_main,
+    restore_verified_release,
     select_release_manifest,
     verify_archive_index,
     verify_archive_directory,
@@ -25,6 +30,9 @@ from gateway.tee.verify_release_artifacts_v2 import (
     verify_release_artifacts,
 )
 from leadpoet_canonical.attested_v2 import sha256_json
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _sha(value: bytes) -> str:
@@ -151,6 +159,351 @@ def test_verified_gateway_release_is_archived_as_complete_immutable_set(tmp_path
     assert result["retained_release_count"] == 1
 
 
+def test_exact_gateway_release_restores_from_verified_archive(tmp_path, monkeypatch):
+    gateway_root, eif_root, release_path, release = _release_fixture(
+        tmp_path / "build", "a"
+    )
+    archive_root = tmp_path / "archive"
+    archived = archive_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=archive_root,
+    )
+    restored_root = tmp_path / "restored"
+    restored_root.mkdir()
+    (restored_root / "tee-enclave-gateway_scoring.eif").write_bytes(b"stale")
+    verified_roots = []
+    verifier = release_archive.verify_release_artifacts
+
+    def record_verification(**kwargs):
+        verified_roots.append(Path(kwargs["eif_root"]))
+        return verifier(**kwargs)
+
+    monkeypatch.setattr(
+        release_archive, "verify_release_artifacts", record_verification
+    )
+
+    result = restore_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=restored_root,
+        archive_root=archive_root,
+    )
+
+    assert result["status"] == "restored"
+    assert result["release_hash"] == release["release_hash"]
+    assert result["commit_sha"] == release["commit_sha"]
+    archive_path = Path(archived["archive_path"])
+    for relative in release_archive._restored_runtime_files():
+        assert (restored_root / relative).read_bytes() == (
+            archive_path / relative
+        ).read_bytes()
+    assert len(verified_roots) == 3
+    assert verified_roots[0] == restored_root
+    assert verified_roots[-1] == restored_root
+    assert not list(tmp_path.glob(".gateway-eif-restore.*"))
+
+
+def test_exact_gateway_release_skips_reinstall_when_live_set_is_verified(
+    tmp_path, monkeypatch
+):
+    gateway_root, eif_root, release_path, release = _release_fixture(
+        tmp_path / "build", "1"
+    )
+    archive_root = tmp_path / "archive"
+    archive_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=archive_root,
+    )
+
+    def unexpected_install(**_kwargs):
+        raise AssertionError("verified live EIFs must not be reinstalled")
+
+    monkeypatch.setattr(
+        release_archive, "_install_restored_runtime", unexpected_install
+    )
+    result = restore_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=archive_root,
+    )
+
+    assert result["status"] == "already_installed"
+    assert result["release_hash"] == release["release_hash"]
+
+
+def test_gateway_restore_copies_read_only_live_rollback_backups(
+    tmp_path, monkeypatch
+):
+    gateway_root, eif_root, release_path, _release = _release_fixture(
+        tmp_path / "build", "2"
+    )
+    archive_root = tmp_path / "archive"
+    archive_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=archive_root,
+    )
+    restored_root = tmp_path / "restored"
+    restored_root.mkdir()
+    sentinel = restored_root / "tee-enclave-gateway_scoring.eif"
+    sentinel.write_bytes(b"old-live-eif")
+    sentinel.chmod(0o444)
+    copies = []
+    copier = release_archive._copy_regular_for_rollback
+
+    def record_copy(source, destination):
+        copier(source, destination)
+        copies.append((Path(source), Path(destination)))
+        assert Path(source).stat().st_ino != Path(destination).stat().st_ino
+        assert Path(destination).read_bytes() == b"old-live-eif"
+
+    monkeypatch.setattr(
+        release_archive, "_copy_regular_for_rollback", record_copy
+    )
+    restore_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=restored_root,
+        archive_root=archive_root,
+    )
+
+    assert any(source == sentinel for source, _destination in copies)
+
+
+def test_gateway_restore_backup_failure_leaves_live_set_unchanged(
+    tmp_path, monkeypatch
+):
+    gateway_root, eif_root, release_path, _release = _release_fixture(
+        tmp_path / "build-backup-failure", "7"
+    )
+    archive_root = tmp_path / "archive"
+    archive_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=archive_root,
+    )
+    restored_root = tmp_path / "restored"
+    restored_root.mkdir()
+    original = {}
+    for relative in release_archive._restored_runtime_files():
+        payload = ("old:" + relative).encode("utf-8")
+        (restored_root / relative).write_bytes(payload)
+        original[relative] = payload
+
+    copies = 0
+    copier = release_archive._copy_regular_for_rollback
+
+    def fail_second_copy(source, destination):
+        nonlocal copies
+        copies += 1
+        if copies == 2:
+            raise OSError("simulated rollback copy failure")
+        copier(source, destination)
+
+    installed = []
+    monkeypatch.setattr(
+        release_archive, "_copy_regular_for_rollback", fail_second_copy
+    )
+    monkeypatch.setattr(
+        release_archive,
+        "_install_replace",
+        lambda source, destination: installed.append((source, destination)),
+    )
+
+    with pytest.raises(
+        ReleaseArchiveV2Error, match="cannot be retained atomically"
+    ):
+        restore_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=restored_root,
+            archive_root=archive_root,
+        )
+
+    assert installed == []
+    for relative, payload in original.items():
+        assert (restored_root / relative).read_bytes() == payload
+    assert not list(tmp_path.glob(".gateway-eif-restore.*"))
+
+
+def test_restore_cli_returns_three_only_for_genuine_cache_miss(
+    tmp_path, capsys
+):
+    gateway_root, eif_root, release_path, _release = _release_fixture(
+        tmp_path / "build", "b"
+    )
+    missing_archive = tmp_path / "missing-archive"
+
+    status = archive_main(
+        [
+            "--restore",
+            "--release-manifest",
+            str(release_path),
+            "--gateway-root",
+            str(gateway_root),
+            "--eif-root",
+            str(eif_root),
+            "--archive-root",
+            str(missing_archive),
+        ]
+    )
+
+    assert status == 3
+    assert json.loads(capsys.readouterr().out)["status"] == "cache_miss"
+
+
+def test_exact_gateway_restore_fails_closed_on_present_archive_tamper(tmp_path):
+    gateway_root, eif_root, release_path, _release = _release_fixture(
+        tmp_path / "build", "c"
+    )
+    archive_root = tmp_path / "archive"
+    archived = archive_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=archive_root,
+    )
+    restored_root = tmp_path / "restored"
+    restored_root.mkdir()
+    sentinel = restored_root / "tee-enclave-gateway_scoring.eif"
+    sentinel.write_bytes(b"still-live")
+    (Path(archived["archive_path"]) / sentinel.name).write_bytes(b"tampered")
+
+    with pytest.raises(ReleaseArchiveV2Error) as error:
+        archive_main(
+            [
+                "--restore",
+                "--release-manifest",
+                str(release_path),
+                "--gateway-root",
+                str(gateway_root),
+                "--eif-root",
+                str(restored_root),
+                "--archive-root",
+                str(archive_root),
+            ]
+        )
+
+    assert not isinstance(error.value, ReleaseArchiveCacheMiss)
+    assert sentinel.read_bytes() == b"still-live"
+
+
+def test_exact_gateway_restore_rolls_back_an_atomic_install_failure(
+    tmp_path, monkeypatch
+):
+    gateway_root, eif_root, release_path, _release = _release_fixture(
+        tmp_path / "build", "d"
+    )
+    archive_root = tmp_path / "archive"
+    archive_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=archive_root,
+    )
+    restored_root = tmp_path / "restored"
+    restored_root.mkdir()
+    original = {}
+    for relative in release_archive._restored_runtime_files():
+        payload = ("old:" + relative).encode("utf-8")
+        (restored_root / relative).write_bytes(payload)
+        original[relative] = payload
+
+    replacements = 0
+
+    def fail_second_replace(source, destination):
+        nonlocal replacements
+        replacements += 1
+        if replacements == 2:
+            raise OSError("simulated atomic replacement failure")
+        os.replace(source, destination)
+
+    monkeypatch.setattr(release_archive, "_install_replace", fail_second_replace)
+    with pytest.raises(OSError, match="simulated atomic replacement failure"):
+        restore_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=restored_root,
+            archive_root=archive_root,
+        )
+
+    for relative, payload in original.items():
+        assert (restored_root / relative).read_bytes() == payload
+    assert not list(tmp_path.glob(".gateway-eif-restore.*"))
+
+
+def test_exact_gateway_restore_rejects_symlinked_archive_root(tmp_path):
+    gateway_root, eif_root, release_path, _release = _release_fixture(
+        tmp_path / "build", "e"
+    )
+    real_archive = tmp_path / "real-archive"
+    archive_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=real_archive,
+    )
+    linked_archive = tmp_path / "linked-archive"
+    linked_archive.symlink_to(real_archive, target_is_directory=True)
+
+    with pytest.raises(ReleaseArchiveV2Error, match="symlink ancestry"):
+        restore_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=eif_root,
+            archive_root=linked_archive,
+        )
+
+
+def test_gateway_archive_writer_rejects_symlinked_root_and_lock(tmp_path):
+    gateway_root, eif_root, release_path, _release = _release_fixture(
+        tmp_path / "build", "3"
+    )
+    real_archive = tmp_path / "real-archive"
+    real_archive.mkdir()
+    linked_archive = tmp_path / "linked-archive"
+    linked_archive.symlink_to(real_archive, target_is_directory=True)
+
+    with pytest.raises(ReleaseArchiveV2Error, match="symlink ancestry"):
+        archive_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=eif_root,
+            archive_root=linked_archive,
+        )
+
+    lock_target = tmp_path / "lock-target"
+    lock_target.write_text("do-not-follow", encoding="utf-8")
+    (real_archive / ".archive.lock").symlink_to(lock_target)
+    with pytest.raises(ReleaseArchiveV2Error, match="lock is unavailable"):
+        archive_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=eif_root,
+            archive_root=real_archive,
+        )
+    assert lock_target.read_text(encoding="utf-8") == "do-not-follow"
+
+
+def test_gateway_role_builder_cold_builds_only_on_exact_archive_miss():
+    script = (ROOT / "gateway" / "tee" / "build_role_enclaves.sh").read_text(
+        encoding="utf-8"
+    )
+    restore = script.index("--restore")
+    miss = script.index('[ "$restore_status" -ne 3 ]', restore)
+    cold_gate = script.index('[ "$RESTORED_EXACT_RELEASE" != "1" ]', miss)
+    cold_build = script.index("sudo docker build", cold_gate)
+    assert restore < miss < cold_gate < cold_build
+    assert "exit \"$restore_status\"" in script[miss:cold_gate]
+
+
 def test_gateway_archive_rejects_artifact_tampering(tmp_path):
     gateway_root, eif_root, release_path, _release = _release_fixture(
         tmp_path / "build", "b"
@@ -218,6 +571,135 @@ def test_gateway_archive_retains_current_plus_two_predecessors(tmp_path):
         release["release_hash"] for release in reversed(releases[-3:])
     ]
     assert not (archive_root / releases[0]["release_hash"].split(":", 1)[1]).exists()
+
+
+@pytest.mark.parametrize("already_installed", [True, False])
+def test_restore_promotes_verified_retained_release_to_archive_head(
+    tmp_path, already_installed
+):
+    archive_root = tmp_path / "archive"
+    fixtures = []
+    for character in ("a", "b", "c"):
+        fixture = _release_fixture(tmp_path / ("build-" + character), character)
+        gateway_root, eif_root, release_path, _release = fixture
+        archive_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=eif_root,
+            archive_root=archive_root,
+        )
+        fixtures.append(fixture)
+
+    gateway_root, built_eif_root, release_path, release = fixtures[1]
+    if already_installed:
+        eif_root = built_eif_root
+    else:
+        eif_root = tmp_path / "restored"
+        eif_root.mkdir()
+    result = restore_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=archive_root,
+    )
+
+    assert result["status"] == (
+        "already_installed" if already_installed else "restored"
+    )
+    index = json.loads((archive_root / "index.json").read_text(encoding="utf-8"))
+    assert index["current_release_hash"] == release["release_hash"]
+    assert index["releases"][0]["release_hash"] == release["release_hash"]
+    assert len(index["releases"]) == 3
+
+
+def test_failed_restore_does_not_promote_archive_head(tmp_path, monkeypatch):
+    archive_root = tmp_path / "archive"
+    fixtures = []
+    for character in ("a", "b", "c"):
+        fixture = _release_fixture(tmp_path / ("build-" + character), character)
+        gateway_root, eif_root, release_path, _release = fixture
+        archive_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=eif_root,
+            archive_root=archive_root,
+        )
+        fixtures.append(fixture)
+    original_index = (archive_root / "index.json").read_bytes()
+    gateway_root, _eif_root, release_path, _release = fixtures[0]
+    restored_root = tmp_path / "restored"
+    restored_root.mkdir()
+
+    def fail_install(_source, _destination):
+        raise OSError("simulated install failure")
+
+    monkeypatch.setattr(release_archive, "_install_replace", fail_install)
+    with pytest.raises(OSError, match="simulated install failure"):
+        restore_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=restored_root,
+            archive_root=archive_root,
+        )
+
+    assert (archive_root / "index.json").read_bytes() == original_index
+
+
+def test_archive_writer_rejects_noncanonical_retention_bound(tmp_path):
+    gateway_root, eif_root, release_path, _release = _release_fixture(
+        tmp_path / "build", "8"
+    )
+    with pytest.raises(ReleaseArchiveV2Error, match="exactly current plus two"):
+        archive_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=eif_root,
+            archive_root=tmp_path / "archive",
+            retain_releases=4,
+        )
+
+
+def test_restore_and_archive_reject_oversized_index_before_mutation(tmp_path):
+    archive_root = tmp_path / "archive"
+    fixtures = []
+    for character in ("a", "b", "c"):
+        fixture = _release_fixture(tmp_path / ("build-" + character), character)
+        gateway_root, eif_root, release_path, _release = fixture
+        archive_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=eif_root,
+            archive_root=archive_root,
+        )
+        fixtures.append(fixture)
+    index_path = archive_root / "index.json"
+    oversized = json.loads(index_path.read_text(encoding="utf-8"))
+    oversized["releases"].append(dict(oversized["releases"][-1]))
+    index_path.write_text(json.dumps(oversized), encoding="utf-8")
+    original_index = index_path.read_bytes()
+
+    gateway_root, eif_root, release_path, _release = fixtures[0]
+    with pytest.raises(ReleaseArchiveV2Error, match="unbounded"):
+        restore_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=eif_root,
+            archive_root=archive_root,
+        )
+    assert index_path.read_bytes() == original_index
+
+    gateway_root, eif_root, release_path, newest = _release_fixture(
+        tmp_path / "build-d", "d"
+    )
+    with pytest.raises(ReleaseArchiveV2Error, match="unbounded"):
+        archive_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=eif_root,
+            archive_root=archive_root,
+        )
+    assert index_path.read_bytes() == original_index
+    assert not (archive_root / newest["release_hash"].split(":", 1)[1]).exists()
 
 
 def test_gateway_archive_pins_verified_last_good_across_failed_builds(tmp_path):

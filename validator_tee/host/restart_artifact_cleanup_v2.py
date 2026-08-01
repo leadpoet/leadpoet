@@ -1,7 +1,8 @@
 """Bounded cleanup for repository-owned restart build artifacts.
 
 The caller must hold the shared Docker operation lock.  This helper deletes
-only explicitly named, old workspaces and refuses to touch open paths,
+only explicitly named, old workspaces (including interrupted gateway archive
+and EIF restore staging directories) and refuses to touch open paths,
 symlinks, nested mounts, or legacy EIF backups without a verified rollback
 set containing the durable last-good gateway commit.
 """
@@ -356,6 +357,8 @@ def _specifications(
     temporary_root: Path,
     gateway_build_root: Optional[Path],
     validator_build_root: Optional[Path],
+    gateway_eif_root: Optional[Path],
+    gateway_archive_root: Optional[Path],
     emergency_backup_root: Optional[Path],
     temp_min_age_seconds: int,
     emergency_min_age_seconds: int,
@@ -414,6 +417,24 @@ def _specifications(
                 prefix="pcr0_normalize_",
             )
         )
+    if gateway_eif_root is not None:
+        specs.append(
+            _Spec(
+                gateway_eif_root.parent,
+                "gateway_eif_restore",
+                temp_min_age_seconds,
+                prefix=".gateway-eif-restore.",
+            )
+        )
+    if gateway_archive_root is not None:
+        specs.append(
+            _Spec(
+                gateway_archive_root,
+                "gateway_release_archive_prepare",
+                temp_min_age_seconds,
+                prefix=".release.",
+            )
+        )
     if emergency_backup_root is not None:
         specs.append(
             _Spec(
@@ -467,6 +488,7 @@ def cleanup_restart_artifacts(
     temporary_root: Path,
     gateway_build_root: Optional[Path] = None,
     validator_build_root: Optional[Path] = None,
+    gateway_eif_root: Optional[Path] = None,
     emergency_backup_root: Optional[Path] = None,
     gateway_archive_root: Optional[Path] = None,
     gateway_last_good_manifest: Optional[Path] = None,
@@ -507,6 +529,10 @@ def cleanup_restart_artifacts(
         gateway_build_root=Path(gateway_build_root) if gateway_build_root else None,
         validator_build_root=(
             Path(validator_build_root) if validator_build_root else None
+        ),
+        gateway_eif_root=Path(gateway_eif_root) if gateway_eif_root else None,
+        gateway_archive_root=(
+            Path(gateway_archive_root) if gateway_archive_root else None
         ),
         emergency_backup_root=(
             Path(emergency_backup_root) if emergency_backup_root else None
@@ -698,6 +724,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--temporary-root", type=Path, default=Path("/tmp"))
     parser.add_argument("--gateway-build-root", type=Path)
     parser.add_argument("--validator-build-root", type=Path)
+    parser.add_argument("--gateway-eif-root", type=Path)
     parser.add_argument("--emergency-backup-root", type=Path)
     parser.add_argument("--gateway-archive-root", type=Path)
     parser.add_argument("--gateway-last-good-manifest", type=Path)
@@ -729,6 +756,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         temporary_root=args.temporary_root,
         gateway_build_root=args.gateway_build_root,
         validator_build_root=args.validator_build_root,
+        gateway_eif_root=args.gateway_eif_root,
         emergency_backup_root=args.emergency_backup_root,
         gateway_archive_root=args.gateway_archive_root,
         gateway_last_good_manifest=args.gateway_last_good_manifest,

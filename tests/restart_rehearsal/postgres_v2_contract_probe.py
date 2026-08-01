@@ -128,6 +128,9 @@ ANCESTRY_CHECKPOINT_MIGRATION = (
 ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION = (
     "137-research-lab-allocation-settlement-frontier.sql"
 )
+ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION = (
+    "138-research-lab-ancestry-checkpoint-bootstrap-purpose.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -2458,6 +2461,36 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             fixture=fixture,
             verified_bundle=verified,
         )
+        database.apply_migration(
+            scripts / ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION
+        )
+        applied.append(ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION)
+        bootstrap_purpose_constraint = database.psql(
+            """
+            SELECT public.research_lab_ancestry_checkpoint_bootstrap_contract_v2()
+                   ::text;
+            """,
+            tuples_only=True,
+        ).stdout.strip()
+        bootstrap_purpose_contract = json.loads(
+            bootstrap_purpose_constraint
+        )
+        if (
+            bootstrap_purpose_contract.get("schema_version")
+            != "leadpoet.ancestry_checkpoint_bootstrap_contract.v2"
+            or bootstrap_purpose_contract.get("operation")
+            != "ancestry_checkpoint_bootstrap_v2"
+            or bootstrap_purpose_contract.get("purpose")
+            != "research_lab.ancestry_checkpoint_bootstrap.v2"
+            or bootstrap_purpose_contract.get("constraint_valid") is not True
+            or "research_lab.ancestry_checkpoint_bootstrap.v2"
+            not in str(
+                bootstrap_purpose_contract.get("constraint_definition") or ""
+            )
+        ):
+            raise PostgresContractProbeError(
+                "post-138 ancestry checkpoint bootstrap purpose is incomplete"
+            )
         provider_outcome_append = _provider_outcome_append_contract(database)
         historical_compute_seed_rows = (
             _historical_compute_allocation_seed_rows(
@@ -2514,6 +2547,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post_135_active_model_replay_contract_valid": True,
                 "post_136_ancestry_checkpoint_contract_valid": True,
                 "post_137_allocation_settlement_frontier_contract_valid": True,
+                "post_138_ancestry_checkpoint_bootstrap_purpose_valid": True,
                 "provider_outcome_append_atomic": True,
                 "provider_outcome_contention_zero_rollback": True,
                 "provider_outcome_conflict_head_exact": True,

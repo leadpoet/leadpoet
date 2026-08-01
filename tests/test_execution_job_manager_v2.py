@@ -37,6 +37,10 @@ from leadpoet_canonical.attested_v2 import (
     validate_signed_execution_receipt,
     validate_signed_transition_command,
 )
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION,
+    ANCESTRY_CHECKPOINT_BOOTSTRAP_RESULT_SCHEMA_VERSION,
+)
 
 
 HASH = "sha256:" + "a" * 64
@@ -44,7 +48,13 @@ HASH_B = "sha256:" + "b" * 64
 NOW = "2026-07-10T20:00:00Z"
 
 
-def _manager(executor, *, checkpoint_lineage=False):
+def _manager(
+    executor,
+    *,
+    checkpoint_lineage=False,
+    role="gateway_scoring",
+    operations=None,
+):
     key = Ed25519PrivateKey.generate()
     pubkey = key.public_key().public_bytes(
         serialization.Encoding.Raw,
@@ -52,8 +62,8 @@ def _manager(executor, *, checkpoint_lineage=False):
     ).hex()
     boot = create_boot_identity(
         body=build_boot_identity_body(
-            role="gateway_scoring",
-            physical_role="gateway_scoring",
+            role=role,
+            physical_role=role,
             commit_sha="c" * 40,
             pcr0="d" * 96,
             build_manifest_hash=HASH,
@@ -73,17 +83,21 @@ def _manager(executor, *, checkpoint_lineage=False):
         checkpoint_kwargs = {
             "ancestry_lineage_id": HASH,
             "ancestry_boot_attestation_verifier": lambda identity: identity,
-            "ancestry_allowed_issuer_roles": ("gateway_scoring",),
+            "ancestry_allowed_issuer_roles": (role,),
         }
     manager = ExecutionJobManagerV2(
         boot_identity_supplier=lambda: boot,
         sign_digest=key.sign,
-        operations={
-            "score": {
-                "research_lab.candidate_score.v2",
-                "research_lab.baseline_score.v2",
+        operations=(
+            operations
+            if operations is not None
+            else {
+                "score": {
+                    "research_lab.candidate_score.v2",
+                    "research_lab.baseline_score.v2",
+                }
             }
-        },
+        ),
         executor=executor,
         worker_count=1,
         **checkpoint_kwargs,
@@ -978,6 +992,75 @@ def test_checkpointed_parent_remains_visible_and_extends_certificate_generation(
     assert second_claim["parent_authorities"][0]["parent_receipt_hash"] == (
         first_receipt["receipt_hash"]
     )
+
+
+def test_manager_issues_bootstrap_proofs_before_normal_session_receipt():
+    source_manager, source_boot = _manager(
+        lambda _operation, payload, _context: payload
+    )
+    source_payload = _payload()
+    assert _run(source_manager, source_payload)["state"] == "succeeded"
+    source_receipt = source_manager.receipt("score-job-1")
+    source_graph = build_receipt_graph(
+        root_receipt_hash=source_receipt["receipt_hash"],
+        boot_identities=(source_boot,),
+        receipts=source_manager.receipts("score-job-1"),
+        transport_attempts=source_manager.transport_attempts("score-job-1"),
+        host_operations=source_manager.host_operations("score-job-1"),
+    )
+
+    request_schema = ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION
+
+    def bootstrap_executor(_operation, payload, _context):
+        return ExecutionResultV2(
+            output={
+                "schema_version": request_schema,
+                "selected_root_receipt_hashes": list(
+                    payload["selected_root_receipt_hashes"]
+                ),
+            },
+            ancestry_checkpoint_bootstrap=True,
+        )
+
+    manager, _ = _manager(
+        bootstrap_executor,
+        checkpoint_lineage=True,
+        role="gateway_coordinator",
+        operations={
+            "ancestry_checkpoint_bootstrap_v2": {
+                "research_lab.ancestry_checkpoint_bootstrap.v2"
+            }
+        },
+    )
+    payload = json.dumps(
+        {
+            "schema_version": request_schema,
+            "selected_root_receipt_hashes": [source_receipt["receipt_hash"]],
+            PARENT_RECEIPT_GRAPHS_FIELD: [source_graph],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    manifest = _manifest(
+        payload,
+        job_id="ancestry-bootstrap-1",
+        operation="ancestry_checkpoint_bootstrap_v2",
+        purpose="research_lab.ancestry_checkpoint_bootstrap.v2",
+        parent_receipt_hashes=[source_receipt["receipt_hash"]],
+    )
+    assert _run(manager, payload, manifest)["state"] == "succeeded"
+    result_chunk = manager.result_chunk(job_id="ancestry-bootstrap-1")
+    result = json.loads(base64.b64decode(result_chunk["data_b64"]))
+    assert (
+        result["schema_version"]
+        == ANCESTRY_CHECKPOINT_BOOTSTRAP_RESULT_SCHEMA_VERSION
+    )
+    assert len(result["checkpoint_proofs"]) == 1
+    assert result["checkpoint_root_receipt_hashes"] == [
+        source_receipt["receipt_hash"]
+    ]
+    validate_signed_execution_receipt(manager.receipt("ancestry-bootstrap-1"))
+    assert manager.ancestry_compact_proof("ancestry-bootstrap-1")
 
 
 def test_nested_graph_covers_multiple_declared_parent_receipts():

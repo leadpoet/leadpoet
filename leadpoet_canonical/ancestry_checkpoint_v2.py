@@ -24,6 +24,7 @@ import re
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from leadpoet_canonical.attested_v2 import (
+    build_checkpointed_receipt_graph,
     RECEIPT_GRAPH_SCHEMA_VERSION,
     canonical_json,
     host_operation_root,
@@ -56,6 +57,12 @@ ANCESTRY_PARENT_AUTHORITY_SCHEMA_VERSION = (
 ANCESTRY_FULL_GRAPH_PARENT_SCHEMA_VERSION = (
     "leadpoet.attested_ancestry_full_graph_parent.v2"
 )
+ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION = (
+    "leadpoet.ancestry_checkpoint_bootstrap_request.v2"
+)
+ANCESTRY_CHECKPOINT_BOOTSTRAP_RESULT_SCHEMA_VERSION = (
+    "leadpoet.ancestry_checkpoint_bootstrap_result.v2"
+)
 
 MAX_FULL_GRAPH_RECEIPTS = 10_000
 MAX_FULL_GRAPH_BOOTS = 10_000
@@ -79,7 +86,10 @@ _SIGNATURE_RE = re.compile(r"^[0-9a-f]{128}$")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$")
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _EXTENDED_PARENT_AUTHORITY_PURPOSES = frozenset(
-    {"research_lab.allocation.v2"}
+    {
+        "research_lab.allocation.v2",
+        "research_lab.ancestry_checkpoint_bootstrap.v2",
+    }
 )
 
 _PROJECTION_BODY_FIELDS = frozenset(
@@ -1526,6 +1536,661 @@ def build_compact_ancestry_proof_v2(
     )
 
 
+def build_checkpointed_receipt_graph_from_full_graph_v2(
+    full_graph: Mapping[str, Any],
+    compact_proof: Mapping[str, Any],
+    *,
+    expected_lineage_id: str,
+    boot_attestation_verifier: Callable[[Mapping[str, Any]], Any],
+    allowed_issuer_roles: Iterable[str],
+    allowed_failed_receipt_hashes: Iterable[str] = (),
+    required_purposes: Iterable[str] = (),
+) -> Dict[str, Any]:
+    """Extract the proof's exact bounded graph without host-side selection.
+
+    The complete source graph is revalidated first.  The proof determines the
+    only receipt/boot disclosure that may be extracted, and its certificate
+    evidence commitment revalidates the exact scoped transport and host
+    bodies.  Reordering, omission, or substitution therefore fails before a
+    checkpointed graph can be persisted.
+    """
+
+    allowed_failed = _sorted_hashes(
+        list(allowed_failed_receipt_hashes),
+        "allowed failed receipt hash",
+        MAX_ALLOWED_FAILED_RECEIPTS,
+    )
+    required = _sorted_identifiers(
+        list(required_purposes),
+        "required purpose",
+        MAX_REQUIRED_PURPOSES,
+    )
+    project_receipt_graph_v2(
+        full_graph,
+        boot_attestation_verifier=boot_attestation_verifier,
+        allowed_failed_receipt_hashes=allowed_failed,
+        required_purposes=required,
+    )
+    normalized_proof = validate_compact_ancestry_proof_v2(
+        compact_proof,
+        expected_lineage_id=expected_lineage_id,
+        boot_attestation_verifier=boot_attestation_verifier,
+        allowed_issuer_roles=allowed_issuer_roles,
+        required_purposes=required,
+    )
+    projection = normalized_proof["certificate"]["claim"][
+        "local_delta_projection"
+    ]
+    _require(
+        int(projection["receipt_count"]) == 1,
+        "checkpoint bootstrap proof must disclose one receipt",
+    )
+    local_delta = _extract_local_delta_from_full_graph(
+        full_graph, normalized_proof["certificate"]
+    )
+    normalized_delta = _normalized_evidence(
+        local_delta, ANCESTRY_DELTA_SCHEMA_VERSION
+    )
+    rebuilt_proof = build_compact_ancestry_proof_from_delta_v2(
+        normalized_delta,
+        normalized_proof["certificate"],
+        expected_lineage_id=expected_lineage_id,
+        boot_attestation_verifier=boot_attestation_verifier,
+        allowed_issuer_roles=allowed_issuer_roles,
+    )
+    _require(
+        canonical_json(rebuilt_proof) == canonical_json(normalized_proof),
+        "checkpoint bootstrap proof differs from full graph evidence",
+    )
+    local_failed = [
+        str(receipt["receipt_hash"])
+        for receipt in normalized_delta["receipts"]
+        if receipt["status"] != "succeeded"
+    ]
+    checkpointed = build_checkpointed_receipt_graph(
+        root_receipt_hash=normalized_delta["root_receipt_hash"],
+        boot_identities=normalized_delta["boot_identities"],
+        receipts=normalized_delta["receipts"],
+        transport_attempts=normalized_delta["transport_attempts"],
+        host_operations=normalized_delta["host_operations"],
+        ancestry_lineage_id=expected_lineage_id,
+        ancestry_proof=rebuilt_proof,
+        allowed_failed_receipt_hashes=local_failed,
+        boot_attestation_verifier=boot_attestation_verifier,
+        require_boot_attestation_verification=True,
+    )
+    return checkpointed
+
+
+def select_ancestry_checkpoint_resume_frontier_v2(
+    *,
+    full_graphs: Sequence[Mapping[str, Any]],
+    selected_root_receipt_hashes: Sequence[str],
+    durable_compact_proofs: Sequence[Mapping[str, Any]],
+    allowed_failed_receipt_hashes_by_graph: Sequence[Iterable[str]],
+    expected_lineage_id: str,
+    boot_attestation_verifier: Callable[[Mapping[str, Any]], Any],
+    allowed_issuer_roles: Iterable[str],
+) -> List[Dict[str, Any]]:
+    """Select the exact bounded durable frontier required for one retry.
+
+    Callers supply durable proofs whose roots occur in the selected complete
+    graphs. A selected-root checkpoint directly commits any still-legacy
+    parent subgraph as a measured full projection, so only already-durable
+    direct parents are part of its recursive frontier. This keeps bootstrap
+    output and every later operational proof bounded independently of
+    historical graph depth. Already-durable selected roots are excluded by
+    contract because they require no bootstrap job.
+    """
+
+    graphs = list(full_graphs)
+    policies = list(allowed_failed_receipt_hashes_by_graph)
+    _require(bool(graphs), "checkpoint resume selection requires a full graph")
+    _require(
+        len(graphs) == len(policies),
+        "checkpoint resume graph policies differ from graph count",
+    )
+    selected = _sorted_hashes(
+        list(selected_root_receipt_hashes),
+        "selected root receipt hash",
+        MAX_ALLOCATION_PARENT_AUTHORITIES,
+    )
+    _require(
+        list(selected_root_receipt_hashes) == selected,
+        "checkpoint resume selected roots are not canonical",
+    )
+    graph_roots = [str(graph.get("root_receipt_hash") or "") for graph in graphs]
+    _require(
+        graph_roots == selected,
+        "checkpoint resume selected roots differ from full graphs",
+    )
+    receipt_by_hash = {}  # type: Dict[str, Dict[str, Any]]
+    graph_memberships = {}  # type: Dict[str, List[int]]
+    normalized_policies = []  # type: List[List[str]]
+    for index, (graph, policy_values) in enumerate(zip(graphs, policies)):
+        _require(
+            isinstance(graph, Mapping)
+            and graph.get("schema_version") == RECEIPT_GRAPH_SCHEMA_VERSION,
+            "checkpoint resume requires legacy full graphs",
+        )
+        policy = _sorted_hashes(
+            list(policy_values),
+            "allowed failed receipt hash",
+            MAX_ALLOWED_FAILED_RECEIPTS,
+        )
+        normalized_policies.append(policy)
+        project_receipt_graph_v2(
+            graph,
+            boot_attestation_verifier=boot_attestation_verifier,
+            allowed_failed_receipt_hashes=policy,
+        )
+        normalized = _normalized_evidence(graph, RECEIPT_GRAPH_SCHEMA_VERSION)
+        for receipt in normalized["receipts"]:
+            root_hash = str(receipt["receipt_hash"])
+            previous = receipt_by_hash.get(root_hash)
+            _require(
+                previous is None
+                or canonical_json(previous) == canonical_json(receipt),
+                "checkpoint resume receipt conflicts across graphs",
+            )
+            receipt_by_hash[root_hash] = dict(receipt)
+            graph_memberships.setdefault(root_hash, []).append(index)
+
+    roles = tuple(allowed_issuer_roles)
+    durable_by_root = {}  # type: Dict[str, Dict[str, Any]]
+    for proof_value in durable_compact_proofs:
+        proof = validate_compact_ancestry_proof_v2(
+            proof_value,
+            expected_lineage_id=expected_lineage_id,
+            boot_attestation_verifier=boot_attestation_verifier,
+            allowed_issuer_roles=roles,
+        )
+        root_hash = str(
+            proof["certificate"]["claim"]["output_root_receipt_hash"]
+        )
+        memberships = graph_memberships.get(root_hash)
+        _require(
+            bool(memberships),
+            "checkpoint resume proof root is absent from full graphs",
+        )
+        build_checkpointed_receipt_graph_from_full_graph_v2(
+            graphs[memberships[0]],
+            proof,
+            expected_lineage_id=expected_lineage_id,
+            boot_attestation_verifier=boot_attestation_verifier,
+            allowed_issuer_roles=roles,
+            allowed_failed_receipt_hashes=normalized_policies[memberships[0]],
+        )
+        previous = durable_by_root.get(root_hash)
+        _require(
+            previous is None
+            or previous["proof_hash"] == proof["proof_hash"],
+            "checkpoint resume proof conflicts",
+        )
+        _require(previous is None, "checkpoint resume proof is duplicated")
+        durable_by_root[root_hash] = proof
+
+    durable_roots = set(durable_by_root)
+    _require(
+        not (durable_roots & set(selected)),
+        "checkpoint resume selected root is already durable",
+    )
+    direct_parent_roots = {
+        str(parent_hash)
+        for selected_root in selected
+        for parent_hash in receipt_by_hash[selected_root][
+            "parent_receipt_hashes"
+        ]
+    }
+    frontier_roots = sorted(durable_roots & direct_parent_roots)
+    _require(
+        len(frontier_roots) <= MAX_ALLOCATION_PARENT_AUTHORITIES,
+        "checkpoint resume frontier exceeds bound",
+    )
+    return [durable_by_root[root_hash] for root_hash in frontier_roots]
+
+
+def _checkpoint_bootstrap_set_hash(
+    certificates_by_root: Mapping[str, Mapping[str, Any]]
+) -> str:
+    leaves = []  # type: List[str]
+    for root_hash in sorted(certificates_by_root):
+        leaves.append(
+            _domain_hash(
+                "leadpoet-ancestry-checkpoint-bootstrap-leaf-v2",
+                {
+                    "root_receipt_hash": root_hash,
+                    "certificate_hash": certificates_by_root[root_hash][
+                        "certificate_hash"
+                    ],
+                },
+            )
+        )
+    return merkle_root(
+        leaves,
+        domain="leadpoet-ancestry-checkpoint-bootstrap-set-v2",
+    )
+
+
+def issue_legacy_ancestry_checkpoint_bootstrap_v2(
+    *,
+    full_graphs: Sequence[Mapping[str, Any]],
+    selected_root_receipt_hashes: Sequence[str],
+    existing_compact_proofs: Sequence[Mapping[str, Any]],
+    allowed_failed_receipt_hashes_by_graph: Sequence[Iterable[str]],
+    lineage_id: str,
+    issuer_boot_identity: Mapping[str, Any],
+    issued_at: str,
+    sign_digest: Callable[[bytes], Any],
+    boot_attestation_verifier: Callable[[Mapping[str, Any]], Any],
+    allowed_issuer_roles: Iterable[str],
+) -> Dict[str, Any]:
+    """Convert complete legacy DAGs into deterministic selected-root proofs.
+
+    The complete graphs are independently revalidated inside the measured
+    boundary. Identical overlaps are folded, while conflicting bodies,
+    policies, resume proofs, or ordering fail closed. Every newly issued proof
+    discloses exactly its selected signed root receipt and scoped sidecars.
+    Each still-legacy direct parent is represented by a compact full-graph
+    projection that the measured issuer derives only after validating that
+    exact ancestor subgraph. The enclave signature therefore commits every
+    omitted receipt, edge, boot/release identity, transport root, and host root
+    without returning one transport proof per historical receipt.
+    """
+
+    graphs = list(full_graphs)
+    policies = list(allowed_failed_receipt_hashes_by_graph)
+    issuer_roles = tuple(allowed_issuer_roles)
+    _require(bool(graphs), "checkpoint bootstrap requires a full graph")
+    _require(
+        len(graphs) <= MAX_ALLOCATION_PARENT_AUTHORITIES,
+        "checkpoint bootstrap graph count exceeds bound",
+    )
+    _require(
+        len(policies) == len(graphs),
+        "checkpoint bootstrap graph policies differ from graph count",
+    )
+    selected = _sorted_hashes(
+        list(selected_root_receipt_hashes),
+        "selected root receipt hash",
+        MAX_ALLOCATION_PARENT_AUTHORITIES,
+    )
+    _require(
+        list(selected_root_receipt_hashes) == selected,
+        "selected root receipt hashes are not canonical",
+    )
+    _require(
+        bool(selected), "checkpoint bootstrap selected roots are empty"
+    )
+
+    receipt_by_hash = {}  # type: Dict[str, Dict[str, Any]]
+    boot_by_hash = {}  # type: Dict[str, Dict[str, Any]]
+    attempt_by_hash = {}  # type: Dict[str, Dict[str, Any]]
+    host_by_hash = {}  # type: Dict[str, Dict[str, Any]]
+    graph_roots = []  # type: List[str]
+    normalized_graphs = []  # type: List[Dict[str, Any]]
+    graph_memberships = {}  # type: Dict[str, List[int]]
+    normalized_graph_policies = []  # type: List[List[str]]
+
+    def merge_exact(
+        target: Dict[str, Dict[str, Any]],
+        key: str,
+        value: Mapping[str, Any],
+        label: str,
+    ) -> None:
+        normalized = dict(value)
+        previous = target.get(key)
+        _require(
+            previous is None or canonical_json(previous) == canonical_json(normalized),
+            "checkpoint bootstrap %s conflicts across graphs" % label,
+        )
+        target[key] = normalized
+
+    for graph_index, (graph, allowed_failed_values) in enumerate(
+        zip(graphs, policies)
+    ):
+        _require(
+            isinstance(graph, Mapping)
+            and graph.get("schema_version") == RECEIPT_GRAPH_SCHEMA_VERSION,
+            "checkpoint bootstrap requires legacy full graphs",
+        )
+        allowed_failed = _sorted_hashes(
+            list(allowed_failed_values),
+            "allowed failed receipt hash",
+            MAX_ALLOWED_FAILED_RECEIPTS,
+        )
+        normalized_graph_policies.append(allowed_failed)
+        project_receipt_graph_v2(
+            graph,
+            boot_attestation_verifier=boot_attestation_verifier,
+            allowed_failed_receipt_hashes=allowed_failed,
+        )
+        normalized_graph = _normalized_evidence(
+            graph, RECEIPT_GRAPH_SCHEMA_VERSION
+        )
+        normalized_graphs.append(normalized_graph)
+        graph_roots.append(str(normalized_graph["root_receipt_hash"]))
+        for receipt in normalized_graph["receipts"]:
+            receipt_hash = str(receipt["receipt_hash"])
+            merge_exact(
+                receipt_by_hash,
+                receipt_hash,
+                receipt,
+                "receipt",
+            )
+            graph_memberships.setdefault(receipt_hash, []).append(graph_index)
+        for boot in normalized_graph["boot_identities"]:
+            merge_exact(
+                boot_by_hash,
+                str(boot["boot_identity_hash"]),
+                boot,
+                "boot identity",
+            )
+        for attempt in normalized_graph["transport_attempts"]:
+            merge_exact(
+                attempt_by_hash,
+                str(attempt["attempt_hash"]),
+                attempt,
+                "transport attempt",
+            )
+        for host_record in normalized_graph["host_operations"]:
+            merge_exact(
+                host_by_hash,
+                _host_key(host_record),
+                host_record,
+                "host operation",
+            )
+
+    _require(
+        len(graph_roots) == len(set(graph_roots)),
+        "checkpoint bootstrap full graph root is duplicated",
+    )
+    _require(
+        graph_roots == selected,
+        "checkpoint bootstrap selected roots differ from full graphs",
+    )
+    attempts_by_scope = {}  # type: Dict[Tuple[str, str], List[Dict[str, Any]]]
+    for attempt in attempt_by_hash.values():
+        scope = (str(attempt["job_id"]), str(attempt["purpose"]))
+        attempts_by_scope.setdefault(scope, []).append(dict(attempt))
+    hosts_by_scope = {}  # type: Dict[Tuple[str, str], List[Dict[str, Any]]]
+    for host_record in host_by_hash.values():
+        request = host_record["request"]
+        scope = (str(request["job_id"]), str(request["purpose"]))
+        hosts_by_scope.setdefault(scope, []).append(dict(host_record))
+
+    proof_values = list(existing_compact_proofs)
+    _require(
+        len(proof_values) <= MAX_ALLOCATION_PARENT_AUTHORITIES,
+        "checkpoint bootstrap resume proof count exceeds bound",
+    )
+    proof_roots = []  # type: List[str]
+    certificates_by_root = {}  # type: Dict[str, Dict[str, Any]]
+    for proof_value in proof_values:
+        normalized_proof = validate_compact_ancestry_proof_v2(
+            proof_value,
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=boot_attestation_verifier,
+            allowed_issuer_roles=issuer_roles,
+        )
+        certificate = normalized_proof["certificate"]
+        claim = certificate["claim"]
+        projection = claim["local_delta_projection"]
+        root_hash = str(claim["output_root_receipt_hash"])
+        proof_roots.append(root_hash)
+        receipt = receipt_by_hash.get(root_hash)
+        _require(
+            receipt is not None,
+            "checkpoint bootstrap resume proof root is absent from full graphs",
+        )
+        graph_index = graph_memberships[root_hash][0]
+        build_checkpointed_receipt_graph_from_full_graph_v2(
+            graphs[graph_index],
+            normalized_proof,
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=boot_attestation_verifier,
+            allowed_issuer_roles=issuer_roles,
+            allowed_failed_receipt_hashes=(
+                normalized_graph_policies[graph_index]
+            ),
+        )
+        _require(
+            int(projection["receipt_count"]) == 1
+            and projection["receipt_hashes"] == [root_hash]
+            and len(normalized_proof["disclosed_receipts"]) == 1
+            and canonical_json(normalized_proof["disclosed_receipts"][0])
+            == canonical_json(receipt),
+            "checkpoint bootstrap resume proof receipt differs",
+        )
+        boot_hash = str(receipt["boot_identity_hash"])
+        _require(
+            projection["boot_identity_hashes"] == [boot_hash]
+            and len(normalized_proof["disclosed_boot_identities"]) == 1
+            and canonical_json(normalized_proof["disclosed_boot_identities"][0])
+            == canonical_json(boot_by_hash[boot_hash]),
+            "checkpoint bootstrap resume proof boot differs",
+        )
+        expected_failed = (
+            [root_hash] if receipt["status"] != "succeeded" else []
+        )
+        _require(
+            claim["policy"]["allowed_failed_receipt_hashes"]
+            == expected_failed
+            and claim["policy"]["required_purposes"]
+            == [str(receipt["purpose"])],
+            "checkpoint bootstrap resume proof policy differs",
+        )
+        _require(
+            projection["external_parent_receipt_hashes"]
+            == sorted(str(item) for item in receipt["parent_receipt_hashes"]),
+            "checkpoint bootstrap resume proof ancestry differs",
+        )
+        previous = certificates_by_root.get(root_hash)
+        _require(
+            previous is None
+            or previous["certificate_hash"] == certificate["certificate_hash"],
+            "checkpoint bootstrap resume proof conflicts",
+        )
+        certificates_by_root[root_hash] = dict(certificate)
+    _require(
+        proof_roots == sorted(proof_roots)
+        and len(proof_roots) == len(set(proof_roots)),
+        "checkpoint bootstrap resume proofs are not canonical",
+    )
+    _require(
+        not (set(proof_roots) & set(selected)),
+        "checkpoint bootstrap selected root is already durable",
+    )
+
+    direct_parent_roots = {
+        str(parent_hash)
+        for selected_root in selected
+        for parent_hash in receipt_by_hash[selected_root][
+            "parent_receipt_hashes"
+        ]
+    }
+    _require(
+        set(proof_roots).issubset(direct_parent_roots),
+        "checkpoint bootstrap resume frontier contains an unused proof",
+    )
+
+    def full_parent_for(
+        *, graph_index: int, parent_root: str
+    ) -> Dict[str, Any]:
+        graph = normalized_graphs[graph_index]
+        graph_receipts = {
+            str(item["receipt_hash"]): item for item in graph["receipts"]
+        }
+        closure = set()  # type: set
+        pending = [parent_root]
+        while pending:
+            receipt_hash = pending.pop()
+            if receipt_hash in closure:
+                continue
+            receipt = graph_receipts.get(receipt_hash)
+            _require(
+                receipt is not None,
+                "checkpoint bootstrap parent subgraph is incomplete",
+            )
+            closure.add(receipt_hash)
+            pending.extend(
+                str(item) for item in receipt["parent_receipt_hashes"]
+            )
+        receipts = [
+            dict(item)
+            for item in graph["receipts"]
+            if str(item["receipt_hash"]) in closure
+        ]
+        boot_hashes = {
+            str(item["boot_identity_hash"]) for item in receipts
+        }
+        scopes = {
+            (str(item["job_id"]), str(item["purpose"]))
+            for item in receipts
+        }
+        subgraph = {
+            "schema_version": RECEIPT_GRAPH_SCHEMA_VERSION,
+            "root_receipt_hash": parent_root,
+            "boot_identities": [
+                dict(item)
+                for item in graph["boot_identities"]
+                if str(item["boot_identity_hash"]) in boot_hashes
+            ],
+            "receipts": receipts,
+            "transport_attempts": [
+                dict(item)
+                for item in graph["transport_attempts"]
+                if (str(item["job_id"]), str(item["purpose"])) in scopes
+            ],
+            "host_operations": [
+                dict(item)
+                for item in graph["host_operations"]
+                if (
+                    str(item["request"]["job_id"]),
+                    str(item["request"]["purpose"]),
+                )
+                in scopes
+            ],
+        }
+        allowed_failed = [
+            item
+            for item in normalized_graph_policies[graph_index]
+            if item in closure
+        ]
+        return build_full_graph_parent_v2(
+            subgraph,
+            allowed_failed_receipt_hashes=allowed_failed,
+        )
+
+    newly_issued = []  # type: List[Dict[str, Any]]
+    newly_issued_roots = set()  # type: set
+    remaining_selected = set(selected)
+    while remaining_selected:
+        ready = sorted(
+            receipt_hash
+            for receipt_hash in remaining_selected
+            if all(
+                str(parent_hash) not in remaining_selected
+                for parent_hash in receipt_by_hash[receipt_hash][
+                    "parent_receipt_hashes"
+                ]
+            )
+        )
+        _require(
+            bool(ready),
+            "checkpoint bootstrap selected roots contain a cycle",
+        )
+        for receipt_hash in ready:
+            receipt = receipt_by_hash[receipt_hash]
+            graph_index = graph_roots.index(receipt_hash)
+            parent_hashes = [
+                str(item) for item in receipt["parent_receipt_hashes"]
+            ]
+            parent_certificates = [
+                certificates_by_root[item]
+                for item in parent_hashes
+                if item in certificates_by_root
+            ]
+            parent_full_graphs = [
+                full_parent_for(
+                    graph_index=graph_index,
+                    parent_root=parent_hash,
+                )
+                for parent_hash in parent_hashes
+                if parent_hash not in certificates_by_root
+            ]
+            parent_sequences = [
+                int(item["claim"]["certificate_sequence"])
+                for item in parent_certificates
+            ]
+            scope = (str(receipt["job_id"]), str(receipt["purpose"]))
+            boot_hash = str(receipt["boot_identity_hash"])
+            local_delta = {
+                "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+                "root_receipt_hash": receipt_hash,
+                "boot_identities": [dict(boot_by_hash[boot_hash])],
+                "receipts": [dict(receipt)],
+                "transport_attempts": list(
+                    attempts_by_scope.get(scope, ())
+                ),
+                "host_operations": list(hosts_by_scope.get(scope, ())),
+            }
+            certificate = issue_ancestry_certificate_v2(
+                local_delta=local_delta,
+                lineage_id=lineage_id,
+                certificate_sequence=(
+                    max(parent_sequences) + 1 if parent_sequences else 0
+                ),
+                issuer_boot_identity=issuer_boot_identity,
+                issued_at=issued_at,
+                sign_digest=sign_digest,
+                boot_attestation_verifier=boot_attestation_verifier,
+                allowed_issuer_roles=issuer_roles,
+                parent_certificates=parent_certificates,
+                parent_full_graphs=parent_full_graphs,
+                allowed_failed_receipt_hashes=(
+                    (receipt_hash,)
+                    if receipt["status"] != "succeeded"
+                    else ()
+                ),
+                required_purposes=(str(receipt["purpose"]),),
+            )
+            proof = build_compact_ancestry_proof_from_delta_v2(
+                local_delta,
+                certificate,
+                expected_lineage_id=lineage_id,
+                boot_attestation_verifier=boot_attestation_verifier,
+                allowed_issuer_roles=issuer_roles,
+            )
+            certificates_by_root[receipt_hash] = dict(certificate)
+            newly_issued.append(proof)
+            newly_issued_roots.add(receipt_hash)
+            remaining_selected.remove(receipt_hash)
+
+    _require(
+        newly_issued_roots == set(selected),
+        "checkpoint bootstrap selected root proof is missing",
+    )
+    checkpoint_roots = sorted(certificates_by_root)
+    result = {
+        "schema_version": ANCESTRY_CHECKPOINT_BOOTSTRAP_RESULT_SCHEMA_VERSION,
+        "selected_root_receipt_hashes": selected,
+        "checkpoint_proofs": newly_issued,
+        "checkpoint_root_receipt_hashes": checkpoint_roots,
+        "checkpoint_set_hash": _checkpoint_bootstrap_set_hash(
+            certificates_by_root
+        ),
+    }
+    return validate_ancestry_checkpoint_bootstrap_result_v2(
+        result,
+        expected_selected_root_receipt_hashes=selected,
+        existing_compact_proofs=proof_values,
+        expected_lineage_id=lineage_id,
+        boot_attestation_verifier=boot_attestation_verifier,
+        allowed_issuer_roles=issuer_roles,
+    )
+
+
 def _projection_from_disclosures(
     *,
     projection: Mapping[str, Any],
@@ -1718,7 +2383,215 @@ def validate_compact_ancestry_proof_v2(
     }
 
 
+def validate_ancestry_checkpoint_bootstrap_result_v2(
+    value: Mapping[str, Any],
+    *,
+    expected_selected_root_receipt_hashes: Sequence[str],
+    existing_compact_proofs: Sequence[Mapping[str, Any]],
+    expected_lineage_id: str,
+    boot_attestation_verifier: Callable[[Mapping[str, Any]], Any],
+    allowed_issuer_roles: Iterable[str],
+) -> Dict[str, Any]:
+    """Validate one canonical bootstrap result and its resume frontier."""
+
+    result_fields = {
+        "schema_version",
+        "selected_root_receipt_hashes",
+        "checkpoint_proofs",
+        "checkpoint_root_receipt_hashes",
+        "checkpoint_set_hash",
+    }
+    result = _exact(value, result_fields, "checkpoint bootstrap result")
+    _require(
+        result.get("schema_version")
+        == ANCESTRY_CHECKPOINT_BOOTSTRAP_RESULT_SCHEMA_VERSION,
+        "checkpoint bootstrap result schema is invalid",
+    )
+    expected_selected = _sorted_hashes(
+        list(expected_selected_root_receipt_hashes),
+        "expected selected root receipt hash",
+        MAX_ALLOCATION_PARENT_AUTHORITIES,
+    )
+    _require(
+        list(expected_selected_root_receipt_hashes) == expected_selected,
+        "expected selected root receipt hashes are not canonical",
+    )
+    selected = _sorted_hashes(
+        result.get("selected_root_receipt_hashes"),
+        "selected root receipt hash",
+        MAX_ALLOCATION_PARENT_AUTHORITIES,
+    )
+    _require(
+        list(result["selected_root_receipt_hashes"]) == selected
+        and selected == expected_selected,
+        "checkpoint bootstrap result selected roots differ",
+    )
+    existing_values = list(existing_compact_proofs)
+    _require(
+        len(existing_values) <= MAX_ALLOCATION_PARENT_AUTHORITIES,
+        "checkpoint bootstrap result resume proofs exceed bound",
+    )
+    new_values = result.get("checkpoint_proofs")
+    _require(
+        isinstance(new_values, list),
+        "checkpoint bootstrap result proofs must be an array",
+    )
+    _require(
+        len(new_values) == len(selected),
+        "checkpoint bootstrap result proof count differs from selected roots",
+    )
+    checkpoint_root_values = result.get("checkpoint_root_receipt_hashes")
+    _require(
+        isinstance(checkpoint_root_values, list),
+        "checkpoint bootstrap result roots must be an array",
+    )
+    _require(
+        len(checkpoint_root_values) == len(selected) + len(existing_values),
+        "checkpoint bootstrap result root count differs from bounded frontier",
+    )
+
+    existing_by_root = {}  # type: Dict[str, Dict[str, Any]]
+    existing_roots = []  # type: List[str]
+    for proof_value in existing_values:
+        proof = validate_compact_ancestry_proof_v2(
+            proof_value,
+            expected_lineage_id=expected_lineage_id,
+            boot_attestation_verifier=boot_attestation_verifier,
+            allowed_issuer_roles=allowed_issuer_roles,
+        )
+        root_hash = str(
+            proof["certificate"]["claim"]["output_root_receipt_hash"]
+        )
+        existing_roots.append(root_hash)
+        _require(
+            root_hash not in existing_by_root,
+            "checkpoint bootstrap result resume proof is duplicated",
+        )
+        existing_by_root[root_hash] = proof
+    _require(
+        existing_roots == sorted(existing_roots),
+        "checkpoint bootstrap result resume proofs are not canonical",
+    )
+
+    new_by_root = {}  # type: Dict[str, Dict[str, Any]]
+    new_roots = []  # type: List[str]
+    for proof_value in new_values:
+        proof = validate_compact_ancestry_proof_v2(
+            proof_value,
+            expected_lineage_id=expected_lineage_id,
+            boot_attestation_verifier=boot_attestation_verifier,
+            allowed_issuer_roles=allowed_issuer_roles,
+        )
+        _require(
+            canonical_json(proof) == canonical_json(proof_value),
+            "checkpoint bootstrap result proof is not canonical",
+        )
+        root_hash = str(
+            proof["certificate"]["claim"]["output_root_receipt_hash"]
+        )
+        _require(
+            root_hash not in existing_by_root and root_hash not in new_by_root,
+            "checkpoint bootstrap result proof root is duplicated",
+        )
+        new_roots.append(root_hash)
+        new_by_root[root_hash] = proof
+
+    certificates_by_root = {
+        root_hash: proof["certificate"]
+        for root_hash, proof in existing_by_root.items()
+    }
+    certificates_by_root.update(
+        {
+            root_hash: proof["certificate"]
+            for root_hash, proof in new_by_root.items()
+        }
+    )
+    _require(
+        set(new_by_root) == set(selected),
+        "checkpoint bootstrap result selected root proof set differs",
+    )
+    available = set(existing_by_root)
+    remaining = set(new_by_root)
+    expected_order = []  # type: List[str]
+    while remaining:
+        ready = []  # type: List[str]
+        for root_hash in remaining:
+            parent_rows = new_by_root[root_hash]["certificate"]["claim"][
+                "parent_authorities"
+            ]
+            certificate_parent_roots = {
+                str(item["parent_receipt_hash"])
+                for item in parent_rows
+                if item["authority_kind"] == "certificate"
+            }
+            _require(
+                all(
+                    item["authority_kind"]
+                    in {"certificate", "full_projection"}
+                    for item in parent_rows
+                ),
+                "checkpoint bootstrap result proof parent kind is invalid",
+            )
+            _require(
+                certificate_parent_roots.issubset(
+                    set(certificates_by_root)
+                ),
+                "checkpoint bootstrap result proof parent is absent",
+            )
+            for parent_row in parent_rows:
+                if parent_row["authority_kind"] == "full_projection":
+                    continue
+                parent_root = str(parent_row["parent_receipt_hash"])
+                _require(
+                    parent_row["authority_hash"]
+                    == certificates_by_root[parent_root]["certificate_hash"],
+                    "checkpoint bootstrap result proof parent authority differs",
+                )
+            if certificate_parent_roots.issubset(available):
+                ready.append(root_hash)
+        ready.sort()
+        _require(
+            bool(ready),
+            "checkpoint bootstrap result proof order is not parent-first",
+        )
+        expected_order.extend(ready)
+        available.update(ready)
+        remaining.difference_update(ready)
+    _require(
+        new_roots == expected_order,
+        "checkpoint bootstrap result proof order is not canonical",
+    )
+    checkpoint_roots = _sorted_hashes(
+        checkpoint_root_values,
+        "checkpoint root receipt hash",
+        len(selected) + len(existing_values),
+    )
+    _require(
+        list(result["checkpoint_root_receipt_hashes"]) == checkpoint_roots
+        and checkpoint_roots == sorted(certificates_by_root),
+        "checkpoint bootstrap result root set differs",
+    )
+    _require(
+        set(selected).issubset(set(checkpoint_roots)),
+        "checkpoint bootstrap result selected root proof is missing",
+    )
+    _require(
+        result.get("checkpoint_set_hash")
+        == _checkpoint_bootstrap_set_hash(certificates_by_root),
+        "checkpoint bootstrap result set hash differs",
+    )
+    return {
+        "schema_version": ANCESTRY_CHECKPOINT_BOOTSTRAP_RESULT_SCHEMA_VERSION,
+        "selected_root_receipt_hashes": selected,
+        "checkpoint_proofs": [new_by_root[item] for item in new_roots],
+        "checkpoint_root_receipt_hashes": checkpoint_roots,
+        "checkpoint_set_hash": str(result["checkpoint_set_hash"]),
+    }
+
+
 __all__ = [
+    "ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION",
+    "ANCESTRY_CHECKPOINT_BOOTSTRAP_RESULT_SCHEMA_VERSION",
     "ANCESTRY_CERTIFICATE_CLAIM_SCHEMA_VERSION",
     "ANCESTRY_CERTIFICATE_SCHEMA_VERSION",
     "ANCESTRY_COMPACT_PROOF_SCHEMA_VERSION",
@@ -1746,14 +2619,18 @@ __all__ = [
     "build_ancestry_policy_v2",
     "build_certificate_disclosure_parent_authority_v2",
     "build_certificate_parent_authority_v2",
+    "build_checkpointed_receipt_graph_from_full_graph_v2",
     "build_compact_ancestry_proof_from_delta_v2",
     "build_compact_ancestry_proof_v2",
     "build_full_graph_parent_v2",
     "build_full_graph_parent_authority_v2",
     "derive_ancestry_lineage_id_v2",
     "issue_ancestry_certificate_v2",
+    "issue_legacy_ancestry_checkpoint_bootstrap_v2",
     "project_receipt_graph_v2",
+    "select_ancestry_checkpoint_resume_frontier_v2",
     "validate_ancestry_certificate_v2",
+    "validate_ancestry_checkpoint_bootstrap_result_v2",
     "validate_ancestry_delta_v2",
     "validate_ancestry_lineage_id_v2",
     "validate_ancestry_parent_authority_v2",

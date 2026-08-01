@@ -4,9 +4,11 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
+import time
 
 from gateway.tee import build_identity
 
@@ -18,6 +20,15 @@ def _ordered_offsets(text: str, markers: tuple[str, ...]) -> list[int]:
     offsets = [text.index(marker) for marker in markers]
     assert offsets == sorted(offsets)
     return offsets
+
+
+def _shell_function_source(script: str, name: str) -> str:
+    lines = script.splitlines()
+    start = lines.index(f"{name}() {{")
+    for end in range(start + 1, len(lines)):
+        if lines[end] == "}":
+            return "\n".join(lines[start : end + 1])
+    raise AssertionError(f"unterminated shell function: {name}")
 
 
 def test_gateway_restart_accepts_only_one_exact_commit_argument() -> None:
@@ -96,13 +107,18 @@ def test_pinned_gateway_rollback_preserves_newer_restart_controller() -> None:
 
 def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    main_flow = script[
+        script.index(
+            'echo "Preparing exact gateway commit from configured GitHub branch"'
+        ) :
+    ]
     _ordered_offsets(
-        script,
+        main_flow,
         (
             'echo "Preparing exact gateway commit from configured GitHub branch"',
             'echo "Capturing the official subnet restart window before release acquisition"',
+            'echo "Preparing exact hash-locked V2 build artifacts during release acquisition"',
             'echo "Validating the prepared V2 release before production shutdown"',
-            'echo "Preparing exact hash-locked V2 build artifacts before production shutdown"',
             'echo "Stopping existing gateway and Research Lab worker processes"',
             'echo "Waiting for :8000 to free"',
             'echo "Activating prepared gateway Git commit after process shutdown"',
@@ -487,14 +503,32 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     credential_envelopes = script.index(
         'run_prepared_gateway_module gateway.tee.prepare_gateway_envelopes_v2'
     )
+    artifact_prepare = script.index(
+        'echo "Preparing exact hash-locked V2 build artifacts during release acquisition"'
+    )
+    checkpoint_start = script.index(
+        "if ! start_gateway_ancestry_checkpoint_bootstrap; then"
+    )
+    artifact_start = script.index(
+        "if ! start_gateway_offline_artifact_prepare; then",
+        artifact_prepare,
+    )
+    release_ready = script.index(
+        'record_gateway_restart_timing "release_ready"',
+        release_channel,
+    )
+    artifact_join = script.index(
+        "if ! wait_for_gateway_offline_artifact_prepare; then",
+        release_ready,
+    )
     preflight = script.index(
         'echo "Validating the prepared V2 release before production shutdown"'
     )
+    checkpoint_join = script.index(
+        "if ! wait_for_gateway_ancestry_checkpoint_bootstrap; then"
+    )
     shutdown = script.index(
         'echo "Stopping existing gateway and Research Lab worker processes"'
-    )
-    artifact_prepare = script.index(
-        'echo "Preparing exact hash-locked V2 build artifacts before production shutdown"'
     )
     dependency_preflight = script.index(
         'echo "Installing gateway host Python dependencies before production shutdown"'
@@ -502,12 +536,17 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     assert (
         materialize
         < restart_window
+        < checkpoint_start
+        < artifact_prepare
+        < artifact_start
         < release_channel
+        < release_ready
+        < artifact_join
         < credential_envelopes
         < preflight
+        < checkpoint_join
     )
     assert preflight < shutdown
-    assert preflight < artifact_prepare < shutdown
     assert dependency_preflight < preflight < shutdown
     assert (
         script.index(
@@ -540,7 +579,482 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     ) < shutdown
     assert script.index('--topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}"') < shutdown
     assert script.index("prepare_offline_artifacts_v2.sh") < shutdown
+    assert script.index("bootstrap_active_ancestry_checkpoints_v2.py") < shutdown
+    assert script.count('bash "$prepare_script"') == 1
+    assert (
+        'echo "Preparing exact hash-locked V2 build artifacts before production shutdown"'
+        not in script
+    )
     assert script.index('pkill -9 -f "python3 -u -m gateway.main"') > shutdown
+
+
+def test_gateway_restart_bounds_active_ancestry_before_weight_preparation() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    shutdown = script.index(
+        'echo "Stopping existing gateway and Research Lab worker processes"'
+    )
+    runtime_ready = script.index(
+        'record_gateway_restart_timing "v2_runtime_ready"'
+    )
+    postcheckpoint = script.index(
+        "verify_gateway_active_ancestry_checkpoints\n",
+        runtime_ready,
+    )
+    repair = script.index(
+        "repair_and_verify_gateway_weight_input\n",
+        postcheckpoint,
+    )
+
+    assert script.index("start_gateway_ancestry_checkpoint_bootstrap") < shutdown
+    assert script.index("wait_for_gateway_ancestry_checkpoint_bootstrap") < shutdown
+    assert runtime_ready < postcheckpoint < repair
+    assert '--release-manifest "$GATEWAY_V2_RELEASE_MANIFEST"' in script[
+        runtime_ready:repair
+    ]
+    assert "return 3" in (
+        ROOT / "gateway" / "tee" / "bootstrap_active_ancestry_checkpoints_v2.py"
+    ).read_text(encoding="utf-8")
+    assert '3)\n      # Expected exactly once' in script
+    assert "candidate runtime did not durably bound active receipt ancestry" in script
+
+
+def test_gateway_offline_artifact_prepare_overlaps_release_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    helper_source = "\n\n".join(
+        _shell_function_source(script, name)
+        for name in (
+            "wait_for_gateway_owned_process_group",
+            "start_gateway_offline_artifact_prepare",
+            "wait_for_gateway_offline_artifact_prepare",
+        )
+    )
+    preflight_tree = tmp_path / "candidate"
+    prepare_script = (
+        preflight_tree / "gateway" / "tee" / "prepare_offline_artifacts_v2.sh"
+    )
+    prepare_script.parent.mkdir(parents=True)
+    prepare_script.write_text(
+        """#!/bin/bash
+set -euo pipefail
+echo artifact-start >> "$CONCURRENCY_LOG"
+sleep "${FAKE_ARTIFACT_SECONDS}"
+echo artifact-end >> "$CONCURRENCY_LOG"
+echo artifact-ready
+exit "${FAKE_ARTIFACT_STATUS:-0}"
+""",
+        encoding="utf-8",
+    )
+    prepare_script.chmod(0o755)
+    artifact_root = tmp_path / "artifacts"
+    artifact_log = tmp_path / "artifact.log"
+    timing_log = tmp_path / "timing.log"
+    concurrency_log = tmp_path / "concurrency.log"
+    shutdown_marker = tmp_path / "shutdown"
+    harness = f"""set -euo pipefail
+record_gateway_restart_timing() {{
+  printf '%s:%s\\n' "$1" "${{2:-reached}}" >> "$TIMING_LOG"
+}}
+{helper_source}
+GATEWAY_PREFLIGHT_TREE="$1"
+GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$2"
+GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG="$3"
+GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID=""
+TIMING_LOG="$4"
+SHUTDOWN_MARKER="$5"
+start_gateway_offline_artifact_prepare
+echo release-start >> "$CONCURRENCY_LOG"
+sleep "$FAKE_RELEASE_SECONDS"
+echo release-end >> "$CONCURRENCY_LOG"
+if wait_for_gateway_offline_artifact_prepare; then
+  touch "$SHUTDOWN_MARKER"
+else
+  status=$?
+  test ! -e "$SHUTDOWN_MARKER"
+  exit "$status"
+fi
+"""
+    command = [
+        "bash",
+        "-c",
+        harness,
+        "gateway-offline-overlap-test",
+        str(preflight_tree),
+        str(artifact_root),
+        str(artifact_log),
+        str(timing_log),
+        str(shutdown_marker),
+    ]
+
+    success = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=4,
+        env={
+            **os.environ,
+            "CONCURRENCY_LOG": str(concurrency_log),
+            "FAKE_ARTIFACT_SECONDS": "1.0",
+            "FAKE_RELEASE_SECONDS": "1.0",
+        },
+    )
+    assert success.returncode == 0, success.stderr
+    concurrency_events = concurrency_log.read_text(encoding="utf-8").splitlines()
+    assert concurrency_events.index("artifact-start") < concurrency_events.index(
+        "release-end"
+    )
+    assert concurrency_events.index("release-start") < concurrency_events.index(
+        "artifact-end"
+    )
+    assert shutdown_marker.exists()
+    assert "artifact-ready" in success.stdout
+    assert timing_log.read_text(encoding="utf-8").splitlines() == [
+        "offline_artifact_prepare_started:reached",
+        "offline_artifact_prepare_complete:passed",
+    ]
+
+    shutdown_marker.unlink()
+    timing_log.unlink()
+    concurrency_log.unlink()
+    failed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=3,
+        env={
+            **os.environ,
+            "CONCURRENCY_LOG": str(concurrency_log),
+            "FAKE_ARTIFACT_SECONDS": "0.05",
+            "FAKE_ARTIFACT_STATUS": "23",
+            "FAKE_RELEASE_SECONDS": "0.1",
+        },
+    )
+    assert failed.returncode == 23
+    assert not shutdown_marker.exists()
+    assert "failed before shutdown" in failed.stderr
+    assert timing_log.read_text(encoding="utf-8").splitlines() == [
+        "offline_artifact_prepare_started:reached",
+        "offline_artifact_prepare_complete:failed",
+    ]
+
+
+def test_gateway_ancestry_precheckpoint_overlaps_and_has_exact_exit_semantics(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    helper_source = "\n\n".join(
+        _shell_function_source(script, name)
+        for name in (
+            "wait_for_gateway_owned_process_group",
+            "start_gateway_ancestry_checkpoint_bootstrap",
+            "wait_for_gateway_ancestry_checkpoint_bootstrap",
+        )
+    )
+    preflight_tree = tmp_path / "candidate"
+    helper = (
+        preflight_tree
+        / "gateway"
+        / "tee"
+        / "bootstrap_active_ancestry_checkpoints_v2.py"
+    )
+    helper.parent.mkdir(parents=True)
+    helper.write_text("# candidate helper\n", encoding="utf-8")
+    environment = tmp_path / "gateway.env"
+    environment.write_text("export TEST_GATEWAY_ENV=ready\n", encoding="utf-8")
+    commit = "a" * 40
+    release = tmp_path / "release.json"
+    release.write_text(json.dumps({"commit_sha": commit}), encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        f"""#!/bin/bash
+case "$*" in
+  *build-info*) printf '%s\\n' '{{"git_commit":"{commit}"}}' ;;
+  *health/v2-authority*) printf '%s\\n' '{{"status":"ready"}}' ;;
+  *) exit 22 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+    fake_timeout = fake_bin / "timeout"
+    fake_timeout.write_text(
+        "#!/bin/bash\nshift\nexec \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_timeout.chmod(0o755)
+    fake_python = tmp_path / "gateway-python"
+    fake_python.write_text(
+        f"""#!/bin/bash
+if [ "${{1:-}}" = "-" ]; then
+  exec {shlex.quote(sys.executable)} "$@"
+fi
+test "$1" = "-m"
+test "$2" = "gateway.tee.bootstrap_active_ancestry_checkpoints_v2"
+test "$TEST_GATEWAY_ENV" = "ready"
+sleep "${{FAKE_CHECKPOINT_SECONDS:-0}}"
+exit "${{FAKE_CHECKPOINT_STATUS:-0}}"
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    timing_log = tmp_path / "timing.log"
+    harness = f"""set -euo pipefail
+record_gateway_restart_timing() {{
+  printf '%s:%s\\n' "$1" "${{2:-reached}}" >> "$TIMING_LOG"
+}}
+{helper_source}
+GATEWAY_PREFLIGHT_TREE="$1"
+GATEWAY_PYTHON_BIN="$2"
+GATEWAY_V2_RELEASE_MANIFEST="$3"
+GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT="$4"
+GATEWAY_ANCESTRY_CHECKPOINT_LOG="$5"
+ENV_CLONE="$6"
+TIMING_LOG="$7"
+GATEWAY_ANCESTRY_CHECKPOINT_PID=""
+GATEWAY_ANCESTRY_CHECKPOINT_STATE="not_started"
+start_gateway_ancestry_checkpoint_bootstrap
+sleep "$FAKE_RELEASE_SECONDS"
+if [ "${{REQUIRE_CHECKPOINT_RUNNING:-0}}" = "1" ]; then
+  kill -0 "$GATEWAY_ANCESTRY_CHECKPOINT_PID"
+fi
+wait_for_gateway_ancestry_checkpoint_bootstrap
+printf '%s\\n' "$GATEWAY_ANCESTRY_CHECKPOINT_STATE"
+"""
+    command = [
+        "bash",
+        "-c",
+        harness,
+        "gateway-ancestry-overlap-test",
+        str(preflight_tree),
+        str(fake_python),
+        str(release),
+        str(tmp_path / "release-snapshot.json"),
+        str(tmp_path / "checkpoint.log"),
+        str(environment),
+        str(timing_log),
+    ]
+    base_env = {
+        **os.environ,
+        "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+        "FAKE_RELEASE_SECONDS": "0.05",
+    }
+
+    passed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=3,
+        env={
+            **base_env,
+            "FAKE_CHECKPOINT_SECONDS": "0.3",
+            "REQUIRE_CHECKPOINT_RUNNING": "1",
+        },
+    )
+    assert passed.returncode == 0, passed.stderr
+    assert passed.stdout.rstrip().endswith("passed")
+    assert timing_log.read_text(encoding="utf-8").splitlines() == [
+        "ancestry_precheckpoint_started:reached",
+        "ancestry_precheckpoint_complete:passed",
+    ]
+
+    timing_log.unlink()
+    unsupported = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=3,
+        env={
+            **base_env,
+            "FAKE_CHECKPOINT_SECONDS": "0.01",
+            "FAKE_CHECKPOINT_STATUS": "3",
+            "FAKE_RELEASE_SECONDS": "0.01",
+        },
+    )
+    assert unsupported.returncode == 0, unsupported.stderr
+    assert unsupported.stdout.rstrip().endswith("unsupported")
+    assert timing_log.read_text(encoding="utf-8").splitlines() == [
+        "ancestry_precheckpoint_started:reached",
+        "ancestry_precheckpoint_complete:unsupported",
+    ]
+
+    timing_log.unlink()
+    failed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=3,
+        env={
+            **base_env,
+            "FAKE_CHECKPOINT_SECONDS": "0.01",
+            "FAKE_CHECKPOINT_STATUS": "23",
+            "FAKE_RELEASE_SECONDS": "0.01",
+        },
+    )
+    assert failed.returncode == 23
+    assert "failed before shutdown" in failed.stderr
+    assert timing_log.read_text(encoding="utf-8").splitlines() == [
+        "ancestry_precheckpoint_started:reached",
+        "ancestry_precheckpoint_complete:failed",
+    ]
+
+
+def test_gateway_exit_cleanup_terminates_offline_artifact_prepare(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    helper_source = "\n\n".join(
+        _shell_function_source(script, name)
+        for name in (
+            "wait_for_gateway_owned_process_group",
+            "cancel_gateway_owned_process_group",
+            "start_gateway_offline_artifact_prepare",
+            "cancel_gateway_offline_artifact_prepare",
+        )
+    )
+    preflight_tree = tmp_path / "candidate"
+    prepare_script = (
+        preflight_tree / "gateway" / "tee" / "prepare_offline_artifacts_v2.sh"
+    )
+    prepare_script.parent.mkdir(parents=True)
+    prepare_script.write_text(
+        """#!/bin/bash
+set -euo pipefail
+echo started > "$FAKE_STARTED_MARKER"
+sleep 300 &
+child_pid="$!"
+printf '%s\n' "$child_pid" > "$FAKE_CHILD_PID_MARKER"
+wait "$child_pid"
+""",
+        encoding="utf-8",
+    )
+    prepare_script.chmod(0o755)
+    started_marker = tmp_path / "started"
+    child_pid_marker = tmp_path / "child-pid"
+    harness = f"""set -euo pipefail
+record_gateway_restart_timing() {{ :; }}
+{helper_source}
+GATEWAY_PREFLIGHT_TREE="$1"
+GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$2"
+GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG="$3"
+GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID=""
+start_gateway_offline_artifact_prepare
+prepare_pid="$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID"
+for _ in $(seq 1 20); do
+  if [ -s "$FAKE_STARTED_MARKER" ] && [ -s "$FAKE_CHILD_PID_MARKER" ]; then
+    break
+  fi
+  sleep 0.05
+done
+test -s "$FAKE_STARTED_MARKER"
+test -s "$FAKE_CHILD_PID_MARKER"
+child_pid="$(cat "$FAKE_CHILD_PID_MARKER")"
+cancel_gateway_offline_artifact_prepare
+test -z "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID"
+for _ in $(seq 1 20); do
+  if ! kill -0 "$child_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.05
+done
+if kill -0 "$prepare_pid" 2>/dev/null || kill -0 "$child_pid" 2>/dev/null; then
+  exit 91
+fi
+"""
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness,
+            "gateway-offline-cleanup-test",
+            str(preflight_tree),
+            str(tmp_path / "artifacts"),
+            str(tmp_path / "artifact.log"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env={
+            **os.environ,
+            "FAKE_STARTED_MARKER": str(started_marker),
+            "FAKE_CHILD_PID_MARKER": str(child_pid_marker),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert child_pid_marker.exists()
+
+    exit_handler = _shell_function_source(script, "on_gateway_restart_exit")
+    assert exit_handler.index("cancel_gateway_offline_artifact_prepare") < (
+        exit_handler.index('rm -rf "$GATEWAY_PREFLIGHT_TREE"')
+    )
+    assert exit_handler.index("cancel_gateway_ancestry_checkpoint_bootstrap") < (
+        exit_handler.index('rm -rf "$GATEWAY_PREFLIGHT_TREE"')
+    )
+
+
+def test_gateway_background_launch_waits_for_owned_process_group_before_return(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    helper_source = "\n\n".join(
+        _shell_function_source(script, name)
+        for name in (
+            "wait_for_gateway_owned_process_group",
+            "cancel_gateway_owned_process_group",
+            "start_gateway_offline_artifact_prepare",
+            "cancel_gateway_offline_artifact_prepare",
+        )
+    )
+    preflight_tree = tmp_path / "candidate"
+    prepare_script = (
+        preflight_tree / "gateway" / "tee" / "prepare_offline_artifacts_v2.sh"
+    )
+    prepare_script.parent.mkdir(parents=True)
+    prepare_script.write_text("#!/bin/bash\nsleep 300\n", encoding="utf-8")
+    prepare_script.chmod(0o755)
+    artifact_log = tmp_path / "artifact.log"
+    harness = f"""set -euo pipefail
+record_gateway_restart_timing() {{ :; }}
+{helper_source}
+GATEWAY_PREFLIGHT_TREE="$1"
+GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$2"
+GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG="$3"
+GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID=""
+start_gateway_offline_artifact_prepare
+prepare_pid="$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID"
+marker="${{GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG}}.process-group"
+test "$(cat "$marker")" = "$prepare_pid"
+kill -0 -- "-$prepare_pid"
+cancel_gateway_offline_artifact_prepare
+test ! -e "$marker"
+if kill -0 "$prepare_pid" 2>/dev/null || kill -0 -- "-$prepare_pid" 2>/dev/null; then
+  exit 91
+fi
+"""
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness,
+            "gateway-owned-process-group-test",
+            str(preflight_tree),
+            str(tmp_path / "artifacts"),
+            str(artifact_log),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_gateway_worker_deferral_is_restart_scoped() -> None:
@@ -631,9 +1145,28 @@ def test_gateway_restart_records_nonblocking_commit_bound_stage_timings() -> Non
 
     assert "leadpoet.gateway_restart_timing.v1" in script
     assert 'record_gateway_restart_timing "invoked"' in script
+    assert 'record_gateway_restart_timing "offline_artifact_prepare_started"' in script
+    assert 'record_gateway_restart_timing "ancestry_precheckpoint_started"' in script
+    assert 'record_gateway_restart_timing "release_wait_started"' in script
     assert 'record_gateway_restart_timing "release_ready"' in script
     assert (
+        'record_gateway_restart_timing "offline_artifact_prepare_complete" "passed"'
+        in script
+    )
+    assert (
+        'record_gateway_restart_timing "offline_artifact_prepare_complete" "failed"'
+        in script
+    )
+    assert (
         'record_gateway_restart_timing "pre_shutdown_checks_complete"'
+        in script
+    )
+    assert (
+        'record_gateway_restart_timing "ancestry_postcheckpoint_started"'
+        in script
+    )
+    assert (
+        'record_gateway_restart_timing "ancestry_postcheckpoint_complete" "passed"'
         in script
     )
     assert 'record_gateway_restart_timing "candidate_activated"' in script
@@ -931,6 +1464,9 @@ def test_gateway_fallback_logs_stay_outside_canonical_checkout(tmp_path: Path) -
 
 def test_gateway_restart_pins_all_build_provenance_to_selected_sha() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    role_builder = (ROOT / "gateway" / "tee" / "build_role_enclaves.sh").read_text(
+        encoding="utf-8"
+    )
     for assignment in (
         'export GITHUB_SHA="$GATEWAY_DEPLOY_SHA"',
         'export GITHUB_COMMIT="$GATEWAY_DEPLOY_SHA"',
@@ -941,7 +1477,13 @@ def test_gateway_restart_pins_all_build_provenance_to_selected_sha() -> None:
         assert assignment in script
     assert 'printf \'%s\\n\' "$GATEWAY_DEPLOY_SHA" > "$GATEWAY_ROOT/.source_commit"' in script
     assert 'http://localhost:8000/build-info' in script
-    assert 'rm -f "$GATEWAY_TEE_EIF_ROOT"/enclave-build-*.json' in script
+    # Preserve the current exact build evidence long enough to prove a
+    # content-addressed same-release restore.  A cache miss performs the old
+    # cold path, which deletes each output/measurement immediately before it
+    # is rebuilt.
+    assert 'rm -f "$GATEWAY_TEE_EIF_ROOT"/enclave-build-*.json' not in script
+    assert 'rm -f "$output" "$measurements"' in role_builder
+    assert "release_archive_v2" in role_builder
     assert (
         'enclave-build-gateway.json' in script
         or 'build_role_enclaves.sh' in script

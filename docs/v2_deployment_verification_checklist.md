@@ -76,6 +76,56 @@ contract; never force-reset the protected model branch. Verify the
 old-equivalent artifact under the dual-compatible Leadpoet release before
 considering a rollback to older strict consumer code.
 
+### 2b. Bounded Ancestry Restart Rollout
+
+Gateway releases containing the measured ancestry-bootstrap operation require
+`scripts/138-research-lab-ancestry-checkpoint-bootstrap-purpose.sql` before the
+restart. The pre-shutdown Supabase contract probe fails closed if that
+migration, its validated role/purpose constraint, or its service-role-only RPC
+is missing.
+
+- [ ] Keep every immutable receipt, edge, boot identity, transport root, and
+  host-operation root in the append-only store. A checkpoint replaces only the
+  restart transport of already-verified ancestry; it never deletes authority
+  or changes scoring/allocation inputs.
+- [ ] On the first rollout, expect the N-1 coordinator to report the new
+  operation as explicitly `unsupported`. This is the only tolerated
+  pre-checkpoint result; the candidate coordinator must then validate the full
+  active legacy roots, sign one bounded recursive proof per selected root,
+  persist it, and pass exact durable readback before weight preparation.
+- [ ] On subsequent rollouts, require the old gateway's release manifest,
+  `/build-info`, V2 health, coordinator boot identity, release/PCR0
+  commitments, and ancestry lineage to agree before candidate host code may
+  request pre-checkpointing. The work runs at low CPU/I/O priority during
+  attestation acquisition and is joined before shutdown.
+- [ ] Require the candidate-side checkpoint verification on every restart,
+  even when pre-checkpointing passed. It must reselect active allocation and
+  sourcing roots, prove the epoch/root set is stable, and find no remaining
+  full legacy root before authoritative weight preparation.
+- [ ] Treat invalid health, boot/release mismatch, changed roots, proof
+  omission/reordering, signature mismatch, persistence mismatch, or missing
+  readback as fatal. Do not turn these into cache misses or broad retries.
+- [ ] Review the `ancestry-checkpoint.log` and restart timing events
+  `ancestry_precheckpoint_*` and `ancestry_postcheckpoint_*` to distinguish
+  selection, proof loading, enclave execution, persistence, and readback.
+- [ ] Exact-release EIF archive restore is eligible only when commit, source,
+  dependency lock, role/image identity, release manifest, and PCR0 all verify.
+  It accelerates a same-SHA retry or retained rollback; a new SHA still cold
+  builds, and any present-but-invalid archive fails closed rather than falling
+  back silently. Retain exactly the current release plus two predecessors;
+  promote an older release only after exact installed readback. Rollback copies
+  must complete before replacement, and cleanup may remove only aged, unopened
+  interrupted staging directories.
+
+Offline artifact preparation may overlap the release wait, but it must own a
+cancelable process group and join successfully before shutdown. Downloads and
+temporary verification remain parallel; final shared-cache publication and
+readback must hold the Docker operation lock used by live PCR0 consumers. Release
+approval, lineage verification, credential envelopes, prelaunch validation,
+largest-first Nitro startup, direct authority verification, and the independent
+HTTP validator handoff remain mandatory and serialized at their trust
+boundaries.
+
 ### 3. Accelerated Production Rehearsal
 
 Replace `<deployed-sha>` with the exact production N-1 SHA:
@@ -95,7 +145,9 @@ It runs one exact forward transition and must prove:
   exact commit agree.
 - [ ] Installed N-1 gateway and validator launcher paths complete.
 - [ ] Candidate migrations apply to disposable PostgreSQL; strict PostgREST
-  validates real relation, column, view, constraint, and RPC contracts.
+  validates real relation, column, view, constraint, and RPC contracts,
+  including the ancestry-bootstrap purpose and contract RPC from migration
+  137.
 - [ ] Credential-envelope and provider preflight paths complete without
   plaintext fallback.
 - [ ] Signed private-model v7 -> v8 -> v7 transition, pointer/source alignment,

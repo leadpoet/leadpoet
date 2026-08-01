@@ -44,12 +44,16 @@ from gateway.tee.topology import ROLE_SPECS, topology_hash
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     build_boot_identity_body,
+    build_receipt_graph,
     build_transport_attempt,
     create_boot_identity,
     sha256_bytes,
     sha256_json,
     transport_root,
     validate_receipt_graph,
+)
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION,
 )
 
 
@@ -703,6 +707,106 @@ async def test_v2_bridge_retains_checkpoint_parent_for_business_logic_and_extend
             ],
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_bootstrap_resume_proof_is_input_not_session_parent():
+    release = _release()
+    scoring = _Client(release)
+
+    async def persist(graph, **_kwargs):
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    common = {
+        "operation": "benchmark_icp_score",
+        "purpose": "research_lab.benchmark.v2",
+        "worker_index": 0,
+        "release_manifest": release,
+        "client": scoring,
+        "persist_graph": persist,
+        "boot_verifier": lambda identity: identity,
+        "poll_seconds": 0.001,
+    }
+    first = await execute_scoring_v2(
+        **common,
+        epoch_id=12,
+        sequence=0,
+        payload={"generation": 1},
+    )
+    second = await execute_scoring_v2(
+        **common,
+        epoch_id=13,
+        sequence=0,
+        payload={"generation": 2},
+        parent_graphs=(first["receipt_graph"],),
+        parent_ancestry_proofs=(first["ancestry_compact_proof"],),
+    )
+    legacy_graph = build_receipt_graph(
+        root_receipt_hash=second["receipt"]["receipt_hash"],
+        boot_identities=(scoring.boot,),
+        receipts=(first["receipt"], second["receipt"]),
+        transport_attempts=(),
+    )
+    request_schema = ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION
+    coordinator = _CoordinatorClient(
+        release,
+        executor=lambda _operation, payload, _context: ExecutionResultV2(
+            output={
+                "schema_version": request_schema,
+                "selected_root_receipt_hashes": list(
+                    payload["selected_root_receipt_hashes"]
+                ),
+            },
+            ancestry_checkpoint_bootstrap=True,
+        ),
+    )
+    async def persist_checkpoint(
+        proof, *, checkpointed_graph, **_kwargs
+    ):
+        return {
+            "root_receipt_hash": checkpointed_graph["root_receipt_hash"],
+            "proof_hash": proof["proof_hash"],
+        }
+
+    bootstrap = await execute_scoring_v2(
+        operation="ancestry_checkpoint_bootstrap_v2",
+        purpose="research_lab.ancestry_checkpoint_bootstrap.v2",
+        epoch_id=13,
+        sequence=0,
+        payload={
+            "schema_version": request_schema,
+            "selected_root_receipt_hashes": [
+                legacy_graph["root_receipt_hash"]
+            ],
+        },
+        worker_index=0,
+        parent_graphs=(legacy_graph,),
+        parent_ancestry_proofs=(first["ancestry_compact_proof"],),
+        release_manifest=release,
+        client=coordinator,
+        persist_graph=persist,
+        persist_ancestry_checkpoint=persist_checkpoint,
+        boot_verifier=lambda identity: identity,
+        operation_registry=COORDINATOR_OPERATIONS_V2,
+        physical_role_override="gateway_coordinator",
+        expected_service_role="gateway_coordinator",
+        rpc_namespace="coordinator_v2",
+        poll_seconds=0.001,
+    )
+    selected_root = legacy_graph["root_receipt_hash"]
+    resume_root = first["receipt"]["receipt_hash"]
+    assert bootstrap["receipt"]["parent_receipt_hashes"] == [
+        selected_root
+    ]
+    assert resume_root not in bootstrap["receipt"][
+        "parent_receipt_hashes"
+    ]
+    assert [
+        item["parent_receipt_hash"]
+        for item in bootstrap["ancestry_compact_proof"]["certificate"][
+            "claim"
+        ]["parent_authorities"]
+    ] == [selected_root]
 
 
 @pytest.mark.asyncio

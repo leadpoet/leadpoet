@@ -4,6 +4,7 @@ from gateway.tee.artifact_vault_v2 import (
     ARTIFACT_PERSISTENCE_MAX_ATTEMPTS_PER_METHOD,
 )
 from gateway.tee.coordinator_executor_v2 import (
+    OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2,
     OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
     OP_ATTEST_ARTIFACT_PERSISTENCE,
     OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2,
@@ -19,12 +20,16 @@ from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.provider_outcome_v2 import ProviderOutcomeLedgerV2
 from gateway.tee.scoring_executor import ScoringExecutionResult
 from leadpoet_canonical.attested_v2 import (
+    RECEIPT_GRAPH_SCHEMA_VERSION,
     build_transport_attempt,
     sha256_json,
     transport_root,
 )
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     build_allocation_settlement_frontier_v2,
+)
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION,
 )
 from leadpoet_canonical.weight_computation import (
     WEIGHT_SNAPSHOT_SCHEMA_VERSION,
@@ -143,6 +148,50 @@ def _weight_snapshot():
     }
     value["config_hash"] = weight_config_hash(value)
     return value
+
+
+@pytest.mark.asyncio
+async def test_coordinator_ancestry_bootstrap_requires_canonical_legacy_roots():
+    root_hash = "sha256:" + "1" * 64
+    context = ExecutionContextV2(
+        job_id="ancestry-bootstrap:test",
+        purpose="research_lab.ancestry_checkpoint_bootstrap.v2",
+        epoch_id=100,
+        external_receipt_graphs=[
+            {
+                "schema_version": RECEIPT_GRAPH_SCHEMA_VERSION,
+                "root_receipt_hash": root_hash,
+                "receipts": [{"receipt_hash": root_hash}],
+            }
+        ],
+    )
+    result = await CoordinatorExecutorV2()(
+        OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2,
+        {
+            "schema_version": (
+                ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION
+            ),
+            "selected_root_receipt_hashes": [root_hash],
+        },
+        context,
+    )
+    assert result.ancestry_checkpoint_bootstrap is True
+    assert result.output["selected_root_receipt_hashes"] == [root_hash]
+
+    context.external_receipt_graphs[0]["schema_version"] = (
+        "leadpoet.attested_checkpointed_receipt_graph.v3"
+    )
+    with pytest.raises(ValueError, match="requires legacy full graphs"):
+        await CoordinatorExecutorV2()(
+            OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2,
+            {
+                "schema_version": (
+                    ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION
+                ),
+                "selected_root_receipt_hashes": [root_hash],
+            },
+            context,
+        )
 
 
 @pytest.mark.asyncio

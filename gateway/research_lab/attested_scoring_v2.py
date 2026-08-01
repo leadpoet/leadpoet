@@ -22,6 +22,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from gateway.tee.execution_job_manager_v2 import (
     JOB_SCHEMA_VERSION,
+    MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
     MAX_EXTERNAL_RECEIPT_GRAPHS,
     MAX_INPUT_BYTES,
     PARENT_ANCESTRY_PROOFS_FIELD,
@@ -158,6 +159,13 @@ def _compact_proof_root(proof: Mapping[str, Any]) -> str:
         if isinstance(claim, Mapping)
         else ""
     ).lower()
+
+
+def _is_checkpoint_bootstrap_scope(*, operation: str, purpose: str) -> bool:
+    return (
+        operation == "ancestry_checkpoint_bootstrap_v2"
+        and purpose == "research_lab.ancestry_checkpoint_bootstrap.v2"
+    )
 
 
 async def _resolve_parent_ancestry_transport_v2(
@@ -1048,6 +1056,10 @@ async def execute_scoring_v2(
         )
 
         load_ancestry_proofs = load_ancestry_checkpoint_proofs_v2
+    checkpoint_bootstrap_scope = _is_checkpoint_bootstrap_scope(
+        operation=operation,
+        purpose=purpose,
+    )
     (
         transport_parent_graphs,
         transport_parent_proofs,
@@ -1058,10 +1070,41 @@ async def execute_scoring_v2(
         allowed_failed_receipt_hashes=allowed_failed,
         expected_lineage_id=ancestry_lineage_id,
         boot_attestation_verifier=verifier,
-        load_ancestry_proofs=load_ancestry_proofs,
+        # Selected legacy roots must reach the checkpoint issuer as complete
+        # graphs even if a concurrent durable lookup happens to find another
+        # proof. Explicit resume proofs remain authenticated payload inputs.
+        load_ancestry_proofs=(
+            None if checkpoint_bootstrap_scope else load_ancestry_proofs
+        ),
     )
+    if checkpoint_bootstrap_scope:
+        selected_graph_roots = sorted(
+            str(graph.get("root_receipt_hash") or "").lower()
+            for graph in transport_parent_graphs
+        )
+        if (
+            len(selected_graph_roots) != len(parent_graphs)
+            or set(selected_graph_roots)
+            != {
+                str(graph.get("root_receipt_hash") or "").lower()
+                for graph in parent_graphs
+            }
+        ):
+            raise AttestedScoringV2Error(
+                "checkpoint bootstrap selected legacy graphs are incomplete"
+            )
+        trusted_parent_authorities = {
+            root: trusted_parent_authorities[root]
+            for root in selected_graph_roots
+        }
     parent_roots = sorted(trusted_parent_authorities)
     logical_payload_document = dict(payload)
+    if checkpoint_bootstrap_scope and transport_parent_proofs:
+        logical_payload_document[
+            "_v2_checkpoint_resume_proof_hashes"
+        ] = sorted(
+            str(proof["proof_hash"]) for proof in transport_parent_proofs
+        )
     if normalized_profile != "default":
         logical_payload_document["_v2_provider_credential_profile"] = normalized_profile
     if credential_refs:
@@ -1088,7 +1131,10 @@ async def execute_scoring_v2(
         parent_graphs=transport_parent_graphs,
         provider_credential_profile=normalized_profile,
         provider_credential_ref_hashes=credential_refs,
-        max_parent_graph_count=max_parent_authorities,
+        max_parent_graph_count=min(
+            max_parent_authorities,
+            MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
+        ),
     )
     payload_bytes = _canonical_bytes(payload_document)
     if transport_metadata["encoding"] == "receipt_graph_set":

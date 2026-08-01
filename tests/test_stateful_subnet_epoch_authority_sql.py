@@ -89,6 +89,9 @@ def test_receipt_allowlist_retains_canonical_contract_and_adds_epoch_authorities
         migrated_purposes = set(re.findall(r"'([^']+)'", match.group(1)))
         expected_purposes = set(canonical_purposes)
         if role == "gateway_coordinator":
+            expected_purposes.discard(
+                "research_lab.ancestry_checkpoint_bootstrap.v2"
+            )
             expected_purposes.add("research_lab.subnet_epoch_cutover.v2")
             expected_purposes.discard(
                 "research_lab.chain_weight_observation.v1"

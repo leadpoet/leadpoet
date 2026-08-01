@@ -452,11 +452,12 @@ def _migration_schema_contract(
         "135-research-lab-active-model-result-replay.sql",
         "136-research-lab-ancestry-checkpoint-sidecars.sql",
         "137-research-lab-allocation-settlement-frontier.sql",
+        "138-research-lab-ancestry-checkpoint-bootstrap-purpose.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (
         not isinstance(applied_migrations, list)
-        or applied_migrations[-8:] != expected_final_migrations
+        or applied_migrations[-9:] != expected_final_migrations
     ):
         raise RuntimeError(
             "migration-backed final migration order differs from production"
@@ -537,6 +538,7 @@ def _migration_schema_contract(
         "research_lab_champion_lifetime_credit_contract_v1",
         "persist_research_lab_ancestry_checkpoint_v2",
         "persist_research_lab_allocation_settlement_frontier_v2",
+        "research_lab_ancestry_checkpoint_bootstrap_contract_v2",
     }
     if not required_rpcs <= set(raw_rpcs):
         raise RuntimeError(

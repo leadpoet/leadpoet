@@ -40,6 +40,12 @@ GATEWAY_RESTART_STARTED_EPOCH="${GATEWAY_RESTART_STARTED_EPOCH:-$(date -u +%s)}"
 GATEWAY_RESTART_TIMING_DIR="${GATEWAY_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
 GATEWAY_RESTART_TIMING_FILE="${GATEWAY_RESTART_TIMING_FILE:-$GATEWAY_RESTART_TIMING_DIR/gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$.jsonl}"
 GATEWAY_RESTART_TIMING_INITIALIZED="${GATEWAY_RESTART_TIMING_INITIALIZED:-0}"
+GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID=""
+GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG="${GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.offline-artifacts.log}"
+GATEWAY_ANCESTRY_CHECKPOINT_PID=""
+GATEWAY_ANCESTRY_CHECKPOINT_STATE="not_started"
+GATEWAY_ANCESTRY_CHECKPOINT_LOG="${GATEWAY_ANCESTRY_CHECKPOINT_LOG:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.ancestry-checkpoint.log}"
+GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT="${GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.running-release.json}"
 GATEWAY_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
 GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST="${GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
 GATEWAY_RESTART_START_PATH="/home/ec2-user/.config/leadpoet/restart-start-v1.json"
@@ -116,7 +122,6 @@ if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \
   echo "ERROR: --commit must be a lowercase full 40-character SHA" >&2
   exit 2
 fi
-
 V2_CREDENTIAL_ENVELOPES=(
   "$GATEWAY_V2_CONFIG_DIR/artifact_master_key.json"
   "$GATEWAY_V2_CONFIG_DIR/openrouter.json"
@@ -175,6 +180,347 @@ PY
     echo "WARNING: gateway restart timing event could not be recorded: $stage" >&2
   fi
   return 0
+}
+
+wait_for_gateway_owned_process_group() {
+  local process_pid="$1" ready_marker="$2" label="$3"
+  local observed_pid=""
+  for _ in $(seq 1 100); do
+    if [ -s "$ready_marker" ]; then
+      IFS= read -r observed_pid < "$ready_marker" || observed_pid=""
+      # The child writes this only after setsid.  It may legitimately finish
+      # before the parent observes the marker; as an unreaped child its PID
+      # cannot be reused before the later wait.
+      if [ "$observed_pid" = "$process_pid" ]; then
+        return 0
+      fi
+      break
+    fi
+    if ! kill -0 "$process_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.01
+  done
+  kill -TERM "$process_pid" 2>/dev/null || true
+  wait "$process_pid" 2>/dev/null || true
+  rm -f -- "$ready_marker"
+  echo "ERROR: $label did not establish its owned process group" >&2
+  return 1
+}
+
+cancel_gateway_owned_process_group() {
+  local process_pid="$1" ready_marker="$2"
+  if kill -0 -- "-$process_pid" 2>/dev/null; then
+    kill -TERM -- "-$process_pid" 2>/dev/null || true
+  else
+    # The direct-PID fallback closes the small launch window before setsid.
+    kill -TERM "$process_pid" 2>/dev/null || true
+  fi
+  for _ in $(seq 1 20); do
+    if ! kill -0 -- "-$process_pid" 2>/dev/null \
+        && ! kill -0 "$process_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+  kill -KILL -- "-$process_pid" 2>/dev/null || true
+  kill -KILL "$process_pid" 2>/dev/null || true
+  wait "$process_pid" 2>/dev/null || true
+  rm -f -- "$ready_marker"
+}
+
+start_gateway_offline_artifact_prepare() {
+  local prepare_script process_group_marker
+  local -a prepare_command
+  prepare_script="$GATEWAY_PREFLIGHT_TREE/gateway/tee/prepare_offline_artifacts_v2.sh"
+  if [ -n "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID" ]; then
+    echo "ERROR: V2 offline artifact preparation is already running" >&2
+    return 1
+  fi
+  if [ ! -r "$prepare_script" ]; then
+    echo "ERROR: prepared V2 offline artifact helper is unavailable" >&2
+    return 1
+  fi
+  if ! mkdir -p "$(dirname "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG")" \
+      || ! : > "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG" \
+      || ! chmod 600 "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG"; then
+    echo "ERROR: V2 offline artifact preparation log is unavailable" >&2
+    return 1
+  fi
+  process_group_marker="${GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG}.process-group"
+  rm -f -- "$process_group_marker"
+
+  record_gateway_restart_timing "offline_artifact_prepare_started"
+  prepare_command=(bash "$prepare_script")
+  if command -v ionice >/dev/null 2>&1; then
+    prepare_command=(ionice -c2 -n7 "${prepare_command[@]}")
+  fi
+  # Own the whole helper process group so an interrupted curl/pip/rsync child
+  # cannot outlive the candidate tree.  Keep this release-independent work at
+  # low CPU and I/O priority while the attestation runner is building.
+  python3 -c '
+import os
+import sys
+
+os.chdir(sys.argv[1])
+os.setsid()
+os.nice(10)
+marker_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+marker = os.open(sys.argv[2], marker_flags, 0o600)
+with os.fdopen(marker, "w", encoding="ascii") as handle:
+    handle.write(str(os.getpid()) + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.execvp(sys.argv[3], sys.argv[3:])
+' "$GATEWAY_PREFLIGHT_TREE" "$process_group_marker" "${prepare_command[@]}" \
+    >"$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG" 2>&1 &
+  GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID="$!"
+  if ! wait_for_gateway_owned_process_group \
+      "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID" \
+      "$process_group_marker" \
+      "V2 offline artifact preparation"; then
+    GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID=""
+    return 1
+  fi
+  echo "Started candidate V2 offline artifact preparation as PID $GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID"
+  echo "Offline artifact preparation log: $GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG"
+}
+
+wait_for_gateway_offline_artifact_prepare() {
+  local prepare_pid status=0
+  prepare_pid="$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID"
+  if [ -z "$prepare_pid" ]; then
+    echo "ERROR: V2 offline artifact preparation was not started" >&2
+    return 1
+  fi
+  if wait "$prepare_pid"; then
+    status=0
+  else
+    status="$?"
+  fi
+  GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID=""
+  rm -f -- "${GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG}.process-group"
+  cat "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG"
+  if [ "$status" -ne 0 ]; then
+    record_gateway_restart_timing "offline_artifact_prepare_complete" "failed"
+    echo "ERROR: V2 offline artifact preparation failed before shutdown" >&2
+    return "$status"
+  fi
+  record_gateway_restart_timing "offline_artifact_prepare_complete" "passed"
+  return 0
+}
+
+cancel_gateway_offline_artifact_prepare() {
+  local prepare_pid process_group_marker
+  prepare_pid="$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID"
+  [ -n "$prepare_pid" ] || return 0
+  process_group_marker="${GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG}.process-group"
+  cancel_gateway_owned_process_group "$prepare_pid" "$process_group_marker"
+  GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID=""
+}
+
+cancel_gateway_ancestry_checkpoint_bootstrap() {
+  local checkpoint_pid process_group_marker
+  checkpoint_pid="$GATEWAY_ANCESTRY_CHECKPOINT_PID"
+  [ -n "$checkpoint_pid" ] || return 0
+  process_group_marker="${GATEWAY_ANCESTRY_CHECKPOINT_LOG}.process-group"
+  cancel_gateway_owned_process_group "$checkpoint_pid" "$process_group_marker"
+  GATEWAY_ANCESTRY_CHECKPOINT_PID=""
+}
+
+start_gateway_ancestry_checkpoint_bootstrap() {
+  local build_info authority_health checkpoint_module process_group_marker
+  local -a checkpoint_command
+  checkpoint_module="$GATEWAY_PREFLIGHT_TREE/gateway/tee/bootstrap_active_ancestry_checkpoints_v2.py"
+  if [ -n "$GATEWAY_ANCESTRY_CHECKPOINT_PID" ]; then
+    echo "ERROR: active ancestry checkpoint bootstrap is already running" >&2
+    return 1
+  fi
+  if [ ! -r "$checkpoint_module" ]; then
+    echo "ERROR: prepared active ancestry checkpoint helper is unavailable" >&2
+    return 1
+  fi
+  if ! mkdir -p "$(dirname "$GATEWAY_ANCESTRY_CHECKPOINT_LOG")" \
+      || ! : > "$GATEWAY_ANCESTRY_CHECKPOINT_LOG" \
+      || ! chmod 600 "$GATEWAY_ANCESTRY_CHECKPOINT_LOG"; then
+    echo "ERROR: active ancestry checkpoint log is unavailable" >&2
+    return 1
+  fi
+
+  # This is an availability optimization only.  Do not send candidate code to
+  # an unverified or partially ready old runtime.  The candidate performs the
+  # same bootstrap again, fail-closed, after its own enclave is ready.
+  if ! build_info="$(timeout 10 curl -fsS http://localhost:8000/build-info 2>/dev/null)" \
+      || ! authority_health="$(timeout 15 curl -fsS http://localhost:8000/health/v2-authority 2>/dev/null)"; then
+    GATEWAY_ANCESTRY_CHECKPOINT_STATE="skipped"
+    record_gateway_restart_timing "ancestry_precheckpoint_skipped" "old_gateway_unavailable"
+    echo "Old gateway V2 authority is unavailable; deferring ancestry checkpoint bootstrap to the candidate runtime"
+    return 0
+  fi
+  if ! rm -f -- "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT" \
+      || ! "$GATEWAY_PYTHON_BIN" - \
+        "$GATEWAY_V2_RELEASE_MANIFEST" \
+        "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT" \
+        "$build_info" \
+        "$authority_health" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+source_path, destination_path, raw_build_info, raw_health = sys.argv[1:]
+build_info = json.loads(raw_build_info)
+health = json.loads(raw_health)
+commit = str(build_info.get("git_commit") or "").lower()
+if not re.fullmatch(r"[0-9a-f]{40}", commit):
+    raise SystemExit("running gateway build identity is invalid")
+if health.get("status") not in {"ready", "healthy"}:
+    raise SystemExit("running gateway V2 authority is not ready")
+
+flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+descriptor = os.open(source_path, flags)
+try:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4 * 1024 * 1024:
+        raise SystemExit("running gateway release manifest is not a bounded regular file")
+    with os.fdopen(descriptor, "rb", closefd=False) as handle:
+        raw_manifest = handle.read(4 * 1024 * 1024 + 1)
+finally:
+    os.close(descriptor)
+manifest = json.loads(raw_manifest)
+if str(manifest.get("commit_sha") or "").lower() != commit:
+    raise SystemExit("running gateway release differs from its build identity")
+
+output_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+output = os.open(destination_path, output_flags, 0o600)
+try:
+    with os.fdopen(output, "wb") as handle:
+        handle.write(raw_manifest)
+        handle.flush()
+        os.fsync(handle.fileno())
+finally:
+    try:
+        os.close(output)
+    except OSError:
+        pass
+PY
+  then
+    GATEWAY_ANCESTRY_CHECKPOINT_STATE="skipped"
+    record_gateway_restart_timing "ancestry_precheckpoint_skipped" "running_release_unverified"
+    echo "Running gateway release could not be bound exactly; deferring ancestry checkpoint bootstrap to the candidate runtime"
+    rm -f -- "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT"
+    return 0
+  fi
+
+  checkpoint_command=(
+    bash -c '
+set -a
+. "$1"
+set +a
+export PYTHONPATH="$2"
+exec "$3" -m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 \
+  --release-manifest "$4"
+' checkpoint-bootstrap \
+      "$ENV_CLONE" \
+      "$GATEWAY_PREFLIGHT_TREE" \
+      "$GATEWAY_PYTHON_BIN" \
+      "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT"
+  )
+  if command -v ionice >/dev/null 2>&1; then
+    checkpoint_command=(ionice -c2 -n7 "${checkpoint_command[@]}")
+  fi
+  record_gateway_restart_timing "ancestry_precheckpoint_started"
+  process_group_marker="${GATEWAY_ANCESTRY_CHECKPOINT_LOG}.process-group"
+  rm -f -- "$process_group_marker"
+  python3 -c '
+import os
+import sys
+
+os.chdir(sys.argv[1])
+os.setsid()
+os.nice(10)
+marker_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+marker = os.open(sys.argv[2], marker_flags, 0o600)
+with os.fdopen(marker, "w", encoding="ascii") as handle:
+    handle.write(str(os.getpid()) + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.execvp(sys.argv[3], sys.argv[3:])
+' "$GATEWAY_PREFLIGHT_TREE" "$process_group_marker" "${checkpoint_command[@]}" \
+    >"$GATEWAY_ANCESTRY_CHECKPOINT_LOG" 2>&1 &
+  GATEWAY_ANCESTRY_CHECKPOINT_PID="$!"
+  if ! wait_for_gateway_owned_process_group \
+      "$GATEWAY_ANCESTRY_CHECKPOINT_PID" \
+      "$process_group_marker" \
+      "active ancestry checkpoint bootstrap"; then
+    GATEWAY_ANCESTRY_CHECKPOINT_PID=""
+    GATEWAY_ANCESTRY_CHECKPOINT_STATE="failed"
+    return 1
+  fi
+  GATEWAY_ANCESTRY_CHECKPOINT_STATE="running"
+  echo "Started old-runtime active ancestry checkpoint bootstrap as PID $GATEWAY_ANCESTRY_CHECKPOINT_PID"
+  echo "Ancestry checkpoint log: $GATEWAY_ANCESTRY_CHECKPOINT_LOG"
+}
+
+wait_for_gateway_ancestry_checkpoint_bootstrap() {
+  local checkpoint_pid status=0
+  case "$GATEWAY_ANCESTRY_CHECKPOINT_STATE" in
+    skipped|unsupported|passed)
+      return 0
+      ;;
+    running)
+      ;;
+    *)
+      echo "ERROR: active ancestry checkpoint bootstrap was not initialized" >&2
+      return 1
+      ;;
+  esac
+  checkpoint_pid="$GATEWAY_ANCESTRY_CHECKPOINT_PID"
+  if wait "$checkpoint_pid"; then
+    status=0
+  else
+    status="$?"
+  fi
+  GATEWAY_ANCESTRY_CHECKPOINT_PID=""
+  rm -f -- "${GATEWAY_ANCESTRY_CHECKPOINT_LOG}.process-group"
+  cat "$GATEWAY_ANCESTRY_CHECKPOINT_LOG"
+  rm -f -- "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT"
+  case "$status" in
+    0)
+      GATEWAY_ANCESTRY_CHECKPOINT_STATE="passed"
+      record_gateway_restart_timing "ancestry_precheckpoint_complete" "passed"
+      ;;
+    3)
+      # Expected exactly once when the running N-1 enclave predates the new
+      # measured operation.  The candidate-side bootstrap below is mandatory.
+      GATEWAY_ANCESTRY_CHECKPOINT_STATE="unsupported"
+      record_gateway_restart_timing "ancestry_precheckpoint_complete" "unsupported"
+      echo "Running N-1 coordinator predates measured ancestry bootstrap; candidate runtime will perform the one-time conversion"
+      ;;
+    *)
+      GATEWAY_ANCESTRY_CHECKPOINT_STATE="failed"
+      record_gateway_restart_timing "ancestry_precheckpoint_complete" "failed"
+      echo "ERROR: old-runtime ancestry checkpoint bootstrap failed before shutdown" >&2
+      return "$status"
+      ;;
+  esac
+}
+
+verify_gateway_active_ancestry_checkpoints() {
+  record_gateway_restart_timing "ancestry_postcheckpoint_started"
+  if ! (
+      cd "$LEADPOET_REPO_ROOT"
+      PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+        -m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 \
+        --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST"
+    ); then
+    record_gateway_restart_timing "ancestry_postcheckpoint_complete" "failed"
+    echo "ERROR: candidate runtime did not durably bound active receipt ancestry" >&2
+    return 1
+  fi
+  record_gateway_restart_timing "ancestry_postcheckpoint_complete" "passed"
 }
 
 if [ "$GATEWAY_RESTART_TIMING_INITIALIZED" = "1" ]; then
@@ -364,6 +710,9 @@ on_gateway_restart_exit() {
     record_gateway_restart_timing "${GATEWAY_DEPLOY_STAGE:-unknown}" "failed" \
       >/dev/null 2>&1 || true
   fi
+  cancel_gateway_offline_artifact_prepare
+  cancel_gateway_ancestry_checkpoint_bootstrap
+  rm -f -- "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT" 2>/dev/null || true
   if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ]; then
     rm -rf "$GATEWAY_PREFLIGHT_TREE"
   fi
@@ -716,6 +1065,7 @@ run_bounded_restart_artifact_cleanup() {
       --temporary-root /tmp \
       --gateway-build-root "$gateway_build_root" \
       --validator-build-root "$validator_build_root" \
+      --gateway-eif-root "$GATEWAY_TEE_EIF_ROOT" \
       --emergency-backup-root "$HOME/.config/leadpoet" \
       --gateway-archive-root "$GATEWAY_V2_RELEASE_ARCHIVE_ROOT" \
       --gateway-last-good-manifest "$GATEWAY_LAST_GOOD_MANIFEST" \
@@ -1306,7 +1656,22 @@ if ! run_prepared_gateway_module Leadpoet.utils.restart_epoch_gate \
   exit 75
 fi
 
+echo "Checkpointing active legacy ancestry under the verified running gateway while release acquisition proceeds"
+if ! start_gateway_ancestry_checkpoint_bootstrap; then
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 75
+fi
+
+echo "Preparing exact hash-locked V2 build artifacts during release acquisition"
+if ! start_gateway_offline_artifact_prepare; then
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 75
+fi
+
 echo "Acquiring the independently built V2 release channel"
+GATEWAY_DEPLOY_STAGE="v2_release_acquisition"
+export GATEWAY_DEPLOY_STAGE
+record_gateway_restart_timing "release_wait_started"
 V2_RELEASE_READY=0
 for attempt in $(seq 1 300); do
   if run_prepared_gateway_module gateway.tee.release_channel_v2 \
@@ -1330,6 +1695,12 @@ if [ "$V2_RELEASE_READY" != "1" ]; then
   exit 75
 fi
 record_gateway_restart_timing "release_ready"
+if ! wait_for_gateway_offline_artifact_prepare; then
+  GATEWAY_DEPLOY_STAGE="v2_offline_artifact_prepare"
+  export GATEWAY_DEPLOY_STAGE
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 75
+fi
 
 echo "Preparing commit-bound KMS credential envelopes"
 GATEWAY_DEPLOY_STAGE="v2_credential_envelope_preparation"
@@ -1501,18 +1872,6 @@ echo "Validating the prepared V2 release before production shutdown"
     echo "ERROR: prepared V2 release failed before-shutdown validation" >&2
     exit 1
   fi
-  echo "Preparing exact hash-locked V2 build artifacts before production shutdown"
-  GATEWAY_DEPLOY_STAGE="v2_offline_artifact_prepare"
-  export GATEWAY_DEPLOY_STAGE
-  if ! (
-      cd "$GATEWAY_PREFLIGHT_TREE"
-      GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
-        bash "$GATEWAY_PREFLIGHT_TREE/gateway/tee/prepare_offline_artifacts_v2.sh"
-    ); then
-    echo "ERROR: V2 offline artifact preparation failed before shutdown" >&2
-    exit 1
-  fi
-
 if [ "$GATEWAY_STATEFUL_CUTOVER_CEREMONY" = "1" ]; then
   echo "Validating the one-time receipt-backed cutover before production shutdown"
   GATEWAY_DEPLOY_STAGE="stateful_epoch_cutover_preflight"
@@ -1565,6 +1924,14 @@ else:
     if not authority.startswith("sha256:") or len(authority) != 71:
         raise SystemExit("durable stateful epoch authority hash is invalid")
 PY
+fi
+
+echo "Joining the old-runtime active ancestry checkpoint bootstrap before production shutdown"
+GATEWAY_DEPLOY_STAGE="ancestry_precheckpoint"
+export GATEWAY_DEPLOY_STAGE
+if ! wait_for_gateway_ancestry_checkpoint_bootstrap; then
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
 fi
 
 DOCKER_LOCK_HELPER="$GATEWAY_PREFLIGHT_TREE/validator_tee/scripts/docker_operation_lock_v2.sh"
@@ -1781,7 +2148,6 @@ GATEWAY_DEPLOY_STAGE="attested_runtime_and_enclave_build"
 export GATEWAY_DEPLOY_STAGE
 cd "$GATEWAY_ROOT/tee"
 sudo mkdir -p "$GATEWAY_TEE_EIF_ROOT"
-sudo rm -f "$GATEWAY_TEE_EIF_ROOT"/enclave-build-*.json
 rm -f "$GATEWAY_ROOT/tee/tee-enclave.eif"
 sudo docker rmi tee-enclave:latest 2>/dev/null || true
 bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"
@@ -2028,6 +2394,11 @@ PY
   sed -i '/^export LEADPOET_RESTART_START_PATH=/d' "$ENV_CLONE"
   rm -f "$GATEWAY_RESTART_START_PATH"
 fi
+
+echo "Verifying active receipt ancestry is durably bounded before authoritative weight preparation"
+GATEWAY_DEPLOY_STAGE="ancestry_postcheckpoint"
+export GATEWAY_DEPLOY_STAGE
+verify_gateway_active_ancestry_checkpoints
 
 echo "Installing Python dependencies"
 GATEWAY_DEPLOY_STAGE="dependency_install"

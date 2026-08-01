@@ -163,9 +163,25 @@ def test_role_build_archives_only_after_local_release_verification():
         encoding="utf-8"
     )
     verify_offset = script.index("verify_release_artifacts_v2.py")
-    archive_offset = script.index("gateway.tee.release_archive_v2")
+    archive_offset = script.index("--archive", verify_offset)
     assert verify_offset < archive_offset
     assert '--retain 3' in script
     assert '--last-good-manifest "$LAST_GOOD_MANIFEST"' in script
-    assert "docker_image_normalizer_v2" in script
-    assert 'RELEASE_ARCHIVE_ROOT="${GATEWAY_V2_RELEASE_ARCHIVE_ROOT:-$EIF_ROOT/releases-v2}"' in script
+
+
+def test_restart_preserves_exact_role_artifacts_until_verified_restore_or_build():
+    restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    builder = (ROOT / "gateway" / "tee" / "build_role_enclaves.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'rm -f "$GATEWAY_TEE_EIF_ROOT"/enclave-build-*.json' not in restart
+    assert 'rm -f "$output" "$measurements"' in builder
+    assert restart.index('bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"') < (
+        restart.index('bash "$GATEWAY_ROOT/tee/build_role_enclaves.sh"')
+    )
+    assert "docker_image_normalizer_v2" in builder
+    assert (
+        'RELEASE_ARCHIVE_ROOT="${GATEWAY_V2_RELEASE_ARCHIVE_ROOT:-$EIF_ROOT/releases-v2}"'
+        in builder
+    )

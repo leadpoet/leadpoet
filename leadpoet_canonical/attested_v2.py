@@ -63,6 +63,7 @@ ROLE_PURPOSES = {
             "research_lab.leaderboard_input.v2",
             "research_lab.ban_input.v2",
             "research_lab.anomaly_adjustment_input.v2",
+            "research_lab.ancestry_checkpoint_bootstrap.v2",
             "gateway.weights.publication.v2",
         }
     ),
@@ -1623,26 +1624,31 @@ def _validate_receipt_graph(
     visiting = set()
     visited = set()
     ordered = []  # type: List[str]
-
-    def visit(receipt_hash: str) -> None:
+    stack = [(root_hash, False)]  # type: List[Tuple[str, bool]]
+    while stack:
+        receipt_hash, expanded = stack.pop()
+        if expanded:
+            if receipt_hash in visited:
+                continue
+            visiting.remove(receipt_hash)
+            visited.add(receipt_hash)
+            ordered.append(receipt_hash)
+            continue
         if receipt_hash in visited:
-            return
+            continue
         _require(receipt_hash not in visiting, "receipt graph contains a cycle")
         visiting.add(receipt_hash)
+        stack.append((receipt_hash, True))
         receipt = receipts[receipt_hash]
-        for parent_hash in receipt["parent_receipt_hashes"]:
+        for parent_hash in reversed(receipt["parent_receipt_hashes"]):
             _require(parent_hash in receipts, "receipt graph parent is missing")
             parent = receipts[parent_hash]
             _require(
                 int(parent["epoch_id"]) <= int(receipt["epoch_id"]),
                 "receipt parent epoch is newer than child",
             )
-            visit(parent_hash)
-        visiting.remove(receipt_hash)
-        visited.add(receipt_hash)
-        ordered.append(receipt_hash)
-
-    visit(root_hash)
+            if parent_hash not in visited:
+                stack.append((parent_hash, False))
     _require(set(visited) == set(receipts), "receipt graph contains disconnected receipts")
     observed_purposes = {str(receipt["purpose"]) for receipt in receipts.values()}
     for purpose in required_purposes:

@@ -57,6 +57,73 @@ def test_cleanup_removes_only_old_allowlisted_workspaces(tmp_path: Path) -> None
     assert report["bytes_removed"] > 0
 
 
+def test_cleanup_removes_only_old_gateway_restore_and_archive_staging(
+    tmp_path: Path,
+) -> None:
+    eif_root = tmp_path / "tee"
+    eif_root.mkdir()
+    archive_root = tmp_path / "archive"
+    archive_root.mkdir()
+    stale_restore = tmp_path / ".gateway-eif-restore.stale"
+    stale_restore.mkdir()
+    (stale_restore / "gateway-v2-release-manifest.json").write_bytes(b"old")
+    stale_archive = archive_root / ".release.stale"
+    stale_archive.mkdir()
+    (stale_archive / "archive.json").write_bytes(b"old")
+    recent_restore = tmp_path / ".gateway-eif-restore.recent"
+    recent_restore.mkdir()
+    recent_archive = archive_root / ".release.recent"
+    recent_archive.mkdir()
+    _age(stale_restore)
+    _age(stale_archive)
+
+    report = _run(
+        tmp_path,
+        gateway_eif_root=eif_root,
+        gateway_archive_root=archive_root,
+    )
+
+    assert not stale_restore.exists()
+    assert not stale_archive.exists()
+    assert recent_restore.exists()
+    assert recent_archive.exists()
+    deleted = {item["path"]: item["kind"] for item in report["deleted"]}
+    assert deleted[str(stale_restore)] == "gateway_eif_restore"
+    assert deleted[str(stale_archive)] == "gateway_release_archive_prepare"
+
+
+def test_cleanup_skips_open_gateway_restore_and_archive_staging(
+    tmp_path: Path,
+) -> None:
+    eif_root = tmp_path / "tee"
+    eif_root.mkdir()
+    archive_root = tmp_path / "archive"
+    archive_root.mkdir()
+    stale_restore = tmp_path / ".gateway-eif-restore.open"
+    stale_restore.mkdir()
+    restore_file = stale_restore / "gateway-v2-release-manifest.json"
+    restore_file.write_bytes(b"open")
+    stale_archive = archive_root / ".release.open"
+    stale_archive.mkdir()
+    archive_file = stale_archive / "archive.json"
+    archive_file.write_bytes(b"open")
+    _age(stale_restore)
+    _age(stale_archive)
+
+    report = _run(
+        tmp_path,
+        gateway_eif_root=eif_root,
+        gateway_archive_root=archive_root,
+        usage_provider=lambda: [restore_file, archive_file],
+    )
+
+    assert stale_restore.exists()
+    assert stale_archive.exists()
+    reasons = {item["path"]: item["reason"] for item in report["skipped"]}
+    assert reasons[str(stale_restore)] == "candidate is open or in use"
+    assert reasons[str(stale_archive)] == "candidate is open or in use"
+
+
 def test_cleanup_skips_open_workspace_and_symlink(tmp_path: Path) -> None:
     stale = tmp_path / "pcr0_normalize_open"
     stale.mkdir()

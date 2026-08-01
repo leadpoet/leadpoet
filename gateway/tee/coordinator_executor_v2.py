@@ -23,12 +23,17 @@ from gateway.tee.scoring_executor import (
     execute_scoring_operation,
 )
 from leadpoet_canonical.attested_v2 import (
+    RECEIPT_GRAPH_SCHEMA_VERSION,
     sha256_json,
     transport_root,
     validate_transport_attempt,
 )
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     frontier_artifact_hashes_v2,
+)
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION,
+    MAX_ALLOCATION_PARENT_AUTHORITIES,
 )
 from leadpoet_canonical.weight_authority_v2 import (
     WEIGHT_INPUT_PURPOSES,
@@ -70,6 +75,9 @@ OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2 = (
     "attest_legacy_finalized_allocation_v2"
 )
 OP_CLASSIFY_LEGACY_ALLOCATION_V2 = "classify_legacy_allocation_v2"
+OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2 = (
+    "ancestry_checkpoint_bootstrap_v2"
+)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ARTIFACT_PERSISTENCE_PURPOSE = "leadpoet.artifact_persistence.v2"
 _ARTIFACT_PERSISTENCE_PROVIDER = "aws_s3_object_lock"
@@ -172,6 +180,9 @@ def _validated_artifact_persistence_attempts(
 
 
 COORDINATOR_OPERATIONS_V2 = {
+    OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2: frozenset(
+        {"research_lab.ancestry_checkpoint_bootstrap.v2"}
+    ),
     OP_PROMOTION_IMPROVEMENT: frozenset({"research_lab.ranking.v2"}),
     OP_PROMOTION_GATE_DECISION: frozenset(
         {"research_lab.promotion_decision.v2"}
@@ -406,6 +417,8 @@ class CoordinatorExecutorV2:
     ) -> ExecutionResultV2:
         if operation not in COORDINATOR_OPERATIONS_V2:
             raise ValueError("unsupported V2 coordinator operation")
+        if operation == OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2:
+            return self._ancestry_checkpoint_bootstrap(payload, context)
         if operation == OP_ATTEST_ARTIFACT_PERSISTENCE:
             return self._attest_artifact_persistence(payload, context)
         if operation == OP_ATTEST_QUALIFICATION_ADMISSION:
@@ -664,6 +677,91 @@ class CoordinatorExecutorV2:
         return ExecutionResultV2(
             output=output,
             artifact_hashes=tuple(evidence_hashes),
+        )
+
+    @staticmethod
+    def _ancestry_checkpoint_bootstrap(
+        payload: Mapping[str, Any],
+        context: ExecutionContextV2,
+    ) -> ExecutionResultV2:
+        if context.purpose != "research_lab.ancestry_checkpoint_bootstrap.v2":
+            raise ValueError("ancestry checkpoint bootstrap purpose is incorrect")
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "schema_version",
+            "selected_root_receipt_hashes",
+        }:
+            raise ValueError("ancestry checkpoint bootstrap request is invalid")
+        if (
+            payload.get("schema_version")
+            != ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION
+        ):
+            raise ValueError("ancestry checkpoint bootstrap request is invalid")
+        selected = payload.get("selected_root_receipt_hashes")
+        if (
+            not isinstance(selected, list)
+            or not selected
+            or len(selected) > MAX_ALLOCATION_PARENT_AUTHORITIES
+            or any(
+                not isinstance(item, str) or not _HASH_RE.fullmatch(item)
+                for item in selected
+            )
+            or selected != sorted(selected)
+            or len(selected) != len(set(selected))
+        ):
+            raise ValueError(
+                "ancestry checkpoint bootstrap selected roots are invalid"
+            )
+        graphs = list(context.external_receipt_graphs)
+        if not graphs or any(
+            not isinstance(graph, Mapping)
+            or graph.get("schema_version") != RECEIPT_GRAPH_SCHEMA_VERSION
+            for graph in graphs
+        ):
+            raise ValueError(
+                "ancestry checkpoint bootstrap requires legacy full graphs"
+            )
+        graph_roots = [str(graph.get("root_receipt_hash") or "") for graph in graphs]
+        if graph_roots != sorted(graph_roots) or graph_roots != selected:
+            raise ValueError(
+                "ancestry checkpoint bootstrap roots differ from full graphs"
+            )
+        proofs = list(context.external_ancestry_proofs)
+        if len(proofs) > MAX_ALLOCATION_PARENT_AUTHORITIES:
+            raise ValueError(
+                "ancestry checkpoint bootstrap resume proofs exceed bound"
+            )
+        proof_roots = [
+            str(
+                proof.get("certificate", {})
+                .get("claim", {})
+                .get("output_root_receipt_hash", "")
+            )
+            for proof in proofs
+        ]
+        if proof_roots != sorted(proof_roots) or len(proof_roots) != len(
+            set(proof_roots)
+        ):
+            raise ValueError(
+                "ancestry checkpoint bootstrap resume proofs are not canonical"
+            )
+        graph_receipts = {
+            str(receipt.get("receipt_hash") or "")
+            for graph in graphs
+            for receipt in graph.get("receipts") or ()
+            if isinstance(receipt, Mapping)
+        }
+        if not set(proof_roots).issubset(graph_receipts):
+            raise ValueError(
+                "ancestry checkpoint bootstrap resume proof is outside full graphs"
+            )
+        return ExecutionResultV2(
+            output={
+                "schema_version": (
+                    ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION
+                ),
+                "selected_root_receipt_hashes": list(selected),
+            },
+            ancestry_checkpoint_bootstrap=True,
         )
 
     @staticmethod

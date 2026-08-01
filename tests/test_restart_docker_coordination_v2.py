@@ -40,6 +40,7 @@ def test_gateway_holds_shared_docker_lock_through_authority_repair() -> None:
         '--docker-lock-owner-pid "${LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID:-$$}"'
         in script
     )
+    assert '--gateway-eif-root "$GATEWAY_TEE_EIF_ROOT"' in script
     assert "wait_for_gateway_build_memory" in script
     assert "--watch-parent" not in script
     assert "PYTHONSAFEPATH=1 LEADPOET_REPO_ROOT=" in script

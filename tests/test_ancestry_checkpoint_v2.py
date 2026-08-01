@@ -7,20 +7,25 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    ANCESTRY_CHECKPOINT_BOOTSTRAP_RESULT_SCHEMA_VERSION,
     ANCESTRY_DELTA_SCHEMA_VERSION,
     MAX_DELTA_RECEIPTS,
     MAX_PARENT_AUTHORITIES,
     AncestryCheckpointV2Error,
     build_ancestry_policy_v2,
     build_certificate_parent_authority_v2,
+    build_checkpointed_receipt_graph_from_full_graph_v2,
     build_compact_ancestry_proof_from_delta_v2,
     build_compact_ancestry_proof_v2,
     build_full_graph_parent_v2,
     build_full_graph_parent_authority_v2,
     derive_ancestry_lineage_id_v2,
     issue_ancestry_certificate_v2,
+    issue_legacy_ancestry_checkpoint_bootstrap_v2,
     project_receipt_graph_v2,
+    select_ancestry_checkpoint_resume_frontier_v2,
     validate_ancestry_certificate_v2,
+    validate_ancestry_checkpoint_bootstrap_result_v2,
     validate_ancestry_delta_v2,
     validate_ancestry_lineage_id_v2,
     validate_ancestry_projection_v2,
@@ -414,6 +419,388 @@ def test_projection_requires_exact_attestation_and_rejects_tampered_graph(
         project_receipt_graph_v2(
             disconnected, boot_attestation_verifier=_boot_verifier
         )
+
+
+def test_legacy_bootstrap_issues_one_bounded_selected_root_proof_and_resumes(
+    ancestry_fixture,
+):
+    graph = ancestry_fixture["combined_graph"]
+    selected = [graph["root_receipt_hash"]]
+    result = issue_legacy_ancestry_checkpoint_bootstrap_v2(
+        full_graphs=(graph,),
+        selected_root_receipt_hashes=selected,
+        existing_compact_proofs=(),
+        allowed_failed_receipt_hashes_by_graph=((),),
+        lineage_id=LINEAGE_ID,
+        issuer_boot_identity=ancestry_fixture["current_boot"],
+        issued_at=NOW,
+        sign_digest=ancestry_fixture["current_key"].sign,
+        boot_attestation_verifier=_boot_verifier,
+        allowed_issuer_roles=(SCORING_ROLE,),
+    )
+    assert set(result) == {
+        "schema_version",
+        "selected_root_receipt_hashes",
+        "checkpoint_proofs",
+        "checkpoint_root_receipt_hashes",
+        "checkpoint_set_hash",
+    }
+    assert (
+        result["schema_version"]
+        == ANCESTRY_CHECKPOINT_BOOTSTRAP_RESULT_SCHEMA_VERSION
+    )
+    assert validate_ancestry_checkpoint_bootstrap_result_v2(
+        result,
+        expected_selected_root_receipt_hashes=selected,
+        existing_compact_proofs=(),
+        expected_lineage_id=LINEAGE_ID,
+        boot_attestation_verifier=_boot_verifier,
+        allowed_issuer_roles=(SCORING_ROLE,),
+    ) == result
+    tampered_result = deepcopy(result)
+    tampered_result["checkpoint_set_hash"] = HASH_D
+    with pytest.raises(AncestryCheckpointV2Error, match="set hash differs"):
+        validate_ancestry_checkpoint_bootstrap_result_v2(
+            tampered_result,
+            expected_selected_root_receipt_hashes=selected,
+            existing_compact_proofs=(),
+            expected_lineage_id=LINEAGE_ID,
+            boot_attestation_verifier=_boot_verifier,
+            allowed_issuer_roles=(SCORING_ROLE,),
+        )
+    oversized_proofs = deepcopy(result)
+    oversized_proofs["checkpoint_proofs"] = (
+        oversized_proofs["checkpoint_proofs"] * 2
+    )
+    with pytest.raises(
+        AncestryCheckpointV2Error,
+        match="proof count differs from selected roots",
+    ):
+        validate_ancestry_checkpoint_bootstrap_result_v2(
+            oversized_proofs,
+            expected_selected_root_receipt_hashes=selected,
+            existing_compact_proofs=(),
+            expected_lineage_id=LINEAGE_ID,
+            boot_attestation_verifier=lambda _value: (_ for _ in ()).throw(
+                AssertionError("oversized proof set reached signature validation")
+            ),
+            allowed_issuer_roles=(SCORING_ROLE,),
+        )
+    oversized_roots = deepcopy(result)
+    oversized_roots["checkpoint_root_receipt_hashes"].append(HASH_D)
+    with pytest.raises(
+        AncestryCheckpointV2Error,
+        match="root count differs from bounded frontier",
+    ):
+        validate_ancestry_checkpoint_bootstrap_result_v2(
+            oversized_roots,
+            expected_selected_root_receipt_hashes=selected,
+            existing_compact_proofs=(),
+            expected_lineage_id=LINEAGE_ID,
+            boot_attestation_verifier=lambda _value: (_ for _ in ()).throw(
+                AssertionError("oversized root set reached signature validation")
+            ),
+            allowed_issuer_roles=(SCORING_ROLE,),
+        )
+    proof_roots = [
+        proof["certificate"]["claim"]["output_root_receipt_hash"]
+        for proof in result["checkpoint_proofs"]
+    ]
+    assert proof_roots == [ancestry_fixture["output"]["receipt_hash"]]
+    for proof in result["checkpoint_proofs"]:
+        claim = proof["certificate"]["claim"]
+        assert claim["local_delta_projection"]["receipt_count"] == 1
+        assert len(proof["disclosed_receipts"]) == 1
+        assert [
+            item["authority_kind"]
+            for item in claim["parent_authorities"]
+        ] == ["full_projection"]
+        validate_compact_ancestry_proof_v2(
+            proof,
+            expected_lineage_id=LINEAGE_ID,
+            boot_attestation_verifier=_boot_verifier,
+            allowed_issuer_roles=(SCORING_ROLE,),
+            required_receipt_hashes=(claim["output_root_receipt_hash"],),
+        )
+
+    checkpointed_graph = build_checkpointed_receipt_graph_from_full_graph_v2(
+        graph,
+        result["checkpoint_proofs"][0],
+        expected_lineage_id=LINEAGE_ID,
+        boot_attestation_verifier=_boot_verifier,
+        allowed_issuer_roles=(SCORING_ROLE,),
+    )
+    assert checkpointed_graph["root_receipt_hash"] == ancestry_fixture[
+        "output"
+    ]["receipt_hash"]
+    assert checkpointed_graph["receipts"] == [ancestry_fixture["output"]]
+    assert checkpointed_graph["host_operations"] == [ancestry_fixture["host"]]
+    omitted_attempt = deepcopy(graph)
+    omitted_attempt["transport_attempts"] = []
+    with pytest.raises(AncestryCheckpointV2Error, match="attested validation"):
+        build_checkpointed_receipt_graph_from_full_graph_v2(
+            omitted_attempt,
+            result["checkpoint_proofs"][0],
+            expected_lineage_id=LINEAGE_ID,
+            boot_attestation_verifier=_boot_verifier,
+            allowed_issuer_roles=(SCORING_ROLE,),
+        )
+
+    intermediate_graph = build_receipt_graph(
+        root_receipt_hash=ancestry_fixture["intermediate"]["receipt_hash"],
+        boot_identities=[
+            ancestry_fixture["legacy_boot"],
+            ancestry_fixture["current_boot"],
+        ],
+        receipts=[
+            ancestry_fixture["legacy"],
+            ancestry_fixture["intermediate"],
+        ],
+        transport_attempts=[ancestry_fixture["attempt"]],
+    )
+    intermediate_result = issue_legacy_ancestry_checkpoint_bootstrap_v2(
+        full_graphs=(intermediate_graph,),
+        selected_root_receipt_hashes=[
+            ancestry_fixture["intermediate"]["receipt_hash"]
+        ],
+        existing_compact_proofs=(),
+        allowed_failed_receipt_hashes_by_graph=((),),
+        lineage_id=LINEAGE_ID,
+        issuer_boot_identity=ancestry_fixture["current_boot"],
+        issued_at=NOW,
+        sign_digest=ancestry_fixture["current_key"].sign,
+        boot_attestation_verifier=_boot_verifier,
+        allowed_issuer_roles=(SCORING_ROLE,),
+    )
+    persisted = [intermediate_result["checkpoint_proofs"][0]]
+    resumed = issue_legacy_ancestry_checkpoint_bootstrap_v2(
+        full_graphs=(graph,),
+        selected_root_receipt_hashes=selected,
+        existing_compact_proofs=persisted,
+        allowed_failed_receipt_hashes_by_graph=((),),
+        lineage_id=LINEAGE_ID,
+        issuer_boot_identity=ancestry_fixture["current_boot"],
+        issued_at=LATER,
+        sign_digest=ancestry_fixture["current_key"].sign,
+        boot_attestation_verifier=_boot_verifier,
+        allowed_issuer_roles=(SCORING_ROLE,),
+    )
+    assert len(resumed["checkpoint_proofs"]) == 1
+    assert resumed["checkpoint_proofs"][0]["certificate"]["claim"][
+        "output_root_receipt_hash"
+    ] == ancestry_fixture["output"]["receipt_hash"]
+    assert resumed["checkpoint_proofs"][0]["certificate"]["claim"][
+        "parent_authorities"
+    ][0]["authority_kind"] == "certificate"
+    assert resumed["checkpoint_root_receipt_hashes"] == sorted(
+        [
+            ancestry_fixture["intermediate"]["receipt_hash"],
+            ancestry_fixture["output"]["receipt_hash"],
+        ]
+    )
+
+
+def test_legacy_bootstrap_rejects_noncanonical_roots_and_incomplete_resume(
+    ancestry_fixture,
+):
+    graph = ancestry_fixture["combined_graph"]
+    with pytest.raises(
+        AncestryCheckpointV2Error,
+        match="selected roots differ",
+    ):
+        issue_legacy_ancestry_checkpoint_bootstrap_v2(
+            full_graphs=(graph,),
+            selected_root_receipt_hashes=[
+                ancestry_fixture["legacy"]["receipt_hash"]
+            ],
+            existing_compact_proofs=(),
+            allowed_failed_receipt_hashes_by_graph=((),),
+            lineage_id=LINEAGE_ID,
+            issuer_boot_identity=ancestry_fixture["current_boot"],
+            issued_at=NOW,
+            sign_digest=ancestry_fixture["current_key"].sign,
+            boot_attestation_verifier=_boot_verifier,
+            allowed_issuer_roles=(SCORING_ROLE,),
+        )
+
+    legacy_result = issue_legacy_ancestry_checkpoint_bootstrap_v2(
+        full_graphs=(ancestry_fixture["legacy_graph"],),
+        selected_root_receipt_hashes=[
+            ancestry_fixture["legacy"]["receipt_hash"]
+        ],
+        existing_compact_proofs=(),
+        allowed_failed_receipt_hashes_by_graph=((),),
+        lineage_id=LINEAGE_ID,
+        issuer_boot_identity=ancestry_fixture["current_boot"],
+        issued_at=NOW,
+        sign_digest=ancestry_fixture["current_key"].sign,
+        boot_attestation_verifier=_boot_verifier,
+        allowed_issuer_roles=(SCORING_ROLE,),
+    )
+    intermediate_graph = build_receipt_graph(
+        root_receipt_hash=ancestry_fixture["intermediate"]["receipt_hash"],
+        boot_identities=[
+            ancestry_fixture["legacy_boot"],
+            ancestry_fixture["current_boot"],
+        ],
+        receipts=[
+            ancestry_fixture["legacy"],
+            ancestry_fixture["intermediate"],
+        ],
+        transport_attempts=[ancestry_fixture["attempt"]],
+    )
+    intermediate_result = issue_legacy_ancestry_checkpoint_bootstrap_v2(
+        full_graphs=(intermediate_graph,),
+        selected_root_receipt_hashes=[
+            ancestry_fixture["intermediate"]["receipt_hash"]
+        ],
+        existing_compact_proofs=[
+            legacy_result["checkpoint_proofs"][0]
+        ],
+        allowed_failed_receipt_hashes_by_graph=((),),
+        lineage_id=LINEAGE_ID,
+        issuer_boot_identity=ancestry_fixture["current_boot"],
+        issued_at=NOW,
+        sign_digest=ancestry_fixture["current_key"].sign,
+        boot_attestation_verifier=_boot_verifier,
+        allowed_issuer_roles=(SCORING_ROLE,),
+    )
+    sibling = _receipt(
+        private_key=ancestry_fixture["current_key"],
+        public_key=ancestry_fixture["current_pub"],
+        boot=ancestry_fixture["current_boot"],
+        purpose="research_lab.confirmation_score.v2",
+        job_id="resume-sibling",
+        parents=(ancestry_fixture["legacy"]["receipt_hash"],),
+        sequence=3,
+    )
+    sibling_graph = build_receipt_graph(
+        root_receipt_hash=sibling["receipt_hash"],
+        boot_identities=[
+            ancestry_fixture["legacy_boot"],
+            ancestry_fixture["current_boot"],
+        ],
+        receipts=[ancestry_fixture["legacy"], sibling],
+        transport_attempts=[],
+    )
+    graph_pairs = sorted(
+        [
+            (graph["root_receipt_hash"], graph),
+            (sibling_graph["root_receipt_hash"], sibling_graph),
+        ]
+    )
+    overlap_graphs = tuple(item[1] for item in graph_pairs)
+    overlap_selected = [item[0] for item in graph_pairs]
+    durable = [
+        legacy_result["checkpoint_proofs"][0],
+        intermediate_result["checkpoint_proofs"][0],
+    ]
+    frontier = select_ancestry_checkpoint_resume_frontier_v2(
+        full_graphs=overlap_graphs,
+        selected_root_receipt_hashes=overlap_selected,
+        durable_compact_proofs=durable,
+        allowed_failed_receipt_hashes_by_graph=((), ()),
+        expected_lineage_id=LINEAGE_ID,
+        boot_attestation_verifier=_boot_verifier,
+        allowed_issuer_roles=(SCORING_ROLE,),
+    )
+    assert {
+        proof["certificate"]["claim"]["output_root_receipt_hash"]
+        for proof in frontier
+    } == {
+        ancestry_fixture["legacy"]["receipt_hash"],
+        ancestry_fixture["intermediate"]["receipt_hash"],
+    }
+    overlap_result = issue_legacy_ancestry_checkpoint_bootstrap_v2(
+        full_graphs=overlap_graphs,
+        selected_root_receipt_hashes=overlap_selected,
+        existing_compact_proofs=frontier,
+        allowed_failed_receipt_hashes_by_graph=((), ()),
+        lineage_id=LINEAGE_ID,
+        issuer_boot_identity=ancestry_fixture["current_boot"],
+        issued_at=LATER,
+        sign_digest=ancestry_fixture["current_key"].sign,
+        boot_attestation_verifier=_boot_verifier,
+        allowed_issuer_roles=(SCORING_ROLE,),
+    )
+    assert {
+        proof["certificate"]["claim"]["output_root_receipt_hash"]
+        for proof in overlap_result["checkpoint_proofs"]
+    } == {
+        graph["root_receipt_hash"],
+        sibling_graph["root_receipt_hash"],
+    }
+    reordered = deepcopy(overlap_result)
+    reordered["checkpoint_proofs"].reverse()
+    with pytest.raises(AncestryCheckpointV2Error, match="order"):
+        validate_ancestry_checkpoint_bootstrap_result_v2(
+            reordered,
+            expected_selected_root_receipt_hashes=overlap_selected,
+            existing_compact_proofs=frontier,
+            expected_lineage_id=LINEAGE_ID,
+            boot_attestation_verifier=_boot_verifier,
+            allowed_issuer_roles=(SCORING_ROLE,),
+        )
+    with pytest.raises(
+        AncestryCheckpointV2Error,
+        match="unused proof",
+    ):
+        issue_legacy_ancestry_checkpoint_bootstrap_v2(
+            full_graphs=(graph,),
+            selected_root_receipt_hashes=[graph["root_receipt_hash"]],
+            existing_compact_proofs=[
+                legacy_result["checkpoint_proofs"][0]
+            ],
+            allowed_failed_receipt_hashes_by_graph=((),),
+            lineage_id=LINEAGE_ID,
+            issuer_boot_identity=ancestry_fixture["current_boot"],
+            issued_at=LATER,
+            sign_digest=ancestry_fixture["current_key"].sign,
+            boot_attestation_verifier=_boot_verifier,
+            allowed_issuer_roles=(SCORING_ROLE,),
+        )
+
+
+def test_legacy_bootstrap_handles_receipt_chain_beyond_python_recursion_limit():
+    private_key, public_key = _keypair()
+    boot = _boot(private_key, public_key, nonce="9" * 32)
+    receipts = []
+    parents = ()
+    for index in range(1_050):
+        receipt = _receipt(
+            private_key=private_key,
+            public_key=public_key,
+            boot=boot,
+            purpose="research_lab.candidate_score.v2",
+            job_id="long-chain-%04d" % index,
+            parents=parents,
+            sequence=index,
+        )
+        receipts.append(receipt)
+        parents = (receipt["receipt_hash"],)
+    graph = build_receipt_graph(
+        root_receipt_hash=receipts[-1]["receipt_hash"],
+        boot_identities=[boot],
+        receipts=receipts,
+        transport_attempts=[],
+    )
+    result = issue_legacy_ancestry_checkpoint_bootstrap_v2(
+        full_graphs=(graph,),
+        selected_root_receipt_hashes=[graph["root_receipt_hash"]],
+        existing_compact_proofs=(),
+        allowed_failed_receipt_hashes_by_graph=((),),
+        lineage_id=LINEAGE_ID,
+        issuer_boot_identity=boot,
+        issued_at=NOW,
+        sign_digest=private_key.sign,
+        boot_attestation_verifier=_boot_verifier,
+        allowed_issuer_roles=(SCORING_ROLE,),
+    )
+    assert len(result["checkpoint_proofs"]) == 1
+    assert result["checkpoint_proofs"][0]["certificate"]["claim"][
+        "output_root_receipt_hash"
+    ] == graph["root_receipt_hash"]
+    assert len(canonical_json(result).encode("utf-8")) < 16_384
 
 
 def test_detached_certificate_and_local_body_proof_round_trip(ancestry_fixture):

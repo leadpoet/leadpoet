@@ -37,9 +37,11 @@ from leadpoet_canonical.attested_v2 import (
 )
 from leadpoet_canonical.ancestry_checkpoint_v2 import (
     ANCESTRY_DELTA_SCHEMA_VERSION,
+    ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION,
     build_compact_ancestry_proof_from_delta_v2,
     build_full_graph_parent_v2,
     issue_ancestry_certificate_v2,
+    issue_legacy_ancestry_checkpoint_bootstrap_v2,
     validate_compact_ancestry_proof_v2,
 )
 
@@ -68,6 +70,10 @@ MAX_INPUT_BYTES = 64 * 1024 * 1024
 MAX_ALLOCATION_ANCESTRY_INPUT_BYTES = 256 * 1024 * 1024
 _ALLOCATION_ANCESTRY_JOB_SCOPES = frozenset(
     {
+        (
+            "ancestry_checkpoint_bootstrap_v2",
+            "research_lab.ancestry_checkpoint_bootstrap.v2",
+        ),
         ("research_lab_allocation", "research_lab.allocation.v2"),
         ("attest_artifact_persistence", "leadpoet.artifact_persistence.v2"),
         ("attest_weight_input", "research_lab.allocation.v2"),
@@ -90,6 +96,13 @@ MAX_EXTERNAL_RECEIPT_GRAPHS = 128
 # authorities than an ordinary scoring job. Keep the larger object bound tied
 # to the same exact operation/purpose allowlist as the 256 MiB input exception.
 MAX_ALLOCATION_ANCESTRY_AUTHORITIES = 256
+# Checkpoint bootstrap accepts two independently bounded authority sets: up to
+# 256 complete legacy graphs and up to 256 already-issued resume proofs.  The
+# resume proofs are authenticated job inputs, not additional parents of the
+# bootstrap session receipt (the selected full-graph roots are those parents).
+MAX_CHECKPOINT_BOOTSTRAP_INPUT_AUTHORITIES = (
+    MAX_ALLOCATION_ANCESTRY_AUTHORITIES * 2
+)
 MAX_EXTERNAL_RECEIPT_GRAPH_BYTES = 64 * 1024 * 1024
 MAX_EXTERNAL_ANCESTRY_PROOF_BYTES = 4 * 1024 * 1024
 TERMINAL_STATES = frozenset({"cancelled", "failed", "succeeded"})
@@ -157,6 +170,7 @@ class ExecutionResultV2:
     transport_attempts: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     artifact_hashes: Sequence[str] = field(default_factory=tuple)
     transitions: Sequence[TransitionSpecV2] = field(default_factory=tuple)
+    ancestry_checkpoint_bootstrap: bool = False
 
 
 @dataclass(frozen=True)
@@ -901,6 +915,11 @@ def _job_input_limit_bytes(*, operation: str, purpose: str) -> int:
 
 
 def _job_external_authority_limit(*, operation: str, purpose: str) -> int:
+    if (
+        operation == "ancestry_checkpoint_bootstrap_v2"
+        and purpose == "research_lab.ancestry_checkpoint_bootstrap.v2"
+    ):
+        return MAX_CHECKPOINT_BOOTSTRAP_INPUT_AUTHORITIES
     if (operation, purpose) in _ALLOCATION_ANCESTRY_JOB_SCOPES:
         return MAX_ALLOCATION_ANCESTRY_AUTHORITIES
     return MAX_EXTERNAL_RECEIPT_GRAPHS
@@ -1383,6 +1402,7 @@ class ExecutionJobManagerV2:
         root_receipt: Mapping[str, Any],
         local_receipts: Sequence[Mapping[str, Any]],
         host_operations: Sequence[Mapping[str, Any]],
+        include_external_ancestry_proofs: bool = True,
     ) -> Optional[Dict[str, Any]]:
         if self._ancestry_lineage_id is None:
             return None
@@ -1407,10 +1427,14 @@ class ExecutionJobManagerV2:
             ],
             "host_operations": [dict(item) for item in host_operations],
         }
-        parent_certificates = [
-            dict(item["certificate"])
-            for item in context.external_ancestry_proofs
-        ]
+        parent_certificates = (
+            [
+                dict(item["certificate"])
+                for item in context.external_ancestry_proofs
+            ]
+            if include_external_ancestry_proofs
+            else []
+        )
         parent_full_graphs = []
         for graph in context.external_receipt_graphs:
             root_hash = str(graph["root_receipt_hash"])
@@ -1504,6 +1528,11 @@ class ExecutionJobManagerV2:
                 purpose=manifest["purpose"],
             ),
         )
+        checkpoint_bootstrap_scope = (
+            manifest["operation"] == "ancestry_checkpoint_bootstrap_v2"
+            and manifest["purpose"]
+            == "research_lab.ancestry_checkpoint_bootstrap.v2"
+        )
         if self._host_operation_channel_factory is not None:
             context.host_operation_channel = self._host_operation_channel_factory(
                 job_id,
@@ -1526,7 +1555,10 @@ class ExecutionJobManagerV2:
             if parent_graph_set is not None:
                 parent_graphs, parent_graph_sizes = _unpack_parent_receipt_graph_set_v2(
                     parent_graph_set,
-                    max_graph_count=context.max_external_ancestry_authorities,
+                    max_graph_count=min(
+                        context.max_external_ancestry_authorities,
+                        MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
+                    ),
                 )
             elif parent_graphs is None:
                 parent_graphs = []
@@ -1542,6 +1574,13 @@ class ExecutionJobManagerV2:
                 not isinstance(proof, Mapping) for proof in parent_proofs
             ):
                 raise ExecutionJobV2Error("job parent ancestry proofs are invalid")
+            if checkpoint_bootstrap_scope and (
+                len(parent_graphs) > MAX_ALLOCATION_ANCESTRY_AUTHORITIES
+                or len(parent_proofs) > MAX_ALLOCATION_ANCESTRY_AUTHORITIES
+            ):
+                raise ExecutionJobV2Error(
+                    "checkpoint bootstrap ancestry input count exceeds limit"
+                )
             if parent_proofs and self._ancestry_lineage_id is None:
                 raise ExecutionJobV2Error(
                     "job parent ancestry proofs are unsupported"
@@ -1642,7 +1681,8 @@ class ExecutionJobManagerV2:
                     raise ExecutionJobV2Error(
                         "job parent ancestry authority is duplicated"
                     )
-                parent_roots.append(parent_root)
+                if not checkpoint_bootstrap_scope:
+                    parent_roots.append(parent_root)
                 parent_receipt_hashes.add(parent_root)
             declared_parent_hashes = set(manifest["parent_receipt_hashes"])
             exact_checkpoint_roots = bool(parent_proofs) or (
@@ -1666,6 +1706,57 @@ class ExecutionJobManagerV2:
             result = value if isinstance(value, ExecutionResultV2) else ExecutionResultV2(value)
             if not isinstance(result.output, Mapping):
                 raise ExecutionJobV2Error("executor output must be an object")
+            if result.ancestry_checkpoint_bootstrap:
+                if (
+                    self._ancestry_lineage_id is None
+                    or self._ancestry_boot_attestation_verifier is None
+                ):
+                    raise ExecutionJobV2Error(
+                        "ancestry checkpoint bootstrap is unavailable"
+                    )
+                if (
+                    set(result.output)
+                    != {"schema_version", "selected_root_receipt_hashes"}
+                    or result.output.get("schema_version")
+                    != ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION
+                    or result.receipt_output is not None
+                    or result.transport_attempts
+                    or result.artifact_hashes
+                    or result.transitions
+                ):
+                    raise ExecutionJobV2Error(
+                        "ancestry checkpoint bootstrap executor result is invalid"
+                    )
+                graph_policies = [
+                    context.external_receipt_graph_policies.get(
+                        str(graph["root_receipt_hash"]), ()
+                    )
+                    for graph in context.external_receipt_graphs
+                ]
+                result = ExecutionResultV2(
+                    output=issue_legacy_ancestry_checkpoint_bootstrap_v2(
+                        full_graphs=context.external_receipt_graphs,
+                        selected_root_receipt_hashes=result.output[
+                            "selected_root_receipt_hashes"
+                        ],
+                        existing_compact_proofs=(
+                            context.external_ancestry_proofs
+                        ),
+                        allowed_failed_receipt_hashes_by_graph=(
+                            graph_policies
+                        ),
+                        lineage_id=self._ancestry_lineage_id,
+                        issuer_boot_identity=self.boot_identity,
+                        issued_at=_utc_timestamp(self._clock()),
+                        sign_digest=self._sign_digest,
+                        boot_attestation_verifier=(
+                            self._ancestry_boot_attestation_verifier
+                        ),
+                        allowed_issuer_roles=(
+                            self._ancestry_allowed_issuer_roles
+                        ),
+                    )
+                )
             for attempt in result.transport_attempts:
                 context.record_transport(attempt)
             for artifact_hash in result.artifact_hashes:
@@ -1688,7 +1779,8 @@ class ExecutionJobManagerV2:
             if stage_receipts:
                 root_parents = [stage_receipts[-1]["receipt_hash"]]
             root_parents.extend(context.external_receipt_roots())
-            root_parents.extend(context.external_ancestry_roots())
+            if not checkpoint_bootstrap_scope:
+                root_parents.extend(context.external_ancestry_roots())
             root_manifest["parent_receipt_hashes"] = sorted(set(root_parents))
             receipt = self._receipt(
                 manifest=root_manifest,
@@ -1705,6 +1797,9 @@ class ExecutionJobManagerV2:
                 root_receipt=receipt,
                 local_receipts=local_receipts,
                 host_operations=host_operation_records,
+                include_external_ancestry_proofs=(
+                    not checkpoint_bootstrap_scope
+                ),
             )
             transitions = self._transitions(receipt, result.transitions)
             with self._lock:
@@ -1731,6 +1826,9 @@ class ExecutionJobManagerV2:
                         root_receipt=cancelled_receipt,
                         local_receipts=cancelled_receipts,
                         host_operations=host_operation_records,
+                        include_external_ancestry_proofs=(
+                            not checkpoint_bootstrap_scope
+                        ),
                     )
                     job["state"] = "cancelled"
                     job["result"] = cancelled_bytes
@@ -1776,10 +1874,16 @@ class ExecutionJobManagerV2:
             )
             try:
                 failure_manifest = dict(manifest)
-                failure_manifest["parent_receipt_hashes"] = sorted(
+                failure_parent_roots = (
                     set(manifest["parent_receipt_hashes"])
                     | set(context.external_receipt_roots())
-                    | set(context.external_ancestry_roots())
+                )
+                if not checkpoint_bootstrap_scope:
+                    failure_parent_roots.update(
+                        context.external_ancestry_roots()
+                    )
+                failure_manifest["parent_receipt_hashes"] = sorted(
+                    failure_parent_roots
                 )
                 receipt = self._receipt(
                     manifest=failure_manifest,
@@ -1800,6 +1904,9 @@ class ExecutionJobManagerV2:
                     root_receipt=receipt,
                     local_receipts=(receipt,),
                     host_operations=failure_host_operations,
+                    include_external_ancestry_proofs=(
+                        not checkpoint_bootstrap_scope
+                    ),
                 )
             except Exception:
                 receipt = None

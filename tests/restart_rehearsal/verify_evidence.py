@@ -716,6 +716,7 @@ def verify_migration_backed_database_contract(
         "post_135_active_model_replay_contract_valid",
         "post_136_ancestry_checkpoint_contract_valid",
         "post_137_allocation_settlement_frontier_contract_valid",
+        "post_138_ancestry_checkpoint_bootstrap_purpose_valid",
         "provider_outcome_append_atomic",
         "provider_outcome_contention_zero_rollback",
         "provider_outcome_conflict_head_exact",
@@ -745,6 +746,7 @@ def verify_migration_backed_database_contract(
         "135-research-lab-active-model-result-replay.sql",
         "136-research-lab-ancestry-checkpoint-sidecars.sql",
         "137-research-lab-allocation-settlement-frontier.sql",
+        "138-research-lab-ancestry-checkpoint-bootstrap-purpose.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -755,7 +757,7 @@ def verify_migration_backed_database_contract(
         or set(checks) != required_checks
         or any(checks[name] is not True for name in required_checks)
         or not isinstance(applied_migrations, list)
-        or applied_migrations[-8:] != expected_final_migrations
+        or applied_migrations[-9:] != expected_final_migrations
     ):
         raise SystemExit(
             "migration-backed PostgreSQL contract evidence is incomplete"
@@ -813,6 +815,7 @@ def verify_migration_backed_database_contract(
         not isinstance(rpcs, list)
         or "persist_research_lab_ancestry_checkpoint_v2" not in rpcs
         or "persist_research_lab_allocation_settlement_frontier_v2" not in rpcs
+        or "research_lab_ancestry_checkpoint_bootstrap_contract_v2" not in rpcs
     ):
         raise SystemExit(
             "migration-backed ancestry checkpoint RPC evidence is missing"

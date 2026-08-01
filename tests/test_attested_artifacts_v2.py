@@ -74,6 +74,7 @@ async def _exercise(
         }
     ]
     persistence_job_ids = []
+    durability_events = []
     source_proof = {"proof_hash": _hash("4")}
     final_proof = {"proof_hash": _hash("5")}
 
@@ -104,6 +105,11 @@ async def _exercise(
         }
 
     async def execute(**kwargs):
+        assert durability_events[:2] == [
+            ("graph", source_receipt["receipt_hash"]),
+            ("checkpoint", source_receipt["receipt_hash"]),
+        ]
+        durability_events.append(("child", None))
         assert kwargs["parent_ancestry_proofs"] == (source_proof,)
         job_id = persistence_job_ids[0] if persistence_job_ids else expected_job_id[0]
         receipt = {
@@ -125,10 +131,17 @@ async def _exercise(
         return {"artifact_link_count": len(kwargs["artifacts"])}
 
     async def persist_checkpoint(proof, *, checkpointed_graph, **_kwargs):
+        durability_events.append(
+            ("checkpoint", checkpointed_graph["root_receipt_hash"])
+        )
         return {
             "root_receipt_hash": checkpointed_graph["root_receipt_hash"],
             "proof_hash": proof["proof_hash"],
         }
+
+    async def persist_graph(graph, **_kwargs):
+        durability_events.append(("graph", graph["root_receipt_hash"]))
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
 
     expected_job_id = []
     original_derive = __import__(
@@ -176,10 +189,14 @@ async def _exercise(
         client=Client(),
         bucket=None if replay else "immutable-bucket",
         source_ancestry_compact_proof=source_proof,
+        persist_graph=persist_graph,
         persist_ancestry_checkpoint=persist_checkpoint,
         boot_verifier=lambda identity: identity,
     )
     assert result["receipt"]["job_id"] == expected_job_id[0]
+    assert durability_events.index(("child", None)) > durability_events.index(
+        ("checkpoint", source_receipt["receipt_hash"])
+    )
     if partial:
         assert len(persistence_job_ids) == 1
     return result

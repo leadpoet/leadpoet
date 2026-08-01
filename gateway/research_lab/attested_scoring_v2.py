@@ -421,6 +421,54 @@ async def _persist_ancestry_checkpoint_after_graph_v2(
     return dict(persisted)
 
 
+async def _persist_graph_then_ancestry_checkpoint_v2(
+    graph: Mapping[str, Any],
+    proof: Mapping[str, Any],
+    *,
+    expected_root_receipt_hash: str,
+    expected_lineage_id: str,
+    boot_attestation_verifier: Any,
+    persist_graph: Any,
+    persist_ancestry_checkpoint: Any,
+    allowed_failed_receipt_hashes: Iterable[str] = (),
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Make one receipt root durable before exposing it as a parent."""
+
+    if persist_graph is None:
+        from gateway.research_lab.attested_v2_store import (
+            persist_receipt_graph_v2,
+        )
+
+        persist_graph = persist_receipt_graph_v2
+    failed_hashes = tuple(sorted(set(allowed_failed_receipt_hashes)))
+    if failed_hashes:
+        persisted_graph = persist_graph(
+            graph,
+            allowed_failed_receipt_hashes=failed_hashes,
+        )
+    else:
+        persisted_graph = persist_graph(graph)
+    if inspect.isawaitable(persisted_graph):
+        persisted_graph = await persisted_graph
+    if (
+        not isinstance(persisted_graph, Mapping)
+        or persisted_graph.get("root_receipt_hash")
+        != expected_root_receipt_hash
+    ):
+        raise AttestedScoringV2Error(
+            "V2 receipt graph durable readback root mismatch"
+        )
+    persisted_checkpoint = await _persist_ancestry_checkpoint_after_graph_v2(
+        proof,
+        checkpointed_graph=graph,
+        expected_root_receipt_hash=expected_root_receipt_hash,
+        expected_lineage_id=expected_lineage_id,
+        boot_attestation_verifier=boot_attestation_verifier,
+        persist_ancestry_checkpoint=persist_ancestry_checkpoint,
+    )
+    return dict(persisted_graph), dict(persisted_checkpoint)
+
+
 def _compact_parent_graphs_for_transport(
     parent_graphs: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1523,6 +1571,7 @@ async def execute_scoring_v2(
                 bucket=artifact_bucket,
                 key_prefix=artifact_key_prefix,
                 source_ancestry_compact_proof=ancestry_compact_proof,
+                persist_graph=persist_graph,
                 load_ancestry_proofs=load_ancestry_proofs,
                 persist_ancestry_checkpoint=persist_ancestry_checkpoint,
                 boot_verifier=verifier,
@@ -1744,6 +1793,18 @@ async def execute_scoring_v2(
 
         persist_graph = persist_receipt_graph_v2
     if artifact_persistence or reuse_persisted_artifacts:
+        _, source_checkpoint_persistence = (
+            await _persist_graph_then_ancestry_checkpoint_v2(
+                graph,
+                ancestry_compact_proof,
+                expected_root_receipt_hash=str(receipt["receipt_hash"]),
+                expected_lineage_id=ancestry_lineage_id,
+                boot_attestation_verifier=verifier,
+                persist_graph=persist_graph,
+                persist_ancestry_checkpoint=persist_ancestry_checkpoint,
+                allowed_failed_receipt_hashes=allowed_failed,
+            )
+        )
         if artifact_lineage_attestor is None:
             from gateway.research_lab.attested_coordinator_v2 import (
                 execute_coordinator_v2,
@@ -1837,16 +1898,6 @@ async def execute_scoring_v2(
                 )
             },
             allowed_failed_receipt_hashes=allowed_failed,
-        )
-        source_checkpoint_persistence = (
-            await _persist_ancestry_checkpoint_after_graph_v2(
-                ancestry_compact_proof,
-                checkpointed_graph=graph,
-                expected_root_receipt_hash=str(receipt["receipt_hash"]),
-                expected_lineage_id=ancestry_lineage_id,
-                boot_attestation_verifier=verifier,
-                persist_ancestry_checkpoint=persist_ancestry_checkpoint,
-            )
         )
         lineage_checkpoint_persistence = (
             await _persist_ancestry_checkpoint_after_graph_v2(
@@ -1951,23 +2002,16 @@ async def execute_scoring_v2(
                 lineage_checkpoint_persistence
             ),
         }
-    if allowed_failed:
-        persistence = await persist_graph(
+    persistence, ancestry_checkpoint_persistence = (
+        await _persist_graph_then_ancestry_checkpoint_v2(
             graph,
-            allowed_failed_receipt_hashes=allowed_failed,
-        )
-    else:
-        persistence = await persist_graph(graph)
-    if persistence.get("root_receipt_hash") != receipt["receipt_hash"]:
-        raise AttestedScoringV2Error("V2 scoring durable readback root mismatch")
-    ancestry_checkpoint_persistence = (
-        await _persist_ancestry_checkpoint_after_graph_v2(
             ancestry_compact_proof,
-            checkpointed_graph=graph,
             expected_root_receipt_hash=str(receipt["receipt_hash"]),
             expected_lineage_id=ancestry_lineage_id,
             boot_attestation_verifier=verifier,
+            persist_graph=persist_graph,
             persist_ancestry_checkpoint=persist_ancestry_checkpoint,
+            allowed_failed_receipt_hashes=allowed_failed,
         )
     )
     sidecar_persistence = {}

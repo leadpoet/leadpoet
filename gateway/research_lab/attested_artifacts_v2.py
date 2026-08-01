@@ -43,6 +43,7 @@ async def persist_execution_transport_artifacts_v2(
     bucket: str | None = None,
     key_prefix: str = ATTESTED_V2_ARTIFACT_KEY_PREFIX,
     source_ancestry_compact_proof: Mapping[str, Any],
+    persist_graph: Any = None,
     load_ancestry_proofs: Any = None,
     persist_ancestry_checkpoint: Any = None,
     boot_verifier: Any = None,
@@ -117,6 +118,7 @@ async def persist_execution_transport_artifacts_v2(
     # same deterministic source identity is used for each S3 readback proof.
     from gateway.research_lab.attested_scoring_v2 import (
         _gateway_ancestry_lineage_id,
+        _persist_graph_then_ancestry_checkpoint_v2,
         _persist_ancestry_checkpoint_after_graph_v2,
         derive_execution_job_id_v2,
     )
@@ -161,6 +163,23 @@ async def persist_execution_transport_artifacts_v2(
                     "V2 encrypted artifact persistence failed closed"
                 )
             persisted.append(dict(result))
+    if not callable(boot_verifier):
+        raise AttestedArtifactPersistenceV2Error(
+            "V2 artifact ancestry boot verifier is unavailable"
+        )
+    lineage_id = _gateway_ancestry_lineage_id()
+    _, source_checkpoint_persistence = (
+        await _persist_graph_then_ancestry_checkpoint_v2(
+            source_graph,
+            source_ancestry_compact_proof,
+            expected_root_receipt_hash=str(source_receipt["receipt_hash"]),
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=boot_verifier,
+            persist_graph=persist_graph,
+            persist_ancestry_checkpoint=persist_ancestry_checkpoint,
+            allowed_failed_receipt_hashes=allowed_failed,
+        )
+    )
     outcome = await execute_coordinator_v2(
         operation=OP_ATTEST_ARTIFACT_PERSISTENCE,
         purpose="leadpoet.artifact_persistence.v2",
@@ -173,6 +192,7 @@ async def persist_execution_transport_artifacts_v2(
         input_artifact_hashes=(),
         release_manifest=release_manifest,
         client=client,
+        persist_graph=persist_graph,
         load_ancestry_proofs=load_ancestry_proofs,
         persist_ancestry_checkpoint=persist_ancestry_checkpoint,
         boot_verifier=boot_verifier,
@@ -196,21 +216,6 @@ async def persist_execution_transport_artifacts_v2(
         graph,
         required_purposes=(purpose, "leadpoet.artifact_persistence.v2"),
         allowed_failed_receipt_hashes=allowed_failed,
-    )
-    if not callable(boot_verifier):
-        raise AttestedArtifactPersistenceV2Error(
-            "V2 artifact ancestry boot verifier is unavailable"
-        )
-    lineage_id = _gateway_ancestry_lineage_id()
-    source_checkpoint_persistence = (
-        await _persist_ancestry_checkpoint_after_graph_v2(
-            source_ancestry_compact_proof,
-            checkpointed_graph=source_graph,
-            expected_root_receipt_hash=str(source_receipt["receipt_hash"]),
-            expected_lineage_id=lineage_id,
-            boot_attestation_verifier=boot_verifier,
-            persist_ancestry_checkpoint=persist_ancestry_checkpoint,
-        )
     )
     final_checkpoint_persistence = (
         await _persist_ancestry_checkpoint_after_graph_v2(

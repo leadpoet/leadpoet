@@ -211,6 +211,7 @@ PROTECTED_SYMBOLS = {
         "_validate_output_ancestry_checkpoint_v2",
         "_validate_checkpointed_graph_proof_v2",
         "_persist_ancestry_checkpoint_after_graph_v2",
+        "_persist_graph_then_ancestry_checkpoint_v2",
         "_compact_parent_graphs_for_transport",
         "execute_scoring_v2",
     ),

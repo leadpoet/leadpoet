@@ -1483,7 +1483,9 @@ class _ArtifactCoordinator:
 
 
 @pytest.mark.asyncio
-async def test_v2_bridge_persists_every_authenticated_provider_artifact_first():
+async def test_v2_bridge_persists_every_authenticated_provider_artifact_first(
+    monkeypatch,
+):
     release = _release()
 
     def executor(operation, payload, context):
@@ -1498,6 +1500,7 @@ async def test_v2_bridge_persists_every_authenticated_provider_artifact_first():
     persisted_artifacts = []
     persisted_graphs = []
     persisted_sidecars = []
+    durability_events = []
 
     async def persist_artifact(artifact_id, **kwargs):
         persisted_artifacts.append((artifact_id, kwargs))
@@ -1520,7 +1523,23 @@ async def test_v2_bridge_persists_every_authenticated_provider_artifact_first():
 
     async def persist_graph(graph):
         persisted_graphs.append(graph)
+        durability_events.append(("graph", graph["root_receipt_hash"]))
         return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    async def persist_checkpoint(proof, *, checkpointed_graph, **_kwargs):
+        durability_events.append(
+            ("checkpoint", checkpointed_graph["root_receipt_hash"])
+        )
+        return {
+            "root_receipt_hash": checkpointed_graph["root_receipt_hash"],
+            "proof_hash": proof["proof_hash"],
+        }
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_ancestry_checkpoint_v2",
+        persist_checkpoint,
+    )
 
     async def persist_sidecars(**kwargs):
         persisted_sidecars.append(kwargs)
@@ -1564,7 +1583,15 @@ async def test_v2_bridge_persists_every_authenticated_provider_artifact_first():
         result["receipt_graph"]["root_receipt_hash"]
         == result["receipt"]["receipt_hash"]
     )
-    assert len(persisted_graphs) == 1
+    assert len(persisted_graphs) == 2
+    assert durability_events[:2] == [
+        ("graph", result["execution_receipt"]["receipt_hash"]),
+        ("checkpoint", result["execution_receipt"]["receipt_hash"]),
+    ]
+    assert durability_events[2:4] == [
+        ("graph", result["receipt"]["receipt_hash"]),
+        ("checkpoint", result["receipt"]["receipt_hash"]),
+    ]
     assert persisted_sidecars[0]["artifact_receipt_hash"] == result["receipt"][
         "receipt_hash"
     ]

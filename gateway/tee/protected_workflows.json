@@ -112,7 +112,7 @@
       "symbol": "recover_research_lab_checkpointed_audit_epochs"
     },
     {
-      "ast_sha256": "sha256:bfa57fc4a50bbbbd2d1e2ab1ca983e4a314cc35c01ea286e1278de53337227bb",
+      "ast_sha256": "sha256:e65789da10c4b032a48d72896c482bbcf8551f54cfe8eb84e5e187ce936ca9b4",
       "path": "gateway/research_lab/attested_artifacts_v2.py",
       "symbol": "persist_execution_transport_artifacts_v2"
     },
@@ -147,6 +147,11 @@
       "symbol": "_persist_ancestry_checkpoint_after_graph_v2"
     },
     {
+      "ast_sha256": "sha256:d65beb8b67150c2a31b6c28ddb1aaddb2828117f904b9d82a95dadf8192cd7ba",
+      "path": "gateway/research_lab/attested_scoring_v2.py",
+      "symbol": "_persist_graph_then_ancestry_checkpoint_v2"
+    },
+    {
       "ast_sha256": "sha256:9bacfde3620c8a6094a65ee87d7a64ce178a5615b229785019231a2ca5d4462f",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "_resolve_parent_ancestry_transport_v2"
@@ -162,7 +167,7 @@
       "symbol": "_validate_output_ancestry_checkpoint_v2"
     },
     {
-      "ast_sha256": "sha256:4c9925c7d65162a1417c162a45eafc77e9c4acbde085359f459882bbed6c3314",
+      "ast_sha256": "sha256:a0227d948308a85959bc52134cfb79d8dc855427400758b084e7d2d83f88d510",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "execute_scoring_v2"
     },
@@ -1642,7 +1647,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:637c36cac989936d02566091b528a2bab50fc4d51ce66085d8b8cc992b042740",
+  "manifest_hash": "sha256:8b00942f610020b1e44c20d8a68619efc5c8beba9be82ff789f82654200b260e",
   "protected_source_commit": "f190248b2454f208f6cc4b92d85e78afbc8ffd63",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -29,6 +29,7 @@ _PROFILE_EPOCH_COUNTS = {
 # These are stable behaviors, not implementation phases. The runner can change
 # how it reaches them without weakening the release contract.
 BEHAVIOR_SCENARIOS = (
+    "signed-private-model-contract-transition",
     "chain-settlement-state-space",
     "conditional-icp-policy",
     "conditional-candidate-gate",
@@ -51,6 +52,7 @@ AUTHORITY_DIAGNOSTICS = (
 BEHAVIORAL_INVARIANTS = (
     "candidate_identity_exact",
     "protected_source_identity_exact",
+    "signed_private_model_contract_transition_exact",
     "chain_settlement_state_space_complete",
     "conditional_icp_policy_config_bound",
     "conditional_candidate_advancement_exact",
@@ -79,6 +81,12 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "scripts/restart_attested_release_local.sh",
     "gateway/tee/rehearsal_behavior_contract_v2.py",
     "gateway/tee/verify_weight_submission_ready_v2.py",
+    "research_lab/eval/private_runtime.py",
+    "research_lab/sourcing_model_contract.json",
+    "research_lab/sourcing_model_contract_check.py",
+    "research_lab/sourcing_model_contract_v7.json",
+    "research_lab/sourcing_model_parity_fixtures.json",
+    "research_lab/sourcing_model_parity_fixtures_v7.json",
     "gateway/research_lab/champion_settlement_v2.py",
     "gateway/research_lab/allocations.py",
     "gateway/research_lab/scoring_worker.py",

@@ -6,7 +6,7 @@
       "reject_unknown": true
     },
     "aws_kms": {
-      "allowed_operations": ["decrypt", "encrypt", "generate_data_key_pair_without_plaintext"],
+      "allowed_operations": ["decrypt", "encrypt", "generate_data_key_pair_without_plaintext", "verify"],
       "reject_unknown": true
     },
     "aws_s3_object_lock": {

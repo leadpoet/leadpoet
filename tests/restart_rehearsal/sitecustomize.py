@@ -65,6 +65,16 @@ VALIDATOR_RUNTIME_LOCK_PATH = Path(
 )
 _GATEWAY_RUNTIME_OBJECTS: dict[str, dict[str, Any]] = {}
 _GATEWAY_RUNTIME_OBJECTS_LOCK = threading.Lock()
+_PRIVATE_MODEL_BUCKET = "leadpoet-private-model-artifacts-493765492819"
+_PRIVATE_MODEL_PREFIX = "research-lab/sourcing-model/"
+_PRIVATE_MODEL_POINTER_KEY = (
+    _PRIVATE_MODEL_PREFIX + "branches/leadpoet-lab/current.json"
+)
+_PRIVATE_MODEL_SIGNING_KEY_ID = (
+    "alias/leadpoet-research-lab-artifact-signing"
+)
+_PRIVATE_MODEL_OBJECTS: dict[tuple[str, str], bytes] = {}
+_PRIVATE_MODEL_OBJECTS_LOCK = threading.Lock()
 _REAL_SUBTENSOR_CLASS: Any = None
 _ORIGINAL_SOCKET = socket.socket
 _ORIGINAL_GETADDRINFO = socket.getaddrinfo
@@ -1673,6 +1683,73 @@ def _artifact_record_path(bucket: str, key: str) -> Path:
     return STATE_ROOT / "s3-artifacts" / (digest + ".json")
 
 
+def _private_model_signing_key() -> Any:
+    """Return a deterministic local P-256 equivalent of the production key."""
+
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    order = int(
+        "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
+        16,
+    )
+    seed = hashlib.sha256(
+        b"leadpoet-local-private-model-signing-key-v1"
+    ).digest()
+    scalar = (int.from_bytes(seed, "big") % (order - 1)) + 1
+    return ec.derive_private_key(scalar, ec.SECP256R1())
+
+
+def _sign_private_model_manifest_hash(manifest_hash: str) -> bytes:
+    """Sign one canonical manifest hash through the strict local boundary."""
+
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    normalized = str(manifest_hash)
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", normalized):
+        raise ValueError("local private model manifest hash is invalid")
+    return _private_model_signing_key().sign(
+        normalized.encode("utf-8"),
+        ec.ECDSA(hashes.SHA256()),
+    )
+
+
+def _install_private_model_s3_object(
+    *,
+    bucket: str,
+    key: str,
+    body: bytes,
+) -> None:
+    """Install an immutable artifact or the one mutable branch pointer."""
+
+    normalized_bucket = str(bucket)
+    normalized_key = str(key)
+    payload = bytes(body)
+    if (
+        normalized_bucket != _PRIVATE_MODEL_BUCKET
+        or not normalized_key.startswith(_PRIVATE_MODEL_PREFIX)
+        or not payload
+    ):
+        raise ValueError("local private model S3 fixture contract differs")
+    identity = (normalized_bucket, normalized_key)
+    with _PRIVATE_MODEL_OBJECTS_LOCK:
+        existing = _PRIVATE_MODEL_OBJECTS.get(identity)
+        if (
+            existing is not None
+            and existing != payload
+            and normalized_key != _PRIVATE_MODEL_POINTER_KEY
+        ):
+            raise ValueError("local private model immutable object differs")
+        _PRIVATE_MODEL_OBJECTS[identity] = payload
+
+
+def _clear_private_model_s3_objects() -> None:
+    """Reset only test-owned private-model fixtures between scenarios."""
+
+    with _PRIVATE_MODEL_OBJECTS_LOCK:
+        _PRIVATE_MODEL_OBJECTS.clear()
+
+
 def _local_artifact_transport(
     *,
     method: str,
@@ -2790,6 +2867,26 @@ class _LocalS3:
         return commit, body
 
     def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+        private_model_identity = (str(Bucket), str(Key))
+        with _PRIVATE_MODEL_OBJECTS_LOCK:
+            private_model_body = _PRIVATE_MODEL_OBJECTS.get(
+                private_model_identity
+            )
+        if private_model_body is not None:
+            _external_event(
+                "aws_s3_object_lock",
+                "get_object",
+                service="s3",
+                bucket=Bucket,
+                key=Key,
+                private_model_artifact=True,
+            )
+            return {
+                "Body": io.BytesIO(private_model_body),
+                "ContentLength": len(private_model_body),
+                "VersionId": "local-private-model-"
+                + hashlib.sha256(private_model_body).hexdigest()[:24],
+            }
         artifact_path = _artifact_record_path(Bucket, Key)
         if artifact_path.is_file():
             record = json.loads(artifact_path.read_text(encoding="utf-8"))
@@ -2821,6 +2918,25 @@ class _LocalS3:
         return {"Body": io.BytesIO(body)}
 
     def head_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+        private_model_identity = (str(Bucket), str(Key))
+        with _PRIVATE_MODEL_OBJECTS_LOCK:
+            private_model_body = _PRIVATE_MODEL_OBJECTS.get(
+                private_model_identity
+            )
+        if private_model_body is not None:
+            _external_event(
+                "aws_s3_object_lock",
+                "head_object",
+                service="s3",
+                bucket=Bucket,
+                key=Key,
+                private_model_artifact=True,
+            )
+            return {
+                "ContentLength": len(private_model_body),
+                "VersionId": "local-private-model-"
+                + hashlib.sha256(private_model_body).hexdigest()[:24],
+            }
         artifact_path = _artifact_record_path(Bucket, Key)
         if artifact_path.is_file():
             record = json.loads(artifact_path.read_text(encoding="utf-8"))
@@ -3025,6 +3141,62 @@ class _LocalS3:
 
 
 class _LocalKMS:
+    def verify(
+        self,
+        *,
+        KeyId: str,
+        Message: bytes,
+        MessageType: str,
+        Signature: bytes,
+        SigningAlgorithm: str,
+    ) -> dict[str, Any]:
+        """Verify the production private-model ECDSA request contract."""
+
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        if (
+            str(KeyId) != _PRIVATE_MODEL_SIGNING_KEY_ID
+            or str(MessageType) != "RAW"
+            or str(SigningAlgorithm) != "ECDSA_SHA_256"
+            or not isinstance(Message, (bytes, bytearray))
+            or not re.fullmatch(
+                rb"sha256:[0-9a-f]{64}", bytes(Message)
+            )
+            or not isinstance(Signature, (bytes, bytearray))
+            or not Signature
+        ):
+            raise ValueError("local KMS verify contract differs")
+        try:
+            _private_model_signing_key().public_key().verify(
+                bytes(Signature),
+                bytes(Message),
+                ec.ECDSA(hashes.SHA256()),
+            )
+        except (InvalidSignature, ValueError):
+            valid = False
+        else:
+            valid = True
+        _external_event(
+            "aws_kms",
+            "verify",
+            key_id_hash=_sha256(str(KeyId)),
+            message_hash=(
+                "sha256:" + hashlib.sha256(bytes(Message)).hexdigest()
+            ),
+            signature_hash=(
+                "sha256:" + hashlib.sha256(bytes(Signature)).hexdigest()
+            ),
+            signature_valid=valid,
+            signing_algorithm=str(SigningAlgorithm),
+        )
+        return {
+            "KeyId": str(KeyId),
+            "SignatureValid": valid,
+            "SigningAlgorithm": str(SigningAlgorithm),
+        }
+
     def encrypt(
         self,
         *,

@@ -1396,6 +1396,88 @@ def test_gateway_rehearsal_artifact_store_is_object_locked_and_immutable(
         )
 
 
+def test_private_model_rehearsal_boundary_is_signed_and_fail_closed(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(rehearsal_sitecustomize, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        rehearsal_sitecustomize,
+        "EVENT_PATH",
+        tmp_path / "events.jsonl",
+    )
+    rehearsal_sitecustomize._clear_private_model_s3_objects()
+    bucket = rehearsal_sitecustomize._PRIVATE_MODEL_BUCKET
+    immutable_key = rehearsal_sitecustomize._PRIVATE_MODEL_PREFIX + "fixture.json"
+    pointer_key = rehearsal_sitecustomize._PRIVATE_MODEL_POINTER_KEY
+    client = rehearsal_sitecustomize._LocalS3()
+    rehearsal_sitecustomize._install_private_model_s3_object(
+        bucket=bucket,
+        key=immutable_key,
+        body=b'{"version":7}',
+    )
+    assert (
+        client.get_object(Bucket=bucket, Key=immutable_key)["Body"].read()
+        == b'{"version":7}'
+    )
+    with pytest.raises(ValueError, match="immutable object differs"):
+        rehearsal_sitecustomize._install_private_model_s3_object(
+            bucket=bucket,
+            key=immutable_key,
+            body=b'{"version":8}',
+        )
+
+    rehearsal_sitecustomize._install_private_model_s3_object(
+        bucket=bucket,
+        key=pointer_key,
+        body=b'{"version":7}',
+    )
+    rehearsal_sitecustomize._install_private_model_s3_object(
+        bucket=bucket,
+        key=pointer_key,
+        body=b'{"version":8}',
+    )
+    assert (
+        client.get_object(Bucket=bucket, Key=pointer_key)["Body"].read()
+        == b'{"version":8}'
+    )
+
+    manifest_hash = "sha256:" + "4" * 64
+    signature = rehearsal_sitecustomize._sign_private_model_manifest_hash(manifest_hash)
+    kms = rehearsal_sitecustomize._LocalKMS()
+    valid = kms.verify(
+        KeyId=rehearsal_sitecustomize._PRIVATE_MODEL_SIGNING_KEY_ID,
+        Message=manifest_hash.encode("utf-8"),
+        MessageType="RAW",
+        Signature=signature,
+        SigningAlgorithm="ECDSA_SHA_256",
+    )
+    assert valid["SignatureValid"] is True
+    corrupted = signature[:-1] + bytes((signature[-1] ^ 1,))
+    invalid = kms.verify(
+        KeyId=rehearsal_sitecustomize._PRIVATE_MODEL_SIGNING_KEY_ID,
+        Message=manifest_hash.encode("utf-8"),
+        MessageType="RAW",
+        Signature=corrupted,
+        SigningAlgorithm="ECDSA_SHA_256",
+    )
+    assert invalid["SignatureValid"] is False
+    with pytest.raises(ValueError, match="verify contract differs"):
+        kms.verify(
+            KeyId=rehearsal_sitecustomize._PRIVATE_MODEL_SIGNING_KEY_ID,
+            Message=manifest_hash.encode("utf-8"),
+            MessageType="DIGEST",
+            Signature=signature,
+            SigningAlgorithm="ECDSA_SHA_256",
+        )
+    operations = [
+        json.loads(line)["operation"]
+        for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert operations.count("verify") == 2
+    rehearsal_sitecustomize._clear_private_model_s3_objects()
+
+
 def test_gateway_rehearsal_provider_boundary_rejects_unknown_hosts() -> None:
     with pytest.raises(ValueError, match="unknown host"):
         rehearsal_sitecustomize._local_provider_transport(
@@ -2774,6 +2856,21 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
         "proxy_dns",
         "proxy_tls_connect",
     } <= set(contract["boundaries"]["http_service"]["allowed_operations"])
+    assert "verify" in set(
+        contract["boundaries"]["aws_kms"]["allowed_operations"]
+    )
+    behavior_contract = build_rehearsal_behavior_contract_v2(
+        source_root=Path(__file__).resolve().parents[2],
+        candidate_sha=COMMIT,
+        profile="prepush",
+        epoch_count=1,
+    )
+    assert "signed-private-model-contract-transition" in set(
+        behavior_contract["behavior_scenarios"]
+    )
+    assert "signed_private_model_contract_transition_exact" in set(
+        behavior_contract["required_invariant_ids"]
+    )
     assert "proxy-authorization:" in tls_proxy_service
     assert "ssl.PROTOCOL_TLS_SERVER" in tls_proxy_service
     assert '"openrouter.ai:443"' in tls_proxy_service

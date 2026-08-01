@@ -1,7 +1,7 @@
 """Sourcing-model consumer-contract conformance checks.
 
-The model-owned contract is snapshotted byte-for-byte at
-``research_lab/sourcing_model_contract.json``. The exact function signatures
+The reviewed model-owned v7/v8 contracts are snapshotted byte-for-byte under
+``research_lab/``. The exact function signatures
 the Lab and production harness call
 (``research_lab_adapter.run_icp``/``adapter_metadata``,
 ``sourcing_model.core.qualify``, the discovery/validation/client seams the
@@ -20,12 +20,13 @@ patched source.  Intended call sites:
 * local/CI checks against a model checkout.
 
 Pure stdlib. A candidate is rejected unless its embedded canonical contract and
-parity fixtures are byte-identical to these reviewed consumer snapshots.
+parity fixtures are a byte-identical pair from the reviewed consumer allowlist.
 """
 
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
@@ -33,6 +34,34 @@ from typing import Any, Dict, List, Mapping
 CONTRACT_PATH = Path(__file__).with_name("sourcing_model_contract.json")
 PARITY_FIXTURE_PATH = Path(__file__).with_name(
     "sourcing_model_parity_fixtures.json"
+)
+CONTRACT_V7_PATH = Path(__file__).with_name("sourcing_model_contract_v7.json")
+PARITY_FIXTURE_V7_PATH = Path(__file__).with_name(
+    "sourcing_model_parity_fixtures_v7.json"
+)
+REVIEWED_CONSUMER_SNAPSHOT_SPECS = (
+    {
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v8",
+        "contract_path": CONTRACT_PATH,
+        "contract_sha256": (
+            "sha256:ff2fdc05dcabf2715337e2f76be33368cfdbdc8381cb8e62a48c4cc134673361"
+        ),
+        "parity_path": PARITY_FIXTURE_PATH,
+        "parity_sha256": (
+            "sha256:5527186b45294135639619d99bfcf076ec98035670f68843244ccd18fc3f80fe"
+        ),
+    },
+    {
+        "contract_id": "leadpoet-sourcing-wrapper-contract-v7",
+        "contract_path": CONTRACT_V7_PATH,
+        "contract_sha256": (
+            "sha256:f2fea5a16de1dd1fafb1fa5259b161cd0dd8059fddaf30d8e9982d3eec391d10"
+        ),
+        "parity_path": PARITY_FIXTURE_V7_PATH,
+        "parity_sha256": (
+            "sha256:c39c48335a4877c091e6ca264f3f9411dbecd4992c09e9c77bdb789479076d3a"
+        ),
+    },
 )
 
 
@@ -54,6 +83,84 @@ def load_wrapper_contract(path: Path | None = None) -> Dict[str, Any]:
         if key not in document:
             raise ValueError(f"wrapper contract missing required key {key!r}")
     return document
+
+
+def reviewed_consumer_snapshots() -> Dict[str, Dict[str, Any]]:
+    """Return the exact contract/parity pairs accepted by this consumer.
+
+    Contract ids are selectors only. Acceptance still requires byte equality
+    with both files in the selected pair, so an artifact cannot mix a reviewed
+    contract with unrelated parity projections.
+    """
+
+    snapshots: Dict[str, Dict[str, Any]] = {}
+    for spec in REVIEWED_CONSUMER_SNAPSHOT_SPECS:
+        contract_path = Path(spec["contract_path"])
+        parity_path = Path(spec["parity_path"])
+        contract_sha256 = _snapshot_sha256(contract_path)
+        parity_sha256 = _snapshot_sha256(parity_path)
+        if contract_sha256 != spec["contract_sha256"]:
+            raise ValueError(
+                f"reviewed sourcing contract hash differs: {contract_path.name}"
+            )
+        if parity_sha256 != spec["parity_sha256"]:
+            raise ValueError(
+                f"reviewed sourcing parity hash differs: {parity_path.name}"
+            )
+        document = load_wrapper_contract(contract_path)
+        contract_id = str(spec["contract_id"])
+        if document["contract_id"] != contract_id:
+            raise ValueError(
+                f"reviewed sourcing contract id differs: {contract_path.name}"
+            )
+        if contract_id in snapshots:
+            raise ValueError(
+                f"duplicate reviewed sourcing wrapper contract id: {contract_id}"
+            )
+        if not parity_path.is_file():
+            raise ValueError(
+                f"reviewed sourcing parity snapshot is missing: {parity_path.name}"
+            )
+        snapshots[contract_id] = {
+            "contract": document,
+            "contract_path": contract_path,
+            "contract_sha256": contract_sha256,
+            "parity_path": parity_path,
+            "parity_sha256": parity_sha256,
+        }
+    return snapshots
+
+
+def _snapshot_sha256(path: Path) -> str:
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"reviewed sourcing snapshot is unreadable: {path.name}") from exc
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def resolve_reviewed_consumer_snapshot(root: Path) -> Dict[str, Any] | None:
+    """Resolve a model tree to one exact reviewed contract/parity pair."""
+
+    root = Path(root)
+    matches: list[Dict[str, Any]] = []
+    for snapshot in reviewed_consumer_snapshots().values():
+        document = snapshot["contract"]
+        candidate_contract_path = root / str(document["canonical_path"])
+        candidate_parity_path = root / str(document["parity_fixture_path"])
+        try:
+            if (
+                candidate_contract_path.is_file()
+                and candidate_parity_path.is_file()
+                and candidate_contract_path.read_bytes()
+                == Path(snapshot["contract_path"]).read_bytes()
+                and candidate_parity_path.read_bytes()
+                == Path(snapshot["parity_path"]).read_bytes()
+            ):
+                matches.append(snapshot)
+        except OSError:
+            continue
+    return matches[0] if len(matches) == 1 else None
 
 
 def _function_signature(node: ast.AST) -> Dict[str, Any]:
@@ -300,9 +407,7 @@ def _same_literal(actual: Any, expected: Any) -> bool:
     return type(actual) is type(expected) and actual == expected
 
 
-def verify_source_tree_contract(
-    root: Path, contract: Mapping[str, Any] | None = None
-) -> List[str]:
+def verify_source_tree_contract(root: Path) -> List[str]:
     """Return every contract violation for the model source tree at ``root``.
 
     An empty list means the tree conforms.  Violations are stable, specific
@@ -310,8 +415,28 @@ def verify_source_tree_contract(
     drift, integer floor breach) suitable for build receipts.
     """
     root = Path(root)
-    document = dict(contract) if contract is not None else load_wrapper_contract()
+    detected_snapshot = resolve_reviewed_consumer_snapshot(root)
     violations: List[str] = []
+    if detected_snapshot is not None:
+        document = dict(detected_snapshot["contract"])
+    else:
+        document = load_wrapper_contract()
+        violations.append(
+            "model-owned compatibility contract/parity pair is not reviewed"
+        )
+    reviewed_snapshot = detected_snapshot or reviewed_consumer_snapshots()[
+        str(document["contract_id"])
+    ]
+    expected_contract_path = Path(
+        reviewed_snapshot["contract_path"]
+        if reviewed_snapshot is not None
+        else CONTRACT_PATH
+    )
+    expected_parity_path = Path(
+        reviewed_snapshot["parity_path"]
+        if reviewed_snapshot is not None
+        else PARITY_FIXTURE_PATH
+    )
     frozen_asyncness = dict(document.get("frozen_asyncness") or {})
     exact_signatures = set(document.get("exact_signatures") or ())
     frozen_required_keyword_only = dict(
@@ -322,7 +447,7 @@ def verify_source_tree_contract(
     canonical_path = root / canonical_relative
     if canonical_path.is_file():
         try:
-            if canonical_path.read_bytes() != CONTRACT_PATH.read_bytes():
+            if canonical_path.read_bytes() != expected_contract_path.read_bytes():
                 violations.append(
                     "model-owned compatibility contract differs from the "
                     "reviewed Lab snapshot"
@@ -336,7 +461,7 @@ def verify_source_tree_contract(
     parity_path = root / parity_relative
     if parity_path.is_file():
         try:
-            if parity_path.read_bytes() != PARITY_FIXTURE_PATH.read_bytes():
+            if parity_path.read_bytes() != expected_parity_path.read_bytes():
                 violations.append(
                     "model-owned parity fixtures differ from the reviewed "
                     "Lab snapshot"

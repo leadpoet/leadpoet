@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "contract_id": "leadpoet-sourcing-wrapper-contract-v8",
+  "contract_id": "leadpoet-sourcing-wrapper-contract-v7",
   "canonical_path": "sourcing_model/consumer_contract.json",
   "parity_fixture_path": "sourcing_model/consumer_parity_fixtures.json",
   "required_files": [
@@ -556,13 +556,13 @@
       "DEFAULT_POLICY_VERSION": "sourcing-model-routing:v2"
     },
     "sourcing_model/routing/runtime.py": {
-      "RUNTIME_CATALOG_VERSION": "sourcing-model-runtime-tools:v7",
-      "RUNTIME_POLICY_VERSION": "sourcing-model-runtime-routing:v7"
+      "RUNTIME_CATALOG_VERSION": "sourcing-model-runtime-tools:v6",
+      "RUNTIME_POLICY_VERSION": "sourcing-model-runtime-routing:v6"
     },
     "sourcing_model/scrapingdog_signal_contract.py": {
       "EVIDENCE_SCHEMA_VERSION": "v1",
-      "REQUEST_SCHEMA_VERSION": "v5",
-      "SCHEMA_VERSION": "scrapingdog-routing-v6"
+      "REQUEST_SCHEMA_VERSION": "v4",
+      "SCHEMA_VERSION": "scrapingdog-routing-v5"
     },
     "sourcing_model/normalized_icp_discovery_plan.py": {
       "CONTACT_PERSONA_SENIORITY_LEVELS": [

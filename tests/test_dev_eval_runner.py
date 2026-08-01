@@ -53,6 +53,7 @@ from research_lab.eval.provider_evidence_cache import (
     EVIDENCE_CACHE_SCHEMA_VERSION,
     icp_evidence_cache_key,
 )
+from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
 
 IMAGE_DIGEST = "123456789.dkr.ecr.test/model@sha256:" + "a" * 64
 DEV_ICP_COUNT = DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
@@ -495,6 +496,7 @@ async def test_attested_evaluator_preserves_legacy_result_and_requests_candidate
         "def run_icp(icp, context):\n    return []\n",
         encoding="utf-8",
     )
+    install_reviewed_consumer_snapshot(source)
     artifact = PrivateModelArtifactManifest.from_mapping(
         build_local_private_artifact_manifest(
             source_path=source,

@@ -4,6 +4,7 @@ import subprocess
 
 import pytest
 
+from gateway.tee import protected_workflows as protected_workflows_module
 from gateway.tee.protected_workflows import (
     PROTECTED_SYMBOLS,
     ProtectedWorkflowError,
@@ -54,4 +55,29 @@ def test_protected_manifest_detects_logic_change(tmp_path: Path):
         encoding="utf-8",
     )
     with pytest.raises(ProtectedWorkflowError, match="promotion_metric.py"):
+        verify_manifest(copied_root, manifest)
+
+
+def test_protected_manifest_detects_policy_constant_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    copied_root = tmp_path / "repo"
+    policy_path = copied_root / "policy.py"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_path.write_text('POLICY_VERSION = "v1"\n', encoding="utf-8")
+    monkeypatch.setattr(
+        protected_workflows_module,
+        "PROTECTED_SYMBOLS",
+        {"policy.py": ("POLICY_VERSION",)},
+    )
+    manifest = build_manifest(
+        copied_root,
+        baseline_commit="1" * 40,
+        protected_source_commit="2" * 40,
+    )
+
+    policy_path.write_text('POLICY_VERSION = "v2"\n', encoding="utf-8")
+
+    with pytest.raises(ProtectedWorkflowError, match="policy.py:POLICY_VERSION"):
         verify_manifest(copied_root, manifest)

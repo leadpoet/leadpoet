@@ -43,6 +43,7 @@ from research_lab.eval.provider_evidence_cache import (
 )
 from research_lab.eval.snapshot_store import MODE_RECORD, MODE_REPLAY, ProviderSnapshotStore
 from tests.v2_epoch_test_utils import epoch_test_environment
+from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
 
 
 HASH = "sha256:" + "a" * 64
@@ -746,6 +747,7 @@ async def test_v2_dev_replay_preserves_score_and_adds_tree_commitments(tmp_path)
         "def run_icp(icp, context):\n    return []\n",
         encoding="utf-8",
     )
+    install_reviewed_consumer_snapshot(source)
     artifact = build_local_private_artifact_manifest(
         source_path=source,
         git_commit_sha="a" * 40,

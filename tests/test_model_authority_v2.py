@@ -18,6 +18,7 @@ from research_lab.eval.private_runtime import (
     begin_incontainer_trace_collection,
     end_incontainer_trace_collection,
 )
+from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
 
 
 def _artifact(tmp_path):
@@ -27,6 +28,7 @@ def _artifact(tmp_path):
         "def run_icp(icp, context):\n    return []\n",
         encoding="utf-8",
     )
+    install_reviewed_consumer_snapshot(source)
     return build_local_private_artifact_manifest(
         source_path=source,
         git_commit_sha="a" * 40,

@@ -9,6 +9,7 @@ harness output shape in the lab's company normalizer.
 
 from __future__ import annotations
 
+import json
 import textwrap
 from pathlib import Path
 
@@ -16,8 +17,11 @@ import pytest
 
 from research_lab.sourcing_model_contract_check import (
     CONTRACT_PATH,
+    CONTRACT_V7_PATH,
     PARITY_FIXTURE_PATH,
+    PARITY_FIXTURE_V7_PATH,
     load_wrapper_contract,
+    resolve_reviewed_consumer_snapshot,
     verify_source_tree_contract,
 )
 
@@ -28,7 +32,17 @@ def _write(root: Path, relative: str, body: str) -> None:
     path.write_text(textwrap.dedent(body), encoding="utf-8")
 
 
-def _conforming_tree(root: Path) -> None:
+def _conforming_tree(
+    root: Path,
+    *,
+    contract_snapshot: Path = CONTRACT_PATH,
+    parity_snapshot: Path = PARITY_FIXTURE_PATH,
+    runtime_version: int = 7,
+) -> None:
+    contract_document = json.loads(contract_snapshot.read_text(encoding="utf-8"))
+    scrapingdog_constants = contract_document["exact_constants"][
+        "sourcing_model/scrapingdog_signal_contract.py"
+    ]
     _write(root, "requirements.txt", "httpx\n")
     _write(root, "research_lab_adapter.py", """
         ADAPTER_VERSION = "sourcing-model-research-lab-adapter:v3"
@@ -43,9 +57,9 @@ def _conforming_tree(root: Path) -> None:
     _write(root, "sourcing_model/__init__.py", "from .core import qualify\n")
     contract_path = root / "sourcing_model" / "consumer_contract.json"
     contract_path.parent.mkdir(parents=True, exist_ok=True)
-    contract_path.write_bytes(CONTRACT_PATH.read_bytes())
+    contract_path.write_bytes(contract_snapshot.read_bytes())
     parity_path = root / "sourcing_model" / "consumer_parity_fixtures.json"
-    parity_path.write_bytes(PARITY_FIXTURE_PATH.read_bytes())
+    parity_path.write_bytes(parity_snapshot.read_bytes())
     _write(
         root,
         "sourcing_model/consumer_parity.py",
@@ -224,8 +238,8 @@ def _conforming_tree(root: Path) -> None:
     """)
     _write(root, "sourcing_model/routing/policy.py", "POLICY = True\n")
     _write(root, "sourcing_model/routing/runtime.py", """
-        RUNTIME_CATALOG_VERSION = "sourcing-model-runtime-tools:v6"
-        RUNTIME_POLICY_VERSION = "sourcing-model-runtime-routing:v6"
+        RUNTIME_CATALOG_VERSION = "sourcing-model-runtime-tools:v__RUNTIME_VERSION__"
+        RUNTIME_POLICY_VERSION = "sourcing-model-runtime-routing:v__RUNTIME_VERSION__"
 
         def runtime_tool_definitions():
             return ()
@@ -270,7 +284,7 @@ def _conforming_tree(root: Path) -> None:
 
         def runtime_routing_metadata():
             return {}
-    """)
+    """.replace("__RUNTIME_VERSION__", str(runtime_version)))
     _write(root, "sourcing_model/runtime_capabilities.py", """
         def capability_metadata():
             return {}
@@ -297,8 +311,8 @@ def _conforming_tree(root: Path) -> None:
             return None
     """)
     _write(root, "sourcing_model/scrapingdog_signal_contract.py", """
-        SCHEMA_VERSION = "scrapingdog-routing-v5"
-        REQUEST_SCHEMA_VERSION = "v4"
+        SCHEMA_VERSION = __SCHEMA_VERSION__
+        REQUEST_SCHEMA_VERSION = __REQUEST_SCHEMA_VERSION__
         EVIDENCE_SCHEMA_VERSION = "v1"
 
         def canonical_json(value):
@@ -321,7 +335,12 @@ def _conforming_tree(root: Path) -> None:
 
         def sha256_payload(value):
             return "0" * 64
-    """)
+    """.replace(
+        "__SCHEMA_VERSION__", repr(scrapingdog_constants["SCHEMA_VERSION"])
+    ).replace(
+        "__REQUEST_SCHEMA_VERSION__",
+        repr(scrapingdog_constants["REQUEST_SCHEMA_VERSION"]),
+    ))
     _write(root, "verified_intent_event.py", """
         VERIFIED_INTENT_EVENT_SCHEMA_VERSION = "verified-intent-event:v1"
 
@@ -356,7 +375,7 @@ def _conforming_tree(root: Path) -> None:
 
 def test_contract_loads_and_declares_frozen_surface() -> None:
     contract = load_wrapper_contract()
-    assert contract["contract_id"] == "leadpoet-sourcing-wrapper-contract-v7"
+    assert contract["contract_id"] == "leadpoet-sourcing-wrapper-contract-v8"
     assert (
         "sourcing_model/scrapingdog_signal_contract.py"
         in contract["required_files"]
@@ -370,6 +389,44 @@ def test_contract_loads_and_declares_frozen_surface() -> None:
     assert contract["required_imports"]["sourcing_model/clients.py"] == [
         "urllib.request"
     ]
+
+
+def test_exact_v7_and_v8_source_pairs_are_both_reviewed(tmp_path: Path) -> None:
+    v8_root = tmp_path / "v8"
+    _conforming_tree(v8_root)
+    assert resolve_reviewed_consumer_snapshot(v8_root)["contract"][
+        "contract_id"
+    ].endswith("v8")
+    assert verify_source_tree_contract(v8_root) == []
+
+    v7_root = tmp_path / "v7"
+    _conforming_tree(
+        v7_root,
+        contract_snapshot=CONTRACT_V7_PATH,
+        parity_snapshot=PARITY_FIXTURE_V7_PATH,
+        runtime_version=6,
+    )
+    assert resolve_reviewed_consumer_snapshot(v7_root)["contract"][
+        "contract_id"
+    ].endswith("v7")
+    assert verify_source_tree_contract(v7_root) == []
+
+
+def test_mixed_reviewed_contract_and_parity_versions_fail_closed(
+    tmp_path: Path,
+) -> None:
+    _conforming_tree(
+        tmp_path,
+        contract_snapshot=CONTRACT_V7_PATH,
+        parity_snapshot=PARITY_FIXTURE_PATH,
+        runtime_version=6,
+    )
+
+    assert resolve_reviewed_consumer_snapshot(tmp_path) is None
+    assert (
+        "model-owned compatibility contract/parity pair is not reviewed"
+        in verify_source_tree_contract(tmp_path)
+    )
 
 
 def test_nonidentical_contract_and_parity_snapshots_fail_closed(

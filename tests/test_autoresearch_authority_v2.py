@@ -34,6 +34,7 @@ from gateway.research_lab.git_tree_models import (
     derive_tree_id,
 )
 from gateway.research_lab.git_tree_repository import GitTreeRepository
+from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
 
 
 MINER_HOTKEY = "miner-hotkey"
@@ -124,6 +125,7 @@ def _artifact(tmp_path: Path):
         "def run():\n    return 1\n",
         encoding="utf-8",
     )
+    install_reviewed_consumer_snapshot(source)
     return authority.PrivateModelArtifactManifest.from_mapping(
         build_local_private_artifact_manifest(
             source_path=source,

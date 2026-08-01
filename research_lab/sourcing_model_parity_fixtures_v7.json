@@ -129,119 +129,6 @@
       ]
     }
   ],
-  "source_add_parity_cases": [
-    {
-      "fixture_id": "techstack-observe-cost-fallback",
-      "category": "TECHSTACK",
-      "available_tools": {
-        "intent.source_add.builtwith": true,
-        "intent.source_add.bloomberry": true,
-        "intent.source_add.sumble": false,
-        "intent.first_party": true
-      },
-      "remaining_seconds": 60,
-      "remaining_calls": 4,
-      "credit_cap": 4.2
-    },
-    {
-      "fixture_id": "techstack-bloomberry-fractional-authorized",
-      "category": "TECHSTACK",
-      "available_tools": {
-        "intent.source_add.builtwith": true,
-        "intent.source_add.bloomberry": true,
-        "intent.source_add.sumble": false,
-        "intent.first_party": true
-      },
-      "remaining_seconds": 60,
-      "remaining_calls": 4,
-      "credit_cap": 4.21
-    },
-    {
-      "fixture_id": "hiring-sumble-unavailable-digest-drift-fallback",
-      "category": "HIRING",
-      "available_tools": {
-        "intent.source_add.sumble": false,
-        "intent.first_party": true
-      },
-      "remaining_seconds": 60,
-      "remaining_calls": 4,
-      "credit_cap": 1.0
-    },
-    {
-      "fixture_id": "hiring-sumble-bound-route",
-      "category": "HIRING",
-      "available_tools": {
-        "intent.source_add.sumble": true,
-        "intent.first_party": true
-      },
-      "remaining_seconds": 60,
-      "remaining_calls": 4,
-      "credit_cap": 2.0
-    }
-  ],
-  "expected_source_add_projections": [
-    {
-      "fixture_id": "techstack-observe-cost-fallback",
-      "selected_tool_ids": [
-        "intent.source_add.builtwith",
-        "intent.first_party"
-      ],
-      "exclusions": [
-        {"tool_id": "intent.source_add.bloomberry", "reason_code": "credit_budget_exhausted"},
-        {"tool_id": "intent.source_add.sumble", "reason_code": "tool_unavailable"}
-      ],
-      "receipt": [
-        {"tool_id": "intent.source_add.bloomberry", "phase": "skipped", "reason_code": "credit_budget_exhausted"},
-        {"tool_id": "intent.source_add.sumble", "phase": "skipped", "reason_code": "tool_unavailable"},
-        {"tool_id": "intent.source_add.builtwith", "phase": "observed", "outcome": "not_invoked", "execution_mode": "observe", "credit_cap": 0.0},
-        {"tool_id": "intent.first_party", "phase": "selected", "outcome": "selected", "execution_mode": "invoke", "credit_cap": 0.0}
-      ],
-      "source_add_attestation_sha256": "b162a41b19dd5783505e2604de75289a87daf7f2407ea7f19e6dbe37d737d289"
-    },
-    {
-      "fixture_id": "techstack-bloomberry-fractional-authorized",
-      "selected_tool_ids": [
-        "intent.source_add.builtwith",
-        "intent.source_add.bloomberry",
-        "intent.first_party"
-      ],
-      "exclusions": [
-        {"tool_id": "intent.source_add.sumble", "reason_code": "tool_unavailable"}
-      ],
-      "receipt": [
-        {"tool_id": "intent.source_add.sumble", "phase": "skipped", "reason_code": "tool_unavailable"},
-        {"tool_id": "intent.source_add.builtwith", "phase": "observed", "outcome": "not_invoked", "execution_mode": "observe", "credit_cap": 0.0},
-        {"tool_id": "intent.source_add.bloomberry", "phase": "selected", "outcome": "selected", "execution_mode": "invoke", "credit_cap": 4.21},
-        {"tool_id": "intent.first_party", "phase": "selected", "outcome": "selected", "execution_mode": "invoke", "credit_cap": 0.0}
-      ],
-      "source_add_attestation_sha256": "b162a41b19dd5783505e2604de75289a87daf7f2407ea7f19e6dbe37d737d289"
-    },
-    {
-      "fixture_id": "hiring-sumble-unavailable-digest-drift-fallback",
-      "selected_tool_ids": ["intent.first_party"],
-      "exclusions": [
-        {"tool_id": "intent.source_add.sumble", "reason_code": "tool_unavailable"}
-      ],
-      "receipt": [
-        {"tool_id": "intent.source_add.sumble", "phase": "skipped", "reason_code": "tool_unavailable"},
-        {"tool_id": "intent.first_party", "phase": "selected", "outcome": "selected", "execution_mode": "invoke", "credit_cap": 0.0}
-      ],
-      "source_add_attestation_sha256": "b162a41b19dd5783505e2604de75289a87daf7f2407ea7f19e6dbe37d737d289"
-    },
-    {
-      "fixture_id": "hiring-sumble-bound-route",
-      "selected_tool_ids": [
-        "intent.source_add.sumble",
-        "intent.first_party"
-      ],
-      "exclusions": [],
-      "receipt": [
-        {"tool_id": "intent.source_add.sumble", "phase": "selected", "outcome": "selected", "execution_mode": "invoke", "credit_cap": 2.0},
-        {"tool_id": "intent.first_party", "phase": "selected", "outcome": "selected", "execution_mode": "invoke", "credit_cap": 0.0}
-      ],
-      "source_add_attestation_sha256": "b162a41b19dd5783505e2604de75289a87daf7f2407ea7f19e6dbe37d737d289"
-    }
-  ],
   "expected_projections": [
     {
       "adapter_metadata": {
@@ -252,25 +139,6 @@
         "routing_catalog_sha256": "f91c7ca3e19f85514bb2f0bf0adeec8b41e7963651238a488aa6b42809b73e1b",
         "routing_compiler_version": "routing-compiler-v2",
         "routing_policy_sha256": "d98f5b54abcf349f433f927d1d03c1e14ee71ff263365e55967869809bd469f5",
-        "runtime_routing_catalog_sha256": "36c02525aeaf8a678b39ea7bd0630513089c93243dcbbdcb3959a28b3be15475",
-        "runtime_routing_policy_sha256": "cc019ec5553d98684177aa04f17e06deef3785864f2d4424279682f8661a660d",
-        "runtime_source_add_manifest_attestations": [
-          {
-            "manifest_sha256": "9c0130dd089bc5645314f087c58b2c58b064b8e56d1e6bd4039e3e1502278d7b",
-            "revision": "source-add-9c0130dd089b",
-            "tool_id": "intent.source_add.bloomberry"
-          },
-          {
-            "manifest_sha256": "cbe713744e649d58db69f98ebf0f2eb2b82b1a5cb1281f7e7f514abd51a1e393",
-            "revision": "source-add-cbe713744e64",
-            "tool_id": "intent.source_add.builtwith"
-          },
-          {
-            "manifest_sha256": "d2f5b630956ae18863ed968d1e4f1f73dade4caaf161ade1324daa5255fe8da6",
-            "revision": "source-add-d2f5b630956a",
-            "tool_id": "intent.source_add.sumble"
-          }
-        ],
         "taxonomy_content_hash": "sha256:a8ade1218bb78062f7af508489d32ca0ff00e24e0647f2afaf274c5a64a64619"
       },
       "candidate_route": {
@@ -536,25 +404,6 @@
         "routing_catalog_sha256": "f91c7ca3e19f85514bb2f0bf0adeec8b41e7963651238a488aa6b42809b73e1b",
         "routing_compiler_version": "routing-compiler-v2",
         "routing_policy_sha256": "d98f5b54abcf349f433f927d1d03c1e14ee71ff263365e55967869809bd469f5",
-        "runtime_routing_catalog_sha256": "36c02525aeaf8a678b39ea7bd0630513089c93243dcbbdcb3959a28b3be15475",
-        "runtime_routing_policy_sha256": "cc019ec5553d98684177aa04f17e06deef3785864f2d4424279682f8661a660d",
-        "runtime_source_add_manifest_attestations": [
-          {
-            "manifest_sha256": "9c0130dd089bc5645314f087c58b2c58b064b8e56d1e6bd4039e3e1502278d7b",
-            "revision": "source-add-9c0130dd089b",
-            "tool_id": "intent.source_add.bloomberry"
-          },
-          {
-            "manifest_sha256": "cbe713744e649d58db69f98ebf0f2eb2b82b1a5cb1281f7e7f514abd51a1e393",
-            "revision": "source-add-cbe713744e64",
-            "tool_id": "intent.source_add.builtwith"
-          },
-          {
-            "manifest_sha256": "d2f5b630956ae18863ed968d1e4f1f73dade4caaf161ade1324daa5255fe8da6",
-            "revision": "source-add-d2f5b630956a",
-            "tool_id": "intent.source_add.sumble"
-          }
-        ],
         "taxonomy_content_hash": "sha256:a8ade1218bb78062f7af508489d32ca0ff00e24e0647f2afaf274c5a64a64619"
       },
       "candidate_route": {

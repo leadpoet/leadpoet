@@ -25,6 +25,7 @@ from leadpoet_canonical.attested_v2 import (
 from research_lab.eval import build_local_private_artifact_manifest
 from research_lab.eval.artifacts import PrivateModelArtifactManifest
 from research_lab.eval.promotion_metric import promotion_gate_decision
+from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
 
 
 class _Reader:
@@ -44,6 +45,7 @@ def _artifact(tmp_path) -> PrivateModelArtifactManifest:
         "def run():\n    return 1\n",
         encoding="utf-8",
     )
+    install_reviewed_consumer_snapshot(source)
     return PrivateModelArtifactManifest.from_mapping(
         build_local_private_artifact_manifest(
             source_path=source,

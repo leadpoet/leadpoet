@@ -40,6 +40,42 @@ python3 -m pytest -q \
 Run independent focused checks in parallel where practical. Do not silently
 expand to the full repository suite.
 
+### 2a. Signed Sourcing-Model Contract Transition
+
+For a private sourcing-model contract upgrade, keep the branch-specific model
+pointer on the currently deployed artifact until the dual-compatible Leadpoet
+candidate is deployed and attested.
+
+- [ ] Verify the immutable old and new manifests and signatures with the
+  configured KMS public key.
+- [ ] Verify each manifest's Git commit, image digest, source-tree hash,
+  compatibility-contract hash, and paired parity-fixture hash.
+- [ ] Reject unknown contracts, crossed old/new contract and parity pairs,
+  pointer/source mismatches, and signature or manifest tampering.
+- [ ] Confirm the candidate accepts both exact reviewed versions while the
+  current production release accepts its existing version unchanged.
+- [ ] Confirm provider projection keeps the model-owned binding-manifest digest
+  separate from provisioning-row provenance and carries no endpoint,
+  credential, or provider response into the model contract.
+- [ ] Confirm no database migration is required. Contract, binding, and active
+  model identities remain inside existing append-only, hash-bound JSON
+  documents unless a separately reviewed physical query requires a column.
+- [ ] Exercise old -> new -> old contract activation and rebenchmarking with
+  the dual-compatible candidate before changing the live model pointer.
+
+The safe forward order is Leadpoet candidate push and attestation, coordinated
+gateway/validator deployment, exact old-artifact weight verification, then an
+operator fast-forward of the model's protected Lab branch. After the pointer
+advances, require active-model supersession, rebenchmark, conditional-ICP,
+scoring, allocation, primary/auditor bundle equality, submission,
+finalization, `LastUpdate`, and reveal/readback evidence.
+
+Rollback is pointer first, code second. Create normal signed model revert
+commits in newest-first order until the tree exactly matches the reviewed old
+contract; never force-reset the protected model branch. Verify the
+old-equivalent artifact under the dual-compatible Leadpoet release before
+considering a rollback to older strict consumer code.
+
 ### 3. Accelerated Production Rehearsal
 
 Replace `<deployed-sha>` with the exact production N-1 SHA:
@@ -62,6 +98,9 @@ It runs one exact forward transition and must prove:
   validates real relation, column, view, constraint, and RPC contracts.
 - [ ] Credential-envelope and provider preflight paths complete without
   plaintext fallback.
+- [ ] Signed private-model v7 -> v8 -> v7 transition, pointer/source alignment,
+  exact contract/parity pairing, and KMS verification complete; hybrid,
+  unknown, and tampered artifacts fail closed.
 - [ ] Gateway builds one canonical bundle.
 - [ ] Primary and audit validators receive byte-identical vectors.
 - [ ] Parsing, verification, SDK signing, submission, finalization,

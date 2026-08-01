@@ -68,6 +68,7 @@ from research_lab.eval import (
     build_local_private_artifact_manifest,
 )
 from research_lab.code_editing import CodeEditDraft
+from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
 
 
 PRIVACY_RECEIPT_HASH = "sha256:" + "2" * 64
@@ -199,6 +200,7 @@ def _source_and_artifact(tmp_path: Path):
         (root / directory / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
     (root / "research_lab_adapter.py").write_text("def run():\n    return 1\n", encoding="utf-8")
     (root / "requirements.txt").write_text("", encoding="utf-8")
+    install_reviewed_consumer_snapshot(root)
     manifest = build_local_private_artifact_manifest(
         source_path=root,
         git_commit_sha="a" * 40,

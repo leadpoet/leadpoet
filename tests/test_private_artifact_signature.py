@@ -14,9 +14,12 @@ from research_lab.eval import (
     DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID,
     PrivateModelArtifactManifest,
     PrivateModelRuntimeError,
+    build_local_private_artifact_manifest,
     validate_private_model_artifact_manifest,
     verify_private_artifact_manifest_signature,
 )
+from research_lab.sourcing_model_contract_check import reviewed_consumer_snapshots
+from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
 
 
 class FakeS3:
@@ -53,7 +56,30 @@ CONSUMER_CONTRACT_ID = json.loads(
 )["contract_id"]
 
 
-def artifact_mapping(**overrides: Any) -> dict[str, Any]:
+def _consumer_manifest_pair(contract_id: str) -> tuple[dict[str, str], dict[str, str]]:
+    snapshot = reviewed_consumer_snapshots()[contract_id]
+    contract = snapshot["contract"]
+    return (
+        {
+            "contract_id": contract_id,
+            "path": str(contract["canonical_path"]),
+            "sha256": sha256_bytes(Path(snapshot["contract_path"]).read_bytes()),
+        },
+        {
+            "path": str(contract["parity_fixture_path"]),
+            "sha256": sha256_bytes(Path(snapshot["parity_path"]).read_bytes()),
+        },
+    )
+
+
+def artifact_mapping(
+    *,
+    consumer_contract_id: str = CONSUMER_CONTRACT_ID,
+    **overrides: Any,
+) -> dict[str, Any]:
+    compatibility_contract, consumer_parity_fixtures = _consumer_manifest_pair(
+        consumer_contract_id
+    )
     payload = {
         "model_artifact_hash": "sha256:" + "1" * 64,
         "git_commit_sha": "2" * 40,
@@ -64,24 +90,8 @@ def artifact_mapping(**overrides: Any) -> dict[str, Any]:
         "config_hash": "sha256:" + "4" * 64,
         "component_registry_version": "components:v1",
         "scoring_adapter_version": "scorer:v1",
-        "compatibility_contract": {
-            "contract_id": CONSUMER_CONTRACT_ID,
-            "path": "sourcing_model/consumer_contract.json",
-            "sha256": sha256_bytes(
-                (
-                    RESEARCH_LAB_ROOT / "sourcing_model_contract.json"
-                ).read_bytes()
-            ),
-        },
-        "consumer_parity_fixtures": {
-            "path": "sourcing_model/consumer_parity_fixtures.json",
-            "sha256": sha256_bytes(
-                (
-                    RESEARCH_LAB_ROOT
-                    / "sourcing_model_parity_fixtures.json"
-                ).read_bytes()
-            ),
-        },
+        "compatibility_contract": compatibility_contract,
+        "consumer_parity_fixtures": consumer_parity_fixtures,
         "manifest_uri": "s3://artifacts/model.json",
         "signature_ref": "s3://artifacts/model.sig.b64",
         "build_id": "build-1",
@@ -91,6 +101,26 @@ def artifact_mapping(**overrides: Any) -> dict[str, Any]:
         **payload,
         "manifest_hash": sha256_json(payload),
     }
+
+
+def _build_manifest_for_source(source: Path, **kwargs: Any) -> dict[str, Any]:
+    (source / "research_lab_adapter.py").write_text(
+        "def run_icp(icp, context=None):\n    return []\n",
+        encoding="utf-8",
+    )
+    return build_local_private_artifact_manifest(
+        source_path=source,
+        git_commit_sha="a" * 40,
+        image_digest=(
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com/private@sha256:"
+            + "b" * 64
+        ),
+        manifest_uri="s3://private/manifests/model.json",
+        signature_ref="s3://private/manifests/model.sig.b64",
+        component_registry_version="1",
+        scoring_adapter_version="1",
+        **kwargs,
+    )
 
 
 def test_kms_verifies_the_final_manifest_hash() -> None:
@@ -115,6 +145,115 @@ def test_kms_verifies_the_final_manifest_hash() -> None:
             "SigningAlgorithm": "ECDSA_SHA_256",
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "contract_id",
+    tuple(sorted(reviewed_consumer_snapshots())),
+)
+def test_each_reviewed_contract_pair_verifies(contract_id: str) -> None:
+    result = verify_private_artifact_manifest_signature(
+        artifact_mapping(consumer_contract_id=contract_id),
+        s3_client=FakeS3(),
+        kms_client=FakeKms(),
+    )
+
+    assert result["verified"] is True
+
+
+def test_v7_v8_v7_pointer_transition_remains_exact_and_rollback_safe() -> None:
+    snapshots = reviewed_consumer_snapshots()
+    v7 = next(item for item in snapshots if item.endswith("v7"))
+    v8 = next(item for item in snapshots if item.endswith("v8"))
+
+    for contract_id in (v7, v8, v7):
+        result = verify_private_artifact_manifest_signature(
+            artifact_mapping(consumer_contract_id=contract_id),
+            s3_client=FakeS3(),
+            kms_client=FakeKms(),
+        )
+        assert result["verified"] is True
+
+
+def test_reviewed_contract_cannot_be_paired_with_other_version_fixtures() -> None:
+    snapshots = reviewed_consumer_snapshots()
+    v7 = next(item for item in snapshots if item.endswith("v7"))
+    v8 = next(item for item in snapshots if item.endswith("v8"))
+    manifest = artifact_mapping(consumer_contract_id=v7)
+    _contract, v8_fixtures = _consumer_manifest_pair(v8)
+    manifest["consumer_parity_fixtures"] = v8_fixtures
+    payload = dict(manifest)
+    payload.pop("manifest_hash")
+    manifest["manifest_hash"] = sha256_json(payload)
+    s3 = FakeS3()
+    kms = FakeKms()
+
+    with pytest.raises(
+        PrivateModelRuntimeError,
+        match="parity fixtures differ",
+    ):
+        verify_private_artifact_manifest_signature(
+            manifest,
+            s3_client=s3,
+            kms_client=kms,
+        )
+
+    assert s3.calls == []
+    assert kms.calls == []
+
+
+@pytest.mark.parametrize(
+    "contract_id",
+    tuple(sorted(reviewed_consumer_snapshots())),
+)
+def test_local_manifest_builder_derives_exact_source_pair(
+    tmp_path: Path,
+    contract_id: str,
+) -> None:
+    source = tmp_path / contract_id
+    source.mkdir()
+    install_reviewed_consumer_snapshot(source, contract_id=contract_id)
+
+    manifest = _build_manifest_for_source(source)
+    expected_contract, expected_fixtures = _consumer_manifest_pair(contract_id)
+
+    assert manifest["compatibility_contract"] == expected_contract
+    assert manifest["consumer_parity_fixtures"] == expected_fixtures
+
+
+def test_local_manifest_builder_rejects_hybrid_source_pair(tmp_path: Path) -> None:
+    snapshots = reviewed_consumer_snapshots()
+    v7 = next(item for item in snapshots if item.endswith("v7"))
+    v8 = next(item for item in snapshots if item.endswith("v8"))
+    source = tmp_path / "hybrid"
+    source.mkdir()
+    install_reviewed_consumer_snapshot(source, contract_id=v7)
+    v7_contract = snapshots[v7]["contract"]
+    source_parity = source / str(v7_contract["parity_fixture_path"])
+    source_parity.write_bytes(Path(snapshots[v8]["parity_path"]).read_bytes())
+
+    with pytest.raises(
+        PrivateModelRuntimeError,
+        match="no reviewed contract/parity pair",
+    ):
+        _build_manifest_for_source(source)
+
+
+def test_local_manifest_builder_rejects_requested_version_mismatch(
+    tmp_path: Path,
+) -> None:
+    snapshots = reviewed_consumer_snapshots()
+    v7 = next(item for item in snapshots if item.endswith("v7"))
+    v8 = next(item for item in snapshots if item.endswith("v8"))
+    source = tmp_path / "v7"
+    source.mkdir()
+    install_reviewed_consumer_snapshot(source, contract_id=v7)
+
+    with pytest.raises(
+        PrivateModelRuntimeError,
+        match="differs from requested contract id",
+    ):
+        _build_manifest_for_source(source, consumer_contract_id=v8)
 
 
 def test_invalid_kms_signature_fails_closed() -> None:

@@ -1,9 +1,9 @@
 """Hash and verify protected Research Lab business-logic ASTs.
 
-The manifest deliberately hashes selected function/class bodies rather than
-whole files. I/O adapters and imports can move around those bodies while CI
-continues to fail if scoring, autoresearch, promotion, accounting, allocation,
-or weight behavior changes unintentionally.
+The manifest deliberately hashes selected function, class, and policy-constant
+definitions rather than whole files. I/O adapters and imports can move around
+those definitions while CI continues to fail if scoring, autoresearch,
+promotion, accounting, allocation, or weight behavior changes unintentionally.
 """
 
 from __future__ import annotations
@@ -110,6 +110,20 @@ PROTECTED_SYMBOLS = {
     "gateway/research_lab/code_loop_engine.py": (
         "CodeEditLoopEngine",
         "_bind_loop_direction_plan",
+    ),
+    "research_lab/sourcing_model_contract_check.py": (
+        "REVIEWED_CONSUMER_SNAPSHOT_SPECS",
+        "load_wrapper_contract",
+        "reviewed_consumer_snapshots",
+        "_snapshot_sha256",
+        "resolve_reviewed_consumer_snapshot",
+        "verify_source_tree_contract",
+    ),
+    "research_lab/eval/private_runtime.py": (
+        "_private_manifest_hash_payload",
+        "_verify_consumer_contract_manifest",
+        "verify_private_artifact_manifest_signature",
+        "build_local_private_artifact_manifest",
     ),
     "gateway/research_lab/provider_capabilities.py": (
         "EffectiveProviderCapabilities",
@@ -527,6 +541,14 @@ def _symbol_index(tree: ast.Module) -> Dict[str, ast.AST]:
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             index[node.name] = node
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    index[target.id] = node
+        if isinstance(node, (ast.AnnAssign, ast.AugAssign)) and isinstance(
+            node.target, ast.Name
+        ):
+            index[node.target.id] = node
         if isinstance(node, ast.ClassDef):
             for child in node.body:
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):

@@ -26,6 +26,10 @@ from research_lab.employee_buckets import (
     normalize_employee_count_bucket as _normalize_linkedin_employee_count_bucket,
     normalize_employee_count_buckets,
 )
+from research_lab.sourcing_model_contract_check import (
+    resolve_reviewed_consumer_snapshot,
+    reviewed_consumer_snapshots,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +120,20 @@ EXPECTED_CONSUMER_CONTRACT_PATH = str(
 )
 EXPECTED_CONSUMER_PARITY_FIXTURE_PATH = str(
     _LAB_CONSUMER_CONTRACT["parity_fixture_path"]
+)
+_REVIEWED_CONSUMER_MANIFEST_PAIRS = tuple(
+    (
+        {
+            "contract_id": contract_id,
+            "path": str(snapshot["contract"]["canonical_path"]),
+            "sha256": str(snapshot["contract_sha256"]),
+        },
+        {
+            "path": str(snapshot["contract"]["parity_fixture_path"]),
+            "sha256": str(snapshot["parity_sha256"]),
+        },
+    )
+    for contract_id, snapshot in sorted(reviewed_consumer_snapshots().items())
 )
 DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID = (
     "alias/leadpoet-research-lab-artifact-signing"
@@ -750,26 +768,20 @@ def _private_manifest_hash_payload(manifest: Any) -> dict[str, Any]:
 def _verify_consumer_contract_manifest(payload: Mapping[str, Any]) -> None:
     contract = payload.get("compatibility_contract")
     fixtures = payload.get("consumer_parity_fixtures")
-    expected_contract = {
-        "contract_id": EXPECTED_CONSUMER_CONTRACT_ID,
-        "path": EXPECTED_CONSUMER_CONTRACT_PATH,
-        "sha256": sha256_bytes(LAB_CONSUMER_CONTRACT_PATH.read_bytes()),
-    }
-    expected_fixtures = {
-        "path": EXPECTED_CONSUMER_PARITY_FIXTURE_PATH,
-        "sha256": sha256_bytes(
-            LAB_CONSUMER_PARITY_FIXTURE_PATH.read_bytes()
-        ),
-    }
-    if contract != expected_contract:
+    matching_contracts = [
+        expected_fixtures
+        for expected_contract, expected_fixtures in _REVIEWED_CONSUMER_MANIFEST_PAIRS
+        if contract == expected_contract
+    ]
+    if not matching_contracts:
         raise PrivateModelRuntimeError(
             "private artifact compatibility contract differs from the "
-            "reviewed Lab snapshot"
+            "reviewed Lab snapshots"
         )
-    if fixtures != expected_fixtures:
+    if fixtures not in matching_contracts:
         raise PrivateModelRuntimeError(
             "private artifact parity fixtures differ from the reviewed Lab "
-            "snapshot"
+            "contract pair"
         )
 
 
@@ -913,6 +925,7 @@ def build_local_private_artifact_manifest(
     scoring_adapter_version: str,
     build_id: str = "",
     config_payload: Mapping[str, Any] | None = None,
+    consumer_contract_id: str = "",
 ) -> dict[str, Any]:
     """Build the same manifest shape private CI publishes.
 
@@ -920,6 +933,26 @@ def build_local_private_artifact_manifest(
     and S3 URI. This helper exists so the CI script and local verification use
     one canonical hash shape.
     """
+    reviewed_snapshots = reviewed_consumer_snapshots()
+    source_snapshot = resolve_reviewed_consumer_snapshot(Path(source_path))
+    requested_contract_id = str(consumer_contract_id or "").strip()
+    if source_snapshot is None:
+        raise PrivateModelRuntimeError(
+            "private model source has no reviewed contract/parity pair"
+        )
+    if requested_contract_id and requested_contract_id not in reviewed_snapshots:
+        raise PrivateModelRuntimeError(
+            "private model consumer contract id is not reviewed"
+        )
+    if (
+        requested_contract_id
+        and requested_contract_id
+        != str(source_snapshot["contract"]["contract_id"])
+    ):
+        raise PrivateModelRuntimeError(
+            "private model source contract differs from requested contract id"
+        )
+    contract = source_snapshot["contract"]
     payload = {
         "model_artifact_hash": compute_private_source_tree_hash(source_path),
         "git_commit_sha": str(git_commit_sha),
@@ -928,17 +961,13 @@ def build_local_private_artifact_manifest(
         "component_registry_version": str(component_registry_version),
         "scoring_adapter_version": str(scoring_adapter_version),
         "compatibility_contract": {
-            "contract_id": EXPECTED_CONSUMER_CONTRACT_ID,
-            "path": EXPECTED_CONSUMER_CONTRACT_PATH,
-            "sha256": sha256_bytes(
-                LAB_CONSUMER_CONTRACT_PATH.read_bytes()
-            ),
+            "contract_id": str(contract["contract_id"]),
+            "path": str(contract["canonical_path"]),
+            "sha256": str(source_snapshot["contract_sha256"]),
         },
         "consumer_parity_fixtures": {
-            "path": EXPECTED_CONSUMER_PARITY_FIXTURE_PATH,
-            "sha256": sha256_bytes(
-                LAB_CONSUMER_PARITY_FIXTURE_PATH.read_bytes()
-            ),
+            "path": str(contract["parity_fixture_path"]),
+            "sha256": str(source_snapshot["parity_sha256"]),
         },
         "manifest_uri": str(manifest_uri),
         "signature_ref": str(signature_ref),

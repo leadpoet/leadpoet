@@ -51,6 +51,10 @@ GATEWAY_DEPLOYMENT_MANIFEST="${GATEWAY_DEPLOYMENT_MANIFEST:-$GATEWAY_DEPLOYMENT_
 GATEWAY_LAST_GOOD_MANIFEST="${GATEWAY_LAST_GOOD_MANIFEST:-$GATEWAY_DEPLOYMENT_DIR/gateway-last-good.json}"
 GATEWAY_HOST_RESTART_SCRIPT="${GATEWAY_HOST_RESTART_SCRIPT:-/home/ec2-user/gw_restart.sh}"
 GATEWAY_TEE_EIF_ROOT="${GATEWAY_TEE_EIF_ROOT:-/home/ec2-user/tee}"
+GATEWAY_V2_RELEASE_ARCHIVE_ROOT="${GATEWAY_V2_RELEASE_ARCHIVE_ROOT:-$GATEWAY_TEE_EIF_ROOT/releases-v2}"
+GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS="${GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS:-86400}"
+GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS="${GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS:-604800}"
+GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES="${GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES:-64}"
 RESEARCH_LAB_TEE_PROTOCOL="${RESEARCH_LAB_TEE_PROTOCOL:-}"
 GATEWAY_V2_CONFIG_DIR="${GATEWAY_V2_CONFIG_DIR:-/home/ec2-user/.config/leadpoet/v2}"
 GATEWAY_V2_RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-manifest.json}"
@@ -431,7 +435,10 @@ validate_runtime_secret_paths() {
 enforce_deployment_environment() {
   unset BUILD_ID BUILD_TIME_UTC BUILD_TIMESTAMP GITHUB_TAG GIT_TAG
   export LEADPOET_REPO_ROOT GATEWAY_ROOT GATEWAY_LOG_ROOT GATEWAY_LOG_FILE
-  export GATEWAY_TEE_EIF_ROOT
+  export GATEWAY_TEE_EIF_ROOT GATEWAY_V2_RELEASE_ARCHIVE_ROOT
+  export GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS
+  export GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS
+  export GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES
   export GATEWAY_STATEFUL_CUTOVER_CEREMONY
   export RESEARCH_LAB_TEE_PROTOCOL
   export GATEWAY_V2_CONFIG_DIR GATEWAY_V2_RELEASE_MANIFEST GATEWAY_V2_ARTIFACT_POLICY
@@ -657,8 +664,35 @@ for entry in Path("/proc").iterdir():
 PY
 }
 
+run_bounded_restart_artifact_cleanup() {
+  local gateway_build_root validator_build_root
+  gateway_build_root="${GATEWAY_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/gateway-release-build-v2}"
+  validator_build_root="${VALIDATOR_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/validator-pcr0-normalizer-v2}"
+  if [ ! -r "$LEADPOET_REPO_ROOT/validator_tee/host/restart_artifact_cleanup_v2.py" ]; then
+    echo "WARNING: bounded restart artifact cleanup helper is unavailable" >&2
+    return 0
+  fi
+  if ! sudo env PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+      -m validator_tee.host.restart_artifact_cleanup_v2 \
+      --apply \
+      --temporary-root /tmp \
+      --gateway-build-root "$gateway_build_root" \
+      --validator-build-root "$validator_build_root" \
+      --emergency-backup-root "$HOME/.config/leadpoet" \
+      --gateway-archive-root "$GATEWAY_V2_RELEASE_ARCHIVE_ROOT" \
+      --gateway-last-good-manifest "$GATEWAY_LAST_GOOD_MANIFEST" \
+      --docker-lock-file "$LEADPOET_DOCKER_OPERATION_LOCK_FILE" \
+      --docker-lock-owner-pid "${LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID:-$$}" \
+      --temp-min-age-seconds "$GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS" \
+      --emergency-min-age-seconds "$GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS" \
+      --max-candidates "$GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES" \
+      --allowed-owner-uid "$(id -u)"; then
+    echo "WARNING: bounded restart artifact cleanup failed closed" >&2
+  fi
+}
+
 emergency_disk_preflight() {
-  local free_kb
+  local free_kb free_kb_after_prune
   free_kb="$(root_free_kb)"
   if [ "${free_kb:-0}" -ge "$MIN_FREE_KB" ]; then
     return 0
@@ -672,14 +706,32 @@ emergency_disk_preflight() {
     \( -name "gateway.env.before-gw-restart.*.bak" -o -name "gateway.env.before-secret-hydrate.*" \) \
     -delete 2>/dev/null || true
   sudo journalctl --vacuum-size=200M 2>/dev/null || true
-  sudo rm -rf /tmp/research-lab-* /tmp/pcr0_builder /tmp/docker-build-* /tmp/buildkit-* 2>/dev/null || true
-  sudo docker container prune -f 2>/dev/null || true
-  sudo docker builder prune -af 2>/dev/null || true
-  sudo docker system prune -af --volumes 2>/dev/null || true
-
-  local free_kb_after_prune
-  free_kb_after_prune="$(root_free_kb)"
-  reset_orphaned_docker_storage_if_needed "$free_kb_after_prune" "orphaned Docker storage after emergency cleanup"
+  local emergency_lock_helper
+  emergency_lock_helper="$LEADPOET_REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
+  if [ -r "$emergency_lock_helper" ]; then
+    . "$emergency_lock_helper"
+    if leadpoet_acquire_docker_operation_lock_v2; then
+      if PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+          -m validator_tee.host.docker_operation_guard_v2 \
+          --wait \
+          --timeout-seconds 1800 \
+          --interval-seconds 3; then
+        run_bounded_restart_artifact_cleanup
+        sudo docker container prune -f 2>/dev/null || true
+        sudo docker builder prune -af 2>/dev/null || true
+        sudo docker system prune -af --volumes 2>/dev/null || true
+        free_kb_after_prune="$(root_free_kb)"
+        reset_orphaned_docker_storage_if_needed \
+          "$free_kb_after_prune" \
+          "orphaned Docker storage after emergency cleanup"
+      else
+        echo "WARNING: emergency Docker cleanup deferred because the operation guard failed" >&2
+      fi
+      leadpoet_release_docker_operation_lock_v2
+    fi
+  else
+    echo "WARNING: emergency Docker cleanup deferred until the shared lock helper is available" >&2
+  fi
 
   echo "Disk after emergency cleanup"
   df -h / /var/lib/docker 2>/dev/null || df -h /
@@ -839,6 +891,10 @@ raw = src.read_text()
 restart_only_keys = {
     "GATEWAY_DEPLOY_COMMIT",
     "GATEWAY_V2_DEFER_WORKER_FLEETS",
+    "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
+    "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
+    "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
+    "GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES",
 }
 
 try:
@@ -902,6 +958,10 @@ skip_keys = {
     "GATEWAY_LOG_ROOT",
     "GATEWAY_LOG_FILE",
     "GATEWAY_TEE_EIF_ROOT",
+    "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
+    "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
+    "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
+    "GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES",
     "GATEWAY_TEE_FALLBACK_LOG_DIR",
     "GATEWAY_GIT_HELPER",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
@@ -988,6 +1048,10 @@ skip_keys = {
     "GATEWAY_LOG_ROOT",
     "GATEWAY_LOG_FILE",
     "GATEWAY_TEE_EIF_ROOT",
+    "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
+    "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
+    "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
+    "GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES",
     "GATEWAY_TEE_FALLBACK_LOG_DIR",
     "GATEWAY_GIT_HELPER",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
@@ -1547,6 +1611,7 @@ exec env \
   LEADPOET_DOCKER_OPERATION_LOCK_FILE="$LEADPOET_DOCKER_OPERATION_LOCK_FILE" \
   LEADPOET_DOCKER_OPERATION_LOCK_HELD=1 \
   GATEWAY_TEE_EIF_ROOT="$GATEWAY_TEE_EIF_ROOT" \
+  GATEWAY_V2_RELEASE_ARCHIVE_ROOT="$GATEWAY_V2_RELEASE_ARCHIVE_ROOT" \
   GATEWAY_PYTHON_BIN="$GATEWAY_PYTHON_BIN" \
   GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT="$GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT" \
   GATEWAY_RESTART_STARTED_EPOCH="$GATEWAY_RESTART_STARTED_EPOCH" \
@@ -1609,7 +1674,7 @@ export GATEWAY_DEPLOY_STAGE
 ensure_docker_ready
 df -h / /var/lib/docker 2>/dev/null || df -h /
 sudo journalctl --vacuum-size=200M 2>/dev/null || true
-sudo rm -rf /tmp/research-lab-* /tmp/pcr0_builder /tmp/docker-build-* /tmp/buildkit-* 2>/dev/null || true
+run_bounded_restart_artifact_cleanup
 
 sudo docker container prune -f 2>/dev/null || true
 sudo docker builder prune -af 2>/dev/null || true

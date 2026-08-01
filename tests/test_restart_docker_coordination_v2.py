@@ -7,7 +7,10 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_gateway_holds_shared_docker_lock_through_authority_repair() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 
-    acquire = script.index("leadpoet_acquire_docker_operation_lock_v2")
+    acquire = script.index(
+        "leadpoet_acquire_docker_operation_lock_v2",
+        script.index('DOCKER_LOCK_HELPER="$GATEWAY_PREFLIGHT_TREE'),
+    )
     shutdown = script.index(
         'echo "Stopping existing gateway and Research Lab worker processes"'
     )
@@ -16,12 +19,27 @@ def test_gateway_holds_shared_docker_lock_through_authority_repair() -> None:
         "\nrepair_and_verify_gateway_weight_input\n",
         enclave,
     )
-    release = script.index("leadpoet_release_docker_operation_lock_v2")
+    release = script.index("leadpoet_release_docker_operation_lock_v2", repair)
+    cleanup_stage = script.index('GATEWAY_DEPLOY_STAGE="docker_disk_cleanup"')
+    cleanup = script.index("run_bounded_restart_artifact_cleanup", cleanup_stage)
+    prune = script.index("sudo docker system prune -af --volumes", cleanup)
     launch = script.index(
         'setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main'
     )
 
     assert acquire < shutdown < enclave < repair < release < launch
+    assert shutdown < cleanup < prune < enclave
+    emergency = script.index("emergency_disk_preflight()")
+    assert (
+        script.index("leadpoet_acquire_docker_operation_lock_v2", emergency)
+        < script.index("sudo docker system prune -af --volumes", emergency)
+        < script.index("leadpoet_release_docker_operation_lock_v2", emergency)
+    )
+    assert "sudo rm -rf /tmp/research-lab-*" not in script
+    assert (
+        '--docker-lock-owner-pid "${LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID:-$$}"'
+        in script
+    )
     assert "wait_for_gateway_build_memory" in script
     assert "--watch-parent" not in script
     assert "PYTHONSAFEPATH=1 LEADPOET_REPO_ROOT=" in script
@@ -36,6 +54,8 @@ def test_validator_holds_shared_host_lock_through_late_activation_barrier() -> N
 
     gate = restart.index("Validating the official restart start")
     acquire = restart.index("leadpoet_acquire_docker_operation_lock_v2")
+    guard = restart.index("docker_operation_guard_v2", acquire)
+    cleanup = restart.index("run_bounded_validator_restart_artifact_cleanup", guard)
     shutdown = restart.index('echo "Stopping validator processes and containers"')
     final_check = restart.index(
         "validator coordinator failed its final restart-wrapper check"
@@ -57,7 +77,7 @@ def test_validator_holds_shared_host_lock_through_late_activation_barrier() -> N
         active_image_id,
     )
 
-    assert gate < acquire < shutdown < final_check < release
+    assert gate < acquire < guard < cleanup < shutdown < final_check < release
     assert (
         app_lock
         < app_build
@@ -71,6 +91,10 @@ def test_validator_holds_shared_host_lock_through_late_activation_barrier() -> N
     assert "Cleaning incomplete validator activation" in restart
     assert "leadpoet_release_docker_operation_lock_v2 || true" in restart
     assert "docker_operation_guard_v2" in restart
+    assert (
+        '--docker-lock-owner-pid "${LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID:-$$}"'
+        in restart
+    )
     assert "7>&- &" in restart
     assert "leadpoet_run_docker_build_with_retry_v2" in deploy
     assert "pkill -TERM" not in deploy

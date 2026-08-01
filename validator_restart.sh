@@ -13,6 +13,8 @@ VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST="${VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST:-
 VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE="${VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE:-/home/ec2-user/.config/leadpoet/gateway-v2-release-lineage.json}"
 VALIDATOR_V2_RELEASE_MANIFEST="${VALIDATOR_V2_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
 VALIDATOR_V2_RELEASE_ARCHIVE_ROOT="${VALIDATOR_V2_RELEASE_ARCHIVE_ROOT:-/home/ec2-user/.config/leadpoet/validator-releases-v2}"
+VALIDATOR_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS="${VALIDATOR_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS:-86400}"
+VALIDATOR_RESTART_CLEANUP_MAX_CANDIDATES="${VALIDATOR_RESTART_CLEANUP_MAX_CANDIDATES:-64}"
 VALIDATOR_V2_HOTKEY_CONFIG="${VALIDATOR_V2_HOTKEY_CONFIG:-/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json}"
 VALIDATOR_V2_HOTKEY_ENVELOPE="${VALIDATOR_V2_HOTKEY_ENVELOPE:-/home/ec2-user/.config/leadpoet/validator-hotkey-envelope-v2.json}"
 VALIDATOR_RESTART_CONTROLLER_ROOT="${VALIDATOR_RESTART_CONTROLLER_ROOT:-/home/ec2-user/.config/leadpoet/restart-controller/validator}"
@@ -50,6 +52,29 @@ REQUESTED_VALIDATOR_DEPLOY_COMMIT="${VALIDATOR_DEPLOY_COMMIT:-}"
 unset VALIDATOR_DEPLOY_COMMIT
 REQUESTED_COORDINATED_EXPECTED_COMMIT="${VALIDATOR_COORDINATED_EXPECTED_COMMIT:-}"
 unset VALIDATOR_COORDINATED_EXPECTED_COMMIT
+
+run_bounded_validator_restart_artifact_cleanup() {
+  local gateway_build_root validator_build_root
+  gateway_build_root="${GATEWAY_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/gateway-release-build-v2}"
+  validator_build_root="${VALIDATOR_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/validator-pcr0-normalizer-v2}"
+  if [ ! -r "$VALIDATOR_ROOT/validator_tee/host/restart_artifact_cleanup_v2.py" ]; then
+    echo "WARNING: bounded validator restart artifact cleanup helper is unavailable" >&2
+    return 0
+  fi
+  if ! sudo env PYTHONPATH="$VALIDATOR_ROOT" "$VALIDATOR_PYTHON_BIN" \
+      -m validator_tee.host.restart_artifact_cleanup_v2 \
+      --apply \
+      --temporary-root /tmp \
+      --gateway-build-root "$gateway_build_root" \
+      --validator-build-root "$validator_build_root" \
+      --docker-lock-file "$LEADPOET_DOCKER_OPERATION_LOCK_FILE" \
+      --docker-lock-owner-pid "${LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID:-$$}" \
+      --temp-min-age-seconds "$VALIDATOR_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS" \
+      --max-candidates "$VALIDATOR_RESTART_CLEANUP_MAX_CANDIDATES" \
+      --allowed-owner-uid "$(id -u)"; then
+    echo "WARNING: bounded validator restart artifact cleanup failed closed" >&2
+  fi
+}
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -418,6 +443,8 @@ skip_keys = {
     "VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE",
     "VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS",
     "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS",
+    "VALIDATOR_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
+    "VALIDATOR_RESTART_CLEANUP_MAX_CANDIDATES",
 }
 exports = []
 for raw_line in raw.replace("\x00", "\n").splitlines():
@@ -731,6 +758,7 @@ PYTHONPATH="$VALIDATOR_ROOT" "$VALIDATOR_PYTHON_BIN" \
   --wait \
   --timeout-seconds 1800 \
   --interval-seconds 3
+run_bounded_validator_restart_artifact_cleanup
 
 VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1
 VALIDATOR_DEPLOY_STAGE="runtime_rebuild"

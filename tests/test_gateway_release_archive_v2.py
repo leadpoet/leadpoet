@@ -10,7 +10,9 @@ from gateway.tee import verify_release_artifacts_v2 as artifact_verifier
 from gateway.tee.release_archive_v2 import (
     ReleaseArchiveV2Error,
     archive_verified_release,
+    load_last_good_release,
     select_release_manifest,
+    verify_archive_index,
     verify_archive_directory,
 )
 from gateway.tee.release_manifest_v2 import (
@@ -27,6 +29,12 @@ from leadpoet_canonical.attested_v2 import sha256_json
 
 def _sha(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def _role_pcr0s(release):
+    return {
+        role: release["roles"][role]["pcr0"] for role in sorted(ROLE_SPECS)
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -210,6 +218,63 @@ def test_gateway_archive_retains_current_plus_two_predecessors(tmp_path):
         release["release_hash"] for release in reversed(releases[-3:])
     ]
     assert not (archive_root / releases[0]["release_hash"].split(":", 1)[1]).exists()
+
+
+def test_gateway_cleanup_verifier_binds_complete_last_good_identity(tmp_path):
+    archive_root = tmp_path / "archive"
+    releases = []
+    for character in ("a", "b", "c"):
+        gateway_root, eif_root, release_path, release = _release_fixture(
+            tmp_path / ("build-" + character), character
+        )
+        archive_verified_release(
+            release_manifest_path=release_path,
+            gateway_root=gateway_root,
+            eif_root=eif_root,
+            archive_root=archive_root,
+        )
+        releases.append(release)
+
+    marker = tmp_path / "gateway-last-good.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "status": "succeeded",
+                "target_sha": "a" * 40,
+                "role_pcr0s": _role_pcr0s(releases[0]),
+            }
+        ),
+        encoding="utf-8",
+    )
+    last_good = load_last_good_release(marker)
+    index = verify_archive_index(
+        archive_root=archive_root,
+        required_commit_sha=last_good["commit_sha"],
+        required_role_pcr0s=last_good["role_pcr0s"],
+        minimum_releases=3,
+        maximum_releases=3,
+    )
+    assert len(index["releases"]) == 3
+
+    wrong_pcr0s = dict(last_good["role_pcr0s"])
+    wrong_pcr0s[sorted(ROLE_SPECS)[0]] = "f" * 96
+    with pytest.raises(ReleaseArchiveV2Error, match="role PCR0s"):
+        verify_archive_index(
+            archive_root=archive_root,
+            required_commit_sha=last_good["commit_sha"],
+            required_role_pcr0s=wrong_pcr0s,
+            minimum_releases=3,
+            maximum_releases=3,
+        )
+
+
+def test_gateway_cleanup_verifier_rejects_symlink_last_good(tmp_path):
+    target = tmp_path / "target.json"
+    target.write_text("{}", encoding="utf-8")
+    marker = tmp_path / "gateway-last-good.json"
+    marker.symlink_to(target)
+    with pytest.raises(ReleaseArchiveV2Error, match="non-regular"):
+        load_last_good_release(marker)
 
 
 def test_gateway_rollback_selection_exports_only_a_verified_release(tmp_path):

@@ -24,6 +24,8 @@ ARCHIVE_SCHEMA_VERSION = "leadpoet.gateway_release_archive.v2"
 ARCHIVE_INDEX_SCHEMA_VERSION = "leadpoet.gateway_release_archive_index.v2"
 DEFAULT_RETAIN_RELEASES = 3
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+_PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
 
 
 class ReleaseArchiveV2Error(RuntimeError):
@@ -44,6 +46,165 @@ def _load_json(path: Path, field: str) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ReleaseArchiveV2Error("%s must be an object" % field)
     return dict(value)
+
+
+def _load_regular_json(path: Path, field: str) -> Dict[str, Any]:
+    if not path.is_file() or path.is_symlink():
+        raise ReleaseArchiveV2Error("%s is unavailable or non-regular" % field)
+    return _load_json(path, field)
+
+
+def _normalize_role_pcr0s(value: Any, field: str) -> Dict[str, str]:
+    if not isinstance(value, Mapping) or set(value) != set(ROLE_SPECS):
+        raise ReleaseArchiveV2Error("%s is incomplete" % field)
+    normalized: Dict[str, str] = {}
+    for role in sorted(ROLE_SPECS):
+        pcr0 = str(value.get(role) or "").strip().lower()
+        if not _PCR0_RE.fullmatch(pcr0) or pcr0 == "0" * 96:
+            raise ReleaseArchiveV2Error("%s is invalid: %s" % (field, role))
+        normalized[role] = pcr0
+    return normalized
+
+
+def load_last_good_release(path: Path) -> Dict[str, Any]:
+    """Return the exact measured identity from a successful deployment record."""
+
+    document = _load_regular_json(Path(path), "gateway last-good deployment")
+    commit_sha = str(document.get("target_sha") or "").lower()
+    if document.get("status") != "succeeded" or not _COMMIT_RE.fullmatch(commit_sha):
+        raise ReleaseArchiveV2Error(
+            "gateway last-good deployment is not a successful exact commit"
+        )
+    return {
+        "commit_sha": commit_sha,
+        "role_pcr0s": _normalize_role_pcr0s(
+            document.get("role_pcr0s"),
+            "gateway last-good deployment role PCR0s",
+        ),
+    }
+
+
+def _release_role_pcr0s(release: Mapping[str, Any]) -> Dict[str, str]:
+    roles = release.get("roles") if isinstance(release, Mapping) else None
+    if not isinstance(roles, Mapping):
+        raise ReleaseArchiveV2Error("gateway release roles are unavailable")
+    return _normalize_role_pcr0s(
+        {
+            role: roles.get(role, {}).get("pcr0")
+            if isinstance(roles.get(role), Mapping)
+            else None
+            for role in ROLE_SPECS
+        },
+        "gateway release role PCR0s",
+    )
+
+
+def _archived_role_pcr0s(root: Path, item: Mapping[str, Any]) -> Dict[str, str]:
+    release_hash = str(item.get("release_hash") or "").lower()
+    if not _HASH_RE.fullmatch(release_hash):
+        raise ReleaseArchiveV2Error("gateway release archive identity is invalid")
+    release = validate_release_manifest(
+        _load_regular_json(
+            root
+            / release_hash.split(":", 1)[1]
+            / "gateway-v2-release-manifest.json",
+            "archived gateway release manifest",
+        )
+    )
+    return _release_role_pcr0s(release)
+
+
+def _verify_index_entry(root: Path, item: Mapping[str, Any]) -> Dict[str, Any]:
+    expected_fields = {"release_hash", "commit_sha", "archive_hash", "archived_at"}
+    if not isinstance(item, Mapping) or set(item) != expected_fields:
+        raise ReleaseArchiveV2Error("gateway release archive index entry is invalid")
+    release_hash = str(item.get("release_hash") or "").lower()
+    commit_sha = str(item.get("commit_sha") or "").lower()
+    if not _HASH_RE.fullmatch(release_hash) or not _COMMIT_RE.fullmatch(commit_sha):
+        raise ReleaseArchiveV2Error("gateway release archive index identity is invalid")
+    archive_path = root / release_hash.split(":", 1)[1]
+    if not archive_path.is_dir() or archive_path.is_symlink():
+        raise ReleaseArchiveV2Error("gateway indexed release archive is unavailable")
+    archive_manifest = archive_path / "archive.json"
+    if not archive_manifest.is_file() or archive_manifest.is_symlink():
+        raise ReleaseArchiveV2Error("gateway release archive is unavailable")
+    archived = verify_archive_directory(archive_path)
+    for field in expected_fields:
+        if archived.get(field) != item.get(field):
+            raise ReleaseArchiveV2Error(
+                "gateway release archive differs from its index entry"
+            )
+    return dict(item)
+
+
+def verify_archive_index(
+    *,
+    archive_root: Path,
+    required_commit_sha: Optional[str] = None,
+    required_role_pcr0s: Optional[Mapping[str, Any]] = None,
+    minimum_releases: int = 1,
+    maximum_releases: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Verify the bounded archive index and every retained release under its lock."""
+
+    root = Path(archive_root)
+    if not root.is_dir() or root.is_symlink():
+        raise ReleaseArchiveV2Error("gateway release archive root is unavailable")
+    lock_path = root / ".archive.lock"
+    if not lock_path.is_file() or lock_path.is_symlink():
+        raise ReleaseArchiveV2Error("gateway release archive lock is unavailable")
+    try:
+        lock_handle = lock_path.open("r", encoding="utf-8")
+    except OSError as exc:
+        raise ReleaseArchiveV2Error(
+            "gateway release archive lock is unavailable"
+        ) from exc
+    with lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        index = _load_regular_json(
+            root / "index.json", "gateway release archive index"
+        )
+        if (
+            set(index) != {"schema_version", "current_release_hash", "releases"}
+            or index.get("schema_version") != ARCHIVE_INDEX_SCHEMA_VERSION
+            or not isinstance(index.get("releases"), list)
+        ):
+            raise ReleaseArchiveV2Error("gateway release archive index schema is invalid")
+        releases = list(index["releases"])
+        if len(releases) < int(minimum_releases):
+            raise ReleaseArchiveV2Error("gateway rollback archive set is incomplete")
+        if maximum_releases is not None and len(releases) > int(maximum_releases):
+            raise ReleaseArchiveV2Error("gateway rollback archive set is unbounded")
+        verified = [_verify_index_entry(root, item) for item in releases]
+        hashes = [str(item["release_hash"]) for item in verified]
+        if len(set(hashes)) != len(hashes):
+            raise ReleaseArchiveV2Error("gateway release archive index contains duplicates")
+        if not hashes or index.get("current_release_hash") != hashes[0]:
+            raise ReleaseArchiveV2Error(
+                "gateway release archive current identity is inconsistent"
+            )
+        required = str(required_commit_sha or "").lower()
+        if required or required_role_pcr0s is not None:
+            if not _COMMIT_RE.fullmatch(required):
+                raise ReleaseArchiveV2Error("required gateway rollback commit is invalid")
+            required_pcr0s = _normalize_role_pcr0s(
+                required_role_pcr0s,
+                "required gateway rollback role PCR0s",
+            )
+            matching = [item for item in verified if item["commit_sha"] == required]
+            if len(matching) != 1:
+                raise ReleaseArchiveV2Error(
+                    "gateway last-good commit is not uniquely retained"
+                )
+            if _archived_role_pcr0s(root, matching[0]) != required_pcr0s:
+                raise ReleaseArchiveV2Error(
+                    "gateway last-good role PCR0s are not retained"
+                )
+        return {
+            "schema_version": index["schema_version"],
+            "current_release_hash": index["current_release_hash"],
+            "releases": verified,
+        }
 
 
 def _sha256_file(path: Path) -> str:

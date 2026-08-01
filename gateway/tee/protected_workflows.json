@@ -297,7 +297,7 @@
       "symbol": "build_gateway_weight_inputs_v2"
     },
     {
-      "ast_sha256": "sha256:37345988cb96134a1c1ecc941bfdb2db120309acdfc2e5061b9230ecb93f86d6",
+      "ast_sha256": "sha256:814ddf9d1eb399b44fb56467e93b4434fc7ecc00c4ec2d7a80568b58e080028f",
       "path": "gateway/research_lab/autoresearch_authority_v2.py",
       "symbol": "run_authoritative_autoresearch_v2"
     },
@@ -397,7 +397,7 @@
       "symbol": "validate_legacy_settlement_migrations_v2"
     },
     {
-      "ast_sha256": "sha256:f83f565394888bb2bea81eccb25f7a96cb0421fc3458af12f740f7e8f721fbb8",
+      "ast_sha256": "sha256:877b59bcd544004706490988134e48e5f3062d9ea83d128e9e13698c00b34356",
       "path": "gateway/research_lab/code_build.py",
       "symbol": "CodeEditCandidateBuilder._build_under_deadline"
     },
@@ -927,7 +927,7 @@
       "symbol": "hourly_batch_task"
     },
     {
-      "ast_sha256": "sha256:ea4ac297429d3f970b41335f2e692c5496f4799e0cb79775ed8bc15f1f70ebf5",
+      "ast_sha256": "sha256:fc8dc353b8d588e95a5e9445d138276ef0091dee516b84b754291bfebedcf30a",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "AutoresearchExecutorV2"
     },
@@ -1892,7 +1892,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:f1c603bef4f94fee759983efe5cb287b2dd06080e0a1a9a64391596987f4659c",
-  "protected_source_commit": "f43c851b1ebf1d2a74437da446dc58c45becb310",
+  "manifest_hash": "sha256:bcb6725fe6466b41bda91858fd29972fbf23b89678fcea61abb61a90dd608090",
+  "protected_source_commit": "2f7c1a9ab1b03c77f5eb0de72af6c7e1a035df73",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -134,6 +134,27 @@ def test_gateway_restart_preserves_release_lineage_path_across_reexec() -> None:
     assert (
         'GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE"' in reexec
     )
+    assert 'GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET"' in reexec
+    assert 'GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX"' in reexec
+
+
+def test_gateway_restart_revalidates_release_lineage_after_n_minus_one_activation() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    reexec = script.index("GATEWAY_RESTART_PHASE=post_activate")
+    candidate = script.index('GATEWAY_DEPLOY_SHA="$(deployment_field target_sha)"')
+    revalidate = script.index(
+        "if ! ensure_activated_gateway_release_lineage;", candidate
+    )
+    enclave_build = script.index('echo "Building/restarting TEE enclave"')
+
+    assert reexec < candidate < revalidate < enclave_build
+    assert "rev-parse --verify 'origin/main^{commit}'" in script
+    assert "merge-base --is-ancestor" in script
+    assert '"$GATEWAY_DEPLOY_SHA" "$authority_commit"' in script
+    assert '--expected-commit "$GATEWAY_DEPLOY_SHA"' in script
+    assert '--lineage-output "$GATEWAY_V2_RELEASE_LINEAGE"' in script
+    assert '--lineage-authority-commit "$authority_commit"' in script
 
 
 def test_gateway_restart_fails_closed_on_all_authoritative_readiness_routes() -> None:
@@ -745,7 +766,8 @@ def test_gateway_restart_has_fail_closed_lock_and_official_epoch_gate() -> None:
     release = "gateway.tee.release_channel_v2"
     shutdown = 'echo "Stopping existing gateway and Research Lab worker processes"'
     assert gate in script
-    assert script.index(gate) < script.index(release) < script.index(shutdown)
+    gate_offset = script.index(gate)
+    assert gate_offset < script.index(release, gate_offset) < script.index(shutdown)
     assert "waiting inside the valid restart invocation" in script
     assert "--maximum" not in script
 

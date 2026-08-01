@@ -409,6 +409,42 @@ run_prepared_gateway_module() {
     PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -m "$@"
   )
 }
+
+ensure_activated_gateway_release_lineage() {
+  local authority_commit
+
+  authority_commit="$(
+    git -C "$LEADPOET_REPO_ROOT" rev-parse --verify 'origin/main^{commit}'
+  )" || {
+    echo "ERROR: activated gateway cannot resolve the fetched main authority" >&2
+    return 1
+  }
+  if ! [[ "$authority_commit" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "ERROR: fetched main authority is not an exact commit" >&2
+    return 1
+  fi
+  if ! git -C "$LEADPOET_REPO_ROOT" merge-base --is-ancestor \
+      "$GATEWAY_DEPLOY_SHA" "$authority_commit"; then
+    echo "ERROR: activated gateway release is absent from fetched main ancestry" >&2
+    return 1
+  fi
+
+  # A deployed N-1 restart controller may predate release-lineage output. The
+  # activated candidate therefore reacquires and verifies the immutable
+  # release channel and its bounded main-branch lineage before any enclave is
+  # bootstrapped. This is intentionally fail-closed and never synthesizes
+  # release evidence.
+  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+    -m gateway.tee.release_channel_v2 \
+    --ensure \
+    --expected-commit "$GATEWAY_DEPLOY_SHA" \
+    --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
+    --prefix "$GATEWAY_V2_RELEASE_PREFIX" \
+    --gateway-output "$GATEWAY_V2_RELEASE_MANIFEST" \
+    --lineage-output "$GATEWAY_V2_RELEASE_LINEAGE" \
+    --lineage-repository "$LEADPOET_REPO_ROOT" \
+    --lineage-authority-commit "$authority_commit"
+}
 trap on_gateway_restart_exit EXIT
 
 validate_runtime_secret_paths() {
@@ -1627,6 +1663,8 @@ exec env \
   GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
   GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
   GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE" \
+  GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET" \
+  GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX" \
   GATEWAY_V2_ARTIFACT_POLICY="$GATEWAY_V2_ARTIFACT_POLICY" \
   RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET="$RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET" \
   GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
@@ -1654,6 +1692,14 @@ export GATEWAY_DEPLOY_STAGE
     "$GATEWAY_V2_CONFIG_DIR/gateway-candidate-tree-preflight.json" \
   --activated-root "$LEADPOET_REPO_ROOT"
 enforce_deployment_environment
+
+echo "Revalidating the exact approved V2 release and bounded lineage after activation"
+GATEWAY_DEPLOY_STAGE="v2_release_lineage_revalidation"
+export GATEWAY_DEPLOY_STAGE
+if ! ensure_activated_gateway_release_lineage; then
+  echo "ERROR: activated gateway V2 release lineage is unavailable or invalid" >&2
+  exit 1
+fi
 
 echo "Recording exact gateway Git build provenance"
 GATEWAY_DEPLOY_STAGE="build_provenance"

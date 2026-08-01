@@ -1191,7 +1191,13 @@ class ExecutionJobManagerV2:
             job = self._job(job_id)
             if job["state"] != "uploading":
                 raise ExecutionJobV2Error("job does not accept chunks")
-            if offset != len(job["input"]):
+            uploaded = len(job["input"])
+            if offset < uploaded:
+                end = offset + len(chunk)
+                if end <= uploaded and bytes(job["input"][offset:end]) == chunk:
+                    return self._summary(job)
+                raise ExecutionJobV2Error("chunk conflicts with uploaded payload")
+            if offset != uploaded:
                 raise ExecutionJobV2Error("chunk offset differs from uploaded length")
             if offset + len(chunk) > job["manifest"]["payload_size_bytes"]:
                 raise ExecutionJobV2Error("chunk exceeds declared payload")

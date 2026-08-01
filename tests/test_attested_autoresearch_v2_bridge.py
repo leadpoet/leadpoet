@@ -387,6 +387,8 @@ async def test_autoresearch_bridge_dispatches_signed_host_op_and_persists_full_c
     )
 
     assert result["result"] == {"echo": 7}
+    assert result["execution_receipt"] == result["receipt"]
+    assert result["execution_receipt_graph"] == result["receipt_graph"]
     assert len(result["receipt_graph"]["receipts"]) == 2
     assert len(result["receipt_graph"]["host_operations"]) == 1
     assert persisted[0]["root_receipt_hash"] == result["receipt"]["receipt_hash"]

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from gateway.research_lab import active_model_authority_v2
 from gateway.tee.coordinator_active_model_source_v2 import (
     CoordinatorActiveModelSourceV2,
     CoordinatorActiveModelSourceV2Error,
@@ -393,3 +394,79 @@ def test_repo_head_release_accepts_historical_missing_redundant_manifest_uri(tmp
         match="repo-head release manifest URI differs",
     ):
         source.resolve(payload={"artifact": artifact.to_dict()}, context=_context())
+
+
+@pytest.mark.asyncio
+async def test_active_model_authority_uses_measured_execution_receipt(
+    tmp_path,
+    monkeypatch,
+):
+    artifact = _artifact(tmp_path)
+    row = _active_row(artifact)
+    result = {
+        "schema_version": "leadpoet.active_private_model.v2",
+        "artifact": private_model_artifact_replay_identity_v2(artifact),
+        "active_model": {
+            "private_model_version_id": row["private_model_version_id"]
+        },
+    }
+    execution_receipt = {
+        "receipt_hash": "sha256:" + "a" * 64,
+        "output_root": sha256_json(result),
+    }
+    execution_graph = {
+        "root_receipt_hash": execution_receipt["receipt_hash"],
+        "receipts": [execution_receipt],
+    }
+    artifact_receipt = {
+        "receipt_hash": "sha256:" + "b" * 64,
+        "output_root": "sha256:" + "b" * 64,
+    }
+    artifact_graph = {
+        "root_receipt_hash": artifact_receipt["receipt_hash"],
+        "receipts": [artifact_receipt],
+    }
+    validated = []
+    linked = []
+
+    async def select_many(*_args, **_kwargs):
+        return [row]
+
+    async def execute(**_kwargs):
+        return {
+            "result": result,
+            "receipt": artifact_receipt,
+            "receipt_graph": artifact_graph,
+            "execution_receipt": execution_receipt,
+            "execution_receipt_graph": execution_graph,
+        }
+
+    async def persist_links(**kwargs):
+        linked.append(kwargs)
+        return {"business_artifact_link_count": 1}
+
+    def validate(graph, **kwargs):
+        validated.append((graph, kwargs))
+
+    monkeypatch.setattr(active_model_authority_v2, "select_many", select_many)
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "validate_receipt_graph",
+        validate,
+    )
+
+    outcome = await active_model_authority_v2.attest_active_private_model_v2(
+        artifact=artifact,
+        epoch_id=42,
+        execute=execute,
+        persist_links=persist_links,
+    )
+
+    assert outcome["status"] == "matched"
+    assert validated == [
+        (
+            execution_graph,
+            {"required_purposes": ("research_lab.active_private_model.v2",)},
+        )
+    ]
+    assert linked[0]["receipt_hash"] == execution_receipt["receipt_hash"]

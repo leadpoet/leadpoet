@@ -80,8 +80,8 @@ async def attest_active_private_model_v2(
         ),
     )
     result = outcome.get("result")
-    receipt = outcome.get("receipt") or outcome.get("execution_receipt")
-    graph = outcome.get("receipt_graph")
+    receipt = outcome.get("execution_receipt") or outcome.get("receipt")
+    graph = outcome.get("execution_receipt_graph") or outcome.get("receipt_graph")
     if (
         not isinstance(result, Mapping)
         or not isinstance(receipt, Mapping)

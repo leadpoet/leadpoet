@@ -121,6 +121,77 @@ def _coordinator_graph(
     return graph, receipt
 
 
+def _artifact_wrapped_coordinator_authority(result, *, purpose):
+    execution_graph, execution_receipt = _coordinator_graph(
+        result,
+        purpose=purpose,
+    )
+    key = Ed25519PrivateKey.generate()
+    public_key = key.public_key().public_bytes_raw().hex()
+    boot = create_boot_identity(
+        body=build_boot_identity_body(
+            role="gateway_coordinator",
+            physical_role="gateway_coordinator",
+            commit_sha="a" * 40,
+            pcr0="b" * 96,
+            build_manifest_hash="sha256:" + "c" * 64,
+            dependency_lock_hash="sha256:" + "d" * 64,
+            config_hash="sha256:" + "e" * 64,
+            boot_nonce="6" * 32,
+            signing_pubkey=public_key,
+            transport_pubkey="7" * 64,
+            transport_certificate_hash="sha256:" + "8" * 64,
+            attestation_user_data_hash="sha256:" + "9" * 64,
+            issued_at="2026-07-10T20:00:01Z",
+        ),
+        attestation_document_b64=base64.b64encode(b"attestation").decode(
+            "ascii"
+        ),
+    )
+    artifact_receipt = create_signed_execution_receipt(
+        body=build_execution_receipt_body(
+            role="gateway_coordinator",
+            purpose="leadpoet.artifact_persistence.v2",
+            job_id="artifact-persistence",
+            epoch_id=10,
+            sequence=0,
+            commit_sha="a" * 40,
+            pcr0="b" * 96,
+            build_manifest_hash="sha256:" + "c" * 64,
+            dependency_lock_hash="sha256:" + "d" * 64,
+            config_hash="sha256:" + "e" * 64,
+            boot_identity_hash=boot["boot_identity_hash"],
+            input_root="sha256:" + "6" * 64,
+            output_root="sha256:" + "7" * 64,
+            transport_root_hash=EMPTY_TRANSPORT_ROOT,
+            host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
+            artifact_root=EMPTY_ARTIFACT_ROOT,
+            parent_receipt_hashes=(execution_receipt["receipt_hash"],),
+            status="succeeded",
+            failure_code=None,
+            issued_at="2026-07-10T20:00:01Z",
+        ),
+        enclave_pubkey=public_key,
+        sign_digest=key.sign,
+    )
+    lineage_graph = build_receipt_graph(
+        root_receipt_hash=artifact_receipt["receipt_hash"],
+        boot_identities=(
+            *execution_graph["boot_identities"],
+            boot,
+        ),
+        receipts=(execution_receipt, artifact_receipt),
+        transport_attempts=(),
+    )
+    return {
+        "result": result,
+        "receipt": artifact_receipt,
+        "receipt_graph": lineage_graph,
+        "execution_receipt": execution_receipt,
+        "execution_receipt_graph": execution_graph,
+    }
+
+
 def _artifact(tmp_path: Path):
     source = tmp_path / "source"
     source.mkdir()
@@ -362,7 +433,12 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
     outcome_result = ProviderOutcomeLedgerV2(
         clock=lambda: "2026-07-10T20:00:00Z"
     ).snapshot()
-    outcome_graph, outcome_receipt = _coordinator_graph(outcome_result)
+    outcome_authority = _artifact_wrapped_coordinator_authority(
+        outcome_result,
+        purpose="research_lab.provider_outcome_snapshot.v2",
+    )
+    outcome_graph = outcome_authority["receipt_graph"]
+    outcome_receipt = outcome_authority["receipt"]
     active_result = {
         "schema_version": "leadpoet.active_private_model.v2",
         "artifact": private_model_artifact_replay_identity_v2(artifact),
@@ -371,10 +447,12 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
         },
         "source_state_hash": "sha256:" + "2" * 64,
     }
-    active_graph, active_receipt = _coordinator_graph(
+    active_authority = _artifact_wrapped_coordinator_authority(
         active_result,
         purpose="research_lab.active_private_model.v2",
     )
+    active_graph = active_authority["receipt_graph"]
+    active_receipt = active_authority["receipt"]
     catalog = build_source_add_runtime_catalog_v2([])
     catalog_result = {
         "schema_version": "leadpoet.source_add_catalog_snapshot.v2",
@@ -385,7 +463,11 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
         "runtime_catalog": catalog,
         "runtime_catalog_hash": catalog["catalog_hash"],
     }
-    catalog_hash = "sha256:" + "7" * 64
+    catalog_authority = _artifact_wrapped_coordinator_authority(
+        catalog_result,
+        purpose="research_lab.source_add_catalog_snapshot.v2",
+    )
+    catalog_hash = catalog_authority["receipt"]["receipt_hash"]
     guard_hash = "sha256:" + "8" * 64
     component_hash = "sha256:" + "9" * 64
     observed = {}
@@ -424,18 +506,10 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
     )
 
     async def load_catalog_snapshot(**_kwargs):
-        return {
-            "result": catalog_result,
-            "receipt": {"receipt_hash": catalog_hash},
-            "receipt_graph": {"root_receipt_hash": catalog_hash},
-        }
+        return catalog_authority
 
     async def load_outcome_snapshot(**_kwargs):
-        return {
-            "result": outcome_result,
-            "receipt": outcome_receipt,
-            "receipt_graph": outcome_graph,
-        }
+        return outcome_authority
 
     async def execute(**kwargs):
         observed.update(kwargs)
@@ -532,11 +606,7 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
                 "receipt": {"receipt_hash": component_hash},
                 "receipt_graph": {"root_receipt_hash": component_hash},
             },
-            active_model_authority={
-                "result": active_result,
-                "receipt": active_receipt,
-                "receipt_graph": active_graph,
-            },
+            active_model_authority=active_authority,
             expected_event_state_hash="sha256:" + "c" * 64,
             record_loop_event=lambda _event: {},
             code_builder=SimpleNamespace(
@@ -559,6 +629,7 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
     assert observed["parent_graphs"][-1] == outcome_graph
     assert active_graph in observed["parent_graphs"]
     assert active_receipt["receipt_hash"] in observed["input_artifact_hashes"]
+    assert catalog_hash in observed["input_artifact_hashes"]
     assert outcome_receipt["receipt_hash"] in observed["input_artifact_hashes"]
     assert len(client.released) == 1
 

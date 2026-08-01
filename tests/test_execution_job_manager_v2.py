@@ -1190,6 +1190,39 @@ def test_job_id_and_payload_are_immutable_and_canonical():
         manager.seal("score-job-1")
 
 
+def test_exact_duplicate_chunk_is_idempotent_but_conflicting_overlap_fails():
+    manager, _ = _manager(lambda _op, value, _ctx: value)
+    payload = _payload()
+    manifest = _manifest(payload)
+    manager.submit(manifest)
+    encoded = base64.b64encode(payload).decode("ascii")
+    digest = sha256_bytes(payload)
+
+    first = manager.put_chunk(
+        job_id=manifest["job_id"],
+        offset=0,
+        data_b64=encoded,
+        chunk_sha256=digest,
+    )
+    duplicate = manager.put_chunk(
+        job_id=manifest["job_id"],
+        offset=0,
+        data_b64=encoded,
+        chunk_sha256=digest,
+    )
+
+    assert first["uploaded_bytes"] == len(payload)
+    assert duplicate["uploaded_bytes"] == len(payload)
+    conflicting = b"[" + payload[1:]
+    with pytest.raises(ExecutionJobV2Error, match="conflicts with uploaded"):
+        manager.put_chunk(
+            job_id=manifest["job_id"],
+            offset=0,
+            data_b64=base64.b64encode(conflicting).decode("ascii"),
+            chunk_sha256=sha256_bytes(conflicting),
+        )
+
+
 def test_v1_purpose_and_unknown_operation_fail_closed():
     manager, _ = _manager(lambda _op, value, _ctx: value)
     payload = _payload()

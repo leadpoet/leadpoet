@@ -92,6 +92,71 @@ async def test_business_links_reject_execution_graph_with_different_root():
         )
 
 
+@pytest.mark.asyncio
+async def test_catalog_snapshot_validates_measured_execution_before_artifact_wrapper(
+    monkeypatch,
+):
+    runtime_catalog = v2_authority.build_source_add_runtime_catalog_v2([])
+    result = {
+        "schema_version": "leadpoet.source_add_catalog_snapshot.v2",
+        "provisioned_sources": [],
+        "private_registry_rows": [],
+        "runtime_catalog": runtime_catalog,
+        "provisioned_sources_hash": v2_authority.sha256_json([]),
+        "private_registry_rows_hash": v2_authority.sha256_json([]),
+        "runtime_catalog_hash": runtime_catalog["catalog_hash"],
+    }
+    execution_receipt = {
+        "receipt_hash": HASH_A,
+        "output_root": v2_authority.sha256_json(result),
+    }
+    execution_graph = {
+        "root_receipt_hash": HASH_A,
+        "receipts": [execution_receipt],
+    }
+    artifact_receipt = {
+        "receipt_hash": HASH_B,
+        "output_root": HASH_B,
+    }
+    artifact_graph = {
+        "root_receipt_hash": HASH_B,
+        "receipts": [artifact_receipt],
+    }
+    validated = []
+
+    async def execute(**_kwargs):
+        return {
+            "status": "succeeded",
+            "result": result,
+            "receipt": artifact_receipt,
+            "receipt_graph": artifact_graph,
+            "execution_receipt": execution_receipt,
+            "execution_receipt_graph": execution_graph,
+        }
+
+    def validate(graph, **kwargs):
+        validated.append((graph, kwargs))
+
+    monkeypatch.setattr(v2_authority, "validate_receipt_graph", validate)
+
+    outcome = await v2_authority.load_source_add_catalog_snapshot_v2(
+        epoch_id=42,
+        execute=execute,
+    )
+
+    assert outcome["receipt"] == artifact_receipt
+    assert validated == [
+        (
+            execution_graph,
+            {
+                "required_purposes": {
+                    "research_lab.source_add_catalog_snapshot.v2"
+                }
+            },
+        )
+    ]
+
+
 def test_malformed_allocation_schedule_fails_closed():
     with pytest.raises(
         v2_authority.ResearchLabV2AuthorityError,

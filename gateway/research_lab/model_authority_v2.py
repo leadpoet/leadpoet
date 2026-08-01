@@ -779,13 +779,23 @@ class AttestedPrivateModelRunnerV2:
         catalog_outcome = await catalog_loader(epoch_id=int(execution_epoch))
         catalog_result = catalog_outcome.get("result")
         catalog_graph = catalog_outcome.get("receipt_graph")
-        catalog_receipt = catalog_outcome.get("receipt") or catalog_outcome.get(
+        catalog_lineage_receipt = catalog_outcome.get("receipt")
+        catalog_execution_graph = catalog_outcome.get(
+            "execution_receipt_graph"
+        ) or catalog_outcome.get("receipt_graph")
+        catalog_execution_receipt = catalog_outcome.get(
             "execution_receipt"
-        )
+        ) or catalog_outcome.get("receipt")
         if (
             not isinstance(catalog_result, Mapping)
             or not isinstance(catalog_graph, Mapping)
-            or not isinstance(catalog_receipt, Mapping)
+            or not isinstance(catalog_lineage_receipt, Mapping)
+            or not isinstance(catalog_execution_graph, Mapping)
+            or not isinstance(catalog_execution_receipt, Mapping)
+            or catalog_graph.get("root_receipt_hash")
+            != catalog_lineage_receipt.get("receipt_hash")
+            or catalog_execution_graph.get("root_receipt_hash")
+            != catalog_execution_receipt.get("receipt_hash")
         ):
             raise AttestedPrivateModelRunnerV2Error(
                 "measured SOURCE_ADD catalog authority is unavailable"
@@ -823,12 +833,11 @@ class AttestedPrivateModelRunnerV2:
             != sha256_json([dict(item) for item in private_registry_rows])
             or catalog_result.get("runtime_catalog_hash")
             != runtime_catalog["catalog_hash"]
-            or catalog_root != catalog_receipt.get("receipt_hash")
-            or catalog_receipt.get("role") != "gateway_coordinator"
-            or catalog_receipt.get("purpose")
+            or catalog_execution_receipt.get("role") != "gateway_coordinator"
+            or catalog_execution_receipt.get("purpose")
             != "research_lab.source_add_catalog_snapshot.v2"
-            or catalog_receipt.get("status") != "succeeded"
-            or catalog_receipt.get("output_root")
+            or catalog_execution_receipt.get("status") != "succeeded"
+            or catalog_execution_receipt.get("output_root")
             != sha256_json(dict(catalog_result))
         ):
             raise AttestedPrivateModelRunnerV2Error(

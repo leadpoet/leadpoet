@@ -1060,19 +1060,27 @@ async def run_authoritative_autoresearch_v2(
         )
     component_receipt_hash = str(component_receipt["receipt_hash"])
     active_model_graph = active_model_authority.get("receipt_graph")
-    active_model_receipt = active_model_authority.get("receipt") or (
-        active_model_authority.get("execution_receipt")
-    )
+    active_model_lineage_receipt = active_model_authority.get("receipt")
+    active_model_execution_graph = active_model_authority.get(
+        "execution_receipt_graph"
+    ) or active_model_authority.get("receipt_graph")
+    active_model_execution_receipt = active_model_authority.get(
+        "execution_receipt"
+    ) or active_model_authority.get("receipt")
     active_model_result = active_model_authority.get("result")
     if (
         not isinstance(active_model_graph, Mapping)
-        or not isinstance(active_model_receipt, Mapping)
+        or not isinstance(active_model_lineage_receipt, Mapping)
+        or not isinstance(active_model_execution_graph, Mapping)
+        or not isinstance(active_model_execution_receipt, Mapping)
         or not isinstance(active_model_result, Mapping)
         or active_model_graph.get("root_receipt_hash")
-        != active_model_receipt.get("receipt_hash")
-        or active_model_receipt.get("purpose")
+        != active_model_lineage_receipt.get("receipt_hash")
+        or active_model_execution_graph.get("root_receipt_hash")
+        != active_model_execution_receipt.get("receipt_hash")
+        or active_model_execution_receipt.get("purpose")
         != "research_lab.active_private_model.v2"
-        or active_model_receipt.get("output_root")
+        or active_model_execution_receipt.get("output_root")
         != sha256_json(dict(active_model_result))
         or active_model_result.get("artifact")
         != private_model_artifact_replay_identity_v2(artifact)
@@ -1080,24 +1088,39 @@ async def run_authoritative_autoresearch_v2(
         raise AutoresearchAuthorityV2Error(
             "active private model measured lineage is unavailable"
         )
-    active_model_receipt_hash = str(active_model_receipt["receipt_hash"])
+    active_model_receipt_hash = str(
+        active_model_lineage_receipt["receipt_hash"]
+    )
     catalog_outcome = await load_catalog_snapshot(epoch_id=int(epoch_id))
     catalog_result = catalog_outcome.get("result")
     catalog_graph = catalog_outcome.get("receipt_graph")
-    catalog_receipt = catalog_outcome.get("receipt") or catalog_outcome.get(
+    catalog_lineage_receipt = catalog_outcome.get("receipt")
+    catalog_execution_graph = catalog_outcome.get(
+        "execution_receipt_graph"
+    ) or catalog_outcome.get("receipt_graph")
+    catalog_execution_receipt = catalog_outcome.get(
         "execution_receipt"
-    )
+    ) or catalog_outcome.get("receipt")
     if (
         not isinstance(catalog_result, Mapping)
         or not isinstance(catalog_graph, Mapping)
-        or not isinstance(catalog_receipt, Mapping)
+        or not isinstance(catalog_lineage_receipt, Mapping)
+        or not isinstance(catalog_execution_graph, Mapping)
+        or not isinstance(catalog_execution_receipt, Mapping)
         or catalog_graph.get("root_receipt_hash")
-        != catalog_receipt.get("receipt_hash")
+        != catalog_lineage_receipt.get("receipt_hash")
+        or catalog_execution_graph.get("root_receipt_hash")
+        != catalog_execution_receipt.get("receipt_hash")
+        or catalog_execution_receipt.get("purpose")
+        != "research_lab.source_add_catalog_snapshot.v2"
+        or catalog_execution_receipt.get("status") != "succeeded"
+        or catalog_execution_receipt.get("output_root")
+        != sha256_json(dict(catalog_result))
     ):
         raise AutoresearchAuthorityV2Error(
             "SOURCE_ADD catalog measured lineage is unavailable"
         )
-    catalog_receipt_hash = str(catalog_receipt["receipt_hash"])
+    catalog_receipt_hash = str(catalog_lineage_receipt["receipt_hash"])
     runtime_catalog = validate_source_add_runtime_catalog_v2(
         _mapping(catalog_result.get("runtime_catalog"), "runtime catalog")
     )
@@ -1113,9 +1136,13 @@ async def run_authoritative_autoresearch_v2(
     )
     provider_outcome_result_raw = provider_outcome.get("result")
     provider_outcome_graph = provider_outcome.get("receipt_graph")
-    provider_outcome_receipt = provider_outcome.get(
-        "receipt"
-    ) or provider_outcome.get("execution_receipt")
+    provider_outcome_lineage_receipt = provider_outcome.get("receipt")
+    provider_outcome_execution_graph = provider_outcome.get(
+        "execution_receipt_graph"
+    ) or provider_outcome.get("receipt_graph")
+    provider_outcome_execution_receipt = provider_outcome.get(
+        "execution_receipt"
+    ) or provider_outcome.get("receipt")
     try:
         provider_outcome_result = validate_provider_outcome_snapshot_v2(
             _mapping(
@@ -1136,21 +1163,28 @@ async def run_authoritative_autoresearch_v2(
         raise AutoresearchAuthorityV2Error(
             "provider outcome measured lineage is invalid"
         ) from exc
-    if not isinstance(provider_outcome_receipt, Mapping):
+    if (
+        not isinstance(provider_outcome_lineage_receipt, Mapping)
+        or not isinstance(provider_outcome_execution_graph, Mapping)
+        or not isinstance(provider_outcome_execution_receipt, Mapping)
+    ):
         raise AutoresearchAuthorityV2Error(
             "provider outcome measured lineage is unavailable"
         )
     provider_outcome_receipt_hash = str(
-        provider_outcome_receipt.get("receipt_hash") or ""
+        provider_outcome_lineage_receipt.get("receipt_hash") or ""
     )
     if (
         provider_outcome_graph.get("root_receipt_hash")
         != provider_outcome_receipt_hash
-        or provider_outcome_receipt.get("role") != "gateway_coordinator"
-        or provider_outcome_receipt.get("purpose")
+        or provider_outcome_execution_graph.get("root_receipt_hash")
+        != provider_outcome_execution_receipt.get("receipt_hash")
+        or provider_outcome_execution_receipt.get("role")
+        != "gateway_coordinator"
+        or provider_outcome_execution_receipt.get("purpose")
         != "research_lab.provider_outcome_snapshot.v2"
-        or provider_outcome_receipt.get("status") != "succeeded"
-        or provider_outcome_receipt.get("output_root")
+        or provider_outcome_execution_receipt.get("status") != "succeeded"
+        or provider_outcome_execution_receipt.get("output_root")
         != sha256_json(provider_outcome_result)
     ):
         raise AutoresearchAuthorityV2Error(

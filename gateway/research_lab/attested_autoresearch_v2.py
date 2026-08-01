@@ -16,6 +16,10 @@ from pathlib import Path
 import re
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
+from gateway.research_lab.attested_execution_upload_v2 import (
+    AttestedExecutionUploadV2Error,
+    upload_attested_execution_job_v2,
+)
 from gateway.tee.autoresearch_executor_v2 import (
     AUTORESEARCH_OPERATIONS_V2,
     OP_REPAIR_STALE_PARENT,
@@ -769,18 +773,18 @@ async def execute_autoresearch_v2(
         "provider_credential_profile": normalized_profile,
         "provider_credential_ref_hashes": dict(sorted(credential_refs.items())),
     }
-    submitted = await client.autoresearch_v2_submit_job(manifest)
-    if submitted.get("state") == "uploading":
-        offset = int(submitted.get("uploaded_bytes") or 0)
-        while offset < len(payload_bytes):
-            chunk = payload_bytes[offset : offset + UPLOAD_CHUNK_BYTES]
-            await client.autoresearch_v2_put_chunk(
-                job_id=job_id,
-                offset=offset,
-                data=chunk,
-            )
-            offset += len(chunk)
-        await client.autoresearch_v2_seal_job(job_id)
+    try:
+        await upload_attested_execution_job_v2(
+            manifest=manifest,
+            payload=payload_bytes,
+            chunk_size=UPLOAD_CHUNK_BYTES,
+            submit_job=client.autoresearch_v2_submit_job,
+            put_chunk=client.autoresearch_v2_put_chunk,
+            seal_job=client.autoresearch_v2_seal_job,
+            get_status=client.autoresearch_v2_get_status,
+        )
+    except AttestedExecutionUploadV2Error as exc:
+        raise AttestedAutoresearchV2Error(str(exc)) from exc
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + max(1.0, float(timeout_seconds))
@@ -1004,6 +1008,7 @@ async def execute_autoresearch_v2(
             "status": "succeeded" if succeeded else "failed",
             "result": result,
             "execution_receipt": dict(receipt),
+            "execution_receipt_graph": dict(graph),
             "receipt": dict(final_receipt),
             "receipt_graph": dict(final_graph),
             "ancestry_compact_proof": dict(final_ancestry_proof),
@@ -1052,6 +1057,8 @@ async def execute_autoresearch_v2(
         "status": "succeeded" if succeeded else "failed",
         "result": result,
         "receipt": dict(receipt),
+        "execution_receipt": dict(receipt),
+        "execution_receipt_graph": dict(graph),
         "receipt_graph": graph,
         "ancestry_compact_proof": dict(normalized_ancestry_proof),
         "transitions": list(transitions),

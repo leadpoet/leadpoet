@@ -141,19 +141,31 @@ def _catalog_outcome(rows=()):
         "runtime_catalog": runtime_catalog,
         "runtime_catalog_hash": runtime_catalog["catalog_hash"],
     }
-    receipt = {
+    execution_receipt = {
         "receipt_hash": "sha256:" + "c" * 64,
         "role": "gateway_coordinator",
         "purpose": "research_lab.source_add_catalog_snapshot.v2",
         "status": "succeeded",
         "output_root": sha256_json(result),
     }
+    artifact_receipt = {
+        "receipt_hash": "sha256:" + "d" * 64,
+        "role": "gateway_coordinator",
+        "purpose": "leadpoet.artifact_persistence.v2",
+        "status": "succeeded",
+        "output_root": "sha256:" + "d" * 64,
+    }
     return {
         "result": result,
-        "receipt": receipt,
+        "receipt": artifact_receipt,
+        "execution_receipt": execution_receipt,
+        "execution_receipt_graph": {
+            "root_receipt_hash": execution_receipt["receipt_hash"],
+            "receipts": [execution_receipt],
+        },
         "receipt_graph": {
-            "root_receipt_hash": receipt["receipt_hash"],
-            "receipts": [receipt],
+            "root_receipt_hash": artifact_receipt["receipt_hash"],
+            "receipts": [execution_receipt, artifact_receipt],
         },
     }
 

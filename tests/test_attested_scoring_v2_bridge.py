@@ -557,6 +557,22 @@ class _CoordinatorClient(_Client):
     coordinator_v2_get_transitions = _Client.scoring_v2_get_transitions
 
 
+class _ConcurrentSubmitClient(_Client):
+    def __init__(self, release, *, callers, executor):
+        super().__init__(release, executor=executor)
+        self._callers = callers
+        self._submit_count = 0
+        self._all_submitted = asyncio.Event()
+
+    async def scoring_v2_submit_job(self, manifest):
+        summary = self.manager.submit(manifest)
+        self._submit_count += 1
+        if self._submit_count == self._callers:
+            self._all_submitted.set()
+        await asyncio.wait_for(self._all_submitted.wait(), timeout=1)
+        return summary
+
+
 @pytest.mark.asyncio
 async def test_v2_bridge_returns_only_durable_release_verified_result():
     release = _release()
@@ -605,7 +621,93 @@ async def test_v2_bridge_returns_only_durable_release_verified_result():
     }
     assert result["status"] == "succeeded"
     assert result["physical_role"] == "gateway_scoring"
+    assert result["execution_receipt"] == result["receipt"]
+    assert result["execution_receipt_graph"] == result["receipt_graph"]
     assert persisted[0]["root_receipt_hash"] == result["receipt"]["receipt_hash"]
+
+
+@pytest.mark.asyncio
+async def test_same_manifest_concurrent_callers_converge_on_one_execution():
+    release = _release()
+    execution_count = 0
+
+    def executor(operation, payload, context):
+        nonlocal execution_count
+        execution_count += 1
+        for digest in (_hash("8"), _hash("9"), _hash("6")):
+            context.record_artifact(digest)
+        return ExecutionResultV2(
+            output={"operation": operation, "echo": payload},
+            transport_attempts=(_authenticated_attempt(context),),
+        )
+
+    caller_count = 5
+    client = _ConcurrentSubmitClient(
+        release,
+        callers=caller_count,
+        executor=executor,
+    )
+    artifact_client = _ArtifactCoordinator(
+        release,
+        (_hash("8"), _hash("6")),
+    )
+
+    async def persist(graph, **_kwargs):
+        validate_receipt_graph(graph)
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    async def persist_artifact(artifact_id, **kwargs):
+        return {
+            "status": "persisted",
+            "artifact_id": artifact_id,
+            "storage_document_hash": _hash("d"),
+            "artifact_kind": "provider_response",
+            "artifact_hash": _hash("c"),
+            "encryption_context_hash": _hash("e"),
+            "object_lock_mode": "COMPLIANCE",
+            "retain_until": "2027-07-10T12:00:00Z",
+            "transport_root": transport_root(
+                _storage_attempts_for_job(
+                    artifact_id,
+                    kwargs["attestation_job_id"],
+                )
+            ),
+        }
+
+    async def persist_sidecars(**_kwargs):
+        return {"artifact_link_count": 2, "transition_count": 0}
+
+    async def run_once():
+        return await execute_scoring_v2(
+            operation="benchmark_icp_score",
+            purpose="research_lab.benchmark.v2",
+            epoch_id=12,
+            sequence=0,
+            payload={"scores": [1.0, 2.0]},
+            worker_index=0,
+            release_manifest=release,
+            client=client,
+            artifact_coordinator_client=artifact_client,
+            persist_artifact=persist_artifact,
+            artifact_bucket="immutable-bucket",
+            persist_graph=persist,
+            persist_sidecars=persist_sidecars,
+            boot_verifier=lambda identity: identity,
+            poll_seconds=0.001,
+        )
+
+    results = await asyncio.gather(*(run_once() for _ in range(caller_count)))
+
+    assert execution_count == 1
+    assert {item["receipt"]["receipt_hash"] for item in results} == {
+        results[0]["receipt"]["receipt_hash"]
+    }
+    assert all(
+        item["receipt"]["receipt_hash"]
+        != item["execution_receipt"]["receipt_hash"]
+        for item in results
+    )
+    assert all(item["result"] == results[0]["result"] for item in results)
 
 
 @pytest.mark.asyncio
@@ -1031,6 +1133,8 @@ async def test_v2_bridge_replays_exact_durable_coordinator_result_without_resubm
     assert replayed["replay_status"] == "durable_exact"
     assert replayed["result"] == fresh["result"]
     assert replayed["receipt"] == fresh["receipt"]
+    assert replayed["execution_receipt"] == fresh["receipt"]
+    assert replayed["execution_receipt_graph"] == fresh["receipt_graph"]
 
     tampered = dict(fresh["result"])
     tampered["operation"] = "tampered"
@@ -1615,6 +1719,10 @@ async def test_v2_bridge_durably_persists_signed_failure_before_raising():
     assert authority is not None
     assert authority["status"] == "failed"
     assert authority["execution_receipt"]["status"] == "failed"
+    assert (
+        authority["execution_receipt_graph"]["root_receipt_hash"]
+        == authority["execution_receipt"]["receipt_hash"]
+    )
     assert authority["result"] == {
         "status": "failed",
         "failure_code": "execution_valueerror",

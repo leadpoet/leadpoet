@@ -327,7 +327,7 @@ async def _process_provenance(
             "precheck_status": precheck.precheck_status,
             "precheck_doc": precheck_doc,
             "provenance_receipt_hash": str(
-                (outcome.get("receipt") or outcome.get("execution_receipt") or {}).get(
+                (outcome.get("execution_receipt") or outcome.get("receipt") or {}).get(
                     "receipt_hash"
                 )
                 or ""
@@ -603,7 +603,7 @@ def _functional_attempt_doc(
     result: Mapping[str, Any],
     outcome: Mapping[str, Any],
 ) -> dict[str, Any]:
-    receipt = outcome.get("receipt") or outcome.get("execution_receipt") or {}
+    receipt = outcome.get("execution_receipt") or outcome.get("receipt") or {}
     receipt_hash = str(receipt.get("receipt_hash") or "") if isinstance(receipt, Mapping) else ""
     business_hash = str(receipt.get("output_root") or "") if isinstance(receipt, Mapping) else ""
     if not _HASH_RE.fullmatch(receipt_hash) or business_hash != sha256_json(dict(result)):

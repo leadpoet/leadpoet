@@ -20,6 +20,10 @@ from pathlib import Path
 import re
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
+from gateway.research_lab.attested_execution_upload_v2 import (
+    AttestedExecutionUploadV2Error,
+    upload_attested_execution_job_v2,
+)
 from gateway.tee.execution_job_manager_v2 import (
     JOB_SCHEMA_VERSION,
     MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
@@ -1291,6 +1295,7 @@ async def execute_scoring_v2(
                 "result": dict(replay_result),
                 "receipt": dict(replay_receipt),
                 "execution_receipt": dict(replay_receipt),
+                "execution_receipt_graph": dict(replay_graph),
                 "receipt_graph": dict(replay_graph),
                 "transitions": [],
                 "transport_attempts": replay_attempts,
@@ -1364,18 +1369,18 @@ async def execute_scoring_v2(
         "provider_credential_ref_hashes": dict(sorted(credential_refs.items())),
     }
     async def run_remote_job() -> tuple[dict[str, Any], str, dict[str, Any]]:
-        submitted = await rpc_method("submit_job")(manifest)
-        if submitted.get("state") == "uploading":
-            offset = int(submitted.get("uploaded_bytes") or 0)
-            while offset < len(payload_bytes):
-                chunk = payload_bytes[offset : offset + UPLOAD_CHUNK_BYTES]
-                await rpc_method("put_chunk")(
-                    job_id=job_id,
-                    offset=offset,
-                    data=chunk,
-                )
-                offset += len(chunk)
-            await rpc_method("seal_job")(job_id)
+        try:
+            await upload_attested_execution_job_v2(
+                manifest=manifest,
+                payload=payload_bytes,
+                chunk_size=UPLOAD_CHUNK_BYTES,
+                submit_job=rpc_method("submit_job"),
+                put_chunk=rpc_method("put_chunk"),
+                seal_job=rpc_method("seal_job"),
+                get_status=rpc_method("get_status"),
+            )
+        except AttestedExecutionUploadV2Error as exc:
+            raise AttestedScoringV2Error(str(exc)) from exc
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(1.0, float(timeout_seconds))
@@ -1618,6 +1623,7 @@ async def execute_scoring_v2(
             "result": result,
             "receipt": dict(receipt),
             "execution_receipt": dict(receipt),
+            "execution_receipt_graph": dict(graph),
             "receipt_graph": graph,
             "transitions": [],
             "transport_attempts": list(transport_attempts),
@@ -2121,6 +2127,8 @@ async def execute_scoring_v2(
         "status": "succeeded",
         "result": result,
         "receipt": dict(receipt),
+        "execution_receipt": dict(receipt),
+        "execution_receipt_graph": dict(graph),
         "receipt_graph": graph,
         "transitions": list(transitions),
         "transport_attempts": list(transport_attempts),

@@ -167,9 +167,13 @@ async def test_provisioning_smoke_pass_finalizes_with_exact_work_lease(monkeypat
         assert kwargs["sequence"] == 1
         return result, {
             "receipt": {
+                "receipt_hash": "sha256:" + "5" * 64,
+                "output_root": "sha256:" + "5" * 64,
+            },
+            "execution_receipt": {
                 "receipt_hash": "sha256:" + "4" * 64,
                 "output_root": sha256_json(result),
-            }
+            },
         }
 
     observed = {}
@@ -202,6 +206,7 @@ async def test_provisioning_smoke_pass_finalizes_with_exact_work_lease(monkeypat
     assert smoke["work_id"] == work["work_id"]
     assert smoke["attempt_number"] == 1
     assert smoke["evaluation_mode"] == "provisioning_smoke"
+    assert smoke["receipt_hash"] == "sha256:" + "4" * 64
     assert smoke["business_artifact_hash"] == sha256_json(result)
 
 

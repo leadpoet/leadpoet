@@ -354,7 +354,7 @@ async def evaluate_source_add_functional_probe_v2(
             "SOURCE_ADD functional probe result binding differs"
         )
     receipt = outcome.get("execution_receipt") or outcome.get("receipt")
-    graph = outcome.get("receipt_graph")
+    graph = outcome.get("execution_receipt_graph") or outcome.get("receipt_graph")
     if (
         not isinstance(receipt, Mapping)
         or not isinstance(graph, Mapping)
@@ -914,13 +914,16 @@ async def judge_source_add_implementation_v2(
     )
     if verdict.verdict not in {"helped", "not_helped", "uncertain"}:
         raise ResearchLabV2AuthorityError("SOURCE_ADD judge verdict value is invalid")
-    graph = outcome.get("receipt_graph")
-    receipt = outcome.get("receipt")
+    graph = outcome.get("execution_receipt_graph") or outcome.get("receipt_graph")
+    receipt = outcome.get("execution_receipt") or outcome.get("receipt")
     if not isinstance(graph, Mapping) or not isinstance(receipt, Mapping):
         raise ResearchLabV2AuthorityError("SOURCE_ADD judge receipt graph is missing")
     validate_receipt_graph(graph, required_purposes={"research_lab.source_add_judge.v2"})
-    if graph.get("root_receipt_hash") != receipt.get("receipt_hash"):
-        raise ResearchLabV2AuthorityError("SOURCE_ADD judge graph root differs")
+    if (
+        graph.get("root_receipt_hash") != receipt.get("receipt_hash")
+        or receipt.get("output_root") != sha256_json(dict(result))
+    ):
+        raise ResearchLabV2AuthorityError("SOURCE_ADD judge receipt differs")
     return verdict, dict(outcome)
 
 
@@ -979,8 +982,8 @@ async def load_source_add_catalog_snapshot_v2(
         raise ResearchLabV2AuthorityError(
             "SOURCE_ADD runtime catalog commitment differs"
         )
-    receipt = outcome.get("receipt") or outcome.get("execution_receipt")
-    graph = outcome.get("receipt_graph")
+    receipt = outcome.get("execution_receipt") or outcome.get("receipt")
+    graph = outcome.get("execution_receipt_graph") or outcome.get("receipt_graph")
     if (
         not isinstance(receipt, Mapping)
         or not isinstance(graph, Mapping)

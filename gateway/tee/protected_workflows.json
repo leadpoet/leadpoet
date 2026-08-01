@@ -182,6 +182,16 @@
       "symbol": "_select_by_values"
     },
     {
+      "ast_sha256": "sha256:3460dc5634b675a03419966783843c83e5c460b6d3d6e92d2b8095bdb939d884",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "_validate_allocation_settlement_frontier_storage_v2"
+    },
+    {
+      "ast_sha256": "sha256:41431ea278b9ca89447ac6b350130e52b8f4a9c0c58a43dfa974eea50136922c",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "load_allocation_settlement_frontier_context_v2"
+    },
+    {
       "ast_sha256": "sha256:b392d1938c681ed9e5ebc37e8c879e38439a1ae4c288c208fa5a026a21915098",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "load_ancestry_checkpoint_proof_v2"
@@ -237,6 +247,11 @@
       "symbol": "load_compact_weight_publication_intent_v2"
     },
     {
+      "ast_sha256": "sha256:bb1b5c0b600c13f4f94e886a900dc988dc7e1aaa2dbf5d3d051aa7b534cb2c51",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "load_execution_result_by_receipt_v2"
+    },
+    {
       "ast_sha256": "sha256:d4b4b002a46dc745dd3271f3a1d9ab4bf7efe423ce86d1add7a80a81c84dcdc1",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "load_receipt_graph_v2"
@@ -245,6 +260,11 @@
       "ast_sha256": "sha256:453117214a61731bb23daa02924890dd7202ea6db6b4d6ac54b30bf16a3e13b8",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "load_receipt_graphs_v2"
+    },
+    {
+      "ast_sha256": "sha256:ff7bb8f6ad2ed101a9632f0cfddb54f89a5343d2d1760f0156abfc08de85bed0",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "persist_allocation_settlement_frontier_v2"
     },
     {
       "ast_sha256": "sha256:b0c4f8382f12cfeb00090b9105d07cbb47850622ad0a4167abada51b586b4fe9",
@@ -877,7 +897,7 @@
       "symbol": "normalize_tee_protocol"
     },
     {
-      "ast_sha256": "sha256:b568c8e584fb948f11d40a7daad561c4d6090d99ede474930405781b21045444",
+      "ast_sha256": "sha256:e52d58ed0aafa93c8dfdc5baafce816091a3827d23d985fb6eae75ddc670ad05",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "_load_allocation_parent_graphs_v2"
     },
@@ -897,7 +917,7 @@
       "symbol": "attest_historical_source_add_reward_v2"
     },
     {
-      "ast_sha256": "sha256:a6c42eed9c67009ff41741665ad7108bbdaccc938d7275469229f7cfda45241c",
+      "ast_sha256": "sha256:f34ad4768327a6b7314baddcd1af021000f0bb19223a92669e4ed6a91c920841",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "build_allocation_v2"
     },
@@ -937,7 +957,7 @@
       "symbol": "CoordinatorActiveModelSourceV2"
     },
     {
-      "ast_sha256": "sha256:eb13d87a3de6a6d274970d075932ef64fe4320663374f884e916f968f1a271ef",
+      "ast_sha256": "sha256:987cbf3545d628ef292b8c335494a888814c9aa4c63928de15397eed23459e61",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
@@ -957,7 +977,7 @@
       "symbol": "attest_subnet_epoch_cutover_v2"
     },
     {
-      "ast_sha256": "sha256:da258c4424077640c7e652efaaa3f498cb8f3308596e4e88446440bc6a4476ad",
+      "ast_sha256": "sha256:7690d13e7f861c82997d63f7638c42a3130cd91cd44ff45ef9dc9a551fcea751",
       "path": "gateway/tee/coordinator_executor_v2.py",
       "symbol": "CoordinatorExecutorV2"
     },
@@ -1140,6 +1160,136 @@
       "ast_sha256": "sha256:31f445dbb9fd20c62058465d6e0407c19cca53594b523f3661342e4a31ff3791",
       "path": "gateway/utils/arweave_client.py",
       "symbol": "wait_for_confirmation"
+    },
+    {
+      "ast_sha256": "sha256:a43037b9df3559be26f1929b64bbc17022dc912ff8d15b692d9cfbea63652bf2",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "ALLOCATION_SETTLEMENT_FRONTIER_SCHEMA_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:8670cbbede1b1894013e6ff3401e2b0ae8d93bef2195a6640475513335cdc244",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "ALPHA_QUANT"
+    },
+    {
+      "ast_sha256": "sha256:6dd60cee2037c30d9a44899782573896a3181541b13c635b520aae82aa680304",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "AllocationSettlementFrontierV2Error"
+    },
+    {
+      "ast_sha256": "sha256:27f6a9a9ff4e50862a5897c2b4eeadc0721a61a568aa0c18415d313ab9844795",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "FRONTIER_MODES"
+    },
+    {
+      "ast_sha256": "sha256:cc00fb550be5373b7f03434dd435f83b8e619ef577376d1640e555fc78b06942",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "MAX_ALPHA_PERCENT"
+    },
+    {
+      "ast_sha256": "sha256:8a1f4155acbf8aeff83652adbb287e5272fcf49d56378c472536b669f9a94e43",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "MAX_EPOCH"
+    },
+    {
+      "ast_sha256": "sha256:413f74c0e27aecffbba181195832528d5e316d54f871112db0cec7c0ac5b0c17",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "MAX_NETUID"
+    },
+    {
+      "ast_sha256": "sha256:ea6027b2fe87aee09796da665cf673ed9ed8e0c4f11c9fa6b71e19221b6acdd1",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "MAX_REWARD_CHECKPOINTS"
+    },
+    {
+      "ast_sha256": "sha256:ac801bf44f22da85426ae7a186865e5ef54cc8a7ee358212a24f9a97f5291aa4",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "REWARD_KINDS"
+    },
+    {
+      "ast_sha256": "sha256:19d4f38e619b8f1574e196e85fae123f5e25ffa04cf8a9f9dfe905970a7a3c12",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "REWARD_SETTLEMENT_CHECKPOINT_SCHEMA_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:9488d9ec3f208443c0bcbdfc8e4b53b672019082c1ab83daa1e4ba9b67893ec0",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "_alpha_text"
+    },
+    {
+      "ast_sha256": "sha256:e85dd84e8c72707f21b626a0f64f5904c7ae1f4885f9134b7118317e7e6ba2f8",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "_decimal"
+    },
+    {
+      "ast_sha256": "sha256:f257084e5742d5f1321001de64c9874e20036d36f1062b8cefa87bacf3d5b14e",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "_hash"
+    },
+    {
+      "ast_sha256": "sha256:41e4ce34901c9dc18d0f7e9d1aac64bec57bf6307a4c3ed04304af4e383543dc",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "_identifier"
+    },
+    {
+      "ast_sha256": "sha256:f730df872955f8c1f04f7f62604e235ca659dcb0ab1567340b5a42745f2aa677",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "_integer"
+    },
+    {
+      "ast_sha256": "sha256:a1e4349ba31fbc288dfd78b6169e670a049865c78761410ca13d9623c37babca",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "_require"
+    },
+    {
+      "ast_sha256": "sha256:3edc71752e81aeff31bd473d336e4a6fb46d31f7bebdbbf2eaee1c42b0f964ff",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "_validated_alpha_text"
+    },
+    {
+      "ast_sha256": "sha256:5c493195e6e14e6e5516f554585e549d8ed64654638e77cc1bcadd4d8f28727f",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "build_allocation_settlement_frontier_v2"
+    },
+    {
+      "ast_sha256": "sha256:3adc6a00063399ef582ee154eb8a1db9756f60ff9d6da888b81c67d755cd4b56",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "build_reward_settlement_checkpoint_v2"
+    },
+    {
+      "ast_sha256": "sha256:71a96787dc1adb6470be3a5eacbc342030a57b4c494793d91f9f3909b1402db7",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "frontier_artifact_hashes_v2"
+    },
+    {
+      "ast_sha256": "sha256:5d1a8d3a1136f89b10cbf8781881362b56a7417cf86ae14e44685332a9e416a5",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "frontier_paid_maps_v2"
+    },
+    {
+      "ast_sha256": "sha256:ad42e724d5a7196b400d431f2e6ca7dc99f44788655a74d749409303def5a0ae",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "reward_checkpoint_index_v2"
+    },
+    {
+      "ast_sha256": "sha256:2113e5a3fb12d0739d725fddddfe8d0970780f246d5306391c8c268825a41e49",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "reward_checkpoint_key_v2"
+    },
+    {
+      "ast_sha256": "sha256:599879276312860d3cebe5f8caad28fc3252181e5962240b7ebaf4485dcd801c",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "validate_allocation_settlement_frontier_v2"
+    },
+    {
+      "ast_sha256": "sha256:a2054f35861243af60c69502cacb67914632ec54f23a57142c870f638814823b",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "validate_frontier_successor_v2"
+    },
+    {
+      "ast_sha256": "sha256:62d813b0b606c57739a6c8abedaa581c215340c47238036407f9499ae33f9710",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "validate_reward_settlement_checkpoint_v2"
     },
     {
       "ast_sha256": "sha256:5b207b340e38cc24f0b508181d94dcd99aece2078c73a7a5426e1374e613e1ec",
@@ -1892,7 +2042,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:519fec20e4ffbeecf3b68db4937a5b3adb756c6f377f026e2ffc8270da89554f",
-  "protected_source_commit": "3c6ba261e3c35ee597c1daf95f8b56d1c1ad8e10",
+  "manifest_hash": "sha256:194df5df84e5a23b0a77c939ed8fe474259c22832a9bec5611f1534c539856cd",
+  "protected_source_commit": "fc9cc307ed4fa4f367d9e6664f2fe15e854831d3",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

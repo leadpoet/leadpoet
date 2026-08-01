@@ -12,6 +12,136 @@
       "symbol": "validate_allocation_handoff_v2"
     },
     {
+      "ast_sha256": "sha256:a43037b9df3559be26f1929b64bbc17022dc912ff8d15b692d9cfbea63652bf2",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "ALLOCATION_SETTLEMENT_FRONTIER_SCHEMA_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:8670cbbede1b1894013e6ff3401e2b0ae8d93bef2195a6640475513335cdc244",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "ALPHA_QUANT"
+    },
+    {
+      "ast_sha256": "sha256:6dd60cee2037c30d9a44899782573896a3181541b13c635b520aae82aa680304",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "AllocationSettlementFrontierV2Error"
+    },
+    {
+      "ast_sha256": "sha256:27f6a9a9ff4e50862a5897c2b4eeadc0721a61a568aa0c18415d313ab9844795",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "FRONTIER_MODES"
+    },
+    {
+      "ast_sha256": "sha256:cc00fb550be5373b7f03434dd435f83b8e619ef577376d1640e555fc78b06942",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "MAX_ALPHA_PERCENT"
+    },
+    {
+      "ast_sha256": "sha256:8a1f4155acbf8aeff83652adbb287e5272fcf49d56378c472536b669f9a94e43",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "MAX_EPOCH"
+    },
+    {
+      "ast_sha256": "sha256:413f74c0e27aecffbba181195832528d5e316d54f871112db0cec7c0ac5b0c17",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "MAX_NETUID"
+    },
+    {
+      "ast_sha256": "sha256:ea6027b2fe87aee09796da665cf673ed9ed8e0c4f11c9fa6b71e19221b6acdd1",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "MAX_REWARD_CHECKPOINTS"
+    },
+    {
+      "ast_sha256": "sha256:ac801bf44f22da85426ae7a186865e5ef54cc8a7ee358212a24f9a97f5291aa4",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "REWARD_KINDS"
+    },
+    {
+      "ast_sha256": "sha256:19d4f38e619b8f1574e196e85fae123f5e25ffa04cf8a9f9dfe905970a7a3c12",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "REWARD_SETTLEMENT_CHECKPOINT_SCHEMA_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:9488d9ec3f208443c0bcbdfc8e4b53b672019082c1ab83daa1e4ba9b67893ec0",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "_alpha_text"
+    },
+    {
+      "ast_sha256": "sha256:e85dd84e8c72707f21b626a0f64f5904c7ae1f4885f9134b7118317e7e6ba2f8",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "_decimal"
+    },
+    {
+      "ast_sha256": "sha256:f257084e5742d5f1321001de64c9874e20036d36f1062b8cefa87bacf3d5b14e",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "_hash"
+    },
+    {
+      "ast_sha256": "sha256:41e4ce34901c9dc18d0f7e9d1aac64bec57bf6307a4c3ed04304af4e383543dc",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "_identifier"
+    },
+    {
+      "ast_sha256": "sha256:f730df872955f8c1f04f7f62604e235ca659dcb0ab1567340b5a42745f2aa677",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "_integer"
+    },
+    {
+      "ast_sha256": "sha256:a1e4349ba31fbc288dfd78b6169e670a049865c78761410ca13d9623c37babca",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "_require"
+    },
+    {
+      "ast_sha256": "sha256:3edc71752e81aeff31bd473d336e4a6fb46d31f7bebdbbf2eaee1c42b0f964ff",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "_validated_alpha_text"
+    },
+    {
+      "ast_sha256": "sha256:5c493195e6e14e6e5516f554585e549d8ed64654638e77cc1bcadd4d8f28727f",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "build_allocation_settlement_frontier_v2"
+    },
+    {
+      "ast_sha256": "sha256:3adc6a00063399ef582ee154eb8a1db9756f60ff9d6da888b81c67d755cd4b56",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "build_reward_settlement_checkpoint_v2"
+    },
+    {
+      "ast_sha256": "sha256:71a96787dc1adb6470be3a5eacbc342030a57b4c494793d91f9f3909b1402db7",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "frontier_artifact_hashes_v2"
+    },
+    {
+      "ast_sha256": "sha256:5d1a8d3a1136f89b10cbf8781881362b56a7417cf86ae14e44685332a9e416a5",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "frontier_paid_maps_v2"
+    },
+    {
+      "ast_sha256": "sha256:ad42e724d5a7196b400d431f2e6ca7dc99f44788655a74d749409303def5a0ae",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "reward_checkpoint_index_v2"
+    },
+    {
+      "ast_sha256": "sha256:2113e5a3fb12d0739d725fddddfe8d0970780f246d5306391c8c268825a41e49",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "reward_checkpoint_key_v2"
+    },
+    {
+      "ast_sha256": "sha256:599879276312860d3cebe5f8caad28fc3252181e5962240b7ebaf4485dcd801c",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "validate_allocation_settlement_frontier_v2"
+    },
+    {
+      "ast_sha256": "sha256:a2054f35861243af60c69502cacb67914632ec54f23a57142c870f638814823b",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "validate_frontier_successor_v2"
+    },
+    {
+      "ast_sha256": "sha256:62d813b0b606c57739a6c8abedaa581c215340c47238036407f9499ae33f9710",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_v2.py",
+      "symbol": "validate_reward_settlement_checkpoint_v2"
+    },
+    {
       "ast_sha256": "sha256:5b207b340e38cc24f0b508181d94dcd99aece2078c73a7a5426e1374e613e1ec",
       "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
       "symbol": "build_ancestry_policy_v2"
@@ -572,7 +702,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:f7577763998ad50607ba5fea0fa74faf92d088c02fdbb11d813fe124b64ba345",
-  "protected_source_commit": "3c6ba261e3c35ee597c1daf95f8b56d1c1ad8e10",
+  "manifest_hash": "sha256:7678c704493faecdd7ed3dbe02d74349f1b3b2c969232fe7128c777465f88fbb",
+  "protected_source_commit": "fc9cc307ed4fa4f367d9e6664f2fe15e854831d3",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

@@ -653,6 +653,16 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
         "kind": "v",
         "columns": list(EXPECTED_FINALIZED_VIEW_COLUMNS),
     }
+    relations["research_lab_maintenance_lease"] = {
+        "kind": "r",
+        "columns": [
+            "lease_name",
+            "holder_ref",
+            "acquired_at",
+            "expires_at",
+            "updated_at",
+        ],
+    }
     contract = {
         "schema_version": "leadpoet.restart_rehearsal.postgres_contract.v1",
         "candidate_sha": COMMIT,
@@ -670,6 +680,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
         ],
         "relations": relations,
         "rpcs": [
+            "research_lab_acquire_maintenance_lease",
             "research_lab_attested_transport_purpose_contract_v2",
             "research_lab_attested_transport_terminal_contract_v2",
             "append_research_lab_provider_outcome_checkpoint_v2",
@@ -680,7 +691,16 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_active_model_replay_contract_v2",
             "persist_research_lab_ancestry_checkpoint_v2",
         ],
+        "maintenance_lease": {
+            "schema_version": "leadpoet.maintenance_lease_contract.v1",
+            "atomic_acquire": True,
+            "live_contention_rejected": True,
+            "same_holder_renewed": True,
+            "expired_holder_replaced": True,
+            "invalid_ttl_rejected": True,
+        },
         "checks": {
+            "maintenance_lease_contract_valid": True,
             "pre_128_transport_rejected": True,
             "post_128_transport_persisted": True,
             "pre_129_attested_local_transport_rejected": True,
@@ -798,6 +818,16 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             ANCESTRY_CHECKPOINT_MIGRATION,
         ],
         "relations": {
+            "research_lab_maintenance_lease": {
+                "kind": "r",
+                "columns": [
+                    "lease_name",
+                    "holder_ref",
+                    "acquired_at",
+                    "expires_at",
+                    "updated_at",
+                ],
+            },
             "research_lab_finalized_allocation_epochs_v2": {
                 "kind": "v",
                 "columns": list(EXPECTED_FINALIZED_VIEW_COLUMNS),
@@ -828,10 +858,20 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             },
         },
         "rpcs": [
+            "research_lab_acquire_maintenance_lease",
             "research_lab_active_model_replay_contract_v2",
             "persist_research_lab_ancestry_checkpoint_v2",
         ],
+        "maintenance_lease": {
+            "schema_version": "leadpoet.maintenance_lease_contract.v1",
+            "atomic_acquire": True,
+            "live_contention_rejected": True,
+            "same_holder_renewed": True,
+            "expired_holder_replaced": True,
+            "invalid_ttl_rejected": True,
+        },
         "checks": {
+            "maintenance_lease_contract_valid": True,
             "pre_128_transport_rejected": True,
             "post_128_transport_persisted": True,
             "transport_contract_valid": True,

@@ -47,6 +47,7 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     _schema_contract,
 )
 from tests.restart_rehearsal.postgres_v2_contract_probe import (
+    ANCESTRY_CHECKPOINT_MIGRATION,
     CHAMPION_LIFETIME_CREDIT_MIGRATION,
     DisposablePostgres,
     EXPECTED_FINALIZED_VIEW_COLUMNS,
@@ -642,6 +643,8 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_chain_realized_settlement_activation_v1",
             "research_lab_chain_realized_obligation_credits_v1",
             "research_lab_provider_outcome_checkpoints_v2",
+            "research_lab_attested_ancestry_checkpoints_v2",
+            "research_lab_attested_ancestry_activations_v2",
         }
     }
     relations["research_lab_finalized_allocation_epochs_v2"] = {
@@ -660,6 +663,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             CHAMPION_LIFETIME_CREDIT_MIGRATION,
             PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
             PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
+            ANCESTRY_CHECKPOINT_MIGRATION,
         ],
         "relations": relations,
         "rpcs": [
@@ -670,6 +674,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_provider_outcome_contention_contract_v3",
             "persist_research_lab_chain_realized_lifetime_settlement_v2",
             "research_lab_champion_lifetime_credit_contract_v1",
+            "persist_research_lab_ancestry_checkpoint_v2",
         ],
         "checks": {
             "pre_128_transport_rejected": True,
@@ -681,6 +686,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "post_133_provider_outcome_contract_valid": True,
             "pre_134_provider_outcome_head_contract_rejected": True,
             "post_134_provider_outcome_head_contract_valid": True,
+            "post_135_ancestry_checkpoint_contract_valid": True,
             "provider_outcome_append_atomic": True,
             "provider_outcome_contention_zero_rollback": True,
             "provider_outcome_conflict_head_exact": True,
@@ -749,6 +755,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
         in rpcs
     )
     assert "research_lab_champion_lifetime_credit_contract_v1" in rpcs
+    assert "persist_research_lab_ancestry_checkpoint_v2" in rpcs
     assert _migration_seed_rows(
         path,
         candidate_sha=COMMIT,
@@ -781,6 +788,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             CHAMPION_LIFETIME_CREDIT_MIGRATION,
             PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
             PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
+            ANCESTRY_CHECKPOINT_MIGRATION,
         ],
         "relations": {
             "research_lab_finalized_allocation_epochs_v2": {
@@ -803,7 +811,16 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
                 "kind": "r",
                 "columns": ["receipt_hash"],
             },
+            "research_lab_attested_ancestry_checkpoints_v2": {
+                "kind": "r",
+                "columns": ["root_receipt_hash"],
+            },
+            "research_lab_attested_ancestry_activations_v2": {
+                "kind": "r",
+                "columns": ["activation_root_receipt_hash"],
+            },
         },
+        "rpcs": ["persist_research_lab_ancestry_checkpoint_v2"],
         "checks": {
             "pre_128_transport_rejected": True,
             "post_128_transport_persisted": True,
@@ -815,6 +832,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "post_133_provider_outcome_contract_valid": True,
             "pre_134_provider_outcome_head_contract_rejected": True,
             "post_134_provider_outcome_head_contract_valid": True,
+            "post_135_ancestry_checkpoint_contract_valid": True,
             "provider_outcome_append_atomic": True,
             "provider_outcome_contention_zero_rollback": True,
             "provider_outcome_conflict_head_exact": True,

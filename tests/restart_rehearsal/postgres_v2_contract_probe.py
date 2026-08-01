@@ -95,6 +95,9 @@ PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION = (
 PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION = (
     "134-research-lab-provider-outcome-head-contention.sql"
 )
+ANCESTRY_CHECKPOINT_MIGRATION = (
+    "135-research-lab-ancestry-checkpoint-sidecars.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -2057,6 +2060,23 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-134 provider outcome head contract differs"
             )
+        database.apply_migration(scripts / ANCESTRY_CHECKPOINT_MIGRATION)
+        applied.append(ANCESTRY_CHECKPOINT_MIGRATION)
+        checkpoint_catalog = _relation_contract(database)
+        checkpoint_relations = checkpoint_catalog["relations"]
+        checkpoint_rpcs = set(checkpoint_catalog["rpcs"])
+        required_checkpoint_relations = {
+            "research_lab_attested_ancestry_checkpoints_v2",
+            "research_lab_attested_ancestry_activations_v2",
+        }
+        if (
+            not required_checkpoint_relations <= set(checkpoint_relations)
+            or "persist_research_lab_ancestry_checkpoint_v2"
+            not in checkpoint_rpcs
+        ):
+            raise PostgresContractProbeError(
+                "post-135 ancestry checkpoint contract is incomplete"
+            )
         provider_outcome_append = _provider_outcome_append_contract(database)
         historical_compute_seed_rows = (
             _historical_compute_allocation_seed_rows(
@@ -2108,6 +2128,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post_133_provider_outcome_contract_valid": True,
                 "pre_134_provider_outcome_head_contract_rejected": True,
                 "post_134_provider_outcome_head_contract_valid": True,
+                "post_135_ancestry_checkpoint_contract_valid": True,
                 "provider_outcome_append_atomic": True,
                 "provider_outcome_contention_zero_rollback": True,
                 "provider_outcome_conflict_head_exact": True,

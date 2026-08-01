@@ -14,6 +14,7 @@ import asyncio
 import subprocess
 import base64
 import hashlib
+import threading
 from typing import Dict, List, Optional
 from datetime import datetime
 
@@ -58,10 +59,11 @@ class TEEClient:
         """
         self.cid = cid
         self.port = port
-        # Only CID discovery is shared mutable state. Each RPC owns its socket
-        # so concurrent callers cannot close or overwrite another request's
-        # transport.
-        self._lock = asyncio.Lock()
+        # Only CID discovery is shared mutable state. Locks are created lazily
+        # for the active loop so importing this host module from an enclave RPC
+        # worker never requires an implicit event loop.
+        self._cid_locks: Dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
+        self._cid_locks_guard = threading.Lock()
     
     async def _get_enclave_cid(self) -> Optional[int]:
         """
@@ -101,7 +103,15 @@ class TEEClient:
         """
         Resolve the enclave CID once without serializing independent RPCs.
         """
-        async with self._lock:
+        if self.cid is not None:
+            return int(self.cid)
+        loop = asyncio.get_running_loop()
+        with self._cid_locks_guard:
+            lock = self._cid_locks.get(loop)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._cid_locks[loop] = lock
+        async with lock:
             if self.cid is None:
                 self.cid = await self._get_enclave_cid()
                 if self.cid is None:

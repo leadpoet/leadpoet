@@ -285,6 +285,25 @@ def test_validator_client_exact_reader_handles_fragments():
     assert validator_client._recv_exact(_FragmentSocket(b"response", 1), 8) == b"response"
 
 
+def test_gateway_client_can_be_constructed_in_rpc_worker_without_event_loop():
+    with ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="gateway-vsock-rpc",
+    ) as executor:
+        client = executor.submit(gateway_client.TEEClient, 16).result(timeout=1.0)
+
+    assert client.cid == 16
+
+
+def test_fixed_cid_gateway_client_is_reusable_across_consecutive_event_loops():
+    client = gateway_client.TEEClient(cid=16)
+
+    first = asyncio.run(client._resolved_cid())
+    second = asyncio.run(client._resolved_cid())
+
+    assert (first, second) == (16, 16)
+
+
 @pytest.mark.asyncio
 async def test_gateway_client_surfaces_enclave_error_without_status_field(
     monkeypatch,

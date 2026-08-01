@@ -347,7 +347,7 @@ def _normalize_source_add_v8_registration(
     """Losslessly mirror Sourcing_model v8 registration normalization.
 
     Source reference:
-    ``leadpoet/Sourcing_model@adda083273946be4c6b49f3129f56212520ae0e0``
+    ``leadpoet/Sourcing_model@2d90daa8347daec34e8e7966eb6d208f47f52df2``
     ``sourcing_model/routing/{contracts,runtime}.py``.  This code validates a
     proposed model edit without importing or executing candidate code.
     """

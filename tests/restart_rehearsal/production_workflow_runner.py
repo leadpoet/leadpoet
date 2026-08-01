@@ -136,12 +136,12 @@ SIGNED_PRIVATE_MODEL_RELEASES = {
         ),
     },
     "leadpoet-sourcing-wrapper-contract-v8": {
-        "build_id": "30691672200-1",
+        "build_id": "30693188436-1",
         "compatibility_contract": {
             "contract_id": "leadpoet-sourcing-wrapper-contract-v8",
             "path": "sourcing_model/consumer_contract.json",
             "sha256": (
-                "sha256:ff2fdc05dcabf2715337e2f76be33368cfdbdc8381cb8e62a48c4cc134673361"
+                "sha256:080e7b199c3e1d27ae080e497b541b560a2e12d383a709d453e7a2dd320b8dfc"
             ),
         },
         "component_registry_version": "sourcing-model-components:v2",
@@ -154,27 +154,27 @@ SIGNED_PRIVATE_MODEL_RELEASES = {
                 "sha256:5527186b45294135639619d99bfcf076ec98035670f68843244ccd18fc3f80fe"
             ),
         },
-        "git_commit_sha": "adda083273946be4c6b49f3129f56212520ae0e0",
+        "git_commit_sha": "2d90daa8347daec34e8e7966eb6d208f47f52df2",
         "image_digest": (
             "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/"
-            "sourcing-model@sha256:f5180f15f4e2a2e86e7dc9a404d1c275ec75d861e7251166ba7ba645579783cc"
+            "sourcing-model@sha256:dd5710d30d589b657f4bd593d4d015bbfe47374283a862bbb2aef57455c3de4a"
         ),
         "manifest_hash": (
-            "sha256:444dc07da57f0190a1b4f22d4c2eb4a2f49e70c4000f70388268f962d46fa111"
+            "sha256:3f92e56236f4c5f583ca0b3f8cf6c2b42bcf41a7a06c3ec584a8d6b8ceee6caa"
         ),
         "manifest_uri": (
             "s3://leadpoet-private-model-artifacts-493765492819/"
             "research-lab/sourcing-model/"
-            "adda083273946be4c6b49f3129f56212520ae0e0.json"
+            "2d90daa8347daec34e8e7966eb6d208f47f52df2.json"
         ),
         "model_artifact_hash": (
-            "sha256:f5eb3c97cc0e4a8e4c5720ec13aeea82143d89233be461525599bf88ffe01dc1"
+            "sha256:879ace5e05383dcfebf877d60d80f7e179017a7c487741990e896c1d63caed28"
         ),
         "scoring_adapter_version": "qualification-company-scorer:v1",
         "signature_ref": (
             "s3://leadpoet-private-model-artifacts-493765492819/"
             "research-lab/sourcing-model/"
-            "adda083273946be4c6b49f3129f56212520ae0e0.sig.b64"
+            "2d90daa8347daec34e8e7966eb6d208f47f52df2.sig.b64"
         ),
     },
 }

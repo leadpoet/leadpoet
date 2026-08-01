@@ -44,7 +44,7 @@ REVIEWED_CONSUMER_SNAPSHOT_SPECS = (
         "contract_id": "leadpoet-sourcing-wrapper-contract-v8",
         "contract_path": CONTRACT_PATH,
         "contract_sha256": (
-            "sha256:ff2fdc05dcabf2715337e2f76be33368cfdbdc8381cb8e62a48c4cc134673361"
+            "sha256:080e7b199c3e1d27ae080e497b541b560a2e12d383a709d453e7a2dd320b8dfc"
         ),
         "parity_path": PARITY_FIXTURE_PATH,
         "parity_sha256": (

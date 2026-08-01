@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import re
 import subprocess
 
 import pytest
@@ -138,17 +139,13 @@ def test_release_reuses_candidate_migrated_durable_boundary_state() -> None:
     assert 'dst=/rehearsal-durable-state"' in controller
     assert 'dst=/rehearsal-from-fixture-seed,readonly"' in controller
     assert "durable_state_root=durable_state_root" in controller
-    assert (
-        "from_fixture_seed_root=fixture_seeds[\n"
-        "                                    run_from\n"
-        "                                ]"
-        in controller
+    assert re.search(
+        r"from_fixture_seed_root=fixture_seeds\[\s*run_from\s*\]",
+        controller,
     )
-    assert (
-        "durable_fixture_seed_root=fixture_seeds[\n"
-        "                                    candidate_sha\n"
-        "                                ]"
-        in controller
+    assert re.search(
+        r"durable_fixture_seed_root=fixture_seeds\[\s*candidate_sha\s*\]",
+        controller,
     )
     assert 'REHEARSAL_DURABLE_SCHEMA_SHA:-' in launcher
     assert "REHEARSAL_DURABLE_SCHEMA_SHA is required" in launcher

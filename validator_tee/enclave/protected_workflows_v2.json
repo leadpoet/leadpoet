@@ -7,7 +7,7 @@
       "symbol": "build_allocation_handoff_v2"
     },
     {
-      "ast_sha256": "sha256:1648126007a0e33ad00874b7d29f6d926f429654285eb0a264c8a1a573b30f75",
+      "ast_sha256": "sha256:e912c745c3d979bbb9a50e6e4db46328a03428d58abb4af4857152d2b8f01a65",
       "path": "leadpoet_canonical/allocation_handoff_v2.py",
       "symbol": "validate_allocation_handoff_v2"
     },
@@ -572,7 +572,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:4447ae8cb62126889c5565a1f9eb146e2d664c62b13303b4efe546ea946befac",
+  "manifest_hash": "sha256:8c0abe27da7591eda92eabec44a7559db4af3f62c2711753648d7f43c076053d",
   "protected_source_commit": "978c7677db00c416f1aaf1f9e7f66ffc9395b46d",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

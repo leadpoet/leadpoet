@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import ast
 import csv
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
@@ -846,6 +846,107 @@ class LocalPostgRESTState:
                 self._provider_outcome_locks[identity] = lock
             return lock
 
+    def acquire_maintenance_lease(
+        self,
+        body: Any,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Mirror migration 118's atomic acquire-or-renew RPC."""
+
+        if not isinstance(body, dict) or set(body) != {
+            "p_lease_name",
+            "p_holder_ref",
+            "p_ttl_seconds",
+        }:
+            raise ValueError("maintenance lease RPC body is invalid")
+        lease_name = body.get("p_lease_name")
+        holder_ref = body.get("p_holder_ref")
+        ttl_seconds = body.get("p_ttl_seconds")
+        if (
+            not isinstance(lease_name, str)
+            or not isinstance(holder_ref, str)
+            or not isinstance(ttl_seconds, int)
+            or isinstance(ttl_seconds, bool)
+            or ttl_seconds <= 0
+            or ttl_seconds > 86400
+        ):
+            raise ValueError("maintenance lease arguments are invalid")
+        table = "research_lab_maintenance_lease"
+        expected_columns = {
+            "lease_name",
+            "holder_ref",
+            "acquired_at",
+            "expires_at",
+            "updated_at",
+        }
+        relation_columns = self.relation_columns.get(table)
+        if (
+            table not in self.rows
+            or relation_columns is None
+            or set(relation_columns) != expected_columns
+        ):
+            raise ValueError("maintenance lease migration contract is unavailable")
+
+        observed_now = now or datetime.now(timezone.utc)
+        if observed_now.tzinfo is None:
+            raise ValueError("maintenance lease clock must be timezone-aware")
+        observed_now = observed_now.astimezone(timezone.utc)
+        expires_at = observed_now + timedelta(seconds=ttl_seconds)
+        encoded_now = observed_now.isoformat()
+        encoded_expiry = expires_at.isoformat()
+
+        with self.lock:
+            row = next(
+                (
+                    candidate
+                    for candidate in self.rows[table]
+                    if candidate.get("lease_name") == lease_name
+                ),
+                None,
+            )
+            acquired = False
+            mutated = False
+            if row is None:
+                row = {
+                    "lease_name": lease_name,
+                    "holder_ref": holder_ref,
+                    "acquired_at": encoded_now,
+                    "expires_at": encoded_expiry,
+                    "updated_at": encoded_now,
+                }
+                self.rows[table].append(row)
+                acquired = True
+                mutated = True
+            else:
+                try:
+                    current_expiry = datetime.fromisoformat(
+                        str(row.get("expires_at") or "").replace("Z", "+00:00")
+                    )
+                except ValueError as exc:
+                    raise ValueError(
+                        "maintenance lease durable expiry is invalid"
+                    ) from exc
+                if current_expiry.tzinfo is None:
+                    raise ValueError(
+                        "maintenance lease durable expiry is not timezone-aware"
+                    )
+                same_holder = row.get("holder_ref") == holder_ref
+                if current_expiry < observed_now or same_holder:
+                    if not same_holder:
+                        row["holder_ref"] = holder_ref
+                        row["acquired_at"] = encoded_now
+                    row["expires_at"] = encoded_expiry
+                    row["updated_at"] = encoded_now
+                    acquired = True
+                    mutated = True
+            self._write_durable_state_locked(mutated=mutated)
+            return {
+                "acquired": acquired,
+                "holder_ref": row["holder_ref"],
+                "expires_at": row["expires_at"],
+            }
+
     def append_provider_outcome_checkpoint(
         self,
         body: Any,
@@ -1635,6 +1736,22 @@ class Handler(BaseHTTPRequestHandler):
             elif name == "research_lab_source_add_claim_work":
                 # The exact fixture intentionally has no source-add work.
                 response = []
+            elif name == "research_lab_acquire_maintenance_lease":
+                response = self.server.state.acquire_maintenance_lease(body)
+                self.server.state.record(
+                    status="ok",
+                    operation="maintenance_lease_acquired",
+                    method=self.command,
+                    target=name,
+                    lease_name=(
+                        body.get("p_lease_name")
+                        if isinstance(body, dict)
+                        else None
+                    ),
+                    acquired=response["acquired"],
+                    holder_ref=response["holder_ref"],
+                    expires_at=response["expires_at"],
+                )
             elif name in {
                 "persist_research_lab_chain_realized_settlement_v1",
                 "persist_research_lab_chain_realized_unattributed_v2",

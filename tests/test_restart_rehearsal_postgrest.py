@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,31 @@ from tests.restart_rehearsal.gateway_boundary_service import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _maintenance_lease_state(tmp_path: Path) -> LocalPostgRESTState:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    return LocalPostgRESTState(
+        state_root=state_root,
+        fixture={},
+        source_root=ROOT,
+        tables={"research_lab_maintenance_lease"},
+        rpcs={"research_lab_acquire_maintenance_lease"},
+        relation_columns={
+            "research_lab_maintenance_lease": frozenset(
+                {
+                    "lease_name",
+                    "holder_ref",
+                    "acquired_at",
+                    "expires_at",
+                    "updated_at",
+                }
+            )
+        },
+        durable_state_path=tmp_path / "durable.json",
+        durable_schema_sha="1" * 40,
+    )
 
 
 def test_json_filters_match_postgrest_text_and_json_semantics() -> None:
@@ -144,3 +170,110 @@ def test_durable_postgrest_state_rejects_schema_or_hash_drift(
             durable_state_path=durable_path,
             durable_schema_sha="1" * 40,
         )
+
+
+def test_maintenance_lease_matches_acquire_renew_and_contention_contract(
+    tmp_path: Path,
+) -> None:
+    state = _maintenance_lease_state(tmp_path)
+    now = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    first = state.acquire_maintenance_lease(
+        {
+            "p_lease_name": "scoring_worker_recovery",
+            "p_holder_ref": "worker-a",
+            "p_ttl_seconds": 180,
+        },
+        now=now,
+    )
+    contender = state.acquire_maintenance_lease(
+        {
+            "p_lease_name": "scoring_worker_recovery",
+            "p_holder_ref": "worker-b",
+            "p_ttl_seconds": 180,
+        },
+        now=now + timedelta(seconds=30),
+    )
+    renewal = state.acquire_maintenance_lease(
+        {
+            "p_lease_name": "scoring_worker_recovery",
+            "p_holder_ref": "worker-a",
+            "p_ttl_seconds": 180,
+        },
+        now=now + timedelta(seconds=60),
+    )
+
+    row = state.rows["research_lab_maintenance_lease"][0]
+    assert first["acquired"] is True
+    assert contender["acquired"] is False
+    assert contender["holder_ref"] == "worker-a"
+    assert renewal["acquired"] is True
+    assert row["holder_ref"] == "worker-a"
+    assert row["acquired_at"] == now.isoformat()
+    assert row["updated_at"] == (now + timedelta(seconds=60)).isoformat()
+
+
+def test_maintenance_lease_allows_expired_takeover_and_persists_it(
+    tmp_path: Path,
+) -> None:
+    state = _maintenance_lease_state(tmp_path)
+    now = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    body = {
+        "p_lease_name": "hosted_worker_maintenance",
+        "p_holder_ref": "worker-a",
+        "p_ttl_seconds": 30,
+    }
+    state.acquire_maintenance_lease(body, now=now)
+    takeover = state.acquire_maintenance_lease(
+        {**body, "p_holder_ref": "worker-b"},
+        now=now + timedelta(seconds=31),
+    )
+
+    restored_root = tmp_path / "restored"
+    restored_root.mkdir()
+    restored = LocalPostgRESTState(
+        state_root=restored_root,
+        fixture={},
+        source_root=ROOT,
+        tables={"research_lab_maintenance_lease"},
+        rpcs={"research_lab_acquire_maintenance_lease"},
+        relation_columns=state.relation_columns,
+        durable_state_path=tmp_path / "durable.json",
+        durable_schema_sha="1" * 40,
+    )
+
+    assert takeover["acquired"] is True
+    assert takeover["holder_ref"] == "worker-b"
+    assert restored.rows["research_lab_maintenance_lease"] == (
+        state.rows["research_lab_maintenance_lease"]
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {
+            "p_lease_name": "lease",
+            "p_holder_ref": "holder",
+            "p_ttl_seconds": 0,
+        },
+        {
+            "p_lease_name": "lease",
+            "p_holder_ref": "holder",
+            "p_ttl_seconds": 86401,
+        },
+        {
+            "p_lease_name": "lease",
+            "p_holder_ref": "holder",
+            "p_ttl_seconds": True,
+        },
+    ],
+)
+def test_maintenance_lease_rejects_malformed_requests(
+    tmp_path: Path,
+    body: dict[str, object],
+) -> None:
+    state = _maintenance_lease_state(tmp_path)
+
+    with pytest.raises(ValueError, match="maintenance lease"):
+        state.acquire_maintenance_lease(body)

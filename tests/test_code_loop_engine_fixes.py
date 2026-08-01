@@ -26,6 +26,7 @@ from gateway.research_lab.code_build import (
 )
 from gateway.research_lab.provider_capabilities import (
     EffectiveProviderCapabilities,
+    approved_source_router_suggestions,
 )
 from gateway.research_lab.git_tree_models import TreePolicy, derive_tree_id
 from gateway.research_lab.git_tree_repository import GitTreeCommit
@@ -181,6 +182,13 @@ def _source_add_context(tmp_path):
     )
     runtime_path.parent.mkdir(parents=True, exist_ok=True)
     runtime_path.write_text(
+        "SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION = (\n"
+        "    'leadpoet.intent-source-binding-manifest:v1'\n"
+        ")\n\n"
+        "class SourceAddCategoryContract:\n"
+        "    pass\n\n"
+        "class SourceAddRoutingRegistration:\n"
+        "    pass\n\n"
         "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
         ")\n",
         encoding="utf-8",
@@ -205,32 +213,44 @@ def _source_add_context(tmp_path):
     )
 
 
-def _source_add_runtime_diff(*, provider_id: str, manifest: str) -> str:
-    before = (
+def _source_add_runtime_diff(*, request: dict) -> str:
+    contract_prefix = (
+        "SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION = (\n"
+        "    'leadpoet.intent-source-binding-manifest:v1'\n"
+        ")\n\n"
+        "class SourceAddCategoryContract:\n"
+        "    pass\n\n"
+        "class SourceAddRoutingRegistration:\n"
+        "    pass\n\n"
+    )
+    before = contract_prefix + (
         "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
         ")\n"
     )
-    after = (
+    after = contract_prefix + (
         "SOURCE_ADD_ROUTING_REGISTRATIONS = (\n"
         "    SourceAddRoutingRegistration(\n"
-        f"        provider_id={provider_id!r},\n"
-        "        stage='candidate_acquisition',\n"
-        f"        revision={'source-add-' + manifest[:12]!r},\n"
-        f"        manifest_sha256={manifest!r},\n"
-        "        priority=80,\n"
-        "        capabilities=('candidate.provider_discovery',),\n"
-        "        idempotency='idempotent',\n"
-        "        cost_class='metered',\n"
-        "        unit_cost=0.005,\n"
-        "        max_calls=1,\n"
-        "        max_results=100,\n"
-        "        timeout_seconds=60.0,\n"
-        "        intent_categories=(),\n"
-        "        evidence_types=('provider_database',),\n"
-        "        best_for=('icp.structured_eligible',),\n"
-        "        avoid_when=(),\n"
-        "        best_for_description='Approved SOURCE_ADD company-discovery provider for structured ICP acquisition.',\n"
-        "        avoid_when_description='Avoid when the consumer binding is unavailable, unhealthy, outside its approved categories, or over budget.',\n"
+        f"        provider_id={request['provider_id']!r},\n"
+        f"        stage={request['stage']!r},\n"
+        f"        revision={request['revision']!r},\n"
+        f"        manifest_sha256={request['manifest_sha256']!r},\n"
+        f"        execution_mode={request['execution_mode']!r},\n"
+        f"        priority={request['priority']!r},\n"
+        f"        capabilities={tuple(request['capabilities'])!r},\n"
+        f"        idempotency={request['idempotency']!r},\n"
+        f"        cost_class={request['cost_class']!r},\n"
+        f"        unit_cost={request['unit_cost']!r},\n"
+        f"        max_calls={request['max_calls']!r},\n"
+        f"        max_results={request['max_results']!r},\n"
+        f"        timeout_seconds={request['timeout_seconds']!r},\n"
+        f"        intent_categories={tuple(request['intent_categories'])!r},\n"
+        f"        evidence_types={tuple(request['evidence_types'])!r},\n"
+        "        category_contracts=(),\n"
+        f"        binding_requirements={tuple(request['binding_requirements'])!r},\n"
+        f"        best_for={tuple(request['best_for'])!r},\n"
+        f"        avoid_when={tuple(request['avoid_when'])!r},\n"
+        f"        best_for_description={request['best_for_description']!r},\n"
+        f"        avoid_when_description={request['avoid_when_description']!r},\n"
         "    ),\n"
         ")\n"
     )
@@ -1304,6 +1324,10 @@ async def test_source_add_request_reaches_exact_registration_validation_and_buil
         private_snapshot_loaded=False,
         source_add_provider_count=1,
     )
+    expected_request = approved_source_router_suggestions(
+        "Use community accounts for company discovery.",
+        capabilities.providers,
+    )["requests"][0]
     plan_path_id = "register-community-accounts"
     plan = _loop_direction_plan_payload(
         required_lane="source_routing",
@@ -1330,10 +1354,7 @@ async def test_source_add_request_reaches_exact_registration_validation_and_buil
     draft = _draft(
         lane="source_routing",
         target_files=("sourcing_model/routing/runtime.py",),
-        unified_diff=_source_add_runtime_diff(
-            provider_id=provider_id,
-            manifest=manifest,
-        ),
+        unified_diff=_source_add_runtime_diff(request=expected_request),
         mechanism=plan["required_mechanism"],
         plan_path_id=plan_path_id,
         redacted_summary="register approved community accounts source",
@@ -1420,14 +1441,21 @@ async def test_source_add_request_reaches_exact_registration_validation_and_buil
         "approved_provider_capabilities"
     ]["routerverse_source_incorporation"]["requests"][0]
     assert request["provider_id"] == provider_id
-    assert request["manifest_sha256"] == manifest
+    assert request["provisioning_provenance_sha256"] == manifest
+    assert request["legacy_v7_manifest_sha256"] == manifest
+    assert request["manifest_sha256"] == expected_request["manifest_sha256"]
+    assert request["binding_manifest"] == expected_request["binding_manifest"]
     assert prompt_contexts["source_inspection"][
         "approved_provider_capabilities"
     ]["routerverse_source_incorporation"]["requests"] == [request]
     assert prompt_contexts["code_edit_draft"][
         "approved_provider_capabilities"
     ]["routerverse_source_incorporation"]["requests"] == [request]
-    assert result.status == "completed"
+    assert result.status == "completed", [
+        (event.event_type, event.event_doc)
+        for event in events
+        if "validation" in event.event_type or "draft" in event.event_type
+    ]
     assert builder.builds == [(plan_path_id, 0)]
     assert not any(
         event.event_type == "code_edit_validation_failed"

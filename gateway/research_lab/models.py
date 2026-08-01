@@ -463,6 +463,7 @@ class ResearchLabSourceAdapterProbeConfigureResponse(BaseModel):
 
 class ResearchLabSourceAdapterProvisionRequest(BaseModel):
     registry_provider_id: str = Field(min_length=2, max_length=80)
+    provider_alias: Optional[str] = Field(default=None, min_length=1, max_length=80)
     provision_status: str = Field(default="provisioned_autoresearch_eligible", max_length=80)
     base_url: Optional[str] = Field(default=None, max_length=500)
     auth_kind: str = Field(default="none", max_length=20)
@@ -471,6 +472,7 @@ class ResearchLabSourceAdapterProvisionRequest(BaseModel):
     api_credential: Optional[SecretStr] = Field(default=None, min_length=1, max_length=65536)
     api_credential_v2: Optional[AttestedCredentialCiphertextV2] = None
     cost_model: dict[str, Any] = Field(default_factory=dict)
+    routing_contract: dict[str, Any] = Field(default_factory=dict)
     probe_endpoints: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
     request_headers: dict[str, str] = Field(default_factory=dict, max_length=16)
     test_probes: list[ResearchLabSourceAddProbeSpec] = Field(default_factory=list, max_length=3)
@@ -488,8 +490,12 @@ class ResearchLabSourceAdapterProvisionRequest(BaseModel):
     @classmethod
     def valid_registry_provider_id(cls, value: str) -> str:
         normalized = value.strip()
-        if not normalized.replace("_", "").replace("-", "").isalnum():
-            raise ValueError("registry_provider_id must be a slug")
+        if value != normalized or not re.fullmatch(
+            r"[a-z][a-z0-9_-]{1,79}", normalized
+        ):
+            raise ValueError(
+                "registry_provider_id must be a canonical lowercase slug"
+            )
         return normalized
 
     @field_validator("operator_notes")
@@ -499,7 +505,18 @@ class ResearchLabSourceAdapterProvisionRequest(BaseModel):
             reject_secret_material(value)
         return value
 
-    @field_validator("cost_model", "probe_endpoints", "request_headers")
+    @field_validator("provider_alias")
+    @classmethod
+    def normalize_provider_alias(cls, value: Optional[str]) -> Optional[str]:
+        normalized = " ".join(str(value or "").split())
+        return normalized or None
+
+    @field_validator(
+        "cost_model",
+        "routing_contract",
+        "probe_endpoints",
+        "request_headers",
+    )
     @classmethod
     def provision_docs_have_no_secret_material(cls, value: Any) -> Any:
         reject_secret_material(value)

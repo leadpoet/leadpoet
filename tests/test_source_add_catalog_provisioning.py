@@ -494,7 +494,39 @@ async def test_owner_provision_requires_exact_functional_pass_and_finalizes_atom
         "source_add_submission:" + "a" * 16,
         ResearchLabSourceAdapterProvisionRequest(
             registry_provider_id="test_source",
+            provider_alias="Test source discovery",
             provision_status=PROVISION_STATUS_APPROVED_PENDING,
+            cost_model={"est_cost_microusd_per_call": 250_000},
+            routing_contract={
+                "stage": "candidate_acquisition",
+                "execution_mode": "observe",
+                "priority": 91,
+                "capabilities": [
+                    "candidate.provider_discovery",
+                    "intent.monitoring",
+                ],
+                "idempotency": "resume_safe",
+                "cost_class": "paid",
+                "unit_cost": 0.25,
+                "max_calls": 2,
+                "max_results": 25,
+                "timeout_seconds": 12.3456,
+                "intent_categories": ["hiring"],
+                "evidence_types": ["provider_database", "job_posting"],
+                "category_contracts": [
+                    {
+                        "category": "HIRING",
+                        "capabilities": ["intent.monitoring"],
+                        "evidence_types": ["job_posting"],
+                        "requirements": ["receipt_only"],
+                    }
+                ],
+                "binding_requirements": ["receipt_only"],
+                "best_for": ["icp.structured_eligible", "intent.hiring"],
+                "avoid_when": ["provider.unhealthy"],
+                "best_for_description": "Use for reviewed hiring discovery.",
+                "avoid_when_description": "Avoid when provider health fails.",
+            },
             probe_endpoints=[
                 {
                     "endpoint_id": "test_source.search",
@@ -511,7 +543,34 @@ async def test_owner_provision_requires_exact_functional_pass_and_finalizes_atom
     assert response.adapter_id == "adapter:test-source"
     assert response.provision_status == PROVISION_STATUS_APPROVED_PENDING
     assert finalized["p_smoke_attempt"] == {}
-    assert finalized["p_provision_row"]["provision_doc"]["provider_registry_entry"]["id"] == "test_source"
+    registry_entry = finalized["p_provision_row"]["provision_doc"][
+        "provider_registry_entry"
+    ]
+    assert registry_entry["id"] == "test_source"
+    planner = registry_entry["planner_summary"]
+    assert planner["provider_alias"] == "Test source discovery"
+    assert planner["stage"] == "candidate_acquisition"
+    assert planner["execution_mode"] == "observe"
+    assert planner["idempotency"] == "resume_safe"
+    assert planner["cost_class"] == "paid"
+    assert planner["unit_cost"] == 0.25
+    assert planner["max_calls"] == 2
+    assert planner["timeout_seconds"] == 12.346
+    assert planner["intent_categories"] == ["HIRING"]
+    assert planner["category_contracts"] == [
+        {
+            "category": "HIRING",
+            "capabilities": ["intent.monitoring"],
+            "evidence_types": ["job_posting"],
+            "requirements": ["receipt_only"],
+        }
+    ]
+    assert planner["binding_requirements"] == ["receipt_only"]
+    assert planner["best_for_features"] == [
+        "icp.structured_eligible",
+        "intent.hiring",
+    ]
+    assert planner["avoid_when_features"] == ["provider.unhealthy"]
     assert finalized["p_provision_row"]["credential_envelope"] == {}
     assert "api_credential" not in str(finalized)
 
@@ -652,6 +711,72 @@ def test_owner_process_environment_credentials_are_retired():
             registry_provider_id="test_source_auth",
             provision_status=PROVISION_STATUS_ELIGIBLE,
             credential_env_refs=["SYNTHETIC_SOURCE_CREDENTIAL"],
+        )
+
+
+def test_source_add_v8_routing_contract_round_trips_as_json():
+    request = ResearchLabSourceAdapterProvisionRequest(
+        registry_provider_id="test_source",
+        provider_alias="Test source",
+        routing_contract={
+            "stage": "intent_evidence",
+            "execution_mode": "invoke",
+            "priority": 40,
+            "capabilities": ["intent.provider_evidence"],
+            "idempotency": "idempotent",
+            "cost_class": "free",
+            "unit_cost": 0.0,
+            "max_calls": 1,
+            "max_results": 10,
+            "timeout_seconds": 15.0,
+            "intent_categories": ["funding"],
+            "evidence_types": ["funding_event"],
+            "category_contracts": [
+                {
+                    "category": "FUNDING",
+                    "capabilities": ["intent.provider_evidence"],
+                    "evidence_types": ["funding_event"],
+                    "requirements": [],
+                }
+            ],
+            "binding_requirements": [],
+            "best_for": ["intent.funding"],
+            "avoid_when": [],
+        },
+    )
+    dumped = request.model_dump(mode="json")
+    assert ResearchLabSourceAdapterProvisionRequest.model_validate(
+        dumped
+    ).model_dump(mode="json") == dumped
+
+
+@pytest.mark.parametrize(
+    "provider_id",
+    ("Test_Source", "1test_source", " test_source", "test_source "),
+)
+def test_source_add_provision_rejects_noncanonical_v8_provider_id(provider_id):
+    with pytest.raises(
+        ValidationError,
+        match="canonical lowercase slug",
+    ):
+        ResearchLabSourceAdapterProvisionRequest(
+            registry_provider_id=provider_id,
+        )
+
+
+def test_source_add_provision_rejects_invalid_explicit_v8_contract():
+    request = ResearchLabSourceAdapterProvisionRequest(
+        registry_provider_id="test_source",
+        routing_contract={
+            "stage": "candidate_acquisition",
+            "cost_class": "free",
+            "unit_cost": 1.0,
+        },
+    )
+    with pytest.raises(ValueError, match="cost_class and unit_cost differ"):
+        api.normalize_source_add_planner_contract(
+            request.registry_provider_id,
+            request.routing_contract,
         )
 
 

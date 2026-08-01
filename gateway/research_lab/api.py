@@ -156,7 +156,10 @@ from gateway.research_lab.provider_evidence_proxy import (
     reserved_builtin_provider_ids_sync,
     validate_provider_registry_entries,
 )
-from gateway.research_lab.provider_capabilities import validate_capability_provider_doc
+from gateway.research_lab.provider_capabilities import (
+    normalize_source_add_planner_contract,
+    validate_capability_provider_doc,
+)
 from research_lab.probe_catalog import ProviderProbeEndpoint, validate_probe_catalog
 from research_lab.improvement_engine.config import ImprovementEngineConfig
 from research_lab.source_add_execution import intake_source_add_submission
@@ -1146,6 +1149,40 @@ async def provision_research_lab_source_adapter(
             if credential_envelope
             else ()
         )
+        planner_summary: dict[str, Any] = {
+            "provider_alias": payload.provider_alias
+            or payload.registry_provider_id,
+            "endpoint_families": [
+                {
+                    "endpoint_id": endpoint.endpoint_id,
+                    "description": endpoint.description[:200],
+                }
+                for endpoint in probe_objects
+            ],
+            "model_policy": "",
+            "probe_metadata": [
+                endpoint.endpoint_id for endpoint in probe_objects
+            ],
+        }
+        if payload.routing_contract:
+            try:
+                planner_summary.update(
+                    normalize_source_add_planner_contract(
+                        payload.registry_provider_id,
+                        payload.routing_contract,
+                        estimated_cost_microusd_per_call=int(
+                            payload.cost_model.get(
+                                "est_cost_microusd_per_call", 0
+                            )
+                            or 0
+                        ),
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="invalid SOURCE_ADD v8 routing contract",
+                ) from exc
         registry_entry = ProviderRegistryEntry(
             id=payload.registry_provider_id,
             base_url=str(probe_doc.get("base_url") or ""),
@@ -1164,18 +1201,7 @@ async def provision_research_lab_source_adapter(
                 "unlisted_methods": [],
                 "model_policy": {"kind": "none"},
             },
-            planner_summary={
-                "provider_alias": payload.registry_provider_id,
-                "endpoint_families": [
-                    {
-                        "endpoint_id": endpoint.endpoint_id,
-                        "description": endpoint.description[:200],
-                    }
-                    for endpoint in probe_objects
-                ],
-                "model_policy": "",
-                "probe_metadata": [endpoint.endpoint_id for endpoint in probe_objects],
-            },
+            planner_summary=planner_summary,
             probe_endpoints=tuple(probe_endpoints),
             origin="source_add",
             reward_eligible=True,

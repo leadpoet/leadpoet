@@ -688,6 +688,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     source_add_provision.add_argument("--submission-id", required=True)
     source_add_provision.add_argument("--registry-provider-id", required=True)
+    source_add_provision.add_argument("--provider-alias")
     source_add_provision.add_argument(
         "--status",
         dest="provision_status",
@@ -701,6 +702,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Provider probe endpoint JSON (repeatable)",
     )
     source_add_provision.add_argument("--cost-model-json", default="{}")
+    source_add_provision.add_argument(
+        "--routing-contract-json",
+        default="{}",
+        help="Reviewed Sourcing_model v8 routing contract JSON",
+    )
     source_add_provision.add_argument("--operator-notes")
     source_add_provision.add_argument("--gateway-url", default="http://127.0.0.1:8000")
     source_add_provision.add_argument("--apply", action="store_true")
@@ -1554,9 +1560,14 @@ async def _run_source_add_admin(args: argparse.Namespace) -> dict[str, Any]:
         ]
         payload = ResearchLabSourceAdapterProvisionRequest.model_validate({
             "registry_provider_id": args.registry_provider_id,
+            "provider_alias": args.provider_alias,
             "provision_status": args.provision_status,
             "cost_model": _source_add_json_object(
                 args.cost_model_json, field="--cost-model-json"
+            ),
+            "routing_contract": _source_add_json_object(
+                args.routing_contract_json,
+                field="--routing-contract-json",
             ),
             "probe_endpoints": endpoints,
             "operator_notes": args.operator_notes,

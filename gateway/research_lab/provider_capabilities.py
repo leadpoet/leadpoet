@@ -11,6 +11,7 @@ import ast
 import base64
 import binascii
 from dataclasses import dataclass
+import hashlib
 import json
 import logging
 import math
@@ -66,11 +67,21 @@ _ENV_REF_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _SOURCE_ADD_MANIFEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _ROUTING_FEATURE_RE = re.compile(r"^[a-z][a-z0-9_.:-]{1,95}$")
 _SOURCE_ADD_RUNTIME_PATH = "sourcing_model/routing/runtime.py"
+_SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION = (
+    "leadpoet.intent-source-binding-manifest:v1"
+)
+_SOURCE_ADD_V8_REQUEST_SCHEMA_VERSION = (
+    "leadpoet.routerverse_source_incorporation.v3"
+)
+_SOURCE_ADD_V7_REQUEST_SCHEMA_VERSION = (
+    "leadpoet.routerverse_source_incorporation.v2"
+)
 _SOURCE_ADD_REGISTRATION_FIELDS = (
     "provider_id",
     "stage",
     "revision",
     "manifest_sha256",
+    "execution_mode",
     "priority",
     "capabilities",
     "idempotency",
@@ -81,14 +92,26 @@ _SOURCE_ADD_REGISTRATION_FIELDS = (
     "timeout_seconds",
     "intent_categories",
     "evidence_types",
+    "category_contracts",
+    "binding_requirements",
     "best_for",
     "avoid_when",
     "best_for_description",
     "avoid_when_description",
 )
-_SOURCE_ADD_LEGACY_REGISTRATION_FIELDS = tuple(
+_SOURCE_ADD_V7_REGISTRATION_FIELDS = tuple(
     field
     for field in _SOURCE_ADD_REGISTRATION_FIELDS
+    if field
+    not in {
+        "execution_mode",
+        "category_contracts",
+        "binding_requirements",
+    }
+)
+_SOURCE_ADD_V7_LEGACY_REGISTRATION_FIELDS = tuple(
+    field
+    for field in _SOURCE_ADD_V7_REGISTRATION_FIELDS
     if field
     not in {
         "best_for",
@@ -97,15 +120,67 @@ _SOURCE_ADD_LEGACY_REGISTRATION_FIELDS = tuple(
         "avoid_when_description",
     }
 )
-_SOURCE_ADD_ORIGINAL_REGISTRATION_FIELDS = tuple(
+_SOURCE_ADD_V7_ORIGINAL_REGISTRATION_FIELDS = tuple(
     field
-    for field in _SOURCE_ADD_LEGACY_REGISTRATION_FIELDS
+    for field in _SOURCE_ADD_V7_LEGACY_REGISTRATION_FIELDS
     if field != "intent_categories"
 )
-_SOURCE_ADD_GUIDANCE_WITHOUT_CATEGORIES_FIELDS = tuple(
+_SOURCE_ADD_V7_GUIDANCE_WITHOUT_CATEGORIES_FIELDS = tuple(
     field
-    for field in _SOURCE_ADD_REGISTRATION_FIELDS
+    for field in _SOURCE_ADD_V7_REGISTRATION_FIELDS
     if field != "intent_categories"
+)
+_SOURCE_ADD_V8_REQUIRED_REGISTRATION_FIELDS = frozenset(
+    {"provider_id", "stage", "priority", "capabilities"}
+)
+_SOURCE_ADD_LITERAL_NAMES = {
+    "STAGE_CANDIDATE_ACQUISITION": "candidate_acquisition",
+    "STAGE_INTENT_EVIDENCE": "intent_evidence",
+    "EXECUTION_INVOKE": "invoke",
+    "EXECUTION_OBSERVE": "observe",
+    "EXECUTION_VIRTUAL": "virtual",
+    "COST_FREE": "free",
+    "COST_METERED": "metered",
+    "COST_PAID": "paid",
+    "IDEMPOTENT": "idempotent",
+    "RESUME_SAFE": "resume_safe",
+    "NON_IDEMPOTENT": "non_idempotent",
+}
+_SOURCE_ADD_EXECUTION_MODES = frozenset({"invoke", "observe", "virtual"})
+_SOURCE_ADD_IDEMPOTENCY_MODES = frozenset(
+    {"idempotent", "resume_safe", "non_idempotent"}
+)
+_SOURCE_ADD_COST_CLASSES = frozenset({"free", "metered", "paid"})
+_SOURCE_ADD_MANIFEST_FORBIDDEN_KEYS = frozenset(
+    {
+        "api_key",
+        "authorization",
+        "credential",
+        "endpoint",
+        "password",
+        "secret",
+        "token",
+    }
+)
+_SOURCE_ADD_V8_PLANNER_FIELDS = (
+    "stage",
+    "execution_mode",
+    "priority",
+    "capabilities",
+    "idempotency",
+    "cost_class",
+    "unit_cost",
+    "max_calls",
+    "max_results",
+    "timeout_seconds",
+    "intent_categories",
+    "evidence_types",
+    "category_contracts",
+    "binding_requirements",
+    "best_for_features",
+    "avoid_when_features",
+    "best_for",
+    "avoid_when",
 )
 _COMPANY_DISCOVERY_PATTERNS = (
     re.compile(r"\b(?:company|candidate|account)\s+(?:discovery|sourcing|acquisition)\b"),
@@ -115,6 +190,624 @@ _INTENT_DISCOVERY_PATTERNS = (
     re.compile(r"\b(?:intent|signal|evidence)\s+(?:discovery|sourcing|acquisition)\b"),
     re.compile(r"\b(?:discover|source|find)\s+(?:intent|signals|evidence)\b"),
 )
+
+
+def _source_add_model_string_tuple(
+    values: Any,
+    *,
+    field_name: str,
+    maximum: int,
+    allow_empty: bool,
+) -> tuple[str, ...]:
+    """Mirror Sourcing_model v8 ``routing.contracts._string_tuple``.
+
+    This compatibility adapter is intentionally mechanical.  Semantic
+    ownership remains in ``leadpoet/Sourcing_model``; parity tests execute the
+    upstream v8 fixtures and this helper must be removed if the model exports a
+    stable public registration parser.
+    """
+
+    if not isinstance(values, (list, tuple)):
+        raise ValueError(f"{field_name} must be a literal sequence")
+    output: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not _ROUTING_FEATURE_RE.fullmatch(text):
+            raise ValueError(f"{field_name} contains an invalid value")
+        if text not in output:
+            output.append(text)
+    if len(output) > maximum or (not allow_empty and not output):
+        raise ValueError(f"{field_name} is out of bounds")
+    return tuple(output)
+
+
+def _source_add_manifest_string_tuple(
+    values: Any,
+    *,
+    field_name: str,
+    maximum: int,
+) -> tuple[str, ...]:
+    """Mirror Sourcing_model v8 ``runtime._source_add_string_tuple``."""
+
+    if not isinstance(values, (list, tuple)):
+        raise ValueError(f"{field_name} must be a literal sequence")
+    normalized = tuple(
+        dict.fromkeys(
+            str(value or "").strip()
+            for value in values
+            if str(value or "").strip()
+        )
+    )
+    if (
+        not normalized
+        or len(normalized) > maximum
+        or any(len(value) > 160 for value in normalized)
+    ):
+        raise ValueError(f"{field_name} is out of bounds")
+    return normalized
+
+
+def _source_add_bounded_int(
+    value: Any,
+    *,
+    field_name: str,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} must be an integer")
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{field_name} is out of bounds")
+    return value
+
+
+def _source_add_bounded_float(
+    value: Any,
+    *,
+    field_name: str,
+    minimum: float,
+    maximum: float,
+    precision: int | None,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be numeric")
+    number = float(value)
+    if not math.isfinite(number) or not minimum <= number <= maximum:
+        raise ValueError(f"{field_name} is out of bounds")
+    return round(number, precision) if precision is not None else number
+
+
+def _source_add_description(
+    value: Any,
+    *,
+    field_name: str,
+    default: str,
+) -> str:
+    text = " ".join(str(value or "").split()) or default
+    if len(text) > 500:
+        raise ValueError(f"{field_name} exceeds 500 characters")
+    return text
+
+
+def _source_add_binding_manifest(
+    normalized: Mapping[str, Any],
+) -> dict[str, Any]:
+    stage = str(normalized["stage"])
+    provider_id = str(normalized["provider_id"])
+    return {
+        "schema_version": _SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION,
+        "tool_id": (
+            "candidate" if stage == "candidate_acquisition" else "intent"
+        )
+        + ".source_add."
+        + provider_id,
+        "provider_id": provider_id,
+        "stage": stage,
+        "execution_mode": normalized["execution_mode"],
+        "cost_class": normalized["cost_class"],
+        "unit_cost": normalized["unit_cost"],
+        "max_calls": normalized["max_calls"],
+        "max_results": normalized["max_results"],
+        "timeout_seconds": normalized["timeout_seconds"],
+        "capabilities": list(normalized["capabilities"]),
+        "intent_categories": list(normalized["intent_categories"]),
+        "evidence_types": list(normalized["evidence_types"]),
+        "category_contracts": [
+            {
+                "category": contract["category"],
+                "capabilities": list(contract["capabilities"]),
+                "evidence_types": list(contract["evidence_types"]),
+                "requirements": list(contract["requirements"]),
+            }
+            for contract in sorted(
+                normalized["category_contracts"],
+                key=lambda item: str(item["category"]),
+            )
+        ],
+        "binding_requirements": list(normalized["binding_requirements"]),
+    }
+
+
+def _source_add_binding_manifest_digest(
+    normalized: Mapping[str, Any],
+) -> str:
+    rendered = json.dumps(
+        _source_add_binding_manifest(normalized),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _normalize_source_add_v8_registration(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Losslessly mirror Sourcing_model v8 registration normalization.
+
+    Source reference:
+    ``leadpoet/Sourcing_model@adda083273946be4c6b49f3129f56212520ae0e0``
+    ``sourcing_model/routing/{contracts,runtime}.py``.  This code validates a
+    proposed model edit without importing or executing candidate code.
+    """
+
+    normalized = dict(value)
+    provider_id = str(normalized.get("provider_id") or "").strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{1,79}", provider_id):
+        raise ValueError("provider_id is invalid")
+    stage = normalized.get("stage")
+    if stage not in {"candidate_acquisition", "intent_evidence"}:
+        raise ValueError("stage is invalid")
+    normalized["provider_id"] = provider_id
+    normalized["stage"] = stage
+    normalized["priority"] = _source_add_bounded_int(
+        normalized.get("priority"),
+        field_name="priority",
+        minimum=0,
+        maximum=10_000,
+    )
+    normalized["capabilities"] = _source_add_model_string_tuple(
+        normalized.get("capabilities", ()),
+        field_name="capabilities",
+        maximum=32,
+        allow_empty=False,
+    )
+    execution_mode = normalized.get("execution_mode", "invoke")
+    if execution_mode not in _SOURCE_ADD_EXECUTION_MODES:
+        raise ValueError("execution_mode is invalid")
+    normalized["execution_mode"] = execution_mode
+    idempotency = normalized.get("idempotency", "idempotent")
+    if idempotency not in _SOURCE_ADD_IDEMPOTENCY_MODES:
+        raise ValueError("idempotency is invalid")
+    normalized["idempotency"] = idempotency
+    cost_class = normalized.get("cost_class", "metered")
+    if cost_class not in _SOURCE_ADD_COST_CLASSES:
+        raise ValueError("cost_class is invalid")
+    normalized["cost_class"] = cost_class
+    unit_cost = _source_add_bounded_float(
+        normalized.get("unit_cost", 0.01),
+        field_name="unit_cost",
+        minimum=0.0,
+        maximum=10_000.0,
+        precision=None,
+    )
+    if (
+        cost_class == "free" and unit_cost != 0.0
+    ) or (
+        cost_class != "free" and unit_cost <= 0.0
+    ):
+        raise ValueError("cost_class and unit_cost differ")
+    normalized["unit_cost"] = round(unit_cost, 6)
+    # Sourcing_model validates once before and once after normalizing the
+    # ToolDefinition, so a positive sub-micro-unit metered cost also fails.
+    if cost_class != "free" and normalized["unit_cost"] <= 0.0:
+        raise ValueError("cost_class and unit_cost differ after normalization")
+    normalized["max_calls"] = _source_add_bounded_int(
+        normalized.get("max_calls", 1),
+        field_name="max_calls",
+        minimum=1,
+        maximum=10_000,
+    )
+    normalized["max_results"] = _source_add_bounded_int(
+        normalized.get("max_results", 1),
+        field_name="max_results",
+        minimum=1,
+        maximum=100_000,
+    )
+    normalized["timeout_seconds"] = _source_add_bounded_float(
+        normalized.get("timeout_seconds", 30.0),
+        field_name="timeout_seconds",
+        minimum=0.1,
+        maximum=3_600.0,
+        precision=3,
+    )
+    raw_categories = normalized.get("intent_categories", ())
+    if not isinstance(raw_categories, (list, tuple)):
+        raise ValueError("intent_categories must be a literal sequence")
+    categories = tuple(
+        dict.fromkeys(
+            str(item or "").strip().upper()
+            for item in raw_categories
+            if str(item or "").strip()
+        )
+    )
+    if len(categories) > 64 or any(len(item) > 80 for item in categories):
+        raise ValueError("intent_categories are out of bounds")
+    normalized["intent_categories"] = categories
+    normalized["evidence_types"] = _source_add_model_string_tuple(
+        normalized.get("evidence_types", ()),
+        field_name="evidence_types",
+        maximum=24,
+        allow_empty=True,
+    )
+    default_best_for = (
+        ("icp.structured_eligible",)
+        if stage == "candidate_acquisition"
+        else ("intent.general",)
+    )
+    raw_best_for = normalized.get("best_for") or default_best_for
+    normalized["best_for"] = _source_add_model_string_tuple(
+        raw_best_for,
+        field_name="best_for",
+        maximum=32,
+        allow_empty=False,
+    )
+    normalized["avoid_when"] = _source_add_model_string_tuple(
+        normalized.get("avoid_when", ()),
+        field_name="avoid_when",
+        maximum=32,
+        allow_empty=True,
+    )
+    source_add_best_description = (
+        "Approved SOURCE_ADD company-discovery provider for structured ICP "
+        "acquisition."
+        if stage == "candidate_acquisition"
+        else "Approved SOURCE_ADD provider for company-scoped intent-evidence "
+        "discovery."
+    )
+    raw_best_description = normalized.get("best_for_description")
+    if not raw_best_description:
+        raw_best_description = source_add_best_description
+    normalized["best_for_description"] = _source_add_description(
+        raw_best_description,
+        field_name="best_for_description",
+        default=(
+            "Use when the route context matches: "
+            + ", ".join(normalized["best_for"])
+        ),
+    )
+    raw_avoid_description = normalized.get("avoid_when_description")
+    if not raw_avoid_description:
+        raw_avoid_description = (
+            "Avoid when the consumer binding is unavailable, unhealthy, "
+            "outside its approved categories, or over budget."
+        )
+    normalized["avoid_when_description"] = _source_add_description(
+        raw_avoid_description,
+        field_name="avoid_when_description",
+        default=(
+            "No additional structured exclusions; availability, category, "
+            "budget, and policy gates remain authoritative."
+        ),
+    )
+
+    raw_contracts = normalized.get("category_contracts", ())
+    if not isinstance(raw_contracts, (list, tuple)):
+        raise ValueError("category_contracts must be a literal sequence")
+    category_contracts: list[dict[str, Any]] = []
+    for raw_contract in raw_contracts:
+        if not isinstance(raw_contract, Mapping) or set(raw_contract) != {
+            "category",
+            "capabilities",
+            "evidence_types",
+            "requirements",
+        }:
+            raise ValueError("category contract fields differ from the contract")
+        category = str(raw_contract.get("category") or "").strip().upper()
+        if not category or len(category) > 80:
+            raise ValueError("category contract is invalid")
+        category_contracts.append(
+            {
+                "category": category,
+                "capabilities": _source_add_manifest_string_tuple(
+                    raw_contract.get("capabilities"),
+                    field_name="category capabilities",
+                    maximum=24,
+                ),
+                "evidence_types": _source_add_manifest_string_tuple(
+                    raw_contract.get("evidence_types"),
+                    field_name="category evidence_types",
+                    maximum=24,
+                ),
+                "requirements": _source_add_manifest_string_tuple(
+                    raw_contract.get("requirements"),
+                    field_name="category requirements",
+                    maximum=24,
+                ),
+            }
+        )
+    contract_categories = tuple(item["category"] for item in category_contracts)
+    if len(contract_categories) != len(set(contract_categories)):
+        raise ValueError("duplicate category contract")
+    if category_contracts and set(contract_categories) != set(categories):
+        raise ValueError("category contracts must match intent_categories")
+    if any(
+        not set(item["capabilities"]) <= set(normalized["capabilities"])
+        or not set(item["evidence_types"]) <= set(normalized["evidence_types"])
+        for item in category_contracts
+    ):
+        raise ValueError("category contract exceeds the tool definition")
+    normalized["category_contracts"] = tuple(category_contracts)
+
+    raw_requirements = normalized.get("binding_requirements", ())
+    normalized["binding_requirements"] = (
+        _source_add_manifest_string_tuple(
+            raw_requirements,
+            field_name="binding requirements",
+            maximum=32,
+        )
+        if raw_requirements
+        else ()
+    )
+    computed_manifest = _source_add_binding_manifest_digest(normalized)
+    configured_manifest = str(normalized.get("manifest_sha256") or "").strip()
+    if configured_manifest and configured_manifest != computed_manifest:
+        raise ValueError("manifest_sha256 does not match binding manifest")
+    normalized["manifest_sha256"] = computed_manifest
+    expected_revision = f"source-add-{computed_manifest[:12]}"
+    configured_revision = str(normalized.get("revision") or "").strip()
+    if configured_revision and configured_revision != expected_revision:
+        raise ValueError("revision does not match binding manifest")
+    normalized["revision"] = expected_revision
+    return {
+        field: normalized[field]
+        for field in _SOURCE_ADD_REGISTRATION_FIELDS
+    }
+
+
+def normalize_source_add_planner_contract(
+    provider_id: str,
+    contract: Mapping[str, Any],
+    *,
+    estimated_cost_microusd_per_call: int = 0,
+) -> dict[str, Any]:
+    """Validate a provisioning-time planner contract against v8 exactly.
+
+    The admin API persists this JSON-safe projection in ``planner_summary``;
+    the signed Sourcing_model artifact remains the semantic authority.  Empty
+    contracts retain the pre-v8 default behavior, while any explicit contract
+    must name one stage and may contain only v8 registration fields whose
+    manifest and revision are derived later from the canonical registration.
+    """
+
+    if not isinstance(contract, Mapping) or not contract:
+        raise ValueError("routing_contract must be a non-empty object")
+    allowed = set(_SOURCE_ADD_REGISTRATION_FIELDS) - {
+        "provider_id",
+        "revision",
+        "manifest_sha256",
+    }
+    unknown = set(contract) - allowed
+    if unknown or "stage" not in contract:
+        raise ValueError("routing_contract fields differ from the v8 contract")
+    stage = contract.get("stage")
+    candidate_stage = stage == "candidate_acquisition"
+    try:
+        microusd = max(0, int(estimated_cost_microusd_per_call))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("estimated provider cost is invalid") from exc
+    values = {
+        "provider_id": provider_id,
+        "stage": stage,
+        "execution_mode": contract.get("execution_mode", "invoke"),
+        "priority": contract.get(
+            "priority", 80 if candidate_stage else 35
+        ),
+        "capabilities": contract.get(
+            "capabilities",
+            (
+                "candidate.provider_discovery"
+                if candidate_stage
+                else "intent.provider_evidence",
+            ),
+        ),
+        "idempotency": contract.get("idempotency", "idempotent"),
+        "cost_class": contract.get(
+            "cost_class", "metered" if microusd else "free"
+        ),
+        "unit_cost": contract.get(
+            "unit_cost",
+            (
+                round(max(microusd / 1_000_000, 0.000001), 6)
+                if microusd
+                else 0.0
+            ),
+        ),
+        "max_calls": contract.get("max_calls", 1),
+        "max_results": contract.get(
+            "max_results", 100 if candidate_stage else 1
+        ),
+        "timeout_seconds": contract.get(
+            "timeout_seconds", 60.0 if candidate_stage else 30.0
+        ),
+        "intent_categories": contract.get("intent_categories", ()),
+        "evidence_types": contract.get(
+            "evidence_types",
+            ("provider_database" if candidate_stage else "external",),
+        ),
+        "category_contracts": contract.get("category_contracts", ()),
+        "binding_requirements": contract.get("binding_requirements", ()),
+        "best_for": contract.get(
+            "best_for",
+            (
+                ("icp.structured_eligible",)
+                if candidate_stage
+                else ("intent.general",)
+            ),
+        ),
+        "avoid_when": contract.get("avoid_when", ()),
+        "best_for_description": contract.get("best_for_description"),
+        "avoid_when_description": contract.get("avoid_when_description"),
+    }
+    normalized = _normalize_source_add_v8_registration(values)
+    return {
+        "stage": normalized["stage"],
+        "execution_mode": normalized["execution_mode"],
+        "priority": normalized["priority"],
+        "capabilities": list(normalized["capabilities"]),
+        "idempotency": normalized["idempotency"],
+        "cost_class": normalized["cost_class"],
+        "unit_cost": normalized["unit_cost"],
+        "max_calls": normalized["max_calls"],
+        "max_results": normalized["max_results"],
+        "timeout_seconds": normalized["timeout_seconds"],
+        "intent_categories": list(normalized["intent_categories"]),
+        "evidence_types": list(normalized["evidence_types"]),
+        "category_contracts": [
+            {
+                key: list(value) if isinstance(value, tuple) else value
+                for key, value in item.items()
+            }
+            for item in normalized["category_contracts"]
+        ],
+        "binding_requirements": list(normalized["binding_requirements"]),
+        "best_for_features": list(normalized["best_for"]),
+        "avoid_when_features": list(normalized["avoid_when"]),
+        "best_for": normalized["best_for_description"],
+        "avoid_when": normalized["avoid_when_description"],
+    }
+
+
+def _normalize_source_add_v7_registration(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Preserve the current v7 rollback validator without v8 reinterpretation."""
+
+    normalized = dict(value)
+    provider_id = normalized.get("provider_id")
+    stage = normalized.get("stage")
+    revision = normalized.get("revision")
+    manifest = normalized.get("manifest_sha256")
+    if not isinstance(provider_id, str) or not re.fullmatch(
+        r"[a-z][a-z0-9_-]{1,79}", provider_id
+    ):
+        raise ValueError("provider_id is invalid")
+    if stage not in {"candidate_acquisition", "intent_evidence"}:
+        raise ValueError("stage is invalid")
+    if (
+        not isinstance(manifest, str)
+        or not _SOURCE_ADD_MANIFEST_RE.fullmatch(manifest)
+        or revision != f"source-add-{manifest[:12]}"
+    ):
+        raise ValueError("registration revision is not manifest-bound")
+    for name in ("capabilities", "evidence_types", "best_for"):
+        field_value = normalized.get(name)
+        if (
+            not isinstance(field_value, (list, tuple))
+            or not field_value
+            or any(not isinstance(item, str) or not item for item in field_value)
+        ):
+            raise ValueError(f"{name} must be a literal sequence")
+        normalized[name] = tuple(field_value)
+    intent_categories = normalized.get("intent_categories")
+    if not isinstance(intent_categories, (list, tuple)) or any(
+        not isinstance(item, str)
+        or not item.strip()
+        or len(item.strip()) > 80
+        for item in intent_categories
+    ):
+        raise ValueError("intent_categories must be a literal sequence")
+    normalized["intent_categories"] = tuple(
+        dict.fromkeys(item.strip().upper() for item in intent_categories)
+    )
+    avoid_when = normalized.get("avoid_when")
+    if not isinstance(avoid_when, (list, tuple)) or any(
+        not isinstance(item, str) or not _ROUTING_FEATURE_RE.fullmatch(item)
+        for item in avoid_when
+    ):
+        raise ValueError("avoid_when must be a literal feature sequence")
+    normalized["avoid_when"] = tuple(avoid_when)
+    if any(not _ROUTING_FEATURE_RE.fullmatch(item) for item in normalized["best_for"]):
+        raise ValueError("best_for contains an invalid routing feature")
+    for name in ("best_for_description", "avoid_when_description"):
+        field_value = normalized.get(name)
+        if (
+            not isinstance(field_value, str)
+            or not field_value.strip()
+            or len(field_value) > 500
+        ):
+            raise ValueError(f"{name} must contain 1-500 characters")
+        normalized[name] = " ".join(field_value.split())
+    for name in ("priority", "max_calls", "max_results"):
+        field_value = normalized.get(name)
+        if isinstance(field_value, bool) or not isinstance(field_value, int):
+            raise ValueError(f"{name} must be an integer")
+    for name in ("unit_cost", "timeout_seconds"):
+        field_value = normalized.get(name)
+        if isinstance(field_value, bool) or not isinstance(field_value, (int, float)):
+            raise ValueError(f"{name} must be numeric")
+        field_value = float(field_value)
+        if not math.isfinite(field_value) or field_value < 0:
+            raise ValueError(f"{name} must be finite and non-negative")
+        normalized[name] = field_value
+    expected_by_stage = {
+        "candidate_acquisition": {
+            "priority": 80,
+            "capabilities": ("candidate.provider_discovery",),
+            "max_results": 100,
+            "timeout_seconds": 60.0,
+            "evidence_types": ("provider_database",),
+        },
+        "intent_evidence": {
+            "priority": 35,
+            "capabilities": ("intent.provider_evidence",),
+            "max_results": 1,
+            "timeout_seconds": 30.0,
+            "evidence_types": ("external",),
+        },
+    }
+    expected = expected_by_stage[str(stage)]
+    if any(
+        normalized.get(name) != expected_value
+        for name, expected_value in expected.items()
+    ):
+        raise ValueError("registration stage contract is invalid")
+    if stage == "candidate_acquisition" and normalized["intent_categories"]:
+        raise ValueError("candidate registrations must not declare intent categories")
+    if (
+        normalized.get("idempotency") != "idempotent"
+        or normalized.get("cost_class") not in {"free", "metered"}
+        or normalized.get("max_calls") != 1
+        or (
+            normalized.get("cost_class") == "free"
+            and normalized.get("unit_cost") != 0.0
+        )
+        or (
+            normalized.get("cost_class") == "metered"
+            and normalized.get("unit_cost") <= 0.0
+        )
+    ):
+        raise ValueError("registration execution contract is invalid")
+    return {
+        field: normalized[field]
+        for field in _SOURCE_ADD_REGISTRATION_FIELDS
+        if field
+        not in {"execution_mode", "category_contracts", "binding_requirements"}
+    }
+
+
+def _source_add_provisioning_provenance(provider: Mapping[str, Any]) -> str:
+    for field_name in (
+        "source_add_provisioning_provenance_sha256",
+        # Compatibility with provider documents projected before v8. This
+        # value is never used as a v8 binding-manifest digest.
+        "source_add_manifest_sha256",
+    ):
+        value = str(provider.get(field_name) or "").strip()
+        if _SOURCE_ADD_MANIFEST_RE.fullmatch(value):
+            return value
+    return ""
 
 
 def capability_catalog_enabled() -> bool:
@@ -357,8 +1050,8 @@ class EffectiveProviderCapabilities:
                     {
                         "governance_origin": "source_add",
                         "provider_id": provider_id,
-                        "manifest_sha256": str(
-                            provider.get("source_add_manifest_sha256") or ""
+                        "provisioning_provenance_sha256": (
+                            _source_add_provisioning_provenance(provider)
                         ),
                     }
                 )
@@ -416,8 +1109,8 @@ def _mentioned_source_add_providers(
             or provider.get("credential_ready") is not True
         ):
             continue
-        manifest = str(provider.get("source_add_manifest_sha256") or "")
-        if not _SOURCE_ADD_MANIFEST_RE.fullmatch(manifest):
+        provenance = _source_add_provisioning_provenance(provider)
+        if not provenance:
             continue
         if any(f" {form} " in focus for form in _source_mention_forms(provider)):
             matches.append(dict(provider))
@@ -459,7 +1152,7 @@ def approved_source_router_suggestions(
         providers_mentioned = directly_named
     elif len(providers_mentioned) > 1:
         return {
-            "schema_version": "leadpoet.routerverse_source_suggestions.v2",
+            "schema_version": "leadpoet.routerverse_source_suggestions.v3",
             "requests": [],
             "clarifications": [
                 {
@@ -473,6 +1166,8 @@ def approved_source_router_suggestions(
                 "explicit_discovery_stage_required": True,
                 "model_registration_required": True,
                 "consumer_binding_activation_separate": True,
+                "provisioning_provenance_is_not_binding_manifest": True,
+                "v7_rollback_manifest_is_explicit": True,
             },
         }
     requests: list[dict[str, Any]] = []
@@ -484,26 +1179,21 @@ def approved_source_router_suggestions(
             if isinstance(provider.get("planner_summary"), Mapping)
             else {}
         )
-        best_for = [
-            str(item).strip()
-            for item in (
-                planner.get("best_for_features")
-                if isinstance(planner.get("best_for_features"), (list, tuple))
-                else ()
-            )
-            if _ROUTING_FEATURE_RE.fullmatch(str(item).strip())
-        ][:16]
-        avoid_when = [
-            str(item).strip()
-            for item in (
-                planner.get("avoid_when_features")
-                if isinstance(planner.get("avoid_when_features"), (list, tuple))
-                else ()
-            )
-            if _ROUTING_FEATURE_RE.fullmatch(str(item).strip())
-        ][:16]
+        best_for = (
+            planner.get("best_for_features")
+            if "best_for_features" in planner
+            else ()
+        )
+        avoid_when = (
+            planner.get("avoid_when_features")
+            if "avoid_when_features" in planner
+            else ()
+        )
         intent_categories: list[str] = []
-        for feature in best_for:
+        for feature in (
+            best_for if isinstance(best_for, (list, tuple)) else ()
+        ):
+            feature = str(feature).strip()
             if not feature.startswith("intent.") or feature == "intent.general":
                 continue
             category = feature.split(".", 1)[1].upper()
@@ -533,14 +1223,102 @@ def approved_source_router_suggestions(
             )
         except (TypeError, ValueError):
             microusd = 0
-        manifest = str(provider.get("source_add_manifest_sha256") or "")
+        provenance = _source_add_provisioning_provenance(provider)
         for stage in stages:
             candidate_stage = stage == "candidate_acquisition"
+            declared_stage = str(planner.get("stage") or "").strip()
+            if declared_stage and declared_stage != stage:
+                clarifications.append(
+                    {
+                        "provider_id": provider_id,
+                        "provider_alias": provider_alias,
+                        "reason_code": "approved_source_stage_contract_differs",
+                    }
+                )
+                continue
+            registration_value: dict[str, Any] = {
+                "provider_id": provider_id,
+                "stage": stage,
+                "execution_mode": planner.get("execution_mode", "invoke"),
+                "priority": planner.get(
+                    "priority", 80 if candidate_stage else 35
+                ),
+                "capabilities": planner.get("capabilities")
+                if "capabilities" in planner
+                else [
+                    "candidate.provider_discovery"
+                    if candidate_stage
+                    else "intent.provider_evidence"
+                ],
+                "idempotency": planner.get("idempotency", "idempotent"),
+                "cost_class": planner.get(
+                    "cost_class", "metered" if microusd else "free"
+                ),
+                "unit_cost": planner.get(
+                    "unit_cost",
+                    (
+                        round(max(microusd / 1_000_000, 0.000001), 6)
+                        if microusd
+                        else 0.0
+                    ),
+                ),
+                "max_calls": planner.get("max_calls", 1),
+                "max_results": planner.get(
+                    "max_results", 100 if candidate_stage else 1
+                ),
+                "timeout_seconds": planner.get(
+                    "timeout_seconds", 60.0 if candidate_stage else 30.0
+                ),
+                "intent_categories": planner.get(
+                    "intent_categories",
+                    intent_categories,
+                ),
+                "evidence_types": (
+                    planner.get("evidence_types")
+                    if "evidence_types" in planner
+                    else [
+                        "provider_database" if candidate_stage else "external"
+                    ]
+                ),
+                "category_contracts": planner.get("category_contracts", []),
+                "binding_requirements": planner.get(
+                    "binding_requirements", []
+                ),
+                "best_for": best_for
+                or (
+                    ["icp.structured_eligible"]
+                    if candidate_stage
+                    else ["intent.general"]
+                ),
+                "avoid_when": avoid_when,
+                "best_for_description": planner.get("best_for")
+                or (
+                    "Approved SOURCE_ADD company-discovery provider for "
+                    "structured ICP acquisition."
+                    if candidate_stage
+                    else "Approved SOURCE_ADD provider for company-scoped "
+                    "intent-evidence discovery."
+                ),
+                "avoid_when_description": planner.get("avoid_when")
+                or "Avoid when the consumer binding is unavailable, unhealthy, "
+                "outside its approved categories, or over budget.",
+            }
+            try:
+                registration = _normalize_source_add_v8_registration(
+                    registration_value
+                )
+            except (TypeError, ValueError):
+                clarifications.append(
+                    {
+                        "provider_id": provider_id,
+                        "provider_alias": provider_alias,
+                        "reason_code": "approved_source_routing_contract_invalid",
+                    }
+                )
+                continue
             requests.append(
                 {
-                    "schema_version": (
-                        "leadpoet.routerverse_source_incorporation.v2"
-                    ),
+                    "schema_version": _SOURCE_ADD_V8_REQUEST_SCHEMA_VERSION,
                     "provider_id": provider_id,
                     "provider_alias": provider_alias,
                     "stage": stage,
@@ -554,64 +1332,34 @@ def approved_source_router_suggestions(
                         "SOURCE_ADD_ROUTING_REGISTRATIONS"
                     ),
                     "registration_type": "SourceAddRoutingRegistration",
-                    "revision": f"source-add-{manifest[:12]}",
-                    "manifest_sha256": manifest,
-                    "priority": 80 if candidate_stage else 35,
-                    "capabilities": [
-                        (
-                            "candidate.provider_discovery"
-                            if candidate_stage
-                            else "intent.provider_evidence"
+                    "provisioning_provenance_sha256": provenance,
+                    "legacy_v7_manifest_sha256": provenance,
+                    "binding_manifest": _source_add_binding_manifest(
+                        registration
+                    ),
+                    **{
+                        field: (
+                            [
+                                {
+                                    name: list(value)
+                                    if isinstance(value, tuple)
+                                    else value
+                                    for name, value in contract.items()
+                                }
+                                for contract in registration[field]
+                            ]
+                            if field == "category_contracts"
+                            else list(registration[field])
+                            if isinstance(registration[field], tuple)
+                            else registration[field]
                         )
-                    ],
-                    "idempotency": "idempotent",
-                    "cost_class": "metered" if microusd else "free",
-                    "unit_cost": (
-                        round(max(microusd / 1_000_000, 0.000001), 6)
-                        if microusd
-                        else 0.0
-                    ),
-                    "max_calls": 1,
-                    "max_results": 100 if candidate_stage else 1,
-                    "timeout_seconds": 60.0 if candidate_stage else 30.0,
-                    "intent_categories": (
-                        [] if candidate_stage else intent_categories
-                    ),
-                    "evidence_types": (
-                        ["provider_database"]
-                        if candidate_stage
-                        else ["external"]
-                    ),
-                    "best_for": (
-                        best_for
-                        or (
-                            ["icp.structured_eligible"]
-                            if candidate_stage
-                            else ["intent.general"]
-                        )
-                    ),
-                    "avoid_when": avoid_when,
-                    "best_for_description": str(
-                        planner.get("best_for")
-                        or (
-                            "Approved SOURCE_ADD company-discovery provider "
-                            "for structured ICP acquisition."
-                            if candidate_stage
-                            else "Approved SOURCE_ADD provider for "
-                            "company-scoped intent-evidence discovery."
-                        )
-                    )[:500],
-                    "avoid_when_description": str(
-                        planner.get("avoid_when")
-                        or "Avoid when the consumer binding is unavailable, "
-                        "unhealthy, outside its approved categories, or over "
-                        "budget."
-                    )[:500],
+                        for field in _SOURCE_ADD_REGISTRATION_FIELDS
+                    },
                     "runtime_binding_id": provider_id,
                 }
             )
     return {
-        "schema_version": "leadpoet.routerverse_source_suggestions.v2",
+        "schema_version": "leadpoet.routerverse_source_suggestions.v3",
         "requests": requests,
         "clarifications": clarifications,
         "rules": {
@@ -619,6 +1367,8 @@ def approved_source_router_suggestions(
             "explicit_discovery_stage_required": True,
             "model_registration_required": True,
             "consumer_binding_activation_separate": True,
+            "provisioning_provenance_is_not_binding_manifest": True,
+            "v7_rollback_manifest_is_explicit": True,
         },
     }
 
@@ -640,134 +1390,24 @@ def validate_source_add_registration_diff(
     def function_name(node: ast.Call) -> str:
         if isinstance(node.func, ast.Name):
             return node.func.id
-        if isinstance(node.func, ast.Attribute):
-            return node.func.attr
         return ""
 
-    def normalize_registration(value: Mapping[str, Any]) -> dict[str, Any]:
-        normalized = dict(value)
-        provider_id = normalized.get("provider_id")
-        stage = normalized.get("stage")
-        revision = normalized.get("revision")
-        manifest = normalized.get("manifest_sha256")
-        if not isinstance(provider_id, str) or not re.fullmatch(
-            r"[a-z][a-z0-9_-]{1,79}", provider_id
-        ):
-            raise ValueError("provider_id is invalid")
-        if stage not in {"candidate_acquisition", "intent_evidence"}:
-            raise ValueError("stage is invalid")
-        if (
-            not isinstance(manifest, str)
-            or not _SOURCE_ADD_MANIFEST_RE.fullmatch(manifest)
-            or revision != f"source-add-{manifest[:12]}"
-        ):
-            raise ValueError("registration revision is not manifest-bound")
-        for name in ("capabilities", "evidence_types", "best_for"):
-            field_value = normalized.get(name)
-            if (
-                not isinstance(field_value, (list, tuple))
-                or not field_value
-                or any(
-                    not isinstance(item, str) or not item
-                    for item in field_value
-                )
-            ):
-                raise ValueError(f"{name} must be a literal sequence")
-            normalized[name] = tuple(field_value)
-        intent_categories = normalized.get("intent_categories")
-        if (
-            not isinstance(intent_categories, (list, tuple))
-            or any(
-                not isinstance(item, str)
-                or not item.strip()
-                or len(item.strip()) > 80
-                for item in intent_categories
-            )
-        ):
-            raise ValueError("intent_categories must be a literal sequence")
-        normalized["intent_categories"] = tuple(
-            dict.fromkeys(item.strip().upper() for item in intent_categories)
-        )
-        avoid_when = normalized.get("avoid_when")
-        if (
-            not isinstance(avoid_when, (list, tuple))
-            or any(
-                not isinstance(item, str)
-                or not _ROUTING_FEATURE_RE.fullmatch(item)
-                for item in avoid_when
-            )
-        ):
-            raise ValueError("avoid_when must be a literal feature sequence")
-        normalized["avoid_when"] = tuple(avoid_when)
-        for name in ("best_for",):
-            if any(
-                not _ROUTING_FEATURE_RE.fullmatch(item)
-                for item in normalized[name]
-            ):
-                raise ValueError(f"{name} contains an invalid routing feature")
-        for name in ("best_for_description", "avoid_when_description"):
-            field_value = normalized.get(name)
-            if (
-                not isinstance(field_value, str)
-                or not field_value.strip()
-                or len(field_value) > 500
-            ):
-                raise ValueError(f"{name} must contain 1-500 characters")
-            normalized[name] = " ".join(field_value.split())
-        for name in ("priority", "max_calls", "max_results"):
-            field_value = normalized.get(name)
-            if isinstance(field_value, bool) or not isinstance(field_value, int):
-                raise ValueError(f"{name} must be an integer")
-        for name in ("unit_cost", "timeout_seconds"):
-            field_value = normalized.get(name)
-            if isinstance(field_value, bool) or not isinstance(
-                field_value, (int, float)
-            ):
-                raise ValueError(f"{name} must be numeric")
-            field_value = float(field_value)
-            if not math.isfinite(field_value) or field_value < 0:
-                raise ValueError(f"{name} must be finite and non-negative")
-            normalized[name] = field_value
-        expected_by_stage = {
-            "candidate_acquisition": {
-                "priority": 80,
-                "capabilities": ("candidate.provider_discovery",),
-                "max_results": 100,
-                "timeout_seconds": 60.0,
-                "evidence_types": ("provider_database",),
-            },
-            "intent_evidence": {
-                "priority": 35,
-                "capabilities": ("intent.provider_evidence",),
-                "max_results": 1,
-                "timeout_seconds": 30.0,
-                "evidence_types": ("external",),
-            },
-        }
-        expected = expected_by_stage[str(stage)]
-        if any(normalized.get(name) != expected_value for name, expected_value in expected.items()):
-            raise ValueError("registration stage contract is invalid")
-        if stage == "candidate_acquisition" and normalized["intent_categories"]:
-            raise ValueError(
-                "candidate registrations must not declare intent categories"
-            )
-        if (
-            normalized.get("idempotency") != "idempotent"
-            or normalized.get("cost_class") not in {"free", "metered"}
-            or normalized.get("max_calls") != 1
-            or (
-                normalized.get("cost_class") == "free"
-                and normalized.get("unit_cost") != 0.0
-            )
-            or (
-                normalized.get("cost_class") == "metered"
-                and normalized.get("unit_cost") <= 0.0
-            )
-        ):
-            raise ValueError("registration execution contract is invalid")
-        return normalized
+    def normalize_registration(
+        value: Mapping[str, Any],
+        *,
+        contract_version: int,
+    ) -> dict[str, Any]:
+        if contract_version == 8:
+            return _normalize_source_add_v8_registration(value)
+        if contract_version == 7:
+            return _normalize_source_add_v7_registration(value)
+        raise ValueError("unsupported SOURCE_ADD registration contract")
 
-    def registration_from_request(request: Mapping[str, Any]) -> dict[str, Any]:
+    def registration_from_request(
+        request: Mapping[str, Any],
+        *,
+        contract_version: int,
+    ) -> dict[str, Any]:
         provider_id = request.get("provider_id")
         stage = request.get("stage")
         expected_tool_id = (
@@ -775,9 +1415,9 @@ def validate_source_add_registration_diff(
             if stage == "candidate_acquisition"
             else f"intent.source_add.{provider_id}"
         )
+        schema_version = request.get("schema_version")
         if (
-            request.get("schema_version")
-            != "leadpoet.routerverse_source_incorporation.v2"
+            stage not in {"candidate_acquisition", "intent_evidence"}
             or request.get("registration_symbol")
             != (
                 "sourcing_model/routing/runtime.py::"
@@ -791,15 +1431,67 @@ def validate_source_add_registration_diff(
             or not 0 < len(request["provider_alias"]) <= 80
         ):
             raise ValueError("approved request metadata is invalid")
-        return normalize_registration(
-            {
-                field: request.get(field)
-                for field in _SOURCE_ADD_REGISTRATION_FIELDS
-            }
-        )
+        values = {
+            field: request.get(field)
+            for field in _SOURCE_ADD_REGISTRATION_FIELDS
+        }
+        if schema_version == _SOURCE_ADD_V8_REQUEST_SCHEMA_VERSION:
+            provenance = str(
+                request.get("provisioning_provenance_sha256") or ""
+            ).strip()
+            legacy_manifest = str(
+                request.get("legacy_v7_manifest_sha256") or ""
+            ).strip()
+            if (
+                not _SOURCE_ADD_MANIFEST_RE.fullmatch(provenance)
+                or legacy_manifest != provenance
+            ):
+                raise ValueError("approved request provenance is invalid")
+            registration = normalize_registration(
+                values,
+                contract_version=8,
+            )
+            binding_manifest = request.get("binding_manifest")
+            if not isinstance(binding_manifest, Mapping):
+                raise ValueError("approved request binding manifest is invalid")
+            try:
+                observed_manifest_json = json.dumps(
+                    dict(binding_manifest),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+                expected_manifest_json = json.dumps(
+                    _source_add_binding_manifest(registration),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "approved request binding manifest is invalid"
+                ) from exc
+            if observed_manifest_json != expected_manifest_json:
+                raise ValueError("approved request binding manifest is invalid")
+            if contract_version == 8:
+                return registration
+            values = dict(registration)
+            values["manifest_sha256"] = legacy_manifest
+            values["revision"] = f"source-add-{legacy_manifest[:12]}"
+            return normalize_registration(values, contract_version=7)
+        if (
+            schema_version != _SOURCE_ADD_V7_REQUEST_SCHEMA_VERSION
+            or contract_version != 7
+        ):
+            raise ValueError("approved request schema is incompatible")
+        return normalize_registration(values, contract_version=7)
 
     def registration_from_call(
         node: ast.Call,
+        *,
+        contract_version: int,
     ) -> tuple[dict[str, Any], bool]:
         if function_name(node) != "SourceAddRoutingRegistration":
             raise ValueError("registry contains a non-registration value")
@@ -807,28 +1499,85 @@ def validate_source_add_registration_diff(
             raise ValueError("registration must use explicit keyword literals")
         keyword_names = [str(keyword.arg) for keyword in node.keywords]
         keyword_set = set(keyword_names)
-        if (
-            len(keyword_names) != len(set(keyword_names))
-            or keyword_set
-            not in (
-                set(_SOURCE_ADD_REGISTRATION_FIELDS),
-                set(_SOURCE_ADD_LEGACY_REGISTRATION_FIELDS),
-                set(_SOURCE_ADD_ORIGINAL_REGISTRATION_FIELDS),
-                set(_SOURCE_ADD_GUIDANCE_WITHOUT_CATEGORIES_FIELDS),
-            )
-        ):
+        if len(keyword_names) != len(set(keyword_names)):
             raise ValueError("registration fields differ from the contract")
+        if contract_version == 8:
+            if (
+                not _SOURCE_ADD_V8_REQUIRED_REGISTRATION_FIELDS <= keyword_set
+                or not keyword_set <= set(_SOURCE_ADD_REGISTRATION_FIELDS)
+            ):
+                raise ValueError(
+                    "registration fields differ from the v8 contract"
+                )
+        elif keyword_set not in (
+            set(_SOURCE_ADD_V7_REGISTRATION_FIELDS),
+            set(_SOURCE_ADD_V7_LEGACY_REGISTRATION_FIELDS),
+            set(_SOURCE_ADD_V7_ORIGINAL_REGISTRATION_FIELDS),
+            set(_SOURCE_ADD_V7_GUIDANCE_WITHOUT_CATEGORIES_FIELDS),
+        ):
+            raise ValueError("registration fields differ from the v7 contract")
+
+        def literal_registration_value(value_node: ast.AST) -> Any:
+            if isinstance(value_node, ast.Name) and contract_version == 8:
+                if value_node.id in _SOURCE_ADD_LITERAL_NAMES:
+                    return _SOURCE_ADD_LITERAL_NAMES[value_node.id]
+                raise ValueError("registration contains an unknown constant")
+            return ast.literal_eval(value_node)
         values: dict[str, Any] = {}
         for keyword in node.keywords:
             try:
-                values[str(keyword.arg)] = ast.literal_eval(keyword.value)
+                if keyword.arg == "category_contracts":
+                    if not isinstance(keyword.value, (ast.Tuple, ast.List)):
+                        raise ValueError("category_contracts must be a literal sequence")
+                    contracts: list[dict[str, Any]] = []
+                    for item in keyword.value.elts:
+                        if not isinstance(item, ast.Call) or function_name(item) != "SourceAddCategoryContract":
+                            raise ValueError("category_contracts entries must be constructors")
+                        if item.args or any(keyword.arg is None for keyword in item.keywords):
+                            raise ValueError("category contract must use explicit keyword literals")
+                        contract_keyword_names = [
+                            str(contract_keyword.arg)
+                            for contract_keyword in item.keywords
+                        ]
+                        if (
+                            len(contract_keyword_names)
+                            != len(set(contract_keyword_names))
+                            or set(contract_keyword_names)
+                            != {
+                                "category",
+                                "capabilities",
+                                "evidence_types",
+                                "requirements",
+                            }
+                        ):
+                            raise ValueError(
+                                "category contract fields differ from the contract"
+                            )
+                        contract_values: dict[str, Any] = {}
+                        for contract_keyword in item.keywords:
+                            contract_values[str(contract_keyword.arg)] = literal_registration_value(
+                                contract_keyword.value
+                            )
+                        contracts.append(contract_values)
+                    values[str(keyword.arg)] = tuple(contracts)
+                else:
+                    values[str(keyword.arg)] = literal_registration_value(keyword.value)
             except (ValueError, TypeError, SyntaxError) as exc:
                 raise ValueError(
                     "registration fields must be literal"
                 ) from exc
-        legacy_contract = keyword_set != set(
-            _SOURCE_ADD_REGISTRATION_FIELDS
-        )
+        if contract_version == 8:
+            return normalize_registration(
+                values,
+                contract_version=8,
+            ), False
+
+        legacy_contract = not {
+            "best_for",
+            "avoid_when",
+            "best_for_description",
+            "avoid_when_description",
+        } <= keyword_set
         if "intent_categories" not in values:
             values["intent_categories"] = ()
         if "best_for" not in values:
@@ -855,15 +1604,232 @@ def validate_source_add_registration_diff(
                     ),
                 }
             )
-        return normalize_registration(values), legacy_contract
+        return normalize_registration(
+            values,
+            contract_version=7,
+        ), legacy_contract
+
+    def source_contract_version(tree: ast.Module) -> int:
+        manifest_assignments: list[ast.AST] = []
+        category_contract_classes = 0
+        routing_registration_classes = 0
+        for node in tree.body:
+            if (
+                isinstance(node, ast.ClassDef)
+                and node.name == "SourceAddCategoryContract"
+            ):
+                category_contract_classes += 1
+            if (
+                isinstance(node, ast.ClassDef)
+                and node.name == "SourceAddRoutingRegistration"
+            ):
+                routing_registration_classes += 1
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name)
+                and target.id == "SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION"
+                for target in node.targets
+            ):
+                manifest_assignments.append(node.value)
+            elif (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id
+                == "SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION"
+            ):
+                manifest_assignments.append(node.value)
+        if routing_registration_classes != 1:
+            raise ValueError("SOURCE_ADD routing contract class is ambiguous")
+        if not manifest_assignments and category_contract_classes == 0:
+            return 7
+        if (
+            len(manifest_assignments) != 1
+            or category_contract_classes != 1
+        ):
+            raise ValueError("v8 SOURCE_ADD contract marker is ambiguous")
+        try:
+            manifest_schema = ast.literal_eval(manifest_assignments[0])
+        except (ValueError, TypeError, SyntaxError) as exc:
+            raise ValueError("v8 SOURCE_ADD contract marker is dynamic") from exc
+        if manifest_schema != _SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION:
+            raise ValueError("v8 SOURCE_ADD contract marker differs")
+        return 8
+
+    def assigned_names(target: ast.AST) -> set[str]:
+        if isinstance(target, ast.Name):
+            return {target.id}
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return {
+                name
+                for item in target.elts
+                for name in assigned_names(item)
+            }
+        return set()
+
+    protected_names = {
+            "Any",
+            "Mapping",
+            "COST_FREE",
+            "COST_METERED",
+            "COST_PAID",
+            "EXECUTION_INVOKE",
+            "EXECUTION_OBSERVE",
+            "EXECUTION_VIRTUAL",
+            "FEATURE_STRUCTURED_ELIGIBLE",
+            "IDEMPOTENT",
+            "NON_IDEMPOTENT",
+            "ORIGIN_SOURCE_ADD",
+            "PolicyStep",
+            "RESUME_SAFE",
+            "RoutingContractError",
+            "SOURCE_ADD_BINDING_MANIFEST_SCHEMA_VERSION",
+            "STAGE_CANDIDATE_ACQUISITION",
+            "STAGE_INTENT_EVIDENCE",
+            "SourceAddCategoryContract",
+            "SourceAddRoutingRegistration",
+            "ToolDefinition",
+            "_SOURCE_ADD_MANIFEST_FORBIDDEN_KEYS",
+            "_SOURCE_ADD_PROVIDER_ID_RE",
+            "_source_add_manifest_digest",
+            "_source_add_manifest_value",
+            "_source_add_string_tuple",
+            "dataclass",
+            "field",
+            "hashlib",
+            "json",
+            "math",
+            "re",
+    }
+
+    def protected_contract_signature(tree: ast.Module) -> tuple[str, ...]:
+        signature: list[str] = []
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                aliases = tuple(
+                    (alias.name, alias.asname)
+                    for alias in node.names
+                    if (alias.asname or alias.name.split(".", 1)[0])
+                    in protected_names
+                )
+                if aliases:
+                    signature.append(repr(("import", aliases)))
+                continue
+            if isinstance(node, ast.ImportFrom):
+                aliases = tuple(
+                    (alias.name, alias.asname)
+                    for alias in node.names
+                    if alias.name == "*"
+                    or (alias.asname or alias.name) in protected_names
+                )
+                if aliases:
+                    signature.append(
+                        repr(("from", node.level, node.module, aliases))
+                    )
+                continue
+            names: set[str] = set()
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                names.add(node.name)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    names.update(assigned_names(target))
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                names.update(assigned_names(node.target))
+            elif isinstance(node, ast.Delete):
+                for target in node.targets:
+                    names.update(assigned_names(target))
+            if names & protected_names:
+                signature.append(ast.dump(node, include_attributes=False))
+        return tuple(signature)
+
+    def is_canonical_registry_assignment(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "SOURCE_ADD_ROUTING_REGISTRATIONS"
+        ) or (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "SOURCE_ADD_ROUTING_REGISTRATIONS"
+        )
+
+    def source_add_sensitive_signature(tree: ast.Module) -> tuple[str, ...]:
+        """Commit all SOURCE_ADD-sensitive code outside the reviewed literal.
+
+        The registry assignment is the only code an approved registration diff
+        may alter.  Comparing every other runtime node would incorrectly block
+        unrelated model work, while checking only direct definitions misses
+        ``+=``, nested assignment, ``globals()[name]``, ``setattr`` and class
+        monkeypatches.  Bind the complete enclosing node whenever it references
+        a protected SOURCE_ADD symbol, including a dynamic string lookup.
+        """
+
+        sensitive_names = protected_names | {
+            "SOURCE_ADD_ROUTING_REGISTRATIONS",
+        }
+        match_as_type = getattr(ast, "MatchAs", ())
+        signature: list[str] = []
+        for node in tree.body:
+            if is_canonical_registry_assignment(node):
+                continue
+            sensitive = False
+            for descendant in ast.walk(node):
+                if (
+                    isinstance(descendant, ast.Name)
+                    and descendant.id in sensitive_names
+                ) or (
+                    isinstance(descendant, ast.Constant)
+                    and isinstance(descendant.value, str)
+                    and descendant.value in sensitive_names
+                ) or (
+                    isinstance(descendant, ast.Attribute)
+                    and descendant.attr in sensitive_names
+                ) or (
+                    isinstance(descendant, ast.alias)
+                    and (
+                        descendant.asname
+                        or descendant.name.split(".", 1)[0]
+                    ) in sensitive_names
+                ) or (
+                    isinstance(descendant, ast.ExceptHandler)
+                    and descendant.name in sensitive_names
+                ) or (
+                    isinstance(descendant, match_as_type)
+                    and descendant.name in sensitive_names
+                ) or (
+                    isinstance(
+                        descendant,
+                        (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+                    )
+                    and descendant.name in sensitive_names
+                ):
+                    sensitive = True
+                    break
+            if sensitive:
+                signature.append(ast.dump(node, include_attributes=False))
+        return tuple(signature)
+
+    def non_registry_signature(tree: ast.Module) -> tuple[str, ...]:
+        signature: list[str] = []
+        for node in tree.body:
+            signature.append(
+                "SOURCE_ADD_ROUTING_REGISTRATIONS=<reviewed>"
+                if is_canonical_registry_assignment(node)
+                else ast.dump(node, include_attributes=False)
+            )
+        return tuple(signature)
 
     def registrations_from_source(
         source: str,
     ) -> tuple[
         dict[tuple[str, str], dict[str, Any]],
         set[tuple[str, str]],
+        int,
+        tuple[str, ...],
+        tuple[str, ...],
+        tuple[str, ...],
     ]:
         tree = ast.parse(source)
+        contract_version = source_contract_version(tree)
         assignments: list[ast.AST] = []
         for node in tree.body:
             if isinstance(node, ast.Assign) and any(
@@ -878,9 +1844,16 @@ def validate_source_add_registration_diff(
                 and node.target.id == "SOURCE_ADD_ROUTING_REGISTRATIONS"
             ):
                 assignments.append(node.value)
+        registry_bindings = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+            and node.id == "SOURCE_ADD_ROUTING_REGISTRATIONS"
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+        ]
         if len(assignments) != 1 or not isinstance(
             assignments[0], (ast.List, ast.Tuple)
-        ):
+        ) or len(registry_bindings) != 1:
             raise ValueError("registration assignment is missing or ambiguous")
         elements = assignments[0].elts
         registration_calls = [
@@ -896,7 +1869,10 @@ def validate_source_add_registration_diff(
         for element in elements:
             if not isinstance(element, ast.Call):
                 raise ValueError("registry contains a dynamic value")
-            registration, legacy_guidance = registration_from_call(element)
+            registration, legacy_guidance = registration_from_call(
+                element,
+                contract_version=contract_version,
+            )
             key = (
                 str(registration.get("provider_id") or ""),
                 str(registration.get("stage") or ""),
@@ -910,7 +1886,14 @@ def validate_source_add_registration_diff(
             registrations[key] = registration
             if legacy_guidance:
                 legacy_guidance_keys.add(key)
-        return registrations, legacy_guidance_keys
+        return (
+            registrations,
+            legacy_guidance_keys,
+            contract_version,
+            protected_contract_signature(tree),
+            non_registry_signature(tree),
+            source_add_sensitive_signature(tree),
+        )
 
     def diff_sections(diff_text: str) -> list[tuple[str, str, str]]:
         sections: list[tuple[str, str, str]] = []
@@ -1030,9 +2013,14 @@ def validate_source_add_registration_diff(
         errors.append("source_add_registration_source_unavailable")
         return sorted(set(errors))
     try:
-        existing, existing_legacy_guidance = registrations_from_source(
-            existing_runtime_source
-        )
+        (
+            existing,
+            existing_legacy_guidance,
+            existing_contract_version,
+            existing_contract_signature,
+            existing_non_registry_signature,
+            existing_sensitive_signature,
+        ) = registrations_from_source(existing_runtime_source)
     except (SyntaxError, ValueError):
         errors.append("source_add_registration_existing_source_invalid")
         return sorted(set(errors))
@@ -1051,10 +2039,27 @@ def validate_source_add_registration_diff(
             errors.append("source_add_registration_runtime_diff_unapplicable")
             return sorted(set(errors))
     try:
-        observed, observed_legacy_guidance = registrations_from_source(
-            patched_source
-        )
+        (
+            observed,
+            observed_legacy_guidance,
+            observed_contract_version,
+            observed_contract_signature,
+            observed_non_registry_signature,
+            observed_sensitive_signature,
+        ) = registrations_from_source(patched_source)
     except (SyntaxError, ValueError):
+        errors.append("source_add_registration_patched_source_invalid")
+        return sorted(set(errors))
+    if (
+        observed_contract_version != existing_contract_version
+        or observed_contract_signature != existing_contract_signature
+        or observed_sensitive_signature != existing_sensitive_signature
+        or (
+            requests
+            and observed_non_registry_signature
+            != existing_non_registry_signature
+        )
+    ):
         errors.append("source_add_registration_patched_source_invalid")
         return sorted(set(errors))
     if any(
@@ -1071,7 +2076,10 @@ def validate_source_add_registration_diff(
         for request in requests:
             if not isinstance(request, Mapping):
                 raise ValueError("approved request is invalid")
-            registration = registration_from_request(request)
+            registration = registration_from_request(
+                request,
+                contract_version=existing_contract_version,
+            )
             key = (
                 str(registration.get("provider_id") or ""),
                 str(registration.get("stage") or ""),
@@ -1191,13 +2199,50 @@ def _provider_doc_from_source_row(
                 "path": str(endpoint.get("path") or ""),
             }
         )
+    raw_planner = (
+        provider.get("planner_summary")
+        if isinstance(provider.get("planner_summary"), Mapping)
+        else {}
+    )
+    planner_summary: dict[str, Any] = {
+        "provider_alias": str(
+            raw_planner.get("provider_alias") or provider.get("id") or ""
+        )[:80],
+        "endpoint_families": [
+            {
+                "endpoint_id": str(item.get("endpoint_id") or "")[:120],
+                "description": str(item.get("description") or "")[:200],
+            }
+            for item in probe_endpoints
+            if isinstance(item, Mapping)
+        ],
+        "model_policy": "",
+        "probe_metadata": [
+            str(item.get("endpoint_id") or "")[:120]
+            for item in probe_endpoints
+            if isinstance(item, Mapping)
+        ],
+    }
+    for field_name in _SOURCE_ADD_V8_PLANNER_FIELDS:
+        if field_name not in raw_planner:
+            continue
+        # Round-trip through strict JSON so the durable provider projection
+        # retains only public, serializable model-routing metadata. The v8
+        # normalizer later validates every semantic value and fails closed.
+        planner_summary[field_name] = json.loads(
+            json.dumps(
+                raw_planner[field_name],
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+        )
     provider.update(
         {
             "origin": "source_add",
             "reward_eligible": True,
-            "source_add_manifest_sha256": sha256_json(dict(row)).split(
-                ":", 1
-            )[-1],
+            "source_add_provisioning_provenance_sha256": sha256_json(
+                dict(row)
+            ).split(":", 1)[-1],
             "probe_endpoints": [dict(item) for item in probe_endpoints if isinstance(item, Mapping)],
             "capability_policy": {
                 "routes": routes,
@@ -1206,19 +2251,7 @@ def _provider_doc_from_source_row(
                 "unlisted_methods": [],
                 "model_policy": {"kind": "none"},
             },
-            "planner_summary": {
-                "provider_alias": str(provider.get("id") or "")[:80],
-                "endpoint_families": [
-                    {
-                        "endpoint_id": str(item.get("endpoint_id") or "")[:120],
-                        "description": str(item.get("description") or "")[:200],
-                    }
-                    for item in probe_endpoints
-                    if isinstance(item, Mapping)
-                ],
-                "model_policy": "",
-                "probe_metadata": [str(item.get("endpoint_id") or "")[:120] for item in probe_endpoints if isinstance(item, Mapping)],
-            },
+            "planner_summary": planner_summary,
         }
     )
     provider["credential_ready"] = _resolved_credential_ready(

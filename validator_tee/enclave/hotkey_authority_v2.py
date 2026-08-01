@@ -31,6 +31,9 @@ from leadpoet_canonical.attested_v2 import (
     verify_boot_identity_nitro,
 )
 from leadpoet_canonical.binding import parse_binding_message
+from leadpoet_canonical.compact_weight_authority_v2 import (
+    validate_compact_weight_submission_shape_v2,
+)
 from leadpoet_canonical.hotkey_authority_v2 import (
     build_application_signature_request_v2,
     build_serve_axon_extrinsic_authorization_v2,
@@ -44,6 +47,7 @@ from leadpoet_canonical.hotkey_authority_v2 import (
 )
 from leadpoet_canonical.kms_recipient import decrypt_kms_recipient_ciphertext
 from leadpoet_canonical.weight_authority_v2 import (
+    VALIDATOR_WEIGHT_INPUT_CATEGORIES,
     validate_published_weight_bundle_v2,
     validate_weight_snapshot_v2,
 )
@@ -470,17 +474,30 @@ class ValidatorHotkeyAuthorityV2:
                 self._commits.pop(commit_id, None)
 
     def register_weight_result(self, response: Mapping[str, Any]) -> str:
-        expected_fields = {
+        full_fields = {
             "weight_snapshot",
             "weight_result",
             "weights_signature",
             "receipt_graph",
             "boot_identity",
         }
-        if not isinstance(response, Mapping) or set(response) != expected_fields:
+        compact_fields = {
+            "weight_snapshot",
+            "weight_result",
+            "weights_signature",
+            "receipt_graph_delta",
+            "ancestry_commitment",
+            "boot_identity",
+        }
+        response_fields = set(response) if isinstance(response, Mapping) else set()
+        if (
+            not isinstance(response, Mapping)
+            or response_fields not in (full_fields, compact_fields)
+        ):
             raise ValidatorHotkeyAuthorityV2Error(
                 "authoritative weight result fields are invalid"
             )
+        compact = response_fields == compact_fields
         boot = dict(self._boot_identity_supplier())
         if dict(response["boot_identity"]) != boot:
             raise ValidatorHotkeyAuthorityV2Error(
@@ -491,12 +508,20 @@ class ValidatorHotkeyAuthorityV2:
             raise ValidatorHotkeyAuthorityV2Error(
                 "authoritative weight result is not canonical"
             )
-        graph = dict(response["receipt_graph"])
-        validate_receipt_graph(graph)
+        if compact:
+            graph = self._validate_compact_weight_delta(
+                response=response,
+                boot=boot,
+                expected_result=expected_result,
+            )
+            root_hash = str(graph["root_receipt_hash"])
+        else:
+            graph = dict(response["receipt_graph"])
+            validate_receipt_graph(graph)
+            root_hash = str(graph["root_receipt_hash"])
         receipts = {
             str(item["receipt_hash"]): item for item in graph["receipts"]
         }
-        root_hash = str(graph["root_receipt_hash"])
         root = receipts.get(root_hash)
         if (
             not isinstance(root, Mapping)
@@ -543,11 +568,174 @@ class ValidatorHotkeyAuthorityV2:
                 "weight_snapshot": dict(response["weight_snapshot"]),
                 "weight_result": expected_result,
                 "root_receipt_hash": root_hash,
-                "receipt_graph": graph,
+                "receipt_graph": (None if compact else graph),
+                "receipt_graph_delta": (graph if compact else None),
+                "ancestry_commitment": (
+                    str(response["ancestry_commitment"])
+                    if compact
+                    else None
+                ),
                 "attempts": 0,
                 "finalization": None,
             }
         return authorization_id
+
+    @staticmethod
+    def _validate_compact_weight_delta(
+        *,
+        response: Mapping[str, Any],
+        boot: Mapping[str, Any],
+        expected_result: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Bind a previously verified compact ancestry to local receipts."""
+
+        commitment = str(response.get("ancestry_commitment") or "").lower()
+        if not _HASH_RE.fullmatch(commitment):
+            raise ValidatorHotkeyAuthorityV2Error(
+                "authoritative compact ancestry commitment is invalid"
+            )
+        delta = response.get("receipt_graph_delta")
+        fields = {
+            "schema_version",
+            "root_receipt_hash",
+            "boot_identities",
+            "receipts",
+            "transport_attempts",
+            "host_operations",
+        }
+        if (
+            not isinstance(delta, Mapping)
+            or set(delta) != fields
+            or delta.get("schema_version")
+            != "leadpoet.validator_weight_receipt_delta.v2"
+            or delta.get("boot_identities") != [boot]
+            or delta.get("host_operations") != []
+            or not isinstance(delta.get("receipts"), list)
+            or not isinstance(delta.get("transport_attempts"), list)
+        ):
+            raise ValidatorHotkeyAuthorityV2Error(
+                "authoritative compact receipt delta is invalid"
+            )
+        receipts = {}
+        scopes = set()
+        for item in delta["receipts"]:
+            validate_signed_execution_receipt(item)
+            receipt = dict(item)
+            receipt_hash = str(receipt["receipt_hash"])
+            scope = (str(receipt["job_id"]), str(receipt["purpose"]))
+            if receipt_hash in receipts or scope in scopes:
+                raise ValidatorHotkeyAuthorityV2Error(
+                    "authoritative compact receipt delta is duplicated"
+                )
+            scopes.add(scope)
+            for receipt_field, boot_field in (
+                ("role", "role"),
+                ("commit_sha", "commit_sha"),
+                ("pcr0", "pcr0"),
+                ("build_manifest_hash", "build_manifest_hash"),
+                ("dependency_lock_hash", "dependency_lock_hash"),
+                ("config_hash", "config_hash"),
+                ("boot_identity_hash", "boot_identity_hash"),
+                ("enclave_pubkey", "signing_pubkey"),
+            ):
+                if receipt.get(receipt_field) != boot.get(boot_field):
+                    raise ValidatorHotkeyAuthorityV2Error(
+                        "authoritative compact receipt differs from boot"
+                    )
+            if receipt.get("host_operation_root") != EMPTY_HOST_OPERATION_ROOT:
+                raise ValidatorHotkeyAuthorityV2Error(
+                    "authoritative compact receipt has host operations"
+                )
+            receipts[receipt_hash] = receipt
+        attempts_by_scope = {}
+        attempt_hashes = set()
+        for item in delta["transport_attempts"]:
+            validate_transport_attempt(item)
+            attempt = dict(item)
+            attempt_hash = str(attempt["attempt_hash"])
+            if attempt_hash in attempt_hashes:
+                raise ValidatorHotkeyAuthorityV2Error(
+                    "authoritative compact transport attempt is duplicated"
+                )
+            attempt_hashes.add(attempt_hash)
+            attempts_by_scope.setdefault(
+                (str(attempt["job_id"]), str(attempt["purpose"])), []
+            ).append(attempt)
+        for receipt in receipts.values():
+            scope = (str(receipt["job_id"]), str(receipt["purpose"]))
+            attempts = attempts_by_scope.pop(scope, [])
+            observed_root = (
+                merkle_root(
+                    [str(item["attempt_hash"]) for item in attempts],
+                    domain="leadpoet-transport-v2",
+                )
+                if attempts
+                else EMPTY_TRANSPORT_ROOT
+            )
+            if receipt.get("transport_root") != observed_root:
+                raise ValidatorHotkeyAuthorityV2Error(
+                    "authoritative compact receipt transport root differs"
+                )
+        if attempts_by_scope:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "authoritative compact delta has unclaimed transport"
+            )
+        root_hash = str(delta.get("root_receipt_hash") or "")
+        root = receipts.get(root_hash)
+        if (
+            not isinstance(root, Mapping)
+            or root.get("purpose") != "validator.weights.computed.v2"
+            or root.get("output_root") != sha256_json(expected_result)
+        ):
+            raise ValidatorHotkeyAuthorityV2Error(
+                "authoritative compact weight root is invalid"
+            )
+        root_parents = list(root.get("parent_receipt_hashes") or [])
+        if len(root_parents) != 1:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "authoritative compact weight root parent is invalid"
+            )
+        snapshot_receipt = receipts.get(str(root_parents[0]))
+        snapshot = response["weight_snapshot"]
+        if (
+            not isinstance(snapshot_receipt, Mapping)
+            or snapshot_receipt.get("purpose")
+            != "validator.weight_snapshot.v2"
+            or snapshot_receipt.get("input_root") != snapshot["source_input_root"]
+            or snapshot_receipt.get("output_root") != snapshot["snapshot_hash"]
+            or snapshot_receipt.get("artifact_root")
+            != merkle_root(
+                [snapshot["calculation_snapshot_hash"], commitment],
+                domain="leadpoet-artifact-v2",
+            )
+        ):
+            raise ValidatorHotkeyAuthorityV2Error(
+                "authoritative compact snapshot receipt is invalid"
+            )
+        local_input_hashes = {
+            str(snapshot["input_receipt_hashes"][category])
+            for category in VALIDATOR_WEIGHT_INPUT_CATEGORIES
+        }
+        if not local_input_hashes.issubset(receipts):
+            raise ValidatorHotkeyAuthorityV2Error(
+                "authoritative compact validator inputs are incomplete"
+            )
+        if not set(snapshot["input_receipt_hashes"].values()).issubset(
+            set(snapshot_receipt.get("parent_receipt_hashes") or [])
+        ):
+            raise ValidatorHotkeyAuthorityV2Error(
+                "authoritative compact snapshot omits direct inputs"
+            )
+        return {
+            "schema_version": str(delta["schema_version"]),
+            "root_receipt_hash": root_hash,
+            "boot_identities": [dict(boot)],
+            "receipts": [dict(item) for item in delta["receipts"]],
+            "transport_attempts": [
+                dict(item) for item in delta["transport_attempts"]
+            ],
+            "host_operations": [],
+        }
 
     def recover_weight_publication(
         self,
@@ -643,7 +831,202 @@ class ValidatorHotkeyAuthorityV2:
             graph,
             root_receipt_hash=str(computed_receipt["receipt_hash"]),
         )
-        weight_result = dict(published_bundle["weight_result"])
+        return self._restore_recovered_weight_publication(
+            weight_snapshot=dict(published_bundle["weight_snapshot"]),
+            weight_result=dict(published_bundle["weight_result"]),
+            computed_receipt=computed_receipt,
+            old_boot=old_boot,
+            weight_submission_event_hash=event_hash,
+            extrinsic_signature_results=extrinsic_signature_results,
+            recovery_identity_hash=str(verified["bundle_hash"]),
+            receipt_graph=recovery_graph,
+            receipt_graph_delta=None,
+            ancestry_commitment=None,
+        )
+
+    def recover_compact_weight_publication(
+        self,
+        *,
+        compact_submission: Mapping[str, Any],
+        weight_submission_event_hash: str,
+        extrinsic_signature_results: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        """Recover bounded public authority without importing historical bodies.
+
+        The caller in ``tee_service`` first validates every gateway checkpoint
+        with the measured weight authority.  This hotkey authority independently
+        validates the old validator boot, local receipts, weight signature, and
+        sr25519 binding before restoring any chain-signing state.
+        """
+
+        self._require_keypair()
+        event_hash = str(weight_submission_event_hash or "").lower()
+        if not _HASH_RE.fullmatch(event_hash):
+            raise ValidatorHotkeyAuthorityV2Error(
+                "compact recovery publication event hash is invalid"
+            )
+        try:
+            compact = validate_compact_weight_submission_shape_v2(
+                compact_submission
+            )
+        except Exception as exc:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "compact recovery authority is invalid"
+            ) from exc
+        if compact["validator_hotkey"] != self.validator_hotkey:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "compact recovery uses another validator hotkey"
+            )
+        delta = compact["validator_receipt_delta"]
+        if len(delta["boot_identities"]) != 1:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "compact recovery validator boot is ambiguous"
+            )
+        old_boot = dict(delta["boot_identities"][0])
+        current_boot = dict(self._boot_identity_supplier())
+        for field in (
+            "commit_sha",
+            "pcr0",
+            "build_manifest_hash",
+            "dependency_lock_hash",
+            "config_hash",
+        ):
+            if old_boot.get(field) != current_boot.get(field):
+                raise ValidatorHotkeyAuthorityV2Error(
+                    "compact recovery validator release differs at %s" % field
+                )
+        try:
+            verify_boot_identity_nitro(
+                old_boot,
+                expected_pcr0=old_boot["pcr0"],
+                certificate_validity_at_attestation_time=True,
+            )
+        except Exception as exc:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "compact recovery validator attestation is invalid"
+            ) from exc
+        expected_result = validate_weight_snapshot_v2(
+            compact["weight_snapshot"]
+        )
+        if dict(compact["weight_result"]) != expected_result:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "compact recovery weight result is not canonical"
+            )
+        local_graph = self._validate_compact_weight_delta(
+            response={
+                "weight_snapshot": compact["weight_snapshot"],
+                "weight_result": compact["weight_result"],
+                "weights_signature": compact["weights_signature"],
+                "receipt_graph_delta": delta,
+                "ancestry_commitment": compact["ancestry_commitment"],
+                "boot_identity": old_boot,
+            },
+            boot=old_boot,
+            expected_result=expected_result,
+        )
+        computed_receipts = [
+            item
+            for item in local_graph["receipts"]
+            if item.get("receipt_hash") == local_graph["root_receipt_hash"]
+            and item.get("purpose") == "validator.weights.computed.v2"
+        ]
+        if len(computed_receipts) != 1:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "compact recovery computing receipt is ambiguous"
+            )
+        computed_receipt = dict(computed_receipts[0])
+        try:
+            ed25519.Ed25519PublicKey.from_public_bytes(
+                bytes.fromhex(str(computed_receipt["enclave_pubkey"]))
+            ).verify(
+                bytes.fromhex(str(compact["weights_signature"])),
+                bytes.fromhex(str(expected_result["weights_hash"])),
+            )
+        except Exception as exc:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "compact recovery weight signature is invalid"
+            ) from exc
+        binding_receipt = dict(compact["binding_receipt"])
+        validate_signed_execution_receipt(binding_receipt)
+        try:
+            binding_signature = bytes.fromhex(
+                str(compact["validator_hotkey_signature"])
+            )
+            binding_message = str(compact["binding_message"]).encode("utf-8")
+        except ValueError as exc:
+            raise ValidatorHotkeyAuthorityV2Error(
+                "compact recovery binding is invalid"
+            ) from exc
+        if not self._sr25519.verify(
+            binding_signature,
+            binding_message,
+            self.hotkey_public_key,
+        ):
+            raise ValidatorHotkeyAuthorityV2Error(
+                "compact recovery binding signature is invalid"
+            )
+        application_request = build_application_signature_request_v2(
+            message=binding_message,
+            validator_hotkey=self.validator_hotkey,
+            boot_identity_hash=str(old_boot["boot_identity_hash"]),
+        )
+        expected_binding_output = {
+            "schema_version": "leadpoet.application_signature_result.v2",
+            "request_hash": application_request["request_hash"],
+            "purpose": "validator.gateway_binding.v2",
+            "validator_hotkey": self.validator_hotkey,
+            "signature": str(compact["validator_hotkey_signature"]),
+        }
+        if (
+            binding_receipt.get("role") != "validator_weights"
+            or binding_receipt.get("purpose")
+            != "validator.hotkey_signature.v2"
+            or binding_receipt.get("boot_identity_hash")
+            != old_boot["boot_identity_hash"]
+            or binding_receipt.get("enclave_pubkey")
+            != old_boot["signing_pubkey"]
+            or binding_receipt.get("parent_receipt_hashes")
+            != [computed_receipt["receipt_hash"]]
+            or binding_receipt.get("input_root")
+            != application_request["request_hash"]
+            or binding_receipt.get("output_root")
+            != sha256_json(expected_binding_output)
+            or int(binding_receipt.get("epoch_id", -1))
+            != int(expected_result["epoch_id"])
+        ):
+            raise ValidatorHotkeyAuthorityV2Error(
+                "compact recovery binding receipt is invalid"
+            )
+        return self._restore_recovered_weight_publication(
+            weight_snapshot=dict(compact["weight_snapshot"]),
+            weight_result=expected_result,
+            computed_receipt=computed_receipt,
+            old_boot=old_boot,
+            weight_submission_event_hash=event_hash,
+            extrinsic_signature_results=extrinsic_signature_results,
+            recovery_identity_hash=str(compact["compact_submission_hash"]),
+            receipt_graph=None,
+            receipt_graph_delta=local_graph,
+            ancestry_commitment=str(compact["ancestry_commitment"]),
+        )
+
+    def _restore_recovered_weight_publication(
+        self,
+        *,
+        weight_snapshot: Mapping[str, Any],
+        weight_result: Mapping[str, Any],
+        computed_receipt: Mapping[str, Any],
+        old_boot: Mapping[str, Any],
+        weight_submission_event_hash: str,
+        extrinsic_signature_results: Sequence[Mapping[str, Any]],
+        recovery_identity_hash: str,
+        receipt_graph: Optional[Mapping[str, Any]],
+        receipt_graph_delta: Optional[Mapping[str, Any]],
+        ancestry_commitment: Optional[str],
+    ) -> Dict[str, Any]:
+        event_hash = str(weight_submission_event_hash)
+        weight_result = dict(weight_result)
+        current_boot = dict(self._boot_identity_supplier())
         normalized_signed = []
         seen_authorizations = set()
         seen_extrinsics = set()
@@ -751,11 +1134,16 @@ class ValidatorHotkeyAuthorityV2:
                     "extrinsic_hex": signed_extrinsic.hex(),
                 }
             )
+        recovery_identity = (
+            {"bundle_hash": str(recovery_identity_hash)}
+            if isinstance(receipt_graph, Mapping)
+            else {"compact_submission_hash": str(recovery_identity_hash)}
+        )
         recovery_id = sha256_json(
             {
                 "schema_version": "leadpoet.validator_weight_recovery.v2",
                 "current_boot_identity_hash": current_boot["boot_identity_hash"],
-                "bundle_hash": verified["bundle_hash"],
+                **recovery_identity,
                 "weight_submission_event_hash": event_hash,
                 "extrinsic_hashes": [
                     item["output"]["extrinsic_hash"] for item in normalized_signed
@@ -773,10 +1161,20 @@ class ValidatorHotkeyAuthorityV2:
                         "pending weight authorization capacity is full"
                     )
                 self._weights[recovery_id] = {
-                    "weight_snapshot": dict(published_bundle["weight_snapshot"]),
+                    "weight_snapshot": dict(weight_snapshot),
                     "weight_result": weight_result,
                     "root_receipt_hash": computed_receipt["receipt_hash"],
-                    "receipt_graph": recovery_graph,
+                    "receipt_graph": (
+                        dict(receipt_graph)
+                        if isinstance(receipt_graph, Mapping)
+                        else None
+                    ),
+                    "receipt_graph_delta": (
+                        dict(receipt_graph_delta)
+                        if isinstance(receipt_graph_delta, Mapping)
+                        else None
+                    ),
+                    "ancestry_commitment": ancestry_commitment,
                     "attempts": len(normalized_signed),
                     "finalization": None,
                 }
@@ -1185,7 +1583,12 @@ class ValidatorHotkeyAuthorityV2:
                 and isinstance(commit.get("signed_result"), Mapping)
             ]
             weight_result = dict(weight["weight_result"])
-            original_graph = dict(weight["receipt_graph"])
+            compact_delta = weight.get("receipt_graph_delta")
+            compact = isinstance(compact_delta, Mapping)
+            original_graph = dict(
+                compact_delta if compact else weight["receipt_graph"]
+            )
+            ancestry_commitment = weight.get("ancestry_commitment")
         if not signed_results:
             raise ValidatorHotkeyAuthorityV2Error(
                 "weight authorization has no signed extrinsic"
@@ -1307,29 +1710,61 @@ class ValidatorHotkeyAuthorityV2:
         }
         current_boot = dict(self._boot_identity_supplier())
         boot_identities[current_boot["boot_identity_hash"]] = current_boot
-        graph = build_receipt_graph(
-            root_receipt_hash=final_receipt["receipt_hash"],
-            boot_identities=[
-                boot_identities[key] for key in sorted(boot_identities)
-            ],
-            receipts=original_receipts + extrinsic_receipts + [final_receipt],
-            transport_attempts=list(original_graph["transport_attempts"])
-            + transport_attempts,
-            host_operations=original_graph["host_operations"],
-        )
-        validate_receipt_graph(
-            graph,
-            required_purposes={
-                "validator.weights.computed.v2",
-                "validator.set_weights_extrinsic.v2",
-                "validator.weights.finalized.v2",
-            },
-        )
-        result = {
-            "finalization": finalization,
-            "receipt_graph": graph,
-            "source_artifacts": source_artifacts,
-        }
+        if compact:
+            # The computed receipt is authenticated by the predecessor
+            # certificate. Carry only the current finalization receipts and
+            # the boot identities they actually reference.
+            compact_receipts = extrinsic_receipts + [final_receipt]
+            referenced_boot_hashes = {
+                str(item["boot_identity_hash"]) for item in compact_receipts
+            }
+            if not referenced_boot_hashes.issubset(boot_identities):
+                raise ValidatorHotkeyAuthorityV2Error(
+                    "compact finalization receipt boot is unavailable"
+                )
+            graph = {
+                "schema_version": (
+                    "leadpoet.validator_weight_finalization_delta.v2"
+                ),
+                "root_receipt_hash": final_receipt["receipt_hash"],
+                "boot_identities": [
+                    boot_identities[key]
+                    for key in sorted(referenced_boot_hashes)
+                ],
+                "receipts": compact_receipts,
+                "transport_attempts": transport_attempts,
+                "host_operations": [],
+            }
+            result = {
+                "finalization": finalization,
+                "receipt_graph_delta": graph,
+                "ancestry_commitment": str(ancestry_commitment),
+                "source_artifacts": source_artifacts,
+            }
+        else:
+            graph = build_receipt_graph(
+                root_receipt_hash=final_receipt["receipt_hash"],
+                boot_identities=[
+                    boot_identities[key] for key in sorted(boot_identities)
+                ],
+                receipts=original_receipts + extrinsic_receipts + [final_receipt],
+                transport_attempts=list(original_graph["transport_attempts"])
+                + transport_attempts,
+                host_operations=original_graph["host_operations"],
+            )
+            validate_receipt_graph(
+                graph,
+                required_purposes={
+                    "validator.weights.computed.v2",
+                    "validator.set_weights_extrinsic.v2",
+                    "validator.weights.finalized.v2",
+                },
+            )
+            result = {
+                "finalization": finalization,
+                "receipt_graph": graph,
+                "source_artifacts": source_artifacts,
+            }
         with self._lock:
             current = self._weights.get(authorization_id)
             if current is None:

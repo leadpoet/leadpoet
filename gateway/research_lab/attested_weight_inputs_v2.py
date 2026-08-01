@@ -83,6 +83,112 @@ def _union_receipt_sets(
     }
 
 
+def _compact_weight_ancestry(
+    *,
+    executions: Mapping[str, Mapping[str, Any]],
+    input_receipt_hashes: Mapping[str, str],
+    receipt_set: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> Dict[str, Any] | None:
+    """Return the bounded evidence needed by the validator enclave.
+
+    The complete receipt set remains available to the legacy/full forensic
+    response.  New validators transport one detached proof per measured input
+    job plus only the attempts needed to re-run the semantic source-evidence
+    checks for the direct input receipts.  Proofs are issued and verified by
+    the measured execution path; the validator enclave independently verifies
+    them again against its approved release lineage.
+
+    A replay produced before checkpoint support has no proof.  In that case we
+    return ``None`` so the caller can use the unchanged full-graph compatibility
+    path instead of silently weakening ancestry validation.
+    """
+
+    proofs: dict[str, dict[str, Any]] = {}
+    direct_scopes: set[tuple[str, str]] = set()
+    receipts_by_hash = {
+        str(receipt.get("receipt_hash") or ""): receipt
+        for receipt in receipt_set["receipts"]
+        if isinstance(receipt, Mapping)
+    }
+    for category in sorted(GATEWAY_WEIGHT_INPUT_CATEGORIES):
+        execution = executions.get(category)
+        if not isinstance(execution, Mapping):
+            raise AttestedWeightInputsV2Error(
+                "%s measured input execution is absent" % category
+            )
+        proof = execution.get("ancestry_compact_proof")
+        if proof is None:
+            return None
+        if not isinstance(proof, Mapping):
+            raise AttestedWeightInputsV2Error(
+                "%s compact ancestry proof is invalid" % category
+            )
+        certificate = proof.get("certificate")
+        claim = (
+            certificate.get("claim")
+            if isinstance(certificate, Mapping)
+            else None
+        )
+        root_hash = str(
+            claim.get("output_root_receipt_hash")
+            if isinstance(claim, Mapping)
+            else ""
+        )
+        graph = execution.get("receipt_graph")
+        if (
+            not isinstance(graph, Mapping)
+            or root_hash != str(graph.get("root_receipt_hash") or "")
+        ):
+            raise AttestedWeightInputsV2Error(
+                "%s compact ancestry root differs from its full graph"
+                % category
+            )
+        receipt_hash = str(input_receipt_hashes[category])
+        disclosed = proof.get("disclosed_receipts")
+        if (
+            not isinstance(disclosed, list)
+            or receipt_hash
+            not in {
+                str(item.get("receipt_hash") or "")
+                for item in disclosed
+                if isinstance(item, Mapping)
+            }
+        ):
+            raise AttestedWeightInputsV2Error(
+                "%s compact ancestry omits its direct input receipt" % category
+            )
+        receipt = receipts_by_hash.get(receipt_hash)
+        if not isinstance(receipt, Mapping):
+            raise AttestedWeightInputsV2Error(
+                "%s direct input receipt is absent" % category
+            )
+        direct_scopes.add((str(receipt["job_id"]), str(receipt["purpose"])))
+        proofs[category] = dict(proof)
+
+    attempts = {}
+    for attempt in receipt_set["transport_attempts"]:
+        if not isinstance(attempt, Mapping):
+            raise AttestedWeightInputsV2Error(
+                "compact weight ancestry attempt is invalid"
+            )
+        scope = (str(attempt.get("job_id") or ""), str(attempt.get("purpose") or ""))
+        if scope not in direct_scopes:
+            continue
+        attempt_hash = str(attempt.get("attempt_hash") or "")
+        normalized = dict(attempt)
+        if attempt_hash in attempts and attempts[attempt_hash] != normalized:
+            raise AttestedWeightInputsV2Error(
+                "compact weight ancestry attempt hash conflicts"
+            )
+        attempts[attempt_hash] = normalized
+    return {
+        "upstream_ancestry_proofs": proofs,
+        "upstream_transport_attempts": [
+            attempts[attempt_hash] for attempt_hash in sorted(attempts)
+        ],
+    }
+
+
 async def build_gateway_weight_inputs_v2(
     *,
     calculation_snapshot: Mapping[str, Any],
@@ -273,9 +379,15 @@ async def build_gateway_weight_inputs_v2(
         raise AttestedWeightInputsV2Error(
             "gateway V2 weight input categories are incomplete"
         )
+    compact = _compact_weight_ancestry(
+        executions=executions,
+        input_receipt_hashes=input_hashes,
+        receipt_set=receipt_set,
+    )
     return {
         "input_receipt_hashes": input_hashes,
         "gateway_authority_event_hash": allocation_hash,
         "upstream_receipt_set": receipt_set,
+        "compact_ancestry": compact,
         "executions": executions,
     }

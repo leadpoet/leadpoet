@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Optional
 
-from leadpoet_canonical.attested_v2 import build_receipt_graph, sha256_json
+from leadpoet_canonical.attested_v2 import (
+    build_receipt_graph,
+    sha256_json,
+    validate_signed_execution_receipt,
+)
+from leadpoet_canonical.compact_weight_authority_v2 import (
+    COMPACT_WEIGHT_SUBMISSION_SCHEMA_VERSION,
+    validate_compact_weight_submission_shape_v2,
+)
 from leadpoet_canonical.weight_authority_v2 import (
     build_published_weight_bundle_v2,
     validate_published_weight_bundle_v2,
@@ -37,6 +45,113 @@ _EPOCH_SNAPSHOT_FIELDS = {
 
 class HostWeightAuthorityV2Error(RuntimeError):
     """An enclave response cannot form the authoritative published graph."""
+
+
+def build_compact_weight_submission_v2(
+    *,
+    enclave_response: Mapping[str, Any],
+    validator_hotkey: str,
+    binding_message: str,
+    binding_signature_result: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Build the bounded request the gateway expands into the V2 bundle.
+
+    Every field is either enclave signed, hotkey signed, or committed by the
+    enclave ancestry hash.  The gateway remains responsible for loading the
+    immutable full predecessor graphs and validating the reconstructed legacy
+    bundle before durable publication.
+    """
+
+    required = {
+        "weight_snapshot",
+        "weight_result",
+        "weights_signature",
+        "receipt_graph_delta",
+        "upstream_ancestry_proofs",
+        "upstream_transport_attempts",
+        "ancestry_commitment",
+        "boot_identity",
+        "weight_authorization_id",
+        "source_artifacts",
+    }
+    optional_epoch_fields = {"epoch_authority", "epoch_boundary"}
+    response_fields = (
+        set(enclave_response) if isinstance(enclave_response, Mapping) else set()
+    )
+    if response_fields not in (required, required | optional_epoch_fields):
+        raise HostWeightAuthorityV2Error(
+            "compact authoritative enclave response fields are invalid"
+        )
+    delta = enclave_response.get("receipt_graph_delta")
+    binding_receipt = binding_signature_result.get("receipt")
+    validator_ancestry_proof = binding_signature_result.get(
+        "validator_ancestry_proof"
+    )
+    if not isinstance(delta, Mapping) or not isinstance(
+        binding_receipt, Mapping
+    ) or not isinstance(validator_ancestry_proof, Mapping):
+        raise HostWeightAuthorityV2Error(
+            "compact authoritative receipt evidence is incomplete"
+        )
+    validate_signed_execution_receipt(binding_receipt)
+    computed_root = str(delta.get("root_receipt_hash") or "")
+    if binding_receipt.get("parent_receipt_hashes") != [computed_root]:
+        raise HostWeightAuthorityV2Error(
+            "compact authoritative binding does not bind computed weights"
+        )
+    if (
+        binding_signature_result.get("purpose")
+        != "validator.gateway_binding.v2"
+        or binding_signature_result.get("validator_hotkey") != validator_hotkey
+    ):
+        raise HostWeightAuthorityV2Error(
+            "compact authoritative binding result has the wrong domain"
+        )
+    commitment = str(enclave_response.get("ancestry_commitment") or "")
+    if not commitment.startswith("sha256:") or len(commitment) != 71:
+        raise HostWeightAuthorityV2Error(
+            "compact authoritative ancestry commitment is invalid"
+        )
+    body = {
+        "schema_version": COMPACT_WEIGHT_SUBMISSION_SCHEMA_VERSION,
+        "validator_hotkey": str(validator_hotkey),
+        "binding_message": str(binding_message),
+        "validator_hotkey_signature": str(
+            binding_signature_result["signature"]
+        ),
+        "weight_snapshot": dict(enclave_response["weight_snapshot"]),
+        "weight_result": dict(enclave_response["weight_result"]),
+        "weights_signature": str(enclave_response["weights_signature"]),
+        "ancestry_commitment": commitment,
+        "upstream_ancestry_proofs": {
+            str(category): dict(proof)
+            for category, proof in dict(
+                enclave_response["upstream_ancestry_proofs"]
+            ).items()
+        },
+        "upstream_transport_attempts": [
+            dict(item)
+            for item in enclave_response["upstream_transport_attempts"]
+        ],
+        "validator_receipt_delta": dict(delta),
+        "binding_receipt": dict(binding_receipt),
+        "validator_ancestry_proof": dict(validator_ancestry_proof),
+        "epoch_authority": (
+            dict(enclave_response["epoch_authority"])
+            if isinstance(enclave_response.get("epoch_authority"), Mapping)
+            else None
+        ),
+        "epoch_boundary": (
+            dict(enclave_response["epoch_boundary"])
+            if isinstance(enclave_response.get("epoch_boundary"), Mapping)
+            else None
+        ),
+    }
+    submission = {
+        **body,
+        "compact_submission_hash": sha256_json(body),
+    }
+    return validate_compact_weight_submission_shape_v2(submission)
 
 
 def build_authoritative_weight_bundle_v2(

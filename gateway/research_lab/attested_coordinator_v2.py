@@ -26,6 +26,7 @@ async def execute_coordinator_v2(
     sequence: int,
     payload: Mapping[str, Any],
     parent_graphs: Sequence[Mapping[str, Any]] = (),
+    parent_ancestry_proofs: Sequence[Mapping[str, Any]] = (),
     allowed_failed_parent_receipt_hashes: Iterable[str] = (),
     input_artifact_hashes: Iterable[str] = (),
     provider_credential_ref_hashes: Optional[Mapping[str, str]] = None,
@@ -42,6 +43,8 @@ async def execute_coordinator_v2(
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
     persist_graph: Any = None,
+    load_ancestry_proofs: Any = None,
+    persist_ancestry_checkpoint: Any = None,
     boot_verifier: Any = None,
 ) -> dict[str, Any]:
     if provider_profile_loader is None:
@@ -54,6 +57,7 @@ async def execute_coordinator_v2(
         payload=payload,
         worker_index=0,
         parent_graphs=parent_graphs,
+        parent_ancestry_proofs=parent_ancestry_proofs,
         allowed_failed_parent_receipt_hashes=allowed_failed_parent_receipt_hashes,
         input_artifact_hashes=input_artifact_hashes,
         provider_credential_ref_hashes=provider_credential_ref_hashes,
@@ -74,6 +78,8 @@ async def execute_coordinator_v2(
         timeout_seconds=timeout_seconds,
         poll_seconds=poll_seconds,
         persist_graph=persist_graph,
+        load_ancestry_proofs=load_ancestry_proofs,
+        persist_ancestry_checkpoint=persist_ancestry_checkpoint,
         boot_verifier=boot_verifier,
         operation_registry=COORDINATOR_OPERATIONS_V2,
         physical_role_override="gateway_coordinator",

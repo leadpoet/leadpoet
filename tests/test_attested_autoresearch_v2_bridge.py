@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -8,10 +9,15 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from gateway.research_lab.attested_autoresearch_v2 import (
     AttestedAutoresearchV2Error,
+    derive_autoresearch_job_id_v2,
     execute_autoresearch_v2,
 )
 from gateway.tee.autoresearch_executor_v2 import AUTORESEARCH_OPERATIONS_V2
-from gateway.tee.execution_job_manager_v2 import ExecutionJobManagerV2
+from gateway.tee.execution_job_manager_v2 import (
+    ExecutionJobManagerV2,
+    PARENT_ANCESTRY_PROOFS_FIELD,
+    PARENT_RECEIPT_GRAPHS_FIELD,
+)
 from gateway.tee.host_operation_channel_v2 import HostOperationChannelV2
 from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
@@ -29,6 +35,20 @@ from leadpoet_canonical.attested_v2 import (
     EMPTY_TRANSPORT_ROOT,
     sha256_json,
     validate_receipt_graph,
+)
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    ANCESTRY_DELTA_SCHEMA_VERSION,
+    build_compact_ancestry_proof_from_delta_v2,
+    issue_ancestry_certificate_v2,
+    validate_compact_ancestry_proof_v2,
+)
+
+
+_ANCESTRY_LINEAGE_ID = "sha256:" + "6" * 64
+_ANCESTRY_ISSUER_ROLES = (
+    "gateway_autoresearch",
+    "gateway_coordinator",
+    "gateway_scoring",
 )
 
 
@@ -70,7 +90,7 @@ def _release():
     )
 
 
-def _nested_scoring_graph():
+def _nested_scoring_authority():
     key = Ed25519PrivateKey.generate()
     pubkey = key.public_key().public_bytes(
         serialization.Encoding.Raw,
@@ -120,13 +140,44 @@ def _nested_scoring_graph():
         enclave_pubkey=pubkey,
         sign_digest=key.sign,
     )
-    return build_receipt_graph(
+    graph = build_receipt_graph(
         root_receipt_hash=receipt["receipt_hash"],
         boot_identities=(boot,),
         receipts=(receipt,),
         transport_attempts=(),
         host_operations=(),
     )
+    local_delta = {
+        "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+        "root_receipt_hash": receipt["receipt_hash"],
+        "boot_identities": [boot],
+        "receipts": [receipt],
+        "transport_attempts": [],
+        "host_operations": [],
+    }
+    certificate = issue_ancestry_certificate_v2(
+        local_delta=local_delta,
+        lineage_id=_ANCESTRY_LINEAGE_ID,
+        certificate_sequence=0,
+        issuer_boot_identity=boot,
+        issued_at="2026-07-10T00:00:00Z",
+        sign_digest=key.sign,
+        boot_attestation_verifier=lambda identity: identity,
+        allowed_issuer_roles=_ANCESTRY_ISSUER_ROLES,
+        required_purposes=("research_lab.candidate_test.v2",),
+    )
+    proof = build_compact_ancestry_proof_from_delta_v2(
+        local_delta,
+        certificate,
+        expected_lineage_id=_ANCESTRY_LINEAGE_ID,
+        boot_attestation_verifier=lambda identity: identity,
+        allowed_issuer_roles=_ANCESTRY_ISSUER_ROLES,
+    )
+    return graph, proof
+
+
+def _nested_scoring_graph():
+    return _nested_scoring_authority()[0]
 
 
 class _Client:
@@ -187,7 +238,11 @@ class _Client:
                 sign_digest=self.key.sign,
                 allowed_operations={"echo_state"},
             ),
+            ancestry_lineage_id=_ANCESTRY_LINEAGE_ID,
+            ancestry_boot_attestation_verifier=lambda identity: identity,
+            ancestry_allowed_issuer_roles=_ANCESTRY_ISSUER_ROLES,
         )
+        self.uploaded_payloads = {}
 
     async def autoresearch_v2_health(self):
         return self.manager.health()
@@ -201,6 +256,9 @@ class _Client:
     async def autoresearch_v2_put_chunk(self, *, job_id, offset, data):
         from leadpoet_canonical.attested_v2 import sha256_bytes
 
+        payload = self.uploaded_payloads.setdefault(job_id, bytearray())
+        assert len(payload) == offset
+        payload.extend(data)
         return self.manager.put_chunk(
             job_id=job_id,
             offset=offset,
@@ -244,8 +302,41 @@ class _Client:
     async def autoresearch_v2_get_external_receipt_graphs(self, job_id):
         return list(self.manager.external_receipt_graphs(job_id))
 
+    async def autoresearch_v2_get_ancestry_compact_proof(self, job_id):
+        return dict(self.manager.ancestry_compact_proof(job_id))
+
     async def autoresearch_v2_get_transitions(self, job_id):
         return list(self.manager.transitions(job_id))
+
+
+class _TamperedHostEvidenceClient(_Client):
+    async def autoresearch_v2_get_host_operations(self, job_id):
+        rows = await super().autoresearch_v2_get_host_operations(job_id)
+        rows[0]["terminal"]["response_hash"] = _hash("0")
+        return rows
+
+
+class _SubmitProbeClient(_Client):
+    async def autoresearch_v2_submit_job(self, manifest):
+        self.submitted_manifest = dict(manifest)
+        raise RuntimeError("submitted")
+
+
+async def _persist_checkpoint(proof, **kwargs):
+    checkpointed_graph = kwargs.pop("checkpointed_graph")
+    normalized = validate_compact_ancestry_proof_v2(proof, **kwargs)
+    certificate = normalized["certificate"]
+    claim = certificate["claim"]
+    assert checkpointed_graph["root_receipt_hash"] == claim["output_root_receipt_hash"]
+    assert any(
+        item["receipt_hash"] == claim["output_root_receipt_hash"]
+        for item in checkpointed_graph["receipts"]
+    )
+    return {
+        "root_receipt_hash": claim["output_root_receipt_hash"],
+        "certificate_hash": certificate["certificate_hash"],
+        "proof_hash": normalized["proof_hash"],
+    }
 
 
 @pytest.mark.asyncio
@@ -271,6 +362,8 @@ async def test_autoresearch_bridge_dispatches_signed_host_op_and_persists_full_c
         release_manifest=release,
         client=client,
         persist_graph=persist,
+        persist_ancestry_checkpoint=_persist_checkpoint,
+        ancestry_lineage_id=_ANCESTRY_LINEAGE_ID,
         boot_verifier=lambda identity: identity,
         poll_seconds=0.001,
     )
@@ -302,6 +395,8 @@ async def test_autoresearch_bridge_merges_nested_scoring_graph_into_root_ancestr
         release_manifest=release,
         client=client,
         persist_graph=persist,
+        persist_ancestry_checkpoint=_persist_checkpoint,
+        ancestry_lineage_id=_ANCESTRY_LINEAGE_ID,
         boot_verifier=lambda identity: identity,
         poll_seconds=0.001,
     )
@@ -321,6 +416,302 @@ async def test_autoresearch_bridge_merges_nested_scoring_graph_into_root_ancestr
         if item["receipt_hash"] == graph["root_receipt_hash"]
     )
     assert nested_root in root["parent_receipt_hashes"]
+
+
+@pytest.mark.asyncio
+async def test_autoresearch_bridge_transports_and_persists_bounded_checkpoint_graph():
+    release = _release()
+    nested, nested_proof = _nested_scoring_authority()
+    client = _Client(release)
+    persisted = []
+
+    async def persist(graph):
+        persisted.append(dict(graph))
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    async def no_loader(*_args, **_kwargs):
+        raise AssertionError("explicit compact proof must not reload storage")
+
+    result = await execute_autoresearch_v2(
+        operation="run_code_edit_loop",
+        purpose="research_lab.candidate_decision.v2",
+        epoch_id=12,
+        sequence=0,
+        payload={"value": 7},
+        host_operation_handlers={
+            "echo_state": lambda payload, _request: {"value": payload["value"]}
+        },
+        parent_graphs=(nested,),
+        parent_ancestry_proofs=(nested_proof,),
+        release_manifest=release,
+        client=client,
+        persist_graph=persist,
+        load_ancestry_proofs=no_loader,
+        persist_ancestry_checkpoint=_persist_checkpoint,
+        ancestry_lineage_id=_ANCESTRY_LINEAGE_ID,
+        boot_verifier=lambda identity: identity,
+        poll_seconds=0.001,
+    )
+
+    uploaded = json.loads(bytes(next(iter(client.uploaded_payloads.values()))))
+    assert PARENT_ANCESTRY_PROOFS_FIELD in uploaded
+    assert PARENT_RECEIPT_GRAPHS_FIELD not in uploaded
+    assert all(
+        item["receipt_hash"] != nested["root_receipt_hash"]
+        for item in persisted[0]["receipts"]
+    )
+    authorities = result["ancestry_compact_proof"]["certificate"]["claim"][
+        "parent_authorities"
+    ]
+    assert len(authorities) == 1
+    assert authorities[0]["authority_kind"] == "certificate"
+    assert authorities[0]["parent_receipt_hash"] == nested["root_receipt_hash"]
+
+
+@pytest.mark.asyncio
+async def test_autoresearch_job_identity_is_stable_across_parent_transport_upgrade():
+    release = _release()
+    nested, nested_proof = _nested_scoring_authority()
+
+    async def persist(graph):
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    async def no_persisted_proofs(*_args, **_kwargs):
+        return {}
+
+    common = {
+        "operation": "run_code_edit_loop",
+        "purpose": "research_lab.candidate_decision.v2",
+        "epoch_id": 12,
+        "sequence": 0,
+        "payload": {"value": 7},
+        "host_operation_handlers": {
+            "echo_state": lambda payload, _request: {"value": payload["value"]}
+        },
+        "parent_graphs": (nested,),
+        "release_manifest": release,
+        "persist_graph": persist,
+        "persist_ancestry_checkpoint": _persist_checkpoint,
+        "ancestry_lineage_id": _ANCESTRY_LINEAGE_ID,
+        "boot_verifier": lambda identity: identity,
+        "poll_seconds": 0.001,
+    }
+    bootstrap_client = _Client(release)
+    bootstrap = await execute_autoresearch_v2(
+        **common,
+        client=bootstrap_client,
+        load_ancestry_proofs=no_persisted_proofs,
+    )
+    compact_client = _Client(release)
+    compact = await execute_autoresearch_v2(
+        **common,
+        client=compact_client,
+        parent_ancestry_proofs=(nested_proof,),
+    )
+
+    bootstrap_payload = json.loads(
+        bytes(next(iter(bootstrap_client.uploaded_payloads.values())))
+    )
+    compact_payload = json.loads(
+        bytes(next(iter(compact_client.uploaded_payloads.values())))
+    )
+    assert PARENT_RECEIPT_GRAPHS_FIELD in bootstrap_payload
+    assert PARENT_ANCESTRY_PROOFS_FIELD not in bootstrap_payload
+    assert PARENT_ANCESTRY_PROOFS_FIELD in compact_payload
+    assert PARENT_RECEIPT_GRAPHS_FIELD not in compact_payload
+    assert bootstrap["receipt"]["job_id"] == compact["receipt"]["job_id"]
+    assert bootstrap["receipt"]["input_root"] != compact["receipt"]["input_root"]
+    assert bootstrap["receipt"]["job_id"] == derive_autoresearch_job_id_v2(
+        operation="run_code_edit_loop",
+        purpose="research_lab.candidate_decision.v2",
+        epoch_id=12,
+        sequence=0,
+        payload_sha256=sha256_json({"value": 7}),
+        parent_receipt_hashes=(nested["root_receipt_hash"],),
+        input_artifact_hashes=(),
+        release_hash=release["release_hash"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_autoresearch_bridge_prefers_exact_persisted_parent_checkpoint():
+    release = _release()
+    nested, nested_proof = _nested_scoring_authority()
+    client = _Client(release)
+    loaded_roots = []
+
+    async def load(roots, **_kwargs):
+        loaded_roots.extend(roots)
+        return {nested["root_receipt_hash"]: nested_proof}
+
+    async def persist(graph):
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    await execute_autoresearch_v2(
+        operation="run_code_edit_loop",
+        purpose="research_lab.candidate_decision.v2",
+        epoch_id=12,
+        sequence=0,
+        payload={"value": 7},
+        host_operation_handlers={
+            "echo_state": lambda payload, _request: {"value": payload["value"]}
+        },
+        parent_graphs=(nested,),
+        release_manifest=release,
+        client=client,
+        persist_graph=persist,
+        load_ancestry_proofs=load,
+        persist_ancestry_checkpoint=_persist_checkpoint,
+        ancestry_lineage_id=_ANCESTRY_LINEAGE_ID,
+        boot_verifier=lambda identity: identity,
+        poll_seconds=0.001,
+    )
+    uploaded = json.loads(bytes(next(iter(client.uploaded_payloads.values()))))
+    assert loaded_roots == [nested["root_receipt_hash"]]
+    assert PARENT_ANCESTRY_PROOFS_FIELD in uploaded
+    assert PARENT_RECEIPT_GRAPHS_FIELD not in uploaded
+
+
+@pytest.mark.asyncio
+async def test_autoresearch_bridge_persists_graph_before_checkpoint_and_fails_closed():
+    release = _release()
+    client = _Client(release)
+    order = []
+
+    async def persist(graph):
+        order.append(("graph", graph["root_receipt_hash"]))
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    async def fail_checkpoint(proof, **_kwargs):
+        assert _kwargs["checkpointed_graph"]["root_receipt_hash"] == (
+            _proof_root_for_test(proof)
+        )
+        order.append(("checkpoint", _proof_root_for_test(proof)))
+        raise RuntimeError("sidecar unavailable")
+
+    with pytest.raises(RuntimeError, match="sidecar unavailable"):
+        await execute_autoresearch_v2(
+            operation="run_code_edit_loop",
+            purpose="research_lab.candidate_decision.v2",
+            epoch_id=12,
+            sequence=0,
+            payload={"value": 7},
+            host_operation_handlers={
+                "echo_state": lambda payload, _request: {
+                    "value": payload["value"]
+                }
+            },
+            release_manifest=release,
+            client=client,
+            persist_graph=persist,
+            persist_ancestry_checkpoint=fail_checkpoint,
+            ancestry_lineage_id=_ANCESTRY_LINEAGE_ID,
+            boot_verifier=lambda identity: identity,
+            poll_seconds=0.001,
+        )
+    assert [stage for stage, _root in order] == ["graph", "checkpoint"]
+
+
+def _proof_root_for_test(proof):
+    return proof["certificate"]["claim"]["output_root_receipt_hash"]
+
+
+@pytest.mark.asyncio
+async def test_autoresearch_bridge_rejects_reserved_compact_authority_payload():
+    release = _release()
+    client = _Client(release)
+    with pytest.raises(AttestedAutoresearchV2Error, match="reserved"):
+        await execute_autoresearch_v2(
+            operation="run_code_edit_loop",
+            purpose="research_lab.candidate_decision.v2",
+            epoch_id=12,
+            sequence=0,
+            payload={
+                "value": 7,
+                PARENT_ANCESTRY_PROOFS_FIELD: [],
+            },
+            host_operation_handlers={},
+            release_manifest=release,
+            client=client,
+            persist_graph=lambda graph: graph,
+            persist_ancestry_checkpoint=_persist_checkpoint,
+            ancestry_lineage_id=_ANCESTRY_LINEAGE_ID,
+            boot_verifier=lambda identity: identity,
+            poll_seconds=0.001,
+        )
+
+
+@pytest.mark.asyncio
+async def test_autoresearch_bridge_rejects_host_evidence_omitted_from_transport_proof():
+    release = _release()
+    client = _TamperedHostEvidenceClient(release)
+    persisted = []
+
+    async def persist(graph):
+        persisted.append(graph)
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    with pytest.raises(Exception, match="host|delta|commitment"):
+        await execute_autoresearch_v2(
+            operation="run_code_edit_loop",
+            purpose="research_lab.candidate_decision.v2",
+            epoch_id=12,
+            sequence=0,
+            payload={"value": 7},
+            host_operation_handlers={
+                "echo_state": lambda payload, _request: {
+                    "value": payload["value"]
+                }
+            },
+            release_manifest=release,
+            client=client,
+            persist_graph=persist,
+            persist_ancestry_checkpoint=_persist_checkpoint,
+            ancestry_lineage_id=_ANCESTRY_LINEAGE_ID,
+            boot_verifier=lambda identity: identity,
+            poll_seconds=0.001,
+        )
+    assert persisted == []
+
+
+@pytest.mark.asyncio
+async def test_autoresearch_bridge_binds_stale_parent_profile_to_repair_operation():
+    release = _release()
+    accepted = _SubmitProbeClient(release)
+    with pytest.raises(RuntimeError, match="submitted"):
+        await execute_autoresearch_v2(
+            operation="repair_stale_parent",
+            purpose="research_lab.stale_parent_repair.v2",
+            epoch_id=12,
+            sequence=0,
+            payload={"value": 7},
+            host_operation_handlers={},
+            provider_credential_profile="stale_parent_repair",
+            release_manifest=release,
+            client=accepted,
+            ancestry_lineage_id=_ANCESTRY_LINEAGE_ID,
+            boot_verifier=lambda identity: identity,
+        )
+    assert accepted.submitted_manifest["provider_credential_profile"] == (
+        "stale_parent_repair"
+    )
+
+    rejected = _SubmitProbeClient(release)
+    with pytest.raises(AttestedAutoresearchV2Error, match="differs from operation"):
+        await execute_autoresearch_v2(
+            operation="repair_stale_parent",
+            purpose="research_lab.stale_parent_repair.v2",
+            epoch_id=12,
+            sequence=0,
+            payload={"value": 7},
+            host_operation_handlers={},
+            provider_credential_profile="default",
+            release_manifest=release,
+            client=rejected,
+            ancestry_lineage_id=_ANCESTRY_LINEAGE_ID,
+            boot_verifier=lambda identity: identity,
+        )
+    assert not hasattr(rejected, "submitted_manifest")
 
 
 @pytest.mark.asyncio
@@ -349,6 +740,8 @@ async def test_autoresearch_bridge_fails_closed_when_host_handler_is_missing():
             release_manifest=release,
             client=client,
             persist_graph=persist,
+            persist_ancestry_checkpoint=_persist_checkpoint,
+            ancestry_lineage_id=_ANCESTRY_LINEAGE_ID,
             boot_verifier=lambda identity: identity,
             poll_seconds=0.001,
         )

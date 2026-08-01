@@ -21,6 +21,9 @@ from leadpoet_canonical.attested_v2 import sha256_json
 from leadpoet_canonical.hotkey_authority_v2 import (
     validate_weight_extrinsic_authorization_v2,
 )
+from leadpoet_canonical.compact_weight_authority_v2 import (
+    validate_compact_weight_submission_shape_v2,
+)
 from leadpoet_canonical.weight_authority_v2 import (
     validate_published_weight_bundle_v2,
 )
@@ -36,6 +39,9 @@ EPOCH_EVIDENCE_JOURNAL_SCHEMA_VERSION = (
     "leadpoet.validator_weight_publication_journal.v3"
 )
 JOURNAL_SCHEMA_VERSION = "leadpoet.validator_weight_publication_journal.v4"
+COMPACT_JOURNAL_SCHEMA_VERSION = (
+    "leadpoet.validator_weight_publication_journal.v5"
+)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _EXTRINSIC_HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _SIGNATURE_RE = re.compile(r"^[0-9a-f]{128}$")
@@ -102,6 +108,14 @@ def validate_publication_journal_v2(
     *,
     chain_profile: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
+    if (
+        isinstance(value, Mapping)
+        and value.get("schema_version") == COMPACT_JOURNAL_SCHEMA_VERSION
+    ):
+        return _validate_compact_publication_journal_v2(
+            value,
+            chain_profile=chain_profile,
+        )
     base_fields = {
         "schema_version",
         "state",
@@ -267,6 +281,151 @@ def validate_publication_journal_v2(
     }
 
 
+def _validate_compact_publication_journal_v2(
+    value: Mapping[str, Any],
+    *,
+    chain_profile: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    fields = {
+        "schema_version",
+        "state",
+        "revision",
+        "weight_authorization_id",
+        "compact_submission",
+        "publication",
+        "extrinsic_signature_results",
+        "finalization_scan_generation",
+        "finalization_scan_id",
+        "updated_at",
+        "journal_hash",
+    }
+    if set(value) != fields:
+        raise WeightPublicationJournalV2Error(
+            "compact publication journal fields are invalid"
+        )
+    if value.get("state") not in {"prepared", "published", "signed"}:
+        raise WeightPublicationJournalV2Error(
+            "compact publication journal state is invalid"
+        )
+    revision = value.get("revision")
+    scan_generation = value.get("finalization_scan_generation")
+    scan_id = value.get("finalization_scan_id")
+    if (
+        not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 0
+        or not isinstance(scan_generation, int)
+        or isinstance(scan_generation, bool)
+        or scan_generation < 0
+        or (scan_id is not None and not _HASH_RE.fullmatch(str(scan_id)))
+        or (scan_generation == 0 and scan_id is not None)
+        or (scan_generation > 0 and scan_id is None)
+    ):
+        raise WeightPublicationJournalV2Error(
+            "compact publication journal counters are invalid"
+        )
+    authorization_id = str(value.get("weight_authorization_id") or "").lower()
+    if not _HASH_RE.fullmatch(authorization_id):
+        raise WeightPublicationJournalV2Error(
+            "compact publication authorization id is invalid"
+        )
+    try:
+        compact = validate_compact_weight_submission_shape_v2(
+            value.get("compact_submission")
+        )
+    except Exception as exc:
+        raise WeightPublicationJournalV2Error(
+            "compact publication authority is invalid"
+        ) from exc
+    result = compact["weight_result"]
+    weight_receipt_hash = str(
+        compact["validator_receipt_delta"]["root_receipt_hash"]
+    )
+    publication = value.get("publication")
+    signatures = value.get("extrinsic_signature_results")
+    if not isinstance(signatures, list):
+        raise WeightPublicationJournalV2Error(
+            "compact publication signatures are invalid"
+        )
+    if publication is None:
+        if value["state"] != "prepared" or signatures:
+            raise WeightPublicationJournalV2Error(
+                "unpublished compact journal contains chain state"
+            )
+        event_hash = None
+    else:
+        if not isinstance(publication, Mapping):
+            raise WeightPublicationJournalV2Error(
+                "compact publication acknowledgment is invalid"
+            )
+        expected_publication_fields = {
+            "success",
+            "epoch_id",
+            "weights_count",
+            "weights_hash",
+            "weight_receipt_hash",
+            "weight_submission_event_hash",
+            "message",
+        }
+        event_hash = str(publication.get("weight_submission_event_hash") or "")
+        if (
+            set(publication) != expected_publication_fields
+            or publication.get("success") is not True
+            or int(publication.get("epoch_id", -1))
+            != int(result["epoch_id"])
+            or int(publication.get("weights_count", -1))
+            != len(result["sparse_uids"])
+            or publication.get("weights_hash") != result["weights_hash"]
+            or publication.get("weight_receipt_hash") != weight_receipt_hash
+            or not _HASH_RE.fullmatch(event_hash)
+        ):
+            raise WeightPublicationJournalV2Error(
+                "compact publication acknowledgment is invalid"
+            )
+        expected_state = "signed" if signatures else "published"
+        if value["state"] != expected_state:
+            raise WeightPublicationJournalV2Error(
+                "compact publication state differs from chain evidence"
+            )
+    profile = chain_profile or load_chain_signing_profile()
+    normalized_signatures = []
+    seen_authorizations = set()
+    seen_extrinsics = set()
+    for item in signatures:
+        normalized = _validate_signature_result(
+            item,
+            bundle=compact,
+            event_hash=str(event_hash),
+            weight_receipt_hash=weight_receipt_hash,
+            chain_profile=profile,
+        )
+        if (
+            normalized["authorization_hash"] in seen_authorizations
+            or normalized["extrinsic_hash"] in seen_extrinsics
+        ):
+            raise WeightPublicationJournalV2Error(
+                "compact journal contains duplicate signed extrinsics"
+            )
+        seen_authorizations.add(normalized["authorization_hash"])
+        seen_extrinsics.add(normalized["extrinsic_hash"])
+        normalized_signatures.append(normalized)
+    body = {key: value[key] for key in fields if key != "journal_hash"}
+    if value.get("journal_hash") != sha256_json(body):
+        raise WeightPublicationJournalV2Error(
+            "compact publication journal hash is invalid"
+        )
+    return {
+        **body,
+        "weight_authorization_id": authorization_id,
+        "compact_submission": compact,
+        "publication": (
+            dict(publication) if isinstance(publication, Mapping) else None
+        ),
+        "extrinsic_signature_results": normalized_signatures,
+        "journal_hash": value["journal_hash"],
+    }
+
+
 class AuthoritativeWeightPublicationJournalV2:
     """Atomically retain exactly one unfinished V2 publication."""
 
@@ -295,32 +454,65 @@ class AuthoritativeWeightPublicationJournalV2:
             )
 
     def record_prepared(self, prepared: Mapping[str, Any]) -> Dict[str, Any]:
-        required = {"weight_authorization_id", "published_bundle"}
-        if not isinstance(prepared, Mapping) or not required <= set(prepared):
+        has_bundle = isinstance(
+            prepared.get("published_bundle")
+            if isinstance(prepared, Mapping)
+            else None,
+            Mapping,
+        )
+        has_compact = isinstance(
+            prepared.get("compact_submission")
+            if isinstance(prepared, Mapping)
+            else None,
+            Mapping,
+        )
+        if (
+            not isinstance(prepared, Mapping)
+            or "weight_authorization_id" not in prepared
+            or has_bundle == has_compact
+        ):
             raise WeightPublicationJournalV2Error(
                 "prepared publication journal input is incomplete"
             )
         with self._lock:
             existing = self.load()
-            body = {
-                "schema_version": JOURNAL_SCHEMA_VERSION,
-                "state": "prepared",
-                "revision": 0,
-                "weight_authorization_id": str(
-                    prepared["weight_authorization_id"]
-                ),
-                "published_bundle": dict(prepared["published_bundle"]),
-                "epoch_evidence": (
-                    dict(prepared["epoch_evidence"])
-                    if isinstance(prepared.get("epoch_evidence"), Mapping)
-                    else None
-                ),
-                "finalization_scan_generation": 0,
-                "finalization_scan_id": None,
-                "publication": None,
-                "extrinsic_signature_results": [],
-                "updated_at": _timestamp(),
-            }
+            if has_compact:
+                body = {
+                    "schema_version": COMPACT_JOURNAL_SCHEMA_VERSION,
+                    "state": "prepared",
+                    "revision": 0,
+                    "weight_authorization_id": str(
+                        prepared["weight_authorization_id"]
+                    ),
+                    "compact_submission": dict(
+                        prepared["compact_submission"]
+                    ),
+                    "finalization_scan_generation": 0,
+                    "finalization_scan_id": None,
+                    "publication": None,
+                    "extrinsic_signature_results": [],
+                    "updated_at": _timestamp(),
+                }
+            else:
+                body = {
+                    "schema_version": JOURNAL_SCHEMA_VERSION,
+                    "state": "prepared",
+                    "revision": 0,
+                    "weight_authorization_id": str(
+                        prepared["weight_authorization_id"]
+                    ),
+                    "published_bundle": dict(prepared["published_bundle"]),
+                    "epoch_evidence": (
+                        dict(prepared["epoch_evidence"])
+                        if isinstance(prepared.get("epoch_evidence"), Mapping)
+                        else None
+                    ),
+                    "finalization_scan_generation": 0,
+                    "finalization_scan_id": None,
+                    "publication": None,
+                    "extrinsic_signature_results": [],
+                    "updated_at": _timestamp(),
+                }
             candidate = {**body, "journal_hash": sha256_json(body)}
             validated = validate_publication_journal_v2(
                 candidate, chain_profile=self._chain_profile
@@ -329,8 +521,10 @@ class AuthoritativeWeightPublicationJournalV2:
                 if (
                     existing["weight_authorization_id"]
                     == validated["weight_authorization_id"]
-                    and existing["published_bundle"]
-                    == validated["published_bundle"]
+                    and existing.get("published_bundle")
+                    == validated.get("published_bundle")
+                    and existing.get("compact_submission")
+                    == validated.get("compact_submission")
                 ):
                     return existing
                 raise WeightPublicationJournalV2Error(
@@ -418,13 +612,15 @@ class AuthoritativeWeightPublicationJournalV2:
                     "prior_journal_hash": current["journal_hash"],
                 }
             )
-            updated = self._replace(
-                current,
-                schema_version=JOURNAL_SCHEMA_VERSION,
-                epoch_evidence=current.get("epoch_evidence"),
-                finalization_scan_generation=generation,
-                finalization_scan_id=scan_id,
-            )
+            changes = {
+                "schema_version": current["schema_version"],
+                "finalization_scan_generation": generation,
+                "finalization_scan_id": scan_id,
+            }
+            if current["schema_version"] != COMPACT_JOURNAL_SCHEMA_VERSION:
+                changes["schema_version"] = JOURNAL_SCHEMA_VERSION
+                changes["epoch_evidence"] = current.get("epoch_evidence")
+            updated = self._replace(current, **changes)
             if updated["finalization_scan_id"] != scan_id:
                 raise WeightPublicationJournalV2Error(
                     "finalization scan reservation did not persist"
@@ -472,7 +668,14 @@ class AuthoritativeWeightPublicationJournalV2:
                 raise WeightPublicationJournalV2Error(
                     "cannot quarantine a missing publication journal"
                 )
-            epoch_id = int(current["published_bundle"]["weight_result"]["epoch_id"])
+            authority = current.get("published_bundle") or current.get(
+                "compact_submission"
+            )
+            if not isinstance(authority, Mapping):
+                raise WeightPublicationJournalV2Error(
+                    "publication journal authority is unavailable"
+                )
+            epoch_id = int(authority["weight_result"]["epoch_id"])
             if epoch_id != int(expected_epoch):
                 raise WeightPublicationJournalV2Error(
                     "refusing to quarantine another publication epoch"

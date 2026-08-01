@@ -635,6 +635,11 @@ class TEEClient:
     async def scoring_v2_get_receipts(self, job_id: str) -> List[Dict]:
         return await self._send_rpc("scoring_v2_get_receipts", {"job_id": job_id})
 
+    async def scoring_v2_get_ancestry_compact_proof(self, job_id: str) -> Dict:
+        return await self._send_rpc(
+            "scoring_v2_get_ancestry_compact_proof", {"job_id": job_id}
+        )
+
     async def scoring_v2_get_transitions(self, job_id: str) -> List[Dict]:
         return await self._send_rpc("scoring_v2_get_transitions", {"job_id": job_id})
 
@@ -706,6 +711,13 @@ class TEEClient:
     async def coordinator_v2_get_receipts(self, job_id: str) -> List[Dict]:
         return await self._send_rpc(
             "coordinator_v2_get_receipts", {"job_id": job_id}
+        )
+
+    async def coordinator_v2_get_ancestry_compact_proof(
+        self, job_id: str
+    ) -> Dict:
+        return await self._send_rpc(
+            "coordinator_v2_get_ancestry_compact_proof", {"job_id": job_id}
         )
 
     async def coordinator_v2_get_transitions(self, job_id: str) -> List[Dict]:
@@ -789,6 +801,13 @@ class TEEClient:
     async def autoresearch_v2_get_receipts(self, job_id: str) -> List[Dict]:
         return await self._send_rpc(
             "autoresearch_v2_get_receipts", {"job_id": job_id}
+        )
+
+    async def autoresearch_v2_get_ancestry_compact_proof(
+        self, job_id: str
+    ) -> Dict:
+        return await self._send_rpc(
+            "autoresearch_v2_get_ancestry_compact_proof", {"job_id": job_id}
         )
 
     async def autoresearch_v2_get_transitions(self, job_id: str) -> List[Dict]:

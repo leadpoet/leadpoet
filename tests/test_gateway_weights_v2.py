@@ -1,6 +1,7 @@
 import asyncio
 import gzip
 import json
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -27,13 +28,21 @@ DURABLE_HASH = "sha256:" + "e" * 64
 EVENT_HASH = "sha256:" + "f" * 64
 VALIDATOR_HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
 VALIDATOR_BOOT_HASH = "sha256:" + "0" * 64
+COMPACT_SUBMISSION_HASH = "sha256:" + "1" * 64
+LINEAGE_ID = "sha256:" + "2" * 64
 
 
-def _request(*, accept_encoding: str = "") -> Request:
+def _request(*, accept_encoding: str = "", query_string: bytes = b"") -> Request:
     headers = []
     if accept_encoding:
         headers.append((b"accept-encoding", accept_encoding.encode("ascii")))
-    return Request({"type": "http", "headers": headers})
+    return Request(
+        {
+            "type": "http",
+            "headers": headers,
+            "query_string": query_string,
+        }
+    )
 
 
 def _legacy_submission():
@@ -257,6 +266,362 @@ def _patch_common(monkeypatch):
     monkeypatch.setattr(weights_api, "verify_binding_message", lambda *args, **kwargs: True)
 
 
+def _compact_submission():
+    return weights_api.CompactWeightSubmissionV2(
+        schema_version="leadpoet.compact_weight_submission.v2",
+        validator_hotkey=VALIDATOR_HOTKEY,
+        binding_message="binding",
+        validator_hotkey_signature="2" * 128,
+        weight_snapshot={},
+        weight_result={},
+        weights_signature="3" * 128,
+        ancestry_commitment="sha256:" + "3" * 64,
+        upstream_ancestry_proofs={},
+        upstream_transport_attempts=[],
+        validator_receipt_delta={},
+        binding_receipt={},
+        validator_ancestry_proof={},
+        epoch_authority=None,
+        epoch_boundary=None,
+        compact_submission_hash=COMPACT_SUBMISSION_HASH,
+    )
+
+
+def _compact_normalized():
+    return {
+        "schema_version": "leadpoet.compact_weight_submission.v2",
+        "validator_hotkey": VALIDATOR_HOTKEY,
+        "weight_result": {
+            "netuid": 71,
+            "epoch_id": 300,
+            "block": 108350,
+            "uids": [0],
+            "weights_u16": [65535],
+            "weights_hash": "5" * 64,
+        },
+        "validator_ancestry_proof": {"proof": True},
+        "compact_submission_hash": COMPACT_SUBMISSION_HASH,
+    }
+
+
+def _compact_verified():
+    return {
+        "bundle_hash": BUNDLE_HASH,
+        "compact_submission_hash": COMPACT_SUBMISSION_HASH,
+        "root_receipt_hash": ROOT_RECEIPT,
+        "weight_receipt_hash": WEIGHT_RECEIPT,
+        "validator_hotkey": VALIDATOR_HOTKEY,
+        "netuid": 71,
+        "epoch_id": 300,
+        "block": 108350,
+        "uids": [0],
+        "weights_hash": "5" * 64,
+    }
+
+
+def _patch_compact_submission_route(monkeypatch, *, calls, coordinator):
+    from gateway.research_lab import attested_coordinator_v2, attested_v2_store
+    from gateway.utils import epoch as gateway_epoch
+
+    normalized = _compact_normalized()
+    verified = _compact_verified()
+    cutover = SimpleNamespace(
+        mapping_hash="sha256:" + "4" * 64,
+        network_genesis_hash="0x" + "5" * 64,
+        netuid=71,
+    )
+
+    async def validate_cutover(_cutover):
+        calls.append("cutover")
+
+    async def persist_graph(_graph):
+        calls.append("graph")
+        return {"root_receipt_hash": ROOT_RECEIPT}
+
+    async def persist_checkpoint(*_args, **_kwargs):
+        calls.append("checkpoint")
+        return {"root_receipt_hash": ROOT_RECEIPT}
+
+    async def persist_submission(_submission):
+        calls.append("submission")
+        return {
+            "bundle_hash": BUNDLE_HASH,
+            "binding_receipt_hash": ROOT_RECEIPT,
+            "durable_readback_hash": DURABLE_HASH,
+        }
+
+    monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {VALIDATOR_HOTKEY})
+    monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
+    monkeypatch.setattr(
+        weights_api,
+        "validate_compact_weight_submission_shape_v2",
+        lambda _payload: normalized,
+    )
+    monkeypatch.setattr(weights_api, "load_subnet_epoch_cutover", lambda: cutover)
+    monkeypatch.setattr(
+        gateway_epoch,
+        "validate_stateful_cutover_authority_async",
+        validate_cutover,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "validate_cutover_anchor_from_archive",
+        lambda _cutover: None,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "derive_ancestry_lineage_id_v2",
+        lambda **_kwargs: LINEAGE_ID,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "verify_compact_weight_submission_v2",
+        lambda *_args, **_kwargs: verified,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "build_checkpointed_weight_graph_from_compact_v2",
+        lambda *_args, **_kwargs: {"root_receipt_hash": ROOT_RECEIPT},
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "_verify_authoritative_v2_boot",
+        lambda identity: identity,
+    )
+    monkeypatch.setattr(attested_v2_store, "persist_receipt_graph_v2", persist_graph)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_ancestry_checkpoint_v2",
+        persist_checkpoint,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_compact_weight_submission_v2",
+        persist_submission,
+    )
+    monkeypatch.setattr(attested_coordinator_v2, "execute_coordinator_v2", coordinator)
+    monkeypatch.setattr(
+        weights_api,
+        "build_compact_published_weight_authority_v2",
+        lambda **kwargs: {
+            "authority_stage": "published",
+            "compact_submission": normalized,
+            "publication": kwargs["publication"],
+        },
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "verify_compact_published_weight_authority_v2",
+        lambda *_args, **_kwargs: verified,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "build_stateful_epoch_evidence_from_compact_v2",
+        lambda *_args, **_kwargs: None,
+    )
+    return normalized, verified
+
+
+@pytest.mark.asyncio
+async def test_compact_publication_intent_allows_exact_retry_after_window(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store
+    from gateway.utils import logger as gateway_logger
+
+    calls = []
+    intent = None
+    coordinator_attempts = 0
+
+    async def coordinator(**kwargs):
+        nonlocal coordinator_attempts
+        coordinator_attempts += 1
+        calls.append("coordinator")
+        if coordinator_attempts == 1:
+            raise TimeoutError("publication transport interrupted")
+        return {
+            "result": {
+                "schema_version": "leadpoet.weight_publication.v2",
+                **kwargs["payload"],
+            },
+            "receipt": {"receipt_hash": "sha256:" + "6" * 64},
+            "ancestry_compact_proof": {"proof_hash": "sha256:" + "7" * 64},
+        }
+
+    _patch_compact_submission_route(
+        monkeypatch,
+        calls=calls,
+        coordinator=coordinator,
+    )
+
+    async def load_authority(**_kwargs):
+        calls.append("authority_load")
+        return None
+
+    async def load_intent(**_kwargs):
+        calls.append("intent_load")
+        return intent
+
+    async def verify_epoch(**_kwargs):
+        calls.append("time_gate")
+        return {"epoch_id": 300, "submission_window": "open"}
+
+    async def log_event(_event_type, _payload):
+        calls.append("transparency")
+        return {"event_hash": EVENT_HASH}
+
+    async def persist_intent(**_kwargs):
+        nonlocal intent
+        calls.append("intent_persist")
+        intent = {
+            "bundle_hash": BUNDLE_HASH,
+            "compact_submission_hash": COMPACT_SUBMISSION_HASH,
+            "root_receipt_hash": ROOT_RECEIPT,
+            "durable_readback_hash": DURABLE_HASH,
+            "transparency_event_hash": EVENT_HASH,
+        }
+        return intent
+
+    async def persist_authority(_authority):
+        calls.append("authority_persist")
+        return {"bundle_hash": BUNDLE_HASH}
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_compact_weight_authority_v2",
+        load_authority,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_compact_weight_publication_intent_v2",
+        load_intent,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_compact_weight_publication_intent_v2",
+        persist_intent,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_compact_weight_authority_v2",
+        persist_authority,
+    )
+    monkeypatch.setattr(weights_api, "_verify_epoch_block_authority", verify_epoch)
+    monkeypatch.setattr(gateway_logger, "log_event", log_event)
+
+    with pytest.raises(HTTPException) as first:
+        await weights_api.submit_compact_weights_v2(_compact_submission())
+    assert first.value.status_code == 503
+    assert calls.count("time_gate") == 1
+    assert calls.count("intent_persist") == 1
+
+    async def stale_gate(**_kwargs):
+        raise AssertionError("durable exact retry must not reapply the time gate")
+
+    monkeypatch.setattr(weights_api, "_verify_epoch_block_authority", stale_gate)
+    response = await weights_api.submit_compact_weights_v2(_compact_submission())
+
+    assert response["bundle_hash"] == BUNDLE_HASH
+    assert response["compact_submission_hash"] == COMPACT_SUBMISSION_HASH
+    assert calls.count("time_gate") == 1
+    assert calls.count("transparency") == 1
+    assert calls.count("intent_persist") == 1
+    assert calls.count("coordinator") == 2
+    assert calls[-1] == "authority_persist"
+
+
+@pytest.mark.asyncio
+async def test_compact_publication_uses_concurrent_immutable_intent_winner(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_coordinator_v2, attested_v2_store
+    from gateway.utils import logger as gateway_logger
+
+    calls = []
+    winner = {
+        "bundle_hash": BUNDLE_HASH,
+        "compact_submission_hash": COMPACT_SUBMISSION_HASH,
+        "root_receipt_hash": ROOT_RECEIPT,
+        "durable_readback_hash": DURABLE_HASH,
+        "transparency_event_hash": "sha256:" + "9" * 64,
+    }
+    intent_loads = 0
+
+    async def coordinator(**kwargs):
+        calls.append("coordinator")
+        assert kwargs["payload"]["transparency_event_hash"] == winner[
+            "transparency_event_hash"
+        ]
+        return {
+            "result": {
+                "schema_version": "leadpoet.weight_publication.v2",
+                **kwargs["payload"],
+            },
+            "receipt": {"receipt_hash": "sha256:" + "6" * 64},
+            "ancestry_compact_proof": {"proof_hash": "sha256:" + "7" * 64},
+        }
+
+    _patch_compact_submission_route(
+        monkeypatch,
+        calls=calls,
+        coordinator=coordinator,
+    )
+
+    async def load_authority(**_kwargs):
+        return None
+
+    async def load_intent(**_kwargs):
+        nonlocal intent_loads
+        intent_loads += 1
+        return None if intent_loads == 1 else winner
+
+    async def reject_loser(**_kwargs):
+        calls.append("intent_conflict")
+        raise attested_v2_store.AttestedV2StoreError("immutable winner exists")
+
+    async def verify_epoch(**_kwargs):
+        calls.append("time_gate")
+        return {"epoch_id": 300, "submission_window": "open"}
+
+    async def log_event(_event_type, _payload):
+        return {"event_hash": EVENT_HASH}
+
+    async def persist_authority(_authority):
+        calls.append("authority_persist")
+        return {"bundle_hash": BUNDLE_HASH}
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_compact_weight_authority_v2",
+        load_authority,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_compact_weight_publication_intent_v2",
+        load_intent,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_compact_weight_publication_intent_v2",
+        reject_loser,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_compact_weight_authority_v2",
+        persist_authority,
+    )
+    monkeypatch.setattr(weights_api, "_verify_epoch_block_authority", verify_epoch)
+    monkeypatch.setattr(gateway_logger, "log_event", log_event)
+    monkeypatch.setattr(attested_coordinator_v2, "execute_coordinator_v2", coordinator)
+
+    response = await weights_api.submit_compact_weights_v2(_compact_submission())
+    assert response["bundle_hash"] == BUNDLE_HASH
+    assert intent_loads == 2
+    assert calls.count("time_gate") == 1
+    assert "intent_conflict" in calls
+    assert calls[-1] == "authority_persist"
+
+
 @pytest.mark.asyncio
 async def test_authoritative_v2_persists_and_publishes_before_ack(monkeypatch):
     from gateway.research_lab import attested_coordinator_v2, attested_v2_store
@@ -444,6 +809,58 @@ async def test_weight_inputs_v2_authenticates_and_returns_complete_measured_set(
     )
     assert calls[1][1]["leaderboard_window_start"] == "2026-07-03T20:00:00Z"
     assert calls[1][1]["leaderboard_window_end"] == "2026-07-10T20:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_weight_inputs_v2_compact_request_never_falls_back_to_full_graph(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store, attested_weight_inputs_v2
+
+    authorization = _weight_inputs_authorization()
+    expected = {
+        "input_receipt_hashes": {
+            "research_lab_allocation": "sha256:" + "7" * 64
+        },
+        "gateway_authority_event_hash": "sha256:" + "6" * 64,
+        "upstream_receipt_set": {
+            "boot_identities": [],
+            "receipts": [],
+            "transport_attempts": [],
+            "host_operations": [],
+        },
+        "compact_ancestry": None,
+    }
+    _patch_epoch_authority(monkeypatch)
+
+    async def load_graph(**_kwargs):
+        return {"root_receipt_hash": "sha256:" + "6" * 64}
+
+    async def build_inputs(**_kwargs):
+        return expected
+
+    monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {VALIDATOR_HOTKEY})
+    monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
+    monkeypatch.setattr(weights_api, "verify_wallet_signature", lambda *args: True)
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_LOADS_INFLIGHT", {})
+    monkeypatch.setattr(weights_api, "_WEIGHT_INPUT_RESULTS", {})
+    monkeypatch.setattr(
+        attested_v2_store, "load_business_artifact_graph_v2", load_graph
+    )
+    monkeypatch.setattr(
+        attested_weight_inputs_v2,
+        "build_gateway_weight_inputs_v2",
+        build_inputs,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await weights_api.get_weight_inputs_v2(
+            authorization,
+            _request(query_string=b"ancestry=compact-v2"),
+        )
+
+    assert exc.value.status_code == 503
+    assert "compact V2 weight ancestry" in exc.value.detail
 
 
 @pytest.mark.asyncio
@@ -659,6 +1076,128 @@ async def test_weight_inputs_v2_fails_closed_on_missing_allocation_lineage(monke
         await weights_api.get_weight_inputs_v2(authorization, _request())
     assert exc.value.status_code == 503
     assert "failed closed" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_compact_finalization_reports_initial_validation_failure(monkeypatch):
+    submission = SimpleNamespace(
+        model_dump=lambda **_kwargs: {"invalid": True},
+        validator_hotkey=VALIDATOR_HOTKEY,
+    )
+
+    def reject(_payload):
+        raise ValueError("invalid finalization shape")
+
+    monkeypatch.setattr(
+        weights_api,
+        "validate_compact_weight_finalization_shape_v2",
+        reject,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await weights_api.finalize_compact_weights_v2(submission)
+
+    assert exc.value.status_code == 503
+    assert "invalid finalization shape" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_compact_finalization_exact_replay_is_idempotent_without_writes(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store
+    from gateway.utils import epoch as gateway_epoch
+
+    finalization = {
+        "netuid": 71,
+        "epoch_id": 300,
+        "extrinsic_hash": "0x" + "a" * 64,
+        "finalized_block": 108355,
+    }
+    normalized = {
+        "validator_hotkey": VALIDATOR_HOTKEY,
+        "weight_submission_event_hash": EVENT_HASH,
+        "finalization": finalization,
+    }
+    submission = SimpleNamespace(
+        model_dump=lambda **_kwargs: normalized,
+        validator_hotkey=VALIDATOR_HOTKEY,
+    )
+    authority = {
+        "authority_stage": "finalized",
+        "finalization": {"compact_submission": normalized},
+    }
+    verified = {
+        "epoch_id": 300,
+        "weights_hash": "5" * 64,
+        "extrinsic_hash": finalization["extrinsic_hash"],
+        "finalized_block": finalization["finalized_block"],
+        "weight_submission_event_hash": EVENT_HASH,
+        "weight_finalization_event_hash": "sha256:" + "b" * 64,
+    }
+    cutover = SimpleNamespace(
+        mapping_hash="sha256:" + "4" * 64,
+        network_genesis_hash="0x" + "5" * 64,
+        netuid=71,
+    )
+
+    async def load_authority(**_kwargs):
+        return authority
+
+    async def no_write(*_args, **_kwargs):
+        raise AssertionError("exact finalized replay must not append evidence")
+
+    monkeypatch.setattr(
+        weights_api,
+        "validate_compact_weight_finalization_shape_v2",
+        lambda _payload: normalized,
+    )
+    monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {VALIDATOR_HOTKEY})
+    monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
+    monkeypatch.setattr(weights_api, "load_subnet_epoch_cutover", lambda: cutover)
+    monkeypatch.setattr(
+        gateway_epoch,
+        "validate_stateful_cutover_authority_async",
+        lambda _cutover: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "validate_cutover_anchor_from_archive",
+        lambda _cutover: None,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "derive_ancestry_lineage_id_v2",
+        lambda **_kwargs: LINEAGE_ID,
+    )
+    monkeypatch.setattr(
+        weights_api,
+        "verify_compact_published_weight_authority_v2",
+        lambda *_args, **_kwargs: verified,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_compact_weight_authority_for_identity_v2",
+        load_authority,
+    )
+    monkeypatch.setattr(attested_v2_store, "persist_receipt_graph_v2", no_write)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_ancestry_checkpoint_v2",
+        no_write,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_compact_weight_authority_v2",
+        no_write,
+    )
+
+    response = await weights_api.finalize_compact_weights_v2(submission)
+    assert response.success is True
+    assert "already" in response.message
+    assert response.weight_finalization_event_hash == verified[
+        "weight_finalization_event_hash"
+    ]
 
 
 @pytest.mark.asyncio

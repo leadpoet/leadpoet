@@ -34,6 +34,13 @@ from leadpoet_canonical.attested_v2 import (
     validate_receipt_graphs,
     validate_transport_attempt,
 )
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    ANCESTRY_DELTA_SCHEMA_VERSION,
+    build_compact_ancestry_proof_from_delta_v2,
+    build_full_graph_parent_v2,
+    issue_ancestry_certificate_v2,
+    validate_compact_ancestry_proof_v2,
+)
 
 
 JOB_SCHEMA_VERSION = "leadpoet.enclave_execution_job.v2"
@@ -42,6 +49,7 @@ PARENT_RECEIPT_GRAPH_SET_FIELD = "_v2_parent_receipt_graph_set"
 PARENT_RECEIPT_GRAPH_SET_SCHEMA_VERSION = (
     "leadpoet.parent_receipt_graph_set.v2"
 )
+PARENT_ANCESTRY_PROOFS_FIELD = "_v2_parent_ancestry_proofs"
 MAX_JOB_COUNT = 256
 MAX_QUEUED_JOBS = 64
 MIN_TERMINAL_EVICTION_AGE_SECONDS = 300
@@ -75,6 +83,7 @@ DEFAULT_RESULT_CHUNK_BYTES = 512 * 1024
 # MAX_INPUT_BYTES limit continues to cap the authenticated request body.
 MAX_EXTERNAL_RECEIPT_GRAPHS = 128
 MAX_EXTERNAL_RECEIPT_GRAPH_BYTES = 64 * 1024 * 1024
+MAX_EXTERNAL_ANCESTRY_PROOF_BYTES = 4 * 1024 * 1024
 TERMINAL_STATES = frozenset({"cancelled", "failed", "succeeded"})
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$")
@@ -152,6 +161,8 @@ class ExecutionContextV2:
     artifact_hashes: list = field(default_factory=list)
     stage_receipts: list = field(default_factory=list)
     external_receipt_graphs: list = field(default_factory=list)
+    external_receipt_graph_policies: dict = field(default_factory=dict)
+    external_ancestry_proofs: list = field(default_factory=list)
     allowed_failed_receipt_hashes: set = field(default_factory=set)
     host_operation_channel: Any = None
     allowed_purposes: frozenset = frozenset()
@@ -237,6 +248,14 @@ class ExecutionContextV2:
             "external root receipt hash",
         )
         with self._external_receipt_lock:
+            proof_roots = {
+                str(item["certificate"]["claim"]["output_root_receipt_hash"])
+                for item in self.external_ancestry_proofs
+            }
+            if root_hash in proof_roots:
+                raise ExecutionJobV2Error(
+                    "external ancestry root is supplied as graph and proof"
+                )
             existing = {
                 str(item["root_receipt_hash"]): item
                 for item in self.external_receipt_graphs
@@ -246,10 +265,23 @@ class ExecutionContextV2:
                     raise ExecutionJobV2Error(
                         "external receipt graph conflicts with existing root"
                     )
+                if self.external_receipt_graph_policies.get(root_hash) != tuple(
+                    sorted(allowed_failed)
+                ):
+                    raise ExecutionJobV2Error(
+                        "external receipt graph policy conflicts with existing root"
+                    )
                 return root_hash
-            if len(self.external_receipt_graphs) >= MAX_EXTERNAL_RECEIPT_GRAPHS:
+            if (
+                len(self.external_receipt_graphs)
+                + len(self.external_ancestry_proofs)
+                >= MAX_EXTERNAL_RECEIPT_GRAPHS
+            ):
                 raise ExecutionJobV2Error("external receipt graph count exceeds limit")
             self.external_receipt_graphs.append(normalized)
+            self.external_receipt_graph_policies[root_hash] = tuple(
+                sorted(allowed_failed)
+            )
             self.allowed_failed_receipt_hashes.update(allowed_failed)
         return root_hash
 
@@ -326,14 +358,36 @@ class ExecutionContextV2:
                 str(item["root_receipt_hash"]): item
                 for item in self.external_receipt_graphs
             }
-            for root_hash, normalized in zip(roots, normalized_graphs):
+            proof_roots = {
+                str(item["certificate"]["claim"]["output_root_receipt_hash"])
+                for item in self.external_ancestry_proofs
+            }
+            for root_hash, normalized, allowed_failed in zip(
+                roots, normalized_graphs, allowed_failed_sets
+            ):
+                if root_hash in proof_roots:
+                    raise ExecutionJobV2Error(
+                        "external ancestry root is supplied as graph and proof"
+                    )
                 if root_hash in existing and existing[root_hash] != normalized:
                     raise ExecutionJobV2Error(
                         "external receipt graph conflicts with existing root"
                     )
+                previous_policy = self.external_receipt_graph_policies.get(
+                    root_hash
+                )
+                if (
+                    root_hash in existing
+                    and previous_policy != tuple(sorted(allowed_failed))
+                ):
+                    raise ExecutionJobV2Error(
+                        "external receipt graph policy conflicts with existing root"
+                    )
             new_graph_count = sum(root not in existing for root in roots)
             if (
-                len(self.external_receipt_graphs) + new_graph_count
+                len(self.external_receipt_graphs)
+                + len(self.external_ancestry_proofs)
+                + new_graph_count
                 > MAX_EXTERNAL_RECEIPT_GRAPHS
             ):
                 raise ExecutionJobV2Error(
@@ -347,6 +401,9 @@ class ExecutionContextV2:
                 if root_hash not in existing:
                     self.external_receipt_graphs.append(normalized)
                     existing[root_hash] = normalized
+                    self.external_receipt_graph_policies[root_hash] = tuple(
+                        sorted(allowed_failed)
+                    )
                 self.allowed_failed_receipt_hashes.update(allowed_failed)
         return tuple(roots)
 
@@ -356,6 +413,71 @@ class ExecutionContextV2:
                 sorted(
                     str(item["root_receipt_hash"])
                     for item in self.external_receipt_graphs
+                )
+            )
+
+    def record_external_ancestry_proof(
+        self,
+        proof: Mapping[str, Any],
+        *,
+        expected_lineage_id: str,
+        boot_attestation_verifier: Callable[[Mapping[str, Any]], Any],
+        allowed_issuer_roles: Iterable[str],
+        required_receipt_hashes: Iterable[str] = (),
+    ) -> str:
+        """Bind one bounded, recursively attested parent authority."""
+
+        normalized = validate_compact_ancestry_proof_v2(
+            proof,
+            expected_lineage_id=expected_lineage_id,
+            boot_attestation_verifier=boot_attestation_verifier,
+            allowed_issuer_roles=allowed_issuer_roles,
+            required_receipt_hashes=required_receipt_hashes,
+        )
+        encoded = _canonical_bytes(normalized)
+        if len(encoded) > MAX_EXTERNAL_ANCESTRY_PROOF_BYTES:
+            raise ExecutionJobV2Error("external ancestry proof exceeds size limit")
+        normalized = json.loads(encoded.decode("utf-8"))
+        root_hash = _hash(
+            normalized["certificate"]["claim"]["output_root_receipt_hash"],
+            "external ancestry root receipt hash",
+        )
+        with self._external_receipt_lock:
+            existing_graph_roots = {
+                str(item["root_receipt_hash"])
+                for item in self.external_receipt_graphs
+            }
+            if root_hash in existing_graph_roots:
+                raise ExecutionJobV2Error(
+                    "external ancestry root is supplied as graph and proof"
+                )
+            existing = {
+                str(item["certificate"]["claim"]["output_root_receipt_hash"]): item
+                for item in self.external_ancestry_proofs
+            }
+            if root_hash in existing:
+                if existing[root_hash] != normalized:
+                    raise ExecutionJobV2Error(
+                        "external ancestry proof conflicts with existing root"
+                    )
+                return root_hash
+            if (
+                len(self.external_receipt_graphs)
+                + len(self.external_ancestry_proofs)
+                >= MAX_EXTERNAL_RECEIPT_GRAPHS
+            ):
+                raise ExecutionJobV2Error(
+                    "external ancestry authority count exceeds limit"
+                )
+            self.external_ancestry_proofs.append(normalized)
+        return root_hash
+
+    def external_ancestry_roots(self) -> tuple:
+        with self._external_receipt_lock:
+            return tuple(
+                sorted(
+                    str(item["certificate"]["claim"]["output_root_receipt_hash"])
+                    for item in self.external_ancestry_proofs
                 )
             )
 
@@ -778,6 +900,11 @@ class ExecutionJobManagerV2:
                 Iterable[str],
             ]
         ] = None,
+        ancestry_lineage_id: Optional[str] = None,
+        ancestry_boot_attestation_verifier: Optional[
+            Callable[[Mapping[str, Any]], Any]
+        ] = None,
+        ancestry_allowed_issuer_roles: Iterable[str] = (),
         retention_seconds: int = 3600,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -794,6 +921,29 @@ class ExecutionJobManagerV2:
         self._executor = executor
         self._host_operation_channel_factory = host_operation_channel_factory
         self._failed_parent_graph_policy = failed_parent_graph_policy
+        ancestry_values = (
+            ancestry_lineage_id,
+            ancestry_boot_attestation_verifier,
+            tuple(ancestry_allowed_issuer_roles),
+        )
+        if any(ancestry_values) and not all(ancestry_values):
+            raise ValueError("ancestry checkpoint configuration is incomplete")
+        self._ancestry_lineage_id = (
+            _hash(ancestry_lineage_id, "ancestry lineage id")
+            if ancestry_lineage_id is not None
+            else None
+        )
+        self._ancestry_boot_attestation_verifier = (
+            ancestry_boot_attestation_verifier
+        )
+        self._ancestry_allowed_issuer_roles = frozenset(
+            str(role) for role in ancestry_allowed_issuer_roles
+        )
+        if self._ancestry_allowed_issuer_roles and (
+            self.role not in self._ancestry_allowed_issuer_roles
+            or any(role not in ROLE_PURPOSES for role in self._ancestry_allowed_issuer_roles)
+        ):
+            raise ValueError("ancestry checkpoint issuer roles are invalid")
         self._retention_seconds = max(60, int(retention_seconds))
         self._clock = clock
         self._jobs = {}  # type: Dict[str, Dict[str, Any]]
@@ -838,6 +988,8 @@ class ExecutionJobManagerV2:
             "job_counts": counts,
             "terminal_eviction_count": self._terminal_eviction_count,
             "supported_operations": sorted(self._operations),
+            "ancestry_checkpoints": self._ancestry_lineage_id is not None,
+            "ancestry_lineage_id": self._ancestry_lineage_id,
         }
 
     def submit(self, manifest: Mapping[str, Any]) -> Dict[str, Any]:
@@ -875,6 +1027,8 @@ class ExecutionJobManagerV2:
                 "artifact_hashes": [],
                 "host_operations": [],
                 "external_receipt_graphs": [],
+                "external_ancestry_proofs": [],
+                "ancestry_compact_proof": None,
                 "host_operation_channel": None,
                 "error_code": None,
                 "cancel_requested": False,
@@ -1075,6 +1229,20 @@ class ExecutionJobManagerV2:
                 for item in job["external_receipt_graphs"]
             )
 
+    def ancestry_compact_proof(self, job_id: str) -> Dict[str, Any]:
+        with self._lock:
+            job = self._job(_identifier(job_id, "job_id"))
+            if job["state"] not in TERMINAL_STATES:
+                raise ExecutionJobV2Error(
+                    "job ancestry compact proof is unavailable"
+                )
+            proof = job.get("ancestry_compact_proof")
+            if not isinstance(proof, Mapping):
+                raise ExecutionJobV2Error(
+                    "job ancestry compact proof is unavailable"
+                )
+            return json.loads(_canonical_bytes(proof).decode("utf-8"))
+
     def _worker_loop(self) -> None:
         while True:
             job_id = self._queue.get()
@@ -1095,6 +1263,83 @@ class ExecutionJobManagerV2:
                 )
             finally:
                 self._queue.task_done()
+
+    def _build_ancestry_compact_proof(
+        self,
+        *,
+        manifest: Mapping[str, Any],
+        context: ExecutionContextV2,
+        root_receipt: Mapping[str, Any],
+        local_receipts: Sequence[Mapping[str, Any]],
+        host_operations: Sequence[Mapping[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if self._ancestry_lineage_id is None:
+            return None
+        if self._ancestry_boot_attestation_verifier is None:
+            raise ExecutionJobV2Error(
+                "ancestry checkpoint boot verifier is unavailable"
+            )
+        local = [dict(item) for item in local_receipts]
+        if not local or str(root_receipt.get("receipt_hash") or "") not in {
+            str(item.get("receipt_hash") or "") for item in local
+        }:
+            raise ExecutionJobV2Error(
+                "ancestry checkpoint local receipt chain is incomplete"
+            )
+        local_delta = {
+            "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+            "root_receipt_hash": str(root_receipt["receipt_hash"]),
+            "boot_identities": [dict(self.boot_identity)],
+            "receipts": local,
+            "transport_attempts": [
+                dict(item) for item in context.transport_attempts
+            ],
+            "host_operations": [dict(item) for item in host_operations],
+        }
+        parent_certificates = [
+            dict(item["certificate"])
+            for item in context.external_ancestry_proofs
+        ]
+        parent_full_graphs = [
+            build_full_graph_parent_v2(
+                graph,
+                allowed_failed_receipt_hashes=(
+                    context.external_receipt_graph_policies.get(
+                        str(graph["root_receipt_hash"]), ()
+                    )
+                ),
+            )
+            for graph in context.external_receipt_graphs
+        ]
+        parent_sequences = [
+            int(item["claim"]["certificate_sequence"])
+            for item in parent_certificates
+        ]
+        certificate = issue_ancestry_certificate_v2(
+            local_delta=local_delta,
+            lineage_id=self._ancestry_lineage_id,
+            certificate_sequence=(max(parent_sequences) + 1 if parent_sequences else 0),
+            issuer_boot_identity=self.boot_identity,
+            issued_at=_utc_timestamp(self._clock()),
+            sign_digest=self._sign_digest,
+            boot_attestation_verifier=self._ancestry_boot_attestation_verifier,
+            allowed_issuer_roles=self._ancestry_allowed_issuer_roles,
+            parent_certificates=parent_certificates,
+            parent_full_graphs=parent_full_graphs,
+            allowed_failed_receipt_hashes=(
+                str(item["receipt_hash"])
+                for item in local
+                if item.get("status") != "succeeded"
+            ),
+            required_purposes=(str(manifest["purpose"]),),
+        )
+        return build_compact_ancestry_proof_from_delta_v2(
+            local_delta,
+            certificate,
+            expected_lineage_id=self._ancestry_lineage_id,
+            boot_attestation_verifier=self._ancestry_boot_attestation_verifier,
+            allowed_issuer_roles=self._ancestry_allowed_issuer_roles,
+        )
 
     def _execute(self, job_id: str) -> None:
         with self._lock:
@@ -1152,11 +1397,24 @@ class ExecutionJobManagerV2:
                 )
             elif parent_graphs is None:
                 parent_graphs = []
+            parent_proofs = payload.pop(PARENT_ANCESTRY_PROOFS_FIELD, None)
+            if parent_proofs is None:
+                parent_proofs = []
             if not isinstance(parent_graphs, list) or any(
                 not isinstance(graph, Mapping) for graph in parent_graphs
             ):
                 raise ExecutionJobV2Error("job parent receipt graphs are invalid")
             allowed_failed_by_graph = []
+            if not isinstance(parent_proofs, list) or any(
+                not isinstance(proof, Mapping) for proof in parent_proofs
+            ):
+                raise ExecutionJobV2Error("job parent ancestry proofs are invalid")
+            if parent_proofs and self._ancestry_lineage_id is None:
+                raise ExecutionJobV2Error(
+                    "job parent ancestry proofs are unsupported"
+                )
+            parent_roots = []
+            parent_receipt_hashes = set()
             for graph in parent_graphs:
                 allowed_failed = ()
                 if self._failed_parent_graph_policy is not None:
@@ -1181,11 +1439,73 @@ class ExecutionJobManagerV2:
                     for receipt in graph.get("receipts") or ()
                     if isinstance(receipt, Mapping)
                 )
+            for proof in parent_proofs:
+                certificate = proof.get("certificate")
+                claim = (
+                    certificate.get("claim")
+                    if isinstance(certificate, Mapping)
+                    else None
+                )
+                proof_root = str(
+                    claim.get("output_root_receipt_hash")
+                    if isinstance(claim, Mapping)
+                    else ""
+                )
+                disclosed_graph = {
+                    "root_receipt_hash": proof_root,
+                    "receipts": proof.get("disclosed_receipts") or [],
+                }
+                expected_allowed_failed = ()
+                if self._failed_parent_graph_policy is not None:
+                    expected_allowed_failed = tuple(
+                        self._failed_parent_graph_policy(
+                            manifest, payload, disclosed_graph
+                        )
+                    )
+                observed_policy = (
+                    claim.get("policy")
+                    if isinstance(claim, Mapping)
+                    else None
+                )
+                observed_allowed_failed = (
+                    tuple(observed_policy.get("allowed_failed_receipt_hashes") or ())
+                    if isinstance(observed_policy, Mapping)
+                    else ()
+                )
+                if tuple(sorted(expected_allowed_failed)) != tuple(
+                    sorted(observed_allowed_failed)
+                ):
+                    raise ExecutionJobV2Error(
+                        "job parent ancestry failure policy is unauthorized"
+                    )
+                parent_root = context.record_external_ancestry_proof(
+                    proof,
+                    expected_lineage_id=str(self._ancestry_lineage_id),
+                    boot_attestation_verifier=(
+                        self._ancestry_boot_attestation_verifier
+                    ),
+                    allowed_issuer_roles=self._ancestry_allowed_issuer_roles,
+                    required_receipt_hashes=(proof_root,),
+                )
+                if parent_root in parent_roots:
+                    raise ExecutionJobV2Error(
+                        "job parent ancestry authority is duplicated"
+                    )
+                parent_roots.append(parent_root)
+                parent_receipt_hashes.add(parent_root)
             declared_parent_hashes = set(manifest["parent_receipt_hashes"])
-            if (
-                not set(parent_roots).issubset(declared_parent_hashes)
-                or not declared_parent_hashes.issubset(parent_receipt_hashes)
-            ):
+            exact_checkpoint_roots = bool(parent_proofs) or (
+                self._ancestry_lineage_id is not None and bool(parent_graphs)
+            )
+            parent_authority_matches = (
+                set(parent_roots) == declared_parent_hashes
+                if exact_checkpoint_roots
+                else (
+                    set(parent_roots).issubset(declared_parent_hashes)
+                    and declared_parent_hashes.issubset(parent_receipt_hashes)
+                )
+            )
+            if not parent_authority_matches:
                 raise ExecutionJobV2Error(
                     "job parent receipt graphs differ from manifest ancestry"
                 )
@@ -1217,6 +1537,7 @@ class ExecutionJobManagerV2:
             if stage_receipts:
                 root_parents = [stage_receipts[-1]["receipt_hash"]]
             root_parents.extend(context.external_receipt_roots())
+            root_parents.extend(context.external_ancestry_roots())
             root_manifest["parent_receipt_hashes"] = sorted(set(root_parents))
             receipt = self._receipt(
                 manifest=root_manifest,
@@ -1224,6 +1545,15 @@ class ExecutionJobManagerV2:
                 output_root=sha256_bytes(receipt_output_bytes),
                 status="succeeded",
                 failure_code=None,
+            )
+            local_receipts = list(stage_receipts) + [receipt]
+            host_operation_records = list(context.host_operation_records())
+            ancestry_compact_proof = self._build_ancestry_compact_proof(
+                manifest=root_manifest,
+                context=context,
+                root_receipt=receipt,
+                local_receipts=local_receipts,
+                host_operations=host_operation_records,
             )
             transitions = self._transitions(receipt, result.transitions)
             with self._lock:
@@ -1241,33 +1571,51 @@ class ExecutionJobManagerV2:
                         status="failed",
                         failure_code="cancelled",
                     )
+                    cancelled_receipts = list(stage_receipts) + [
+                        cancelled_receipt
+                    ]
+                    cancelled_proof = self._build_ancestry_compact_proof(
+                        manifest=root_manifest,
+                        context=context,
+                        root_receipt=cancelled_receipt,
+                        local_receipts=cancelled_receipts,
+                        host_operations=host_operation_records,
+                    )
                     job["state"] = "cancelled"
                     job["result"] = cancelled_bytes
                     job["result_hash"] = sha256_bytes(cancelled_bytes)
                     job["receipt"] = cancelled_receipt
-                    job["receipts"] = [cancelled_receipt]
+                    job["receipts"] = cancelled_receipts
                     job["transitions"] = []
                     job["transport_attempts"] = list(context.transport_attempts)
                     job["artifact_hashes"] = list(context.artifact_hashes)
                     job["host_operations"] = list(
-                        context.host_operation_records()
+                        host_operation_records
                     )
                     job["external_receipt_graphs"] = list(
                         context.external_receipt_graphs
                     )
+                    job["external_ancestry_proofs"] = list(
+                        context.external_ancestry_proofs
+                    )
+                    job["ancestry_compact_proof"] = cancelled_proof
                 else:
                     job["state"] = "succeeded"
                     job["result"] = result_bytes
                     job["result_hash"] = sha256_bytes(result_bytes)
                     job["receipt"] = receipt
-                    job["receipts"] = list(stage_receipts) + [receipt]
+                    job["receipts"] = local_receipts
                     job["transitions"] = transitions
                     job["transport_attempts"] = list(context.transport_attempts)
                     job["artifact_hashes"] = list(context.artifact_hashes)
-                    job["host_operations"] = list(context.host_operation_records())
+                    job["host_operations"] = host_operation_records
                     job["external_receipt_graphs"] = list(
                         context.external_receipt_graphs
                     )
+                    job["external_ancestry_proofs"] = list(
+                        context.external_ancestry_proofs
+                    )
+                    job["ancestry_compact_proof"] = ancestry_compact_proof
                 job["input"] = bytearray()
                 job["updated_at"] = self._clock()
         except Exception as exc:
@@ -1280,6 +1628,7 @@ class ExecutionJobManagerV2:
                 failure_manifest["parent_receipt_hashes"] = sorted(
                     set(manifest["parent_receipt_hashes"])
                     | set(context.external_receipt_roots())
+                    | set(context.external_ancestry_roots())
                 )
                 receipt = self._receipt(
                     manifest=failure_manifest,
@@ -1288,8 +1637,23 @@ class ExecutionJobManagerV2:
                     status="failed",
                     failure_code=failure_code,
                 )
+                try:
+                    failure_host_operations = list(
+                        context.host_operation_records()
+                    )
+                except Exception:
+                    failure_host_operations = []
+                failure_proof = self._build_ancestry_compact_proof(
+                    manifest=failure_manifest,
+                    context=context,
+                    root_receipt=receipt,
+                    local_receipts=(receipt,),
+                    host_operations=failure_host_operations,
+                )
             except Exception:
                 receipt = None
+                failure_proof = None
+                failure_host_operations = []
                 failure_code = "receipt_unavailable"
             with self._lock:
                 job = self._jobs.get(job_id)
@@ -1302,15 +1666,14 @@ class ExecutionJobManagerV2:
                     job["receipts"] = [receipt] if receipt is not None else []
                     job["transport_attempts"] = list(context.transport_attempts)
                     job["artifact_hashes"] = list(context.artifact_hashes)
-                    try:
-                        job["host_operations"] = list(
-                            context.host_operation_records()
-                        )
-                    except Exception:
-                        job["host_operations"] = []
+                    job["host_operations"] = failure_host_operations
                     job["external_receipt_graphs"] = list(
                         context.external_receipt_graphs
                     )
+                    job["external_ancestry_proofs"] = list(
+                        context.external_ancestry_proofs
+                    )
+                    job["ancestry_compact_proof"] = failure_proof
                     job["input"] = bytearray()
                     job["updated_at"] = self._clock()
         finally:
@@ -1466,6 +1829,14 @@ class ExecutionJobManagerV2:
             "artifact_hash_count": len(job["artifact_hashes"]),
             "host_operation_count": len(job["host_operations"]),
             "external_receipt_graph_count": len(job["external_receipt_graphs"]),
+            "external_ancestry_proof_count": len(
+                job["external_ancestry_proofs"]
+            ),
+            "ancestry_compact_proof_hash": (
+                job["ancestry_compact_proof"].get("proof_hash")
+                if isinstance(job.get("ancestry_compact_proof"), Mapping)
+                else None
+            ),
             "error_code": job["error_code"],
             "cancel_requested": bool(job["cancel_requested"]),
         }

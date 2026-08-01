@@ -18,7 +18,9 @@ from gateway.research_lab.store import (
     select_one,
 )
 from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     RECEIPT_GRAPH_SCHEMA_VERSION,
+    build_receipt_graph,
     merkle_root,
     sha256_json,
     validate_boot_identity,
@@ -28,6 +30,17 @@ from leadpoet_canonical.attested_v2 import (
     validate_signed_execution_receipt,
     validate_signed_transition_command,
     validate_transport_attempt,
+)
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    validate_compact_ancestry_proof_v2,
+    validate_local_delta_against_certificate_v2,
+)
+from leadpoet_canonical.compact_auditor_authority_v2 import (
+    validate_compact_published_weight_authority_shape_v2,
+)
+from leadpoet_canonical.compact_weight_authority_v2 import (
+    compact_weight_bundle_hash_v2,
+    validate_compact_weight_submission_shape_v2,
 )
 from leadpoet_canonical.sourcing_history_v2 import validate_sourcing_epoch_v2
 from leadpoet_canonical.weight_authority_v2 import (
@@ -52,6 +65,14 @@ EXECUTION_RESULT_TABLE = "research_lab_attested_execution_results_v2"
 TRANSITION_TABLE = "research_lab_signed_transition_commands_v2"
 SOURCING_EPOCH_TABLE = "validator_sourcing_epoch_inputs_v2"
 LEGACY_SETTLEMENT_TABLE = "research_lab_legacy_finalized_allocation_migrations_v2"
+ANCESTRY_CHECKPOINT_TABLE = "research_lab_attested_ancestry_checkpoints_v2"
+ANCESTRY_ACTIVATION_TABLE = "research_lab_attested_ancestry_activations_v2"
+ANCESTRY_CHECKPOINT_RPC = "persist_research_lab_ancestry_checkpoint_v2"
+COMPACT_WEIGHT_SUBMISSION_TABLE = "research_lab_compact_weight_submissions_v2"
+COMPACT_WEIGHT_PUBLICATION_INTENT_TABLE = (
+    "research_lab_compact_weight_publication_intents_v2"
+)
+COMPACT_WEIGHT_AUTHORITY_TABLE = "research_lab_compact_weight_authorities_v2"
 LEGACY_NONFINALIZATION_TABLE = (
     "research_lab_legacy_allocation_nonfinalizations_v2"
 )
@@ -497,7 +518,12 @@ async def persist_receipt_graph_v2(
     *,
     allowed_failed_receipt_hashes: Iterable[str] = (),
 ) -> dict[str, Any]:
-    """Persist a complete graph parent-first; partial retries are idempotent."""
+    """Persist one legacy graph or bounded checkpoint delta idempotently.
+
+    A checkpointed graph contains only current local evidence. Its external
+    parent rows must already be durable; the edge foreign keys enforce that
+    ordering without loading or reconstructing historical bodies.
+    """
 
     ordered_receipts = validate_receipt_graph(
         graph,
@@ -686,6 +712,653 @@ async def persist_receipt_graph_v2(
         "transport_attempt_count": len(graph["transport_attempts"]),
         "host_operation_count": len(graph["host_operations"]),
     }
+
+
+def ancestry_checkpoint_storage_row_v2(
+    proof: Mapping[str, Any],
+    *,
+    expected_lineage_id: str,
+    boot_attestation_verifier: Any,
+    allowed_issuer_roles: Iterable[str],
+) -> dict[str, Any]:
+    """Validate one detached proof and project its exact append-only row."""
+
+    normalized = validate_compact_ancestry_proof_v2(
+        proof,
+        expected_lineage_id=expected_lineage_id,
+        boot_attestation_verifier=boot_attestation_verifier,
+        allowed_issuer_roles=allowed_issuer_roles,
+    )
+    certificate = normalized["certificate"]
+    claim = certificate["claim"]
+    return {
+        "root_receipt_hash": str(claim["output_root_receipt_hash"]),
+        "schema_version": str(certificate["schema_version"]),
+        "lineage_id": str(claim["lineage_id"]),
+        "certificate_hash": str(certificate["certificate_hash"]),
+        "certificate_sequence": int(claim["certificate_sequence"]),
+        "issuer_boot_identity_hash": str(claim["issuer_boot_identity_hash"]),
+        "proof_hash": str(normalized["proof_hash"]),
+        "certificate_doc": dict(certificate),
+        "proof_doc": dict(normalized),
+    }
+
+
+async def persist_ancestry_checkpoint_v2(
+    proof: Mapping[str, Any],
+    *,
+    checkpointed_graph: Mapping[str, Any],
+    expected_lineage_id: str,
+    boot_attestation_verifier: Any,
+    allowed_issuer_roles: Iterable[str],
+) -> dict[str, Any]:
+    """Atomically append one bounded certificate and activate its lineage.
+
+    Runtime code never reconstructs a complete graph here. The local graph is
+    cryptographically bound to the enclave certificate, while the database RPC
+    verifies that every certificate parent is already durable and permanently
+    rejects a legacy full projection after that exact root is compacted.
+    """
+
+    row = ancestry_checkpoint_storage_row_v2(
+        proof,
+        expected_lineage_id=expected_lineage_id,
+        boot_attestation_verifier=boot_attestation_verifier,
+        allowed_issuer_roles=allowed_issuer_roles,
+    )
+    root_hash = str(row["root_receipt_hash"])
+    if (
+        not isinstance(checkpointed_graph, Mapping)
+        or checkpointed_graph.get("schema_version")
+        != CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        or checkpointed_graph.get("root_receipt_hash") != root_hash
+        or checkpointed_graph.get("ancestry_lineage_id")
+        != expected_lineage_id
+        or checkpointed_graph.get("ancestry_proof") != row["proof_doc"]
+    ):
+        raise AttestedV2StoreError(
+            "ancestry checkpoint bounded graph identity differs"
+        )
+    failed_receipts = tuple(
+        sorted(
+            str(item.get("receipt_hash") or "")
+            for item in checkpointed_graph.get("receipts") or ()
+            if isinstance(item, Mapping) and item.get("status") != "succeeded"
+        )
+    )
+    validate_receipt_graph(
+        checkpointed_graph,
+        allowed_failed_receipt_hashes=failed_receipts,
+        boot_attestation_verifier=boot_attestation_verifier,
+        require_boot_attestation_verification=True,
+    )
+    local_delta = {
+        "schema_version": "leadpoet.attested_ancestry_delta.v2",
+        "root_receipt_hash": checkpointed_graph["root_receipt_hash"],
+        "boot_identities": checkpointed_graph["boot_identities"],
+        "receipts": checkpointed_graph["receipts"],
+        "transport_attempts": checkpointed_graph["transport_attempts"],
+        "host_operations": checkpointed_graph["host_operations"],
+    }
+    validate_local_delta_against_certificate_v2(
+        local_delta,
+        row["certificate_doc"],
+        expected_lineage_id=expected_lineage_id,
+        boot_attestation_verifier=boot_attestation_verifier,
+        allowed_issuer_roles=allowed_issuer_roles,
+    )
+    row = {
+        **row,
+        "checkpoint_graph_hash": sha256_json(dict(checkpointed_graph)),
+        "checkpoint_graph_doc": dict(checkpointed_graph),
+    }
+    result = await call_rpc(ANCESTRY_CHECKPOINT_RPC, {"checkpoint": row})
+    if not isinstance(result, Mapping):
+        raise AttestedV2StoreError(
+            "ancestry checkpoint RPC returned no durable acknowledgment"
+        )
+    expected_ack = {
+        "root_receipt_hash": root_hash,
+        "certificate_hash": row["certificate_hash"],
+        "proof_hash": row["proof_hash"],
+        "lineage_id": row["lineage_id"],
+        "certificate_sequence": row["certificate_sequence"],
+        "checkpoint_graph_hash": row["checkpoint_graph_hash"],
+    }
+    if any(result.get(field) != value for field, value in expected_ack.items()):
+        raise AttestedV2StoreError(
+            "ancestry checkpoint RPC acknowledgment conflicts"
+        )
+    stored = await select_one(
+        ANCESTRY_CHECKPOINT_TABLE,
+        filters=(("root_receipt_hash", root_hash),),
+    )
+    if not isinstance(stored, Mapping):
+        raise AttestedV2StoreError(
+            "ancestry checkpoint durable readback is missing"
+        )
+    _assert_stored_row(ANCESTRY_CHECKPOINT_TABLE, stored, row)
+    return {
+        **expected_ack,
+        "root_activated": result.get("root_activated") is True,
+    }
+
+
+async def load_ancestry_checkpoint_proofs_v2(
+    root_receipt_hashes: Iterable[str],
+    *,
+    expected_lineage_id: str,
+    boot_attestation_verifier: Any,
+    allowed_issuer_roles: Iterable[str],
+) -> dict[str, dict[str, Any]]:
+    """Load selected immutable compact proofs; absent roots remain absent."""
+
+    roots = sorted({str(value or "").lower() for value in root_receipt_hashes})
+    if any(not _HASH_RE.fullmatch(root) for root in roots):
+        raise AttestedV2StoreError("ancestry checkpoint root hash is invalid")
+    if not roots:
+        return {}
+    rows = await _select_by_values(
+        ANCESTRY_CHECKPOINT_TABLE,
+        field="root_receipt_hash",
+        values=roots,
+        key_fields=("root_receipt_hash",),
+        max_total_rows=len(roots),
+    )
+    row_by_root: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        root_hash = str(row.get("root_receipt_hash") or "")
+        if root_hash not in roots or root_hash in row_by_root:
+            raise AttestedV2StoreError(
+                "ancestry checkpoint readback is unexpected or duplicated"
+            )
+        row_by_root[root_hash] = row
+    known = {
+        root_hash: str(row.get("certificate_hash") or "")
+        for root_hash, row in row_by_root.items()
+    }
+    loaded: dict[str, dict[str, Any]] = {}
+    for root_hash, row in row_by_root.items():
+        proof = row.get("proof_doc")
+        if not isinstance(proof, Mapping):
+            raise AttestedV2StoreError(
+                "ancestry checkpoint proof document is unavailable"
+            )
+        normalized = validate_compact_ancestry_proof_v2(
+            proof,
+            expected_lineage_id=expected_lineage_id,
+            boot_attestation_verifier=boot_attestation_verifier,
+            allowed_issuer_roles=allowed_issuer_roles,
+            required_receipt_hashes=(root_hash,),
+            known_certificate_hashes_by_root=known,
+        )
+        expected = ancestry_checkpoint_storage_row_v2(
+            normalized,
+            expected_lineage_id=expected_lineage_id,
+            boot_attestation_verifier=boot_attestation_verifier,
+            allowed_issuer_roles=allowed_issuer_roles,
+        )
+        _assert_stored_row(ANCESTRY_CHECKPOINT_TABLE, row, expected)
+        loaded[root_hash] = normalized
+    return loaded
+
+
+async def load_ancestry_checkpoint_proof_v2(
+    root_receipt_hash: str,
+    *,
+    expected_lineage_id: str,
+    boot_attestation_verifier: Any,
+    allowed_issuer_roles: Iterable[str],
+) -> Optional[dict[str, Any]]:
+    loaded = await load_ancestry_checkpoint_proofs_v2(
+        (root_receipt_hash,),
+        expected_lineage_id=expected_lineage_id,
+        boot_attestation_verifier=boot_attestation_verifier,
+        allowed_issuer_roles=allowed_issuer_roles,
+    )
+    return loaded.get(str(root_receipt_hash or "").lower())
+
+
+async def load_checkpointed_receipt_graphs_v2(
+    root_receipt_hashes: Iterable[str],
+    *,
+    allowed_failed_receipt_hashes: Iterable[str] = (),
+) -> dict[str, dict[str, Any]]:
+    """Load exact bounded graphs without traversing historical receipt edges."""
+
+    roots = sorted({str(value or "").lower() for value in root_receipt_hashes})
+    allowed_failed = {
+        str(value or "").lower() for value in allowed_failed_receipt_hashes
+    }
+    if any(not _HASH_RE.fullmatch(value) for value in [*roots, *allowed_failed]):
+        raise AttestedV2StoreError("checkpointed receipt graph hash is invalid")
+    if allowed_failed and len(roots) != 1:
+        raise AttestedV2StoreError(
+            "V2 failed receipt allowance requires one graph root"
+        )
+    if not roots:
+        return {}
+    rows = await _select_by_values(
+        ANCESTRY_CHECKPOINT_TABLE,
+        field="root_receipt_hash",
+        values=roots,
+        key_fields=("root_receipt_hash",),
+        max_total_rows=len(roots),
+    )
+    loaded: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        root_hash = str(row.get("root_receipt_hash") or "")
+        graph = row.get("checkpoint_graph_doc")
+        proof = row.get("proof_doc")
+        if (
+            root_hash not in roots
+            or root_hash in loaded
+            or not isinstance(graph, Mapping)
+            or not isinstance(proof, Mapping)
+            or graph.get("root_receipt_hash") != root_hash
+            or graph.get("ancestry_proof") != proof
+            or row.get("checkpoint_graph_hash") != sha256_json(dict(graph))
+        ):
+            raise AttestedV2StoreError(
+                "checkpointed receipt graph durable row is inconsistent"
+            )
+        graph_failed = allowed_failed.intersection(
+            str(item.get("receipt_hash") or "")
+            for item in graph.get("receipts") or ()
+            if isinstance(item, Mapping)
+        )
+        validate_receipt_graph(
+            graph,
+            allowed_failed_receipt_hashes=graph_failed,
+        )
+        expected = ancestry_checkpoint_storage_row_v2(
+            proof,
+            expected_lineage_id=str(graph.get("ancestry_lineage_id") or ""),
+            boot_attestation_verifier=lambda identity: identity,
+            allowed_issuer_roles={
+                "gateway_coordinator",
+                "gateway_scoring",
+                "gateway_autoresearch",
+                "validator_weights",
+            },
+        )
+        expected.update(
+            {
+                "checkpoint_graph_hash": sha256_json(dict(graph)),
+                "checkpoint_graph_doc": dict(graph),
+            }
+        )
+        _assert_stored_row(ANCESTRY_CHECKPOINT_TABLE, row, expected)
+        loaded[root_hash] = dict(graph)
+    return loaded
+
+
+async def load_checkpointed_receipt_graph_v2(
+    root_receipt_hash: str,
+    *,
+    allowed_failed_receipt_hashes: Iterable[str] = (),
+) -> Optional[dict[str, Any]]:
+    loaded = await load_checkpointed_receipt_graphs_v2(
+        (root_receipt_hash,),
+        allowed_failed_receipt_hashes=allowed_failed_receipt_hashes,
+    )
+    return loaded.get(str(root_receipt_hash or "").lower())
+
+
+def compact_weight_submission_storage_row_v2(
+    submission: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project one independently hash-bound compact weight submission."""
+
+    compact = validate_compact_weight_submission_shape_v2(submission)
+    result = compact["weight_result"]
+    proof = compact["validator_ancestry_proof"]
+    claim = proof.get("certificate", {}).get("claim", {})
+    lineage_id = str(claim.get("lineage_id") or "")
+    binding_hash = str(compact["binding_receipt"].get("receipt_hash") or "")
+    if (
+        not _HASH_RE.fullmatch(lineage_id)
+        or claim.get("output_root_receipt_hash") != binding_hash
+    ):
+        raise AttestedV2StoreError(
+            "compact weight submission ancestry identity differs"
+        )
+    return {
+        "compact_submission_hash": str(compact["compact_submission_hash"]),
+        "bundle_hash": compact_weight_bundle_hash_v2(compact),
+        "netuid": int(result["netuid"]),
+        "epoch_id": int(result["epoch_id"]),
+        "validator_hotkey": str(compact["validator_hotkey"]),
+        "lineage_id": lineage_id,
+        "binding_receipt_hash": binding_hash,
+        "submission_doc": dict(compact),
+    }
+
+
+async def persist_compact_weight_submission_v2(
+    submission: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Append and exact-read one first-class compact weight submission."""
+
+    row = compact_weight_submission_storage_row_v2(submission)
+    await _insert_exact(
+        COMPACT_WEIGHT_SUBMISSION_TABLE,
+        row,
+        key_filters=(("compact_submission_hash", row["compact_submission_hash"]),),
+    )
+    stored = await select_one(
+        COMPACT_WEIGHT_SUBMISSION_TABLE,
+        filters=(("compact_submission_hash", row["compact_submission_hash"]),),
+    )
+    if not isinstance(stored, Mapping):
+        raise AttestedV2StoreError(
+            "compact weight submission durable readback is missing"
+        )
+    _assert_stored_row(COMPACT_WEIGHT_SUBMISSION_TABLE, stored, row)
+    return {
+        "compact_submission_hash": row["compact_submission_hash"],
+        "bundle_hash": row["bundle_hash"],
+        "binding_receipt_hash": row["binding_receipt_hash"],
+        "lineage_id": row["lineage_id"],
+        "durable_readback_hash": sha256_json(
+            {field: stored[field] for field in sorted(row)}
+        ),
+    }
+
+
+def compact_weight_publication_intent_storage_row_v2(
+    *,
+    submission: Mapping[str, Any],
+    durable_readback_hash: str,
+    epoch_authority: Mapping[str, Any],
+    transparency_event_hash: str,
+) -> dict[str, Any]:
+    """Project one immutable retry boundary for compact publication."""
+
+    compact_row = compact_weight_submission_storage_row_v2(submission)
+    durable_hash = str(durable_readback_hash or "").lower()
+    transparency_hash = str(transparency_event_hash or "").lower()
+    if (
+        not _HASH_RE.fullmatch(durable_hash)
+        or not _HASH_RE.fullmatch(transparency_hash)
+        or not isinstance(epoch_authority, Mapping)
+    ):
+        raise AttestedV2StoreError(
+            "compact weight publication intent inputs are invalid"
+        )
+    authority_doc = dict(epoch_authority)
+    epoch_authority_hash = sha256_json(authority_doc)
+    body = {
+        "schema_version": "leadpoet.compact_weight_publication_intent.v2",
+        "bundle_hash": compact_row["bundle_hash"],
+        "compact_submission_hash": compact_row["compact_submission_hash"],
+        "netuid": compact_row["netuid"],
+        "epoch_id": compact_row["epoch_id"],
+        "validator_hotkey": compact_row["validator_hotkey"],
+        "root_receipt_hash": compact_row["binding_receipt_hash"],
+        "durable_readback_hash": durable_hash,
+        "transparency_event_hash": transparency_hash,
+        "epoch_authority_hash": epoch_authority_hash,
+        "epoch_authority": authority_doc,
+    }
+    intent_doc = {**body, "intent_hash": sha256_json(body)}
+    return {
+        "bundle_hash": body["bundle_hash"],
+        "compact_submission_hash": body["compact_submission_hash"],
+        "netuid": body["netuid"],
+        "epoch_id": body["epoch_id"],
+        "validator_hotkey": body["validator_hotkey"],
+        "root_receipt_hash": body["root_receipt_hash"],
+        "durable_readback_hash": durable_hash,
+        "transparency_event_hash": transparency_hash,
+        "epoch_authority_hash": epoch_authority_hash,
+        "intent_hash": intent_doc["intent_hash"],
+        "intent_doc": intent_doc,
+    }
+
+
+async def persist_compact_weight_publication_intent_v2(
+    *,
+    submission: Mapping[str, Any],
+    durable_readback_hash: str,
+    epoch_authority: Mapping[str, Any],
+    transparency_event_hash: str,
+) -> dict[str, Any]:
+    """Append and exact-read one retryable compact publication intent."""
+
+    row = compact_weight_publication_intent_storage_row_v2(
+        submission=submission,
+        durable_readback_hash=durable_readback_hash,
+        epoch_authority=epoch_authority,
+        transparency_event_hash=transparency_event_hash,
+    )
+    filters = (("bundle_hash", row["bundle_hash"]),)
+    await _insert_exact(
+        COMPACT_WEIGHT_PUBLICATION_INTENT_TABLE,
+        row,
+        key_filters=filters,
+    )
+    stored = await select_one(
+        COMPACT_WEIGHT_PUBLICATION_INTENT_TABLE,
+        filters=filters,
+    )
+    if not isinstance(stored, Mapping):
+        raise AttestedV2StoreError(
+            "compact weight publication intent durable readback is missing"
+        )
+    _assert_stored_row(COMPACT_WEIGHT_PUBLICATION_INTENT_TABLE, stored, row)
+    return dict(row["intent_doc"])
+
+
+async def load_compact_weight_publication_intent_v2(
+    *, bundle_hash: str
+) -> Optional[dict[str, Any]]:
+    """Load and revalidate one immutable compact publication intent."""
+
+    normalized_hash = str(bundle_hash or "").lower()
+    if not _HASH_RE.fullmatch(normalized_hash):
+        raise AttestedV2StoreError(
+            "compact weight publication intent bundle hash is invalid"
+        )
+    row = await select_one(
+        COMPACT_WEIGHT_PUBLICATION_INTENT_TABLE,
+        filters=(("bundle_hash", normalized_hash),),
+    )
+    if not isinstance(row, Mapping):
+        return None
+    submission_row = await select_one(
+        COMPACT_WEIGHT_SUBMISSION_TABLE,
+        filters=(("bundle_hash", normalized_hash),),
+    )
+    submission = (
+        submission_row.get("submission_doc")
+        if isinstance(submission_row, Mapping)
+        else None
+    )
+    intent = row.get("intent_doc")
+    if not isinstance(submission, Mapping) or not isinstance(intent, Mapping):
+        raise AttestedV2StoreError(
+            "compact weight publication intent authority is incomplete"
+        )
+    expected = compact_weight_publication_intent_storage_row_v2(
+        submission=submission,
+        durable_readback_hash=str(intent.get("durable_readback_hash") or ""),
+        epoch_authority=(
+            intent.get("epoch_authority")
+            if isinstance(intent.get("epoch_authority"), Mapping)
+            else {}
+        ),
+        transparency_event_hash=str(
+            intent.get("transparency_event_hash") or ""
+        ),
+    )
+    _assert_stored_row(COMPACT_WEIGHT_PUBLICATION_INTENT_TABLE, row, expected)
+    return dict(expected["intent_doc"])
+
+
+def compact_weight_authority_storage_row_v2(
+    authority: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project one first-class compact public authority."""
+
+    normalized = validate_compact_published_weight_authority_shape_v2(
+        authority
+    )
+    compact = validate_compact_weight_submission_shape_v2(
+        normalized["compact_submission"]
+    )
+    if (
+        normalized["bundle_hash"] != compact_weight_bundle_hash_v2(compact)
+        or normalized["publication"].get("publication_receipt_hash")
+        != normalized["publication"]["ancestry_proof"]
+        .get("certificate", {})
+        .get("claim", {})
+        .get("output_root_receipt_hash")
+    ):
+        raise AttestedV2StoreError(
+            "compact weight authority identity differs"
+        )
+    return _compact_weight_authority_row_from_normalized_v2(normalized)
+
+
+def _compact_weight_authority_row_from_normalized_v2(
+    normalized: Mapping[str, Any],
+) -> dict[str, Any]:
+    compact = validate_compact_weight_submission_shape_v2(
+        normalized["compact_submission"]
+    )
+    finalization = normalized.get("finalization")
+    compact_finalization_hash = (
+        str(finalization["compact_submission"]["compact_finalization_hash"])
+        if isinstance(finalization, Mapping)
+        else None
+    )
+    finalization_receipt_hash = (
+        str(
+            finalization["compact_submission"]["validator_receipt_delta"][
+                "root_receipt_hash"
+            ]
+        )
+        if isinstance(finalization, Mapping)
+        else None
+    )
+    return {
+        "bundle_hash": str(normalized["bundle_hash"]),
+        "netuid": int(compact["weight_result"]["netuid"]),
+        "epoch_id": int(compact["weight_result"]["epoch_id"]),
+        "validator_hotkey": str(compact["validator_hotkey"]),
+        "authority_stage": str(normalized["authority_stage"]),
+        "schema_version": str(normalized["schema_version"]),
+        "lineage_id": str(normalized["lineage_id"]),
+        "authority_hash": str(normalized["authority_hash"]),
+        "compact_submission_hash": str(compact["compact_submission_hash"]),
+        "publication_receipt_hash": str(
+            normalized["publication"]["publication_receipt_hash"]
+        ),
+        "compact_finalization_hash": compact_finalization_hash,
+        "finalization_receipt_hash": finalization_receipt_hash,
+        "authority_doc": dict(normalized),
+    }
+
+
+async def persist_compact_weight_authority_v2(
+    authority: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Append and exact-read one bounded public audit authority."""
+
+    row = compact_weight_authority_storage_row_v2(authority)
+    key_filters = (
+        ("bundle_hash", row["bundle_hash"]),
+        ("authority_stage", row["authority_stage"]),
+    )
+    await _insert_exact(
+        COMPACT_WEIGHT_AUTHORITY_TABLE,
+        row,
+        key_filters=key_filters,
+    )
+    stored = await select_one(
+        COMPACT_WEIGHT_AUTHORITY_TABLE,
+        filters=key_filters,
+    )
+    if not isinstance(stored, Mapping):
+        raise AttestedV2StoreError(
+            "compact weight authority durable readback is missing"
+        )
+    _assert_stored_row(COMPACT_WEIGHT_AUTHORITY_TABLE, stored, row)
+    return {
+        "bundle_hash": row["bundle_hash"],
+        "authority_stage": row["authority_stage"],
+        "authority_hash": row["authority_hash"],
+    }
+
+
+async def load_compact_weight_authority_v2(
+    *,
+    bundle_hash: str,
+    prefer_finalized: bool = True,
+) -> Optional[dict[str, Any]]:
+    """Load an exact sidecar without reconstructing any historical graph."""
+
+    normalized_bundle_hash = str(bundle_hash or "").lower()
+    if not _HASH_RE.fullmatch(normalized_bundle_hash):
+        raise AttestedV2StoreError("compact weight authority bundle hash is invalid")
+    stages = ("finalized", "published") if prefer_finalized else ("published",)
+    for stage in stages:
+        row = await select_one(
+            COMPACT_WEIGHT_AUTHORITY_TABLE,
+            filters=(
+                ("bundle_hash", normalized_bundle_hash),
+                ("authority_stage", stage),
+            ),
+        )
+        if not isinstance(row, Mapping):
+            continue
+        authority = row.get("authority_doc")
+        if not isinstance(authority, Mapping):
+            raise AttestedV2StoreError(
+                "compact weight authority document is unavailable"
+            )
+        normalized = validate_compact_published_weight_authority_shape_v2(
+            authority
+        )
+        expected = _compact_weight_authority_row_from_normalized_v2(normalized)
+        _assert_stored_row(COMPACT_WEIGHT_AUTHORITY_TABLE, row, expected)
+        return normalized
+    return None
+
+
+async def load_compact_weight_authority_for_identity_v2(
+    *,
+    netuid: int,
+    epoch_id: int,
+    validator_hotkey: str,
+) -> Optional[dict[str, Any]]:
+    """Resolve the strongest bounded sidecar without loading the full graph."""
+
+    for stage in ("finalized", "published"):
+        row = await select_one(
+            COMPACT_WEIGHT_AUTHORITY_TABLE,
+            filters=(
+                ("netuid", int(netuid)),
+                ("epoch_id", int(epoch_id)),
+                ("validator_hotkey", str(validator_hotkey)),
+                ("authority_stage", stage),
+            ),
+        )
+        if not isinstance(row, Mapping):
+            continue
+        authority = row.get("authority_doc")
+        if not isinstance(authority, Mapping):
+            raise AttestedV2StoreError(
+                "compact weight authority document is unavailable"
+            )
+        normalized = validate_compact_published_weight_authority_shape_v2(
+            authority
+        )
+        expected = _compact_weight_authority_row_from_normalized_v2(normalized)
+        _assert_stored_row(COMPACT_WEIGHT_AUTHORITY_TABLE, row, expected)
+        return normalized
+    return None
 
 
 async def _load_receipt_graph_batch_v2(
@@ -926,12 +1599,12 @@ async def _load_receipt_graph_batch_v2(
     return graphs
 
 
-async def load_receipt_graphs_v2(
+async def _load_legacy_receipt_graphs_v2(
     root_receipt_hashes: Iterable[str],
     *,
     allowed_failed_receipt_hashes: Iterable[str] = (),
 ) -> dict[str, dict[str, Any]]:
-    """Reconstruct complete persisted ancestry without weakening graph limits."""
+    """Legacy-only recursive expansion used during finite checkpoint bootstrap."""
 
     root_hashes = sorted({str(value or "") for value in root_receipt_hashes})
     allowed_failed = sorted(
@@ -951,12 +1624,40 @@ async def load_receipt_graphs_v2(
             raise
 
     midpoint = len(root_hashes) // 2
-    left = await load_receipt_graphs_v2(root_hashes[:midpoint])
-    right = await load_receipt_graphs_v2(root_hashes[midpoint:])
+    left = await _load_legacy_receipt_graphs_v2(root_hashes[:midpoint])
+    right = await _load_legacy_receipt_graphs_v2(root_hashes[midpoint:])
     overlap = set(left).intersection(right)
     if overlap:
         raise AttestedV2StoreError("V2 receipt graph root is duplicated")
     return {**left, **right}
+
+
+async def load_receipt_graphs_v2(
+    root_receipt_hashes: Iterable[str],
+    *,
+    allowed_failed_receipt_hashes: Iterable[str] = (),
+) -> dict[str, dict[str, Any]]:
+    """Prefer constant-size checkpoint documents; bootstrap legacy roots once."""
+
+    roots = sorted({str(value or "").lower() for value in root_receipt_hashes})
+    if any(not _HASH_RE.fullmatch(value) for value in roots):
+        raise AttestedV2StoreError("V2 graph root receipt hash is invalid")
+    bounded = await load_checkpointed_receipt_graphs_v2(
+        roots,
+        allowed_failed_receipt_hashes=allowed_failed_receipt_hashes,
+    )
+    missing = [root for root in roots if root not in bounded]
+    if not missing:
+        return bounded
+    if bounded and allowed_failed_receipt_hashes:
+        raise AttestedV2StoreError(
+            "V2 failed receipt allowance cannot span graph authority kinds"
+        )
+    legacy = await _load_legacy_receipt_graphs_v2(
+        missing,
+        allowed_failed_receipt_hashes=allowed_failed_receipt_hashes,
+    )
+    return {**bounded, **legacy}
 
 
 async def load_receipt_graph_v2(
@@ -964,7 +1665,7 @@ async def load_receipt_graph_v2(
     *,
     allowed_failed_receipt_hashes: Iterable[str] = (),
 ) -> dict[str, Any]:
-    """Reconstruct one complete persisted ancestry graph and reject partial rows."""
+    """Load one bounded checkpoint graph or bootstrap one legacy full graph."""
 
     root_hash = str(root_receipt_hash or "")
     graphs = await load_receipt_graphs_v2(

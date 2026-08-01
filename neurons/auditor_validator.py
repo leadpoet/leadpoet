@@ -230,6 +230,13 @@ from leadpoet_canonical.auditor_v2 import (
     verify_attested_weight_authority_v2,
     verify_published_weight_authority_stage_v2,
 )
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    derive_ancestry_lineage_id_v2,
+)
+from leadpoet_canonical.compact_auditor_authority_v2 import (
+    COMPACT_PUBLISHED_WEIGHT_AUTHORITY_SCHEMA_VERSION,
+    verify_compact_published_weight_authority_v2,
+)
 
 # Constants from canonical module
 from leadpoet_canonical.constants import WEIGHT_SUBMISSION_BLOCK
@@ -1181,6 +1188,10 @@ class AuditorValidator:
 
         self._last_v2_authority_was_absent = False
         netuid = int(self.config.netuid)
+        compact_url = (
+            f"{self.gateway_url}/weights/v2/published-compact/"
+            f"{netuid}/{int(epoch_id)}"
+        )
         staged_url = (
             f"{self.gateway_url}/weights/v2/published/{netuid}/{int(epoch_id)}"
         )
@@ -1191,10 +1202,12 @@ class AuditorValidator:
             "v2 weight bundle not found",
             "finalized v2 weight authority not found",
             "published v2 weight authority not found",
+            "compact published v2 weight authority not found",
         }
         try:
             async with aiohttp.ClientSession(trust_env=False) as session:
                 for endpoint_kind, url in (
+                    ("published_compact", compact_url),
                     ("published", staged_url),
                     ("finalized_legacy", legacy_url),
                 ):
@@ -1225,9 +1238,19 @@ class AuditorValidator:
                                 if isinstance(not_found, dict)
                                 else ""
                             )
-                            if url == staged_url and detail == "Not Found":
-                                # The gateway predates the staged route;
-                                # fall through to the legacy view.
+                            if (
+                                url == compact_url
+                                and detail
+                                in {
+                                    "Not Found",
+                                    "compact published v2 weight authority not found",
+                                }
+                            ) or (
+                                url == staged_url and detail == "Not Found"
+                            ):
+                                # A compact sidecar is additive and may lag an
+                                # otherwise valid publication; advance only
+                                # through the explicitly compatible routes.
                                 _audit_event(
                                     "bundle_fetch_route_absent",
                                     epoch=int(epoch_id),
@@ -1616,6 +1639,28 @@ class AuditorValidator:
             ).expanduser()
             profile = json.loads(profile_file.read_text(encoding="utf-8"))
             if (
+                isinstance(authority, dict)
+                and authority.get("schema_version")
+                == COMPACT_PUBLISHED_WEIGHT_AUTHORITY_SCHEMA_VERSION
+            ):
+                cutover = getattr(self, "epoch_cutover", None)
+                if cutover is None:
+                    raise ValueError(
+                        "compact authority requires the stateful epoch cutover"
+                    )
+                lineage_id = derive_ancestry_lineage_id_v2(
+                    cutover_mapping_hash=str(cutover.mapping_hash),
+                    network_genesis_hash=str(cutover.network_genesis_hash),
+                    netuid=int(cutover.netuid),
+                )
+                verified = verify_compact_published_weight_authority_v2(
+                    authority,
+                    identity_cache=identity_cache,
+                    chain_signing_profile=profile,
+                    expected_lineage_id=lineage_id,
+                    expected_chain=str(profile["chain_endpoint"]),
+                )
+            elif (
                 isinstance(authority, dict)
                 and "authority_stage" in authority
             ):

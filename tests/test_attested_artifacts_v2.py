@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from gateway.research_lab import attested_artifacts_v2, attested_v2_store
+from gateway.research_lab import (
+    attested_artifacts_v2,
+    attested_scoring_v2,
+    attested_v2_store,
+)
 from leadpoet_canonical.attested_v2 import merkle_root
 
 
@@ -70,6 +74,8 @@ async def _exercise(
         }
     ]
     persistence_job_ids = []
+    source_proof = {"proof_hash": _hash("4")}
+    final_proof = {"proof_hash": _hash("5")}
 
     class Client:
         async def v2_list_encrypted_artifacts(self, *, job_id, purpose):
@@ -97,7 +103,8 @@ async def _exercise(
             "transport_root": _hash("f"),
         }
 
-    async def execute(**_kwargs):
+    async def execute(**kwargs):
+        assert kwargs["parent_ancestry_proofs"] == (source_proof,)
         job_id = persistence_job_ids[0] if persistence_job_ids else expected_job_id[0]
         receipt = {
             "job_id": job_id,
@@ -111,10 +118,17 @@ async def _exercise(
                 "root_receipt_hash": receipt["receipt_hash"],
                 "receipts": [receipt],
             },
+            "ancestry_compact_proof": final_proof,
         }
 
     async def persist_sidecars(**kwargs):
         return {"artifact_link_count": len(kwargs["artifacts"])}
+
+    async def persist_checkpoint(proof, *, checkpointed_graph, **_kwargs):
+        return {
+            "root_receipt_hash": checkpointed_graph["root_receipt_hash"],
+            "proof_hash": proof["proof_hash"],
+        }
 
     expected_job_id = []
     original_derive = __import__(
@@ -139,6 +153,11 @@ async def _exercise(
     )
     monkeypatch.setattr(attested_artifacts_v2, "execute_coordinator_v2", execute)
     monkeypatch.setattr(
+        attested_scoring_v2,
+        "_gateway_ancestry_lineage_id",
+        lambda: _hash("6"),
+    )
+    monkeypatch.setattr(
         attested_v2_store,
         "persist_execution_sidecars_v2",
         persist_sidecars,
@@ -156,6 +175,9 @@ async def _exercise(
         release_manifest={"release_hash": _hash("7")},
         client=Client(),
         bucket=None if replay else "immutable-bucket",
+        source_ancestry_compact_proof=source_proof,
+        persist_ancestry_checkpoint=persist_checkpoint,
+        boot_verifier=lambda identity: identity,
     )
     assert result["receipt"]["job_id"] == expected_job_id[0]
     if partial:

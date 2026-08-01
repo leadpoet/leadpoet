@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import threading
+from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -14,6 +15,7 @@ from gateway.research_lab.attested_scoring_v2 import (
     execute_scoring_v2,
 )
 from gateway.research_lab import attested_scoring_v2
+from gateway.research_lab import attested_v2_store
 from gateway.research_lab.attested_v2_store import (
     AttestedV2StoreError,
     _execution_result_storage_row_v2,
@@ -25,6 +27,7 @@ from gateway.tee.execution_job_manager_v2 import (
     PARENT_RECEIPT_GRAPHS_FIELD,
     unpack_parent_receipt_graph_set_v2,
 )
+from Leadpoet.utils.subnet_epoch import CUTOVER_PATH_ENV
 from gateway.tee.coordinator_executor_v2 import (
     COORDINATOR_OPERATIONS_V2,
     CoordinatorExecutorV2,
@@ -49,6 +52,41 @@ from leadpoet_canonical.attested_v2 import (
 
 def _hash(character):
     return "sha256:" + character * 64
+
+
+@pytest.fixture(autouse=True)
+def _checkpoint_runtime(monkeypatch):
+    monkeypatch.setenv(
+        CUTOVER_PATH_ENV,
+        str(
+            Path(__file__).resolve().parents[1]
+            / "config"
+            / "stateful-epoch-cutover-sn71.json"
+        ),
+    )
+
+    async def load_proofs(*args, **kwargs):
+        return {}
+
+    async def persist_proof(proof, *, checkpointed_graph, **kwargs):
+        assert checkpointed_graph["root_receipt_hash"] == (
+            proof["certificate"]["claim"]["output_root_receipt_hash"]
+        )
+        return {
+            "root_receipt_hash": checkpointed_graph["root_receipt_hash"],
+            "proof_hash": proof["proof_hash"],
+        }
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_ancestry_checkpoint_proofs_v2",
+        load_proofs,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_ancestry_checkpoint_v2",
+        persist_proof,
+    )
 
 
 @pytest.mark.asyncio
@@ -343,6 +381,13 @@ class _Client:
             ),
             worker_count=1,
             configured_worker_count=configured_worker_count,
+            ancestry_lineage_id=attested_scoring_v2._gateway_ancestry_lineage_id(),
+            ancestry_boot_attestation_verifier=lambda identity: identity,
+            ancestry_allowed_issuer_roles=(
+                "gateway_autoresearch",
+                "gateway_coordinator",
+                "gateway_scoring",
+            ),
         )
 
     async def scoring_v2_health(self):
@@ -384,6 +429,12 @@ class _Client:
 
     async def scoring_v2_get_transport_attempts(self, job_id):
         return list(self.manager.transport_attempts(job_id))
+
+    async def scoring_v2_get_host_operations(self, job_id):
+        return list(self.manager.host_operations(job_id))
+
+    async def scoring_v2_get_ancestry_compact_proof(self, job_id):
+        return self.manager.ancestry_compact_proof(job_id)
 
     async def scoring_v2_get_artifact_hashes(self, job_id):
         return list(self.manager.artifact_hashes(job_id))
@@ -433,6 +484,13 @@ class _CoordinatorClient(_Client):
             ),
             worker_count=1,
             configured_worker_count=0,
+            ancestry_lineage_id=attested_scoring_v2._gateway_ancestry_lineage_id(),
+            ancestry_boot_attestation_verifier=lambda identity: identity,
+            ancestry_allowed_issuer_roles=(
+                "gateway_autoresearch",
+                "gateway_coordinator",
+                "gateway_scoring",
+            ),
         )
 
     coordinator_v2_health = _Client.scoring_v2_health
@@ -445,6 +503,10 @@ class _CoordinatorClient(_Client):
     coordinator_v2_get_receipt = _Client.scoring_v2_get_receipt
     coordinator_v2_get_receipts = _Client.scoring_v2_get_receipts
     coordinator_v2_get_transport_attempts = _Client.scoring_v2_get_transport_attempts
+    coordinator_v2_get_host_operations = _Client.scoring_v2_get_host_operations
+    coordinator_v2_get_ancestry_compact_proof = (
+        _Client.scoring_v2_get_ancestry_compact_proof
+    )
     coordinator_v2_get_artifact_hashes = _Client.scoring_v2_get_artifact_hashes
     coordinator_v2_get_transitions = _Client.scoring_v2_get_transitions
 
@@ -1350,6 +1412,13 @@ class _ArtifactCoordinator:
             ),
             worker_count=1,
             configured_worker_count=0,
+            ancestry_lineage_id=attested_scoring_v2._gateway_ancestry_lineage_id(),
+            ancestry_boot_attestation_verifier=lambda identity: identity,
+            ancestry_allowed_issuer_roles=(
+                "gateway_autoresearch",
+                "gateway_coordinator",
+                "gateway_scoring",
+            ),
         )
 
     async def v2_list_encrypted_artifacts(self, *, job_id, purpose):
@@ -1399,6 +1468,12 @@ class _ArtifactCoordinator:
 
     async def coordinator_v2_get_transport_attempts(self, job_id):
         return list(self.manager.transport_attempts(job_id))
+
+    async def coordinator_v2_get_host_operations(self, job_id):
+        return list(self.manager.host_operations(job_id))
+
+    async def coordinator_v2_get_ancestry_compact_proof(self, job_id):
+        return self.manager.ancestry_compact_proof(job_id)
 
     async def coordinator_v2_get_artifact_hashes(self, job_id):
         return list(self.manager.artifact_hashes(job_id))

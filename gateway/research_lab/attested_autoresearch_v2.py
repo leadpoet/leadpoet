@@ -16,9 +16,13 @@ from pathlib import Path
 import re
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
-from gateway.tee.autoresearch_executor_v2 import AUTORESEARCH_OPERATIONS_V2
+from gateway.tee.autoresearch_executor_v2 import (
+    AUTORESEARCH_OPERATIONS_V2,
+    OP_REPAIR_STALE_PARENT,
+)
 from gateway.tee.execution_job_manager_v2 import (
     JOB_SCHEMA_VERSION,
+    PARENT_ANCESTRY_PROOFS_FIELD,
     PARENT_RECEIPT_GRAPHS_FIELD,
 )
 from gateway.tee.release_manifest_v2 import (
@@ -32,6 +36,7 @@ from gateway.tee.release_lineage_v2 import (
 from gateway.utils.tee_client import autoresearch_tee_client
 from leadpoet_canonical.attested_v2 import (
     EMPTY_ARTIFACT_ROOT,
+    build_checkpointed_receipt_graph,
     build_receipt_graph,
     canonical_json,
     merkle_root,
@@ -41,6 +46,16 @@ from leadpoet_canonical.attested_v2 import (
     validate_signed_host_operation_request,
     verify_boot_identity_nitro,
 )
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    ANCESTRY_DELTA_SCHEMA_VERSION,
+    build_certificate_parent_authority_v2,
+    build_full_graph_parent_authority_v2,
+    build_full_graph_parent_v2,
+    derive_ancestry_lineage_id_v2,
+    validate_compact_ancestry_proof_v2,
+    validate_local_delta_against_certificate_v2,
+)
+from Leadpoet.utils.subnet_epoch import load_subnet_epoch_cutover
 
 
 DEFAULT_RELEASE_MANIFEST_PATH = Path(
@@ -50,6 +65,11 @@ DEFAULT_TIMEOUT_SECONDS = 4 * 60 * 60
 DEFAULT_POLL_SECONDS = 0.1
 UPLOAD_CHUNK_BYTES = 512 * 1024
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_GATEWAY_ANCESTRY_ISSUER_ROLES = (
+    "gateway_autoresearch",
+    "gateway_coordinator",
+    "gateway_scoring",
+)
 
 
 class AttestedAutoresearchV2Error(RuntimeError):
@@ -67,6 +87,225 @@ class AttestedAutoresearchV2Error(RuntimeError):
 
 def _canonical_bytes(value: Any) -> bytes:
     return canonical_json(value).encode("utf-8")
+
+
+def _gateway_ancestry_lineage_id() -> str:
+    cutover = load_subnet_epoch_cutover()
+    return derive_ancestry_lineage_id_v2(
+        cutover_mapping_hash=str(cutover.mapping_hash),
+        network_genesis_hash=str(cutover.network_genesis_hash),
+        netuid=int(cutover.netuid),
+    )
+
+
+async def _maybe_await(value: Any) -> Any:
+    if asyncio.iscoroutine(value) or isinstance(value, Awaitable):
+        return await value
+    return value
+
+
+def _proof_root(proof: Mapping[str, Any]) -> str:
+    certificate = proof.get("certificate")
+    claim = certificate.get("claim") if isinstance(certificate, Mapping) else None
+    return str(
+        claim.get("output_root_receipt_hash")
+        if isinstance(claim, Mapping)
+        else ""
+    )
+
+
+async def _resolve_parent_ancestry_transport_v2(
+    *,
+    parent_graphs: Sequence[Mapping[str, Any]],
+    parent_ancestry_proofs: Sequence[Mapping[str, Any]],
+    expected_lineage_id: str,
+    boot_attestation_verifier: Any,
+    load_ancestry_proofs: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Select one exact authority per direct parent without dropping full audit data."""
+
+    graph_by_root: dict[str, dict[str, Any]] = {}
+    for graph in parent_graphs:
+        if not isinstance(graph, Mapping):
+            raise AttestedAutoresearchV2Error(
+                "autoresearch parent receipt graph is invalid"
+            )
+        root = str(graph.get("root_receipt_hash") or "")
+        if not _HASH_RE.fullmatch(root) or root in graph_by_root:
+            raise AttestedAutoresearchV2Error(
+                "autoresearch parent receipt graph root is invalid or duplicated"
+            )
+        graph_by_root[root] = dict(graph)
+
+    proof_by_root: dict[str, dict[str, Any]] = {}
+    for proof in parent_ancestry_proofs:
+        if not isinstance(proof, Mapping):
+            raise AttestedAutoresearchV2Error(
+                "autoresearch parent ancestry proof is invalid"
+            )
+        normalized = validate_compact_ancestry_proof_v2(
+            proof,
+            expected_lineage_id=expected_lineage_id,
+            boot_attestation_verifier=boot_attestation_verifier,
+            allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+        )
+        root = _proof_root(normalized)
+        if root not in graph_by_root or root in proof_by_root:
+            raise AttestedAutoresearchV2Error(
+                "autoresearch parent ancestry proof is unexpected or duplicated"
+            )
+        proof_by_root[root] = normalized
+
+    unresolved = sorted(set(graph_by_root) - set(proof_by_root))
+    if unresolved:
+        if load_ancestry_proofs is None:
+            from gateway.research_lab.attested_v2_store import (
+                load_ancestry_checkpoint_proofs_v2,
+            )
+
+            load_ancestry_proofs = load_ancestry_checkpoint_proofs_v2
+        loaded = await _maybe_await(
+            load_ancestry_proofs(
+                unresolved,
+                expected_lineage_id=expected_lineage_id,
+                boot_attestation_verifier=boot_attestation_verifier,
+                allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+            )
+        )
+        if not isinstance(loaded, Mapping) or any(
+            str(root) not in unresolved or not isinstance(proof, Mapping)
+            for root, proof in dict(loaded).items()
+        ):
+            raise AttestedAutoresearchV2Error(
+                "autoresearch persisted ancestry proof result is invalid"
+            )
+        for declared_root, proof in dict(loaded).items():
+            normalized = validate_compact_ancestry_proof_v2(
+                proof,
+                expected_lineage_id=expected_lineage_id,
+                boot_attestation_verifier=boot_attestation_verifier,
+                allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+                required_receipt_hashes=(str(declared_root),),
+            )
+            root = _proof_root(normalized)
+            if root != str(declared_root) or root in proof_by_root:
+                raise AttestedAutoresearchV2Error(
+                    "autoresearch persisted ancestry proof root differs"
+                )
+            proof_by_root[root] = normalized
+
+    proof_transport = [proof_by_root[root] for root in sorted(proof_by_root)]
+    graph_transport = [
+        graph_by_root[root]
+        for root in sorted(set(graph_by_root) - set(proof_by_root))
+    ]
+    return proof_transport, graph_transport
+
+
+def _merge_exact_parent_graph_sets_v2(
+    *graph_sets: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    graph_by_root: dict[str, dict[str, Any]] = {}
+    for graphs in graph_sets:
+        for graph in graphs:
+            if not isinstance(graph, Mapping):
+                raise AttestedAutoresearchV2Error(
+                    "autoresearch external receipt graph is invalid"
+                )
+            normalized = dict(graph)
+            root = str(normalized.get("root_receipt_hash") or "")
+            if not _HASH_RE.fullmatch(root):
+                raise AttestedAutoresearchV2Error(
+                    "autoresearch external receipt graph root is invalid"
+                )
+            existing = graph_by_root.get(root)
+            if existing is not None and existing != normalized:
+                raise AttestedAutoresearchV2Error(
+                    "autoresearch external receipt graph conflicts with durable parent"
+                )
+            graph_by_root[root] = normalized
+    return [graph_by_root[root] for root in sorted(graph_by_root)]
+
+
+def _trusted_parent_authorities_v2(
+    *,
+    parent_proofs: Sequence[Mapping[str, Any]],
+    parent_full_graphs: Sequence[Mapping[str, Any]],
+    expected_lineage_id: str,
+    boot_attestation_verifier: Any,
+) -> dict[str, str]:
+    authorities: dict[str, str] = {}
+    for proof in parent_proofs:
+        descriptor = build_certificate_parent_authority_v2(
+            proof["certificate"],
+            expected_lineage_id=expected_lineage_id,
+            boot_attestation_verifier=boot_attestation_verifier,
+            allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+        )
+        root = str(descriptor["parent_receipt_hash"])
+        if root in authorities:
+            raise AttestedAutoresearchV2Error(
+                "autoresearch parent ancestry authority is duplicated"
+            )
+        authorities[root] = str(descriptor["authority_hash"])
+    for graph in parent_full_graphs:
+        parent = build_full_graph_parent_v2(graph)
+        descriptor = build_full_graph_parent_authority_v2(
+            parent,
+            boot_attestation_verifier=boot_attestation_verifier,
+        )
+        root = str(descriptor["parent_receipt_hash"])
+        if root in authorities:
+            raise AttestedAutoresearchV2Error(
+                "autoresearch parent ancestry authority is duplicated"
+            )
+        authorities[root] = str(descriptor["authority_hash"])
+    return authorities
+
+
+async def _persist_ancestry_checkpoint_after_graph_v2(
+    *,
+    proof: Mapping[str, Any],
+    checkpointed_graph: Mapping[str, Any],
+    expected_root_receipt_hash: str,
+    expected_lineage_id: str,
+    boot_attestation_verifier: Any,
+    persist_ancestry_checkpoint: Any,
+) -> dict[str, Any]:
+    if (
+        not isinstance(checkpointed_graph, Mapping)
+        or checkpointed_graph.get("root_receipt_hash")
+        != expected_root_receipt_hash
+    ):
+        raise AttestedAutoresearchV2Error(
+            "autoresearch ancestry checkpoint graph differs"
+        )
+    if persist_ancestry_checkpoint is None:
+        from gateway.research_lab.attested_v2_store import (
+            persist_ancestry_checkpoint_v2,
+        )
+
+        persist_ancestry_checkpoint = persist_ancestry_checkpoint_v2
+    persisted = await _maybe_await(
+        persist_ancestry_checkpoint(
+            proof,
+            checkpointed_graph=checkpointed_graph,
+            expected_lineage_id=expected_lineage_id,
+            boot_attestation_verifier=boot_attestation_verifier,
+            allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+        )
+    )
+    if (
+        not isinstance(persisted, Mapping)
+        or persisted.get("root_receipt_hash") != expected_root_receipt_hash
+        or persisted.get("proof_hash") != proof.get("proof_hash")
+        or persisted.get("certificate_hash")
+        != proof.get("certificate", {}).get("certificate_hash")
+    ):
+        raise AttestedAutoresearchV2Error(
+            "autoresearch ancestry checkpoint durable readback differs"
+        )
+    return dict(persisted)
 
 
 def _load_release(path: Path) -> Dict[str, Any]:
@@ -320,6 +559,7 @@ async def execute_autoresearch_v2(
         Callable[[Mapping[str, Any], Mapping[str, Any]], Any],
     ],
     parent_graphs: Sequence[Mapping[str, Any]] = (),
+    parent_ancestry_proofs: Sequence[Mapping[str, Any]] = (),
     input_artifact_hashes: Iterable[str] = (),
     provider_credential_profile: str = "default",
     provider_credential_ref_hashes: Optional[Mapping[str, str]] = None,
@@ -332,6 +572,9 @@ async def execute_autoresearch_v2(
     persist_graph: Any = None,
     boot_verifier: Any = None,
     persist_transport_artifacts: Any = None,
+    load_ancestry_proofs: Any = None,
+    persist_ancestry_checkpoint: Any = None,
+    ancestry_lineage_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     registry = AUTORESEARCH_OPERATIONS_V2
     if operation not in registry or purpose not in registry[operation]:
@@ -349,6 +592,11 @@ async def execute_autoresearch_v2(
         if release_manifest is not None
         else _load_release(release_manifest_path)
     )
+    lineage_id = str(ancestry_lineage_id or _gateway_ancestry_lineage_id())
+    if not _HASH_RE.fullmatch(lineage_id):
+        raise AttestedAutoresearchV2Error(
+            "autoresearch ancestry lineage is invalid"
+        )
     current_release_verifier = boot_verifier or _release_boot_verifier(release)
     health = await client.autoresearch_v2_health()
     worker_count = health.get("worker_count")
@@ -362,6 +610,8 @@ async def execute_autoresearch_v2(
         or worker_count <= 0
         or worker_count != configured_worker_count
         or not health.get("workers_alive")
+        or health.get("ancestry_checkpoints") is not True
+        or health.get("ancestry_lineage_id") != lineage_id
     ):
         raise AttestedAutoresearchV2Error("autoresearch enclave health is invalid")
     boot_identity = await client.v2_get_boot_identity()
@@ -389,17 +639,39 @@ async def execute_autoresearch_v2(
                 "autoresearch receipt release lineage is unavailable"
             ) from exc
 
-    if PARENT_RECEIPT_GRAPHS_FIELD in payload:
+    parent_proof_transport, parent_graph_transport = (
+        await _resolve_parent_ancestry_transport_v2(
+            parent_graphs=parent_graphs,
+            parent_ancestry_proofs=parent_ancestry_proofs,
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=verifier,
+            load_ancestry_proofs=load_ancestry_proofs,
+        )
+    )
+    if (
+        PARENT_RECEIPT_GRAPHS_FIELD in payload
+        or PARENT_ANCESTRY_PROOFS_FIELD in payload
+    ):
         raise AttestedAutoresearchV2Error(
             "autoresearch payload uses a reserved V2 authority field"
         )
     payload_document = dict(payload)
-    if parent_graphs:
+    if parent_graph_transport:
         payload_document[PARENT_RECEIPT_GRAPHS_FIELD] = [
-            dict(graph) for graph in parent_graphs
+            dict(graph) for graph in parent_graph_transport
+        ]
+    if parent_proof_transport:
+        payload_document[PARENT_ANCESTRY_PROOFS_FIELD] = [
+            dict(proof) for proof in parent_proof_transport
         ]
     payload_bytes = _canonical_bytes(payload_document)
     payload_hash = sha256_bytes(payload_bytes)
+    # The logical job identity must not change when an already-certified
+    # parent switches from its full bootstrap graph to the equivalent compact
+    # transport proof.  The signed receipt still commits the exact uploaded
+    # bytes through ``input_root``; credential commitments remain bound below
+    # through ``input_artifact_hashes``.
+    logical_payload_hash = sha256_bytes(_canonical_bytes(dict(payload)))
     credential_refs = {
         str(name): str(digest or "").lower()
         for name, digest in dict(provider_credential_ref_hashes or {}).items()
@@ -413,9 +685,14 @@ async def execute_autoresearch_v2(
             "autoresearch provider credential profile is invalid"
         )
     normalized_profile = str(provider_credential_profile or "default")
-    if normalized_profile != "default":
+    expected_profile = (
+        "stale_parent_repair"
+        if operation == OP_REPAIR_STALE_PARENT
+        else "default"
+    )
+    if normalized_profile != expected_profile:
         raise AttestedAutoresearchV2Error(
-            "autoresearch provider credential profile is unsupported"
+            "autoresearch provider credential profile differs from operation"
         )
     artifact_hashes = sorted(
         {str(item).lower() for item in input_artifact_hashes}
@@ -431,7 +708,7 @@ async def execute_autoresearch_v2(
         purpose=purpose,
         epoch_id=epoch_id,
         sequence=sequence,
-        payload_sha256=payload_hash,
+        payload_sha256=logical_payload_hash,
         parent_receipt_hashes=parent_roots,
         input_artifact_hashes=artifact_hashes,
         release_hash=release["release_hash"],
@@ -570,18 +847,59 @@ async def execute_autoresearch_v2(
         )
     host_operations = await client.autoresearch_v2_get_host_operations(job_id)
     external_graphs = await client.autoresearch_v2_get_external_receipt_graphs(job_id)
+    ancestry_proof = await client.autoresearch_v2_get_ancestry_compact_proof(
+        job_id
+    )
+    transport_full_graphs = _merge_exact_parent_graph_sets_v2(
+        parent_graph_transport,
+        external_graphs,
+    )
+    trusted_parent_authorities = _trusted_parent_authorities_v2(
+        parent_proofs=parent_proof_transport,
+        parent_full_graphs=transport_full_graphs,
+        expected_lineage_id=lineage_id,
+        boot_attestation_verifier=verifier,
+    )
+    local_delta = {
+        "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+        "root_receipt_hash": str(receipt["receipt_hash"]),
+        "boot_identities": [dict(boot_identity)],
+        "receipts": [dict(item) for item in local_receipts],
+        "transport_attempts": [dict(item) for item in transport_attempts],
+        "host_operations": [dict(item) for item in host_operations],
+    }
+    normalized_ancestry_proof = validate_compact_ancestry_proof_v2(
+        ancestry_proof,
+        expected_lineage_id=lineage_id,
+        boot_attestation_verifier=verifier,
+        allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+        required_receipt_hashes=(str(receipt["receipt_hash"]),),
+        required_purposes=(purpose,),
+        trusted_parent_authorities=trusted_parent_authorities,
+    )
+    validate_local_delta_against_certificate_v2(
+        local_delta,
+        normalized_ancestry_proof["certificate"],
+        expected_lineage_id=lineage_id,
+        boot_attestation_verifier=verifier,
+        allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+        trusted_parent_authorities=trusted_parent_authorities,
+    )
     transitions = (
         await client.autoresearch_v2_get_transitions(job_id) if succeeded else []
     )
     allowed_failed = (() if succeeded else (str(receipt["receipt_hash"]),))
-    graph = _merge_receipt_graphs(
+    graph = build_checkpointed_receipt_graph(
         root_receipt_hash=str(receipt["receipt_hash"]),
-        local_boot_identity=boot_identity,
-        local_receipts=local_receipts,
+        boot_identities=(boot_identity,),
+        receipts=local_receipts,
         transport_attempts=transport_attempts,
         host_operations=host_operations,
-        parent_graphs=tuple(parent_graphs) + tuple(external_graphs),
+        ancestry_lineage_id=lineage_id,
+        ancestry_proof=normalized_ancestry_proof,
         allowed_failed_receipt_hashes=allowed_failed,
+        boot_attestation_verifier=verifier,
+        require_boot_attestation_verification=True,
     )
     validate_receipt_graph(
         graph,
@@ -605,6 +923,8 @@ async def execute_autoresearch_v2(
             transport_attempts=transport_attempts,
             execution_artifact_hashes=job_artifact_hashes,
             release_manifest=release,
+            source_ancestry_compact_proof=normalized_ancestry_proof,
+            boot_verifier=verifier,
         )
         if asyncio.iscoroutine(artifact_result) or isinstance(
             artifact_result, Awaitable
@@ -616,9 +936,10 @@ async def execute_autoresearch_v2(
             )
         final_graph = artifact_result.get("receipt_graph")
         final_receipt = artifact_result.get("receipt")
+        final_ancestry_proof = artifact_result.get("ancestry_compact_proof")
         if not isinstance(final_graph, Mapping) or not isinstance(
             final_receipt, Mapping
-        ):
+        ) or not isinstance(final_ancestry_proof, Mapping):
             raise AttestedAutoresearchV2Error(
                 "transport artifact lineage is unavailable"
             )
@@ -629,12 +950,24 @@ async def execute_autoresearch_v2(
             boot_attestation_verifier=verifier,
             require_boot_attestation_verification=True,
         )
+        final_ancestry_proof = validate_compact_ancestry_proof_v2(
+            final_ancestry_proof,
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=verifier,
+            allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+            required_receipt_hashes=(str(final_receipt["receipt_hash"]),),
+            required_purposes=("leadpoet.artifact_persistence.v2",),
+        )
         outcome = {
             "status": "succeeded" if succeeded else "failed",
             "result": result,
             "execution_receipt": dict(receipt),
             "receipt": dict(final_receipt),
             "receipt_graph": dict(final_graph),
+            "ancestry_compact_proof": dict(final_ancestry_proof),
+            "execution_ancestry_compact_proof": dict(
+                normalized_ancestry_proof
+            ),
             "transitions": list(transitions),
             "transport_attempts": list(transport_attempts),
             "artifact_hashes": list(job_artifact_hashes),
@@ -665,16 +998,26 @@ async def execute_autoresearch_v2(
         raise AttestedAutoresearchV2Error(
             "autoresearch receipt durable readback differs"
         )
+    checkpoint_persistence = await _persist_ancestry_checkpoint_after_graph_v2(
+        proof=normalized_ancestry_proof,
+        checkpointed_graph=graph,
+        expected_root_receipt_hash=str(receipt["receipt_hash"]),
+        expected_lineage_id=lineage_id,
+        boot_attestation_verifier=verifier,
+        persist_ancestry_checkpoint=persist_ancestry_checkpoint,
+    )
     outcome = {
         "status": "succeeded" if succeeded else "failed",
         "result": result,
         "receipt": dict(receipt),
         "receipt_graph": graph,
+        "ancestry_compact_proof": dict(normalized_ancestry_proof),
         "transitions": list(transitions),
         "transport_attempts": list(transport_attempts),
         "artifact_hashes": list(job_artifact_hashes),
         "host_operations": list(host_operations),
         "persistence": dict(persistence),
+        "ancestry_checkpoint_persistence": checkpoint_persistence,
         "release_hash": release["release_hash"],
         "physical_role": "gateway_autoresearch",
     }

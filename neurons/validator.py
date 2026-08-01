@@ -4378,7 +4378,15 @@ class Validator(BaseValidatorNeuron):
         record = journal.load()
         if record is None:
             return None
-        epoch_id = int(record["published_bundle"]["weight_result"]["epoch_id"])
+        authority = record.get("published_bundle") or record.get(
+            "compact_submission"
+        )
+        if not isinstance(authority, Mapping):
+            raise RuntimeError(
+                "journaled authoritative V2 publication has no authority"
+            )
+        compact_recovery = "compact_submission" in record
+        epoch_id = int(authority["weight_result"]["epoch_id"])
 
         async def publication_epoch_closed(stage: str) -> bool:
             try:
@@ -4420,9 +4428,18 @@ class Validator(BaseValidatorNeuron):
             record["publication"]["weight_submission_event_hash"]
         )
         try:
+            recovery_method = (
+                self._validator_v2_client.recover_compact_weight_publication_v2
+                if compact_recovery
+                else self._validator_v2_client.recover_weight_publication_v2
+            )
             recovery = await asyncio.to_thread(
-                self._validator_v2_client.recover_weight_publication_v2,
-                published_bundle=record["published_bundle"],
+                recovery_method,
+                **(
+                    {"compact_submission": record["compact_submission"]}
+                    if compact_recovery
+                    else {"published_bundle": record["published_bundle"]}
+                ),
                 weight_submission_event_hash=event_hash,
                 extrinsic_signature_results=record[
                     "extrinsic_signature_results"
@@ -4450,7 +4467,10 @@ class Validator(BaseValidatorNeuron):
             )
         authorization_id = str(recovery["weight_authorization_id"])
         record = journal.replace_authorization(authorization_id)
-        weight_result = record["published_bundle"]["weight_result"]
+        authority = record.get("published_bundle") or record.get(
+            "compact_submission"
+        )
+        weight_result = authority["weight_result"]
         signed_extrinsics = list(recovery["signed_extrinsics"])
         if not signed_extrinsics:
             sdk_uids, sdk_weights = _canonical_sdk_weight_vector(weight_result)

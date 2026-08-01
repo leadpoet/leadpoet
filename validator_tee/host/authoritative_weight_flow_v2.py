@@ -14,6 +14,10 @@ from urllib.parse import urlsplit
 
 from leadpoet_canonical.binding import create_binding_message
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
+from leadpoet_canonical.compact_weight_authority_v2 import (
+    build_compact_weight_finalization_submission_v2,
+    compact_weight_bundle_hash_v2,
+)
 from leadpoet_canonical.hotkey_authority_v2 import (
     MAX_WEIGHT_TRANSPORT_LOGICAL_BYTES,
     MAX_WEIGHT_TRANSPORT_WIRE_BYTES,
@@ -27,6 +31,7 @@ from validator_tee.host.gateway_weight_inputs_v2 import (
 from validator_tee.host.vsock_client import ValidatorEnclaveClient
 from validator_tee.host.weight_authority_v2 import (
     build_authoritative_weight_bundle_v2,
+    build_compact_weight_submission_v2,
     build_stateful_epoch_evidence_v1,
 )
 from leadpoet_canonical.weight_computation import normalize_to_u16_with_uids_pure
@@ -312,7 +317,7 @@ async def prepare_authoritative_weight_publication_v2(
     enclave_client = client or ValidatorEnclaveClient()
     calculation = dict(calculation_snapshot)
     try:
-        endpoint = _gateway_endpoint(gateway_url) + "/weights/submit/v2"
+        gateway_endpoint = _gateway_endpoint(gateway_url)
     except Exception as exc:
         raise AuthoritativeWeightFlowV2Error(str(exc)) from exc
     try:
@@ -326,17 +331,32 @@ async def prepare_authoritative_weight_publication_v2(
             client=enclave_client,
             timeout_seconds=input_timeout_seconds,
         )
+        weight_request = {
+            "validator_hotkey": validator_hotkey,
+            "calculation_snapshot": calculation,
+            "input_receipt_hashes": gateway_inputs["input_receipt_hashes"],
+            "gateway_authority_event_hash": gateway_inputs[
+                "gateway_authority_event_hash"
+            ],
+        }
+        if "upstream_ancestry_proofs" in gateway_inputs:
+            weight_request.update(
+                {
+                    "upstream_ancestry_proofs": gateway_inputs[
+                        "upstream_ancestry_proofs"
+                    ],
+                    "upstream_transport_attempts": gateway_inputs[
+                        "upstream_transport_attempts"
+                    ],
+                }
+            )
+        else:
+            weight_request["upstream_receipt_set"] = gateway_inputs[
+                "upstream_receipt_set"
+            ]
         enclave_response = await asyncio.to_thread(
             enclave_client.compute_authoritative_weights_v2,
-            {
-                "validator_hotkey": validator_hotkey,
-                "calculation_snapshot": calculation,
-                "input_receipt_hashes": gateway_inputs["input_receipt_hashes"],
-                "gateway_authority_event_hash": gateway_inputs[
-                    "gateway_authority_event_hash"
-                ],
-                "upstream_receipt_set": gateway_inputs["upstream_receipt_set"],
-            },
+            weight_request,
         )
         _verify_host_vector(
             host_uids=host_uids,
@@ -344,7 +364,12 @@ async def prepare_authoritative_weight_publication_v2(
             enclave_result=enclave_response["weight_result"],
         )
         boot = enclave_response["boot_identity"]
-        graph = enclave_response["receipt_graph"]
+        compact = "receipt_graph_delta" in enclave_response
+        graph = (
+            enclave_response["receipt_graph_delta"]
+            if compact
+            else enclave_response["receipt_graph"]
+        )
         binding_message = create_binding_message(
             netuid=int(enclave_response["weight_result"]["netuid"]),
             chain=str(expected_chain),
@@ -352,35 +377,66 @@ async def prepare_authoritative_weight_publication_v2(
             validator_code_hash=str(boot["build_manifest_hash"]),
             version=str(boot["commit_sha"]),
         )
+        binding_kwargs = {
+            "parent_receipt_hash": str(graph["root_receipt_hash"])
+        }
+        if compact:
+            binding_kwargs["compact_ancestry_context"] = {
+                "validator_receipt_delta": enclave_response[
+                    "receipt_graph_delta"
+                ],
+                "upstream_ancestry_proofs": enclave_response[
+                    "upstream_ancestry_proofs"
+                ],
+                "epoch_authority": enclave_response["epoch_authority"],
+            }
         binding_signature = await asyncio.to_thread(
             enclave_client.sign_application_message_v2,
             binding_message.encode("utf-8"),
-            parent_receipt_hash=str(graph["root_receipt_hash"]),
+            **binding_kwargs,
         )
-        bundle = build_authoritative_weight_bundle_v2(
-            enclave_response=enclave_response,
-            validator_hotkey=validator_hotkey,
-            binding_message=binding_message,
-            binding_signature_result=binding_signature,
-        )
-        epoch_evidence = build_stateful_epoch_evidence_v1(
-            enclave_response=enclave_response,
-            published_bundle=bundle,
-        )
+        if compact:
+            compact_submission = build_compact_weight_submission_v2(
+                enclave_response=enclave_response,
+                validator_hotkey=validator_hotkey,
+                binding_message=binding_message,
+                binding_signature_result=binding_signature,
+            )
+            bundle = None
+            epoch_evidence = None
+            endpoint = gateway_endpoint + "/weights/submit/compact/v2"
+            publication_payload = compact_submission
+        else:
+            bundle = build_authoritative_weight_bundle_v2(
+                enclave_response=enclave_response,
+                validator_hotkey=validator_hotkey,
+                binding_message=binding_message,
+                binding_signature_result=binding_signature,
+            )
+            compact_submission = None
+            epoch_evidence = build_stateful_epoch_evidence_v1(
+                enclave_response=enclave_response,
+                published_bundle=bundle,
+            )
+            endpoint = gateway_endpoint + "/weights/submit/v2"
+            publication_payload = bundle
         if before_publish is not None:
             prepared = {
                 "weight_authorization_id": str(
                     enclave_response["weight_authorization_id"]
                 ),
-                "published_bundle": bundle,
                 "epoch_evidence": epoch_evidence,
             }
+            if compact:
+                prepared["compact_submission"] = compact_submission
+            else:
+                prepared["published_bundle"] = bundle
             callback_result = before_publish(prepared)
             if asyncio.iscoroutine(callback_result):
                 await callback_result
         publication = await post_json(
             endpoint,
-            bundle,
+            publication_payload,
             float(publication_timeout_seconds),
         )
     except AuthoritativeWeightFlowV2Error:
@@ -390,16 +446,26 @@ async def prepare_authoritative_weight_publication_v2(
             "authoritative V2 weight preparation failed closed"
         ) from exc
 
-    _validate_publication_acknowledgment_v2(
-        bundle=bundle,
-        publication=publication,
-    )
-    epoch_evidence_acknowledgment = await publish_stateful_epoch_evidence_v1(
-        epoch_evidence=epoch_evidence,
-        gateway_url=gateway_url,
-        post_json=post_json,
-        timeout_seconds=publication_timeout_seconds,
-    )
+    if compact:
+        compact_ack = _validate_compact_publication_acknowledgment_v2(
+            compact_submission=compact_submission,
+            acknowledgment=publication,
+        )
+        publication = compact_ack["publication"]
+        epoch_evidence_acknowledgment = compact_ack[
+            "epoch_evidence_acknowledgment"
+        ]
+    else:
+        _validate_publication_acknowledgment_v2(
+            bundle=bundle,
+            publication=publication,
+        )
+        epoch_evidence_acknowledgment = await publish_stateful_epoch_evidence_v1(
+            epoch_evidence=epoch_evidence,
+            gateway_url=gateway_url,
+            post_json=post_json,
+            timeout_seconds=publication_timeout_seconds,
+        )
     result = enclave_response["weight_result"]
     return {
         "uids": list(result["uids"]),
@@ -414,7 +480,11 @@ async def prepare_authoritative_weight_publication_v2(
             publication["weight_submission_event_hash"]
         ),
         "enclave_response": dict(enclave_response),
-        "published_bundle": bundle,
+        **(
+            {"compact_submission": compact_submission}
+            if compact
+            else {"published_bundle": bundle}
+        ),
         "epoch_evidence": epoch_evidence,
         "epoch_evidence_acknowledgment": epoch_evidence_acknowledgment,
         "publication": dict(publication),
@@ -457,6 +527,131 @@ def _validate_publication_acknowledgment_v2(
     return dict(publication)
 
 
+def _validate_compact_publication_acknowledgment_v2(
+    *,
+    compact_submission: Mapping[str, Any],
+    acknowledgment: Mapping[str, Any],
+) -> Dict[str, Any]:
+    expected_fields = {
+        "schema_version",
+        "compact_submission_hash",
+        "bundle_hash",
+        "publication",
+        "epoch_evidence_acknowledgment",
+    }
+    if (
+        not isinstance(acknowledgment, Mapping)
+        or set(acknowledgment) != expected_fields
+        or acknowledgment.get("schema_version")
+        != "leadpoet.compact_weight_submission_ack.v2"
+        or acknowledgment.get("compact_submission_hash")
+        != compact_submission.get("compact_submission_hash")
+        or acknowledgment.get("bundle_hash")
+        != compact_weight_bundle_hash_v2(compact_submission)
+    ):
+        raise AuthoritativeWeightFlowV2Error(
+            "gateway compact V2 publication acknowledgment is invalid"
+        )
+    publication = acknowledgment.get("publication")
+    result = compact_submission.get("weight_result")
+    delta = compact_submission.get("validator_receipt_delta")
+    expected_publication_fields = {
+        "success",
+        "epoch_id",
+        "weights_count",
+        "weights_hash",
+        "weight_receipt_hash",
+        "weight_submission_event_hash",
+        "message",
+    }
+    if (
+        not isinstance(publication, Mapping)
+        or set(publication) != expected_publication_fields
+        or not isinstance(result, Mapping)
+        or not isinstance(delta, Mapping)
+        or publication.get("success") is not True
+        or int(publication.get("epoch_id", -1))
+        != int(result.get("epoch_id", -2))
+        or int(publication.get("weights_count", -1))
+        != len(result.get("sparse_uids") or ())
+        or publication.get("weights_hash") != result.get("weights_hash")
+        or publication.get("weight_receipt_hash")
+        != delta.get("root_receipt_hash")
+        or not _HASH_RE.fullmatch(
+            str(publication.get("weight_submission_event_hash") or "")
+        )
+    ):
+        raise AuthoritativeWeightFlowV2Error(
+            "gateway compact V2 publication differs from enclave weights"
+        )
+    current = compact_submission.get("epoch_authority")
+    boundary = compact_submission.get("epoch_boundary")
+    epoch_ack = acknowledgment.get("epoch_evidence_acknowledgment")
+    if current is None and boundary is None:
+        if epoch_ack is not None:
+            raise AuthoritativeWeightFlowV2Error(
+                "gateway returned unexpected compact epoch evidence"
+            )
+    else:
+        epoch_fields = {
+            "schema_version",
+            "bundle_hash",
+            "mapping_hash",
+            "subnet_epoch_index",
+            "settlement_epoch_id",
+            "boundary_block",
+            "epoch_authority_hash",
+            "epoch_authority_receipt_hash",
+            "boundary_hash",
+            "boundary_receipt_hash",
+            "receipt_graph_hash",
+            "durable_readback_hash",
+        }
+        if (
+            not isinstance(current, Mapping)
+            or not isinstance(boundary, Mapping)
+            or not isinstance(epoch_ack, Mapping)
+            or set(epoch_ack) != epoch_fields
+            or epoch_ack.get("schema_version")
+            != "leadpoet.subnet_epoch_boundary_ack.v1"
+            or epoch_ack.get("bundle_hash")
+            != acknowledgment.get("bundle_hash")
+            or epoch_ack.get("mapping_hash")
+            != current.get("cutover_mapping_hash")
+            or int(epoch_ack.get("subnet_epoch_index", -1))
+            != int(current.get("subnet_epoch_index", -2))
+            or int(epoch_ack.get("settlement_epoch_id", -1))
+            != int(current.get("settlement_epoch_id", -2))
+            or int(epoch_ack.get("boundary_block", -1))
+            != int(boundary.get("current_block", -2))
+            or epoch_ack.get("epoch_authority_hash")
+            != sha256_json(dict(current))
+            or epoch_ack.get("boundary_hash")
+            != sha256_json(dict(boundary))
+            or any(
+                not _HASH_RE.fullmatch(str(epoch_ack.get(field) or ""))
+                for field in (
+                    "epoch_authority_receipt_hash",
+                    "boundary_receipt_hash",
+                    "receipt_graph_hash",
+                    "durable_readback_hash",
+                )
+            )
+        ):
+            raise AuthoritativeWeightFlowV2Error(
+                "gateway compact epoch evidence acknowledgment differs"
+            )
+    return {
+        "schema_version": acknowledgment["schema_version"],
+        "compact_submission_hash": acknowledgment["compact_submission_hash"],
+        "bundle_hash": acknowledgment["bundle_hash"],
+        "publication": dict(publication),
+        "epoch_evidence_acknowledgment": (
+            dict(epoch_ack) if isinstance(epoch_ack, Mapping) else None
+        ),
+    }
+
+
 async def resume_prepared_weight_publication_v2(
     *,
     journal_record: Mapping[str, Any],
@@ -468,14 +663,30 @@ async def resume_prepared_weight_publication_v2(
 ) -> Dict[str, Any]:
     """Replay the exact pre-journaled bundle and verify an idempotent ack."""
 
+    compact_submission = journal_record.get("compact_submission")
     bundle = journal_record.get("published_bundle")
-    if not isinstance(bundle, Mapping):
+    compact = isinstance(compact_submission, Mapping)
+    if compact == isinstance(bundle, Mapping):
         raise AuthoritativeWeightFlowV2Error(
-            "prepared V2 publication has no canonical bundle"
+            "prepared V2 publication authority is ambiguous"
         )
     try:
-        endpoint = _gateway_endpoint(gateway_url) + "/weights/submit/v2"
-        publication = await post_json(endpoint, bundle, float(timeout_seconds))
+        gateway_endpoint = _gateway_endpoint(gateway_url)
+        if compact:
+            acknowledgment = await post_json(
+                gateway_endpoint + "/weights/submit/compact/v2",
+                compact_submission,
+                float(timeout_seconds),
+            )
+            return _validate_compact_publication_acknowledgment_v2(
+                compact_submission=compact_submission,
+                acknowledgment=acknowledgment,
+            )["publication"]
+        publication = await post_json(
+            gateway_endpoint + "/weights/submit/v2",
+            bundle,
+            float(timeout_seconds),
+        )
         validated = _validate_publication_acknowledgment_v2(
             bundle=bundle,
             publication=publication,
@@ -516,24 +727,61 @@ async def finalize_authoritative_weight_publication_v2(
 
     enclave_client = client or ValidatorEnclaveClient()
     try:
-        endpoint = _gateway_endpoint(gateway_url) + "/weights/finalize/v2"
+        gateway_endpoint = _gateway_endpoint(gateway_url)
         authorization_id = str(
             prepared_publication["weight_authorization_id"]
         )
         event_hash = str(
             prepared_publication["weight_submission_event_hash"]
         )
+        compact_submission = prepared_publication.get("compact_submission")
+        compact_context = None
+        if isinstance(compact_submission, Mapping):
+            publication_proof = compact_submission.get(
+                "validator_ancestry_proof"
+            )
+            epoch_authority = compact_submission.get("epoch_authority")
+            if not isinstance(publication_proof, Mapping) or not isinstance(
+                epoch_authority, Mapping
+            ):
+                raise AuthoritativeWeightFlowV2Error(
+                    "compact finalization ancestry context is incomplete"
+                )
+            compact_context = {
+                "publication_ancestry_proof": dict(publication_proof),
+                "epoch_authority": dict(epoch_authority),
+            }
         confirmation = await asyncio.to_thread(
             enclave_client.confirm_weight_publication_v2,
             authorization_id,
             finalization_scan_id=finalization_scan_id,
+            compact_ancestry_context=compact_context,
         )
-        submission = build_weight_finalization_submission_v2(
-            validator_hotkey=validator_hotkey,
-            weight_submission_event_hash=event_hash,
-            finalization=confirmation["finalization"],
-            receipt_graph=confirmation["receipt_graph"],
-        )
+        compact = "receipt_graph_delta" in confirmation
+        if compact:
+            submission = build_compact_weight_finalization_submission_v2(
+                validator_hotkey=validator_hotkey,
+                weight_submission_event_hash=event_hash,
+                finalization=confirmation["finalization"],
+                ancestry_commitment=str(
+                    confirmation["ancestry_commitment"]
+                ),
+                validator_receipt_delta=confirmation[
+                    "receipt_graph_delta"
+                ],
+                validator_ancestry_proof=confirmation[
+                    "validator_ancestry_proof"
+                ],
+            )
+            endpoint = gateway_endpoint + "/weights/finalize/compact/v2"
+        else:
+            submission = build_weight_finalization_submission_v2(
+                validator_hotkey=validator_hotkey,
+                weight_submission_event_hash=event_hash,
+                finalization=confirmation["finalization"],
+                receipt_graph=confirmation["receipt_graph"],
+            )
+            endpoint = gateway_endpoint + "/weights/finalize/v2"
         acknowledgment = await post_json(
             endpoint,
             submission,

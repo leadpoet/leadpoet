@@ -174,7 +174,9 @@ async def test_client_signs_exact_request_and_preserves_complete_receipt_set(mon
         client=client,
         post_json=post_json,
     )
-    assert observed["url"] == "https://gateway.example/weights/inputs/v2"
+    assert observed["url"] == (
+        "https://gateway.example/weights/inputs/v2?ancestry=compact-v2"
+    )
     assert observed["payload"]["validator_hotkey_signature"] == "1" * 128
     assert observed["payload"]["request"]["calculation_snapshot_hash"] == sha256_json(
         _calculation()

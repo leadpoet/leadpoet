@@ -1838,6 +1838,33 @@ def seal_v2_inter_enclave_artifact(
     )
 
 
+def _gateway_ancestry_manager_kwargs(runtime: Any) -> Dict[str, Any]:
+    from leadpoet_canonical.ancestry_checkpoint_v2 import (
+        derive_ancestry_lineage_id_v2,
+    )
+
+    configuration = runtime.runtime_configuration()["configuration"]
+    cutover = configuration["research_lab_execution_config"][
+        "epoch_authority"
+    ]["cutover"]
+    return {
+        "ancestry_lineage_id": derive_ancestry_lineage_id_v2(
+            cutover_mapping_hash=str(cutover["mapping_hash"]),
+            network_genesis_hash=str(cutover["network_genesis_hash"]),
+            netuid=int(cutover["netuid"]),
+        ),
+        "ancestry_boot_attestation_verifier": (
+            runtime.verify_release_lineage_boot
+        ),
+        "ancestry_allowed_issuer_roles": (
+            "gateway_autoresearch",
+            "gateway_coordinator",
+            "gateway_scoring",
+            "validator_weights",
+        ),
+    }
+
+
 def get_v2_scoring_job_manager():
     global v2_scoring_job_manager
     with v2_scoring_job_manager_lock:
@@ -1895,6 +1922,7 @@ def get_v2_scoring_job_manager():
             executor=executor,
             worker_count=worker_count,
             configured_worker_count=configured_worker_count,
+            **_gateway_ancestry_manager_kwargs(runtime),
         )
         return v2_scoring_job_manager
 
@@ -2107,6 +2135,7 @@ def get_v2_coordinator_job_manager():
             worker_count=1,
             configured_worker_count=0,
             failed_parent_graph_policy=coordinator_failed_parent_graph_policy_v2,
+            **_gateway_ancestry_manager_kwargs(runtime),
         )
         return v2_coordinator_job_manager
 
@@ -2214,6 +2243,7 @@ def get_v2_autoresearch_job_manager():
             worker_count=worker_count,
             configured_worker_count=configured_worker_count,
             host_operation_channel_factory=channel_factory,
+            **_gateway_ancestry_manager_kwargs(runtime),
         )
         return v2_autoresearch_job_manager
 
@@ -2276,6 +2306,8 @@ def _handle_v2_job_rpc(
         return list(manager.host_operations(params.get("job_id")))
     if action == "get_external_receipt_graphs":
         return list(manager.external_receipt_graphs(params.get("job_id")))
+    if action == "get_ancestry_compact_proof":
+        return manager.ancestry_compact_proof(params.get("job_id"))
     raise ValueError("unknown V2 execution method")
 
 

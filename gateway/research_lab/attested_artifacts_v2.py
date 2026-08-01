@@ -42,6 +42,10 @@ async def persist_execution_transport_artifacts_v2(
     client: Any = coordinator_tee_client,
     bucket: str | None = None,
     key_prefix: str = ATTESTED_V2_ARTIFACT_KEY_PREFIX,
+    source_ancestry_compact_proof: Mapping[str, Any],
+    load_ancestry_proofs: Any = None,
+    persist_ancestry_checkpoint: Any = None,
+    boot_verifier: Any = None,
 ) -> dict[str, Any]:
     allowed_failed = {
         str(item.get("receipt_hash") or "")
@@ -111,21 +115,20 @@ async def persist_execution_transport_artifacts_v2(
     }
     # The coordinator operation derives and signs the persistence job ID. The
     # same deterministic source identity is used for each S3 readback proof.
-    from gateway.research_lab.attested_scoring_v2 import derive_execution_job_id_v2
-    from gateway.tee.execution_job_manager_v2 import PARENT_RECEIPT_GRAPHS_FIELD
+    from gateway.research_lab.attested_scoring_v2 import (
+        _gateway_ancestry_lineage_id,
+        _persist_ancestry_checkpoint_after_graph_v2,
+        derive_execution_job_id_v2,
+    )
     from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes
 
-    lineage_payload_document = {
-        **lineage_payload,
-        PARENT_RECEIPT_GRAPHS_FIELD: [dict(source_graph)],
-    }
     lineage_job_id = derive_execution_job_id_v2(
         operation=OP_ATTEST_ARTIFACT_PERSISTENCE,
         purpose="leadpoet.artifact_persistence.v2",
         epoch_id=int(epoch_id),
         sequence=int(sequence),
         payload_sha256=sha256_bytes(
-            canonical_json(lineage_payload_document).encode("utf-8")
+            canonical_json(lineage_payload).encode("utf-8")
         ),
         parent_receipt_hashes=(str(source_graph["root_receipt_hash"]),),
         input_artifact_hashes=(),
@@ -165,14 +168,23 @@ async def persist_execution_transport_artifacts_v2(
         sequence=int(sequence),
         payload=lineage_payload,
         parent_graphs=(dict(source_graph),),
+        parent_ancestry_proofs=(dict(source_ancestry_compact_proof),),
         allowed_failed_parent_receipt_hashes=allowed_failed,
         input_artifact_hashes=(),
         release_manifest=release_manifest,
         client=client,
+        load_ancestry_proofs=load_ancestry_proofs,
+        persist_ancestry_checkpoint=persist_ancestry_checkpoint,
+        boot_verifier=boot_verifier,
     )
     graph = outcome.get("receipt_graph")
     receipt = outcome.get("receipt")
-    if not isinstance(graph, Mapping) or not isinstance(receipt, Mapping):
+    ancestry_compact_proof = outcome.get("ancestry_compact_proof")
+    if (
+        not isinstance(graph, Mapping)
+        or not isinstance(receipt, Mapping)
+        or not isinstance(ancestry_compact_proof, Mapping)
+    ):
         raise AttestedArtifactPersistenceV2Error(
             "V2 artifact persistence receipt is unavailable"
         )
@@ -184,6 +196,31 @@ async def persist_execution_transport_artifacts_v2(
         graph,
         required_purposes=(purpose, "leadpoet.artifact_persistence.v2"),
         allowed_failed_receipt_hashes=allowed_failed,
+    )
+    if not callable(boot_verifier):
+        raise AttestedArtifactPersistenceV2Error(
+            "V2 artifact ancestry boot verifier is unavailable"
+        )
+    lineage_id = _gateway_ancestry_lineage_id()
+    source_checkpoint_persistence = (
+        await _persist_ancestry_checkpoint_after_graph_v2(
+            source_ancestry_compact_proof,
+            checkpointed_graph=source_graph,
+            expected_root_receipt_hash=str(source_receipt["receipt_hash"]),
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=boot_verifier,
+            persist_ancestry_checkpoint=persist_ancestry_checkpoint,
+        )
+    )
+    final_checkpoint_persistence = (
+        await _persist_ancestry_checkpoint_after_graph_v2(
+            ancestry_compact_proof,
+            checkpointed_graph=graph,
+            expected_root_receipt_hash=str(receipt["receipt_hash"]),
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=boot_verifier,
+            persist_ancestry_checkpoint=persist_ancestry_checkpoint,
+        )
     )
     if resume_persisted_artifacts:
         lineage_result = outcome.get("result")
@@ -236,4 +273,10 @@ async def persist_execution_transport_artifacts_v2(
         **dict(outcome),
         "artifacts": persisted,
         "sidecar_persistence": dict(sidecars),
+        "execution_ancestry_checkpoint_persistence": dict(
+            source_checkpoint_persistence
+        ),
+        "ancestry_checkpoint_persistence": dict(
+            final_checkpoint_persistence
+        ),
     }

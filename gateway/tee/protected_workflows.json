@@ -2,6 +2,16 @@
   "baseline_commit": "c350c43674d5bd470808e542278b5c05bd3f3534",
   "entries": [
     {
+      "ast_sha256": "sha256:3906c365a737ef356b96ad974e4ece7b8755b49ad097ed24cdbf2dd3662b0c9a",
+      "path": "gateway/api/weights.py",
+      "symbol": "_submit_weights_v2_impl"
+    },
+    {
+      "ast_sha256": "sha256:19170b65b3e4ddd01bd300f15b14b4bceb2ba2998f23cbd7325cd0027110d004",
+      "path": "gateway/api/weights.py",
+      "symbol": "finalize_compact_weights_v2"
+    },
+    {
       "ast_sha256": "sha256:25548040deab80402e0bd7989bb647fefb2c5d2830d0773f178285b420dd81b1",
       "path": "gateway/api/weights.py",
       "symbol": "finalize_weights_v2"
@@ -12,9 +22,19 @@
       "symbol": "get_attested_weights_v2"
     },
     {
-      "ast_sha256": "sha256:533ae39cefc3f260a5b2755562eef3857d822c7f9b6a2a4dafbcc64bd2657cbf",
+      "ast_sha256": "sha256:6ab2d1d25ca3b607658f028dd165621603f9377d8cf770770ed6f1f929bff60e",
+      "path": "gateway/api/weights.py",
+      "symbol": "get_compact_published_weights_v2"
+    },
+    {
+      "ast_sha256": "sha256:b4d771e1e3fefa79d32a78612412273673c92b6c9dade232b003afa3d9b3cae3",
       "path": "gateway/api/weights.py",
       "symbol": "get_weight_inputs_v2"
+    },
+    {
+      "ast_sha256": "sha256:30f75113754f23bc174b13d8350e233ec90eff586b4ee71f272a7b8cfb70bb69",
+      "path": "gateway/api/weights.py",
+      "symbol": "submit_compact_weights_v2"
     },
     {
       "ast_sha256": "sha256:5d3cf1db386bf1cb3eeb42798743b7a19ec3865a3faba752e689a021a78e6834",
@@ -22,7 +42,7 @@
       "symbol": "submit_weights"
     },
     {
-      "ast_sha256": "sha256:87b432a983ab4f2dc605c86aea667486727310fa6699c5ba3d6a3b532f620028",
+      "ast_sha256": "sha256:8191461d5d6aadbca88632ec332fa9de8ea06c0fda59517eb5615cae3f133617",
       "path": "gateway/api/weights.py",
       "symbol": "submit_weights_v2"
     },
@@ -92,6 +112,61 @@
       "symbol": "recover_research_lab_checkpointed_audit_epochs"
     },
     {
+      "ast_sha256": "sha256:bfa57fc4a50bbbbd2d1e2ab1ca983e4a314cc35c01ea286e1278de53337227bb",
+      "path": "gateway/research_lab/attested_artifacts_v2.py",
+      "symbol": "persist_execution_transport_artifacts_v2"
+    },
+    {
+      "ast_sha256": "sha256:b808df83d252af4730d3834ff3e3073a925914b6727e77d2816929eedeacc5e6",
+      "path": "gateway/research_lab/attested_autoresearch_v2.py",
+      "symbol": "_persist_ancestry_checkpoint_after_graph_v2"
+    },
+    {
+      "ast_sha256": "sha256:d7883978a3dd281fea3705daa9d3606041eb1b6ec42485fc99e5fd0e8b1392d5",
+      "path": "gateway/research_lab/attested_autoresearch_v2.py",
+      "symbol": "_resolve_parent_ancestry_transport_v2"
+    },
+    {
+      "ast_sha256": "sha256:f7ec5a971c3e8de588db7bde0c040f593931272f39322c52fe1cc50f4dfe8a45",
+      "path": "gateway/research_lab/attested_autoresearch_v2.py",
+      "symbol": "_trusted_parent_authorities_v2"
+    },
+    {
+      "ast_sha256": "sha256:89dbd952f078ddaf69b7ba832c85e35e3587b8a0b0992fef72633529a2188fce",
+      "path": "gateway/research_lab/attested_autoresearch_v2.py",
+      "symbol": "execute_autoresearch_v2"
+    },
+    {
+      "ast_sha256": "sha256:e7ca9b6363ea77cc6241b70fb5693c9991e72b502a5ee75a68b675b9a933c164",
+      "path": "gateway/research_lab/attested_scoring_v2.py",
+      "symbol": "_compact_parent_graphs_for_transport"
+    },
+    {
+      "ast_sha256": "sha256:10516fad7e51d737dcd0b24952d2b374b6afc6f63431a23645a13a79c2fca7e6",
+      "path": "gateway/research_lab/attested_scoring_v2.py",
+      "symbol": "_persist_ancestry_checkpoint_after_graph_v2"
+    },
+    {
+      "ast_sha256": "sha256:9bacfde3620c8a6094a65ee87d7a64ce178a5615b229785019231a2ca5d4462f",
+      "path": "gateway/research_lab/attested_scoring_v2.py",
+      "symbol": "_resolve_parent_ancestry_transport_v2"
+    },
+    {
+      "ast_sha256": "sha256:3c70a9d7938cdd9ded4b96f089586e5a97b8fe749f784403631d4fe15d810261",
+      "path": "gateway/research_lab/attested_scoring_v2.py",
+      "symbol": "_validate_checkpointed_graph_proof_v2"
+    },
+    {
+      "ast_sha256": "sha256:00de8abb6046e3c5a5215e4c71c3132ec5904745f152c4b3f436f30ec3630237",
+      "path": "gateway/research_lab/attested_scoring_v2.py",
+      "symbol": "_validate_output_ancestry_checkpoint_v2"
+    },
+    {
+      "ast_sha256": "sha256:4c9925c7d65162a1417c162a45eafc77e9c4acbde085359f459882bbed6c3314",
+      "path": "gateway/research_lab/attested_scoring_v2.py",
+      "symbol": "execute_scoring_v2"
+    },
+    {
       "ast_sha256": "sha256:cf0b450a6c135c4ab64c8491b9ed7a3d5ddb65d33d786d8748b9b6eaa2d7732f",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "_load_receipt_graph_batch_v2"
@@ -100,6 +175,16 @@
       "ast_sha256": "sha256:36785139d1e37d2e20f1be8f1e21ab0e14c96067d81efda4d8b9c1518cf22a67",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "_select_by_values"
+    },
+    {
+      "ast_sha256": "sha256:b392d1938c681ed9e5ebc37e8c879e38439a1ae4c288c208fa5a026a21915098",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "load_ancestry_checkpoint_proof_v2"
+    },
+    {
+      "ast_sha256": "sha256:eade2a8f63a679469773a4d7e3e1b3c3dd4e4f14f6dcd97aff04d1c5bc705542",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "load_ancestry_checkpoint_proofs_v2"
     },
     {
       "ast_sha256": "sha256:6ab6cb484c0bcebde82da98cd8523535d6ba1d32120c1759b4be95d5ae2aa254",
@@ -122,19 +207,64 @@
       "symbol": "load_business_artifact_graphs_v2"
     },
     {
+      "ast_sha256": "sha256:fc86222f00891915594f240be5306526481ee4027b355b6b2f96f97eff364033",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "load_checkpointed_receipt_graph_v2"
+    },
+    {
+      "ast_sha256": "sha256:3c5a106f5407d74b65370c613fa4b6e870e1705d4c7dbaae49d0beff68db6307",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "load_checkpointed_receipt_graphs_v2"
+    },
+    {
+      "ast_sha256": "sha256:9b94e3a94f073546c1e24e1ee94e7c1b346c37919d5e200b6e55bbd80b4a7bb5",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "load_compact_weight_authority_for_identity_v2"
+    },
+    {
+      "ast_sha256": "sha256:7b9ac51eee6a119031cae043fe760b5f8ec013db5ecbf2e1836df65b0085fcf8",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "load_compact_weight_authority_v2"
+    },
+    {
+      "ast_sha256": "sha256:9c39febe8306565962d1bcd635b72f628e398aa0da1bad7c82c5501454f10965",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "load_compact_weight_publication_intent_v2"
+    },
+    {
       "ast_sha256": "sha256:d4b4b002a46dc745dd3271f3a1d9ab4bf7efe423ce86d1add7a80a81c84dcdc1",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "load_receipt_graph_v2"
     },
     {
-      "ast_sha256": "sha256:d2e7809bdf35210c2bacd0d71e31c012b64e65b0ac68d0dc16609a2301095426",
+      "ast_sha256": "sha256:453117214a61731bb23daa02924890dd7202ea6db6b4d6ac54b30bf16a3e13b8",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "load_receipt_graphs_v2"
+    },
+    {
+      "ast_sha256": "sha256:b0c4f8382f12cfeb00090b9105d07cbb47850622ad0a4167abada51b586b4fe9",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "persist_ancestry_checkpoint_v2"
     },
     {
       "ast_sha256": "sha256:b79be8c29b6fa9c663231a5463f6a8905be1191e4df024de9dbd01317e20993c",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "persist_chain_realized_settlement_v1"
+    },
+    {
+      "ast_sha256": "sha256:e8227d32460da180b546de527ee7846755ea3504cea7230850a58c4a9e960142",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "persist_compact_weight_authority_v2"
+    },
+    {
+      "ast_sha256": "sha256:b7b1d4a824ebc5543c2717094fb92db9d3e5a0932c830287df5b29e1d6d8e1d4",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "persist_compact_weight_publication_intent_v2"
+    },
+    {
+      "ast_sha256": "sha256:1ff196f7278aa234e620124139463f879f8cf7a1c42d7571a2df4ebf20cd6082",
+      "path": "gateway/research_lab/attested_v2_store.py",
+      "symbol": "persist_compact_weight_submission_v2"
     },
     {
       "ast_sha256": "sha256:c61c74172615010914e9c41c3f416f3d20ec8873406a2ea6c91b0cf3dfa93ade",
@@ -150,6 +280,16 @@
       "ast_sha256": "sha256:e9d17d0d1e12c2637e43672749c6652e386a6315aff31a9c70e8406c619d2617",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "persist_receipt_graph_v2"
+    },
+    {
+      "ast_sha256": "sha256:46b17b5d046a65184e9c2eb5fcb001f3f065fada7086fc4e866f0b10a3b5f1db",
+      "path": "gateway/research_lab/attested_weight_inputs_v2.py",
+      "symbol": "_compact_weight_ancestry"
+    },
+    {
+      "ast_sha256": "sha256:da63615aa8f1899f4991e51ee8b5889991d58766c7e73ab7c16b47e2ced04c9d",
+      "path": "gateway/research_lab/attested_weight_inputs_v2.py",
+      "symbol": "build_gateway_weight_inputs_v2"
     },
     {
       "ast_sha256": "sha256:37345988cb96134a1c1ecc941bfdb2db120309acdfc2e5061b9230ecb93f86d6",
@@ -672,7 +812,7 @@
       "symbol": "CoordinatorWeightSourceV2"
     },
     {
-      "ast_sha256": "sha256:a642f1c82b1b7827dc199ad66e942fa9cb32dc4c13fb1551f0bce90966874db1",
+      "ast_sha256": "sha256:e509be63fb5b5263ed8f288936d5ac20f4f605b4b08e457fb16e49aa5733cdfd",
       "path": "gateway/tee/execution_job_manager_v2.py",
       "symbol": "ExecutionJobManagerV2"
     },
@@ -817,6 +957,101 @@
       "symbol": "wait_for_confirmation"
     },
     {
+      "ast_sha256": "sha256:5b207b340e38cc24f0b508181d94dcd99aece2078c73a7a5426e1374e613e1ec",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "build_ancestry_policy_v2"
+    },
+    {
+      "ast_sha256": "sha256:51d3ac24f77606d70525c5d6c31947e15c1b901126cddf0c275e48d383cff0f5",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "build_certificate_disclosure_parent_authority_v2"
+    },
+    {
+      "ast_sha256": "sha256:cc48f09e43a657951cdd2cd9abdebfd8b870a8ef96889aebbe8a2524a9a4f54d",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "build_certificate_parent_authority_v2"
+    },
+    {
+      "ast_sha256": "sha256:91164a5abda971931319661977e2bbf56b931c4ce9eacbb5687752accdcfb117",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "build_compact_ancestry_proof_from_delta_v2"
+    },
+    {
+      "ast_sha256": "sha256:953f5c9df454a3b4b11877a2de12ac929050e85e888637b2010ddff955a61f9a",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "build_compact_ancestry_proof_v2"
+    },
+    {
+      "ast_sha256": "sha256:9f55e9b5c8afa5f8a4f5f57021be499b666d9517cf048967a2b715dbb8adbaec",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "build_full_graph_parent_authority_v2"
+    },
+    {
+      "ast_sha256": "sha256:446976da1f2b6149d31e5b18ddaf7013162b130360bfb1ca18ea3d5bb0fe5912",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "build_full_graph_parent_v2"
+    },
+    {
+      "ast_sha256": "sha256:a2ea2a9aed8c4db039dfe118b63d7030abd874500edb769d5f4790802fc253e2",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "derive_ancestry_lineage_id_v2"
+    },
+    {
+      "ast_sha256": "sha256:ed12df10098d7a7542341986f4c74076290689c45d5cda032853a5ed988ba0f2",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "issue_ancestry_certificate_v2"
+    },
+    {
+      "ast_sha256": "sha256:ff9d60142942b8f619358aaf1c72402874e8e1ca1a4b00c26a841ed2628c7ea2",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "project_receipt_graph_v2"
+    },
+    {
+      "ast_sha256": "sha256:05da04f74d58b94953fb2afbfa1cd5dcee05c336bab3734020379fb40f33fa61",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "validate_ancestry_certificate_v2"
+    },
+    {
+      "ast_sha256": "sha256:aff62f0a3b45ec4ce84dcd5bf2299dee8ab4b7eb85adb1ee28780680c9570081",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "validate_ancestry_delta_v2"
+    },
+    {
+      "ast_sha256": "sha256:e3b7fc1de81e08c143b7d25d5d7198c3133ce3f5499da4e69f02d6515271f84f",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "validate_ancestry_lineage_id_v2"
+    },
+    {
+      "ast_sha256": "sha256:aaab441cd57e00f048f5fe6051a73f47d35254ee8cc4002693e766db0df9a0da",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "validate_ancestry_parent_authority_v2"
+    },
+    {
+      "ast_sha256": "sha256:ec8dbe8f9b98c5e0b40a8e6e5cb47a4deaf23ea8105c420d764eda8b8c4dc83b",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "validate_ancestry_policy_v2"
+    },
+    {
+      "ast_sha256": "sha256:fee5a3e62da9294b46d6baef19c4577c5dfaa7a89a352199ea0841918338c4e0",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "validate_ancestry_projection_v2"
+    },
+    {
+      "ast_sha256": "sha256:8b732a44b96948e42baf91d55f33d2fa2ae5097140427883df2dbbde7c6f3edd",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "validate_compact_ancestry_proof_v2"
+    },
+    {
+      "ast_sha256": "sha256:da3a59bd9ece1373186d3c21f8ecb3b113b2d2eda716e40bd0058322e86279ad",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "validate_full_graph_parent_v2"
+    },
+    {
+      "ast_sha256": "sha256:3139a72a1699a2dcde64ada217b3f9523e5b5fe7922e0c95b3777c0ff069ec1d",
+      "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
+      "symbol": "validate_local_delta_against_certificate_v2"
+    },
+    {
       "ast_sha256": "sha256:8393b3f6da4f4545710a4c98d49d27c3150a515f996578f191f54388aacb6763",
       "path": "leadpoet_canonical/chain_source_v2.py",
       "symbol": "decode_last_update_storage"
@@ -840,6 +1075,91 @@
       "ast_sha256": "sha256:1e666b972a3e5f1e5df1c2f014f2ea97fade3b8f719b60c3de80f4a484ae49a3",
       "path": "leadpoet_canonical/chain_source_v2.py",
       "symbol": "weights_storage_key"
+    },
+    {
+      "ast_sha256": "sha256:e42729deac58c01dd354e30e5d897bef3665d344e522d21afdb902b600f72976",
+      "path": "leadpoet_canonical/compact_auditor_authority_v2.py",
+      "symbol": "build_compact_published_weight_authority_v2"
+    },
+    {
+      "ast_sha256": "sha256:afb9b45d6705357d7d16deb11e1c5d69183c75e2a03c0f3ade0a260e9971c495",
+      "path": "leadpoet_canonical/compact_auditor_authority_v2.py",
+      "symbol": "validate_compact_published_weight_authority_shape_v2"
+    },
+    {
+      "ast_sha256": "sha256:a97179666ad875af865e892826f6a597105203e7bf685035f900ed03fd72b380",
+      "path": "leadpoet_canonical/compact_auditor_authority_v2.py",
+      "symbol": "verify_compact_published_weight_authority_v2"
+    },
+    {
+      "ast_sha256": "sha256:518190c71c2c4acbf3a25e9e581bea8e3e310f4f2c00023f26de321409989f88",
+      "path": "leadpoet_canonical/compact_auditor_authority_v2.py",
+      "symbol": "verify_compact_weight_submission_v2"
+    },
+    {
+      "ast_sha256": "sha256:433c2eea3901eb22066956f76560bef4478569208121dd7759d44b74941e4269",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "build_checkpointed_weight_finalization_graph_v2"
+    },
+    {
+      "ast_sha256": "sha256:86f1b0512d907073b278c0ef5474805777f95f3075e3842f0b3e8ce7c3c70956",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "build_checkpointed_weight_graph_from_compact_v2"
+    },
+    {
+      "ast_sha256": "sha256:09b99bc611a637c26e03273a952e2fe1cd44d54b2cd28a5d6ecf7cf442bf6dcd",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "build_compact_weight_finalization_submission_v2"
+    },
+    {
+      "ast_sha256": "sha256:829d55964bf4ca498c2d6190d5aa615a1b3008a957344d97c1f15a0ef7715b97",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "build_stateful_epoch_evidence_from_compact_v2"
+    },
+    {
+      "ast_sha256": "sha256:6671f54e9986cde385a4643fbbbcbbc91700540cb9f56d42a9e7e28929a0c54c",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "build_weight_ancestry_commitment_v2"
+    },
+    {
+      "ast_sha256": "sha256:e50aac1623cbcc87c21be9583f54a2cd2a1498d69363558ad1051ee1b99e7ec4",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "compact_gateway_frontier_receipt_hashes_v2"
+    },
+    {
+      "ast_sha256": "sha256:591f0fadb0ed82c2df7feb552ff7746c5abd8555afa8644ae25bd375fcb03125",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "compact_weight_bundle_hash_v2"
+    },
+    {
+      "ast_sha256": "sha256:8108e7481cb703441a9cdde721c899f74792e8de71e14a63ad9b5ebe8faa3167",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "reconstruct_published_weight_bundle_from_compact_v2"
+    },
+    {
+      "ast_sha256": "sha256:763b6a485f082a0295aba22b7def8032410744060be13da4568abb4ea5b1330f",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "reconstruct_weight_finalization_from_compact_v2"
+    },
+    {
+      "ast_sha256": "sha256:92050fb67acfc8c12a2c2183e378624c27885ee023b90cdc1ec50d2577025d47",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "validate_compact_weight_ancestry_v2"
+    },
+    {
+      "ast_sha256": "sha256:5ccccf7306a38305fe4880a716df7d4b1e45ba835a40c09a67e85ec7c4277520",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "validate_compact_weight_finalization_ancestry_v2"
+    },
+    {
+      "ast_sha256": "sha256:ce678230da35d3fe4efb4427d7a159ce910beb5ce8cdffcba5c2ef3a2e034381",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "validate_compact_weight_finalization_shape_v2"
+    },
+    {
+      "ast_sha256": "sha256:d3178f1a9d31e7888471a779685cbbae1fecdb9e849f43381d2f678490d4ee79",
+      "path": "leadpoet_canonical/compact_weight_authority_v2.py",
+      "symbol": "validate_compact_weight_submission_shape_v2"
     },
     {
       "ast_sha256": "sha256:ca4917c451f42deb8c1a394125aa3bac38ff1d7bd605603be3eace8b0c5f11c6",
@@ -1312,7 +1632,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:9aa854d3b5c1f4bdfd0b185a1085e01e7546bc37d7ad722cdca935df4abf8df4",
+  "manifest_hash": "sha256:e5d2a17eb698bbf15fab8c4c6a4436f9022ea68caf5047144afd0fab7d296ccb",
   "protected_source_commit": "f190248b2454f208f6cc4b92d85e78afbc8ffd63",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

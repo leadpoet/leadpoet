@@ -304,10 +304,15 @@ class Client:
         }
 
     def confirm_weight_publication_v2(
-        self, authorization_id, *, finalization_scan_id
+        self,
+        authorization_id,
+        *,
+        finalization_scan_id,
+        compact_ancestry_context=None,
     ):
         assert authorization_id == "sha256:" + "9" * 64
         assert finalization_scan_id == FINALIZATION_SCAN
+        assert compact_ancestry_context is None
         return {
             "finalization": {
                 "epoch_id": 100,

@@ -303,14 +303,14 @@ def _fetch_auditor(monkeypatch, responses):
     return auditor_module, auditor, session, fetch
 
 
-def test_fetch_prefers_staged_route(monkeypatch):
+def test_fetch_prefers_compact_staged_route(monkeypatch):
     _, auditor, session, fetch = _fetch_auditor(
         monkeypatch,
         [_FakeResponse(200, {"authority_stage": "published"})],
     )
     value = asyncio.run(fetch(auditor, 24084))
     assert value == {"authority_stage": "published"}
-    assert session.urls == ["http://gw/weights/v2/published/71/24084"]
+    assert session.urls == ["http://gw/weights/v2/published-compact/71/24084"]
 
 
 def test_fetch_falls_back_when_gateway_predates_staged_route(monkeypatch):
@@ -318,12 +318,14 @@ def test_fetch_falls_back_when_gateway_predates_staged_route(monkeypatch):
         monkeypatch,
         [
             _FakeResponse(404, {"detail": "Not Found"}),
+            _FakeResponse(404, {"detail": "Not Found"}),
             _FakeResponse(200, {"schema_version": "legacy"}),
         ],
     )
     value = asyncio.run(fetch(auditor, 24084))
     assert value == {"schema_version": "legacy"}
     assert session.urls == [
+        "http://gw/weights/v2/published-compact/71/24084",
         "http://gw/weights/v2/published/71/24084",
         "http://gw/weights/v2/latest/71/24084",
     ]
@@ -335,14 +337,39 @@ def test_fetch_marks_absent_authority(monkeypatch):
         monkeypatch,
         [
             _FakeResponse(
+                404, {"detail": "compact published v2 weight authority not found"}
+            ),
+            _FakeResponse(
                 404, {"detail": "published v2 weight authority not found"}
-            )
+            ),
         ],
     )
     value = asyncio.run(fetch(auditor, 24084))
     assert value is None
     assert auditor._last_v2_authority_was_absent is True
-    assert session.urls == ["http://gw/weights/v2/published/71/24084"]
+    assert session.urls == [
+        "http://gw/weights/v2/published-compact/71/24084",
+        "http://gw/weights/v2/published/71/24084",
+    ]
+
+
+def test_fetch_falls_back_when_compact_sidecar_is_not_persisted(monkeypatch):
+    _, auditor, session, fetch = _fetch_auditor(
+        monkeypatch,
+        [
+            _FakeResponse(
+                404, {"detail": "compact published v2 weight authority not found"}
+            ),
+            _FakeResponse(200, {"authority_stage": "published", "full": True}),
+        ],
+    )
+    value = asyncio.run(fetch(auditor, 24084))
+    assert value == {"authority_stage": "published", "full": True}
+    assert session.urls == [
+        "http://gw/weights/v2/published-compact/71/24084",
+        "http://gw/weights/v2/published/71/24084",
+    ]
+    assert auditor._last_v2_authority_was_absent is False
 
 
 def test_verify_dispatches_staged_authority(monkeypatch, tmp_path):

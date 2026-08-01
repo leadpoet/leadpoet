@@ -330,15 +330,25 @@ def compute_authoritative_weights_v2(request: Dict[str, Any]) -> Dict[str, Any]:
     if validator_hotkey_authority_v2 is None:
         raise RuntimeError("validator V2 hotkey authority is not configured")
     result = validator_weight_authority_v2.compute(request)
-    authorization_input = {
-        field: result[field]
-        for field in (
+    if "receipt_graph_delta" in result:
+        authorization_fields = (
+            "weight_snapshot",
+            "weight_result",
+            "weights_signature",
+            "receipt_graph_delta",
+            "ancestry_commitment",
+            "boot_identity",
+        )
+    else:
+        authorization_fields = (
             "weight_snapshot",
             "weight_result",
             "weights_signature",
             "receipt_graph",
             "boot_identity",
         )
+    authorization_input = {
+        field: result[field] for field in authorization_fields
     }
     result["weight_authorization_id"] = (
         validator_hotkey_authority_v2.register_weight_result(
@@ -477,23 +487,54 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
                 raise RuntimeError("validator V2 hotkey authority is not configured")
             message_hex = request.get("message_hex")
             parent_receipt_hash = request.get("parent_receipt_hash")
+            compact_ancestry_context = request.get(
+                "compact_ancestry_context"
+            )
             if not isinstance(message_hex, str) or (
                 parent_receipt_hash is not None
                 and not isinstance(parent_receipt_hash, str)
+            ) or (
+                compact_ancestry_context is not None
+                and not isinstance(compact_ancestry_context, dict)
             ):
                 return {
                     "status": "error",
                     "error": "Invalid application signature request",
                 }
-            return {
-                "status": "ok",
-                "signature_result": (
-                    validator_hotkey_authority_v2.sign_application_message(
-                        message_hex=message_hex,
-                        parent_receipt_hash=parent_receipt_hash,
+            signature_result = (
+                validator_hotkey_authority_v2.sign_application_message(
+                    message_hex=message_hex,
+                    parent_receipt_hash=parent_receipt_hash,
+                )
+            )
+            if compact_ancestry_context is not None:
+                if validator_weight_authority_v2 is None:
+                    raise RuntimeError(
+                        "validator authoritative V2 runtime is not configured"
                     )
-                ),
-            }
+                if set(compact_ancestry_context) != {
+                    "validator_receipt_delta",
+                    "upstream_ancestry_proofs",
+                    "epoch_authority",
+                }:
+                    raise RuntimeError(
+                        "validator compact ancestry context is invalid"
+                    )
+                signature_result["validator_ancestry_proof"] = (
+                    validator_weight_authority_v2.issue_validator_publication_ancestry_proof(
+                        validator_receipt_delta=compact_ancestry_context[
+                            "validator_receipt_delta"
+                        ],
+                        upstream_ancestry_proofs=compact_ancestry_context[
+                            "upstream_ancestry_proofs"
+                        ],
+                        binding_receipt=signature_result["receipt"],
+                        epoch_authority=compact_ancestry_context[
+                            "epoch_authority"
+                        ],
+                    )
+                )
+            return {"status": "ok", "signature_result": signature_result}
 
         elif command == "prepare_weight_commit_v2":
             if validator_hotkey_authority_v2 is None:
@@ -536,22 +577,57 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
                 raise RuntimeError("validator V2 hotkey authority is not configured")
             weight_authorization_id = request.get("weight_authorization_id")
             finalization_scan_id = request.get("finalization_scan_id")
+            compact_ancestry_context = request.get(
+                "compact_ancestry_context"
+            )
             if (
                 not isinstance(weight_authorization_id, str)
                 or not isinstance(finalization_scan_id, str)
+                or (
+                    compact_ancestry_context is not None
+                    and not isinstance(compact_ancestry_context, dict)
+                )
             ):
                 return {
                     "status": "error",
                     "error": "Missing weight publication finalization request",
                 }
+            finalization_result = (
+                validator_hotkey_authority_v2.confirm_weight_publication(
+                    weight_authorization_id=weight_authorization_id,
+                    finalization_scan_id=finalization_scan_id,
+                )
+            )
+            if compact_ancestry_context is not None:
+                if validator_weight_authority_v2 is None:
+                    raise RuntimeError(
+                        "validator authoritative V2 runtime is not configured"
+                    )
+                if set(compact_ancestry_context) != {
+                    "publication_ancestry_proof",
+                    "epoch_authority",
+                } or not isinstance(
+                    finalization_result.get("receipt_graph_delta"), dict
+                ):
+                    raise RuntimeError(
+                        "validator finalization ancestry context is invalid"
+                    )
+                finalization_result["validator_ancestry_proof"] = (
+                    validator_weight_authority_v2.issue_validator_finalization_ancestry_proof(
+                        validator_receipt_delta=finalization_result[
+                            "receipt_graph_delta"
+                        ],
+                        publication_ancestry_proof=compact_ancestry_context[
+                            "publication_ancestry_proof"
+                        ],
+                        epoch_authority=compact_ancestry_context[
+                            "epoch_authority"
+                        ],
+                    )
+                )
             return {
                 "status": "ok",
-                "finalization_result": (
-                    validator_hotkey_authority_v2.confirm_weight_publication(
-                        weight_authorization_id=weight_authorization_id,
-                        finalization_scan_id=finalization_scan_id,
-                    )
-                ),
+                "finalization_result": finalization_result,
             }
 
         elif command == "recover_weight_publication_v2":
@@ -574,6 +650,42 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
                 "recovery_result": (
                     validator_hotkey_authority_v2.recover_weight_publication(
                         published_bundle=published_bundle,
+                        weight_submission_event_hash=event_hash,
+                        extrinsic_signature_results=signed_results,
+                    )
+                ),
+            }
+
+        elif command == "recover_compact_weight_publication_v2":
+            if (
+                validator_hotkey_authority_v2 is None
+                or validator_weight_authority_v2 is None
+            ):
+                raise RuntimeError(
+                    "validator V2 authorities are not configured"
+                )
+            compact_submission = request.get("compact_submission")
+            event_hash = request.get("weight_submission_event_hash")
+            signed_results = request.get("extrinsic_signature_results")
+            if (
+                not isinstance(compact_submission, dict)
+                or not isinstance(event_hash, str)
+                or not isinstance(signed_results, list)
+            ):
+                return {
+                    "status": "error",
+                    "error": "Invalid compact weight recovery request",
+                }
+            normalized_compact = (
+                validator_weight_authority_v2.validate_compact_weight_recovery(
+                    compact_submission
+                )
+            )
+            return {
+                "status": "ok",
+                "recovery_result": (
+                    validator_hotkey_authority_v2.recover_compact_weight_publication(
+                        compact_submission=normalized_compact,
                         weight_submission_event_hash=event_hash,
                         extrinsic_signature_results=signed_results,
                     )

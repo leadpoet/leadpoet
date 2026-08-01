@@ -18,6 +18,9 @@ BOOT_IDENTITY_SCHEMA_VERSION = "leadpoet.attested_boot_identity.v2"
 TRANSPORT_ATTEMPT_SCHEMA_VERSION = "leadpoet.attested_transport_attempt.v2"
 EXECUTION_RECEIPT_SCHEMA_VERSION = "leadpoet.attested_execution_receipt.v2"
 RECEIPT_GRAPH_SCHEMA_VERSION = "leadpoet.attested_receipt_graph.v2"
+CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION = (
+    "leadpoet.attested_checkpointed_receipt_graph.v3"
+)
 TRANSITION_COMMAND_SCHEMA_VERSION = "leadpoet.signed_transition_command.v2"
 HOST_OPERATION_REQUEST_SCHEMA_VERSION = "leadpoet.host_operation_request.v2"
 HOST_OPERATION_TERMINAL_SCHEMA_VERSION = "leadpoet.host_operation_terminal.v2"
@@ -1241,6 +1244,56 @@ _GRAPH_FIELDS = {
     "transport_attempts",
     "host_operations",
 }
+_CHECKPOINTED_GRAPH_FIELDS = _GRAPH_FIELDS | {
+    "ancestry_lineage_id",
+    "ancestry_proof",
+}
+
+
+def build_checkpointed_receipt_graph(
+    *,
+    root_receipt_hash: str,
+    boot_identities: Sequence[Mapping[str, Any]],
+    receipts: Sequence[Mapping[str, Any]],
+    transport_attempts: Sequence[Mapping[str, Any]],
+    host_operations: Sequence[Mapping[str, Any]],
+    ancestry_lineage_id: str,
+    ancestry_proof: Mapping[str, Any],
+    allowed_failed_receipt_hashes: Iterable[str] = (),
+    boot_attestation_verifier: Optional[
+        Callable[[Mapping[str, Any]], Any]
+    ] = None,
+    require_boot_attestation_verification: bool = False,
+) -> Dict[str, Any]:
+    """Build one bounded graph whose omitted parents are certificate-bound.
+
+    The local evidence fields intentionally match the V2 graph surface so
+    business code can inspect the current receipt without recursively carrying
+    historical bodies. The detached proof is the sole authority for every
+    external parent edge.
+    """
+
+    graph = {
+        "schema_version": CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+        "root_receipt_hash": _hash(root_receipt_hash, "root_receipt_hash"),
+        "boot_identities": [dict(item) for item in boot_identities],
+        "receipts": [dict(item) for item in receipts],
+        "transport_attempts": [dict(item) for item in transport_attempts],
+        "host_operations": [dict(item) for item in host_operations],
+        "ancestry_lineage_id": _hash(
+            ancestry_lineage_id, "ancestry_lineage_id"
+        ),
+        "ancestry_proof": dict(ancestry_proof),
+    }
+    validate_receipt_graph(
+        graph,
+        allowed_failed_receipt_hashes=allowed_failed_receipt_hashes,
+        boot_attestation_verifier=boot_attestation_verifier,
+        require_boot_attestation_verification=(
+            require_boot_attestation_verification
+        ),
+    )
+    return graph
 
 
 def build_receipt_graph(
@@ -1305,6 +1358,71 @@ def _validate_receipt_graph(
     require_boot_attestation_verification: bool = False,
     validation_cache: Optional[_ReceiptGraphValidationCache] = None,
 ) -> Tuple[str, ...]:
+    if (
+        isinstance(graph, Mapping)
+        and graph.get("schema_version")
+        == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+    ):
+        _validate_exact_fields(
+            graph, _CHECKPOINTED_GRAPH_FIELDS, "checkpointed receipt graph"
+        )
+        verifier = boot_attestation_verifier
+        if verifier is None:
+            if require_boot_attestation_verification:
+                raise AttestedV2Error("boot attestation verifier is required")
+
+            def verifier(identity: Mapping[str, Any]) -> Mapping[str, Any]:
+                validate_boot_identity(identity)
+                return dict(identity)
+
+        from leadpoet_canonical.ancestry_checkpoint_v2 import (
+            ANCESTRY_DELTA_SCHEMA_VERSION,
+            validate_compact_ancestry_proof_v2,
+            validate_local_delta_against_certificate_v2,
+        )
+
+        lineage_id = _hash(
+            graph.get("ancestry_lineage_id"), "ancestry_lineage_id"
+        )
+        proof = validate_compact_ancestry_proof_v2(
+            graph.get("ancestry_proof"),
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=verifier,
+            allowed_issuer_roles=ROLE_PURPOSES,
+            required_receipt_hashes=(graph.get("root_receipt_hash"),),
+            required_purposes=required_purposes,
+        )
+        local_delta = {
+            "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+            "root_receipt_hash": graph.get("root_receipt_hash"),
+            "boot_identities": graph.get("boot_identities"),
+            "receipts": graph.get("receipts"),
+            "transport_attempts": graph.get("transport_attempts"),
+            "host_operations": graph.get("host_operations"),
+        }
+        projection = validate_local_delta_against_certificate_v2(
+            local_delta,
+            proof["certificate"],
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=verifier,
+            allowed_issuer_roles=ROLE_PURPOSES,
+        )
+        failed = {
+            str(item.get("receipt_hash") or "")
+            for item in graph.get("receipts") or ()
+            if isinstance(item, Mapping) and item.get("status") != "succeeded"
+        }
+        allowed_failed = {
+            _hash(value, "allowed_failed_receipt_hash")
+            for value in allowed_failed_receipt_hashes
+        }
+        if require_success:
+            _require(
+                failed == allowed_failed,
+                "checkpointed receipt graph failure policy differs",
+            )
+        return tuple(projection["receipt_hashes"])
+
     _validate_exact_fields(graph, _GRAPH_FIELDS, "receipt graph")
     _require(graph["schema_version"] == RECEIPT_GRAPH_SCHEMA_VERSION, "unsupported receipt graph schema")
     _require(isinstance(graph["boot_identities"], list), "boot_identities must be a list")
@@ -1544,7 +1662,7 @@ def validate_receipt_graph(
     boot_attestation_verifier: Optional[Callable[[Mapping[str, Any]], Any]] = None,
     require_boot_attestation_verification: bool = False,
 ) -> Tuple[str, ...]:
-    """Validate one complete receipt graph without trusting prior work."""
+    """Validate a complete legacy graph or one bounded checkpointed graph."""
 
     return _validate_receipt_graph(
         graph,

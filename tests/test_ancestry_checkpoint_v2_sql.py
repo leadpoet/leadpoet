@@ -1,0 +1,500 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import time
+import uuid
+
+import pytest
+
+from gateway.tee.supabase_schema_preflight_v2 import (
+    REQUIRED_SUPABASE_V2_SCHEMA,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+MIGRATION_NAME = "scripts/135-research-lab-ancestry-checkpoint-sidecars.sql"
+SQL = (ROOT / MIGRATION_NAME).read_text(encoding="utf-8")
+TABLE = "research_lab_attested_ancestry_checkpoints_v2"
+COMPACT_WEIGHT_TABLE = "research_lab_compact_weight_authorities_v2"
+
+
+def test_ancestry_checkpoint_migration_is_additive_and_ordered() -> None:
+    assert SQL.lstrip().startswith(
+        "-- Authenticated, bounded V2 receipt ancestry and compact weight authority."
+    )
+    assert re.search(r"\bBEGIN\s*;", SQL)
+    assert re.search(r"\bCOMMIT\s*;\s*$", SQL)
+    assert "CREATE TABLE IF NOT EXISTS\npublic.%s" % TABLE in SQL
+    assert not re.search(r"^\s*UPDATE\s+", SQL, flags=re.MULTILINE)
+    assert not re.search(r"^\s*DELETE\s+FROM\s+", SQL, flags=re.MULTILINE)
+    altered_relations = set(
+        re.findall(
+            r"ALTER\s+TABLE\s+(?:public\.)?([a-z][a-z0-9_]*)",
+            SQL,
+            flags=re.IGNORECASE,
+        )
+    )
+    altered_relations.discard("public")  # Dynamic ALTER TABLE public.%I loop.
+    assert altered_relations == {COMPACT_WEIGHT_TABLE}
+    assert "Raw receipts, attempts, host operations, and edges remain append-only" in SQL
+    assert "full-graph parent" in SQL
+
+
+def test_compaction_activation_is_per_root_not_global_lineage() -> None:
+    activation = re.search(
+        r"CREATE TABLE IF NOT EXISTS\s+public\.research_lab_attested_ancestry_activations_v2\s*\((.*?)\n\);",
+        SQL,
+        flags=re.DOTALL,
+    )
+    assert activation is not None
+    body = activation.group(1)
+    assert re.search(r"activation_root_receipt_hash\s+TEXT PRIMARY KEY", body)
+    assert not re.search(r"lineage_id\s+TEXT PRIMARY KEY", body)
+    assert "UNIQUE (lineage_id, activation_root_receipt_hash)" in body
+    assert "a.activation_root_receipt_hash = parent->>'parent_receipt_hash'" in SQL
+    assert "ON CONFLICT (activation_root_receipt_hash) DO NOTHING" in SQL
+    assert "activated ancestry lineage rejects" not in SQL
+
+
+def test_ancestry_checkpoint_migration_binds_durable_receipt_and_boot() -> None:
+    assert (
+        "REFERENCES public.research_lab_attested_execution_receipts_v2(receipt_hash)"
+        in SQL
+    )
+    assert (
+        "REFERENCES public.research_lab_attested_boot_identities_v2(boot_identity_hash)"
+        in SQL
+    )
+    assert SQL.count("ON DELETE RESTRICT") >= 4
+    assert re.search(r"root_receipt_hash\s+TEXT PRIMARY KEY", SQL)
+    assert re.search(r"certificate_hash\s+TEXT NOT NULL UNIQUE", SQL)
+    assert re.search(r"proof_hash\s+TEXT NOT NULL UNIQUE", SQL)
+    assert re.search(r"certificate_sequence\s+BIGINT NOT NULL", SQL)
+    assert "CHECK (certificate_sequence >= 0)" in SQL
+    assert "UNIQUE (root_receipt_hash, lineage_id)" in SQL
+
+
+def test_ancestry_checkpoint_hashes_and_embedded_proof_are_cross_bound() -> None:
+    for column in ("lineage_id", "certificate_hash", "proof_hash"):
+        assert re.search(
+            rf"{column}\s+TEXT\s+NOT NULL(?:\s+UNIQUE)?\s+"
+            r"CHECK \(" + column + r" ~ '\^sha256:\[0-9a-f\]\{64\}\$'\)",
+            SQL,
+        )
+    required_checks = (
+        "certificate_doc->>'schema_version' = schema_version",
+        "certificate_doc->>'certificate_hash' = certificate_hash",
+        "certificate_doc #>> '{claim,output_root_receipt_hash}' = root_receipt_hash",
+        "certificate_doc #>> '{claim,lineage_id}' = lineage_id",
+        "(certificate_doc #>> '{claim,certificate_sequence}')::BIGINT = certificate_sequence",
+        "certificate_doc #>> '{claim,issuer_boot_identity_hash}' = issuer_boot_identity_hash",
+        "proof_doc->>'schema_version' = 'leadpoet.attested_ancestry_compact_proof.v2'",
+        "proof_doc->>'proof_hash' = proof_hash",
+        "proof_doc #>> '{certificate,schema_version}' = schema_version",
+        "proof_doc #>> '{certificate,certificate_hash}' = certificate_hash",
+        "proof_doc #>> '{certificate,claim,output_root_receipt_hash}' = root_receipt_hash",
+        "proof_doc #>> '{certificate,claim,lineage_id}' = lineage_id",
+        "(proof_doc #>> '{certificate,claim,certificate_sequence}')::BIGINT = certificate_sequence",
+        "proof_doc #>> '{certificate,claim,issuer_boot_identity_hash}' = issuer_boot_identity_hash",
+    )
+    for marker in required_checks:
+        assert marker in SQL
+    assert "leadpoet.attested_ancestry_certificate.v2" in SQL
+    assert "jsonb_typeof(certificate_doc) = 'object'" in SQL
+    assert "jsonb_typeof(proof_doc) = 'object'" in SQL
+
+
+def test_ancestry_checkpoint_is_append_only_and_service_role_private() -> None:
+    assert "BEFORE UPDATE OR DELETE" in SQL
+    assert "prevent_research_lab_attested_v2_mutation()" in SQL
+    assert "ENABLE ROW LEVEL SECURITY" in SQL
+    assert "FROM PUBLIC, anon, authenticated" in SQL
+    assert "'GRANT SELECT ON TABLE public.%I TO service_role'" in SQL
+    assert "persist_research_lab_ancestry_checkpoint_v2(JSONB)" in SQL
+    assert re.search(
+        r"GRANT\s+EXECUTE\s+ON\s+FUNCTION[\s\S]+?"
+        r"persist_research_lab_ancestry_checkpoint_v2\(JSONB\)[\s\S]+?"
+        r"TO\s+service_role",
+        SQL,
+        flags=re.IGNORECASE,
+    )
+    assert "FOR SELECT TO service_role USING (true)" in SQL
+    assert "FOR INSERT TO service_role WITH CHECK (true)" in SQL
+    assert not re.search(r"GRANT\s+(?:UPDATE|DELETE)", SQL, flags=re.IGNORECASE)
+    assert not re.search(
+        r"GRANT\s+[^;]+\s+TO\s+(?:PUBLIC|anon|authenticated)",
+        SQL,
+        flags=re.IGNORECASE,
+    )
+
+
+def test_ancestry_checkpoint_indexes_bound_lineage_sequence_and_issuer() -> None:
+    assert "idx_research_lab_ancestry_checkpoint_lineage_v2" in SQL
+    assert re.search(
+        r"lineage_id,\s*certificate_sequence\s+DESC",
+        SQL,
+        flags=re.IGNORECASE,
+    )
+    assert "idx_research_lab_ancestry_checkpoint_issuer_v2" in SQL
+    assert re.search(
+        r"idx_research_lab_ancestry_checkpoint_issuer_v2[\s\S]+?"
+        r"issuer_boot_identity_hash",
+        SQL,
+    )
+
+
+def test_gateway_schema_preflight_requires_the_checkpoint_sidecar() -> None:
+    matches = [
+        (migration, relation, tuple(columns))
+        for migration, relation, columns in REQUIRED_SUPABASE_V2_SCHEMA
+        if relation == TABLE
+    ]
+    assert matches == [
+        (
+            MIGRATION_NAME,
+            TABLE,
+            (
+                "root_receipt_hash",
+                "schema_version",
+                "lineage_id",
+                "certificate_hash",
+                "certificate_sequence",
+                "issuer_boot_identity_hash",
+                "proof_hash",
+                "checkpoint_graph_hash",
+                "certificate_doc",
+                "proof_doc",
+                "checkpoint_graph_doc",
+            ),
+        )
+    ]
+
+
+def test_compact_weight_sidecar_is_bound_indexed_and_preflighted() -> None:
+    assert "CREATE TABLE IF NOT EXISTS\npublic.%s" % COMPACT_WEIGHT_TABLE in SQL
+    for marker in (
+        "UNIQUE (netuid, epoch_id, validator_hotkey, authority_stage)",
+        "authority_doc->>'authority_hash' = authority_hash",
+        "authority_doc #>> '{compact_submission,compact_submission_hash}' = compact_submission_hash",
+        "authority_doc #>> '{publication,publication_receipt_hash}' = publication_receipt_hash",
+        "FOREIGN KEY (binding_receipt_hash, lineage_id)",
+        "FOREIGN KEY (publication_receipt_hash, lineage_id)",
+        "FOREIGN KEY (finalization_receipt_hash, lineage_id)",
+        "submission_doc #>> '{validator_ancestry_proof,certificate,claim,lineage_id}' = lineage_id",
+        "authority_doc #>> '{publication,ancestry_proof,certificate,claim,lineage_id}' = lineage_id",
+        "authority_doc #>> '{finalization,compact_submission,validator_ancestry_proof,certificate,claim,lineage_id}' = lineage_id",
+        "idx_research_lab_compact_weight_identity_v2",
+    ):
+        assert marker in SQL
+    matches = [
+        (migration, relation, tuple(columns))
+        for migration, relation, columns in REQUIRED_SUPABASE_V2_SCHEMA
+        if relation == COMPACT_WEIGHT_TABLE
+    ]
+    assert matches == [
+        (
+            MIGRATION_NAME,
+            COMPACT_WEIGHT_TABLE,
+            (
+                "bundle_hash",
+                "netuid",
+                "epoch_id",
+                "validator_hotkey",
+                "authority_stage",
+                "schema_version",
+                "lineage_id",
+                "authority_hash",
+                "compact_submission_hash",
+                "publication_receipt_hash",
+                "compact_finalization_hash",
+                "finalization_receipt_hash",
+                "authority_doc",
+            ),
+        )
+    ]
+
+
+def test_checkpoint_rpc_is_required_before_gateway_shutdown() -> None:
+    from gateway.tee.supabase_schema_preflight_v2 import REQUIRED_SUPABASE_V2_RPCS
+
+    assert (
+        MIGRATION_NAME,
+        "persist_research_lab_ancestry_checkpoint_v2",
+    ) in REQUIRED_SUPABASE_V2_RPCS
+
+
+def _sha(character: str) -> str:
+    return "sha256:" + character * 64
+
+
+def _checkpoint(
+    *,
+    root: str,
+    lineage: str,
+    certificate_hash: str,
+    proof_hash: str,
+    graph_hash: str,
+    issuer: str,
+    sequence: int,
+    parent_authorities: list[dict[str, object]],
+) -> dict[str, object]:
+    claim = {
+        "output_root_receipt_hash": root,
+        "lineage_id": lineage,
+        "certificate_sequence": sequence,
+        "issuer_boot_identity_hash": issuer,
+        "parent_authorities": parent_authorities,
+    }
+    certificate = {
+        "schema_version": "leadpoet.attested_ancestry_certificate.v2",
+        "certificate_hash": certificate_hash,
+        "claim": claim,
+    }
+    proof = {
+        "schema_version": "leadpoet.attested_ancestry_compact_proof.v2",
+        "proof_hash": proof_hash,
+        "certificate": certificate,
+        "disclosed_receipts": [],
+    }
+    graph = {
+        "schema_version": "leadpoet.attested_checkpointed_receipt_graph.v3",
+        "root_receipt_hash": root,
+        "ancestry_lineage_id": lineage,
+        "ancestry_proof": proof,
+    }
+    return {
+        "root_receipt_hash": root,
+        "schema_version": "leadpoet.attested_ancestry_certificate.v2",
+        "lineage_id": lineage,
+        "certificate_hash": certificate_hash,
+        "certificate_sequence": sequence,
+        "issuer_boot_identity_hash": issuer,
+        "proof_hash": proof_hash,
+        "checkpoint_graph_hash": graph_hash,
+        "certificate_doc": certificate,
+        "proof_doc": proof,
+        "checkpoint_graph_doc": graph,
+    }
+
+
+def test_migration_executes_idempotently_and_enforces_irreversible_frontiers() -> None:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker is required for the PostgreSQL migration contract")
+    info = subprocess.run(
+        ["docker", "info"], capture_output=True, text=True, timeout=15
+    )
+    if info.returncode != 0:
+        pytest.skip("Docker daemon is unavailable")
+
+    container = "leadpoet-ancestry-sql-%s" % uuid.uuid4().hex[:12]
+
+    def psql(statement: str, *, expect_success: bool = True) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            [
+                "docker",
+                "exec",
+                "-i",
+                container,
+                "psql",
+                "-X",
+                "-A",
+                "-t",
+                "-U",
+                "postgres",
+                "-d",
+                "leadpoet",
+                "-v",
+                "ON_ERROR_STOP=1",
+            ],
+            input=statement,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        if expect_success:
+            assert result.returncode == 0, result.stderr
+        else:
+            assert result.returncode != 0, result.stdout
+        return result
+
+    setup_sql = """
+CREATE ROLE anon NOLOGIN;
+CREATE ROLE authenticated NOLOGIN;
+CREATE ROLE service_role NOLOGIN;
+CREATE TABLE public.research_lab_attested_execution_receipts_v2 (
+    receipt_hash TEXT PRIMARY KEY
+);
+CREATE TABLE public.research_lab_attested_boot_identities_v2 (
+    boot_identity_hash TEXT PRIMARY KEY
+);
+CREATE FUNCTION public.prevent_research_lab_attested_v2_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'append-only relation';
+END;
+$$;
+"""
+    lineage = _sha("1")
+    issuer = _sha("2")
+    root_a, root_b, root_c, root_d = (_sha(c) for c in "abcd")
+    legacy_a, legacy_b = _sha("e"), _sha("f")
+    checkpoint_a = _checkpoint(
+        root=root_a,
+        lineage=lineage,
+        certificate_hash=_sha("3"),
+        proof_hash=_sha("4"),
+        graph_hash=_sha("5"),
+        issuer=issuer,
+        sequence=0,
+        parent_authorities=[
+            {
+                "authority_kind": "full_projection",
+                "parent_receipt_hash": legacy_a,
+            }
+        ],
+    )
+    checkpoint_b = _checkpoint(
+        root=root_b,
+        lineage=lineage,
+        certificate_hash=_sha("6"),
+        proof_hash=_sha("7"),
+        graph_hash=_sha("8"),
+        issuer=issuer,
+        sequence=0,
+        parent_authorities=[
+            {
+                "authority_kind": "full_projection",
+                "parent_receipt_hash": legacy_b,
+            }
+        ],
+    )
+    checkpoint_c = _checkpoint(
+        root=root_c,
+        lineage=lineage,
+        certificate_hash=_sha("9"),
+        proof_hash=_sha("0"),
+        graph_hash=_sha("a"),
+        issuer=issuer,
+        sequence=1,
+        parent_authorities=[
+            {
+                "authority_kind": "full_projection",
+                "parent_receipt_hash": root_a,
+            }
+        ],
+    )
+    checkpoint_d = _checkpoint(
+        root=root_d,
+        lineage=lineage,
+        certificate_hash=_sha("b"),
+        proof_hash=_sha("c"),
+        graph_hash=_sha("d"),
+        issuer=issuer,
+        sequence=1,
+        parent_authorities=[
+            {
+                "authority_kind": "certificate",
+                "parent_receipt_hash": root_a,
+                "authority_hash": checkpoint_a["certificate_hash"],
+                "authority_sequence": 0,
+            }
+        ],
+    )
+
+    try:
+        subprocess.run(
+            [
+                "docker",
+                "run",
+                "--detach",
+                "--rm",
+                "--name",
+                container,
+                "--env",
+                "POSTGRES_PASSWORD=postgres",
+                "--env",
+                "POSTGRES_DB=leadpoet",
+                "postgres:15",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        for _ in range(80):
+            ready = subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    container,
+                    "pg_isready",
+                    "-U",
+                    "postgres",
+                    "-d",
+                    "leadpoet",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if ready.returncode == 0:
+                break
+            time.sleep(0.25)
+        else:
+            raise AssertionError("PostgreSQL 15 did not become ready")
+
+        psql(setup_sql)
+        psql(SQL)
+        psql(SQL)  # Operators may safely rerun the migration.
+        psql(
+            "INSERT INTO public.research_lab_attested_boot_identities_v2 VALUES "
+            "('%s'); INSERT INTO public.research_lab_attested_execution_receipts_v2 "
+            "VALUES ('%s'), ('%s'), ('%s'), ('%s');"
+            % (issuer, root_a, root_b, root_c, root_d)
+        )
+
+        for checkpoint in (checkpoint_a, checkpoint_b):
+            result = psql(
+                "SELECT public.persist_research_lab_ancestry_checkpoint_v2("
+                + "'%s'::jsonb);" % json.dumps(checkpoint).replace("'", "''")
+            )
+            assert '"root_activated": true' in result.stdout
+
+        rejected = psql(
+            "SELECT public.persist_research_lab_ancestry_checkpoint_v2("
+            + "'%s'::jsonb);" % json.dumps(checkpoint_c).replace("'", "''"),
+            expect_success=False,
+        )
+        assert "compacted ancestry root rejects full graph parent" in rejected.stderr
+
+        chained = psql(
+            "SELECT public.persist_research_lab_ancestry_checkpoint_v2("
+            + "'%s'::jsonb);" % json.dumps(checkpoint_d).replace("'", "''")
+        )
+        assert '"root_activated": true' in chained.stdout
+
+        exact_replay = psql(
+            "SELECT public.persist_research_lab_ancestry_checkpoint_v2("
+            + "'%s'::jsonb);" % json.dumps(checkpoint_a).replace("'", "''")
+        )
+        assert '"status": "persisted"' in exact_replay.stdout
+
+        conflicting = dict(checkpoint_a)
+        conflicting["checkpoint_graph_hash"] = _sha("e")
+        conflict = psql(
+            "SELECT public.persist_research_lab_ancestry_checkpoint_v2("
+            + "'%s'::jsonb);" % json.dumps(conflicting).replace("'", "''"),
+            expect_success=False,
+        )
+        assert "checkpoint durable readback conflicts" in conflict.stderr
+    finally:
+        subprocess.run(
+            ["docker", "rm", "--force", container],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )

@@ -305,6 +305,7 @@ class ValidatorEnclaveClient:
         message: bytes,
         *,
         parent_receipt_hash: Optional[str] = None,
+        compact_ancestry_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         if not isinstance(message, bytes):
             raise TypeError("application message must be bytes")
@@ -314,6 +315,10 @@ class ValidatorEnclaveClient:
         }
         if parent_receipt_hash is not None:
             request["parent_receipt_hash"] = parent_receipt_hash
+        if compact_ancestry_context is not None:
+            request["compact_ancestry_context"] = dict(
+                compact_ancestry_context
+            )
         response = self._send_request(request)
         return dict(response["signature_result"])
 
@@ -348,13 +353,19 @@ class ValidatorEnclaveClient:
         weight_authorization_id: str,
         *,
         finalization_scan_id: str,
+        compact_ancestry_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        request = {
+            "command": "confirm_weight_publication_v2",
+            "weight_authorization_id": str(weight_authorization_id),
+            "finalization_scan_id": str(finalization_scan_id),
+        }
+        if compact_ancestry_context is not None:
+            request["compact_ancestry_context"] = dict(
+                compact_ancestry_context
+            )
         response = self._send_request(
-            {
-                "command": "confirm_weight_publication_v2",
-                "weight_authorization_id": str(weight_authorization_id),
-                "finalization_scan_id": str(finalization_scan_id),
-            },
+            request,
             timeout_seconds=600,
         )
         return dict(response["finalization_result"])
@@ -370,6 +381,28 @@ class ValidatorEnclaveClient:
             {
                 "command": "recover_weight_publication_v2",
                 "published_bundle": published_bundle,
+                "weight_submission_event_hash": str(
+                    weight_submission_event_hash
+                ),
+                "extrinsic_signature_results": list(
+                    extrinsic_signature_results
+                ),
+            },
+            timeout_seconds=600,
+        )
+        return dict(response["recovery_result"])
+
+    def recover_compact_weight_publication_v2(
+        self,
+        *,
+        compact_submission: Dict[str, Any],
+        weight_submission_event_hash: str,
+        extrinsic_signature_results: list,
+    ) -> Dict[str, Any]:
+        response = self._send_request(
+            {
+                "command": "recover_compact_weight_publication_v2",
+                "compact_submission": compact_submission,
                 "weight_submission_event_hash": str(
                     weight_submission_event_hash
                 ),
@@ -405,17 +438,36 @@ class ValidatorEnclaveClient:
             },
             timeout_seconds=180,
         )
-        return {
+        result = {
             "weight_snapshot": response["weight_snapshot"],
             "weight_result": response["weight_result"],
             "weights_signature": response["weights_signature"],
-            "receipt_graph": response["receipt_graph"],
             "boot_identity": response["boot_identity"],
             "weight_authorization_id": response["weight_authorization_id"],
             "source_artifacts": response["source_artifacts"],
             "epoch_authority": response.get("epoch_authority"),
             "epoch_boundary": response.get("epoch_boundary"),
         }
+        if "receipt_graph_delta" in response:
+            result.update(
+                {
+                    "receipt_graph_delta": response[
+                        "receipt_graph_delta"
+                    ],
+                    "upstream_ancestry_proofs": response[
+                        "upstream_ancestry_proofs"
+                    ],
+                    "upstream_transport_attempts": response[
+                        "upstream_transport_attempts"
+                    ],
+                    "ancestry_commitment": response[
+                        "ancestry_commitment"
+                    ],
+                }
+            )
+        else:
+            result["receipt_graph"] = response["receipt_graph"]
+        return result
 
     def capture_subnet_epoch_boundary_v2(
         self,

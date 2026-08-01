@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Mapping, Optional, Set
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
+from starlette.datastructures import QueryParams
 
 # Canonical imports (MUST use shared module)
 from leadpoet_canonical.weights import bundle_weights_hash, compare_weights_hash
@@ -56,7 +57,27 @@ from leadpoet_canonical.weight_bundle_v2 import (
     WEIGHT_BUNDLE_V2_SCHEMA_VERSION,
     validate_weight_bundle_v2,
 )
-from leadpoet_canonical.attested_v2 import sha256_json, verify_boot_identity_nitro
+from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    sha256_json,
+    verify_boot_identity_nitro,
+)
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    derive_ancestry_lineage_id_v2,
+)
+from leadpoet_canonical.compact_weight_authority_v2 import (
+    build_checkpointed_weight_finalization_graph_v2,
+    build_checkpointed_weight_graph_from_compact_v2,
+    build_stateful_epoch_evidence_from_compact_v2,
+    compact_weight_bundle_hash_v2,
+    validate_compact_weight_finalization_shape_v2,
+    validate_compact_weight_submission_shape_v2,
+)
+from leadpoet_canonical.compact_auditor_authority_v2 import (
+    build_compact_published_weight_authority_v2,
+    verify_compact_published_weight_authority_v2,
+    verify_compact_weight_submission_v2,
+)
 from leadpoet_canonical.hotkey_authority_v2 import (
     subnet_epoch_candidate_authorization_message_v1,
     validate_weight_inputs_request_v2,
@@ -592,6 +613,29 @@ class WeightSubmissionV2Response(BaseModel):
     message: str
 
 
+class CompactWeightSubmissionV2(BaseModel):
+    """Bounded validator handoff expanded only inside the gateway host."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    validator_hotkey: str
+    binding_message: str
+    validator_hotkey_signature: str
+    weight_snapshot: Dict[str, Any]
+    weight_result: Dict[str, Any]
+    weights_signature: str
+    ancestry_commitment: str
+    upstream_ancestry_proofs: Dict[str, Any]
+    upstream_transport_attempts: List[Dict[str, Any]]
+    validator_receipt_delta: Dict[str, Any]
+    binding_receipt: Dict[str, Any]
+    validator_ancestry_proof: Dict[str, Any]
+    epoch_authority: Optional[Dict[str, Any]]
+    epoch_boundary: Optional[Dict[str, Any]]
+    compact_submission_hash: str
+
+
 class WeightFinalizationV2(BaseModel):
     """Validator-enclave proof of finalized extrinsic state transition."""
 
@@ -613,6 +657,21 @@ class WeightFinalizationV2Response(BaseModel):
     message: str
 
 
+class CompactWeightFinalizationV2(BaseModel):
+    """Bounded finalized-chain delta expanded against the durable bundle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    validator_hotkey: str
+    weight_submission_event_hash: str
+    finalization: Dict[str, Any]
+    ancestry_commitment: str
+    validator_receipt_delta: Dict[str, Any]
+    validator_ancestry_proof: Dict[str, Any]
+    compact_finalization_hash: str
+
+
 class WeightInputsV2Authorization(BaseModel):
     """Signed request for measured gateway-owned final-weight inputs."""
 
@@ -627,6 +686,17 @@ class WeightInputsV2Response(BaseModel):
     input_receipt_hashes: Dict[str, str]
     gateway_authority_event_hash: str
     upstream_receipt_set: Dict[str, Any]
+
+
+class WeightInputsCompactV2Response(BaseModel):
+    """Bounded checkpoint transport for current validator releases."""
+
+    request_hash: str
+    calculation_snapshot_hash: str
+    input_receipt_hashes: Dict[str, str]
+    gateway_authority_event_hash: str
+    upstream_ancestry_proofs: Dict[str, Any]
+    upstream_transport_attempts: List[Dict[str, Any]]
 
 
 class SubnetEpochCandidateSubmissionV1(BaseModel):
@@ -1195,6 +1265,7 @@ async def persist_subnet_epoch_evidence_v1(
     from leadpoet_canonical.attested_v2 import validate_receipt_graph
     from gateway.research_lab.attested_v2_store import (
         AttestedV2StoreError,
+        load_compact_weight_authority_for_identity_v2,
         load_weight_bundle_v2,
         load_weight_publication_v2,
     )
@@ -1243,68 +1314,136 @@ async def persist_subnet_epoch_evidence_v1(
             detail="Stateful subnet epoch evidence verification failed closed",
         ) from exc
 
-    try:
-        stored_bundle = await load_weight_bundle_v2(
-            netuid=current.netuid,
-            epoch_id=current.settlement_epoch_id(cutover),
-            validator_hotkey=submission.validator_hotkey,
-        )
-    except AttestedV2StoreError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail="Authoritative V2 weight bundle conflicts with durable state",
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Authoritative V2 weight bundle store is unavailable",
-        ) from exc
-    if not isinstance(stored_bundle, dict):
-        raise HTTPException(
-            status_code=409,
-            detail="Authoritative V2 weight bundle is not durable yet",
-        )
+    if (
+        submission.receipt_graph.get("schema_version")
+        == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+    ):
+        try:
+            compact_authority = await load_compact_weight_authority_for_identity_v2(
+                netuid=current.netuid,
+                epoch_id=current.settlement_epoch_id(cutover),
+                validator_hotkey=submission.validator_hotkey,
+            )
+            if not isinstance(compact_authority, Mapping):
+                raise ValueError("compact weight authority is not durable yet")
+            lineage_id = derive_ancestry_lineage_id_v2(
+                cutover_mapping_hash=str(cutover.mapping_hash),
+                network_genesis_hash=str(cutover.network_genesis_hash),
+                netuid=int(cutover.netuid),
+            )
+            compact_verified = await asyncio.to_thread(
+                verify_compact_published_weight_authority_v2,
+                compact_authority,
+                identity_cache=None,
+                chain_signing_profile=None,
+                expected_lineage_id=lineage_id,
+                expected_chain=EXPECTED_CHAIN,
+                boot_verifier=_verify_authoritative_v2_boot,
+            )
+            expected_graph = await asyncio.to_thread(
+                build_checkpointed_weight_graph_from_compact_v2,
+                compact_authority["compact_submission"],
+                expected_lineage_id=lineage_id,
+                boot_attestation_verifier=_verify_authoritative_v2_boot,
+            )
+            if (
+                compact_authority.get("authority_stage")
+                not in {"published", "finalized"}
+                or submission.bundle_hash != compact_verified["bundle_hash"]
+                or submission.validator_hotkey
+                != compact_verified["validator_hotkey"]
+                or current.netuid != compact_verified["netuid"]
+                or current.settlement_epoch_id(cutover)
+                != compact_verified["epoch_id"]
+                or current.current_block != compact_verified["block"]
+                or submission.receipt_graph != expected_graph
+            ):
+                raise ValueError(
+                    "epoch evidence differs from compact weight authority"
+                )
+        except AttestedV2StoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Compact V2 weight authority conflicts with durable state",
+            ) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Stateful subnet epoch evidence differs from its compact "
+                    "V2 authority"
+                ),
+            ) from exc
+    else:
+        try:
+            stored_bundle = await load_weight_bundle_v2(
+                netuid=current.netuid,
+                epoch_id=current.settlement_epoch_id(cutover),
+                validator_hotkey=submission.validator_hotkey,
+            )
+        except AttestedV2StoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Authoritative V2 weight bundle conflicts with durable state",
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Authoritative V2 weight bundle store is unavailable",
+            ) from exc
+        if not isinstance(stored_bundle, dict):
+            raise HTTPException(
+                status_code=409,
+                detail="Authoritative V2 weight bundle is not durable yet",
+            )
 
-    try:
-        bundle_model = WeightSubmissionV2.model_validate(stored_bundle)
-        bundle_verified, _validator_boot = await asyncio.to_thread(
-            _validate_authoritative_v2_submission,
-            bundle_model,
-        )
-        if (
-            submission.bundle_hash != bundle_verified["bundle_hash"]
-            or submission.validator_hotkey != bundle_verified["validator_hotkey"]
-            or current.netuid != bundle_verified["netuid"]
-            or current.settlement_epoch_id(cutover) != bundle_verified["epoch_id"]
-            or current.current_block != bundle_verified["block"]
-            or submission.receipt_graph != stored_bundle.get("receipt_graph")
-        ):
-            raise ValueError("epoch evidence differs from the durable V2 bundle")
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail="Stateful subnet epoch evidence differs from its V2 bundle",
-        ) from exc
+        try:
+            bundle_model = WeightSubmissionV2.model_validate(stored_bundle)
+            bundle_verified, _validator_boot = await asyncio.to_thread(
+                _validate_authoritative_v2_submission,
+                bundle_model,
+            )
+            if (
+                submission.bundle_hash != bundle_verified["bundle_hash"]
+                or submission.validator_hotkey
+                != bundle_verified["validator_hotkey"]
+                or current.netuid != bundle_verified["netuid"]
+                or current.settlement_epoch_id(cutover)
+                != bundle_verified["epoch_id"]
+                or current.current_block != bundle_verified["block"]
+                or submission.receipt_graph
+                != stored_bundle.get("receipt_graph")
+            ):
+                raise ValueError(
+                    "epoch evidence differs from the durable V2 bundle"
+                )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="Stateful subnet epoch evidence differs from its V2 bundle",
+            ) from exc
 
-    try:
-        publication = await load_weight_publication_v2(
-            bundle_hash=submission.bundle_hash,
-        )
-    except AttestedV2StoreError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail="Authoritative V2 publication conflicts with durable state",
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Authoritative V2 publication store is unavailable",
-        ) from exc
-    if not isinstance(publication, dict):
-        raise HTTPException(
-            status_code=409,
-            detail="Authoritative V2 publication is not durable yet",
-        )
+        try:
+            publication = await load_weight_publication_v2(
+                bundle_hash=submission.bundle_hash,
+            )
+        except AttestedV2StoreError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Authoritative V2 publication conflicts with durable state",
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Authoritative V2 publication store is unavailable",
+            ) from exc
+        if not isinstance(publication, dict):
+            raise HTTPException(
+                status_code=409,
+                detail="Authoritative V2 publication is not durable yet",
+            )
 
     try:
         durable = await persist_post_cutover_evidence_v1(
@@ -1429,20 +1568,61 @@ async def get_weight_inputs_v2(
             detail="Authoritative V2 weight input reconstruction failed closed",
         ) from exc
 
-    response = WeightInputsV2Response(
-        request_hash=request["request_hash"],
-        calculation_snapshot_hash=request["calculation_snapshot_hash"],
-        input_receipt_hashes=result["input_receipt_hashes"],
-        gateway_authority_event_hash=result["gateway_authority_event_hash"],
-        upstream_receipt_set=result["upstream_receipt_set"],
+    # ASGI servers always provide ``query_string``; strict local adapters and
+    # direct Request unit fixtures may omit the optional key.  Parsing the
+    # empty default preserves production semantics without turning a missing
+    # transport detail into an internal error.
+    compact_requested = (
+        QueryParams(http_request.scope.get("query_string", b"")).get(
+            "ancestry"
+        )
+        == "compact-v2"
     )
+    compact = result.get("compact_ancestry")
+    if compact_requested:
+        if not isinstance(compact, Mapping):
+            # A compact-capable validator has explicitly selected the bounded
+            # protocol. Returning a legacy full graph here would silently
+            # change protocols and could reactivate unbounded ancestry after
+            # this lineage has checkpointed. N-1 validators omit the selector
+            # and retain the exact legacy response below.
+            raise HTTPException(
+                status_code=503,
+                detail="Authenticated compact V2 weight ancestry is unavailable",
+            )
+        response = WeightInputsCompactV2Response(
+            request_hash=request["request_hash"],
+            calculation_snapshot_hash=request["calculation_snapshot_hash"],
+            input_receipt_hashes=result["input_receipt_hashes"],
+            gateway_authority_event_hash=result["gateway_authority_event_hash"],
+            upstream_ancestry_proofs=compact["upstream_ancestry_proofs"],
+            upstream_transport_attempts=compact[
+                "upstream_transport_attempts"
+            ],
+        )
+    else:
+        # Old persisted results and N-1 validators retain their exact full
+        # response.  Once a measured result has a checkpoint, new validators
+        # never transport its historical bodies across vsock.
+        response = WeightInputsV2Response(
+            request_hash=request["request_hash"],
+            calculation_snapshot_hash=request["calculation_snapshot_hash"],
+            input_receipt_hashes=result["input_receipt_hashes"],
+            gateway_authority_event_hash=result["gateway_authority_event_hash"],
+            upstream_receipt_set=result["upstream_receipt_set"],
+        )
     return _weight_authority_http_response(
         response.model_dump(mode="json"),
         accept_encoding=http_request.headers.get("accept-encoding", ""),
     )
 
-@router.post("/submit/v2")
-async def submit_weights_v2(submission: WeightSubmissionV2) -> WeightSubmissionV2Response:
+async def _submit_weights_v2_impl(
+    submission: WeightSubmissionV2,
+    *,
+    publication_parent_ancestry_proofs: tuple[
+        Mapping[str, Any], ...
+    ] = (),
+) -> WeightSubmissionV2Response:
     """Persist and publish the only authoritative V2 weight bundle."""
 
     try:
@@ -1506,7 +1686,7 @@ async def submit_weights_v2(submission: WeightSubmissionV2) -> WeightSubmissionV
             )
         try:
             existing_publication = await load_weight_publication_v2(
-                bundle_hash=verified["bundle_hash"]
+                bundle_hash=verified["bundle_hash"],
             )
         except Exception as exc:
             raise HTTPException(
@@ -1583,6 +1763,7 @@ async def submit_weights_v2(submission: WeightSubmissionV2) -> WeightSubmissionV
                 "transparency_event_hash": transparency_hash,
             },
             parent_graphs=(submission.receipt_graph,),
+            parent_ancestry_proofs=publication_parent_ancestry_proofs,
             input_artifact_hashes=(
                 bundle_result["bundle_hash"],
                 bundle_result["durable_readback_hash"],
@@ -1630,6 +1811,327 @@ async def submit_weights_v2(submission: WeightSubmissionV2) -> WeightSubmissionV
         ],
         message="Authoritative V2 bundle durably published",
     )
+
+
+@router.post("/submit/v2")
+async def submit_weights_v2(
+    submission: WeightSubmissionV2,
+) -> WeightSubmissionV2Response:
+    """Persist and publish the complete legacy V2 bundle transport."""
+
+    return await _submit_weights_v2_impl(submission)
+
+
+@router.post("/submit/compact/v2")
+async def submit_compact_weights_v2(
+    submission: CompactWeightSubmissionV2,
+) -> Dict[str, Any]:
+    """Verify and publish one bounded, first-class weight authority."""
+
+    payload = submission.model_dump(mode="python")
+    try:
+        normalized = await asyncio.to_thread(
+            validate_compact_weight_submission_shape_v2,
+            payload,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid compact authoritative v2 submission: {exc}",
+        ) from exc
+    if not PRIMARY_VALIDATOR_HOTKEYS:
+        raise HTTPException(
+            status_code=503,
+            detail="PRIMARY_VALIDATOR_HOTKEYS is required for authoritative v2",
+        )
+    if submission.validator_hotkey not in PRIMARY_VALIDATOR_HOTKEYS:
+        raise HTTPException(status_code=403, detail="Unauthorized validator hotkey")
+    try:
+        cutover = load_subnet_epoch_cutover()
+        from gateway.utils.epoch import validate_stateful_cutover_authority_async
+
+        await validate_stateful_cutover_authority_async(cutover)
+        await asyncio.to_thread(validate_cutover_anchor_from_archive, cutover)
+        lineage_id = derive_ancestry_lineage_id_v2(
+            cutover_mapping_hash=str(cutover.mapping_hash),
+            network_genesis_hash=str(cutover.network_genesis_hash),
+            netuid=int(cutover.netuid),
+        )
+        from gateway.research_lab.attested_v2_store import (
+            AttestedV2StoreError,
+            load_compact_weight_authority_v2,
+            load_compact_weight_publication_intent_v2,
+            persist_ancestry_checkpoint_v2,
+            persist_compact_weight_authority_v2,
+            persist_compact_weight_publication_intent_v2,
+            persist_compact_weight_submission_v2,
+            persist_receipt_graph_v2,
+        )
+
+        verified = await asyncio.to_thread(
+            verify_compact_weight_submission_v2,
+            normalized,
+            expected_lineage_id=lineage_id,
+            expected_chain=EXPECTED_CHAIN,
+            identity_cache=None,
+            boot_verifier=_verify_authoritative_v2_boot,
+        )
+        if ALLOWED_NETUIDS and verified["netuid"] not in ALLOWED_NETUIDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid netuid: {verified['netuid']}",
+            )
+
+        validator_graph = await asyncio.to_thread(
+            build_checkpointed_weight_graph_from_compact_v2,
+            normalized,
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=_verify_authoritative_v2_boot,
+        )
+        graph_result = await persist_receipt_graph_v2(validator_graph)
+        if graph_result.get("root_receipt_hash") != verified["root_receipt_hash"]:
+            raise RuntimeError("compact validator graph durable root differs")
+        await persist_ancestry_checkpoint_v2(
+            normalized["validator_ancestry_proof"],
+            checkpointed_graph=validator_graph,
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=_verify_authoritative_v2_boot,
+            allowed_issuer_roles={"validator_weights"},
+        )
+        bundle_result = await persist_compact_weight_submission_v2(normalized)
+        if (
+            bundle_result.get("bundle_hash") != verified["bundle_hash"]
+            or bundle_result.get("binding_receipt_hash")
+            != verified["root_receipt_hash"]
+        ):
+            raise RuntimeError("compact weight submission durable identity differs")
+
+        compact_authority = await load_compact_weight_authority_v2(
+            bundle_hash=verified["bundle_hash"],
+            prefer_finalized=False,
+        )
+        if compact_authority is None:
+            intent = await load_compact_weight_publication_intent_v2(
+                bundle_hash=verified["bundle_hash"]
+            )
+            if intent is None:
+                weight_epoch_authority = await _verify_epoch_block_authority(
+                    netuid=verified["netuid"],
+                    epoch_id=verified["epoch_id"],
+                    submitted_block=verified["block"],
+                    require_submission_window=True,
+                )
+                from gateway.utils.logger import log_event
+
+                transparency = await log_event(
+                    "WEIGHT_SUBMISSION_V2",
+                    {
+                        "actor_hotkey": verified["validator_hotkey"],
+                        "netuid": verified["netuid"],
+                        "epoch_id": verified["epoch_id"],
+                        "block": verified["block"],
+                        "weights_hash": verified["weights_hash"],
+                        "bundle_hash": verified["bundle_hash"],
+                        "root_receipt_hash": verified["root_receipt_hash"],
+                        "epoch_authority": weight_epoch_authority,
+                    },
+                )
+                raw_transparency_hash = str(
+                    transparency.get("event_hash") or ""
+                ).lower()
+                transparency_hash = (
+                    raw_transparency_hash
+                    if raw_transparency_hash.startswith("sha256:")
+                    else "sha256:" + raw_transparency_hash
+                )
+                if not re.fullmatch(r"sha256:[0-9a-f]{64}", transparency_hash):
+                    raise RuntimeError("signed transparency event hash is invalid")
+                try:
+                    intent = await persist_compact_weight_publication_intent_v2(
+                        submission=normalized,
+                        durable_readback_hash=bundle_result[
+                            "durable_readback_hash"
+                        ],
+                        epoch_authority=weight_epoch_authority,
+                        transparency_event_hash=transparency_hash,
+                    )
+                except AttestedV2StoreError:
+                    # A concurrent exact request may win after both requests
+                    # recorded a transparency event. Only the immutable winner
+                    # can be used to create the measured publication.
+                    intent = await load_compact_weight_publication_intent_v2(
+                        bundle_hash=verified["bundle_hash"]
+                    )
+                    if intent is None:
+                        raise
+            if (
+                intent.get("bundle_hash") != verified["bundle_hash"]
+                or intent.get("compact_submission_hash")
+                != verified["compact_submission_hash"]
+                or intent.get("root_receipt_hash")
+                != verified["root_receipt_hash"]
+                or intent.get("durable_readback_hash")
+                != bundle_result["durable_readback_hash"]
+            ):
+                raise RuntimeError("compact publication intent identity differs")
+
+            from gateway.research_lab.attested_coordinator_v2 import (
+                execute_coordinator_v2,
+            )
+            from gateway.tee.coordinator_executor_v2 import (
+                OP_ATTEST_WEIGHT_PUBLICATION,
+            )
+
+            publication_outcome = await execute_coordinator_v2(
+                operation=OP_ATTEST_WEIGHT_PUBLICATION,
+                purpose="gateway.weights.publication.v2",
+                epoch_id=verified["epoch_id"],
+                sequence=0,
+                payload={
+                    "bundle_hash": verified["bundle_hash"],
+                    "root_receipt_hash": verified["root_receipt_hash"],
+                    "durable_readback_hash": bundle_result[
+                        "durable_readback_hash"
+                    ],
+                    "transparency_event_hash": intent[
+                        "transparency_event_hash"
+                    ],
+                },
+                parent_ancestry_proofs=(
+                    normalized["validator_ancestry_proof"],
+                ),
+                input_artifact_hashes=(
+                    verified["bundle_hash"],
+                    bundle_result["durable_readback_hash"],
+                    intent["transparency_event_hash"],
+                ),
+                persist_graph=persist_receipt_graph_v2,
+                persist_ancestry_checkpoint=persist_ancestry_checkpoint_v2,
+                boot_verifier=_verify_authoritative_v2_boot,
+            )
+            publication_doc = publication_outcome.get("result")
+            publication_receipt = publication_outcome.get("receipt")
+            publication_proof = publication_outcome.get(
+                "ancestry_compact_proof"
+            )
+            expected_publication_doc = {
+                "schema_version": "leadpoet.weight_publication.v2",
+                "bundle_hash": verified["bundle_hash"],
+                "root_receipt_hash": verified["root_receipt_hash"],
+                "durable_readback_hash": bundle_result[
+                    "durable_readback_hash"
+                ],
+                "transparency_event_hash": intent[
+                    "transparency_event_hash"
+                ],
+            }
+            if (
+                publication_doc != expected_publication_doc
+                or not isinstance(publication_receipt, Mapping)
+                or not isinstance(publication_proof, Mapping)
+            ):
+                raise RuntimeError("measured compact publication differs")
+            publication_root = str(
+                publication_receipt.get("receipt_hash") or ""
+            )
+            weight_submission_event_hash = sha256_json(
+                {
+                    "bundle_hash": verified["bundle_hash"],
+                    "publication_receipt_hash": publication_root,
+                    "transparency_event_hash": intent[
+                        "transparency_event_hash"
+                    ],
+                    "durable_readback_hash": bundle_result[
+                        "durable_readback_hash"
+                    ],
+                }
+            )
+            compact_authority = build_compact_published_weight_authority_v2(
+                authority_stage="published",
+                lineage_id=lineage_id,
+                bundle_hash=verified["bundle_hash"],
+                compact_submission=normalized,
+                publication={
+                    "weight_submission_event_hash": (
+                        weight_submission_event_hash
+                    ),
+                    "publication_receipt_hash": publication_root,
+                    "publication_doc": publication_doc,
+                    "ancestry_proof": publication_proof,
+                },
+                finalization=None,
+            )
+            await asyncio.to_thread(
+                verify_compact_published_weight_authority_v2,
+                compact_authority,
+                identity_cache=None,
+                chain_signing_profile=None,
+                expected_lineage_id=lineage_id,
+                expected_chain=EXPECTED_CHAIN,
+                boot_verifier=_verify_authoritative_v2_boot,
+            )
+            await persist_compact_weight_authority_v2(compact_authority)
+        else:
+            compact_verified = await asyncio.to_thread(
+                verify_compact_published_weight_authority_v2,
+                compact_authority,
+                identity_cache=None,
+                chain_signing_profile=None,
+                expected_lineage_id=lineage_id,
+                expected_chain=EXPECTED_CHAIN,
+                boot_verifier=_verify_authoritative_v2_boot,
+            )
+            if (
+                compact_verified["compact_submission_hash"]
+                != verified["compact_submission_hash"]
+                or compact_verified["bundle_hash"] != verified["bundle_hash"]
+            ):
+                raise RuntimeError("durable compact publication differs")
+
+        publication = compact_authority["publication"]
+        publication_response = WeightSubmissionV2Response(
+            success=True,
+            epoch_id=verified["epoch_id"],
+            weights_count=len(verified["uids"]),
+            weights_hash=verified["weights_hash"],
+            weight_receipt_hash=verified["weight_receipt_hash"],
+            weight_submission_event_hash=publication[
+                "weight_submission_event_hash"
+            ],
+            message="Compact authoritative V2 bundle durably published",
+        )
+        epoch_evidence = await asyncio.to_thread(
+            build_stateful_epoch_evidence_from_compact_v2,
+            normalized,
+            bundle_hash=verified["bundle_hash"],
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=_verify_authoritative_v2_boot,
+        )
+        epoch_ack = None
+        if epoch_evidence is not None:
+            epoch_ack = await persist_subnet_epoch_evidence_v1(
+                SubnetEpochEvidenceSubmissionV1.model_validate(epoch_evidence)
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "authoritative_weight_compact_submission_v2_failed epoch=%s type=%s error=%s",
+            normalized.get("weight_result", {}).get("epoch_id"),
+            type(exc).__name__,
+            str(exc)[:300],
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Compact authoritative V2 publication failed closed",
+        ) from exc
+    return {
+        "schema_version": "leadpoet.compact_weight_submission_ack.v2",
+        "compact_submission_hash": normalized["compact_submission_hash"],
+        "bundle_hash": verified["bundle_hash"],
+        "publication": publication_response.model_dump(mode="json"),
+        "epoch_evidence_acknowledgment": epoch_ack,
+    }
 
 
 @router.post("/finalize/v2")
@@ -1714,6 +2216,195 @@ async def finalize_weights_v2(
     )
 
 
+@router.post("/finalize/compact/v2")
+async def finalize_compact_weights_v2(
+    submission: CompactWeightFinalizationV2,
+) -> WeightFinalizationV2Response:
+    """Append one bounded finalized-chain authority without graph expansion."""
+
+    payload = submission.model_dump(mode="python")
+    normalized: Mapping[str, Any] | None = None
+    finalization: Mapping[str, Any] | None = None
+    try:
+        normalized = await asyncio.to_thread(
+            validate_compact_weight_finalization_shape_v2,
+            payload,
+        )
+        finalization = normalized["finalization"]
+        if not PRIMARY_VALIDATOR_HOTKEYS:
+            raise HTTPException(
+                status_code=503,
+                detail="PRIMARY_VALIDATOR_HOTKEYS is required for authoritative v2",
+            )
+        if submission.validator_hotkey not in PRIMARY_VALIDATOR_HOTKEYS:
+            raise HTTPException(
+                status_code=403,
+                detail="Unauthorized validator hotkey",
+            )
+        if ALLOWED_NETUIDS and int(finalization["netuid"]) not in ALLOWED_NETUIDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid netuid: {finalization['netuid']}",
+            )
+        cutover = load_subnet_epoch_cutover()
+        from gateway.utils.epoch import validate_stateful_cutover_authority_async
+
+        await validate_stateful_cutover_authority_async(cutover)
+        await asyncio.to_thread(validate_cutover_anchor_from_archive, cutover)
+        lineage_id = derive_ancestry_lineage_id_v2(
+            cutover_mapping_hash=str(cutover.mapping_hash),
+            network_genesis_hash=str(cutover.network_genesis_hash),
+            netuid=int(cutover.netuid),
+        )
+        from gateway.research_lab.attested_v2_store import (
+            load_compact_weight_authority_for_identity_v2,
+            persist_ancestry_checkpoint_v2,
+            persist_compact_weight_authority_v2,
+            persist_receipt_graph_v2,
+        )
+
+        published_authority = await load_compact_weight_authority_for_identity_v2(
+            netuid=int(finalization["netuid"]),
+            epoch_id=int(finalization["epoch_id"]),
+            validator_hotkey=str(submission.validator_hotkey),
+        )
+        if not isinstance(published_authority, Mapping):
+            raise RuntimeError(
+                "compact finalization publication authority is unavailable"
+            )
+        published_verified = await asyncio.to_thread(
+            verify_compact_published_weight_authority_v2,
+            published_authority,
+            identity_cache=None,
+            chain_signing_profile=None,
+            expected_lineage_id=lineage_id,
+            expected_chain=EXPECTED_CHAIN,
+            boot_verifier=_verify_authoritative_v2_boot,
+        )
+        if published_verified["weight_submission_event_hash"] != normalized[
+            "weight_submission_event_hash"
+        ]:
+            raise RuntimeError("compact finalization publication event differs")
+
+        if published_authority["authority_stage"] == "finalized":
+            durable_finalization = published_authority["finalization"]
+            if durable_finalization.get("compact_submission") != normalized:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Different compact finalization already exists",
+                )
+            return WeightFinalizationV2Response(
+                success=True,
+                epoch_id=published_verified["epoch_id"],
+                weights_hash=published_verified["weights_hash"],
+                extrinsic_hash=published_verified["extrinsic_hash"],
+                finalized_block=published_verified["finalized_block"],
+                weight_submission_event_hash=published_verified[
+                    "weight_submission_event_hash"
+                ],
+                weight_finalization_event_hash=published_verified[
+                    "weight_finalization_event_hash"
+                ],
+                message=(
+                    "Compact authoritative V2 finalized chain state was "
+                    "already durably published"
+                ),
+            )
+
+        finalization_receipt_hash = str(
+            normalized["validator_receipt_delta"]["root_receipt_hash"]
+        )
+        weight_finalization_event_hash = sha256_json(
+            {
+                "weight_submission_event_hash": published_verified[
+                    "weight_submission_event_hash"
+                ],
+                "bundle_hash": published_verified["bundle_hash"],
+                "finalization_receipt_hash": finalization_receipt_hash,
+                "extrinsic_authorization_hash": finalization[
+                    "extrinsic_authorization_hash"
+                ],
+                "extrinsic_hash": finalization["extrinsic_hash"],
+                "finalized_block": finalization["finalized_block"],
+                "finalized_block_hash": finalization[
+                    "finalized_block_hash"
+                ],
+                "state_transition_hash": finalization[
+                    "state_transition_hash"
+                ],
+            }
+        )
+        finalized_authority = build_compact_published_weight_authority_v2(
+            authority_stage="finalized",
+            lineage_id=lineage_id,
+            bundle_hash=published_verified["bundle_hash"],
+            compact_submission=published_authority["compact_submission"],
+            publication=published_authority["publication"],
+            finalization={
+                "weight_finalization_event_hash": (
+                    weight_finalization_event_hash
+                ),
+                "compact_submission": normalized,
+            },
+        )
+        finalized_verified = await asyncio.to_thread(
+            verify_compact_published_weight_authority_v2,
+            finalized_authority,
+            identity_cache=None,
+            chain_signing_profile=None,
+            expected_lineage_id=lineage_id,
+            expected_chain=EXPECTED_CHAIN,
+            boot_verifier=_verify_authoritative_v2_boot,
+        )
+        finalization_graph = await asyncio.to_thread(
+            build_checkpointed_weight_finalization_graph_v2,
+            normalized,
+            compact_weight_submission=published_authority[
+                "compact_submission"
+            ],
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=_verify_authoritative_v2_boot,
+        )
+        graph_result = await persist_receipt_graph_v2(finalization_graph)
+        if graph_result.get("root_receipt_hash") != finalization_receipt_hash:
+            raise RuntimeError("compact finalization durable root differs")
+        await persist_ancestry_checkpoint_v2(
+            normalized["validator_ancestry_proof"],
+            checkpointed_graph=finalization_graph,
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=_verify_authoritative_v2_boot,
+            allowed_issuer_roles={"validator_weights"},
+        )
+        await persist_compact_weight_authority_v2(finalized_authority)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "authoritative_weight_compact_finalization_v2_failed epoch=%s type=%s error=%s",
+            finalization.get("epoch_id") if finalization is not None else None,
+            type(exc).__name__,
+            str(exc)[:300],
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Invalid compact authoritative v2 finalization: {exc}",
+        ) from exc
+    return WeightFinalizationV2Response(
+        success=True,
+        epoch_id=finalized_verified["epoch_id"],
+        weights_hash=finalized_verified["weights_hash"],
+        extrinsic_hash=finalized_verified["extrinsic_hash"],
+        finalized_block=finalized_verified["finalized_block"],
+        weight_submission_event_hash=finalized_verified[
+            "weight_submission_event_hash"
+        ],
+        weight_finalization_event_hash=finalized_verified[
+            "weight_finalization_event_hash"
+        ],
+        message="Compact authoritative V2 finalized chain state durably published",
+    )
+
+
 @router.get("/v2/latest/{netuid}/{epoch_id}")
 async def get_attested_weights_v2(
     netuid: int,
@@ -1789,6 +2480,46 @@ async def get_published_weights_v2(
         raise HTTPException(
             status_code=404,
             detail="published v2 weight authority not found",
+        )
+    return await asyncio.to_thread(
+        _weight_authority_http_response,
+        authority,
+        accept_encoding=request.headers.get("accept-encoding", ""),
+    )
+
+
+@router.get("/v2/published-compact/{netuid}/{epoch_id}")
+async def get_compact_published_weights_v2(
+    netuid: int,
+    epoch_id: int,
+    request: Request,
+) -> Response:
+    """Return bounded recursive authority without loading the full graph."""
+
+    try:
+        if len(PRIMARY_VALIDATOR_HOTKEYS) != 1:
+            raise RuntimeError("authoritative primary validator hotkey is ambiguous")
+        from gateway.research_lab.attested_v2_store import (
+            load_compact_weight_authority_for_identity_v2,
+        )
+
+        authority = await load_compact_weight_authority_for_identity_v2(
+            netuid=int(netuid),
+            epoch_id=int(epoch_id),
+            validator_hotkey=next(iter(PRIMARY_VALIDATOR_HOTKEYS)),
+        )
+    except Exception as exc:
+        raise _weight_authority_load_exception(
+            exc,
+            netuid=netuid,
+            epoch_id=epoch_id,
+            log_tag="weight_published_compact_v2_load_failed",
+            failure_detail="compact v2 staged weight authority load failed",
+        ) from exc
+    if authority is None:
+        raise HTTPException(
+            status_code=404,
+            detail="compact published v2 weight authority not found",
         )
     return await asyncio.to_thread(
         _weight_authority_http_response,

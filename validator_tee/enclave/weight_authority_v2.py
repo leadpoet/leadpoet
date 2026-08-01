@@ -22,6 +22,18 @@ from leadpoet_canonical.attested_v2 import (
     verify_boot_identity_nitro,
 )
 from leadpoet_canonical.chain_source_v2 import chain_source_policy_hash
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    ANCESTRY_DELTA_SCHEMA_VERSION,
+    build_compact_ancestry_proof_from_delta_v2,
+    derive_ancestry_lineage_id_v2,
+    issue_ancestry_certificate_v2,
+    validate_compact_ancestry_proof_v2,
+)
+from leadpoet_canonical.compact_weight_authority_v2 import (
+    build_weight_ancestry_commitment_v2,
+    compact_gateway_frontier_receipt_hashes_v2,
+    validate_compact_weight_ancestry_v2,
+)
 from leadpoet_canonical.weight_authority_v2 import (
     GATEWAY_WEIGHT_INPUT_CATEGORIES,
     VALIDATOR_WEIGHT_INPUT_CATEGORIES,
@@ -75,55 +87,36 @@ class ValidatorWeightAuthorityV2:
         self._clock = clock
 
     def compute(self, request: Mapping[str, Any]) -> Dict[str, Any]:
-        fields = {
+        full_fields = {
             "validator_hotkey",
             "calculation_snapshot",
             "input_receipt_hashes",
             "gateway_authority_event_hash",
             "upstream_receipt_set",
         }
-        if not isinstance(request, Mapping) or set(request) != fields:
+        compact_fields = {
+            "validator_hotkey",
+            "calculation_snapshot",
+            "input_receipt_hashes",
+            "gateway_authority_event_hash",
+            "upstream_ancestry_proofs",
+            "upstream_transport_attempts",
+        }
+        request_fields = set(request) if isinstance(request, Mapping) else set()
+        if (
+            not isinstance(request, Mapping)
+            or request_fields not in (full_fields, compact_fields)
+        ):
             raise ValidatorWeightAuthorityV2Error("weight authority request fields are invalid")
+        compact_transport = request_fields == compact_fields
         boot = dict(self._boot_identity_supplier())
         validate_boot_identity(boot)
         if boot.get("role") != "validator_weights":
             raise ValidatorWeightAuthorityV2Error("validator V2 boot role is invalid")
-        upstream = request.get("upstream_receipt_set")
-        if not isinstance(upstream, Mapping) or set(upstream) != {
-            "boot_identities",
-            "receipts",
-            "transport_attempts",
-            "host_operations",
-        }:
-            raise ValidatorWeightAuthorityV2Error("upstream receipt set is invalid")
-        boots = [dict(item) for item in upstream["boot_identities"]]
-        receipts = [dict(item) for item in upstream["receipts"]]
-        attempts = [dict(item) for item in upstream["transport_attempts"]]
-        host_operations = [dict(item) for item in upstream["host_operations"]]
-        self._verify_boots(boots, boot)
-        for receipt in receipts:
-            validate_signed_execution_receipt(receipt)
-        for attempt in attempts:
-            validate_transport_attempt(attempt)
-        receipt_by_hash = {
-            str(receipt["receipt_hash"]): receipt for receipt in receipts
-        }
         input_hashes = dict(request["input_receipt_hashes"])
         if set(input_hashes) != set(GATEWAY_WEIGHT_INPUT_CATEGORIES):
             raise ValidatorWeightAuthorityV2Error(
                 "gateway weight input categories are incomplete"
-            )
-        direct_input_receipts = [
-            receipt_by_hash.get(str(receipt_hash))
-            for receipt_hash in input_hashes.values()
-        ]
-        if any(
-            isinstance(receipt, Mapping)
-            and receipt.get("role") == "validator_weights"
-            for receipt in direct_input_receipts
-        ):
-            raise ValidatorWeightAuthorityV2Error(
-                "validator-role receipts cannot supply gateway weight inputs"
             )
         proposed_calculation = dict(request["calculation_snapshot"])
         try:
@@ -136,6 +129,57 @@ class ValidatorWeightAuthorityV2:
                 "finalized chain source is unavailable: %s: %s"
                 % (type(exc).__name__, str(exc))
             ) from exc
+        if compact_transport:
+            (
+                boots,
+                receipts,
+                attempts,
+                host_operations,
+                gateway_frontier_hashes,
+                ancestry_commitment,
+                normalized_proofs,
+            ) = self._verify_compact_gateway_ancestry(
+                request=request,
+                input_hashes=input_hashes,
+                chain_snapshot=chain_snapshot,
+                validator_boot=boot,
+            )
+        else:
+            upstream = request.get("upstream_receipt_set")
+            if not isinstance(upstream, Mapping) or set(upstream) != {
+                "boot_identities",
+                "receipts",
+                "transport_attempts",
+                "host_operations",
+            }:
+                raise ValidatorWeightAuthorityV2Error("upstream receipt set is invalid")
+            boots = [dict(item) for item in upstream["boot_identities"]]
+            receipts = [dict(item) for item in upstream["receipts"]]
+            attempts = [dict(item) for item in upstream["transport_attempts"]]
+            host_operations = [dict(item) for item in upstream["host_operations"]]
+            self._verify_boots(boots, boot)
+            for receipt in receipts:
+                validate_signed_execution_receipt(receipt)
+            for attempt in attempts:
+                validate_transport_attempt(attempt)
+            gateway_frontier_hashes = _terminal_receipt_hashes(receipts)
+            ancestry_commitment = None
+            normalized_proofs = None
+        receipt_by_hash = {
+            str(receipt["receipt_hash"]): receipt for receipt in receipts
+        }
+        direct_input_receipts = [
+            receipt_by_hash.get(str(receipt_hash))
+            for receipt_hash in input_hashes.values()
+        ]
+        if any(
+            isinstance(receipt, Mapping)
+            and receipt.get("role") == "validator_weights"
+            for receipt in direct_input_receipts
+        ):
+            raise ValidatorWeightAuthorityV2Error(
+                "validator-role receipts cannot supply gateway weight inputs"
+            )
         calculation = dict(proposed_calculation)
         calculation["block"] = int(chain_snapshot["header"]["block"])
         calculation["metagraph_hotkeys"] = list(
@@ -218,6 +262,16 @@ class ValidatorWeightAuthorityV2:
             raise ValidatorWeightAuthorityV2Error(
                 "combined weight input categories are incomplete"
             )
+        if compact_transport:
+            ancestry_context = dict(ancestry_commitment)
+            ancestry_commitment = build_weight_ancestry_commitment_v2(
+                lineage_id=str(ancestry_context["lineage_id"]),
+                input_receipt_hashes=input_hashes,
+                upstream_ancestry_proofs=ancestry_context[
+                    "normalized_proofs"
+                ],
+                upstream_transport_attempts=ancestry_context["attempts"],
+            )
         calculation["parent_receipt_hashes"] = sorted(input_hashes.values())
         calculation["research_lab_allocation_receipt_hash"] = input_hashes[
             "research_lab_allocation"
@@ -266,9 +320,14 @@ class ValidatorWeightAuthorityV2:
             # those persistence proofs remain on the path to the final root.
             parent_receipt_hashes=sorted(
                 set(input_hashes.values())
-                | set(_terminal_receipt_hashes(receipts + local_receipts))
+                | set(gateway_frontier_hashes)
+                | set(_terminal_receipt_hashes(local_receipts))
             ),
-            artifact_hashes=(snapshot["calculation_snapshot_hash"],),
+            artifact_hashes=(
+                (snapshot["calculation_snapshot_hash"], ancestry_commitment)
+                if ancestry_commitment is not None
+                else (snapshot["calculation_snapshot_hash"],)
+            ),
             issued_at=issued_at,
         )
         result = compute_final_weights(snapshot["calculation_snapshot"])
@@ -299,6 +358,48 @@ class ValidatorWeightAuthorityV2:
             if any(item["boot_identity_hash"] == boot["boot_identity_hash"] for item in boots)
             else [boot]
         )
+        if compact_transport:
+            local_set = {
+                "schema_version": "leadpoet.validator_weight_receipt_delta.v2",
+                "root_receipt_hash": computed_receipt["receipt_hash"],
+                "boot_identities": [dict(boot)],
+                "receipts": [
+                    *[dict(item) for item in local_receipts],
+                    dict(snapshot_receipt),
+                    dict(computed_receipt),
+                ],
+                "transport_attempts": [
+                    dict(item) for item in chain_snapshot["attempts"]
+                ],
+                "host_operations": [],
+            }
+            weights_signature = self._sign_digest(bytes.fromhex(result["weights_hash"]))
+            if not isinstance(weights_signature, (bytes, bytearray)):
+                raise ValidatorWeightAuthorityV2Error("weight signer returned invalid signature")
+            return {
+                "weight_snapshot": snapshot,
+                "weight_result": result,
+                "weights_signature": bytes(weights_signature).hex(),
+                "receipt_graph_delta": local_set,
+                "upstream_ancestry_proofs": normalized_proofs,
+                "upstream_transport_attempts": [dict(item) for item in attempts],
+                "ancestry_commitment": ancestry_commitment,
+                "boot_identity": boot,
+                "source_artifacts": self._validated_source_artifacts(
+                    chain_snapshot["artifacts"],
+                    chain_snapshot["attempts"],
+                ),
+                "epoch_authority": (
+                    dict(chain_snapshot["epoch_authority"])
+                    if chain_snapshot.get("epoch_authority") is not None
+                    else None
+                ),
+                "epoch_boundary": (
+                    dict(chain_snapshot["epoch_boundary"])
+                    if chain_snapshot.get("epoch_boundary") is not None
+                    else None
+                ),
+            }
         graph = build_receipt_graph(
             root_receipt_hash=computed_receipt["receipt_hash"],
             boot_identities=complete_boots,
@@ -343,6 +444,348 @@ class ValidatorWeightAuthorityV2:
                 else None
             ),
         }
+
+    def issue_validator_publication_ancestry_proof(
+        self,
+        *,
+        validator_receipt_delta: Mapping[str, Any],
+        upstream_ancestry_proofs: Mapping[str, Any],
+        binding_receipt: Mapping[str, Any],
+        epoch_authority: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Issue the validator-root proof consumed by the coordinator enclave."""
+
+        boot = dict(self._boot_identity_supplier())
+        try:
+            lineage_id = derive_ancestry_lineage_id_v2(
+                cutover_mapping_hash=str(epoch_authority["cutover_mapping_hash"]),
+                network_genesis_hash=str(epoch_authority["network_genesis_hash"]),
+                netuid=int(epoch_authority["netuid"]),
+            )
+        except Exception as exc:
+            raise ValidatorWeightAuthorityV2Error(
+                "validator ancestry cutover lineage is invalid"
+            ) from exc
+        if (
+            not isinstance(upstream_ancestry_proofs, Mapping)
+            or set(upstream_ancestry_proofs)
+            != set(GATEWAY_WEIGHT_INPUT_CATEGORIES)
+        ):
+            raise ValidatorWeightAuthorityV2Error(
+                "validator ancestry gateway proofs are incomplete"
+            )
+
+        normalized_proofs = {}
+        for category in sorted(GATEWAY_WEIGHT_INPUT_CATEGORIES):
+            try:
+                normalized_proofs[category] = validate_compact_ancestry_proof_v2(
+                    upstream_ancestry_proofs[category],
+                    expected_lineage_id=lineage_id,
+                    boot_attestation_verifier=lambda identity: self._verify_one_boot(
+                        identity, boot
+                    ),
+                    allowed_issuer_roles={"gateway_coordinator"},
+                )
+            except Exception as exc:
+                raise ValidatorWeightAuthorityV2Error(
+                    "validator ancestry gateway proof failed: %s" % category
+                ) from exc
+        frontier_roots = compact_gateway_frontier_receipt_hashes_v2(
+            normalized_proofs
+        )
+        certificates_by_root: Dict[str, Dict[str, Any]] = {}
+        for proof in normalized_proofs.values():
+            certificate = dict(proof["certificate"])
+            root = str(certificate["claim"]["output_root_receipt_hash"])
+            prior = certificates_by_root.get(root)
+            if prior is not None and prior != certificate:
+                raise ValidatorWeightAuthorityV2Error(
+                    "validator ancestry gateway certificate conflicts"
+                )
+            certificates_by_root[root] = certificate
+        if not set(frontier_roots).issubset(certificates_by_root):
+            raise ValidatorWeightAuthorityV2Error(
+                "validator ancestry frontier is incomplete"
+            )
+
+        delta = validator_receipt_delta
+        required_delta_fields = {
+            "schema_version",
+            "root_receipt_hash",
+            "boot_identities",
+            "receipts",
+            "transport_attempts",
+            "host_operations",
+        }
+        if (
+            not isinstance(delta, Mapping)
+            or set(delta) != required_delta_fields
+            or delta.get("schema_version")
+            != "leadpoet.validator_weight_receipt_delta.v2"
+            or delta.get("boot_identities") != [boot]
+            or not isinstance(delta.get("receipts"), list)
+            or not isinstance(delta.get("transport_attempts"), list)
+            or delta.get("host_operations") != []
+        ):
+            raise ValidatorWeightAuthorityV2Error(
+                "validator ancestry local delta is invalid"
+            )
+        validate_signed_execution_receipt(binding_receipt)
+        if (
+            binding_receipt.get("role") != "validator_weights"
+            or binding_receipt.get("purpose")
+            != "validator.hotkey_signature.v2"
+            or binding_receipt.get("boot_identity_hash")
+            != boot["boot_identity_hash"]
+            or binding_receipt.get("parent_receipt_hashes")
+            != [delta["root_receipt_hash"]]
+        ):
+            raise ValidatorWeightAuthorityV2Error(
+                "validator ancestry binding receipt differs"
+            )
+        local_delta = {
+            "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+            "root_receipt_hash": str(binding_receipt["receipt_hash"]),
+            "boot_identities": [boot],
+            "receipts": [
+                *[dict(item) for item in delta["receipts"]],
+                dict(binding_receipt),
+            ],
+            "transport_attempts": [
+                dict(item) for item in delta["transport_attempts"]
+            ],
+            "host_operations": [],
+        }
+        parent_certificates = [
+            certificates_by_root[root] for root in sorted(frontier_roots)
+        ]
+        local_receipt_hashes = {
+            str(item["receipt_hash"]) for item in local_delta["receipts"]
+        }
+        external_parent_hashes = {
+            str(parent_hash)
+            for item in local_delta["receipts"]
+            for parent_hash in item["parent_receipt_hashes"]
+            if str(parent_hash) not in local_receipt_hashes
+        }
+        disclosure_parents = []
+        for parent_hash in sorted(
+            external_parent_hashes - set(frontier_roots)
+        ):
+            candidates = {
+                str(proof["proof_hash"]): proof
+                for proof in normalized_proofs.values()
+                if parent_hash
+                in set(
+                    proof["certificate"]["claim"][
+                        "local_delta_projection"
+                    ]["receipt_hashes"]
+                )
+            }
+            if len(candidates) != 1:
+                raise ValidatorWeightAuthorityV2Error(
+                    "validator ancestry direct input authority is ambiguous"
+                )
+            disclosure_parents.append(
+                (next(iter(candidates.values())), parent_hash)
+            )
+        if external_parent_hashes != (
+            set(frontier_roots)
+            | {item[1] for item in disclosure_parents}
+        ):
+            raise ValidatorWeightAuthorityV2Error(
+                "validator ancestry parent authority is incomplete"
+            )
+        parent_sequences = [
+            int(item["claim"]["certificate_sequence"])
+            for item in parent_certificates
+        ] + [
+            int(item[0]["certificate"]["claim"]["certificate_sequence"])
+            for item in disclosure_parents
+        ]
+        verifier = lambda identity: self._verify_one_boot(identity, boot)
+        try:
+            certificate = issue_ancestry_certificate_v2(
+                local_delta=local_delta,
+                lineage_id=lineage_id,
+                certificate_sequence=(
+                    max(parent_sequences) + 1 if parent_sequences else 0
+                ),
+                issuer_boot_identity=boot,
+                issued_at=_issued_at(self._clock),
+                sign_digest=self._sign_digest,
+                boot_attestation_verifier=verifier,
+                allowed_issuer_roles={
+                    "gateway_coordinator",
+                    "validator_weights",
+                },
+                parent_certificates=parent_certificates,
+                parent_proof_disclosures=disclosure_parents,
+                required_purposes={
+                    "validator.weight_snapshot.v2",
+                    "validator.weights.computed.v2",
+                    "validator.hotkey_signature.v2",
+                },
+            )
+            return build_compact_ancestry_proof_from_delta_v2(
+                local_delta,
+                certificate,
+                expected_lineage_id=lineage_id,
+                boot_attestation_verifier=verifier,
+                allowed_issuer_roles={
+                    "gateway_coordinator",
+                    "validator_weights",
+                },
+            )
+        except Exception as exc:
+            raise ValidatorWeightAuthorityV2Error(
+                "validator ancestry proof issuance failed closed"
+            ) from exc
+
+    def issue_validator_finalization_ancestry_proof(
+        self,
+        *,
+        validator_receipt_delta: Mapping[str, Any],
+        publication_ancestry_proof: Mapping[str, Any],
+        epoch_authority: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Issue a bounded proof extending the published computed receipt."""
+
+        boot = dict(self._boot_identity_supplier())
+        try:
+            lineage_id = derive_ancestry_lineage_id_v2(
+                cutover_mapping_hash=str(epoch_authority["cutover_mapping_hash"]),
+                network_genesis_hash=str(epoch_authority["network_genesis_hash"]),
+                netuid=int(epoch_authority["netuid"]),
+            )
+        except Exception as exc:
+            raise ValidatorWeightAuthorityV2Error(
+                "validator finalization lineage is invalid"
+            ) from exc
+        verifier = lambda identity: self._verify_one_boot(identity, boot)
+        try:
+            parent_proof = validate_compact_ancestry_proof_v2(
+                publication_ancestry_proof,
+                expected_lineage_id=lineage_id,
+                boot_attestation_verifier=verifier,
+                allowed_issuer_roles={"validator_weights"},
+                required_purposes={"validator.weights.computed.v2"},
+            )
+        except Exception as exc:
+            raise ValidatorWeightAuthorityV2Error(
+                "validator finalization predecessor proof is invalid"
+            ) from exc
+        delta = validator_receipt_delta
+        required_fields = {
+            "schema_version",
+            "root_receipt_hash",
+            "boot_identities",
+            "receipts",
+            "transport_attempts",
+            "host_operations",
+        }
+        if (
+            not isinstance(delta, Mapping)
+            or set(delta) != required_fields
+            or delta.get("schema_version")
+            != "leadpoet.validator_weight_finalization_delta.v2"
+            or not isinstance(delta.get("boot_identities"), list)
+            or not isinstance(delta.get("receipts"), list)
+            or not isinstance(delta.get("transport_attempts"), list)
+            or delta.get("host_operations") != []
+        ):
+            raise ValidatorWeightAuthorityV2Error(
+                "validator finalization local delta is invalid"
+            )
+        receipt_hashes = {
+            str(item.get("receipt_hash") or "")
+            for item in delta["receipts"]
+            if isinstance(item, Mapping)
+        }
+        external_parents = {
+            str(parent_hash)
+            for item in delta["receipts"]
+            if isinstance(item, Mapping)
+            for parent_hash in item.get("parent_receipt_hashes") or ()
+            if str(parent_hash) not in receipt_hashes
+        }
+        parent_receipts = {
+            str(item["receipt_hash"]): item
+            for item in parent_proof["disclosed_receipts"]
+            if item.get("purpose") == "validator.weights.computed.v2"
+        }
+        if (
+            len(external_parents) != 1
+            or not external_parents.issubset(parent_receipts)
+        ):
+            raise ValidatorWeightAuthorityV2Error(
+                "validator finalization predecessor receipt is ambiguous"
+            )
+        computed_root = next(iter(external_parents))
+        root_receipts = [
+            item
+            for item in delta["receipts"]
+            if isinstance(item, Mapping)
+            and item.get("receipt_hash") == delta["root_receipt_hash"]
+            and item.get("purpose") == "validator.weights.finalized.v2"
+        ]
+        purposes = {
+            str(item.get("purpose") or "")
+            for item in delta["receipts"]
+            if isinstance(item, Mapping)
+        }
+        if (
+            len(root_receipts) != 1
+            or "validator.set_weights_extrinsic.v2" not in purposes
+            or not delta["boot_identities"]
+        ):
+            raise ValidatorWeightAuthorityV2Error(
+                "validator finalization receipt set is incomplete"
+            )
+        local_delta = {
+            "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+            "root_receipt_hash": str(delta["root_receipt_hash"]),
+            "boot_identities": [
+                dict(item) for item in delta["boot_identities"]
+            ],
+            "receipts": [dict(item) for item in delta["receipts"]],
+            "transport_attempts": [
+                dict(item) for item in delta["transport_attempts"]
+            ],
+            "host_operations": [],
+        }
+        try:
+            certificate = issue_ancestry_certificate_v2(
+                local_delta=local_delta,
+                lineage_id=lineage_id,
+                certificate_sequence=int(
+                    parent_proof["certificate"]["claim"][
+                        "certificate_sequence"
+                    ]
+                )
+                + 1,
+                issuer_boot_identity=boot,
+                issued_at=str(root_receipts[0]["issued_at"]),
+                sign_digest=self._sign_digest,
+                boot_attestation_verifier=verifier,
+                allowed_issuer_roles={"validator_weights"},
+                parent_proof_disclosures=((parent_proof, computed_root),),
+                required_purposes={
+                    "validator.set_weights_extrinsic.v2",
+                    "validator.weights.finalized.v2",
+                },
+            )
+            return build_compact_ancestry_proof_from_delta_v2(
+                local_delta,
+                certificate,
+                expected_lineage_id=lineage_id,
+                boot_attestation_verifier=verifier,
+                allowed_issuer_roles={"validator_weights"},
+            )
+        except Exception as exc:
+            raise ValidatorWeightAuthorityV2Error(
+                "validator finalization ancestry proof issuance failed closed"
+            ) from exc
 
     def capture_epoch_boundary(self, request: Mapping[str, Any]) -> Dict[str, Any]:
         """Create an independently publishable cutover candidate graph.
@@ -493,6 +936,45 @@ class ValidatorWeightAuthorityV2:
                 attempts,
             ),
         }
+
+    def validate_compact_weight_recovery(
+        self,
+        compact_submission: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Re-verify checkpoint ancestry before hotkey-state recovery."""
+
+        epoch_authority = (
+            compact_submission.get("epoch_authority")
+            if isinstance(compact_submission, Mapping)
+            else None
+        )
+        if not isinstance(epoch_authority, Mapping):
+            raise ValidatorWeightAuthorityV2Error(
+                "compact recovery requires stateful epoch authority"
+            )
+        try:
+            lineage_id = derive_ancestry_lineage_id_v2(
+                cutover_mapping_hash=str(
+                    epoch_authority["cutover_mapping_hash"]
+                ),
+                network_genesis_hash=str(
+                    epoch_authority["network_genesis_hash"]
+                ),
+                netuid=int(epoch_authority["netuid"]),
+            )
+            boot = dict(self._boot_identity_supplier())
+            return validate_compact_weight_ancestry_v2(
+                compact_submission,
+                expected_lineage_id=lineage_id,
+                boot_attestation_verifier=lambda identity: self._verify_one_boot(
+                    identity,
+                    boot,
+                ),
+            )
+        except Exception as exc:
+            raise ValidatorWeightAuthorityV2Error(
+                "compact recovery ancestry failed closed"
+            ) from exc
 
     def _validator_input_receipts(
         self,
@@ -737,6 +1219,159 @@ class ValidatorWeightAuthorityV2:
                 "chain source artifact set is incomplete or contains extras"
             )
         return [by_hash[key] for key in sorted(by_hash)]
+
+    def _verify_compact_gateway_ancestry(
+        self,
+        *,
+        request: Mapping[str, Any],
+        input_hashes: Mapping[str, Any],
+        chain_snapshot: Mapping[str, Any],
+        validator_boot: Mapping[str, Any],
+    ) -> Any:
+        """Verify bounded gateway checkpoints against finalized cutover state."""
+
+        epoch_authority = chain_snapshot.get("epoch_authority")
+        if not isinstance(epoch_authority, Mapping):
+            raise ValidatorWeightAuthorityV2Error(
+                "compact ancestry requires stateful subnet epoch authority"
+            )
+        try:
+            lineage_id = derive_ancestry_lineage_id_v2(
+                cutover_mapping_hash=str(
+                    epoch_authority["cutover_mapping_hash"]
+                ),
+                network_genesis_hash=str(
+                    epoch_authority["network_genesis_hash"]
+                ),
+                netuid=int(epoch_authority["netuid"]),
+            )
+        except Exception as exc:
+            raise ValidatorWeightAuthorityV2Error(
+                "compact ancestry cutover lineage is invalid"
+            ) from exc
+        proofs_value = request.get("upstream_ancestry_proofs")
+        if not isinstance(proofs_value, Mapping) or set(proofs_value) != set(
+            GATEWAY_WEIGHT_INPUT_CATEGORIES
+        ):
+            raise ValidatorWeightAuthorityV2Error(
+                "compact gateway ancestry categories are incomplete"
+            )
+        boot_by_hash: dict[str, dict[str, Any]] = {}
+        receipt_by_hash: dict[str, dict[str, Any]] = {}
+        normalized_proofs: dict[str, dict[str, Any]] = {}
+        direct_scopes = set()
+        allocation_authority_observed = False
+
+        def verify_gateway_boot(identity: Mapping[str, Any]) -> Mapping[str, Any]:
+            return self._verify_one_boot(identity, validator_boot)
+
+        for category in sorted(GATEWAY_WEIGHT_INPUT_CATEGORIES):
+            direct_hash = str(input_hashes[category])
+            expected_role, expected_purpose = WEIGHT_INPUT_PURPOSES[category]
+            try:
+                proof = validate_compact_ancestry_proof_v2(
+                    proofs_value[category],
+                    expected_lineage_id=lineage_id,
+                    boot_attestation_verifier=verify_gateway_boot,
+                    allowed_issuer_roles={"gateway_coordinator"},
+                    required_receipt_hashes={direct_hash},
+                    required_purposes={expected_purpose},
+                )
+            except Exception as exc:
+                raise ValidatorWeightAuthorityV2Error(
+                    "compact gateway ancestry failed for %s" % category
+                ) from exc
+            certificate = proof["certificate"]
+            claim = certificate["claim"]
+            for identity in proof["disclosed_boot_identities"]:
+                key = str(identity["boot_identity_hash"])
+                normalized = dict(identity)
+                if key in boot_by_hash and boot_by_hash[key] != normalized:
+                    raise ValidatorWeightAuthorityV2Error(
+                        "compact gateway boot identity conflicts"
+                    )
+                boot_by_hash[key] = normalized
+            direct_receipt = None
+            for receipt in proof["disclosed_receipts"]:
+                key = str(receipt["receipt_hash"])
+                normalized = dict(receipt)
+                if key in receipt_by_hash and receipt_by_hash[key] != normalized:
+                    raise ValidatorWeightAuthorityV2Error(
+                        "compact gateway receipt hash conflicts"
+                    )
+                receipt_by_hash[key] = normalized
+                if key == direct_hash:
+                    direct_receipt = normalized
+            if (
+                not isinstance(direct_receipt, Mapping)
+                or direct_receipt.get("role") != expected_role
+                or direct_receipt.get("purpose") != expected_purpose
+                or int(direct_receipt.get("epoch_id", -1))
+                != int(request["calculation_snapshot"]["epoch_id"])
+            ):
+                raise ValidatorWeightAuthorityV2Error(
+                    "compact gateway direct receipt differs for %s" % category
+                )
+            direct_scopes.add(
+                (str(direct_receipt["job_id"]), str(direct_receipt["purpose"]))
+            )
+            if category == "research_lab_allocation":
+                allocation_authority_observed = any(
+                    item.get("parent_receipt_hash")
+                    == request["gateway_authority_event_hash"]
+                    for item in claim["parent_authorities"]
+                )
+            normalized_proofs[category] = proof
+        if not allocation_authority_observed:
+            raise ValidatorWeightAuthorityV2Error(
+                "compact ancestry omits the allocation authority parent"
+            )
+
+        attempts_value = request.get("upstream_transport_attempts")
+        if not isinstance(attempts_value, list):
+            raise ValidatorWeightAuthorityV2Error(
+                "compact gateway transport evidence is invalid"
+            )
+        attempt_by_hash: dict[str, dict[str, Any]] = {}
+        for attempt in attempts_value:
+            try:
+                validate_transport_attempt(attempt)
+            except Exception as exc:
+                raise ValidatorWeightAuthorityV2Error(
+                    "compact gateway transport attempt is invalid"
+                ) from exc
+            scope = (str(attempt["job_id"]), str(attempt["purpose"]))
+            if scope not in direct_scopes:
+                raise ValidatorWeightAuthorityV2Error(
+                    "compact gateway transport attempt is out of scope"
+                )
+            key = str(attempt["attempt_hash"])
+            normalized = dict(attempt)
+            if key in attempt_by_hash and attempt_by_hash[key] != normalized:
+                raise ValidatorWeightAuthorityV2Error(
+                    "compact gateway transport attempt hash conflicts"
+                )
+            attempt_by_hash[key] = normalized
+        frontier_hashes = compact_gateway_frontier_receipt_hashes_v2(
+            normalized_proofs
+        )
+        # The commitment covers the final combined input map.  Validator-owned
+        # input hashes are added later, so use the canonical builder only after
+        # those receipts exist.
+        commitment = {
+            "lineage_id": lineage_id,
+            "normalized_proofs": normalized_proofs,
+            "attempts": [attempt_by_hash[key] for key in sorted(attempt_by_hash)],
+        }
+        return (
+            [boot_by_hash[key] for key in sorted(boot_by_hash)],
+            [receipt_by_hash[key] for key in sorted(receipt_by_hash)],
+            [attempt_by_hash[key] for key in sorted(attempt_by_hash)],
+            [],
+            sorted(frontier_hashes),
+            commitment,
+            normalized_proofs,
+        )
 
     def _receipt(
         self,

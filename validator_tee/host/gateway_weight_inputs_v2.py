@@ -215,6 +215,136 @@ def _validate_receipt_set(
     return normalized
 
 
+def _validate_compact_ancestry(
+    *,
+    proofs_value: Mapping[str, Any],
+    attempts_value: Any,
+    input_receipt_hashes: Mapping[str, Any],
+    gateway_authority_event_hash: str,
+    epoch_id: int,
+) -> Dict[str, Any]:
+    """Perform host-side shape checks before enclave verification.
+
+    The host is not an ancestry trust boundary: Nitro/release verification and
+    detached-certificate signature checks happen inside the validator enclave.
+    These checks bound the request, reject ambiguous duplicates, and guarantee
+    every semantic input receipt is disclosed before crossing vsock.
+    """
+
+    if not isinstance(proofs_value, Mapping) or set(proofs_value) != set(
+        GATEWAY_WEIGHT_INPUT_CATEGORIES
+    ):
+        raise GatewayWeightInputsV2Error(
+            "gateway V2 compact ancestry categories are incomplete"
+        )
+    if not isinstance(attempts_value, list):
+        raise GatewayWeightInputsV2Error(
+            "gateway V2 compact transport attempts are invalid"
+        )
+    proofs: dict[str, dict[str, Any]] = {}
+    direct_scopes = set()
+    seen_receipts: dict[str, dict[str, Any]] = {}
+    seen_proofs = set()
+    allocation_authority_observed = False
+    for category in sorted(GATEWAY_WEIGHT_INPUT_CATEGORIES):
+        proof = proofs_value.get(category)
+        if not isinstance(proof, Mapping) or set(proof) != {
+            "schema_version",
+            "certificate",
+            "disclosed_receipts",
+            "disclosed_boot_identities",
+            "proof_hash",
+        }:
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 compact ancestry proof is invalid for %s" % category
+            )
+        proof_hash = str(proof.get("proof_hash") or "")
+        if proof_hash in seen_proofs:
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 compact ancestry proof is duplicated"
+            )
+        seen_proofs.add(proof_hash)
+        disclosed_boots = proof.get("disclosed_boot_identities")
+        disclosed_receipts = proof.get("disclosed_receipts")
+        if not isinstance(disclosed_boots, list) or not isinstance(
+            disclosed_receipts, list
+        ):
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 compact ancestry disclosure is invalid"
+            )
+        for identity in disclosed_boots:
+            validate_boot_identity(identity)
+        direct_hash = str(input_receipt_hashes[category])
+        direct_receipt = None
+        for receipt in disclosed_receipts:
+            validate_signed_execution_receipt(receipt)
+            receipt_hash = str(receipt["receipt_hash"])
+            normalized = dict(receipt)
+            if receipt_hash in seen_receipts and seen_receipts[receipt_hash] != normalized:
+                raise GatewayWeightInputsV2Error(
+                    "gateway V2 compact receipt hash conflicts"
+                )
+            seen_receipts[receipt_hash] = normalized
+            if receipt_hash == direct_hash:
+                direct_receipt = normalized
+        expected_role, expected_purpose = WEIGHT_INPUT_PURPOSES[category]
+        if (
+            direct_receipt is None
+            or direct_receipt.get("role") != expected_role
+            or direct_receipt.get("purpose") != expected_purpose
+            or int(direct_receipt.get("epoch_id", -1)) != int(epoch_id)
+        ):
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 compact input receipt differs for %s" % category
+            )
+        direct_scopes.add(
+            (str(direct_receipt["job_id"]), str(direct_receipt["purpose"]))
+        )
+        certificate = proof.get("certificate")
+        claim = certificate.get("claim") if isinstance(certificate, Mapping) else None
+        parent_authorities = (
+            claim.get("parent_authorities") if isinstance(claim, Mapping) else None
+        )
+        if not isinstance(parent_authorities, list):
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 compact parent authorities are invalid"
+            )
+        if category == "research_lab_allocation":
+            allocation_authority_observed = any(
+                isinstance(item, Mapping)
+                and item.get("parent_receipt_hash")
+                == gateway_authority_event_hash
+                for item in parent_authorities
+            )
+        proofs[category] = dict(proof)
+    if not allocation_authority_observed:
+        raise GatewayWeightInputsV2Error(
+            "gateway allocation authority is absent from compact ancestry"
+        )
+
+    attempts: dict[str, dict[str, Any]] = {}
+    for attempt in attempts_value:
+        validate_transport_attempt(attempt)
+        scope = (str(attempt["job_id"]), str(attempt["purpose"]))
+        if scope not in direct_scopes:
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 compact transport attempt is out of scope"
+            )
+        attempt_hash = str(attempt["attempt_hash"])
+        normalized = dict(attempt)
+        if attempt_hash in attempts and attempts[attempt_hash] != normalized:
+            raise GatewayWeightInputsV2Error(
+                "gateway V2 compact transport attempt hash conflicts"
+            )
+        attempts[attempt_hash] = normalized
+    return {
+        "upstream_ancestry_proofs": proofs,
+        "upstream_transport_attempts": [
+            attempts[attempt_hash] for attempt_hash in sorted(attempts)
+        ],
+    }
+
+
 async def fetch_gateway_weight_inputs_v2(
     *,
     gateway_url: str,
@@ -255,7 +385,10 @@ async def fetch_gateway_weight_inputs_v2(
         raise GatewayWeightInputsV2Error(
             "authoritative V2 weight input request is invalid"
         ) from exc
-    endpoint = _gateway_endpoint(gateway_url) + "/weights/inputs/v2"
+    endpoint = (
+        _gateway_endpoint(gateway_url)
+        + "/weights/inputs/v2?ancestry=compact-v2"
+    )
     enclave_client = client or ValidatorEnclaveClient()
     message = weight_inputs_request_message_v2(request).encode("utf-8")
     signature_result = await asyncio.to_thread(
@@ -313,14 +446,26 @@ async def fetch_gateway_weight_inputs_v2(
         raise GatewayWeightInputsV2Error(
             "gateway V2 weight input request exhausted without a response"
         )
-    expected_fields = {
+    full_fields = {
         "request_hash",
         "calculation_snapshot_hash",
         "input_receipt_hashes",
         "gateway_authority_event_hash",
         "upstream_receipt_set",
     }
-    if not isinstance(response, Mapping) or set(response) != expected_fields:
+    compact_fields = {
+        "request_hash",
+        "calculation_snapshot_hash",
+        "input_receipt_hashes",
+        "gateway_authority_event_hash",
+        "upstream_ancestry_proofs",
+        "upstream_transport_attempts",
+    }
+    response_fields = set(response) if isinstance(response, Mapping) else set()
+    if (
+        not isinstance(response, Mapping)
+        or response_fields not in (full_fields, compact_fields)
+    ):
         raise GatewayWeightInputsV2Error("gateway V2 weight input response fields are invalid")
     if (
         response.get("request_hash") != request["request_hash"]
@@ -337,25 +482,36 @@ async def fetch_gateway_weight_inputs_v2(
         raise GatewayWeightInputsV2Error(
             "gateway V2 input receipt categories are incomplete"
         )
-    receipt_set = _validate_receipt_set(
-        value=response["upstream_receipt_set"],
-        input_receipt_hashes=input_hashes,
-        epoch_id=int(calculation["epoch_id"]),
-    )
     authority_hash = str(response.get("gateway_authority_event_hash") or "")
-    receipt_hashes = {
-        str(receipt["receipt_hash"]) for receipt in receipt_set["receipts"]
-    }
-    if authority_hash not in receipt_hashes:
-        raise GatewayWeightInputsV2Error(
-            "gateway allocation authority receipt is absent from the response"
-        )
-    return {
+    result = {
         "input_receipt_hashes": {
             category: str(input_hashes[category])
             for category in sorted(input_hashes)
         },
         "gateway_authority_event_hash": authority_hash,
-        "upstream_receipt_set": receipt_set,
         "request_authorization": dict(signature_result),
     }
+    if response_fields == full_fields:
+        receipt_set = _validate_receipt_set(
+            value=response["upstream_receipt_set"],
+            input_receipt_hashes=input_hashes,
+            epoch_id=int(calculation["epoch_id"]),
+        )
+        receipt_hashes = {
+            str(receipt["receipt_hash"]) for receipt in receipt_set["receipts"]
+        }
+        if authority_hash not in receipt_hashes:
+            raise GatewayWeightInputsV2Error(
+                "gateway allocation authority receipt is absent from the response"
+            )
+        result["upstream_receipt_set"] = receipt_set
+        return result
+    compact = _validate_compact_ancestry(
+        proofs_value=response["upstream_ancestry_proofs"],
+        attempts_value=response["upstream_transport_attempts"],
+        input_receipt_hashes=input_hashes,
+        gateway_authority_event_hash=authority_hash,
+        epoch_id=int(calculation["epoch_id"]),
+    )
+    result.update(compact)
+    return result

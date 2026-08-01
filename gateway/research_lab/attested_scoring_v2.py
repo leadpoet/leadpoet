@@ -23,6 +23,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 from gateway.tee.execution_job_manager_v2 import (
     JOB_SCHEMA_VERSION,
     MAX_INPUT_BYTES,
+    PARENT_ANCESTRY_PROOFS_FIELD,
     PARENT_RECEIPT_GRAPH_SET_FIELD,
     PARENT_RECEIPT_GRAPHS_FIELD,
     pack_parent_receipt_graph_set_v2,
@@ -41,6 +42,8 @@ from gateway.utils.tee_artifact_store_v2 import (
 )
 from gateway.utils.tee_client import coordinator_tee_client, scoring_tee_client
 from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    build_checkpointed_receipt_graph,
     build_receipt_graph,
     canonical_json,
     EMPTY_ARTIFACT_ROOT,
@@ -52,6 +55,17 @@ from leadpoet_canonical.attested_v2 import (
     validate_signed_execution_receipt,
     verify_boot_identity_nitro,
 )
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    ANCESTRY_DELTA_SCHEMA_VERSION,
+    build_certificate_parent_authority_v2,
+    build_compact_ancestry_proof_v2,
+    build_full_graph_parent_authority_v2,
+    build_full_graph_parent_v2,
+    derive_ancestry_lineage_id_v2,
+    validate_compact_ancestry_proof_v2,
+    validate_local_delta_against_certificate_v2,
+)
+from Leadpoet.utils.subnet_epoch import load_subnet_epoch_cutover
 
 
 DEFAULT_RELEASE_MANIFEST_PATH = Path(
@@ -62,6 +76,12 @@ DEFAULT_POLL_SECONDS = 0.25
 UPLOAD_CHUNK_BYTES = 512 * 1024
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 logger = logging.getLogger(__name__)
+_GATEWAY_ANCESTRY_ISSUER_ROLES = (
+    "gateway_autoresearch",
+    "gateway_coordinator",
+    "gateway_scoring",
+    "validator_weights",
+)
 
 
 def _env_flag(name: str) -> bool:
@@ -104,6 +124,301 @@ def scoring_enclave_shard_for_worker(worker_index: int) -> int:
 
 def _canonical_bytes(value: Any) -> bytes:
     return canonical_json(value).encode("utf-8")
+
+
+def _gateway_ancestry_lineage_id() -> str:
+    cutover = load_subnet_epoch_cutover()
+    return derive_ancestry_lineage_id_v2(
+        cutover_mapping_hash=str(cutover.mapping_hash),
+        network_genesis_hash=str(cutover.network_genesis_hash),
+        netuid=int(cutover.netuid),
+    )
+
+
+def _failed_receipts_in_graph(
+    graph: Mapping[str, Any],
+    allowed_failed_receipt_hashes: Iterable[str],
+) -> tuple[str, ...]:
+    allowed = {str(value).lower() for value in allowed_failed_receipt_hashes}
+    receipt_hashes = {
+        str(item.get("receipt_hash") or "")
+        for item in graph.get("receipts") or ()
+        if isinstance(item, Mapping)
+    }
+    return tuple(sorted(allowed & receipt_hashes))
+
+
+def _compact_proof_root(proof: Mapping[str, Any]) -> str:
+    certificate = proof.get("certificate")
+    claim = certificate.get("claim") if isinstance(certificate, Mapping) else None
+    return str(
+        claim.get("output_root_receipt_hash")
+        if isinstance(claim, Mapping)
+        else ""
+    ).lower()
+
+
+async def _resolve_parent_ancestry_transport_v2(
+    *,
+    parent_graphs: Sequence[Mapping[str, Any]],
+    parent_ancestry_proofs: Sequence[Mapping[str, Any]],
+    allowed_failed_receipt_hashes: Iterable[str],
+    expected_lineage_id: str,
+    boot_attestation_verifier: Any,
+    load_ancestry_proofs: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
+    """Select one bounded authority for each direct parent.
+
+    Checkpointed graph envelopes are only local evidence plus their detached
+    proof. Legacy complete graphs are accepted solely as bootstrap authorities.
+    A supplied proof may stand alone; requiring the corresponding historical
+    graph would defeat compaction.
+    """
+
+    graph_by_root: dict[str, dict[str, Any]] = {}
+    proof_by_root: dict[str, dict[str, Any]] = {}
+    for raw_graph in parent_graphs:
+        if not isinstance(raw_graph, Mapping):
+            raise AttestedScoringV2Error("parent ancestry graph is invalid")
+        graph = dict(raw_graph)
+        root = str(graph.get("root_receipt_hash") or "").lower()
+        if not _HASH_RE.fullmatch(root) or root in graph_by_root:
+            raise AttestedScoringV2Error("parent ancestry frontier is invalid")
+        graph_by_root[root] = graph
+        embedded = graph.get("ancestry_proof")
+        if graph.get("schema_version") == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION:
+            await _validate_receipt_graph_async(
+                graph,
+                boot_attestation_verifier=boot_attestation_verifier,
+                require_boot_attestation_verification=True,
+            )
+            if not isinstance(embedded, Mapping):
+                raise AttestedScoringV2Error(
+                    "checkpointed parent proof is unavailable"
+                )
+            proof_by_root[root] = dict(embedded)
+
+    for raw_proof in parent_ancestry_proofs:
+        if not isinstance(raw_proof, Mapping):
+            raise AttestedScoringV2Error("parent ancestry proof is invalid")
+        root = _compact_proof_root(raw_proof)
+        existing = proof_by_root.get(root)
+        if not _HASH_RE.fullmatch(root) or (
+            existing is not None and existing != dict(raw_proof)
+        ):
+            raise AttestedScoringV2Error(
+                "parent ancestry proof is invalid or conflicting"
+            )
+        proof_by_root[root] = dict(raw_proof)
+
+    missing_roots = [root for root in graph_by_root if root not in proof_by_root]
+    if missing_roots and load_ancestry_proofs is not None:
+        loaded = load_ancestry_proofs(
+            missing_roots,
+            expected_lineage_id=expected_lineage_id,
+            boot_attestation_verifier=boot_attestation_verifier,
+            allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+        )
+        if inspect.isawaitable(loaded):
+            loaded = await loaded
+        if not isinstance(loaded, Mapping) or any(
+            str(root) not in missing_roots or not isinstance(proof, Mapping)
+            for root, proof in loaded.items()
+        ):
+            raise AttestedScoringV2Error(
+                "durable parent ancestry proof selection is invalid"
+            )
+        for root, proof in loaded.items():
+            normalized_root = str(root).lower()
+            if normalized_root != _compact_proof_root(proof):
+                raise AttestedScoringV2Error(
+                    "durable parent ancestry proof root differs"
+                )
+            proof_by_root[normalized_root] = dict(proof)
+
+    transport_graphs: list[dict[str, Any]] = []
+    transport_proofs: list[dict[str, Any]] = []
+    trusted_parent_authorities: dict[str, str] = {}
+    all_roots = sorted(set(graph_by_root) | set(proof_by_root))
+    for root in all_roots:
+        graph = graph_by_root.get(root)
+        proof = proof_by_root.get(root)
+        if proof is not None:
+            normalized = validate_compact_ancestry_proof_v2(
+                proof,
+                expected_lineage_id=expected_lineage_id,
+                boot_attestation_verifier=boot_attestation_verifier,
+                allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+                required_receipt_hashes=(root,),
+            )
+            if graph is not None and graph.get("schema_version") != CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION:
+                graph_allowed_failed = _failed_receipts_in_graph(
+                    graph, allowed_failed_receipt_hashes
+                )
+                reconstructed = build_compact_ancestry_proof_v2(
+                    graph,
+                    normalized["certificate"],
+                    expected_lineage_id=expected_lineage_id,
+                    boot_attestation_verifier=boot_attestation_verifier,
+                    allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+                    allowed_failed_receipt_hashes=graph_allowed_failed,
+                )
+                if reconstructed != normalized:
+                    raise AttestedScoringV2Error(
+                        "parent ancestry proof differs from bootstrap graph"
+                    )
+            transport_proofs.append(normalized)
+            authority = build_certificate_parent_authority_v2(
+                normalized["certificate"],
+                expected_lineage_id=expected_lineage_id,
+                boot_attestation_verifier=boot_attestation_verifier,
+                allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+            )
+        elif graph is not None:
+            graph_allowed_failed = _failed_receipts_in_graph(
+                graph, allowed_failed_receipt_hashes
+            )
+            full_parent = build_full_graph_parent_v2(
+                graph,
+                allowed_failed_receipt_hashes=graph_allowed_failed,
+            )
+            authority = build_full_graph_parent_authority_v2(
+                full_parent,
+                boot_attestation_verifier=boot_attestation_verifier,
+            )
+            transport_graphs.append(graph)
+        else:
+            raise AttestedScoringV2Error("parent ancestry authority is absent")
+        if authority.get("parent_receipt_hash") != root:
+            raise AttestedScoringV2Error("parent ancestry authority root differs")
+        trusted_parent_authorities[root] = str(authority["authority_hash"])
+    if set(trusted_parent_authorities) != set(all_roots):
+        raise AttestedScoringV2Error("parent ancestry frontier is incomplete")
+    return transport_graphs, transport_proofs, trusted_parent_authorities
+
+
+def _validate_output_ancestry_checkpoint_v2(
+    *,
+    proof: Mapping[str, Any],
+    root_receipt: Mapping[str, Any],
+    boot_identity: Mapping[str, Any],
+    local_receipts: Sequence[Mapping[str, Any]],
+    transport_attempts: Sequence[Mapping[str, Any]],
+    host_operations: Sequence[Mapping[str, Any]],
+    purpose: str,
+    expected_lineage_id: str,
+    boot_attestation_verifier: Any,
+    trusted_parent_authorities: Mapping[str, str],
+) -> dict[str, Any]:
+    root_hash = str(root_receipt.get("receipt_hash") or "")
+    normalized = validate_compact_ancestry_proof_v2(
+        proof,
+        expected_lineage_id=expected_lineage_id,
+        boot_attestation_verifier=boot_attestation_verifier,
+        allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+        required_receipt_hashes=(root_hash,),
+        required_purposes=(purpose,),
+        trusted_parent_authorities=trusted_parent_authorities,
+    )
+    certificate = normalized["certificate"]
+    if (
+        certificate["claim"]["issuer_boot_identity_hash"]
+        != boot_identity.get("boot_identity_hash")
+        or certificate.get("enclave_pubkey")
+        != boot_identity.get("signing_pubkey")
+    ):
+        raise AttestedScoringV2Error(
+            "V2 ancestry checkpoint issuer differs from active enclave"
+        )
+    local_delta = {
+        "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+        "root_receipt_hash": root_hash,
+        "boot_identities": [dict(boot_identity)],
+        "receipts": [dict(item) for item in local_receipts],
+        "transport_attempts": [dict(item) for item in transport_attempts],
+        "host_operations": [dict(item) for item in host_operations],
+    }
+    validate_local_delta_against_certificate_v2(
+        local_delta,
+        certificate,
+        expected_lineage_id=expected_lineage_id,
+        boot_attestation_verifier=boot_attestation_verifier,
+        allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+        trusted_parent_authorities=trusted_parent_authorities,
+    )
+    return normalized
+
+
+def _validate_checkpointed_graph_proof_v2(
+    *,
+    proof: Mapping[str, Any],
+    graph: Mapping[str, Any],
+    expected_root_receipt_hash: str,
+    expected_lineage_id: str,
+    boot_attestation_verifier: Any,
+    trusted_parent_authorities: Mapping[str, str],
+    allowed_failed_receipt_hashes: Iterable[str] = (),
+) -> dict[str, Any]:
+    normalized = validate_compact_ancestry_proof_v2(
+        proof,
+        expected_lineage_id=expected_lineage_id,
+        boot_attestation_verifier=boot_attestation_verifier,
+        allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+        required_receipt_hashes=(expected_root_receipt_hash,),
+        trusted_parent_authorities=trusted_parent_authorities,
+    )
+    awaitable_guard = graph.get("ancestry_proof")
+    if (
+        graph.get("schema_version")
+        != CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        or not isinstance(awaitable_guard, Mapping)
+        or dict(awaitable_guard) != normalized
+    ):
+        raise AttestedScoringV2Error(
+            "V2 ancestry checkpoint differs from bounded graph"
+        )
+    validate_receipt_graph(
+        graph,
+        allowed_failed_receipt_hashes=allowed_failed_receipt_hashes,
+        boot_attestation_verifier=boot_attestation_verifier,
+        require_boot_attestation_verification=True,
+    )
+    return normalized
+
+
+async def _persist_ancestry_checkpoint_after_graph_v2(
+    proof: Mapping[str, Any],
+    *,
+    checkpointed_graph: Mapping[str, Any],
+    expected_root_receipt_hash: str,
+    expected_lineage_id: str,
+    boot_attestation_verifier: Any,
+    persist_ancestry_checkpoint: Any,
+) -> dict[str, Any]:
+    if persist_ancestry_checkpoint is None:
+        from gateway.research_lab.attested_v2_store import (
+            persist_ancestry_checkpoint_v2,
+        )
+
+        persist_ancestry_checkpoint = persist_ancestry_checkpoint_v2
+    persisted = persist_ancestry_checkpoint(
+        proof,
+        checkpointed_graph=checkpointed_graph,
+        expected_lineage_id=expected_lineage_id,
+        boot_attestation_verifier=boot_attestation_verifier,
+        allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+    )
+    if inspect.isawaitable(persisted):
+        persisted = await persisted
+    if (
+        not isinstance(persisted, Mapping)
+        or persisted.get("root_receipt_hash") != expected_root_receipt_hash
+        or persisted.get("proof_hash") != proof.get("proof_hash")
+    ):
+        raise AttestedScoringV2Error(
+            "V2 ancestry checkpoint durable readback differs"
+        )
+    return dict(persisted)
 
 
 def _compact_parent_graphs_for_transport(
@@ -263,6 +578,7 @@ def _merge_graphs(
     boot_identity: Mapping[str, Any],
     local_receipts: Sequence[Mapping[str, Any]],
     transport_attempts: Sequence[Mapping[str, Any]],
+    host_operations: Sequence[Mapping[str, Any]],
     parent_graphs: Sequence[Mapping[str, Any]],
     allowed_failed_receipt_hashes: Iterable[str] = (),
 ) -> Dict[str, Any]:
@@ -282,7 +598,10 @@ def _merge_graphs(
     attempts = {
         str(item["attempt_hash"]): dict(item) for item in transport_attempts
     }
-    host_operations = {}
+    merged_host_operations = {
+        str(record["request"]["request_hash"]): dict(record)
+        for record in host_operations
+    }
     local_hashes = set(receipts)
     expected_parent_roots = {
         str(parent_hash)
@@ -327,11 +646,14 @@ def _merge_graphs(
             attempts[key] = dict(attempt)
         for record in graph["host_operations"]:
             key = str(record["request"]["request_hash"])
-            if key in host_operations and host_operations[key] != dict(record):
+            if (
+                key in merged_host_operations
+                and merged_host_operations[key] != dict(record)
+            ):
                 raise AttestedScoringV2Error(
                     "host operation request conflicts across graphs"
                 )
-            host_operations[key] = dict(record)
+            merged_host_operations[key] = dict(record)
     if observed_parent_roots != expected_parent_roots:
         raise AttestedScoringV2Error(
             "parent graphs differ from direct receipt ancestry"
@@ -341,7 +663,10 @@ def _merge_graphs(
         boot_identities=[boots[key] for key in sorted(boots)],
         receipts=[receipts[key] for key in sorted(receipts)],
         transport_attempts=[attempts[key] for key in sorted(attempts)],
-        host_operations=[host_operations[key] for key in sorted(host_operations)],
+        host_operations=[
+            merged_host_operations[key]
+            for key in sorted(merged_host_operations)
+        ],
         allowed_failed_receipt_hashes=allowed_failed,
     )
 
@@ -422,6 +747,7 @@ async def execute_scoring_v2(
     payload: Mapping[str, Any],
     worker_index: int,
     parent_graphs: Sequence[Mapping[str, Any]] = (),
+    parent_ancestry_proofs: Sequence[Mapping[str, Any]] = (),
     allowed_failed_parent_receipt_hashes: Iterable[str] = (),
     input_artifact_hashes: Iterable[str] = (),
     provider_credential_profile: str = "default",
@@ -441,6 +767,8 @@ async def execute_scoring_v2(
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
     persist_graph: Any = None,
+    load_ancestry_proofs: Any = None,
+    persist_ancestry_checkpoint: Any = None,
     boot_verifier: Any = None,
     operation_registry: Optional[Mapping[str, Iterable[str]]] = None,
     physical_role_override: Optional[str] = None,
@@ -503,6 +831,7 @@ async def execute_scoring_v2(
         and 1 <= configured_worker_count <= 500
         and normalized_worker_index < configured_worker_count
     )
+    ancestry_lineage_id = _gateway_ancestry_lineage_id()
     if (
         health.get("authority") != "v2_only"
         or health.get("role") != expected_service_role
@@ -511,6 +840,8 @@ async def execute_scoring_v2(
         or not 1 <= execution_worker_count <= 10
         or not (coordinator_capacity_valid or configured_capacity_valid)
         or not health.get("workers_alive")
+        or health.get("ancestry_checkpoints") is not True
+        or health.get("ancestry_lineage_id") != ancestry_lineage_id
     ):
         raise AttestedScoringV2Error("V2 scoring enclave health is invalid")
     boot_identity = await scoring_client.v2_get_boot_identity()
@@ -618,6 +949,7 @@ async def execute_scoring_v2(
         or "_v2_provider_credential_profile" in payload
         or PARENT_RECEIPT_GRAPHS_FIELD in payload
         or PARENT_RECEIPT_GRAPH_SET_FIELD in payload
+        or PARENT_ANCESTRY_PROOFS_FIELD in payload
     ):
         raise AttestedScoringV2Error("payload uses a reserved V2 authority field")
     artifact_hashes = sorted(
@@ -626,9 +958,6 @@ async def execute_scoring_v2(
     )
     if any(not _HASH_RE.fullmatch(item) for item in artifact_hashes):
         raise AttestedScoringV2Error("input artifact hash is invalid")
-    parent_roots = sorted(str(graph.get("root_receipt_hash") or "") for graph in parent_graphs)
-    if any(not _HASH_RE.fullmatch(item) for item in parent_roots):
-        raise AttestedScoringV2Error("parent graph root is invalid")
     allowed_failed = {
         str(item).lower() for item in allowed_failed_parent_receipt_hashes
     }
@@ -647,9 +976,38 @@ async def execute_scoring_v2(
         raise AttestedScoringV2Error(
             "allowed failed receipts must be present in parent graphs"
         )
-    transport_parent_graphs = _compact_parent_graphs_for_transport(parent_graphs)
+    if load_ancestry_proofs is None:
+        from gateway.research_lab.attested_v2_store import (
+            load_ancestry_checkpoint_proofs_v2,
+        )
+
+        load_ancestry_proofs = load_ancestry_checkpoint_proofs_v2
+    (
+        transport_parent_graphs,
+        transport_parent_proofs,
+        trusted_parent_authorities,
+    ) = await _resolve_parent_ancestry_transport_v2(
+        parent_graphs=parent_graphs,
+        parent_ancestry_proofs=parent_ancestry_proofs,
+        allowed_failed_receipt_hashes=allowed_failed,
+        expected_lineage_id=ancestry_lineage_id,
+        boot_attestation_verifier=verifier,
+        load_ancestry_proofs=load_ancestry_proofs,
+    )
+    parent_roots = sorted(trusted_parent_authorities)
+    logical_payload_document = dict(payload)
+    if normalized_profile != "default":
+        logical_payload_document["_v2_provider_credential_profile"] = normalized_profile
+    if credential_refs:
+        logical_payload_document["_v2_provider_credential_ref_hashes"] = dict(
+            sorted(credential_refs.items())
+        )
+    logical_payload_hash = sha256_bytes(_canonical_bytes(logical_payload_document))
+    transport_payload = dict(payload)
+    if transport_parent_proofs:
+        transport_payload[PARENT_ANCESTRY_PROOFS_FIELD] = transport_parent_proofs
     payload_document, transport_metadata = _build_transport_payload_document(
-        payload=payload,
+        payload=transport_payload,
         parent_graphs=transport_parent_graphs,
         provider_credential_profile=normalized_profile,
         provider_credential_ref_hashes=credential_refs,
@@ -678,7 +1036,7 @@ async def execute_scoring_v2(
         purpose=purpose,
         epoch_id=epoch_id,
         sequence=sequence,
-        payload_sha256=payload_hash,
+        payload_sha256=logical_payload_hash,
         parent_receipt_hashes=parent_roots,
         input_artifact_hashes=artifact_hashes,
         release_hash=release["release_hash"],
@@ -789,6 +1147,21 @@ async def execute_scoring_v2(
                     replay_graph["host_operations"]
                 ),
             }
+            replay_proofs = load_ancestry_proofs(
+                (str(replay_graph["root_receipt_hash"]),),
+                expected_lineage_id=ancestry_lineage_id,
+                boot_attestation_verifier=verifier,
+                allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+            )
+            if inspect.isawaitable(replay_proofs):
+                replay_proofs = await replay_proofs
+            if not isinstance(replay_proofs, Mapping):
+                raise AttestedScoringV2Error(
+                    "V2 durable replay ancestry checkpoint lookup is invalid"
+                )
+            replay_proof = replay_proofs.get(
+                str(replay_graph["root_receipt_hash"])
+            )
             return {
                 "status": "succeeded",
                 "result": dict(replay_result),
@@ -804,6 +1177,11 @@ async def execute_scoring_v2(
                 "release_hash": release["release_hash"],
                 "physical_role": physical_role,
                 "replay_status": "durable_exact",
+                "ancestry_compact_proof": (
+                    dict(replay_proof)
+                    if isinstance(replay_proof, Mapping)
+                    else None
+                ),
             }
     raw_additional_envelopes = additional_job_credential_envelopes
     if additional_job_credential_envelope_builder is not None:
@@ -1042,6 +1420,38 @@ async def execute_scoring_v2(
     if external_parent_hashes != set(parent_roots):
         raise AttestedScoringV2Error("V2 scoring receipt ancestry mismatch")
     transport_attempts = await rpc_method("get_transport_attempts")(job_id)
+    host_operations = await rpc_method("get_host_operations")(job_id)
+    if not isinstance(host_operations, list) or any(
+        not isinstance(item, Mapping) for item in host_operations
+    ):
+        raise AttestedScoringV2Error("V2 scoring host operation set is invalid")
+    ancestry_compact_proof = _validate_output_ancestry_checkpoint_v2(
+        proof=await rpc_method("get_ancestry_compact_proof")(job_id),
+        root_receipt=receipt,
+        boot_identity=boot_identity,
+        local_receipts=local_receipts,
+        transport_attempts=transport_attempts,
+        host_operations=host_operations,
+        purpose=purpose,
+        expected_lineage_id=ancestry_lineage_id,
+        boot_attestation_verifier=verifier,
+        trusted_parent_authorities=trusted_parent_authorities,
+    )
+    graph_allowed_failed = set(allowed_failed)
+    if not succeeded:
+        graph_allowed_failed.add(str(receipt["receipt_hash"]))
+    checkpointed_graph = build_checkpointed_receipt_graph(
+        root_receipt_hash=str(receipt["receipt_hash"]),
+        boot_identities=(boot_identity,),
+        receipts=local_receipts,
+        transport_attempts=transport_attempts,
+        host_operations=host_operations,
+        ancestry_lineage_id=ancestry_lineage_id,
+        ancestry_proof=ancestry_compact_proof,
+        allowed_failed_receipt_hashes=graph_allowed_failed,
+        boot_attestation_verifier=verifier,
+        require_boot_attestation_verification=True,
+    )
     job_artifact_hashes = await rpc_method("get_artifact_hashes")(job_id)
     if not isinstance(job_artifact_hashes, list) or any(
         not _HASH_RE.fullmatch(str(item or "")) for item in job_artifact_hashes
@@ -1055,9 +1465,6 @@ async def execute_scoring_v2(
     if receipt.get("artifact_root") != expected_artifact_root:
         raise AttestedScoringV2Error("V2 scoring artifact root differs")
     transitions = await rpc_method("get_transitions")(job_id) if succeeded else []
-    graph_allowed_failed = set(allowed_failed)
-    if not succeeded:
-        graph_allowed_failed.add(str(receipt["receipt_hash"]))
     request_artifact_hashes = sorted(
         str(attempt.get("request_artifact_hash") or "")
         for attempt in transport_attempts
@@ -1074,14 +1481,7 @@ async def execute_scoring_v2(
         request_artifact_hashes + response_artifact_hashes
     )
     if not succeeded:
-        graph = await _merge_graphs_async(
-            root_receipt=receipt,
-            boot_identity=boot_identity,
-            local_receipts=local_receipts,
-            transport_attempts=transport_attempts,
-            parent_graphs=parent_graphs,
-            allowed_failed_receipt_hashes=graph_allowed_failed,
-        )
+        graph = checkpointed_graph
         await _validate_receipt_graph_async(
             graph,
             required_purposes=(purpose,),
@@ -1100,6 +1500,9 @@ async def execute_scoring_v2(
             "artifact_hashes": list(job_artifact_hashes),
             "release_hash": release["release_hash"],
             "physical_role": physical_role,
+            "execution_ancestry_compact_proof": dict(
+                ancestry_compact_proof
+            ),
         }
         if job_artifact_hashes:
             from gateway.research_lab.attested_artifacts_v2 import (
@@ -1119,12 +1522,17 @@ async def execute_scoring_v2(
                 client=artifact_coordinator_client,
                 bucket=artifact_bucket,
                 key_prefix=artifact_key_prefix,
+                source_ancestry_compact_proof=ancestry_compact_proof,
+                load_ancestry_proofs=load_ancestry_proofs,
+                persist_ancestry_checkpoint=persist_ancestry_checkpoint,
+                boot_verifier=verifier,
             )
             artifact_graph = artifact_outcome.get("receipt_graph")
             artifact_receipt = artifact_outcome.get("receipt")
+            artifact_proof = artifact_outcome.get("ancestry_compact_proof")
             if not isinstance(artifact_graph, Mapping) or not isinstance(
                 artifact_receipt, Mapping
-            ):
+            ) or not isinstance(artifact_proof, Mapping):
                 raise AttestedScoringV2Error(
                     "V2 scoring failure artifact lineage is unavailable"
                 )
@@ -1151,6 +1559,7 @@ async def execute_scoring_v2(
                     "receipt": dict(artifact_receipt),
                     "receipt_graph": dict(artifact_graph),
                     "artifact_persistence": dict(artifact_outcome),
+                    "ancestry_compact_proof": dict(artifact_proof),
                 }
             )
         else:
@@ -1169,6 +1578,19 @@ async def execute_scoring_v2(
                     "V2 scoring failure durable readback root mismatch"
                 )
             outcome["persistence"] = dict(persistence)
+            outcome["ancestry_checkpoint_persistence"] = (
+                await _persist_ancestry_checkpoint_after_graph_v2(
+                    ancestry_compact_proof,
+                    checkpointed_graph=graph,
+                    expected_root_receipt_hash=str(receipt["receipt_hash"]),
+                    expected_lineage_id=ancestry_lineage_id,
+                    boot_attestation_verifier=verifier,
+                    persist_ancestry_checkpoint=persist_ancestry_checkpoint,
+                )
+            )
+            outcome["ancestry_compact_proof"] = dict(
+                ancestry_compact_proof
+            )
         raise AttestedScoringV2Error(
             "V2 scoring failed closed: %s" % result["failure_code"],
             authority=outcome,
@@ -1200,14 +1622,7 @@ async def execute_scoring_v2(
     expected_artifact_hashes = sorted(
         transport_artifact_hashes + expected_sealed_hashes
     )
-    graph = await _merge_graphs_async(
-        root_receipt=receipt,
-        boot_identity=boot_identity,
-        local_receipts=local_receipts,
-        transport_attempts=transport_attempts,
-        parent_graphs=parent_graphs,
-        allowed_failed_receipt_hashes=allowed_failed,
-    )
+    graph = checkpointed_graph
     await _validate_receipt_graph_async(
         graph,
         required_purposes=(purpose,),
@@ -1280,19 +1695,13 @@ async def execute_scoring_v2(
             "artifact_ids": [item["artifact_id"] for item in artifacts],
             "artifact_plaintext_hashes": expected_artifact_hashes,
         }
-        lineage_payload_document, _lineage_transport_metadata = (
-            _build_transport_payload_document(
-                payload=lineage_payload,
-                parent_graphs=(graph,),
-            )
-        )
         lineage_job_id = derive_execution_job_id_v2(
             operation=OP_ATTEST_ARTIFACT_PERSISTENCE,
             purpose="leadpoet.artifact_persistence.v2",
             epoch_id=epoch_id,
             sequence=sequence,
             payload_sha256=sha256_bytes(
-                _canonical_bytes(lineage_payload_document)
+                _canonical_bytes(lineage_payload)
             ),
             parent_receipt_hashes=(str(graph["root_receipt_hash"]),),
             input_artifact_hashes=(),
@@ -1347,12 +1756,19 @@ async def execute_scoring_v2(
                     sequence=kwargs["sequence"],
                     payload=kwargs["payload"],
                     parent_graphs=(kwargs["source_graph"],),
+                    parent_ancestry_proofs=(
+                        kwargs["source_ancestry_compact_proof"],
+                    ),
                     input_artifact_hashes=kwargs["input_artifact_hashes"],
                     release_manifest=kwargs["release_manifest"],
                     client=kwargs["client"],
                     timeout_seconds=kwargs["timeout_seconds"],
                     poll_seconds=kwargs["poll_seconds"],
                     persist_graph=kwargs["persist_graph"],
+                    load_ancestry_proofs=kwargs["load_ancestry_proofs"],
+                    persist_ancestry_checkpoint=kwargs[
+                        "persist_ancestry_checkpoint"
+                    ],
                     boot_verifier=kwargs["boot_verifier"],
                     allowed_failed_parent_receipt_hashes=kwargs[
                         "allowed_failed_parent_receipt_hashes"
@@ -1364,20 +1780,24 @@ async def execute_scoring_v2(
             sequence=sequence,
             payload=lineage_payload,
             source_graph=graph,
+            source_ancestry_compact_proof=ancestry_compact_proof,
             input_artifact_hashes=(),
             release_manifest=release,
             client=artifact_coordinator_client,
             timeout_seconds=timeout_seconds,
             poll_seconds=poll_seconds,
             persist_graph=persist_graph,
+            load_ancestry_proofs=load_ancestry_proofs,
+            persist_ancestry_checkpoint=persist_ancestry_checkpoint,
             boot_verifier=verifier,
             allowed_failed_parent_receipt_hashes=allowed_failed,
         )
         lineage_graph = lineage.get("receipt_graph")
         lineage_receipt = lineage.get("receipt")
+        lineage_ancestry_proof = lineage.get("ancestry_compact_proof")
         if not isinstance(lineage_graph, Mapping) or not isinstance(
             lineage_receipt, Mapping
-        ):
+        ) or not isinstance(lineage_ancestry_proof, Mapping):
             raise AttestedScoringV2Error(
                 "V2 encrypted artifact lineage receipt is unavailable"
             )
@@ -1399,6 +1819,47 @@ async def execute_scoring_v2(
             raise AttestedScoringV2Error(
                 "V2 encrypted artifact lineage ancestry is invalid"
             )
+        source_authority = build_certificate_parent_authority_v2(
+            ancestry_compact_proof["certificate"],
+            expected_lineage_id=ancestry_lineage_id,
+            boot_attestation_verifier=verifier,
+            allowed_issuer_roles=_GATEWAY_ANCESTRY_ISSUER_ROLES,
+        )
+        normalized_lineage_ancestry_proof = _validate_checkpointed_graph_proof_v2(
+            proof=lineage_ancestry_proof,
+            graph=lineage_graph,
+            expected_root_receipt_hash=str(lineage_receipt["receipt_hash"]),
+            expected_lineage_id=ancestry_lineage_id,
+            boot_attestation_verifier=verifier,
+            trusted_parent_authorities={
+                str(receipt["receipt_hash"]): str(
+                    source_authority["authority_hash"]
+                )
+            },
+            allowed_failed_receipt_hashes=allowed_failed,
+        )
+        source_checkpoint_persistence = (
+            await _persist_ancestry_checkpoint_after_graph_v2(
+                ancestry_compact_proof,
+                checkpointed_graph=graph,
+                expected_root_receipt_hash=str(receipt["receipt_hash"]),
+                expected_lineage_id=ancestry_lineage_id,
+                boot_attestation_verifier=verifier,
+                persist_ancestry_checkpoint=persist_ancestry_checkpoint,
+            )
+        )
+        lineage_checkpoint_persistence = (
+            await _persist_ancestry_checkpoint_after_graph_v2(
+                normalized_lineage_ancestry_proof,
+                checkpointed_graph=lineage_graph,
+                expected_root_receipt_hash=str(
+                    lineage_receipt["receipt_hash"]
+                ),
+                expected_lineage_id=ancestry_lineage_id,
+                boot_attestation_verifier=verifier,
+                persist_ancestry_checkpoint=persist_ancestry_checkpoint,
+            )
+        )
         if resume_persisted_artifacts:
             lineage_result = lineage.get("result")
             persisted = (
@@ -1477,6 +1938,18 @@ async def execute_scoring_v2(
             "sidecar_persistence": dict(sidecar_persistence),
             "release_hash": release["release_hash"],
             "physical_role": physical_role,
+            "execution_ancestry_compact_proof": dict(
+                ancestry_compact_proof
+            ),
+            "ancestry_compact_proof": dict(
+                normalized_lineage_ancestry_proof
+            ),
+            "execution_ancestry_checkpoint_persistence": dict(
+                source_checkpoint_persistence
+            ),
+            "ancestry_checkpoint_persistence": dict(
+                lineage_checkpoint_persistence
+            ),
         }
     if allowed_failed:
         persistence = await persist_graph(
@@ -1487,6 +1960,16 @@ async def execute_scoring_v2(
         persistence = await persist_graph(graph)
     if persistence.get("root_receipt_hash") != receipt["receipt_hash"]:
         raise AttestedScoringV2Error("V2 scoring durable readback root mismatch")
+    ancestry_checkpoint_persistence = (
+        await _persist_ancestry_checkpoint_after_graph_v2(
+            ancestry_compact_proof,
+            checkpointed_graph=graph,
+            expected_root_receipt_hash=str(receipt["receipt_hash"]),
+            expected_lineage_id=ancestry_lineage_id,
+            boot_attestation_verifier=verifier,
+            persist_ancestry_checkpoint=persist_ancestry_checkpoint,
+        )
+    )
     sidecar_persistence = {}
     if transitions:
         if persist_sidecars is None:
@@ -1527,4 +2010,8 @@ async def execute_scoring_v2(
         "sidecar_persistence": dict(sidecar_persistence),
         "release_hash": release["release_hash"],
         "physical_role": physical_role,
+        "ancestry_compact_proof": dict(ancestry_compact_proof),
+        "ancestry_checkpoint_persistence": dict(
+            ancestry_checkpoint_persistence
+        ),
     }

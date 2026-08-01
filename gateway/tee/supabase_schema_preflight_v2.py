@@ -195,6 +195,82 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
             "credit_doc",
         ),
     ),
+    (
+        "scripts/135-research-lab-ancestry-checkpoint-sidecars.sql",
+        "research_lab_attested_ancestry_checkpoints_v2",
+        (
+            "root_receipt_hash",
+            "schema_version",
+            "lineage_id",
+            "certificate_hash",
+            "certificate_sequence",
+            "issuer_boot_identity_hash",
+            "proof_hash",
+            "checkpoint_graph_hash",
+            "certificate_doc",
+            "proof_doc",
+            "checkpoint_graph_doc",
+        ),
+    ),
+    (
+        "scripts/135-research-lab-ancestry-checkpoint-sidecars.sql",
+        "research_lab_attested_ancestry_activations_v2",
+        (
+            "lineage_id",
+            "activation_root_receipt_hash",
+            "activation_certificate_hash",
+        ),
+    ),
+    (
+        "scripts/135-research-lab-ancestry-checkpoint-sidecars.sql",
+        "research_lab_compact_weight_submissions_v2",
+        (
+            "compact_submission_hash",
+            "bundle_hash",
+            "netuid",
+            "epoch_id",
+            "validator_hotkey",
+            "lineage_id",
+            "binding_receipt_hash",
+            "submission_doc",
+        ),
+    ),
+    (
+        "scripts/135-research-lab-ancestry-checkpoint-sidecars.sql",
+        "research_lab_compact_weight_publication_intents_v2",
+        (
+            "bundle_hash",
+            "compact_submission_hash",
+            "netuid",
+            "epoch_id",
+            "validator_hotkey",
+            "root_receipt_hash",
+            "durable_readback_hash",
+            "transparency_event_hash",
+            "epoch_authority_hash",
+            "intent_hash",
+            "intent_doc",
+        ),
+    ),
+    (
+        "scripts/135-research-lab-ancestry-checkpoint-sidecars.sql",
+        "research_lab_compact_weight_authorities_v2",
+        (
+            "bundle_hash",
+            "netuid",
+            "epoch_id",
+            "validator_hotkey",
+            "authority_stage",
+            "schema_version",
+            "lineage_id",
+            "authority_hash",
+            "compact_submission_hash",
+            "publication_receipt_hash",
+            "compact_finalization_hash",
+            "finalization_receipt_hash",
+            "authority_doc",
+        ),
+    ),
 )
 
 REQUIRED_SUPABASE_V2_RPCS = (
@@ -273,6 +349,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
     (
         "scripts/132-research-lab-champion-lifetime-credit.sql",
         "research_lab_champion_lifetime_credit_contract_v1",
+    ),
+    (
+        "scripts/135-research-lab-ancestry-checkpoint-sidecars.sql",
+        "persist_research_lab_ancestry_checkpoint_v2",
     ),
 )
 

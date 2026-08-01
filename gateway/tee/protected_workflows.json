@@ -167,7 +167,7 @@
       "symbol": "_validate_output_ancestry_checkpoint_v2"
     },
     {
-      "ast_sha256": "sha256:a0227d948308a85959bc52134cfb79d8dc855427400758b084e7d2d83f88d510",
+      "ast_sha256": "sha256:57564d304852993515e0d2ca551685597682dce3e30f5728f2612ed469c3ee86",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "execute_scoring_v2"
     },
@@ -987,7 +987,7 @@
       "symbol": "CoordinatorWeightSourceV2"
     },
     {
-      "ast_sha256": "sha256:0212ebd6a85da84941aa985527768be021249dbd0921865612215293f777ebad",
+      "ast_sha256": "sha256:03ba68070796a03b8c7a7350d41824e41817c1d470399fd2c278541a351ad00d",
       "path": "gateway/tee/execution_job_manager_v2.py",
       "symbol": "ExecutionJobManagerV2"
     },
@@ -1892,7 +1892,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:bcb6725fe6466b41bda91858fd29972fbf23b89678fcea61abb61a90dd608090",
-  "protected_source_commit": "2f7c1a9ab1b03c77f5eb0de72af6c7e1a035df73",
+  "manifest_hash": "sha256:71a74e3d03f552aae244bcebb091850f9048ea4011e7cb9f62f14a4ddb50a7ae",
+  "protected_source_commit": "e6677bb833ad86113dce33f812be82af0a074c37",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

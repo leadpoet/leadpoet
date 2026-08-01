@@ -11,6 +11,7 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Optional
 import urllib.request
@@ -3825,6 +3826,7 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
     candidate_sha = "3" * 40
     calls: list[str] = []
     captured: dict[str, Any] = {}
+    component_barrier = threading.Barrier(2)
 
     @contextmanager
     def source_snapshot(**_kwargs):
@@ -3872,6 +3874,7 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
 
     def run_component(_tag, *, component, **_kwargs):
         calls.append(component)
+        component_barrier.wait(timeout=1)
         if component == "gateway":
             raise subprocess.CalledProcessError(17, ["gateway-restart"])
 
@@ -3911,7 +3914,8 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
             ]
         )
 
-    assert calls == ["gateway", "validator", "workflow"]
+    assert set(calls[:2]) == {"gateway", "validator"}
+    assert calls[-1] == "workflow"
     by_stage = {
         item["stage"]: item for item in captured["stages"]
     }

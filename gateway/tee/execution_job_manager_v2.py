@@ -47,8 +47,11 @@ from leadpoet_canonical.ancestry_checkpoint_v2 import (
 JOB_SCHEMA_VERSION = "leadpoet.enclave_execution_job.v2"
 PARENT_RECEIPT_GRAPHS_FIELD = "_v2_parent_receipt_graphs"
 PARENT_RECEIPT_GRAPH_SET_FIELD = "_v2_parent_receipt_graph_set"
-PARENT_RECEIPT_GRAPH_SET_SCHEMA_VERSION = (
+LEGACY_PARENT_RECEIPT_GRAPH_SET_SCHEMA_VERSION = (
     "leadpoet.parent_receipt_graph_set.v2"
+)
+PARENT_RECEIPT_GRAPH_SET_SCHEMA_VERSION = (
+    "leadpoet.parent_receipt_graph_set.v3"
 )
 PARENT_ANCESTRY_PROOFS_FIELD = "_v2_parent_ancestry_proofs"
 MAX_JOB_COUNT = 256
@@ -102,6 +105,9 @@ _RECEIPT_GRAPH_FIELDS = frozenset(
         "host_operations",
     }
 )
+_CHECKPOINTED_RECEIPT_GRAPH_FIELDS = _RECEIPT_GRAPH_FIELDS | frozenset(
+    {"ancestry_lineage_id", "ancestry_proof"}
+)
 _RECEIPT_GRAPH_SET_FIELDS = frozenset(
     {
         "schema_version",
@@ -112,7 +118,7 @@ _RECEIPT_GRAPH_SET_FIELDS = frozenset(
         "host_operations",
     }
 )
-_RECEIPT_GRAPH_DESCRIPTOR_FIELDS = frozenset(
+_LEGACY_RECEIPT_GRAPH_DESCRIPTOR_FIELDS = frozenset(
     {
         "root_receipt_hash",
         "boot_identity_hashes",
@@ -120,6 +126,13 @@ _RECEIPT_GRAPH_DESCRIPTOR_FIELDS = frozenset(
         "transport_attempt_hashes",
         "host_operation_request_hashes",
     }
+)
+_RECEIPT_GRAPH_DESCRIPTOR_FIELDS = (
+    _LEGACY_RECEIPT_GRAPH_DESCRIPTOR_FIELDS | frozenset({"schema_version"})
+)
+_CHECKPOINTED_RECEIPT_GRAPH_DESCRIPTOR_FIELDS = (
+    _RECEIPT_GRAPH_DESCRIPTOR_FIELDS
+    | frozenset({"ancestry_lineage_id", "ancestry_proof"})
 )
 
 
@@ -648,10 +661,18 @@ def pack_parent_receipt_graph_set_v2(
         if not isinstance(graph, Mapping):
             raise ExecutionJobV2Error("parent receipt graph is not an object")
         normalized_graph = dict(graph)
-        if set(normalized_graph) != _RECEIPT_GRAPH_FIELDS:
-            raise ExecutionJobV2Error("parent receipt graph fields are invalid")
-        if normalized_graph.get("schema_version") != RECEIPT_GRAPH_SCHEMA_VERSION:
+        graph_schema = normalized_graph.get("schema_version")
+        expected_fields = (
+            _RECEIPT_GRAPH_FIELDS
+            if graph_schema == RECEIPT_GRAPH_SCHEMA_VERSION
+            else _CHECKPOINTED_RECEIPT_GRAPH_FIELDS
+            if graph_schema == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+            else None
+        )
+        if expected_fields is None:
             raise ExecutionJobV2Error("parent receipt graph schema is invalid")
+        if set(normalized_graph) != expected_fields:
+            raise ExecutionJobV2Error("parent receipt graph fields are invalid")
         root = _hash(
             normalized_graph.get("root_receipt_hash"),
             "parent receipt graph root",
@@ -664,27 +685,40 @@ def pack_parent_receipt_graph_set_v2(
                 raise ExecutionJobV2Error(
                     "parent receipt graph %s must be an array" % field
                 )
-        descriptors.append(
-            {
-                "root_receipt_hash": root,
-                "boot_identity_hashes": [
-                    add_object("boot_identities", item)
-                    for item in normalized_graph["boot_identities"]
-                ],
-                "receipt_hashes": [
-                    add_object("receipts", item)
-                    for item in normalized_graph["receipts"]
-                ],
-                "transport_attempt_hashes": [
-                    add_object("transport_attempts", item)
-                    for item in normalized_graph["transport_attempts"]
-                ],
-                "host_operation_request_hashes": [
-                    add_object("host_operations", item)
-                    for item in normalized_graph["host_operations"]
-                ],
-            }
-        )
+        descriptor = {
+            "schema_version": graph_schema,
+            "root_receipt_hash": root,
+            "boot_identity_hashes": [
+                add_object("boot_identities", item)
+                for item in normalized_graph["boot_identities"]
+            ],
+            "receipt_hashes": [
+                add_object("receipts", item)
+                for item in normalized_graph["receipts"]
+            ],
+            "transport_attempt_hashes": [
+                add_object("transport_attempts", item)
+                for item in normalized_graph["transport_attempts"]
+            ],
+            "host_operation_request_hashes": [
+                add_object("host_operations", item)
+                for item in normalized_graph["host_operations"]
+            ],
+        }
+        if graph_schema == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION:
+            descriptor.update(
+                {
+                    "ancestry_lineage_id": _hash(
+                        normalized_graph.get("ancestry_lineage_id"),
+                        "parent receipt graph ancestry lineage",
+                    ),
+                    "ancestry_proof": _normalized_transport_object(
+                        normalized_graph.get("ancestry_proof"),
+                        "parent receipt graph ancestry proof",
+                    ),
+                }
+            )
+        descriptors.append(descriptor)
     return {
         "schema_version": PARENT_RECEIPT_GRAPH_SET_SCHEMA_VERSION,
         "graphs": descriptors,
@@ -701,7 +735,11 @@ def _unpack_parent_receipt_graph_set_v2(
 
     if not isinstance(value, Mapping) or set(value) != _RECEIPT_GRAPH_SET_FIELDS:
         raise ExecutionJobV2Error("parent receipt graph set fields are invalid")
-    if value.get("schema_version") != PARENT_RECEIPT_GRAPH_SET_SCHEMA_VERSION:
+    graph_set_schema = value.get("schema_version")
+    if graph_set_schema not in {
+        LEGACY_PARENT_RECEIPT_GRAPH_SET_SCHEMA_VERSION,
+        PARENT_RECEIPT_GRAPH_SET_SCHEMA_VERSION,
+    }:
         raise ExecutionJobV2Error("parent receipt graph set schema is invalid")
     max_graph_count = _bounded_external_authority_limit(max_graph_count)
     descriptors = value.get("graphs")
@@ -753,9 +791,27 @@ def _unpack_parent_receipt_graph_set_v2(
     graphs: list[Dict[str, Any]] = []
     graph_sizes: list[int] = []
     for descriptor in descriptors:
+        if not isinstance(descriptor, Mapping):
+            raise ExecutionJobV2Error(
+                "parent receipt graph descriptor fields are invalid"
+            )
+        if graph_set_schema == LEGACY_PARENT_RECEIPT_GRAPH_SET_SCHEMA_VERSION:
+            graph_schema = RECEIPT_GRAPH_SCHEMA_VERSION
+            expected_descriptor_fields = (
+                _LEGACY_RECEIPT_GRAPH_DESCRIPTOR_FIELDS
+            )
+        else:
+            graph_schema = descriptor.get("schema_version")
+            expected_descriptor_fields = (
+                _RECEIPT_GRAPH_DESCRIPTOR_FIELDS
+                if graph_schema == RECEIPT_GRAPH_SCHEMA_VERSION
+                else _CHECKPOINTED_RECEIPT_GRAPH_DESCRIPTOR_FIELDS
+                if graph_schema == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+                else None
+            )
         if (
-            not isinstance(descriptor, Mapping)
-            or set(descriptor) != _RECEIPT_GRAPH_DESCRIPTOR_FIELDS
+            expected_descriptor_fields is None
+            or set(descriptor) != expected_descriptor_fields
         ):
             raise ExecutionJobV2Error(
                 "parent receipt graph descriptor fields are invalid"
@@ -770,7 +826,7 @@ def _unpack_parent_receipt_graph_set_v2(
             )
         roots.add(root)
         graph: Dict[str, Any] = {
-            "schema_version": RECEIPT_GRAPH_SCHEMA_VERSION,
+            "schema_version": graph_schema,
             "root_receipt_hash": root,
         }
         for descriptor_field, collection in descriptor_fields.items():
@@ -792,6 +848,19 @@ def _unpack_parent_receipt_graph_set_v2(
                 )
             graph[collection] = [indexes[collection][item] for item in normalized_hashes]
             used[collection].update(normalized_hashes)
+        if graph_schema == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION:
+            graph.update(
+                {
+                    "ancestry_lineage_id": _hash(
+                        descriptor.get("ancestry_lineage_id"),
+                        "parent receipt graph descriptor ancestry lineage",
+                    ),
+                    "ancestry_proof": _normalized_transport_object(
+                        descriptor.get("ancestry_proof"),
+                        "parent receipt graph descriptor ancestry proof",
+                    ),
+                }
+            )
         graphs.append(graph)
         graph_sizes.append(len(_canonical_bytes(graph)))
 

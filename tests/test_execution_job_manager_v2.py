@@ -258,6 +258,27 @@ def _run(manager, payload, manifest=None):
     raise AssertionError("V2 job did not terminate")
 
 
+def _checkpointed_parent_graph():
+    manager, boot = _manager(
+        lambda _operation, payload, _context: payload,
+        checkpoint_lineage=True,
+    )
+    payload = _payload()
+    assert _run(manager, payload)["state"] == "succeeded"
+    receipt = manager.receipt("score-job-1")
+    return build_checkpointed_receipt_graph(
+        root_receipt_hash=receipt["receipt_hash"],
+        boot_identities=(boot,),
+        receipts=manager.receipts("score-job-1"),
+        transport_attempts=manager.transport_attempts("score-job-1"),
+        host_operations=manager.host_operations("score-job-1"),
+        ancestry_lineage_id=HASH,
+        ancestry_proof=manager.ancestry_compact_proof("score-job-1"),
+        boot_attestation_verifier=lambda identity: identity,
+        require_boot_attestation_verification=True,
+    )
+
+
 def test_parent_receipt_graph_set_preserves_membership_and_deduplicates():
     boot = {"boot_identity_hash": HASH, "marker": "shared-boot"}
     shared_receipt = {"receipt_hash": HASH, "marker": "shared-receipt"}
@@ -290,6 +311,36 @@ def test_parent_receipt_graph_set_preserves_membership_and_deduplicates():
     assert unpacked == graphs
     assert unpacked[0]["boot_identities"][0] is unpacked[1]["boot_identities"][0]
     assert unpacked[0]["receipts"][0] is unpacked[1]["receipts"][0]
+
+
+def test_parent_receipt_graph_set_preserves_checkpoint_authority_and_reads_v2():
+    checkpointed = _checkpointed_parent_graph()
+    ordinary = {
+        "schema_version": "leadpoet.attested_receipt_graph.v2",
+        "root_receipt_hash": HASH_B,
+        "boot_identities": [],
+        "receipts": [{"receipt_hash": HASH_B}],
+        "transport_attempts": [],
+        "host_operations": [],
+    }
+
+    packed = pack_parent_receipt_graph_set_v2((ordinary, checkpointed))
+
+    assert packed["schema_version"] == "leadpoet.parent_receipt_graph_set.v3"
+    assert unpack_parent_receipt_graph_set_v2(packed) == [ordinary, checkpointed]
+    assert packed["graphs"][1]["ancestry_proof"] == (
+        checkpointed["ancestry_proof"]
+    )
+
+    malformed = json.loads(json.dumps(packed))
+    malformed["graphs"][1].pop("ancestry_proof")
+    with pytest.raises(ExecutionJobV2Error, match="descriptor fields are invalid"):
+        unpack_parent_receipt_graph_set_v2(malformed)
+
+    legacy = pack_parent_receipt_graph_set_v2((ordinary,))
+    legacy["schema_version"] = "leadpoet.parent_receipt_graph_set.v2"
+    legacy["graphs"][0].pop("schema_version")
+    assert unpack_parent_receipt_graph_set_v2(legacy) == [ordinary]
 
 
 def test_parent_receipt_graph_set_count_exception_is_explicit_and_scoped():

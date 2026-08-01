@@ -3036,8 +3036,15 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
         _receipt_graphs_by_declared_root,
     )
     from leadpoet_canonical.attested_v2 import (
+        CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
         RECEIPT_GRAPH_SCHEMA_VERSION,
+        build_checkpointed_receipt_graph,
         sha256_bytes,
+    )
+    from leadpoet_canonical.ancestry_checkpoint_v2 import (
+        ANCESTRY_DELTA_SCHEMA_VERSION,
+        build_compact_ancestry_proof_from_delta_v2,
+        issue_ancestry_certificate_v2,
     )
 
     candidate_sha = subprocess.run(
@@ -3091,8 +3098,9 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
         shared_receipts.append(receipt)
         parents = [str(receipt["receipt_hash"])]
 
+    checkpoint_graph_count = 2
     graphs: list[dict[str, Any]] = []
-    for index in range(graph_count):
+    for index in range(graph_count - checkpoint_graph_count):
         child = fixture.receipt(
             role="gateway_coordinator",
             purpose="research_lab.allocation.v2",
@@ -3112,6 +3120,68 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
             "host_operations": [],
         }
         graphs.append(graph)
+
+    lineage_id = sha256_json({"rehearsal": "mixed-allocation-frontier"})
+
+    def verify_boot(identity):
+        return identity
+
+    for index in range(checkpoint_graph_count):
+        receipt = fixture.receipt(
+            role="gateway_coordinator",
+            purpose="research_lab.allocation.v2",
+            job_id=f"rehearsal-checkpointed-root-{index}",
+            key=fixture.coordinator_key,
+            boot=boot,
+            config_hash=config_hash,
+            parents=(),
+            sequence=graph_count + index,
+        )
+        delta = {
+            "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+            "root_receipt_hash": receipt["receipt_hash"],
+            "boot_identities": [boot],
+            "receipts": [receipt],
+            "transport_attempts": [],
+            "host_operations": [],
+        }
+        certificate = issue_ancestry_certificate_v2(
+            local_delta=delta,
+            lineage_id=lineage_id,
+            certificate_sequence=0,
+            issuer_boot_identity=boot,
+            issued_at="2026-07-10T20:00:00Z",
+            sign_digest=fixture.coordinator_key.sign,
+            boot_attestation_verifier=verify_boot,
+            allowed_issuer_roles=("gateway_coordinator",),
+            required_purposes=("research_lab.allocation.v2",),
+        )
+        proof = build_compact_ancestry_proof_from_delta_v2(
+            delta,
+            certificate,
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=verify_boot,
+            allowed_issuer_roles=("gateway_coordinator",),
+        )
+        graphs.append(
+            build_checkpointed_receipt_graph(
+                root_receipt_hash=receipt["receipt_hash"],
+                boot_identities=(boot,),
+                receipts=(receipt,),
+                transport_attempts=(),
+                host_operations=(),
+                ancestry_lineage_id=lineage_id,
+                ancestry_proof=proof,
+                boot_attestation_verifier=verify_boot,
+                require_boot_attestation_verification=True,
+            )
+        )
+    if sum(
+        graph.get("schema_version")
+        == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        for graph in graphs
+    ) != checkpoint_graph_count:
+        raise RuntimeError("mixed checkpoint ancestry fixture is incomplete")
 
     try:
         pack_parent_receipt_graph_set_v2(graphs)
@@ -3172,6 +3242,9 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
         executor=executor,
         worker_count=1,
         configured_worker_count=0,
+        ancestry_lineage_id=lineage_id,
+        ancestry_boot_attestation_verifier=verify_boot,
+        ancestry_allowed_issuer_roles=("gateway_coordinator",),
     )
     manifest = {
         "schema_version": JOB_SCHEMA_VERSION,
@@ -3261,6 +3334,8 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
         "shared_object_identity_preserved": True,
         "malformed_evidence_rejected": True,
         "ordinary_graph_bound_preserved": True,
+        "checkpointed_graph_count": checkpoint_graph_count,
+        "checkpoint_authority_preserved": True,
     }
 
 

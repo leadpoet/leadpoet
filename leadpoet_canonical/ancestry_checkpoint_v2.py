@@ -68,6 +68,7 @@ MAX_DELTA_ATTEMPTS = 100_000
 MAX_DELTA_HOST_OPERATIONS = 100_000
 MAX_DELTA_EDGES = 4_096
 MAX_PARENT_AUTHORITIES = 128
+MAX_ALLOCATION_PARENT_AUTHORITIES = 256
 MAX_ALLOWED_FAILED_RECEIPTS = 128
 MAX_REQUIRED_PURPOSES = 128
 MAX_NETUID = 2 ** 31 - 1
@@ -77,6 +78,9 @@ _CHAIN_HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _SIGNATURE_RE = re.compile(r"^[0-9a-f]{128}$")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$")
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_EXTENDED_PARENT_AUTHORITY_PURPOSES = frozenset(
+    {"research_lab.allocation.v2"}
+)
 
 _PROJECTION_BODY_FIELDS = frozenset(
     {
@@ -364,6 +368,30 @@ def _release_leaf(identity: Mapping[str, Any]) -> str:
     )
 
 
+def _parent_authority_limit(root_purpose: Any) -> int:
+    purpose = _identifier(root_purpose, "root purpose")
+    return (
+        MAX_ALLOCATION_PARENT_AUTHORITIES
+        if purpose in _EXTENDED_PARENT_AUTHORITY_PURPOSES
+        else MAX_PARENT_AUTHORITIES
+    )
+
+
+def _local_delta_root_purpose(delta: Mapping[str, Any]) -> str:
+    _require(isinstance(delta, Mapping), "local delta is not an object")
+    root_hash = _hash(delta.get("root_receipt_hash"), "local delta root")
+    receipts = delta.get("receipts")
+    _require(isinstance(receipts, list), "local delta receipts must be an array")
+    roots = [
+        item
+        for item in receipts
+        if isinstance(item, Mapping)
+        and str(item.get("receipt_hash") or "") == root_hash
+    ]
+    _require(len(roots) == 1, "local delta root receipt is missing")
+    return _identifier(roots[0].get("purpose"), "local delta root purpose")
+
+
 def _projection_from_validated_evidence(
     normalized: Mapping[str, Any],
     *,
@@ -519,7 +547,7 @@ def validate_ancestry_projection_v2(value: Mapping[str, Any]) -> Dict[str, Any]:
     external = _sorted_hashes(
         projection.get("external_parent_receipt_hashes"),
         "external parent receipt hash",
-        MAX_PARENT_AUTHORITIES,
+        _parent_authority_limit(projection.get("root_purpose")),
     )
     _require(list(projection["receipt_hashes"]) == receipt_hashes, "projection receipt hashes are not canonical")
     _require(list(projection["boot_identity_hashes"]) == boot_hashes, "projection boot hashes are not canonical")
@@ -927,10 +955,15 @@ def _validate_delta_and_project(
     )
     normalized = _normalized_evidence(delta, ANCESTRY_DELTA_SCHEMA_VERSION)
     policy_doc = validate_ancestry_policy_v2(policy)
+    parent_limit = _parent_authority_limit(_local_delta_root_purpose(delta))
+    _require(
+        len(parent_authorities) <= parent_limit,
+        "parent authority count exceeds bound",
+    )
     authorities = [_validate_parent_authority(item) for item in parent_authorities]
     authority_by_root = {str(item["parent_receipt_hash"]): item for item in authorities}
     _require(len(authority_by_root) == len(authorities), "parent authority root is duplicated")
-    _require(len(authorities) <= MAX_PARENT_AUTHORITIES, "parent authority count exceeds bound")
+    _require(len(authorities) <= parent_limit, "parent authority count exceeds bound")
 
     boots = {}  # type: Dict[str, Mapping[str, Any]]
     for identity in normalized["boot_identities"]:
@@ -1106,11 +1139,14 @@ def issue_ancestry_certificate_v2(
         allowed_failed_receipt_hashes=allowed_failed_receipt_hashes,
         required_purposes=required_purposes,
     )
+    parent_limit = _parent_authority_limit(
+        _local_delta_root_purpose(local_delta)
+    )
     _require(
         len(parent_certificates)
         + len(parent_proof_disclosures)
         + len(parent_full_graphs)
-        <= MAX_PARENT_AUTHORITIES,
+        <= parent_limit,
         "parent authority count exceeds bound",
     )
     descriptors = []  # type: List[Dict[str, Any]]
@@ -1156,7 +1192,7 @@ def issue_ancestry_certificate_v2(
                 ]
             )
         )
-    _require(len(descriptors) <= MAX_PARENT_AUTHORITIES, "parent authority count exceeds bound")
+    _require(len(descriptors) <= parent_limit, "parent authority count exceeds bound")
     descriptors.sort(key=lambda item: str(item["parent_receipt_hash"]))
     _require(len({item["parent_receipt_hash"] for item in descriptors}) == len(descriptors), "parent authority root is duplicated")
     expected_sequence = max(parent_sequences) + 1 if parent_sequences else 0
@@ -1232,7 +1268,10 @@ def validate_ancestry_certificate_v2(
     policy = validate_ancestry_policy_v2(claim.get("policy"))
     parent_rows = claim.get("parent_authorities")
     _require(isinstance(parent_rows, list), "certificate parent authorities must be an array")
-    _require(len(parent_rows) <= MAX_PARENT_AUTHORITIES, "certificate parent authorities exceed bound")
+    _require(
+        len(parent_rows) <= _parent_authority_limit(projection["root_purpose"]),
+        "certificate parent authorities exceed bound",
+    )
     parents = [_validate_parent_authority(item) for item in parent_rows]
     _require(parents == sorted(parents, key=lambda item: str(item["parent_receipt_hash"])), "certificate parent authorities are not sorted")
     _require(len({item["parent_receipt_hash"] for item in parents}) == len(parents), "certificate parent authority is duplicated")
@@ -1690,6 +1729,7 @@ __all__ = [
     "ANCESTRY_PROJECTION_SCHEMA_VERSION",
     "AncestryCheckpointV2Error",
     "MAX_ALLOWED_FAILED_RECEIPTS",
+    "MAX_ALLOCATION_PARENT_AUTHORITIES",
     "MAX_DELTA_ATTEMPTS",
     "MAX_DELTA_BOOTS",
     "MAX_DELTA_EDGES",

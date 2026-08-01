@@ -10,7 +10,10 @@ from gateway.tee.coordinator_allocation_source_v2 import (
 )
 from gateway.tee import coordinator_allocation_source_v2 as allocation_source
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
-from leadpoet_canonical.attested_v2 import sha256_json
+from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    sha256_json,
+)
 from leadpoet_verifier.economics import allocate_research_lab_epoch
 
 
@@ -544,6 +547,48 @@ def test_declared_roots_are_reconstructed_from_one_compact_graph(monkeypatch):
     assert graphs[parent_hash]["root_receipt_hash"] == parent_hash
     assert graphs[parent_hash]["receipts"] == [parent]
     assert graphs[child_hash] == compact_graph
+
+
+def test_checkpointed_declared_root_preserves_certificate_bound_graph(monkeypatch):
+    root = "sha256:" + "a" * 64
+    external_parent = "sha256:" + "b" * 64
+    graph = {
+        "schema_version": CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+        "root_receipt_hash": root,
+        "boot_identities": [],
+        "receipts": [
+            {
+                "receipt_hash": root,
+                "parent_receipt_hashes": [external_parent],
+            }
+        ],
+        "transport_attempts": [],
+        "host_operations": [],
+        "ancestry_lineage_id": "sha256:" + "c" * 64,
+        "ancestry_proof": {"certificate": "preserved"},
+    }
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_receipt_graphs",
+        lambda _values: None,
+    )
+
+    derived = allocation_source._receipt_graphs_by_declared_root(
+        [graph],
+        [root],
+    )
+
+    assert derived == {root: graph}
+    assert derived[root]["ancestry_proof"] == graph["ancestry_proof"]
+
+    with pytest.raises(
+        CoordinatorAllocationSourceV2Error,
+        match="differs from certified root",
+    ):
+        allocation_source._receipt_subgraph_from_validated(
+            graph,
+            root_receipt_hash=external_parent,
+        )
 
 
 def test_declared_root_lookup_indexes_each_graph_once(monkeypatch):

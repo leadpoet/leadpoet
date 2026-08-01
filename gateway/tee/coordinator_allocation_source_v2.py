@@ -40,6 +40,7 @@ from gateway.tee.reward_executor_v2 import (
     source_add_reward_row_projection_v2,
 )
 from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     canonical_json,
     sha256_json,
     validate_receipt_graph,
@@ -76,6 +77,18 @@ def _receipt_subgraph_from_validated(
     *,
     root_receipt_hash: str,
 ) -> dict[str, Any]:
+    if (
+        graph.get("schema_version")
+        == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+    ):
+        if root_receipt_hash != str(graph.get("root_receipt_hash") or ""):
+            raise CoordinatorAllocationSourceV2Error(
+                "checkpointed allocation parent differs from certified root"
+            )
+        # A checkpoint certificate binds omitted parent edges to this exact
+        # root. Preserve the complete bounded graph and proof; deriving a
+        # different root would either strip that authority or misstate it.
+        return dict(graph)
     receipts_by_hash = {
         str(receipt.get("receipt_hash") or ""): receipt
         for receipt in graph.get("receipts") or ()

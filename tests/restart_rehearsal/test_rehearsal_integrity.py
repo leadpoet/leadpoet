@@ -3078,6 +3078,33 @@ def test_workflow_runs_before_command_adapters_are_installed() -> None:
     assert "/harness/production_workflow_runner.py" in script[workflow:adapters]
 
 
+def test_workflow_uses_the_strict_exact_external_boundaries(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def run(command):
+        captured["command"] = list(command)
+
+    monkeypatch.setattr(rehearsal, "_run", run)
+    rehearsal._run_workflow(
+        "rehearsal-image",
+        source_root=tmp_path / "source",
+        evidence_root=tmp_path / "evidence",
+        candidate_sha="1" * 40,
+        profile="prepush",
+        docker_platform="linux/amd64",
+    )
+
+    command = captured["command"]
+    assert any(
+        command[index : index + 2]
+        == ["--env", "REHEARSAL_SCOPE=exact"]
+        for index in range(len(command) - 1)
+    )
+
+
 def test_local_chain_rejects_unknown_and_joins_finalized_reveal(
     tmp_path,
 ) -> None:

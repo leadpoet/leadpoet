@@ -1068,6 +1068,8 @@ def _run_workflow(
         "--env",
         "REHEARSAL_TRANSITION=forward",
         "--env",
+        "REHEARSAL_SCOPE=exact",
+        "--env",
         f"REHEARSAL_PROFILE={profile}",
         "--env",
         f"REHEARSAL_EPOCHS={limits['epochs']}",

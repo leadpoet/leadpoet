@@ -2095,7 +2095,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             != {
                 "research_lab_attested_execution_results_v2_operation_check",
                 "research_lab_attested_execution_results_v2_purpose_check",
-                "research_lab_attested_execution_results_v2_operation_purpose_check",
+                "research_lab_attested_exec_results_v2_op_purpose_check",
             }
             or any(
                 constraint.get("constraint_valid") is not True

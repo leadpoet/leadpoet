@@ -65,7 +65,7 @@ ALTER TABLE public.research_lab_attested_execution_results_v2
         )
     ) NOT VALID,
     ADD CONSTRAINT
-        research_lab_attested_execution_results_v2_operation_purpose_check
+        research_lab_attested_exec_results_v2_op_purpose_check
     CHECK (
         (
             operation = 'research_lab_allocation'
@@ -108,7 +108,7 @@ ALTER TABLE public.research_lab_attested_execution_results_v2
         research_lab_attested_execution_results_v2_purpose_check;
 ALTER TABLE public.research_lab_attested_execution_results_v2
     VALIDATE CONSTRAINT
-        research_lab_attested_execution_results_v2_operation_purpose_check;
+        research_lab_attested_exec_results_v2_op_purpose_check;
 
 CREATE OR REPLACE FUNCTION public.research_lab_active_model_replay_contract_v2()
 RETURNS JSONB
@@ -138,7 +138,7 @@ AS $$
                   AND constraint_record.conname IN (
                       'research_lab_attested_execution_results_v2_operation_check',
                       'research_lab_attested_execution_results_v2_purpose_check',
-                      'research_lab_attested_execution_results_v2_operation_purpose_check'
+                      'research_lab_attested_exec_results_v2_op_purpose_check'
                   )
             ),
             '{}'::JSONB

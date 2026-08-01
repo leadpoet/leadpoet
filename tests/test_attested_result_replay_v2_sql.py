@@ -74,7 +74,7 @@ def test_active_model_result_replay_is_exactly_scoped_and_migration_gated():
     for constraint in (
         "research_lab_attested_execution_results_v2_operation_check",
         "research_lab_attested_execution_results_v2_purpose_check",
-        "research_lab_attested_execution_results_v2_operation_purpose_check",
+        "research_lab_attested_exec_results_v2_op_purpose_check",
     ):
         assert f"VALIDATE CONSTRAINT\n        {constraint}" in (
             ACTIVE_MODEL_REPLAY_SQL

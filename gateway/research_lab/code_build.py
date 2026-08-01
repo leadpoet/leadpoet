@@ -31,9 +31,12 @@ from research_lab.code_editing import (
     validate_code_edit_draft,
 )
 from research_lab.eval import (
+    DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID,
     PrivateModelArtifactManifest,
+    PrivateModelRuntimeError,
     compute_private_source_tree_hash,
     validate_private_model_artifact_manifest,
+    verify_private_artifact_manifest_signature,
 )
 
 
@@ -158,6 +161,51 @@ class CodeEditInfraFailureError(CodeEditImageBuildError):
 
     default_failure_stage = "candidate_build_infra_failed"
     retryable = True
+
+
+PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID_ENV = (
+    "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID"
+)
+
+
+def _verify_built_candidate_artifact(
+    candidate_manifest: PrivateModelArtifactManifest,
+) -> dict[str, Any]:
+    """Verify one built candidate before it can enter paid scoring.
+
+    Structural validation alone does not bind the candidate to an exact
+    reviewed sourcing contract or prove that the configured artifact authority
+    signed it. Keep those checks on the build boundary so an unknown, hybrid,
+    tampered, or unsigned manifest never becomes a scored candidate.
+    """
+
+    errors = validate_private_model_artifact_manifest(candidate_manifest)
+    if errors:
+        raise CodeEditImageBuildError(
+            "candidate artifact manifest failed validation: "
+            + "; ".join(errors)
+        )
+    signing_key_id = (
+        os.getenv(
+            PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID_ENV,
+            DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID,
+        ).strip()
+        or DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID
+    )
+    try:
+        return verify_private_artifact_manifest_signature(
+            candidate_manifest,
+            key_id=signing_key_id,
+        )
+    except PrivateModelRuntimeError as exc:
+        cause = str(exc.__cause__ or "")
+        if _is_infra_failure_text(str(exc), cause):
+            raise CodeEditInfraFailureError(
+                "candidate artifact signature verification failed on infrastructure"
+            ) from exc
+        raise CodeEditImageBuildError(
+            "candidate artifact manifest failed exact contract/signature verification"
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -593,9 +641,7 @@ class CodeEditCandidateBuilder:
             candidate_manifest = PrivateModelArtifactManifest.from_mapping(
                 json.loads(manifest_path.read_text(encoding="utf-8"))
             )
-            errors = validate_private_model_artifact_manifest(candidate_manifest)
-            if errors:
-                raise CodeEditImageBuildError("candidate artifact manifest failed validation: " + "; ".join(errors))
+            _verify_built_candidate_artifact(candidate_manifest)
             if candidate_manifest.model_artifact_hash == parent_artifact.model_artifact_hash:
                 raise CodeEditImageBuildError("candidate artifact hash must differ from parent artifact hash")
             build_doc = {
@@ -1487,7 +1533,7 @@ import sourcing_model
 metadata = research_lab_adapter.adapter_metadata()
 assert metadata.get("adapter_version") == "sourcing-model-research-lab-adapter:v3"
 assert metadata.get("component_registry_version") == "sourcing-model-components:v2"
-assert metadata.get("routing", {{}}).get("compiler_version") == "routing-compiler-v1"
+assert metadata.get("routing", {{}}).get("compiler_version") == "routing-compiler-v2"
 assert metadata.get("routing", {{}}).get("private_bindings_exposed") is False
 assert sourcing_model is not None
 PY

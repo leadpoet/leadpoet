@@ -40,6 +40,18 @@ def test_private_artifact_signature_boundary_is_protected():
         "_verify_private_artifact_manifest_signature_cached",
         "_verify_private_artifact_manifest_signature_uncached",
     } <= set(PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"])
+    assert {
+        "DEFAULT_PRIVATE_TEST_CMD",
+        "DEFAULT_PRIVATE_BUILD_CMD",
+    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/config.py"])
+    assert {
+        "_verify_built_candidate_artifact",
+        "CodeEditCandidateBuilder._build_under_deadline",
+    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/code_build.py"])
+    assert {
+        "ResearchLabPromotionController._promote_built_image_candidate",
+        "_load_valid_artifact",
+    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/promotion.py"])
 
 
 def test_protected_manifest_detects_logic_change(tmp_path: Path):

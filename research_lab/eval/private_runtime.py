@@ -87,7 +87,7 @@ SOURCING_MODEL_MAX_RUNTIME_CAP_SECONDS = 1500.0
 SOURCING_MODEL_MAX_AGENT_TIMEOUT_SECONDS = 900
 EXPECTED_SOURCING_ADAPTER_VERSION = "sourcing-model-research-lab-adapter:v3"
 EXPECTED_COMPONENT_REGISTRY_VERSION = "sourcing-model-components:v2"
-EXPECTED_ROUTING_COMPILER_VERSION = "routing-compiler-v1"
+EXPECTED_ROUTING_COMPILER_VERSION = "routing-compiler-v2"
 REQUIRED_RUNTIME_CANDIDATE_TOOLS = {
     "candidate.backlog",
     "candidate.registry_feed",

@@ -1752,15 +1752,36 @@ def validate_source_add_registration_diff(
             and node.target.id == "SOURCE_ADD_ROUTING_REGISTRATIONS"
         )
 
+    def canonical_registry_assignment_signature(node: ast.AST) -> str:
+        reviewed_value = ast.Constant(
+            value="SOURCE_ADD_ROUTING_REGISTRATIONS=<reviewed>"
+        )
+        if isinstance(node, ast.Assign):
+            skeleton: ast.AST = ast.Assign(
+                targets=node.targets,
+                value=reviewed_value,
+                type_comment=node.type_comment,
+            )
+        elif isinstance(node, ast.AnnAssign):
+            skeleton = ast.AnnAssign(
+                target=node.target,
+                annotation=node.annotation,
+                value=reviewed_value,
+                simple=node.simple,
+            )
+        else:
+            raise ValueError("registration assignment is not canonical")
+        return ast.dump(skeleton, include_attributes=False)
+
     def source_add_sensitive_signature(tree: ast.Module) -> tuple[str, ...]:
         """Commit all SOURCE_ADD-sensitive code outside the reviewed literal.
 
         The registry assignment is the only code an approved registration diff
-        may alter.  Comparing every other runtime node would incorrectly block
-        unrelated model work, while checking only direct definitions misses
-        ``+=``, nested assignment, ``globals()[name]``, ``setattr`` and class
-        monkeypatches.  Bind the complete enclosing node whenever it references
-        a protected SOURCE_ADD symbol, including a dynamic string lookup.
+        may alter. Bind the complete enclosing node whenever it references a
+        protected SOURCE_ADD symbol or Python namespace-reflection primitive.
+        The caller also compares every non-registry node because arbitrary
+        Python reflection cannot otherwise be proven unable to mutate the
+        registry after this static review.
         """
 
         sensitive_names = protected_names | {
@@ -1769,13 +1790,20 @@ def validate_source_add_registration_diff(
         dynamic_namespace_names = {
             "__builtins__",
             "__dict__",
+            "__delattr__",
+            "__delitem__",
+            "__getattr__",
+            "__getattribute__",
             "__globals__",
             "__import__",
+            "__setattr__",
+            "__setitem__",
             "builtins",
             "compile",
             "delattr",
             "eval",
             "exec",
+            "getattr",
             "globals",
             "locals",
             "setattr",
@@ -1831,7 +1859,7 @@ def validate_source_add_registration_diff(
         signature: list[str] = []
         for node in tree.body:
             signature.append(
-                "SOURCE_ADD_ROUTING_REGISTRATIONS=<reviewed>"
+                canonical_registry_assignment_signature(node)
                 if is_canonical_registry_assignment(node)
                 else ast.dump(node, include_attributes=False)
             )
@@ -2073,11 +2101,7 @@ def validate_source_add_registration_diff(
         observed_contract_version != existing_contract_version
         or observed_contract_signature != existing_contract_signature
         or observed_sensitive_signature != existing_sensitive_signature
-        or (
-            requests
-            and observed_non_registry_signature
-            != existing_non_registry_signature
-        )
+        or observed_non_registry_signature != existing_non_registry_signature
     ):
         errors.append("source_add_registration_patched_source_invalid")
         return sorted(set(errors))

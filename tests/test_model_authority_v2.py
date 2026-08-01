@@ -118,7 +118,7 @@ def _ready_adapter_metadata() -> dict:
             "taxonomy_content_hash": "sha256:" + "d" * 64
         },
         "routing": {
-            "compiler_version": "routing-compiler-v1",
+            "compiler_version": "routing-compiler-v2",
             "catalog": routing_catalog,
             "catalog_sha256": sha256_json(routing_catalog).removeprefix("sha256:"),
             "policy": routing_policy,
@@ -128,7 +128,7 @@ def _ready_adapter_metadata() -> dict:
             "private_bindings_exposed": False,
         },
         "runtime_routing": {
-            "compiler_version": "routing-compiler-v1",
+            "compiler_version": "routing-compiler-v2",
             "catalog": runtime_catalog,
             "catalog_sha256": sha256_json(runtime_catalog).removeprefix("sha256:"),
             "policy": runtime_policy,

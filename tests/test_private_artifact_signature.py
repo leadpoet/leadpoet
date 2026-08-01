@@ -239,6 +239,33 @@ def test_local_manifest_builder_rejects_hybrid_source_pair(tmp_path: Path) -> No
         _build_manifest_for_source(source)
 
 
+def test_local_manifest_builder_rejects_unknown_source_pair(tmp_path: Path) -> None:
+    source = tmp_path / "unknown"
+    source.mkdir()
+    (source / "sourcing_model").mkdir()
+    (source / "sourcing_model" / "consumer_contract.json").write_text(
+        json.dumps(
+            {
+                "contract_id": "leadpoet-sourcing-wrapper-contract-v999",
+                "consumer_parity_fixture_path": (
+                    "sourcing_model/consumer_parity_fixtures.json"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (source / "sourcing_model" / "consumer_parity_fixtures.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        PrivateModelRuntimeError,
+        match="no reviewed contract/parity pair",
+    ):
+        _build_manifest_for_source(source)
+
+
 def test_local_manifest_builder_rejects_requested_version_mismatch(
     tmp_path: Path,
 ) -> None:

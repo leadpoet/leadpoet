@@ -202,7 +202,7 @@ import sourcing_model
 metadata = research_lab_adapter.adapter_metadata()
 assert metadata.get("adapter_version") == "sourcing-model-research-lab-adapter:v3"
 assert metadata.get("component_registry_version") == "sourcing-model-components:v2"
-assert metadata.get("routing", {}).get("compiler_version") == "routing-compiler-v1"
+assert metadata.get("routing", {}).get("compiler_version") == "routing-compiler-v2"
 assert metadata.get("routing", {}).get("private_bindings_exposed") is False
 assert sourcing_model is not None
 PY
@@ -223,6 +223,7 @@ IMAGE_TAG_RAW="research-lab-${RUN_ID}-${CANDIDATE_INDEX}-${COMMIT_SHA}"
 IMAGE_TAG="$(printf '%s' "${IMAGE_TAG_RAW}" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-120)"
 IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 IMAGE_DIGEST=""
+BUILD_WORK_DIR="$(mktemp -d /tmp/research-lab-candidate-manifest.XXXXXX)"
 cleanup_candidate_image() {
   if [ -n "${IMAGE_DIGEST:-}" ]; then
     docker image rm "${IMAGE_DIGEST}" >/dev/null 2>&1 || true
@@ -230,6 +231,13 @@ cleanup_candidate_image() {
   if [ -n "${IMAGE_URI:-}" ]; then
     docker image rm "${IMAGE_URI}" >/dev/null 2>&1 || true
   fi
+  case "${BUILD_WORK_DIR:-}" in
+    /tmp/research-lab-candidate-manifest.*)
+      if [ -d "${BUILD_WORK_DIR}" ]; then
+        rm -rf -- "${BUILD_WORK_DIR}"
+      fi
+      ;;
+  esac
 }
 trap cleanup_candidate_image EXIT
 PLATFORM="${RESEARCH_LAB_PRIVATE_MODEL_DOCKER_PLATFORM:-linux/amd64}"
@@ -237,8 +245,10 @@ PARENT_MANIFEST_URI="${RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI:-s3://leadpoet-pr
 MANIFEST_BASE="${PARENT_MANIFEST_URI%/*}"
 MANIFEST_URI="${MANIFEST_BASE}/candidates/${RUN_ID}/${CANDIDATE_INDEX}/${COMMIT_SHA}.json"
 SIGNATURE_URI="${MANIFEST_BASE}/candidates/${RUN_ID}/${CANDIDATE_INDEX}/${COMMIT_SHA}.sig.b64"
-KMS_KEY_ID="${RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID:?RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID is required}"
+KMS_KEY_ID="${RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID:?RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID is required}"
 OUTPUT_PATH="${RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT:-.research_lab/candidate_manifest.json}"
+MANIFEST_HASH_PATH="${BUILD_WORK_DIR}/manifest-hash.txt"
+MANIFEST_SIGNATURE_PATH="${BUILD_WORK_DIR}/manifest.sig.b64"
 
 aws ecr get-login-password --region "${AWS_REGION}" \
   | docker login --username AWS --password-stdin "${REGISTRY}" >/dev/null
@@ -252,71 +262,65 @@ DIGEST="$(aws ecr describe-images \
   --output text)"
 IMAGE_DIGEST="${REGISTRY}/${ECR_REPOSITORY}@${DIGEST}"
 
+PYTHONSAFEPATH=1 \
+PYTHONNOUSERSITE=1 \
+PYTHONPATH="${RESEARCH_LAB_RUNTIME_SOURCE_ROOT:?RESEARCH_LAB_RUNTIME_SOURCE_ROOT is required}" \
 python3 - "${OUTPUT_PATH}" "${IMAGE_DIGEST}" "${MANIFEST_URI}" "${SIGNATURE_URI}" "${COMMIT_SHA}" <<'PY'
-import hashlib
 import json
+import os
 from pathlib import Path
 import sys
-import research_lab_adapter
+
+import research_lab.eval.private_runtime as private_runtime
+from research_lab.eval.private_runtime import (
+    PrivateModelAdapterSpec,
+    SubprocessPrivateModelRunner,
+    build_local_private_artifact_manifest,
+)
 
 output = Path(sys.argv[1])
 image_digest, manifest_uri, signature_ref, git_commit_sha = sys.argv[2:6]
-excluded_parts = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".venv", "venv", ".research_lab"}
-excluded_suffixes = (".pyc", ".pyo", ".env", ".pem", ".key")
+runtime_source_root = Path(os.environ["RESEARCH_LAB_RUNTIME_SOURCE_ROOT"]).resolve()
+runtime_module_path = Path(private_runtime.__file__).resolve()
+try:
+    runtime_module_path.relative_to(runtime_source_root)
+except ValueError as exc:
+    raise RuntimeError("private artifact builder did not load from the attested runtime source") from exc
 
-def sha256_json(value):
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
-
-def sha256_bytes(value):
-    return "sha256:" + hashlib.sha256(value).hexdigest()
-
-def excluded(rel):
-    parts = rel.split("/")
-    return any(part in excluded_parts for part in parts) or rel.endswith(excluded_suffixes) or rel == ".env" or rel.startswith(".env.")
-
-digest_inputs = []
-for path in sorted(Path(".").rglob("*")):
-    if not path.is_file():
-        continue
-    rel = path.as_posix()
-    if excluded(rel):
-        continue
-    digest_inputs.append((rel, sha256_bytes(path.read_bytes())))
-
-runtime_metadata = research_lab_adapter.adapter_metadata()
+runtime_metadata = SubprocessPrivateModelRunner(
+    PrivateModelAdapterSpec(source_path=Path.cwd())
+).metadata()
 config_payload = {
     "component_registry_version": str(runtime_metadata["component_registry_version"]),
     "scoring_adapter_version": str(runtime_metadata["scoring_adapter_version"]),
     "adapter_version": str(runtime_metadata["adapter_version"]),
 }
-payload = {
-    "model_artifact_hash": sha256_json(digest_inputs),
-    "git_commit_sha": git_commit_sha,
-    "image_digest": image_digest,
-    "config_hash": sha256_json(config_payload),
-    "component_registry_version": config_payload["component_registry_version"],
-    "scoring_adapter_version": config_payload["scoring_adapter_version"],
-    "manifest_uri": manifest_uri,
-    "signature_ref": signature_ref,
-    "build_id": f"gateway-code-edit:{git_commit_sha}",
-}
-manifest = {**payload, "manifest_hash": sha256_json(payload)}
+manifest = build_local_private_artifact_manifest(
+    source_path=Path.cwd(),
+    git_commit_sha=git_commit_sha,
+    image_digest=image_digest,
+    manifest_uri=manifest_uri,
+    signature_ref=signature_ref,
+    component_registry_version=config_payload["component_registry_version"],
+    scoring_adapter_version=config_payload["scoring_adapter_version"],
+    build_id=f"gateway-code-edit:{git_commit_sha}",
+    config_payload=config_payload,
+)
 output.parent.mkdir(parents=True, exist_ok=True)
 output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 print(manifest["manifest_hash"])
 PY
 
-MANIFEST_HASH="$(python3 -c "import json; print(json.load(open('${OUTPUT_PATH}'))['manifest_hash'])")"
-printf '%s' "${MANIFEST_HASH}" > /tmp/research_lab_candidate_manifest_hash.txt
+MANIFEST_HASH="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["manifest_hash"])' "${OUTPUT_PATH}")"
+printf '%s' "${MANIFEST_HASH}" > "${MANIFEST_HASH_PATH}"
 aws kms sign \
   --key-id "${KMS_KEY_ID}" \
-  --message fileb:///tmp/research_lab_candidate_manifest_hash.txt \
+  --message "fileb://${MANIFEST_HASH_PATH}" \
   --message-type RAW \
   --signing-algorithm ECDSA_SHA_256 \
   --query Signature \
-  --output text > /tmp/research_lab_candidate_manifest.sig.b64
-aws s3 cp /tmp/research_lab_candidate_manifest.sig.b64 "${SIGNATURE_URI}" >/dev/null
+  --output text > "${MANIFEST_SIGNATURE_PATH}"
+aws s3 cp "${MANIFEST_SIGNATURE_PATH}" "${SIGNATURE_URI}" >/dev/null
 aws s3 cp "${OUTPUT_PATH}" "${MANIFEST_URI}" >/dev/null
 BASH
 """.strip()

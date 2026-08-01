@@ -1918,6 +1918,17 @@ class ResearchLabPromotionController:
         errors = validate_private_model_artifact_manifest(new_artifact)
         if errors:
             raise RuntimeError("candidate image manifest failed validation: " + "; ".join(errors))
+        signing_key_id = (
+            os.getenv(
+                PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID_ENV,
+                DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID,
+            ).strip()
+            or DEFAULT_PRIVATE_MODEL_ARTIFACT_SIGNING_KMS_KEY_ID
+        )
+        verify_private_artifact_manifest_signature(
+            new_artifact,
+            key_id=signing_key_id,
+        )
         if str(score_bundle.get("candidate_artifact_hash") or "") != new_artifact.model_artifact_hash:
             raise RuntimeError("score bundle candidate artifact does not match built image manifest")
         private_repo_result = await self._maybe_push_private_repo_candidate(

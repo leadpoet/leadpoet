@@ -8,7 +8,9 @@ head sha recorded), bug #30 (infra-vs-candidate build failure classification).
 
 from __future__ import annotations
 
+import ast
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1005,3 +1007,117 @@ def test_recorded_sha_falls_back_to_workspace_when_nothing_valid(monkeypatch):
         workspace_sha="9" * 40, parent_artifact=_manifest(git_sha="not-a-sha")
     )
     assert (sha, source) == ("9" * 40, "build_workspace")
+
+
+def test_built_candidate_artifact_requires_exact_signature_authority(
+    monkeypatch,
+):
+    manifest = _manifest()
+    verified = {}
+    monkeypatch.setenv(
+        "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID",
+        "alias/test-private-artifact",
+    )
+    monkeypatch.setattr(
+        code_build,
+        "validate_private_model_artifact_manifest",
+        lambda _artifact: [],
+    )
+
+    def fake_verify(artifact, *, key_id):
+        verified["artifact"] = artifact
+        verified["key_id"] = key_id
+        return {"verified": True}
+
+    monkeypatch.setattr(
+        code_build,
+        "verify_private_artifact_manifest_signature",
+        fake_verify,
+    )
+
+    assert code_build._verify_built_candidate_artifact(manifest) == {
+        "verified": True
+    }
+    assert verified == {
+        "artifact": manifest,
+        "key_id": "alias/test-private-artifact",
+    }
+
+
+def test_built_candidate_artifact_rejects_contract_or_signature_failure(
+    monkeypatch,
+):
+    from research_lab.eval import PrivateModelRuntimeError
+
+    monkeypatch.setattr(
+        code_build,
+        "validate_private_model_artifact_manifest",
+        lambda _artifact: [],
+    )
+    monkeypatch.setattr(
+        code_build,
+        "verify_private_artifact_manifest_signature",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PrivateModelRuntimeError("consumer contract/parity mismatch")
+        ),
+    )
+
+    with pytest.raises(
+        code_build.CodeEditImageBuildError,
+        match="exact contract/signature verification",
+    ) as exc_info:
+        code_build._verify_built_candidate_artifact(_manifest())
+    assert isinstance(exc_info.value.__cause__, PrivateModelRuntimeError)
+
+
+def test_built_candidate_artifact_classifies_signature_transport_failure(
+    monkeypatch,
+):
+    from research_lab.eval import PrivateModelRuntimeError
+
+    monkeypatch.setattr(
+        code_build,
+        "validate_private_model_artifact_manifest",
+        lambda _artifact: [],
+    )
+
+    def fail_verify(*_args, **_kwargs):
+        try:
+            raise RuntimeError("connection refused")
+        except RuntimeError as cause:
+            raise PrivateModelRuntimeError(
+                "private artifact manifest KMS signature verification failed"
+            ) from cause
+
+    monkeypatch.setattr(
+        code_build,
+        "verify_private_artifact_manifest_signature",
+        fail_verify,
+    )
+
+    with pytest.raises(code_build.CodeEditInfraFailureError):
+        code_build._verify_built_candidate_artifact(_manifest())
+
+
+def test_candidate_signature_gate_precedes_build_evidence_and_return() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "gateway"
+        / "research_lab"
+        / "code_build.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    build_fn = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_build_under_deadline"
+    )
+    call_lines = {
+        node.func.id: node.lineno
+        for node in ast.walk(build_fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert call_lines["_verify_built_candidate_artifact"] < call_lines[
+        "_write_private_code_edit_diff_artifact"
+    ]

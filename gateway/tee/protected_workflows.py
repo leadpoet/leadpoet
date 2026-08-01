@@ -120,6 +120,7 @@ PROTECTED_SYMBOLS = {
         "verify_source_tree_contract",
     ),
     "research_lab/eval/private_runtime.py": (
+        "EXPECTED_ROUTING_COMPILER_VERSION",
         "_REVIEWED_CONSUMER_MANIFEST_PAIRS",
         "_private_manifest_hash_payload",
         "_verify_consumer_contract_manifest",
@@ -127,6 +128,15 @@ PROTECTED_SYMBOLS = {
         "_verify_private_artifact_manifest_signature_cached",
         "_verify_private_artifact_manifest_signature_uncached",
         "build_local_private_artifact_manifest",
+        "validate_sourcing_adapter_metadata",
+    ),
+    "gateway/research_lab/config.py": (
+        "DEFAULT_PRIVATE_TEST_CMD",
+        "DEFAULT_PRIVATE_BUILD_CMD",
+    ),
+    "gateway/research_lab/code_build.py": (
+        "_verify_built_candidate_artifact",
+        "CodeEditCandidateBuilder._build_under_deadline",
     ),
     "gateway/research_lab/provider_capabilities.py": (
         "_SOURCE_ADD_MANIFEST_RE",
@@ -393,6 +403,8 @@ PROTECTED_SYMBOLS = {
         "confirmation_attempt_budget",
         "_baseline_aggregate_excluding_icps",
         "ResearchLabPromotionController.process_scored_candidate",
+        "ResearchLabPromotionController._promote_built_image_candidate",
+        "_load_valid_artifact",
         "_candidate_icp_score",
     ),
     "leadpoet_canonical/weight_computation.py": (

@@ -251,7 +251,7 @@ def test_adapter_metadata_gate_requires_all_runtime_readiness_proofs() -> None:
         },
         "industry_taxonomy": {"taxonomy_content_hash": "sha256:" + "a" * 64},
         "routing": {
-            "compiler_version": "routing-compiler-v1",
+            "compiler_version": "routing-compiler-v2",
             "catalog": routing_catalog,
             "catalog_sha256": sha256_json(routing_catalog).removeprefix("sha256:"),
             "policy": routing_policy,
@@ -261,7 +261,7 @@ def test_adapter_metadata_gate_requires_all_runtime_readiness_proofs() -> None:
             "private_bindings_exposed": False,
         },
         "runtime_routing": {
-            "compiler_version": "routing-compiler-v1",
+            "compiler_version": "routing-compiler-v2",
             "catalog": runtime_catalog,
             "catalog_sha256": sha256_json(runtime_catalog).removeprefix("sha256:"),
             "policy": runtime_policy,

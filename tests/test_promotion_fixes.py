@@ -1153,6 +1153,11 @@ async def test_promoted_candidate_writes_derived_benchmark_and_links_active_vers
     monkeypatch.setattr(ResearchLabPromotionController, "_maybe_push_private_repo_candidate", _fake_push)
     monkeypatch.setattr(ResearchLabPromotionController, "_maybe_create_champion_reward", _fake_reward)
     monkeypatch.setattr(promotion, "wait_for_current_manifest_git_sha", _fake_wait)
+    monkeypatch.setattr(
+        promotion,
+        "verify_private_artifact_manifest_signature",
+        lambda *_args, **_kwargs: {"verified": True},
+    )
 
     controller = ResearchLabPromotionController(_controller_config(auto_commit_enabled=True), worker_ref="test-worker")
     candidate = {
@@ -1258,6 +1263,11 @@ async def test_promoted_candidate_source_push_pending_leaves_previous_active_mod
     monkeypatch.setattr(ResearchLabPromotionController, "_maybe_push_private_repo_candidate", _fake_push)
     monkeypatch.setattr(ResearchLabPromotionController, "_maybe_create_champion_reward", _fake_reward)
     monkeypatch.setattr(promotion, "wait_for_current_manifest_git_sha", _fake_wait)
+    monkeypatch.setattr(
+        promotion,
+        "verify_private_artifact_manifest_signature",
+        lambda *_args, **_kwargs: {"verified": True},
+    )
 
     controller = ResearchLabPromotionController(_controller_config(auto_commit_enabled=True), worker_ref="test-worker")
     candidate = {
@@ -1294,6 +1304,79 @@ async def test_promoted_candidate_source_push_pending_leaves_previous_active_mod
     assert pending_events[0]["event_doc"]["action"] == (
         "leave_previous_active_model_active_until_current_json_matches_pushed_commit"
     )
+
+
+async def test_promoted_candidate_rejects_unverified_artifact_before_side_effects(
+    store,
+    monkeypatch,
+):
+    from research_lab.eval import PrivateModelRuntimeError
+
+    parent = FakeArtifact()
+    candidate_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "c" * 64,
+        git_commit_sha="d" * 40,
+    )
+
+    async def _unexpected_push(self: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("private source push must not precede artifact verification")
+
+    monkeypatch.setattr(
+        ResearchLabPromotionController,
+        "_maybe_push_private_repo_candidate",
+        _unexpected_push,
+    )
+    monkeypatch.setattr(
+        promotion,
+        "verify_private_artifact_manifest_signature",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PrivateModelRuntimeError("consumer contract/parity mismatch")
+        ),
+    )
+
+    controller = ResearchLabPromotionController(
+        _controller_config(auto_commit_enabled=False),
+        worker_ref="test-worker",
+    )
+    candidate = {
+        "candidate_id": "candidate:" + "1" * 64,
+        "parent_artifact_hash": parent.model_artifact_hash,
+        "candidate_kind": "image_build",
+        "candidate_model_manifest_doc": candidate_artifact.to_dict(),
+    }
+    with pytest.raises(
+        PrivateModelRuntimeError,
+        match="consumer contract/parity mismatch",
+    ):
+        await controller._promote_built_image_candidate(
+            candidate=candidate,
+            score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+            score_bundle={
+                "candidate_artifact_hash": candidate_artifact.model_artifact_hash
+            },
+            active=ActivePrivateModel(
+                artifact=parent,
+                version_row=_active_row(parent),
+            ),
+            active_parent=parent.model_artifact_hash,
+            candidate_parent=parent.model_artifact_hash,
+            rolling_window_hash="sha256:" + "3" * 64,
+            improvement_points=2.0,
+            threshold=1.0,
+        )
+
+    for writes in (
+        store.version_writes,
+        store.version_event_writes,
+        store.promotion_event_writes,
+        store.candidate_evaluation_event_writes,
+        store.scoring_dispatch_event_writes,
+        store.reward_obligation_writes,
+        store.private_benchmark_writes,
+        store.public_report_writes,
+        store.generic_insert_writes,
+    ):
+        assert writes == []
 
 
 async def test_promoted_candidate_bridge_reuses_existing_rows_without_duplicate_writes(store):

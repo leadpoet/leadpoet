@@ -996,6 +996,10 @@ def test_source_add_registration_diff_without_approved_request_fails_closed():
         'globals()["SOURCE_ADD_ROUTING_REGISTRATIONS"] = load_unreviewed_registrations()\n',
         'globals()["SOURCE_" + "ADD_ROUTING_REGISTRATIONS"] = ()\n',
         'setattr(sys.modules[__name__], "SOURCE_" + "ADD_ROUTING_REGISTRATIONS", ())\n',
+        'object.__setattr__(sys.modules[__name__], "SOURCE_" + "ADD_ROUTING_REGISTRATIONS", ())\n',
+        'type(sys.modules[__name__]).__setattr__(sys.modules[__name__], "SOURCE_" + "ADD_ROUTING_REGISTRATIONS", ())\n',
+        'sys.modules[__name__].__class__.__setattr__(sys.modules[__name__], "SOURCE_" + "ADD_ROUTING_REGISTRATIONS", ())\n',
+        'getattr(object, "__set" + "attr__")(sys.modules[__name__], "SOURCE_" + "ADD_ROUTING_REGISTRATIONS", ())\n',
         '__builtins__["glo" + "bals"]()["SOURCE_" + "ADD_ROUTING_REGISTRATIONS"] = ()\n',
         'globals()["SourceAddRoutingRegistration"] = unreviewed.SourceAddRoutingRegistration\n',
         "SourceAddRoutingRegistration.__new__ = unreviewed_new\n",
@@ -1353,7 +1357,7 @@ def test_source_add_registration_diff_migrates_unchanged_legacy_guidance_only():
         ),
         None,
         existing_runtime_source=legacy,
-    ) == []
+    ) == ["source_add_registration_patched_source_invalid"]
     assert validate_source_add_registration_diff(
         _router_runtime_diff(
             legacy,
@@ -1400,14 +1404,32 @@ def test_source_add_registration_diff_rejects_wrong_target_and_unapplicable_patc
     ) == ["source_add_registration_runtime_diff_unapplicable"]
 
 
-def test_source_add_registration_diff_allows_unrelated_runtime_change():
+def test_source_add_registration_diff_rejects_unreviewed_runtime_change():
     existing = _EMPTY_ROUTER_RUNTIME + "ROUTER_BATCH_SIZE = 10\n"
     changed = _EMPTY_ROUTER_RUNTIME + "ROUTER_BATCH_SIZE = 20\n"
     assert validate_source_add_registration_diff(
         _router_runtime_diff(existing, changed),
         None,
         existing_runtime_source=existing,
-    ) == []
+    ) == ["source_add_registration_patched_source_invalid"]
+
+
+def test_source_add_registration_rejects_annotation_side_effect():
+    existing = _EMPTY_V8_ROUTER_RUNTIME.replace(
+        "SOURCE_ADD_ROUTING_REGISTRATIONS = ()",
+        "SOURCE_ADD_ROUTING_REGISTRATIONS: "
+        "tuple[SourceAddRoutingRegistration, ...] = ()",
+    )
+    changed = existing.replace(
+        "tuple[SourceAddRoutingRegistration, ...]",
+        '(globals().__setitem__("SOURCE_ADD_ROUTING_REGISTRATIONS", '
+        '("evil",)), tuple)[1]',
+    )
+    assert validate_source_add_registration_diff(
+        _router_runtime_diff(existing, changed),
+        None,
+        existing_runtime_source=existing,
+    ) == ["source_add_registration_patched_source_invalid"]
 
 
 def test_route_policy_allows_unlisted_safe_paths_and_blocks_admin_paths():

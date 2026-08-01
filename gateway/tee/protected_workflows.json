@@ -397,6 +397,16 @@
       "symbol": "validate_legacy_settlement_migrations_v2"
     },
     {
+      "ast_sha256": "sha256:f83f565394888bb2bea81eccb25f7a96cb0421fc3458af12f740f7e8f721fbb8",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "CodeEditCandidateBuilder._build_under_deadline"
+    },
+    {
+      "ast_sha256": "sha256:c25d69005a275bb7508a817868a4383fd4e5ee0cf018f6a8cbcea804ea020695",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "_verify_built_candidate_artifact"
+    },
+    {
       "ast_sha256": "sha256:225c6e0b97fbf125175a9d2e6f32e15649160a68c71e0fc633471c79cc85bd91",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "CodeEditLoopEngine"
@@ -405,6 +415,16 @@
       "ast_sha256": "sha256:e1f7ee5df68cf43be4d8caad3bf4fddc8561b90e5fbdc4b45401b1e178c4797b",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "_bind_loop_direction_plan"
+    },
+    {
+      "ast_sha256": "sha256:6dea1c370a92bda5c68fa90b0ab620bb78ef4eebfcbc87b9d3a20fb11bb01462",
+      "path": "gateway/research_lab/config.py",
+      "symbol": "DEFAULT_PRIVATE_BUILD_CMD"
+    },
+    {
+      "ast_sha256": "sha256:d2141481ab39d6bf465c20ab61d4c7d6a13195bcd1ffe54294ab84bfa5b8d150",
+      "path": "gateway/research_lab/config.py",
+      "symbol": "DEFAULT_PRIVATE_TEST_CMD"
     },
     {
       "ast_sha256": "sha256:d8e1da92de5964ccc3303651e163ea46ff83982043cd1dde023067db01b1ab8d",
@@ -562,6 +582,11 @@
       "symbol": "reconcile_champion_reward_statuses"
     },
     {
+      "ast_sha256": "sha256:874dd6b2ed9057bbf85a34f1d54da7b617efa125899bdb734b7535315fe254e0",
+      "path": "gateway/research_lab/promotion.py",
+      "symbol": "ResearchLabPromotionController._promote_built_image_candidate"
+    },
+    {
       "ast_sha256": "sha256:9e9873735281d7ae52e6726f1b90dde5b1447dac4cd11c3b0b3388350fbfd2fd",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "ResearchLabPromotionController.process_scored_candidate"
@@ -575,6 +600,11 @@
       "ast_sha256": "sha256:a5d660dcbf57931380d6d65b75f87bd379d20b12eb0bd4162ef5a5262ae6aa22",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "_candidate_icp_score"
+    },
+    {
+      "ast_sha256": "sha256:71ae256cb2d29f1fd6157d318dc926f9c80157ff44bb92945efed49083e7341d",
+      "path": "gateway/research_lab/promotion.py",
+      "symbol": "_load_valid_artifact"
     },
     {
       "ast_sha256": "sha256:3ad1a2e70cf8e8210f0dbf0602df4ed297d5ee37001944f5b3f2fd39ecc24b06",
@@ -772,7 +802,7 @@
       "symbol": "normalize_source_add_planner_contract"
     },
     {
-      "ast_sha256": "sha256:9fa07a0bacb4b860a30efeb990f054e20a24458b8f5068f0fd7aa66e83b28709",
+      "ast_sha256": "sha256:d066efcc5ffcccbecd7a2883536e010c83a985d8b34b15e112b5defc9a47adfb",
       "path": "gateway/research_lab/provider_capabilities.py",
       "symbol": "validate_source_add_registration_diff"
     },
@@ -1692,6 +1722,11 @@
       "symbol": "score_private_model_pair_items"
     },
     {
+      "ast_sha256": "sha256:48946b3e3ad9bdcd86fafe88ac5b06c70c423f9f53532f1b04730ce0d2090eda",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "EXPECTED_ROUTING_COMPILER_VERSION"
+    },
+    {
       "ast_sha256": "sha256:680df3b60298fb5f1bb62aac049d534db17ef6ebda127c5a27d38c855a04d860",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "_REVIEWED_CONSUMER_MANIFEST_PAIRS"
@@ -1720,6 +1755,11 @@
       "ast_sha256": "sha256:678085f71d8ac2b46f7264c609d11e908478bcacca1e124792d578095b5ce1eb",
       "path": "research_lab/eval/private_runtime.py",
       "symbol": "build_local_private_artifact_manifest"
+    },
+    {
+      "ast_sha256": "sha256:90ca8db8a9572102075299d56c335801e786d06e0e8caa8c0e80b704a935b952",
+      "path": "research_lab/eval/private_runtime.py",
+      "symbol": "validate_sourcing_adapter_metadata"
     },
     {
       "ast_sha256": "sha256:9793c2c8145ae6c2777f677899711fcd124d01fb5c9da1f4e26e5cad03146286",
@@ -1852,7 +1892,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:1902a45e28bd6ae53134c633ccd6090bbcf475e12816e6cf401d99f25cc074a9",
-  "protected_source_commit": "eedbe8fd646bf27afad8d2055b93af16ccd3b550",
+  "manifest_hash": "sha256:ddb7303dca73667fc7fe5273379e63b768af55bbc1a9035e0084dfd407cd8a2c",
+  "protected_source_commit": "c6a0a586a5a1a5838a5238f97df72c3c276b5c13",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

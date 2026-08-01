@@ -20,6 +20,16 @@ from leadpoet_canonical.attested_v2 import sha256_json
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_postgrest_boundary_imports_candidate_source_tree() -> None:
+    script = (
+        ROOT / "tests" / "restart_rehearsal" / "run_inside.sh"
+    ).read_text(encoding="utf-8")
+    assert (
+        'PYTHONPATH="/source:/harness" /usr/bin/python3.11 \\\n'
+        "    /harness/gateway_boundary_service.py"
+    ) in script
+
+
 def _maintenance_lease_state(tmp_path: Path) -> LocalPostgRESTState:
     state_root = tmp_path / "state"
     state_root.mkdir()

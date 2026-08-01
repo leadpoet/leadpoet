@@ -268,7 +268,8 @@ if [ "$COMPONENT" = "gateway" ] || [ "$COMPONENT" = "validator" ]; then
     --release-build-input \
       "$DURABLE_SCHEMA_SEED_ROOT/release-build-input.json" \
     --output "$REHEARSAL_STATE_ROOT/postgres-v2-schema-contract.json"
-  /usr/bin/python3.11 /harness/gateway_boundary_service.py \
+  PYTHONPATH="/source:/harness" /usr/bin/python3.11 \
+    /harness/gateway_boundary_service.py \
     --host 127.0.0.1 \
     --port 54321 \
     --fixture /harness/fixtures/production_shaped_v2.json \

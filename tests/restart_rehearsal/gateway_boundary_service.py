@@ -438,11 +438,12 @@ def _migration_schema_contract(
         "132-research-lab-champion-lifetime-credit.sql",
         "133-research-lab-provider-outcome-contention-status.sql",
         "134-research-lab-provider-outcome-head-contention.sql",
+        "135-research-lab-active-model-result-replay.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (
         not isinstance(applied_migrations, list)
-        or applied_migrations[-5:] != expected_provider_outcome_migrations
+        or applied_migrations[-6:] != expected_provider_outcome_migrations
     ):
         raise RuntimeError(
             "migration-backed provider outcome order differs from production"

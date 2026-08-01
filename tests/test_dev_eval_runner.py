@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from gateway.research_lab import dev_eval_runner as dev_eval_runner_module
 from gateway.research_lab.config import DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG
 from gateway.research_lab.dev_eval_runner import (
     AttestedReplayDevEvaluatorV2,
@@ -113,6 +114,38 @@ def _rich_company(index: int = 0) -> dict:
             }
         ],
     }
+
+
+def test_snapshot_readiness_reports_wrapped_object_store_error_code(
+    monkeypatch,
+):
+    class ObjectStoreError(RuntimeError):
+        def __init__(self):
+            super().__init__("object is unavailable")
+            self.response = {"Error": {"Code": "NoSuchKey"}}
+
+    def fail_resolution(_root_uri):
+        try:
+            raise ObjectStoreError()
+        except ObjectStoreError as exc:
+            raise dev_eval_runner_module.DevEvalRunnerError(
+                "snapshot pointer resolution failed"
+            ) from exc
+
+    monkeypatch.setattr(
+        dev_eval_runner_module,
+        "resolve_snapshot_uri",
+        fail_resolution,
+    )
+
+    readiness = snapshot_readiness("s3://private-bucket/current.json")
+
+    assert readiness["ready"] is False
+    assert readiness["reason"] == (
+        "snapshot_preflight_error:DevEvalRunnerError"
+    )
+    assert readiness["error_code"] == "NoSuchKey"
+    assert "private-bucket" not in readiness["error_code"]
 
 
 def _write_snapshot_set(

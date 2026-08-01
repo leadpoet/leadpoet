@@ -87,6 +87,7 @@ MAX_DEV_SNAPSHOT_BANK_ICP_COUNT = 100
 CONTAINER_SNAPSHOT_DIR = "/research_lab_dev_snapshots"
 _TRUTHY = ("1", "true", "yes", "on")
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SAFE_ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 _PROVIDER_CREDENTIAL_ENV_NAMES = frozenset(
     {
         "DEEPLINE_API_KEY",
@@ -278,6 +279,26 @@ def _verify_pointer_bindings(
         raise DevEvalRunnerError("snapshot pointer READY hash does not match immutable target")
 
 
+def _snapshot_preflight_error_code(exc: BaseException) -> str:
+    """Return a bounded non-secret cause code from a wrapped store failure."""
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    fallback = type(exc).__name__
+    while current is not None and id(current) not in seen and len(seen) < 8:
+        seen.add(id(current))
+        fallback = type(current).__name__
+        response = getattr(current, "response", None)
+        if isinstance(response, Mapping):
+            error = response.get("Error")
+            if isinstance(error, Mapping):
+                code = str(error.get("Code") or "")
+                if _SAFE_ERROR_CODE_RE.fullmatch(code):
+                    return code
+        current = current.__cause__ or current.__context__
+    return fallback if _SAFE_ERROR_CODE_RE.fullmatch(fallback) else "SnapshotError"
+
+
 def snapshot_readiness(
     root_uri: str,
     *,
@@ -419,6 +440,7 @@ def snapshot_readiness(
         return {
             "ready": False,
             "reason": f"snapshot_preflight_error:{type(exc).__name__}",
+            "error_code": _snapshot_preflight_error_code(exc),
             "error": str(exc)[:240],
         }
 

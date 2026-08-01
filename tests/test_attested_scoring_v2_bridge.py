@@ -736,6 +736,96 @@ async def test_v2_bridge_replays_exact_durable_coordinator_result_without_resubm
 
 
 @pytest.mark.asyncio
+async def test_v2_bridge_replays_exact_active_model_authority_after_restart():
+    release = _release()
+    captured = {}
+
+    async def load_missing(**_kwargs):
+        return None
+
+    async def persist(graph):
+        validate_receipt_graph(graph)
+        return {
+            "root_receipt_hash": graph["root_receipt_hash"],
+            "graph_hash": sha256_json(graph),
+        }
+
+    async def persist_result(**kwargs):
+        captured.update(kwargs)
+        return _execution_result_storage_row_v2(**kwargs)
+
+    common = {
+        "operation": "attest_active_private_model",
+        "purpose": "research_lab.active_private_model.v2",
+        "epoch_id": 24_285,
+        "sequence": 0,
+        "payload": {
+            "artifact": {
+                "model_artifact_hash": _hash("5"),
+                "manifest_hash": _hash("6"),
+            }
+        },
+        "input_artifact_hashes": (_hash("5"), _hash("6")),
+        "worker_index": 0,
+        "provider_profile_loader": lambda *args, **kwargs: {
+            "profile": "default",
+            "credential_ref_hashes": {},
+            "envelopes": [],
+        },
+        "release_manifest": release,
+        "persist_graph": persist,
+        "boot_verifier": lambda identity: identity,
+        "poll_seconds": 0.001,
+        "operation_registry": COORDINATOR_OPERATIONS_V2,
+        "physical_role_override": "gateway_coordinator",
+        "expected_service_role": "gateway_coordinator",
+        "rpc_namespace": "coordinator_v2",
+        "receipt_output_projector": coordinator_receipt_output_v2,
+    }
+    fresh = await execute_scoring_v2(
+        **common,
+        client=_CoordinatorClient(release),
+        load_replayable_result=load_missing,
+        persist_replayable_result=persist_result,
+    )
+    assert captured["operation"] == "attest_active_private_model"
+
+    async def load_replay(**kwargs):
+        assert kwargs == {
+            "role": "gateway_coordinator",
+            "operation": "attest_active_private_model",
+            "purpose": "research_lab.active_private_model.v2",
+            "job_id": fresh["receipt"]["job_id"],
+        }
+        return {
+            "row": {"release_hash": release["release_hash"]},
+            "result": fresh["result"],
+            "receipt": fresh["receipt"],
+            "receipt_graph": fresh["receipt_graph"],
+            "artifact_hashes": fresh["artifact_hashes"],
+        }
+
+    restarted = _CoordinatorClient(release)
+
+    async def reject_submit(_manifest):
+        raise AssertionError(
+            "same-epoch active-model replay must not submit a second job"
+        )
+
+    restarted.coordinator_v2_submit_job = reject_submit
+    replayed = await execute_scoring_v2(
+        **common,
+        client=restarted,
+        load_replayable_result=load_replay,
+        persist_replayable_result=persist_result,
+    )
+
+    assert replayed["replay_status"] == "durable_exact"
+    assert replayed["result"] == fresh["result"]
+    assert replayed["receipt"] == fresh["receipt"]
+
+
+@pytest.mark.asyncio
 async def test_v2_bridge_preserves_complete_local_stage_receipt_chain():
     release = _release()
 

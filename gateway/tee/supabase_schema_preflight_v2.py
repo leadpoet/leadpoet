@@ -274,6 +274,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "scripts/132-research-lab-champion-lifetime-credit.sql",
         "research_lab_champion_lifetime_credit_contract_v1",
     ),
+    (
+        "scripts/135-research-lab-active-model-result-replay.sql",
+        "research_lab_active_model_replay_contract_v2",
+    ),
 )
 
 

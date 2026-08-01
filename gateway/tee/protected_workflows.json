@@ -272,7 +272,7 @@
       "symbol": "DockerReplayDevEvaluator"
     },
     {
-      "ast_sha256": "sha256:cd1f89b404a6edc912062d730cde4b35e9ca5be3913fe49dc26a1ae2b636d00f",
+      "ast_sha256": "sha256:4a20c974029ac8af0a9e91a4d46cc34c6a9e1955de925e159c42af5505837ab5",
       "path": "gateway/research_lab/dev_eval_runner.py",
       "symbol": "snapshot_readiness"
     },
@@ -1312,7 +1312,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:1e18f6027b205febe0a75e136775cd4218dd562a89097e357113a36e0745f65e",
+  "manifest_hash": "sha256:5c1842b8f89797fe23d1efc27240e0984d7b7811a9c0e94a7d34fcea56931462",
   "protected_source_commit": "f190248b2454f208f6cc4b92d85e78afbc8ffd63",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

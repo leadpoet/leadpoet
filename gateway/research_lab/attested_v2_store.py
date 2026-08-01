@@ -81,6 +81,10 @@ _REPLAYABLE_EXECUTION_PAIRS = frozenset(
     {
         ("research_lab_allocation", "research_lab.allocation.v2"),
         (
+            "attest_active_private_model",
+            "research_lab.active_private_model.v2",
+        ),
+        (
             "observe_chain_realized_weights_v1",
             "research_lab.chain_weight_observation.v1",
         ),

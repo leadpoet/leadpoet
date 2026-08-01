@@ -11,6 +11,11 @@ SQL = (
     / "scripts"
     / "104-research-lab-attested-result-replay-v2.sql"
 ).read_text(encoding="utf-8")
+ACTIVE_MODEL_REPLAY_SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "135-research-lab-active-model-result-replay.sql"
+).read_text(encoding="utf-8")
 
 
 def test_result_replay_table_is_append_only_and_receipt_bound():
@@ -49,3 +54,30 @@ def test_result_replay_table_is_limited_to_public_weight_authority_results():
             operation="attest_weight_input",
             purpose=purpose,
         )
+
+
+def test_active_model_result_replay_is_exactly_scoped_and_migration_gated():
+    assert replayable_execution_result_v2(
+        operation="attest_active_private_model",
+        purpose="research_lab.active_private_model.v2",
+    )
+    assert not replayable_execution_result_v2(
+        operation="attest_active_private_model",
+        purpose="research_lab.allocation.v2",
+    )
+    for value in (
+        "attest_active_private_model",
+        "research_lab.active_private_model.v2",
+        "research_lab_active_model_replay_contract_v2",
+    ):
+        assert value in ACTIVE_MODEL_REPLAY_SQL
+    for constraint in (
+        "research_lab_attested_execution_results_v2_operation_check",
+        "research_lab_attested_execution_results_v2_purpose_check",
+        "research_lab_attested_execution_results_v2_operation_purpose_check",
+    ):
+        assert f"VALIDATE CONSTRAINT\n        {constraint}" in (
+            ACTIVE_MODEL_REPLAY_SQL
+        )
+    assert "FROM PUBLIC, anon, authenticated" in ACTIVE_MODEL_REPLAY_SQL
+    assert "TO service_role" in ACTIVE_MODEL_REPLAY_SQL

@@ -2218,6 +2218,9 @@ class ResearchLabHostedWorker:
             reason = "tree_snapshot_not_ready:" + str(
                 readiness.get("reason") or "unknown"
             )
+            error_code = str(readiness.get("error_code") or "")
+            if error_code:
+                reason += ":error_code=" + error_code
         elif float(readiness.get("snapshot_age_seconds") or 0.0) > 14 * 86400:
             reason = "tree_snapshot_stale"
         elif str(readiness.get("champion_image_digest") or "") != str(
@@ -2353,11 +2356,14 @@ class ResearchLabHostedWorker:
             except ValueError:
                 status_interval = 600
             now_monotonic = time.monotonic()
-            last_status_reconcile = float(
-                getattr(self, "_champion_status_reconcile_monotonic", 0.0)
-                or 0.0
+            last_status_reconcile = getattr(
+                self, "_champion_status_reconcile_monotonic", None
             )
-            if now_monotonic - last_status_reconcile >= status_interval:
+            if (
+                last_status_reconcile is None
+                or now_monotonic - float(last_status_reconcile)
+                >= status_interval
+            ):
                 self._champion_status_reconcile_monotonic = now_monotonic
                 try:
                     await reconcile_champion_reward_statuses(

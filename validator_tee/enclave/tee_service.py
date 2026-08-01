@@ -62,6 +62,9 @@ AF_VSOCK = 40  # Address family for vsock
 VMADDR_CID_ANY = 0xFFFFFFFF  # Bind to any CID (inside enclave)
 PARENT_CID = 3  # Parent EC2's CID
 RPC_PORT = 5001  # Use different port from gateway (5001 vs 5000)
+VSOCK_RPC_LISTEN_BACKLOG = 32
+VSOCK_RPC_RECEIVE_TIMEOUT_SECONDS = 30.0
+VSOCK_RPC_RESPONSE_TIMEOUT_SECONDS = 600.0
 # Authoritative weight requests and responses include the complete measured
 # receipt graph. Keep the wire envelope small and retain an explicit
 # expanded-size ceiling inside the memory-constrained enclave.
@@ -811,6 +814,45 @@ def _receive_request(client: Any) -> tuple[Dict[str, Any], bool]:
         raise ValueError("request must be a JSON object")
     return request, length_prefixed
 
+
+def _handle_vsock_client(client: Any, addr: Any) -> None:
+    """Handle one validator RPC with a bounded abandoned-client lifetime."""
+
+    try:
+        client.settimeout(VSOCK_RPC_RECEIVE_TIMEOUT_SECONDS)
+        print(f"[TEE] Connection from CID {addr[0]}", flush=True)
+
+        request, length_prefixed = _receive_request(client)
+        client.settimeout(VSOCK_RPC_RESPONSE_TIMEOUT_SECONDS)
+        print(f"[TEE] Request: {request.get('command')}", flush=True)
+
+        response = handle_request(request)
+        response_data = json.dumps(response).encode()
+        if length_prefixed:
+            response_frame = _encode_rpc_payload(
+                response_data,
+                logical_limit=MAX_RPC_RESPONSE_BYTES,
+                frame_limit=MAX_RPC_RESPONSE_FRAME_BYTES,
+            )
+            client.sendall(
+                len(response_frame).to_bytes(4, byteorder="big")
+                + response_frame
+            )
+        else:
+            if len(response_data) > MAX_RPC_RESPONSE_FRAME_BYTES:
+                raise ValueError("legacy response exceeds maximum size")
+            client.sendall(response_data)
+    except Exception as exc:
+        print(f"[TEE] ❌ Server error: {exc}", flush=True)
+        import traceback
+
+        traceback.print_exc()
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
 def run_vsock_server():
     """
     Run vsock server to handle requests from parent EC2.
@@ -823,45 +865,20 @@ def run_vsock_server():
     
     # Bind to any CID on our port
     server.bind((VMADDR_CID_ANY, RPC_PORT))
-    server.listen(5)
+    server.listen(VSOCK_RPC_LISTEN_BACKLOG)
     
     print(f"[TEE] ✅ Listening on vsock port {RPC_PORT}", flush=True)
     
     while True:
-        client = None
         try:
             client, addr = server.accept()
-            print(f"[TEE] Connection from CID {addr[0]}", flush=True)
-            
-            request, length_prefixed = _receive_request(client)
-            print(f"[TEE] Request: {request.get('command')}", flush=True)
-
-            response = handle_request(request)
-            response_data = json.dumps(response).encode()
-            if length_prefixed:
-                response_frame = _encode_rpc_payload(
-                    response_data,
-                    logical_limit=MAX_RPC_RESPONSE_BYTES,
-                    frame_limit=MAX_RPC_RESPONSE_FRAME_BYTES,
-                )
-                client.sendall(
-                    len(response_frame).to_bytes(4, byteorder="big")
-                    + response_frame
-                )
-            else:
-                if len(response_data) > MAX_RPC_RESPONSE_FRAME_BYTES:
-                    raise ValueError("legacy response exceeds maximum size")
-                client.sendall(response_data)
-        except Exception as e:
-            print(f"[TEE] ❌ Server error: {e}", flush=True)
+        except Exception as exc:
+            print(f"[TEE] ❌ Server accept error: {exc}", flush=True)
             import traceback
+
             traceback.print_exc()
-        finally:
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    pass
+            continue
+        _handle_vsock_client(client, addr)
 
 
 # ============================================================================

@@ -31,11 +31,12 @@ import sys
 import os
 import hashlib
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
-from threading import Lock
+from threading import BoundedSemaphore, Lock
 print("🐛 DEBUG: Standard library imports OK", flush=True)
 
 # Cryptography for Ed25519 keypair generation
@@ -75,6 +76,9 @@ PARENT_CID = 3
 # RPC port for communication
 RPC_PORT = 5000
 MAX_RPC_REQUEST_BYTES = 64 * 1024 * 1024
+VSOCK_RPC_LISTEN_BACKLOG = 128
+VSOCK_RPC_MAX_CONNECTIONS = 64
+VSOCK_RPC_CONNECTION_TIMEOUT_SECONDS = 30.0
 
 # Note: The enclave's actual CID (e.g., 16, 26, 27) is assigned by AWS
 # and visible to the parent EC2, but the enclave binds to VMADDR_CID_ANY
@@ -2622,130 +2626,132 @@ def _recv_exact(conn: Any, size: int) -> bytes:
     return bytes(output)
 
 
+def _handle_vsock_connection(conn: Any, addr: Any) -> None:
+    """Handle one bounded RPC without allowing a dead peer to wedge the role."""
+
+    try:
+        conn.settimeout(VSOCK_RPC_CONNECTION_TIMEOUT_SECONDS)
+        print(f"[TEE] Connection from CID {addr[0]}, port {addr[1]}", flush=True)
+        length_bytes = _recv_exact(conn, 4)
+        if len(length_bytes) != 4:
+            print("[TEE] ⚠️ Invalid request (no length prefix)", flush=True)
+            return
+
+        request_length = int.from_bytes(length_bytes, byteorder="big")
+        if request_length < 2 or request_length > MAX_RPC_REQUEST_BYTES:
+            print(
+                f"[TEE] ⚠️ Request length outside limit: {request_length}",
+                flush=True,
+            )
+            return
+
+        request_data = _recv_exact(conn, request_length)
+        if len(request_data) != request_length:
+            print(
+                "[TEE] ⚠️ Incomplete request "
+                f"(expected {request_length}, got {len(request_data)})",
+                flush=True,
+            )
+            return
+
+        try:
+            request = json.loads(request_data.decode("utf-8"))
+            method = request.get("method")
+            params = request.get("params", {})
+            print(f"[TEE] RPC call: {method}", flush=True)
+            response = handle_rpc(method, params)
+        except json.JSONDecodeError as exc:
+            response = {"error": f"Invalid JSON: {str(exc)}"}
+
+        response_bytes = json.dumps(response).encode("utf-8")
+        conn.sendall(
+            len(response_bytes).to_bytes(4, byteorder="big")
+            + response_bytes
+        )
+        print(f"[TEE] ✅ Response sent ({len(response_bytes)} bytes)", flush=True)
+    except Exception as exc:
+        print(f"[TEE] ❌ Connection error: {exc}", flush=True)
+        import traceback
+
+        traceback.print_exc()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _serve_vsock_connections(
+    sock: Any,
+    *,
+    stop_event: Optional[Any] = None,
+    max_connections: int = VSOCK_RPC_MAX_CONNECTIONS,
+) -> None:
+    """Accept RPCs with bounded concurrency and deterministic backpressure."""
+
+    connection_slots = BoundedSemaphore(max(1, int(max_connections)))
+    executor = ThreadPoolExecutor(
+        max_workers=max(1, int(max_connections)),
+        thread_name_prefix="gateway-vsock-rpc",
+    )
+    try:
+        while stop_event is None or not stop_event.is_set():
+            connection_slots.acquire()
+            try:
+                conn, addr = sock.accept()
+            except socket.timeout:
+                connection_slots.release()
+                continue
+            except Exception:
+                connection_slots.release()
+                if stop_event is not None and stop_event.is_set():
+                    break
+                raise
+            try:
+                future = executor.submit(_handle_vsock_connection, conn, addr)
+            except Exception:
+                connection_slots.release()
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                raise
+            future.add_done_callback(lambda _future: connection_slots.release())
+    finally:
+        executor.shutdown(wait=True)
+
+
 def start_vsock_server():
-    """
-    Start vsock server to listen for RPC calls from parent EC2.
-    
-    vsock Protocol (Length-Prefixed JSON):
-    1. Parent EC2 (CID 3) connects to enclave on port 5000
-    2. Parent sends: [4-byte length (big-endian)][JSON-RPC request]
-       Request format: {"method": "...", "params": {...}}
-    3. Enclave processes request
-    4. Enclave sends: [4-byte length (big-endian)][JSON response]
-       Response format: {"result": ...} or {"error": "..."}
-    5. Connection closes (stateless, one request per connection)
-    
-    Why vsock?
-    - Hardware-isolated channel (no network access)
-    - Only parent EC2 can connect (AWS Nitro enforces)
-    - Direct memory channel (faster than TCP)
-    - Secure by design (cannot be sniffed or intercepted)
-    
-    Why length-prefixed protocol?
-    - Handles large payloads reliably (event batches can be MBs)
-    - Prevents partial reads/writes
-    - Compatible with async clients (tee_client.py)
-    """
+    """Start the bounded parent-to-enclave RPC service."""
+
     print("[TEE] Starting vsock server...", flush=True)
     print(f"[TEE] Binding to VMADDR_CID_ANY (any CID), port {RPC_PORT}", flush=True)
-    
-    # Create vsock socket
-    # AF_VSOCK: Address family for virtual sockets
-    # SOCK_STREAM: TCP-like reliable stream protocol
     print("[TEE] DEBUG: Creating vsock socket...", flush=True)
     try:
         sock = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
         print("[TEE] DEBUG: Socket created successfully", flush=True)
-    except Exception as e:
-        print(f"[TEE] ❌ ERROR creating socket: {e}", flush=True)
+    except Exception as exc:
+        print(f"[TEE] ❌ ERROR creating socket: {exc}", flush=True)
         raise
-    
-    # Bind to VMADDR_CID_ANY (not a specific CID)
-    # This allows the enclave to accept connections on its assigned CID
+
     print(f"[TEE] DEBUG: Binding to ({VMADDR_CID_ANY}, {RPC_PORT})...", flush=True)
     try:
         sock.bind((VMADDR_CID_ANY, RPC_PORT))
         print("[TEE] DEBUG: Bind successful", flush=True)
-    except Exception as e:
-        print(f"[TEE] ❌ ERROR binding socket: {e}", flush=True)
-        raise
-    
-    # Listen for connections (backlog=5)
-    print("[TEE] DEBUG: Starting to listen...", flush=True)
-    try:
-        sock.listen(5)
+        print("[TEE] DEBUG: Starting to listen...", flush=True)
+        sock.listen(VSOCK_RPC_LISTEN_BACKLOG)
         print("[TEE] DEBUG: Listen successful", flush=True)
-    except Exception as e:
-        print(f"[TEE] ❌ ERROR listening: {e}", flush=True)
+    except Exception as exc:
+        print(f"[TEE] ❌ ERROR starting socket: {exc}", flush=True)
+        sock.close()
         raise
-    
+
     print("[TEE] ✅ vsock server started", flush=True)
     print("[TEE] Ready to accept RPC calls from parent EC2", flush=True)
-    
-    # Accept connections in loop
-    while True:
-        try:
-            # Accept connection from parent EC2
-            conn, addr = sock.accept()
-            print(f"[TEE] Connection from CID {addr[0]}, port {addr[1]}", flush=True)
-            
-            # Receive request with length prefix (4 bytes, big-endian)
-            # Protocol: [4-byte length][JSON data]
-            length_bytes = _recv_exact(conn, 4)
-            
-            if len(length_bytes) != 4:
-                print(f"[TEE] ⚠️ Invalid request (no length prefix)", flush=True)
-                conn.close()
-                continue
-            
-            request_length = int.from_bytes(length_bytes, byteorder='big')
-            if request_length < 2 or request_length > MAX_RPC_REQUEST_BYTES:
-                print(f"[TEE] ⚠️ Request length outside limit: {request_length}", flush=True)
-                conn.close()
-                continue
-            
-            # Receive JSON data
-            request_data = _recv_exact(conn, request_length)
-            
-            if len(request_data) != request_length:
-                print(f"[TEE] ⚠️ Incomplete request (expected {request_length}, got {len(request_data)})", flush=True)
-                conn.close()
-                continue
-            
-            # Parse JSON-RPC request
-            try:
-                request = json.loads(request_data.decode('utf-8'))
-                method = request.get("method")
-                params = request.get("params", {})
-                
-                print(f"[TEE] RPC call: {method}", flush=True)
-                
-                # Handle RPC
-                response = handle_rpc(method, params)
-                
-                # Send JSON response with length prefix
-                response_bytes = json.dumps(response).encode('utf-8')
-                response_length = len(response_bytes)
-                length_prefix = response_length.to_bytes(4, byteorder='big')
-                
-                conn.sendall(length_prefix + response_bytes)
-                
-                print(f"[TEE] ✅ Response sent ({response_length} bytes)", flush=True)
-            
-            except json.JSONDecodeError as e:
-                error_response = {"error": f"Invalid JSON: {str(e)}"}
-                error_bytes = json.dumps(error_response).encode('utf-8')
-                error_length = len(error_bytes)
-                length_prefix = error_length.to_bytes(4, byteorder='big')
-                conn.sendall(length_prefix + error_bytes)
-            
-            # Close connection
-            conn.close()
-        
-        except Exception as e:
-            print(f"[TEE] ❌ Connection error: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
+    try:
+        _serve_vsock_connections(sock)
+    finally:
+        sock.close()
 
 
 # ============================================================================

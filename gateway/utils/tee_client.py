@@ -58,7 +58,9 @@ class TEEClient:
         """
         self.cid = cid
         self.port = port
-        self._socket: Optional[socket.socket] = None
+        # Only CID discovery is shared mutable state. Each RPC owns its socket
+        # so concurrent callers cannot close or overwrite another request's
+        # transport.
         self._lock = asyncio.Lock()
     
     async def _get_enclave_cid(self) -> Optional[int]:
@@ -95,40 +97,70 @@ class TEEClient:
             print(f"❌ Failed to get enclave CID: {e}")
             return None
     
-    async def _ensure_connected(self):
+    async def _resolved_cid(self) -> int:
         """
-        Ensure vsock connection is established.
-        
-        Note: Always creates a fresh connection since enclave closes socket after each RPC.
-        
-        Raises:
-            RuntimeError: If enclave is not running or connection fails
+        Resolve the enclave CID once without serializing independent RPCs.
         """
         async with self._lock:
-            # If no CID provided, auto-detect
             if self.cid is None:
                 self.cid = await self._get_enclave_cid()
                 if self.cid is None:
                     raise RuntimeError("No enclave running - cannot connect")
-            
-            # Always close existing socket and create fresh connection
-            # (Enclave closes socket after each RPC)
-            if self._socket is not None:
-                try:
-                    self._socket.close()
-                except:
-                    pass
-                self._socket = None
-            
-            # Create fresh vsock socket
+            return int(self.cid)
+
+    def _send_rpc_blocking(
+        self,
+        *,
+        cid: int,
+        request_bytes: bytes,
+    ) -> Dict:
+        """Perform one complete RPC on one socket owned by this call."""
+
+        rpc_socket: Optional[socket.socket] = None
+        try:
             try:
-                self._socket = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
-                self._socket.settimeout(30.0)  # 30 second timeout (NSM hardware call can be slow)
-                self._socket.connect((self.cid, self.port))
-                print(f"✅ Connected to enclave via vsock (CID {self.cid}, port {self.port})")
-            except Exception as e:
-                self._socket = None
-                raise RuntimeError(f"Failed to connect to enclave: {e}")
+                rpc_socket = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
+                rpc_socket.settimeout(30.0)
+                rpc_socket.connect((cid, self.port))
+                print(
+                    f"✅ Connected to enclave via vsock (CID {cid}, port {self.port})"
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Failed to connect to enclave: {exc}") from exc
+
+            request_length = len(request_bytes)
+            rpc_socket.sendall(
+                request_length.to_bytes(4, byteorder="big") + request_bytes
+            )
+
+            response_length_bytes = _recv_exact(rpc_socket, 4)
+            if len(response_length_bytes) != 4:
+                raise RuntimeError("Failed to read response length")
+
+            response_length = int.from_bytes(
+                response_length_bytes, byteorder="big"
+            )
+            if response_length < 2 or response_length > MAX_RPC_RESPONSE_BYTES:
+                raise RuntimeError("RPC response size is outside the allowed range")
+
+            response_bytes = _recv_exact(rpc_socket, response_length)
+            if len(response_bytes) != response_length:
+                raise RuntimeError("Connection closed by enclave")
+
+            response = json.loads(response_bytes.decode("utf-8"))
+            if response.get("status") == "error" or "error" in response:
+                raise RuntimeError(f"Enclave error: {response.get('error')}")
+            return response.get("result", {})
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"RPC failed: {exc}") from exc
+        finally:
+            if rpc_socket is not None:
+                try:
+                    rpc_socket.close()
+                except Exception:
+                    pass
     
     async def _send_rpc(self, method: str, params: Optional[Dict] = None) -> Dict:
         """
@@ -148,8 +180,6 @@ class TEEClient:
         Raises:
             RuntimeError: If RPC fails or enclave returns error
         """
-        await self._ensure_connected()
-        
         # Build RPC request
         request = {
             "method": method,
@@ -164,40 +194,15 @@ class TEEClient:
         request_length = len(request_bytes)
         if request_length < 2 or request_length > MAX_RPC_REQUEST_BYTES:
             raise RuntimeError("RPC request size is outside the allowed range")
-        length_prefix = request_length.to_bytes(4, byteorder='big')
-        
-        try:
-            self._socket.sendall(length_prefix + request_bytes)
-            
-            # Receive response (read length prefix first)
-            response_length_bytes = _recv_exact(self._socket, 4)
-            if len(response_length_bytes) != 4:
-                raise RuntimeError("Failed to read response length")
-            
-            response_length = int.from_bytes(response_length_bytes, byteorder='big')
-            if response_length < 2 or response_length > MAX_RPC_RESPONSE_BYTES:
-                raise RuntimeError("RPC response size is outside the allowed range")
-            
-            # Read response body
-            response_bytes = _recv_exact(self._socket, response_length)
-            if len(response_bytes) != response_length:
-                raise RuntimeError("Connection closed by enclave")
-            
-            # Parse response
-            response = json.loads(response_bytes.decode('utf-8'))
-            
-            # Check status
-            if response.get("status") == "error" or "error" in response:
-                raise RuntimeError(f"Enclave error: {response.get('error')}")
-            
-            return response.get("result", {})
-        
-        except Exception as e:
-            # Close socket on error (will reconnect on next call)
-            if self._socket:
-                self._socket.close()
-                self._socket = None
-            raise RuntimeError(f"RPC failed: {e}")
+        cid = await self._resolved_cid()
+        # Socket calls are blocking. Keeping them off the event loop allows
+        # maintenance-lease heartbeats and cancellation logic to keep running
+        # while an enclave request is in flight.
+        return await asyncio.to_thread(
+            self._send_rpc_blocking,
+            cid=cid,
+            request_bytes=request_bytes,
+        )
     
     async def append_event(self, event: Dict) -> Dict:
         """
@@ -873,10 +878,7 @@ class TEEClient:
         )
     
     def close(self):
-        """Close vsock connection."""
-        if self._socket:
-            self._socket.close()
-            self._socket = None
+        """Compatibility no-op: RPC sockets are call-scoped and self-closing."""
 
 
 # Fixed CIDs are part of the measured V2 topology. Existing event/checkpoint

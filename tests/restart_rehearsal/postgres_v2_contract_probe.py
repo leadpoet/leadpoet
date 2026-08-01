@@ -65,7 +65,21 @@ from tests.restart_rehearsal.sanitized_weight_fixture import (
 ALLOCATION_CANDIDATE_MIGRATION = (
     "33-research-lab-candidate-evaluation-queue.sql"
 )
+ALLOCATION_AUTO_RESEARCH_MIGRATION = (
+    "34-research-lab-auto-research-loop-events.sql"
+)
 ALLOCATION_SCHEMA_MIGRATION = "35-research-lab-emission-allocator.sql"
+ALLOCATION_SCORING_AUDIT_MIGRATION = (
+    "36-research-lab-gateway-scoring-audit.sql"
+)
+ALLOCATION_PROMOTION_MIGRATION = (
+    "37-research-lab-promotion-and-public-benchmarks.sql"
+)
+ALLOCATION_IMAGE_BUILD_MIGRATIONS = (
+    "46-research-lab-code-edit-candidate-images.sql",
+    "47-research-lab-disable-new-patch-candidates.sql",
+    "52-research-lab-image-build-candidate-current-view.sql",
+)
 ALLOCATION_CONTAINMENT_MIGRATION = (
     "87-research-lab-source-add-allocation-containment.sql"
 )
@@ -1683,9 +1697,45 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             scripts / ALLOCATION_CANDIDATE_MIGRATION
         )
         applied.append(ALLOCATION_CANDIDATE_MIGRATION)
-        database.psql(GIT_TREE_CANDIDATE_PREREQUISITES_SQL)
+        database.apply_migration(
+            scripts / ALLOCATION_AUTO_RESEARCH_MIGRATION
+        )
+        applied.append(ALLOCATION_AUTO_RESEARCH_MIGRATION)
         database.apply_migration(scripts / ALLOCATION_SCHEMA_MIGRATION)
         applied.append(ALLOCATION_SCHEMA_MIGRATION)
+        for name in (
+            ALLOCATION_SCORING_AUDIT_MIGRATION,
+            ALLOCATION_PROMOTION_MIGRATION,
+            *ALLOCATION_IMAGE_BUILD_MIGRATIONS,
+        ):
+            database.apply_migration(scripts / name)
+            applied.append(name)
+        candidate_view_columns = {
+            row.strip()
+            for row in database.psql(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'research_lab_candidate_evaluation_current';
+                """,
+                tuples_only=True,
+            ).stdout.splitlines()
+            if row.strip()
+        }
+        required_candidate_view_columns = {
+            "candidate_kind",
+            "candidate_model_manifest_hash",
+            "candidate_model_manifest_doc",
+            "candidate_source_diff_hash",
+            "candidate_build_doc",
+        }
+        if not required_candidate_view_columns.issubset(candidate_view_columns):
+            raise PostgresContractProbeError(
+                "candidate evaluation view is missing image-build columns: %s"
+                % sorted(required_candidate_view_columns - candidate_view_columns)
+            )
+        database.psql(GIT_TREE_CANDIDATE_PREREQUISITES_SQL)
         for name in MIGRATIONS_BEFORE_TRANSPORT_FIX:
             database.apply_migration(scripts / name)
             applied.append(name)

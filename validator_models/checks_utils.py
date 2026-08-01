@@ -114,7 +114,7 @@ if HTTP_PROXY_URL:
         'http': HTTP_PROXY_URL,
         'https': HTTPS_PROXY_URL or HTTP_PROXY_URL
     }
-    print(f"🌐 Proxy enabled: {HTTP_PROXY_URL[:50]}... (all API requests will use this IP)")
+    print("🌐 Proxy enabled (credentials redacted; all API requests will use it)")
 
 def get_aiohttp_connector():
     """

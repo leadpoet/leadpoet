@@ -132,9 +132,6 @@ class TEEClient:
                 rpc_socket = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
                 rpc_socket.settimeout(30.0)
                 rpc_socket.connect((cid, self.port))
-                print(
-                    f"✅ Connected to enclave via vsock (CID {cid}, port {self.port})"
-                )
             except Exception as exc:
                 raise RuntimeError(f"Failed to connect to enclave: {exc}") from exc
 

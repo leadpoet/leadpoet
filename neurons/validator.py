@@ -273,6 +273,28 @@ def _shared_block_write_due(owner: Any, *, now: Optional[float] = None) -> bool:
     return True
 
 
+# The fulfillment heartbeat is written at each observed progress boundary.
+# Its stale threshold must be longer than one fully legal polling iteration:
+# a bounded chain read, a bounded workflow call, the normal poll interval, and
+# a small scheduling margin.  The previous 120-second threshold contradicted
+# the workflow's own 300-second guard and produced false restart instructions
+# during ordinary gateway timeouts.
+_FULFILLMENT_EPOCH_READ_TIMEOUT_SECONDS = 15.0
+_FULFILLMENT_WORKFLOW_TIMEOUT_SECONDS = 300.0
+_FULFILLMENT_POLL_INTERVAL_SECONDS = 30.0
+_FULFILLMENT_HEARTBEAT_SCHEDULING_MARGIN_SECONDS = 30.0
+_FULFILLMENT_HEARTBEAT_STALE_SECONDS = (
+    _FULFILLMENT_EPOCH_READ_TIMEOUT_SECONDS
+    + _FULFILLMENT_WORKFLOW_TIMEOUT_SECONDS
+    + _FULFILLMENT_POLL_INTERVAL_SECONDS
+    + _FULFILLMENT_HEARTBEAT_SCHEDULING_MARGIN_SECONDS
+)
+
+
+def _fulfillment_heartbeat_is_stale(age_seconds: float) -> bool:
+    return float(age_seconds) > _FULFILLMENT_HEARTBEAT_STALE_SECONDS
+
+
 def _canonical_sdk_weight_vector(weight_result: Mapping[str, Any]):
     """Return the exact UID-sorted float vector authorized by the enclave."""
 
@@ -2574,7 +2596,8 @@ class Validator(BaseValidatorNeuron):
             #   * queries current_block synchronously each tick and
             #     passes it to process_fulfillment_workflow via
             #     current_block_override
-            #   * wraps each workflow call in asyncio.wait_for(timeout=300)
+            #   * wraps each workflow call in asyncio.wait_for using the
+            #     shared bounded workflow timeout
             #     so a hung tick can't permanently freeze the loop
             #   * sleeps 30s between ticks, checks self.should_exit for
             #     clean shutdown
@@ -2595,12 +2618,40 @@ class Validator(BaseValidatorNeuron):
                         thread_loop.close()
                         return
 
-                    # Heartbeat path — updated at the end of every tick.
-                    # External watchdog (or operator) can check the file
-                    # mtime; stale >2min ⇒ polling thread is wedged.
+                    # Heartbeat path — updated at every progress boundary and
+                    # at the end of every tick. External watchdogs can use the
+                    # timestamp without mistaking an allowed blocking gateway
+                    # request for a wedged thread.
                     # See validator_models/containerizing for the in-container
                     # mount point — this dir is bind-mounted to the host.
                     _ff_heartbeat = Path("validator_weights") / "ff_poll_heartbeat"
+
+                    def _record_fulfillment_progress() -> None:
+                        heartbeat_tmp = None
+                        try:
+                            _ff_heartbeat.parent.mkdir(parents=True, exist_ok=True)
+                            heartbeat_tmp = _ff_heartbeat.with_name(
+                                f".{_ff_heartbeat.name}.{os.getpid()}.tmp"
+                            )
+                            heartbeat_tmp.write_text(str(int(time.time())))
+                            os.replace(heartbeat_tmp, _ff_heartbeat)
+                        except Exception as e:
+                            print(
+                                "⚠️  Fulfillment heartbeat write failed "
+                                f"(non-fatal): {e}"
+                            )
+                            try:
+                                if heartbeat_tmp is not None:
+                                    heartbeat_tmp.unlink()
+                            except Exception:
+                                pass
+
+                    # Synchronous gateway calls inside the fulfillment method
+                    # report safe phase boundaries through this callback. It
+                    # changes no delivery, retry, or idempotency behavior.
+                    self._fulfillment_progress_heartbeat = (
+                        _record_fulfillment_progress
+                    )
 
                     async def _safe_epoch_read(timeout: float = 15.0):
                         """Read one coherent thread-local epoch state with a hard timeout.
@@ -2636,8 +2687,11 @@ class Validator(BaseValidatorNeuron):
                     async def _poll():
                         consec_block_timeouts = 0
                         while not self.should_exit:
+                            _record_fulfillment_progress()
                             try:
-                                current_epoch_state = await _safe_epoch_read(timeout=15.0)
+                                current_epoch_state = await _safe_epoch_read(
+                                    timeout=_FULFILLMENT_EPOCH_READ_TIMEOUT_SECONDS
+                                )
                             except Exception as e:
                                 print(f"⚠️  Fulfillment tick: block query failed: {e}")
                                 current_epoch_state = None
@@ -2652,47 +2706,27 @@ class Validator(BaseValidatorNeuron):
                             else:
                                 consec_block_timeouts = 0
                                 try:
+                                    _record_fulfillment_progress()
                                     await asyncio.wait_for(
                                         self.process_fulfillment_workflow(
                                             current_epoch_state=current_epoch_state,
                                         ),
-                                        timeout=300,
+                                        timeout=_FULFILLMENT_WORKFLOW_TIMEOUT_SECONDS,
                                     )
                                 except asyncio.TimeoutError:
                                     print(
-                                        "⚠️  Fulfillment tick exceeded 300s guard — "
+                                        "⚠️  Fulfillment tick exceeded bounded guard — "
                                         "skipping this tick, will retry next interval"
                                     )
                                 except Exception as e:
                                     print(f"⚠️  Fulfillment tick error (non-fatal): {e}")
 
-                            # Heartbeat written on every iteration — including
-                            # block-timeout iterations — so file mtime proves
-                            # "thread reached end of tick".  Stale mtime is the
-                            # ONLY external signal that the thread has wedged.
-                            try:
-                                _ff_heartbeat.parent.mkdir(parents=True, exist_ok=True)
-                                # Replace instead of rewriting in place: the
-                                # heartbeat file can be owned by another
-                                # container user on the shared mount, and
-                                # os.replace only needs directory write
-                                # permission. It is also atomic, so the
-                                # watchdog never reads a partial value.
-                                _ff_heartbeat_tmp = _ff_heartbeat.with_name(
-                                    f".{_ff_heartbeat.name}.{os.getpid()}.tmp"
-                                )
-                                _ff_heartbeat_tmp.write_text(str(int(time.time())))
-                                os.replace(_ff_heartbeat_tmp, _ff_heartbeat)
-                            except Exception as e:
-                                print(f"⚠️  Fulfillment heartbeat write failed (non-fatal): {e}")
-                                try:
-                                    if _ff_heartbeat_tmp.exists():
-                                        _ff_heartbeat_tmp.unlink()
-                                except Exception:
-                                    pass
+                            _record_fulfillment_progress()
 
                             try:
-                                await asyncio.sleep(30)
+                                await asyncio.sleep(
+                                    _FULFILLMENT_POLL_INTERVAL_SECONDS
+                                )
                             except asyncio.CancelledError:
                                 break
 
@@ -2748,8 +2782,9 @@ class Validator(BaseValidatorNeuron):
                     #
                     # Watchdog: the polling thread writes a heartbeat file
                     # at the end of every tick.  We check its mtime once
-                    # per main-loop iteration; stale >120s ⇒ thread is
-                    # wedged (e.g. subtensor RPC hang).  We log loudly so
+                    # per main-loop iteration. The threshold covers one full
+                    # legal fulfillment tick; beyond it the thread is likely
+                    # wedged (e.g. an uncapped RPC hang). We log loudly so
                     # CloudWatch alerts trigger; we do NOT auto-restart the
                     # thread here (Python threads can't be killed cleanly,
                     # so recreating a thread while the old one may still
@@ -2762,14 +2797,18 @@ class Validator(BaseValidatorNeuron):
                             and hb_path.exists()
                         ):
                             stale_s = time.time() - int(hb_path.read_text().strip())
-                            if stale_s > 120 and not getattr(self, "_ff_stale_alerted", False):
+                            if _fulfillment_heartbeat_is_stale(
+                                stale_s
+                            ) and not getattr(self, "_ff_stale_alerted", False):
                                 print(
                                     f"🚨 Fulfillment polling thread heartbeat stale "
                                     f"({stale_s:.0f}s old) — thread is likely wedged. "
                                     f"Restart leadpoet-validator-main container to recover."
                                 )
                                 self._ff_stale_alerted = True
-                            elif stale_s <= 120 and getattr(self, "_ff_stale_alerted", False):
+                            elif not _fulfillment_heartbeat_is_stale(
+                                stale_s
+                            ) and getattr(self, "_ff_stale_alerted", False):
                                 print(
                                     f"✅ Fulfillment polling thread heartbeat recovered "
                                     f"({stale_s:.0f}s old)"
@@ -6094,6 +6133,9 @@ class Validator(BaseValidatorNeuron):
 
         fulfillment_worker_ids = detect_fulfillment_worker_ids()
         num_workers = len(fulfillment_worker_ids)
+        progress_heartbeat = getattr(
+            self, "_fulfillment_progress_heartbeat", None
+        )
 
         # ═══════════════════════════════════════════════════════════════════
         # PHASE 1: DISTRIBUTE — fetch scoring-ready reveals, write work files
@@ -6115,6 +6157,9 @@ class Validator(BaseValidatorNeuron):
             try:
                 from Leadpoet.utils.cloud_db import gateway_get_fulfillment_reveals
 
+                if callable(progress_heartbeat):
+                    progress_heartbeat()
+
                 # Reveals fetch may raise RuntimeError after exhausting its
                 # 5 retries.  Catch it here and return from Phase 1 cleanly
                 # so the next 30s polling tick retries the fetch.  A true
@@ -6123,6 +6168,8 @@ class Validator(BaseValidatorNeuron):
                 # ready requests" branch below.
                 try:
                     data = gateway_get_fulfillment_reveals(self.wallet)
+                    if callable(progress_heartbeat):
+                        progress_heartbeat()
                 except RuntimeError as e:
                     bt.logging.warning(
                         f"Fulfillment reveals unreachable after retries — "
@@ -6315,6 +6362,8 @@ class Validator(BaseValidatorNeuron):
                                 if not leads_raw:
                                     continue
                                 try:
+                                    if callable(progress_heartbeat):
+                                        progress_heartbeat()
                                     results = await score_miner_submission(leads_raw, icp_details)
                                     scores_payload = format_scores_for_gateway(
                                         miner_hk, lead_ids, results,
@@ -6327,6 +6376,8 @@ class Validator(BaseValidatorNeuron):
                                             "gateway rejected fulfillment scores "
                                             "without raising an exception"
                                         )
+                                    if callable(progress_heartbeat):
+                                        progress_heartbeat()
                                     print(f"   ✅ Inline: submitted {len(scores_payload)} scores for {miner_hk[:8]}...")
                                 except Exception as e:
                                     print(f"   ❌ Inline scoring failed for {miner_hk[:8]}: {e}")
@@ -6402,6 +6453,8 @@ class Validator(BaseValidatorNeuron):
             any_submit_failed = False
 
             for work_file in sorted(ready):
+                if callable(progress_heartbeat):
+                    progress_heartbeat()
                 results_file = _results_path_for(work_file)
 
                 # Parse worker id from filename for logging
@@ -6490,6 +6543,8 @@ class Validator(BaseValidatorNeuron):
                         print(f"     {icon} Lead {idx+1}: score={sr.final_score:.1f} [{reason}]")
 
                     try:
+                        if callable(progress_heartbeat):
+                            progress_heartbeat()
                         scores_payload = format_scores_for_gateway(
                             miner_hk, lead_ids, results,
                             request_id=request_id, submission_id=sub_id,
@@ -6501,6 +6556,8 @@ class Validator(BaseValidatorNeuron):
                                 "gateway rejected fulfillment scores "
                                 "without raising an exception"
                             )
+                        if callable(progress_heartbeat):
+                            progress_heartbeat()
                         print(f"   ✅ Submitted {len(scores_payload)} scores for miner {miner_hk[:8]}...")
                     except Exception as e:
                         worker_all_ok = False
@@ -10922,7 +10979,7 @@ def run_dedicated_qualification_worker(config):
         os.environ["HTTP_PROXY"] = proxy_url
         os.environ["HTTPS_PROXY"] = proxy_url
         print(f"🌐 Using proxy for qualification worker {qual_container_id}")
-        print(f"   Proxy: {proxy_url[:50]}...")
+        print("   Proxy: configured (credentials redacted)")
     else:
         print(f"⚠️ No proxy configured for qualification worker {qual_container_id}")
         print(f"   Expected env var: {proxy_var}")
@@ -11647,7 +11704,7 @@ def run_dedicated_fulfillment_worker(config):
         os.environ["HTTP_PROXY"] = proxy_url
         os.environ["HTTPS_PROXY"] = proxy_url
         print(f"🌐 Using proxy for fulfillment worker {fulfillment_container_id}")
-        print(f"   Proxy: {proxy_url[:50]}...")
+        print("   Proxy: configured (credentials redacted)")
     else:
         print(f"⚠️ No proxy configured for fulfillment worker {fulfillment_container_id}")
         print(f"   Expected env var: {proxy_var}")

@@ -18,11 +18,13 @@ from gateway.research_lab.worker_autostart import (
 )
 from neurons.validator import (
     Validator,
+    _FULFILLMENT_HEARTBEAT_STALE_SECONDS,
     _ValidatorEpochState,
     _atomic_write_json_file,
     _load_fulfillment_work_file,
     _quarantine_fulfillment_work_file,
     _shared_block_write_due,
+    _fulfillment_heartbeat_is_stale,
     detect_fulfillment_worker_ids,
 )
 from qualification.scoring.fulfillment_scorer import format_scores_for_gateway
@@ -105,6 +107,45 @@ def test_shared_block_heartbeat_uses_elapsed_time_not_call_count() -> None:
     assert _shared_block_write_due(owner, now=100.0) is True
     assert _shared_block_write_due(owner, now=111.9) is False
     assert _shared_block_write_due(owner, now=112.0) is True
+
+
+def test_fulfillment_watchdog_allows_one_legal_blocking_tick() -> None:
+    assert _FULFILLMENT_HEARTBEAT_STALE_SECONDS > 300
+    assert _fulfillment_heartbeat_is_stale(127) is False
+    assert (
+        _fulfillment_heartbeat_is_stale(
+            _FULFILLMENT_HEARTBEAT_STALE_SECONDS
+        )
+        is False
+    )
+    assert (
+        _fulfillment_heartbeat_is_stale(
+            _FULFILLMENT_HEARTBEAT_STALE_SECONDS + 0.001
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_fulfillment_workflow_reports_gateway_progress_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ENABLE_FULFILLMENT", "true")
+    _clear_fulfillment_proxies(monkeypatch)
+    monkeypatch.setattr(
+        cloud_db,
+        "gateway_get_fulfillment_reveals",
+        lambda _wallet: {"requests": []},
+    )
+    beats = []
+    validator = _validator_stub(last_processed_epoch=-1)
+    validator._fulfillment_progress_heartbeat = lambda: beats.append("beat")
+
+    await Validator.process_fulfillment_workflow(validator, _epoch_state())
+
+    assert beats == ["beat", "beat"]
 
 
 def test_fulfillment_worker_detection_uses_all_configured_numeric_ids(

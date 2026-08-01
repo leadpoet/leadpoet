@@ -323,6 +323,26 @@ async def test_gateway_client_surfaces_enclave_error_without_status_field(
 
 
 @pytest.mark.asyncio
+async def test_gateway_client_does_not_log_each_successful_vsock_connection(
+    monkeypatch,
+    capsys,
+):
+    body = json.dumps({"result": {"status": "healthy"}}).encode()
+    client = gateway_client.TEEClient(cid=16)
+    rpc_socket = _RPCSocket(len(body).to_bytes(4, "big") + body)
+    monkeypatch.setattr(
+        gateway_client.socket,
+        "socket",
+        lambda *_args, **_kwargs: rpc_socket,
+    )
+
+    assert await client._send_rpc("scoring_v2_health", {}) == {
+        "status": "healthy"
+    }
+    assert "Connected to enclave via vsock" not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
 async def test_gateway_client_uses_call_scoped_sockets_for_concurrent_rpc(
     monkeypatch,
 ):

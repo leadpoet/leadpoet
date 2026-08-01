@@ -432,3 +432,20 @@ def test_validator_secret_environment_overrides_local_fallback_files() -> None:
     assert capture < main_env < docker_env < restore < first_container
     assert "destination.chmod(0o600)" in deploy
     assert 'rm -f "$INHERITED_ENV_FILE"' in deploy
+
+
+def test_validator_runtime_never_logs_proxy_userinfo() -> None:
+    deploy = (
+        ROOT / "validator_models" / "containerizing" / "deploy_dynamic.sh"
+    ).read_text(encoding="utf-8")
+    validator = (ROOT / "neurons" / "validator.py").read_text(encoding="utf-8")
+    checks = (
+        ROOT / "validator_models" / "checks_utils.py"
+    ).read_text(encoding="utf-8")
+
+    assert "Proxy: ${PROXY_URL" not in deploy
+    assert "Proxy: ${QUAL_PROXY_VALUE" not in deploy
+    assert "Proxy: ${FF_PROXY_VALUE" not in deploy
+    assert "Proxy: {proxy_url" not in validator
+    assert "Proxy enabled: {HTTP_PROXY_URL" not in checks
+    assert deploy.count("Proxy: configured (credentials redacted)") == 3

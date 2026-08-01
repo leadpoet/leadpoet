@@ -349,3 +349,38 @@ def test_repo_head_release_binds_repo_sha_and_manifest_uri(tmp_path):
         match="repo-head release commit differs",
     ):
         source.resolve(payload={"artifact": artifact.to_dict()}, context=_context())
+
+
+def test_repo_head_release_accepts_historical_missing_redundant_manifest_uri(tmp_path):
+    artifact = _artifact(tmp_path)
+    release_doc = {
+        "source": "repo_head_sync",
+        "model_artifact_hash": artifact.model_artifact_hash,
+        "private_model_manifest_hash": artifact.manifest_hash,
+        "git_commit_sha": artifact.git_commit_sha,
+        "component_registry_version": artifact.component_registry_version,
+        "scoring_adapter_version": artifact.scoring_adapter_version,
+        "repo_main_sha": artifact.git_commit_sha,
+    }
+    source = CoordinatorActiveModelSourceV2(
+        reader=_Reader(
+            {
+                "active_private_model_current": [
+                    _active_row(artifact, redacted_version_doc=release_doc)
+                ]
+            }
+        ),
+        config_supplier=lambda: SimpleNamespace(improvement_threshold_points=0.25),
+    )
+
+    result = source.resolve(
+        payload={"artifact": artifact.to_dict()}, context=_context()
+    )
+    assert result["active_model"]["lineage_kind"] == "attested_repo_head_sync"
+
+    release_doc["current_json_manifest_uri"] = "s3://wrong/manifest.json"
+    with pytest.raises(
+        CoordinatorActiveModelSourceV2Error,
+        match="repo-head release manifest URI differs",
+    ):
+        source.resolve(payload={"artifact": artifact.to_dict()}, context=_context())

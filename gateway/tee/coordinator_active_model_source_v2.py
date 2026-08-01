@@ -177,7 +177,15 @@ class CoordinatorActiveModelSourceV2:
                 raise CoordinatorActiveModelSourceV2Error(
                     "repo-head release commit differs from its artifact"
                 )
-            if str(redacted.get("current_json_manifest_uri") or "") != artifact.manifest_uri:
+            # Older repo-head sync rows predate this redundant redacted field.
+            # The authoritative row's private_model_manifest_uri was already
+            # matched to the signed artifact above, so absence is compatible;
+            # a conflicting stored value remains a fail-closed mismatch.
+            current_json_manifest_uri = redacted.get("current_json_manifest_uri")
+            if (
+                current_json_manifest_uri is not None
+                and str(current_json_manifest_uri) != artifact.manifest_uri
+            ):
                 raise CoordinatorActiveModelSourceV2Error(
                     "repo-head release manifest URI differs"
                 )

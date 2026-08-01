@@ -2361,7 +2361,7 @@ class ResearchLabHostedWorker:
                 self._champion_status_reconcile_monotonic = now_monotonic
                 try:
                     await reconcile_champion_reward_statuses(
-                        netuid=int(self.config.netuid),
+                        netuid=int(os.getenv("BITTENSOR_NETUID", "71")),
                         actor_ref=self.worker_ref,
                         dry_run=False,
                     )

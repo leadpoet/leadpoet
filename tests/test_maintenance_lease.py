@@ -245,7 +245,7 @@ async def test_heartbeat_fails_closed_when_renewal_is_lost() -> None:
 @pytest.mark.asyncio
 async def test_nonzero_hosted_lease_holder_runs_snapshot_refresh(monkeypatch) -> None:
     worker = object.__new__(hosted.ResearchLabHostedWorker)
-    worker.config = SimpleNamespace(hosted_worker_index=7, netuid=71)
+    worker.config = SimpleNamespace(hosted_worker_index=7)
     worker.tree_policy = SimpleNamespace(mode="active")
     worker.worker_ref = "hosted-worker-8"
     worker._holds_maintenance_lease = True
@@ -263,14 +263,22 @@ async def test_nonzero_hosted_lease_holder_runs_snapshot_refresh(monkeypatch) ->
     monkeypatch.setattr(hosted, "reconcile_active_private_model_lineage", noop)
     monkeypatch.setattr(hosted, "maybe_refresh_dev_snapshot", snapshot)
     monkeypatch.setattr(hosted, "reconcile_pending_champion_rewards", noop)
-    monkeypatch.setattr(hosted, "reconcile_champion_reward_statuses", noop)
+    async def reconcile_statuses(**kwargs: Any) -> None:
+        observed["netuid"] = kwargs["netuid"]
+
+    monkeypatch.setenv("BITTENSOR_NETUID", "71")
+    monkeypatch.setattr(hosted, "reconcile_champion_reward_statuses", reconcile_statuses)
 
     from gateway.research_lab import trajectory_projector
 
     monkeypatch.setattr(trajectory_projector, "projector_enabled", lambda: False)
     await worker._run_periodic_reconciles()
 
-    assert observed == {"worker_index": 0, "tree_policy": worker.tree_policy}
+    assert observed == {
+        "worker_index": 0,
+        "tree_policy": worker.tree_policy,
+        "netuid": 71,
+    }
     observed.clear()
     worker._holds_maintenance_lease = False
     await worker._run_periodic_reconciles()

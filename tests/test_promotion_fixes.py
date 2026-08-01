@@ -685,6 +685,7 @@ async def test_repo_head_sync_registers_current_json_with_db_safe_doc(store, mon
     version_doc = store.version_writes[0]["redacted_version_doc"]
     _assert_db_doc_safe(version_doc)
     assert version_doc["repo_branch"] == DEFAULT_PRIVATE_REPO_BRANCH
+    assert version_doc["current_json_manifest_uri"] == current_artifact.manifest_uri
     assert version_doc["image_ref_hash"].startswith("sha256:")
     assert "image_digest" not in json.dumps(version_doc, sort_keys=True, default=str)
 

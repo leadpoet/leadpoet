@@ -1013,6 +1013,7 @@ async def sync_active_model_to_repo_head(
                 repo_branch=branch_name,
                 repo_main_sha=repo_main_sha,
                 current_json_pointer_uri=config.private_model_manifest_uri,
+                current_json_manifest_uri=current_artifact.manifest_uri,
                 previous_active_model_version_id=(
                     str(active_row.get("private_model_version_id") or "") if active_row else ""
                 ),

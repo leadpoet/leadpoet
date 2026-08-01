@@ -52,7 +52,7 @@
       "symbol": "derive_ancestry_lineage_id_v2"
     },
     {
-      "ast_sha256": "sha256:ed12df10098d7a7542341986f4c74076290689c45d5cda032853a5ed988ba0f2",
+      "ast_sha256": "sha256:e1f55ae88ed3f43e024d30e06cd4d66b48a5578ec4354d639952697d82322bba",
       "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
       "symbol": "issue_ancestry_certificate_v2"
     },
@@ -62,7 +62,7 @@
       "symbol": "project_receipt_graph_v2"
     },
     {
-      "ast_sha256": "sha256:05da04f74d58b94953fb2afbfa1cd5dcee05c336bab3734020379fb40f33fa61",
+      "ast_sha256": "sha256:0b22a303e55287575aee9de68ca8083651a1c49c968cb18450136e9160e49b32",
       "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
       "symbol": "validate_ancestry_certificate_v2"
     },
@@ -87,7 +87,7 @@
       "symbol": "validate_ancestry_policy_v2"
     },
     {
-      "ast_sha256": "sha256:fee5a3e62da9294b46d6baef19c4577c5dfaa7a89a352199ea0841918338c4e0",
+      "ast_sha256": "sha256:92cb949b3777209bb838f18ffdf0c376e025a7b89eb6390804334a1da85a848f",
       "path": "leadpoet_canonical/ancestry_checkpoint_v2.py",
       "symbol": "validate_ancestry_projection_v2"
     },
@@ -572,7 +572,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:8c0abe27da7591eda92eabec44a7559db4af3f62c2711753648d7f43c076053d",
-  "protected_source_commit": "978c7677db00c416f1aaf1f9e7f66ffc9395b46d",
+  "manifest_hash": "sha256:f7577763998ad50607ba5fea0fa74faf92d088c02fdbb11d813fe124b64ba345",
+  "protected_source_commit": "3c6ba261e3c35ee597c1daf95f8b56d1c1ad8e10",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

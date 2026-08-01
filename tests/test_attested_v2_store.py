@@ -1120,10 +1120,18 @@ async def test_v2_batch_graph_loader_splits_only_aggregate_row_limit(
             }
         }
 
+    async def _no_checkpoints(*_args, **_kwargs):
+        return {}
+
     monkeypatch.setattr(
         attested_v2_store,
         "_load_receipt_graph_batch_v2",
         _load_batch,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_checkpointed_receipt_graphs_v2",
+        _no_checkpoints,
     )
 
     loaded = await attested_v2_store.load_receipt_graphs_v2(roots)
@@ -1152,10 +1160,18 @@ async def test_v2_batch_graph_loader_keeps_single_graph_row_limit_fail_closed(
             "V2 receipt graph exceeds row limit"
         )
 
+    async def _no_checkpoints(*_args, **_kwargs):
+        return {}
+
     monkeypatch.setattr(
         attested_v2_store,
         "_load_receipt_graph_batch_v2",
         _load_batch,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_checkpointed_receipt_graphs_v2",
+        _no_checkpoints,
     )
 
     with pytest.raises(

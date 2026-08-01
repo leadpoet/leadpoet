@@ -33,6 +33,11 @@ does not activate this override.
 `origin/main` is authoritative. Open PRs, old worktrees, and copied files are
 not.
 
+The canonical local checkout is
+`/Users/pranav/Downloads/Election_Analysis/Bittensor-subnet`. A clean worktree
+may be used to protect concurrent work, but synchronizing or pushing from that
+worktree does **not** synchronize the canonical checkout.
+
 Before editing and again before committing or pushing:
 
 ```bash
@@ -50,8 +55,21 @@ git log HEAD..origin/main --oneline
 - Before push, fetch again. Integrate upstream safely and rerun affected fast
   checks. Never replace a newer remote file with a stale local copy.
 - The task commit may contain only reviewed task paths.
-- After push, fetch and verify `HEAD == origin/main`, no tracked diff remains,
-  and the canonical checkout contains every tracked `origin/main` path.
+- After every push, return to the canonical checkout, fetch `origin`, and
+  synchronize it to the newly pushed `origin/main` with `git pull --ff-only`
+  when its tracked worktree is clean and it has no local-only commits. This is
+  mandatory before reporting the task complete or sending the final response.
+- Post-push verification must run in the canonical checkout, not merely in the
+  publishing worktree. Verify `HEAD == origin/main`, `git diff origin/main --`
+  is empty, every path from `git ls-tree -r --name-only origin/main` exists
+  locally, and no tracked local path is absent from `origin/main`.
+- Preserve all untracked/local-only files during canonical synchronization;
+  never add or push them merely because they exist locally.
+- If tracked edits or local-only commits in the canonical checkout prevent a
+  safe fast-forward, do not overwrite, stash, reset, clean, or rebase them.
+  Report the exact blocking paths/commits immediately and do not claim local
+  synchronization succeeded. The task remains incomplete until the canonical
+  checkout is safely synchronized.
 
 ## Secrets and production safety
 

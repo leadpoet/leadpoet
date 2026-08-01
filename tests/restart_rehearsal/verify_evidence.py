@@ -712,7 +712,8 @@ def verify_migration_backed_database_contract(
         "post_133_provider_outcome_contract_valid",
         "pre_134_provider_outcome_head_contract_rejected",
         "post_134_provider_outcome_head_contract_valid",
-        "post_135_ancestry_checkpoint_contract_valid",
+        "post_135_active_model_replay_contract_valid",
+        "post_136_ancestry_checkpoint_contract_valid",
         "provider_outcome_append_atomic",
         "provider_outcome_contention_zero_rollback",
         "provider_outcome_conflict_head_exact",
@@ -739,7 +740,8 @@ def verify_migration_backed_database_contract(
         "132-research-lab-champion-lifetime-credit.sql",
         "133-research-lab-provider-outcome-contention-status.sql",
         "134-research-lab-provider-outcome-head-contention.sql",
-        "135-research-lab-ancestry-checkpoint-sidecars.sql",
+        "135-research-lab-active-model-result-replay.sql",
+        "136-research-lab-ancestry-checkpoint-sidecars.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -750,7 +752,7 @@ def verify_migration_backed_database_contract(
         or set(checks) != required_checks
         or any(checks[name] is not True for name in required_checks)
         or not isinstance(applied_migrations, list)
-        or applied_migrations[-6:] != expected_final_migrations
+        or applied_migrations[-7:] != expected_final_migrations
     ):
         raise SystemExit(
             "migration-backed PostgreSQL contract evidence is incomplete"

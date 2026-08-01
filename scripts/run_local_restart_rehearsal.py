@@ -18,8 +18,10 @@ the rehearsal contract may be implemented locally.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 import fcntl
+from functools import partial
 import hashlib
 import json
 import os
@@ -1347,6 +1349,9 @@ def _run_profile(args: argparse.Namespace) -> int:
                         run_from, run_candidate = candidate_sha, from_sha
                     elif ordinal == 2:
                         run_from, run_candidate = from_sha, candidate_sha
+                    component_actions: list[
+                        tuple[str, Callable[[], Any]]
+                    ] = []
                     for component in ("gateway", "validator"):
                         print(
                             f"Running isolated {component} restart rehearsal "
@@ -1384,41 +1389,69 @@ def _run_profile(args: argparse.Namespace) -> int:
                                 stages=stage_results,
                             )
                             continue
-                        _run_independent_stage(
-                            stage=stage,
-                            action=lambda component=component,
-                            run_from=run_from,
-                            run_candidate=run_candidate,
-                            run_transition=run_transition,
-                            ordinal=ordinal: _run_component(
-                                tag,
-                                source_root=source_root,
-                                component=component,
-                                from_sha=run_from,
-                                candidate_sha=run_candidate,
-                                transition=run_transition,
-                                evidence_root=evidence_root,
-                                drand_artifact_root=drand_artifacts[
-                                    run_candidate
-                                ],
-                                profile=args.profile,
-                                docker_platform=docker_platform,
-                                fixture_seed_root=fixture_seeds[run_candidate],
-                                from_fixture_seed_root=fixture_seeds[
-                                    run_from
-                                ],
-                                durable_fixture_seed_root=fixture_seeds[
-                                    candidate_sha
-                                ],
-                                durable_state_root=durable_state_root,
-                                durable_schema_sha=candidate_sha,
-                                run_ordinal=ordinal + 1,
-                                gateway_worker_fleet_mode=(
-                                    args.gateway_worker_fleet_mode
+                        component_actions.append(
+                            (
+                                stage,
+                                partial(
+                                    _run_component,
+                                    tag,
+                                    source_root=source_root,
+                                    component=component,
+                                    from_sha=run_from,
+                                    candidate_sha=run_candidate,
+                                    transition=run_transition,
+                                    evidence_root=evidence_root,
+                                    drand_artifact_root=drand_artifacts[
+                                        run_candidate
+                                    ],
+                                    profile=args.profile,
+                                    docker_platform=docker_platform,
+                                    fixture_seed_root=fixture_seeds[
+                                        run_candidate
+                                    ],
+                                    from_fixture_seed_root=fixture_seeds[
+                                        run_from
+                                    ],
+                                    durable_fixture_seed_root=fixture_seeds[
+                                        candidate_sha
+                                    ],
+                                    durable_state_root=durable_state_root,
+                                    durable_schema_sha=candidate_sha,
+                                    run_ordinal=ordinal + 1,
+                                    gateway_worker_fleet_mode=(
+                                        args.gateway_worker_fleet_mode
+                                    ),
                                 ),
-                            ),
-                            stages=stage_results,
+                            )
                         )
+                    if args.profile == "prepush" and len(component_actions) > 1:
+                        def run_component_stage(
+                            item: tuple[str, Callable[[], Any]],
+                        ) -> list[dict[str, Any]]:
+                            local_stages: list[dict[str, Any]] = []
+                            _run_independent_stage(
+                                stage=item[0],
+                                action=item[1],
+                                stages=local_stages,
+                            )
+                            return local_stages
+
+                        with ThreadPoolExecutor(
+                            max_workers=len(component_actions)
+                        ) as executor:
+                            futures = [
+                                executor.submit(run_component_stage, item)
+                                for item in component_actions
+                            ]
+                            for future in futures:
+                                stage_results.extend(future.result())
+                    else:
+                        for stage, action in component_actions:
+                            _run_independent_stage(
+                                stage=stage,
+                                action=action,
+                                stages=stage_results,
+                            )
             print(
                 "Running production V2 workflow against strict local "
                 f"boundaries ({args.profile})",

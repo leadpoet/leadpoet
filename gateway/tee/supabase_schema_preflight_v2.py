@@ -196,7 +196,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
-        "scripts/135-research-lab-ancestry-checkpoint-sidecars.sql",
+        "scripts/136-research-lab-ancestry-checkpoint-sidecars.sql",
         "research_lab_attested_ancestry_checkpoints_v2",
         (
             "root_receipt_hash",
@@ -213,7 +213,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
-        "scripts/135-research-lab-ancestry-checkpoint-sidecars.sql",
+        "scripts/136-research-lab-ancestry-checkpoint-sidecars.sql",
         "research_lab_attested_ancestry_activations_v2",
         (
             "lineage_id",
@@ -222,7 +222,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
-        "scripts/135-research-lab-ancestry-checkpoint-sidecars.sql",
+        "scripts/136-research-lab-ancestry-checkpoint-sidecars.sql",
         "research_lab_compact_weight_submissions_v2",
         (
             "compact_submission_hash",
@@ -236,7 +236,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
-        "scripts/135-research-lab-ancestry-checkpoint-sidecars.sql",
+        "scripts/136-research-lab-ancestry-checkpoint-sidecars.sql",
         "research_lab_compact_weight_publication_intents_v2",
         (
             "bundle_hash",
@@ -253,7 +253,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
         ),
     ),
     (
-        "scripts/135-research-lab-ancestry-checkpoint-sidecars.sql",
+        "scripts/136-research-lab-ancestry-checkpoint-sidecars.sql",
         "research_lab_compact_weight_authorities_v2",
         (
             "bundle_hash",
@@ -351,7 +351,11 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "research_lab_champion_lifetime_credit_contract_v1",
     ),
     (
-        "scripts/135-research-lab-ancestry-checkpoint-sidecars.sql",
+        "scripts/135-research-lab-active-model-result-replay.sql",
+        "research_lab_active_model_replay_contract_v2",
+    ),
+    (
+        "scripts/136-research-lab-ancestry-checkpoint-sidecars.sql",
         "persist_research_lab_ancestry_checkpoint_v2",
     ),
 )

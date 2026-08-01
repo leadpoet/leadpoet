@@ -42,6 +42,111 @@ def _sha256(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _state_hash(value: dict[str, Any]) -> str:
+    canonical = {
+        "schema_version": value.get("schema_version"),
+        "durable_schema_sha": value.get("durable_schema_sha"),
+        "revision": value.get("revision"),
+        "rows": value.get("rows"),
+    }
+    return "sha256:" + hashlib.sha256(
+        json.dumps(
+            canonical,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _verify_durable_boundary_continuity(
+    launcher_rows: list[dict[str, Any]],
+    *,
+    profile: str,
+    evidence_root: Path,
+    candidate_sha: str,
+) -> None:
+    intervals: list[tuple[tuple[int, str], tuple[int, str]]] = []
+    hashes_by_revision: dict[int, str] = {}
+    durable_mutation_observed = False
+    for row in launcher_rows:
+        durable = row.get("durable_boundary_state")
+        if (
+            not isinstance(durable, dict)
+            or durable.get("schema_version")
+            != "leadpoet.restart_rehearsal.durable_boundary_state.v1"
+            or durable.get("durable_schema_sha") != candidate_sha
+            or not isinstance(durable.get("start_revision"), int)
+            or not isinstance(durable.get("end_revision"), int)
+            or int(durable["start_revision"]) < 0
+            or int(durable["end_revision"])
+            < int(durable["start_revision"])
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(durable.get("start_state_hash") or ""),
+            )
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(durable.get("end_state_hash") or ""),
+            )
+        ):
+            raise SystemExit("launcher durable boundary evidence is invalid")
+        current_start = (
+            int(durable["start_revision"]),
+            str(durable["start_state_hash"]),
+        )
+        current_end = (
+            int(durable["end_revision"]),
+            str(durable["end_state_hash"]),
+        )
+        for revision, state_hash in (current_start, current_end):
+            previous_hash = hashes_by_revision.setdefault(revision, state_hash)
+            if previous_hash != state_hash:
+                raise SystemExit(
+                    "durable boundary revision has conflicting state hashes"
+                )
+        intervals.append((current_start, current_end))
+        durable_mutation_observed = (
+            durable_mutation_observed or current_end != current_start
+        )
+
+    if not intervals or min(start[0] for start, _ in intervals) != 0:
+        raise SystemExit("durable boundary state did not start cleanly")
+
+    if profile == "prepush":
+        final_state = _load(
+            evidence_root / "durable-boundary-state/postgrest-state.json"
+        )
+        final_revision = final_state.get("revision")
+        final_hash = final_state.get("state_hash")
+        if (
+            final_state.get("schema_version")
+            != "leadpoet.local_postgrest_durable_state.v1"
+            or final_state.get("durable_schema_sha") != candidate_sha
+            or not isinstance(final_revision, int)
+            or final_revision < 0
+            or not isinstance(final_hash, str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", final_hash)
+            or final_hash != _state_hash(final_state)
+        ):
+            raise SystemExit("final durable boundary state is invalid")
+        latest_observed = max(end for _, end in intervals)
+        if (final_revision, final_hash) != latest_observed:
+            raise SystemExit(
+                "concurrent durable boundary state did not survive activation"
+            )
+    else:
+        previous_end: tuple[int, str] | None = None
+        for current_start, current_end in intervals:
+            if previous_end is not None and current_start != previous_end:
+                raise SystemExit(
+                    "durable boundary state did not survive activation"
+                )
+            previous_end = current_end
+
+    if not durable_mutation_observed:
+        raise SystemExit("durable boundary state was not exercised")
+
+
 def _launcher_path(
     root: Path,
     ordinal: int,
@@ -145,60 +250,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     candidate_postgres_contract_sha256 = next(
         iter(postgres_contracts_by_schema[args.candidate_sha])
     )
-    previous_durable_end: tuple[int, str] | None = None
-    durable_mutation_observed = False
-    for index, row in enumerate(launcher_rows):
-        durable = row.get("durable_boundary_state")
-        if (
-            not isinstance(durable, dict)
-            or durable.get("schema_version")
-            != "leadpoet.restart_rehearsal.durable_boundary_state.v1"
-            or durable.get("durable_schema_sha") != args.candidate_sha
-            or not isinstance(durable.get("start_revision"), int)
-            or not isinstance(durable.get("end_revision"), int)
-            or int(durable["start_revision"]) < 0
-            or int(durable["end_revision"])
-            < int(durable["start_revision"])
-            or not re.fullmatch(
-                r"sha256:[0-9a-f]{64}",
-                str(durable.get("start_state_hash") or ""),
-            )
-            or not re.fullmatch(
-                r"sha256:[0-9a-f]{64}",
-                str(durable.get("end_state_hash") or ""),
-            )
-        ):
-            raise SystemExit(
-                "launcher durable boundary evidence is invalid"
-            )
-        current_start = (
-            int(durable["start_revision"]),
-            str(durable["start_state_hash"]),
-        )
-        if index == 0 and current_start[0] != 0:
-            raise SystemExit(
-                "durable boundary state did not start cleanly"
-            )
-        if (
-            previous_durable_end is not None
-            and current_start != previous_durable_end
-        ):
-            raise SystemExit(
-                "durable boundary state did not survive activation"
-            )
-        current_end = (
-            int(durable["end_revision"]),
-            str(durable["end_state_hash"]),
-        )
-        durable_mutation_observed = (
-            durable_mutation_observed
-            or current_end != current_start
-        )
-        previous_durable_end = current_end
-    if not durable_mutation_observed:
-        raise SystemExit(
-            "durable boundary state was not exercised"
-        )
+    _verify_durable_boundary_continuity(
+        launcher_rows,
+        profile=args.profile,
+        evidence_root=args.evidence_root,
+        candidate_sha=args.candidate_sha,
+    )
 
     workflow = _load(workflow_path)
     expected_epochs = 1 if args.profile == "prepush" else 100

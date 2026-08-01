@@ -2218,6 +2218,9 @@ class ResearchLabHostedWorker:
             reason = "tree_snapshot_not_ready:" + str(
                 readiness.get("reason") or "unknown"
             )
+            error_code = str(readiness.get("error_code") or "")
+            if error_code:
+                reason += ":error_code=" + error_code
         elif float(readiness.get("snapshot_age_seconds") or 0.0) > 14 * 86400:
             reason = "tree_snapshot_stale"
         elif str(readiness.get("champion_image_digest") or "") != str(

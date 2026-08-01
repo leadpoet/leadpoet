@@ -288,6 +288,49 @@ async def test_tree_preflight_defers_before_paid_run_processing(monkeypatch):
     assert "pointer_missing" in outcome.error
 
 
+@pytest.mark.asyncio
+async def test_tree_snapshot_preflight_surfaces_safe_store_error_code(
+    monkeypatch,
+):
+    monkeypatch.setenv("RESEARCH_LAB_TREE_MODE", "active")
+    monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "v2")
+    monkeypatch.setenv("RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED", "true")
+    worker = worker_mod.ResearchLabHostedWorker(
+        ResearchLabGatewayConfig(),
+        worker_ref="worker-a",
+    )
+
+    monkeypatch.setattr(
+        worker_mod,
+        "snapshot_readiness",
+        lambda *_args, **_kwargs: {
+            "ready": False,
+            "reason": "snapshot_preflight_error:DevSnapshotStoreError",
+            "error_code": "NoSuchKey",
+            "error": "sensitive diagnostic text",
+        },
+    )
+
+    _readiness, commitment, reason = (
+        await worker._load_tree_snapshot_readiness(
+            context=_make_context(),
+            artifact=SimpleNamespace(
+                image_digest="image@sha256:" + "1" * 64,
+                manifest_hash="sha256:" + "2" * 64,
+            ),
+            pinned_evaluator_commitment=None,
+        )
+    )
+
+    assert commitment == {}
+    assert reason == (
+        "tree_snapshot_not_ready:"
+        "snapshot_preflight_error:DevSnapshotStoreError:"
+        "error_code=NoSuchKey"
+    )
+    assert "sensitive diagnostic text" not in reason
+
+
 def test_outcome_memory_uses_recomputed_daily_baseline_paired_metric():
     bundle = {
         "aggregates": {

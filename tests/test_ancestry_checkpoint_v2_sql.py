@@ -16,7 +16,7 @@ from gateway.tee.supabase_schema_preflight_v2 import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MIGRATION_NAME = "scripts/135-research-lab-ancestry-checkpoint-sidecars.sql"
+MIGRATION_NAME = "scripts/136-research-lab-ancestry-checkpoint-sidecars.sql"
 SQL = (ROOT / MIGRATION_NAME).read_text(encoding="utf-8")
 TABLE = "research_lab_attested_ancestry_checkpoints_v2"
 COMPACT_WEIGHT_TABLE = "research_lab_compact_weight_authorities_v2"

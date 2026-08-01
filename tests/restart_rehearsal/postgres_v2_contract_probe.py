@@ -95,8 +95,11 @@ PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION = (
 PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION = (
     "134-research-lab-provider-outcome-head-contention.sql"
 )
+ACTIVE_MODEL_RESULT_REPLAY_MIGRATION = (
+    "135-research-lab-active-model-result-replay.sql"
+)
 ANCESTRY_CHECKPOINT_MIGRATION = (
-    "135-research-lab-ancestry-checkpoint-sidecars.sql"
+    "136-research-lab-ancestry-checkpoint-sidecars.sql"
 )
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
@@ -2060,6 +2063,55 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-134 provider outcome head contract differs"
             )
+        database.apply_migration(
+            scripts / ACTIVE_MODEL_RESULT_REPLAY_MIGRATION
+        )
+        applied.append(ACTIVE_MODEL_RESULT_REPLAY_MIGRATION)
+        active_model_replay_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_active_model_replay_contract_v2()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        replay_constraints = active_model_replay_contract.get("constraints")
+        replay_constraint_definitions = (
+            "\n".join(
+                str(constraint.get("constraint_definition") or "")
+                for constraint in replay_constraints.values()
+            )
+            if isinstance(replay_constraints, Mapping)
+            else ""
+        )
+        if (
+            active_model_replay_contract.get("schema_version")
+            != "leadpoet.active_model_replay_contract.v2"
+            or active_model_replay_contract.get("operation")
+            != "attest_active_private_model"
+            or active_model_replay_contract.get("purpose")
+            != "research_lab.active_private_model.v2"
+            or not isinstance(replay_constraints, Mapping)
+            or set(replay_constraints)
+            != {
+                "research_lab_attested_execution_results_v2_operation_check",
+                "research_lab_attested_execution_results_v2_purpose_check",
+                "research_lab_attested_exec_results_v2_op_purpose_check",
+            }
+            or any(
+                constraint.get("constraint_valid") is not True
+                for constraint in replay_constraints.values()
+            )
+            or "attest_active_private_model"
+            not in replay_constraint_definitions
+            or "research_lab.active_private_model.v2"
+            not in replay_constraint_definitions
+        ):
+            raise PostgresContractProbeError(
+                "post-135 active-model replay contract differs"
+            )
+
         database.apply_migration(scripts / ANCESTRY_CHECKPOINT_MIGRATION)
         applied.append(ANCESTRY_CHECKPOINT_MIGRATION)
         checkpoint_catalog = _relation_contract(database)
@@ -2075,7 +2127,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             not in checkpoint_rpcs
         ):
             raise PostgresContractProbeError(
-                "post-135 ancestry checkpoint contract is incomplete"
+                "post-136 ancestry checkpoint contract is incomplete"
             )
         provider_outcome_append = _provider_outcome_append_contract(database)
         historical_compute_seed_rows = (
@@ -2128,7 +2180,8 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post_133_provider_outcome_contract_valid": True,
                 "pre_134_provider_outcome_head_contract_rejected": True,
                 "post_134_provider_outcome_head_contract_valid": True,
-                "post_135_ancestry_checkpoint_contract_valid": True,
+                "post_135_active_model_replay_contract_valid": True,
+                "post_136_ancestry_checkpoint_contract_valid": True,
                 "provider_outcome_append_atomic": True,
                 "provider_outcome_contention_zero_rollback": True,
                 "provider_outcome_conflict_head_exact": True,

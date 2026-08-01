@@ -83,6 +83,10 @@ DEFAULT_RESULT_CHUNK_BYTES = 512 * 1024
 # compaction. Keep their object count bounded while the stricter aggregate
 # MAX_INPUT_BYTES limit continues to cap the authenticated request body.
 MAX_EXTERNAL_RECEIPT_GRAPHS = 128
+# Historical allocation bootstrap can contain more independent direct
+# authorities than an ordinary scoring job. Keep the larger object bound tied
+# to the same exact operation/purpose allowlist as the 256 MiB input exception.
+MAX_ALLOCATION_ANCESTRY_AUTHORITIES = 256
 MAX_EXTERNAL_RECEIPT_GRAPH_BYTES = 64 * 1024 * 1024
 MAX_EXTERNAL_ANCESTRY_PROOF_BYTES = 4 * 1024 * 1024
 TERMINAL_STATES = frozenset({"cancelled", "failed", "succeeded"})
@@ -168,6 +172,7 @@ class ExecutionContextV2:
     host_operation_channel: Any = None
     allowed_purposes: frozenset = frozenset()
     max_external_receipt_graph_bytes: int = MAX_EXTERNAL_RECEIPT_GRAPH_BYTES
+    max_external_ancestry_authorities: int = MAX_EXTERNAL_RECEIPT_GRAPHS
     _transport_lock: Any = field(
         default_factory=threading.RLock,
         repr=False,
@@ -276,7 +281,7 @@ class ExecutionContextV2:
             if (
                 len(self.external_receipt_graphs)
                 + len(self.external_ancestry_proofs)
-                >= MAX_EXTERNAL_RECEIPT_GRAPHS
+                >= self.max_external_ancestry_authorities
             ):
                 raise ExecutionJobV2Error("external receipt graph count exceeds limit")
             self.external_receipt_graphs.append(normalized)
@@ -397,7 +402,7 @@ class ExecutionContextV2:
                 len(self.external_receipt_graphs)
                 + len(self.external_ancestry_proofs)
                 + new_graph_count
-                > MAX_EXTERNAL_RECEIPT_GRAPHS
+                > self.max_external_ancestry_authorities
             ):
                 raise ExecutionJobV2Error(
                     "external receipt graph count exceeds limit"
@@ -473,7 +478,7 @@ class ExecutionContextV2:
             if (
                 len(self.external_receipt_graphs)
                 + len(self.external_ancestry_proofs)
-                >= MAX_EXTERNAL_RECEIPT_GRAPHS
+                >= self.max_external_ancestry_authorities
             ):
                 raise ExecutionJobV2Error(
                     "external ancestry authority count exceeds limit"
@@ -577,6 +582,8 @@ def _host_operation_request_hash(value: Mapping[str, Any]) -> str:
 
 def pack_parent_receipt_graph_set_v2(
     graphs: Sequence[Mapping[str, Any]],
+    *,
+    max_graph_count: int = MAX_EXTERNAL_RECEIPT_GRAPHS,
 ) -> Dict[str, Any]:
     """Deduplicate graph objects without changing any graph membership."""
 
@@ -584,7 +591,8 @@ def pack_parent_receipt_graph_set_v2(
         graphs, (str, bytes, bytearray)
     ):
         raise ExecutionJobV2Error("parent receipt graphs must be an array")
-    if len(graphs) > MAX_EXTERNAL_RECEIPT_GRAPHS:
+    max_graph_count = _bounded_external_authority_limit(max_graph_count)
+    if len(graphs) > max_graph_count:
         raise ExecutionJobV2Error("external receipt graph count exceeds limit")
 
     collections: Dict[str, list[Dict[str, Any]]] = {
@@ -686,6 +694,8 @@ def pack_parent_receipt_graph_set_v2(
 
 def _unpack_parent_receipt_graph_set_v2(
     value: Mapping[str, Any],
+    *,
+    max_graph_count: int = MAX_EXTERNAL_RECEIPT_GRAPHS,
 ) -> tuple[list[Dict[str, Any]], list[int]]:
     """Reconstruct exact graph memberships from a bounded deduplicated set."""
 
@@ -693,10 +703,11 @@ def _unpack_parent_receipt_graph_set_v2(
         raise ExecutionJobV2Error("parent receipt graph set fields are invalid")
     if value.get("schema_version") != PARENT_RECEIPT_GRAPH_SET_SCHEMA_VERSION:
         raise ExecutionJobV2Error("parent receipt graph set schema is invalid")
+    max_graph_count = _bounded_external_authority_limit(max_graph_count)
     descriptors = value.get("graphs")
     if (
         not isinstance(descriptors, list)
-        or len(descriptors) > MAX_EXTERNAL_RECEIPT_GRAPHS
+        or len(descriptors) > max_graph_count
     ):
         raise ExecutionJobV2Error("parent receipt graph set count is invalid")
 
@@ -793,15 +804,37 @@ def _unpack_parent_receipt_graph_set_v2(
 
 def unpack_parent_receipt_graph_set_v2(
     value: Mapping[str, Any],
+    *,
+    max_graph_count: int = MAX_EXTERNAL_RECEIPT_GRAPHS,
 ) -> list[Dict[str, Any]]:
-    graphs, _ = _unpack_parent_receipt_graph_set_v2(value)
+    graphs, _ = _unpack_parent_receipt_graph_set_v2(
+        value,
+        max_graph_count=max_graph_count,
+    )
     return graphs
+
+
+def _bounded_external_authority_limit(value: int) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 1
+        or value > MAX_ALLOCATION_ANCESTRY_AUTHORITIES
+    ):
+        raise ExecutionJobV2Error("external ancestry authority limit is invalid")
+    return value
 
 
 def _job_input_limit_bytes(*, operation: str, purpose: str) -> int:
     if (operation, purpose) in _ALLOCATION_ANCESTRY_JOB_SCOPES:
         return MAX_ALLOCATION_ANCESTRY_INPUT_BYTES
     return MAX_INPUT_BYTES
+
+
+def _job_external_authority_limit(*, operation: str, purpose: str) -> int:
+    if (operation, purpose) in _ALLOCATION_ANCESTRY_JOB_SCOPES:
+        return MAX_ALLOCATION_ANCESTRY_AUTHORITIES
+    return MAX_EXTERNAL_RECEIPT_GRAPHS
 
 
 def _manifest(
@@ -1397,6 +1430,10 @@ class ExecutionJobManagerV2:
                 operation=manifest["operation"],
                 purpose=manifest["purpose"],
             ),
+            max_external_ancestry_authorities=_job_external_authority_limit(
+                operation=manifest["operation"],
+                purpose=manifest["purpose"],
+            ),
         )
         if self._host_operation_channel_factory is not None:
             context.host_operation_channel = self._host_operation_channel_factory(
@@ -1419,7 +1456,8 @@ class ExecutionJobManagerV2:
             parent_graph_sizes = None
             if parent_graph_set is not None:
                 parent_graphs, parent_graph_sizes = _unpack_parent_receipt_graph_set_v2(
-                    parent_graph_set
+                    parent_graph_set,
+                    max_graph_count=context.max_external_ancestry_authorities,
                 )
             elif parent_graphs is None:
                 parent_graphs = []

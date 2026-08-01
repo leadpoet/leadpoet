@@ -16,12 +16,14 @@ from gateway.research_lab.attested_scoring_v2 import (
 )
 from gateway.research_lab import attested_scoring_v2
 from gateway.research_lab import attested_v2_store
+from gateway.tee import execution_job_manager_v2
 from gateway.research_lab.attested_v2_store import (
     AttestedV2StoreError,
     _execution_result_storage_row_v2,
 )
 from gateway.tee.execution_job_manager_v2 import (
     ExecutionJobManagerV2,
+    ExecutionJobV2Error,
     ExecutionResultV2,
     PARENT_RECEIPT_GRAPH_SET_FIELD,
     PARENT_RECEIPT_GRAPHS_FIELD,
@@ -253,6 +255,45 @@ def test_small_parent_graph_payload_keeps_legacy_encoding():
     assert evidence["encoding"] == "receipt_graphs"
     assert evidence["legacy_size_bytes"] == len(
         attested_scoring_v2._canonical_bytes(document)
+    )
+
+
+def test_transport_builder_requires_explicit_allocation_graph_bound(monkeypatch):
+    monkeypatch.setattr(attested_scoring_v2, "MAX_INPUT_BYTES", 1)
+    graphs = [
+        {
+            "schema_version": "leadpoet.attested_receipt_graph.v2",
+            "root_receipt_hash": "sha256:" + format(index, "064x"),
+            "boot_identities": [],
+            "receipts": [
+                {"receipt_hash": "sha256:" + format(index, "064x")}
+            ],
+            "transport_attempts": [],
+            "host_operations": [],
+        }
+        for index in range(129)
+    ]
+
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="external receipt graph count exceeds limit",
+    ):
+        _build_transport_payload_document(
+            payload={"epoch": 24_294},
+            parent_graphs=graphs,
+        )
+
+    document, evidence = _build_transport_payload_document(
+        payload={"epoch": 24_294},
+        parent_graphs=graphs,
+        max_parent_graph_count=(
+            execution_job_manager_v2.MAX_ALLOCATION_ANCESTRY_AUTHORITIES
+        ),
+    )
+    assert evidence["parent_graph_count"] == 129
+    assert (
+        PARENT_RECEIPT_GRAPHS_FIELD in document
+        or PARENT_RECEIPT_GRAPH_SET_FIELD in document
     )
 
 

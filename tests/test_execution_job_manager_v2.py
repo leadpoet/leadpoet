@@ -99,7 +99,7 @@ def _payload():
     ).encode("utf-8")
 
 
-def test_external_receipt_graph_count_remains_bounded_above_production_need(
+def test_external_receipt_graph_count_is_larger_only_for_allocation_ancestry(
     monkeypatch,
 ):
     monkeypatch.setattr(
@@ -108,17 +108,52 @@ def test_external_receipt_graph_count_remains_bounded_above_production_need(
         lambda _graph, **_kwargs: (),
     )
     context = ExecutionContextV2(
-        job_id="allocation-job",
-        purpose="research_lab.allocation.v2",
+        job_id="score-job",
+        purpose="research_lab.candidate_score.v2",
         epoch_id=24_262,
     )
 
-    for index in range(128):
+    for index in range(job_manager_v2.MAX_EXTERNAL_RECEIPT_GRAPHS):
         root = "sha256:" + format(index, "064x")
         context.record_external_receipt_graph(
             {
                 "root_receipt_hash": root,
                 "receipts": [{"receipt_hash": root}],
+            }
+        )
+
+    allocation_context = ExecutionContextV2(
+        job_id="allocation-job",
+        purpose="research_lab.allocation.v2",
+        epoch_id=24_262,
+        max_external_ancestry_authorities=(
+            job_manager_v2._job_external_authority_limit(
+                operation="research_lab_allocation",
+                purpose="research_lab.allocation.v2",
+            )
+        ),
+    )
+    for index in range(job_manager_v2.MAX_ALLOCATION_ANCESTRY_AUTHORITIES):
+        root = "sha256:" + format(index, "064x")
+        allocation_context.record_external_receipt_graph(
+            {
+                "root_receipt_hash": root,
+                "receipts": [{"receipt_hash": root}],
+            }
+        )
+
+    assert (
+        len(allocation_context.external_receipt_graphs)
+        == job_manager_v2.MAX_ALLOCATION_ANCESTRY_AUTHORITIES
+    )
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="external receipt graph count exceeds limit",
+    ):
+        allocation_context.record_external_receipt_graph(
+            {
+                "root_receipt_hash": "sha256:" + "e" * 64,
+                "receipts": [{"receipt_hash": "sha256:" + "e" * 64}],
             }
         )
 
@@ -255,6 +290,42 @@ def test_parent_receipt_graph_set_preserves_membership_and_deduplicates():
     assert unpacked == graphs
     assert unpacked[0]["boot_identities"][0] is unpacked[1]["boot_identities"][0]
     assert unpacked[0]["receipts"][0] is unpacked[1]["receipts"][0]
+
+
+def test_parent_receipt_graph_set_count_exception_is_explicit_and_scoped():
+    graphs = [
+        {
+            "schema_version": "leadpoet.attested_receipt_graph.v2",
+            "root_receipt_hash": "sha256:" + format(index, "064x"),
+            "boot_identities": [],
+            "receipts": [
+                {"receipt_hash": "sha256:" + format(index, "064x")}
+            ],
+            "transport_attempts": [],
+            "host_operations": [],
+        }
+        for index in range(job_manager_v2.MAX_EXTERNAL_RECEIPT_GRAPHS + 1)
+    ]
+
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="external receipt graph count exceeds limit",
+    ):
+        pack_parent_receipt_graph_set_v2(graphs)
+
+    packed = pack_parent_receipt_graph_set_v2(
+        graphs,
+        max_graph_count=job_manager_v2.MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
+    )
+    with pytest.raises(
+        ExecutionJobV2Error,
+        match="parent receipt graph set count is invalid",
+    ):
+        unpack_parent_receipt_graph_set_v2(packed)
+    assert unpack_parent_receipt_graph_set_v2(
+        packed,
+        max_graph_count=job_manager_v2.MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
+    ) == graphs
 
 
 def test_parent_receipt_graph_set_rejects_conflicts_and_unreferenced_evidence():
@@ -428,6 +499,14 @@ def test_large_ancestry_scope_is_applied_to_external_parent_graphs(monkeypatch):
         operation="score",
         purpose="research_lab.candidate_score.v2",
     ) == 64 * 1024 * 1024
+    assert job_manager_v2._job_external_authority_limit(
+        operation="attest_weight_publication",
+        purpose="gateway.weights.publication.v2",
+    ) == job_manager_v2.MAX_ALLOCATION_ANCESTRY_AUTHORITIES
+    assert job_manager_v2._job_external_authority_limit(
+        operation="score",
+        purpose="research_lab.candidate_score.v2",
+    ) == job_manager_v2.MAX_EXTERNAL_RECEIPT_GRAPHS
 
     graph = {
         "root_receipt_hash": HASH,

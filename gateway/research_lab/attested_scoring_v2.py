@@ -22,10 +22,12 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from gateway.tee.execution_job_manager_v2 import (
     JOB_SCHEMA_VERSION,
+    MAX_EXTERNAL_RECEIPT_GRAPHS,
     MAX_INPUT_BYTES,
     PARENT_ANCESTRY_PROOFS_FIELD,
     PARENT_RECEIPT_GRAPH_SET_FIELD,
     PARENT_RECEIPT_GRAPHS_FIELD,
+    _job_external_authority_limit,
     pack_parent_receipt_graph_set_v2,
 )
 from gateway.tee.release_manifest_v2 import (
@@ -565,6 +567,7 @@ def _build_transport_payload_document(
     parent_graphs: Sequence[Mapping[str, Any]],
     provider_credential_profile: str = "default",
     provider_credential_ref_hashes: Optional[Mapping[str, str]] = None,
+    max_parent_graph_count: int = MAX_EXTERNAL_RECEIPT_GRAPHS,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Choose the exact or deduplicated graph encoding at the size boundary."""
 
@@ -601,7 +604,10 @@ def _build_transport_payload_document(
             ]
         return document, metadata
 
-    graph_set = pack_parent_receipt_graph_set_v2(parent_graphs)
+    graph_set = pack_parent_receipt_graph_set_v2(
+        parent_graphs,
+        max_graph_count=max_parent_graph_count,
+    )
     graph_set_document = dict(document)
     graph_set_document.pop(PARENT_RECEIPT_GRAPHS_FIELD, None)
     graph_set_document[PARENT_RECEIPT_GRAPH_SET_FIELD] = graph_set
@@ -1066,11 +1072,23 @@ async def execute_scoring_v2(
     transport_payload = dict(payload)
     if transport_parent_proofs:
         transport_payload[PARENT_ANCESTRY_PROOFS_FIELD] = transport_parent_proofs
+    max_parent_authorities = _job_external_authority_limit(
+        operation=operation,
+        purpose=purpose,
+    )
+    if (
+        len(transport_parent_graphs) + len(transport_parent_proofs)
+        > max_parent_authorities
+    ):
+        raise AttestedScoringV2Error(
+            "external ancestry authority count exceeds limit"
+        )
     payload_document, transport_metadata = _build_transport_payload_document(
         payload=transport_payload,
         parent_graphs=transport_parent_graphs,
         provider_credential_profile=normalized_profile,
         provider_credential_ref_hashes=credential_refs,
+        max_parent_graph_count=max_parent_authorities,
     )
     payload_bytes = _canonical_bytes(payload_document)
     if transport_metadata["encoding"] == "receipt_graph_set":

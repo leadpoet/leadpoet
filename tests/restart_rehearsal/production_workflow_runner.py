@@ -3019,11 +3019,14 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
 
     from gateway.tee.execution_job_manager_v2 import (
         JOB_SCHEMA_VERSION,
+        MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
         MAX_ALLOCATION_ANCESTRY_INPUT_BYTES,
         MAX_EXTERNAL_RECEIPT_GRAPHS,
         MAX_INPUT_BYTES,
         PARENT_RECEIPT_GRAPH_SET_FIELD,
         ExecutionJobManagerV2,
+        ExecutionJobV2Error,
+        pack_parent_receipt_graph_set_v2,
         unpack_parent_receipt_graph_set_v2,
     )
     from gateway.research_lab.attested_scoring_v2 import (
@@ -3063,7 +3066,7 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
         sequence=0,
     )
     sample_receipt_bytes = len(_canonical(sample_receipt))
-    graph_count = MAX_EXTERNAL_RECEIPT_GRAPHS
+    graph_count = MAX_ALLOCATION_ANCESTRY_AUTHORITIES - 1
     legacy_reproduction_target = MAX_INPUT_BYTES * 2 + MAX_INPUT_BYTES // 32
     shared_receipt_count = (
         legacy_reproduction_target
@@ -3110,9 +3113,18 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
         }
         graphs.append(graph)
 
+    try:
+        pack_parent_receipt_graph_set_v2(graphs)
+    except ExecutionJobV2Error as exc:
+        if "external receipt graph count exceeds limit" not in str(exc):
+            raise
+    else:
+        raise RuntimeError("ordinary V2 ancestry accepted allocation frontier")
+
     transport_document, transport_metadata = _build_transport_payload_document(
         payload={"epoch": 30_000},
         parent_graphs=graphs,
+        max_parent_graph_count=MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
     )
     if transport_metadata.get("encoding") != "receipt_graph_set":
         raise RuntimeError("oversized shared ancestry was not deduplicated")
@@ -3120,7 +3132,10 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
     if legacy_size_bytes <= MAX_INPUT_BYTES * 2:
         raise RuntimeError("legacy payload did not reproduce the old boundary")
     graph_set = transport_document[PARENT_RECEIPT_GRAPH_SET_FIELD]
-    reconstructed = unpack_parent_receipt_graph_set_v2(graph_set)
+    reconstructed = unpack_parent_receipt_graph_set_v2(
+        graph_set,
+        max_graph_count=MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
+    )
     if reconstructed != graphs:
         raise RuntimeError("deduplicated receipt graph membership differs")
     del reconstructed
@@ -3222,7 +3237,10 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
         }
     )
     try:
-        unpack_parent_receipt_graph_set_v2(malformed)
+        unpack_parent_receipt_graph_set_v2(
+            malformed,
+            max_graph_count=MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
+        )
     except Exception as exc:
         if "unreferenced evidence" not in str(exc):
             raise
@@ -3242,6 +3260,7 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
         "allocation_source_path_verified": True,
         "shared_object_identity_preserved": True,
         "malformed_evidence_rejected": True,
+        "ordinary_graph_bound_preserved": True,
     }
 
 
@@ -3708,6 +3727,11 @@ def main() -> int:
                 "receipt-graph-transport-deduplication",
                 {},
             ).get("malformed_evidence_rejected")
+            is True
+            and behavior_evidence.get(
+                "receipt-graph-transport-deduplication",
+                {},
+            ).get("ordinary_graph_bound_preserved")
             is True
             and behavior_evidence.get(
                 "receipt-graph-transport-deduplication",

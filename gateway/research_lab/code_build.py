@@ -353,6 +353,52 @@ class CodeEditCandidateBuilder:
             source_dir=source_root,
             timeout_seconds=self.config.code_edit_build_timeout_seconds,
         )
+        return self._source_context_from_root(
+            parent_artifact=parent_artifact,
+            source_root=source_root,
+            source_mode="parent_image_extract",
+            source_tree_hash=source_tree_hash,
+            top_level_paths=top_level_paths,
+        )
+
+    def prepare_attested_source_context(
+        self,
+        *,
+        parent_artifact: PrivateModelArtifactManifest,
+        source_bundle: Mapping[str, Any],
+        workspace_dir: Path,
+    ) -> ParentImageSourceContext:
+        """Reconstruct and normalize the exact signed source used by Git-tree builds."""
+
+        from gateway.tee.source_bundle_v2 import extract_source_bundle_v2
+
+        source_root = workspace_dir / "attested_private_source"
+        extract_source_bundle_v2(
+            source_bundle,
+            destination=source_root,
+            expected_source_tree_hash=parent_artifact.model_artifact_hash,
+        )
+        _write_research_lab_build_scaffold(
+            source_root,
+            base_image_ref=parent_artifact.image_digest,
+        )
+        return self._source_context_from_root(
+            parent_artifact=parent_artifact,
+            source_root=source_root,
+            source_mode="attested_source_bundle",
+            source_tree_hash=compute_private_source_tree_hash(source_root),
+            top_level_paths=_top_level_paths(source_root),
+        )
+
+    def _source_context_from_root(
+        self,
+        *,
+        parent_artifact: PrivateModelArtifactManifest,
+        source_root: Path,
+        source_mode: str,
+        source_tree_hash: str,
+        top_level_paths: Sequence[str],
+    ) -> ParentImageSourceContext:
         editable_files = _editable_runtime_files(
             source_root,
             allowed_prefixes=self.config.code_edit_allowed_path_prefixes(),
@@ -360,8 +406,12 @@ class CodeEditCandidateBuilder:
             allowed_suffixes=self.config.code_edit_allowed_suffixes(),
         )
         if not editable_files:
-            raise CodeEditBuildError("parent image /app has no editable runtime files in the code-edit allowlist")
-        parent_image_digest_hash = canonical_hash({"image_digest": image_digest})
+            raise CodeEditBuildError(
+                "parent source has no editable runtime files in the code-edit allowlist"
+            )
+        parent_image_digest_hash = canonical_hash(
+            {"image_digest": parent_artifact.image_digest}
+        )
         planner_source_index: dict[str, Any] = {}
         if bool(getattr(self.config, "planner_symbol_index_enabled", True)):
             try:
@@ -379,7 +429,7 @@ class CodeEditCandidateBuilder:
                 )
         return ParentImageSourceContext(
             source_root=source_root,
-            source_mode="parent_image_extract",
+            source_mode=source_mode,
             parent_image_digest_hash=parent_image_digest_hash,
             source_tree_hash=source_tree_hash,
             top_level_paths=tuple(top_level_paths),
@@ -510,9 +560,14 @@ class CodeEditCandidateBuilder:
         )
         source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
         parent_image_digest_hash = canonical_hash({"image_digest": parent_artifact.image_digest})
+        source_mode = (
+            source_context.source_mode
+            if source_context is not None
+            else "parent_image_extract"
+        )
         repo_ref_hash = canonical_hash(
             {
-                "source_mode": "parent_image_extract",
+                "source_mode": source_mode,
                 "parent_manifest_hash": parent_artifact.manifest_hash,
                 "parent_image_digest_hash": parent_image_digest_hash,
             }
@@ -647,7 +702,7 @@ class CodeEditCandidateBuilder:
             build_doc = {
                 "schema_version": "1.1",
                 "candidate_kind": "image_build",
-                "source_mode": "parent_image_extract",
+                "source_mode": source_mode,
                 "repo_ref_hash": repo_ref_hash,
                 "parent_artifact_hash": parent_artifact.model_artifact_hash,
                 "parent_manifest_hash": parent_artifact.manifest_hash,
@@ -890,7 +945,11 @@ def _ensure_parent_image_available(image_ref: str, *, timeout_seconds: int) -> N
         pass
     pull_cmd = ["docker", "pull", "--platform", _docker_platform(), image_ref]
     try:
-        _run(pull_cmd, cwd=Path.cwd(), timeout_seconds=timeout_seconds)
+        _pull_parent_image(
+            image_ref,
+            pull_cmd=pull_cmd,
+            timeout_seconds=timeout_seconds,
+        )
         return
     except CodeEditBuildError as exc:
         if not _infra_retry_enabled():
@@ -904,7 +963,11 @@ def _ensure_parent_image_available(image_ref: str, *, timeout_seconds: int) -> N
         )
         _bounded_retry_sleep(_infra_retry_backoff_seconds())
         try:
-            _run(pull_cmd, cwd=Path.cwd(), timeout_seconds=timeout_seconds)
+            _pull_parent_image(
+                image_ref,
+                pull_cmd=pull_cmd,
+                timeout_seconds=timeout_seconds,
+            )
         except CodeEditBuildError as retry_exc:
             raise CodeEditInfraFailureError(
                 f"parent image pull failed after infra retry: {retry_exc}",
@@ -920,6 +983,130 @@ def _parent_image_cached_locally(image_ref: str) -> bool:
         return True
     except CodeEditBuildError:
         return False
+
+
+_ECR_REGISTRY_RE = re.compile(
+    r"^(?P<registry>[0-9]+\.dkr\.ecr\.(?P<region>[a-z0-9-]+)\.amazonaws\.com(?:\.cn)?)/"
+)
+
+
+def _ecr_auth_failure(exc: CodeEditBuildError) -> bool:
+    text = " ".join((str(exc), exc.stderr, exc.stdout)).lower()
+    return any(
+        marker in text
+        for marker in (
+            "authorization token has expired",
+            "no basic auth credentials",
+            "pull access denied",
+            "requested access to the resource is denied",
+        )
+    )
+
+
+def _pull_parent_image(
+    image_ref: str,
+    *,
+    pull_cmd: Sequence[str],
+    timeout_seconds: int,
+) -> None:
+    """Pull an immutable parent, refreshing only expired private-ECR auth."""
+
+    try:
+        _run(
+            list(pull_cmd),
+            cwd=Path.cwd(),
+            timeout_seconds=timeout_seconds,
+        )
+    except CodeEditBuildError as exc:
+        if not _ECR_REGISTRY_RE.match(str(image_ref)) or not _ecr_auth_failure(exc):
+            raise
+        _pull_parent_image_with_refreshed_ecr_auth(
+            str(image_ref),
+            timeout_seconds=timeout_seconds,
+        )
+
+
+def _pull_parent_image_with_refreshed_ecr_auth(
+    image_ref: str,
+    *,
+    timeout_seconds: int,
+) -> None:
+    """Authenticate in an ephemeral Docker config and pull without persisting a token."""
+
+    match = _ECR_REGISTRY_RE.match(str(image_ref))
+    if match is None:
+        raise CodeEditBuildError("parent image is not a supported private ECR ref")
+    registry = match.group("registry")
+    region = match.group("region")
+    timeout = _bounded_command_timeout(timeout_seconds)
+    try:
+        password_result = subprocess.run(
+            ["aws", "ecr", "get-login-password", "--region", region],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CodeEditBuildError("private ECR authentication refresh failed") from exc
+    password = password_result.stdout.strip()
+    if password_result.returncode != 0 or not password:
+        raise CodeEditBuildError(
+            "private ECR authentication refresh failed",
+            stderr=password_result.stderr,
+            exit_code=password_result.returncode,
+        )
+    with tempfile.TemporaryDirectory(prefix="research-lab-docker-auth-") as config_dir:
+        try:
+            login_result = subprocess.run(
+                [
+                    "docker",
+                    "--config",
+                    config_dir,
+                    "login",
+                    "--username",
+                    "AWS",
+                    "--password-stdin",
+                    registry,
+                ],
+                input=password + "\n",
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=_bounded_command_timeout(timeout_seconds),
+            )
+            if login_result.returncode != 0:
+                raise CodeEditBuildError(
+                    "private ECR Docker login failed",
+                    stderr=login_result.stderr,
+                    exit_code=login_result.returncode,
+                )
+            pull_result = subprocess.run(
+                [
+                    "docker",
+                    "--config",
+                    config_dir,
+                    "pull",
+                    "--platform",
+                    _docker_platform(),
+                    image_ref,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=_bounded_command_timeout(timeout_seconds),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CodeEditBuildError(
+                "ECR-authenticated parent image pull failed"
+            ) from exc
+    if pull_result.returncode != 0:
+        raise CodeEditBuildError(
+            "ECR-authenticated parent image pull failed",
+            stderr=pull_result.stderr,
+            stdout=pull_result.stdout,
+            exit_code=pull_result.returncode,
+        )
 
 
 def _prepull_parent_image_for_build(image_ref: str) -> None:
@@ -950,7 +1137,11 @@ def _prepull_parent_image_for_build(image_ref: str) -> None:
     pull_cmd = ["docker", "pull", "--platform", _docker_platform(), image]
     timeout_seconds = _parent_image_pull_timeout_seconds()
     try:
-        _run(pull_cmd, cwd=Path.cwd(), timeout_seconds=timeout_seconds)
+        _pull_parent_image(
+            image,
+            pull_cmd=pull_cmd,
+            timeout_seconds=timeout_seconds,
+        )
         return
     except CodeEditBuildError as exc:
         if not _infra_retry_enabled():
@@ -966,7 +1157,11 @@ def _prepull_parent_image_for_build(image_ref: str) -> None:
         )
         _bounded_retry_sleep(_infra_retry_backoff_seconds())
         try:
-            _run(pull_cmd, cwd=Path.cwd(), timeout_seconds=timeout_seconds)
+            _pull_parent_image(
+                image,
+                pull_cmd=pull_cmd,
+                timeout_seconds=timeout_seconds,
+            )
         except CodeEditBuildError as retry_exc:
             raise CodeEditInfraFailureError(
                 f"parent image pre-pull failed after infra retry: {retry_exc}",

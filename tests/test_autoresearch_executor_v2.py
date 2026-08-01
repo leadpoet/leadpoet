@@ -18,13 +18,18 @@ from gateway.research_lab.git_tree_models import (
     TreePolicy,
     TreeReplacement,
     TreeResult,
+    derive_child_slot,
     derive_tree_id,
 )
 from gateway.research_lab.code_build import (
     CodeEditBuildResult,
     CodeEditCandidateBuilder,
     CodeEditPatchApplyError,
+    _prepare_parent_image_workspace,
+    _run_git_apply,
+    _write_research_lab_build_scaffold,
 )
+from gateway.research_lab.git_tree_repository import GitTreeRepository
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.autoresearch_runtime import AutoResearchLoopEvent
 from gateway.tee.autoresearch_executor_v2 import (
@@ -48,7 +53,10 @@ from gateway.tee.autoresearch_executor_v2 import (
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.provider_outcome_v2 import ProviderOutcomeLedgerV2
-from gateway.tee.source_bundle_v2 import build_source_bundle_v2
+from gateway.tee.source_bundle_v2 import (
+    build_source_bundle_v2,
+    extract_source_bundle_v2,
+)
 from leadpoet_canonical.attested_v2 import (
     EMPTY_ARTIFACT_ROOT,
     EMPTY_HOST_OPERATION_ROOT,
@@ -68,6 +76,7 @@ from research_lab.eval import (
     build_local_private_artifact_manifest,
 )
 from research_lab.code_editing import CodeEditDraft
+from research_lab.eval.private_runtime import compute_private_source_tree_hash
 from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
 
 
@@ -1076,6 +1085,96 @@ def test_v2_builder_restores_git_tree_parent_from_cumulative_patch(tmp_path):
                 tree_cumulative_source_diff_hash="sha256:" + "0" * 64,
             )
         )
+
+
+def test_signed_source_normalization_matches_tree_and_build_hashes(tmp_path):
+    source_bundle, root_artifact_doc = _source_and_artifact(tmp_path)
+    root_artifact = PrivateModelArtifactManifest.from_mapping(root_artifact_doc)
+    config = _config()
+    builder = CodeEditCandidateBuilder(config)
+    host_context = builder.prepare_attested_source_context(
+        parent_artifact=root_artifact,
+        source_bundle=source_bundle,
+        workspace_dir=tmp_path / "host",
+    )
+
+    measured_root = tmp_path / "measured"
+    extract_source_bundle_v2(
+        source_bundle,
+        destination=measured_root,
+        expected_source_tree_hash=root_artifact.model_artifact_hash,
+    )
+    _write_research_lab_build_scaffold(
+        measured_root,
+        base_image_ref=root_artifact.image_digest,
+    )
+    measured_context = _source_context(
+        source_root=measured_root,
+        artifact=root_artifact,
+        config=config,
+    )
+
+    assert host_context.source_tree_hash == measured_context.source_tree_hash
+    assert host_context.source_tree_hash != root_artifact.model_artifact_hash
+
+    policy = TreePolicy(mode="active")
+    tree_id = derive_tree_id(
+        run_id="run-normalized-v2",
+        root_artifact_hash=root_artifact.model_artifact_hash,
+        policy=policy,
+    )
+    repository = GitTreeRepository(workspace=tmp_path / "tree", tree_id=tree_id)
+    repository.initialize(
+        source_root=host_context.source_root,
+        root_artifact_hash=root_artifact.model_artifact_hash,
+        policy_hash=policy.policy_hash,
+    )
+    draft = CodeEditDraft(
+        failure_mode="bounded recall",
+        mechanism="increase the source runtime value",
+        expected_improvement="recover more valid companies",
+        risk="bounded runtime increase",
+        lane="query_construction",
+        target_files=("sourcing_model/runtime.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
+            "--- a/sourcing_model/runtime.py\n"
+            "+++ b/sourcing_model/runtime.py\n"
+            "@@ -1 +1 @@\n"
+            "-VALUE = 1\n"
+            "+VALUE = 2\n"
+        ),
+        redacted_summary="increase a bounded sourcing runtime value",
+        test_plan="run private tests",
+        rollback_plan="revert the patch",
+    )
+    slot = derive_child_slot(
+        tree_id=tree_id,
+        parent_node_id="root",
+        root_branch_id="",
+        depth=1,
+        slot_index=0,
+    )
+    tree_commit = repository.commit_child(
+        slot=slot,
+        draft=draft,
+        expected_parent_source_tree_hash=host_context.source_tree_hash,
+    )
+
+    build_root = tmp_path / "build"
+    observed_parent_hash, _ = _prepare_parent_image_workspace(
+        image_digest=root_artifact.image_digest,
+        repo_dir=build_root,
+        timeout_seconds=30,
+        source_context=host_context,
+    )
+    diff_path = tmp_path / "candidate.diff"
+    diff_path.write_text(draft.unified_diff, encoding="utf-8")
+    _run_git_apply(diff_path, cwd=build_root, timeout_seconds=30, check=True)
+    _run_git_apply(diff_path, cwd=build_root, timeout_seconds=30, check=False)
+
+    assert observed_parent_hash == host_context.source_tree_hash
+    assert compute_private_source_tree_hash(build_root) == tree_commit.source_tree_hash
 
 
 def test_autoresearch_executor_rejects_tampered_provider_catalog(tmp_path):

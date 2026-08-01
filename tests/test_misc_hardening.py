@@ -32,6 +32,10 @@ CODE_BUILD_SOURCE = REPO_ROOT / "gateway" / "research_lab" / "code_build.py"
 CODE_LOOP_ENGINE_SOURCE = REPO_ROOT / "gateway" / "research_lab" / "code_loop_engine.py"
 
 IMAGE_REF = "public.ecr.aws/example/sourcing-model@sha256:" + "a" * 64
+ECR_IMAGE_REF = (
+    "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:"
+    + "b" * 64
+)
 
 T1 = "2026-07-01T00:00:00+00:00"
 T2 = "2026-07-01T01:00:00+00:00"
@@ -228,6 +232,89 @@ class TestParentImagePrepull:
         monkeypatch.setattr(code_build, "_run", fake_run)
         code_build._prepull_parent_image_for_build(IMAGE_REF)
         assert state["pull_attempts"] == 2
+
+    def test_expired_ecr_token_refreshes_in_ephemeral_config(self, monkeypatch):
+        calls = []
+        refreshed = []
+
+        def fake_run(cmd, *, cwd, timeout_seconds):
+            calls.append((list(cmd), timeout_seconds))
+            if cmd[:3] == ["docker", "image", "inspect"]:
+                raise code_build.CodeEditBuildError("No such image")
+            if cmd[:2] == ["docker", "pull"]:
+                raise code_build.CodeEditBuildError(
+                    "denied: Your authorization token has expired"
+                )
+            return ""
+
+        monkeypatch.setattr(code_build, "_run", fake_run)
+        monkeypatch.setattr(
+            code_build,
+            "_pull_parent_image_with_refreshed_ecr_auth",
+            lambda image_ref, *, timeout_seconds: refreshed.append(
+                (image_ref, timeout_seconds)
+            ),
+        )
+
+        code_build._prepull_parent_image_for_build(ECR_IMAGE_REF)
+
+        assert len(_pull_calls(calls)) == 1
+        assert refreshed == [(ECR_IMAGE_REF, 900)]
+
+    def test_non_auth_pull_failure_does_not_refresh_ecr(self, monkeypatch):
+        calls = []
+        refreshed = []
+        monkeypatch.setattr(
+            code_build,
+            "_run",
+            _fake_run_recorder(calls, inspect_fails=True, pull_fails=True),
+        )
+        monkeypatch.setattr(
+            code_build,
+            "_pull_parent_image_with_refreshed_ecr_auth",
+            lambda *_args, **_kwargs: refreshed.append(True),
+        )
+        with pytest.raises(code_build.CodeEditInfraFailureError):
+            code_build._prepull_parent_image_for_build(IMAGE_REF)
+        assert refreshed == []
+
+    def test_ecr_refresh_uses_stdin_and_removes_temporary_config(self, monkeypatch):
+        calls = []
+
+        def fake_subprocess_run(cmd, **kwargs):
+            calls.append((list(cmd), dict(kwargs)))
+            stdout = "ephemeral-password\n" if cmd[:3] == [
+                "aws",
+                "ecr",
+                "get-login-password",
+            ] else ""
+            return code_build.subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=stdout,
+                stderr="",
+            )
+
+        monkeypatch.setattr(code_build.subprocess, "run", fake_subprocess_run)
+
+        code_build._pull_parent_image_with_refreshed_ecr_auth(
+            ECR_IMAGE_REF,
+            timeout_seconds=90,
+        )
+
+        assert [call[0][:3] for call in calls] == [
+            ["aws", "ecr", "get-login-password"],
+            ["docker", "--config", calls[1][0][2]],
+            ["docker", "--config", calls[2][0][2]],
+        ]
+        config_dir = Path(calls[1][0][2])
+        assert calls[2][0][2] == str(config_dir)
+        assert not config_dir.exists()
+        assert calls[1][1]["input"] == "ephemeral-password\n"
+        assert all(
+            "ephemeral-password" not in " ".join(command)
+            for command, _kwargs in calls
+        )
 
     def test_build_prepulls_before_the_build_command(self):
         """The pre-pull call sits inside build() BEFORE the private build cmd."""

@@ -1318,6 +1318,8 @@ async def run_authoritative_autoresearch_v2(
             "next_state_hash": next_hash,
         }
 
+    host_root_source_context: dict[str, Any] = {}
+
     async def build_handler(command: Mapping[str, Any], request: Mapping[str, Any]):
         expected_state = sha256_json(
             {
@@ -1333,6 +1335,15 @@ async def run_authoritative_autoresearch_v2(
         )
         if request.get("expected_state_hash") != expected_state:
             raise AutoresearchAuthorityV2Error("candidate build state differs")
+        source_context = host_root_source_context.get("value")
+        if (
+            source_context is None
+            or command.get("source_bundle_hash")
+            != source_bundle.get("archive_sha256")
+        ):
+            raise AutoresearchAuthorityV2Error(
+                "candidate build source authority is unavailable"
+            )
         result = await asyncio.to_thread(
             code_builder.build,
             draft=_draft(command["draft"]),
@@ -1341,6 +1352,7 @@ async def run_authoritative_autoresearch_v2(
             ),
             run_id=str(command["run_id"]),
             candidate_index=int(command["candidate_index"]),
+            source_context=source_context,
         )
         if (
             result.candidate_model_manifest.model_artifact_hash
@@ -1447,36 +1459,34 @@ async def run_authoritative_autoresearch_v2(
                     raise AutoresearchAuthorityV2Error(
                         "Git-tree durable frontier has no recovery artifact"
                     )
-            with tempfile.TemporaryDirectory(
-                prefix="leadpoet-git-tree-root-"
-            ) as temporary:
-                source_context = await asyncio.to_thread(
-                    code_builder.prepare_parent_source_context,
-                    parent_artifact=artifact,
-                    workspace_dir=Path(temporary),
+            source_workspace = _git_tree_workspace(tree_id) / "source-context"
+            source_context = await asyncio.to_thread(
+                code_builder.prepare_attested_source_context,
+                parent_artifact=artifact,
+                source_bundle=source_bundle,
+                workspace_dir=source_workspace,
+            )
+            if (
+                source_context.source_tree_hash
+                != command.get("root_source_tree_hash")
+            ):
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree normalized root source commitment differs"
                 )
-                if (
-                    source_context.source_tree_hash
-                    != command.get("root_source_tree_hash")
-                    or source_context.source_tree_hash
-                    != artifact.model_artifact_hash
-                ):
-                    raise AutoresearchAuthorityV2Error(
-                        "Git-tree extracted root source commitment differs"
-                    )
-                root_git_commit = await asyncio.to_thread(
-                    repository.initialize,
-                    source_root=source_context.source_root,
-                    root_artifact_hash=artifact.model_artifact_hash,
-                    policy_hash=str(command["policy_hash"]),
-                    run_id=str(run_id),
-                    root_manifest_hash=artifact.manifest_hash,
-                    root_image_digest=str(command["root_image_digest"]),
-                    evaluator_commitment_hash=str(
-                        command["evaluator_commitment_hash"]
-                    ),
-                    tree_doc=tree_doc,
-                )
+            host_root_source_context["value"] = source_context
+            root_git_commit = await asyncio.to_thread(
+                repository.initialize,
+                source_root=source_context.source_root,
+                root_artifact_hash=artifact.model_artifact_hash,
+                policy_hash=str(command["policy_hash"]),
+                run_id=str(run_id),
+                root_manifest_hash=artifact.manifest_hash,
+                root_image_digest=str(command["root_image_digest"]),
+                evaluator_commitment_hash=str(
+                    command["evaluator_commitment_hash"]
+                ),
+                tree_doc=tree_doc,
+            )
             persisted_tree = await authoritative_tree_store.create_tree(
                 tree_id=tree_id,
                 run_id=str(run_id),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -12,10 +13,12 @@ from gateway.research_lab.model_authority_v2 import (
 from gateway.research_lab.tee_protocol import ResearchLabTeeProtocolError
 from gateway.tee.model_sandbox_v2 import provider_evidence_tape_input_root
 from gateway.tee.source_add_runtime_v2 import build_source_add_runtime_catalog_v2
+from gateway.tee.source_bundle_v2 import extract_source_bundle_v2
 from leadpoet_canonical.attested_v2 import sha256_json
 from research_lab.eval import DockerPrivateModelSpec, build_local_private_artifact_manifest
 from research_lab.eval.private_runtime import (
     begin_incontainer_trace_collection,
+    compute_private_source_tree_hash,
     end_incontainer_trace_collection,
 )
 from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
@@ -40,6 +43,89 @@ def _artifact(tmp_path):
         signature_ref="kms:signature",
         component_registry_version="1",
         scoring_adapter_version="1",
+    )
+
+
+def test_source_bundle_uses_exact_signed_repo_when_image_is_runtime_subset(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "private-repo"
+    source.mkdir()
+    (source / "research_lab_adapter.py").write_text(
+        "def run_icp(icp, context):\n    return []\n",
+        encoding="utf-8",
+    )
+    install_reviewed_consumer_snapshot(source)
+    (source / "repo-only.txt").write_text("signed full source\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet"], cwd=source, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Research Lab Test"],
+        cwd=source,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@leadpoet.local"],
+        cwd=source,
+        check=True,
+    )
+    subprocess.run(["git", "add", "-A"], cwd=source, check=True)
+    subprocess.run(
+        ["git", "commit", "--quiet", "-m", "signed source"],
+        cwd=source,
+        check=True,
+    )
+    commit_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=source, text=True
+    ).strip()
+    artifact = model_authority_v2.PrivateModelArtifactManifest.from_mapping(
+        build_local_private_artifact_manifest(
+            source_path=source,
+            git_commit_sha=commit_sha,
+            image_digest=(
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com/private@sha256:"
+                + "b" * 64
+            ),
+            manifest_uri="s3://private/manifests/current.json",
+            signature_ref="kms:signature",
+            component_registry_version="1",
+            scoring_adapter_version="1",
+        )
+    )
+
+    def extract_runtime_subset(*, image_digest, source_dir, timeout_seconds):
+        assert image_digest == artifact.image_digest
+        assert timeout_seconds >= 120
+        source_dir.mkdir(parents=True)
+        (source_dir / "research_lab_adapter.py").write_text(
+            "def run_icp(icp, context):\n    return []\n",
+            encoding="utf-8",
+        )
+        return compute_private_source_tree_hash(source_dir), [
+            "research_lab_adapter.py"
+        ]
+
+    monkeypatch.setattr(
+        model_authority_v2,
+        "_extract_parent_image_source",
+        extract_runtime_subset,
+    )
+    monkeypatch.setenv("RESEARCH_LAB_PRIVATE_REPO_URL", str(source))
+    model_authority_v2._SOURCE_BUNDLE_CACHE.clear()
+
+    bundle = model_authority_v2._source_bundle_for_artifact(
+        artifact,
+        timeout_seconds=120,
+    )
+
+    assert bundle["source_tree_hash"] == artifact.model_artifact_hash
+    restored = tmp_path / "restored"
+    extract_source_bundle_v2(
+        bundle,
+        destination=restored,
+        expected_source_tree_hash=artifact.model_artifact_hash,
+    )
+    assert (restored / "repo-only.txt").read_text(encoding="utf-8") == (
+        "signed full source\n"
     )
 
 

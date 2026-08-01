@@ -33,6 +33,7 @@ from gateway.research_lab.code_build import (
     _top_level_paths,
     _prepare_parent_image_workspace,
     _run,
+    _write_research_lab_build_scaffold,
     resolve_source_inspection_requests,
 )
 from gateway.research_lab.code_loop_engine import (
@@ -1042,12 +1043,18 @@ class _HostCandidateBuilder:
         source_context: ParentImageSourceContext,
         source_bundle_hash: str,
         execution_context: ExecutionContextV2,
+        root_artifact_hash: str = "",
     ) -> None:
         self.config = config
         self._local = CodeEditCandidateBuilder(config)
         self._source_context = source_context
+        self._root_artifact_hash = (
+            str(root_artifact_hash or "").strip()
+            or source_context.source_tree_hash
+        )
         self._source_contexts = {
             source_context.source_tree_hash: source_context,
+            self._root_artifact_hash: source_context,
         }
         self._source_context_lock = threading.RLock()
         self._derived_source_root = source_context.source_root.parent / "git-tree-candidates"
@@ -1093,13 +1100,13 @@ class _HostCandidateBuilder:
             if existing is not None:
                 return existing
 
-            root_hash = self._source_context.source_tree_hash
             draft_hash = sha256_json(
                 {"unified_diff": candidate.draft.unified_diff}
             )
             if (
                 candidate.tree_depth <= 0
-                or candidate.tree_root_artifact_hash != root_hash
+                or candidate.tree_root_artifact_hash
+                != self._root_artifact_hash
                 or candidate.tree_cumulative_source_diff_hash != draft_hash
                 or candidate.build.source_diff_hash != draft_hash
                 or not re.fullmatch(r"[0-9a-f]{64}", candidate.tree_git_commit)
@@ -1107,7 +1114,7 @@ class _HostCandidateBuilder:
                     candidate.build.code_edit_manifest.get("parent_artifact_hash")
                     or ""
                 )
-                != root_hash
+                != self._root_artifact_hash
             ):
                 raise AutoresearchExecutorV2Error(
                     "rehydrated Git-tree candidate commitment differs"
@@ -1279,7 +1286,9 @@ def _source_context(
     source_root: Path,
     artifact: PrivateModelArtifactManifest,
     config: ResearchLabGatewayConfig,
+    source_mode: str = "attested_source_bundle",
 ) -> ParentImageSourceContext:
+    source_tree_hash = compute_private_source_tree_hash(source_root)
     editable_files = _editable_runtime_files(
         source_root,
         allowed_prefixes=config.code_edit_allowed_path_prefixes(),
@@ -1294,17 +1303,14 @@ def _source_context(
         planner_source_index = build_source_symbol_index(
             source_root=source_root,
             editable_files=editable_files,
-            source_tree_hash=artifact.model_artifact_hash,
+            source_tree_hash=source_tree_hash,
             parent_image_digest_hash=parent_image_digest_hash,
         )
     return ParentImageSourceContext(
         source_root=source_root,
-        # Preserve the exact prompt/event value used by the host engine.  The
-        # V2 receipt records the attested bundle separately; changing this
-        # product-facing field would alter loop prompts and checkpoints.
-        source_mode="parent_image_extract",
+        source_mode=source_mode,
         parent_image_digest_hash=parent_image_digest_hash,
-        source_tree_hash=artifact.model_artifact_hash,
+        source_tree_hash=source_tree_hash,
         top_level_paths=tuple(_top_level_paths(source_root)),
         editable_files=tuple(editable_files),
         file_previews=tuple(_source_file_previews(source_root, editable_files)),
@@ -1639,10 +1645,15 @@ class AutoresearchExecutorV2:
                 context=context,
                 plaintext=source_archive,
             )
+            _write_research_lab_build_scaffold(
+                source_root,
+                base_image_ref=artifact.image_digest,
+            )
             source_context = _source_context(
                 source_root=source_root,
                 artifact=artifact,
                 config=config,
+                source_mode="attested_source_bundle",
             )
             tree_runtime_policy = _mapping(
                 request["budget_context"].get("tree_policy"),
@@ -1675,6 +1686,7 @@ class AutoresearchExecutorV2:
                 source_context=source_context,
                 source_bundle_hash=str(source_evidence["archive_sha256"]),
                 execution_context=context,
+                root_artifact_hash=artifact.model_artifact_hash,
             )
             event_sink = self._event_sink(
                 context=context,

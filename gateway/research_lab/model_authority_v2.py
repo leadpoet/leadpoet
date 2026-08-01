@@ -12,8 +12,12 @@ import asyncio
 from collections import OrderedDict
 from dataclasses import replace
 import json
+import logging
 import os
 from pathlib import Path
+import re
+import shutil
+import subprocess
 import tempfile
 import threading
 from typing import Any, Mapping, Sequence
@@ -40,6 +44,7 @@ from research_lab.eval import (
     DockerPrivateModelSpec,
     PrivateModelArtifactManifest,
     PrivateModelRuntimeError,
+    compute_private_source_tree_hash,
     ensure_private_model_outputs,
     validate_private_model_artifact_manifest,
 )
@@ -60,6 +65,9 @@ _SOURCE_BUNDLE_CACHE_SIZE = 8
 _SOURCE_BUNDLE_CACHE: "OrderedDict[tuple[str, str], dict[str, Any]]" = OrderedDict()
 _SOURCE_BUNDLE_CACHE_LOCK = threading.Lock()
 _SOURCE_BUNDLE_BUILD_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_PRIVATE_REPO_URL_ENV = "RESEARCH_LAB_PRIVATE_REPO_URL"
+_GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+logger = logging.getLogger(__name__)
 V2_PROVIDER_PROFILE_ENV = "LEADPOET_V2_PROVIDER_CREDENTIAL_PROFILE"
 PROVIDER_EVIDENCE_TAPE_ARTIFACT_KIND = "provider_evidence_tape_v2"
 _CREDENTIAL_ENV_NAMES = frozenset(
@@ -91,6 +99,86 @@ _HOST_ONLY_ENV_NAMES = frozenset(
 
 class AttestedPrivateModelRunnerV2Error(PrivateModelRuntimeError):
     """The measured model result or one of its commitments is invalid."""
+
+
+def _run_private_source_git(
+    args: Sequence[str],
+    *,
+    cwd: Path,
+    timeout_seconds: int,
+) -> str:
+    """Run private-source Git without exposing credentialed remotes in errors."""
+
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=max(1, int(timeout_seconds)),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AttestedPrivateModelRunnerV2Error(
+            "exact private model source checkout failed"
+        ) from exc
+    if result.returncode != 0:
+        raise AttestedPrivateModelRunnerV2Error(
+            "exact private model source checkout failed"
+        )
+    return result.stdout.strip()
+
+
+def _checkout_private_source_for_artifact(
+    artifact: PrivateModelArtifactManifest,
+    *,
+    destination: Path,
+    timeout_seconds: int,
+) -> str:
+    repo_url = str(os.getenv(_PRIVATE_REPO_URL_ENV) or "").strip()
+    commit_sha = str(artifact.git_commit_sha or "").strip().lower()
+    if not repo_url:
+        raise AttestedPrivateModelRunnerV2Error(
+            f"{_PRIVATE_REPO_URL_ENV} is required when the immutable image contains only the runtime source closure"
+        )
+    if not _GIT_SHA_RE.fullmatch(commit_sha):
+        raise AttestedPrivateModelRunnerV2Error(
+            "private model artifact commit is not a full Git SHA"
+        )
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True)
+    _run_private_source_git(
+        ["init", "--quiet"],
+        cwd=destination,
+        timeout_seconds=timeout_seconds,
+    )
+    _run_private_source_git(
+        ["remote", "add", "origin", repo_url],
+        cwd=destination,
+        timeout_seconds=timeout_seconds,
+    )
+    _run_private_source_git(
+        ["fetch", "--quiet", "--depth", "1", "origin", commit_sha],
+        cwd=destination,
+        timeout_seconds=timeout_seconds,
+    )
+    _run_private_source_git(
+        ["checkout", "--quiet", "--detach", "FETCH_HEAD"],
+        cwd=destination,
+        timeout_seconds=timeout_seconds,
+    )
+    observed_commit = _run_private_source_git(
+        ["rev-parse", "HEAD"],
+        cwd=destination,
+        timeout_seconds=timeout_seconds,
+    ).lower()
+    if observed_commit != commit_sha:
+        raise AttestedPrivateModelRunnerV2Error(
+            "checked-out private model source commit differs from its signed artifact"
+        )
+    return compute_private_source_tree_hash(destination)
 
 
 class _LegacyPrivateModelRunnerAdapter:
@@ -192,8 +280,20 @@ def _source_bundle_for_artifact(
                 timeout_seconds=max(120, int(timeout_seconds)),
             )
             if observed_tree_hash != artifact.model_artifact_hash:
+                logger.info(
+                    "research_lab_v2_image_contains_runtime_source_closure "
+                    "artifact=%s image_source=%s",
+                    artifact.model_artifact_hash,
+                    observed_tree_hash,
+                )
+                observed_tree_hash = _checkout_private_source_for_artifact(
+                    artifact,
+                    destination=source_root,
+                    timeout_seconds=max(120, int(timeout_seconds)),
+                )
+            if observed_tree_hash != artifact.model_artifact_hash:
                 raise AttestedPrivateModelRunnerV2Error(
-                    "immutable model image source differs from its signed artifact"
+                    "exact private model source differs from its signed artifact"
                 )
             bundle = build_source_bundle_v2(source_root)
         if bundle.get("source_tree_hash") != artifact.model_artifact_hash:

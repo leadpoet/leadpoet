@@ -48,8 +48,9 @@ git log origin/main..HEAD --oneline
 git log HEAD..origin/main --oneline
 test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 git diff --exit-code origin/main --
-git ls-tree -r --name-only origin/main | while IFS= read -r path; do
-  test -e "$path" || test -L "$path" || printf 'MISSING %s\n' "$path"
+git ls-tree -r --name-only origin/main | while IFS= read -r tracked_path; do
+  test -e "$tracked_path" || test -L "$tracked_path" || \
+    printf 'MISSING %s\n' "$tracked_path"
 done
 ```
 

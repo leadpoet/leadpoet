@@ -3098,11 +3098,13 @@ def test_workflow_uses_the_strict_exact_external_boundaries(
     )
 
     command = captured["command"]
-    assert any(
-        command[index : index + 2]
-        == ["--env", "REHEARSAL_SCOPE=exact"]
-        for index in range(len(command) - 1)
-    )
+    environment = {
+        command[index + 1]
+        for index, value in enumerate(command[:-1])
+        if value == "--env"
+    }
+    assert "REHEARSAL_SCOPE=exact" in environment
+    assert "PYTHONPATH=/source:/harness" in environment
 
 
 def test_local_chain_rejects_unknown_and_joins_finalized_reveal(

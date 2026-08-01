@@ -1070,6 +1070,8 @@ def _run_workflow(
         "--env",
         "REHEARSAL_SCOPE=exact",
         "--env",
+        "PYTHONPATH=/source:/harness",
+        "--env",
         f"REHEARSAL_PROFILE={profile}",
         "--env",
         f"REHEARSAL_EPOCHS={limits['epochs']}",

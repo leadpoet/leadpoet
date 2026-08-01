@@ -21,7 +21,6 @@ from gateway.tee.mtls_identity import (
     write_identity_to_tmpfs,
 )
 from gateway.tee.topology import ROLE_SPECS, role_spec, topology_hash
-from gateway.utils.tee_client import AF_VSOCK, _recv_exact
 from leadpoet_canonical.attested_v2 import (
     canonical_json,
     validate_boot_identity,
@@ -29,6 +28,7 @@ from leadpoet_canonical.attested_v2 import (
 )
 
 
+AF_VSOCK = 40
 PARENT_CID = 3
 RELAY_PORT = 5002
 TLS_SERVICE_PORT = 5003
@@ -40,6 +40,18 @@ _ERROR_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 class InterEnclaveTLSError(RuntimeError):
     """A peer, certificate, frame, or topology binding is invalid."""
+
+
+def _recv_exact(connection: Any, size: int) -> bytes:
+    """Read one complete bounded frame without importing the host TEE client."""
+
+    output = bytearray()
+    while len(output) < size:
+        chunk = connection.recv(min(64 * 1024, size - len(output)))
+        if not chunk:
+            break
+        output.extend(chunk)
+    return bytes(output)
 
 
 def _certificate_der(certificate_pem: bytes) -> bytes:

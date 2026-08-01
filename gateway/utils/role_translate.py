@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import re
+import threading
 import unicodedata
 from collections import OrderedDict
 from typing import Optional
@@ -31,7 +32,7 @@ _ENDPOINT = f"{GATEWAY_URL}/fulfillment/translate-role" if GATEWAY_URL else ""
 # container skips even the gateway HTTP call.  Tiny memory footprint.
 _LRU_MAX = 1000
 _lru: "OrderedDict[str, str]" = OrderedDict()
-_lru_lock = asyncio.Lock()
+_lru_lock = threading.Lock()
 
 # Normalization MUST match what gateway/api/role_translate.py:_normalize does,
 # otherwise an accent/whitespace variant misses our per-process LRU even
@@ -54,7 +55,7 @@ def _normalize(role: str) -> str:
 
 
 async def _lru_get(key: str) -> Optional[str]:
-    async with _lru_lock:
+    with _lru_lock:
         if key in _lru:
             _lru.move_to_end(key)
             return _lru[key]
@@ -62,7 +63,7 @@ async def _lru_get(key: str) -> Optional[str]:
 
 
 async def _lru_put(key: str, val: str) -> None:
-    async with _lru_lock:
+    with _lru_lock:
         _lru[key] = val
         _lru.move_to_end(key)
         while len(_lru) > _LRU_MAX:

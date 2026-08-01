@@ -22,7 +22,6 @@ from gateway.tee.kms_recipient_v2 import (
     KMS_KEY_ENCRYPTION_ALGORITHM,
     KMS_RECIPIENT_SCHEMA_VERSION,
 )
-from gateway.utils.tee_client import coordinator_tee_client
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
 
 logger = logging.getLogger(__name__)
@@ -35,6 +34,14 @@ _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 class TEEKMSProvisionV2Error(RuntimeError):
     """An encrypted credential envelope or KMS recipient response is unsafe."""
+
+
+def _default_coordinator_tee_client() -> Any:
+    """Load the host RPC client only when a host provisioning call needs it."""
+
+    from gateway.utils.tee_client import coordinator_tee_client
+
+    return coordinator_tee_client
 
 
 def _default_kms_client() -> Any:
@@ -182,10 +189,12 @@ def validate_provider_envelope(value: Mapping[str, Any]) -> Dict[str, Any]:
 async def provision_provider_envelope_v2(
     envelope: Mapping[str, Any],
     *,
-    client: Any = coordinator_tee_client,
+    client: Any = None,
     kms_client: Any = None,
 ) -> Dict[str, Any]:
     normalized = validate_provider_envelope(envelope)
+    if client is None:
+        client = _default_coordinator_tee_client()
     recipient = await client.v2_get_kms_recipient(
         normalized["credential_slot"]
     )
@@ -298,12 +307,14 @@ def validate_job_provider_envelope(value: Mapping[str, Any]) -> Dict[str, Any]:
 async def provision_job_provider_envelope_v2(
     envelope: Mapping[str, Any],
     *,
-    client: Any = coordinator_tee_client,
+    client: Any = None,
     kms_client: Any = None,
 ) -> Dict[str, Any]:
     """KMS unwrap one per-miner key directly into the coordinator enclave."""
 
     normalized = validate_job_provider_envelope(envelope)
+    if client is None:
+        client = _default_coordinator_tee_client()
     try:
         recipient = await client.v2_get_job_kms_recipient(
             job_id=normalized["job_id"],
@@ -436,7 +447,7 @@ def validate_job_credential_envelope_v2(
 async def provision_job_credential_envelope_v2(
     envelope: Mapping[str, Any],
     *,
-    client: Any = coordinator_tee_client,
+    client: Any = None,
     kms_client: Any = None,
 ) -> Dict[str, Any]:
     """Lease one validated job credential without exposing plaintext to parent."""
@@ -449,6 +460,8 @@ async def provision_job_credential_envelope_v2(
     )
 
     normalized = validate_job_credential_envelope_v2(envelope)
+    if client is None:
+        client = _default_coordinator_tee_client()
     wire = {
         key: item
         for key, item in normalized.items()

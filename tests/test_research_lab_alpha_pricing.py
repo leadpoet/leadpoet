@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+import threading
 
 import pytest
 
@@ -120,6 +123,7 @@ def test_dynamic_valuation_drives_reimbursement_allocation_without_touching_cham
 @pytest.mark.asyncio
 async def test_epoch_price_cache_fetches_once_per_epoch(monkeypatch):
     alpha_pricing._CACHE.clear()
+    alpha_pricing._CACHE_INFLIGHT.clear()
     calls = {"alpha": 0, "tao": 0}
 
     async def fake_alpha(*, network: str, netuid: int, timeout_seconds: float):
@@ -161,6 +165,7 @@ async def test_epoch_price_cache_fetches_once_per_epoch(monkeypatch):
 @pytest.mark.asyncio
 async def test_epoch_price_fetch_failure_uses_static_fallback(monkeypatch):
     alpha_pricing._CACHE.clear()
+    alpha_pricing._CACHE_INFLIGHT.clear()
     calls = {"alpha": 0}
 
     async def fail_alpha(*, network: str, netuid: int, timeout_seconds: float):
@@ -199,6 +204,154 @@ async def test_epoch_price_fetch_failure_uses_static_fallback(monkeypatch):
         max_attempts=1,
     )
     assert calls["alpha"] == 2
+
+
+def test_epoch_price_singleflight_is_shared_across_event_loops(monkeypatch):
+    alpha_pricing._CACHE.clear()
+    alpha_pricing._CACHE_INFLIGHT.clear()
+    calls = {"alpha": 0, "tao": 0}
+    calls_lock = threading.Lock()
+    callers_ready = threading.Barrier(2)
+    fetch_started = threading.Barrier(3)
+
+    async def fake_alpha(*, network: str, netuid: int, timeout_seconds: float):
+        with calls_lock:
+            calls["alpha"] += 1
+        await asyncio.to_thread(fetch_started.wait)
+        return Decimal("0.006702566")
+
+    async def fake_tao(*, timeout_seconds: float):
+        with calls_lock:
+            calls["tao"] += 1
+        await asyncio.to_thread(fetch_started.wait)
+        return Decimal("202.58")
+
+    monkeypatch.setattr(alpha_pricing, "_fetch_tao_per_alpha", fake_alpha)
+    monkeypatch.setattr(alpha_pricing, "_fetch_tao_usd", fake_tao)
+
+    def resolve():
+        callers_ready.wait()
+        return asyncio.run(
+            resolve_epoch_alpha_price_valuation(
+                network="finney",
+                netuid=71,
+                epoch=903,
+                enabled=True,
+                require_live=True,
+                miner_alpha_per_epoch=147.6,
+                static_usd_per_0_1_percent_epoch=0.162,
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [executor.submit(resolve) for _ in range(2)]
+        fetch_started.wait()
+        valuations = [result.result(timeout=2.0) for result in results]
+
+    assert calls == {"alpha": 1, "tao": 1}
+    assert sorted(item.pricing_status for item in valuations) == [
+        "cache_hit",
+        "live",
+    ]
+    assert valuations[0].usd_per_0_1_percent_epoch == valuations[1].usd_per_0_1_percent_epoch
+    assert alpha_pricing._CACHE_INFLIGHT == {}
+
+
+@pytest.mark.asyncio
+async def test_epoch_price_failed_singleflight_clears_for_retry(monkeypatch):
+    alpha_pricing._CACHE.clear()
+    alpha_pricing._CACHE_INFLIGHT.clear()
+
+    async def fail_alpha(*, network: str, netuid: int, timeout_seconds: float):
+        raise RuntimeError("subtensor unavailable")
+
+    async def fail_tao(*, timeout_seconds: float):
+        raise RuntimeError("coingecko unavailable")
+
+    monkeypatch.setattr(alpha_pricing, "_fetch_tao_per_alpha", fail_alpha)
+    monkeypatch.setattr(alpha_pricing, "_fetch_tao_usd", fail_tao)
+
+    with pytest.raises(RuntimeError, match="live alpha price unavailable"):
+        await resolve_epoch_alpha_price_valuation(
+            network="finney",
+            netuid=71,
+            epoch=904,
+            enabled=True,
+            require_live=True,
+            miner_alpha_per_epoch=147.6,
+            static_usd_per_0_1_percent_epoch=0.162,
+            max_attempts=1,
+        )
+    assert alpha_pricing._CACHE_INFLIGHT == {}
+
+    async def fake_alpha(*, network: str, netuid: int, timeout_seconds: float):
+        return Decimal("0.006702566")
+
+    async def fake_tao(*, timeout_seconds: float):
+        return Decimal("202.58")
+
+    monkeypatch.setattr(alpha_pricing, "_fetch_tao_per_alpha", fake_alpha)
+    monkeypatch.setattr(alpha_pricing, "_fetch_tao_usd", fake_tao)
+    valuation = await resolve_epoch_alpha_price_valuation(
+        network="finney",
+        netuid=71,
+        epoch=904,
+        enabled=True,
+        require_live=True,
+        miner_alpha_per_epoch=147.6,
+        static_usd_per_0_1_percent_epoch=0.162,
+        max_attempts=1,
+    )
+
+    assert valuation.pricing_status == "live"
+    assert alpha_pricing._CACHE_INFLIGHT == {}
+
+
+@pytest.mark.asyncio
+async def test_epoch_price_cancelled_waiter_does_not_cancel_shared_fetch(monkeypatch):
+    alpha_pricing._CACHE.clear()
+    alpha_pricing._CACHE_INFLIGHT.clear()
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def fake_alpha(*, network: str, netuid: int, timeout_seconds: float):
+        started.set()
+        await release.wait()
+        return Decimal("0.006702566")
+
+    async def fake_tao(*, timeout_seconds: float):
+        await release.wait()
+        return Decimal("202.58")
+
+    monkeypatch.setattr(alpha_pricing, "_fetch_tao_per_alpha", fake_alpha)
+    monkeypatch.setattr(alpha_pricing, "_fetch_tao_usd", fake_tao)
+
+    async def resolve():
+        return await resolve_epoch_alpha_price_valuation(
+            network="finney",
+            netuid=71,
+            epoch=905,
+            enabled=True,
+            require_live=True,
+            miner_alpha_per_epoch=147.6,
+            static_usd_per_0_1_percent_epoch=0.162,
+        )
+
+    owner = asyncio.create_task(resolve())
+    await started.wait()
+    waiter = asyncio.create_task(resolve())
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    release.set()
+    valuation = await owner
+    cached = await resolve()
+
+    assert valuation.pricing_status == "live"
+    assert cached.pricing_status == "cache_hit"
+    assert alpha_pricing._CACHE_INFLIGHT == {}
 
 
 def test_static_fallback_doc_is_auditable_when_dynamic_pricing_disabled():

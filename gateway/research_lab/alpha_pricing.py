@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import logging
+import threading
 from typing import Any
 
 import aiohttp
@@ -56,7 +58,10 @@ class AlphaPriceValuation:
 
 
 _CACHE: dict[tuple[str, int, int], AlphaPriceValuation] = {}
-_CACHE_LOCK = asyncio.Lock()
+_CACHE_INFLIGHT: dict[
+    tuple[str, int, int], Future[AlphaPriceValuation]
+] = {}
+_CACHE_GUARD = threading.Lock()
 
 
 def compute_alpha_price_valuation(
@@ -164,15 +169,23 @@ async def resolve_epoch_alpha_price_valuation(
             reason="dynamic_alpha_price_disabled",
         )
 
-    cached = _CACHE.get(cache_key)
-    if cached is not None:
-        return _with_status(cached, "cache_hit")
-
-    async with _CACHE_LOCK:
+    with _CACHE_GUARD:
         cached = _CACHE.get(cache_key)
         if cached is not None:
             return _with_status(cached, "cache_hit")
+        inflight = _CACHE_INFLIGHT.get(cache_key)
+        owns_fetch = inflight is None
+        if inflight is None:
+            inflight = Future()
+            _CACHE_INFLIGHT[cache_key] = inflight
 
+    if not owns_fetch:
+        shared = await asyncio.shield(asyncio.wrap_future(inflight))
+        if shared.pricing_status == "live":
+            return _with_status(shared, "cache_hit")
+        return shared
+
+    try:
         last_error = ""
         for attempt in range(1, max(1, int(max_attempts)) + 1):
             try:
@@ -193,7 +206,10 @@ async def resolve_epoch_alpha_price_valuation(
                     miner_alpha_per_epoch=miner_alpha_per_epoch,
                     pricing_status="live",
                 )
-                _CACHE[cache_key] = valuation
+                with _CACHE_GUARD:
+                    _CACHE[cache_key] = valuation
+                    _CACHE_INFLIGHT.pop(cache_key, None)
+                inflight.set_result(valuation)
                 return valuation
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
@@ -222,7 +238,19 @@ async def resolve_epoch_alpha_price_valuation(
             miner_alpha_per_epoch=miner_alpha_per_epoch,
             reason=last_error or "live_price_unavailable",
         )
+        with _CACHE_GUARD:
+            _CACHE_INFLIGHT.pop(cache_key, None)
+        inflight.set_result(fallback)
         return fallback
+    except BaseException as exc:
+        with _CACHE_GUARD:
+            _CACHE_INFLIGHT.pop(cache_key, None)
+        if not inflight.done():
+            if isinstance(exc, asyncio.CancelledError):
+                inflight.cancel()
+            else:
+                inflight.set_exception(exc)
+        raise
 
 
 def inject_alpha_price_valuation(policy: dict[str, Any], valuation: AlphaPriceValuation) -> dict[str, Any]:

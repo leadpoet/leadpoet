@@ -48,6 +48,7 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     _schema_contract,
 )
 from tests.restart_rehearsal.postgres_v2_contract_probe import (
+    ACTIVE_MODEL_RESULT_REPLAY_MIGRATION,
     CHAMPION_LIFETIME_CREDIT_MIGRATION,
     DisposablePostgres,
     EXPECTED_FINALIZED_VIEW_COLUMNS,
@@ -661,6 +662,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             CHAMPION_LIFETIME_CREDIT_MIGRATION,
             PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
             PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
+            ACTIVE_MODEL_RESULT_REPLAY_MIGRATION,
         ],
         "relations": relations,
         "rpcs": [
@@ -671,6 +673,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_provider_outcome_contention_contract_v3",
             "persist_research_lab_chain_realized_lifetime_settlement_v2",
             "research_lab_champion_lifetime_credit_contract_v1",
+            "research_lab_active_model_replay_contract_v2",
         ],
         "checks": {
             "pre_128_transport_rejected": True,
@@ -682,6 +685,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "post_133_provider_outcome_contract_valid": True,
             "pre_134_provider_outcome_head_contract_rejected": True,
             "post_134_provider_outcome_head_contract_valid": True,
+            "post_135_active_model_replay_contract_valid": True,
             "provider_outcome_append_atomic": True,
             "provider_outcome_contention_zero_rollback": True,
             "provider_outcome_conflict_head_exact": True,
@@ -750,6 +754,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
         in rpcs
     )
     assert "research_lab_champion_lifetime_credit_contract_v1" in rpcs
+    assert "research_lab_active_model_replay_contract_v2" in rpcs
     assert _migration_seed_rows(
         path,
         candidate_sha=COMMIT,
@@ -782,6 +787,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             CHAMPION_LIFETIME_CREDIT_MIGRATION,
             PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
             PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
+            ACTIVE_MODEL_RESULT_REPLAY_MIGRATION,
         ],
         "relations": {
             "research_lab_finalized_allocation_epochs_v2": {
@@ -816,6 +822,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "post_133_provider_outcome_contract_valid": True,
             "pre_134_provider_outcome_head_contract_rejected": True,
             "post_134_provider_outcome_head_contract_valid": True,
+            "post_135_active_model_replay_contract_valid": True,
             "provider_outcome_append_atomic": True,
             "provider_outcome_contention_zero_rollback": True,
             "provider_outcome_conflict_head_exact": True,
@@ -2953,13 +2960,11 @@ def test_joined_manifest_requires_every_authority_field(
     monkeypatch,
     tmp_path,
 ) -> None:
+    initial_hash = "sha256:" + "a" * 64
+    final_hash = _write_final_durable_state(tmp_path, revision=1)
     for component in ("gateway", "validator"):
-        start_revision = 0 if component == "gateway" else 1
-        end_revision = 1
-        start_hash = (
-            "sha256:" + ("a" if component == "gateway" else "b") * 64
-        )
-        end_hash = "sha256:" + "b" * 64
+        end_revision = 1 if component == "gateway" else 0
+        end_hash = final_hash if component == "gateway" else initial_hash
         (tmp_path / f"1-{component}-forward-{COMMIT}.json").write_text(
             json.dumps(
                 {
@@ -2978,8 +2983,8 @@ def test_joined_manifest_requires_every_authority_field(
                             "durable_boundary_state.v1"
                         ),
                         "durable_schema_sha": COMMIT,
-                        "start_revision": start_revision,
-                        "start_state_hash": start_hash,
+                        "start_revision": 0,
+                        "start_state_hash": initial_hash,
                         "end_revision": end_revision,
                         "end_state_hash": end_hash,
                     },
@@ -3200,7 +3205,7 @@ def test_joined_manifest_requires_every_authority_field(
     validator_path.write_text(json.dumps(validator), encoding="utf-8")
     with pytest.raises(
         SystemExit,
-        match="durable boundary state did not survive activation",
+        match="durable boundary revision has conflicting state hashes",
     ):
         join_evidence.main(
             [
@@ -3216,9 +3221,7 @@ def test_joined_manifest_requires_every_authority_field(
                 str(output),
             ]
         )
-    validator["durable_boundary_state"]["start_state_hash"] = (
-        "sha256:" + "b" * 64
-    )
+    validator["durable_boundary_state"]["start_state_hash"] = initial_hash
     validator_path.write_text(json.dumps(validator), encoding="utf-8")
 
     workflow["stages"][-1]["status"] = "unexercised"
@@ -3927,6 +3930,121 @@ def test_prepush_runs_validator_and_workflow_after_gateway_failure(
         "stage": "evidence-join-prepush",
         "status": "unexercised",
     }
+
+
+def _durable_interval(
+    start_revision: int,
+    start_hash: str,
+    end_revision: int,
+    end_hash: str,
+) -> dict[str, Any]:
+    return {
+        "durable_boundary_state": {
+            "schema_version": (
+                "leadpoet.restart_rehearsal.durable_boundary_state.v1"
+            ),
+            "durable_schema_sha": COMMIT,
+            "start_revision": start_revision,
+            "start_state_hash": start_hash,
+            "end_revision": end_revision,
+            "end_state_hash": end_hash,
+        }
+    }
+
+
+def _write_final_durable_state(
+    tmp_path: Path,
+    *,
+    revision: int,
+) -> str:
+    state = {
+        "schema_version": "leadpoet.local_postgrest_durable_state.v1",
+        "durable_schema_sha": COMMIT,
+        "revision": revision,
+        "rows": {"example": [{"revision": revision}]},
+    }
+    state["state_hash"] = join_evidence._state_hash(state)
+    path = tmp_path / "durable-boundary-state/postgrest-state.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(state), encoding="utf-8")
+    return str(state["state_hash"])
+
+
+def test_prepush_durable_continuity_accepts_overlapping_launcher_intervals(
+    tmp_path,
+) -> None:
+    initial_hash = "sha256:" + "0" * 64
+    final_hash = _write_final_durable_state(tmp_path, revision=9)
+
+    join_evidence._verify_durable_boundary_continuity(
+        [
+            _durable_interval(0, initial_hash, 9, final_hash),
+            _durable_interval(0, initial_hash, 0, initial_hash),
+        ],
+        profile="prepush",
+        evidence_root=tmp_path,
+        candidate_sha=COMMIT,
+    )
+
+
+def test_prepush_durable_continuity_rejects_conflicting_revision_hashes(
+    tmp_path,
+) -> None:
+    initial_hash = "sha256:" + "0" * 64
+    conflicting_hash = "sha256:" + "1" * 64
+    final_hash = _write_final_durable_state(tmp_path, revision=9)
+
+    with pytest.raises(SystemExit, match="conflicting state hashes"):
+        join_evidence._verify_durable_boundary_continuity(
+            [
+                _durable_interval(0, initial_hash, 9, final_hash),
+                _durable_interval(0, conflicting_hash, 0, conflicting_hash),
+            ],
+            profile="prepush",
+            evidence_root=tmp_path,
+            candidate_sha=COMMIT,
+        )
+
+
+def test_prepush_durable_continuity_rejects_stale_final_state(
+    tmp_path,
+) -> None:
+    initial_hash = "sha256:" + "0" * 64
+    observed_hash = "sha256:" + "9" * 64
+    _write_final_durable_state(tmp_path, revision=8)
+
+    with pytest.raises(SystemExit, match="did not survive activation"):
+        join_evidence._verify_durable_boundary_continuity(
+            [_durable_interval(0, initial_hash, 9, observed_hash)],
+            profile="prepush",
+            evidence_root=tmp_path,
+            candidate_sha=COMMIT,
+        )
+
+
+def test_release_durable_continuity_remains_strictly_sequential(
+    tmp_path,
+) -> None:
+    hashes = ["sha256:" + str(index) * 64 for index in range(3)]
+    join_evidence._verify_durable_boundary_continuity(
+        [
+            _durable_interval(0, hashes[0], 5, hashes[1]),
+            _durable_interval(5, hashes[1], 9, hashes[2]),
+        ],
+        profile="release",
+        evidence_root=tmp_path,
+        candidate_sha=COMMIT,
+    )
+    with pytest.raises(SystemExit, match="did not survive activation"):
+        join_evidence._verify_durable_boundary_continuity(
+            [
+                _durable_interval(0, hashes[0], 5, hashes[1]),
+                _durable_interval(0, hashes[0], 9, hashes[2]),
+            ],
+            profile="release",
+            evidence_root=tmp_path,
+            candidate_sha=COMMIT,
+        )
 
 
 def test_workflow_runner_continues_across_failed_release_epochs(

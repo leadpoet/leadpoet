@@ -126,6 +126,16 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
     )
 
 
+def test_gateway_restart_preserves_release_lineage_path_across_reexec() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    reexec_start = script.index("exec env ")
+    reexec = script[reexec_start : script.index("\nfi", reexec_start)]
+
+    assert (
+        'GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE"' in reexec
+    )
+
+
 def test_gateway_restart_fails_closed_on_all_authoritative_readiness_routes() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     assert "http://localhost:8000/health/v2-authority >/dev/null" in script

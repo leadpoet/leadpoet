@@ -15,6 +15,7 @@ from gateway.research_lab.store import (
     call_rpc,
     insert_row,
     select_all,
+    select_many,
     select_one,
 )
 from leadpoet_canonical.attested_v2 import (
@@ -90,6 +91,15 @@ CHAIN_REALIZED_LIFETIME_SETTLEMENT_RPC = (
 )
 CHAIN_REALIZED_UNATTRIBUTED_SETTLEMENT_RPC = (
     "persist_research_lab_chain_realized_unattributed_v2"
+)
+ALLOCATION_SETTLEMENT_FRONTIER_TABLE = (
+    "research_lab_allocation_settlement_frontiers_v2"
+)
+ALLOCATION_SETTLEMENT_FRONTIER_ACTIVATION_TABLE = (
+    "research_lab_allocation_settlement_frontier_activation_v2"
+)
+ALLOCATION_SETTLEMENT_FRONTIER_RPC = (
+    "persist_research_lab_allocation_settlement_frontier_v2"
 )
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GRAPH_QUERY_CHUNK = 50
@@ -1897,6 +1907,422 @@ async def load_execution_result_v2(
         "receipt_graph": dict(graph),
         "artifact_hashes": list(expected["artifact_hashes"]),
     }
+
+
+async def load_execution_result_by_receipt_v2(
+    receipt_hash: str,
+    *,
+    expected_operation: str,
+    expected_purpose: str,
+) -> dict[str, Any]:
+    """Load and validate one exact replayable result by signed receipt."""
+
+    normalized_receipt_hash = str(receipt_hash or "").lower()
+    if not _HASH_RE.fullmatch(normalized_receipt_hash):
+        raise AttestedV2StoreError("execution result receipt hash is invalid")
+    stored = await select_one(
+        EXECUTION_RESULT_TABLE,
+        filters=(("receipt_hash", normalized_receipt_hash),),
+    )
+    if not isinstance(stored, Mapping):
+        raise AttestedV2StoreError("execution result is unavailable")
+    operation = str(expected_operation or "")
+    purpose = str(expected_purpose or "")
+    if (
+        stored.get("operation") != operation
+        or stored.get("purpose") != purpose
+        or stored.get("role") != "gateway_coordinator"
+    ):
+        raise AttestedV2StoreError("execution result scope differs")
+    graph = await load_receipt_graph_v2(normalized_receipt_hash)
+    receipts = {
+        str(item.get("receipt_hash") or ""): item
+        for item in graph.get("receipts") or ()
+        if isinstance(item, Mapping)
+    }
+    receipt = receipts.get(normalized_receipt_hash)
+    result = stored.get("result_doc")
+    artifacts = stored.get("artifact_hashes")
+    if (
+        graph.get("root_receipt_hash") != normalized_receipt_hash
+        or not isinstance(receipt, Mapping)
+        or not isinstance(result, Mapping)
+        or not isinstance(artifacts, list)
+    ):
+        raise AttestedV2StoreError("execution result authority is incomplete")
+    expected = _execution_result_storage_row_v2(
+        operation=operation,
+        result=result,
+        receipt=receipt,
+        artifact_hashes=artifacts,
+        release_hash=str(stored.get("release_hash") or ""),
+    )
+    _assert_stored_row(EXECUTION_RESULT_TABLE, stored, expected)
+    return {
+        "row": expected,
+        "result": dict(result),
+        "receipt": dict(receipt),
+        "receipt_graph": dict(graph),
+        "artifact_hashes": list(expected["artifact_hashes"]),
+    }
+
+
+def _validate_allocation_settlement_frontier_storage_v2(
+    row: Mapping[str, Any],
+    *,
+    source: Mapping[str, Any],
+) -> dict[str, Any]:
+    from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+        frontier_artifact_hashes_v2,
+        validate_allocation_settlement_frontier_v2,
+    )
+
+    frontier = validate_allocation_settlement_frontier_v2(
+        row.get("frontier_doc")
+    )
+    source_result = source.get("result")
+    source_row = source.get("row")
+    source_receipt = source.get("receipt")
+    source_artifacts = source.get("artifact_hashes")
+    if (
+        not isinstance(source_result, Mapping)
+        or not isinstance(source_row, Mapping)
+        or not isinstance(source_receipt, Mapping)
+        or not isinstance(source_artifacts, list)
+    ):
+        raise AttestedV2StoreError("allocation frontier source is incomplete")
+    source_state = source_result.get("source_state")
+    source_state_hash = str(source_result.get("source_state_hash") or "")
+    required_artifacts = set(frontier_artifact_hashes_v2(frontier)) | {
+        source_state_hash
+    }
+    if (
+        not isinstance(source_state, Mapping)
+        or source_state_hash != sha256_json(dict(source_state))
+        or source_state.get("settlement_frontier") != frontier
+        or int(source_state.get("netuid", -1)) != int(frontier["netuid"])
+        or int(source_state.get("epoch", -1))
+        != int(frontier["allocation_epoch"])
+        or int(source_row.get("epoch_id", -1))
+        != int(frontier["allocation_epoch"])
+        or source_receipt.get("receipt_hash")
+        != str(row.get("source_receipt_hash") or "")
+        or str(row.get("source_state_hash") or "") != source_state_hash
+        or str(row.get("frontier_hash") or "")
+        != str(frontier["frontier_hash"])
+        or int(row.get("netuid", -1)) != int(frontier["netuid"])
+        or int(row.get("allocation_epoch", -1))
+        != int(frontier["allocation_epoch"])
+        or int(row.get("settled_through_epoch", -2))
+        != int(frontier["settled_through_epoch"])
+        or str(row.get("schema_version") or "")
+        != str(frontier["schema_version"])
+        or row.get("predecessor_frontier_hash")
+        != frontier.get("predecessor_frontier_hash")
+        or not required_artifacts.issubset(set(source_artifacts))
+    ):
+        raise AttestedV2StoreError("allocation settlement frontier differs")
+    return {
+        "frontier": frontier,
+        "source": dict(source),
+        "row": {
+            key: row.get(key)
+            for key in (
+                "netuid",
+                "allocation_epoch",
+                "settled_through_epoch",
+                "schema_version",
+                "frontier_hash",
+                "predecessor_frontier_hash",
+                "source_receipt_hash",
+                "source_state_hash",
+                "frontier_doc",
+            )
+        },
+    }
+
+
+async def load_allocation_settlement_frontier_context_v2(
+    *,
+    netuid: int,
+    before_epoch: int,
+) -> Optional[dict[str, Any]]:
+    """Load the latest signed frontier before an allocation epoch."""
+
+    normalized_netuid = int(netuid)
+    normalized_epoch = int(before_epoch)
+    if normalized_netuid <= 0 or normalized_epoch < 0:
+        raise AttestedV2StoreError("allocation frontier scope is invalid")
+    activation = await select_one(
+        ALLOCATION_SETTLEMENT_FRONTIER_ACTIVATION_TABLE,
+        filters=(("netuid", normalized_netuid),),
+    )
+    rows = await select_many(
+        ALLOCATION_SETTLEMENT_FRONTIER_TABLE,
+        filters=(
+            ("netuid", normalized_netuid),
+            ("allocation_epoch", "lt", normalized_epoch),
+        ),
+        order_by=(("allocation_epoch", True),),
+        limit=1,
+    )
+    if not isinstance(activation, Mapping):
+        if rows:
+            raise AttestedV2StoreError(
+                "allocation frontier exists without activation"
+            )
+        return None
+    if (
+        activation.get("schema_version")
+        != "leadpoet.research_lab_allocation_settlement_frontier_activation.v2"
+        or int(activation.get("netuid", -1)) != normalized_netuid
+        or int(activation.get("first_allocation_epoch", -1)) < 1
+        or int(activation.get("first_allocation_epoch", -1))
+        >= normalized_epoch
+        or not _HASH_RE.fullmatch(
+            str(activation.get("first_frontier_hash") or "")
+        )
+        or not _HASH_RE.fullmatch(
+            str(activation.get("source_receipt_hash") or "")
+        )
+        or not rows
+    ):
+        raise AttestedV2StoreError(
+            "allocation frontier activation is incomplete"
+        )
+    first_epoch = int(activation["first_allocation_epoch"])
+    first_row = await select_one(
+        ALLOCATION_SETTLEMENT_FRONTIER_TABLE,
+        filters=(
+            ("netuid", normalized_netuid),
+            ("allocation_epoch", first_epoch),
+        ),
+    )
+    if not isinstance(first_row, Mapping):
+        raise AttestedV2StoreError(
+            "allocation frontier activation source is missing"
+        )
+    from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+        validate_allocation_settlement_frontier_v2,
+    )
+
+    first_frontier = validate_allocation_settlement_frontier_v2(
+        first_row.get("frontier_doc")
+    )
+    if (
+        first_frontier.get("mode") != "legacy_full_history_bootstrap"
+        or int(first_frontier.get("allocation_epoch", -1)) != first_epoch
+        or first_frontier.get("predecessor_frontier_hash") is not None
+        or first_frontier.get("frontier_hash")
+        != activation.get("first_frontier_hash")
+        or int(first_row.get("netuid", -1)) != normalized_netuid
+        or int(first_row.get("allocation_epoch", -1)) != first_epoch
+        or int(first_row.get("settled_through_epoch", -2))
+        != int(first_frontier["settled_through_epoch"])
+        or first_row.get("schema_version")
+        != first_frontier.get("schema_version")
+        or first_row.get("frontier_hash")
+        != first_frontier.get("frontier_hash")
+        or first_row.get("predecessor_frontier_hash") is not None
+        or first_row.get("source_receipt_hash")
+        != activation.get("source_receipt_hash")
+    ):
+        raise AttestedV2StoreError(
+            "allocation frontier activation source differs"
+        )
+    row = rows[0]
+    first_receipt_hash = str(first_row.get("source_receipt_hash") or "")
+    latest_receipt_hash = str(row.get("source_receipt_hash") or "")
+    first_source = await load_execution_result_by_receipt_v2(
+        first_receipt_hash,
+        expected_operation="research_lab_allocation",
+        expected_purpose="research_lab.allocation.v2",
+    )
+    first_validated = _validate_allocation_settlement_frontier_storage_v2(
+        first_row,
+        source=first_source,
+    )
+    if first_validated["frontier"] != first_frontier:
+        raise AttestedV2StoreError(
+            "allocation frontier activation authority differs"
+        )
+    source = (
+        first_source
+        if latest_receipt_hash == first_receipt_hash
+        else await load_execution_result_by_receipt_v2(
+            latest_receipt_hash,
+            expected_operation="research_lab_allocation",
+            expected_purpose="research_lab.allocation.v2",
+        )
+    )
+    validated = _validate_allocation_settlement_frontier_storage_v2(
+        row,
+        source=source,
+    )
+    validated["activation"] = dict(activation)
+    validated["activation_source"] = dict(first_source)
+    return validated
+
+
+async def persist_allocation_settlement_frontier_v2(
+    *,
+    frontier: Mapping[str, Any],
+    source_receipt_hash: str,
+    source_state_hash: str,
+) -> dict[str, Any]:
+    """Atomically append one signed frontier and exact predecessor edge."""
+
+    from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+        validate_allocation_settlement_frontier_v2,
+    )
+
+    normalized_frontier = validate_allocation_settlement_frontier_v2(frontier)
+    normalized_receipt_hash = str(source_receipt_hash or "").lower()
+    normalized_source_state_hash = str(source_state_hash or "").lower()
+    if (
+        not _HASH_RE.fullmatch(normalized_receipt_hash)
+        or not _HASH_RE.fullmatch(normalized_source_state_hash)
+    ):
+        raise AttestedV2StoreError("allocation frontier source hash is invalid")
+    source = await load_execution_result_by_receipt_v2(
+        normalized_receipt_hash,
+        expected_operation="research_lab_allocation",
+        expected_purpose="research_lab.allocation.v2",
+    )
+    candidate_row = {
+        "netuid": int(normalized_frontier["netuid"]),
+        "allocation_epoch": int(normalized_frontier["allocation_epoch"]),
+        "settled_through_epoch": int(
+            normalized_frontier["settled_through_epoch"]
+        ),
+        "schema_version": str(normalized_frontier["schema_version"]),
+        "frontier_hash": str(normalized_frontier["frontier_hash"]),
+        "predecessor_frontier_hash": normalized_frontier.get(
+            "predecessor_frontier_hash"
+        ),
+        "source_receipt_hash": normalized_receipt_hash,
+        "source_state_hash": normalized_source_state_hash,
+        "frontier_doc": normalized_frontier,
+    }
+    _validate_allocation_settlement_frontier_storage_v2(
+        candidate_row,
+        source=source,
+    )
+    rpc_payload = {
+        "requested_frontier": normalized_frontier,
+        "requested_source_receipt_hash": normalized_receipt_hash,
+        "requested_source_state_hash": normalized_source_state_hash,
+    }
+    result: Any = None
+    for attempt in range(_EXACT_INSERT_ATTEMPTS):
+        try:
+            result = await call_rpc(
+                ALLOCATION_SETTLEMENT_FRONTIER_RPC,
+                rpc_payload,
+            )
+            break
+        except Exception as exc:
+            if not _is_transient_store_error(exc):
+                raise
+            try:
+                stored_after_error = await select_one(
+                    ALLOCATION_SETTLEMENT_FRONTIER_TABLE,
+                    filters=(
+                        ("netuid", int(normalized_frontier["netuid"])),
+                        (
+                            "allocation_epoch",
+                            int(normalized_frontier["allocation_epoch"]),
+                        ),
+                    ),
+                )
+            except Exception as readback_exc:
+                if not _is_transient_store_error(readback_exc):
+                    raise
+                stored_after_error = None
+            if isinstance(stored_after_error, Mapping):
+                _assert_stored_row(
+                    ALLOCATION_SETTLEMENT_FRONTIER_TABLE,
+                    stored_after_error,
+                    candidate_row,
+                )
+                _validate_allocation_settlement_frontier_storage_v2(
+                    stored_after_error,
+                    source=source,
+                )
+                result = {
+                    "status": "already_persisted",
+                    "netuid": int(normalized_frontier["netuid"]),
+                    "allocation_epoch": int(
+                        normalized_frontier["allocation_epoch"]
+                    ),
+                    "frontier_hash": str(normalized_frontier["frontier_hash"]),
+                    "source_receipt_hash": normalized_receipt_hash,
+                    "source_state_hash": normalized_source_state_hash,
+                }
+                break
+            if attempt == _EXACT_INSERT_ATTEMPTS - 1:
+                raise
+            backoff = _EXACT_INSERT_BACKOFF_SECONDS[
+                min(attempt, len(_EXACT_INSERT_BACKOFF_SECONDS) - 1)
+            ]
+            logger.warning(
+                "allocation_settlement_frontier_retry netuid=%s epoch=%s "
+                "attempt=%s/%s type=%s error=%s",
+                normalized_frontier["netuid"],
+                normalized_frontier["allocation_epoch"],
+                attempt + 1,
+                _EXACT_INSERT_ATTEMPTS,
+                type(exc).__name__,
+                str(exc)[:160],
+            )
+            await asyncio.sleep(backoff)
+    if (
+        not isinstance(result, Mapping)
+        or result.get("status") not in {"persisted", "already_persisted"}
+        or int(result.get("netuid", -1)) != int(normalized_frontier["netuid"])
+        or int(result.get("allocation_epoch", -1))
+        != int(normalized_frontier["allocation_epoch"])
+        or result.get("frontier_hash") != normalized_frontier["frontier_hash"]
+        or result.get("source_receipt_hash") != normalized_receipt_hash
+        or result.get("source_state_hash") != normalized_source_state_hash
+    ):
+        raise AttestedV2StoreError(
+            "allocation frontier durable readback differs"
+        )
+    stored = await select_one(
+        ALLOCATION_SETTLEMENT_FRONTIER_TABLE,
+        filters=(
+            ("netuid", int(normalized_frontier["netuid"])),
+            (
+                "allocation_epoch",
+                int(normalized_frontier["allocation_epoch"]),
+            ),
+        ),
+    )
+    if not isinstance(stored, Mapping):
+        raise AttestedV2StoreError(
+            "allocation frontier durable readback is missing"
+        )
+    stored_receipt_hash = str(stored.get("source_receipt_hash") or "")
+    stored_source = await load_execution_result_by_receipt_v2(
+        stored_receipt_hash,
+        expected_operation="research_lab_allocation",
+        expected_purpose="research_lab.allocation.v2",
+    )
+    validated = _validate_allocation_settlement_frontier_storage_v2(
+        stored,
+        source=stored_source,
+    )
+    if (
+        validated["frontier"] != normalized_frontier
+        or str(stored.get("source_state_hash") or "")
+        != normalized_source_state_hash
+        or result.get("source_receipt_hash") != stored_receipt_hash
+    ):
+        raise AttestedV2StoreError(
+            "allocation frontier durable readback differs"
+        )
+    return dict(result)
 
 
 async def persist_sourcing_epoch_v2(

@@ -26,6 +26,7 @@ from gateway.research_lab.champion_settlement_v2 import (
     validate_legacy_settlement_migrations_v2,
 )
 from gateway.research_lab.attested_v2_store import (
+    _execution_result_storage_row_v2,
     boot_storage_row,
     receipt_storage_row,
     transport_storage_row,
@@ -37,12 +38,19 @@ from gateway.tee.supabase_schema_preflight_v2 import (
 from gateway.tee.coordinator_chain_realized_settlement_v1 import (
     OP_ATTEST_CHAIN_REALIZED_SETTLEMENT_V1,
 )
-from gateway.tee.coordinator_executor_v2 import CoordinatorExecutorV2
+from gateway.tee.coordinator_executor_v2 import (
+    CoordinatorExecutorV2,
+    coordinator_receipt_output_v2,
+)
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from leadpoet_canonical.attested_v2 import (
     build_receipt_graph,
     build_transport_attempt,
+    merkle_root,
     sha256_json,
+)
+from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+    build_allocation_settlement_frontier_v2,
 )
 from leadpoet_canonical.legacy_settlement_v2 import (
     LEGACY_SETTLEMENT_SCHEMA_VERSION,
@@ -116,6 +124,9 @@ ACTIVE_MODEL_RESULT_REPLAY_MIGRATION = (
 )
 ANCESTRY_CHECKPOINT_MIGRATION = (
     "136-research-lab-ancestry-checkpoint-sidecars.sql"
+)
+ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION = (
+    "137-research-lab-allocation-settlement-frontier.sql"
 )
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
@@ -1681,6 +1692,165 @@ def _historical_compute_allocation_seed_rows(
     return rows
 
 
+def _allocation_settlement_frontier_contract(
+    *,
+    database: DisposablePostgres,
+    fixture: SanitizedWeightFixture,
+    verified_bundle: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Exercise migration 137 with a signed production-shaped allocation."""
+
+    epoch_id = int(verified_bundle["epoch_id"])
+    netuid = int(verified_bundle["netuid"])
+    frontier = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=netuid,
+        allocation_epoch=epoch_id,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(),
+    )
+    source_state = {
+        "epoch": epoch_id,
+        "netuid": netuid,
+        "settlement_frontier": frontier,
+    }
+    source_state_hash = sha256_json(source_state)
+    allocation = {
+        "schema_version": "leadpoet.research_lab_allocation.v2",
+        "epoch": epoch_id,
+        "netuid": netuid,
+        "allocations": [],
+    }
+    result = {
+        "allocation": allocation,
+        "allocation_inputs": {},
+        "source_state": source_state,
+        "source_state_hash": source_state_hash,
+    }
+    artifact_hashes = sorted(
+        {source_state_hash, str(frontier["frontier_hash"])}
+    )
+    fixture_bundle = fixture.bundle()
+    coordinator_boot = next(
+        identity
+        for identity in fixture_bundle["receipt_graph"]["boot_identities"]
+        if identity["physical_role"] == "gateway_coordinator"
+    )
+    receipt = fixture.receipt(
+        role="gateway_coordinator",
+        purpose="research_lab.allocation.v2",
+        job_id="postgres-contract-allocation-frontier",
+        key=fixture.coordinator_key,
+        boot=coordinator_boot,
+        config_hash=str(coordinator_boot["config_hash"]),
+        input_root=sha256_json(
+            {"kind": "allocation-frontier", "epoch_id": epoch_id}
+        ),
+        output_root=sha256_json(
+            coordinator_receipt_output_v2(
+                "research_lab_allocation",
+                result,
+            )
+        ),
+        artifact_root=merkle_root(
+            artifact_hashes,
+            domain="leadpoet-artifact-v2",
+        ),
+        sequence=805,
+    )
+    execution_row = _execution_result_storage_row_v2(
+        operation="research_lab_allocation",
+        result=result,
+        receipt=receipt,
+        artifact_hashes=artifact_hashes,
+        release_hash=sha256_json(
+            {
+                "candidate_sha": fixture.candidate_sha,
+                "contract": "allocation-settlement-frontier",
+            }
+        ),
+    )
+    database.psql(
+        "".join(
+            (
+                _json_insert_sql(
+                    "research_lab_attested_execution_receipts_v2",
+                    receipt_storage_row(receipt),
+                ),
+                _json_insert_sql(
+                    "research_lab_attested_execution_results_v2",
+                    execution_row,
+                ),
+            )
+        )
+    )
+    frontier_payload = json.dumps(
+        frontier,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if "$leadpoet$" in frontier_payload:
+        raise PostgresContractProbeError(
+            "allocation settlement frontier JSON delimiter collision"
+        )
+    request_sql = """
+        SELECT public.persist_research_lab_allocation_settlement_frontier_v2(
+            $leadpoet$%s$leadpoet$::jsonb,
+            '%s',
+            '%s'
+        )::text;
+    """ % (
+        frontier_payload,
+        receipt["receipt_hash"],
+        source_state_hash,
+    )
+    persisted = json.loads(
+        database.psql(request_sql, tuples_only=True).stdout.strip()
+    )
+    replayed = json.loads(
+        database.psql(request_sql, tuples_only=True).stdout.strip()
+    )
+    counts = json.loads(
+        database.psql(
+            """
+            SELECT pg_catalog.json_build_object(
+                'frontiers', (
+                    SELECT pg_catalog.count(*)
+                    FROM public.research_lab_allocation_settlement_frontiers_v2
+                ),
+                'activations', (
+                    SELECT pg_catalog.count(*)
+                    FROM public.research_lab_allocation_settlement_frontier_activation_v2
+                )
+            )::text;
+            """,
+            tuples_only=True,
+        ).stdout.strip()
+    )
+    expected_identity = {
+        "netuid": netuid,
+        "allocation_epoch": epoch_id,
+        "frontier_hash": frontier["frontier_hash"],
+        "source_receipt_hash": receipt["receipt_hash"],
+        "source_state_hash": source_state_hash,
+    }
+    if (
+        persisted != {"status": "persisted", **expected_identity}
+        or replayed != {"status": "already_persisted", **expected_identity}
+        or counts != {"frontiers": 1, "activations": 1}
+    ):
+        raise PostgresContractProbeError(
+            "post-137 allocation settlement frontier contract differs"
+        )
+    return {
+        "frontier_hash": frontier["frontier_hash"],
+        "source_receipt_hash": receipt["receipt_hash"],
+        "idempotent_replay": True,
+        "frontier_count": 1,
+        "activation_count": 1,
+    }
+
+
 def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
     declaration_counts = _validate_required_migration_declarations(args.source_root)
     coordinator_release_identity = _load_coordinator_release_identity(
@@ -2279,6 +2449,15 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             raise PostgresContractProbeError(
                 "post-136 ancestry checkpoint contract is incomplete"
             )
+        database.apply_migration(
+            scripts / ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION
+        )
+        applied.append(ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION)
+        frontier_contract = _allocation_settlement_frontier_contract(
+            database=database,
+            fixture=fixture,
+            verified_bundle=verified,
+        )
         provider_outcome_append = _provider_outcome_append_contract(database)
         historical_compute_seed_rows = (
             _historical_compute_allocation_seed_rows(
@@ -2334,6 +2513,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post_134_provider_outcome_head_contract_valid": True,
                 "post_135_active_model_replay_contract_valid": True,
                 "post_136_ancestry_checkpoint_contract_valid": True,
+                "post_137_allocation_settlement_frontier_contract_valid": True,
                 "provider_outcome_append_atomic": True,
                 "provider_outcome_contention_zero_rollback": True,
                 "provider_outcome_conflict_head_exact": True,
@@ -2365,6 +2545,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "historical_contract": historical_contract,
                 "persistence": first_persistence,
             },
+            "allocation_settlement_frontier": frontier_contract,
             "provider_outcome_append": provider_outcome_append,
             "provider_outcome_contention_contract": head_contention_contract,
             "required_schema_declarations": declaration_counts,

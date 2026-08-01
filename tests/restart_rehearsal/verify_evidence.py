@@ -715,6 +715,7 @@ def verify_migration_backed_database_contract(
         "post_134_provider_outcome_head_contract_valid",
         "post_135_active_model_replay_contract_valid",
         "post_136_ancestry_checkpoint_contract_valid",
+        "post_137_allocation_settlement_frontier_contract_valid",
         "provider_outcome_append_atomic",
         "provider_outcome_contention_zero_rollback",
         "provider_outcome_conflict_head_exact",
@@ -743,6 +744,7 @@ def verify_migration_backed_database_contract(
         "134-research-lab-provider-outcome-head-contention.sql",
         "135-research-lab-active-model-result-replay.sql",
         "136-research-lab-ancestry-checkpoint-sidecars.sql",
+        "137-research-lab-allocation-settlement-frontier.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (
@@ -753,7 +755,7 @@ def verify_migration_backed_database_contract(
         or set(checks) != required_checks
         or any(checks[name] is not True for name in required_checks)
         or not isinstance(applied_migrations, list)
-        or applied_migrations[-7:] != expected_final_migrations
+        or applied_migrations[-8:] != expected_final_migrations
     ):
         raise SystemExit(
             "migration-backed PostgreSQL contract evidence is incomplete"
@@ -799,6 +801,8 @@ def verify_migration_backed_database_contract(
             "research_lab_finalized_allocation_epochs_v2",
             "research_lab_attested_ancestry_checkpoints_v2",
             "research_lab_attested_ancestry_activations_v2",
+            "research_lab_allocation_settlement_frontiers_v2",
+            "research_lab_allocation_settlement_frontier_activation_v2",
         } <= set(relations)
     ):
         raise SystemExit(
@@ -808,9 +812,28 @@ def verify_migration_backed_database_contract(
     if (
         not isinstance(rpcs, list)
         or "persist_research_lab_ancestry_checkpoint_v2" not in rpcs
+        or "persist_research_lab_allocation_settlement_frontier_v2" not in rpcs
     ):
         raise SystemExit(
             "migration-backed ancestry checkpoint RPC evidence is missing"
+        )
+    frontier = document.get("allocation_settlement_frontier")
+    if (
+        not isinstance(frontier, dict)
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(frontier.get("frontier_hash") or ""),
+        )
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(frontier.get("source_receipt_hash") or ""),
+        )
+        or frontier.get("idempotent_replay") is not True
+        or frontier.get("frontier_count") != 1
+        or frontier.get("activation_count") != 1
+    ):
+        raise SystemExit(
+            "migration-backed allocation settlement frontier evidence is missing"
         )
     seed_rows = document.get("seed_rows")
     required_seed_relations = {

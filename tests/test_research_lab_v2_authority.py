@@ -8,10 +8,23 @@ from gateway.research_lab import v2_authority
 from gateway.research_lab.attested_scoring_v2 import (
     derive_execution_job_id_v2,
 )
+from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+    build_allocation_settlement_frontier_v2,
+)
 
 
 HASH_A = "sha256:" + "a" * 64
 HASH_B = "sha256:" + "b" * 64
+
+
+def _frontier(epoch=10):
+    return build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=epoch,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(),
+    )
 
 
 def _outcome(result):
@@ -326,10 +339,12 @@ async def test_allocation_binds_every_reward_parent(monkeypatch):
     }
     source_state = {
         "epoch": 10,
+        "netuid": 71,
         "policy": {},
         "reimbursement_obligations": [],
         "champion_obligations": [],
         "fallback_reimbursement_obligations": fallback_obligations,
+        "settlement_frontier": _frontier(),
     }
 
     async def load_parent_graphs(**kwargs):
@@ -389,6 +404,7 @@ async def test_allocation_fallback_projection_mismatch_fails_closed(
     allocation = {"allocation_hash": HASH_A}
     source_state = {
         "epoch": 10,
+        "netuid": 71,
         "policy": {},
         "reimbursement_obligations": [],
         "champion_obligations": [],
@@ -398,6 +414,7 @@ async def test_allocation_fallback_projection_mismatch_fails_closed(
                 "uid": 2,
             }
         ],
+        "settlement_frontier": _frontier(),
     }
 
     async def load_parent_graphs(**_kwargs):
@@ -922,8 +939,10 @@ async def test_allocation_parent_loader_reuses_raw_authority_graphs(
                 ]
         return []
 
+    business_requests = []
+
     async def load_empty_business(artifacts):
-        assert not list(artifacts)
+        business_requests.append(list(artifacts))
         return {}
 
     async def load_receipts(receipt_hashes):
@@ -990,6 +1009,10 @@ async def test_allocation_parent_loader_reuses_raw_authority_graphs(
         native_root,
         unattributed_root,
     }
+    assert business_requests == [
+        [],
+        [("champion_reward_decision", "champion:test")],
+    ]
 
     async def load_history(**kwargs):
         kwargs["_receipt_graph_records_out"].update(raw_graph_records)
@@ -1067,6 +1090,15 @@ async def test_default_allocation_threads_readiness_authority_graphs(
         "ensure_chain_realized_settlements_v1",
         no_settlement_repair,
     )
+
+    async def no_frontier(**_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "gateway.research_lab.attested_v2_store."
+        "load_allocation_settlement_frontier_context_v2",
+        no_frontier,
+    )
     monkeypatch.setattr(
         v2_authority,
         "_load_allocation_parent_graphs_v2",
@@ -1086,6 +1118,381 @@ async def test_default_allocation_threads_readiness_authority_graphs(
             "graph": authority_graph,
         }
     }
+
+
+@pytest.mark.asyncio
+async def test_default_allocation_uses_frontier_without_legacy_readiness(
+    monkeypatch,
+):
+    from gateway.research_lab import champion_settlement_v2
+
+    frontier = _frontier(epoch=98)
+    frontier_receipt = "sha256:" + "7" * 64
+    frontier_context = {
+        "frontier": frontier,
+        "row": {"source_receipt_hash": frontier_receipt},
+        "source": {
+            "receipt_graph": {
+                "root_receipt_hash": frontier_receipt,
+                "receipts": [{"receipt_hash": frontier_receipt}],
+            }
+        },
+    }
+    captured = {}
+
+    async def load_frontier(**kwargs):
+        assert kwargs == {"netuid": 71, "before_epoch": 101}
+        return frontier_context
+
+    async def readiness_must_not_run(**_kwargs):
+        raise AssertionError("legacy full-history readiness was invoked")
+
+    class ParentLoaderReached(RuntimeError):
+        pass
+
+    async def parent_loader(**kwargs):
+        captured.update(kwargs)
+        raise ParentLoaderReached
+
+    monkeypatch.setattr(
+        "gateway.research_lab.attested_v2_store."
+        "load_allocation_settlement_frontier_context_v2",
+        load_frontier,
+    )
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "champion_v2_cutover_readiness",
+        readiness_must_not_run,
+    )
+    monkeypatch.setattr(
+        v2_authority,
+        "_load_allocation_parent_graphs_v2",
+        parent_loader,
+    )
+
+    async def execute(**_kwargs):
+        raise AssertionError("execution should not begin before parent loading")
+
+    with pytest.raises(ParentLoaderReached):
+        await v2_authority.build_allocation_v2(
+            epoch_id=100,
+            netuid=71,
+            policy={},
+            execute=execute,
+        )
+
+    assert captured["settlement_frontier_context"] == frontier_context
+    assert captured["finalized_champion_history"] is None
+    assert captured["preloaded_receipt_graph_records"] == {}
+    assert captured["preloaded_business_graphs"] == {}
+
+
+@pytest.mark.asyncio
+async def test_default_allocation_recovers_exact_current_frontier(monkeypatch):
+    frontier = _frontier(epoch=100)
+    parent_root = "sha256:" + "6" * 64
+    receipt_hash = "sha256:" + "7" * 64
+    source_state = {
+        "epoch": 100,
+        "netuid": 71,
+        "policy": {},
+        "reimbursement_obligations": [],
+        "champion_obligations": [],
+        "settlement_frontier": frontier,
+    }
+    allocation_payload = {"epoch": 100, "netuid": 71}
+    allocation = {
+        **allocation_payload,
+        "allocation_hash": v2_authority.sha256_json(allocation_payload),
+    }
+    authority_result = {
+        "allocation": allocation,
+        "allocation_inputs": {
+            "epoch": 100,
+            "policy": {},
+            "active_reimbursement_obligations": [],
+            "active_champion_obligations": [],
+        },
+        "source_state": source_state,
+        "source_state_hash": v2_authority.sha256_json(source_state),
+    }
+    source_receipt = {
+        "receipt_hash": receipt_hash,
+        "parent_receipt_hashes": [parent_root],
+    }
+    context = {
+        "frontier": frontier,
+        "row": {"source_receipt_hash": receipt_hash},
+        "source": {
+            "result": authority_result,
+            "receipt": source_receipt,
+        },
+    }
+    parent_graph = {"root_receipt_hash": parent_root, "receipts": []}
+    calls = []
+
+    async def load_frontier(**kwargs):
+        assert kwargs == {"netuid": 71, "before_epoch": 101}
+        return context
+
+    async def load_graphs(roots, **_kwargs):
+        assert roots == [parent_root]
+        return [parent_graph]
+
+    async def parent_loader(**_kwargs):
+        raise AssertionError("current frontier recovery rebuilt allocation inputs")
+
+    async def execute(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status": "succeeded",
+            "result": authority_result,
+            "receipt": source_receipt,
+            "receipt_graph": {
+                "root_receipt_hash": receipt_hash,
+                "receipts": [source_receipt],
+            },
+        }
+
+    async def persist_links(**_kwargs):
+        return {"business_artifact_link_count": 1}
+
+    monkeypatch.setattr(
+        "gateway.research_lab.attested_v2_store."
+        "load_allocation_settlement_frontier_context_v2",
+        load_frontier,
+    )
+    monkeypatch.setattr(v2_authority, "_graphs_for_roots", load_graphs)
+    monkeypatch.setattr(
+        v2_authority,
+        "_validate_allocation_parent_graphs",
+        lambda graphs: [
+            {
+                "receipt_hash": graphs[0]["root_receipt_hash"],
+                "receipt_purpose": "research_lab.reward_decision.v2",
+                "receipt_role": "gateway_coordinator",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        v2_authority,
+        "_load_allocation_parent_graphs_v2",
+        parent_loader,
+    )
+
+    recovered = await v2_authority.build_allocation_v2(
+        epoch_id=100,
+        netuid=71,
+        policy={},
+        execute=execute,
+        persist_links=persist_links,
+    )
+
+    assert recovered["status"] == "matched"
+    assert recovered["result"] == authority_result
+    assert calls[0]["parent_graphs"] == [parent_graph]
+
+
+@pytest.mark.asyncio
+async def test_current_frontier_recovery_rejects_another_execution_receipt(
+    monkeypatch,
+):
+    frontier = _frontier(epoch=100)
+    source_receipt = {
+        "receipt_hash": HASH_A,
+        "parent_receipt_hashes": [],
+    }
+    source_state = {
+        "epoch": 100,
+        "netuid": 71,
+        "policy": {},
+        "reimbursement_obligations": [],
+        "champion_obligations": [],
+        "settlement_frontier": frontier,
+    }
+    result = {
+        "allocation": {
+            "allocation_hash": v2_authority.sha256_json({"epoch": 100})
+        },
+        "allocation_inputs": {
+            "epoch": 100,
+            "policy": {},
+            "active_reimbursement_obligations": [],
+            "active_champion_obligations": [],
+        },
+        "source_state": source_state,
+        "source_state_hash": v2_authority.sha256_json(source_state),
+    }
+
+    async def load_frontier(**_kwargs):
+        return {
+            "frontier": frontier,
+            "source": {"result": result, "receipt": source_receipt},
+        }
+
+    async def execute(**_kwargs):
+        return {
+            "result": result,
+            "receipt": {
+                "receipt_hash": HASH_B,
+                "parent_receipt_hashes": [],
+            },
+        }
+
+    monkeypatch.setattr(
+        "gateway.research_lab.attested_v2_store."
+        "load_allocation_settlement_frontier_context_v2",
+        load_frontier,
+    )
+    monkeypatch.setattr(
+        v2_authority,
+        "_validate_allocation_parent_graphs",
+        lambda _graphs: [],
+    )
+
+    with pytest.raises(
+        v2_authority.ResearchLabV2AuthorityError,
+        match="replay authority differs",
+    ):
+        await v2_authority.build_allocation_v2(
+            epoch_id=100,
+            netuid=71,
+            policy={},
+            execute=execute,
+        )
+
+
+@pytest.mark.asyncio
+async def test_allocation_parent_loader_reads_only_frontier_delta(monkeypatch):
+    from gateway.research_lab import (
+        attested_v2_store,
+        champion_settlement_v2,
+        store,
+    )
+
+    frontier = _frontier(epoch=98)
+    frontier_receipt = "sha256:" + "7" * 64
+    delta_receipt = "sha256:" + "8" * 64
+    history_calls = []
+    receipt_requests = []
+
+    monkeypatch.setattr(
+        v2_authority,
+        "validate_receipt_graph",
+        lambda _graph: None,
+    )
+
+    async def select_all(table, *, filters=(), **_kwargs):
+        if table == "research_lab_champion_reward_current":
+            status = next(
+                (
+                    value
+                    for field, value in filters
+                    if field == "current_reward_status"
+                ),
+                "",
+            )
+            if status == "active":
+                return [
+                    {
+                        "champion_reward_id": "champion:active",
+                        "current_reward_status": "active",
+                        "start_epoch": 1,
+                        "epoch_count": 200,
+                        "desired_alpha_percent": 1.0,
+                    }
+                ]
+        return []
+
+    async def load_history(**kwargs):
+        history_calls.append(
+            {
+                key: value
+                for key, value in kwargs.items()
+                if key != "_receipt_graph_records_out"
+            }
+        )
+        kwargs["_receipt_graph_records_out"][delta_receipt] = {
+            "epoch_id": 99,
+            "graph": {
+                "root_receipt_hash": delta_receipt,
+                "receipts": [{"receipt_hash": delta_receipt}],
+            },
+        }
+        return [
+            {
+                "epoch": 99,
+                "netuid": 71,
+                "authority_types": [
+                    "chain_realized_unattributed_observation_v1"
+                ],
+                "allocation_doc": {
+                    "champion_allocations": [],
+                    "queued_champion_allocations": [],
+                },
+            }
+        ]
+
+    async def load_business(_artifacts):
+        return {}
+
+    async def load_receipts(receipt_hashes):
+        receipt_requests.extend(sorted(receipt_hashes))
+        return {}
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "load_settled_allocation_history_v2",
+        load_history,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_v2",
+        load_business,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_by_ref_v2",
+        load_business,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_receipt_graphs_v2",
+        load_receipts,
+    )
+
+    graphs = await v2_authority._load_allocation_parent_graphs_v2(
+        epoch_id=100,
+        netuid=71,
+        policy={},
+        settlement_frontier_context={
+            "frontier": frontier,
+            "row": {"source_receipt_hash": frontier_receipt},
+            "activation": {"source_receipt_hash": frontier_receipt},
+            "source": {
+                "receipt_graph": {
+                    "root_receipt_hash": frontier_receipt,
+                    "receipts": [{"receipt_hash": frontier_receipt}],
+                }
+            },
+            "activation_source": {
+                "receipt_graph": {
+                    "root_receipt_hash": frontier_receipt,
+                    "receipts": [{"receipt_hash": frontier_receipt}],
+                }
+            },
+        },
+    )
+
+    assert history_calls == [
+        {"netuid": 71, "start_epoch": 98, "end_epoch": 99}
+    ]
+    assert receipt_requests == []
+    assert [graph["root_receipt_hash"] for graph in graphs] == [
+        frontier_receipt,
+        delta_receipt,
+    ]
 
 
 @pytest.mark.asyncio
@@ -1189,7 +1596,9 @@ async def test_allocation_parent_loader_skips_fully_paid_legacy_source_receipt(
     )
 
     assert source_statuses == ["active", "queued", "partially_paid"]
-    assert business_refs == []
+    assert business_refs == [
+        ("source_add_reward_decision", reward_ref)
+    ]
     assert receipt_roots == [settlement_receipt]
     assert [graph["root_receipt_hash"] for graph in graphs] == [
         settlement_receipt

@@ -511,6 +511,42 @@ QUERY_POLICIES = {
         max_pages=100,
         order="epoch_id.asc,obligation_kind.asc,obligation_source_id.asc",
     ),
+    "allocation_settlement_frontier_activation": SupabaseQueryV2(
+        policy_id="allocation_settlement_frontier_activation",
+        table="research_lab_allocation_settlement_frontier_activation_v2",
+        select=(
+            "netuid,schema_version,first_allocation_epoch,first_frontier_hash,"
+            "source_receipt_hash"
+        ),
+        parameter_names=("netuid",),
+        max_pages=1,
+        limit=1,
+    ),
+    "allocation_settlement_frontiers": SupabaseQueryV2(
+        policy_id="allocation_settlement_frontiers",
+        table="research_lab_allocation_settlement_frontiers_v2",
+        select=(
+            "netuid,allocation_epoch,settled_through_epoch,schema_version,"
+            "frontier_hash,predecessor_frontier_hash,source_receipt_hash,"
+            "source_state_hash,frontier_doc"
+        ),
+        parameter_names=("netuid", "before_epoch"),
+        max_pages=1,
+        order="allocation_epoch.desc",
+        limit=1,
+    ),
+    "allocation_settlement_frontier_by_epoch": SupabaseQueryV2(
+        policy_id="allocation_settlement_frontier_by_epoch",
+        table="research_lab_allocation_settlement_frontiers_v2",
+        select=(
+            "netuid,allocation_epoch,settled_through_epoch,schema_version,"
+            "frontier_hash,predecessor_frontier_hash,source_receipt_hash,"
+            "source_state_hash,frontier_doc"
+        ),
+        parameter_names=("netuid", "allocation_epoch"),
+        max_pages=1,
+        limit=1,
+    ),
     "legacy_weight_bundles_by_epoch": SupabaseQueryV2(
         policy_id="legacy_weight_bundles_by_epoch",
         table="published_weight_bundles",
@@ -563,6 +599,18 @@ QUERY_POLICIES = {
         policy_id="attested_receipt_by_hash",
         table="research_lab_attested_execution_receipts_v2",
         select="receipt_hash,role,purpose,epoch_id,output_root,boot_identity_hash,receipt_doc",
+        parameter_names=("receipt_hash",),
+        max_pages=1,
+        limit=1,
+    ),
+    "attested_execution_result_by_receipt": SupabaseQueryV2(
+        policy_id="attested_execution_result_by_receipt",
+        table="research_lab_attested_execution_results_v2",
+        select=(
+            "receipt_hash,schema_version,role,operation,purpose,job_id,epoch_id,"
+            "sequence,release_hash,input_root,output_root,artifact_root,"
+            "result_hash,artifact_hashes,result_doc"
+        ),
         parameter_names=("receipt_hash",),
         max_pages=1,
         limit=1,
@@ -952,6 +1000,41 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
                 % _non_negative_int(parameters["netuid"], "netuid"),
             ),
         )
+    if policy.policy_id == "allocation_settlement_frontier_activation":
+        return (
+            (
+                "netuid",
+                "eq.%d"
+                % _non_negative_int(parameters["netuid"], "netuid"),
+            ),
+        )
+    if policy.policy_id == "allocation_settlement_frontiers":
+        before_epoch = _non_negative_int(
+            parameters["before_epoch"], "before_epoch"
+        )
+        return (
+            (
+                "netuid",
+                "eq.%d"
+                % _non_negative_int(parameters["netuid"], "netuid"),
+            ),
+            ("allocation_epoch", "lt.%d" % before_epoch),
+        )
+    if policy.policy_id == "allocation_settlement_frontier_by_epoch":
+        return (
+            (
+                "netuid",
+                "eq.%d"
+                % _non_negative_int(parameters["netuid"], "netuid"),
+            ),
+            (
+                "allocation_epoch",
+                "eq.%d"
+                % _non_negative_int(
+                    parameters["allocation_epoch"], "allocation_epoch"
+                ),
+            ),
+        )
     if policy.policy_id == "finalized_authority_by_chain_vector":
         raw_uids = parameters["uids"]
         raw_weights = parameters["weights_u16"]
@@ -1074,6 +1157,14 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
         )
     if policy.policy_id == "attested_receipt_by_hash":
         return (("receipt_hash", "eq.%s" % _identifier(parameters["receipt_hash"], "receipt_hash")),)
+    if policy.policy_id == "attested_execution_result_by_receipt":
+        return (
+            (
+                "receipt_hash",
+                "eq.%s"
+                % _content_hash(parameters["receipt_hash"], "receipt_hash"),
+            ),
+        )
     if policy.policy_id == "attested_artifact_by_ref":
         return (
             ("artifact_kind", "eq.%s" % _identifier(parameters["artifact_kind"], "artifact_kind")),

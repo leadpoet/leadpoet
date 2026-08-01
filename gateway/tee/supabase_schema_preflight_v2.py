@@ -271,6 +271,32 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
             "authority_doc",
         ),
     ),
+    (
+        "scripts/137-research-lab-allocation-settlement-frontier.sql",
+        "research_lab_allocation_settlement_frontiers_v2",
+        (
+            "netuid",
+            "allocation_epoch",
+            "settled_through_epoch",
+            "schema_version",
+            "frontier_hash",
+            "predecessor_frontier_hash",
+            "source_receipt_hash",
+            "source_state_hash",
+            "frontier_doc",
+        ),
+    ),
+    (
+        "scripts/137-research-lab-allocation-settlement-frontier.sql",
+        "research_lab_allocation_settlement_frontier_activation_v2",
+        (
+            "netuid",
+            "schema_version",
+            "first_allocation_epoch",
+            "first_frontier_hash",
+            "source_receipt_hash",
+        ),
+    ),
 )
 
 REQUIRED_SUPABASE_V2_RPCS = (
@@ -357,6 +383,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
     (
         "scripts/136-research-lab-ancestry-checkpoint-sidecars.sql",
         "persist_research_lab_ancestry_checkpoint_v2",
+    ),
+    (
+        "scripts/137-research-lab-allocation-settlement-frontier.sql",
+        "persist_research_lab_allocation_settlement_frontier_v2",
     ),
 )
 

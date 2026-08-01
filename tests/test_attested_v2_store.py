@@ -2291,3 +2291,385 @@ async def test_replayable_result_requires_durable_receipt_and_exact_readback(
     assert loaded["result"] == result
     assert loaded["receipt"] == receipt
     assert loaded["receipt_graph"] == graph
+
+
+@pytest.mark.asyncio
+async def test_allocation_frontier_activation_binds_exact_bootstrap(monkeypatch):
+    from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+        build_allocation_settlement_frontier_v2,
+        validate_allocation_settlement_frontier_v2,
+    )
+
+    bootstrap = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=100,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(),
+    )
+    latest = build_allocation_settlement_frontier_v2(
+        mode="bounded_delta_v1",
+        netuid=71,
+        allocation_epoch=101,
+        predecessor_frontier_hash=bootstrap["frontier_hash"],
+        reward_checkpoints=(),
+    )
+    first_receipt = "sha256:" + "1" * 64
+    latest_receipt = "sha256:" + "2" * 64
+    activation = {
+        "schema_version": (
+            "leadpoet.research_lab_allocation_settlement_frontier_activation.v2"
+        ),
+        "netuid": 71,
+        "first_allocation_epoch": 100,
+        "first_frontier_hash": bootstrap["frontier_hash"],
+        "source_receipt_hash": first_receipt,
+    }
+
+    def row(frontier, receipt_hash):
+        return {
+            "netuid": 71,
+            "allocation_epoch": frontier["allocation_epoch"],
+            "settled_through_epoch": frontier["settled_through_epoch"],
+            "schema_version": frontier["schema_version"],
+            "frontier_hash": frontier["frontier_hash"],
+            "predecessor_frontier_hash": frontier["predecessor_frontier_hash"],
+            "source_receipt_hash": receipt_hash,
+            "source_state_hash": "sha256:" + "3" * 64,
+            "frontier_doc": frontier,
+        }
+
+    first_row = row(bootstrap, first_receipt)
+    latest_row = row(latest, latest_receipt)
+
+    async def select_one(table, *, filters):
+        if table == attested_v2_store.ALLOCATION_SETTLEMENT_FRONTIER_ACTIVATION_TABLE:
+            return dict(activation)
+        assert table == attested_v2_store.ALLOCATION_SETTLEMENT_FRONTIER_TABLE
+        assert filters == (("netuid", 71), ("allocation_epoch", 100))
+        return dict(first_row)
+
+    async def select_many(*_args, **_kwargs):
+        return [dict(latest_row)]
+
+    loaded_receipts = []
+
+    async def load_source(receipt_hash, **_kwargs):
+        loaded_receipts.append(receipt_hash)
+        return {"receipt_hash": receipt_hash}
+
+    def validate_row(stored, *, source):
+        assert source["receipt_hash"] == stored["source_receipt_hash"]
+        return {
+            "frontier": validate_allocation_settlement_frontier_v2(
+                stored["frontier_doc"]
+            ),
+            "source": source,
+            "row": dict(stored),
+        }
+
+    monkeypatch.setattr(attested_v2_store, "select_one", select_one)
+    monkeypatch.setattr(attested_v2_store, "select_many", select_many)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_execution_result_by_receipt_v2",
+        load_source,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "_validate_allocation_settlement_frontier_storage_v2",
+        validate_row,
+    )
+
+    loaded = await attested_v2_store.load_allocation_settlement_frontier_context_v2(
+        netuid=71,
+        before_epoch=102,
+    )
+    assert loaded["frontier"] == latest
+    assert loaded["activation"] == activation
+    assert loaded["activation_source"] == {"receipt_hash": first_receipt}
+    assert loaded_receipts == [first_receipt, latest_receipt]
+
+    activation["first_frontier_hash"] = "sha256:" + "9" * 64
+    with pytest.raises(
+        attested_v2_store.AttestedV2StoreError,
+        match="activation source differs",
+    ):
+        await attested_v2_store.load_allocation_settlement_frontier_context_v2(
+            netuid=71,
+            before_epoch=102,
+        )
+
+
+@pytest.mark.asyncio
+async def test_allocation_frontier_recovers_committed_rpc_timeout(monkeypatch):
+    from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+        build_allocation_settlement_frontier_v2,
+    )
+
+    frontier = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=100,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(),
+    )
+    receipt_hash = "sha256:" + "1" * 64
+    source_state_hash = "sha256:" + "2" * 64
+    stored = {
+        "netuid": 71,
+        "allocation_epoch": 100,
+        "settled_through_epoch": 99,
+        "schema_version": frontier["schema_version"],
+        "frontier_hash": frontier["frontier_hash"],
+        "predecessor_frontier_hash": None,
+        "source_receipt_hash": receipt_hash,
+        "source_state_hash": source_state_hash,
+        "frontier_doc": frontier,
+    }
+    source = {"source": "validated"}
+    rpc_calls = []
+    source_loads = []
+
+    async def load_source(value, **_kwargs):
+        source_loads.append(value)
+        return source
+
+    async def call_rpc(name, payload):
+        rpc_calls.append((name, payload))
+        raise TimeoutError("response timed out after commit")
+
+    async def select_one(table, *, filters):
+        assert table == attested_v2_store.ALLOCATION_SETTLEMENT_FRONTIER_TABLE
+        assert filters == (("netuid", 71), ("allocation_epoch", 100))
+        return dict(stored)
+
+    def validate_row(row, *, source):
+        assert row == stored
+        assert source == {"source": "validated"}
+        return {"frontier": frontier, "source": source, "row": row}
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_execution_result_by_receipt_v2",
+        load_source,
+    )
+    monkeypatch.setattr(attested_v2_store, "call_rpc", call_rpc)
+    monkeypatch.setattr(attested_v2_store, "select_one", select_one)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "_validate_allocation_settlement_frontier_storage_v2",
+        validate_row,
+    )
+
+    result = await attested_v2_store.persist_allocation_settlement_frontier_v2(
+        frontier=frontier,
+        source_receipt_hash=receipt_hash,
+        source_state_hash=source_state_hash,
+    )
+
+    assert result == {
+        "status": "already_persisted",
+        "netuid": 71,
+        "allocation_epoch": 100,
+        "frontier_hash": frontier["frontier_hash"],
+        "source_receipt_hash": receipt_hash,
+        "source_state_hash": source_state_hash,
+    }
+    assert len(rpc_calls) == 1
+    assert source_loads == [receipt_hash, receipt_hash]
+
+
+@pytest.mark.asyncio
+async def test_allocation_frontier_retries_uncommitted_rpc_timeout(monkeypatch):
+    from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+        build_allocation_settlement_frontier_v2,
+    )
+
+    frontier = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=100,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(),
+    )
+    receipt_hash = "sha256:" + "1" * 64
+    source_state_hash = "sha256:" + "2" * 64
+    stored = {
+        "netuid": 71,
+        "allocation_epoch": 100,
+        "settled_through_epoch": 99,
+        "schema_version": frontier["schema_version"],
+        "frontier_hash": frontier["frontier_hash"],
+        "predecessor_frontier_hash": None,
+        "source_receipt_hash": receipt_hash,
+        "source_state_hash": source_state_hash,
+        "frontier_doc": frontier,
+    }
+    source = {"source": "validated"}
+    rpc_calls = []
+    reads = []
+    sleeps = []
+
+    async def load_source(*_args, **_kwargs):
+        return source
+
+    async def call_rpc(_name, _payload):
+        rpc_calls.append(1)
+        if len(rpc_calls) == 1:
+            raise TimeoutError("request timed out before commit")
+        return {
+            "status": "persisted",
+            "netuid": 71,
+            "allocation_epoch": 100,
+            "frontier_hash": frontier["frontier_hash"],
+            "source_receipt_hash": receipt_hash,
+            "source_state_hash": source_state_hash,
+        }
+
+    async def select_one(table, *, filters):
+        assert table == attested_v2_store.ALLOCATION_SETTLEMENT_FRONTIER_TABLE
+        assert filters == (("netuid", 71), ("allocation_epoch", 100))
+        reads.append(1)
+        return None if len(reads) == 1 else dict(stored)
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+
+    def validate_row(row, *, source):
+        assert row == stored
+        assert source == {"source": "validated"}
+        return {"frontier": frontier, "source": source, "row": row}
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_execution_result_by_receipt_v2",
+        load_source,
+    )
+    monkeypatch.setattr(attested_v2_store, "call_rpc", call_rpc)
+    monkeypatch.setattr(attested_v2_store, "select_one", select_one)
+    monkeypatch.setattr(attested_v2_store.asyncio, "sleep", sleep)
+    monkeypatch.setattr(
+        attested_v2_store,
+        "_validate_allocation_settlement_frontier_storage_v2",
+        validate_row,
+    )
+
+    result = await attested_v2_store.persist_allocation_settlement_frontier_v2(
+        frontier=frontier,
+        source_receipt_hash=receipt_hash,
+        source_state_hash=source_state_hash,
+    )
+
+    assert result["status"] == "persisted"
+    assert len(rpc_calls) == 2
+    assert len(reads) == 2
+    assert sleeps == [0.25]
+
+
+@pytest.mark.asyncio
+async def test_allocation_frontier_retry_exhaustion_fails_closed(monkeypatch):
+    from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+        build_allocation_settlement_frontier_v2,
+    )
+
+    frontier = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=100,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(),
+    )
+    calls = []
+    sleeps = []
+
+    async def load_source(*_args, **_kwargs):
+        return {}
+
+    def validate_row(*_args, **_kwargs):
+        return {}
+
+    async def call_rpc(*_args, **_kwargs):
+        calls.append(1)
+        raise TimeoutError("persistent edge timeout")
+
+    async def select_one(*_args, **_kwargs):
+        return None
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_execution_result_by_receipt_v2",
+        load_source,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "_validate_allocation_settlement_frontier_storage_v2",
+        validate_row,
+    )
+    monkeypatch.setattr(attested_v2_store, "call_rpc", call_rpc)
+    monkeypatch.setattr(attested_v2_store, "select_one", select_one)
+    monkeypatch.setattr(attested_v2_store.asyncio, "sleep", sleep)
+
+    with pytest.raises(TimeoutError, match="persistent edge timeout"):
+        await attested_v2_store.persist_allocation_settlement_frontier_v2(
+            frontier=frontier,
+            source_receipt_hash="sha256:" + "1" * 64,
+            source_state_hash="sha256:" + "2" * 64,
+        )
+
+    assert len(calls) == attested_v2_store._EXACT_INSERT_ATTEMPTS
+    assert sleeps == list(
+        attested_v2_store._EXACT_INSERT_BACKOFF_SECONDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_allocation_frontier_does_not_retry_contract_failure(monkeypatch):
+    from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+        build_allocation_settlement_frontier_v2,
+    )
+
+    frontier = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=100,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(),
+    )
+    calls = []
+
+    async def load_source(*_args, **_kwargs):
+        return {}
+
+    def validate_row(*_args, **_kwargs):
+        return {}
+
+    async def call_rpc(*_args, **_kwargs):
+        calls.append(1)
+        error = RuntimeError("allocation_settlement_frontier_conflict")
+        error.code = "23505"
+        raise error
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_execution_result_by_receipt_v2",
+        load_source,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "_validate_allocation_settlement_frontier_storage_v2",
+        validate_row,
+    )
+    monkeypatch.setattr(attested_v2_store, "call_rpc", call_rpc)
+
+    with pytest.raises(RuntimeError, match="frontier_conflict"):
+        await attested_v2_store.persist_allocation_settlement_frontier_v2(
+            frontier=frontier,
+            source_receipt_hash="sha256:" + "1" * 64,
+            source_state_hash="sha256:" + "2" * 64,
+        )
+
+    assert calls == [1]

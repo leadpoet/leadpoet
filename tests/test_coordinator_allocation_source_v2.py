@@ -12,7 +12,12 @@ from gateway.tee import coordinator_allocation_source_v2 as allocation_source
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    merkle_root,
     sha256_json,
+)
+from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+    build_allocation_settlement_frontier_v2,
+    frontier_artifact_hashes_v2,
 )
 from leadpoet_verifier.economics import allocate_research_lab_epoch
 
@@ -486,6 +491,391 @@ def test_business_receipt_rejects_a_different_artifact_hash(monkeypatch):
             artifact_ref="epoch:99",
             artifact_hash=artifact_hash,
             context=_context((receipt_hash,)),
+        )
+
+
+def test_prior_settlement_frontier_reconstructs_exact_signed_authority(
+    monkeypatch,
+):
+    frontier = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=99,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(),
+    )
+    receipt_hash = "sha256:" + "4" * 64
+    source_state = {"settlement_frontier": frontier}
+    source_state_hash = sha256_json(source_state)
+    allocation = {"allocation_hash": "sha256:" + "5" * 64}
+    result = {
+        "allocation": allocation,
+        "source_state": source_state,
+        "source_state_hash": source_state_hash,
+    }
+    artifact_hashes = sorted(
+        set(frontier_artifact_hashes_v2(frontier)) | {source_state_hash}
+    )
+    artifact_root = merkle_root(
+        artifact_hashes,
+        domain="leadpoet-artifact-v2",
+    )
+    input_root = "sha256:" + "6" * 64
+    output_root = sha256_json({"allocation": allocation})
+    receipt = {
+        "receipt_hash": receipt_hash,
+        "role": "gateway_coordinator",
+        "purpose": "research_lab.allocation.v2",
+        "status": "succeeded",
+        "epoch_id": 99,
+        "input_root": input_root,
+        "output_root": output_root,
+        "artifact_root": artifact_root,
+    }
+    reader = FakeReader(
+        {
+            "allocation_settlement_frontier_activation": [
+                {
+                    "schema_version": (
+                        "leadpoet.research_lab_allocation_"
+                        "settlement_frontier_activation.v2"
+                    ),
+                    "netuid": 71,
+                    "first_allocation_epoch": 99,
+                    "first_frontier_hash": frontier["frontier_hash"],
+                    "source_receipt_hash": receipt_hash,
+                }
+            ],
+            "allocation_settlement_frontiers": [
+                {
+                    "schema_version": frontier["schema_version"],
+                    "netuid": 71,
+                    "allocation_epoch": 99,
+                    "settled_through_epoch": 98,
+                    "frontier_hash": frontier["frontier_hash"],
+                    "predecessor_frontier_hash": None,
+                    "source_receipt_hash": receipt_hash,
+                    "source_state_hash": source_state_hash,
+                    "frontier_doc": frontier,
+                }
+            ],
+            "allocation_settlement_frontier_by_epoch": [
+                {
+                    "schema_version": frontier["schema_version"],
+                    "netuid": 71,
+                    "allocation_epoch": 99,
+                    "settled_through_epoch": 98,
+                    "frontier_hash": frontier["frontier_hash"],
+                    "predecessor_frontier_hash": None,
+                    "source_receipt_hash": receipt_hash,
+                    "source_state_hash": source_state_hash,
+                    "frontier_doc": frontier,
+                }
+            ],
+            "attested_execution_result_by_receipt": [
+                {
+                    "schema_version": "leadpoet.attested_execution_result.v2",
+                    "receipt_hash": receipt_hash,
+                    "role": "gateway_coordinator",
+                    "operation": "research_lab_allocation",
+                    "purpose": "research_lab.allocation.v2",
+                    "epoch_id": 99,
+                    "result_doc": result,
+                    "result_hash": sha256_json(result),
+                    "artifact_hashes": artifact_hashes,
+                    "artifact_root": artifact_root,
+                    "input_root": input_root,
+                    "output_root": output_root,
+                }
+            ],
+            "attested_receipt_by_hash": [
+                {"receipt_hash": receipt_hash, "receipt_doc": receipt}
+            ],
+        }
+    )
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=FakeChainSource(),
+        config_supplier=_config,
+        network_supplier=lambda: "finney",
+    )
+    context = _context((receipt_hash,))
+    context.external_receipt_graphs = [
+        {
+            "root_receipt_hash": receipt_hash,
+            "receipts": [{"receipt_hash": receipt_hash}],
+        }
+    ]
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_signed_execution_receipt",
+        lambda _value: None,
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "_receipt_graphs_by_declared_root",
+        lambda _graphs, declared_roots: {
+            root: {"root_receipt_hash": root}
+            for root in declared_roots
+        },
+    )
+    required = set()
+
+    observed = resolver._load_prior_settlement_frontier(
+        epoch=100,
+        netuid=71,
+        context=context,
+        required_parents=required,
+    )
+
+    assert observed == {"frontier": frontier, "receipt_hash": receipt_hash}
+    assert required == {receipt_hash}
+    assert reader.calls == [
+        ("allocation_settlement_frontier_activation", {"netuid": 71}),
+        (
+            "allocation_settlement_frontiers",
+            {"netuid": 71, "before_epoch": 100},
+        ),
+        (
+            "allocation_settlement_frontier_by_epoch",
+            {"netuid": 71, "allocation_epoch": 99},
+        ),
+        (
+            "attested_execution_result_by_receipt",
+            {"receipt_hash": receipt_hash},
+        ),
+        ("attested_receipt_by_hash", {"receipt_hash": receipt_hash}),
+    ]
+
+
+def test_first_frontier_same_epoch_replay_has_no_prior_frontier():
+    activation = {
+        "schema_version": (
+            "leadpoet.research_lab_allocation_settlement_frontier_activation.v2"
+        ),
+        "netuid": 71,
+        "first_allocation_epoch": 100,
+        "first_frontier_hash": "sha256:" + "1" * 64,
+        "source_receipt_hash": "sha256:" + "2" * 64,
+    }
+    reader = FakeReader(
+        {
+            "allocation_settlement_frontier_activation": [activation],
+            "allocation_settlement_frontiers": [],
+        }
+    )
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=FakeChainSource(),
+        config_supplier=_config,
+        network_supplier=lambda: "finney",
+    )
+
+    assert resolver._load_prior_settlement_frontier(
+        epoch=100,
+        netuid=71,
+        context=_context(()),
+        required_parents=set(),
+    ) is None
+
+    with pytest.raises(
+        CoordinatorAllocationSourceV2Error,
+        match="unavailable or ambiguous",
+    ):
+        resolver._load_prior_settlement_frontier(
+            epoch=101,
+            netuid=71,
+            context=_context(()),
+            required_parents=set(),
+        )
+
+
+def test_successor_frontier_requires_signed_bootstrap_and_latest_authorities(
+    monkeypatch,
+):
+    bootstrap = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=98,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(),
+    )
+    successor = build_allocation_settlement_frontier_v2(
+        mode="bounded_delta_v1",
+        netuid=71,
+        allocation_epoch=99,
+        predecessor_frontier_hash=bootstrap["frontier_hash"],
+        reward_checkpoints=(),
+    )
+
+    def authority(frontier, receipt_digit, allocation_digit):
+        receipt_hash = "sha256:" + receipt_digit * 64
+        source_state = {"settlement_frontier": frontier}
+        source_state_hash = sha256_json(source_state)
+        allocation = {
+            "allocation_hash": "sha256:" + allocation_digit * 64
+        }
+        result = {
+            "allocation": allocation,
+            "source_state": source_state,
+            "source_state_hash": source_state_hash,
+        }
+        artifact_hashes = sorted(
+            set(frontier_artifact_hashes_v2(frontier))
+            | {source_state_hash}
+        )
+        artifact_root = merkle_root(
+            artifact_hashes,
+            domain="leadpoet-artifact-v2",
+        )
+        input_root = "sha256:" + allocation_digit * 64
+        output_root = sha256_json({"allocation": allocation})
+        receipt = {
+            "receipt_hash": receipt_hash,
+            "role": "gateway_coordinator",
+            "purpose": "research_lab.allocation.v2",
+            "status": "succeeded",
+            "epoch_id": frontier["allocation_epoch"],
+            "input_root": input_root,
+            "output_root": output_root,
+            "artifact_root": artifact_root,
+        }
+        row = {
+            "schema_version": frontier["schema_version"],
+            "netuid": 71,
+            "allocation_epoch": frontier["allocation_epoch"],
+            "settled_through_epoch": frontier["settled_through_epoch"],
+            "frontier_hash": frontier["frontier_hash"],
+            "predecessor_frontier_hash": frontier[
+                "predecessor_frontier_hash"
+            ],
+            "source_receipt_hash": receipt_hash,
+            "source_state_hash": source_state_hash,
+            "frontier_doc": frontier,
+        }
+        execution = {
+            "schema_version": "leadpoet.attested_execution_result.v2",
+            "receipt_hash": receipt_hash,
+            "role": "gateway_coordinator",
+            "operation": "research_lab_allocation",
+            "purpose": "research_lab.allocation.v2",
+            "epoch_id": frontier["allocation_epoch"],
+            "result_doc": result,
+            "result_hash": sha256_json(result),
+            "artifact_hashes": artifact_hashes,
+            "artifact_root": artifact_root,
+            "input_root": input_root,
+            "output_root": output_root,
+        }
+        return row, execution, receipt
+
+    first_row, first_execution, first_receipt = authority(
+        bootstrap,
+        "1",
+        "3",
+    )
+    latest_row, latest_execution, latest_receipt = authority(
+        successor,
+        "2",
+        "4",
+    )
+    executions = {
+        first_receipt["receipt_hash"]: first_execution,
+        latest_receipt["receipt_hash"]: latest_execution,
+    }
+    receipts = {
+        first_receipt["receipt_hash"]: first_receipt,
+        latest_receipt["receipt_hash"]: latest_receipt,
+    }
+
+    class FrontierReader(FakeReader):
+        def read(self, *, policy_id, parameters, **_kwargs):
+            self.calls.append((policy_id, dict(parameters)))
+            if policy_id == "allocation_settlement_frontier_activation":
+                return [
+                    {
+                        "schema_version": (
+                            "leadpoet.research_lab_allocation_"
+                            "settlement_frontier_activation.v2"
+                        ),
+                        "netuid": 71,
+                        "first_allocation_epoch": 98,
+                        "first_frontier_hash": bootstrap["frontier_hash"],
+                        "source_receipt_hash": first_receipt["receipt_hash"],
+                    }
+                ]
+            if policy_id == "allocation_settlement_frontiers":
+                return [dict(latest_row)]
+            if policy_id == "allocation_settlement_frontier_by_epoch":
+                return [dict(first_row)]
+            if policy_id == "attested_execution_result_by_receipt":
+                return [dict(executions[parameters["receipt_hash"]])]
+            if policy_id == "attested_receipt_by_hash":
+                receipt = receipts[parameters["receipt_hash"]]
+                return [
+                    {
+                        "receipt_hash": receipt["receipt_hash"],
+                        "receipt_doc": dict(receipt),
+                    }
+                ]
+            return []
+
+    reader = FrontierReader()
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=FakeChainSource(),
+        config_supplier=_config,
+        network_supplier=lambda: "finney",
+    )
+    parent_hashes = (
+        first_receipt["receipt_hash"],
+        latest_receipt["receipt_hash"],
+    )
+    context = _context(parent_hashes)
+    context.external_receipt_graphs = [
+        {
+            "root_receipt_hash": receipt_hash,
+            "receipts": [{"receipt_hash": receipt_hash}],
+        }
+        for receipt_hash in parent_hashes
+    ]
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_signed_execution_receipt",
+        lambda _value: None,
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "_receipt_graphs_by_declared_root",
+        lambda _graphs, declared_roots: {
+            root: {"root_receipt_hash": root} for root in declared_roots
+        },
+    )
+    required = set()
+
+    observed = resolver._load_prior_settlement_frontier(
+        epoch=100,
+        netuid=71,
+        context=context,
+        required_parents=required,
+    )
+
+    assert observed == {
+        "frontier": successor,
+        "receipt_hash": latest_receipt["receipt_hash"],
+    }
+    assert required == set(parent_hashes)
+
+    context.parent_receipt_hashes = (latest_receipt["receipt_hash"],)
+    with pytest.raises(
+        CoordinatorAllocationSourceV2Error,
+        match="not a declared source",
+    ):
+        resolver._load_prior_settlement_frontier(
+            epoch=100,
+            netuid=71,
+            context=context,
+            required_parents=set(),
         )
 
 

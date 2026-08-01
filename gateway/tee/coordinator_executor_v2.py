@@ -27,6 +27,9 @@ from leadpoet_canonical.attested_v2 import (
     transport_root,
     validate_transport_attempt,
 )
+from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+    frontier_artifact_hashes_v2,
+)
 from leadpoet_canonical.weight_authority_v2 import (
     WEIGHT_INPUT_PURPOSES,
 )
@@ -747,6 +750,14 @@ class CoordinatorExecutorV2:
             raise ValueError("allocation source and protected kernel differ")
         artifact_hashes = list(result.evidence_roots.values())
         artifact_hashes.append(str(authority["source_state_hash"]))
+        source_state = authority.get("source_state")
+        if not isinstance(source_state, Mapping):
+            raise ValueError("allocation source state is invalid")
+        artifact_hashes.extend(
+            frontier_artifact_hashes_v2(
+                source_state.get("settlement_frontier")
+            )
+        )
         return ExecutionResultV2(
             output=authority,
             receipt_output=coordinator_receipt_output_v2(

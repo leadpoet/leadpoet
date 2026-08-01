@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 import re
 from typing import Any, Callable, Dict, Mapping, Sequence, Set, Tuple
 
@@ -9,8 +10,7 @@ from gateway.research_lab.allocations import (
     ACTIVE_CHAMPION_STATUSES,
     ACTIVE_REIMBURSEMENT_STATUSES,
     ACTIVE_SCHEDULE_STATUSES,
-    _champion_paid_alpha_to_date_from_snapshots,
-    _champion_obligation_caps,
+    _champion_lifetime_credit_ledger_from_snapshots,
     _champion_replay_obligation,
     _epoch_active,
     _historical_compute_fallback_from_snapshot,
@@ -42,10 +42,19 @@ from gateway.tee.reward_executor_v2 import (
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     canonical_json,
+    merkle_root,
     sha256_json,
     validate_receipt_graph,
     validate_receipt_graphs,
     validate_signed_execution_receipt,
+)
+from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+    build_allocation_settlement_frontier_v2,
+    build_reward_settlement_checkpoint_v2,
+    frontier_artifact_hashes_v2,
+    frontier_paid_maps_v2,
+    reward_checkpoint_index_v2,
+    validate_allocation_settlement_frontier_v2,
 )
 from leadpoet_verifier.economics import allocate_research_lab_epoch
 
@@ -263,17 +272,42 @@ class CoordinatorAllocationSourceV2:
         source_add_rows = self._read(
             "allocation_source_add_rewards", {"epoch_id": epoch}, context
         )
+        prior_frontier_context = self._load_prior_settlement_frontier(
+            epoch=epoch,
+            netuid=netuid,
+            context=context,
+            required_parents=required_parent_hashes,
+        )
+        prior_frontier = (
+            prior_frontier_context["frontier"]
+            if prior_frontier_context is not None
+            else None
+        )
         finalized_reward_history = self._finalized_champion_history(
             epoch=epoch,
             netuid=netuid,
             champion_rows=tuple(champion_source_rows) + tuple(source_add_rows),
+            history_start=(
+                int(prior_frontier["settled_through_epoch"]) + 1
+                if prior_frontier is not None
+                else None
+            ),
             context=context,
             required_parents=required_parent_hashes,
         )
+        settlement_frontier = self._build_settlement_frontier(
+            epoch=epoch,
+            netuid=netuid,
+            champion_rows=champion_source_rows,
+            source_add_rows=source_add_rows,
+            history=finalized_reward_history,
+            predecessor=prior_frontier,
+        )
+        paid_maps = frontier_paid_maps_v2(settlement_frontier)
         champion_rows, champion_skipped = self._champions(
             epoch=epoch,
             rows=champion_source_rows,
-            history=finalized_reward_history,
+            paid_by_reward=paid_maps["champion"],
             hotkey_uids=hotkey_uids,
             enable_champ_cap=bool(policy.get("enable_champ_cap", True)),
             context=context,
@@ -282,7 +316,7 @@ class CoordinatorAllocationSourceV2:
         source_add_obligations, source_add_skipped = self._source_add(
             epoch=epoch,
             rows=source_add_rows,
-            history=finalized_reward_history,
+            paid_by_reward=paid_maps["source_add"],
             hotkey_uids=hotkey_uids,
             context=context,
             required_parents=required_parent_hashes,
@@ -395,6 +429,7 @@ class CoordinatorAllocationSourceV2:
             "champion_obligation_count": len(champion_rows),
             "reimbursement_obligations": reimbursement_rows,
             "champion_obligations": champion_rows,
+            "settlement_frontier": settlement_frontier,
             "skipped": {
                 "reimbursements": reimbursement_skipped,
                 "champions": champion_skipped,
@@ -431,6 +466,472 @@ class CoordinatorAllocationSourceV2:
             "source_state": source_state,
             "source_state_hash": sha256_json(source_state),
         }
+
+    def _load_prior_settlement_frontier(
+        self,
+        *,
+        epoch: int,
+        netuid: int,
+        context: ExecutionContextV2,
+        required_parents: Set[str],
+    ) -> Any:
+        activation_rows = self._read(
+            "allocation_settlement_frontier_activation",
+            {"netuid": netuid},
+            context,
+        )
+        frontier_rows = self._read(
+            "allocation_settlement_frontiers",
+            {"netuid": netuid, "before_epoch": epoch},
+            context,
+        )
+        if not activation_rows:
+            if frontier_rows:
+                raise CoordinatorAllocationSourceV2Error(
+                    "allocation settlement frontier exists without activation"
+                )
+            return None
+        if len(activation_rows) != 1:
+            raise CoordinatorAllocationSourceV2Error(
+                "allocation settlement frontier is unavailable or ambiguous"
+            )
+        activation = activation_rows[0]
+        try:
+            first_epoch = int(activation["first_allocation_epoch"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CoordinatorAllocationSourceV2Error(
+                "allocation settlement frontier activation is invalid"
+            ) from exc
+        if (
+            activation.get("schema_version")
+            != "leadpoet.research_lab_allocation_settlement_frontier_activation.v2"
+            or int(activation.get("netuid", -1)) != netuid
+            or first_epoch < 1
+            or first_epoch > epoch
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(activation.get("first_frontier_hash") or ""),
+            )
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(activation.get("source_receipt_hash") or ""),
+            )
+        ):
+            raise CoordinatorAllocationSourceV2Error(
+                "allocation settlement frontier activation is invalid"
+            )
+        # The activation and first frontier are committed atomically after the
+        # first allocation execution. Replaying that same execution has no
+        # prior frontier by definition, so rebuild it from its original parent
+        # graphs. Every later epoch must have exactly one prior frontier.
+        if not frontier_rows:
+            if first_epoch == epoch:
+                return None
+            raise CoordinatorAllocationSourceV2Error(
+                "allocation settlement frontier is unavailable or ambiguous"
+            )
+        if len(frontier_rows) != 1:
+            raise CoordinatorAllocationSourceV2Error(
+                "allocation settlement frontier is unavailable or ambiguous"
+            )
+        row = frontier_rows[0]
+        try:
+            frontier = validate_allocation_settlement_frontier_v2(
+                row.get("frontier_doc")
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CoordinatorAllocationSourceV2Error(
+                "allocation settlement frontier is invalid"
+            ) from exc
+        source_receipt_hash = str(row.get("source_receipt_hash") or "")
+        source_state_hash = str(row.get("source_state_hash") or "")
+        if (
+            first_epoch > int(frontier["allocation_epoch"])
+            or int(row.get("netuid", -1)) != netuid
+            or int(row.get("allocation_epoch", -1))
+            != int(frontier["allocation_epoch"])
+            or int(row.get("settled_through_epoch", -2))
+            != int(frontier["settled_through_epoch"])
+            or row.get("schema_version") != frontier["schema_version"]
+            or row.get("frontier_hash") != frontier["frontier_hash"]
+            or row.get("predecessor_frontier_hash")
+            != frontier.get("predecessor_frontier_hash")
+            or int(frontier["netuid"]) != netuid
+            or int(frontier["allocation_epoch"]) >= epoch
+        ):
+            raise CoordinatorAllocationSourceV2Error(
+                "allocation settlement frontier scope differs"
+            )
+        if frontier["mode"] == "legacy_full_history_bootstrap":
+            if (
+                int(frontier["allocation_epoch"]) != first_epoch
+                or frontier["frontier_hash"]
+                != activation.get("first_frontier_hash")
+                or source_receipt_hash
+                != activation.get("source_receipt_hash")
+            ):
+                raise CoordinatorAllocationSourceV2Error(
+                    "allocation settlement frontier activation differs"
+                )
+        elif int(frontier["allocation_epoch"]) <= first_epoch:
+            raise CoordinatorAllocationSourceV2Error(
+                "allocation settlement frontier successor is invalid"
+            )
+
+        graphs = _receipt_graphs_by_declared_root(
+            context.external_receipt_graphs,
+            context.parent_receipt_hashes,
+        )
+
+        def validate_frontier_authority(
+            *,
+            authority_row: Mapping[str, Any],
+            authority_frontier: Mapping[str, Any],
+        ) -> str:
+            authority_receipt_hash = str(
+                authority_row.get("source_receipt_hash") or ""
+            )
+            authority_state_hash = str(
+                authority_row.get("source_state_hash") or ""
+            )
+            execution_rows = self._read(
+                "attested_execution_result_by_receipt",
+                {"receipt_hash": authority_receipt_hash},
+                context,
+            )
+            receipt_rows = self._read(
+                "attested_receipt_by_hash",
+                {"receipt_hash": authority_receipt_hash},
+                context,
+            )
+            if len(execution_rows) != 1 or len(receipt_rows) != 1:
+                raise CoordinatorAllocationSourceV2Error(
+                    "allocation frontier execution authority is unavailable"
+                )
+            execution = execution_rows[0]
+            result = execution.get("result_doc")
+            receipt = receipt_rows[0].get("receipt_doc")
+            artifact_hashes = execution.get("artifact_hashes")
+            if (
+                not isinstance(result, Mapping)
+                or not isinstance(receipt, Mapping)
+                or not isinstance(artifact_hashes, list)
+            ):
+                raise CoordinatorAllocationSourceV2Error(
+                    "allocation frontier execution authority is incomplete"
+                )
+            validate_signed_execution_receipt(receipt)
+            normalized_artifacts = sorted(
+                {str(item or "").lower() for item in artifact_hashes}
+            )
+            source_state = result.get("source_state")
+            allocation = result.get("allocation")
+            required_artifacts = set(
+                frontier_artifact_hashes_v2(authority_frontier)
+            ) | {authority_state_hash}
+            receipt_projection = (
+                {"allocation": dict(allocation)}
+                if isinstance(allocation, Mapping)
+                else None
+            )
+            if (
+                len(normalized_artifacts) != len(artifact_hashes)
+                or any(
+                    not re.fullmatch(r"sha256:[0-9a-f]{64}", item)
+                    for item in normalized_artifacts
+                )
+                or not isinstance(source_state, Mapping)
+                or source_state.get("settlement_frontier")
+                != authority_frontier
+                or sha256_json(dict(source_state)) != authority_state_hash
+                or result.get("source_state_hash") != authority_state_hash
+                or not required_artifacts.issubset(set(normalized_artifacts))
+                or execution.get("schema_version")
+                != "leadpoet.attested_execution_result.v2"
+                or execution.get("receipt_hash") != authority_receipt_hash
+                or execution.get("role") != "gateway_coordinator"
+                or execution.get("operation") != "research_lab_allocation"
+                or execution.get("purpose") != "research_lab.allocation.v2"
+                or int(execution.get("epoch_id", -1))
+                != int(authority_frontier["allocation_epoch"])
+                or execution.get("result_hash") != sha256_json(dict(result))
+                or execution.get("artifact_root")
+                != merkle_root(
+                    normalized_artifacts,
+                    domain="leadpoet-artifact-v2",
+                )
+                or receipt.get("receipt_hash") != authority_receipt_hash
+                or receipt.get("role") != "gateway_coordinator"
+                or receipt.get("purpose") != "research_lab.allocation.v2"
+                or receipt.get("status") != "succeeded"
+                or int(receipt.get("epoch_id", -1))
+                != int(authority_frontier["allocation_epoch"])
+                or receipt.get("output_root")
+                != (
+                    sha256_json(receipt_projection)
+                    if receipt_projection
+                    else ""
+                )
+                or receipt.get("artifact_root")
+                != execution.get("artifact_root")
+                or receipt.get("input_root") != execution.get("input_root")
+                or receipt.get("output_root") != execution.get("output_root")
+                or receipt_rows[0].get("receipt_hash")
+                != authority_receipt_hash
+            ):
+                raise CoordinatorAllocationSourceV2Error(
+                    "allocation frontier execution authority differs"
+                )
+            if (
+                authority_receipt_hash not in graphs
+                or authority_receipt_hash
+                not in context.parent_receipt_hashes
+            ):
+                raise CoordinatorAllocationSourceV2Error(
+                    "allocation frontier receipt is not a declared source"
+                )
+            required_parents.add(authority_receipt_hash)
+            return authority_receipt_hash
+
+        first_rows = self._read(
+            "allocation_settlement_frontier_by_epoch",
+            {"netuid": netuid, "allocation_epoch": first_epoch},
+            context,
+        )
+        if len(first_rows) != 1:
+            raise CoordinatorAllocationSourceV2Error(
+                "allocation frontier activation authority is unavailable"
+            )
+        first_row = first_rows[0]
+        try:
+            first_frontier = validate_allocation_settlement_frontier_v2(
+                first_row.get("frontier_doc")
+            )
+        except (TypeError, ValueError) as exc:
+            raise CoordinatorAllocationSourceV2Error(
+                "allocation frontier activation authority is invalid"
+            ) from exc
+        if (
+            first_frontier.get("mode") != "legacy_full_history_bootstrap"
+            or int(first_frontier.get("netuid", -1)) != netuid
+            or int(first_frontier.get("allocation_epoch", -1)) != first_epoch
+            or first_frontier.get("predecessor_frontier_hash") is not None
+            or first_frontier.get("frontier_hash")
+            != activation.get("first_frontier_hash")
+            or int(first_row.get("netuid", -1)) != netuid
+            or int(first_row.get("allocation_epoch", -1)) != first_epoch
+            or int(first_row.get("settled_through_epoch", -2))
+            != int(first_frontier["settled_through_epoch"])
+            or first_row.get("schema_version")
+            != first_frontier.get("schema_version")
+            or first_row.get("frontier_hash")
+            != first_frontier.get("frontier_hash")
+            or first_row.get("predecessor_frontier_hash") is not None
+            or first_row.get("source_receipt_hash")
+            != activation.get("source_receipt_hash")
+        ):
+            raise CoordinatorAllocationSourceV2Error(
+                "allocation frontier activation authority differs"
+            )
+        first_receipt_hash = validate_frontier_authority(
+            authority_row=first_row,
+            authority_frontier=first_frontier,
+        )
+        if source_receipt_hash != first_receipt_hash:
+            validate_frontier_authority(
+                authority_row=row,
+                authority_frontier=frontier,
+            )
+        return {"frontier": frontier, "receipt_hash": source_receipt_hash}
+
+    def _build_settlement_frontier(
+        self,
+        *,
+        epoch: int,
+        netuid: int,
+        champion_rows: Sequence[Mapping[str, Any]],
+        source_add_rows: Sequence[Mapping[str, Any]],
+        history: Sequence[Mapping[str, Any]],
+        predecessor: Any,
+    ) -> Dict[str, Any]:
+        previous = (
+            validate_allocation_settlement_frontier_v2(predecessor)
+            if predecessor is not None
+            else None
+        )
+        previous_index = (
+            reward_checkpoint_index_v2(previous["reward_checkpoints"])
+            if previous is not None
+            else {}
+        )
+        champion_delta = _champion_lifetime_credit_ledger_from_snapshots(
+            list(history),
+            obligation_caps=None,
+        )["realized_by_reward"]
+        source_add_delta = _source_add_paid_alpha_to_date_from_snapshots(
+            list(history)
+        )
+        checkpoints: list[Dict[str, Any]] = []
+        seen: set[Tuple[str, str]] = set()
+
+        def append_checkpoint(
+            *,
+            reward_kind: str,
+            source_id: str,
+            obligation_hash: str,
+            start_epoch: int,
+            epoch_count: int,
+            desired_alpha_percent: Any,
+            delta_realized: Any,
+        ) -> None:
+            key = (reward_kind, source_id)
+            if key in seen:
+                raise CoordinatorAllocationSourceV2Error(
+                    "allocation settlement reward is duplicated"
+                )
+            seen.add(key)
+            prior = previous_index.get(key)
+            if (
+                prior is None
+                and previous is not None
+                and start_epoch <= int(previous["settled_through_epoch"])
+            ):
+                raise CoordinatorAllocationSourceV2Error(
+                    "historical reward is absent from prior settlement frontier"
+                )
+            prior_applied = Decimal(
+                str(prior["applied_alpha_percent"] if prior else "0")
+            )
+            prior_realized = Decimal(
+                str(prior["realized_alpha_percent"] if prior else "0")
+            )
+            try:
+                delta = Decimal(str(delta_realized or 0))
+                desired = Decimal(str(desired_alpha_percent or 0))
+            except Exception as exc:
+                raise CoordinatorAllocationSourceV2Error(
+                    "allocation settlement reward amount is invalid"
+                ) from exc
+            if (
+                not delta.is_finite()
+                or delta < 0
+                or not desired.is_finite()
+                or desired < 0
+                or epoch_count <= 0
+                or start_epoch < 0
+            ):
+                raise CoordinatorAllocationSourceV2Error(
+                    "allocation settlement reward amount is invalid"
+                )
+            total_due = desired * Decimal(epoch_count)
+            realized = prior_realized + delta
+            applied = min(total_due, prior_applied + delta)
+            checkpoint = build_reward_settlement_checkpoint_v2(
+                reward_kind=reward_kind,
+                source_id=source_id,
+                obligation_hash=obligation_hash,
+                start_epoch=start_epoch,
+                epoch_count=epoch_count,
+                desired_alpha_percent=desired,
+                applied_alpha_percent=applied,
+                realized_alpha_percent=realized,
+                excess_alpha_percent=realized - applied,
+            )
+            if prior is not None and any(
+                checkpoint[field] != prior[field]
+                for field in (
+                    "obligation_hash",
+                    "start_epoch",
+                    "epoch_count",
+                    "desired_alpha_percent",
+                    "total_due_alpha_percent",
+                )
+            ):
+                raise CoordinatorAllocationSourceV2Error(
+                    "allocation settlement reward identity changed"
+                )
+            checkpoints.append(checkpoint)
+
+        for row in champion_rows:
+            source_id = str(row.get("champion_reward_id") or "")
+            append_checkpoint(
+                reward_kind="champion",
+                source_id=source_id,
+                obligation_hash=sha256_json(
+                    champion_reward_row_projection_v2(row)
+                ),
+                start_epoch=int(row.get("start_epoch") or 0),
+                epoch_count=int(row.get("epoch_count") or 0),
+                desired_alpha_percent=row.get("desired_alpha_percent") or 0,
+                delta_realized=champion_delta.get(source_id, 0),
+            )
+        for row in source_add_rows:
+            source_id = str(row.get("reward_ref") or "")
+            append_checkpoint(
+                reward_kind="source_add",
+                source_id=source_id,
+                obligation_hash=sha256_json(
+                    source_add_reward_row_projection_v2(
+                        "source_add_leg%d" % int(row.get("leg") or 0),
+                        {
+                            **dict(row),
+                            "initial_reward_status": "active",
+                        },
+                    )
+                ),
+                start_epoch=int(row.get("start_epoch") or 0),
+                epoch_count=int(
+                    row.get("epoch_count")
+                    or row.get("reward_epochs")
+                    or 0
+                ),
+                desired_alpha_percent=(
+                    row.get("desired_alpha_percent")
+                    or row.get("alpha_percent")
+                    or 0
+                ),
+                delta_realized=source_add_delta.get(source_id, 0),
+            )
+        for key, prior in previous_index.items():
+            if key in seen:
+                continue
+            reward_kind, source_id = key
+            raw_delta = (
+                champion_delta.get(source_id, 0)
+                if reward_kind == "champion"
+                else source_add_delta.get(source_id, 0)
+            )
+            try:
+                delta = Decimal(str(raw_delta or 0))
+                prior_applied = Decimal(str(prior["applied_alpha_percent"]))
+                total_due = Decimal(str(prior["total_due_alpha_percent"]))
+            except Exception as exc:
+                raise CoordinatorAllocationSourceV2Error(
+                    "retired allocation settlement reward is invalid"
+                ) from exc
+            if not delta.is_finite() or delta < 0:
+                raise CoordinatorAllocationSourceV2Error(
+                    "retired allocation settlement reward is invalid"
+                )
+            if min(total_due, prior_applied + delta) != total_due:
+                raise CoordinatorAllocationSourceV2Error(
+                    "unsettled reward disappeared from the active frontier"
+                )
+        return build_allocation_settlement_frontier_v2(
+            mode=(
+                "legacy_full_history_bootstrap"
+                if previous is None
+                else "bounded_delta_v1"
+            ),
+            netuid=netuid,
+            allocation_epoch=epoch,
+            predecessor_frontier_hash=(
+                str(previous["frontier_hash"])
+                if previous is not None
+                else None
+            ),
+            reward_checkpoints=checkpoints,
+        )
 
     def _policy_and_chain_state(
         self,
@@ -750,16 +1251,12 @@ class CoordinatorAllocationSourceV2:
         *,
         epoch: int,
         rows: Sequence[Mapping[str, Any]],
-        history: Sequence[Mapping[str, Any]],
+        paid_by_reward: Mapping[str, float],
         hotkey_uids: Mapping[str, int],
         enable_champ_cap: bool,
         context: ExecutionContextV2,
         required_parents: Set[str],
     ) -> Tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
-        paid = _champion_paid_alpha_to_date_from_snapshots(
-            list(history),
-            obligation_caps=_champion_obligation_caps(rows),
-        )
         obligations = []
         skipped = []
         accepted_statuses = (
@@ -772,14 +1269,6 @@ class CoordinatorAllocationSourceV2:
             if status not in accepted_statuses:
                 continue
             reward_id = str(row.get("champion_reward_id") or "")
-            replay = _champion_replay_obligation(
-                row,
-                paid_by_reward=paid,
-                epoch=epoch,
-                enable_champ_cap=bool(enable_champ_cap),
-            )
-            if replay is None:
-                continue
             self._require_reward_receipt(
                 artifact_kind="champion_reward_decision",
                 artifact_ref=reward_id,
@@ -789,6 +1278,14 @@ class CoordinatorAllocationSourceV2:
                 context=context,
                 required_parents=required_parents,
             )
+            replay = _champion_replay_obligation(
+                row,
+                paid_by_reward=paid_by_reward,
+                epoch=epoch,
+                enable_champ_cap=bool(enable_champ_cap),
+            )
+            if replay is None:
+                continue
             hotkey = str(row.get("miner_hotkey") or "")
             uid = hotkey_uids.get(hotkey)
             if uid is None:
@@ -823,6 +1320,7 @@ class CoordinatorAllocationSourceV2:
         epoch: int,
         netuid: int,
         champion_rows: Sequence[Mapping[str, Any]],
+        history_start: Any = None,
         context: ExecutionContextV2,
         required_parents: Set[str],
     ) -> list[Dict[str, Any]]:
@@ -831,9 +1329,13 @@ class CoordinatorAllocationSourceV2:
             for row in champion_rows
             if int(row.get("start_epoch") or 0) <= epoch
         ]
-        if not starts or epoch <= 0:
+        if epoch <= 0 or (history_start is None and not starts):
             return []
-        history_start = min(starts)
+        normalized_history_start = (
+            min(starts)
+            if history_start is None
+            else self._non_negative_int(history_start, "history_start")
+        )
         history_end = epoch - 1
         activation_rows = self._read(
             "chain_realized_settlement_activation",
@@ -875,12 +1377,12 @@ class CoordinatorAllocationSourceV2:
                 "finalized_allocation_authorities",
                 {
                     "netuid": netuid,
-                    "start_epoch": history_start,
+                    "start_epoch": normalized_history_start,
                     "end_epoch": finalized_end,
                 },
                 context,
             )
-            if finalized_end >= history_start
+            if finalized_end >= normalized_history_start
             else []
         )
         legacy_rows = (
@@ -888,15 +1390,15 @@ class CoordinatorAllocationSourceV2:
                 "legacy_finalized_allocation_migrations",
                 {
                     "netuid": netuid,
-                    "start_epoch": history_start,
+                    "start_epoch": normalized_history_start,
                     "end_epoch": finalized_end,
                 },
                 context,
             )
-            if finalized_end >= history_start
+            if finalized_end >= normalized_history_start
             else []
         )
-        chain_start = max(history_start, activation_epoch)
+        chain_start = max(normalized_history_start, activation_epoch)
         chain_settlement_rows = (
             self._read(
                 "chain_realized_epoch_settlements",
@@ -1053,12 +1555,11 @@ class CoordinatorAllocationSourceV2:
         *,
         epoch: int,
         rows: Sequence[Mapping[str, Any]],
-        history: Sequence[Mapping[str, Any]],
+        paid_by_reward: Mapping[str, float],
         hotkey_uids: Mapping[str, int],
         context: ExecutionContextV2,
         required_parents: Set[str],
     ) -> Tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
-        paid = _source_add_paid_alpha_to_date_from_snapshots(list(history))
         obligations = []
         skipped = []
         for row in rows:
@@ -1066,24 +1567,6 @@ class CoordinatorAllocationSourceV2:
             if status not in ACTIVE_CHAMPION_STATUSES:
                 continue
             reward_ref = str(row.get("reward_ref") or "")
-            replay = _champion_replay_obligation(
-                {
-                    "champion_reward_id": reward_ref,
-                    "start_epoch": int(row.get("start_epoch") or 0),
-                    "epoch_count": int(
-                        row.get("epoch_count") or row.get("reward_epochs") or 0
-                    ),
-                    "desired_alpha_percent": float(
-                        row.get("desired_alpha_percent")
-                        or row.get("alpha_percent")
-                        or 0.0
-                    ),
-                },
-                paid_by_reward=paid,
-                epoch=epoch,
-            )
-            if replay is None:
-                continue
             self._require_reward_receipt(
                 artifact_kind="source_add_reward_decision",
                 artifact_ref=reward_ref,
@@ -1099,6 +1582,24 @@ class CoordinatorAllocationSourceV2:
                 context=context,
                 required_parents=required_parents,
             )
+            replay = _champion_replay_obligation(
+                {
+                    "champion_reward_id": reward_ref,
+                    "start_epoch": int(row.get("start_epoch") or 0),
+                    "epoch_count": int(
+                        row.get("epoch_count") or row.get("reward_epochs") or 0
+                    ),
+                    "desired_alpha_percent": float(
+                        row.get("desired_alpha_percent")
+                        or row.get("alpha_percent")
+                        or 0.0
+                    ),
+                },
+                paid_by_reward=paid_by_reward,
+                epoch=epoch,
+            )
+            if replay is None:
+                continue
             hotkey = str(row.get("miner_hotkey") or "")
             uid = hotkey_uids.get(hotkey)
             if uid is None:

@@ -23,6 +23,9 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
     transport_root,
 )
+from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+    build_allocation_settlement_frontier_v2,
+)
 from leadpoet_canonical.weight_computation import (
     WEIGHT_SNAPSHOT_SCHEMA_VERSION,
     weight_config_hash,
@@ -251,10 +254,20 @@ async def test_coordinator_allocation_binds_projected_receipt_output(monkeypatch
     allocation = {"epoch_id": 100, "champion_allocations": []}
     source_state_hash = "sha256:" + "1" * 64
     kernel_evidence_hash = "sha256:" + "2" * 64
+    frontier = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=100,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(),
+    )
     authority = {
         "allocation": allocation,
         "allocation_inputs": {"epoch_id": 100},
-        "source_state": {"epoch_id": 100},
+        "source_state": {
+            "epoch_id": 100,
+            "settlement_frontier": frontier,
+        },
         "source_state_hash": source_state_hash,
     }
 
@@ -287,6 +300,7 @@ async def test_coordinator_allocation_binds_projected_receipt_output(monkeypatch
     assert set(result.artifact_hashes) == {
         source_state_hash,
         kernel_evidence_hash,
+        frontier["frontier_hash"],
     }
 
 

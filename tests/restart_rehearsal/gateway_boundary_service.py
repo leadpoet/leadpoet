@@ -20,6 +20,12 @@ import time
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
+from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+    frontier_artifact_hashes_v2,
+    validate_allocation_settlement_frontier_v2,
+)
+from leadpoet_canonical.attested_v2 import sha256_json
+
 try:
     from fixture_contract import (
         load_rehearsal_current_settlement_epoch_id,
@@ -445,11 +451,12 @@ def _migration_schema_contract(
         "134-research-lab-provider-outcome-head-contention.sql",
         "135-research-lab-active-model-result-replay.sql",
         "136-research-lab-ancestry-checkpoint-sidecars.sql",
+        "137-research-lab-allocation-settlement-frontier.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (
         not isinstance(applied_migrations, list)
-        or applied_migrations[-7:] != expected_final_migrations
+        or applied_migrations[-8:] != expected_final_migrations
     ):
         raise RuntimeError(
             "migration-backed final migration order differs from production"
@@ -511,6 +518,8 @@ def _migration_schema_contract(
         "research_lab_provider_outcome_checkpoints_v2",
         "research_lab_attested_ancestry_checkpoints_v2",
         "research_lab_attested_ancestry_activations_v2",
+        "research_lab_allocation_settlement_frontiers_v2",
+        "research_lab_allocation_settlement_frontier_activation_v2",
     }
     if not required_relations <= set(relations):
         raise RuntimeError(
@@ -527,6 +536,7 @@ def _migration_schema_contract(
         "persist_research_lab_chain_realized_lifetime_settlement_v2",
         "research_lab_champion_lifetime_credit_contract_v1",
         "persist_research_lab_ancestry_checkpoint_v2",
+        "persist_research_lab_allocation_settlement_frontier_v2",
     }
     if not required_rpcs <= set(raw_rpcs):
         raise RuntimeError(
@@ -1385,6 +1395,279 @@ class LocalPostgRESTState:
             "root_activated": True,
         }
 
+    def persist_allocation_settlement_frontier(
+        self,
+        body: Any,
+    ) -> dict[str, Any]:
+        """Mirror migration 137's exact append and activation contract."""
+
+        if not isinstance(body, dict) or set(body) != {
+            "requested_frontier",
+            "requested_source_receipt_hash",
+            "requested_source_state_hash",
+        }:
+            raise ValueError(
+                "allocation settlement frontier RPC body is invalid"
+            )
+        frontier = validate_allocation_settlement_frontier_v2(
+            body.get("requested_frontier")
+        )
+        source_receipt_hash = str(
+            body.get("requested_source_receipt_hash") or ""
+        )
+        source_state_hash = str(
+            body.get("requested_source_state_hash") or ""
+        )
+        if (
+            not HASH_RE.fullmatch(source_receipt_hash)
+            or not HASH_RE.fullmatch(source_state_hash)
+        ):
+            raise ValueError("allocation frontier source hash is invalid")
+
+        frontier_table = (
+            "research_lab_allocation_settlement_frontiers_v2"
+        )
+        activation_table = (
+            "research_lab_allocation_settlement_frontier_activation_v2"
+        )
+        execution_table = "research_lab_attested_execution_results_v2"
+        receipt_table = "research_lab_attested_execution_receipts_v2"
+        frontier_columns = self.relation_columns.get(frontier_table)
+        activation_columns = self.relation_columns.get(activation_table)
+        if (
+            frontier_columns is None
+            or activation_columns is None
+            or frontier_table not in self.rows
+            or activation_table not in self.rows
+        ):
+            raise ValueError(
+                "allocation settlement frontier migration is unavailable"
+            )
+
+        netuid = int(frontier["netuid"])
+        epoch = int(frontier["allocation_epoch"])
+        frontier_hash = str(frontier["frontier_hash"])
+        with self.lock:
+            execution = next(
+                (
+                    row
+                    for row in self.rows.get(execution_table, [])
+                    if row.get("receipt_hash") == source_receipt_hash
+                ),
+                None,
+            )
+            receipt = next(
+                (
+                    row
+                    for row in self.rows.get(receipt_table, [])
+                    if row.get("receipt_hash") == source_receipt_hash
+                ),
+                None,
+            )
+            result_doc = (
+                execution.get("result_doc")
+                if isinstance(execution, dict)
+                else None
+            )
+            source_state = (
+                result_doc.get("source_state")
+                if isinstance(result_doc, dict)
+                else None
+            )
+            artifacts = (
+                execution.get("artifact_hashes")
+                if isinstance(execution, dict)
+                else None
+            )
+            required_artifacts = set(frontier_artifact_hashes_v2(frontier)) | {
+                source_state_hash
+            }
+            execution_receipt_fields = (
+                "role",
+                "purpose",
+                "job_id",
+                "epoch_id",
+                "sequence",
+                "input_root",
+                "output_root",
+                "artifact_root",
+            )
+            if (
+                not isinstance(execution, dict)
+                or not isinstance(receipt, dict)
+                or not isinstance(result_doc, dict)
+                or not isinstance(source_state, dict)
+                or not isinstance(artifacts, list)
+                or execution.get("role") != "gateway_coordinator"
+                or execution.get("operation") != "research_lab_allocation"
+                or execution.get("purpose") != "research_lab.allocation.v2"
+                or execution.get("epoch_id") != epoch
+                or result_doc.get("source_state_hash") != source_state_hash
+                or sha256_json(source_state) != source_state_hash
+                or source_state.get("settlement_frontier") != frontier
+                or source_state.get("epoch") != epoch
+                or source_state.get("netuid") != netuid
+                or receipt.get("receipt_status") != "succeeded"
+                or any(
+                    receipt.get(field) != execution.get(field)
+                    for field in execution_receipt_fields
+                )
+                or not required_artifacts.issubset(set(artifacts))
+            ):
+                raise ValueError(
+                    "allocation settlement frontier source is invalid"
+                )
+
+            frontiers = self.rows[frontier_table]
+            activations = self.rows[activation_table]
+            activation = next(
+                (
+                    row
+                    for row in activations
+                    if row.get("netuid") == netuid
+                ),
+                None,
+            )
+            if activation is not None:
+                first = next(
+                    (
+                        row
+                        for row in frontiers
+                        if row.get("frontier_hash")
+                        == activation.get("first_frontier_hash")
+                    ),
+                    None,
+                )
+                first_doc = (
+                    first.get("frontier_doc")
+                    if isinstance(first, dict)
+                    else None
+                )
+                if (
+                    not isinstance(first, dict)
+                    or not isinstance(first_doc, dict)
+                    or first.get("netuid") != netuid
+                    or first.get("allocation_epoch")
+                    != activation.get("first_allocation_epoch")
+                    or first.get("frontier_hash")
+                    != activation.get("first_frontier_hash")
+                    or first.get("source_receipt_hash")
+                    != activation.get("source_receipt_hash")
+                    or first_doc.get("mode")
+                    != "legacy_full_history_bootstrap"
+                    or first.get("predecessor_frontier_hash") is not None
+                ):
+                    raise ValueError(
+                        "allocation settlement frontier activation is invalid"
+                    )
+            existing = next(
+                (
+                    row
+                    for row in frontiers
+                    if row.get("netuid") == netuid
+                    and row.get("allocation_epoch") == epoch
+                ),
+                None,
+            )
+            expected_row = {
+                "netuid": netuid,
+                "allocation_epoch": epoch,
+                "settled_through_epoch": int(
+                    frontier["settled_through_epoch"]
+                ),
+                "schema_version": str(frontier["schema_version"]),
+                "frontier_hash": frontier_hash,
+                "predecessor_frontier_hash": frontier.get(
+                    "predecessor_frontier_hash"
+                ),
+                "source_receipt_hash": source_receipt_hash,
+                "source_state_hash": source_state_hash,
+                "frontier_doc": frontier,
+            }
+            if set(expected_row) != set(frontier_columns) - {"created_at"}:
+                raise ValueError(
+                    "allocation settlement frontier columns differ"
+                )
+            if existing is not None:
+                if activation is None:
+                    raise ValueError(
+                        "allocation settlement frontier activation is invalid"
+                    )
+                durable = {
+                    field: value
+                    for field, value in existing.items()
+                    if field != "created_at"
+                }
+                if durable != expected_row:
+                    raise ValueError(
+                        "allocation settlement frontier durable row conflicts"
+                    )
+                status = "already_persisted"
+            else:
+                lineage = [
+                    row for row in frontiers if row.get("netuid") == netuid
+                ]
+                previous = (
+                    max(lineage, key=lambda row: int(row["allocation_epoch"]))
+                    if lineage
+                    else None
+                )
+                if activation is None:
+                    if (
+                        previous is not None
+                        or frontier.get("mode")
+                        != "legacy_full_history_bootstrap"
+                        or frontier.get("predecessor_frontier_hash") is not None
+                    ):
+                        raise ValueError(
+                            "allocation settlement frontier bootstrap is invalid"
+                        )
+                elif (
+                    previous is None
+                    or frontier.get("mode") != "bounded_delta_v1"
+                    or frontier.get("predecessor_frontier_hash")
+                    != previous.get("frontier_hash")
+                    or int(frontier["settled_through_epoch"])
+                    <= int(previous["settled_through_epoch"])
+                ):
+                    raise ValueError(
+                        "allocation settlement frontier successor is invalid"
+                    )
+
+                stored = {
+                    **expected_row,
+                    "created_at": "2026-07-25T00:00:00+00:00",
+                }
+                frontiers.append(stored)
+                if activation is None:
+                    activation = {
+                        "netuid": netuid,
+                        "schema_version": (
+                            "leadpoet.research_lab_allocation_settlement_"
+                            "frontier_activation.v2"
+                        ),
+                        "first_allocation_epoch": epoch,
+                        "first_frontier_hash": frontier_hash,
+                        "source_receipt_hash": source_receipt_hash,
+                        "activated_at": "2026-07-25T00:00:00+00:00",
+                    }
+                    if set(activation) != set(activation_columns):
+                        raise ValueError(
+                            "allocation frontier activation columns differ"
+                        )
+                    activations.append(activation)
+                self._write_durable_state_locked(mutated=True)
+                status = "persisted"
+
+        return {
+            "status": status,
+            "netuid": netuid,
+            "allocation_epoch": epoch,
+            "frontier_hash": frontier_hash,
+            "source_receipt_hash": source_receipt_hash,
+            "source_state_hash": source_state_hash,
+        }
+
     def persist_chain_realized_settlement(
         self,
         *,
@@ -1811,6 +2094,25 @@ class Handler(BaseHTTPRequestHandler):
                         "checkpoint_graph_hash"
                     ],
                     root_activated=response["root_activated"],
+                )
+            elif name == (
+                "persist_research_lab_allocation_settlement_frontier_v2"
+            ):
+                response = (
+                    self.server.state.persist_allocation_settlement_frontier(
+                        body
+                    )
+                )
+                self.server.state.record(
+                    status="ok",
+                    operation="allocation_settlement_frontier_persisted",
+                    method=self.command,
+                    target=name,
+                    result_status=response["status"],
+                    netuid=response["netuid"],
+                    allocation_epoch=response["allocation_epoch"],
+                    frontier_hash=response["frontier_hash"],
+                    source_receipt_hash=response["source_receipt_hash"],
                 )
             else:
                 raise ValueError(

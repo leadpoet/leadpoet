@@ -3,6 +3,11 @@ from pathlib import Path
 
 
 ENCLAVE_ROOT = Path(__file__).parents[1] / "validator_tee" / "enclave"
+CANONICAL_FRONTIER = (
+    Path(__file__).parents[1]
+    / "leadpoet_canonical"
+    / "allocation_settlement_frontier_v2.py"
+)
 
 
 def test_validator_enclave_sources_are_python37_compatible() -> None:
@@ -14,3 +19,10 @@ def test_validator_enclave_sources_are_python37_compatible() -> None:
         # added in Python 3.9 and fail only after the signed extrinsic exists.
         assert ".removeprefix(" not in source
         assert ".removesuffix(" not in source
+
+
+def test_allocation_settlement_frontier_is_python37_compatible() -> None:
+    source = CANONICAL_FRONTIER.read_text(encoding="utf-8")
+    ast.parse(source, filename=str(CANONICAL_FRONTIER), feature_version=(3, 7))
+    assert ".removeprefix(" not in source
+    assert ".removesuffix(" not in source

@@ -10,6 +10,11 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     LocalPostgRESTState,
     _matches_filter,
 )
+from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+    build_allocation_settlement_frontier_v2,
+    frontier_artifact_hashes_v2,
+)
+from leadpoet_canonical.attested_v2 import sha256_json
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +43,111 @@ def _maintenance_lease_state(tmp_path: Path) -> LocalPostgRESTState:
         durable_state_path=tmp_path / "durable.json",
         durable_schema_sha="1" * 40,
     )
+
+
+def _allocation_frontier_state(
+    tmp_path: Path,
+) -> tuple[LocalPostgRESTState, dict[str, object]]:
+    frontier_table = "research_lab_allocation_settlement_frontiers_v2"
+    activation_table = (
+        "research_lab_allocation_settlement_frontier_activation_v2"
+    )
+    execution_table = "research_lab_attested_execution_results_v2"
+    receipt_table = "research_lab_attested_execution_receipts_v2"
+    state_root = tmp_path / "frontier-state"
+    state_root.mkdir()
+    state = LocalPostgRESTState(
+        state_root=state_root,
+        fixture={},
+        source_root=ROOT,
+        tables={
+            frontier_table,
+            activation_table,
+            execution_table,
+            receipt_table,
+        },
+        rpcs={"persist_research_lab_allocation_settlement_frontier_v2"},
+        relation_columns={
+            frontier_table: frozenset(
+                {
+                    "netuid",
+                    "allocation_epoch",
+                    "settled_through_epoch",
+                    "schema_version",
+                    "frontier_hash",
+                    "predecessor_frontier_hash",
+                    "source_receipt_hash",
+                    "source_state_hash",
+                    "frontier_doc",
+                    "created_at",
+                }
+            ),
+            activation_table: frozenset(
+                {
+                    "netuid",
+                    "schema_version",
+                    "first_allocation_epoch",
+                    "first_frontier_hash",
+                    "source_receipt_hash",
+                    "activated_at",
+                }
+            ),
+            execution_table: frozenset(),
+            receipt_table: frozenset(),
+        },
+        durable_state_path=tmp_path / "frontier-durable.json",
+        durable_schema_sha="2" * 40,
+    )
+    frontier = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=100,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(),
+    )
+    receipt_hash = "sha256:" + "4" * 64
+    source_state = {
+        "epoch": 100,
+        "netuid": 71,
+        "settlement_frontier": frontier,
+    }
+    source_state_hash = sha256_json(source_state)
+    shared_receipt_fields = {
+        "role": "gateway_coordinator",
+        "purpose": "research_lab.allocation.v2",
+        "job_id": "allocation:100",
+        "epoch_id": 100,
+        "sequence": 0,
+        "input_root": "sha256:" + "5" * 64,
+        "output_root": "sha256:" + "6" * 64,
+        "artifact_root": "sha256:" + "7" * 64,
+    }
+    state.rows[execution_table].append(
+        {
+            **shared_receipt_fields,
+            "receipt_hash": receipt_hash,
+            "operation": "research_lab_allocation",
+            "result_doc": {
+                "source_state": source_state,
+                "source_state_hash": source_state_hash,
+            },
+            "artifact_hashes": list(frontier_artifact_hashes_v2(frontier))
+            + [source_state_hash],
+        }
+    )
+    state.rows[receipt_table].append(
+        {
+            **shared_receipt_fields,
+            "receipt_hash": receipt_hash,
+            "receipt_status": "succeeded",
+        }
+    )
+    body = {
+        "requested_frontier": frontier,
+        "requested_source_receipt_hash": receipt_hash,
+        "requested_source_state_hash": source_state_hash,
+    }
+    return state, body
 
 
 def test_json_filters_match_postgrest_text_and_json_semantics() -> None:
@@ -170,6 +280,47 @@ def test_durable_postgrest_state_rejects_schema_or_hash_drift(
             durable_state_path=durable_path,
             durable_schema_sha="1" * 40,
         )
+
+
+def test_frontier_boundary_persists_and_replays_exact_request(
+    tmp_path: Path,
+) -> None:
+    state, body = _allocation_frontier_state(tmp_path)
+
+    first = state.persist_allocation_settlement_frontier(body)
+    replay = state.persist_allocation_settlement_frontier(body)
+
+    assert first["status"] == "persisted"
+    assert replay["status"] == "already_persisted"
+    assert first["frontier_hash"] == body["requested_frontier"][
+        "frontier_hash"
+    ]
+
+
+def test_frontier_boundary_fails_closed_without_activation(
+    tmp_path: Path,
+) -> None:
+    state, body = _allocation_frontier_state(tmp_path)
+    state.persist_allocation_settlement_frontier(body)
+    state.rows[
+        "research_lab_allocation_settlement_frontier_activation_v2"
+    ].clear()
+
+    with pytest.raises(ValueError, match="activation is invalid"):
+        state.persist_allocation_settlement_frontier(body)
+
+
+def test_frontier_boundary_rejects_alternate_receipt_authority(
+    tmp_path: Path,
+) -> None:
+    state, body = _allocation_frontier_state(tmp_path)
+    altered = {
+        **body,
+        "requested_source_receipt_hash": "sha256:" + "8" * 64,
+    }
+
+    with pytest.raises(ValueError, match="source is invalid"):
+        state.persist_allocation_settlement_frontier(altered)
 
 
 def test_maintenance_lease_matches_acquire_renew_and_contention_contract(

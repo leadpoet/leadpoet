@@ -141,6 +141,73 @@ def test_champion_allocation_query_matches_live_reward_view_contract():
     assert "reward_kind" not in dict(query)["select"].split(",")
 
 
+def test_allocation_frontier_queries_are_exact_and_single_page():
+    activation_provider = FakeProvider([{"rows": []}])
+    _read(
+        activation_provider,
+        policy_id="allocation_settlement_frontier_activation",
+        parameters={"netuid": 71},
+    )
+    activation_url = urlsplit(activation_provider.requests[0]["url"])
+    activation_query = dict(
+        parse_qsl(activation_url.query, keep_blank_values=True)
+    )
+    assert activation_url.path.endswith(
+        "/rest/v1/research_lab_allocation_settlement_frontier_activation_v2"
+    )
+    assert activation_query["netuid"] == "eq.71"
+    assert activation_query["limit"] == "1"
+    assert QUERY_POLICIES[
+        "allocation_settlement_frontier_activation"
+    ].max_pages == 1
+
+    frontier_provider = FakeProvider([{"rows": []}])
+    _read(
+        frontier_provider,
+        policy_id="allocation_settlement_frontiers",
+        parameters={"netuid": 71, "before_epoch": 24199},
+    )
+    frontier_url = urlsplit(frontier_provider.requests[0]["url"])
+    frontier_query = dict(parse_qsl(frontier_url.query, keep_blank_values=True))
+    assert frontier_url.path.endswith(
+        "/rest/v1/research_lab_allocation_settlement_frontiers_v2"
+    )
+    assert frontier_query["netuid"] == "eq.71"
+    assert frontier_query["allocation_epoch"] == "lt.24199"
+    assert frontier_query["order"] == "allocation_epoch.desc"
+    assert frontier_query["limit"] == "1"
+    assert QUERY_POLICIES["allocation_settlement_frontiers"].max_pages == 1
+
+    exact_provider = FakeProvider([{"rows": []}])
+    _read(
+        exact_provider,
+        policy_id="allocation_settlement_frontier_by_epoch",
+        parameters={"netuid": 71, "allocation_epoch": 24001},
+    )
+    exact_url = urlsplit(exact_provider.requests[0]["url"])
+    exact_query = dict(parse_qsl(exact_url.query, keep_blank_values=True))
+    assert exact_url.path.endswith(
+        "/rest/v1/research_lab_allocation_settlement_frontiers_v2"
+    )
+    assert exact_query["netuid"] == "eq.71"
+    assert exact_query["allocation_epoch"] == "eq.24001"
+    assert exact_query["limit"] == "1"
+    assert QUERY_POLICIES[
+        "allocation_settlement_frontier_by_epoch"
+    ].max_pages == 1
+
+
+def test_allocation_frontier_receipt_query_rejects_hash_injection():
+    provider = FakeProvider([{"rows": []}])
+    with pytest.raises(SupabaseSourceV2Error, match="receipt_hash"):
+        _read(
+            provider,
+            policy_id="attested_execution_result_by_receipt",
+            parameters={"receipt_hash": HASH + "&select=result_doc"},
+        )
+    assert provider.requests == []
+
+
 def test_uncapped_champion_query_includes_paid_projection():
     provider = FakeProvider([{"rows": []}])
     _read(

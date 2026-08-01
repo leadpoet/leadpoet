@@ -1398,68 +1398,116 @@ async def build_allocation_v2(
     if load_allocation_parent_graphs is None:
         load_allocation_parent_graphs = _load_allocation_parent_graphs_v2
     finalized_history: list[dict[str, Any]] = []
+    settlement_frontier_context: Mapping[str, Any] | None = None
+    current_frontier_context: Mapping[str, Any] | None = None
     readiness_authority_graph_records: dict[str, dict[str, Any]] = {}
     readiness_business_graphs: dict[
         tuple[str, str], dict[str, Any]
     ] = {}
     if using_default_parent_loader:
-        if execute is execute_coordinator_v2:
+        from gateway.research_lab.attested_v2_store import (
+            load_allocation_settlement_frontier_context_v2,
+        )
+
+        settlement_frontier_context = (
+            await load_allocation_settlement_frontier_context_v2(
+                netuid=int(netuid),
+                before_epoch=int(epoch_id) + 1,
+            )
+        )
+        if (
+            settlement_frontier_context is not None
+            and int(
+                (settlement_frontier_context.get("frontier") or {}).get(
+                    "allocation_epoch", -1
+                )
+            )
+            == int(epoch_id)
+        ):
+            current_frontier_context = settlement_frontier_context
+            settlement_frontier_context = None
+        if current_frontier_context is None and execute is execute_coordinator_v2:
             await ensure_chain_realized_settlements_v1(
                 epoch_id=int(epoch_id),
                 netuid=int(netuid),
                 execute=execute,
             )
-        from gateway.research_lab.champion_settlement_v2 import (
-            champion_v2_cutover_readiness,
-        )
-
-        readiness = await champion_v2_cutover_readiness(
-            epoch=int(epoch_id),
-            netuid=int(netuid),
-            _finalized_history_out=finalized_history,
-            _authority_graph_records_out=readiness_authority_graph_records,
-            _business_graphs_out=readiness_business_graphs,
-        )
-        if (
-            readiness.get("ready") is not True
-            or float(readiness.get("receipt_coverage") or 0.0) != 1.0
-            or float(
-                readiness.get("historical_classification_coverage")
-                or readiness.get("historical_settlement_coverage")
-                or 0.0
-            )
-            != 1.0
-        ):
-            raise ResearchLabV2AuthorityError(
-                "champion V2 cutover blocked: %d obligations and %d "
-                "historical allocations lack authoritative classifications"
-                % (
-                    len(readiness.get("missing") or ()),
-                    len(
-                        readiness.get(
-                            "missing_historical_classifications"
-                        )
-                        or readiness.get("missing_historical_settlements")
-                        or ()
-                    ),
+        if settlement_frontier_context is None:
+            if current_frontier_context is not None:
+                source = current_frontier_context.get("source")
+                source_receipt = (
+                    source.get("receipt") if isinstance(source, Mapping) else None
                 )
+                if not isinstance(source_receipt, Mapping):
+                    raise ResearchLabV2AuthorityError(
+                        "current allocation frontier source is incomplete"
+                    )
+                parent_roots = source_receipt.get("parent_receipt_hashes")
+                if not isinstance(parent_roots, list):
+                    raise ResearchLabV2AuthorityError(
+                        "current allocation frontier parents are invalid"
+                    )
+                graphs = await _graphs_for_roots(parent_roots)
+            else:
+                graphs = []
+        if settlement_frontier_context is None and current_frontier_context is None:
+            from gateway.research_lab.champion_settlement_v2 import (
+                champion_v2_cutover_readiness,
             )
-    parent_loader_kwargs = {
-        "epoch_id": int(epoch_id),
-        "netuid": int(netuid),
-        "policy": dict(policy),
-    }
-    if using_default_parent_loader:
-        parent_loader_kwargs.update(
-            {
-                "finalized_champion_history": finalized_history,
-                "preloaded_receipt_graph_records": (
-                    readiness_authority_graph_records
-                ),
-                "preloaded_business_graphs": readiness_business_graphs,
-            }
-        )
-    graphs = list(await load_allocation_parent_graphs(**parent_loader_kwargs))
+
+            readiness = await champion_v2_cutover_readiness(
+                epoch=int(epoch_id),
+                netuid=int(netuid),
+                _finalized_history_out=finalized_history,
+                _authority_graph_records_out=readiness_authority_graph_records,
+                _business_graphs_out=readiness_business_graphs,
+            )
+            if (
+                readiness.get("ready") is not True
+                or float(readiness.get("receipt_coverage") or 0.0) != 1.0
+                or float(
+                    readiness.get("historical_classification_coverage")
+                    or readiness.get("historical_settlement_coverage")
+                    or 0.0
+                )
+                != 1.0
+            ):
+                raise ResearchLabV2AuthorityError(
+                    "champion V2 cutover blocked: %d obligations and %d "
+                    "historical allocations lack authoritative classifications"
+                    % (
+                        len(readiness.get("missing") or ()),
+                        len(
+                            readiness.get(
+                                "missing_historical_classifications"
+                            )
+                            or readiness.get("missing_historical_settlements")
+                            or ()
+                        ),
+                    )
+                )
+    if current_frontier_context is None:
+        parent_loader_kwargs = {
+            "epoch_id": int(epoch_id),
+            "netuid": int(netuid),
+            "policy": dict(policy),
+        }
+        if using_default_parent_loader:
+            parent_loader_kwargs.update(
+                {
+                    "finalized_champion_history": (
+                        finalized_history
+                        if settlement_frontier_context is None
+                        else None
+                    ),
+                    "preloaded_receipt_graph_records": (
+                        readiness_authority_graph_records
+                    ),
+                    "preloaded_business_graphs": readiness_business_graphs,
+                    "settlement_frontier_context": settlement_frontier_context,
+                }
+            )
+        graphs = list(await load_allocation_parent_graphs(**parent_loader_kwargs))
     bindings = await asyncio.to_thread(_validate_allocation_parent_graphs, graphs)
     outcome = await execute(
         operation=OP_RESEARCH_LAB_ALLOCATION,
@@ -1493,6 +1541,48 @@ async def build_allocation_v2(
         raise ResearchLabV2AuthorityError("allocation hash is invalid")
     if authority_result.get("source_state_hash") != sha256_json(dict(source_state)):
         raise ResearchLabV2AuthorityError("allocation source-state hash differs")
+    if current_frontier_context is not None:
+        recovered_source = current_frontier_context.get("source")
+        recovered_result = (
+            recovered_source.get("result")
+            if isinstance(recovered_source, Mapping)
+            else None
+        )
+        recovered_receipt = (
+            recovered_source.get("receipt")
+            if isinstance(recovered_source, Mapping)
+            else None
+        )
+        outcome_receipt = outcome.get("execution_receipt") or outcome.get("receipt")
+        if (
+            not isinstance(recovered_result, Mapping)
+            or not isinstance(recovered_receipt, Mapping)
+            or not isinstance(outcome_receipt, Mapping)
+            or outcome_receipt.get("receipt_hash")
+            != recovered_receipt.get("receipt_hash")
+        ):
+            raise ResearchLabV2AuthorityError(
+                "current allocation frontier replay authority differs"
+            )
+        _assert_equal(
+            authority_result,
+            recovered_result,
+            "current allocation frontier replay",
+        )
+    from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+        validate_allocation_settlement_frontier_v2,
+    )
+
+    settlement_frontier = validate_allocation_settlement_frontier_v2(
+        source_state.get("settlement_frontier")
+    )
+    if (
+        int(settlement_frontier["netuid"]) != int(netuid)
+        or int(settlement_frontier["allocation_epoch"]) != int(epoch_id)
+    ):
+        raise ResearchLabV2AuthorityError(
+            "allocation settlement frontier scope differs"
+        )
     expected_inputs = {
         "epoch": int(source_state.get("epoch", -1)),
         "policy": dict(source_state.get("policy") or {}),
@@ -1515,6 +1605,25 @@ async def build_allocation_v2(
             fallback_obligations
         )
     _assert_equal(allocation_inputs, expected_inputs, "allocation source projection")
+    if using_default_parent_loader and execute is execute_coordinator_v2:
+        from gateway.research_lab.attested_v2_store import (
+            persist_allocation_settlement_frontier_v2,
+        )
+
+        execution_receipt = outcome.get("execution_receipt") or outcome.get(
+            "receipt"
+        )
+        if not isinstance(execution_receipt, Mapping):
+            raise ResearchLabV2AuthorityError(
+                "allocation settlement frontier receipt is missing"
+            )
+        await persist_allocation_settlement_frontier_v2(
+            frontier=settlement_frontier,
+            source_receipt_hash=str(
+                execution_receipt.get("receipt_hash") or ""
+            ),
+            source_state_hash=str(authority_result["source_state_hash"]),
+        )
     link = await _persist_business_links(
         outcome,
         (
@@ -1968,6 +2077,7 @@ async def _load_allocation_parent_graphs_v2(
     preloaded_business_graphs: Mapping[
         tuple[str, str], Mapping[str, Any]
     ] | None = None,
+    settlement_frontier_context: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Load candidate parent graphs; the enclave independently checks completeness."""
 
@@ -1978,11 +2088,7 @@ async def _load_allocation_parent_graphs_v2(
     )
     from gateway.research_lab.allocations import (
         POSTGREST_IN_FILTER_CHUNK,
-        _champion_obligation_caps,
-        _champion_paid_alpha_to_date_from_snapshots,
-        _champion_replay_obligation,
         _load_latest_finalized_compute_snapshot_v2,
-        _source_add_paid_alpha_to_date_from_snapshots,
     )
     from gateway.research_lab.champion_settlement_v2 import (
         CHAIN_REALIZED_AUTHORITY_TYPE_V1,
@@ -1996,6 +2102,69 @@ async def _load_allocation_parent_graphs_v2(
     receipt_roots: set[str] = set()
     preloaded = dict(preloaded_business_graphs or {})
     preloaded_receipts: dict[str, tuple[int, dict[str, Any]]] = {}
+    prior_frontier: Mapping[str, Any] | None = None
+
+    if settlement_frontier_context is not None:
+        from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+            validate_allocation_settlement_frontier_v2,
+        )
+
+        raw_frontier = settlement_frontier_context.get("frontier")
+        source = settlement_frontier_context.get("source")
+        activation = settlement_frontier_context.get("activation")
+        activation_source = settlement_frontier_context.get(
+            "activation_source"
+        )
+        source_graph = (
+            source.get("receipt_graph") if isinstance(source, Mapping) else None
+        )
+        source_receipt_hash = str(
+            (settlement_frontier_context.get("row") or {}).get(
+                "source_receipt_hash"
+            )
+            if isinstance(settlement_frontier_context.get("row"), Mapping)
+            else ""
+        )
+        try:
+            prior_frontier = validate_allocation_settlement_frontier_v2(
+                raw_frontier
+            )
+        except ValueError as exc:
+            raise ResearchLabV2AuthorityError(
+                "allocation settlement frontier is invalid"
+            ) from exc
+        if (
+            int(prior_frontier["netuid"]) != int(netuid)
+            or int(prior_frontier["allocation_epoch"]) >= int(epoch_id)
+            or not isinstance(source_graph, Mapping)
+            or source_graph.get("root_receipt_hash") != source_receipt_hash
+        ):
+            raise ResearchLabV2AuthorityError(
+                "allocation settlement frontier context differs"
+            )
+        validate_receipt_graph(source_graph)
+        graphs[source_receipt_hash] = dict(source_graph)
+        activation_receipt_hash = str(
+            activation.get("source_receipt_hash")
+            if isinstance(activation, Mapping)
+            else ""
+        )
+        activation_graph = (
+            activation_source.get("receipt_graph")
+            if isinstance(activation_source, Mapping)
+            else None
+        )
+        if (
+            not _HASH_RE.fullmatch(activation_receipt_hash)
+            or not isinstance(activation_graph, Mapping)
+            or activation_graph.get("root_receipt_hash")
+            != activation_receipt_hash
+        ):
+            raise ResearchLabV2AuthorityError(
+                "allocation settlement frontier activation context differs"
+            )
+        validate_receipt_graph(activation_graph)
+        graphs[activation_receipt_hash] = dict(activation_graph)
 
     def add_preloaded_receipt_record(
         declared_root: str,
@@ -2193,8 +2362,12 @@ async def _load_allocation_parent_graphs_v2(
         if int(row.get("start_epoch") or 0) <= int(epoch_id)
     ]
     normalized_finalized_history: list[dict[str, Any]] = []
-    if history_starts and int(epoch_id) > 0:
-        history_start = min(history_starts)
+    if (history_starts or prior_frontier is not None) and int(epoch_id) > 0:
+        history_start = (
+            int(prior_frontier["settled_through_epoch"]) + 1
+            if prior_frontier is not None
+            else min(history_starts)
+        )
         for root, (source_epoch, graph) in preloaded_receipts.items():
             if history_start <= source_epoch < int(epoch_id):
                 graphs[root] = graph
@@ -2228,18 +2401,7 @@ async def _load_allocation_parent_graphs_v2(
                 raise ResearchLabV2AuthorityError(
                     "allocation finalized history netuid differs"
                 )
-    paid_by_reward = _champion_paid_alpha_to_date_from_snapshots(
-        normalized_finalized_history,
-        obligation_caps=_champion_obligation_caps(champion_rows),
-    )
     for row in champion_rows:
-        if _champion_replay_obligation(
-            row,
-            paid_by_reward=paid_by_reward,
-            epoch=int(epoch_id),
-            enable_champ_cap=bool(policy.get("enable_champ_cap", True)),
-        ) is None:
-            continue
         add(
             "champion_reward_decision",
             str(row.get("champion_reward_id") or ""),
@@ -2264,28 +2426,8 @@ async def _load_allocation_parent_graphs_v2(
             )
             for receipt_hash in row.get("chain_realized_credit_receipt_hashes") or ():
                 add_receipt_root(str(receipt_hash))
-    source_paid_by_reward = _source_add_paid_alpha_to_date_from_snapshots(
-        normalized_finalized_history
-    )
     for row in source_rows:
         reward_ref = str(row.get("reward_ref") or "")
-        if _champion_replay_obligation(
-            {
-                "champion_reward_id": reward_ref,
-                "start_epoch": int(row.get("start_epoch") or 0),
-                "epoch_count": int(
-                    row.get("epoch_count") or row.get("reward_epochs") or 0
-                ),
-                "desired_alpha_percent": float(
-                    row.get("desired_alpha_percent")
-                    or row.get("alpha_percent")
-                    or 0.0
-                ),
-            },
-            paid_by_reward=source_paid_by_reward,
-            epoch=int(epoch_id),
-        ) is None:
-            continue
         add("source_add_reward_decision", reward_ref)
 
     exact_items = sorted(

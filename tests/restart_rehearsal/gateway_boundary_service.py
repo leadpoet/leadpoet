@@ -68,6 +68,11 @@ JSON_FILTER_TOKEN_RE = re.compile(
 )
 HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+SENSITIVE_DOCUMENT_RE = re.compile(
+    r"(sk-or-|sb_secret|service_role|openrouter_api_key|raw_secret|"
+    r"authorization|proxy-authorization|://[^/]+:[^/@]+@)",
+    re.IGNORECASE,
+)
 CONTROL_QUERY_FIELDS = frozenset(
     {"columns", "limit", "offset", "on_conflict", "order", "select"}
 )
@@ -1007,6 +1012,271 @@ class LocalPostgRESTState:
         finally:
             lineage_lock.release()
 
+    def persist_ancestry_checkpoint(
+        self,
+        body: Any,
+    ) -> dict[str, Any]:
+        """Mirror migration 135's atomic checkpoint RPC at the boundary."""
+
+        if not isinstance(body, dict) or set(body) != {"checkpoint"}:
+            raise ValueError("ancestry checkpoint RPC body is invalid")
+        row = body.get("checkpoint")
+        checkpoint_table = (
+            "research_lab_attested_ancestry_checkpoints_v2"
+        )
+        activation_table = (
+            "research_lab_attested_ancestry_activations_v2"
+        )
+        checkpoint_columns = self.relation_columns.get(checkpoint_table)
+        activation_columns = self.relation_columns.get(activation_table)
+        expected_columns = (
+            checkpoint_columns - {"created_at"}
+            if checkpoint_columns is not None
+            else None
+        )
+        if (
+            not isinstance(row, dict)
+            or expected_columns is None
+            or activation_columns is None
+            or set(row) != set(expected_columns)
+            or row.get("schema_version")
+            != "leadpoet.attested_ancestry_certificate.v2"
+            or not isinstance(row.get("certificate_sequence"), int)
+            or isinstance(row.get("certificate_sequence"), bool)
+            or int(row["certificate_sequence"]) < 0
+        ):
+            raise ValueError("ancestry checkpoint fields are invalid")
+
+        hash_fields = {
+            "root_receipt_hash",
+            "lineage_id",
+            "certificate_hash",
+            "issuer_boot_identity_hash",
+            "proof_hash",
+            "checkpoint_graph_hash",
+        }
+        if any(
+            not HASH_RE.fullmatch(str(row.get(field) or ""))
+            for field in hash_fields
+        ):
+            raise ValueError("ancestry checkpoint identity is invalid")
+
+        certificate = row.get("certificate_doc")
+        proof = row.get("proof_doc")
+        graph = row.get("checkpoint_graph_doc")
+        if not all(
+            isinstance(value, dict)
+            for value in (certificate, proof, graph)
+        ):
+            raise ValueError("ancestry checkpoint documents are invalid")
+        serialized_documents = json.dumps(
+            [certificate, proof, graph],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if SENSITIVE_DOCUMENT_RE.search(serialized_documents):
+            raise ValueError("ancestry checkpoint documents contain a secret")
+
+        claim = certificate.get("claim")
+        proof_certificate = proof.get("certificate")
+        graph_proof = graph.get("ancestry_proof")
+        sequence = int(row["certificate_sequence"])
+        root_hash = str(row["root_receipt_hash"])
+        lineage = str(row["lineage_id"])
+        certificate_hash = str(row["certificate_hash"])
+        if (
+            not isinstance(claim, dict)
+            or not isinstance(claim.get("parent_authorities"), list)
+            or certificate.get("schema_version") != row["schema_version"]
+            or certificate.get("certificate_hash") != certificate_hash
+            or claim.get("output_root_receipt_hash") != root_hash
+            or claim.get("lineage_id") != lineage
+            or claim.get("certificate_sequence") != sequence
+            or claim.get("issuer_boot_identity_hash")
+            != row["issuer_boot_identity_hash"]
+            or proof.get("schema_version")
+            != "leadpoet.attested_ancestry_compact_proof.v2"
+            or proof.get("proof_hash") != row["proof_hash"]
+            or proof_certificate != certificate
+            or graph.get("schema_version")
+            != "leadpoet.attested_checkpointed_receipt_graph.v3"
+            or graph.get("root_receipt_hash") != root_hash
+            or graph.get("ancestry_lineage_id") != lineage
+            or graph_proof != proof
+        ):
+            raise ValueError("ancestry checkpoint document identity differs")
+
+        with self.lock:
+            receipt_rows = self.rows.get(
+                "research_lab_attested_execution_receipts_v2", []
+            )
+            boot_rows = self.rows.get(
+                "research_lab_attested_boot_identities_v2", []
+            )
+            if not any(
+                stored.get("receipt_hash") == root_hash
+                for stored in receipt_rows
+            ):
+                raise ValueError(
+                    "ancestry checkpoint receipt is not durable"
+                )
+            if not any(
+                stored.get("boot_identity_hash")
+                == row["issuer_boot_identity_hash"]
+                for stored in boot_rows
+            ):
+                raise ValueError(
+                    "ancestry checkpoint issuer boot is not durable"
+                )
+            checkpoints = self.rows[checkpoint_table]
+            activations = self.rows[activation_table]
+            for parent in claim["parent_authorities"]:
+                if not isinstance(parent, dict):
+                    raise ValueError(
+                        "ancestry checkpoint parent authority is invalid"
+                    )
+                kind = str(parent.get("authority_kind") or "")
+                parent_root = str(parent.get("parent_receipt_hash") or "")
+                if kind == "full_projection":
+                    if any(
+                        stored.get("lineage_id") == lineage
+                        and stored.get("activation_root_receipt_hash")
+                        == parent_root
+                        for stored in activations
+                    ):
+                        raise ValueError(
+                            "compacted ancestry root rejects full graph parent"
+                        )
+                elif kind == "certificate":
+                    parent_sequence = parent.get("authority_sequence")
+                    if (
+                        not isinstance(parent_sequence, int)
+                        or isinstance(parent_sequence, bool)
+                        or not any(
+                            stored.get("root_receipt_hash") == parent_root
+                            and stored.get("lineage_id") == lineage
+                            and stored.get("certificate_hash")
+                            == parent.get("authority_hash")
+                            and stored.get("certificate_sequence")
+                            == parent_sequence
+                            and int(parent_sequence) < sequence
+                            for stored in checkpoints
+                        )
+                    ):
+                        raise ValueError(
+                            "checkpoint certificate parent is not durable"
+                        )
+                elif kind == "certificate_disclosure":
+                    parent_sequence = parent.get("authority_sequence")
+                    if (
+                        not isinstance(parent_sequence, int)
+                        or isinstance(parent_sequence, bool)
+                        or not any(
+                            stored.get("lineage_id") == lineage
+                            and stored.get("certificate_sequence")
+                            == parent_sequence
+                            and int(parent_sequence) < sequence
+                            and any(
+                                isinstance(disclosed, dict)
+                                and disclosed.get("receipt_hash") == parent_root
+                                for disclosed in (
+                                    stored.get("proof_doc", {}).get(
+                                        "disclosed_receipts", []
+                                    )
+                                    if isinstance(stored.get("proof_doc"), dict)
+                                    else []
+                                )
+                            )
+                            for stored in checkpoints
+                        )
+                    ):
+                        raise ValueError(
+                            "checkpoint disclosure parent is not durable"
+                        )
+                else:
+                    raise ValueError(
+                        "checkpoint parent authority kind is invalid"
+                    )
+
+            stored = next(
+                (
+                    existing
+                    for existing in checkpoints
+                    if existing.get("root_receipt_hash") == root_hash
+                ),
+                None,
+            )
+            mutated = False
+            if stored is None:
+                for unique_field in (
+                    "certificate_hash",
+                    "proof_hash",
+                    "checkpoint_graph_hash",
+                ):
+                    if any(
+                        existing.get(unique_field) == row[unique_field]
+                        for existing in checkpoints
+                    ):
+                        raise ValueError(
+                            "ancestry checkpoint unique identity conflicts"
+                        )
+                stored = dict(row)
+                stored["created_at"] = "2026-07-25T00:00:00+00:00"
+                checkpoints.append(stored)
+                mutated = True
+            elif {
+                field: value
+                for field, value in stored.items()
+                if field != "created_at"
+            } != row:
+                raise ValueError("checkpoint durable readback conflicts")
+
+            activation = next(
+                (
+                    existing
+                    for existing in activations
+                    if existing.get("activation_root_receipt_hash")
+                    == root_hash
+                ),
+                None,
+            )
+            expected_activation = {
+                "lineage_id": lineage,
+                "activation_root_receipt_hash": root_hash,
+                "activation_certificate_hash": certificate_hash,
+            }
+            if activation is None:
+                if any(
+                    existing.get("activation_certificate_hash")
+                    == certificate_hash
+                    for existing in activations
+                ):
+                    raise ValueError("ancestry root activation conflicts")
+                activation = {
+                    **expected_activation,
+                    "activated_at": "2026-07-25T00:00:00+00:00",
+                }
+                activations.append(activation)
+                mutated = True
+            elif {
+                field: value
+                for field, value in activation.items()
+                if field != "activated_at"
+            } != expected_activation:
+                raise ValueError("ancestry root activation conflicts")
+            self._write_durable_state_locked(mutated=mutated)
+
+        return {
+            "status": "persisted",
+            "root_receipt_hash": root_hash,
+            "lineage_id": lineage,
+            "certificate_hash": certificate_hash,
+            "certificate_sequence": sequence,
+            "proof_hash": row["proof_hash"],
+            "checkpoint_graph_hash": row["checkpoint_graph_hash"],
+            "root_activated": True,
+        }
+
     def persist_chain_realized_settlement(
         self,
         *,
@@ -1357,6 +1627,9 @@ class Handler(BaseHTTPRequestHandler):
                 "research_lab_stateful_subnet_epoch_cutover_public_state_v1"
             ):
                 response = self.server.state.cutover_state
+            elif name == "research_lab_source_add_claim_work":
+                # The exact fixture intentionally has no source-add work.
+                response = []
             elif name in {
                 "persist_research_lab_chain_realized_settlement_v1",
                 "persist_research_lab_chain_realized_unattributed_v2",
@@ -1397,6 +1670,27 @@ class Handler(BaseHTTPRequestHandler):
                         if isinstance(checkpoint_row, dict)
                         else None
                     ),
+                )
+            elif name == "persist_research_lab_ancestry_checkpoint_v2":
+                response = self.server.state.persist_ancestry_checkpoint(body)
+                self.server.state.record(
+                    status="ok",
+                    operation="ancestry_checkpoint_persisted",
+                    method=self.command,
+                    target=name,
+                    root_receipt_hash=response["root_receipt_hash"],
+                    lineage_id=response["lineage_id"],
+                    certificate_hash=response["certificate_hash"],
+                    certificate_sequence=response["certificate_sequence"],
+                    proof_hash=response["proof_hash"],
+                    checkpoint_graph_hash=response[
+                        "checkpoint_graph_hash"
+                    ],
+                    root_activated=response["root_activated"],
+                )
+            else:
+                raise ValueError(
+                    "declared RPC lacks a strict rehearsal implementation"
                 )
             self._json_response(200, response)
             return

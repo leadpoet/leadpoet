@@ -3636,6 +3636,243 @@ def test_gateway_rehearsal_provider_checkpoint_rpc_matches_migration_134(
     ] == [1, 2]
 
 
+def test_gateway_rehearsal_ancestry_checkpoint_rpc_matches_migration_135(
+    tmp_path,
+) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    fixture = json.loads(
+        (
+            source_root
+            / "tests/restart_rehearsal/fixtures/production_shaped_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+    checkpoint_table = "research_lab_attested_ancestry_checkpoints_v2"
+    activation_table = "research_lab_attested_ancestry_activations_v2"
+    checkpoint_columns = frozenset(
+        {
+            "root_receipt_hash",
+            "schema_version",
+            "lineage_id",
+            "certificate_hash",
+            "certificate_sequence",
+            "issuer_boot_identity_hash",
+            "proof_hash",
+            "checkpoint_graph_hash",
+            "certificate_doc",
+            "proof_doc",
+            "checkpoint_graph_doc",
+            "created_at",
+        }
+    )
+    activation_columns = frozenset(
+        {
+            "lineage_id",
+            "activation_root_receipt_hash",
+            "activation_certificate_hash",
+            "activated_at",
+        }
+    )
+    durable_state = tmp_path / "postgrest-state.json"
+    state = LocalPostgRESTState(
+        state_root=tmp_path,
+        fixture=fixture,
+        source_root=source_root,
+        tables={
+            checkpoint_table,
+            activation_table,
+            "research_lab_attested_execution_receipts_v2",
+            "research_lab_attested_boot_identities_v2",
+        },
+        rpcs={"persist_research_lab_ancestry_checkpoint_v2"},
+        relation_columns={
+            checkpoint_table: checkpoint_columns,
+            activation_table: activation_columns,
+        },
+        durable_state_path=durable_state,
+        durable_schema_sha=COMMIT,
+    )
+
+    def sha(character: str) -> str:
+        return "sha256:" + character * 64
+
+    lineage = sha("1")
+    issuer = sha("2")
+    legacy_root = sha("3")
+    disclosed_root = sha("4")
+    roots = [sha(character) for character in "abcde"]
+    state.rows["research_lab_attested_boot_identities_v2"].append(
+        {"boot_identity_hash": issuer}
+    )
+    state.rows["research_lab_attested_execution_receipts_v2"].extend(
+        {"receipt_hash": root} for root in roots
+    )
+
+    def checkpoint(
+        *,
+        root: str,
+        sequence: int,
+        hash_characters: str,
+        parents: list[dict[str, Any]],
+        disclosed_receipts: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        assert len(hash_characters) == 3
+        certificate_hash = sha(hash_characters[0])
+        proof_hash = sha(hash_characters[1])
+        graph_hash = sha(hash_characters[2])
+        claim = {
+            "output_root_receipt_hash": root,
+            "lineage_id": lineage,
+            "certificate_sequence": sequence,
+            "issuer_boot_identity_hash": issuer,
+            "parent_authorities": parents,
+        }
+        certificate = {
+            "schema_version": "leadpoet.attested_ancestry_certificate.v2",
+            "certificate_hash": certificate_hash,
+            "claim": claim,
+        }
+        proof = {
+            "schema_version": (
+                "leadpoet.attested_ancestry_compact_proof.v2"
+            ),
+            "proof_hash": proof_hash,
+            "certificate": certificate,
+            "disclosed_receipts": list(disclosed_receipts or []),
+        }
+        graph = {
+            "schema_version": (
+                "leadpoet.attested_checkpointed_receipt_graph.v3"
+            ),
+            "root_receipt_hash": root,
+            "ancestry_lineage_id": lineage,
+            "ancestry_proof": proof,
+        }
+        return {
+            "root_receipt_hash": root,
+            "schema_version": "leadpoet.attested_ancestry_certificate.v2",
+            "lineage_id": lineage,
+            "certificate_hash": certificate_hash,
+            "certificate_sequence": sequence,
+            "issuer_boot_identity_hash": issuer,
+            "proof_hash": proof_hash,
+            "checkpoint_graph_hash": graph_hash,
+            "certificate_doc": certificate,
+            "proof_doc": proof,
+            "checkpoint_graph_doc": graph,
+        }
+
+    first = checkpoint(
+        root=roots[0],
+        sequence=0,
+        hash_characters="567",
+        parents=[
+            {
+                "authority_kind": "full_projection",
+                "parent_receipt_hash": legacy_root,
+            }
+        ],
+        disclosed_receipts=[{"receipt_hash": disclosed_root}],
+    )
+    expected_ack = {
+        "status": "persisted",
+        "root_receipt_hash": roots[0],
+        "lineage_id": lineage,
+        "certificate_hash": first["certificate_hash"],
+        "certificate_sequence": 0,
+        "proof_hash": first["proof_hash"],
+        "checkpoint_graph_hash": first["checkpoint_graph_hash"],
+        "root_activated": True,
+    }
+    assert state.persist_ancestry_checkpoint({"checkpoint": first}) == (
+        expected_ack
+    )
+    first_revision = state.durable_state_identity()["revision"]
+    assert state.persist_ancestry_checkpoint({"checkpoint": first}) == (
+        expected_ack
+    )
+    assert state.durable_state_identity()["revision"] == first_revision
+
+    certificate_child = checkpoint(
+        root=roots[1],
+        sequence=1,
+        hash_characters="89a",
+        parents=[
+            {
+                "authority_kind": "certificate",
+                "parent_receipt_hash": roots[0],
+                "authority_hash": first["certificate_hash"],
+                "authority_sequence": 0,
+            }
+        ],
+    )
+    assert state.persist_ancestry_checkpoint(
+        {"checkpoint": certificate_child}
+    )["root_activated"] is True
+
+    disclosure_child = checkpoint(
+        root=roots[2],
+        sequence=1,
+        hash_characters="bcd",
+        parents=[
+            {
+                "authority_kind": "certificate_disclosure",
+                "parent_receipt_hash": disclosed_root,
+                "authority_sequence": 0,
+            }
+        ],
+    )
+    assert state.persist_ancestry_checkpoint(
+        {"checkpoint": disclosure_child}
+    )["root_activated"] is True
+
+    forbidden_full_parent = checkpoint(
+        root=roots[3],
+        sequence=0,
+        hash_characters="ef0",
+        parents=[
+            {
+                "authority_kind": "full_projection",
+                "parent_receipt_hash": roots[0],
+            }
+        ],
+    )
+    with pytest.raises(
+        ValueError,
+        match="compacted ancestry root rejects full graph parent",
+    ):
+        state.persist_ancestry_checkpoint(
+            {"checkpoint": forbidden_full_parent}
+        )
+
+    missing_parent = checkpoint(
+        root=roots[4],
+        sequence=2,
+        hash_characters="123",
+        parents=[
+            {
+                "authority_kind": "certificate",
+                "parent_receipt_hash": sha("9"),
+                "authority_hash": sha("0"),
+                "authority_sequence": 1,
+            }
+        ],
+    )
+    with pytest.raises(ValueError, match="parent is not durable"):
+        state.persist_ancestry_checkpoint({"checkpoint": missing_parent})
+
+    conflict = json.loads(json.dumps(first))
+    conflict["proof_hash"] = sha("f")
+    conflict["proof_doc"]["proof_hash"] = sha("f")
+    conflict["checkpoint_graph_doc"]["ancestry_proof"][
+        "proof_hash"
+    ] = sha("f")
+    with pytest.raises(ValueError, match="durable readback conflicts"):
+        state.persist_ancestry_checkpoint({"checkpoint": conflict})
+
+    assert len(state.rows[checkpoint_table]) == 3
+    assert len(state.rows[activation_table]) == 3
+
+
 def test_rehearsal_provider_boundaries_require_job_credentials_and_tls_proxy(
     tmp_path,
     monkeypatch,

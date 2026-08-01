@@ -739,7 +739,7 @@ if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" != "1" ]; then
   echo "Checking same-SHA gateway readiness before stopping the running validator"
   VALIDATOR_DEPLOY_STAGE="pre_shutdown_gateway_alignment"
   if ! verify_pinned_gateway_release \
-      "${VALIDATOR_PINNED_GATEWAY_PRESTART_MAX_ATTEMPTS:-1200}"; then
+      "${VALIDATOR_PINNED_GATEWAY_PRESTART_MAX_ATTEMPTS:-3000}"; then
     echo "Validator remains running; production shutdown has not started." >&2
     exit 1
   fi
@@ -902,7 +902,7 @@ else
   echo "Selected rollback deployer lacks the image-prepared gateway activation barrier"
   echo "Checking same-SHA gateway alignment before invoking the legacy deployer"
   if ! verify_pinned_gateway_release \
-      "${VALIDATOR_PINNED_GATEWAY_PRESTART_MAX_ATTEMPTS:-1200}"; then
+      "${VALIDATOR_PINNED_GATEWAY_PRESTART_MAX_ATTEMPTS:-3000}"; then
     exit 1
   fi
 fi

@@ -162,13 +162,13 @@ def test_pinned_gateway_verifier_rejects_unbounded_wait(
         env={
             **os.environ,
             "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
-            "VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS": "1201",
+            "VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS": "3001",
         },
         timeout=10,
     )
 
     assert result.returncode == 2
-    assert "must be between 1 and 1200" in result.stderr
+    assert "must be between 1 and 3000" in result.stderr
 
 
 def test_pinned_gateway_verifier_rejects_unbounded_release_attempts(
@@ -183,7 +183,7 @@ def test_pinned_gateway_verifier_rejects_unbounded_release_attempts(
         env={
             **os.environ,
             "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
-            "VALIDATOR_PINNED_GATEWAY_MAX_ATTEMPTS": "1201",
+            "VALIDATOR_PINNED_GATEWAY_MAX_ATTEMPTS": "3001",
         },
         timeout=10,
     )
@@ -218,6 +218,25 @@ def test_pinned_gateway_verifier_accepts_matching_coordinator_completion(
         tmp_path,
         transient_first=False,
         coordination_file=barrier,
+    )
+
+    assert result.returncode == 0
+    assert "pinned_gateway_release_aligned" in result.stdout
+    assert requests == 3
+
+
+def test_pinned_gateway_verifier_accepts_extended_restart_budget(
+    tmp_path: Path,
+) -> None:
+    barrier = tmp_path / "gateway-restart-complete"
+    barrier.write_text(COMMIT + "\n", encoding="utf-8")
+    result, requests = _run(
+        tmp_path,
+        transient_first=False,
+        coordination_file=barrier,
+        coordination_max_attempts=3000,
+        max_attempts=3000,
+        timeout_seconds=9300,
     )
 
     assert result.returncode == 0
@@ -287,7 +306,7 @@ def test_pinned_gateway_verifier_rejects_unbounded_total_timeout(
         env={
             **os.environ,
             "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
-            "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS": "7201",
+            "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS": "10801",
         },
         timeout=10,
     )

@@ -26,7 +26,10 @@ def test_attested_release_restart_operator_is_fail_closed() -> None:
     assert "exact_commit_restart_v2.py" in source
     assert "--compatibility-floor" not in source
     assert "VALIDATOR_PINNED_GATEWAY_COORDINATION_MAX_ATTEMPTS" in source
+    assert "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS" in source
     assert "VALIDATOR_PINNED_GATEWAY_COORDINATION_FILE" in source
+    assert "VALIDATOR_COORDINATION_ATTEMPTS=3000" in source
+    assert "VALIDATOR_COORDINATION_TIMEOUT_SECONDS=9300" in source
     assert "Acquiring the independently built V2 release channel" in source
     assert "gw_restart.sh" in source
     assert "validator_restart.sh" in source

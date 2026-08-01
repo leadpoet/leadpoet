@@ -18,6 +18,7 @@ from typing import Any, Mapping, Sequence
 from leadpoet_canonical.attested_v2 import (
     sha256_json,
     validate_receipt_graph,
+    validate_receipt_graphs,
 )
 from leadpoet_canonical.legacy_settlement_v2 import (
     validate_legacy_nonfinalization_document_v2,
@@ -1285,13 +1286,15 @@ def _chain_realized_receipt_root_v1(
     receipt_graphs: Mapping[str, Mapping[str, Any]],
     purpose: str,
     output_root: str,
+    graph_prevalidated: bool = False,
 ) -> str:
     graph = receipt_graphs.get(str(receipt_hash or ""))
     if not isinstance(graph, Mapping):
         raise ChampionSettlementV2Error(
             "chain realized receipt graph is missing"
         )
-    validate_receipt_graph(graph)
+    if not graph_prevalidated:
+        validate_receipt_graph(graph)
     if graph.get("root_receipt_hash") != receipt_hash:
         raise ChampionSettlementV2Error(
             "chain realized receipt graph root differs"
@@ -1322,6 +1325,7 @@ def validate_chain_realized_epoch_settlements_v1(
     rows: Sequence[Mapping[str, Any]],
     *,
     receipt_graphs: Mapping[str, Mapping[str, Any]],
+    _receipt_graphs_prevalidated: bool = False,
 ) -> list[dict[str, Any]]:
     """Validate complete epoch-level chain-realized settlement markers.
 
@@ -1331,6 +1335,8 @@ def validate_chain_realized_epoch_settlements_v1(
     accidentally under-crediting other Lab obligations in the same epoch.
     """
 
+    if not _receipt_graphs_prevalidated:
+        validate_receipt_graphs(list(receipt_graphs.values()))
     settled: list[dict[str, Any]] = []
     seen_epochs: set[tuple[int, int]] = set()
     for raw_row in rows:
@@ -1569,6 +1575,7 @@ def validate_chain_realized_epoch_settlements_v1(
             receipt_graphs=receipt_graphs,
             purpose=CHAIN_REALIZED_SETTLEMENT_RECEIPT_PURPOSE_V1,
             output_root=settlement_hash,
+            graph_prevalidated=True,
         )
         settled.append(
             {
@@ -1595,9 +1602,12 @@ def validate_chain_realized_obligation_credits_v1(
     *,
     settlement_rows: Sequence[Mapping[str, Any]],
     receipt_graphs: Mapping[str, Mapping[str, Any]],
+    _receipt_graphs_prevalidated: bool = False,
 ) -> list[dict[str, Any]]:
     """Validate and normalize complete chain-realized obligation credits."""
 
+    if not _receipt_graphs_prevalidated:
+        validate_receipt_graphs(list(receipt_graphs.values()))
     settlements = {
         (
             int(row["netuid"]),
@@ -1880,6 +1890,7 @@ def validate_chain_realized_obligation_credits_v1(
             receipt_graphs=receipt_graphs,
             purpose=CHAIN_REALIZED_SETTLEMENT_RECEIPT_PURPOSE_V1,
             output_root=settlement_hash,
+            graph_prevalidated=True,
         )
         credits_by_settlement[settlement_key].append(
             {

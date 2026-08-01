@@ -241,7 +241,10 @@ def test_parent_receipt_graph_set_preserves_membership_and_deduplicates():
 
     assert len(packed["boot_identities"]) == 1
     assert len(packed["receipts"]) == 3
-    assert unpack_parent_receipt_graph_set_v2(packed) == graphs
+    unpacked = unpack_parent_receipt_graph_set_v2(packed)
+    assert unpacked == graphs
+    assert unpacked[0]["boot_identities"][0] is unpacked[1]["boot_identities"][0]
+    assert unpacked[0]["receipts"][0] is unpacked[1]["receipts"][0]
 
 
 def test_parent_receipt_graph_set_rejects_conflicts_and_unreferenced_evidence():

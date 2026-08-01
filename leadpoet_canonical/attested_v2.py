@@ -1268,13 +1268,31 @@ def build_receipt_graph(
 
 
 class _ReceiptGraphValidationCache:
-    """Per-call cache of exact objects already verified cryptographically."""
+    """Reuse validation only for the same parsed object within one batch."""
 
     def __init__(self) -> None:
-        self.boot_identities = {}  # type: Dict[str, Dict[str, Any]]
-        self.receipts = {}  # type: Dict[str, Dict[str, Any]]
-        self.transport_attempts = {}  # type: Dict[str, Dict[str, Any]]
-        self.host_operations = {}  # type: Dict[str, Dict[str, Any]]
+        self.objects = {}  # type: Dict[str, Dict[str, Mapping[str, Any]]]
+
+    def validate_once(
+        self,
+        *,
+        collection: str,
+        object_hash: str,
+        value: Mapping[str, Any],
+        validator: Callable[[Mapping[str, Any]], Any],
+    ) -> None:
+        values = self.objects.setdefault(collection, {})
+        previous = values.get(object_hash)
+        if previous is value:
+            return
+        validator(value)
+        if previous is not None:
+            _require(
+                dict(previous) == dict(value),
+                "%s conflicts across receipt graphs" % collection,
+            )
+            return
+        values[object_hash] = value
 
 
 def _validate_receipt_graph(
@@ -1298,25 +1316,23 @@ def _validate_receipt_graph(
     for identity in graph["boot_identities"]:
         _require(isinstance(identity, Mapping), "boot identity is not an object")
         identity_hash = str(identity.get("boot_identity_hash") or "")
-        cached_identity = (
-            validation_cache.boot_identities.get(identity_hash)
-            if validation_cache is not None
-            else None
-        )
-        if cached_identity is not None:
-            _require(
-                cached_identity == dict(identity),
-                "boot identity hash conflicts across receipt graphs",
-            )
-        else:
-            validate_boot_identity(identity)
+
+        def validate_identity(value: Mapping[str, Any]) -> None:
+            validate_boot_identity(value)
             if boot_attestation_verifier is not None:
-                boot_attestation_verifier(identity)
+                boot_attestation_verifier(value)
             elif require_boot_attestation_verification:
                 raise AttestedV2Error("boot attestation verifier is required")
-            identity_hash = str(identity["boot_identity_hash"])
-            if validation_cache is not None:
-                validation_cache.boot_identities[identity_hash] = dict(identity)
+
+        if validation_cache is None:
+            validate_identity(identity)
+        else:
+            validation_cache.validate_once(
+                collection="boot identity hash",
+                object_hash=identity_hash,
+                value=identity,
+                validator=validate_identity,
+            )
         _require(identity_hash not in boots, "boot identity is duplicated")
         boots[identity_hash] = identity
 
@@ -1329,21 +1345,15 @@ def _validate_receipt_graph(
     for receipt in graph["receipts"]:
         _require(isinstance(receipt, Mapping), "receipt is not an object")
         receipt_hash = str(receipt.get("receipt_hash") or "")
-        cached_receipt = (
-            validation_cache.receipts.get(receipt_hash)
-            if validation_cache is not None
-            else None
-        )
-        if cached_receipt is not None:
-            _require(
-                cached_receipt == dict(receipt),
-                "receipt hash conflicts across receipt graphs",
-            )
-        else:
+        if validation_cache is None:
             validate_signed_execution_receipt(receipt)
-            receipt_hash = str(receipt["receipt_hash"])
-            if validation_cache is not None:
-                validation_cache.receipts[receipt_hash] = dict(receipt)
+        else:
+            validation_cache.validate_once(
+                collection="receipt hash",
+                object_hash=receipt_hash,
+                value=receipt,
+                validator=validate_signed_execution_receipt,
+            )
         _require(receipt_hash not in receipts, "receipt is duplicated")
         scope = (str(receipt["job_id"]), str(receipt["purpose"]))
         _require(scope not in scope_receipts, "job/purpose receipt scope is duplicated")
@@ -1391,21 +1401,15 @@ def _validate_receipt_graph(
     for attempt in graph["transport_attempts"]:
         _require(isinstance(attempt, Mapping), "transport attempt is not an object")
         attempt_hash = str(attempt.get("attempt_hash") or "")
-        cached_attempt = (
-            validation_cache.transport_attempts.get(attempt_hash)
-            if validation_cache is not None
-            else None
-        )
-        if cached_attempt is not None:
-            _require(
-                cached_attempt == dict(attempt),
-                "transport attempt hash conflicts across receipt graphs",
-            )
-        else:
+        if validation_cache is None:
             validate_transport_attempt(attempt)
-            attempt_hash = str(attempt["attempt_hash"])
-            if validation_cache is not None:
-                validation_cache.transport_attempts[attempt_hash] = dict(attempt)
+        else:
+            validation_cache.validate_once(
+                collection="transport attempt hash",
+                object_hash=attempt_hash,
+                value=attempt,
+                validator=validate_transport_attempt,
+            )
         _require(attempt_hash not in attempt_hashes, "transport attempt is duplicated")
         attempt_hashes.add(attempt_hash)
         scope = (str(attempt["job_id"]), str(attempt["purpose"]))
@@ -1416,7 +1420,7 @@ def _validate_receipt_graph(
         scoped_attempts = attempts_by_scope.pop(scope, [])
         observed_root = (
             merkle_root(
-                [str(item["attempt_hash"]) for item in scoped_attempts],
+                (str(item["attempt_hash"]) for item in scoped_attempts),
                 domain="leadpoet-transport-v2",
             )
             if validation_cache is not None
@@ -1436,22 +1440,15 @@ def _validate_receipt_graph(
         request = record.get("request")
         _require(isinstance(request, Mapping), "host operation request is missing")
         request_hash = str(request.get("request_hash") or "")
-        cached_record = (
-            validation_cache.host_operations.get(request_hash)
-            if validation_cache is not None
-            else None
-        )
-        if cached_record is not None:
-            _require(
-                cached_record == dict(record),
-                "host operation request conflicts across receipt graphs",
-            )
-        else:
+        if validation_cache is None:
             validate_host_operation_record(record)
-            request = record["request"]
-            request_hash = str(request["request_hash"])
-            if validation_cache is not None:
-                validation_cache.host_operations[request_hash] = dict(record)
+        else:
+            validation_cache.validate_once(
+                collection="host operation request",
+                object_hash=request_hash,
+                value=record,
+                validator=validate_host_operation_record,
+            )
         _require(
             request_hash not in host_request_hashes,
             "host operation request is duplicated",
@@ -1485,7 +1482,10 @@ def _validate_receipt_graph(
             )
         observed_root = (
             merkle_root(
-                [str(record["terminal"]["terminal_hash"]) for record in records],
+                (
+                    str(record["terminal"]["terminal_hash"])
+                    for record in records
+                ),
                 domain="leadpoet-host-operation-v2",
             )
             if validation_cache is not None

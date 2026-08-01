@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -84,20 +85,21 @@ def _overlapping_graphs():
         "research_lab.reward_decision.v2",
         (shared["receipt_hash"],),
     )
-    return (
-        attested_v2.build_receipt_graph(
-            root_receipt_hash=child_a["receipt_hash"],
-            boot_identities=(boot,),
-            receipts=(shared, child_a),
-            transport_attempts=(),
-        ),
-        attested_v2.build_receipt_graph(
-            root_receipt_hash=child_b["receipt_hash"],
-            boot_identities=(boot,),
-            receipts=(shared, child_b),
-            transport_attempts=(),
-        ),
+    graph_a = attested_v2.build_receipt_graph(
+        root_receipt_hash=child_a["receipt_hash"],
+        boot_identities=(boot,),
+        receipts=(shared, child_a),
+        transport_attempts=(),
     )
+    graph_b = attested_v2.build_receipt_graph(
+        root_receipt_hash=child_b["receipt_hash"],
+        boot_identities=(boot,),
+        receipts=(shared, child_b),
+        transport_attempts=(),
+    )
+    graph_b["boot_identities"][0] = graph_a["boot_identities"][0]
+    graph_b["receipts"][0] = graph_a["receipts"][0]
+    return graph_a, graph_b
 
 
 def test_batch_verifies_each_exact_signed_object_once(monkeypatch):
@@ -127,11 +129,43 @@ def test_batch_verifies_each_exact_signed_object_once(monkeypatch):
     assert counts == {"boot": 1, "receipt": 3}
 
 
-def test_batch_rejects_conflicting_object_with_a_verified_hash():
+def test_batch_revalidates_equal_but_distinct_signed_objects(monkeypatch):
+    graph_a, graph_b = _overlapping_graphs()
+    graph_b = copy.deepcopy(graph_b)
+    counts = {"boot": 0, "receipt": 0}
+    validate_boot = attested_v2.validate_boot_identity
+    validate_receipt = attested_v2.validate_signed_execution_receipt
+
+    def counted_boot(value):
+        counts["boot"] += 1
+        return validate_boot(value)
+
+    def counted_receipt(value, *, verify_signature=True):
+        counts["receipt"] += 1
+        return validate_receipt(value, verify_signature=verify_signature)
+
+    monkeypatch.setattr(attested_v2, "validate_boot_identity", counted_boot)
+    monkeypatch.setattr(
+        attested_v2,
+        "validate_signed_execution_receipt",
+        counted_receipt,
+    )
+
+    attested_v2.validate_receipt_graphs((graph_a, graph_b))
+
+    assert counts == {"boot": 2, "receipt": 4}
+
+
+def test_batch_rejects_conflicting_object_with_a_verified_hash(monkeypatch):
     graph_a, graph_b = _overlapping_graphs()
     conflicting = dict(graph_b)
     conflicting["receipts"] = [dict(item) for item in graph_b["receipts"]]
     conflicting["receipts"][0]["output_root"] = HASH_A
+    monkeypatch.setattr(
+        attested_v2,
+        "validate_signed_execution_receipt",
+        lambda _value: None,
+    )
 
     with pytest.raises(
         attested_v2.AttestedV2Error,

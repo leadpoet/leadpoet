@@ -1090,6 +1090,12 @@ async def test_v2_batch_graph_loader_reuses_shared_ancestry(monkeypatch):
     assert [
         receipt["receipt_hash"] for receipt in loaded[parent]["receipts"]
     ] == [parent]
+    shared_root_receipt = next(
+        receipt
+        for receipt in loaded[root]["receipts"]
+        if receipt["receipt_hash"] == parent
+    )
+    assert shared_root_receipt is loaded[parent]["receipts"][0]
     assert receipt_queries == [{root, parent}]
 
 

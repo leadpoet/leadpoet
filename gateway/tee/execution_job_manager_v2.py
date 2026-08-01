@@ -260,6 +260,8 @@ class ExecutionContextV2:
         allowed_failed_receipt_hashes_by_graph: Optional[
             Sequence[Iterable[str]]
         ] = None,
+        _encoded_sizes: Optional[Sequence[int]] = None,
+        _share_objects: bool = False,
     ) -> tuple:
         """Bind overlapping graphs after one fail-closed batch verification."""
 
@@ -272,6 +274,10 @@ class ExecutionContextV2:
                 raise ExecutionJobV2Error(
                     "external receipt graph failure policies differ from graph count"
                 )
+        if _encoded_sizes is not None and len(_encoded_sizes) != len(graph_list):
+            raise ExecutionJobV2Error(
+                "external receipt graph sizes differ from graph count"
+            )
         validate_receipt_graphs(
             graph_list,
             allowed_failed_receipt_hashes_by_graph=failed_by_graph,
@@ -280,13 +286,24 @@ class ExecutionContextV2:
         normalized_graphs = []
         allowed_failed_sets = []
         roots = []
-        for graph, allowed_failed_values in zip(graph_list, failed_by_graph):
-            encoded = _canonical_bytes(graph)
-            if len(encoded) > self.max_external_receipt_graph_bytes:
+        for index, (graph, allowed_failed_values) in enumerate(
+            zip(graph_list, failed_by_graph)
+        ):
+            encoded = None if _encoded_sizes is not None else _canonical_bytes(graph)
+            encoded_size = (
+                int(_encoded_sizes[index])
+                if _encoded_sizes is not None
+                else len(encoded or b"")
+            )
+            if encoded_size > self.max_external_receipt_graph_bytes:
                 raise ExecutionJobV2Error(
                     "external receipt graph exceeds size limit"
                 )
-            normalized = json.loads(encoded.decode("utf-8"))
+            normalized = (
+                dict(graph)
+                if _share_objects
+                else json.loads((encoded or _canonical_bytes(graph)).decode("utf-8"))
+            )
             root_hash = _hash(
                 normalized.get("root_receipt_hash"),
                 "external root receipt hash",
@@ -536,9 +553,9 @@ def pack_parent_receipt_graph_set_v2(
     }
 
 
-def unpack_parent_receipt_graph_set_v2(
+def _unpack_parent_receipt_graph_set_v2(
     value: Mapping[str, Any],
-) -> list[Dict[str, Any]]:
+) -> tuple[list[Dict[str, Any]], list[int]]:
     """Reconstruct exact graph memberships from a bounded deduplicated set."""
 
     if not isinstance(value, Mapping) or set(value) != _RECEIPT_GRAPH_SET_FIELDS:
@@ -592,6 +609,7 @@ def unpack_parent_receipt_graph_set_v2(
     used = {field: set() for field in collection_specs}
     roots: set[str] = set()
     graphs: list[Dict[str, Any]] = []
+    graph_sizes: list[int] = []
     for descriptor in descriptors:
         if (
             not isinstance(descriptor, Mapping)
@@ -630,16 +648,22 @@ def unpack_parent_receipt_graph_set_v2(
                 raise ExecutionJobV2Error(
                     "parent receipt graph descriptor reference is missing"
                 )
-            graph[collection] = [
-                dict(indexes[collection][item]) for item in normalized_hashes
-            ]
+            graph[collection] = [indexes[collection][item] for item in normalized_hashes]
             used[collection].update(normalized_hashes)
         graphs.append(graph)
+        graph_sizes.append(len(_canonical_bytes(graph)))
 
     if any(set(indexes[field]) != used[field] for field in collection_specs):
         raise ExecutionJobV2Error(
             "parent receipt graph set contains unreferenced evidence"
         )
+    return graphs, graph_sizes
+
+
+def unpack_parent_receipt_graph_set_v2(
+    value: Mapping[str, Any],
+) -> list[Dict[str, Any]]:
+    graphs, _ = _unpack_parent_receipt_graph_set_v2(value)
     return graphs
 
 
@@ -1120,8 +1144,10 @@ class ExecutionJobManagerV2:
                 raise ExecutionJobV2Error(
                     "job supplies multiple parent receipt graph encodings"
                 )
+            shared_parent_graph_objects = parent_graph_set is not None
+            parent_graph_sizes = None
             if parent_graph_set is not None:
-                parent_graphs = unpack_parent_receipt_graph_set_v2(
+                parent_graphs, parent_graph_sizes = _unpack_parent_receipt_graph_set_v2(
                     parent_graph_set
                 )
             elif parent_graphs is None:
@@ -1144,6 +1170,8 @@ class ExecutionJobManagerV2:
                     allowed_failed_receipt_hashes_by_graph=(
                         allowed_failed_by_graph
                     ),
+                    _encoded_sizes=parent_graph_sizes,
+                    _share_objects=shared_parent_graph_objects,
                 )
             )
             parent_receipt_hashes = set()

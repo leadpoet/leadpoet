@@ -18,12 +18,13 @@ from gateway.research_lab.store import (
     select_one,
 )
 from leadpoet_canonical.attested_v2 import (
-    build_receipt_graph,
+    RECEIPT_GRAPH_SCHEMA_VERSION,
     merkle_root,
     sha256_json,
     validate_boot_identity,
     validate_host_operation_record,
     validate_receipt_graph,
+    validate_receipt_graphs,
     validate_signed_execution_receipt,
     validate_signed_transition_command,
     validate_transport_attempt,
@@ -872,6 +873,7 @@ async def _load_receipt_graph_batch_v2(
         host_operations_by_receipt.setdefault(receipt_hash, []).append(record)
 
     graphs: dict[str, dict[str, Any]] = {}
+    allowed_failed_by_graph: list[set[str]] = []
     for root_hash in root_hashes:
         closure: set[str] = set()
         graph_pending = {root_hash}
@@ -901,22 +903,26 @@ async def _load_receipt_graph_batch_v2(
             graph_host_operations.extend(
                 host_operations_by_receipt.get(receipt_hash, ())
             )
-        graph_allowed_failed = allowed_failed.intersection(closure)
-        graphs[root_hash] = build_receipt_graph(
-            root_receipt_hash=root_hash,
-            boot_identities=[
+        allowed_failed_by_graph.append(allowed_failed.intersection(closure))
+        graphs[root_hash] = {
+            "schema_version": RECEIPT_GRAPH_SCHEMA_VERSION,
+            "root_receipt_hash": root_hash,
+            "boot_identities": [
                 boots[key] for key in sorted(graph_boot_hashes)
             ],
-            receipts=[receipt_docs[key] for key in sorted(closure)],
-            transport_attempts=[
+            "receipts": [receipt_docs[key] for key in sorted(closure)],
+            "transport_attempts": [
                 attempts[key] for key in sorted(graph_attempt_hashes)
             ],
-            host_operations=sorted(
+            "host_operations": sorted(
                 graph_host_operations,
                 key=lambda record: record["request"]["request_hash"],
             ),
-            allowed_failed_receipt_hashes=graph_allowed_failed,
-        )
+        }
+    validate_receipt_graphs(
+        list(graphs.values()),
+        allowed_failed_receipt_hashes_by_graph=allowed_failed_by_graph,
+    )
     return graphs
 
 

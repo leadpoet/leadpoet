@@ -61,6 +61,7 @@ from leadpoet_canonical.attested_v2 import (
     canonical_json,
     sha256_json,
     validate_receipt_graph,
+    validate_receipt_graphs,
 )
 
 
@@ -81,9 +82,9 @@ class ResearchLabV2AuthorityError(RuntimeError):
 def _validate_allocation_parent_graphs(
     graphs: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, str]]:
+    validate_receipt_graphs(graphs)
     bindings: list[dict[str, str]] = []
     for graph in graphs:
-        validate_receipt_graph(graph)
         root_hash = str(graph.get("root_receipt_hash") or "")
         receipts = {
             str(receipt["receipt_hash"]): receipt for receipt in graph["receipts"]

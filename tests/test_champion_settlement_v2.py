@@ -1336,7 +1336,7 @@ async def test_chain_realized_bootstrap_rejects_unbounded_or_missing_source(
 
 
 def test_chain_realized_history_replaces_finalized_weight_intent(monkeypatch):
-    monkeypatch.setattr(settlement, "validate_receipt_graph", lambda _graph: ())
+    monkeypatch.setattr(settlement, "validate_receipt_graphs", lambda _graphs: ())
     settlement_row, credit_row, _doc, graphs = _chain_realized_fixture(
         observed="30.000000",
         attributed="5.000000",
@@ -1574,7 +1574,7 @@ async def test_settled_history_rejects_chain_rows_outside_requested_range(
 def test_unattributed_chain_history_remains_zero_credit_v2_authority(
     monkeypatch,
 ):
-    monkeypatch.setattr(settlement, "validate_receipt_graph", lambda _graph: ())
+    monkeypatch.setattr(settlement, "validate_receipt_graphs", lambda _graphs: ())
     settlement_row, _credit_row, settlement_doc, _graphs = (
         _chain_realized_fixture()
     )
@@ -1669,7 +1669,7 @@ def test_chain_realized_credit_kinds_map_to_allocation_sections(
     section,
     identity_field,
 ):
-    monkeypatch.setattr(settlement, "validate_receipt_graph", lambda _graph: ())
+    monkeypatch.setattr(settlement, "validate_receipt_graphs", lambda _graphs: ())
     settlement_row, credit_row, _doc, graphs = _chain_realized_fixture(
         reward_id=source_id,
         kind=kind,
@@ -1698,7 +1698,7 @@ def test_chain_realized_credit_kinds_map_to_allocation_sections(
 
 
 def test_chain_realized_credit_sets_must_be_epoch_complete(monkeypatch):
-    monkeypatch.setattr(settlement, "validate_receipt_graph", lambda _graph: ())
+    monkeypatch.setattr(settlement, "validate_receipt_graphs", lambda _graphs: ())
     settlement_row, credit_row, _doc, graphs = _chain_realized_fixture()
     missing_hash_doc = dict(settlement_row["settlement_doc"])
     missing_hash_doc["credit_hashes"] = [
@@ -1764,7 +1764,7 @@ def test_chain_realized_credits_cannot_overcredit_obligations(
     credited,
     message,
 ):
-    monkeypatch.setattr(settlement, "validate_receipt_graph", lambda _graph: ())
+    monkeypatch.setattr(settlement, "validate_receipt_graphs", lambda _graphs: ())
     settlement_row, credit_row, _doc, graphs = _chain_realized_fixture(
         observed=observed,
         attributed=attributed,
@@ -1785,7 +1785,7 @@ def test_chain_realized_credits_cannot_overcredit_obligations(
 
 
 def test_chain_realized_credit_set_cannot_overattribute_one_uid(monkeypatch):
-    monkeypatch.setattr(settlement, "validate_receipt_graph", lambda _graph: ())
+    monkeypatch.setattr(settlement, "validate_receipt_graphs", lambda _graphs: ())
     settlement_row, first, _doc, graphs = _chain_realized_fixture(
         reward_id="champion_reward:first",
         observed="5.000000",
@@ -1840,7 +1840,7 @@ def test_chain_realized_credit_set_cannot_overattribute_one_uid(monkeypatch):
 
 
 def test_chain_realized_credit_rejects_active_and_queued_duplicate(monkeypatch):
-    monkeypatch.setattr(settlement, "validate_receipt_graph", lambda _graph: ())
+    monkeypatch.setattr(settlement, "validate_receipt_graphs", lambda _graphs: ())
     settlement_row, first, _doc, graphs = _chain_realized_fixture(
         reward_id="champion_reward:duplicate",
         observed="5.000000",

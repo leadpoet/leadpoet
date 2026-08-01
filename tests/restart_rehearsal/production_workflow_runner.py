@@ -2290,6 +2290,9 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
     from gateway.research_lab.attested_scoring_v2 import (
         _build_transport_payload_document,
     )
+    from gateway.tee.coordinator_allocation_source_v2 import (
+        _receipt_graphs_by_declared_root,
+    )
     from leadpoet_canonical.attested_v2 import (
         RECEIPT_GRAPH_SCHEMA_VERSION,
         sha256_bytes,
@@ -2400,6 +2403,10 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
     def executor(_operation, payload, context):
         observed["payload"] = dict(payload)
         observed["graphs"] = list(context.external_receipt_graphs)
+        observed["derived_graphs"] = _receipt_graphs_by_declared_root(
+            context.external_receipt_graphs,
+            context.parent_receipt_hashes,
+        )
         return {"status": "verified"}
 
     manager = ExecutionJobManagerV2(
@@ -2446,12 +2453,27 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
         time.sleep(0.01)
     else:
         raise RuntimeError("deduplicated receipt graph job did not terminate")
+    expected_graphs_by_root = {
+        str(graph["root_receipt_hash"]): graph for graph in graphs
+    }
     if (
         status["state"] != "succeeded"
         or observed.get("payload") != {"epoch": 30_000}
         or observed.get("graphs") != graphs
+        or observed.get("derived_graphs") != expected_graphs_by_root
     ):
         raise RuntimeError("deduplicated receipt graph job was not exact")
+    observed_graphs = observed["graphs"]
+    derived_graphs = list(observed["derived_graphs"].values())
+    if (
+        observed_graphs[0]["boot_identities"][0]
+        is not observed_graphs[1]["boot_identities"][0]
+        or observed_graphs[0]["receipts"][0]
+        is not observed_graphs[1]["receipts"][0]
+        or derived_graphs[0]["receipts"][0]
+        is not derived_graphs[1]["receipts"][0]
+    ):
+        raise RuntimeError("shared receipt graph evidence was rematerialized")
 
     malformed = json.loads(json.dumps(graph_set))
     malformed["receipts"].append(
@@ -2478,6 +2500,8 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
         ),
         "unique_receipt_count": len(graph_set["receipts"]),
         "exact_job_path_verified": True,
+        "allocation_source_path_verified": True,
+        "shared_object_identity_preserved": True,
         "malformed_evidence_rejected": True,
     }
 

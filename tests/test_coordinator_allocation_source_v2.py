@@ -531,8 +531,8 @@ def test_declared_roots_are_reconstructed_from_one_compact_graph(monkeypatch):
     }
     monkeypatch.setattr(
         allocation_source,
-        "validate_receipt_graph",
-        lambda _value: None,
+        "validate_receipt_graphs",
+        lambda _values: None,
     )
 
     graphs = allocation_source._receipt_graphs_by_declared_root(
@@ -562,10 +562,15 @@ def test_declared_root_lookup_indexes_each_graph_once(monkeypatch):
     ]
     monkeypatch.setattr(
         allocation_source,
-        "_receipt_subgraph",
+        "_receipt_subgraph_from_validated",
         lambda _graph, *, root_receipt_hash: {
             "root_receipt_hash": root_receipt_hash
         },
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_receipt_graphs",
+        lambda _values: None,
     )
 
     graphs = allocation_source._receipt_graphs_by_declared_root(
@@ -583,11 +588,16 @@ def test_declared_root_lookup_still_rejects_conflicting_graphs(monkeypatch):
     root = "sha256:" + "a" * 64
     monkeypatch.setattr(
         allocation_source,
-        "_receipt_subgraph",
+        "_receipt_subgraph_from_validated",
         lambda graph, *, root_receipt_hash: {
             "root_receipt_hash": root_receipt_hash,
             "marker": graph["marker"],
         },
+    )
+    monkeypatch.setattr(
+        allocation_source,
+        "validate_receipt_graphs",
+        lambda _values: None,
     )
 
     with pytest.raises(
@@ -802,12 +812,12 @@ def test_finalized_history_ignores_superseded_native_authority_graphs(
     monkeypatch.setattr(
         allocation_source,
         "validate_chain_realized_epoch_settlements_v1",
-        lambda rows, *, receipt_graphs: [],
+        lambda rows, *, receipt_graphs, _receipt_graphs_prevalidated=False: [],
     )
     monkeypatch.setattr(
         allocation_source,
         "validate_chain_realized_obligation_credits_v1",
-        lambda rows, *, settlement_rows, receipt_graphs: [],
+        lambda rows, *, settlement_rows, receipt_graphs, _receipt_graphs_prevalidated=False: [],
     )
     monkeypatch.setattr(
         allocation_source,
@@ -909,12 +919,12 @@ def test_finalized_history_requires_every_raw_authority_graph(monkeypatch):
     monkeypatch.setattr(
         allocation_source,
         "validate_chain_realized_epoch_settlements_v1",
-        lambda _rows, *, receipt_graphs: [],
+        lambda _rows, *, receipt_graphs, _receipt_graphs_prevalidated=False: [],
     )
     monkeypatch.setattr(
         allocation_source,
         "validate_chain_realized_obligation_credits_v1",
-        lambda _rows, *, settlement_rows, receipt_graphs: [],
+        lambda _rows, *, settlement_rows, receipt_graphs, _receipt_graphs_prevalidated=False: [],
     )
     monkeypatch.setattr(
         allocation_source,

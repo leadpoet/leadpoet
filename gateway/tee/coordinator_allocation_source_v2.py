@@ -43,6 +43,7 @@ from leadpoet_canonical.attested_v2 import (
     canonical_json,
     sha256_json,
     validate_receipt_graph,
+    validate_receipt_graphs,
     validate_signed_execution_receipt,
 )
 from leadpoet_verifier.economics import allocate_research_lab_epoch
@@ -62,6 +63,19 @@ def _receipt_subgraph(
     root_receipt_hash: str,
 ) -> dict[str, Any]:
     validate_receipt_graph(graph)
+    subgraph = _receipt_subgraph_from_validated(
+        graph,
+        root_receipt_hash=root_receipt_hash,
+    )
+    validate_receipt_graph(subgraph)
+    return subgraph
+
+
+def _receipt_subgraph_from_validated(
+    graph: Mapping[str, Any],
+    *,
+    root_receipt_hash: str,
+) -> dict[str, Any]:
     receipts_by_hash = {
         str(receipt.get("receipt_hash") or ""): receipt
         for receipt in graph.get("receipts") or ()
@@ -87,7 +101,7 @@ def _receipt_subgraph(
 
     select(root_receipt_hash)
     selected_receipts = [
-        dict(receipt)
+        receipt
         for receipt in graph["receipts"]
         if str(receipt["receipt_hash"]) in selected_hashes
     ]
@@ -102,19 +116,19 @@ def _receipt_subgraph(
         "schema_version": graph["schema_version"],
         "root_receipt_hash": root_receipt_hash,
         "boot_identities": [
-            dict(identity)
+            identity
             for identity in graph["boot_identities"]
             if str(identity["boot_identity_hash"]) in selected_boot_hashes
         ],
         "receipts": selected_receipts,
         "transport_attempts": [
-            dict(attempt)
+            attempt
             for attempt in graph["transport_attempts"]
             if (str(attempt["job_id"]), str(attempt["purpose"]))
             in selected_scopes
         ],
         "host_operations": [
-            dict(record)
+            record
             for record in graph["host_operations"]
             if (
                 str(record["request"]["job_id"]),
@@ -123,7 +137,6 @@ def _receipt_subgraph(
             in selected_scopes
         ],
     }
-    validate_receipt_graph(subgraph)
     return subgraph
 
 
@@ -131,6 +144,7 @@ def _receipt_graphs_by_declared_root(
     graphs: Sequence[Mapping[str, Any]],
     declared_roots: Sequence[str],
 ) -> dict[str, dict[str, Any]]:
+    validate_receipt_graphs(graphs)
     roots = tuple(dict.fromkeys(declared_roots))
     requested_roots = set(roots)
     matches_by_root: dict[str, list[Mapping[str, Any]]] = {
@@ -154,12 +168,12 @@ def _receipt_graphs_by_declared_root(
             raise CoordinatorAllocationSourceV2Error(
                 "declared allocation parent is absent from receipt graphs"
             )
-        derived = _receipt_subgraph(
+        derived = _receipt_subgraph_from_validated(
             matches[0],
             root_receipt_hash=str(root),
         )
         for graph in matches[1:]:
-            candidate = _receipt_subgraph(
+            candidate = _receipt_subgraph_from_validated(
                 graph,
                 root_receipt_hash=str(root),
             )
@@ -168,6 +182,7 @@ def _receipt_graphs_by_declared_root(
                     "declared allocation parent graphs conflict"
                 )
         by_root[str(root)] = derived
+    validate_receipt_graphs(list(by_root.values()))
     return by_root
 
 
@@ -921,11 +936,13 @@ class CoordinatorAllocationSourceV2:
         chain_settlements = validate_chain_realized_epoch_settlements_v1(
             chain_settlement_rows,
             receipt_graphs=graph_by_root,
+            _receipt_graphs_prevalidated=True,
         )
         chain_realized = validate_chain_realized_obligation_credits_v1(
             chain_credit_rows,
             settlement_rows=chain_settlements,
             receipt_graphs=graph_by_root,
+            _receipt_graphs_prevalidated=True,
         )
         finalized = merge_settled_allocation_histories_v2(
             finalized,

@@ -48,6 +48,7 @@ from leadpoet_canonical.attested_v2 import (
     sha256_bytes,
     sha256_json,
     validate_receipt_graph,
+    validate_receipt_graphs,
     validate_signed_execution_receipt,
     verify_boot_identity_nitro,
 )
@@ -290,17 +291,21 @@ def _merge_graphs(
         if str(parent_hash) not in local_hashes
     }
     allowed_failed = {str(item) for item in allowed_failed_receipt_hashes}
-    observed_parent_roots = set()
-    for graph in parent_graphs:
-        graph_receipt_hashes = {
+    allowed_failed_by_graph = [
+        allowed_failed
+        & {
             str(item.get("receipt_hash") or "")
             for item in graph.get("receipts") or ()
             if isinstance(item, Mapping)
         }
-        validate_receipt_graph(
-            graph,
-            allowed_failed_receipt_hashes=(allowed_failed & graph_receipt_hashes),
-        )
+        for graph in parent_graphs
+    ]
+    validate_receipt_graphs(
+        parent_graphs,
+        allowed_failed_receipt_hashes_by_graph=allowed_failed_by_graph,
+    )
+    observed_parent_roots = set()
+    for graph in parent_graphs:
         parent_root = str(graph["root_receipt_hash"])
         if parent_root in observed_parent_roots:
             raise AttestedScoringV2Error("parent receipt graph is duplicated")

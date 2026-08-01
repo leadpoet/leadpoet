@@ -253,13 +253,13 @@ async def test_allocation_binds_every_reward_parent(monkeypatch):
         }
     ]
 
-    def validate_receipt_graph(*_args, **_kwargs):
+    def validate_receipt_graphs(*_args, **_kwargs):
         validation_threads.append(threading.get_ident())
 
     monkeypatch.setattr(
         v2_authority,
-        "validate_receipt_graph",
-        validate_receipt_graph,
+        "validate_receipt_graphs",
+        validate_receipt_graphs,
     )
     expected = {"allocation_hash": HASH_A}
     allocation_inputs = {

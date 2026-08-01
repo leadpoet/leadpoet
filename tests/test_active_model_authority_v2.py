@@ -10,6 +10,7 @@ from gateway.tee.coordinator_active_model_source_v2 import (
     CoordinatorActiveModelSourceV2,
     CoordinatorActiveModelSourceV2Error,
 )
+from gateway.research_lab.bundles import contains_secret_material
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from leadpoet_canonical.attested_v2 import (
     EMPTY_ARTIFACT_ROOT,
@@ -23,7 +24,10 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
 )
 from research_lab.eval import build_local_private_artifact_manifest
-from research_lab.eval.artifacts import PrivateModelArtifactManifest
+from research_lab.eval.artifacts import (
+    PrivateModelArtifactManifest,
+    private_model_artifact_replay_identity_v2,
+)
 from research_lab.eval.promotion_metric import promotion_gate_decision
 from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
 
@@ -172,7 +176,10 @@ def test_bootstrap_model_must_match_authenticated_active_row(tmp_path):
         context=_context(),
     )
 
-    assert result["artifact"] == artifact.to_dict()
+    assert result["artifact"] == private_model_artifact_replay_identity_v2(
+        artifact
+    )
+    assert contains_secret_material(result) is False
     assert result["active_model"]["lineage_kind"] == (
         "attested_bootstrap_private_model_manifest_uri"
     )

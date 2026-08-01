@@ -12,6 +12,7 @@ from leadpoet_canonical.attested_v2 import (
 )
 from research_lab.eval.artifacts import (
     PrivateModelArtifactManifest,
+    private_model_artifact_replay_identity_v2,
     validate_private_model_artifact_manifest,
 )
 from research_lab.eval.promotion_metric import promotion_gate_decision
@@ -138,7 +139,7 @@ class CoordinatorActiveModelSourceV2:
         }
         return {
             "schema_version": "leadpoet.active_private_model.v2",
-            "artifact": artifact.to_dict(),
+            "artifact": private_model_artifact_replay_identity_v2(artifact),
             "active_model": active_model,
             "source_state_hash": sha256_json(source_state),
         }

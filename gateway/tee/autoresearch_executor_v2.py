@@ -108,6 +108,7 @@ from research_lab.code_editing import (
 from research_lab.eval import (
     CandidatePatchManifest,
     PrivateModelArtifactManifest,
+    private_model_artifact_replay_identity_v2,
     validate_candidate_patch_manifest,
     validate_private_model_artifact_manifest,
 )
@@ -2364,7 +2365,10 @@ class AutoresearchExecutorV2:
         )
         if (
             active_model_graph.get("root_receipt_hash") != active_model_root
-            or active_model_result.get("artifact") != payload.get("artifact")
+            or active_model_result.get("artifact")
+            != private_model_artifact_replay_identity_v2(
+                _mapping(payload.get("artifact"), "artifact")
+            )
             or not any(
                 receipt.get("receipt_hash") == active_model_root
                 and receipt.get("purpose")

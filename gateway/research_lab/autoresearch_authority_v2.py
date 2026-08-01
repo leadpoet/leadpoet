@@ -85,6 +85,7 @@ from research_lab.code_editing import CodeEditDraft
 from research_lab.eval import (
     CandidatePatchManifest,
     PrivateModelArtifactManifest,
+    private_model_artifact_replay_identity_v2,
     validate_candidate_patch_manifest,
     validate_private_model_artifact_manifest,
 )
@@ -1073,7 +1074,8 @@ async def run_authoritative_autoresearch_v2(
         != "research_lab.active_private_model.v2"
         or active_model_receipt.get("output_root")
         != sha256_json(dict(active_model_result))
-        or active_model_result.get("artifact") != artifact.to_dict()
+        or active_model_result.get("artifact")
+        != private_model_artifact_replay_identity_v2(artifact)
     ):
         raise AutoresearchAuthorityV2Error(
             "active private model measured lineage is unavailable"

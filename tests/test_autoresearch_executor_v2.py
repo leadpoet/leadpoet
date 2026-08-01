@@ -74,6 +74,7 @@ from leadpoet_canonical.attested_v2 import (
 from research_lab.eval import (
     PrivateModelArtifactManifest,
     build_local_private_artifact_manifest,
+    private_model_artifact_replay_identity_v2,
 )
 from research_lab.code_editing import CodeEditDraft
 from research_lab.eval.private_runtime import compute_private_source_tree_hash
@@ -230,7 +231,7 @@ def _payload(tmp_path: Path):
     tree_policy = TreePolicy(mode="active")
     active_model_result = {
         "schema_version": "leadpoet.active_private_model.v2",
-        "artifact": artifact,
+        "artifact": private_model_artifact_replay_identity_v2(artifact),
         "active_model": {
             "private_model_version_id": "private-model-v1",
         },

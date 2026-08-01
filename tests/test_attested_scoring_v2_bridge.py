@@ -944,6 +944,23 @@ async def test_v2_bridge_replays_exact_durable_coordinator_result_without_resubm
 async def test_v2_bridge_replays_exact_active_model_authority_after_restart():
     release = _release()
     captured = {}
+    artifact_identity = {
+        "schema_version": "leadpoet.private_model_artifact_replay_identity.v2",
+        "model_artifact_hash": _hash("5"),
+        "manifest_hash": _hash("6"),
+        "git_commit_sha": "7" * 40,
+        "config_hash": _hash("8"),
+        "component_registry_version": "components-v1",
+        "scoring_adapter_version": "scoring-v1",
+    }
+    active_model_result = {
+        "schema_version": "leadpoet.active_private_model.v2",
+        "artifact": artifact_identity,
+        "active_model": {
+            "private_model_version_id": "private-model-v1",
+        },
+        "source_state_hash": _hash("9"),
+    }
 
     async def load_missing(**_kwargs):
         return None
@@ -968,6 +985,15 @@ async def test_v2_bridge_replays_exact_active_model_authority_after_restart():
             "artifact": {
                 "model_artifact_hash": _hash("5"),
                 "manifest_hash": _hash("6"),
+                "git_commit_sha": "7" * 40,
+                "config_hash": _hash("8"),
+                "component_registry_version": "components-v1",
+                "scoring_adapter_version": "scoring-v1",
+                "image_digest": "sha256:" + "a" * 64,
+                "image_uri": (
+                    "493765492819.dkr.ecr.us-east-1.amazonaws.com/"
+                    "leadpoet/sourcing-model@sha256:" + "a" * 64
+                ),
             }
         },
         "input_artifact_hashes": (_hash("5"), _hash("6")),
@@ -989,11 +1015,16 @@ async def test_v2_bridge_replays_exact_active_model_authority_after_restart():
     }
     fresh = await execute_scoring_v2(
         **common,
-        client=_CoordinatorClient(release),
+        client=_CoordinatorClient(
+            release,
+            executor=lambda _operation, _payload, _context: active_model_result,
+        ),
         load_replayable_result=load_missing,
         persist_replayable_result=persist_result,
     )
     assert captured["operation"] == "attest_active_private_model"
+    assert captured["result"] == active_model_result
+    assert "image_digest" not in captured["result"]["artifact"]
 
     async def load_replay(**kwargs):
         assert kwargs == {

@@ -297,7 +297,7 @@
       "symbol": "build_gateway_weight_inputs_v2"
     },
     {
-      "ast_sha256": "sha256:814ddf9d1eb399b44fb56467e93b4434fc7ecc00c4ec2d7a80568b58e080028f",
+      "ast_sha256": "sha256:30068edb368afb15d99c288d46007bf6a9fb8306843f6f6c095d6817f74e5eeb",
       "path": "gateway/research_lab/autoresearch_authority_v2.py",
       "symbol": "run_authoritative_autoresearch_v2"
     },
@@ -927,12 +927,12 @@
       "symbol": "hourly_batch_task"
     },
     {
-      "ast_sha256": "sha256:fc8dc353b8d588e95a5e9445d138276ef0091dee516b84b754291bfebedcf30a",
+      "ast_sha256": "sha256:2d3c28403d74110aa9d41009e9b0ec21e1e7045e96cd8b1836b3d497cbcd7c6e",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "AutoresearchExecutorV2"
     },
     {
-      "ast_sha256": "sha256:db4c5499524c52c9ea2082e64d2304b535f84e32201273c2f383c4db8bb6bde2",
+      "ast_sha256": "sha256:9fa97722538aeaa9c8666bace401e74fb468132a0b4df3e70ab6adbf87c2987d",
       "path": "gateway/tee/coordinator_active_model_source_v2.py",
       "symbol": "CoordinatorActiveModelSourceV2"
     },
@@ -1892,7 +1892,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:38a6ebda77b0ebec5d5acce080ae71bb75f172c30db1e64d8085dfa0df62b66a",
+  "manifest_hash": "sha256:519fec20e4ffbeecf3b68db4937a5b3adb756c6f377f026e2ffc8270da89554f",
   "protected_source_commit": "3c6ba261e3c35ee597c1daf95f8b56d1c1ad8e10",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

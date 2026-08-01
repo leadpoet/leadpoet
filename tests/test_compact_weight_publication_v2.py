@@ -52,6 +52,13 @@ from tests.test_validator_weight_authority_v2 import (
     _receipt,
     _source_attempt,
 )
+from tests.test_validator_hotkey_authority_v2 import (
+    HOTKEY_PUBLIC,
+    _Drand,
+    _Sr25519,
+    _profile,
+)
+from validator_tee.enclave.hotkey_authority_v2 import ValidatorHotkeyAuthorityV2
 from validator_tee.host.weight_authority_v2 import (
     build_compact_weight_submission_v2,
 )
@@ -217,7 +224,33 @@ def test_compact_weight_publication_reconstructs_exact_canonical_bundle(monkeypa
             "upstream_transport_attempts": direct_attempts,
         }
     )
-    enclave_response["weight_authorization_id"] = "sha256:" + "a" * 64
+    hotkey_authority = ValidatorHotkeyAuthorityV2(
+        boot_identity_supplier=lambda: fixture["validator_boot"],
+        validator_hotkey=VALIDATOR_HOTKEY,
+        hotkey_public_key_hex=HOTKEY_PUBLIC.hex(),
+        chain_profile=_profile(),
+        sign_receipt_digest=fixture["validator_key"].sign,
+        attestation_supplier=lambda **_kwargs: b"attestation",
+        drand_backend=_Drand(),
+        chain_source=fixture["chain_source"],
+        sr25519_backend=_Sr25519(),
+        clock=lambda: NOW,
+    )
+    enclave_response["weight_authorization_id"] = (
+        hotkey_authority.register_weight_result(
+            {
+                field: enclave_response[field]
+                for field in (
+                    "weight_snapshot",
+                    "weight_result",
+                    "weights_signature",
+                    "receipt_graph_delta",
+                    "ancestry_commitment",
+                    "boot_identity",
+                )
+            }
+        )
+    )
     boot = enclave_response["boot_identity"]
     binding_message = create_binding_message(
         netuid=71,

@@ -12,7 +12,10 @@ from gateway.research_lab.attested_v2_store import (
 from gateway.research_lab.store import select_many
 from gateway.tee.coordinator_executor_v2 import OP_ATTEST_ACTIVE_PRIVATE_MODEL
 from leadpoet_canonical.attested_v2 import sha256_json, validate_receipt_graph
-from research_lab.eval.artifacts import PrivateModelArtifactManifest
+from research_lab.eval.artifacts import (
+    PrivateModelArtifactManifest,
+    private_model_artifact_replay_identity_v2,
+)
 
 
 class ActivePrivateModelAuthorityV2Error(RuntimeError):
@@ -84,7 +87,8 @@ async def attest_active_private_model_v2(
         or not isinstance(receipt, Mapping)
         or not isinstance(graph, Mapping)
         or result.get("schema_version") != "leadpoet.active_private_model.v2"
-        or result.get("artifact") != artifact.to_dict()
+        or result.get("artifact")
+        != private_model_artifact_replay_identity_v2(artifact)
         or str((result.get("active_model") or {}).get("private_model_version_id") or "")
         != str(row.get("private_model_version_id") or "")
         or receipt.get("output_root") != sha256_json(dict(result))

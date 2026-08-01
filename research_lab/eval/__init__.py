@@ -6,6 +6,7 @@ include simulated model improvements or public miner model submission logic.
 
 from .artifacts import (
     PrivateModelArtifactManifest,
+    private_model_artifact_replay_identity_v2,
     validate_private_model_artifact_manifest,
     verify_private_model_artifact_manifest,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "evaluate_private_model_pair",
     "load_private_artifact_manifest",
     "private_model_env_passthrough",
+    "private_model_artifact_replay_identity_v2",
     "score_private_model_pair_items",
     "sign_digest_with_kms",
     "validate_candidate_patch_manifest",

@@ -706,7 +706,7 @@ class ValidatorHotkeyAuthorityV2:
             or snapshot_receipt.get("artifact_root")
             != merkle_root(
                 [snapshot["calculation_snapshot_hash"], commitment],
-                domain="leadpoet-artifact-v2",
+                domain="leadpoet-validator-weight-artifact-v2",
             )
         ):
             raise ValidatorHotkeyAuthorityV2Error(

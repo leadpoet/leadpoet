@@ -82,6 +82,27 @@ class PrivateModelArtifactManifest:
         return payload
 
 
+def private_model_artifact_replay_identity_v2(
+    manifest: PrivateModelArtifactManifest | Mapping[str, Any],
+) -> dict[str, str]:
+    """Return the non-secret identity committed by replayable V2 results."""
+
+    normalized = (
+        manifest
+        if isinstance(manifest, PrivateModelArtifactManifest)
+        else PrivateModelArtifactManifest.from_mapping(manifest)
+    )
+    return {
+        "schema_version": "leadpoet.private_model_artifact_replay_identity.v2",
+        "model_artifact_hash": normalized.model_artifact_hash,
+        "manifest_hash": normalized.manifest_hash,
+        "git_commit_sha": normalized.git_commit_sha,
+        "config_hash": normalized.config_hash,
+        "component_registry_version": normalized.component_registry_version,
+        "scoring_adapter_version": normalized.scoring_adapter_version,
+    }
+
+
 def validate_private_model_artifact_manifest(
     manifest: PrivateModelArtifactManifest | Mapping[str, Any],
 ) -> list[str]:

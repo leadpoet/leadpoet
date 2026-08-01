@@ -25,7 +25,10 @@ from leadpoet_canonical.attested_v2 import (
     sha256_bytes,
     sha256_json,
 )
-from research_lab.eval import build_local_private_artifact_manifest
+from research_lab.eval import (
+    build_local_private_artifact_manifest,
+    private_model_artifact_replay_identity_v2,
+)
 from gateway.research_lab.autoresearch_runtime import AutoResearchRuntimeSettings
 from gateway.research_lab.git_tree_models import (
     TreeCheckpoint,
@@ -362,7 +365,7 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
     outcome_graph, outcome_receipt = _coordinator_graph(outcome_result)
     active_result = {
         "schema_version": "leadpoet.active_private_model.v2",
-        "artifact": artifact.to_dict(),
+        "artifact": private_model_artifact_replay_identity_v2(artifact),
         "active_model": {
             "private_model_version_id": "private_model_version:" + "1" * 64
         },

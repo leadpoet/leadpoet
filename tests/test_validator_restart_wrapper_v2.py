@@ -358,7 +358,7 @@ def test_exact_restart_requires_gateway_before_shutdown_and_rechecks_activation(
         assert endpoint in verifier
     assert 'export VALIDATOR_EXACT_RELEASE_PINNED=1' in script
     assert "VALIDATOR_EXACT_RELEASE_PINNED=0" not in script
-    assert "VALIDATOR_PINNED_GATEWAY_PRESTART_MAX_ATTEMPTS:-600" in script
+    assert "VALIDATOR_PINNED_GATEWAY_PRESTART_MAX_ATTEMPTS:-1200" in script
     assert "VALIDATOR_PINNED_GATEWAY_POSTSTART_MAX_ATTEMPTS:-12" in script
     assert "verify_pinned_gateway_release_v2.sh" in script
     assert "stop_pinned_validator_after_alignment_failure" in script

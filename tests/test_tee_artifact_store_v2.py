@@ -5,6 +5,7 @@ import json
 import boto3
 import pytest
 
+from gateway.utils import tee_artifact_store_v2
 from gateway.utils.tee_artifact_store_v2 import (
     ATTESTED_V2_ARTIFACT_KEY_PREFIX,
     TEEArtifactStoreV2Error,
@@ -71,6 +72,7 @@ async def test_default_s3_client_uses_regional_virtual_host(
 ) -> None:
     captured = {}
     s3 = _S3()
+    tee_artifact_store_v2._regional_s3_client.cache_clear()
 
     def fake_client(service_name, **kwargs):
         captured["service_name"] = service_name
@@ -93,6 +95,36 @@ async def test_default_s3_client_uses_regional_virtual_host(
     assert captured["endpoint_url"] == "https://s3.us-east-1.amazonaws.com"
     assert captured["config"].signature_version == "s3v4"
     assert captured["config"].s3 == {"addressing_style": "virtual"}
+    tee_artifact_store_v2._regional_s3_client.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_default_s3_client_reuses_regional_connection_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clients = []
+
+    def fake_client(_service_name, **_kwargs):
+        client = _S3()
+        clients.append(client)
+        return client
+
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setattr(boto3, "client", fake_client)
+    tee_artifact_store_v2._regional_s3_client.cache_clear()
+    try:
+        for _ in range(2):
+            result = await persist_enclave_artifact_v2(
+                ARTIFACT_ID,
+                bucket="immutable-example",
+                attestation_job_id="artifact-lineage-job",
+                client=_Client(),
+            )
+            assert result["status"] == "persisted"
+    finally:
+        tee_artifact_store_v2._regional_s3_client.cache_clear()
+
+    assert len(clients) == 1
 
 
 @pytest.mark.asyncio

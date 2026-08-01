@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from functools import lru_cache
 import os
 import re
 from typing import Any, Dict, Mapping, Optional
@@ -42,16 +43,11 @@ def _object_key(prefix: str, artifact_id: str) -> str:
     return "%s/%s.json" % (normalized_prefix, artifact_id.split(":", 1)[1])
 
 
-def _default_s3_client() -> Any:
+@lru_cache(maxsize=4)
+def _regional_s3_client(region: str) -> Any:
     import boto3
     from botocore.config import Config
 
-    region = str(
-        os.getenv("AWS_REGION")
-        or os.getenv("AWS_DEFAULT_REGION")
-        or boto3.session.Session().region_name
-        or "us-east-1"
-    ).strip()
     return boto3.client(
         "s3",
         region_name=region,
@@ -61,6 +57,18 @@ def _default_s3_client() -> Any:
             s3={"addressing_style": "virtual"},
         ),
     )
+
+
+def _default_s3_client() -> Any:
+    import boto3
+
+    region = str(
+        os.getenv("AWS_REGION")
+        or os.getenv("AWS_DEFAULT_REGION")
+        or boto3.session.Session().region_name
+        or "us-east-1"
+    ).strip()
+    return _regional_s3_client(region)
 
 
 async def persist_enclave_artifact_v2(

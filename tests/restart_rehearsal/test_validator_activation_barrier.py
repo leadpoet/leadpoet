@@ -33,6 +33,21 @@ def _gateway_event(endpoint: str, commit: str, **details) -> dict:
 
 def _late_barrier_rows() -> list[dict]:
     return [
+        _gateway_event(
+            "/health/v2-authority",
+            FROM_SHA,
+            gateway_probe_attempt=1,
+        ),
+        _gateway_event(
+            "/health/v2-authority",
+            CANDIDATE_SHA,
+            gateway_probe_attempt=2,
+        ),
+        _gateway_event("/build-info", CANDIDATE_SHA),
+        _gateway_event(
+            f"/weights/v2/release-evidence/{CANDIDATE_SHA}",
+            CANDIDATE_SHA,
+        ),
         {"module": "validator_tee.host.refresh_hotkey_config_v2"},
         {"module": "validator_tee.host.restart_preflight_v2"},
         {"kind": "nitro", "operation": "build_enclave"},
@@ -70,13 +85,8 @@ def _late_barrier_rows() -> list[dict]:
         },
         _gateway_event(
             "/health/v2-authority",
-            FROM_SHA,
-            gateway_probe_attempt=1,
-        ),
-        _gateway_event(
-            "/health/v2-authority",
             CANDIDATE_SHA,
-            gateway_probe_attempt=2,
+            gateway_probe_attempt=3,
         ),
         _gateway_event("/build-info", CANDIDATE_SHA),
         _gateway_event(
@@ -102,8 +112,52 @@ def _late_barrier_rows() -> list[dict]:
         _gateway_event(
             "/health/v2-authority",
             CANDIDATE_SHA,
-            gateway_probe_attempt=3,
+            gateway_probe_attempt=4,
         ),
+        _gateway_event("/build-info", CANDIDATE_SHA),
+        _gateway_event(
+            f"/weights/v2/release-evidence/{CANDIDATE_SHA}",
+            CANDIDATE_SHA,
+        ),
+    ]
+
+
+def _legacy_barrier_rows() -> list[dict]:
+    return [
+        _gateway_event(
+            "/health/v2-authority",
+            FROM_SHA,
+            gateway_probe_attempt=1,
+        ),
+        _gateway_event("/health/v2-authority", CANDIDATE_SHA),
+        _gateway_event("/build-info", CANDIDATE_SHA),
+        _gateway_event(
+            f"/weights/v2/release-evidence/{CANDIDATE_SHA}",
+            CANDIDATE_SHA,
+        ),
+        {
+            "kind": "docker",
+            "operation": "build",
+            "argv": ["build", "-t", "leadpoet-validator:latest", "."],
+        },
+        {
+            "kind": "docker",
+            "operation": "inspect",
+            "argv": [
+                "image",
+                "inspect",
+                "leadpoet-validator:latest",
+                "--format",
+                "{{ index .Config.Labels "
+                '"org.opencontainers.image.revision" }}',
+            ],
+        },
+        {
+            "kind": "validator-process",
+            "process": "validator.coordinator",
+            "status": "started",
+        },
+        _gateway_event("/health/v2-authority", CANDIDATE_SHA),
         _gateway_event("/build-info", CANDIDATE_SHA),
         _gateway_event(
             f"/weights/v2/release-evidence/{CANDIDATE_SHA}",
@@ -169,12 +223,12 @@ def test_late_activation_evidence_requires_preparation_before_alignment() -> Non
 
 def test_late_activation_evidence_rejects_early_validator_process() -> None:
     rows = _late_barrier_rows()
-    process = rows.pop(15)
-    rows.insert(13, process)
+    process = rows.pop(18)
+    rows.insert(16, process)
 
     with pytest.raises(
         SystemExit,
-        match="candidate release evidence before activation",
+        match="candidate release evidence at activation barrier",
     ):
         verify_validator_gateway_activation_barrier(
             rows,
@@ -185,16 +239,7 @@ def test_late_activation_evidence_rejects_early_validator_process() -> None:
 
 
 def test_legacy_deployer_remains_behind_exact_release_fallback() -> None:
-    rows = _late_barrier_rows()
-    preparation = rows[:10]
-    alignment = rows[10:14]
-    post_alignment = rows[14:]
-    legacy_rows = [
-        *alignment,
-        preparation[7],
-        preparation[8],
-        *post_alignment[1:],
-    ]
+    legacy_rows = _legacy_barrier_rows()
 
     result = verify_validator_gateway_activation_barrier(
         legacy_rows,
@@ -206,17 +251,9 @@ def test_legacy_deployer_remains_behind_exact_release_fallback() -> None:
 
 
 def test_legacy_deployer_rejects_application_build_before_exact_release() -> None:
-    rows = _late_barrier_rows()
-    preparation = rows[:10]
-    alignment = rows[10:14]
-    post_alignment = rows[14:]
-    legacy_rows = [
-        *alignment[:3],
-        preparation[7],
-        preparation[8],
-        alignment[3],
-        *post_alignment[1:],
-    ]
+    legacy_rows = _legacy_barrier_rows()
+    application_build = legacy_rows.pop(4)
+    legacy_rows.insert(3, application_build)
 
     with pytest.raises(
         SystemExit,
@@ -233,8 +270,8 @@ def test_legacy_deployer_rejects_application_build_before_exact_release() -> Non
 @pytest.mark.parametrize(
     ("removed_index", "expected_error"),
     (
-        (9, "candidate validator preparation did not complete"),
-        (14, "unchanged validator image identity after alignment"),
+        (13, "candidate authority health at activation barrier"),
+        (17, "unchanged validator image identity after alignment"),
     ),
 )
 def test_late_activation_requires_both_image_identity_checks(

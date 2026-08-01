@@ -247,6 +247,14 @@ def _symbol_index(tree: ast.Module) -> Dict[str, ast.AST]:
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             index[node.name] = node
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    index[target.id] = node
+        if isinstance(node, (ast.AnnAssign, ast.AugAssign)) and isinstance(
+            node.target, ast.Name
+        ):
+            index[node.target.id] = node
         if isinstance(node, ast.ClassDef):
             for child in node.body:
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):

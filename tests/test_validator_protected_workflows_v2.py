@@ -67,6 +67,40 @@ def test_validator_protected_manifest_detects_weight_logic_change(tmp_path: Path
         verify_manifest(copied_root, manifest)
 
 
+def test_validator_protected_manifest_detects_settlement_constant_change(
+    tmp_path: Path,
+):
+    manifest = build_manifest(
+        ROOT,
+        baseline_commit="7c9766b71d4c08b0059f6e3230dbe742b1d58e79",
+        protected_source_commit="178ad8652744f2171a3cf6775767f55c5e59bbae",
+    )
+    copied_root = tmp_path / "repo"
+    for relative_path in PROTECTED_SYMBOLS:
+        source = ROOT / relative_path
+        destination = copied_root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    target = (
+        copied_root
+        / "leadpoet_canonical"
+        / "allocation_settlement_frontier_v2.py"
+    )
+    target.write_text(
+        target.read_text(encoding="utf-8").replace(
+            "MAX_REWARD_CHECKPOINTS = 512",
+            "MAX_REWARD_CHECKPOINTS = 513",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValidatorProtectedWorkflowError,
+        match="MAX_REWARD_CHECKPOINTS",
+    ):
+        verify_manifest(copied_root, manifest)
+
+
 def test_validator_build_runs_protected_workflow_gate():
     script = (ROOT / "validator_tee" / "scripts" / "build_enclave.sh").read_text(
         encoding="utf-8"

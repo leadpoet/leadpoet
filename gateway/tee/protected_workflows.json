@@ -27,7 +27,7 @@
       "symbol": "get_compact_published_weights_v2"
     },
     {
-      "ast_sha256": "sha256:b4d771e1e3fefa79d32a78612412273673c92b6c9dade232b003afa3d9b3cae3",
+      "ast_sha256": "sha256:afa49a95a349bd5739878bc5e081a0c3b1902c4b7c93126a5a6ff4cedf800d1c",
       "path": "gateway/api/weights.py",
       "symbol": "get_weight_inputs_v2"
     },
@@ -757,7 +757,7 @@
       "symbol": "AutoresearchExecutorV2"
     },
     {
-      "ast_sha256": "sha256:fff07bca7ee1ee11d8b8cd9d3ee24de17f565ae44d9cfbda5961794c82a19438",
+      "ast_sha256": "sha256:db4c5499524c52c9ea2082e64d2304b535f84e32201273c2f383c4db8bb6bde2",
       "path": "gateway/tee/coordinator_active_model_source_v2.py",
       "symbol": "CoordinatorActiveModelSourceV2"
     },
@@ -1642,7 +1642,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:53f41100155e68fee8bfdce902abfc4b8a5c3cb27d788a2b24e40ce5d9c4d259",
+  "manifest_hash": "sha256:637c36cac989936d02566091b528a2bab50fc4d51ce66085d8b8cc992b042740",
   "protected_source_commit": "f190248b2454f208f6cc4b92d85e78afbc8ffd63",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

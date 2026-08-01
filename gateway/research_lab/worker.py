@@ -2353,15 +2353,18 @@ class ResearchLabHostedWorker:
             except ValueError:
                 status_interval = 600
             now_monotonic = time.monotonic()
-            last_status_reconcile = float(
-                getattr(self, "_champion_status_reconcile_monotonic", 0.0)
-                or 0.0
+            last_status_reconcile = getattr(
+                self, "_champion_status_reconcile_monotonic", None
             )
-            if now_monotonic - last_status_reconcile >= status_interval:
+            if (
+                last_status_reconcile is None
+                or now_monotonic - float(last_status_reconcile)
+                >= status_interval
+            ):
                 self._champion_status_reconcile_monotonic = now_monotonic
                 try:
                     await reconcile_champion_reward_statuses(
-                        netuid=int(self.config.netuid),
+                        netuid=int(os.getenv("BITTENSOR_NETUID", "71")),
                         actor_ref=self.worker_ref,
                         dry_run=False,
                     )

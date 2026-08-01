@@ -238,6 +238,26 @@ async def _build_weight_inputs_v2_singleflight(
     return await asyncio.shield(task)
 
 
+def _weight_inputs_v2_has_authorized_work(request_hash: str) -> bool:
+    """Return whether this process already authorized the exact request."""
+
+    loop = asyncio.get_running_loop()
+    key = (id(loop), str(request_hash))
+    cached = _WEIGHT_INPUT_RESULTS.get(key)
+    if cached is not None:
+        expires_at, _result = cached
+        if expires_at > loop.time():
+            return True
+        _WEIGHT_INPUT_RESULTS.pop(key, None)
+    task = _WEIGHT_INPUT_LOADS_INFLIGHT.get(key)
+    if task is None:
+        return False
+    if task.get_loop() is not loop or task.done():
+        _WEIGHT_INPUT_LOADS_INFLIGHT.pop(key, None)
+        return False
+    return True
+
+
 def _weight_authority_http_response(
     authority: Mapping[str, Any],
     *,
@@ -1538,12 +1558,16 @@ async def get_weight_inputs_v2(
     ):
         raise HTTPException(status_code=403, detail="Invalid V2 weight input signature")
 
-    await _verify_epoch_block_authority(
-        netuid=request["netuid"],
-        epoch_id=request["epoch_id"],
-        submitted_block=request["block"],
-        require_submission_window=False,
-    )
+    # An exact signed retry may arrive after the original authorized build has
+    # outlived MAX_BLOCK_DRIFT. Attach it to that same immutable work/result;
+    # all new request hashes must still pass current chain authority.
+    if not _weight_inputs_v2_has_authorized_work(request["request_hash"]):
+        await _verify_epoch_block_authority(
+            netuid=request["netuid"],
+            epoch_id=request["epoch_id"],
+            submitted_block=request["block"],
+            require_submission_window=False,
+        )
 
     try:
         result = await _build_weight_inputs_v2_singleflight(

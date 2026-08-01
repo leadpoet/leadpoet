@@ -58,6 +58,7 @@ GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES="${GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES
 RESEARCH_LAB_TEE_PROTOCOL="${RESEARCH_LAB_TEE_PROTOCOL:-}"
 GATEWAY_V2_CONFIG_DIR="${GATEWAY_V2_CONFIG_DIR:-/home/ec2-user/.config/leadpoet/v2}"
 GATEWAY_V2_RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-manifest.json}"
+GATEWAY_V2_RELEASE_LINEAGE="${GATEWAY_V2_RELEASE_LINEAGE:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-lineage.json}"
 GATEWAY_V2_ARTIFACT_POLICY="${GATEWAY_V2_ARTIFACT_POLICY:-$GATEWAY_V2_CONFIG_DIR/encrypted-artifact-policy.json}"
 GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST="${GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST:-$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2.json}"
 GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT="${GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT:-$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2}"
@@ -441,7 +442,8 @@ enforce_deployment_environment() {
   export GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES
   export GATEWAY_STATEFUL_CUTOVER_CEREMONY
   export RESEARCH_LAB_TEE_PROTOCOL
-  export GATEWAY_V2_CONFIG_DIR GATEWAY_V2_RELEASE_MANIFEST GATEWAY_V2_ARTIFACT_POLICY
+  export GATEWAY_V2_CONFIG_DIR GATEWAY_V2_RELEASE_MANIFEST GATEWAY_V2_RELEASE_LINEAGE
+  export GATEWAY_V2_ARTIFACT_POLICY
   export GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT
   export RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET
   export GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"
@@ -1276,7 +1278,10 @@ for attempt in $(seq 1 300); do
       --expected-commit "$PREPARED_GATEWAY_SHA" \
       --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
       --prefix "$GATEWAY_V2_RELEASE_PREFIX" \
-      --gateway-output "$GATEWAY_V2_RELEASE_MANIFEST"; then
+      --gateway-output "$GATEWAY_V2_RELEASE_MANIFEST" \
+      --lineage-output "$GATEWAY_V2_RELEASE_LINEAGE" \
+      --lineage-repository "$LEADPOET_REPO_ROOT" \
+      --lineage-authority-commit "$ORIGIN_MAIN_GATEWAY_SHA"; then
     V2_RELEASE_READY=1
     break
   fi
@@ -1860,6 +1865,10 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     echo "ERROR: approved V2 release manifest is missing" >&2
     exit 1
   }
+  test -s "$GATEWAY_V2_RELEASE_LINEAGE" || {
+    echo "ERROR: approved V2 release lineage is missing" >&2
+    exit 1
+  }
   test -s "$GATEWAY_V2_ARTIFACT_POLICY" || {
     echo "ERROR: encrypted V2 artifact policy is missing" >&2
     exit 1
@@ -1880,6 +1889,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   done
   PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_v2_bootstrap \
     --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+    --gateway-release-lineage "$GATEWAY_V2_RELEASE_LINEAGE" \
     "${V2_BOOTSTRAP_ARGS[@]}" \
     --protected-workflow-manifest "$GATEWAY_ROOT/_attested_runtime/protected_workflows.json" \
     --encrypted-artifact-policy "$GATEWAY_V2_ARTIFACT_POLICY" \

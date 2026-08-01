@@ -1306,6 +1306,18 @@ class _LocalRuntimeIdentity:
             sorted(self._document["configuration"]["peer_releases"])
         )
 
+    def verify_release_lineage_boot(
+        self, identity: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        from gateway.tee.release_lineage_v2 import (
+            build_compact_release_lineage_boot_verifier_v2,
+        )
+
+        verifier = build_compact_release_lineage_boot_verifier_v2(
+            self._document["configuration"]["gateway_release_lineage"]
+        )
+        return verifier(identity)
+
     def research_lab_config(self) -> Any:
         from gateway.tee.research_lab_runtime_config_v2 import (
             research_lab_config_from_document,

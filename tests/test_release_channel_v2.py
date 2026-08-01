@@ -257,6 +257,31 @@ def test_release_lineage_rejects_missing_current_channel():
         build_release_lineage_v2([historical], current_commit=COMMIT)
 
 
+def test_release_lineage_ignores_unrelated_channels_before_size_bound():
+    current = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(),
+        validator_release_manifest=_validator_manifest(),
+    )
+    s3 = _S3()
+    s3.objects[("release-bucket", release_channel_key(COMMIT))] = (
+        json.dumps(current, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    for index in range(513):
+        unrelated_commit = f"{index + 2:040x}"
+        s3.objects[
+            ("release-bucket", release_channel_key(unrelated_commit))
+        ] = b"untrusted branch release"
+
+    lineage = fetch_release_lineage_v2(
+        bucket="release-bucket",
+        current_commit=COMMIT,
+        s3_client=s3,
+        allowed_commits=(COMMIT,),
+    )
+
+    assert tuple(lineage["releases"]) == (COMMIT,)
+
+
 def test_cli_reports_unpublished_channel_without_traceback(monkeypatch, capsys):
     def _unavailable(**_kwargs):
         raise ReleaseChannelV2Error("approved release channel is unavailable")

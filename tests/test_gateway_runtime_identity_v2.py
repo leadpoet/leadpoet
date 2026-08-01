@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -95,6 +96,27 @@ def _configuration():
             "gateway_autoresearch",
         )
     }
+    lineage_roles = {
+        **release_roles,
+        "validator_weights": {
+            "commit_sha": "c" * 40,
+            "pcr0": "5" * 96,
+            "build_manifest_hash": HASH,
+            "dependency_lock_hash": "sha256:" + "d" * 64,
+        },
+    }
+    lineage_body = {
+        "schema_version": "leadpoet.attested_release_lineage.v1",
+        "current_commit_sha": "c" * 40,
+        "current_gateway_release_hash": HASH,
+        "releases": {
+            "c" * 40: {
+                "channel_hash": "sha256:" + "9" * 64,
+                "gateway_release_hash": HASH,
+                "roles": lineage_roles,
+            }
+        },
+    }
     research_lab_config = build_research_lab_execution_config(
         environment=epoch_test_environment()
     )
@@ -112,6 +134,10 @@ def _configuration():
             topology_hash="sha256:" + "f" * 64,
         )["identity_hash"],
         "release_roles": release_roles,
+        "gateway_release_lineage": {
+            **lineage_body,
+            "lineage_hash": sha256_json(lineage_body),
+        },
         "peer_releases": {
             "gateway_coordinator": {
                 "commit_sha": "c" * 40,
@@ -168,6 +194,31 @@ def test_runtime_boot_identity_binds_role_build_config_tls_and_nitro(tmp_path: P
     assert json.loads(observed["user_data"]) == build_boot_attestation_user_data(boot)
     assert observed["signing_pubkey"] == bytes.fromhex(signing_pubkey)
     assert manager.transport_certificate_pem().startswith(b"-----BEGIN CERTIFICATE-----")
+
+
+def test_runtime_verifies_checkpoint_boot_against_hash_bound_release_lineage(
+    tmp_path: Path, monkeypatch
+):
+    from gateway.tee import release_lineage_v2
+
+    observed = []
+    monkeypatch.setattr(
+        release_lineage_v2,
+        "verify_boot_identity_nitro",
+        lambda identity, **kwargs: observed.append(kwargs) or identity,
+    )
+    manager, _, _ = _manager(tmp_path)
+    configuration = _configuration()
+    manager.configure(
+        configuration=configuration,
+        expected_config_hash=_configuration_hash(configuration),
+    )
+    boot = manager.boot_identity()
+    assert manager.verify_release_lineage_boot(boot) == boot
+    assert observed[0]["expected_pcr0"] == boot["pcr0"]
+
+    with pytest.raises(Exception, match="pcr0"):
+        manager.verify_release_lineage_boot({**boot, "pcr0": "9" * 96})
 
 
 def test_runtime_configuration_is_immutable_for_boot(tmp_path: Path):
@@ -234,3 +285,35 @@ def test_runtime_reconstructs_exact_measured_research_lab_config(tmp_path: Path)
         expected_config_hash=_configuration_hash(configuration),
     )
     assert manager.research_lab_config().improvement_threshold_points == 2.75
+
+
+def test_runtime_configuration_accepts_the_fixed_512_release_bound(tmp_path: Path):
+    manager, _, _ = _manager(tmp_path)
+    configuration = _configuration()
+    lineage = configuration["gateway_release_lineage"]
+    template = next(iter(lineage["releases"].values()))
+    releases = {}
+    for index in range(511):
+        commit = f"{index:040x}"
+        entry = copy.deepcopy(template)
+        entry["roles"] = {
+            role: {**expectation, "commit_sha": commit}
+            for role, expectation in entry["roles"].items()
+        }
+        releases[commit] = entry
+    releases["c" * 40] = template
+    body = {
+        "schema_version": "leadpoet.attested_release_lineage.v1",
+        "current_commit_sha": "c" * 40,
+        "current_gateway_release_hash": HASH,
+        "releases": {commit: releases[commit] for commit in sorted(releases)},
+    }
+    configuration["gateway_release_lineage"] = {
+        **body,
+        "lineage_hash": sha256_json(body),
+    }
+    assert len(canonical_json(configuration).encode("utf-8")) < 1024 * 1024
+    manager.configure(
+        configuration=configuration,
+        expected_config_hash=_configuration_hash(configuration),
+    )

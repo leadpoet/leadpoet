@@ -65,6 +65,37 @@ def _release():
     )
 
 
+def _lineage(release):
+    roles = {
+        role: {
+            "commit_sha": summary["commit_sha"],
+            "pcr0": summary["pcr0"],
+            "build_manifest_hash": summary["execution_manifest_hash"],
+            "dependency_lock_hash": summary["dependency_lock_hash"],
+        }
+        for role, summary in release["roles"].items()
+    }
+    roles["validator_weights"] = {
+        "commit_sha": release["commit_sha"],
+        "pcr0": "9" * 96,
+        "build_manifest_hash": _hash("8"),
+        "dependency_lock_hash": _hash("7"),
+    }
+    body = {
+        "schema_version": "leadpoet.attested_release_lineage.v1",
+        "current_commit_sha": release["commit_sha"],
+        "current_gateway_release_hash": release["release_hash"],
+        "releases": {
+            release["commit_sha"]: {
+                "channel_hash": _hash("6"),
+                "gateway_release_hash": release["release_hash"],
+                "roles": roles,
+            }
+        },
+    }
+    return {**body, "lineage_hash": sha256_json(body)}
+
+
 class _Client:
     def __init__(self, role, release):
         self.role = role
@@ -116,6 +147,7 @@ def _documents(release):
     protected_hash = _hash("5")
     return runtime_configuration_documents(
         release_manifest=release,
+        gateway_release_lineage=_lineage(release),
         provider_ref_hashes={
             "openrouter": _hash("1"),
             "exa": _hash("2"),

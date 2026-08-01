@@ -7,8 +7,10 @@ import pytest
 from gateway.tee import release_lineage_v2
 from gateway.tee.release_lineage_v2 import (
     ReleaseLineageV2Error,
+    build_compact_release_lineage_boot_verifier_v2,
     build_release_lineage_boot_verifier_v2,
     load_approved_release_lineage_v2,
+    validate_compact_release_lineage_v2,
 )
 from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
@@ -86,6 +88,111 @@ def _identity(release, role="gateway_scoring"):
         "build_manifest_hash": expectation["execution_manifest_hash"],
         "dependency_lock_hash": expectation["dependency_lock_hash"],
     }
+
+
+def _compact_lineage(current, *historical):
+    releases = {}
+    for gateway in (current, *historical):
+        commit = gateway["commit_sha"]
+        roles = {
+            role: {
+                "commit_sha": summary["commit_sha"],
+                "pcr0": summary["pcr0"],
+                "build_manifest_hash": summary["execution_manifest_hash"],
+                "dependency_lock_hash": summary["dependency_lock_hash"],
+            }
+            for role, summary in gateway["roles"].items()
+        }
+        validator = _validator_manifest(commit)["release"]
+        roles["validator_weights"] = {
+            "commit_sha": validator["commit_sha"],
+            "pcr0": validator["pcr0"],
+            "build_manifest_hash": validator["app_manifest_hash"],
+            "dependency_lock_hash": validator["dependency_lock_hash"],
+        }
+        releases[commit] = {
+            "channel_hash": _hash(commit[0]),
+            "gateway_release_hash": gateway["release_hash"],
+            "roles": roles,
+        }
+    body = {
+        "schema_version": "leadpoet.attested_release_lineage.v1",
+        "current_commit_sha": current["commit_sha"],
+        "current_gateway_release_hash": current["release_hash"],
+        "releases": {commit: releases[commit] for commit in sorted(releases)},
+    }
+    return {**body, "lineage_hash": release_lineage_v2.sha256_json(body)}
+
+
+def test_compact_lineage_verifies_historical_gateway_and_validator_boots():
+    current = _release("1")
+    historical = _release("2")
+    lineage = validate_compact_release_lineage_v2(
+        _compact_lineage(current, historical),
+        expected_current_commit=current["commit_sha"],
+        expected_current_gateway_release_hash=current["release_hash"],
+    )
+    observed = []
+    verifier = build_compact_release_lineage_boot_verifier_v2(
+        lineage,
+        boot_verifier=lambda identity, **kwargs: observed.append(
+            (identity["physical_role"], kwargs["expected_pcr0"])
+        )
+        or identity,
+    )
+    gateway_boot = _identity(historical)
+    validator_boot = _validator_identity("2")
+    assert verifier(gateway_boot) == gateway_boot
+    assert verifier(validator_boot) == validator_boot
+    assert observed == [
+        ("gateway_scoring", gateway_boot["pcr0"]),
+        ("validator_weights", validator_boot["pcr0"]),
+    ]
+
+
+def test_compact_lineage_fails_closed_on_hash_role_and_pcr_drift():
+    current = _release("1")
+    historical = _release("2")
+    lineage = _compact_lineage(current, historical)
+    with pytest.raises(ReleaseLineageV2Error, match="hash differs"):
+        validate_compact_release_lineage_v2(
+            {**lineage, "lineage_hash": _hash("9")}
+        )
+
+    verifier = build_compact_release_lineage_boot_verifier_v2(
+        lineage,
+        boot_verifier=lambda identity, **_: identity,
+    )
+    with pytest.raises(ReleaseLineageV2Error, match="pcr0"):
+        verifier({**_identity(historical), "pcr0": "9" * 96})
+    with pytest.raises(ReleaseLineageV2Error, match="role is absent"):
+        verifier({**_identity(historical), "physical_role": "unknown"})
+
+
+def test_compact_lineage_rejects_more_than_512_attested_releases():
+    current = _release("1")
+    lineage = _compact_lineage(current)
+    template = next(iter(lineage["releases"].values()))
+    releases = {}
+    for index in range(513):
+        commit = f"{index:040x}"
+        releases[commit] = {
+            **template,
+            "roles": {
+                role: {**expectation, "commit_sha": commit}
+                for role, expectation in template["roles"].items()
+            },
+        }
+    body = {
+        "schema_version": lineage["schema_version"],
+        "current_commit_sha": "0" * 40,
+        "current_gateway_release_hash": template["gateway_release_hash"],
+        "releases": releases,
+    }
+    with pytest.raises(ReleaseLineageV2Error, match="lineage is invalid"):
+        validate_compact_release_lineage_v2(
+            {**body, "lineage_hash": release_lineage_v2.sha256_json(body)}
+        )
 
 
 def test_lineage_loads_missing_commit_from_exact_release_channel():

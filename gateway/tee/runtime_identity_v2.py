@@ -25,6 +25,7 @@ from leadpoet_canonical.attested_v2 import (
 
 RUNTIME_CONFIG_SCHEMA_VERSION = "leadpoet.enclave_runtime_config.v2"
 BOOTSTRAP_SCHEMA_VERSION = "leadpoet.gateway_v2_bootstrap.v2"
+MAX_RUNTIME_CONFIGURATION_BYTES = 1024 * 1024
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
 _SECRET_MARKERS = (
@@ -55,7 +56,7 @@ def _validate_public_configuration(configuration: Mapping[str, Any]) -> Dict[str
         raise RuntimeIdentityV2Error("V2 runtime configuration must be an object")
     normalized = json.loads(canonical_json(dict(configuration)))
     encoded = canonical_json(normalized).encode("utf-8")
-    if len(encoded) > 256 * 1024:
+    if len(encoded) > MAX_RUNTIME_CONFIGURATION_BYTES:
         raise RuntimeIdentityV2Error("V2 runtime configuration exceeds size limit")
     for key in normalized:
         lowered = str(key).lower()
@@ -90,6 +91,7 @@ def _validate_release_configuration(
         "own_build_identity_hash",
         "release_roles",
         "peer_releases",
+        "gateway_release_lineage",
         "provider_ref_hashes",
         "job_lease_slot_ref_hashes",
         "provider_retry_policy_hashes",
@@ -112,6 +114,20 @@ def _validate_release_configuration(
         raise RuntimeIdentityV2Error("V2 release commit differs from measured build")
     if configuration.get("own_build_identity_hash") != build_identity.get("identity_hash"):
         raise RuntimeIdentityV2Error("V2 release build identity differs from measured build")
+    from gateway.tee.release_lineage_v2 import (
+        validate_compact_release_lineage_v2,
+    )
+
+    try:
+        validate_compact_release_lineage_v2(
+            configuration.get("gateway_release_lineage"),
+            expected_current_commit=str(configuration["release_commit_sha"]),
+            expected_current_gateway_release_hash=str(configuration["release_hash"]),
+        )
+    except Exception as exc:
+        raise RuntimeIdentityV2Error(
+            "V2 gateway release lineage is invalid"
+        ) from exc
     if (
         configuration.get("protected_workflow_manifest_hash")
         != build_identity.get("protected_manifest_hash")
@@ -338,6 +354,7 @@ class RuntimeIdentityV2:
         self._runtime_configuration = None  # type: Optional[Dict[str, Any]]
         self._tls_identity = None  # type: Optional[Dict[str, Any]]
         self._boot_identity = None  # type: Optional[Dict[str, Any]]
+        self._release_lineage_boot_verifier = None  # type: Optional[Callable[..., Any]]
 
     def configure(
         self,
@@ -350,6 +367,15 @@ class RuntimeIdentityV2:
             normalized,
             physical_role=self._physical_role,
             build_identity=self._build_identity,
+        )
+        from gateway.tee.release_lineage_v2 import (
+            build_compact_release_lineage_boot_verifier_v2,
+        )
+
+        release_lineage_boot_verifier = (
+            build_compact_release_lineage_boot_verifier_v2(
+                normalized["gateway_release_lineage"]
+            )
         )
         config_document = {
             "schema_version": RUNTIME_CONFIG_SCHEMA_VERSION,
@@ -420,6 +446,7 @@ class RuntimeIdentityV2:
             self._runtime_configuration = config_document
             self._tls_identity = tls_identity
             self._boot_identity = boot_identity
+            self._release_lineage_boot_verifier = release_lineage_boot_verifier
             return self.public_status()
 
     def public_status(self) -> Dict[str, Any]:
@@ -511,6 +538,15 @@ class RuntimeIdentityV2:
         if not isinstance(releases, Mapping):
             raise RuntimeIdentityV2Error("V2 peer release map is unavailable")
         return tuple(sorted(str(role) for role in releases))
+
+    def verify_release_lineage_boot(
+        self, identity: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        with self._lock:
+            verifier = self._release_lineage_boot_verifier
+        if verifier is None:
+            raise RuntimeIdentityV2Error("V2 runtime identity is not configured")
+        return verifier(identity)
 
     def runtime_configuration(self) -> Dict[str, Any]:
         with self._lock:

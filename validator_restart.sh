@@ -304,6 +304,7 @@ fi
 echo "Pulling latest GitHub main before stopping validator"
 before_head="$(git rev-parse HEAD)"
 git fetch origin
+VALIDATOR_LINEAGE_AUTHORITY_SHA="$(git rev-parse origin/main)"
 if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
   if ! [[ "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
     echo "ERROR: VALIDATOR_DEPLOY_COMMIT must be a full 40-character SHA" >&2
@@ -629,7 +630,8 @@ for attempt in $(seq 1 300); do
       --gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
       --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST" \
       --lineage-output "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
-      --lineage-repository "$VALIDATOR_ROOT"; then
+      --lineage-repository "$VALIDATOR_ROOT" \
+      --lineage-authority-commit "$VALIDATOR_LINEAGE_AUTHORITY_SHA"; then
     VALIDATOR_V2_RELEASE_READY=1
     break
   fi

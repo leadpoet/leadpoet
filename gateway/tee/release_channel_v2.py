@@ -267,6 +267,17 @@ def fetch_release_lineage_v2(
         rf"^{re.escape(normalized_prefix)}/([0-9a-f]{{40}})/"
         r"release-channel-v2\.json$"
     )
+    allowed = None
+    if allowed_commits is not None:
+        allowed = {str(commit or "").lower() for commit in allowed_commits}
+        if (
+            not allowed
+            or any(not _COMMIT_RE.fullmatch(commit) for commit in allowed)
+            or str(current_commit).lower() not in allowed
+        ):
+            raise ReleaseChannelV2Error(
+                "approved release lineage Git ancestry is invalid"
+            )
     commits = []
     continuation_token = None
     try:
@@ -281,7 +292,9 @@ def fetch_release_lineage_v2(
             response = s3_client.list_objects_v2(**request)
             for item in response.get("Contents") or ():
                 match = key_pattern.fullmatch(str(item.get("Key") or ""))
-                if match:
+                if match and (
+                    allowed is None or match.group(1) in allowed
+                ):
                     commits.append(match.group(1))
                     if len(commits) > MAX_LINEAGE_RELEASES:
                         raise ReleaseChannelV2Error(
@@ -302,17 +315,6 @@ def fetch_release_lineage_v2(
         ) from exc
     if len(commits) != len(set(commits)):
         raise ReleaseChannelV2Error("approved release lineage is duplicated")
-    if allowed_commits is not None:
-        allowed = {str(commit or "").lower() for commit in allowed_commits}
-        if (
-            not allowed
-            or any(not _COMMIT_RE.fullmatch(commit) for commit in allowed)
-            or str(current_commit).lower() not in allowed
-        ):
-            raise ReleaseChannelV2Error(
-                "approved release lineage Git ancestry is invalid"
-            )
-        commits = [commit for commit in commits if commit in allowed]
     channels = [
         fetch_release_channel_v2(
             bucket=bucket,
@@ -415,6 +417,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--validator-output", type=Path)
     parser.add_argument("--lineage-output", type=Path)
     parser.add_argument("--lineage-repository", type=Path)
+    parser.add_argument("--lineage-authority-commit")
     parser.add_argument("--bucket", default=DEFAULT_BUCKET)
     parser.add_argument("--prefix", default=DEFAULT_PREFIX)
     parser.add_argument("--retention-days", type=int, default=DEFAULT_RETENTION_DAYS)
@@ -468,14 +471,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 raise ReleaseChannelV2Error(
                     "--lineage-output requires --lineage-repository"
                 )
+            authority_commit = str(
+                args.lineage_authority_commit or commit
+            ).lower()
+            if not _COMMIT_RE.fullmatch(authority_commit):
+                raise ReleaseChannelV2Error(
+                    "release lineage authority commit is invalid"
+                )
+            allowed_commits = git_ancestor_commits_v2(
+                repository=args.lineage_repository,
+                current_commit=authority_commit,
+            )
+            if commit not in allowed_commits:
+                raise ReleaseChannelV2Error(
+                    "selected release is absent from main release lineage"
+                )
             lineage = fetch_release_lineage_v2(
                 bucket=args.bucket,
                 current_commit=commit,
                 prefix=args.prefix,
-                allowed_commits=git_ancestor_commits_v2(
-                    repository=args.lineage_repository,
-                    current_commit=commit,
-                ),
+                allowed_commits=allowed_commits,
             )
             _atomic_json(args.lineage_output, lineage)
             result = {

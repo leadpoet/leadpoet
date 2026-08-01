@@ -59,6 +59,7 @@ def _hash_map(value: Mapping[str, Any], field: str) -> Dict[str, str]:
 def runtime_configuration_documents(
     *,
     release_manifest: Mapping[str, Any],
+    gateway_release_lineage: Mapping[str, Any],
     provider_ref_hashes: Mapping[str, str],
     provider_retry_policy_hashes: Mapping[str, str],
     provider_registry_hash: str,
@@ -76,6 +77,15 @@ def runtime_configuration_documents(
     )
 
     release = validate_release_manifest(release_manifest)
+    from gateway.tee.release_lineage_v2 import (
+        validate_compact_release_lineage_v2,
+    )
+
+    lineage = validate_compact_release_lineage_v2(
+        gateway_release_lineage,
+        expected_current_commit=str(release["commit_sha"]),
+        expected_current_gateway_release_hash=str(release["release_hash"]),
+    )
     provider_refs = _hash_map(provider_ref_hashes, "provider_ref_hashes")
     retry_hashes = _hash_map(
         provider_retry_policy_hashes, "provider_retry_policy_hashes"
@@ -175,6 +185,7 @@ def runtime_configuration_documents(
                 }
                 for release_role in sorted(ROLE_SPECS)
             },
+            "gateway_release_lineage": lineage,
             "peer_releases": peer_releases,
             "provider_ref_hashes": provider_refs,
             "job_lease_slot_ref_hashes": (
@@ -336,6 +347,14 @@ async def _main_async(args: argparse.Namespace) -> Dict[str, Any]:
     )
 
     release = load_release_manifest(args.release_manifest)
+    try:
+        gateway_release_lineage = json.loads(
+            args.gateway_release_lineage.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TEEV2BootstrapError(
+            "gateway release lineage is unavailable"
+        ) from exc
     envelopes = load_provider_envelopes(args.credential_envelope)
     provider_refs = provider_reference_hashes_from_envelopes(envelopes)
     artifact_envelopes = [
@@ -365,6 +384,7 @@ async def _main_async(args: argparse.Namespace) -> Dict[str, Any]:
     )
     documents = runtime_configuration_documents(
         release_manifest=release,
+        gateway_release_lineage=gateway_release_lineage,
         provider_ref_hashes=provider_refs,
         provider_retry_policy_hashes=measured_retry_policy_hashes(protected_hash),
         provider_registry_hash=provider_registry_hash(),
@@ -389,6 +409,7 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-manifest", required=True, type=Path)
+    parser.add_argument("--gateway-release-lineage", required=True, type=Path)
     parser.add_argument(
         "--credential-envelope",
         action="append",

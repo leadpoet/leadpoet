@@ -847,6 +847,11 @@
       "symbol": "ProviderSemanticsAuthorityV2"
     },
     {
+      "ast_sha256": "sha256:b53bde53f38b5f86020a9bd33aaace194d917ee0f04fe7aedb2c5107bfc73496",
+      "path": "gateway/tee/release_lineage_v2.py",
+      "symbol": "build_compact_release_lineage_boot_verifier_v2"
+    },
+    {
       "ast_sha256": "sha256:ddd86fd7a2444cac90547957c324929ddda42ad974d22a6801efc35f6cc466da",
       "path": "gateway/tee/release_lineage_v2.py",
       "symbol": "build_release_lineage_boot_verifier_v2"
@@ -855,6 +860,11 @@
       "ast_sha256": "sha256:bddb7fd580c65dbe598383d498a879cbb12a841d8e0103ed4e16262f7f259f5a",
       "path": "gateway/tee/release_lineage_v2.py",
       "symbol": "load_approved_release_lineage_v2"
+    },
+    {
+      "ast_sha256": "sha256:16a268458970e4cbcc234285708664825c6fb6f686561331b6f2c5c60f328bee",
+      "path": "gateway/tee/release_lineage_v2.py",
+      "symbol": "validate_compact_release_lineage_v2"
     },
     {
       "ast_sha256": "sha256:da5da28f8062a709f7d5d4ad697a6a07087c3c6bf6bddae6682995356e28ac63",
@@ -1632,7 +1642,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:e5d2a17eb698bbf15fab8c4c6a4436f9022ea68caf5047144afd0fab7d296ccb",
+  "manifest_hash": "sha256:53f41100155e68fee8bfdce902abfc4b8a5c3cb27d788a2b24e40ce5d9c4d259",
   "protected_source_commit": "f190248b2454f208f6cc4b92d85e78afbc8ffd63",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

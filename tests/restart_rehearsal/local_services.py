@@ -20,7 +20,7 @@ import threading
 from types import SimpleNamespace
 from typing import Any, Mapping
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 
 def _canonical(value: Any) -> bytes:
@@ -288,6 +288,7 @@ class LocalBoundaryServices(AbstractContextManager["LocalBoundaryServices"]):
         )
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self.server.state = self.state  # type: ignore[attr-defined]
+        self.opener = build_opener(ProxyHandler({}))
         self.thread = threading.Thread(
             target=self.server.serve_forever,
             name="leadpoet-local-boundary",
@@ -334,7 +335,7 @@ class LocalBoundaryServices(AbstractContextManager["LocalBoundaryServices"]):
             headers={"Content-Type": "application/json"},
         )
         try:
-            with urlopen(request, timeout=5) as response:
+            with self.opener.open(request, timeout=5) as response:
                 status = response.status
                 value = json.loads(response.read())
         except HTTPError as exc:

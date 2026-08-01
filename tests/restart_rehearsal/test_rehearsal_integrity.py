@@ -3160,6 +3160,46 @@ def test_local_chain_rejects_unknown_and_joins_finalized_reveal(
     assert not services.thread.is_alive()
 
 
+def test_local_boundary_service_survives_process_wide_exact_adapters(
+    tmp_path,
+) -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    harness_root = repository_root / "tests" / "restart_rehearsal"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONPATH": f"{repository_root}:{harness_root}",
+            "REHEARSAL_SCOPE": "exact",
+            "REHEARSAL_SOURCE_ROOT": str(repository_root),
+            "REHEARSAL_STATE_ROOT": str(tmp_path / "state"),
+        }
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "from pathlib import Path",
+                    "from local_services import LocalBoundaryServices",
+                    "fixture = {'sanitization': {'contains_production_credentials': False}}",
+                    f"root = Path({str(tmp_path / 'boundary')!r})",
+                    "with LocalBoundaryServices(root=root, fixture=fixture) as services:",
+                    "    value = services.request('POST', '/database/insert', {'kind': 'probe', 'epoch_id': 1, 'body': {'ok': True}})",
+                    "assert value['status'] == 'persisted'",
+                )
+            ),
+        ],
+        cwd=repository_root,
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0
+
+
 def test_joined_manifest_requires_every_authority_field(
     monkeypatch,
     tmp_path,

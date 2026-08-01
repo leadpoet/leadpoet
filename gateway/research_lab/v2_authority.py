@@ -1112,7 +1112,9 @@ async def _persist_business_links(
     persist_links: Any = None,
 ) -> dict[str, Any]:
     receipt = outcome.get("execution_receipt") or outcome.get("receipt")
-    graph = outcome.get("receipt_graph")
+    graph = outcome.get("execution_receipt_graph")
+    if graph is None:
+        graph = outcome.get("receipt_graph")
     if not isinstance(receipt, Mapping) or not isinstance(graph, Mapping):
         raise ResearchLabV2AuthorityError("V2 authority receipt graph is missing")
     root = str(receipt.get("receipt_hash") or "")
@@ -1121,7 +1123,11 @@ async def _persist_business_links(
         for item in graph.get("receipts", [])
         if isinstance(item, Mapping)
     }
-    if root not in graph_receipts or graph_receipts[root] != dict(receipt):
+    if (
+        graph.get("root_receipt_hash") != root
+        or root not in graph_receipts
+        or graph_receipts[root] != dict(receipt)
+    ):
         raise ResearchLabV2AuthorityError(
             "V2 authority execution receipt is absent from its graph"
         )

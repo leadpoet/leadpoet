@@ -134,6 +134,8 @@ _PARENT_AUTHORITY_FIELDS = frozenset(
         "authority_kind",
         "parent_receipt_hash",
         "parent_epoch_id",
+        "parent_role",
+        "parent_purpose",
         "authority_hash",
         "authority_policy_hash",
         "authority_sequence",
@@ -736,6 +738,8 @@ def _parent_descriptor_from_projection(
         "authority_kind": "full_projection",
         "parent_receipt_hash": value["root_receipt_hash"],
         "parent_epoch_id": value["root_epoch_id"],
+        "parent_role": value["root_role"],
+        "parent_purpose": value["root_purpose"],
         "authority_hash": _domain_hash(
             "leadpoet-ancestry-full-parent-authority-v2",
             {
@@ -757,6 +761,8 @@ def _parent_descriptor_from_certificate(certificate: Mapping[str, Any]) -> Dict[
         "authority_kind": "certificate",
         "parent_receipt_hash": claim["output_root_receipt_hash"],
         "parent_epoch_id": projection["root_epoch_id"],
+        "parent_role": projection["root_role"],
+        "parent_purpose": projection["root_purpose"],
         "authority_hash": certificate["certificate_hash"],
         "authority_policy_hash": claim["policy"]["policy_hash"],
         "authority_sequence": claim["certificate_sequence"],
@@ -783,6 +789,8 @@ def _parent_descriptor_from_certificate_disclosure(
         "authority_kind": "certificate_disclosure",
         "parent_receipt_hash": receipt_hash,
         "parent_epoch_id": int(disclosed[0]["epoch_id"]),
+        "parent_role": str(disclosed[0]["role"]),
+        "parent_purpose": str(disclosed[0]["purpose"]),
         "authority_hash": _domain_hash(
             "leadpoet-ancestry-certificate-disclosure-authority-v2",
             {
@@ -877,6 +885,8 @@ def _validate_parent_authority(value: Mapping[str, Any]) -> Dict[str, Any]:
     _hash(item.get("parent_receipt_hash"), "parent authority receipt hash")
     _hash(item.get("authority_hash"), "parent authority hash")
     _hash(item.get("authority_policy_hash"), "parent authority policy hash")
+    _identifier(item.get("parent_role"), "parent authority role")
+    _identifier(item.get("parent_purpose"), "parent authority root purpose")
     purposes = _sorted_identifiers(
         item.get("authority_purposes"),
         "parent authority purpose",
@@ -885,6 +895,10 @@ def _validate_parent_authority(value: Mapping[str, Any]) -> Dict[str, Any]:
     _require(
         list(item["authority_purposes"]) == purposes,
         "parent authority purposes are not canonical",
+    )
+    _require(
+        item["parent_purpose"] in purposes,
+        "parent authority root purpose is absent from ancestry",
     )
     _count(item.get("parent_epoch_id"), "parent authority epoch", 2 ** 63 - 1)
     if kind in {"certificate", "certificate_disclosure"}:

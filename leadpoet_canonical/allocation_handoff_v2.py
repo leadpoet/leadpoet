@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping
 
-from leadpoet_canonical.attested_v2 import sha256_json, validate_receipt_graph
+from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    sha256_json,
+    validate_receipt_graph,
+)
 
 
 ALLOCATION_HANDOFF_SCHEMA_VERSION = "leadpoet.attested_allocation_handoff.v2"
@@ -102,6 +106,36 @@ def validate_allocation_handoff_v2(
     if expected_netuid is not None and netuid != int(expected_netuid):
         raise AllocationHandoffV2Error("allocation handoff netuid differs")
     parent_hashes = sorted(str(item) for item in root["parent_receipt_hashes"])
+    checkpoint_parent_authorities = {}
+    if graph.get("schema_version") == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION:
+        proof = graph.get("ancestry_proof")
+        certificate = (
+            proof.get("certificate") if isinstance(proof, Mapping) else None
+        )
+        claim = (
+            certificate.get("claim")
+            if isinstance(certificate, Mapping)
+            else None
+        )
+        authorities = (
+            claim.get("parent_authorities") if isinstance(claim, Mapping) else None
+        )
+        if not isinstance(authorities, list):
+            raise AllocationHandoffV2Error(
+                "allocation checkpoint parent authorities are missing"
+            )
+        checkpoint_parent_authorities = {
+            str(item.get("parent_receipt_hash") or ""): item
+            for item in authorities
+            if isinstance(item, Mapping)
+        }
+        if (
+            len(checkpoint_parent_authorities) != len(authorities)
+            or sorted(checkpoint_parent_authorities) != parent_hashes
+        ):
+            raise AllocationHandoffV2Error(
+                "allocation checkpoint parent authorities differ from root"
+            )
     normalized_bindings = []
     for binding in bindings:
         if not isinstance(binding, Mapping) or set(binding) != {
@@ -114,12 +148,17 @@ def validate_allocation_handoff_v2(
             )
         receipt_hash = str(binding.get("receipt_hash") or "")
         receipt = receipts.get(receipt_hash)
-        if (
-            receipt_hash not in parent_hashes
-            or not isinstance(receipt, Mapping)
-            or receipt.get("purpose") != binding.get("receipt_purpose")
-            or receipt.get("role") != binding.get("receipt_role")
-        ):
+        authority = checkpoint_parent_authorities.get(receipt_hash)
+        metadata_matches = (
+            isinstance(receipt, Mapping)
+            and receipt.get("purpose") == binding.get("receipt_purpose")
+            and receipt.get("role") == binding.get("receipt_role")
+        ) or (
+            isinstance(authority, Mapping)
+            and authority.get("parent_purpose") == binding.get("receipt_purpose")
+            and authority.get("parent_role") == binding.get("receipt_role")
+        )
+        if receipt_hash not in parent_hashes or not metadata_matches:
             raise AllocationHandoffV2Error(
                 "allocation lineage binding differs from graph"
             )

@@ -24,6 +24,61 @@ def _outcome(result):
     }
 
 
+@pytest.mark.asyncio
+async def test_business_links_bind_execution_graph_before_artifact_wrapper():
+    execution_receipt = {"receipt_hash": HASH_A}
+    artifact_receipt = {"receipt_hash": HASH_B}
+    observed = {}
+
+    async def persist_links(**kwargs):
+        observed.update(kwargs)
+        return {"business_artifact_link_count": 1}
+
+    result = await v2_authority._persist_business_links(
+        {
+            "execution_receipt": execution_receipt,
+            "execution_receipt_graph": {
+                "root_receipt_hash": HASH_A,
+                "receipts": [execution_receipt],
+            },
+            "receipt": artifact_receipt,
+            "receipt_graph": {
+                "root_receipt_hash": HASH_B,
+                "receipts": [artifact_receipt],
+            },
+        },
+        ({"artifact_kind": "allocation"},),
+        persist_links=persist_links,
+    )
+
+    assert result == {"business_artifact_link_count": 1}
+    assert observed == {
+        "receipt_hash": HASH_A,
+        "artifacts": ({"artifact_kind": "allocation"},),
+    }
+
+
+@pytest.mark.asyncio
+async def test_business_links_reject_execution_graph_with_different_root():
+    execution_receipt = {"receipt_hash": HASH_A}
+
+    with pytest.raises(
+        v2_authority.ResearchLabV2AuthorityError,
+        match="execution receipt is absent",
+    ):
+        await v2_authority._persist_business_links(
+            {
+                "execution_receipt": execution_receipt,
+                "execution_receipt_graph": {
+                    "root_receipt_hash": HASH_B,
+                    "receipts": [execution_receipt],
+                },
+            },
+            (),
+            persist_links=lambda **_kwargs: None,
+        )
+
+
 def test_malformed_allocation_schedule_fails_closed():
     with pytest.raises(
         v2_authority.ResearchLabV2AuthorityError,

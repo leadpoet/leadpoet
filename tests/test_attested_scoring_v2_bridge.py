@@ -650,6 +650,10 @@ async def test_v2_bridge_retains_checkpoint_parent_for_business_logic_and_extend
             "parent_epoch_id": first_claim["local_delta_projection"][
                 "root_epoch_id"
             ],
+            "parent_role": first_claim["local_delta_projection"]["root_role"],
+            "parent_purpose": first_claim["local_delta_projection"][
+                "root_purpose"
+            ],
             "authority_hash": first_proof["certificate"]["certificate_hash"],
             "authority_policy_hash": first_claim["policy"]["policy_hash"],
             "authority_sequence": first_claim["certificate_sequence"],

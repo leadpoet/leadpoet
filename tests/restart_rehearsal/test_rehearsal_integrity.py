@@ -48,6 +48,7 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     _schema_contract,
 )
 from tests.restart_rehearsal.postgres_v2_contract_probe import (
+    ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION,
     ANCESTRY_CHECKPOINT_MIGRATION,
     ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
     ACTIVE_MODEL_RESULT_REPLAY_MIGRATION,
@@ -649,6 +650,8 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_provider_outcome_checkpoints_v2",
             "research_lab_attested_ancestry_checkpoints_v2",
             "research_lab_attested_ancestry_activations_v2",
+            "research_lab_allocation_settlement_frontiers_v2",
+            "research_lab_allocation_settlement_frontier_activation_v2",
         }
     }
     relations["research_lab_finalized_allocation_epochs_v2"] = {
@@ -679,6 +682,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
             ACTIVE_MODEL_RESULT_REPLAY_MIGRATION,
             ANCESTRY_CHECKPOINT_MIGRATION,
+            ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION,
             ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
         ],
         "relations": relations,
@@ -693,6 +697,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_champion_lifetime_credit_contract_v1",
             "research_lab_active_model_replay_contract_v2",
             "persist_research_lab_ancestry_checkpoint_v2",
+            "persist_research_lab_allocation_settlement_frontier_v2",
             "research_lab_ancestry_checkpoint_bootstrap_contract_v2",
         ],
         "maintenance_lease": {
@@ -716,7 +721,8 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "post_134_provider_outcome_head_contract_valid": True,
             "post_135_active_model_replay_contract_valid": True,
             "post_136_ancestry_checkpoint_contract_valid": True,
-            "post_137_ancestry_checkpoint_bootstrap_purpose_valid": True,
+            "post_137_allocation_settlement_frontier_contract_valid": True,
+            "post_138_ancestry_checkpoint_bootstrap_purpose_valid": True,
             "provider_outcome_append_atomic": True,
             "provider_outcome_contention_zero_rollback": True,
             "provider_outcome_conflict_head_exact": True,
@@ -795,6 +801,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     assert "research_lab_champion_lifetime_credit_contract_v1" in rpcs
     assert "research_lab_active_model_replay_contract_v2" in rpcs
     assert "persist_research_lab_ancestry_checkpoint_v2" in rpcs
+    assert "persist_research_lab_allocation_settlement_frontier_v2" in rpcs
     assert "research_lab_ancestry_checkpoint_bootstrap_contract_v2" in rpcs
     assert _migration_seed_rows(
         path,
@@ -830,6 +837,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
             ACTIVE_MODEL_RESULT_REPLAY_MIGRATION,
             ANCESTRY_CHECKPOINT_MIGRATION,
+            ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION,
             ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
         ],
         "relations": {
@@ -871,11 +879,20 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
                 "kind": "r",
                 "columns": ["activation_root_receipt_hash"],
             },
+            "research_lab_allocation_settlement_frontiers_v2": {
+                "kind": "r",
+                "columns": ["frontier_hash"],
+            },
+            "research_lab_allocation_settlement_frontier_activation_v2": {
+                "kind": "r",
+                "columns": ["netuid"],
+            },
         },
         "rpcs": [
             "research_lab_acquire_maintenance_lease",
             "research_lab_active_model_replay_contract_v2",
             "persist_research_lab_ancestry_checkpoint_v2",
+            "persist_research_lab_allocation_settlement_frontier_v2",
             "research_lab_ancestry_checkpoint_bootstrap_contract_v2",
         ],
         "maintenance_lease": {
@@ -900,7 +917,8 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "post_134_provider_outcome_head_contract_valid": True,
             "post_135_active_model_replay_contract_valid": True,
             "post_136_ancestry_checkpoint_contract_valid": True,
-            "post_137_ancestry_checkpoint_bootstrap_purpose_valid": True,
+            "post_137_allocation_settlement_frontier_contract_valid": True,
+            "post_138_ancestry_checkpoint_bootstrap_purpose_valid": True,
             "provider_outcome_append_atomic": True,
             "provider_outcome_contention_zero_rollback": True,
             "provider_outcome_conflict_head_exact": True,
@@ -944,6 +962,13 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "contention_rollback_delta": 0,
             "durable_head_conflict_verified": True,
             "empty_head_conflict_verified": True,
+        },
+        "allocation_settlement_frontier": {
+            "frontier_hash": "sha256:" + "a" * 64,
+            "source_receipt_hash": "sha256:" + "b" * 64,
+            "idempotent_replay": True,
+            "frontier_count": 1,
+            "activation_count": 1,
         },
         "seed_rows": {
             "research_lab_finalized_allocation_epochs_v2": [

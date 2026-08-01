@@ -426,6 +426,12 @@ $$;
             timeout=120,
         )
         for _ in range(80):
+            startup = subprocess.run(
+                ["docker", "logs", container],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
             ready = subprocess.run(
                 [
                     "docker",
@@ -441,7 +447,11 @@ $$;
                 text=True,
                 timeout=5,
             )
-            if ready.returncode == 0:
+            if (
+                "PostgreSQL init process complete; ready for start up."
+                in startup.stdout + startup.stderr
+                and ready.returncode == 0
+            ):
                 break
             time.sleep(0.25)
         else:

@@ -365,7 +365,12 @@ def is_gateway_restart_owned_pause(
 
 
 async def resume_gateway_restart_owned_maintenance() -> dict[str, Any]:
-    """Resume only maintenance state created by the gateway restart operator."""
+    """Recover restart-owned scoring state without resuming autoresearch.
+
+    Autoresearch admission is an explicit operator control.  A gateway restart
+    may preserve a restart-owned pause, but it must not emit a resume control
+    event or requeue paused runs as a side effect of becoming ready.
+    """
 
     autoresearch_state = await get_autoresearch_maintenance_state()
     scoring_state = await get_scoring_maintenance_state()
@@ -386,40 +391,9 @@ async def resume_gateway_restart_owned_maintenance() -> dict[str, Any]:
                 "state": autoresearch_state,
             }
         else:
-            prior_seq = autoresearch_state.get("event_seq")
-            if not isinstance(prior_seq, int) or isinstance(prior_seq, bool):
-                raise RuntimeError(
-                    "restart-owned autoresearch pause has no valid event sequence"
-                )
-            event = await set_autoresearch_maintenance_paused(
-                paused=False,
-                reason=GATEWAY_RESTART_RESUME_REASON,
-                actor_ref=GATEWAY_RESTART_ACTOR_REF,
-                event_doc={
-                    "operator_action": "resume-autoresearch",
-                    "resume_source": "gateway_restart_post_readiness",
-                    "previous_event_hash": autoresearch_state.get("event_hash"),
-                    "previous_event_seq": prior_seq,
-                },
-                expected_prior_seq=prior_seq,
-            )
-            requeue = await requeue_paused_autoresearch_runs(
-                actor_ref=GATEWAY_RESTART_ACTOR_REF,
-                reason=GATEWAY_RESTART_RESUME_REASON,
-            )
-            failed = int(requeue.get("failed") or 0)
-            capacity_limited = int(requeue.get("capacity_limited") or 0)
-            result["ok"] = not failed
             result["autoresearch"] = {
-                "status": (
-                    "resumed_with_deferred_capacity"
-                    if capacity_limited
-                    else "resumed"
-                ),
-                "event_hash": event.get("anchored_hash"),
-                "event_seq": event.get("seq"),
-                "requeue": requeue,
-                "state": await get_autoresearch_maintenance_state(),
+                "status": "preserved_restart_pause",
+                "state": autoresearch_state,
             }
 
     if scoring_state.get("paused"):

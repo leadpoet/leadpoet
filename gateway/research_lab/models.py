@@ -509,6 +509,8 @@ class ResearchLabSourceAdapterProvisionRequest(BaseModel):
     @classmethod
     def normalize_provider_alias(cls, value: Optional[str]) -> Optional[str]:
         normalized = " ".join(str(value or "").split())
+        if normalized:
+            reject_secret_material(normalized)
         return normalized or None
 
     @field_validator(

@@ -32,6 +32,16 @@ def test_committed_protected_workflow_manifest_matches_source():
     assert len(manifest["entries"]) == sum(len(items) for items in PROTECTED_SYMBOLS.values())
 
 
+def test_private_artifact_signature_boundary_is_protected():
+    assert {
+        "_REVIEWED_CONSUMER_MANIFEST_PAIRS",
+        "_verify_consumer_contract_manifest",
+        "verify_private_artifact_manifest_signature",
+        "_verify_private_artifact_manifest_signature_cached",
+        "_verify_private_artifact_manifest_signature_uncached",
+    } <= set(PROTECTED_SYMBOLS["research_lab/eval/private_runtime.py"])
+
+
 def test_protected_manifest_detects_logic_change(tmp_path: Path):
     committed = load_manifest(MANIFEST_PATH)
     manifest = build_manifest(

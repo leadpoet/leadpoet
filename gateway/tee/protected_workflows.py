@@ -120,9 +120,12 @@ PROTECTED_SYMBOLS = {
         "verify_source_tree_contract",
     ),
     "research_lab/eval/private_runtime.py": (
+        "_REVIEWED_CONSUMER_MANIFEST_PAIRS",
         "_private_manifest_hash_payload",
         "_verify_consumer_contract_manifest",
         "verify_private_artifact_manifest_signature",
+        "_verify_private_artifact_manifest_signature_cached",
+        "_verify_private_artifact_manifest_signature_uncached",
         "build_local_private_artifact_manifest",
     ),
     "gateway/research_lab/provider_capabilities.py": (

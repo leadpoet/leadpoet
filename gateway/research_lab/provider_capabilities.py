@@ -1766,6 +1766,22 @@ def validate_source_add_registration_diff(
         sensitive_names = protected_names | {
             "SOURCE_ADD_ROUTING_REGISTRATIONS",
         }
+        dynamic_namespace_names = {
+            "__builtins__",
+            "__dict__",
+            "__globals__",
+            "__import__",
+            "builtins",
+            "compile",
+            "delattr",
+            "eval",
+            "exec",
+            "globals",
+            "locals",
+            "setattr",
+            "vars",
+        }
+        guarded_names = sensitive_names | dynamic_namespace_names
         match_as_type = getattr(ast, "MatchAs", ())
         signature: list[str] = []
         for node in tree.body:
@@ -1775,32 +1791,35 @@ def validate_source_add_registration_diff(
             for descendant in ast.walk(node):
                 if (
                     isinstance(descendant, ast.Name)
-                    and descendant.id in sensitive_names
+                    and descendant.id in guarded_names
                 ) or (
                     isinstance(descendant, ast.Constant)
                     and isinstance(descendant.value, str)
-                    and descendant.value in sensitive_names
+                    and descendant.value in guarded_names
                 ) or (
                     isinstance(descendant, ast.Attribute)
-                    and descendant.attr in sensitive_names
+                    and descendant.attr in guarded_names
                 ) or (
                     isinstance(descendant, ast.alias)
                     and (
-                        descendant.asname
-                        or descendant.name.split(".", 1)[0]
-                    ) in sensitive_names
+                        descendant.name in guarded_names
+                        or (
+                            descendant.asname
+                            or descendant.name.split(".", 1)[0]
+                        ) in guarded_names
+                    )
                 ) or (
                     isinstance(descendant, ast.ExceptHandler)
-                    and descendant.name in sensitive_names
+                    and descendant.name in guarded_names
                 ) or (
                     isinstance(descendant, match_as_type)
-                    and descendant.name in sensitive_names
+                    and descendant.name in guarded_names
                 ) or (
                     isinstance(
                         descendant,
                         (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
                     )
-                    and descendant.name in sensitive_names
+                    and descendant.name in guarded_names
                 ):
                     sensitive = True
                     break

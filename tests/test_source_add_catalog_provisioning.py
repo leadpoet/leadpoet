@@ -714,6 +714,14 @@ def test_owner_process_environment_credentials_are_retired():
         )
 
 
+def test_source_add_provider_alias_rejects_secret_material():
+    with pytest.raises(ValidationError, match="raw provider secret material"):
+        ResearchLabSourceAdapterProvisionRequest(
+            registry_provider_id="test_source",
+            provider_alias="".join(("sk", "-or-", "synthetic")),
+        )
+
+
 def test_source_add_v8_routing_contract_round_trips_as_json():
     request = ResearchLabSourceAdapterProvisionRequest(
         registry_provider_id="test_source",

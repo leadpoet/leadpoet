@@ -3018,7 +3018,7 @@ async def test_uncapped_status_reconciler_reactivates_early_paid_projection(
 async def test_default_v2_allocation_path_blocks_incomplete_champion_coverage(
     monkeypatch,
 ):
-    from gateway.research_lab import v2_authority
+    from gateway.research_lab import attested_v2_store, v2_authority
 
     async def not_ready(**_kwargs):
         return {
@@ -3032,6 +3032,16 @@ async def test_default_v2_allocation_path_blocks_incomplete_champion_coverage(
         "champion_v2_cutover_readiness",
         not_ready,
     )
+
+    async def no_settlement_frontier(**_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_allocation_settlement_frontier_context_v2",
+        no_settlement_frontier,
+    )
+
     async def settle_history(**_kwargs):
         return []
 

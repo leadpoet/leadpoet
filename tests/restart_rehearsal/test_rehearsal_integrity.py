@@ -3582,6 +3582,10 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "measured_drand_commit" in service
     assert "trap finalize_rehearsal EXIT" in run_inside
     assert "preserve_rehearsal_evidence" in run_inside
+    assert (
+        'PYTHONPATH="/source:/harness" /usr/bin/python3.11 \\\n'
+        "  /harness/verify_evidence.py"
+    ) in run_inside
     assert "tls-connect-proxy-ca.pem" in run_inside
     assert "authenticated_http_or_https_connect.v2" in (
         Path(__file__).resolve().parents[2]

@@ -751,7 +751,8 @@ fi
 
 preserve_rehearsal_evidence
 
-/usr/bin/python3.11 /harness/verify_evidence.py \
+PYTHONPATH="/source:/harness" /usr/bin/python3.11 \
+  /harness/verify_evidence.py \
   "$COMPONENT" "$FROM_SHA" "$CANDIDATE_SHA" "$WEIGHT_READINESS_SCENARIO" "$REHEARSAL_SCOPE" "$TRANSITION" \
   | tee "/evidence/${RUN_ORDINAL}-${COMPONENT}-${TRANSITION}-${CANDIDATE_SHA}.json"
 if [ "$REHEARSAL_SCOPE" = "exact" ]; then

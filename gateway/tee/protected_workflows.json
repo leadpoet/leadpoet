@@ -177,7 +177,7 @@
       "symbol": "_validate_output_ancestry_checkpoint_v2"
     },
     {
-      "ast_sha256": "sha256:28ed052348bcabbcf21c745d39da86e7639bdcc90e88a10ab5ef9046b7dc2fe7",
+      "ast_sha256": "sha256:8853b68110d3f7a6cf2a494e22fc5f642f82d45601cd5887f8a520b0e5d89495",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "execute_scoring_v2"
     },
@@ -192,12 +192,12 @@
       "symbol": "_select_by_values"
     },
     {
-      "ast_sha256": "sha256:3460dc5634b675a03419966783843c83e5c460b6d3d6e92d2b8095bdb939d884",
+      "ast_sha256": "sha256:ac9c3f66998e101abc1e8ca9f6cba2a319fa93d0124a1734f8f4901bfaea43a6",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "_validate_allocation_settlement_frontier_storage_v2"
     },
     {
-      "ast_sha256": "sha256:41431ea278b9ca89447ac6b350130e52b8f4a9c0c58a43dfa974eea50136922c",
+      "ast_sha256": "sha256:d5925aea22ad9171405067239326fc2079cbf3f2db227b1260a6707cd40014e7",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "load_allocation_settlement_frontier_context_v2"
     },
@@ -257,7 +257,7 @@
       "symbol": "load_compact_weight_publication_intent_v2"
     },
     {
-      "ast_sha256": "sha256:bb1b5c0b600c13f4f94e886a900dc988dc7e1aaa2dbf5d3d051aa7b534cb2c51",
+      "ast_sha256": "sha256:0ee14e4610a55655883f35764594bc64ccee9be9c06e731081c27e7c018b0dc8",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "load_execution_result_by_receipt_v2"
     },
@@ -272,7 +272,7 @@
       "symbol": "load_receipt_graphs_v2"
     },
     {
-      "ast_sha256": "sha256:ff7bb8f6ad2ed101a9632f0cfddb54f89a5343d2d1760f0156abfc08de85bed0",
+      "ast_sha256": "sha256:87bba680eea955293fe3427b271cdbc818e8adacca1e36b91c133619498e5e5e",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "persist_allocation_settlement_frontier_v2"
     },
@@ -1027,7 +1027,7 @@
       "symbol": "_verify_coordinator_capability"
     },
     {
-      "ast_sha256": "sha256:6b5596781923cb590ddf07e73fda84679f3c6f7e2ba72478ea69f7e8d78085f7",
+      "ast_sha256": "sha256:e2f189a148931d9c063223e672772543eeff8f5a3f9624aa2cdf1804ca264764",
       "path": "gateway/tee/bootstrap_active_ancestry_checkpoints_v2.py",
       "symbol": "bootstrap_active_ancestry_checkpoints_v2"
     },
@@ -1037,12 +1037,37 @@
       "symbol": "main"
     },
     {
+      "ast_sha256": "sha256:7326db80ae897bd25e4048a1169cc51d03e4be566f9ea270d46dc907dd60a2a3",
+      "path": "gateway/tee/bootstrap_allocation_settlement_frontier_v2.py",
+      "symbol": "_load_candidate_reward_graphs_v2"
+    },
+    {
+      "ast_sha256": "sha256:533701cede15b58fc942952ffbba1a4086a8d30d2b9b7f20adc280e0510e685e",
+      "path": "gateway/tee/bootstrap_allocation_settlement_frontier_v2.py",
+      "symbol": "ensure_allocation_settlement_frontier_v2"
+    },
+    {
+      "ast_sha256": "sha256:ebe3ddaec5a93f32aac5263480abc27bab5e8f504555e56a40972e77e2dd8b84",
+      "path": "gateway/tee/bootstrap_allocation_settlement_frontier_v2.py",
+      "symbol": "load_latest_checkpointed_allocation_source_v2"
+    },
+    {
       "ast_sha256": "sha256:9fa97722538aeaa9c8666bace401e74fb468132a0b4df3e70ab6adbf87c2987d",
       "path": "gateway/tee/coordinator_active_model_source_v2.py",
       "symbol": "CoordinatorActiveModelSourceV2"
     },
     {
-      "ast_sha256": "sha256:987cbf3545d628ef292b8c335494a888814c9aa4c63928de15397eed23459e61",
+      "ast_sha256": "sha256:5cbbf068c830bed02281d0ca3cdb3851bcab96a13ccf18b51519ea6e51fb27dc",
+      "path": "gateway/tee/coordinator_allocation_frontier_bootstrap_v2.py",
+      "symbol": "CoordinatorAllocationFrontierBootstrapV2"
+    },
+    {
+      "ast_sha256": "sha256:c3d6ba0f5f776f5f2bab4db6a015f2af186126166c78708c4daccb48f6e603eb",
+      "path": "gateway/tee/coordinator_allocation_frontier_bootstrap_v2.py",
+      "symbol": "select_latest_allocation_source_row_v2"
+    },
+    {
+      "ast_sha256": "sha256:ade90c82130388a5f65b78570cd7dd8e67bbcd2bcf1626351143019ecdb9c094",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
@@ -1062,7 +1087,7 @@
       "symbol": "attest_subnet_epoch_cutover_v2"
     },
     {
-      "ast_sha256": "sha256:26c5b42afceb88587cbccb6cd75bd286bc86c5fe5913f29804fd48dfefbff931",
+      "ast_sha256": "sha256:6a8701f85baec4969d70bed93747087b3637a27d9c8c75d837d55f6ff4580f91",
       "path": "gateway/tee/coordinator_executor_v2.py",
       "symbol": "CoordinatorExecutorV2"
     },
@@ -1092,7 +1117,7 @@
       "symbol": "CoordinatorWeightSourceV2"
     },
     {
-      "ast_sha256": "sha256:47d7caff88780ec185f663ee7a8d1fab3e47a573786eb0ab35ab55df9f857f8c",
+      "ast_sha256": "sha256:eef76d1f791bc58afb4bf97554224f808d6c42165decbc87e6f766be6276264d",
       "path": "gateway/tee/execution_job_manager_v2.py",
       "symbol": "ExecutionJobManagerV2"
     },
@@ -1347,6 +1372,21 @@
       "symbol": "validate_source_add_sealed_job_envelope_v2"
     },
     {
+      "ast_sha256": "sha256:d5975781917b70b3439cc313db097ca2947fb3007d579ddbd72f40c38f3a5317",
+      "path": "gateway/tee/supabase_source_v2.py",
+      "symbol": "QUERY_POLICIES"
+    },
+    {
+      "ast_sha256": "sha256:c923ef9e3baef2946b2bfc66ee4182ea748f7e5438876ab7d8b9b2938d17b8f4",
+      "path": "gateway/tee/supabase_source_v2.py",
+      "symbol": "SupabaseSourceReaderV2"
+    },
+    {
+      "ast_sha256": "sha256:3f61c8c0615e124341bfa064dc02079dcaf6dcd1bbe86462b40bf04e7029b3de",
+      "path": "gateway/tee/supabase_source_v2.py",
+      "symbol": "_filters"
+    },
+    {
       "ast_sha256": "sha256:5944137b4646e929f04e692133cac378ff7a0827d49a0494f65b196dada74159",
       "path": "gateway/tee/tee_service.py",
       "symbol": "acknowledge_checkpoint"
@@ -1390,6 +1430,46 @@
       "ast_sha256": "sha256:31f445dbb9fd20c62058465d6e0407c19cca53594b523f3661342e4a31ff3791",
       "path": "gateway/utils/arweave_client.py",
       "symbol": "wait_for_confirmation"
+    },
+    {
+      "ast_sha256": "sha256:e06e39974f04169a5acca07e59cbe47edb9417b4a5f88e1b2aff99e25d670785",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_bootstrap_v2.py",
+      "symbol": "ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION"
+    },
+    {
+      "ast_sha256": "sha256:0e061c2ec68d0b269896f3c5e78134bfddf88dde2c35b31b3587394cb9cbf32e",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_bootstrap_v2.py",
+      "symbol": "ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE"
+    },
+    {
+      "ast_sha256": "sha256:9b519fcd8d0a58e05e1f7d2b00ee517b0774d5fdd58b5bdda68095d0c21e8ff2",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_bootstrap_v2.py",
+      "symbol": "ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_REQUEST_SCHEMA_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:5d57fcebb39bf1b513acd515a87cd361c3c21947060974a7f0fe41d02cefc074",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_bootstrap_v2.py",
+      "symbol": "ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_SCHEMA_VERSION"
+    },
+    {
+      "ast_sha256": "sha256:1e8034d0e7fcb49e686ee77f55f9812717c64b52f114fc153c981f92077ce2dd",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_bootstrap_v2.py",
+      "symbol": "AllocationSettlementFrontierBootstrapV2Error"
+    },
+    {
+      "ast_sha256": "sha256:6a996b29a5fa9fadecf405469c7d4b07f1b3b62eb50a8f97bc4cc23bb77f3cba",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_bootstrap_v2.py",
+      "symbol": "build_allocation_settlement_frontier_bootstrap_v2"
+    },
+    {
+      "ast_sha256": "sha256:f60f44255f2ae11afc61dfc5e0054a40888c9b4462e3c6e5c57ad0420d433f50",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_bootstrap_v2.py",
+      "symbol": "frontier_bootstrap_artifact_hashes_v2"
+    },
+    {
+      "ast_sha256": "sha256:8a2f425a1e47aeb5d92a68e286e508a45b874dd51c02527906ba126ea2b17b0c",
+      "path": "leadpoet_canonical/allocation_settlement_frontier_bootstrap_v2.py",
+      "symbol": "validate_allocation_settlement_frontier_bootstrap_v2"
     },
     {
       "ast_sha256": "sha256:a43037b9df3559be26f1929b64bbc17022dc912ff8d15b692d9cfbea63652bf2",
@@ -2317,7 +2397,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:63cb4d279af854f1b840d8b4bb980cb3707ddf6853b1f9e5477d99e61419f745",
-  "protected_source_commit": "8d287969ae3a60cfd2fc86e505945025bf83ee37",
+  "manifest_hash": "sha256:90086e6705a84021e5e8f4f1eceee327385fc35afdfa3866b733bd14cf7ad595",
+  "protected_source_commit": "f9db67b6e78eb88098df239dc9cf002a640e75d2",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

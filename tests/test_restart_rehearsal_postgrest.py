@@ -171,7 +171,7 @@ def _allocation_frontier_bootstrap_state(
 ) -> tuple[LocalPostgRESTState, dict[str, object]]:
     state, _unused = _allocation_frontier_state(tmp_path)
     state.rpcs.add(
-        "persist_research_lab_allocation_settlement_frontier_bootstrap_v2"
+        "persist_research_lab_allocation_frontier_bootstrap_v2"
     )
     execution_table = "research_lab_attested_execution_results_v2"
     receipt_table = "research_lab_attested_execution_receipts_v2"

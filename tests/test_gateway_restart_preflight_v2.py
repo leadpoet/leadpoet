@@ -511,6 +511,11 @@ def test_required_supabase_v2_schema_covers_git_tree_runtime_contract() -> None:
         )
     }
     rpc_contract = set(schema_preflight.REQUIRED_SUPABASE_V2_RPCS)
+    assert all(
+        len(function_name.encode("utf-8"))
+        <= schema_preflight.POSTGRES_IDENTIFIER_MAX_BYTES
+        for _migration, function_name in rpc_contract
+    )
     relation_columns = {
         relation: set(columns)
         for _migration, relation, columns in (

@@ -1121,7 +1121,7 @@ def verify_migration_backed_database_contract(
         not isinstance(rpcs, list)
         or "persist_research_lab_ancestry_checkpoint_v2" not in rpcs
         or "persist_research_lab_allocation_settlement_frontier_v2" not in rpcs
-        or "persist_research_lab_allocation_settlement_frontier_bootstrap_v2"
+        or "persist_research_lab_allocation_frontier_bootstrap_v2"
         not in rpcs
         or "research_lab_ancestry_checkpoint_bootstrap_contract_v2" not in rpcs
         or "research_lab_allocation_frontier_bootstrap_contract_v2" not in rpcs

@@ -102,7 +102,7 @@ ALLOCATION_SETTLEMENT_FRONTIER_RPC = (
     "persist_research_lab_allocation_settlement_frontier_v2"
 )
 ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_RPC = (
-    "persist_research_lab_allocation_settlement_frontier_bootstrap_v2"
+    "persist_research_lab_allocation_frontier_bootstrap_v2"
 )
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GRAPH_QUERY_CHUNK = 50

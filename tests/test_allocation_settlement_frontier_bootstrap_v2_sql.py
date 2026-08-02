@@ -31,7 +31,7 @@ FRONTIER_MIGRATION = (
 MIGRATION_NAME = "scripts/139-research-lab-allocation-frontier-bootstrap.sql"
 MIGRATION = ROOT / MIGRATION_NAME
 SQL = MIGRATION.read_text(encoding="utf-8")
-RPC = "persist_research_lab_allocation_settlement_frontier_bootstrap_v2"
+RPC = "persist_research_lab_allocation_frontier_bootstrap_v2"
 CONTRACT_RPC = "research_lab_allocation_frontier_bootstrap_contract_v2"
 
 
@@ -159,6 +159,7 @@ def test_migration_is_additive_private_and_declares_current_contract() -> None:
     assert "allocation_frontier_bootstrap_already_initialized" in SQL
     assert "allocation_frontier_bootstrap_source_invalid" in SQL
     assert "parent_receipt_hashes" in SQL
+    assert len(RPC.encode("utf-8")) <= 63
     assert (MIGRATION_NAME, RPC) in REQUIRED_SUPABASE_V2_RPCS
     assert (MIGRATION_NAME, CONTRACT_RPC) in REQUIRED_SUPABASE_V2_RPCS
 

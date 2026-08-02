@@ -2475,7 +2475,7 @@ def _allocation_settlement_frontier_bootstrap_contract(
             "allocation frontier bootstrap JSON delimiter collision"
         )
     request_sql = """
-        SELECT public.persist_research_lab_allocation_settlement_frontier_bootstrap_v2(
+        SELECT public.persist_research_lab_allocation_frontier_bootstrap_v2(
             $leadpoet$%s$leadpoet$::jsonb,
             '%s',
             '%s'
@@ -3932,7 +3932,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             or allocation_frontier_bootstrap_schema.get("purpose")
             != ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE
             or allocation_frontier_bootstrap_schema.get("persistence_rpc")
-            != "persist_research_lab_allocation_settlement_frontier_bootstrap_v2"
+            != "persist_research_lab_allocation_frontier_bootstrap_v2"
             or not isinstance(bootstrap_constraints, Mapping)
             or len(bootstrap_constraints) != 4
             or any(

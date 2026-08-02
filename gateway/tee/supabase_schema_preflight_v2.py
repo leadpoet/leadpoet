@@ -534,7 +534,7 @@ REQUIRED_SUPABASE_V2_RPCS = (
     ),
     (
         "scripts/139-research-lab-allocation-frontier-bootstrap.sql",
-        "persist_research_lab_allocation_settlement_frontier_bootstrap_v2",
+        "persist_research_lab_allocation_frontier_bootstrap_v2",
     ),
     (
         "scripts/139-research-lab-allocation-frontier-bootstrap.sql",
@@ -545,6 +545,9 @@ REQUIRED_SUPABASE_V2_RPCS = (
 
 class SupabaseSchemaPreflightV2Error(RuntimeError):
     """The selected V2 release cannot use the live PostgREST schema."""
+
+
+POSTGRES_IDENTIFIER_MAX_BYTES = 63
 
 
 def _verify_chain_realized_activation_v1(
@@ -660,6 +663,13 @@ def verify_required_supabase_v2_schema(
     opener: Any = urlopen,
     timeout_seconds: float = 10.0,
 ) -> Dict[str, Any]:
+    for migration, function_name in REQUIRED_SUPABASE_V2_RPCS:
+        if len(function_name.encode("utf-8")) > POSTGRES_IDENTIFIER_MAX_BYTES:
+            raise SupabaseSchemaPreflightV2Error(
+                "required Supabase V2 RPC identifier exceeds PostgreSQL's "
+                f"{POSTGRES_IDENTIFIER_MAX_BYTES}-byte limit for "
+                f"{function_name}; correct {migration} before restart"
+            )
     supabase_url = str(parent_environment.get("SUPABASE_URL") or "").rstrip("/")
     service_role_key = str(parent_environment.get("SUPABASE_SERVICE_ROLE_KEY") or "")
     if not supabase_url or not service_role_key:

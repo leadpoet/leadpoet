@@ -547,7 +547,7 @@ def _migration_schema_contract(
         "research_lab_champion_lifetime_credit_contract_v1",
         "persist_research_lab_ancestry_checkpoint_v2",
         "persist_research_lab_allocation_settlement_frontier_v2",
-        "persist_research_lab_allocation_settlement_frontier_bootstrap_v2",
+        "persist_research_lab_allocation_frontier_bootstrap_v2",
         "research_lab_ancestry_checkpoint_bootstrap_contract_v2",
         "research_lab_allocation_frontier_bootstrap_contract_v2",
     }
@@ -2544,7 +2544,7 @@ class Handler(BaseHTTPRequestHandler):
                     source_receipt_hash=response["source_receipt_hash"],
                 )
             elif name == (
-                "persist_research_lab_allocation_settlement_frontier_bootstrap_v2"
+                "persist_research_lab_allocation_frontier_bootstrap_v2"
             ):
                 response = self.server.state.persist_allocation_settlement_frontier_bootstrap(
                     body

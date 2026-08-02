@@ -226,7 +226,7 @@ ALTER TABLE public.research_lab_attested_execution_receipts_v2
         research_lab_attested_execution_receipts_v2_role_purpose_check;
 
 CREATE OR REPLACE FUNCTION
-public.persist_research_lab_allocation_settlement_frontier_bootstrap_v2(
+public.persist_research_lab_allocation_frontier_bootstrap_v2(
     requested_frontier JSONB,
     requested_source_receipt_hash TEXT,
     requested_source_state_hash TEXT
@@ -566,7 +566,7 @@ AS $$
         'purpose',
         'research_lab.allocation_settlement_frontier_bootstrap.v2',
         'persistence_rpc',
-        'persist_research_lab_allocation_settlement_frontier_bootstrap_v2',
+        'persist_research_lab_allocation_frontier_bootstrap_v2',
         'constraints', (
             SELECT pg_catalog.jsonb_object_agg(
                 constraint_record.conname,
@@ -593,14 +593,14 @@ AS $$
 $$;
 
 REVOKE ALL ON FUNCTION
-    public.persist_research_lab_allocation_settlement_frontier_bootstrap_v2(
+    public.persist_research_lab_allocation_frontier_bootstrap_v2(
         JSONB,
         TEXT,
         TEXT
     )
     FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION
-    public.persist_research_lab_allocation_settlement_frontier_bootstrap_v2(
+    public.persist_research_lab_allocation_frontier_bootstrap_v2(
         JSONB,
         TEXT,
         TEXT

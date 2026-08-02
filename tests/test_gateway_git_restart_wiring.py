@@ -1569,3 +1569,21 @@ def test_gateway_restart_defaults_research_lab_to_branch_manifest() -> None:
     assert 'RESEARCH_LAB_PRIVATE_REPO_BRANCH="${' not in script
     assert 'RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="${' not in script
     assert 'RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID="${' not in script
+
+
+def test_gateway_restart_wires_automatic_signed_dev_snapshot_refresh() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+
+    assert (
+        'export RESEARCH_LAB_DEV_SNAPSHOT_AUTO_REFRESH_ENABLED="${'
+        'RESEARCH_LAB_DEV_SNAPSHOT_AUTO_REFRESH_ENABLED:-true}"'
+    ) in script
+    assert (
+        'export RESEARCH_LAB_DEV_SNAPSHOT_RECORD_ENABLED="${'
+        'RESEARCH_LAB_DEV_SNAPSHOT_RECORD_ENABLED:-true}"'
+    ) in script
+    assert (
+        'export RESEARCH_LAB_DEV_SNAPSHOT_KMS_KEY_ID="${'
+        'RESEARCH_LAB_DEV_SNAPSHOT_KMS_KEY_ID:-alias/'
+        'leadpoet-research-lab-artifact-signing}"'
+    ) in script

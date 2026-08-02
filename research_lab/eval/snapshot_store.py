@@ -86,6 +86,7 @@ DEV_ICPS_NAME = "dev_icps.json"
 READY_NAME = "READY.json"
 POINTER_NAME = "current.json"
 RECORD_FAILURES_NAME = "record_failures.jsonl"
+RECORDED_PROVIDER_MODELS_NAME = "provider_models.jsonl"
 
 
 def build_snapshot_pointer_document(
@@ -1203,6 +1204,7 @@ _RL_DEV_EMPTY_BODIES = {"exa": '{"results": []}', "scrapingdog": "{}", "openrout
 # Keep in sync with research_lab.eval.private_runtime.SECRET_MARKERS.
 _RL_DEV_SECRET_MARKERS = ("sk-or-", "sb_secret_", "aws_secret_access_key", "openrouter_api_key", "scrapingdog_api_key", "exa_api_key", "raw_secret", "service_role")
 _RL_DEV_RECORD_FAILURES_PATH = os.path.join(_RL_DEV_SNAPSHOT_DIR, "record_failures.jsonl")
+_RL_DEV_PROVIDER_MODELS_PATH = os.path.join(_RL_DEV_SNAPSHOT_DIR, "provider_models.jsonl")
 
 
 def _rl_dev_canonical_json(data):
@@ -1523,6 +1525,33 @@ def _rl_dev_record_failure(reason, request_key=""):
         )
 
 
+def _rl_dev_record_provider_model(provider, body, request_key):
+    if provider != "openrouter":
+        return True
+    normalized = _rl_dev_normalized_body(body)
+    model_id = ""
+    if isinstance(normalized, dict):
+        model_id = str(normalized.get("model") or "").strip()
+    if not model_id:
+        return True
+    lowered = model_id.lower()
+    if len(model_id) > 500 or any(marker in lowered for marker in _RL_DEV_SECRET_MARKERS):
+        _rl_dev_record_failure("provider_model_id_rejected", request_key)
+        return False
+    try:
+        row = {"provider": "openrouter", "model_id": model_id}
+        with open(_RL_DEV_PROVIDER_MODELS_PATH, "a", encoding="utf-8") as handle:
+            handle.write(_rl_dev_canonical_json(row) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return True
+    except Exception as exc:
+        _rl_dev_record_failure(
+            "provider_model_id_write_error:" + type(exc).__name__, request_key
+        )
+        return False
+
+
 def _rl_dev_record(method, url, body, status, headers, body_text, params=None):
     request_key = ""
     try:
@@ -1551,6 +1580,8 @@ def _rl_dev_record(method, url, body, status, headers, body_text, params=None):
         payload_text = _rl_dev_canonical_json(record).lower()
         if any(marker in payload_text for marker in _RL_DEV_SECRET_MARKERS):
             _rl_dev_record_failure("secret_material_rejected", request_key)
+            return False
+        if not _rl_dev_record_provider_model(provider, body, request_key):
             return False
         path = _rl_dev_snapshot_path(storage_name)
         os.makedirs(os.path.dirname(path), exist_ok=True)

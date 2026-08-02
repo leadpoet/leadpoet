@@ -69,6 +69,17 @@ def _configure(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv(SNAPSHOT_URI_ENV, "s3://private-bucket/dev/current.json")
 
 
+def test_auto_refresh_defaults_on_and_explicit_false_disables(monkeypatch):
+    monkeypatch.delenv(snapshot_refresh.AUTO_REFRESH_ENABLED_ENV, raising=False)
+    assert snapshot_refresh.snapshot_auto_refresh_enabled() is True
+
+    monkeypatch.setenv(snapshot_refresh.AUTO_REFRESH_ENABLED_ENV, "false")
+    assert snapshot_refresh.snapshot_auto_refresh_enabled() is False
+
+    monkeypatch.setenv(snapshot_refresh.AUTO_REFRESH_ENABLED_ENV, "invalid")
+    assert snapshot_refresh.snapshot_auto_refresh_enabled() is False
+
+
 def test_only_worker_zero_in_active_tree_mode_can_refresh(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path)
     config = SimpleNamespace()
@@ -184,6 +195,44 @@ def test_due_refresh_publishes_immutable_target_before_pointer(monkeypatch, tmp_
     assert "--skip-current-pointer" in commands[2]
     assert "--skip-current-pointer" not in commands[3]
     assert not any((tmp_path / "work").glob("refresh-*"))
+
+
+def test_due_refresh_uses_observed_model_provenance_without_manual_ids(
+    monkeypatch, tmp_path
+):
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.delenv(snapshot_refresh.PROVIDER_MODEL_IDS_ENV)
+    commands: list[list[str]] = []
+    readiness = iter(
+        [
+            _ready(ready=False, reason="snapshot_not_ready"),
+            _ready(manifest_hash="sha256:" + "e" * 64),
+        ]
+    )
+
+    async def active_loader(*_args: Any, **_kwargs: Any):
+        return _active()
+
+    def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
+        commands.append(list(command))
+        return "ok"
+
+    result = asyncio.run(
+        snapshot_refresh.maybe_refresh_dev_snapshot(
+            SimpleNamespace(),
+            worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
+            now=1000,
+            command_runner=command_runner,
+            readiness_loader=lambda _uri, **_kwargs: next(readiness),
+            active_loader=active_loader,
+        )
+    )
+
+    assert result["status"] == "refreshed"
+    record_command = commands[1]
+    assert record_command[1].endswith("record_research_lab_dev_snapshots.py")
+    assert "--provider-model-id" not in record_command
 
 
 def test_active_model_change_keeps_existing_pointer_untouched(monkeypatch, tmp_path):

@@ -53,7 +53,8 @@ ActiveLoader = Callable[..., Awaitable[Any]]
 
 
 def snapshot_auto_refresh_enabled() -> bool:
-    return str(os.getenv(AUTO_REFRESH_ENABLED_ENV) or "").strip().lower() in _TRUTHY
+    configured = str(os.getenv(AUTO_REFRESH_ENABLED_ENV) or "").strip().lower()
+    return not configured or configured in _TRUTHY
 
 
 def _positive_env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -286,8 +287,6 @@ async def maybe_refresh_dev_snapshot(
             if not kms_key_id:
                 raise RuntimeError(f"{KMS_KEY_ID_ENV} is required")
             provider_model_ids = _provider_model_ids()
-            if not provider_model_ids:
-                raise RuntimeError(f"{PROVIDER_MODEL_IDS_ENV} is required")
             raw_source_root = str(os.getenv(RUNTIME_SOURCE_ROOT_ENV) or "").strip()
             if not raw_source_root:
                 raise RuntimeError(f"{RUNTIME_SOURCE_ROOT_ENV} is required")
@@ -346,6 +345,10 @@ async def maybe_refresh_dev_snapshot(
                     identity_before[3],
                     "--record",
                 ]
+                # Optional declarations constrain the recorder. The recorder
+                # derives signed provenance from the OpenRouter requests the
+                # champion actually emits, so model changes require no manual
+                # restart-environment update.
                 for model_id in provider_model_ids:
                     record_command.extend(("--provider-model-id", model_id))
                 await asyncio.to_thread(

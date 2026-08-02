@@ -62,6 +62,10 @@ from gateway.research_lab.config import (  # noqa: E402
     ResearchLabGitTreeConfig,
     ResearchLabGitTreeConfigError,
 )
+from research_lab.eval.private_runtime import SECRET_MARKERS  # noqa: E402
+from research_lab.eval.snapshot_store import (  # noqa: E402
+    RECORDED_PROVIDER_MODELS_NAME,
+)
 
 RECORD_ENABLED_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_RECORD_ENABLED"
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
@@ -387,6 +391,49 @@ def _recording_failure_summary(
     }
 
 
+def _recorded_provider_model_ids(snapshot_dir: Path) -> list[str]:
+    """Load exact OpenRouter model IDs observed by the recording bootstrap."""
+
+    path = snapshot_dir / RECORDED_PROVIDER_MODELS_NAME
+    if not path.is_file():
+        return []
+    model_ids: set[str] = set()
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, Mapping) or row.get("provider") != "openrouter":
+                raise ValueError("recorded provider-model row is invalid")
+            model_id = str(row.get("model_id") or "").strip()
+            lowered = model_id.lower()
+            if (
+                not model_id
+                or len(model_id) > 500
+                or any(marker in lowered for marker in SECRET_MARKERS)
+            ):
+                raise ValueError("recorded provider model ID is invalid")
+            model_ids.add(model_id)
+    finally:
+        path.unlink(missing_ok=True)
+    return sorted(model_ids)
+
+
+def _resolve_provider_model_ids(
+    observed: Sequence[str], declared: Sequence[str]
+) -> list[str]:
+    actual = sorted({str(item).strip() for item in observed if str(item).strip()})
+    allowed = {str(item).strip() for item in declared if str(item).strip()}
+    if not actual:
+        raise ValueError("champion emitted no attributable OpenRouter model request")
+    unexpected = sorted(set(actual) - allowed) if allowed else []
+    if unexpected:
+        raise ValueError(
+            "champion used an OpenRouter model outside the declared allowlist"
+        )
+    return actual
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Record a frozen provider snapshot set for the L1 dev-eval rung"
@@ -407,7 +454,15 @@ def main() -> int:
     parser.add_argument("--source-commit", default=os.getenv("RESEARCH_LAB_PRIVATE_COMMIT_SHA", ""))
     parser.add_argument("--model-config-hash", default=os.getenv("RESEARCH_LAB_PRIVATE_MODEL_CONFIG_HASH", ""))
     parser.add_argument("--private-model-manifest-hash", required=True)
-    parser.add_argument("--provider-model-id", action="append", default=[])
+    parser.add_argument(
+        "--provider-model-id",
+        action="append",
+        default=[],
+        help=(
+            "Optional expected OpenRouter model allowlist. Signed provenance "
+            "is always derived from requests observed during recording."
+        ),
+    )
     parser.add_argument("--module-name", default="research_lab_adapter")
     parser.add_argument("--callable-name", default="run_icp")
     parser.add_argument("--timeout-seconds", type=int, default=900)
@@ -528,10 +583,9 @@ def main() -> int:
     ):
         print("ERROR: daily baseline model manifest differs from the active champion")
         return 1
-    provider_model_ids = sorted({str(item).strip() for item in args.provider_model_id if str(item).strip()})
-    if not provider_model_ids:
-        print("ERROR: pass at least one --provider-model-id used by the champion")
-        return 1
+    declared_provider_model_ids = sorted(
+        {str(item).strip() for item in args.provider_model_id if str(item).strip()}
+    )
     missing = [group for group, present in _provider_key_presence().items() if not present]
     if missing:
         print(f"ERROR: missing provider keys: {', '.join(missing)}")
@@ -581,6 +635,15 @@ def main() -> int:
                 f"{failure_summary['provider_failure_event_count']} distinct provider "
                 "snapshot failure event(s) recorded"
             )
+
+        try:
+            provider_model_ids = _resolve_provider_model_ids(
+                _recorded_provider_model_ids(staging),
+                declared_provider_model_ids,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"ERROR: could not bind provider-model provenance: {exc}")
+            return 1
 
         store.write_dev_icp_items(dev_set.items)
         if not failure_summary["has_failures"]:

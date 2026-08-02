@@ -25,10 +25,10 @@ BEGIN
     SELECT pg_catalog.pg_get_functiondef(function_signature::OID)
       INTO STRICT function_definition;
 
-    IF pg_catalog.position(compatible_guard IN function_definition) > 0 THEN
+    IF pg_catalog.strpos(function_definition, compatible_guard) > 0 THEN
         RETURN;
     END IF;
-    IF pg_catalog.position(legacy_guard IN function_definition) = 0 THEN
+    IF pg_catalog.strpos(function_definition, legacy_guard) = 0 THEN
         RAISE EXCEPTION
             'allocation_frontier_bootstrap_historical_source_guard_missing'
             USING ERRCODE = '23514';
@@ -40,8 +40,8 @@ BEGIN
         compatible_guard
     );
     IF patched_definition = function_definition
-       OR pg_catalog.position(legacy_guard IN patched_definition) > 0
-       OR pg_catalog.position(compatible_guard IN patched_definition) = 0 THEN
+       OR pg_catalog.strpos(patched_definition, legacy_guard) > 0
+       OR pg_catalog.strpos(patched_definition, compatible_guard) = 0 THEN
         RAISE EXCEPTION
             'allocation_frontier_bootstrap_historical_source_patch_invalid'
             USING ERRCODE = '23514';

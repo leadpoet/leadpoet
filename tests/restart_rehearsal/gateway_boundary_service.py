@@ -462,11 +462,12 @@ def _migration_schema_contract(
         "137-research-lab-allocation-settlement-frontier.sql",
         "138-research-lab-ancestry-checkpoint-bootstrap-purpose.sql",
         "139-research-lab-allocation-frontier-bootstrap.sql",
+        "140-research-lab-allocation-frontier-historical-source.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (
         not isinstance(applied_migrations, list)
-        or applied_migrations[-10:] != expected_final_migrations
+        or applied_migrations[-11:] != expected_final_migrations
     ):
         raise RuntimeError(
             "migration-backed final migration order differs from production"

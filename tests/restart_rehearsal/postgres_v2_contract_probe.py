@@ -166,6 +166,9 @@ ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION = (
 ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_MIGRATION = (
     "139-research-lab-allocation-frontier-bootstrap.sql"
 )
+ALLOCATION_SETTLEMENT_FRONTIER_HISTORICAL_SOURCE_MIGRATION = (
+    "140-research-lab-allocation-frontier-historical-source.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -197,6 +200,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION,
     ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
     ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_MIGRATION,
+    ALLOCATION_SETTLEMENT_FRONTIER_HISTORICAL_SOURCE_MIGRATION,
 )
 EXPECTED_FINALIZED_VIEW_COLUMNS = (
     "bundle_hash",
@@ -3905,6 +3909,13 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             scripts / ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_MIGRATION
         )
         applied.append(ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_MIGRATION)
+        database.apply_migration(
+            scripts
+            / ALLOCATION_SETTLEMENT_FRONTIER_HISTORICAL_SOURCE_MIGRATION
+        )
+        applied.append(
+            ALLOCATION_SETTLEMENT_FRONTIER_HISTORICAL_SOURCE_MIGRATION
+        )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
                 database=database,

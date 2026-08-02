@@ -31,6 +31,11 @@ FRONTIER_MIGRATION = (
 MIGRATION_NAME = "scripts/139-research-lab-allocation-frontier-bootstrap.sql"
 MIGRATION = ROOT / MIGRATION_NAME
 SQL = MIGRATION.read_text(encoding="utf-8")
+HISTORICAL_SOURCE_MIGRATION = (
+    ROOT
+    / "scripts/140-research-lab-allocation-frontier-historical-source.sql"
+)
+HISTORICAL_SOURCE_SQL = HISTORICAL_SOURCE_MIGRATION.read_text(encoding="utf-8")
 RPC = "persist_research_lab_allocation_frontier_bootstrap_v2"
 CONTRACT_RPC = "research_lab_allocation_frontier_bootstrap_contract_v2"
 
@@ -62,7 +67,6 @@ def _row_documents(*, epoch: int = 200) -> tuple[dict, dict, dict, dict, dict]:
     source_state = {
         "epoch": epoch,
         "netuid": 71,
-        "settlement_frontier": None,
     }
     source_state_hash = sha256_json(source_state)
     allocation_receipt_hash = _sha("1")
@@ -181,6 +185,24 @@ def test_migration_is_additive_private_and_declares_current_contract() -> None:
     for operation, purpose in _REPLAYABLE_EXECUTION_PAIRS:
         assert "operation = '%s'" % operation in pair_clause
         assert "'%s'" % purpose in pair_clause
+
+
+def test_historical_source_migration_accepts_only_absent_or_null_frontier() -> None:
+    assert HISTORICAL_SOURCE_SQL.lstrip().startswith(
+        "-- Accept the historical allocation-source shape"
+    )
+    assert "COALESCE(" in HISTORICAL_SOURCE_SQL
+    assert "'settlement_frontier'," in HISTORICAL_SOURCE_SQL
+    assert ") IS DISTINCT FROM 'null'::JSONB" in HISTORICAL_SOURCE_SQL
+    assert "pg_get_functiondef" in HISTORICAL_SOURCE_SQL
+    assert "allocation_frontier_bootstrap_historical_source_guard_missing" in (
+        HISTORICAL_SOURCE_SQL
+    )
+    assert not re.search(
+        r"^\s*(?:UPDATE|DELETE\s+FROM)\s+",
+        HISTORICAL_SOURCE_SQL,
+        re.M,
+    )
 
 
 def test_migration_persists_one_exact_measured_bootstrap() -> None:
@@ -361,6 +383,8 @@ $$;
         psql(FRONTIER_MIGRATION.read_text(encoding="utf-8"))
         psql(SQL)
         psql(SQL)
+        psql(HISTORICAL_SOURCE_SQL)
+        psql(HISTORICAL_SOURCE_SQL)
         insert("research_lab_attested_execution_receipts_v2", allocation_receipt)
         insert("research_lab_attested_execution_results_v2", allocation_row)
         insert("research_lab_attested_execution_receipts_v2", bootstrap_receipt)

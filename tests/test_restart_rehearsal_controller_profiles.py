@@ -106,6 +106,31 @@ def test_time_budget_is_not_swallowed_as_an_independent_stage_failure() -> None:
     assert stages == []
 
 
+def test_workflow_preserves_distinct_n_minus_one_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = _load_controller()
+    commands: list[list[str]] = []
+    from_sha = "a" * 40
+    candidate_sha = "b" * 40
+    monkeypatch.setattr(controller, "_run", lambda command: commands.append(command))
+
+    controller._run_workflow(
+        "rehearsal-image",
+        source_root=tmp_path / "source",
+        evidence_root=tmp_path / "evidence",
+        from_sha=from_sha,
+        candidate_sha=candidate_sha,
+        profile="prepush",
+        docker_platform="linux/arm64",
+    )
+
+    assert len(commands) == 1
+    assert f"REHEARSAL_FROM_SHA={from_sha}" in commands[0]
+    assert f"REHEARSAL_CANDIDATE_SHA={candidate_sha}" in commands[0]
+
+
 def test_instruction_files_define_fast_default_and_match() -> None:
     agents = (ROOT / "AGENTS.md").read_bytes()
     claude = (ROOT / "CLAUDE.md").read_bytes()

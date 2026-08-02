@@ -3,6 +3,8 @@ patch when the contract crosses modules; the validator enforces the cap."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from research_lab.code_editing import (
@@ -64,6 +66,27 @@ def test_multi_file_draft_over_cap_rejected():
 def test_cap_zero_means_unlimited():
     assert validate_code_edit_draft(_draft(FOUR_FILES)) == []
     assert validate_code_edit_draft(_draft(FOUR_FILES), max_target_files=0) == []
+
+
+@pytest.mark.parametrize(
+    "declared_paths,diff_paths",
+    [
+        (["gateway/a.py"], ["gateway/a.py", "gateway/b.py"]),
+        (["gateway/a.py", "gateway/b.py"], ["gateway/a.py"]),
+    ],
+)
+def test_declared_target_files_must_exactly_match_unified_diff(
+    declared_paths, diff_paths
+):
+    draft = replace(
+        _draft(declared_paths),
+        target_files=tuple(declared_paths),
+        unified_diff=_diff(diff_paths),
+    )
+    with pytest.raises(
+        ValueError, match="code_edit_target_files_differ_from_unified_diff"
+    ):
+        validate_code_edit_draft(draft)
 
 
 def test_single_file_cap_restores_strict_behavior():

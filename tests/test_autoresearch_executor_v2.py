@@ -25,6 +25,8 @@ from gateway.research_lab.code_build import (
     CodeEditBuildResult,
     CodeEditCandidateBuilder,
     CodeEditPatchApplyError,
+    _copy_source_tree,
+    _initialize_temporary_git_repo,
     _prepare_parent_image_workspace,
     _run_git_apply,
     _write_research_lab_build_scaffold,
@@ -37,6 +39,7 @@ from gateway.tee.autoresearch_executor_v2 import (
     HOST_APPEND_EVENT,
     HOST_EVENT_RESULT_SCHEMA_VERSION,
     HOST_GIT_TREE,
+    HOST_GIT_TREE_COMMIT_SCHEMA_VERSION,
     HOST_GIT_TREE_RESULT_SCHEMA_VERSION,
     OPENROUTER_GUARD_REQUEST_SCHEMA_VERSION,
     OP_REPAIR_STALE_PARENT,
@@ -953,7 +956,9 @@ def test_host_git_tree_operation_commitment_is_strictly_validated():
             return kwargs["response_validator"](response)
 
     result = _HostGitTreeRepository(
-        Context(), tree_id=tree_id
+        Context(),
+        tree_id=tree_id,
+        child_source_verifier=lambda **_kwargs: None,
     ).operation_settlement_commitment()
 
     assert observed["operation"] == HOST_GIT_TREE
@@ -964,6 +969,138 @@ def test_host_git_tree_operation_commitment_is_strictly_validated():
     assert result["operation_count"] == 3
     assert result["settled_cost_microusd"] == 12_345
     assert result["provider_call_count"] == 2
+
+
+def _host_git_tree_commit_context(*, slot_index_value=0):
+    class Context:
+        @staticmethod
+        def execute_host_operation(**kwargs):
+            payload = kwargs["payload"]
+            draft = payload["draft"]
+            incremental_patch = str(draft["unified_diff"])
+            response = {
+                "schema_version": HOST_GIT_TREE_RESULT_SCHEMA_VERSION,
+                "action": "commit_child",
+                "state_hash": kwargs["expected_state_hash"],
+                "result": {
+                    "schema_version": HOST_GIT_TREE_COMMIT_SCHEMA_VERSION,
+                    "tree_id": payload["tree_id"],
+                    "node_id": payload["slot"]["node_id"],
+                    "parent_node_id": payload["slot"]["parent_node_id"],
+                    "root_branch_id": payload["slot"]["root_branch_id"],
+                    "depth": payload["slot"]["depth"],
+                    "slot_index": slot_index_value,
+                    "git_commit": "1" * 64,
+                    "parent_git_commit": "2" * 64,
+                    "source_tree_hash": "sha256:" + "3" * 64,
+                    "draft_patch_hash": sha256_json(
+                        {"unified_diff": draft["unified_diff"]}
+                    ),
+                    "incremental_patch_hash": sha256_json(
+                        {"unified_diff": incremental_patch}
+                    ),
+                    "cumulative_patch_hash": sha256_json(
+                        {"unified_diff": incremental_patch}
+                    ),
+                    "changed_files": list(draft["target_files"]),
+                    "incremental_patch": incremental_patch,
+                    "cumulative_patch": incremental_patch,
+                },
+            }
+            return kwargs["response_validator"](response)
+
+    return Context()
+
+
+def test_host_git_tree_commit_accepts_valid_zero_slot_index():
+    tree_id = "sha256:" + "4" * 64
+    draft = CodeEditDraft(
+        failure_mode="bounded recall",
+        mechanism="increase runtime value",
+        expected_improvement="recover valid companies",
+        risk="bounded change",
+        lane="query_construction",
+        target_files=("sourcing_model/runtime.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
+            "--- a/sourcing_model/runtime.py\n"
+            "+++ b/sourcing_model/runtime.py\n"
+            "@@ -1 +1 @@\n"
+            "-VALUE = 1\n"
+            "+VALUE = 2\n"
+        ),
+        redacted_summary="increase one bounded runtime value",
+        test_plan="run private tests",
+        rollback_plan="revert the patch",
+    )
+    slot = derive_child_slot(
+        tree_id=tree_id,
+        parent_node_id="root",
+        root_branch_id="",
+        depth=1,
+        slot_index=0,
+    )
+
+    commit = _HostGitTreeRepository(
+        _host_git_tree_commit_context(),
+        tree_id=tree_id,
+        child_source_verifier=lambda **_kwargs: None,
+    ).commit_child(
+        slot=slot,
+        draft=draft,
+        expected_parent_source_tree_hash="sha256:" + "5" * 64,
+    )
+
+    assert commit["slot_index"] == 0
+    assert commit["node_id"] == slot.node_id
+
+
+@pytest.mark.parametrize("invalid_slot_index", [False, "0", None, -1])
+def test_host_git_tree_commit_rejects_noncanonical_slot_index(
+    invalid_slot_index,
+):
+    tree_id = "sha256:" + "4" * 64
+    draft = CodeEditDraft(
+        failure_mode="bounded recall",
+        mechanism="increase runtime value",
+        expected_improvement="recover valid companies",
+        risk="bounded change",
+        lane="query_construction",
+        target_files=("sourcing_model/runtime.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
+            "--- a/sourcing_model/runtime.py\n"
+            "+++ b/sourcing_model/runtime.py\n"
+            "@@ -1 +1 @@\n"
+            "-VALUE = 1\n"
+            "+VALUE = 2\n"
+        ),
+        redacted_summary="increase one bounded runtime value",
+        test_plan="run private tests",
+        rollback_plan="revert the patch",
+    )
+    slot = derive_child_slot(
+        tree_id=tree_id,
+        parent_node_id="root",
+        root_branch_id="",
+        depth=1,
+        slot_index=0,
+    )
+    with pytest.raises(
+        AutoresearchExecutorV2Error,
+        match="Git-tree commit result topology differs",
+    ):
+        _HostGitTreeRepository(
+            _host_git_tree_commit_context(
+                slot_index_value=invalid_slot_index
+            ),
+            tree_id=tree_id,
+            child_source_verifier=lambda **_kwargs: None,
+        ).commit_child(
+            slot=slot,
+            draft=draft,
+            expected_parent_source_tree_hash="sha256:" + "5" * 64,
+        )
 
 
 def test_v2_builder_restores_git_tree_parent_from_cumulative_patch(tmp_path):
@@ -1087,6 +1224,37 @@ def test_v2_builder_restores_git_tree_parent_from_cumulative_patch(tmp_path):
             )
         )
 
+    structural_diff = draft.unified_diff.replace(
+        "--- a/sourcing_model/runtime.py\n",
+        "old mode 100644\nnew mode 100755\n"
+        "--- a/sourcing_model/runtime.py\n",
+    )
+    structural_hash = sha256_json({"unified_diff": structural_diff})
+    structural_candidate = replace(
+        candidate,
+        draft=replace(draft, unified_diff=structural_diff),
+        build=replace(candidate.build, source_diff_hash=structural_hash),
+        tree_incremental_source_diff_hash=structural_hash,
+        tree_cumulative_source_diff_hash=structural_hash,
+    )
+    structural_builder = _HostCandidateBuilder(
+        config=config,
+        source_context=_source_context(
+            source_root=source_root,
+            artifact=root_artifact,
+            config=config,
+        ),
+        source_bundle_hash=source_bundle["archive_sha256"],
+        execution_context=object(),
+    )
+    with pytest.raises(
+        AutoresearchExecutorV2Error,
+        match="not a content-only Git patch",
+    ):
+        structural_builder.restore_rehydrated_candidate_source_context(
+            candidate=structural_candidate
+        )
+
 
 def test_signed_source_normalization_matches_tree_and_build_hashes(tmp_path):
     source_bundle, root_artifact_doc = _source_and_artifact(tmp_path)
@@ -1176,6 +1344,363 @@ def test_signed_source_normalization_matches_tree_and_build_hashes(tmp_path):
 
     assert observed_parent_hash == host_context.source_tree_hash
     assert compute_private_source_tree_hash(build_root) == tree_commit.source_tree_hash
+
+
+@pytest.mark.parametrize(
+    "structural_metadata",
+    (
+        "old mode 100644\nnew mode 100755\n",
+        (
+            "rename from sourcing_model/runtime.py\n"
+            "rename to sourcing_model/runtime.py\n"
+        ),
+        "GIT binary patch\n",
+    ),
+)
+def test_measured_host_rejects_structural_git_patch_metadata(
+    tmp_path,
+    structural_metadata,
+):
+    source_bundle, root_artifact_doc = _source_and_artifact(tmp_path)
+    root_artifact = PrivateModelArtifactManifest.from_mapping(root_artifact_doc)
+    config = _config()
+    source_context = CodeEditCandidateBuilder(
+        config
+    ).prepare_attested_source_context(
+        parent_artifact=root_artifact,
+        source_bundle=source_bundle,
+        workspace_dir=tmp_path / "host-context",
+    )
+    patch = (
+        "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
+        f"{structural_metadata}"
+        "--- a/sourcing_model/runtime.py\n"
+        "+++ b/sourcing_model/runtime.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 2\n"
+    )
+
+    with pytest.raises(
+        AutoresearchExecutorV2Error,
+        match="is not a content-only Git patch",
+    ):
+        _HostCandidateBuilder._apply_measured_patch(
+            context=source_context,
+            unified_diff=patch,
+            label="Git-tree canonical incremental patch",
+        )
+
+
+def test_host_git_tree_rejects_semantically_substituted_cumulative_patch(
+    tmp_path,
+):
+    source_bundle, root_artifact_doc = _source_and_artifact(tmp_path)
+    root_artifact = PrivateModelArtifactManifest.from_mapping(root_artifact_doc)
+    config = _config()
+    local_builder = CodeEditCandidateBuilder(config)
+    host_context = local_builder.prepare_attested_source_context(
+        parent_artifact=root_artifact,
+        source_bundle=source_bundle,
+        workspace_dir=tmp_path / "host-context",
+    )
+    measured_builder = _HostCandidateBuilder(
+        config=config,
+        source_context=host_context,
+        source_bundle_hash=source_bundle["archive_sha256"],
+        execution_context=object(),
+        root_artifact_hash=root_artifact.model_artifact_hash,
+    )
+    tree_id = derive_tree_id(
+        run_id="run-measured-git-substitution-v2",
+        root_artifact_hash=root_artifact.model_artifact_hash,
+        policy=TreePolicy(mode="active"),
+    )
+    repository = GitTreeRepository(
+        workspace=tmp_path / "tree-substitution",
+        tree_id=tree_id,
+    )
+    repository.initialize(
+        source_root=host_context.source_root,
+        root_artifact_hash=root_artifact.model_artifact_hash,
+        policy_hash=TreePolicy(mode="active").policy_hash,
+    )
+    draft = CodeEditDraft(
+        failure_mode="bounded recall",
+        mechanism="increase the source runtime value",
+        expected_improvement="recover more valid companies",
+        risk="bounded runtime increase",
+        lane="query_construction",
+        target_files=("sourcing_model/runtime.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
+            "--- a/sourcing_model/runtime.py\n"
+            "+++ b/sourcing_model/runtime.py\n"
+            "@@ -1 +1 @@\n"
+            "-VALUE = 1\n"
+            "+VALUE = 2\n"
+        ),
+        redacted_summary="increase a bounded sourcing runtime value",
+        test_plan="run private tests",
+        rollback_plan="revert the patch",
+    )
+    slot = derive_child_slot(
+        tree_id=tree_id,
+        parent_node_id="root",
+        root_branch_id="",
+        depth=1,
+        slot_index=0,
+    )
+    genuine = repository.commit_child(
+        slot=slot,
+        draft=draft,
+        expected_parent_source_tree_hash=host_context.source_tree_hash,
+    )
+    measured_builder.verify_git_tree_child_semantics(
+        draft=draft,
+        canonical_incremental_patch=genuine.incremental_patch,
+        cumulative_patch=genuine.cumulative_patch,
+        changed_files=genuine.changed_files,
+        expected_parent_source_tree_hash=host_context.source_tree_hash,
+        expected_child_source_tree_hash=genuine.source_tree_hash,
+    )
+    substituted_cumulative = (
+        "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
+        "--- a/sourcing_model/runtime.py\n"
+        "+++ b/sourcing_model/runtime.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 999\n"
+    )
+
+    class Context:
+        @staticmethod
+        def execute_host_operation(**kwargs):
+            result = {
+                **genuine.to_dict(),
+                "incremental_patch": genuine.incremental_patch,
+                "cumulative_patch": substituted_cumulative,
+                "cumulative_patch_hash": sha256_json(
+                    {"unified_diff": substituted_cumulative}
+                ),
+            }
+            return kwargs["response_validator"](
+                {
+                    "schema_version": HOST_GIT_TREE_RESULT_SCHEMA_VERSION,
+                    "action": "commit_child",
+                    "state_hash": kwargs["expected_state_hash"],
+                    "result": result,
+                }
+            )
+
+    with pytest.raises(
+        AutoresearchExecutorV2Error,
+        match="Git-tree child patches are not measured-source equivalent",
+    ):
+        _HostGitTreeRepository(
+            Context(),
+            tree_id=tree_id,
+            child_source_verifier=(
+                measured_builder.verify_git_tree_child_semantics
+            ),
+        ).commit_child(
+            slot=slot,
+            draft=draft,
+            expected_parent_source_tree_hash=host_context.source_tree_hash,
+        )
+
+
+def test_measured_host_rejects_incremental_patch_with_undeclared_extra_path(
+    tmp_path,
+):
+    source_bundle, root_artifact_doc = _source_and_artifact(tmp_path)
+    root_artifact = PrivateModelArtifactManifest.from_mapping(root_artifact_doc)
+    config = _config()
+    local_builder = CodeEditCandidateBuilder(config)
+    host_context = local_builder.prepare_attested_source_context(
+        parent_artifact=root_artifact,
+        source_bundle=source_bundle,
+        workspace_dir=tmp_path / "host-context",
+    )
+    measured_builder = _HostCandidateBuilder(
+        config=config,
+        source_context=host_context,
+        source_bundle_hash=source_bundle["archive_sha256"],
+        execution_context=object(),
+        root_artifact_hash=root_artifact.model_artifact_hash,
+    )
+    draft = CodeEditDraft(
+        failure_mode="bounded recall",
+        mechanism="increase the source runtime value",
+        expected_improvement="recover more valid companies",
+        risk="bounded runtime increase",
+        lane="query_construction",
+        target_files=("sourcing_model/runtime.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
+            "--- a/sourcing_model/runtime.py\n"
+            "+++ b/sourcing_model/runtime.py\n"
+            "@@ -1 +1 @@\n"
+            "-VALUE = 1\n"
+            "+VALUE = 2\n"
+        ),
+        redacted_summary="increase a bounded sourcing runtime value",
+        test_plan="run private tests",
+        rollback_plan="revert the patch",
+    )
+    canonical_with_extra_path = draft.unified_diff + (
+        "diff --git a/gateway/research_lab/runtime.py "
+        "b/gateway/research_lab/runtime.py\n"
+        "--- a/gateway/research_lab/runtime.py\n"
+        "+++ b/gateway/research_lab/runtime.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 2\n"
+    )
+
+    with pytest.raises(
+        AutoresearchExecutorV2Error,
+        match="Git-tree incremental changed-file set differs",
+    ):
+        measured_builder.verify_git_tree_child_semantics(
+            draft=draft,
+            canonical_incremental_patch=canonical_with_extra_path,
+            cumulative_patch=canonical_with_extra_path,
+            changed_files=draft.target_files,
+            expected_parent_source_tree_hash=host_context.source_tree_hash,
+            expected_child_source_tree_hash="sha256:" + "f" * 64,
+        )
+
+
+def test_host_git_tree_accepts_depth_two_incremental_and_cumulative_paths(
+    tmp_path,
+):
+    source_bundle, root_artifact_doc = _source_and_artifact(tmp_path)
+    root_artifact = PrivateModelArtifactManifest.from_mapping(root_artifact_doc)
+    config = _config()
+    local_builder = CodeEditCandidateBuilder(config)
+    root_context = local_builder.prepare_attested_source_context(
+        parent_artifact=root_artifact,
+        source_bundle=source_bundle,
+        workspace_dir=tmp_path / "root-context",
+    )
+    measured_builder = _HostCandidateBuilder(
+        config=config,
+        source_context=root_context,
+        source_bundle_hash=source_bundle["archive_sha256"],
+        execution_context=object(),
+        root_artifact_hash=root_artifact.model_artifact_hash,
+    )
+    tree_id = derive_tree_id(
+        run_id="run-measured-depth-two-v2",
+        root_artifact_hash=root_artifact.model_artifact_hash,
+        policy=TreePolicy(mode="active"),
+    )
+    repository = GitTreeRepository(
+        workspace=tmp_path / "tree-depth-two",
+        tree_id=tree_id,
+    )
+    repository.initialize(
+        source_root=root_context.source_root,
+        root_artifact_hash=root_artifact.model_artifact_hash,
+        policy_hash=TreePolicy(mode="active").policy_hash,
+    )
+
+    first_draft = CodeEditDraft(
+        failure_mode="bounded recall",
+        mechanism="increase the source runtime value",
+        expected_improvement="recover more valid companies",
+        risk="bounded runtime increase",
+        lane="query_construction",
+        target_files=("sourcing_model/runtime.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
+            "--- a/sourcing_model/runtime.py\n"
+            "+++ b/sourcing_model/runtime.py\n"
+            "@@ -1 +1 @@\n"
+            "-VALUE = 1\n"
+            "+VALUE = 2\n"
+        ),
+        redacted_summary="increase a bounded sourcing runtime value",
+        test_plan="run private tests",
+        rollback_plan="revert the patch",
+    )
+    first_slot = derive_child_slot(
+        tree_id=tree_id,
+        parent_node_id="root",
+        root_branch_id="",
+        depth=1,
+        slot_index=0,
+    )
+    first = repository.commit_child(
+        slot=first_slot,
+        draft=first_draft,
+        expected_parent_source_tree_hash=root_context.source_tree_hash,
+    )
+
+    first_source = tmp_path / "first-child-source"
+    _copy_source_tree(root_context.source_root, first_source)
+    _initialize_temporary_git_repo(first_source)
+    first_diff = tmp_path / "first-child.diff"
+    first_diff.write_text(first_draft.unified_diff, encoding="utf-8")
+    _run_git_apply(first_diff, cwd=first_source, timeout_seconds=30, check=True)
+    _run_git_apply(first_diff, cwd=first_source, timeout_seconds=30, check=False)
+    first_artifact = replace(
+        root_artifact,
+        model_artifact_hash=first.source_tree_hash,
+    )
+    first_context = _source_context(
+        source_root=first_source,
+        artifact=first_artifact,
+        config=config,
+    )
+    assert first_context.source_tree_hash == first.source_tree_hash
+    measured_builder._source_contexts[first.source_tree_hash] = first_context
+
+    second_draft = CodeEditDraft(
+        failure_mode="bounded routing",
+        mechanism="increase an independent gateway runtime value",
+        expected_improvement="improve source routing",
+        risk="bounded runtime increase",
+        lane="source_routing",
+        target_files=("gateway/research_lab/runtime.py",),
+        unified_diff=(
+            "diff --git a/gateway/research_lab/runtime.py "
+            "b/gateway/research_lab/runtime.py\n"
+            "--- a/gateway/research_lab/runtime.py\n"
+            "+++ b/gateway/research_lab/runtime.py\n"
+            "@@ -1 +1 @@\n"
+            "-VALUE = 1\n"
+            "+VALUE = 3\n"
+        ),
+        redacted_summary="increase an independent gateway runtime value",
+        test_plan="run private tests",
+        rollback_plan="revert the patch",
+    )
+    second_slot = derive_child_slot(
+        tree_id=tree_id,
+        parent_node_id=first_slot.node_id,
+        root_branch_id=first_slot.root_branch_id,
+        depth=2,
+        slot_index=0,
+    )
+    second = repository.commit_child(
+        slot=second_slot,
+        draft=second_draft,
+        expected_parent_source_tree_hash=first.source_tree_hash,
+    )
+
+    assert second.changed_files == ("gateway/research_lab/runtime.py",)
+    assert "sourcing_model/runtime.py" in second.cumulative_patch
+    assert "gateway/research_lab/runtime.py" in second.cumulative_patch
+    measured_builder.verify_git_tree_child_semantics(
+        draft=second_draft,
+        canonical_incremental_patch=second.incremental_patch,
+        cumulative_patch=second.cumulative_patch,
+        changed_files=second.changed_files,
+        expected_parent_source_tree_hash=first.source_tree_hash,
+        expected_child_source_tree_hash=second.source_tree_hash,
+    )
 
 
 def test_autoresearch_executor_rejects_tampered_provider_catalog(tmp_path):

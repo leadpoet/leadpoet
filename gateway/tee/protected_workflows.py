@@ -134,6 +134,8 @@ PROTECTED_SYMBOLS = {
         "parse_code_edit_source_inspection_response",
         "parse_code_edit_response",
         "parse_code_edit_repair_response",
+        "_GIT_STRUCTURAL_DIFF_PREFIXES",
+        "git_diff_structural_metadata",
         "validate_code_edit_draft",
         "code_edit_candidate_manifest",
     ),
@@ -170,6 +172,7 @@ PROTECTED_SYMBOLS = {
         "DEFAULT_PRIVATE_BUILD_CMD",
     ),
     "gateway/research_lab/code_build.py": (
+        "validate_private_code_edit_diff_artifact",
         "_verify_built_candidate_artifact",
         "CodeEditCandidateBuilder._build_under_deadline",
     ),
@@ -328,6 +331,8 @@ PROTECTED_SYMBOLS = {
         "maybe_refresh_dev_snapshot",
     ),
     "gateway/tee/autoresearch_executor_v2.py": (
+        "_HostGitTreeRepository",
+        "_HostCandidateBuilder",
         "AutoresearchExecutorV2",
     ),
     "research_lab/eval/evaluator.py": (
@@ -446,7 +451,11 @@ PROTECTED_SYMBOLS = {
         "ResearchLabPromotionController.process_scored_candidate",
         "ResearchLabPromotionController._promote_built_image_candidate",
         "_load_valid_artifact",
+        "_push_candidate_source_diff_to_repo",
         "_candidate_icp_score",
+    ),
+    "gateway/research_lab/scoring_worker.py": (
+        "_load_candidate_source_diff",
     ),
     "leadpoet_canonical/weight_computation.py": (
         "weight_config_document",

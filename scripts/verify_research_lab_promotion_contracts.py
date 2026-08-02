@@ -115,22 +115,47 @@ def main() -> int:
     if not anchored_hash.startswith("sha256:") or anchored_hash.startswith("champion_reward:"):
         errors.append("champion reward anchored_hash must satisfy DB sha256 check constraint")
 
+    async def fake_compare_promotion_metric(**kwargs):
+        return {
+            "status": "matched",
+            "improvement_points": kwargs["expected_improvement_points"],
+            "event_doc": dict(kwargs["expected_event_doc"]),
+        }
+
+    async def fake_compare_promotion_gate_decision(**kwargs):
+        return {
+            "status": "matched",
+            "decision": dict(kwargs["expected_decision"]),
+        }
+
+    original_metric_authority = promotion_module.compare_promotion_metric
+    original_gate_authority = promotion_module.compare_promotion_gate_decision
     try:
-        asyncio.run(_test_stale_scored_candidate_requires_rebase())
-    except Exception as exc:
-        errors.append(f"stale scored candidate promotion contract failed: {exc}")
-    try:
-        asyncio.run(_test_private_source_reconciler_skips_recovered_stale_parent())
-    except Exception as exc:
-        errors.append(f"private-source recovered stale-parent idempotency failed: {exc}")
-    try:
-        asyncio.run(_test_disabled_auto_promotion_writes_terminal_decision())
-    except Exception as exc:
-        errors.append(f"disabled auto-promotion decision contract failed: {exc}")
-    try:
-        asyncio.run(_test_daily_baseline_delta_overrides_legacy_mean_delta())
-    except Exception as exc:
-        errors.append(f"daily-baseline promotion gate contract failed: {exc}")
+        # The verifier keeps the exact production controller and replaces only
+        # the enclave comparison boundary with a strict deterministic match.
+        promotion_module.compare_promotion_metric = fake_compare_promotion_metric
+        promotion_module.compare_promotion_gate_decision = (
+            fake_compare_promotion_gate_decision
+        )
+        try:
+            asyncio.run(_test_stale_scored_candidate_requires_rebase())
+        except Exception as exc:
+            errors.append(f"stale scored candidate promotion contract failed: {exc}")
+        try:
+            asyncio.run(_test_private_source_reconciler_skips_recovered_stale_parent())
+        except Exception as exc:
+            errors.append(f"private-source recovered stale-parent idempotency failed: {exc}")
+        try:
+            asyncio.run(_test_disabled_auto_promotion_writes_terminal_decision())
+        except Exception as exc:
+            errors.append(f"disabled auto-promotion decision contract failed: {exc}")
+        try:
+            asyncio.run(_test_daily_baseline_delta_overrides_legacy_mean_delta())
+        except Exception as exc:
+            errors.append(f"daily-baseline promotion gate contract failed: {exc}")
+    finally:
+        promotion_module.compare_promotion_metric = original_metric_authority
+        promotion_module.compare_promotion_gate_decision = original_gate_authority
     migration_56 = (ROOT / "scripts" / "56-research-lab-promotion-decision-events.sql").read_text(encoding="utf-8")
     if "stale_parent_needs_rescore" not in migration_56:
         errors.append("script 56 must preserve existing stale_parent_needs_rescore promotion_status rows")
@@ -273,11 +298,16 @@ async def _test_stale_scored_candidate_requires_rebase() -> None:
         events.append(kwargs)
         return kwargs
 
+    async def fake_candidate_already_promoted(_candidate_id):
+        return None
+
     original_load_active = promotion_module.load_active_private_model
     original_promotion_event = promotion_module.create_candidate_promotion_event
+    original_already_promoted = promotion_module.candidate_already_promoted
     try:
         promotion_module.load_active_private_model = fake_load_active_private_model
         promotion_module.create_candidate_promotion_event = fake_create_candidate_promotion_event
+        promotion_module.candidate_already_promoted = fake_candidate_already_promoted
         result = await ResearchLabPromotionController(
             ResearchLabGatewayConfig(auto_promotion_enabled=True),
             worker_ref="test-worker",
@@ -289,6 +319,7 @@ async def _test_stale_scored_candidate_requires_rebase() -> None:
     finally:
         promotion_module.load_active_private_model = original_load_active
         promotion_module.create_candidate_promotion_event = original_promotion_event
+        promotion_module.candidate_already_promoted = original_already_promoted
 
     if result.get("status") != "stale_parent_needs_rescore":
         raise AssertionError(f"expected stale_parent_needs_rescore, got {result}")
@@ -472,11 +503,16 @@ async def _test_daily_baseline_delta_overrides_legacy_mean_delta() -> None:
         events.append(kwargs)
         return kwargs
 
+    async def fake_candidate_already_promoted(_candidate_id):
+        return None
+
     original_load_active = promotion_module.load_active_private_model
     original_promotion_event = promotion_module.create_candidate_promotion_event
+    original_already_promoted = promotion_module.candidate_already_promoted
     try:
         promotion_module.load_active_private_model = fake_load_active_private_model
         promotion_module.create_candidate_promotion_event = fake_create_candidate_promotion_event
+        promotion_module.candidate_already_promoted = fake_candidate_already_promoted
         result = await ResearchLabPromotionController(
             ResearchLabGatewayConfig(auto_promotion_enabled=True),
             worker_ref="test-worker",
@@ -488,6 +524,7 @@ async def _test_daily_baseline_delta_overrides_legacy_mean_delta() -> None:
     finally:
         promotion_module.load_active_private_model = original_load_active
         promotion_module.create_candidate_promotion_event = original_promotion_event
+        promotion_module.candidate_already_promoted = original_already_promoted
 
     if result.get("status") != "rejected_below_threshold":
         raise AssertionError(f"expected daily-baseline rejection, got {result}")

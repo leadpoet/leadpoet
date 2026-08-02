@@ -16,6 +16,9 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.research_lab import scoring_worker as sw
+from gateway.research_lab.code_build import CodeEditBuildError
+from research_lab.canonical import sha256_json
+from research_lab.code_editing import validate_code_edit_draft
 from gateway.research_lab.promotion import (
     PrivateModelLineageUnavailableError,
     PromotionPausedError,
@@ -29,6 +32,303 @@ EVENT_DOC_BANNED_RE = re.compile(
     r"proxy[_-]?url|://[^/]+:[^/@]+@)",
     re.IGNORECASE,
 )
+
+
+def _candidate_source_diff_fixture():
+    unified_diff = (
+        "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
+        "--- a/sourcing_model/runtime.py\n"
+        "+++ b/sourcing_model/runtime.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 2\n"
+    )
+    payload = {
+        "schema_version": "1.0",
+        "artifact_type": "research_lab_code_edit_source_diff",
+        "run_id": "run-source-diff-rebase",
+        "candidate_index": 0,
+        "parent_artifact_hash": "sha256:" + "1" * 64,
+        "parent_manifest_hash": "sha256:" + "2" * 64,
+        "source_diff_hash": sha256_json({"unified_diff": unified_diff}),
+        "target_files": ["sourcing_model/runtime.py"],
+        "unified_diff": unified_diff,
+        "draft_hash": "sha256:" + "3" * 64,
+    }
+    artifact = {**payload, "artifact_hash": sha256_json(payload)}
+    candidate_manifest_payload = {
+        "model_artifact_hash": "sha256:" + "4" * 64,
+        "git_commit_sha": "5" * 40,
+        "image_digest": (
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com/candidate@sha256:"
+            + "6" * 64
+        ),
+        "config_hash": "sha256:" + "7" * 64,
+        "component_registry_version": "1",
+        "scoring_adapter_version": "1",
+        "manifest_uri": "s3://fixture/candidate.json",
+        "signature_ref": "kms:fixture",
+        "build_id": "fixture-build",
+    }
+    candidate_manifest = {
+        **candidate_manifest_payload,
+        "manifest_hash": sha256_json(candidate_manifest_payload),
+    }
+    build_payload = {
+        "parent_artifact_hash": artifact["parent_artifact_hash"],
+        "parent_manifest_hash": artifact["parent_manifest_hash"],
+        "candidate_model_artifact_hash": candidate_manifest[
+            "model_artifact_hash"
+        ],
+        "candidate_model_manifest_hash": candidate_manifest["manifest_hash"],
+        "source_diff_hash": artifact["source_diff_hash"],
+        "source_diff_artifact_hash": artifact["artifact_hash"],
+        "source_diff_artifact_uri": "s3://fixture/candidates/run-source-diff-rebase/0/source_diff.json",
+        "changed_files": ["sourcing_model/runtime.py"],
+    }
+    build_doc = {
+        **build_payload,
+        "build_doc_hash": sha256_json(build_payload),
+        "conditional_validation_policy": {"mode": "on"},
+        "loop_node_id": "tree-node:" + "8" * 64,
+        "stale_parent_rebase": {"depth": 1},
+    }
+    patch_payload = {
+        "candidate_kind": "image_build",
+        "patch_type": "IMAGE_BUILD",
+        "target_component_id": "private_model_source_tree",
+        "parent_artifact_hash": artifact["parent_artifact_hash"],
+        "candidate_artifact_hash": candidate_manifest["model_artifact_hash"],
+        "candidate_model_manifest_hash": candidate_manifest["manifest_hash"],
+        "patch_payload_hash": artifact["source_diff_hash"],
+        "candidate_source_diff_hash": artifact["source_diff_hash"],
+        "candidate_build_doc_hash": build_doc["build_doc_hash"],
+        "redacted_summary": "fixture",
+        "validation_result": "passed",
+        "patch_doc": {
+            "target_files": ["sourcing_model/runtime.py"],
+        },
+    }
+    patch_manifest = {
+        **patch_payload,
+        "manifest_hash": sha256_json(patch_payload),
+    }
+    candidate = {
+        "run_id": artifact["run_id"],
+        "parent_artifact_hash": artifact["parent_artifact_hash"],
+        "candidate_source_diff_hash": artifact["source_diff_hash"],
+        "candidate_build_doc": build_doc,
+        "candidate_patch_manifest": patch_manifest,
+        "candidate_patch_hash": sha256_json(patch_manifest),
+        "candidate_model_manifest_doc": candidate_manifest,
+    }
+    return candidate, artifact
+
+
+def test_stale_parent_rebase_loads_only_fully_committed_source_diff(monkeypatch):
+    candidate, artifact = _candidate_source_diff_fixture()
+    monkeypatch.setattr(sw, "_load_private_json_artifact", lambda _uri: artifact)
+    assert sw._load_candidate_source_diff(candidate) == artifact["unified_diff"]
+
+    tampered = {**artifact, "run_id": "other-run"}
+    tampered_payload = {
+        key: value for key, value in tampered.items() if key != "artifact_hash"
+    }
+    tampered["artifact_hash"] = sha256_json(tampered_payload)
+    monkeypatch.setattr(sw, "_load_private_json_artifact", lambda _uri: tampered)
+    with pytest.raises(CodeEditBuildError, match="run identity differs"):
+        sw._load_candidate_source_diff(candidate)
+
+
+def test_stale_parent_rebase_rejects_hash_consistent_mode_change(monkeypatch):
+    candidate, artifact = _candidate_source_diff_fixture()
+    structural_diff = artifact["unified_diff"].replace(
+        "--- a/sourcing_model/runtime.py\n",
+        "old mode 100644\nnew mode 100755\n"
+        "--- a/sourcing_model/runtime.py\n",
+    )
+    source_diff_hash = sha256_json({"unified_diff": structural_diff})
+    artifact_payload = {
+        **{
+            key: value
+            for key, value in artifact.items()
+            if key != "artifact_hash"
+        },
+        "unified_diff": structural_diff,
+        "source_diff_hash": source_diff_hash,
+    }
+    artifact = {
+        **artifact_payload,
+        "artifact_hash": sha256_json(artifact_payload),
+    }
+    old_build = candidate["candidate_build_doc"]
+    build_payload = {
+        key: value
+        for key, value in old_build.items()
+        if key
+        not in {
+            "build_doc_hash",
+            "conditional_validation_policy",
+            "loop_node_id",
+            "stale_parent_rebase",
+        }
+    }
+    build_payload.update(
+        {
+            "source_diff_hash": source_diff_hash,
+            "source_diff_artifact_hash": artifact["artifact_hash"],
+        }
+    )
+    build_doc = {
+        **build_payload,
+        "build_doc_hash": sha256_json(build_payload),
+        "conditional_validation_policy": {"mode": "on"},
+        "loop_node_id": "tree-node:" + "8" * 64,
+        "stale_parent_rebase": {"depth": 1},
+    }
+    old_patch = candidate["candidate_patch_manifest"]
+    patch_payload = {
+        **{
+            key: value
+            for key, value in old_patch.items()
+            if key != "manifest_hash"
+        },
+        "patch_payload_hash": source_diff_hash,
+        "candidate_source_diff_hash": source_diff_hash,
+        "candidate_build_doc_hash": build_doc["build_doc_hash"],
+    }
+    patch_manifest = {
+        **patch_payload,
+        "manifest_hash": sha256_json(patch_payload),
+    }
+    candidate.update(
+        {
+            "candidate_source_diff_hash": source_diff_hash,
+            "candidate_build_doc": build_doc,
+            "candidate_patch_manifest": patch_manifest,
+            "candidate_patch_hash": sha256_json(patch_manifest),
+        }
+    )
+    monkeypatch.setattr(sw, "_load_private_json_artifact", lambda _uri: artifact)
+
+    with pytest.raises(CodeEditBuildError, match="not a content-only Git patch"):
+        sw._load_candidate_source_diff(candidate)
+
+
+def test_stale_parent_rebase_normalizes_historical_depth_two_targets(monkeypatch):
+    candidate, artifact = _candidate_source_diff_fixture()
+    child_diff = (
+        "diff --git a/sourcing_model/ranking.py b/sourcing_model/ranking.py\n"
+        "--- a/sourcing_model/ranking.py\n"
+        "+++ b/sourcing_model/ranking.py\n"
+        "@@ -1 +1 @@\n"
+        "-RANK = 1\n"
+        "+RANK = 2\n"
+    )
+    cumulative_diff = artifact["unified_diff"].rstrip() + "\n" + child_diff
+    cumulative_hash = sha256_json({"unified_diff": cumulative_diff})
+    incremental_hash = sha256_json({"unified_diff": child_diff})
+
+    artifact_payload = {
+        **{
+            key: value
+            for key, value in artifact.items()
+            if key != "artifact_hash"
+        },
+        "source_diff_hash": cumulative_hash,
+        # Historical depth>1 rows retained only the direct-parent target.
+        "target_files": ["sourcing_model/ranking.py"],
+        "unified_diff": cumulative_diff,
+    }
+    artifact = {
+        **artifact_payload,
+        "artifact_hash": sha256_json(artifact_payload),
+    }
+
+    old_build = candidate["candidate_build_doc"]
+    child_artifact_hash = candidate["candidate_model_manifest_doc"][
+        "model_artifact_hash"
+    ]
+    composition = {
+        "schema_version": "research_lab.git_tree_composition.v1",
+        "incremental_source_diff_hash": incremental_hash,
+        "cumulative_source_diff_hash": cumulative_hash,
+        "cumulative_changed_files": ["sourcing_model/ranking.py"],
+        "child_source_tree_hash": child_artifact_hash,
+    }
+    lineage = {
+        "schema_version": "research_lab.git_tree_lineage.v1",
+        "depth": 2,
+        "root_artifact_hash": artifact["parent_artifact_hash"],
+        "incremental_source_diff_hash": incremental_hash,
+        "cumulative_source_diff_hash": cumulative_hash,
+        "composition": composition,
+    }
+    build_payload = {
+        key: value
+        for key, value in old_build.items()
+        if key
+        not in {
+            "build_doc_hash",
+            "conditional_validation_policy",
+            "loop_node_id",
+            "stale_parent_rebase",
+        }
+    }
+    build_payload.update(
+        {
+            "source_diff_hash": cumulative_hash,
+            "source_diff_artifact_hash": artifact["artifact_hash"],
+            "changed_files": [
+                "sourcing_model/ranking.py",
+                "sourcing_model/runtime.py",
+            ],
+            "git_tree": lineage,
+        }
+    )
+    build_doc = {
+        **build_payload,
+        "build_doc_hash": sha256_json(build_payload),
+        "conditional_validation_policy": {"mode": "on"},
+        "loop_node_id": "tree-node:" + "8" * 64,
+        "stale_parent_rebase": {"depth": 1},
+    }
+
+    old_patch = candidate["candidate_patch_manifest"]
+    patch_payload = {
+        **{
+            key: value
+            for key, value in old_patch.items()
+            if key != "manifest_hash"
+        },
+        "patch_payload_hash": cumulative_hash,
+        "candidate_source_diff_hash": cumulative_hash,
+        "candidate_build_doc_hash": build_doc["build_doc_hash"],
+        "patch_doc": {"target_files": ["sourcing_model/ranking.py"]},
+    }
+    patch_manifest = {
+        **patch_payload,
+        "manifest_hash": sha256_json(patch_payload),
+    }
+    candidate.update(
+        {
+            "candidate_source_diff_hash": cumulative_hash,
+            "candidate_build_doc": build_doc,
+            "candidate_patch_manifest": patch_manifest,
+            "candidate_patch_hash": sha256_json(patch_manifest),
+        }
+    )
+    monkeypatch.setattr(sw, "_load_private_json_artifact", lambda _uri: artifact)
+
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    draft = worker._draft_from_stale_candidate(candidate)
+
+    assert draft.target_files == (
+        "sourcing_model/ranking.py",
+        "sourcing_model/runtime.py",
+    )
+    assert draft.unified_diff == cumulative_diff
+    assert validate_code_edit_draft(draft) == []
 
 
 def test_measured_private_scoring_env_never_contains_host_provider_credentials(

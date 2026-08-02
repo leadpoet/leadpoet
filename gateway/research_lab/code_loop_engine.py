@@ -74,6 +74,7 @@ from research_lab.code_editing import (
     build_loop_direction_reference_repair_messages,
     build_plan_alignment_judge_messages,
     code_edit_plan_alignment_errors,
+    extract_unified_diff_paths,
     loop_direction_plan_contract_errors,
     loop_direction_plan_from_mapping,
     parse_code_edit_no_viable_patch_response,
@@ -5856,6 +5857,19 @@ class CodeEditLoopEngine:
                         raise CodeEditPatchApplyError(
                             "Git-tree commit returned incomplete canonical patches"
                         )
+                    incremental_changed_files = tuple(
+                        sorted(extract_unified_diff_paths(canonical_incremental_patch))
+                    )
+                    cumulative_changed_files = tuple(
+                        sorted(extract_unified_diff_paths(canonical_cumulative_patch))
+                    )
+                    if (
+                        incremental_changed_files != tuple(sorted(changed_files))
+                        or not cumulative_changed_files
+                    ):
+                        raise CodeEditPatchApplyError(
+                            "Git-tree canonical changed-file commitments differ"
+                        )
                     if str(commit_doc.get("draft_patch_hash") or "") != drafted_incremental_hash:
                         raise CodeEditPatchApplyError(
                             "Git-tree draft commitment differs from generated child"
@@ -5865,7 +5879,7 @@ class CodeEditLoopEngine:
                     )
                     submission_draft = replace(
                         incremental_draft,
-                        target_files=changed_files,
+                        target_files=cumulative_changed_files,
                         unified_diff=canonical_cumulative_patch,
                     )
                     cumulative_source_diff_hash = sha256_json(
@@ -5917,7 +5931,12 @@ class CodeEditLoopEngine:
                         "draft_patch_hash": drafted_incremental_hash,
                         "incremental_source_diff_hash": incremental_source_diff_hash,
                         "cumulative_source_diff_hash": cumulative_source_diff_hash,
-                        "cumulative_changed_files": list(changed_files),
+                        "incremental_changed_files": list(
+                            incremental_changed_files
+                        ),
+                        "cumulative_changed_files": list(
+                            cumulative_changed_files
+                        ),
                         "cumulative_apply_verified": True,
                     }
                     build_candidate_index = built_candidate_total

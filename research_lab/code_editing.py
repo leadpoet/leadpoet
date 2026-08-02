@@ -2396,8 +2396,12 @@ def validate_code_edit_draft(
         errors.append("code_edit_uses_apply_patch_format")
     if stripped_diff and not stripped_diff.startswith("diff --git "):
         errors.append("code_edit_requires_git_unified_diff")
+    if git_diff_structural_metadata(draft.unified_diff):
+        errors.append("code_edit_requires_content_only_git_patch")
     diff_paths = extract_unified_diff_paths(draft.unified_diff)
     target_paths = set(draft.target_files)
+    if diff_paths != target_paths:
+        errors.append("code_edit_target_files_differ_from_unified_diff")
     all_paths = sorted(diff_paths | target_paths)
     if not all_paths:
         errors.append("code_edit_has_no_target_paths")
@@ -2475,6 +2479,35 @@ def extract_unified_diff_paths(diff_text: str) -> set[str]:
             if normalized:
                 paths.add(normalized)
     return {path for path in paths if path}
+
+
+_GIT_STRUCTURAL_DIFF_PREFIXES = (
+    "old mode ",
+    "new mode ",
+    "new file mode ",
+    "deleted file mode ",
+    "similarity index ",
+    "dissimilarity index ",
+    "rename from ",
+    "rename to ",
+    "copy from ",
+    "copy to ",
+    "Binary files ",
+    "GIT binary patch",
+    "Subproject commit ",
+    "--- /dev/null",
+    "+++ /dev/null",
+)
+
+
+def git_diff_structural_metadata(diff_text: str) -> tuple[str, ...]:
+    """Return Git extended headers that are not committed by content hashes."""
+
+    return tuple(
+        line
+        for line in str(diff_text or "").splitlines()
+        if line.startswith(_GIT_STRUCTURAL_DIFF_PREFIXES)
+    )
 
 
 def _validate_repo_path(

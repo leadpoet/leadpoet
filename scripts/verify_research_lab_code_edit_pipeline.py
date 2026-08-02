@@ -36,7 +36,7 @@ from research_lab.eval.evaluator import evaluate_private_model_pair  # noqa: E40
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest  # noqa: E402
 from gateway.research_lab import scoring_worker as scoring_worker_module  # noqa: E402
-from gateway.research_lab.code_build import CodeEditPatchApplyError  # noqa: E402
+from gateway.research_lab import attested_v2_store as attested_v2_store_module  # noqa: E402
 from gateway.research_lab.scoring_worker import (  # noqa: E402
     ResearchLabGatewayScoringWorker,
     StaleParentDuringScoring,
@@ -60,6 +60,44 @@ def _manifest(name: str) -> PrivateModelArtifactManifest:
     }
     payload["manifest_hash"] = sha256_json(payload)
     return PrivateModelArtifactManifest.from_mapping(payload)
+
+
+def _write_source_diff_fixture(
+    *,
+    path: Path,
+    draft: CodeEditDraft,
+    parent: PrivateModelArtifactManifest,
+    run_id: str,
+    candidate_index: int,
+) -> tuple[str, dict[str, object]]:
+    """Write the same authenticated source-diff envelope as production."""
+
+    source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
+    artifact = {
+        "schema_version": "1.0",
+        "artifact_type": "research_lab_code_edit_source_diff",
+        "run_id": str(run_id),
+        "candidate_index": int(candidate_index),
+        "parent_artifact_hash": parent.model_artifact_hash,
+        "parent_manifest_hash": parent.manifest_hash,
+        "source_diff_hash": source_diff_hash,
+        "target_files": list(draft.target_files),
+        "unified_diff": draft.unified_diff,
+        "draft_hash": sha256_json(draft.to_dict()),
+    }
+    artifact["artifact_hash"] = sha256_json(artifact)
+    path.write_text(json.dumps(artifact, sort_keys=True), encoding="utf-8")
+    build_doc: dict[str, object] = {
+        "schema_version": "1.1",
+        "parent_artifact_hash": parent.model_artifact_hash,
+        "parent_manifest_hash": parent.manifest_hash,
+        "source_diff_hash": source_diff_hash,
+        "source_diff_artifact_uri": str(path),
+        "source_diff_artifact_hash": artifact["artifact_hash"],
+        "changed_files": list(draft.target_files),
+    }
+    build_doc["build_doc_hash"] = sha256_json(build_doc)
+    return source_diff_hash, build_doc
 
 
 def _valid_response() -> str:
@@ -522,24 +560,22 @@ def test_candidate_artifact_contract_requires_image_build() -> None:
 
 def test_private_source_diff_artifact_loader() -> None:
     draft = test_code_edit_parser_accepts_safe_diff()
-    source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
+    parent = _manifest("parent")
+    run_id = "11111111-1111-4111-8111-111111111111"
     with tempfile.TemporaryDirectory(prefix="research-lab-diff-loader-") as tmp:
         path = Path(tmp) / "source_diff.json"
-        path.write_text(
-            json.dumps(
-                {
-                    "schema_version": "1.0",
-                    "artifact_type": "research_lab_code_edit_source_diff",
-                    "source_diff_hash": source_diff_hash,
-                    "unified_diff": draft.unified_diff,
-                },
-                sort_keys=True,
-            ),
-            encoding="utf-8",
+        source_diff_hash, build_doc = _write_source_diff_fixture(
+            path=path,
+            draft=draft,
+            parent=parent,
+            run_id=run_id,
+            candidate_index=0,
         )
         candidate = {
+            "run_id": run_id,
+            "parent_artifact_hash": parent.model_artifact_hash,
             "candidate_source_diff_hash": source_diff_hash,
-            "candidate_build_doc": {"source_diff_artifact_uri": str(path)},
+            "candidate_build_doc": build_doc,
         }
         assert _load_candidate_source_diff(candidate) == draft.unified_diff
 
@@ -547,7 +583,7 @@ def test_private_source_diff_artifact_loader() -> None:
         try:
             _load_candidate_source_diff(candidate)
         except Exception as exc:
-            assert "hash mismatch" in str(exc)
+            assert "commitment differs" in str(exc)
         else:
             raise AssertionError("source diff artifact hash mismatch should fail")
 
@@ -562,24 +598,19 @@ async def test_stale_parent_rebase_queues_current_parent_candidate() -> None:
     old_parent = _manifest("parent")
     active_parent = _manifest("active-parent")
     candidate_manifest = _manifest("candidate")
-    source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
+    run_id = "11111111-1111-4111-8111-111111111111"
     with tempfile.TemporaryDirectory(prefix="research-lab-stale-rebase-") as tmp:
         diff_path = Path(tmp) / "source_diff.json"
-        diff_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": "1.0",
-                    "artifact_type": "research_lab_code_edit_source_diff",
-                    "source_diff_hash": source_diff_hash,
-                    "unified_diff": draft.unified_diff,
-                },
-                sort_keys=True,
-            ),
-            encoding="utf-8",
+        source_diff_hash, source_build_doc = _write_source_diff_fixture(
+            path=diff_path,
+            draft=draft,
+            parent=old_parent,
+            run_id=run_id,
+            candidate_index=0,
         )
         candidate = {
             "candidate_id": "candidate:" + "1" * 64,
-            "run_id": "11111111-1111-4111-8111-111111111111",
+            "run_id": run_id,
             "ticket_id": "22222222-2222-4222-8222-222222222222",
             "receipt_id": None,
             "miner_hotkey": "5EFakeMinerHotkey111111111111111111111111111",
@@ -587,14 +618,15 @@ async def test_stale_parent_rebase_queues_current_parent_candidate() -> None:
             "candidate_kind": "image_build",
             "parent_artifact_hash": old_parent.model_artifact_hash,
             "candidate_source_diff_hash": source_diff_hash,
-            "candidate_build_doc": {"source_diff_artifact_uri": str(diff_path)},
+            "candidate_build_doc": source_build_doc,
+            "candidate_model_manifest": candidate_manifest.to_dict(),
             "candidate_patch_manifest": code_edit_candidate_manifest(
                 draft=draft,
                 parent_artifact_hash=old_parent.model_artifact_hash,
                 candidate_artifact_hash=candidate_manifest.model_artifact_hash,
                 candidate_model_manifest_hash=candidate_manifest.manifest_hash,
                 source_diff_hash=source_diff_hash,
-                build_doc_hash=sha256_json({"build": "old"}),
+                build_doc_hash=str(source_build_doc["build_doc_hash"]),
             ),
             "hypothesis_doc": {},
             "redacted_public_summary": "Rebase miner diff onto current parent.",
@@ -663,6 +695,27 @@ async def test_stale_parent_rebase_queues_current_parent_candidate() -> None:
             captured["dispatch_events"].append(kwargs)
             return kwargs
 
+        async def fake_parent_graphs(**kwargs):
+            assert kwargs["candidate_id"] == candidate["candidate_id"]
+            return ({"root_receipt_hash": "sha256:" + "7" * 64},)
+
+        async def fake_attest_stale_parent_rebase(**kwargs):
+            assert kwargs["candidate_receipt_graph"]["root_receipt_hash"]
+            return SimpleNamespace(
+                draft=kwargs["original_draft"],
+                repair_used=False,
+                authority={
+                    "execution_receipt": {
+                        "receipt_hash": "sha256:" + "8" * 64,
+                    }
+                },
+            )
+
+        async def fake_persist_business_artifact_links(**kwargs):
+            assert kwargs["receipt_hash"] == "sha256:" + "8" * 64
+            assert len(kwargs["artifacts"]) == 3
+            return {"status": "persisted"}
+
         original_builder = scoring_worker_module.CodeEditCandidateBuilder
         original_load_active = scoring_worker_module.load_active_private_model
         original_create_candidate = scoring_worker_module.create_candidate_artifact
@@ -670,6 +723,9 @@ async def test_stale_parent_rebase_queues_current_parent_candidate() -> None:
         original_promotion_event = scoring_worker_module.create_candidate_promotion_event
         original_eval_event = scoring_worker_module.create_candidate_evaluation_event
         original_dispatch_event = scoring_worker_module.create_scoring_dispatch_event
+        original_parent_graphs = scoring_worker_module._attested_model_parent_graphs
+        original_attest_rebase = scoring_worker_module.attest_stale_parent_rebase_v2
+        original_persist_links = attested_v2_store_module.persist_business_artifact_links_v2
         try:
             scoring_worker_module.CodeEditCandidateBuilder = FakeBuilder
             scoring_worker_module.load_active_private_model = fake_load_active_private_model
@@ -678,6 +734,9 @@ async def test_stale_parent_rebase_queues_current_parent_candidate() -> None:
             scoring_worker_module.create_candidate_promotion_event = fake_promotion_event
             scoring_worker_module.create_candidate_evaluation_event = fake_eval_event
             scoring_worker_module.create_scoring_dispatch_event = fake_dispatch_event
+            scoring_worker_module._attested_model_parent_graphs = fake_parent_graphs
+            scoring_worker_module.attest_stale_parent_rebase_v2 = fake_attest_stale_parent_rebase
+            attested_v2_store_module.persist_business_artifact_links_v2 = fake_persist_business_artifact_links
 
             worker = ResearchLabGatewayScoringWorker(ResearchLabGatewayConfig(), worker_ref="test-worker")
             result = await worker._maybe_rebase_stale_candidate_before_scoring(
@@ -693,6 +752,9 @@ async def test_stale_parent_rebase_queues_current_parent_candidate() -> None:
             scoring_worker_module.create_candidate_promotion_event = original_promotion_event
             scoring_worker_module.create_candidate_evaluation_event = original_eval_event
             scoring_worker_module.create_scoring_dispatch_event = original_dispatch_event
+            scoring_worker_module._attested_model_parent_graphs = original_parent_graphs
+            scoring_worker_module.attest_stale_parent_rebase_v2 = original_attest_rebase
+            attested_v2_store_module.persist_business_artifact_links_v2 = original_persist_links
 
         assert result["status"] == "stale_parent_rebased_to_current"
         assert captured["builds"][0]["parent"] == active_parent.model_artifact_hash
@@ -709,24 +771,19 @@ async def test_stale_parent_rebase_routes_apply_failure_to_repair() -> None:
     old_parent = _manifest("parent")
     active_parent = _manifest("active-parent")
     candidate_manifest = _manifest("candidate")
-    source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
+    run_id = "11111111-1111-4111-8111-111111111111"
     with tempfile.TemporaryDirectory(prefix="research-lab-stale-repair-") as tmp:
         diff_path = Path(tmp) / "source_diff.json"
-        diff_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": "1.0",
-                    "artifact_type": "research_lab_code_edit_source_diff",
-                    "source_diff_hash": source_diff_hash,
-                    "unified_diff": draft.unified_diff,
-                },
-                sort_keys=True,
-            ),
-            encoding="utf-8",
+        source_diff_hash, source_build_doc = _write_source_diff_fixture(
+            path=diff_path,
+            draft=draft,
+            parent=old_parent,
+            run_id=run_id,
+            candidate_index=0,
         )
         candidate = {
             "candidate_id": "candidate:" + "4" * 64,
-            "run_id": "11111111-1111-4111-8111-111111111111",
+            "run_id": run_id,
             "ticket_id": "22222222-2222-4222-8222-222222222222",
             "receipt_id": None,
             "miner_hotkey": "5EFakeMinerHotkey111111111111111111111111111",
@@ -734,14 +791,15 @@ async def test_stale_parent_rebase_routes_apply_failure_to_repair() -> None:
             "candidate_kind": "image_build",
             "parent_artifact_hash": old_parent.model_artifact_hash,
             "candidate_source_diff_hash": source_diff_hash,
-            "candidate_build_doc": {"source_diff_artifact_uri": str(diff_path)},
+            "candidate_build_doc": source_build_doc,
+            "candidate_model_manifest": candidate_manifest.to_dict(),
             "candidate_patch_manifest": code_edit_candidate_manifest(
                 draft=draft,
                 parent_artifact_hash=old_parent.model_artifact_hash,
                 candidate_artifact_hash=candidate_manifest.model_artifact_hash,
                 candidate_model_manifest_hash=candidate_manifest.manifest_hash,
                 source_diff_hash=source_diff_hash,
-                build_doc_hash=sha256_json({"build": "old"}),
+                build_doc_hash=str(source_build_doc["build_doc_hash"]),
             ),
             "hypothesis_doc": {},
             "redacted_public_summary": "Repair stale miner diff onto current parent.",
@@ -776,13 +834,13 @@ async def test_stale_parent_rebase_routes_apply_failure_to_repair() -> None:
                 source_diff_hash=source_diff_hash,
             )
 
-        class FailingBuilder:
+        class MeasuredRepairBuilder:
             def __init__(self, config):
                 self.config = config
 
             def build(self, *, draft, parent_artifact, run_id, candidate_index, source_context=None):
                 captured["builds"].append({"parent": parent_artifact.model_artifact_hash})
-                raise CodeEditPatchApplyError("patch does not apply")
+                return build_result(parent_artifact)
 
         async def fake_load_active_private_model(_config, *, register_bootstrap=False):
             return SimpleNamespace(artifact=active_parent, version_row=None)
@@ -806,16 +864,32 @@ async def test_stale_parent_rebase_routes_apply_failure_to_repair() -> None:
             captured["dispatch_events"].append(kwargs)
             return kwargs
 
-        async def fake_repair(self, candidate, *, active_artifact, original_error, run_id):
+        async def fake_parent_graphs(**kwargs):
+            assert kwargs["candidate_id"] == candidate["candidate_id"]
+            return ({"root_receipt_hash": "sha256:" + "9" * 64},)
+
+        async def fake_attest_stale_parent_rebase(**kwargs):
             captured["repairs"].append(
                 {
-                    "candidate_id": candidate["candidate_id"],
-                    "active_parent": active_artifact.model_artifact_hash,
-                    "error": str(original_error),
-                    "run_id": run_id,
+                    "candidate_id": kwargs["candidate"]["candidate_id"],
+                    "active_parent": kwargs["active_artifact"].model_artifact_hash,
+                    "run_id": kwargs["candidate"]["run_id"],
                 }
             )
-            return draft, build_result(active_artifact)
+            return SimpleNamespace(
+                draft=kwargs["original_draft"],
+                repair_used=True,
+                authority={
+                    "execution_receipt": {
+                        "receipt_hash": "sha256:" + "a" * 64,
+                    }
+                },
+            )
+
+        async def fake_persist_business_artifact_links(**kwargs):
+            assert kwargs["receipt_hash"] == "sha256:" + "a" * 64
+            assert len(kwargs["artifacts"]) == 3
+            return {"status": "persisted"}
 
         original_builder = scoring_worker_module.CodeEditCandidateBuilder
         original_load_active = scoring_worker_module.load_active_private_model
@@ -824,16 +898,20 @@ async def test_stale_parent_rebase_routes_apply_failure_to_repair() -> None:
         original_promotion_event = scoring_worker_module.create_candidate_promotion_event
         original_eval_event = scoring_worker_module.create_candidate_evaluation_event
         original_dispatch_event = scoring_worker_module.create_scoring_dispatch_event
-        original_repair = ResearchLabGatewayScoringWorker._repair_and_build_stale_candidate
+        original_parent_graphs = scoring_worker_module._attested_model_parent_graphs
+        original_attest_rebase = scoring_worker_module.attest_stale_parent_rebase_v2
+        original_persist_links = attested_v2_store_module.persist_business_artifact_links_v2
         try:
-            scoring_worker_module.CodeEditCandidateBuilder = FailingBuilder
+            scoring_worker_module.CodeEditCandidateBuilder = MeasuredRepairBuilder
             scoring_worker_module.load_active_private_model = fake_load_active_private_model
             scoring_worker_module.create_candidate_artifact = fake_create_candidate_artifact
             scoring_worker_module.select_many = fake_select_many
             scoring_worker_module.create_candidate_promotion_event = fake_promotion_event
             scoring_worker_module.create_candidate_evaluation_event = fake_eval_event
             scoring_worker_module.create_scoring_dispatch_event = fake_dispatch_event
-            ResearchLabGatewayScoringWorker._repair_and_build_stale_candidate = fake_repair
+            scoring_worker_module._attested_model_parent_graphs = fake_parent_graphs
+            scoring_worker_module.attest_stale_parent_rebase_v2 = fake_attest_stale_parent_rebase
+            attested_v2_store_module.persist_business_artifact_links_v2 = fake_persist_business_artifact_links
 
             worker = ResearchLabGatewayScoringWorker(ResearchLabGatewayConfig(), worker_ref="test-worker")
             result = await worker._maybe_rebase_stale_candidate_before_scoring(
@@ -849,7 +927,9 @@ async def test_stale_parent_rebase_routes_apply_failure_to_repair() -> None:
             scoring_worker_module.create_candidate_promotion_event = original_promotion_event
             scoring_worker_module.create_candidate_evaluation_event = original_eval_event
             scoring_worker_module.create_scoring_dispatch_event = original_dispatch_event
-            ResearchLabGatewayScoringWorker._repair_and_build_stale_candidate = original_repair
+            scoring_worker_module._attested_model_parent_graphs = original_parent_graphs
+            scoring_worker_module.attest_stale_parent_rebase_v2 = original_attest_rebase
+            attested_v2_store_module.persist_business_artifact_links_v2 = original_persist_links
 
         assert result["status"] == "stale_parent_rebased_to_current"
         assert result["repair_used"] is True
@@ -1022,9 +1102,9 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
         captured["score_bundles"].append({"called": True})
         raise AssertionError("partial stale scoring must not create a score bundle")
 
-    class FakeDockerPrivateModelRunner:
-        def __init__(self, _spec):
-            self.spec = _spec
+    class FakeAttestedPrivateModelRunner:
+        def __init__(self, _spec=None, **kwargs):
+            self.spec = _spec or kwargs.get("spec")
 
         async def __call__(self, _icp, _context):
             return []
@@ -1058,6 +1138,12 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
     async def fake_find_reusable_bundle(self, **_kwargs):
         return None
 
+    async def fake_parent_graphs(**_kwargs):
+        return ({"root_receipt_hash": "sha256:" + "b" * 64},)
+
+    def fake_load_scoring_progress(*_args, **_kwargs):
+        return []
+
     original_resolve_epoch = ResearchLabGatewayScoringWorker._resolve_evaluation_epoch
     original_load_active = scoring_worker_module.load_active_private_model
     original_fetch_window = scoring_worker_module.fetch_rolling_icp_window
@@ -1066,7 +1152,7 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
     original_dispatch_event = scoring_worker_module.create_scoring_dispatch_event
     original_evaluate_pair = scoring_worker_module.evaluate_private_model_pair
     original_score_bundle = scoring_worker_module.create_score_bundle
-    original_docker_runner = scoring_worker_module.DockerPrivateModelRunner
+    original_model_runner = scoring_worker_module.AttestedPrivateModelRunnerV2
     original_rebase = ResearchLabGatewayScoringWorker._queue_stale_parent_rebase
     original_finalize = ResearchLabGatewayScoringWorker._maybe_finalize_candidate_receipt
     original_public_activity = scoring_worker_module.safe_project_public_loop_activity
@@ -1074,6 +1160,8 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
     original_holdout_gate = ResearchLabGatewayScoringWorker._candidate_private_holdout_gate
     original_daily_window_and_gate = ResearchLabGatewayScoringWorker._daily_candidate_scoring_window_and_gate
     original_find_reusable = ResearchLabGatewayScoringWorker._find_reusable_scored_bundle
+    original_parent_graphs = scoring_worker_module._attested_model_parent_graphs
+    original_load_progress = scoring_worker_module._load_scoring_progress
     try:
         ResearchLabGatewayScoringWorker._resolve_evaluation_epoch = fake_resolve_epoch
         scoring_worker_module.load_active_private_model = fake_load_active_private_model
@@ -1083,7 +1171,7 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
         scoring_worker_module.create_scoring_dispatch_event = fake_dispatch_event
         scoring_worker_module.evaluate_private_model_pair = fake_evaluate_pair
         scoring_worker_module.create_score_bundle = fake_score_bundle
-        scoring_worker_module.DockerPrivateModelRunner = FakeDockerPrivateModelRunner
+        scoring_worker_module.AttestedPrivateModelRunnerV2 = FakeAttestedPrivateModelRunner
         ResearchLabGatewayScoringWorker._queue_stale_parent_rebase = fake_rebase
         ResearchLabGatewayScoringWorker._maybe_finalize_candidate_receipt = fake_finalize
         scoring_worker_module.safe_project_public_loop_activity = fake_public_activity
@@ -1091,6 +1179,8 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
         ResearchLabGatewayScoringWorker._candidate_private_holdout_gate = fake_holdout_gate
         ResearchLabGatewayScoringWorker._daily_candidate_scoring_window_and_gate = fake_daily_window_and_gate
         ResearchLabGatewayScoringWorker._find_reusable_scored_bundle = fake_find_reusable_bundle
+        scoring_worker_module._attested_model_parent_graphs = fake_parent_graphs
+        scoring_worker_module._load_scoring_progress = fake_load_scoring_progress
 
         worker = ResearchLabGatewayScoringWorker(ResearchLabGatewayConfig(), worker_ref="test-worker")
         await worker._score_candidate(candidate)
@@ -1103,7 +1193,7 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
         scoring_worker_module.create_scoring_dispatch_event = original_dispatch_event
         scoring_worker_module.evaluate_private_model_pair = original_evaluate_pair
         scoring_worker_module.create_score_bundle = original_score_bundle
-        scoring_worker_module.DockerPrivateModelRunner = original_docker_runner
+        scoring_worker_module.AttestedPrivateModelRunnerV2 = original_model_runner
         ResearchLabGatewayScoringWorker._queue_stale_parent_rebase = original_rebase
         ResearchLabGatewayScoringWorker._maybe_finalize_candidate_receipt = original_finalize
         scoring_worker_module.safe_project_public_loop_activity = original_public_activity
@@ -1111,6 +1201,8 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
         ResearchLabGatewayScoringWorker._candidate_private_holdout_gate = original_holdout_gate
         ResearchLabGatewayScoringWorker._daily_candidate_scoring_window_and_gate = original_daily_window_and_gate
         ResearchLabGatewayScoringWorker._find_reusable_scored_bundle = original_find_reusable
+        scoring_worker_module._attested_model_parent_graphs = original_parent_graphs
+        scoring_worker_module._load_scoring_progress = original_load_progress
 
     assert not captured["score_bundles"]
     assert captured["rebase_calls"][0]["stage"] == "during_scoring_parent_changed"
@@ -1158,13 +1250,22 @@ async def test_stale_parent_rebase_depth_failure_preserves_reimbursement() -> No
         captured["dispatch_events"].append(kwargs)
         return kwargs
 
+    async def fake_recovery(_self, _candidate):
+        return {"ok": True, "status": "fixture_recovery_recorded"}
+
     original_promotion_event = scoring_worker_module.create_candidate_promotion_event
     original_eval_event = scoring_worker_module.create_candidate_evaluation_event
     original_dispatch_event = scoring_worker_module.create_scoring_dispatch_event
+    original_recovery = (
+        ResearchLabGatewayScoringWorker._recover_stale_parent_rebase_failed_candidate
+    )
     try:
         scoring_worker_module.create_candidate_promotion_event = fake_promotion_event
         scoring_worker_module.create_candidate_evaluation_event = fake_eval_event
         scoring_worker_module.create_scoring_dispatch_event = fake_dispatch_event
+        ResearchLabGatewayScoringWorker._recover_stale_parent_rebase_failed_candidate = (
+            fake_recovery
+        )
 
         worker = ResearchLabGatewayScoringWorker(
             ResearchLabGatewayConfig(stale_parent_rebase_max_depth=3),
@@ -1183,6 +1284,9 @@ async def test_stale_parent_rebase_depth_failure_preserves_reimbursement() -> No
         scoring_worker_module.create_candidate_promotion_event = original_promotion_event
         scoring_worker_module.create_candidate_evaluation_event = original_eval_event
         scoring_worker_module.create_scoring_dispatch_event = original_dispatch_event
+        ResearchLabGatewayScoringWorker._recover_stale_parent_rebase_failed_candidate = (
+            original_recovery
+        )
 
     assert result["status"] == "stale_parent_rebase_failed"
     event_doc = captured["evaluation_events"][0]["event_doc"]
@@ -1222,16 +1326,24 @@ async def test_scoring_worker_terminal_decision_events() -> None:
         captured.append(kwargs)
         return kwargs
 
+    async def fake_promotion_metric(**kwargs):
+        return {
+            "status": "matched",
+            "improvement_points": kwargs["expected_improvement_points"],
+        }
+
     original_promotion_event = scoring_worker_module.create_candidate_promotion_event
+    original_promotion_metric = scoring_worker_module.compare_attested_promotion_metric
     try:
         scoring_worker_module.create_candidate_promotion_event = fake_promotion_event
+        scoring_worker_module.compare_attested_promotion_metric = fake_promotion_metric
         worker = ResearchLabGatewayScoringWorker(
             ResearchLabGatewayConfig(scoring_health_gate_enabled=True),
             worker_ref="test-worker",
         )
         gate_result = worker._scoring_health_gate_result(score_bundle)
         assert gate_result["configured_enabled"] is True
-        assert gate_result["decision"] == "observe_only"
+        assert gate_result["decision"] == "quarantine"
         assert gate_result["would_quarantine"] is True
 
         public_result = await worker._record_public_holdout_rejected(
@@ -1252,6 +1364,7 @@ async def test_scoring_worker_terminal_decision_events() -> None:
         )
     finally:
         scoring_worker_module.create_candidate_promotion_event = original_promotion_event
+        scoring_worker_module.compare_attested_promotion_metric = original_promotion_metric
 
     assert public_result["status"] == "rejected_public_holdout_gate"
     assert [event["event_type"] for event in captured] == [

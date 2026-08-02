@@ -16,7 +16,12 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.research_lab import code_build
+from gateway.research_lab.code_build import (
+    CodeEditBuildError,
+    validate_private_code_edit_diff_artifact,
+)
 from research_lab import code_editing
+from research_lab.canonical import sha256_json
 from research_lab.code_editing import CodeEditDraft
 
 
@@ -35,6 +40,340 @@ def _draft(**overrides):
     )
     payload.update(overrides)
     return CodeEditDraft(**payload)
+
+
+def _private_source_diff_fixture():
+    unified_diff = (
+        "diff --git a/sourcing_model.py b/sourcing_model.py\n"
+        "--- a/sourcing_model.py\n"
+        "+++ b/sourcing_model.py\n"
+        "@@ -1 +1 @@\n"
+        "-x = 1\n"
+        "+x = 2\n"
+    )
+    artifact_payload = {
+        "schema_version": "1.0",
+        "artifact_type": "research_lab_code_edit_source_diff",
+        "run_id": "run-bound-source-diff",
+        "candidate_index": 3,
+        "parent_artifact_hash": "sha256:" + "1" * 64,
+        "parent_manifest_hash": "sha256:" + "2" * 64,
+        "source_diff_hash": sha256_json({"unified_diff": unified_diff}),
+        "target_files": ["sourcing_model.py"],
+        "unified_diff": unified_diff,
+        "draft_hash": "sha256:" + "3" * 64,
+    }
+    artifact = {
+        **artifact_payload,
+        "artifact_hash": sha256_json(artifact_payload),
+    }
+    build_payload = {
+        "parent_artifact_hash": artifact["parent_artifact_hash"],
+        "parent_manifest_hash": artifact["parent_manifest_hash"],
+        "source_diff_hash": artifact["source_diff_hash"],
+        "source_diff_artifact_hash": artifact["artifact_hash"],
+        "changed_files": ["sourcing_model.py"],
+    }
+    build_doc = {
+        **build_payload,
+        "build_doc_hash": sha256_json(build_payload),
+    }
+    return artifact, build_doc
+
+
+def _rehash_private_source_diff_artifact(document):
+    payload = {key: value for key, value in document.items() if key != "artifact_hash"}
+    return {**payload, "artifact_hash": sha256_json(payload)}
+
+
+def _rehash_candidate_build_doc(document):
+    payload = {key: value for key, value in document.items() if key != "build_doc_hash"}
+    return {**payload, "build_doc_hash": sha256_json(payload)}
+
+
+def _candidate_patch_manifest_for(
+    artifact, build_doc, *, candidate_model_artifact_hash="sha256:" + "4" * 64,
+    candidate_model_manifest_hash="sha256:" + "5" * 64,
+):
+    payload = {
+        "candidate_kind": "image_build",
+        "patch_type": "IMAGE_BUILD",
+        "target_component_id": "private_model_source_tree",
+        "parent_artifact_hash": artifact["parent_artifact_hash"],
+        "candidate_artifact_hash": candidate_model_artifact_hash,
+        "candidate_model_manifest_hash": candidate_model_manifest_hash,
+        "patch_payload_hash": artifact["source_diff_hash"],
+        "candidate_source_diff_hash": artifact["source_diff_hash"],
+        "candidate_build_doc_hash": build_doc["build_doc_hash"],
+        "redacted_summary": "fixture",
+        "validation_result": "passed",
+        "patch_doc": {},
+    }
+    payload["patch_doc"] = {
+        "target_files": list(artifact["target_files"]),
+    }
+    return {**payload, "manifest_hash": sha256_json(payload)}
+
+
+def test_private_source_diff_artifact_binds_full_build_authority():
+    artifact, build_doc = _private_source_diff_fixture()
+
+    assert validate_private_code_edit_diff_artifact(
+        artifact,
+        candidate_build_doc=build_doc,
+        expected_source_diff_hash=artifact["source_diff_hash"],
+        expected_parent_artifact_hash=artifact["parent_artifact_hash"],
+        expected_run_id=artifact["run_id"],
+    ) == artifact
+
+
+def test_private_source_diff_rejects_hash_consistent_structural_git_metadata():
+    artifact, build_doc = _private_source_diff_fixture()
+    structural_diff = artifact["unified_diff"].replace(
+        "--- a/sourcing_model.py\n",
+        "old mode 100644\nnew mode 100755\n--- a/sourcing_model.py\n",
+    )
+    source_diff_hash = sha256_json({"unified_diff": structural_diff})
+    structural_artifact = _rehash_private_source_diff_artifact(
+        {
+            **artifact,
+            "unified_diff": structural_diff,
+            "source_diff_hash": source_diff_hash,
+        }
+    )
+    structural_build = _rehash_candidate_build_doc(
+        {
+            **build_doc,
+            "source_diff_hash": source_diff_hash,
+            "source_diff_artifact_hash": structural_artifact["artifact_hash"],
+        }
+    )
+
+    with pytest.raises(CodeEditBuildError, match="not a content-only Git patch"):
+        validate_private_code_edit_diff_artifact(
+            structural_artifact,
+            candidate_build_doc=structural_build,
+            expected_source_diff_hash=source_diff_hash,
+            expected_parent_artifact_hash=artifact["parent_artifact_hash"],
+            expected_run_id=artifact["run_id"],
+        )
+
+
+def test_private_source_diff_accepts_only_declared_unhashed_worker_annotations():
+    artifact, build_doc = _private_source_diff_fixture()
+    annotated = {
+        **build_doc,
+        "loop_direction_plan_hash": "sha256:" + "6" * 64,
+        "selected_path_id": "alternate-source-path",
+        "plan_alignment": {"passes": True},
+        "conditional_validation_policy": {"mode": "on"},
+        "loop_node_id": "tree-node:" + "7" * 64,
+        "loop_dev_score": 51.5,
+        "loop_dev_score_version": "fixture-v1",
+        "stale_parent_rebase": {"depth": 1},
+    }
+    patch_manifest = _candidate_patch_manifest_for(artifact, build_doc)
+
+    assert validate_private_code_edit_diff_artifact(
+        artifact,
+        candidate_build_doc=annotated,
+        candidate_patch_manifest=patch_manifest,
+        expected_candidate_patch_hash=sha256_json(patch_manifest),
+    ) == artifact
+
+    with pytest.raises(
+        CodeEditBuildError, match="candidate build document commitment differs"
+    ):
+        validate_private_code_edit_diff_artifact(
+            artifact,
+            candidate_build_doc={**annotated, "unreviewed_worker_annotation": True},
+            candidate_patch_manifest=patch_manifest,
+            expected_candidate_patch_hash=sha256_json(patch_manifest),
+        )
+
+
+def test_private_source_diff_rejects_build_hash_not_bound_by_patch_manifest():
+    artifact, build_doc = _private_source_diff_fixture()
+    patch_manifest = _candidate_patch_manifest_for(artifact, build_doc)
+    rewritten_build = _rehash_candidate_build_doc(
+        {**build_doc, "changed_files": ["different.py"]}
+    )
+
+    with pytest.raises(
+        CodeEditBuildError, match="differs from patch manifest"
+    ):
+        validate_private_code_edit_diff_artifact(
+            artifact,
+            candidate_build_doc=rewritten_build,
+            candidate_patch_manifest=patch_manifest,
+            expected_candidate_patch_hash=sha256_json(patch_manifest),
+        )
+
+
+def test_private_source_diff_normalizes_authenticated_legacy_depth_two_targets():
+    first_patch = (
+        "diff --git a/sourcing_model.py b/sourcing_model.py\n"
+        "--- a/sourcing_model.py\n"
+        "+++ b/sourcing_model.py\n"
+        "@@ -1 +1 @@\n"
+        "-x = 1\n"
+        "+x = 2\n"
+    )
+    incremental_patch = (
+        "diff --git a/gateway/module.py b/gateway/module.py\n"
+        "--- a/gateway/module.py\n"
+        "+++ b/gateway/module.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 2\n"
+    )
+    cumulative_patch = first_patch + incremental_patch
+    source_diff_hash = sha256_json({"unified_diff": cumulative_patch})
+    incremental_hash = sha256_json({"unified_diff": incremental_patch})
+    parent_artifact_hash = "sha256:" + "1" * 64
+    candidate_artifact_hash = "sha256:" + "4" * 64
+    artifact_payload = {
+        "schema_version": "1.0",
+        "artifact_type": "research_lab_code_edit_source_diff",
+        "run_id": "run-legacy-depth-two",
+        "candidate_index": 2,
+        "parent_artifact_hash": parent_artifact_hash,
+        "parent_manifest_hash": "sha256:" + "2" * 64,
+        "source_diff_hash": source_diff_hash,
+        "target_files": ["gateway/module.py"],
+        "unified_diff": cumulative_patch,
+        "draft_hash": "sha256:" + "3" * 64,
+    }
+    artifact = {
+        **artifact_payload,
+        "artifact_hash": sha256_json(artifact_payload),
+    }
+    composition = {
+        "schema_version": "research_lab.git_tree_composition.v1",
+        "incremental_source_diff_hash": incremental_hash,
+        "cumulative_source_diff_hash": source_diff_hash,
+        # This was populated from the incremental Git diff before the fix.
+        "cumulative_changed_files": ["gateway/module.py"],
+        "child_source_tree_hash": candidate_artifact_hash,
+    }
+    lineage = {
+        "schema_version": "research_lab.git_tree_lineage.v1",
+        "depth": 2,
+        "root_artifact_hash": parent_artifact_hash,
+        "incremental_source_diff_hash": incremental_hash,
+        "cumulative_source_diff_hash": source_diff_hash,
+        "composition": composition,
+    }
+    build_payload = {
+        "parent_artifact_hash": parent_artifact_hash,
+        "parent_manifest_hash": artifact["parent_manifest_hash"],
+        "source_diff_hash": source_diff_hash,
+        "source_diff_artifact_hash": artifact["artifact_hash"],
+        "candidate_model_artifact_hash": candidate_artifact_hash,
+        "changed_files": ["gateway/module.py", "sourcing_model.py"],
+        "git_tree": lineage,
+    }
+    build_doc = {
+        **build_payload,
+        "build_doc_hash": sha256_json(build_payload),
+    }
+    patch_manifest = _candidate_patch_manifest_for(
+        artifact,
+        build_doc,
+        candidate_model_artifact_hash=candidate_artifact_hash,
+    )
+
+    validated = validate_private_code_edit_diff_artifact(
+        artifact,
+        candidate_build_doc=build_doc,
+        candidate_patch_manifest=patch_manifest,
+        expected_candidate_patch_hash=sha256_json(patch_manifest),
+        expected_source_diff_hash=source_diff_hash,
+        expected_parent_artifact_hash=parent_artifact_hash,
+        expected_run_id=artifact["run_id"],
+    )
+    assert validated["target_files"] == [
+        "gateway/module.py",
+        "sourcing_model.py",
+    ]
+
+    rewritten_lineage = {
+        **lineage,
+        "composition": {
+            **composition,
+            "incremental_changed_files": ["gateway/module.py"],
+        },
+    }
+    rewritten_build = _rehash_candidate_build_doc(
+        {**build_doc, "git_tree": rewritten_lineage}
+    )
+    rewritten_patch = _candidate_patch_manifest_for(
+        artifact,
+        rewritten_build,
+        candidate_model_artifact_hash=candidate_artifact_hash,
+    )
+    with pytest.raises(CodeEditBuildError, match="target files differ"):
+        validate_private_code_edit_diff_artifact(
+            artifact,
+            candidate_build_doc=rewritten_build,
+            candidate_patch_manifest=rewritten_patch,
+            expected_candidate_patch_hash=sha256_json(rewritten_patch),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation,error",
+    [
+        ({"unified_diff": "diff --git a/x.py b/x.py\n"}, "commitment differs"),
+        ({"run_id": "another-run"}, "run identity differs"),
+        ({"parent_artifact_hash": "sha256:" + "9" * 64}, "parent artifact differs"),
+        ({"target_files": ["sourcing_model.py", "extra.py"]}, "target files differ"),
+    ],
+)
+def test_private_source_diff_artifact_rejects_tampered_authority(mutation, error):
+    artifact, build_doc = _private_source_diff_fixture()
+    tampered = _rehash_private_source_diff_artifact({**artifact, **mutation})
+    if mutation.keys() == {"unified_diff"}:
+        # Preserve the original advertised artifact hash to model an S3 body
+        # replacement at an already committed object URI.
+        tampered["artifact_hash"] = artifact["artifact_hash"]
+    elif "parent_artifact_hash" in mutation:
+        build_doc = _rehash_candidate_build_doc(
+            {
+                **build_doc,
+                "source_diff_artifact_hash": tampered["artifact_hash"],
+                "parent_artifact_hash": tampered["parent_artifact_hash"],
+            }
+        )
+    elif "target_files" in mutation:
+        build_doc = _rehash_candidate_build_doc(
+            {
+                **build_doc,
+                "source_diff_artifact_hash": tampered["artifact_hash"],
+                "changed_files": list(tampered["target_files"]),
+            }
+        )
+
+    with pytest.raises(CodeEditBuildError, match=error):
+        validate_private_code_edit_diff_artifact(
+            tampered,
+            candidate_build_doc=build_doc,
+            expected_source_diff_hash=artifact["source_diff_hash"],
+            expected_parent_artifact_hash=artifact["parent_artifact_hash"],
+            expected_run_id=artifact["run_id"],
+        )
+
+
+def test_private_source_diff_artifact_rejects_rewritten_build_document():
+    artifact, build_doc = _private_source_diff_fixture()
+    tampered_build = _rehash_candidate_build_doc(
+        {**build_doc, "source_diff_artifact_hash": "sha256:" + "8" * 64}
+    )
+    with pytest.raises(CodeEditBuildError, match="hash differs from build"):
+        validate_private_code_edit_diff_artifact(
+            artifact,
+            candidate_build_doc=tampered_build,
+        )
 
 
 # --- bug #18: forbidden terms scanned on added lines only ---

@@ -18,6 +18,19 @@ import subprocess
 import tempfile
 import time
 from typing import Any, Mapping, Sequence
+from uuid import UUID
+
+from gateway.research_lab import store as research_lab_store
+from gateway.research_lab.git_tree_models import (
+    TreePolicy,
+    TreeReplacement,
+    cohort_evaluation_operation_id,
+    derive_child_slot,
+    derive_tree_id,
+    generation_operation_id,
+)
+from gateway.research_lab.git_tree_store import GitTreeStore, ZERO_HASH
+from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest
 
 from gateway.research_lab.champion_settlement_v2 import (
     CHAIN_WEIGHT_OBSERVATION_SCHEMA_VERSION_V1,
@@ -98,6 +111,12 @@ ALLOCATION_IMAGE_BUILD_MIGRATIONS = (
 ALLOCATION_CONTAINMENT_MIGRATION = (
     "87-research-lab-source-add-allocation-containment.sql"
 )
+GIT_TREE_AUTORESEARCH_MIGRATION = (
+    "95-research-lab-git-tree-autoresearch.sql"
+)
+GIT_TREE_ROOT_REPLACEMENT_MIGRATION = (
+    "115-research-lab-git-tree-root-replacement.sql"
+)
 MAINTENANCE_LEASE_MIGRATION = "118-research-lab-maintenance-lease.sql"
 MIGRATIONS_BEFORE_TRANSPORT_FIX = (
     "86-research-lab-attested-v2-authority.sql",
@@ -140,6 +159,34 @@ ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION = (
 )
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
+)
+EXPECTED_APPLIED_MIGRATIONS = (
+    ALLOCATION_CANDIDATE_MIGRATION,
+    ALLOCATION_AUTO_RESEARCH_MIGRATION,
+    ALLOCATION_SCHEMA_MIGRATION,
+    ALLOCATION_SCORING_AUDIT_MIGRATION,
+    ALLOCATION_PROMOTION_MIGRATION,
+    *ALLOCATION_IMAGE_BUILD_MIGRATIONS,
+    MIGRATIONS_BEFORE_TRANSPORT_FIX[0],
+    ALLOCATION_CONTAINMENT_MIGRATION,
+    MIGRATIONS_BEFORE_TRANSPORT_FIX[1],
+    MIGRATIONS_BEFORE_TRANSPORT_FIX[2],
+    GIT_TREE_AUTORESEARCH_MIGRATION,
+    MIGRATIONS_BEFORE_TRANSPORT_FIX[3],
+    MIGRATIONS_BEFORE_TRANSPORT_FIX[4],
+    GIT_TREE_ROOT_REPLACEMENT_MIGRATION,
+    *MIGRATIONS_BEFORE_TRANSPORT_FIX[5:],
+    TRANSPORT_FIX_MIGRATION,
+    TRANSPORT_TERMINAL_MIGRATION,
+    PROVIDER_OUTCOME_APPEND_MIGRATION,
+    PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
+    CHAMPION_LIFETIME_CREDIT_MIGRATION,
+    PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
+    PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
+    ACTIVE_MODEL_RESULT_REPLAY_MIGRATION,
+    ANCESTRY_CHECKPOINT_MIGRATION,
+    ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION,
+    ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
 )
 EXPECTED_FINALIZED_VIEW_COLUMNS = (
     "bundle_hash",
@@ -443,6 +490,121 @@ def _json_insert_sql(table: str, row: Mapping[str, Any]) -> str:
 
 def _deterministic_seed_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return {**dict(row), "created_at": NOW}
+
+
+def _postgres_literal(value: Any) -> str:
+    """Return one strict literal for the disposable-Postgres adapter."""
+
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, (Mapping, list, tuple)):
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        if "$leadpoet$" in encoded:
+            raise PostgresContractProbeError("Postgres JSON delimiter collision")
+        return "$leadpoet$%s$leadpoet$::jsonb" % encoded
+    encoded = str(value)
+    if "$leadpoet$" in encoded:
+        raise PostgresContractProbeError("Postgres text delimiter collision")
+    return "$leadpoet$%s$leadpoet$" % encoded
+
+
+def _postgres_rpc(
+    database: DisposablePostgres,
+    function_name: str,
+    params: Mapping[str, Any],
+) -> Any:
+    if not IDENTIFIER_RE.fullmatch(function_name):
+        raise PostgresContractProbeError("invalid RPC identifier")
+    arguments = []
+    for name, value in params.items():
+        if not IDENTIFIER_RE.fullmatch(name):
+            raise PostgresContractProbeError("invalid RPC parameter identifier")
+        arguments.append("%s => %s" % (name, _postgres_literal(value)))
+    result = database.psql(
+        "SELECT pg_catalog.to_jsonb(public.%s(%s))::text;"
+        % (function_name, ",".join(arguments)),
+        check=False,
+        tuples_only=True,
+    )
+    if result.returncode != 0:
+        raise PostgresContractProbeError(
+            "Postgres RPC failed function=%s stderr=%s"
+            % (function_name, result.stderr.strip())
+        )
+    payload = result.stdout.strip()
+    return json.loads(payload) if payload else None
+
+
+def _postgres_select_one(
+    database: DisposablePostgres,
+    table: str,
+    *,
+    columns: str,
+    filters: Sequence[tuple[Any, ...]],
+) -> dict[str, Any] | None:
+    if not IDENTIFIER_RE.fullmatch(table):
+        raise PostgresContractProbeError("invalid relation identifier")
+    if columns.strip() == "*":
+        projection = "*"
+    else:
+        projected = tuple(part.strip() for part in columns.split(","))
+        if not projected or any(
+            not IDENTIFIER_RE.fullmatch(part) for part in projected
+        ):
+            raise PostgresContractProbeError("invalid relation projection")
+        projection = ",".join(projected)
+    predicates = []
+    for raw_filter in filters:
+        if len(raw_filter) != 2:
+            raise PostgresContractProbeError(
+                "disposable Postgres adapter only permits equality filters"
+            )
+        column, value = raw_filter
+        if not IDENTIFIER_RE.fullmatch(str(column)):
+            raise PostgresContractProbeError("invalid filter identifier")
+        predicates.append(
+            "%s IS NOT DISTINCT FROM %s" % (column, _postgres_literal(value))
+        )
+    where = " AND ".join(predicates) if predicates else "TRUE"
+    result = database.psql(
+        "SELECT pg_catalog.to_jsonb(selected)::text FROM "
+        "(SELECT %s FROM public.%s WHERE %s LIMIT 1) AS selected;"
+        % (projection, table, where),
+        tuples_only=True,
+    ).stdout.strip()
+    return dict(json.loads(result)) if result else None
+
+
+def _postgres_insert_row(
+    database: DisposablePostgres,
+    table: str,
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not IDENTIFIER_RE.fullmatch(table):
+        raise PostgresContractProbeError("invalid insert relation identifier")
+    columns = tuple(row)
+    if not columns or any(not IDENTIFIER_RE.fullmatch(name) for name in columns):
+        raise PostgresContractProbeError("invalid insert columns")
+    payload = json.dumps(dict(row), sort_keys=True, separators=(",", ":"))
+    if "$leadpoet$" in payload:
+        raise PostgresContractProbeError("insert JSON delimiter collision")
+    selected = ",".join(columns)
+    result = database.psql(
+        "WITH inserted AS ("
+        "INSERT INTO public.%s (%s) "
+        "SELECT %s FROM pg_catalog.json_populate_record("
+        "NULL::public.%s, $leadpoet$%s$leadpoet$::json) RETURNING *"
+        ") SELECT pg_catalog.to_jsonb(inserted)::text FROM inserted;"
+        % (table, selected, selected, table, payload),
+        tuples_only=True,
+    ).stdout.strip()
+    if not result:
+        raise PostgresContractProbeError("insert returned no row: %s" % table)
+    return dict(json.loads(result))
 
 
 def _provider_outcome_append_sql(row: Mapping[str, Any]) -> str:
@@ -2148,6 +2310,684 @@ def _allocation_settlement_frontier_contract(
     }
 
 
+def _private_model_seed_rows(
+    *,
+    suffix: str,
+    artifact_hash: str,
+    manifest_hash: str,
+    event_status: str,
+    event_seq: int = 0,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    version_id = "private_model_version:%s" % artifact_hash
+    version_hash = sha256_json(
+        {
+            "contract": "git-tree-postgres-rehearsal",
+            "version_id": version_id,
+            "suffix": suffix,
+        }
+    )
+    version = {
+        "private_model_version_id": version_id,
+        "schema_version": "1.0",
+        "model_artifact_hash": artifact_hash,
+        "private_model_manifest_hash": manifest_hash,
+        "private_model_manifest_uri": (
+            "s3://leadpoet-rehearsal/private-model-%s.json" % suffix
+        ),
+        "git_commit_sha": suffix * 64,
+        "config_hash": sha256_json({"config": suffix}),
+        "component_registry_version": "rehearsal-v1",
+        "scoring_adapter_version": "rehearsal-v1",
+        "source_candidate_id": None,
+        "source_score_bundle_id": None,
+        "source_benchmark_bundle_id": None,
+        "signature_ref": "rehearsal-signature-%s" % suffix,
+        "build_id": "rehearsal-build-%s" % suffix,
+        "redacted_version_doc": {"fixture": "git-tree-%s" % suffix},
+        "version_hash": version_hash,
+        "anchored_hash": version_hash,
+    }
+    event_payload = {
+        "private_model_version_id": version_id,
+        "seq": event_seq,
+        "event_type": event_status,
+        "version_status": event_status,
+        "reason": "restart_rehearsal",
+        "event_doc": {"fixture": "git-tree-%s" % suffix},
+    }
+    event = {
+        "event_id": str(
+            UUID("00000000-0000-4000-8000-%012d" % (100 + ord(suffix)))
+        ),
+        "schema_version": "1.0",
+        **event_payload,
+        "anchored_hash": sha256_json(event_payload),
+    }
+    return version, event
+
+
+def _git_tree_candidate_request(
+    *,
+    run_id: str,
+    ticket_id: str,
+    tree_id: str,
+    node_id: str,
+    root_artifact_hash: str,
+    root_manifest_hash: str,
+    root_git_commit: str,
+    node_git_commit: str,
+    candidate_artifact_hash: str,
+    candidate_manifest_hash: str,
+) -> ResearchLabCandidateArtifactCreateRequest:
+    lineage = {
+        "schema_version": "research_lab.git_tree_lineage.v1",
+        "tree_id": tree_id,
+        "node_id": node_id,
+        "git_commit": node_git_commit,
+        "composition": {"root_git_commit": root_git_commit},
+    }
+    return ResearchLabCandidateArtifactCreateRequest(
+        run_id=run_id,
+        ticket_id=ticket_id,
+        miner_hotkey="5F-rehearsal-miner-hotkey",
+        island="git-tree-rehearsal",
+        private_model_manifest={
+            "manifest_hash": root_manifest_hash,
+            "model_artifact_hash": root_artifact_hash,
+        },
+        candidate_patch_manifest={
+            "schema_version": "research_lab.candidate_patch.v2",
+            "parent_artifact_hash": root_artifact_hash,
+            "candidate_artifact_hash": candidate_artifact_hash,
+        },
+        candidate_model_manifest={
+            "schema_version": "research_lab.private_model_manifest.v2",
+            "manifest_hash": candidate_manifest_hash,
+            "model_artifact_hash": candidate_artifact_hash,
+        },
+        candidate_source_diff_hash=sha256_json(
+            {"source_diff": candidate_artifact_hash, "tree_id": tree_id}
+        ),
+        candidate_build_doc={
+            "schema_version": "research_lab.code_edit_build.v2",
+            "source_diff_artifact_uri": (
+                "s3://leadpoet-rehearsal/source-diff-%s.json"
+                % candidate_artifact_hash.split(":", 1)[1]
+            ),
+            "git_tree": lineage,
+        },
+        hypothesis_doc={"fixture": "postgres-git-tree"},
+        redacted_public_summary="Disposable PostgreSQL Git-tree rehearsal",
+        git_tree_id=tree_id,
+        git_tree_node_id=node_id,
+        git_tree_root_commit=root_git_commit,
+        git_tree_node_commit=node_git_commit,
+        git_tree_lineage_hash=sha256_json(lineage),
+    )
+
+
+def _git_tree_autoresearch_postgres_contract(
+    database: DisposablePostgres,
+) -> dict[str, Any]:
+    """Drive production Git-tree adapters through real migration 95/115 RPCs."""
+
+    run_id = "00000000-0000-4000-8000-000000000095"
+    ticket_id = "00000000-0000-4000-8000-000000000096"
+    root_a = sha256_json({"root": "a"})
+    manifest_a = sha256_json({"manifest": "a"})
+    root_b = sha256_json({"root": "b"})
+    manifest_b = sha256_json({"manifest": "b"})
+    candidate_artifact_hash = sha256_json({"candidate": "selected"})
+    candidate_manifest_hash = sha256_json({"candidate_manifest": "selected"})
+    policy = TreePolicy(mode="active")
+    root_git_a = "a" * 64
+    root_git_b = "b" * 64
+    image_a = sha256_json({"image": "a"})
+    image_b = sha256_json({"image": "b"})
+    evaluator_hash = sha256_json({"evaluator": "postgres-rehearsal"})
+    source_a = sha256_json({"source": "a"})
+    source_b = sha256_json({"source": "b"})
+
+    version_a, active_a = _private_model_seed_rows(
+        suffix="a",
+        artifact_hash=root_a,
+        manifest_hash=manifest_a,
+        event_status="active",
+    )
+    database.psql(
+        "".join(
+            (
+                _json_insert_sql("research_loop_tickets", {"ticket_id": ticket_id}),
+                _json_insert_sql("research_lab_private_model_versions", version_a),
+                _json_insert_sql("research_lab_private_model_version_events", active_a),
+            )
+        )
+    )
+
+    original_store = {
+        "call_rpc": research_lab_store.call_rpc,
+        "select_one": research_lab_store.select_one,
+        "insert_row": research_lab_store.insert_row,
+        "next_event_seq": research_lab_store.next_event_seq,
+    }
+
+    async def call_rpc(function_name: str, params: Mapping[str, Any]) -> Any:
+        return _postgres_rpc(database, function_name, params)
+
+    async def select_one(
+        table: str,
+        *,
+        columns: str = "*",
+        filters: Sequence[tuple[Any, ...]],
+    ) -> dict[str, Any] | None:
+        return _postgres_select_one(
+            database,
+            table,
+            columns=columns,
+            filters=filters,
+        )
+
+    async def insert_row(table: str, row: Mapping[str, Any]) -> dict[str, Any]:
+        return _postgres_insert_row(database, table, row)
+
+    async def next_event_seq(table: str, key_field: str, key_value: Any) -> int:
+        if not IDENTIFIER_RE.fullmatch(table) or not IDENTIFIER_RE.fullmatch(
+            key_field
+        ):
+            raise PostgresContractProbeError("invalid sequence query identifier")
+        value = database.psql(
+            "SELECT COALESCE(MAX(seq) + 1, 0) FROM public.%s "
+            "WHERE %s IS NOT DISTINCT FROM %s;"
+            % (table, key_field, _postgres_literal(key_value)),
+            tuples_only=True,
+        ).stdout.strip()
+        return int(value)
+
+    research_lab_store.call_rpc = call_rpc
+    research_lab_store.select_one = select_one
+    research_lab_store.insert_row = insert_row
+    research_lab_store.next_event_seq = next_event_seq
+
+    async def exercise() -> dict[str, Any]:
+        tree_store = GitTreeStore()
+        tree_a = derive_tree_id(
+            run_id=run_id,
+            root_artifact_hash=root_a,
+            policy=policy,
+        )
+
+        async def create_tree(
+            *,
+            tree_id: str,
+            root_artifact_hash: str,
+            root_manifest_hash: str,
+            root_source_tree_hash: str,
+            root_git_commit: str,
+            root_image_digest: str,
+            replacement: TreeReplacement | None = None,
+        ) -> Mapping[str, Any]:
+            tree_doc = {
+                "schema_version": "research_lab.git_tree_authority.v1",
+                "tree_id": tree_id,
+                "run_id": run_id,
+                "policy": policy.to_dict(),
+            }
+            if replacement is not None:
+                tree_doc["replacement"] = replacement.to_dict()
+            return await tree_store.create_tree(
+                tree_id=tree_id,
+                run_id=run_id,
+                root_artifact_hash=root_artifact_hash,
+                root_manifest_hash=root_manifest_hash,
+                root_source_tree_hash=root_source_tree_hash,
+                root_git_commit=root_git_commit,
+                root_image_digest=root_image_digest,
+                policy_hash=policy.policy_hash,
+                evaluator_commitment_hash=evaluator_hash,
+                tree_doc=tree_doc,
+            )
+
+        async def evaluate_one(
+            *,
+            tree_id: str,
+            root_git_commit: str,
+            slot_index: int,
+        ) -> tuple[Any, str, str]:
+            slot = derive_child_slot(
+                tree_id=tree_id,
+                parent_node_id="root",
+                root_branch_id="",
+                depth=1,
+                slot_index=slot_index,
+            )
+            generation_request = sha256_json(
+                {"operation": "generation", "node_id": slot.node_id}
+            )
+            node_doc = {
+                "schema_version": "research_lab.git_tree_node.v1",
+                **slot.to_dict(),
+                "status": "planned",
+            }
+            planned = await tree_store.plan_node(
+                slot=slot,
+                request_hash=generation_request,
+                node_doc=node_doc,
+            )
+            replayed_plan = await tree_store.plan_node(
+                slot=slot,
+                request_hash=generation_request,
+                node_doc=node_doc,
+            )
+            if planned["node"]["node_id"] != replayed_plan["node"]["node_id"]:
+                raise PostgresContractProbeError("node planning replay differed")
+            node_git_commit = ("c" if slot_index == 0 else "d") * 64
+            lineage_hash = sha256_json(
+                {
+                    "schema_version": "research_lab.git_tree_lineage.v1",
+                    "tree_id": tree_id,
+                    "node_id": slot.node_id,
+                    "git_commit": node_git_commit,
+                    "composition": {"root_git_commit": root_git_commit},
+                }
+            )
+            generation_result = sha256_json(
+                {"generated": slot.node_id, "git_commit": node_git_commit}
+            )
+            await tree_store.transition_operation(
+                logical_operation_id=generation_operation_id(slot),
+                tree_id=tree_id,
+                node_id=slot.node_id,
+                operation_kind="generation",
+                operation_status="succeeded",
+                request_hash=generation_request,
+                result_hash=generation_result,
+                expected_current_status="reserved",
+            )
+            await tree_store.append_event_next(
+                tree_id=tree_id,
+                event_type="node_generated",
+                node_id=slot.node_id,
+                event_doc={
+                    "status": "generated",
+                    "git_commit": node_git_commit,
+                    "lineage_hash": lineage_hash,
+                },
+            )
+            evaluation_operation = cohort_evaluation_operation_id(
+                tree_id=tree_id,
+                node_ids=(slot.node_id,),
+                stage="round",
+            )
+            evaluation_request = sha256_json(
+                {"operation": "evaluation", "node_id": slot.node_id}
+            )
+            await tree_store.transition_operation(
+                logical_operation_id=evaluation_operation,
+                tree_id=tree_id,
+                node_id=slot.node_id,
+                operation_kind="evaluation",
+                operation_status="reserved",
+                request_hash=evaluation_request,
+            )
+            await tree_store.transition_operation(
+                logical_operation_id=evaluation_operation,
+                tree_id=tree_id,
+                node_id=slot.node_id,
+                operation_kind="evaluation",
+                operation_status="succeeded",
+                request_hash=evaluation_request,
+                result_hash=sha256_json({"evaluation": slot.node_id}),
+                settled_cost_microusd=125,
+                provider_call_count=2,
+                settlement_doc={"fixture": "postgres-git-tree"},
+                expected_current_status="reserved",
+            )
+            await tree_store.append_event_next(
+                tree_id=tree_id,
+                event_type="node_evaluated",
+                node_id=slot.node_id,
+                event_doc={
+                    "status": "eligible",
+                    "candidate_artifact_hash": candidate_artifact_hash,
+                    "git_commit": node_git_commit,
+                    "lineage_hash": lineage_hash,
+                    "score": 1.0,
+                },
+            )
+            frontier_doc = {
+                "tree_id": tree_id,
+                "round_index": 0,
+                "eligible_node_ids": [slot.node_id],
+            }
+            frontier_hash = sha256_json(frontier_doc)
+            await tree_store.commit_frontier_next(
+                tree_id=tree_id,
+                frontier_hash=frontier_hash,
+                frontier_doc=frontier_doc,
+            )
+            selection = {
+                "tree_id": tree_id,
+                "selected_node_id": slot.node_id,
+                "paid_finalist_count": 1,
+                "selected_candidate_artifact_hash": candidate_artifact_hash,
+                "selected_node_git_commit": node_git_commit,
+                "selected_lineage_hash": lineage_hash,
+            }
+            await tree_store.select_final(
+                tree_id=tree_id,
+                node_id=slot.node_id,
+                selection_hash=sha256_json(selection),
+                selection_doc=selection,
+            )
+            return slot, node_git_commit, lineage_hash
+
+        created_a = await create_tree(
+            tree_id=tree_a,
+            root_artifact_hash=root_a,
+            root_manifest_hash=manifest_a,
+            root_source_tree_hash=source_a,
+            root_git_commit=root_git_a,
+            root_image_digest=image_a,
+        )
+        replayed_a = await create_tree(
+            tree_id=tree_a,
+            root_artifact_hash=root_a,
+            root_manifest_hash=manifest_a,
+            root_source_tree_hash=source_a,
+            root_git_commit=root_git_a,
+            root_image_digest=image_a,
+        )
+        if created_a.get("created") is not True or replayed_a.get("created") is not False:
+            raise PostgresContractProbeError("tree create replay contract differs")
+        await tree_store.append_event_next(
+            tree_id=tree_a,
+            event_type="tree_created",
+            event_doc={"tree_id": tree_a, "run_id": run_id},
+        )
+        slot_a, node_git_a, _ = await evaluate_one(
+            tree_id=tree_a,
+            root_git_commit=root_git_a,
+            slot_index=0,
+        )
+
+        # Re-instantiate the production adapter to exercise restart/resume reads.
+        resumed = GitTreeStore()
+        resumed_tree = await resumed.get_tree_current(tree_id=tree_a)
+        resumed_operation = await resumed.get_operation(
+            logical_operation_id=generation_operation_id(slot_a)
+        )
+        if (
+            not isinstance(resumed_tree, Mapping)
+            or resumed_tree.get("current_event_type") != "final_selected"
+            or resumed_operation.get("exists") is not True
+            or resumed_operation["operation"].get("operation_status")
+            != "succeeded"
+        ):
+            raise PostgresContractProbeError("Git-tree restart resume state differs")
+        predecessor_event = _postgres_select_one(
+            database,
+            "research_lab_autoresearch_tree_events",
+            columns=(
+                "tree_id,seq,event_type,node_id,previous_event_hash,"
+                "event_doc,event_hash"
+            ),
+            filters=(
+                ("tree_id", tree_a),
+                ("event_hash", resumed_tree.get("current_event_hash")),
+            ),
+        )
+        if (
+            not isinstance(predecessor_event, Mapping)
+            or predecessor_event.get("event_type") != "final_selected"
+            or predecessor_event.get("event_hash")
+            != resumed_tree.get("current_event_hash")
+        ):
+            raise PostgresContractProbeError(
+                "Git-tree replacement predecessor event differs"
+            )
+
+        # Advance the active root. The old finalist must fail closed atomically.
+        superseded_payload = {
+            "private_model_version_id": version_a["private_model_version_id"],
+            "seq": 1,
+            "event_type": "superseded",
+            "version_status": "superseded",
+            "reason": "restart_rehearsal_root_advance",
+            "event_doc": {"fixture": "git-tree-root-advance"},
+        }
+        superseded = {
+            "event_id": "00000000-0000-4000-8000-000000000201",
+            "schema_version": "1.0",
+            **superseded_payload,
+            "anchored_hash": sha256_json(superseded_payload),
+        }
+        version_b, active_b = _private_model_seed_rows(
+            suffix="b",
+            artifact_hash=root_b,
+            manifest_hash=manifest_b,
+            event_status="active",
+        )
+        database.psql(
+            "".join(
+                (
+                    _json_insert_sql(
+                        "research_lab_private_model_version_events", superseded
+                    ),
+                    _json_insert_sql("research_lab_private_model_versions", version_b),
+                    _json_insert_sql(
+                        "research_lab_private_model_version_events", active_b
+                    ),
+                )
+            )
+        )
+        stale_request = _git_tree_candidate_request(
+            run_id=run_id,
+            ticket_id=ticket_id,
+            tree_id=tree_a,
+            node_id=slot_a.node_id,
+            root_artifact_hash=root_a,
+            root_manifest_hash=manifest_a,
+            root_git_commit=root_git_a,
+            node_git_commit=node_git_a,
+            candidate_artifact_hash=candidate_artifact_hash,
+            candidate_manifest_hash=candidate_manifest_hash,
+        )
+        try:
+            await research_lab_store.create_candidate_artifact(stale_request)
+        except Exception as exc:
+            if "stale_active_root" not in str(exc):
+                raise PostgresContractProbeError(
+                    "stale handoff failed for the wrong reason: %s" % exc
+                ) from exc
+        else:
+            raise PostgresContractProbeError("stale-root candidate handoff succeeded")
+        if _postgres_select_one(
+            database,
+            "research_lab_candidate_artifacts",
+            columns="candidate_id",
+            filters=(("candidate_artifact_hash", candidate_artifact_hash),),
+        ) is not None:
+            raise PostgresContractProbeError(
+                "stale-root candidate insert was not rolled back atomically"
+            )
+
+        cancellation = await tree_store.append_event_next(
+            tree_id=tree_a,
+            event_type="tree_cancelled_root_changed",
+            event_doc={
+                "schema_version": "research_lab.git_tree_root_change.v2",
+                "run_id": run_id,
+                "tree_id": tree_a,
+                "next_generation": 1,
+                "old_root_artifact_hash": root_a,
+                "new_root_artifact_hash": root_b,
+                "old_root_manifest_hash": manifest_a,
+                "new_root_manifest_hash": manifest_b,
+                "old_policy_hash": policy.policy_hash,
+                "new_policy_hash": policy.policy_hash,
+                "reason": "tree_authority_changed_before_resume",
+            },
+        )
+        if cancellation.get("previous_event_hash") != predecessor_event.get(
+            "event_hash"
+        ):
+            raise PostgresContractProbeError(
+                "Git-tree cancellation is not bound to its predecessor"
+            )
+        replacement = TreeReplacement(
+            generation=1,
+            replaces_tree_id=tree_a,
+            cancellation_event_hash=str(cancellation["event_hash"]),
+            prior_root_artifact_hash=root_a,
+            prior_root_manifest_hash=manifest_a,
+            prior_policy_hash=policy.policy_hash,
+            root_artifact_hash=root_b,
+            root_manifest_hash=manifest_b,
+            policy_hash=policy.policy_hash,
+        )
+        tree_b = derive_tree_id(
+            run_id=run_id,
+            root_artifact_hash=root_b,
+            policy=policy,
+            replacement=replacement,
+        )
+        await create_tree(
+            tree_id=tree_b,
+            root_artifact_hash=root_b,
+            root_manifest_hash=manifest_b,
+            root_source_tree_hash=source_b,
+            root_git_commit=root_git_b,
+            root_image_digest=image_b,
+            replacement=replacement,
+        )
+        await tree_store.append_event_next(
+            tree_id=tree_b,
+            event_type="tree_created",
+            event_doc={
+                "tree_id": tree_b,
+                "run_id": run_id,
+                "replacement_hash": replacement.replacement_hash,
+            },
+        )
+        slot_b, node_git_b, _ = await evaluate_one(
+            tree_id=tree_b,
+            root_git_commit=root_git_b,
+            slot_index=1,
+        )
+        candidate_request = _git_tree_candidate_request(
+            run_id=run_id,
+            ticket_id=ticket_id,
+            tree_id=tree_b,
+            node_id=slot_b.node_id,
+            root_artifact_hash=root_b,
+            root_manifest_hash=manifest_b,
+            root_git_commit=root_git_b,
+            node_git_commit=node_git_b,
+            candidate_artifact_hash=candidate_artifact_hash,
+            candidate_manifest_hash=candidate_manifest_hash,
+        )
+        candidate, queued = await research_lab_store.create_candidate_artifact(
+            candidate_request
+        )
+        replay_candidate, replay_queued = (
+            await research_lab_store.create_candidate_artifact(candidate_request)
+        )
+        if (
+            candidate.get("candidate_id") != replay_candidate.get("candidate_id")
+            or queued.get("event_id") != replay_queued.get("event_id")
+        ):
+            raise PostgresContractProbeError("candidate handoff replay differed")
+
+        usage = _postgres_rpc(
+            database,
+            "research_lab_autoresearch_run_evaluation_usage",
+            {"requested_run_id": run_id},
+        )
+        current = _postgres_select_one(
+            database,
+            "research_lab_autoresearch_run_tree_current",
+            columns=(
+                "tree_id,tree_generation,replaces_tree_id,current_event_type"
+            ),
+            filters=(("run_id", run_id),),
+        )
+        counts = json.loads(
+            database.psql(
+                """
+                SELECT pg_catalog.json_build_object(
+                    'trees', (SELECT pg_catalog.count(*)
+                              FROM public.research_lab_autoresearch_trees),
+                    'handoffs', (SELECT pg_catalog.count(*)
+                                 FROM public.research_lab_autoresearch_tree_handoffs),
+                    'candidates', (SELECT pg_catalog.count(*)
+                                   FROM public.research_lab_candidate_artifacts),
+                    'evaluation_events', (SELECT pg_catalog.count(*)
+                                          FROM public.research_lab_candidate_evaluation_events)
+                )::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if (
+            current
+            != {
+                "tree_id": tree_b,
+                "tree_generation": 1,
+                "replaces_tree_id": tree_a,
+                "current_event_type": "tree_completed",
+            }
+            or usage
+            != {
+                "settled_cost_microusd": 250,
+                "provider_call_count": 4,
+                "terminal_operation_count": 2,
+                "unsettled_operation_ids": [],
+                "indeterminate_operation_ids": [],
+            }
+            or counts
+            != {
+                "trees": 2,
+                "handoffs": 1,
+                "candidates": 1,
+                "evaluation_events": 1,
+            }
+        ):
+            raise PostgresContractProbeError(
+                "Git-tree replacement or handoff persistence contract differs"
+            )
+        return {
+            "run_id": run_id,
+            "policy": policy.to_dict(),
+            "initial_tree_id": tree_a,
+            "replacement_tree_id": tree_b,
+            "replacement_hash": replacement.replacement_hash,
+            "replacement": replacement.to_dict(),
+            "predecessor_event": dict(predecessor_event),
+            "cancellation_event": {
+                "tree_id": str(cancellation.get("tree_id") or ""),
+                "event_type": str(cancellation.get("event_type") or ""),
+                "node_id": str(cancellation.get("node_id") or ""),
+                "previous_event_hash": str(
+                    cancellation.get("previous_event_hash") or ""
+                ),
+                "event_doc": dict(cancellation.get("event_doc") or {}),
+                "event_hash": str(cancellation.get("event_hash") or ""),
+            },
+            "candidate_id": candidate["candidate_id"],
+            "candidate_artifact_hash": candidate_artifact_hash,
+            "evaluation_usage": usage,
+            "row_counts": counts,
+            "restart_replay_exact": True,
+            "stale_root_rejected_atomically": True,
+        }
+
+    try:
+        return asyncio.run(exercise())
+    finally:
+        for name, value in original_store.items():
+            setattr(research_lab_store, name, value)
+
+
 def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
     declaration_counts = _validate_required_migration_declarations(args.source_root)
     coordinator_release_identity = _load_coordinator_release_identity(
@@ -2211,6 +3051,18 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                     scripts / ALLOCATION_CONTAINMENT_MIGRATION
                 )
                 applied.append(ALLOCATION_CONTAINMENT_MIGRATION)
+            if name == "90-research-lab-provider-outcome-checkpoints-v2.sql":
+                database.apply_migration(
+                    scripts / GIT_TREE_AUTORESEARCH_MIGRATION
+                )
+                applied.append(GIT_TREE_AUTORESEARCH_MIGRATION)
+            if name == "104-research-lab-attested-result-replay-v2.sql":
+                database.apply_migration(
+                    scripts / GIT_TREE_ROOT_REPLACEMENT_MIGRATION
+                )
+                applied.append(GIT_TREE_ROOT_REPLACEMENT_MIGRATION)
+
+        git_tree_contract = _git_tree_autoresearch_postgres_contract(database)
 
         maintenance_lease = _maintenance_lease_contract(database)
 
@@ -2863,6 +3715,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "tampered settlement authority was accepted"
             )
 
+        if tuple(applied) != EXPECTED_APPLIED_MIGRATIONS:
+            raise PostgresContractProbeError(
+                "applied migration sequence differs from the rehearsal contract"
+            )
         contract = _relation_contract(database)
         view_columns = contract["relations"][
             "research_lab_finalized_allocation_epochs_v2"
@@ -2905,6 +3761,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "finalized_view_projection_exact": True,
                 "finalized_view_seed_available": True,
                 "historical_compute_schema_migrations_applied": True,
+                "git_tree_autoresearch_schema_migrations_applied": True,
+                "git_tree_autoresearch_persistence_contract_valid": True,
+                "git_tree_stale_root_rejected_atomically": True,
+                "git_tree_replacement_and_restart_replay_valid": True,
                 "historical_compute_finalized_authority_seed_available": True,
                 "historical_compute_allocation_conserved": True,
                 "historical_compute_release_identity_bound": True,
@@ -2923,6 +3783,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "persistence": first_persistence,
             },
             "allocation_settlement_frontier": frontier_contract,
+            "git_tree_autoresearch": git_tree_contract,
             "provider_outcome_append": provider_outcome_append,
             "provider_outcome_contention_contract": head_contention_contract,
             "required_schema_declarations": declaration_counts,

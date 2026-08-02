@@ -21,6 +21,10 @@ from gateway.research_lab.attested_scoring import (
     compare_promotion_metric,
 )
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
+from gateway.research_lab.code_build import (
+    CodeEditBuildError,
+    validate_private_code_edit_diff_artifact,
+)
 from gateway.research_lab.config import (
     DEFAULT_PRIVATE_REPO_BRANCH,
     ResearchLabGatewayConfig,
@@ -2496,7 +2500,18 @@ class ResearchLabPromotionController:
                 candidate_id=candidate_id,
                 score_bundle_id=score_bundle_id,
                 candidate_build_doc=candidate.get("candidate_build_doc"),
+                candidate_patch_manifest=candidate.get(
+                    "candidate_patch_manifest"
+                ),
                 candidate_model_manifest_doc=candidate.get("candidate_model_manifest_doc"),
+                expected_candidate_patch_hash=str(
+                    candidate.get("candidate_patch_hash") or ""
+                ),
+                expected_source_diff_hash=str(
+                    candidate.get("candidate_source_diff_hash") or ""
+                ),
+                expected_parent_artifact_hash=str(candidate_parent or ""),
+                expected_run_id=str(candidate.get("run_id") or ""),
             )
         except Exception as exc:
             error_hash = canonical_hash({"error": str(exc)})
@@ -4321,7 +4336,12 @@ def _push_candidate_source_diff_to_repo(
     candidate_id: str,
     score_bundle_id: str,
     candidate_build_doc: Any,
+    candidate_patch_manifest: Any,
     candidate_model_manifest_doc: Any,
+    expected_candidate_patch_hash: str = "",
+    expected_source_diff_hash: str = "",
+    expected_parent_artifact_hash: str = "",
+    expected_run_id: str = "",
 ) -> dict[str, Any]:
     if not isinstance(candidate_build_doc, Mapping):
         raise RuntimeError("image-build candidate missing candidate_build_doc")
@@ -4340,13 +4360,24 @@ def _push_candidate_source_diff_to_repo(
         source_diff_doc = json.loads(source_diff_text)
     except json.JSONDecodeError as exc:
         raise RuntimeError("candidate source diff artifact is not valid JSON") from exc
-    unified_diff = str(source_diff_doc.get("unified_diff") or "")
-    if not unified_diff.startswith("diff --git "):
-        raise RuntimeError("candidate source diff artifact does not contain a git unified diff")
-    target_files = _safe_target_files(source_diff_doc.get("target_files"))
-    if not target_files:
-        raise RuntimeError("candidate source diff artifact has no target files")
-    source_diff_hash = str(source_diff_doc.get("source_diff_hash") or candidate_build_doc.get("source_diff_hash") or "")
+    try:
+        source_diff_doc = validate_private_code_edit_diff_artifact(
+            source_diff_doc,
+            candidate_build_doc=candidate_build_doc,
+            candidate_patch_manifest=candidate_patch_manifest,
+            candidate_model_manifest_doc=candidate_model_manifest_doc,
+            expected_candidate_patch_hash=expected_candidate_patch_hash,
+            expected_source_diff_hash=expected_source_diff_hash,
+            expected_parent_artifact_hash=expected_parent_artifact_hash,
+            expected_run_id=expected_run_id,
+        )
+    except CodeEditBuildError as exc:
+        raise RuntimeError(str(exc)) from exc
+    unified_diff = str(source_diff_doc["unified_diff"])
+    target_files = list(source_diff_doc["target_files"])
+    if _safe_target_files(target_files) != target_files:
+        raise RuntimeError("candidate source diff artifact has unsafe target files")
+    source_diff_hash = str(source_diff_doc["source_diff_hash"])
     candidate_manifest_sha = str(candidate_model_manifest_doc.get("git_commit_sha") or "")
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="research-lab-private-source-push-"))
@@ -4413,6 +4444,19 @@ def _push_candidate_source_diff_to_repo(
             raise RuntimeError("candidate source diff does not apply to private source branch")
 
         _run_command(["git", "apply", str(patch_path)], cwd=worktree, timeout_seconds=30)
+        changed_files = {
+            line.strip()
+            for line in _run_command(
+                ["git", "diff", "--name-only"],
+                cwd=worktree,
+                timeout_seconds=10,
+            ).splitlines()
+            if line.strip()
+        }
+        if changed_files != set(target_files):
+            raise RuntimeError(
+                "candidate source diff changed files differ from committed targets"
+            )
         status = _run_command(["git", "status", "--porcelain"], cwd=worktree, timeout_seconds=10)
         if not status.strip():
             return {
@@ -4426,6 +4470,27 @@ def _push_candidate_source_diff_to_repo(
         _run_command(["git", "config", "user.name", os.getenv("RESEARCH_LAB_PRIVATE_REPO_GIT_AUTHOR_NAME", "Leadpoet Research Lab")], cwd=worktree, timeout_seconds=10)
         _run_command(["git", "config", "user.email", os.getenv("RESEARCH_LAB_PRIVATE_REPO_GIT_AUTHOR_EMAIL", "research-lab@leadpoet.ai")], cwd=worktree, timeout_seconds=10)
         _run_command(["git", "add", "--", *target_files], cwd=worktree, timeout_seconds=10)
+        staged_files = {
+            line.strip()
+            for line in _run_command(
+                ["git", "diff", "--cached", "--name-only"],
+                cwd=worktree,
+                timeout_seconds=10,
+            ).splitlines()
+            if line.strip()
+        }
+        remaining_files = _run_command(
+            ["git", "status", "--porcelain"],
+            cwd=worktree,
+            timeout_seconds=10,
+        )
+        if staged_files != set(target_files) or any(
+            line and not line.startswith(("A ", "M ", "D ", "R "))
+            for line in remaining_files.splitlines()
+        ):
+            raise RuntimeError(
+                "candidate source diff staging differs from committed targets"
+            )
         short_candidate = _short_ref(candidate_id).replace(":", "-")
         commit_message = (
             f"Promote Research Lab candidate {short_candidate}\n\n"

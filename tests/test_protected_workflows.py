@@ -60,6 +60,26 @@ def test_scoring_receipt_failure_policy_is_protected():
     ]
 
 
+def test_git_tree_source_authority_boundaries_are_protected():
+    assert {
+        "_GIT_STRUCTURAL_DIFF_PREFIXES",
+        "git_diff_structural_metadata",
+    } <= set(PROTECTED_SYMBOLS["research_lab/code_editing.py"])
+    assert "validate_private_code_edit_diff_artifact" in PROTECTED_SYMBOLS[
+        "gateway/research_lab/code_build.py"
+    ]
+    assert "_push_candidate_source_diff_to_repo" in PROTECTED_SYMBOLS[
+        "gateway/research_lab/promotion.py"
+    ]
+    assert "_load_candidate_source_diff" in PROTECTED_SYMBOLS[
+        "gateway/research_lab/scoring_worker.py"
+    ]
+    assert {
+        "_HostGitTreeRepository",
+        "_HostCandidateBuilder",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/autoresearch_executor_v2.py"])
+
+
 def test_protected_manifest_detects_logic_change(tmp_path: Path):
     committed = load_manifest(MANIFEST_PATH)
     manifest = build_manifest(

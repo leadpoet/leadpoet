@@ -103,6 +103,8 @@ from research_lab.code_editing import (
     CodeEditDraft,
     CodeEditSourceInspectionRequest,
     build_code_edit_repair_messages,
+    extract_unified_diff_paths,
+    git_diff_structural_metadata,
     parse_code_edit_repair_response,
 )
 from research_lab.eval import (
@@ -139,6 +141,7 @@ HOST_DEV_EVAL_COHORT_RESULT_SCHEMA_VERSION = (
     "leadpoet.autoresearch_dev_eval_cohort_result.v3"
 )
 HOST_GIT_TREE_RESULT_SCHEMA_VERSION = "leadpoet.autoresearch_git_tree_result.v2"
+HOST_GIT_TREE_COMMIT_SCHEMA_VERSION = "research_lab.git_tree_commit.v1"
 
 OP_RUN_CODE_EDIT_LOOP = "run_code_edit_loop"
 OP_VERIFY_OPENROUTER_GUARD = "verify_openrouter_guard"
@@ -582,9 +585,20 @@ class _HostArtifactIO:
 class _HostGitTreeRepository:
     """Signed proxy for the host's private SHA-256 Git object database."""
 
-    def __init__(self, context: ExecutionContextV2, *, tree_id: str) -> None:
+    def __init__(
+        self,
+        context: ExecutionContextV2,
+        *,
+        tree_id: str,
+        child_source_verifier: Callable[..., None],
+    ) -> None:
         self._context = context
         self._tree_id = _hash(tree_id, "Git-tree id")
+        if not callable(child_source_verifier):
+            raise AutoresearchExecutorV2Error(
+                "measured Git-tree child source verifier is required"
+            )
+        self._child_source_verifier = child_source_verifier
 
     def initialize(
         self,
@@ -936,14 +950,22 @@ class _HostGitTreeRepository:
             raise AutoresearchExecutorV2Error(
                 "Git-tree commit result fields are invalid"
             )
+        result_depth = result.get("depth")
+        result_slot_index = result.get("slot_index")
         if any(
             (
                 result.get("tree_id") != slot.tree_id,
+                result.get("schema_version")
+                != HOST_GIT_TREE_COMMIT_SCHEMA_VERSION,
                 result.get("node_id") != slot.node_id,
                 result.get("parent_node_id") != slot.parent_node_id,
                 result.get("root_branch_id") != slot.root_branch_id,
-                int(result.get("depth") or 0) != slot.depth,
-                int(result.get("slot_index") or -1) != slot.slot_index,
+                isinstance(result_depth, bool),
+                not isinstance(result_depth, int),
+                result_depth != slot.depth,
+                isinstance(result_slot_index, bool),
+                not isinstance(result_slot_index, int),
+                result_slot_index != slot.slot_index,
                 result.get("draft_patch_hash")
                 != sha256_json({"unified_diff": draft.unified_diff}),
             )
@@ -978,6 +1000,14 @@ class _HostGitTreeRepository:
             raise AutoresearchExecutorV2Error(
                 "Git-tree commit changed-file set is invalid"
             )
+        self._child_source_verifier(
+            draft=draft,
+            canonical_incremental_patch=incremental_patch,
+            cumulative_patch=cumulative_patch,
+            changed_files=tuple(changed_files),
+            expected_parent_source_tree_hash=expected_parent_source_tree_hash,
+            expected_child_source_tree_hash=str(result["source_tree_hash"]),
+        )
         return dict(result)
 
     def verify_node_identity(
@@ -1087,6 +1117,139 @@ class _HostCandidateBuilder:
     def check_patch_applies(self, *args: Any, **kwargs: Any) -> None:
         self._local.check_patch_applies(*args, **kwargs)
 
+    @staticmethod
+    def _apply_measured_patch(
+        *,
+        context: ParentImageSourceContext,
+        unified_diff: str,
+        label: str,
+    ) -> tuple[str, frozenset[str]]:
+        paths = frozenset(extract_unified_diff_paths(unified_diff))
+        if not paths:
+            raise AutoresearchExecutorV2Error(
+                f"{label} has no Git-tree source paths"
+            )
+        if not paths.issubset(set(context.editable_files)):
+            raise AutoresearchExecutorV2Error(
+                f"{label} escapes the measured editable source"
+            )
+        if git_diff_structural_metadata(unified_diff):
+            raise AutoresearchExecutorV2Error(
+                f"{label} is not a content-only Git patch"
+            )
+        with tempfile.TemporaryDirectory(
+            prefix="leadpoet-autoresearch-git-semantics-v2-"
+        ) as tmp:
+            staging = Path(tmp) / "source"
+            _copy_source_tree(context.source_root, staging)
+            original_modes: dict[str, int] = {}
+            for path in paths:
+                source_path = staging / path
+                if source_path.is_symlink() or not source_path.is_file():
+                    raise AutoresearchExecutorV2Error(
+                        f"{label} does not target an existing regular file"
+                    )
+                original_modes[path] = source_path.stat().st_mode & 0o7777
+            _initialize_temporary_git_repo(staging)
+            diff_path = Path(tmp) / "candidate.diff"
+            diff_path.write_text(unified_diff, encoding="utf-8")
+            try:
+                _run_git_apply(
+                    diff_path,
+                    cwd=staging,
+                    timeout_seconds=120,
+                    check=True,
+                )
+                _run_git_apply(
+                    diff_path,
+                    cwd=staging,
+                    timeout_seconds=120,
+                    check=False,
+                )
+            except CodeEditPatchApplyError:
+                raise
+            except Exception as exc:
+                raise AutoresearchExecutorV2Error(
+                    f"{label} does not apply to measured source"
+                ) from exc
+            for path, original_mode in original_modes.items():
+                result_path = staging / path
+                if (
+                    result_path.is_symlink()
+                    or not result_path.is_file()
+                    or result_path.stat().st_mode & 0o7777 != original_mode
+                ):
+                    raise AutoresearchExecutorV2Error(
+                        f"{label} changed source file type or mode"
+                    )
+            return compute_private_source_tree_hash(staging), paths
+
+    def verify_git_tree_child_semantics(
+        self,
+        *,
+        draft: CodeEditDraft,
+        canonical_incremental_patch: str,
+        cumulative_patch: str,
+        changed_files: Sequence[str],
+        expected_parent_source_tree_hash: str,
+        expected_child_source_tree_hash: str,
+    ) -> None:
+        """Bind untrusted host Git bytes to the measured child source tree."""
+
+        with self._source_context_lock:
+            parent_context = self._source_contexts.get(
+                expected_parent_source_tree_hash
+            )
+        if (
+            parent_context is None
+            or parent_context.source_tree_hash
+            != expected_parent_source_tree_hash
+        ):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree parent source is not present in measured state"
+            )
+
+        draft_paths = frozenset(draft.target_files)
+        if (
+            not draft_paths
+            or len(draft_paths) != len(draft.target_files)
+            or draft_paths != extract_unified_diff_paths(draft.unified_diff)
+        ):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree generated draft source paths differ"
+            )
+        generated_hash, _ = self._apply_measured_patch(
+            context=parent_context,
+            unified_diff=draft.unified_diff,
+            label="Git-tree generated draft",
+        )
+        incremental_hash, incremental_paths = self._apply_measured_patch(
+            context=parent_context,
+            unified_diff=canonical_incremental_patch,
+            label="Git-tree canonical incremental patch",
+        )
+        cumulative_hash, _ = self._apply_measured_patch(
+            context=self._source_context,
+            unified_diff=cumulative_patch,
+            label="Git-tree cumulative patch",
+        )
+        if (
+            incremental_paths != draft_paths
+            or incremental_paths != frozenset(changed_files)
+            or len(incremental_paths) != len(tuple(changed_files))
+        ):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree incremental changed-file set differs"
+            )
+        if {
+            generated_hash,
+            incremental_hash,
+            cumulative_hash,
+        } != {expected_child_source_tree_hash}:
+            raise AutoresearchExecutorV2Error(
+                "Git-tree child patches are not measured-source equivalent"
+            )
+
     def restore_rehydrated_candidate_source_context(
         self,
         *,
@@ -1119,6 +1282,10 @@ class _HostCandidateBuilder:
             ):
                 raise AutoresearchExecutorV2Error(
                     "rehydrated Git-tree candidate commitment differs"
+                )
+            if git_diff_structural_metadata(candidate.draft.unified_diff):
+                raise AutoresearchExecutorV2Error(
+                    "rehydrated Git-tree candidate is not a content-only Git patch"
                 )
             source_errors = self._local.validate_draft_against_source_context(
                 candidate.draft,
@@ -1726,6 +1893,9 @@ class AutoresearchExecutorV2:
                 tree_repository=_HostGitTreeRepository(
                     context,
                     tree_id=tree_id,
+                    child_source_verifier=(
+                        builder.verify_git_tree_child_semantics
+                    ),
                 ),
                 provider_registry_loader=lambda: (
                     list(provider_entries),

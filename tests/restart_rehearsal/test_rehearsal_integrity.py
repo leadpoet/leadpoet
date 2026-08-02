@@ -18,6 +18,7 @@ import urllib.request
 
 import pytest
 
+from leadpoet_canonical.attested_v2 import sha256_json
 from scripts import run_local_restart_rehearsal as rehearsal
 from tests.restart_rehearsal import postgres_v2_contract_probe as postgres_probe
 from tests.restart_rehearsal.artifact_identity import (
@@ -54,6 +55,7 @@ from tests.restart_rehearsal.postgres_v2_contract_probe import (
     ACTIVE_MODEL_RESULT_REPLAY_MIGRATION,
     CHAMPION_LIFETIME_CREDIT_MIGRATION,
     DisposablePostgres,
+    EXPECTED_APPLIED_MIGRATIONS,
     EXPECTED_FINALIZED_VIEW_COLUMNS,
     MIGRATIONS_BEFORE_TRANSPORT_FIX,
     PROVIDER_OUTCOME_APPEND_MIGRATION,
@@ -71,6 +73,7 @@ from tests.restart_rehearsal.sanitized_weight_fixture import (
 )
 from tests.restart_rehearsal.verify_evidence import (
     EXPECTED_GATEWAY_PRIVATE_MODEL_ENV,
+    REQUIRED_GIT_TREE_RELATION_CONTRACT,
     events,
     selected_weight_storage_preflight_capability,
     verify_gateway_private_model_environment,
@@ -83,6 +86,12 @@ from tests.restart_rehearsal.verify_evidence import (
 )
 from gateway.tee.rehearsal_behavior_contract_v2 import (
     build_rehearsal_behavior_contract_v2,
+)
+from gateway.research_lab.git_tree_models import (
+    TreePolicy,
+    TreeReplacement,
+    derive_child_slot,
+    derive_tree_id,
 )
 
 
@@ -1217,20 +1226,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
     contract = {
         "schema_version": "leadpoet.restart_rehearsal.postgres_contract.v1",
         "candidate_sha": COMMIT,
-        "applied_migrations": [
-            *MIGRATIONS_BEFORE_TRANSPORT_FIX,
-            TRANSPORT_FIX_MIGRATION,
-            TRANSPORT_TERMINAL_MIGRATION,
-            PROVIDER_OUTCOME_APPEND_MIGRATION,
-            PROVIDER_OUTCOME_BACKPRESSURE_MIGRATION,
-            CHAMPION_LIFETIME_CREDIT_MIGRATION,
-            PROVIDER_OUTCOME_CONTENTION_STATUS_MIGRATION,
-            PROVIDER_OUTCOME_HEAD_CONTENTION_MIGRATION,
-            ACTIVE_MODEL_RESULT_REPLAY_MIGRATION,
-            ANCESTRY_CHECKPOINT_MIGRATION,
-            ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION,
-            ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
-        ],
+        "applied_migrations": list(EXPECTED_APPLIED_MIGRATIONS),
         "relations": {
             "research_lab_maintenance_lease": {
                 "kind": "r",
@@ -1271,6 +1267,46 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
                 "kind": "r",
                 "columns": ["netuid"],
             },
+            "research_lab_autoresearch_trees": {
+                "kind": "r",
+                "columns": ["tree_id", "run_id"],
+            },
+            "research_lab_autoresearch_tree_nodes": {
+                "kind": "r",
+                "columns": ["tree_id", "node_id"],
+            },
+            "research_lab_autoresearch_tree_events": {
+                "kind": "r",
+                "columns": ["tree_id", "event_hash"],
+            },
+            "research_lab_autoresearch_operation_settlements": {
+                "kind": "r",
+                "columns": ["logical_operation_id", "tree_id"],
+            },
+            "research_lab_autoresearch_frontier_commitments": {
+                "kind": "r",
+                "columns": ["tree_id", "frontier_hash"],
+            },
+            "research_lab_autoresearch_tree_handoffs": {
+                "kind": "r",
+                "columns": ["tree_id", "handoff_hash"],
+            },
+            "research_lab_autoresearch_tree_node_current": {
+                "kind": "v",
+                "columns": ["tree_id", "node_id", "current_event_hash"],
+            },
+            "research_lab_autoresearch_operation_current": {
+                "kind": "v",
+                "columns": ["logical_operation_id", "operation_status"],
+            },
+            "research_lab_autoresearch_tree_current": {
+                "kind": "v",
+                "columns": ["tree_id", "current_event_hash"],
+            },
+            "research_lab_autoresearch_run_tree_current": {
+                "kind": "v",
+                "columns": ["run_id", "tree_id", "tree_generation"],
+            },
         },
         "rpcs": [
             "research_lab_acquire_maintenance_lease",
@@ -1278,6 +1314,15 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "persist_research_lab_ancestry_checkpoint_v2",
             "persist_research_lab_allocation_settlement_frontier_v2",
             "research_lab_ancestry_checkpoint_bootstrap_contract_v2",
+            "create_research_lab_autoresearch_tree",
+            "plan_research_lab_autoresearch_tree_node",
+            "append_research_lab_autoresearch_tree_event",
+            "transition_research_lab_autoresearch_operation",
+            "commit_research_lab_autoresearch_frontier",
+            "select_research_lab_autoresearch_tree_final",
+            "record_research_lab_autoresearch_tree_handoff",
+            "create_research_lab_git_tree_candidate_handoff",
+            "research_lab_autoresearch_run_evaluation_usage",
         ],
         "maintenance_lease": {
             "schema_version": "leadpoet.maintenance_lease_contract.v1",
@@ -1314,6 +1359,10 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "finalized_view_projection_exact": True,
             "finalized_view_seed_available": True,
             "historical_compute_schema_migrations_applied": True,
+            "git_tree_autoresearch_schema_migrations_applied": True,
+            "git_tree_autoresearch_persistence_contract_valid": True,
+            "git_tree_stale_root_rejected_atomically": True,
+            "git_tree_replacement_and_restart_replay_valid": True,
             "historical_compute_finalized_authority_seed_available": True,
             "historical_compute_allocation_conserved": True,
             "historical_compute_release_identity_bound": True,
@@ -1354,6 +1403,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "frontier_count": 1,
             "activation_count": 1,
         },
+        "git_tree_autoresearch": {},
         "seed_rows": {
             "research_lab_finalized_allocation_epochs_v2": [
                 {
@@ -1381,6 +1431,147 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             ],
             **graph_seed_rows,
         },
+    }
+    for relation, expected in REQUIRED_GIT_TREE_RELATION_CONTRACT.items():
+        contract["relations"][relation] = {
+            "kind": expected["kind"],
+            "columns": sorted(expected["columns"]),
+        }
+    policy = TreePolicy(mode="active")
+    run_id = "00000000-0000-4000-8000-000000000095"
+    root_a = sha256_json({"root": "a"})
+    root_b = sha256_json({"root": "b"})
+    manifest_a = sha256_json({"manifest": "a"})
+    manifest_b = sha256_json({"manifest": "b"})
+    tree_a = derive_tree_id(
+        run_id=run_id,
+        root_artifact_hash=root_a,
+        policy=policy,
+    )
+    cancellation_doc = {
+        "schema_version": "research_lab.git_tree_root_change.v2",
+        "run_id": run_id,
+        "tree_id": tree_a,
+        "next_generation": 1,
+        "old_root_artifact_hash": root_a,
+        "new_root_artifact_hash": root_b,
+        "old_root_manifest_hash": manifest_a,
+        "new_root_manifest_hash": manifest_b,
+        "old_policy_hash": policy.policy_hash,
+        "new_policy_hash": policy.policy_hash,
+        "reason": "tree_authority_changed_before_resume",
+    }
+    selected_slot = derive_child_slot(
+        tree_id=tree_a,
+        parent_node_id="root",
+        root_branch_id="",
+        depth=1,
+        slot_index=0,
+    )
+    candidate_artifact_hash = sha256_json({"candidate": "selected"})
+    selected_lineage_hash = sha256_json(
+        {
+            "schema_version": "research_lab.git_tree_lineage.v1",
+            "tree_id": tree_a,
+            "node_id": selected_slot.node_id,
+            "git_commit": "c" * 64,
+            "composition": {"root_git_commit": "a" * 64},
+        }
+    )
+    selection = {
+        "tree_id": tree_a,
+        "selected_node_id": selected_slot.node_id,
+        "paid_finalist_count": 1,
+        "selected_candidate_artifact_hash": candidate_artifact_hash,
+        "selected_node_git_commit": "c" * 64,
+        "selected_lineage_hash": selected_lineage_hash,
+    }
+    predecessor_doc = {
+        "selection_hash": sha256_json(selection),
+        "selection": selection,
+    }
+    predecessor_previous_hash = sha256_json(
+        {"fixture": "previous-tree-event"}
+    )
+    predecessor_event_hash = sha256_json(
+        {
+            "schema_version": "research_lab.git_tree_event.v1",
+            "tree_id": tree_a,
+            "event_type": "final_selected",
+            "node_id": selected_slot.node_id,
+            "previous_event_hash": predecessor_previous_hash,
+            "event_doc": predecessor_doc,
+        }
+    )
+    cancellation_event_hash = sha256_json(
+        {
+            "schema_version": "research_lab.git_tree_event.v1",
+            "tree_id": tree_a,
+            "event_type": "tree_cancelled_root_changed",
+            "node_id": "",
+            "previous_event_hash": predecessor_event_hash,
+            "event_doc": cancellation_doc,
+        }
+    )
+    replacement = TreeReplacement(
+        generation=1,
+        replaces_tree_id=tree_a,
+        cancellation_event_hash=cancellation_event_hash,
+        prior_root_artifact_hash=root_a,
+        prior_root_manifest_hash=manifest_a,
+        prior_policy_hash=policy.policy_hash,
+        root_artifact_hash=root_b,
+        root_manifest_hash=manifest_b,
+        policy_hash=policy.policy_hash,
+    )
+    contract["git_tree_autoresearch"] = {
+        "run_id": run_id,
+        "policy": policy.to_dict(),
+        "initial_tree_id": tree_a,
+        "replacement_tree_id": derive_tree_id(
+            run_id=run_id,
+            root_artifact_hash=root_b,
+            policy=policy,
+            replacement=replacement,
+        ),
+        "replacement_hash": replacement.replacement_hash,
+        "replacement": replacement.to_dict(),
+        "predecessor_event": {
+            "tree_id": tree_a,
+            "seq": 5,
+            "event_type": "final_selected",
+            "node_id": selected_slot.node_id,
+            "previous_event_hash": predecessor_previous_hash,
+            "event_doc": predecessor_doc,
+            "event_hash": predecessor_event_hash,
+        },
+        "cancellation_event": {
+            "tree_id": tree_a,
+            "event_type": "tree_cancelled_root_changed",
+            "node_id": "",
+            "previous_event_hash": predecessor_event_hash,
+            "event_doc": cancellation_doc,
+            "event_hash": cancellation_event_hash,
+        },
+        "candidate_id": (
+            "candidate:" + candidate_artifact_hash.split(":", 1)[1]
+        ),
+        "candidate_artifact_hash": candidate_artifact_hash,
+        "evaluation_usage": {
+            "settled_cost_microusd": 250,
+            "provider_call_count": 4,
+            "terminal_operation_count": 2,
+            "unsettled_operation_ids": [],
+            "indeterminate_operation_ids": [],
+        },
+        "row_counts": {
+            "trees": 2,
+            "handoffs": 1,
+            "candidates": 1,
+            "evaluation_events": 1,
+        },
+        "restart_replay_exact": True,
+        "stale_root_rejected_atomically": True,
     }
     contract_path.write_text(json.dumps(contract), encoding="utf-8")
     original_is_file = Path.is_file
@@ -1414,10 +1605,74 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
     assert verify_migration_backed_database_contract(COMMIT) == (
         hashlib.sha256(contract_path.read_bytes()).hexdigest()
     )
-    contract["checks"]["measured_settlement_receipt_projection_exact"] = False
-    contract_path.write_text(json.dumps(contract), encoding="utf-8")
-    with pytest.raises(SystemExit, match="evidence is incomplete"):
-        verify_migration_backed_database_contract(COMMIT)
+    invalid_contracts = []
+    missing_check = json.loads(json.dumps(contract))
+    missing_check["checks"][
+        "measured_settlement_receipt_projection_exact"
+    ] = False
+    invalid_contracts.append(missing_check)
+    missing_migration = json.loads(json.dumps(contract))
+    missing_migration["applied_migrations"].remove(
+        EXPECTED_APPLIED_MIGRATIONS[0]
+    )
+    invalid_contracts.append(missing_migration)
+    reordered_migrations = json.loads(json.dumps(contract))
+    reordered_migrations["applied_migrations"][0:2] = reversed(
+        reordered_migrations["applied_migrations"][0:2]
+    )
+    invalid_contracts.append(reordered_migrations)
+    missing_relation = json.loads(json.dumps(contract))
+    del missing_relation["relations"][
+        "research_lab_autoresearch_tree_current"
+    ]
+    invalid_contracts.append(missing_relation)
+    missing_base_column = json.loads(json.dumps(contract))
+    missing_base_column["relations"][
+        "research_lab_autoresearch_tree_events"
+    ]["columns"].remove("event_doc")
+    invalid_contracts.append(missing_base_column)
+    missing_view_column = json.loads(json.dumps(contract))
+    missing_view_column["relations"][
+        "research_lab_autoresearch_tree_current"
+    ]["columns"].remove("current_event_doc")
+    invalid_contracts.append(missing_view_column)
+    wrong_relation_kind = json.loads(json.dumps(contract))
+    wrong_relation_kind["relations"][
+        "research_lab_autoresearch_tree_current"
+    ]["kind"] = "r"
+    invalid_contracts.append(wrong_relation_kind)
+    missing_rpc = json.loads(json.dumps(contract))
+    missing_rpc["rpcs"].remove(
+        "create_research_lab_git_tree_candidate_handoff"
+    )
+    invalid_contracts.append(missing_rpc)
+    fabricated_tree = json.loads(json.dumps(contract))
+    fabricated_tree["git_tree_autoresearch"]["initial_tree_id"] = (
+        "sha256:" + "9" * 64
+    )
+    invalid_contracts.append(fabricated_tree)
+    fabricated_candidate = json.loads(json.dumps(contract))
+    fabricated_candidate_hash = "sha256:" + "8" * 64
+    fabricated_candidate["git_tree_autoresearch"][
+        "candidate_artifact_hash"
+    ] = fabricated_candidate_hash
+    fabricated_candidate["git_tree_autoresearch"]["candidate_id"] = (
+        "candidate:" + fabricated_candidate_hash.split(":", 1)[1]
+    )
+    invalid_contracts.append(fabricated_candidate)
+    detached_predecessor = json.loads(json.dumps(contract))
+    detached_predecessor["git_tree_autoresearch"]["cancellation_event"][
+        "previous_event_hash"
+    ] = "sha256:" + "7" * 64
+    invalid_contracts.append(detached_predecessor)
+
+    for invalid in invalid_contracts:
+        contract_path.write_text(json.dumps(invalid), encoding="utf-8")
+        with pytest.raises(
+            SystemExit,
+            match="evidence is incomplete|evidence is missing|evidence differs",
+        ):
+            verify_migration_backed_database_contract(COMMIT)
 
 
 def test_postgres_fixture_insert_names_explicit_columns() -> None:

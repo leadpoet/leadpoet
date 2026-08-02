@@ -23,6 +23,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
+from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 from typing import Any, Mapping
 
@@ -51,6 +53,404 @@ from research_lab.eval.promotion_metric import (
     PAIRED_LCB_PROMOTION_METRIC_VERSION,
 )
 from gateway.research_lab.source_add_llm_judge import SourceAddJudgeVerdict
+
+
+def _git(cmd, *, cwd=None):
+    return subprocess.run(
+        ["git", *cmd],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _private_source_push_fixture():
+    unified_diff = (
+        "diff --git a/sourcing_model.py b/sourcing_model.py\n"
+        "--- a/sourcing_model.py\n"
+        "+++ b/sourcing_model.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 2\n"
+    )
+    artifact_payload = {
+        "schema_version": "1.0",
+        "artifact_type": "research_lab_code_edit_source_diff",
+        "run_id": "run-private-source-push",
+        "candidate_index": 0,
+        "parent_artifact_hash": "sha256:" + "1" * 64,
+        "parent_manifest_hash": "sha256:" + "2" * 64,
+        "source_diff_hash": sha256_json({"unified_diff": unified_diff}),
+        "target_files": ["sourcing_model.py"],
+        "unified_diff": unified_diff,
+        "draft_hash": "sha256:" + "3" * 64,
+    }
+    artifact = {
+        **artifact_payload,
+        "artifact_hash": sha256_json(artifact_payload),
+    }
+    candidate_manifest_payload = {
+        "model_artifact_hash": "sha256:" + "4" * 64,
+        "git_commit_sha": "5" * 40,
+        "image_digest": (
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com/candidate@sha256:"
+            + "6" * 64
+        ),
+        "config_hash": "sha256:" + "7" * 64,
+        "component_registry_version": "1",
+        "scoring_adapter_version": "1",
+        "manifest_uri": "s3://fixture/candidate.json",
+        "signature_ref": "kms:fixture",
+        "build_id": "fixture-build",
+    }
+    candidate_manifest = {
+        **candidate_manifest_payload,
+        "manifest_hash": sha256_json(candidate_manifest_payload),
+    }
+    build_payload = {
+        "parent_artifact_hash": artifact["parent_artifact_hash"],
+        "parent_manifest_hash": artifact["parent_manifest_hash"],
+        "candidate_model_artifact_hash": candidate_manifest[
+            "model_artifact_hash"
+        ],
+        "candidate_model_manifest_hash": candidate_manifest["manifest_hash"],
+        "source_diff_hash": artifact["source_diff_hash"],
+        "source_diff_artifact_uri": "s3://fixture/candidates/run-private-source-push/0/source_diff.json",
+        "source_diff_artifact_hash": artifact["artifact_hash"],
+        "changed_files": ["sourcing_model.py"],
+    }
+    build_doc = {
+        **build_payload,
+        "build_doc_hash": sha256_json(build_payload),
+        "loop_direction_plan_hash": "sha256:" + "8" * 64,
+        "selected_path_id": "fixture-path",
+        "plan_alignment": {"passes": True},
+        "conditional_validation_policy": {"mode": "on"},
+        "loop_node_id": "tree-node:" + "9" * 64,
+    }
+    patch_payload = {
+        "candidate_kind": "image_build",
+        "patch_type": "IMAGE_BUILD",
+        "target_component_id": "private_model_source_tree",
+        "parent_artifact_hash": artifact["parent_artifact_hash"],
+        "candidate_artifact_hash": candidate_manifest["model_artifact_hash"],
+        "candidate_model_manifest_hash": candidate_manifest["manifest_hash"],
+        "patch_payload_hash": artifact["source_diff_hash"],
+        "candidate_source_diff_hash": artifact["source_diff_hash"],
+        "candidate_build_doc_hash": build_doc["build_doc_hash"],
+        "redacted_summary": "fixture",
+        "validation_result": "passed",
+        "patch_doc": {"target_files": list(artifact["target_files"])},
+    }
+    patch_manifest = {
+        **patch_payload,
+        "manifest_hash": sha256_json(patch_payload),
+    }
+    return artifact, build_doc, patch_manifest, candidate_manifest
+
+
+def test_private_source_push_verifies_artifact_before_git_and_pushes_exact_diff(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(["init", "-q", "-b", "main"], cwd=source)
+    _git(["config", "user.name", "Fixture"], cwd=source)
+    _git(["config", "user.email", "fixture@example.test"], cwd=source)
+    (source / "sourcing_model.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(["add", "sourcing_model.py"], cwd=source)
+    _git(["commit", "-q", "-m", "root"], cwd=source)
+    active_sha = _git(["rev-parse", "HEAD"], cwd=source)
+    remote = tmp_path / "remote.git"
+    _git(["clone", "-q", "--bare", str(source), str(remote)])
+
+    artifact, build_doc, patch_manifest, candidate_manifest = (
+        _private_source_push_fixture()
+    )
+    original_run_command = promotion._run_command
+
+    def run_command(cmd, **kwargs):
+        if cmd[:3] == ["aws", "s3", "cp"]:
+            return json.dumps(artifact, sort_keys=True)
+        return original_run_command(cmd, **kwargs)
+
+    monkeypatch.setattr(promotion, "_run_command", run_command)
+    result = promotion._push_candidate_source_diff_to_repo(
+        repo_url=str(remote),
+        branch_name="main",
+        active_git_commit_sha=active_sha,
+        candidate_id="candidate:fixture",
+        score_bundle_id="bundle:fixture",
+        candidate_build_doc=build_doc,
+        candidate_patch_manifest=patch_manifest,
+        candidate_model_manifest_doc=candidate_manifest,
+        expected_candidate_patch_hash=sha256_json(patch_manifest),
+        expected_source_diff_hash=artifact["source_diff_hash"],
+        expected_parent_artifact_hash=artifact["parent_artifact_hash"],
+        expected_run_id=artifact["run_id"],
+    )
+
+    assert result["status"] == "pushed"
+    assert result["target_files"] == ["sourcing_model.py"]
+    assert _git(
+        ["--git-dir", str(remote), "show", "main:sourcing_model.py"]
+    ) == "VALUE = 2"
+
+
+def test_private_source_push_normalizes_legacy_depth_two_cumulative_targets(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source"
+    (source / "gateway").mkdir(parents=True)
+    _git(["init", "-q", "-b", "main"], cwd=source)
+    _git(["config", "user.name", "Fixture"], cwd=source)
+    _git(["config", "user.email", "fixture@example.test"], cwd=source)
+    (source / "sourcing_model.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (source / "gateway" / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(["add", "sourcing_model.py", "gateway/module.py"], cwd=source)
+    _git(["commit", "-q", "-m", "root"], cwd=source)
+    active_sha = _git(["rev-parse", "HEAD"], cwd=source)
+    remote = tmp_path / "remote.git"
+    _git(["clone", "-q", "--bare", str(source), str(remote)])
+
+    base_artifact, _base_build, _base_patch, candidate_manifest = (
+        _private_source_push_fixture()
+    )
+    first_patch = (
+        "diff --git a/sourcing_model.py b/sourcing_model.py\n"
+        "--- a/sourcing_model.py\n"
+        "+++ b/sourcing_model.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 2\n"
+    )
+    incremental_patch = (
+        "diff --git a/gateway/module.py b/gateway/module.py\n"
+        "--- a/gateway/module.py\n"
+        "+++ b/gateway/module.py\n"
+        "@@ -1 +1 @@\n"
+        "-VALUE = 1\n"
+        "+VALUE = 2\n"
+    )
+    cumulative_patch = first_patch + incremental_patch
+    source_diff_hash = sha256_json({"unified_diff": cumulative_patch})
+    incremental_hash = sha256_json({"unified_diff": incremental_patch})
+    artifact_payload = {
+        **{
+            key: value
+            for key, value in base_artifact.items()
+            if key != "artifact_hash"
+        },
+        "candidate_index": 2,
+        "source_diff_hash": source_diff_hash,
+        "target_files": ["gateway/module.py"],
+        "unified_diff": cumulative_patch,
+    }
+    artifact = {
+        **artifact_payload,
+        "artifact_hash": sha256_json(artifact_payload),
+    }
+    composition = {
+        "schema_version": "research_lab.git_tree_composition.v1",
+        "incremental_source_diff_hash": incremental_hash,
+        "cumulative_source_diff_hash": source_diff_hash,
+        "cumulative_changed_files": ["gateway/module.py"],
+        "child_source_tree_hash": candidate_manifest["model_artifact_hash"],
+    }
+    build_payload = {
+        "parent_artifact_hash": artifact["parent_artifact_hash"],
+        "parent_manifest_hash": artifact["parent_manifest_hash"],
+        "candidate_model_artifact_hash": candidate_manifest["model_artifact_hash"],
+        "candidate_model_manifest_hash": candidate_manifest["manifest_hash"],
+        "source_diff_hash": source_diff_hash,
+        "source_diff_artifact_uri": "s3://fixture/legacy-depth-two/source_diff.json",
+        "source_diff_artifact_hash": artifact["artifact_hash"],
+        "changed_files": ["gateway/module.py", "sourcing_model.py"],
+        "git_tree": {
+            "schema_version": "research_lab.git_tree_lineage.v1",
+            "depth": 2,
+            "root_artifact_hash": artifact["parent_artifact_hash"],
+            "incremental_source_diff_hash": incremental_hash,
+            "cumulative_source_diff_hash": source_diff_hash,
+            "composition": composition,
+        },
+    }
+    build_doc = {
+        **build_payload,
+        "build_doc_hash": sha256_json(build_payload),
+    }
+    patch_payload = {
+        "candidate_kind": "image_build",
+        "patch_type": "IMAGE_BUILD",
+        "target_component_id": "private_model_source_tree",
+        "parent_artifact_hash": artifact["parent_artifact_hash"],
+        "candidate_artifact_hash": candidate_manifest["model_artifact_hash"],
+        "candidate_model_manifest_hash": candidate_manifest["manifest_hash"],
+        "patch_payload_hash": source_diff_hash,
+        "candidate_source_diff_hash": source_diff_hash,
+        "candidate_build_doc_hash": build_doc["build_doc_hash"],
+        "redacted_summary": "legacy depth-two fixture",
+        "validation_result": "passed",
+        "patch_doc": {"target_files": ["gateway/module.py"]},
+    }
+    patch_manifest = {
+        **patch_payload,
+        "manifest_hash": sha256_json(patch_payload),
+    }
+    original_run_command = promotion._run_command
+
+    def run_command(cmd, **kwargs):
+        if cmd[:3] == ["aws", "s3", "cp"]:
+            return json.dumps(artifact, sort_keys=True)
+        return original_run_command(cmd, **kwargs)
+
+    monkeypatch.setattr(promotion, "_run_command", run_command)
+    result = promotion._push_candidate_source_diff_to_repo(
+        repo_url=str(remote),
+        branch_name="main",
+        active_git_commit_sha=active_sha,
+        candidate_id="candidate:legacy-depth-two",
+        score_bundle_id="bundle:legacy-depth-two",
+        candidate_build_doc=build_doc,
+        candidate_patch_manifest=patch_manifest,
+        candidate_model_manifest_doc=candidate_manifest,
+        expected_candidate_patch_hash=sha256_json(patch_manifest),
+        expected_source_diff_hash=source_diff_hash,
+        expected_parent_artifact_hash=artifact["parent_artifact_hash"],
+        expected_run_id=artifact["run_id"],
+    )
+
+    assert result["status"] == "pushed"
+    assert result["target_files"] == ["gateway/module.py", "sourcing_model.py"]
+    assert _git(
+        ["--git-dir", str(remote), "show", "main:sourcing_model.py"]
+    ) == "VALUE = 2"
+    assert _git(
+        ["--git-dir", str(remote), "show", "main:gateway/module.py"]
+    ) == "VALUE = 2"
+
+
+def test_private_source_push_rejects_tampered_s3_body_before_git(
+    monkeypatch,
+):
+    artifact, build_doc, patch_manifest, candidate_manifest = (
+        _private_source_push_fixture()
+    )
+    artifact["unified_diff"] = artifact["unified_diff"].replace(
+        "+VALUE = 2", "+VALUE = 'TAMPERED'"
+    )
+    calls = []
+
+    def run_command(cmd, **_kwargs):
+        calls.append(tuple(cmd))
+        if cmd[:3] == ["aws", "s3", "cp"]:
+            return json.dumps(artifact, sort_keys=True)
+        raise AssertionError("Git must not run for an uncommitted artifact")
+
+    monkeypatch.setattr(promotion, "_run_command", run_command)
+    with pytest.raises(RuntimeError, match="artifact commitment differs"):
+        promotion._push_candidate_source_diff_to_repo(
+            repo_url="unused",
+            branch_name="main",
+            active_git_commit_sha="",
+            candidate_id="candidate:fixture",
+            score_bundle_id="bundle:fixture",
+            candidate_build_doc=build_doc,
+            candidate_patch_manifest=patch_manifest,
+            candidate_model_manifest_doc=candidate_manifest,
+            expected_candidate_patch_hash=sha256_json(patch_manifest),
+            expected_source_diff_hash=artifact["source_diff_hash"],
+            expected_parent_artifact_hash=artifact["parent_artifact_hash"],
+            expected_run_id=artifact["run_id"],
+        )
+    assert calls == [
+        ("aws", "s3", "cp", build_doc["source_diff_artifact_uri"], "-")
+    ]
+
+
+def test_private_source_push_rejects_hash_consistent_mode_change_before_git(
+    monkeypatch,
+):
+    artifact, build_doc, patch_manifest, candidate_manifest = (
+        _private_source_push_fixture()
+    )
+    structural_diff = artifact["unified_diff"].replace(
+        "--- a/sourcing_model.py\n",
+        "old mode 100644\nnew mode 100755\n--- a/sourcing_model.py\n",
+    )
+    source_diff_hash = sha256_json({"unified_diff": structural_diff})
+    artifact_payload = {
+        **{key: value for key, value in artifact.items() if key != "artifact_hash"},
+        "unified_diff": structural_diff,
+        "source_diff_hash": source_diff_hash,
+    }
+    artifact = {
+        **artifact_payload,
+        "artifact_hash": sha256_json(artifact_payload),
+    }
+    unhashed_annotations = {
+        "conditional_validation_policy",
+        "loop_dev_score",
+        "loop_dev_score_version",
+        "loop_direction_plan_hash",
+        "loop_node_id",
+        "plan_alignment",
+        "selected_path_id",
+        "stale_parent_rebase",
+    }
+    build_doc = {
+        **build_doc,
+        "source_diff_hash": source_diff_hash,
+        "source_diff_artifact_hash": artifact["artifact_hash"],
+    }
+    immutable_build = {
+        key: value
+        for key, value in build_doc.items()
+        if key != "build_doc_hash" and key not in unhashed_annotations
+    }
+    build_doc["build_doc_hash"] = sha256_json(immutable_build)
+    patch_payload = {
+        **{
+            key: value
+            for key, value in patch_manifest.items()
+            if key != "manifest_hash"
+        },
+        "patch_payload_hash": source_diff_hash,
+        "candidate_source_diff_hash": source_diff_hash,
+        "candidate_build_doc_hash": build_doc["build_doc_hash"],
+    }
+    patch_manifest = {
+        **patch_payload,
+        "manifest_hash": sha256_json(patch_payload),
+    }
+    calls = []
+
+    def run_command(cmd, **_kwargs):
+        calls.append(tuple(cmd))
+        if cmd[:3] == ["aws", "s3", "cp"]:
+            return json.dumps(artifact, sort_keys=True)
+        raise AssertionError("Git must not run for a structural patch")
+
+    monkeypatch.setattr(promotion, "_run_command", run_command)
+    with pytest.raises(RuntimeError, match="not a content-only Git patch"):
+        promotion._push_candidate_source_diff_to_repo(
+            repo_url="unused",
+            branch_name="main",
+            active_git_commit_sha="",
+            candidate_id="candidate:structural-patch",
+            score_bundle_id="bundle:structural-patch",
+            candidate_build_doc=build_doc,
+            candidate_patch_manifest=patch_manifest,
+            candidate_model_manifest_doc=candidate_manifest,
+            expected_candidate_patch_hash=sha256_json(patch_manifest),
+            expected_source_diff_hash=source_diff_hash,
+            expected_parent_artifact_hash=artifact["parent_artifact_hash"],
+            expected_run_id=artifact["run_id"],
+        )
+    assert calls == [
+        ("aws", "s3", "cp", build_doc["source_diff_artifact_uri"], "-")
+    ]
 
 
 @dataclass

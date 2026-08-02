@@ -28,6 +28,7 @@ from research_lab.code_editing import (
     CodeEditSourceInspectionRequest,
     code_edit_candidate_manifest,
     extract_unified_diff_paths,
+    git_diff_structural_metadata,
     validate_code_edit_draft,
 )
 from research_lab.eval import (
@@ -43,6 +44,347 @@ from research_lab.eval import (
 logger = logging.getLogger(__name__)
 
 _BUILD_DEADLINE = threading.local()
+
+_PRIVATE_SOURCE_DIFF_ARTIFACT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "artifact_type",
+        "run_id",
+        "candidate_index",
+        "parent_artifact_hash",
+        "parent_manifest_hash",
+        "source_diff_hash",
+        "target_files",
+        "unified_diff",
+        "draft_hash",
+        "artifact_hash",
+    }
+)
+_PRIVATE_BUILD_DOC_UNHASHED_ANNOTATION_FIELDS = frozenset(
+    {
+        "conditional_validation_policy",
+        "loop_dev_score",
+        "loop_dev_score_version",
+        "loop_direction_plan_hash",
+        "loop_node_id",
+        "plan_alignment",
+        "selected_path_id",
+        "stale_parent_rebase",
+    }
+)
+_SHA256_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _legacy_git_tree_incremental_target_projection(
+    *,
+    candidate_build_doc: Mapping[str, Any],
+    patch_manifest: Mapping[str, Any] | None,
+    target_files: Sequence[str],
+    source_diff_hash: str,
+    parent_artifact_hash: str,
+) -> bool:
+    """Recognize the exact pre-cumulative-target Git-tree artifact shape.
+
+    Before cumulative target paths were persisted, depth>1 candidates committed
+    the cumulative root patch but retained the direct-parent changed-file list
+    in both ``patch_doc.target_files`` and the (misnamed)
+    ``composition.cumulative_changed_files`` field.  Accept only that fully
+    hash-bound historical shape; callers still normalize to the paths parsed
+    from the cumulative patch before applying or staging it.
+    """
+
+    lineage = candidate_build_doc.get("git_tree")
+    composition = (
+        lineage.get("composition") if isinstance(lineage, Mapping) else None
+    )
+    patch_doc = (
+        patch_manifest.get("patch_doc")
+        if isinstance(patch_manifest, Mapping)
+        else None
+    )
+    legacy_targets = (
+        composition.get("cumulative_changed_files")
+        if isinstance(composition, Mapping)
+        else None
+    )
+    patch_targets = (
+        patch_doc.get("target_files")
+        if isinstance(patch_doc, Mapping)
+        else None
+    )
+    try:
+        depth = int(lineage.get("depth")) if isinstance(lineage, Mapping) else 0
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        depth > 1
+        and isinstance(lineage, Mapping)
+        and lineage.get("schema_version") == "research_lab.git_tree_lineage.v1"
+        and isinstance(composition, Mapping)
+        and composition.get("schema_version")
+        == "research_lab.git_tree_composition.v1"
+        and "incremental_changed_files" not in composition
+        and isinstance(legacy_targets, list)
+        and isinstance(patch_targets, list)
+        and list(target_files) == legacy_targets == patch_targets
+        and len(set(target_files)) == len(target_files)
+        and str(lineage.get("root_artifact_hash") or "")
+        == parent_artifact_hash
+        and str(lineage.get("cumulative_source_diff_hash") or "")
+        == source_diff_hash
+        and str(composition.get("cumulative_source_diff_hash") or "")
+        == source_diff_hash
+        and str(composition.get("incremental_source_diff_hash") or "")
+        == str(lineage.get("incremental_source_diff_hash") or "")
+        and _SHA256_REF_RE.fullmatch(
+            str(lineage.get("incremental_source_diff_hash") or "")
+        )
+        and str(composition.get("child_source_tree_hash") or "")
+        == str(candidate_build_doc.get("candidate_model_artifact_hash") or "")
+    )
+
+
+def validate_private_code_edit_diff_artifact(
+    document: Mapping[str, Any],
+    *,
+    candidate_build_doc: Mapping[str, Any],
+    candidate_patch_manifest: Mapping[str, Any] | None = None,
+    candidate_model_manifest_doc: Mapping[str, Any] | None = None,
+    expected_candidate_patch_hash: str = "",
+    expected_source_diff_hash: str = "",
+    expected_parent_artifact_hash: str = "",
+    expected_run_id: str = "",
+) -> dict[str, Any]:
+    """Verify the private source diff against its scored build commitments."""
+
+    if set(document) != _PRIVATE_SOURCE_DIFF_ARTIFACT_FIELDS:
+        raise CodeEditBuildError("private source diff artifact fields are invalid")
+    if (
+        document.get("schema_version") != "1.0"
+        or document.get("artifact_type")
+        != "research_lab_code_edit_source_diff"
+    ):
+        raise CodeEditBuildError("private source diff artifact schema is invalid")
+
+    run_id = str(document.get("run_id") or "")
+    candidate_index = document.get("candidate_index")
+    if (
+        not run_id
+        or isinstance(candidate_index, bool)
+        or not isinstance(candidate_index, int)
+        or candidate_index < 0
+    ):
+        raise CodeEditBuildError("private source diff artifact identity is invalid")
+    if expected_run_id and run_id != str(expected_run_id):
+        raise CodeEditBuildError("private source diff artifact run identity differs")
+
+    hash_fields = (
+        "parent_artifact_hash",
+        "parent_manifest_hash",
+        "source_diff_hash",
+        "draft_hash",
+        "artifact_hash",
+    )
+    if any(
+        not _SHA256_REF_RE.fullmatch(str(document.get(field) or ""))
+        for field in hash_fields
+    ):
+        raise CodeEditBuildError("private source diff artifact hash is invalid")
+
+    artifact_hash = str(document["artifact_hash"])
+    artifact_payload = {
+        key: document[key]
+        for key in _PRIVATE_SOURCE_DIFF_ARTIFACT_FIELDS
+        if key != "artifact_hash"
+    }
+    if sha256_json(artifact_payload) != artifact_hash:
+        raise CodeEditBuildError("private source diff artifact commitment differs")
+    if artifact_hash != str(
+        candidate_build_doc.get("source_diff_artifact_hash") or ""
+    ):
+        raise CodeEditBuildError("private source diff artifact hash differs from build")
+
+    build_doc_hash = str(candidate_build_doc.get("build_doc_hash") or "")
+    immutable_build_doc = {
+        key: value
+        for key, value in candidate_build_doc.items()
+        if key != "build_doc_hash"
+        and key not in _PRIVATE_BUILD_DOC_UNHASHED_ANNOTATION_FIELDS
+    }
+    if (
+        not _SHA256_REF_RE.fullmatch(build_doc_hash)
+        or sha256_json(immutable_build_doc) != build_doc_hash
+    ):
+        raise CodeEditBuildError("candidate build document commitment differs")
+
+    if candidate_patch_manifest is not None and not isinstance(
+        candidate_patch_manifest, Mapping
+    ):
+        raise CodeEditBuildError("candidate patch manifest is invalid")
+    patch_manifest = (
+        dict(candidate_patch_manifest)
+        if isinstance(candidate_patch_manifest, Mapping)
+        else None
+    )
+    if expected_candidate_patch_hash and patch_manifest is None:
+        raise CodeEditBuildError("candidate patch manifest is missing")
+    if patch_manifest is not None:
+        manifest_hash = str(patch_manifest.get("manifest_hash") or "")
+        if (
+            not _SHA256_REF_RE.fullmatch(manifest_hash)
+            or sha256_json(
+                {
+                    key: value
+                    for key, value in patch_manifest.items()
+                    if key != "manifest_hash"
+                }
+            )
+            != manifest_hash
+        ):
+            raise CodeEditBuildError("candidate patch manifest commitment differs")
+        if (
+            str(patch_manifest.get("candidate_build_doc_hash") or "")
+            != build_doc_hash
+        ):
+            raise CodeEditBuildError(
+                "candidate build document differs from patch manifest"
+            )
+        if expected_candidate_patch_hash and (
+            not _SHA256_REF_RE.fullmatch(str(expected_candidate_patch_hash))
+            or sha256_json(patch_manifest) != str(expected_candidate_patch_hash)
+        ):
+            raise CodeEditBuildError("candidate patch manifest hash differs")
+
+    parent_artifact_hash = str(document["parent_artifact_hash"])
+    if parent_artifact_hash != str(
+        candidate_build_doc.get("parent_artifact_hash") or ""
+    ) or (
+        expected_parent_artifact_hash
+        and parent_artifact_hash != str(expected_parent_artifact_hash)
+    ):
+        raise CodeEditBuildError("private source diff parent artifact differs")
+    if str(document["parent_manifest_hash"]) != str(
+        candidate_build_doc.get("parent_manifest_hash") or ""
+    ):
+        raise CodeEditBuildError("private source diff parent manifest differs")
+
+    unified_diff = str(document.get("unified_diff") or "")
+    source_diff_hash = str(document["source_diff_hash"])
+    if (
+        not unified_diff.startswith("diff --git ")
+        or sha256_json({"unified_diff": unified_diff}) != source_diff_hash
+        or source_diff_hash
+        != str(candidate_build_doc.get("source_diff_hash") or "")
+        or (
+            expected_source_diff_hash
+            and source_diff_hash != str(expected_source_diff_hash)
+        )
+    ):
+        raise CodeEditBuildError("private source diff commitment differs")
+    if git_diff_structural_metadata(unified_diff):
+        raise CodeEditBuildError(
+            "private source diff is not a content-only Git patch"
+        )
+    if patch_manifest is not None and (
+        str(patch_manifest.get("parent_artifact_hash") or "")
+        != parent_artifact_hash
+        or str(patch_manifest.get("candidate_source_diff_hash") or "")
+        != source_diff_hash
+        or str(patch_manifest.get("patch_payload_hash") or "")
+        != source_diff_hash
+    ):
+        raise CodeEditBuildError(
+            "private source diff differs from candidate patch manifest"
+        )
+
+    if candidate_model_manifest_doc is not None:
+        try:
+            candidate_manifest = PrivateModelArtifactManifest.from_mapping(
+                candidate_model_manifest_doc
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CodeEditBuildError(
+                "candidate model manifest is invalid"
+            ) from exc
+        manifest_errors = validate_private_model_artifact_manifest(
+            candidate_manifest
+        )
+        if manifest_errors:
+            raise CodeEditBuildError(
+                "candidate model manifest is invalid: "
+                + "; ".join(manifest_errors)
+            )
+        if (
+            str(candidate_build_doc.get("candidate_model_artifact_hash") or "")
+            != candidate_manifest.model_artifact_hash
+            or str(candidate_build_doc.get("candidate_model_manifest_hash") or "")
+            != candidate_manifest.manifest_hash
+            or (
+                patch_manifest is not None
+                and (
+                    str(patch_manifest.get("candidate_artifact_hash") or "")
+                    != candidate_manifest.model_artifact_hash
+                    or str(
+                        patch_manifest.get("candidate_model_manifest_hash")
+                        or ""
+                    )
+                    != candidate_manifest.manifest_hash
+                )
+            )
+        ):
+            raise CodeEditBuildError(
+                "candidate model identity differs from committed build"
+            )
+
+    raw_target_files = document.get("target_files")
+    if (
+        not isinstance(raw_target_files, list)
+        or not raw_target_files
+        or any(not isinstance(item, str) or not item for item in raw_target_files)
+        or len(set(raw_target_files)) != len(raw_target_files)
+    ):
+        raise CodeEditBuildError("private source diff target files are invalid")
+    target_files = tuple(raw_target_files)
+    diff_paths = extract_unified_diff_paths(unified_diff)
+    patch_target_files: Any = None
+    if patch_manifest is not None:
+        patch_doc = patch_manifest.get("patch_doc")
+        if not isinstance(patch_doc, Mapping):
+            raise CodeEditBuildError("candidate patch manifest document is invalid")
+        patch_target_files = patch_doc.get("target_files")
+        if (
+            not isinstance(patch_target_files, list)
+            or patch_target_files != list(target_files)
+        ):
+            raise CodeEditBuildError(
+                "private source diff target files differ from candidate patch manifest"
+            )
+    legacy_target_projection = False
+    if set(target_files) != diff_paths:
+        legacy_target_projection = _legacy_git_tree_incremental_target_projection(
+            candidate_build_doc=candidate_build_doc,
+            patch_manifest=patch_manifest,
+            target_files=target_files,
+            source_diff_hash=source_diff_hash,
+            parent_artifact_hash=parent_artifact_hash,
+        )
+    if set(target_files) != diff_paths and not legacy_target_projection:
+        raise CodeEditBuildError(
+            "private source diff target files differ from unified diff"
+        )
+    changed_files = candidate_build_doc.get("changed_files")
+    if (
+        not isinstance(changed_files, list)
+        or len(set(changed_files)) != len(changed_files)
+        or set(changed_files) != diff_paths
+    ):
+        raise CodeEditBuildError(
+            "private source diff target files differ from built source"
+        )
+    validated = dict(document)
+    if legacy_target_projection:
+        validated["target_files"] = sorted(diff_paths)
+    return validated
 
 
 class _CandidateBuildDeadline:

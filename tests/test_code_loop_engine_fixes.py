@@ -40,7 +40,7 @@ from gateway.research_lab.autoresearch_runtime import (
     OpenRouterCallResult,
 )
 from leadpoet_canonical.attested_v2 import sha256_json
-from research_lab.code_editing import CodeEditDraft
+from research_lab.code_editing import CodeEditDraft, validate_code_edit_draft
 from research_lab.eval import PrivateModelArtifactManifest
 
 
@@ -559,6 +559,30 @@ class _MemoryTreeRepository:
         assert self.selection is None
         self.failure = json.loads(json.dumps(failure_doc))
         return {"created": True}
+
+
+class _CumulativeMemoryTreeRepository(_MemoryTreeRepository):
+    """Production-shaped parent-incremental/root-cumulative patch projection."""
+
+    def commit_child(self, **kwargs):
+        commit = super().commit_child(**kwargs)
+        if commit.parent_node_id == "root":
+            return commit
+        parent = self.commits[commit.parent_node_id]
+        cumulative_patch = (
+            parent.cumulative_patch.rstrip()
+            + "\n"
+            + commit.incremental_patch.lstrip()
+        )
+        commit = replace(
+            commit,
+            cumulative_patch=cumulative_patch,
+            cumulative_patch_hash=sha256_json(
+                {"unified_diff": cumulative_patch}
+            ),
+        )
+        self.commits[commit.node_id] = commit
+        return commit
 
 
 class _CrashAfterBuildRepository(_MemoryTreeRepository):
@@ -1180,6 +1204,18 @@ class _PlannerBuildsCandidateBuilder(_PlannerNoCandidateBuilder):
         )
 
 
+class _ValidatingCumulativeCandidateBuilder(_PlannerBuildsCandidateBuilder):
+    def __init__(self, source_context):
+        super().__init__(source_context)
+        self.submission_drafts = []
+
+    def build(self, *, draft, **kwargs):
+        validate_code_edit_draft(draft)
+        self.submission_drafts.append(draft)
+        kwargs.pop("timeout_seconds", None)
+        return super().build(draft=draft, **kwargs)
+
+
 @pytest.mark.parametrize(
     "fixture_case",
     _PRODUCTION_PLAN_CASES,
@@ -1640,6 +1676,181 @@ async def test_complete_default_tree_has_direct_children_and_one_finalist(
     assert result.tree_result.selected_node_id == result.selected_candidates[0].node_id
     assert repository.selection["paid_finalist_count"] == 1
     assert sum(event.event_type == "candidate_selected" for event in events) == 1
+
+
+async def test_depth_two_build_uses_cumulative_targets_and_incremental_child_paths(
+    tmp_path,
+):
+    source_context = _source_context(tmp_path)
+    gateway_path = (
+        source_context.source_root / "gateway" / "research_lab" / "runtime.py"
+    )
+    gateway_path.parent.mkdir(parents=True)
+    gateway_path.write_text("VALUE = 1\n", encoding="utf-8")
+    editable_files = tuple(
+        sorted((*source_context.editable_files, "gateway/research_lab/runtime.py"))
+    )
+    source_context = replace(
+        source_context,
+        top_level_paths=("gateway/", "sourcing_model/"),
+        editable_files=editable_files,
+        planner_source_index=build_source_symbol_index(
+            source_root=source_context.source_root,
+            editable_files=editable_files,
+            source_tree_hash=source_context.source_tree_hash,
+            parent_image_digest_hash=source_context.parent_image_digest_hash,
+        ),
+    )
+    builder = _ValidatingCumulativeCandidateBuilder(source_context)
+    repository = _CumulativeMemoryTreeRepository()
+    plan = _loop_direction_plan_payload(
+        required_lane="source_routing",
+        required_mechanism="increase one bounded runtime value",
+        must_inspect=[
+            "sourcing_model/discovery.py",
+            "gateway/research_lab/runtime.py",
+        ],
+        ranked_paths=[
+            {
+                "path_id": "bounded_runtime_value",
+                "lane": "source_routing",
+                "mechanism": "increase one bounded runtime value",
+                "must_inspect": [
+                    "sourcing_model/discovery.py",
+                    "gateway/research_lab/runtime.py",
+                ],
+            }
+        ],
+        selected_path_id="bounded_runtime_value",
+    )
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        del timeout_seconds, max_tokens
+        if stage == "loop_planner":
+            return OpenRouterCallResult(
+                content=json.dumps(plan),
+                provider_usage={"provider": "fixture", "response_id": stage},
+                cost_microusd=1,
+            )
+        context = _model_prompt_context(messages)
+        if stage == "source_inspection":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "requests": [
+                            {
+                                "operation": "read_file",
+                                "path": "sourcing_model/discovery.py",
+                            },
+                            {
+                                "operation": "read_file",
+                                "path": "gateway/research_lab/runtime.py",
+                            },
+                        ]
+                    }
+                ),
+                provider_usage={"provider": "fixture", "response_id": stage},
+                cost_microusd=1,
+            )
+        if stage == "code_edit_draft":
+            branch = context["budget_context"]["within_run_memory"][
+                "git_tree_branch"
+            ]
+            depth_two = branch["parent_node_id"] != "root"
+            if depth_two:
+                target_files = ("gateway/research_lab/runtime.py",)
+                unified_diff = (
+                    "diff --git a/gateway/research_lab/runtime.py "
+                    "b/gateway/research_lab/runtime.py\n"
+                    "--- a/gateway/research_lab/runtime.py\n"
+                    "+++ b/gateway/research_lab/runtime.py\n"
+                    "@@ -1 +1 @@\n"
+                    "-VALUE = 1\n"
+                    "+VALUE = 2\n"
+                )
+            else:
+                target_files = ("sourcing_model/discovery.py",)
+                unified_diff = _draft().unified_diff
+            draft = _draft(
+                lane="source_routing",
+                mechanism="increase one bounded runtime value",
+                plan_path_id="bounded_runtime_value",
+                target_files=target_files,
+                unified_diff=unified_diff,
+            )
+            return OpenRouterCallResult(
+                content=json.dumps({"candidates": [draft.to_dict()]}),
+                provider_usage={"provider": "fixture", "response_id": stage},
+                cost_microusd=1,
+            )
+        raise AssertionError(f"unexpected stage: {stage}")
+
+    policy = TreePolicy(
+        mode="active",
+        branch_factor=1,
+        beam_width=1,
+        max_depth=2,
+        max_nodes=2,
+        shortlist_size=1,
+        diversity_floor=1,
+        deadline_seconds=600,
+        finalization_reserve_seconds=30,
+    )
+    loop = engine.CodeEditLoopEngine(
+        settings=AutoResearchRuntimeSettings(
+            min_seconds=0,
+            max_seconds=600,
+            min_iterations=1,
+            max_iterations=2,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=2,
+        ),
+        call_openrouter=call_model,
+        event_sink=lambda _event: asyncio.sleep(0),
+        builder=builder,
+    )
+    loop._test_tree_repository = repository
+    result = await loop.run(
+        run_id="run-depth-two-cumulative-targets",
+        ticket={
+            "ticket_id": "ticket-depth-two-cumulative-targets",
+            "miner_hotkey": "fixture-hotkey",
+            "island": "generalist",
+            "brief_sanitized_ref": "fixture-brief",
+            "ticket_doc": {"brief_public_summary": "improve qualified sourcing"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="fixture/model",
+        budget_context={
+            "requested_compute_budget_usd": 5.0,
+            "research_model_tier": "default",
+            "tree_policy": _tree_runtime_policy(policy),
+        },
+        requested_loop_count=1,
+    )
+
+    assert result.status == "completed"
+    assert len(builder.submission_drafts) == 2
+    assert builder.submission_drafts[0].target_files == (
+        "sourcing_model/discovery.py",
+    )
+    assert set(builder.submission_drafts[1].target_files) == {
+        "sourcing_model/discovery.py",
+        "gateway/research_lab/runtime.py",
+    }
+    depth_two_commit = next(
+        commit
+        for commit in repository.commits.values()
+        if commit.depth == 2
+    )
+    assert depth_two_commit.changed_files == (
+        "gateway/research_lab/runtime.py",
+    )
 
 
 def _loop_direction_plan_payload(**overrides):

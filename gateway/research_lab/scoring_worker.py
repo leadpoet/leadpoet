@@ -45,6 +45,7 @@ from gateway.research_lab.code_build import (
     CodeEditBuildError,
     CodeEditCandidateBuilder,
     CodeEditPatchApplyError,
+    validate_private_code_edit_diff_artifact,
 )
 from gateway.research_lab.config import (
     DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS,
@@ -3133,16 +3134,23 @@ def _load_candidate_source_diff(candidate: Mapping[str, Any]) -> str:
         or ""
     )
     payload = _load_private_json_artifact(uri)
-    unified_diff = str(payload.get("unified_diff") or "")
-    if not unified_diff.strip():
-        raise CodeEditBuildError("private source diff artifact is missing unified_diff")
-    actual_source_diff_hash = sha256_json({"unified_diff": unified_diff})
-    if expected_source_diff_hash and actual_source_diff_hash != expected_source_diff_hash:
-        raise CodeEditBuildError(
-            "private source diff artifact hash mismatch: "
-            f"expected={compact_ref(expected_source_diff_hash)} actual={compact_ref(actual_source_diff_hash)}"
-        )
-    return unified_diff
+    validated = validate_private_code_edit_diff_artifact(
+        payload,
+        candidate_build_doc=build_doc,
+        candidate_patch_manifest=candidate.get("candidate_patch_manifest"),
+        candidate_model_manifest_doc=candidate.get(
+            "candidate_model_manifest_doc"
+        ),
+        expected_candidate_patch_hash=str(
+            candidate.get("candidate_patch_hash") or ""
+        ),
+        expected_source_diff_hash=expected_source_diff_hash,
+        expected_parent_artifact_hash=str(
+            candidate.get("parent_artifact_hash") or ""
+        ),
+        expected_run_id=str(candidate.get("run_id") or ""),
+    )
+    return str(validated["unified_diff"])
 
 
 def _stale_parent_rebase_depth(candidate: Mapping[str, Any]) -> int:
@@ -9469,9 +9477,16 @@ class ResearchLabGatewayScoringWorker:
             patch_doc = {}
         hypothesis = candidate.get("hypothesis_doc") if isinstance(candidate.get("hypothesis_doc"), Mapping) else {}
         patch_summary = str(patch.get("redacted_summary") or "") if isinstance(patch, Mapping) else ""
-        target_files = patch_doc.get("target_files")
-        if not isinstance(target_files, list) or not target_files:
-            target_files = sorted(_extract_diff_paths_safe(unified_diff))
+        # The private artifact validator above has already authenticated either
+        # the exact current target projection or the narrowly recognized
+        # pre-cumulative-target depth>1 shape.  Reconstruct from the committed
+        # cumulative patch so historical candidates do not reintroduce their
+        # old direct-parent-only target list during a stale-parent rebase.
+        target_files = sorted(_extract_diff_paths_safe(unified_diff))
+        if not target_files:
+            raise CodeEditBuildError(
+                "private source diff artifact has no committed target files"
+            )
         return CodeEditDraft(
             failure_mode=str(hypothesis.get("failure_mode") or "Previously generated miner code edit")[:700],
             mechanism=str(hypothesis.get("mechanism") or patch_doc.get("expected_improvement") or "")[:1000],

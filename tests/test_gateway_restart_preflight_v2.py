@@ -483,6 +483,8 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
     assert len(schema_requests) == 1
     assert schema_requests[0].headers["Accept"] == "application/openapi+json"
     assert {
+        "scripts/95-research-lab-git-tree-autoresearch.sql",
+        "scripts/115-research-lab-git-tree-root-replacement.sql",
         "scripts/117-research-lab-trajectory-antijoin.sql",
         "scripts/118-research-lab-maintenance-lease.sql",
         "scripts/119-research-lab-provider-usage-batch-insert.sql",
@@ -499,6 +501,252 @@ def test_required_supabase_v2_schema_probes_tables_and_columns() -> None:
         "scripts/134-research-lab-provider-outcome-head-contention.sql",
     }.issubset(set(result["migration_files"]))
     assert "service-role-value" not in str(result)
+
+
+def test_required_supabase_v2_schema_covers_git_tree_runtime_contract() -> None:
+    schema_contract = {
+        (migration, relation)
+        for migration, relation, _columns in (
+            schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
+        )
+    }
+    rpc_contract = set(schema_preflight.REQUIRED_SUPABASE_V2_RPCS)
+    relation_columns = {
+        relation: set(columns)
+        for _migration, relation, columns in (
+            schema_preflight.REQUIRED_SUPABASE_V2_SCHEMA
+        )
+    }
+
+    assert (
+        "scripts/95-research-lab-git-tree-autoresearch.sql",
+        "research_lab_autoresearch_tree_node_current",
+    ) in schema_contract
+    assert {
+        "root_manifest_hash",
+        "root_source_tree_hash",
+        "root_git_commit",
+        "root_image_digest",
+        "policy_hash",
+        "evaluator_commitment_hash",
+        "tree_doc",
+        "current_event_type",
+        "current_event_doc",
+        "current_event_hash",
+        "current_round_index",
+        "current_frontier_hash",
+        "current_frontier_doc",
+    }.issubset(relation_columns["research_lab_autoresearch_tree_current"])
+    assert {
+        "tree_generation",
+        "replaces_tree_id",
+        "root_manifest_hash",
+        "policy_hash",
+        "evaluator_commitment_hash",
+        "tree_doc",
+        "current_event_doc",
+        "current_event_hash",
+    }.issubset(
+        relation_columns["research_lab_autoresearch_run_tree_current"]
+    )
+    assert {
+        "event_type",
+        "node_id",
+        "previous_event_hash",
+        "event_doc",
+        "created_at",
+    }.issubset(
+        relation_columns["research_lab_autoresearch_tree_events"]
+    )
+    assert {
+        "schema_version",
+        "expected_previous_hash",
+        "frontier_doc",
+        "commitment_hash",
+        "created_at",
+    }.issubset(
+        relation_columns["research_lab_autoresearch_frontier_commitments"]
+    )
+    assert {"run_id", "candidate_id"}.issubset(
+        relation_columns["research_lab_autoresearch_tree_handoffs"]
+    )
+    assert (
+        "scripts/95-research-lab-git-tree-autoresearch.sql",
+        "research_lab_autoresearch_operation_current",
+    ) in schema_contract
+    assert (
+        "scripts/95-research-lab-git-tree-autoresearch.sql",
+        "research_lab_autoresearch_tree_current",
+    ) in schema_contract
+    assert (
+        "scripts/115-research-lab-git-tree-root-replacement.sql",
+        "research_lab_autoresearch_run_tree_current",
+    ) in schema_contract
+
+    assert {
+        (
+            "scripts/95-research-lab-git-tree-autoresearch.sql",
+            "create_research_lab_autoresearch_tree",
+        ),
+        (
+            "scripts/95-research-lab-git-tree-autoresearch.sql",
+            "plan_research_lab_autoresearch_tree_node",
+        ),
+        (
+            "scripts/95-research-lab-git-tree-autoresearch.sql",
+            "append_research_lab_autoresearch_tree_event",
+        ),
+        (
+            "scripts/95-research-lab-git-tree-autoresearch.sql",
+            "transition_research_lab_autoresearch_operation",
+        ),
+        (
+            "scripts/95-research-lab-git-tree-autoresearch.sql",
+            "commit_research_lab_autoresearch_frontier",
+        ),
+        (
+            "scripts/95-research-lab-git-tree-autoresearch.sql",
+            "select_research_lab_autoresearch_tree_final",
+        ),
+        (
+            "scripts/95-research-lab-git-tree-autoresearch.sql",
+            "record_research_lab_autoresearch_tree_handoff",
+        ),
+        (
+            "scripts/115-research-lab-git-tree-root-replacement.sql",
+            "create_research_lab_git_tree_candidate_handoff",
+        ),
+        (
+            "scripts/115-research-lab-git-tree-root-replacement.sql",
+            "research_lab_autoresearch_run_evaluation_usage",
+        ),
+    }.issubset(rpc_contract)
+
+
+def test_required_supabase_v2_schema_rejects_incomplete_git_tree_current_view() -> None:
+    def opener(request, *, timeout):
+        del timeout
+        if request.full_url.endswith("/rest/v1/"):
+            paths = {
+                f"/rpc/{function_name}": {"post": {}}
+                for _migration, function_name in (
+                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+                )
+            }
+            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
+        if (
+            "research_lab_autoresearch_tree_current?" in request.full_url
+        ):
+            raise HTTPError(
+                request.full_url,
+                400,
+                "current_event_doc column missing",
+                {},
+                None,
+            )
+        if (
+            "research_lab_chain_realized_settlement_activation_v1"
+            in request.full_url
+            and "limit=2" in request.full_url
+        ):
+            return _SchemaResponse(body=_chain_realized_activation_response())
+        return _SchemaResponse()
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match=(
+            r"research_lab_autoresearch_tree_current.*"
+            r"95-research-lab-git-tree-autoresearch"
+        ),
+    ):
+        schema_preflight.verify_required_supabase_v2_schema(
+            {
+                "SUPABASE_URL": "https://project.supabase.co",
+                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
+            },
+            opener=opener,
+        )
+
+
+def test_required_supabase_v2_schema_rejects_incomplete_git_tree_event_table() -> None:
+    def opener(request, *, timeout):
+        del timeout
+        if request.full_url.endswith("/rest/v1/"):
+            paths = {
+                f"/rpc/{function_name}": {"post": {}}
+                for _migration, function_name in (
+                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+                )
+            }
+            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
+        if "research_lab_autoresearch_tree_events?" in request.full_url:
+            raise HTTPError(
+                request.full_url,
+                400,
+                "event_doc column missing",
+                {},
+                None,
+            )
+        if (
+            "research_lab_chain_realized_settlement_activation_v1"
+            in request.full_url
+            and "limit=2" in request.full_url
+        ):
+            return _SchemaResponse(body=_chain_realized_activation_response())
+        return _SchemaResponse()
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match=(
+            r"research_lab_autoresearch_tree_events.*"
+            r"95-research-lab-git-tree-autoresearch"
+        ),
+    ):
+        schema_preflight.verify_required_supabase_v2_schema(
+            {
+                "SUPABASE_URL": "https://project.supabase.co",
+                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
+            },
+            opener=opener,
+        )
+
+
+def test_required_supabase_v2_schema_rejects_missing_git_tree_replacement_rpc() -> None:
+    required_function = "research_lab_autoresearch_run_evaluation_usage"
+
+    def opener(request, *, timeout):
+        del timeout
+        if request.full_url.endswith("/rest/v1/"):
+            paths = {
+                f"/rpc/{function_name}": {"post": {}}
+                for _migration, function_name in (
+                    schema_preflight.REQUIRED_SUPABASE_V2_RPCS
+                )
+                if function_name != required_function
+            }
+            return _SchemaResponse(body=json.dumps({"paths": paths}).encode())
+        if (
+            "research_lab_chain_realized_settlement_activation_v1"
+            in request.full_url
+            and "limit=2" in request.full_url
+        ):
+            return _SchemaResponse(body=_chain_realized_activation_response())
+        return _SchemaResponse()
+
+    with pytest.raises(
+        schema_preflight.SupabaseSchemaPreflightV2Error,
+        match=(
+            r"research_lab_autoresearch_run_evaluation_usage.*"
+            r"115-research-lab-git-tree-root-replacement"
+        ),
+    ):
+        schema_preflight.verify_required_supabase_v2_schema(
+            {
+                "SUPABASE_URL": "https://project.supabase.co",
+                "SUPABASE_SERVICE_ROLE_KEY": "service-role-value",
+            },
+            opener=opener,
+        )
 
 
 def test_required_supabase_v2_schema_names_missing_migration() -> None:
@@ -540,7 +788,10 @@ def test_required_supabase_v2_schema_names_missing_rpc_migration() -> None:
 
     with pytest.raises(
         schema_preflight.SupabaseSchemaPreflightV2Error,
-        match=r"research_lab_missing_trajectory_ids.*117-research-lab-trajectory",
+        match=(
+            r"create_research_lab_autoresearch_tree.*"
+            r"95-research-lab-git-tree-autoresearch"
+        ),
     ):
         schema_preflight.verify_required_supabase_v2_schema(
             {

@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import time
@@ -2283,13 +2284,17 @@ def _exercise_conditional_candidate_gate() -> dict[str, Any]:
 
 
 def _exercise_git_tree_replacement() -> dict[str, Any]:
-    """Validate deterministic replacement ancestry using configured tree policy."""
+    """Exercise real SHA-256 Git lineage, recovery, and replacement ancestry."""
 
     from gateway.research_lab.git_tree_models import (
         TreePolicy,
         TreeReplacement,
+        derive_child_slot,
         derive_tree_id,
     )
+    from gateway.research_lab.git_tree_repository import GitTreeRepository
+    from research_lab.code_editing import CodeEditDraft
+    from research_lab.eval.private_runtime import compute_private_source_tree_hash
 
     policy = TreePolicy.from_env(os.environ)
     run_id = "00000000-0000-4000-8000-000000000001"
@@ -2354,6 +2359,127 @@ def _exercise_git_tree_replacement() -> dict[str, Any]:
         != second_tree_id
     ):
         raise RuntimeError("Git-tree replacement identity is not deterministic")
+
+    with tempfile.TemporaryDirectory(prefix="leadpoet-rehearsal-git-tree-") as tmp:
+        root = Path(tmp)
+        source = root / "source"
+        (source / "gateway").mkdir(parents=True)
+        (source / "gateway/runtime.py").write_text(
+            "VALUE = 0\n", encoding="utf-8"
+        )
+        (source / "research_lab_adapter.py").write_text(
+            "def run_icp(icp, context):\n    return []\n",
+            encoding="utf-8",
+        )
+        workspace = root / "tree"
+        repository = GitTreeRepository(
+            workspace=workspace,
+            tree_id=initial_tree_id,
+        )
+        root_commit = repository.initialize(
+            source_root=source,
+            root_artifact_hash=roots[0],
+            policy_hash=policy.policy_hash,
+            run_id=run_id,
+            root_manifest_hash=manifests[0],
+            root_image_digest="sha256:" + "a" * 64,
+            evaluator_commitment_hash=sha256_json({"evaluator": "rehearsal"}),
+            tree_doc={"schema_version": "research_lab.git_tree.v1"},
+        )
+        slot = derive_child_slot(
+            tree_id=initial_tree_id,
+            parent_node_id="root",
+            root_branch_id="",
+            depth=1,
+            slot_index=0,
+        )
+        draft = CodeEditDraft(
+            failure_mode="fixture",
+            mechanism="change the deterministic fixture value",
+            expected_improvement="exercise the candidate Git lineage",
+            risk="low",
+            lane="query_construction",
+            target_files=("gateway/runtime.py",),
+            unified_diff=(
+                "diff --git a/gateway/runtime.py b/gateway/runtime.py\n"
+                "--- a/gateway/runtime.py\n"
+                "+++ b/gateway/runtime.py\n"
+                "@@ -1 +1 @@\n"
+                "-VALUE = 0\n"
+                "+VALUE = 1\n"
+            ),
+            redacted_summary="exercise deterministic Git-tree mutation",
+            test_plan="verify source commitment",
+            rollback_plan="restore the immutable root",
+        )
+        child = repository.commit_child(
+            slot=slot,
+            draft=draft,
+            expected_parent_source_tree_hash=(
+                compute_private_source_tree_hash(source)
+            ),
+        )
+        repository.verify_node(commit=child)
+        operation_id = sha256_json(
+            {"tree_id": initial_tree_id, "kind": "generation"}
+        )
+        request_hash = sha256_json({"draft": draft.to_dict()})
+        repository.plan_slot(
+            slot=slot,
+            request_hash=request_hash,
+            operation_id=operation_id,
+            node_doc={"node_id": slot.node_id},
+        )
+        repository.settle_operation(
+            operation_id=operation_id,
+            operation_status="succeeded",
+            request_hash=request_hash,
+            result_hash=sha256_json(child.to_dict()),
+            settled_cost_microusd=123,
+            provider_call_count=1,
+            settlement_doc={"operation_kind": "generation"},
+        )
+        checkpoint_doc = {
+            "tree_id": initial_tree_id,
+            "node_ids": [slot.node_id],
+            "operation_ids": [operation_id],
+        }
+        checkpoint_hash = sha256_json(checkpoint_doc)
+        repository.commit_checkpoint(
+            checkpoint_hash=checkpoint_hash,
+            checkpoint_doc=checkpoint_doc,
+        )
+        bundle = repository.create_bundle(root / "tree.bundle")
+        recovery = repository.export_recovery_state(
+            checkpoint_hash=checkpoint_hash,
+            bundle_uri="s3://strict-local-boundary/tree.bundle",
+            bundle_hash=str(bundle["bundle_hash"]),
+            bundle_size_bytes=int(bundle["bundle_size_bytes"]),
+        )
+        shutil.rmtree(workspace)
+        restored = GitTreeRepository(
+            workspace=workspace,
+            tree_id=initial_tree_id,
+        )
+        restored_root = restored.restore_recovery_state(
+            recovery_state=recovery,
+            bundle_path=Path(str(bundle["bundle_path"])),
+        )
+        restored.verify_node_identity(
+            node_id=slot.node_id,
+            git_commit=child.git_commit,
+            parent_node_id="root",
+        )
+        restored_operation = restored.inspect_operation(
+            operation_id=operation_id
+        )
+        if (
+            restored_root != root_commit
+            or restored.state_status() != "complete"
+            or restored_operation.get("operation", {}).get("status")
+            != "succeeded"
+        ):
+            raise RuntimeError("Git-tree checkpoint recovery differs")
     return {
         "policy_hash": policy.policy_hash,
         "max_nodes": policy.max_nodes,
@@ -2366,6 +2492,13 @@ def _exercise_git_tree_replacement() -> dict[str, Any]:
             first.replacement_hash,
             second.replacement_hash,
         ],
+        "root_git_commit": root_commit,
+        "node_git_commit": child.git_commit,
+        "node_source_tree_hash": child.source_tree_hash,
+        "checkpoint_hash": checkpoint_hash,
+        "recovery_bundle_hash": bundle["bundle_hash"],
+        "terminal_operation_count": 1,
+        "restart_resume_verified": True,
     }
 
 
@@ -3765,6 +3898,28 @@ def main() -> int:
             == behavior_contract["policy_commitments"]["git_tree"].get(
                 "policy_hash"
             )
+            and behavior_evidence["git-tree-replacement"].get(
+                "restart_resume_verified"
+            )
+            is True
+            and len(
+                str(
+                    behavior_evidence["git-tree-replacement"].get(
+                        "root_git_commit"
+                    )
+                    or ""
+                )
+            )
+            == 64
+            and len(
+                str(
+                    behavior_evidence["git-tree-replacement"].get(
+                        "node_git_commit"
+                    )
+                    or ""
+                )
+            )
+            == 64
         ),
         "historical_metagraph_layouts_policy_bound": (
             "historical-metagraph-layouts" in behavior_evidence

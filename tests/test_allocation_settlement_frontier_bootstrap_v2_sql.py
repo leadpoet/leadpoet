@@ -56,7 +56,11 @@ def _text(value: str) -> str:
     return "'%s'" % value.replace("'", "''")
 
 
-def _row_documents(*, epoch: int = 200) -> tuple[dict, dict, dict, dict, dict]:
+def _row_documents(
+    *,
+    epoch: int = 200,
+    settlement_frontier: str = "missing",
+) -> tuple[dict, dict, dict, dict, dict]:
     frontier = build_allocation_settlement_frontier_v2(
         mode="legacy_full_history_bootstrap",
         netuid=71,
@@ -68,6 +72,12 @@ def _row_documents(*, epoch: int = 200) -> tuple[dict, dict, dict, dict, dict]:
         "epoch": epoch,
         "netuid": 71,
     }
+    if settlement_frontier == "null":
+        source_state["settlement_frontier"] = None
+    elif settlement_frontier == "non_null":
+        source_state["settlement_frontier"] = {"unexpected": True}
+    elif settlement_frontier != "missing":
+        raise ValueError("unknown settlement frontier fixture")
     source_state_hash = sha256_json(source_state)
     allocation_receipt_hash = _sha("1")
     allocation_result = {
@@ -205,7 +215,18 @@ def test_historical_source_migration_accepts_only_absent_or_null_frontier() -> N
     )
 
 
-def test_migration_persists_one_exact_measured_bootstrap() -> None:
+@pytest.mark.parametrize(
+    ("settlement_frontier", "expect_success"),
+    (
+        pytest.param("missing", True, id="historical-missing"),
+        pytest.param("null", True, id="explicit-null"),
+        pytest.param("non_null", False, id="non-null-rejected"),
+    ),
+)
+def test_migration_persists_one_exact_measured_bootstrap(
+    settlement_frontier: str,
+    expect_success: bool,
+) -> None:
     if shutil.which("docker") is None:
         pytest.skip("Docker is required for the PostgreSQL migration contract")
     info = subprocess.run(
@@ -324,7 +345,7 @@ $$;
         bootstrap_row,
         bootstrap_receipt,
         frontier,
-    ) = _row_documents()
+    ) = _row_documents(settlement_frontier=settlement_frontier)
     source_state_hash = bootstrap_row["result_doc"]["source_state_hash"]
 
     try:
@@ -389,6 +410,18 @@ $$;
         insert("research_lab_attested_execution_results_v2", allocation_row)
         insert("research_lab_attested_execution_receipts_v2", bootstrap_receipt)
         insert("research_lab_attested_execution_results_v2", bootstrap_row)
+
+        if not expect_success:
+            rejected_source = persist(
+                frontier,
+                bootstrap_row["receipt_hash"],
+                source_state_hash,
+                expect_success=False,
+            )
+            assert "allocation_frontier_bootstrap_source_invalid" in (
+                rejected_source.stderr
+            )
+            return
 
         first = json.loads(
             persist(

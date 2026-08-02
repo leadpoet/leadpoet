@@ -50,6 +50,7 @@ from tests.restart_rehearsal.gateway_boundary_service import (
 )
 from tests.restart_rehearsal.postgres_v2_contract_probe import (
     ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_MIGRATION,
+    ALLOCATION_SETTLEMENT_FRONTIER_HISTORICAL_SOURCE_MIGRATION,
     ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION,
     ANCESTRY_CHECKPOINT_MIGRATION,
     ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
@@ -1060,6 +1061,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION,
             ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
             ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_MIGRATION,
+            ALLOCATION_SETTLEMENT_FRONTIER_HISTORICAL_SOURCE_MIGRATION,
         ],
         "relations": relations,
         "rpcs": [

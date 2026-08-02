@@ -2337,7 +2337,6 @@ def _allocation_settlement_frontier_bootstrap_contract(
     source_state = {
         "epoch": epoch_id,
         "netuid": netuid,
-        "settlement_frontier": None,
         "policy": {"enable_champ_cap": True},
         "champion_obligation_count": 0,
         "champion_obligations": [],

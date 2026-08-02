@@ -19,6 +19,7 @@ from research_lab.eval.evaluator import _normalize_company_output  # noqa: E402
 from research_lab.eval.private_runtime import (  # noqa: E402
     DockerPrivateModelRunner,
     DockerPrivateModelSpec,
+    EXPECTED_CONSUMER_CONTRACT_ID,
     PrivateModelAdapterSpec,
     PrivateModelRuntimeError,
     SubprocessPrivateModelRunner,
@@ -28,6 +29,9 @@ from research_lab.eval.private_runtime import (  # noqa: E402
     employee_count_buckets_for_icp,
     ensure_private_model_outputs,
     load_private_artifact_manifest,
+)
+from research_lab.sourcing_model_contract_check import (  # noqa: E402
+    reviewed_consumer_snapshots,
 )
 import research_lab.eval.private_runtime as private_runtime_module  # noqa: E402
 
@@ -55,6 +59,17 @@ def _routing_receipt_line(runtime_cap_seconds: float) -> str:
         ],
     }
     return "sourcing_branch_receipt " + json.dumps(receipt)
+
+
+def _install_reviewed_consumer_snapshot(source_root: Path) -> None:
+    snapshot = reviewed_consumer_snapshots()[EXPECTED_CONSUMER_CONTRACT_ID]
+    contract = snapshot["contract"]
+    contract_path = source_root / str(contract["canonical_path"])
+    parity_path = source_root / str(contract["parity_fixture_path"])
+    contract_path.parent.mkdir(parents=True, exist_ok=True)
+    parity_path.parent.mkdir(parents=True, exist_ok=True)
+    contract_path.write_bytes(Path(snapshot["contract_path"]).read_bytes())
+    parity_path.write_bytes(Path(snapshot["parity_path"]).read_bytes())
 
 
 def main() -> int:
@@ -121,6 +136,7 @@ def run_icp(icp, context):
             + "\n",
             encoding="utf-8",
         )
+        _install_reviewed_consumer_snapshot(root)
 
         runner = SubprocessPrivateModelRunner(PrivateModelAdapterSpec(source_path=root, timeout_seconds=30))
         research_lab_icp = {

@@ -24,6 +24,10 @@ ROOT = Path(__file__).resolve().parents[1]
             "verify_research_lab_hosted_worker.py",
             "Research Lab hosted worker contracts verified",
         ),
+        (
+            "verify_research_lab_private_model_runtime.py",
+            "Research Lab private model runtime bridge verified",
+        ),
     ),
 )
 def test_research_lab_workflow_verifier_runs_without_production_credentials(

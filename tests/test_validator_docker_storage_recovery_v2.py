@@ -158,6 +158,12 @@ emit_rows() {
   done
 }
 case "$command" in
+  env)
+    printf '%s %s\n' "$command" "$*" >> "$FAKE_SUDO_LOG"
+    touch "$FAKE_STALE_RECLAIM_MARKER"
+    printf '{"active_mount_count":%s,"mounted_overlay_count":%s,"reclaimed_mount_count":%s,"schema_version":"leadpoet.docker_stale_mount_reclaim.v3","status":"ready"}\n' \
+      "$FAKE_CONTAINERS" "$((FAKE_CONTAINERS + FAKE_STALE_OVERLAY_MOUNTS))" "$FAKE_STALE_OVERLAY_MOUNTS"
+    ;;
   test)
     exit 0
     ;;
@@ -545,7 +551,7 @@ def test_validator_docker_recovery_reclaims_stale_nitro_mounts_before_floor(
     assert '"mounted_overlay_count":336' in result.stdout
     assert '"reclaimed_mount_count":325' in result.stdout
     assert "Docker storage ready: free_bytes=40000000000" in result.stdout
-    assert sudo_log.count("umount -- /var/lib/docker/overlay2/") == 325
+    assert "docker_stale_mount_reclaimer_v2" in sudo_log
     assert "systemctl stop" not in sudo_log
     assert "rm -rf" not in sudo_log
 

@@ -43,7 +43,7 @@ def test_data_root_reset_fails_if_mounts_remain():
     assert check < remove
 
 
-def test_live_runtime_reclaims_stale_mounts_before_rechecking_capacity():
+def test_live_runtime_reclaims_stale_state_before_rechecking_capacity():
     initial_inventory = SCRIPT.index('INITIAL_CONTAINER_COUNT="$(')
     reclaim = SCRIPT.index("docker_stale_mount_reclaimer_v2")
     repeated_prune = SCRIPT.index(
@@ -54,4 +54,5 @@ def test_live_runtime_reclaims_stale_mounts_before_rechecking_capacity():
 
     assert initial_inventory < reclaim < repeated_prune < capacity
     assert 'if [ "$INITIAL_CONTAINER_COUNT" -ne 0 ]' in SCRIPT
-    assert "Reclaiming stale Docker overlay mounts" in SCRIPT
+    assert "Reclaiming unreachable Docker overlay state" in SCRIPT
+    assert 'sudo env PYTHONPATH="$REPO_ROOT" python3' in SCRIPT

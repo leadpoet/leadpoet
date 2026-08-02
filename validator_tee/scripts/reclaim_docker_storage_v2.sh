@@ -91,8 +91,8 @@ INITIAL_CONTAINER_COUNT="$(
     | awk 'NF { count += 1 } END { print count + 0 }'
 )"
 if [ "$INITIAL_CONTAINER_COUNT" -ne 0 ]; then
-  echo "Reclaiming stale Docker overlay mounts without disturbing live containers"
-  PYTHONPATH="$REPO_ROOT" python3 \
+  echo "Reclaiming unreachable Docker overlay state without disturbing live containers"
+  sudo env PYTHONPATH="$REPO_ROOT" python3 \
     -m validator_tee.host.docker_stale_mount_reclaimer_v2
   # A stale Nitro build mount can keep otherwise unreferenced layers alive.
   # Retry the normal Docker-owned reclamation only after the guarded unmount.

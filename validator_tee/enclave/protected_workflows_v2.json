@@ -577,7 +577,7 @@
       "symbol": "Validator.__init__"
     },
     {
-      "ast_sha256": "sha256:fc0b04e8ecd13b5ca5ac78c1c72cae493b8f9297c01f1eff09e0f24856093f3c",
+      "ast_sha256": "sha256:000a9f3dd2cf70108427b3935cf1e2988104957d6a0366b586ddb459b7ea8fed",
       "path": "neurons/validator.py",
       "symbol": "Validator._authorize_and_set_weights_v2"
     },
@@ -777,7 +777,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:fc33badb8e78034f059ffc0d3bf127810870f6ed570e14c621753e5c80a3af4c",
-  "protected_source_commit": "5034055d5b8cff8b73ae63c36fdec0c4ba74ffd9",
+  "manifest_hash": "sha256:e0b70e844ef14963aaee145d31dce12872b276244e3d304901973453b98f9586",
+  "protected_source_commit": "acbd8940cce56b70843ac870534e528688fabb4e",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

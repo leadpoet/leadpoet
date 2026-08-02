@@ -1,4 +1,6 @@
 from pathlib import Path
+import subprocess
+import sys
 
 
 SCRIPT = Path("validator_tee/scripts/reclaim_docker_storage_v2.sh").read_text()
@@ -43,7 +45,7 @@ def test_data_root_reset_fails_if_mounts_remain():
     assert check < remove
 
 
-def test_live_runtime_reclaims_stale_mounts_before_rechecking_capacity():
+def test_live_runtime_reclaims_stale_state_before_rechecking_capacity():
     initial_inventory = SCRIPT.index('INITIAL_CONTAINER_COUNT="$(')
     reclaim = SCRIPT.index("docker_stale_mount_reclaimer_v2")
     repeated_prune = SCRIPT.index(
@@ -54,4 +56,48 @@ def test_live_runtime_reclaims_stale_mounts_before_rechecking_capacity():
 
     assert initial_inventory < reclaim < repeated_prune < capacity
     assert 'if [ "$INITIAL_CONTAINER_COUNT" -ne 0 ]' in SCRIPT
-    assert "Reclaiming stale Docker overlay mounts" in SCRIPT
+    assert "Reclaiming unreachable Docker overlay state" in SCRIPT
+    assert "sudo env PYTHONSAFEPATH=1 python3" in SCRIPT
+    assert (
+        '"$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py"'
+        in SCRIPT
+    )
+    assert (
+        '"$REPO_ROOT/validator_tee/host/docker_live_restore_reconciler_v2.py"'
+        in SCRIPT
+    )
+    assert 'docker info --format \'{{json .LiveRestoreEnabled}}\'' in SCRIPT
+    assert 'if [ "$RAW_RECLAIM_PERFORMED" -eq 1 ] \\' in SCRIPT
+    assert '|| [ "$LIVE_RESTORE_ENABLED" != "true" ]; then' in SCRIPT
+    assert "-m validator_tee.host.docker_stale_mount_reclaimer_v2" not in SCRIPT
+    assert "-m validator_tee.host.docker_live_restore_reconciler_v2" not in SCRIPT
+
+
+def test_live_reclaimer_bootstraps_without_validator_package_dependencies():
+    helper = Path("validator_tee/host/docker_stale_mount_reclaimer_v2.py").resolve()
+    result = subprocess.run(
+        [sys.executable, "-I", str(helper), "--help"],
+        cwd="/",
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Reclaim unreachable Docker overlay state" in result.stdout
+
+
+def test_live_restore_reconciler_bootstraps_without_validator_dependencies():
+    helper = Path(
+        "validator_tee/host/docker_live_restore_reconciler_v2.py"
+    ).resolve()
+    result = subprocess.run(
+        [sys.executable, "-I", str(helper), "--help"],
+        cwd="/",
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Refresh Docker metadata" in result.stdout

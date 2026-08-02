@@ -91,9 +91,53 @@ INITIAL_CONTAINER_COUNT="$(
     | awk 'NF { count += 1 } END { print count + 0 }'
 )"
 if [ "$INITIAL_CONTAINER_COUNT" -ne 0 ]; then
-  echo "Reclaiming stale Docker overlay mounts without disturbing live containers"
-  PYTHONPATH="$REPO_ROOT" python3 \
-    -m validator_tee.host.docker_stale_mount_reclaimer_v2
+  echo "Reclaiming unreachable Docker overlay state without disturbing live containers"
+  # This runs before release dependencies are installed. Execute the
+  # stdlib-only helper directly so validator_tee/__init__.py cannot import
+  # wallet/runtime packages that are intentionally unavailable at this stage.
+  RECLAIM_RESULT="$(
+    sudo env PYTHONSAFEPATH=1 python3 \
+      "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py"
+  )"
+  printf '%s\n' "$RECLAIM_RESULT"
+  RAW_RECLAIM_PERFORMED="$(
+    printf '%s' "$RECLAIM_RESULT" | python3 -c '
+import json
+import sys
+
+document = json.load(sys.stdin)
+fields = (
+    "reclaimed_layer_record_count",
+    "reclaimed_mount_count",
+    "reclaimed_mount_record_count",
+    "reclaimed_overlay_dir_count",
+    "reclaimed_overlay_link_count",
+)
+if document.get("status") != "ready" or any(
+    not isinstance(document.get(field), int) or document[field] < 0
+    for field in fields
+):
+    raise SystemExit("invalid Docker stale-state reclaim result")
+print(int(any(document[field] for field in fields)))
+'
+  )"
+  if ! LIVE_RESTORE_ENABLED="$(
+    docker info --format '{{json .LiveRestoreEnabled}}' 2>/dev/null
+  )"; then
+    echo "ERROR: Docker live-restore status is unreadable" >&2
+    exit 1
+  fi
+  if [ "$LIVE_RESTORE_ENABLED" != "true" ] \
+      && [ "$LIVE_RESTORE_ENABLED" != "false" ]; then
+    echo "ERROR: Docker live-restore status is malformed" >&2
+    exit 1
+  fi
+  if [ "$RAW_RECLAIM_PERFORMED" -eq 1 ] \
+      || [ "$LIVE_RESTORE_ENABLED" != "true" ]; then
+    echo "Reconciling dockerd metadata while preserving the live runtime"
+    sudo env PYTHONSAFEPATH=1 python3 \
+      "$REPO_ROOT/validator_tee/host/docker_live_restore_reconciler_v2.py"
+  fi
   # A stale Nitro build mount can keep otherwise unreferenced layers alive.
   # Retry the normal Docker-owned reclamation only after the guarded unmount.
   run_prune_with_retry image docker image prune --all --force

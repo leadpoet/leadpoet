@@ -36,7 +36,7 @@ def _repositories(tmp_path: Path) -> tuple[Path, Path, str]:
     origin = tmp_path / "origin.git"
     publisher = tmp_path / "publisher"
     checkout = tmp_path / "checkout"
-    _git("init", "--bare", str(origin))
+    _git("init", "--bare", "--initial-branch=main", str(origin))
     _git("init", "-b", "main", str(publisher))
     for repo in (publisher,):
         _git("config", "user.email", "restart@example.invalid", cwd=repo)
@@ -113,7 +113,7 @@ def _restart_repositories(tmp_path: Path) -> tuple[Path, Path, str, str]:
     origin = tmp_path / "restart-origin.git"
     publisher = tmp_path / "restart-publisher"
     checkout = tmp_path / "restart-checkout"
-    _git("init", "--bare", str(origin))
+    _git("init", "--bare", "--initial-branch=main", str(origin))
     _git("init", "-b", "main", str(publisher))
     _git("config", "user.email", "restart@example.invalid", cwd=publisher)
     _git("config", "user.name", "Restart Test", cwd=publisher)

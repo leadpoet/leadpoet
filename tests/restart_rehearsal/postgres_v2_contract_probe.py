@@ -69,6 +69,7 @@ from leadpoet_verifier.economics import allocate_research_lab_epoch
 from tests.restart_rehearsal.fixture_contract import (
     load_rehearsal_current_settlement_epoch_id,
     load_rehearsal_metagraph_hotkeys,
+    validate_rehearsal_finalized_authority_epochs,
 )
 from tests.restart_rehearsal.sanitized_weight_fixture import (
     NOW,
@@ -1735,7 +1736,7 @@ def _historical_compute_allocation_seed_rows(
 ) -> dict[str, list[dict[str, Any]]]:
     """Persist and read back one finalized prior compute allocation."""
 
-    source_epoch = int(current_epoch) - 1
+    source_epoch = int(current_epoch) - 2
     if source_epoch < 0:
         raise PostgresContractProbeError(
             "historical compute source epoch is unavailable"
@@ -2825,6 +2826,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             prior_view_row,
             view_row,
         ]
+        try:
+            validate_rehearsal_finalized_authority_epochs(merged_seed_rows)
+        except ValueError as exc:
+            raise PostgresContractProbeError(str(exc)) from exc
 
         tampered = copy.deepcopy(view_row)
         tampered["finalization_doc"]["weight_receipt_hash"] = "sha256:" + "0" * 64

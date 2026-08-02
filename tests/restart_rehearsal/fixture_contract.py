@@ -4,11 +4,51 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Mapping, Sequence
 
 
 FIXTURE_PATH = Path(
     "tests/restart_rehearsal/fixtures/production_shaped_v2.json"
 )
+
+
+def validate_rehearsal_finalized_authority_epochs(
+    rows_by_table: Mapping[str, Sequence[Mapping[str, object]]],
+) -> None:
+    """Require legacy fixture authorities to predate native authorities."""
+
+    def scopes(table: str, epoch_field: str) -> set[tuple[int, int]]:
+        try:
+            return {
+                (int(row["netuid"]), int(row[epoch_field]))
+                for row in rows_by_table[table]
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "rehearsal finalized allocation authority scope is invalid"
+            ) from exc
+
+    native = scopes(
+        "research_lab_finalized_allocation_epochs_v2",
+        "epoch_id",
+    )
+    legacy = scopes(
+        "research_lab_legacy_finalized_allocation_migrations_v2",
+        "epoch_id",
+    )
+    if not native or not legacy:
+        raise ValueError(
+            "rehearsal finalized allocation authority history is incomplete"
+        )
+    for netuid, legacy_epoch in legacy:
+        native_epochs = {
+            epoch for native_netuid, epoch in native if native_netuid == netuid
+        }
+        if not native_epochs or legacy_epoch >= min(native_epochs):
+            raise ValueError(
+                "rehearsal legacy allocation authority does not predate "
+                "native authorities"
+            )
 
 
 def _load_rehearsal_fixture(

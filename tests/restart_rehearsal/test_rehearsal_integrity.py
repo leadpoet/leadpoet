@@ -1002,6 +1002,10 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
         "kind": "v",
         "columns": list(EXPECTED_FINALIZED_VIEW_COLUMNS),
     }
+    relations["research_lab_legacy_finalized_allocation_migrations_v2"] = {
+        "kind": "r",
+        "columns": ["schema_version", "netuid", "epoch_id"],
+    }
     relations["research_lab_maintenance_lease"] = {
         "kind": "r",
         "columns": [
@@ -1105,19 +1109,31 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
         "seed_rows": {
             "research_lab_finalized_allocation_epochs_v2": [
                 {
-                    column: None
-                    for column in EXPECTED_FINALIZED_VIEW_COLUMNS
+                    **{
+                        column: None
+                        for column in EXPECTED_FINALIZED_VIEW_COLUMNS
+                    },
+                    "netuid": 71,
+                    "epoch_id": 24_218,
                 },
                 {
-                    column: None
-                    for column in EXPECTED_FINALIZED_VIEW_COLUMNS
+                    **{
+                        column: None
+                        for column in EXPECTED_FINALIZED_VIEW_COLUMNS
+                    },
+                    "netuid": 71,
+                    "epoch_id": 24_219,
                 },
             ],
             "research_lab_emission_allocation_current": [
                 {"schema_version": None},
             ],
             "research_lab_legacy_finalized_allocation_migrations_v2": [
-                {"schema_version": None},
+                {
+                    "schema_version": None,
+                    "netuid": 71,
+                    "epoch_id": 24_217,
+                },
             ],
             **graph_seed_rows,
         },
@@ -1220,7 +1236,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             },
             "research_lab_legacy_finalized_allocation_migrations_v2": {
                 "kind": "r",
-                "columns": ["epoch_id"],
+                "columns": ["netuid", "epoch_id"],
             },
             **graph_relations,
             "research_lab_attested_ancestry_checkpoints_v2": {
@@ -1325,19 +1341,27 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
         "seed_rows": {
             "research_lab_finalized_allocation_epochs_v2": [
                 {
-                    column: None
-                    for column in EXPECTED_FINALIZED_VIEW_COLUMNS
+                    **{
+                        column: None
+                        for column in EXPECTED_FINALIZED_VIEW_COLUMNS
+                    },
+                    "netuid": 71,
+                    "epoch_id": 24_218,
                 },
                 {
-                    column: None
-                    for column in EXPECTED_FINALIZED_VIEW_COLUMNS
+                    **{
+                        column: None
+                        for column in EXPECTED_FINALIZED_VIEW_COLUMNS
+                    },
+                    "netuid": 71,
+                    "epoch_id": 24_219,
                 },
             ],
             "research_lab_emission_allocation_current": [
                 {"epoch": None},
             ],
             "research_lab_legacy_finalized_allocation_migrations_v2": [
-                {"epoch_id": None},
+                {"netuid": 71, "epoch_id": 24_217},
             ],
             **graph_seed_rows,
         },

@@ -3291,14 +3291,16 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
     ):
         raise RuntimeError("deduplicated receipt graph job was not exact")
     observed_graphs = observed["graphs"]
-    derived_graphs = list(observed["derived_graphs"].values())
+    derived_graphs = observed["derived_graphs"]
+    first_shared_root = str(graphs[0]["root_receipt_hash"])
+    second_shared_root = str(graphs[1]["root_receipt_hash"])
     if (
         observed_graphs[0]["boot_identities"][0]
         is not observed_graphs[1]["boot_identities"][0]
         or observed_graphs[0]["receipts"][0]
         is not observed_graphs[1]["receipts"][0]
-        or derived_graphs[0]["receipts"][0]
-        is not derived_graphs[1]["receipts"][0]
+        or derived_graphs[first_shared_root]["receipts"][0]
+        is not derived_graphs[second_shared_root]["receipts"][0]
     ):
         raise RuntimeError("shared receipt graph evidence was rematerialized")
 

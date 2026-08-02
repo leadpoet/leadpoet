@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import subprocess
+from typing import Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +31,8 @@ def _run_recovery(
     non_moby_namespaces: int = 0,
     moby_shims: int = 0,
     live_runtime_min_free_bytes: int = 18_000_000_000,
+    stale_overlay_mounts: int = 0,
+    available_after_stale_reclaim: Optional[int] = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -40,7 +43,11 @@ def _run_recovery(
     _write_executable(
         bin_dir / "df",
         """#!/bin/bash
-printf 'Avail\\n%s\\n' "$FAKE_AVAILABLE"
+available="$FAKE_AVAILABLE"
+if [ -f "$FAKE_STALE_RECLAIM_MARKER" ]; then
+  available="$FAKE_AVAILABLE_AFTER_STALE_RECLAIM"
+fi
+printf 'Avail\\n%s\\n' "$available"
 """,
     )
     _write_executable(
@@ -77,6 +84,14 @@ case "${1:-}:${2:-}" in
     emit_rows "$FAKE_CONTAINERS"
     exit 0
     ;;
+  inspect:--format)
+    shift 3
+    for container_id in "$@"; do
+      index="${container_id#row-}"
+      printf '/var/lib/docker/overlay2/%064x/merged\n' "$index"
+    done
+    exit 0
+    ;;
   image:ls)
     emit_rows "$FAKE_IMAGES"
     exit 0
@@ -101,8 +116,18 @@ exit 2
     _write_executable(
         bin_dir / "findmnt",
         """#!/bin/bash
-# No stale mounts under the fake docker/containerd roots (hermetic on CI and
-# macOS, which lacks findmnt entirely).
+index=0
+while [ "$index" -lt "$FAKE_CONTAINERS" ]; do
+  printf '/var/lib/docker/overlay2/%064x/merged\\n' "$index"
+  index=$((index + 1))
+done
+if [ ! -f "$FAKE_STALE_RECLAIM_MARKER" ]; then
+  index=0
+  while [ "$index" -lt "$FAKE_STALE_OVERLAY_MOUNTS" ]; do
+    printf '/var/lib/docker/overlay2/%064x/merged\\n' "$((65536 + index))"
+    index=$((index + 1))
+  done
+fi
 exit 0
 """,
     )
@@ -188,6 +213,10 @@ case "$command" in
       *) exit 2 ;;
     esac
     ;;
+  umount)
+    printf '%s %s\\n' "$command" "$*" >> "$FAKE_SUDO_LOG"
+    touch "$FAKE_STALE_RECLAIM_MARKER"
+    ;;
   rm)
     printf '%s %s\\n' "$command" "$*" >> "$FAKE_SUDO_LOG"
     if [ "$*" = "-rf --one-file-system /var/lib/containerd" ]; then
@@ -227,6 +256,11 @@ fi
         ),
         "LEADPOET_PROC_ROOT": str(proc_root),
         "FAKE_AVAILABLE": str(available),
+        "FAKE_AVAILABLE_AFTER_STALE_RECLAIM": str(
+            available
+            if available_after_stale_reclaim is None
+            else available_after_stale_reclaim
+        ),
         "FAKE_CONTAINERS": str(containers),
         "FAKE_IMAGES": str(images),
         "FAKE_VOLUMES": str(volumes),
@@ -243,6 +277,8 @@ fi
         "FAKE_SYSTEM_PRUNE_STATE": str(tmp_path / "system-prune-attempts"),
         "FAKE_NON_MOBY_NAMESPACES": str(non_moby_namespaces),
         "FAKE_MOBY_SHIMS": str(moby_shims),
+        "FAKE_STALE_OVERLAY_MOUNTS": str(stale_overlay_mounts),
+        "FAKE_STALE_RECLAIM_MARKER": str(tmp_path / "stale-mounts-reclaimed"),
         "FAKE_CONTAINERD_RESET_MARKER": str(tmp_path / "containerd-reset"),
         "FAKE_DOCKER_ROOT_BYTES": "229720371200",
         "FAKE_SUDO_LOG": str(sudo_log),
@@ -482,6 +518,34 @@ def test_validator_docker_recovery_refuses_live_runtime_below_recovery_reserve(
     assert result.returncode == 1
     assert "live validator runtime has only 17999999999 free bytes" in result.stderr
     assert "refusing to stop containers or reset Docker storage" in result.stderr
+    assert "systemctl stop" not in sudo_log
+    assert "rm -rf" not in sudo_log
+
+
+def test_validator_docker_recovery_reclaims_stale_nitro_mounts_before_floor(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=14_738_382_848,
+        available_after_stale_reclaim=40_000_000_000,
+        containers=11,
+        containerd_containers=11,
+        containerd_tasks=11,
+        containerd_running_tasks=11,
+        moby_shims=11,
+        layerdb_images=4_147,
+        layerdb_mounts=336,
+        overlay_directories=4_819,
+        stale_overlay_mounts=325,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '"active_mount_count":11' in result.stdout
+    assert '"mounted_overlay_count":336' in result.stdout
+    assert '"reclaimed_mount_count":325' in result.stdout
+    assert "Docker storage ready: free_bytes=40000000000" in result.stdout
+    assert sudo_log.count("umount -- /var/lib/docker/overlay2/") == 325
     assert "systemctl stop" not in sudo_log
     assert "rm -rf" not in sudo_log
 

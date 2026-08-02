@@ -107,6 +107,23 @@ jobs:
           if-no-files-found: error
           path: ${{ runner.temp }}/release-evidence/*.json
 
+      - name: Reclaim gateway-parent storage after evidence generation
+        if: always()
+        run: |
+          sudo rm -rf -- \
+            "$RUNNER_TEMP/offline-artifacts" \
+            "$RUNNER_TEMP/gateway-evidence" \
+            "$RUNNER_TEMP/gateway-build-work" \
+            "$RUNNER_TEMP/gateway-pcr0-cache.json" \
+            "$RUNNER_TEMP/validator-build-work" \
+            "$RUNNER_TEMP/validator-evidence" \
+            "$RUNNER_TEMP/release-evidence" \
+            "$RUNNER_TEMP/evidence" \
+            "$RUNNER_TEMP/release"
+          VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
+            bash validator_tee/scripts/reclaim_docker_storage_v2.sh
+          df -h /
+
   validator-parent:
     name: Independent validator-parent builds
     runs-on: [self-hosted, linux, x64, leadpoet-validator-v2-builder]
@@ -185,6 +202,23 @@ jobs:
           retention-days: 7
           if-no-files-found: error
           path: ${{ runner.temp }}/release-evidence/*.json
+
+      - name: Reclaim validator-parent storage after evidence generation
+        if: always()
+        run: |
+          sudo rm -rf -- \
+            "$RUNNER_TEMP/offline-artifacts" \
+            "$RUNNER_TEMP/gateway-evidence" \
+            "$RUNNER_TEMP/gateway-build-work" \
+            "$RUNNER_TEMP/gateway-pcr0-cache.json" \
+            "$RUNNER_TEMP/validator-build-work" \
+            "$RUNNER_TEMP/validator-evidence" \
+            "$RUNNER_TEMP/release-evidence" \
+            "$RUNNER_TEMP/evidence" \
+            "$RUNNER_TEMP/release"
+          VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
+            bash validator_tee/scripts/reclaim_docker_storage_v2.sh
+          df -h /
 
   publish:
     name: Assemble and immutably publish exact-commit channel

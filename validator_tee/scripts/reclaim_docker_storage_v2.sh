@@ -90,6 +90,16 @@ INITIAL_CONTAINER_COUNT="$(
   printf '%s\n' "$INITIAL_CONTAINER_IDS" \
     | awk 'NF { count += 1 } END { print count + 0 }'
 )"
+if [ "$INITIAL_CONTAINER_COUNT" -ne 0 ]; then
+  echo "Reclaiming stale Docker overlay mounts without disturbing live containers"
+  PYTHONPATH="$REPO_ROOT" python3 \
+    -m validator_tee.host.docker_stale_mount_reclaimer_v2
+  # A stale Nitro build mount can keep otherwise unreferenced layers alive.
+  # Retry the normal Docker-owned reclamation only after the guarded unmount.
+  run_prune_with_retry image docker image prune --all --force
+  run_prune_with_retry builder docker builder prune --all --force
+  run_prune_with_retry system docker system prune --all --force
+fi
 if [ "$INITIAL_CONTAINER_COUNT" -eq 0 ]; then
   TEARDOWN_SETTLED=0
   TEARDOWN_PROBE_FAILED=0

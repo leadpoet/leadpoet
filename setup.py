@@ -98,6 +98,9 @@ requirements = [
     "click>=8.1.0",
     "typing-extensions>=4.7.0",
     "tenacity>=8.2.0",
+
+    # Error monitoring (opt-in; inert without the LEADPOET_SENTRY_* env gate)
+    "sentry-sdk>=2.0.0,<3.0.0",
     
     # Google Cloud (optional)
     "google-cloud-firestore>=2.11.1",
@@ -140,7 +143,7 @@ setup(
     author="Leadpoet",  
     author_email="hello@leadpoet.com",  
     license="MIT",
-    packages=find_packages(include=['Leadpoet', 'Leadpoet.*', 'miner_models', 'miner_models.*', 'neurons', 'neurons.*', 'validator_models', 'validator_models.*', 'leadpoet_audit', 'leadpoet_audit.*', 'gateway', 'gateway.*', 'leadpoet_canonical', 'leadpoet_canonical.*', 'qualification', 'qualification.*', 'leadpoet_verifier', 'leadpoet_verifier.*', 'research_lab', 'research_lab.*']),
+    packages=find_packages(include=['Leadpoet', 'Leadpoet.*', 'miner_models', 'miner_models.*', 'neurons', 'neurons.*', 'validator_models', 'validator_models.*', 'leadpoet_audit', 'leadpoet_audit.*', 'gateway', 'gateway.*', 'leadpoet_canonical', 'leadpoet_canonical.*', 'qualification', 'qualification.*', 'leadpoet_verifier', 'leadpoet_verifier.*', 'research_lab', 'research_lab.*', 'leadpoet_observability', 'leadpoet_observability.*']),
     package_data={
         "leadpoet_verifier": [
             "fixtures/*.json",

@@ -4,6 +4,26 @@ import threading
 import argparse
 import traceback
 import getpass
+
+# Opt-in, fail-closed error monitoring (docs/sentry_error_monitoring.md).
+# Complete no-op unless the LEADPOET_SENTRY_* environment gate is satisfied.
+try:
+    try:
+        from leadpoet_observability import init_sentry as _init_sentry
+    except ImportError:
+        import os as _os
+        import sys as _sys
+
+        _sys.path.append(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+        from leadpoet_observability import init_sentry as _init_sentry
+
+    _init_sentry(component="miner")
+except Exception as _sentry_exc:  # error monitoring must never break the miner
+    print(
+        "leadpoet_sentry_wiring_skipped error=%s" % type(_sentry_exc).__name__,
+        flush=True,
+    )
+
 import bittensor as bt
 import socket
 from Leadpoet.base.miner import BaseMinerNeuron

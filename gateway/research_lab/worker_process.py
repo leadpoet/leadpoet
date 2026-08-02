@@ -21,6 +21,18 @@ for path in (ATTESTED_RUNTIME, PACKAGE_PARENT):
         sys.path.remove(str(path))
     sys.path.insert(0, str(path))
 
+# Opt-in, fail-closed error monitoring (docs/sentry_error_monitoring.md).
+# Complete no-op unless the LEADPOET_SENTRY_* environment gate is satisfied.
+try:
+    from leadpoet_observability import init_sentry  # noqa: E402
+
+    init_sentry(component="research-lab-worker")
+except Exception as _sentry_exc:  # must never break the worker
+    print(
+        "leadpoet_sentry_wiring_skipped error=%s" % type(_sentry_exc).__name__,
+        flush=True,
+    )
+
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
 from gateway.research_lab.git_tree_models import TreePolicy  # noqa: E402
 from gateway.research_lab.logging_utils import format_worker_block  # noqa: E402
@@ -160,6 +172,13 @@ def main() -> int:
     parser.add_argument("--worker-prefix", default="")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
+
+    try:  # low-cardinality triage tag; safe no-op when Sentry is inactive
+        from leadpoet_observability import set_sentry_tag
+
+        set_sentry_tag("worker.kind", args.kind)
+    except Exception:
+        pass
 
     build_research_lab_worker_environment()
     _configure_logging(args.log_level)

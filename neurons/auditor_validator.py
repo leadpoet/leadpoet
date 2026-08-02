@@ -194,6 +194,20 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
+
+# Opt-in, fail-closed error monitoring (docs/sentry_error_monitoring.md).
+# Complete no-op unless the LEADPOET_SENTRY_* environment gate is satisfied;
+# public auditors simply leave the gate unset.
+try:
+    from leadpoet_observability import init_sentry as _init_sentry
+
+    _init_sentry(component="auditor-validator")
+except Exception as _sentry_exc:  # must never break the auditor
+    print(
+        "leadpoet_sentry_wiring_skipped error=%s" % type(_sentry_exc).__name__,
+        flush=True,
+    )
+
 import asyncio
 import logging
 import base64

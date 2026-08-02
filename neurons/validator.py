@@ -13,6 +13,19 @@ sys.path.insert(0, str(Path(__file__).parent.parent.resolve()))
 
 os.environ["PYTHONWARNINGS"] = "ignore::UserWarning"
 
+# Opt-in, fail-closed error monitoring (docs/sentry_error_monitoring.md).
+# Wired before the heavy imports below so import-time crashes are captured.
+# Complete no-op unless the LEADPOET_SENTRY_* environment gate is satisfied.
+try:
+    from leadpoet_observability import init_sentry as _init_sentry
+
+    _init_sentry(component="validator")
+except Exception as _sentry_exc:  # must never break the validator
+    print(
+        "leadpoet_sentry_wiring_skipped error=%s" % type(_sentry_exc).__name__,
+        flush=True,
+    )
+
 import re
 import errno
 import time
@@ -12134,6 +12147,13 @@ def main():
     parser.add_argument("--total-containers", type=int, help="Total number of containers running (for dynamic lead distribution)")
     parser.add_argument("--mode", type=str, choices=["coordinator", "worker", "qualification_worker", "fulfillment_worker"], help="Container mode")
     args = parser.parse_args()
+
+    try:  # low-cardinality triage tag; safe no-op when Sentry is inactive
+        from leadpoet_observability import set_sentry_tag as _set_sentry_tag
+
+        _set_sentry_tag("validator.mode", getattr(args, "mode", None) or "coordinator")
+    except Exception:
+        pass
 
     os.environ.setdefault("BITTENSOR_NETWORK", str(args.subtensor_network))
     os.environ.setdefault("BITTENSOR_NETUID", str(args.netuid))

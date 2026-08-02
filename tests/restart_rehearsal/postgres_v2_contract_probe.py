@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import concurrent.futures
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -58,6 +59,11 @@ from leadpoet_canonical.legacy_settlement_v2 import (
 )
 from leadpoet_canonical.weight_authority_v2 import (
     validate_published_weight_bundle_v2,
+    validate_weight_finalization_submission_v2,
+)
+from leadpoet_canonical.hotkey_authority_v2 import (
+    build_weight_extrinsic_authorization_v2,
+    chain_signing_profiles,
 )
 from leadpoet_verifier.economics import allocate_research_lab_epoch
 from tests.restart_rehearsal.fixture_contract import (
@@ -837,6 +843,92 @@ def _settlement_fixture(
         "durable_readback_hash": durable_readback_hash,
         "publication_doc": publication_doc,
     }
+    profile_manifest = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "validator_tee/enclave/chain_signing_profile_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+    profile = next(
+        item
+        for item in chain_signing_profiles(profile_manifest)
+        if int(item["spec_version"])
+        == int(profile_manifest["spec_version"])
+    )
+    block = int(verified["block"])
+    authorization = build_weight_extrinsic_authorization_v2(
+        profile=profile,
+        validator_hotkey=verified["validator_hotkey"],
+        hotkey_public_key_hex=hashlib.sha256(
+            b"postgres-contract-hotkey:" + candidate_sha.encode("ascii")
+        ).hexdigest(),
+        epoch_id=verified["epoch_id"],
+        netuid=verified["netuid"],
+        subnet_epoch_index=verified["epoch_id"],
+        weight_receipt_hash=verified["weight_receipt_hash"],
+        weight_submission_event_hash=submission_event_hash,
+        weights_hash=verified["weights_hash"],
+        sparse_uids=bundle["weight_result"]["sparse_uids"],
+        sparse_weights_u16=bundle["weight_result"]["sparse_weights_u16"],
+        commitment=hashlib.sha512(
+            b"postgres-contract-commitment:"
+            + str(epoch_id).encode("ascii")
+        ).digest(),
+        reveal_round=epoch_id + 1,
+        era_current=block,
+        nonce=epoch_id,
+        block_hash=hashlib.sha256(
+            f"postgres-contract-block:{block}".encode("ascii")
+        ).hexdigest(),
+    )
+    extrinsic_signature = hashlib.sha512(
+        b"postgres-contract-signature:"
+        + authorization["authorization_hash"].encode("ascii")
+    ).hexdigest()
+    extrinsic_hash = "0x" + hashlib.sha256(
+        b"postgres-contract-extrinsic:"
+        + authorization["authorization_hash"].encode("ascii")
+    ).hexdigest()
+    extrinsic_output = {
+        "schema_version": "leadpoet.weight_extrinsic_signature.v2",
+        "authorization_hash": authorization["authorization_hash"],
+        "validator_hotkey": verified["validator_hotkey"],
+        "signature": extrinsic_signature,
+        "extrinsic_hash": extrinsic_hash,
+    }
+    extrinsic_receipt = fixture.receipt(
+        role="validator_weights",
+        purpose="validator.set_weights_extrinsic.v2",
+        job_id=f"postgres-contract-extrinsic-{epoch_id}",
+        key=fixture.weight_key,
+        boot=weight_boot,
+        config_hash=str(weight_boot["config_hash"]),
+        input_root=authorization["authorization_hash"],
+        output_root=sha256_json(extrinsic_output),
+        parents=[verified["weight_receipt_hash"]],
+        sequence=801,
+    )
+    finalization_job_id = f"postgres-contract-finalization-{epoch_id}"
+    finalization_attempts = [
+        fixture.source_attempt(
+            category="weight-finalization",
+            job_id=finalization_job_id,
+            purpose="validator.weights.finalized.v2",
+            sequence=900,
+            provider_id="bittensor_chain",
+            host="entrypoint-finney.opentensor.ai",
+            method="GET",
+        ),
+        fixture.source_attempt(
+            category="weight-finalization-archive",
+            job_id=finalization_job_id,
+            purpose="validator.weights.finalized.v2",
+            sequence=901,
+            provider_id="bittensor_archive",
+            host="archive.chain.opentensor.ai",
+            method="GET",
+        ),
+    ]
     finalization_doc = {
         "schema_version": "leadpoet.weight_finalization.v2",
         "validator_hotkey": verified["validator_hotkey"],
@@ -845,12 +937,12 @@ def _settlement_fixture(
         "weights_hash": verified["weights_hash"],
         "weight_receipt_hash": verified["weight_receipt_hash"],
         "weight_submission_event_hash": submission_event_hash,
-        "extrinsic_authorization_hash": sha256_json(
-            {"kind": "extrinsic-authorization", "epoch_id": epoch_id}
-        ),
-        "extrinsic_hash": "0x"
-        + sha256_json({"kind": "extrinsic", "epoch_id": epoch_id})[7:],
-        "finalized_block": int(verified["block"]) + 1,
+        "extrinsic_authorization": authorization,
+        "extrinsic_authorization_hash": authorization["authorization_hash"],
+        "extrinsic_signature": extrinsic_signature,
+        "extrinsic_receipt_hash": extrinsic_receipt["receipt_hash"],
+        "extrinsic_hash": extrinsic_hash,
+        "finalized_block": block + 1,
         "finalized_block_hash": sha256_json(
             {"kind": "finalized-block", "epoch_id": epoch_id}
         )[7:],
@@ -861,20 +953,71 @@ def _settlement_fixture(
     finalization_receipt = fixture.receipt(
         role="validator_weights",
         purpose="validator.weights.finalized.v2",
-        job_id="postgres-contract-finalization",
+        job_id=finalization_job_id,
         key=fixture.weight_key,
         boot=weight_boot,
         config_hash=str(weight_boot["config_hash"]),
-        input_root=sha256_json({"kind": "finalization", "epoch_id": epoch_id}),
+        input_root=sha256_json(
+            {
+                "weight_submission_event_hash": submission_event_hash,
+                "extrinsic_receipt_hashes": [
+                    extrinsic_receipt["receipt_hash"]
+                ],
+            }
+        ),
         output_root=sha256_json(finalization_doc),
-        parents=[verified["weight_receipt_hash"]],
-        sequence=801,
+        parents=[extrinsic_receipt["receipt_hash"]],
+        sequence=802,
+        transport_root=merkle_root(
+            [item["attempt_hash"] for item in finalization_attempts],
+            domain="leadpoet-transport-v2",
+        ),
+        artifact_root=merkle_root(
+            [
+                item[field]
+                for item in finalization_attempts
+                for field in (
+                    "request_artifact_hash",
+                    "response_artifact_hash",
+                )
+            ],
+            domain="leadpoet-artifact-v2",
+        ),
+    )
+    finalization_graph = build_receipt_graph(
+        root_receipt_hash=finalization_receipt["receipt_hash"],
+        boot_identities=bundle["receipt_graph"]["boot_identities"],
+        receipts=[
+            *[
+                receipt
+                for receipt in bundle["receipt_graph"]["receipts"]
+                if receipt["purpose"] != "validator.hotkey_signature.v2"
+            ],
+            extrinsic_receipt,
+            finalization_receipt,
+        ],
+        transport_attempts=[
+            *bundle["receipt_graph"]["transport_attempts"],
+            *finalization_attempts,
+        ],
+    )
+    verified_finalization = validate_weight_finalization_submission_v2(
+        {
+            "schema_version": "leadpoet.weight_finalization_submission.v2",
+            "validator_hotkey": verified["validator_hotkey"],
+            "weight_submission_event_hash": submission_event_hash,
+            "finalization": finalization_doc,
+            "receipt_graph": finalization_graph,
+        },
+        chain_signing_profile=profile_manifest,
     )
     finalization_event_hash = sha256_json(
         {
             "weight_submission_event_hash": submission_event_hash,
             "bundle_hash": verified["bundle_hash"],
-            "finalization_receipt_hash": finalization_receipt["receipt_hash"],
+            "finalization_receipt_hash": verified_finalization[
+                "finalization_receipt_hash"
+            ],
             "extrinsic_authorization_hash": finalization_doc[
                 "extrinsic_authorization_hash"
             ],
@@ -888,7 +1031,9 @@ def _settlement_fixture(
         "weight_finalization_event_hash": finalization_event_hash,
         "weight_submission_event_hash": submission_event_hash,
         "bundle_hash": verified["bundle_hash"],
-        "finalization_receipt_hash": finalization_receipt["receipt_hash"],
+        "finalization_receipt_hash": verified_finalization[
+            "finalization_receipt_hash"
+        ],
         "extrinsic_authorization_hash": finalization_doc[
             "extrinsic_authorization_hash"
         ],
@@ -901,10 +1046,15 @@ def _settlement_fixture(
     graph_receipts = [
         *bundle["receipt_graph"]["receipts"],
         publication_receipt,
+        extrinsic_receipt,
         finalization_receipt,
     ]
+    all_transport_attempts = [
+        *bundle["receipt_graph"]["transport_attempts"],
+        *finalization_attempts,
+    ]
     attempts_by_scope: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
-    for attempt in bundle["receipt_graph"]["transport_attempts"]:
+    for attempt in all_transport_attempts:
         scope = (str(attempt["job_id"]), str(attempt["purpose"]))
         attempts_by_scope.setdefault(scope, []).append(attempt)
     rows = [
@@ -920,7 +1070,7 @@ def _settlement_fixture(
                 "research_lab_attested_transport_attempts_v2",
                 transport_storage_row(attempt),
             )
-            for attempt in bundle["receipt_graph"]["transport_attempts"]
+            for attempt in all_transport_attempts
         ],
         *[
             (

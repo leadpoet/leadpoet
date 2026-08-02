@@ -317,7 +317,7 @@ def test_finalized_settlement_fixture_exports_complete_receipt_graphs() -> None:
         for row in seed_rows["research_lab_attested_boot_identities_v2"]
     }
     attempts = {
-        row["attempt_hash"]
+        row["attempt_hash"]: row["attempt_doc"]
         for row in seed_rows["research_lab_attested_transport_attempts_v2"]
     }
     edges_by_child: dict[str, set[str]] = {}
@@ -329,10 +329,53 @@ def test_finalized_settlement_fixture_exports_complete_receipt_graphs() -> None:
         assert row["receipt_hash"] in receipts
         assert row["attempt_hash"] in attempts
 
-    finalization_roots = {
-        row["finalization_receipt_hash"]
+    finalization_rows = [
+        row
         for table, row in rows
         if table == "research_lab_attested_weight_finalizations_v2"
+    ]
+    expected_finalization_fields = {
+        "schema_version",
+        "validator_hotkey",
+        "netuid",
+        "epoch_id",
+        "weights_hash",
+        "weight_receipt_hash",
+        "weight_submission_event_hash",
+        "extrinsic_authorization",
+        "extrinsic_authorization_hash",
+        "extrinsic_signature",
+        "extrinsic_receipt_hash",
+        "extrinsic_hash",
+        "finalized_block",
+        "finalized_block_hash",
+        "state_transition_hash",
+    }
+    for row in finalization_rows:
+        finalization = row["finalization_doc"]
+        assert set(finalization) == expected_finalization_fields
+        root = receipts[row["finalization_receipt_hash"]]
+        assert root["purpose"] == "validator.weights.finalized.v2"
+        assert root["parent_receipt_hashes"] == [
+            finalization["extrinsic_receipt_hash"]
+        ]
+        scoped_attempts = [
+            attempt
+            for attempt in attempts.values()
+            if attempt["job_id"] == root["job_id"]
+            and attempt["purpose"] == root["purpose"]
+        ]
+        assert {
+            (attempt["provider_id"], attempt["destination_host"])
+            for attempt in scoped_attempts
+        } == {
+            ("bittensor_chain", "entrypoint-finney.opentensor.ai"),
+            ("bittensor_archive", "archive.chain.opentensor.ai"),
+        }
+
+    finalization_roots = {
+        row["finalization_receipt_hash"]
+        for row in finalization_rows
     }
     assert len(finalization_roots) == 2
     pending = set(finalization_roots)

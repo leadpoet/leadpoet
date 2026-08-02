@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import HTTPException
 
@@ -19,6 +21,43 @@ def _default_historical_compute_fallback_backfill(monkeypatch):
         "backfill_historical_compute_fallback_v2_authority",
         covered,
     )
+
+
+def test_weight_readiness_cli_reserves_stdout_for_one_json_document(
+    monkeypatch,
+    capsys,
+):
+    async def storage_readable(**_kwargs):
+        print("configuration diagnostic")
+        return {
+            "schema_version": "leadpoet.weight_submission_storage_readiness.v2",
+            "status": "readable",
+            "epoch": 24307,
+            "ancestry_safe_epoch": 24303,
+        }
+
+    monkeypatch.setattr(
+        readiness,
+        "verify_weight_submission_storage_readable_v2",
+        storage_readable,
+    )
+    monkeypatch.setattr(
+        readiness.sys,
+        "argv",
+        ["verify_weight_submission_ready_v2", "--storage-read-preflight"],
+    )
+
+    assert readiness.main() == 0
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "schema_version": "leadpoet.weight_submission_storage_readiness.v2",
+        "status": "readable",
+        "epoch": 24307,
+        "ancestry_safe_epoch": 24303,
+    }
+    assert captured.out.count("\n") == 1
+    assert captured.err == "configuration diagnostic\n"
 
 
 @pytest.mark.asyncio

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import redirect_stdout
 import json
 import logging
 import os
+import sys
 from collections.abc import Mapping
 from typing import Any
 
@@ -519,34 +521,37 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = _parser()
     args = parser.parse_args()
-    if args.storage_read_preflight:
-        if args.gateway_url:
-            parser.error("--storage-read-preflight cannot use --gateway-url")
-        result = asyncio.run(
-            verify_weight_submission_storage_readable_v2(
-                epoch=args.epoch,
-                netuid=args.netuid,
+    # This CLI is consumed by restart controllers. Keep stdout as a strict
+    # single-document channel even when imported modules emit diagnostics.
+    with redirect_stdout(sys.stderr):
+        if args.storage_read_preflight:
+            if args.gateway_url:
+                parser.error("--storage-read-preflight cannot use --gateway-url")
+            result = asyncio.run(
+                verify_weight_submission_storage_readable_v2(
+                    epoch=args.epoch,
+                    netuid=args.netuid,
+                )
             )
-        )
-    elif args.repair_chain_settlements:
-        if args.gateway_url:
-            parser.error("--repair-chain-settlements cannot use --gateway-url")
-        result = asyncio.run(
-            repair_chain_realized_settlements_v1(
-                epoch=args.epoch,
-                netuid=args.netuid,
+        elif args.repair_chain_settlements:
+            if args.gateway_url:
+                parser.error("--repair-chain-settlements cannot use --gateway-url")
+            result = asyncio.run(
+                repair_chain_realized_settlements_v1(
+                    epoch=args.epoch,
+                    netuid=args.netuid,
+                )
             )
-        )
-    else:
-        result = asyncio.run(
-            verify_weight_submission_ready_v2(
-                repair=bool(args.repair),
-                gateway_url=args.gateway_url,
-                epoch=args.epoch,
-                netuid=args.netuid,
-                http_timeout_seconds=args.http_timeout_seconds,
+        else:
+            result = asyncio.run(
+                verify_weight_submission_ready_v2(
+                    repair=bool(args.repair),
+                    gateway_url=args.gateway_url,
+                    epoch=args.epoch,
+                    netuid=args.netuid,
+                    http_timeout_seconds=args.http_timeout_seconds,
+                )
             )
-        )
     print(json.dumps(result, sort_keys=True))
     return 0
 

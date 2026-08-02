@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+from contextlib import redirect_stdout
 import json
 import hashlib
 import os
@@ -12,23 +13,29 @@ import re
 import subprocess
 import sys
 
-from gateway.research_lab.git_tree_models import (
-    GitTreeContractError,
-    TreePolicy,
-    TreeReplacement,
-    derive_child_slot,
-    derive_tree_id,
+candidate_source_root = Path(
+    os.environ.get("REHEARSAL_CANDIDATE_SOURCE_ROOT", "/source")
 )
-from gateway.tee.supabase_schema_preflight_v2 import (
-    REQUIRED_SUPABASE_V2_RPCS,
-    REQUIRED_SUPABASE_V2_SCHEMA,
-)
-from leadpoet_canonical.attested_v2 import sha256_json
+if candidate_source_root.is_dir():
+    sys.path.insert(0, str(candidate_source_root))
 
-if __package__:
-    from .postgres_v2_contract_probe import EXPECTED_APPLIED_MIGRATIONS
-else:
-    from postgres_v2_contract_probe import EXPECTED_APPLIED_MIGRATIONS
+with redirect_stdout(sys.stderr):
+    from gateway.research_lab.git_tree_models import (
+        GitTreeContractError,
+        TreePolicy,
+        TreeReplacement,
+        derive_child_slot,
+        derive_tree_id,
+    )
+    from gateway.tee.supabase_schema_preflight_v2 import (
+        REQUIRED_SUPABASE_V2_RPCS,
+        REQUIRED_SUPABASE_V2_SCHEMA,
+    )
+    from leadpoet_canonical.attested_v2 import sha256_json
+    if __package__:
+        from .postgres_v2_contract_probe import EXPECTED_APPLIED_MIGRATIONS
+    else:
+        from postgres_v2_contract_probe import EXPECTED_APPLIED_MIGRATIONS
 
 
 TARGETED_REGRESSION_SCOPE = "weight_readiness_regression"

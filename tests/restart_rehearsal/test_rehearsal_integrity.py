@@ -3583,7 +3583,7 @@ def test_exact_harness_keeps_persistent_role_isolated_enclave_processes() -> Non
     assert "trap finalize_rehearsal EXIT" in run_inside
     assert "preserve_rehearsal_evidence" in run_inside
     assert (
-        'PYTHONPATH="/source:/harness" /usr/bin/python3.11 \\\n'
+        'PYTHONPATH="/harness" /usr/bin/python3.11 \\\n'
         "  /harness/verify_evidence.py"
     ) in run_inside
     assert "tls-connect-proxy-ca.pem" in run_inside
@@ -3749,6 +3749,33 @@ def test_evidence_order_uses_the_boundary_contract_nitro_operations() -> None:
     } <= allowed
     assert verifier.count('"nitro:build_enclave"') == 2
     assert verifier.count('"nitro:run_enclave"') == 2
+
+
+def test_evidence_verifier_keeps_stdout_json_channel_clean() -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    harness_root = Path(__file__).resolve().parent
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import runpy; "
+                f"runpy.run_path({str(harness_root / 'verify_evidence.py')!r}); "
+                "print('VERIFIER_IMPORT_OK')"
+            ),
+        ],
+        cwd=harness_root,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(harness_root),
+            "REHEARSAL_CANDIDATE_SOURCE_ROOT": str(repository_root),
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "VERIFIER_IMPORT_OK\n"
 
 
 def test_workflow_runs_before_command_adapters_are_installed() -> None:

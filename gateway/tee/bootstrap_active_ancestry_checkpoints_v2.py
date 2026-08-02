@@ -237,6 +237,114 @@ def _graph_root(graph: Mapping[str, Any]) -> str:
     return root
 
 
+async def _load_frontier_bounded_allocation_graphs(
+    *,
+    epoch_id: int,
+    netuid: int,
+    policy: Mapping[str, Any],
+    load_frontier_context: Any = None,
+    load_parent_graphs: Any = None,
+    load_graphs: Any = None,
+) -> list[dict[str, Any]]:
+    """Select the exact allocation ancestry without replaying settled history."""
+
+    if load_frontier_context is None or load_graphs is None:
+        from gateway.research_lab.attested_v2_store import (
+            load_allocation_settlement_frontier_context_v2,
+            load_receipt_graphs_v2,
+        )
+
+        load_frontier_context = (
+            load_frontier_context or load_allocation_settlement_frontier_context_v2
+        )
+        load_graphs = load_graphs or load_receipt_graphs_v2
+    if load_parent_graphs is None:
+        from gateway.research_lab.v2_authority import (
+            _load_allocation_parent_graphs_v2,
+        )
+
+        load_parent_graphs = _load_allocation_parent_graphs_v2
+
+    context = await _maybe_await(
+        load_frontier_context(
+            netuid=int(netuid),
+            before_epoch=int(epoch_id) + 1,
+        )
+    )
+    if context is None:
+        return list(
+            await _maybe_await(
+                load_parent_graphs(
+                    epoch_id=int(epoch_id),
+                    netuid=int(netuid),
+                    policy=dict(policy),
+                )
+            )
+        )
+    if not isinstance(context, Mapping):
+        raise ActiveAncestryCheckpointBootstrapV2Error(
+            "allocation settlement frontier context is invalid"
+        )
+    frontier = context.get("frontier")
+    try:
+        frontier_epoch = int(frontier["allocation_epoch"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ActiveAncestryCheckpointBootstrapV2Error(
+            "allocation settlement frontier epoch is invalid"
+        ) from exc
+    if frontier_epoch < 0 or frontier_epoch > int(epoch_id):
+        raise ActiveAncestryCheckpointBootstrapV2Error(
+            "allocation settlement frontier is outside the active epoch"
+        )
+    if frontier_epoch < int(epoch_id):
+        return list(
+            await _maybe_await(
+                load_parent_graphs(
+                    epoch_id=int(epoch_id),
+                    netuid=int(netuid),
+                    policy=dict(policy),
+                    settlement_frontier_context=context,
+                )
+            )
+        )
+
+    source = context.get("source")
+    source_receipt = source.get("receipt") if isinstance(source, Mapping) else None
+    parent_roots = (
+        source_receipt.get("parent_receipt_hashes")
+        if isinstance(source_receipt, Mapping)
+        else None
+    )
+    if not isinstance(parent_roots, list):
+        raise ActiveAncestryCheckpointBootstrapV2Error(
+            "current allocation frontier parents are invalid"
+        )
+    if any(
+        not isinstance(root, str)
+        or root != root.lower()
+        or not _HASH_RE.fullmatch(root)
+        for root in parent_roots
+    ) or len(set(parent_roots)) != len(parent_roots):
+        raise ActiveAncestryCheckpointBootstrapV2Error(
+            "current allocation frontier parent set is invalid"
+        )
+    normalized_roots = sorted(parent_roots)
+    loaded = await _maybe_await(load_graphs(normalized_roots))
+    if not isinstance(loaded, Mapping) or set(loaded) != set(normalized_roots):
+        raise ActiveAncestryCheckpointBootstrapV2Error(
+            "current allocation frontier parent graphs are incomplete"
+        )
+    selected = []
+    for root in normalized_roots:
+        graph = loaded[root]
+        if not isinstance(graph, Mapping) or _graph_root(graph) != root:
+            raise ActiveAncestryCheckpointBootstrapV2Error(
+                "current allocation frontier parent graph differs"
+            )
+        selected.append(dict(graph))
+    return selected
+
+
 async def _select_active_graphs(
     *,
     epoch_id: int,
@@ -373,9 +481,7 @@ async def _bootstrap_one_graph(
         }
 
     durable_values = [
-        dict(durable[item])
-        for item in direct_parent_roots
-        if item in durable
+        dict(durable[item]) for item in direct_parent_roots if item in durable
     ]
     frontier = select_ancestry_checkpoint_resume_frontier_v2(
         full_graphs=(graph,),
@@ -542,11 +648,7 @@ async def bootstrap_active_ancestry_checkpoints_v2(
 
         resolve_epoch = _resolve_maintenance_epoch
     if load_allocation_graphs is None:
-        from gateway.research_lab.v2_authority import (
-            _load_allocation_parent_graphs_v2,
-        )
-
-        load_allocation_graphs = _load_allocation_parent_graphs_v2
+        load_allocation_graphs = _load_frontier_bounded_allocation_graphs
     if load_sourcing_graphs is None:
         from gateway.research_lab.attested_v2_store import (
             load_sourcing_epoch_graphs_v2,

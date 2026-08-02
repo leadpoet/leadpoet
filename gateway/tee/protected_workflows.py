@@ -520,6 +520,7 @@ PROTECTED_SYMBOLS = {
         "_LazyApprovedReleaseBootVerifier",
         "_verify_coordinator_capability",
         "_graph_root",
+        "_load_frontier_bounded_allocation_graphs",
         "_select_active_graphs",
         "_bootstrap_one_graph",
         "bootstrap_active_ancestry_checkpoints_v2",

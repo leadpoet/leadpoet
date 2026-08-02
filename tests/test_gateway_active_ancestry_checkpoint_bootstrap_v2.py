@@ -396,6 +396,134 @@ async def test_active_allocation_and_sourcing_selection_is_concurrent_and_exact(
 
 
 @pytest.mark.asyncio
+async def test_allocation_selection_bootstraps_history_only_without_frontier():
+    calls = []
+
+    async def load_frontier(**kwargs):
+        assert kwargs == {"netuid": 71, "before_epoch": 24001}
+        return None
+
+    async def load_parents(**kwargs):
+        calls.append(kwargs)
+        return [_full_graph(HASH_A)]
+
+    graphs = await bootstrap._load_frontier_bounded_allocation_graphs(
+        epoch_id=24000,
+        netuid=71,
+        policy={"enabled": True},
+        load_frontier_context=load_frontier,
+        load_parent_graphs=load_parents,
+        load_graphs=lambda _roots: {},
+    )
+
+    assert [graph["root_receipt_hash"] for graph in graphs] == [HASH_A]
+    assert calls == [{"epoch_id": 24000, "netuid": 71, "policy": {"enabled": True}}]
+
+
+@pytest.mark.asyncio
+async def test_allocation_selection_uses_prior_frontier_for_bounded_delta():
+    context = {"frontier": {"allocation_epoch": 23999}}
+    calls = []
+
+    async def load_frontier(**_kwargs):
+        return context
+
+    async def load_parents(**kwargs):
+        calls.append(kwargs)
+        return [_full_graph(HASH_B)]
+
+    graphs = await bootstrap._load_frontier_bounded_allocation_graphs(
+        epoch_id=24000,
+        netuid=71,
+        policy={"enabled": True},
+        load_frontier_context=load_frontier,
+        load_parent_graphs=load_parents,
+        load_graphs=lambda _roots: {},
+    )
+
+    assert [graph["root_receipt_hash"] for graph in graphs] == [HASH_B]
+    assert calls == [
+        {
+            "epoch_id": 24000,
+            "netuid": 71,
+            "policy": {"enabled": True},
+            "settlement_frontier_context": context,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_allocation_selection_recovers_exact_current_frontier_parents():
+    calls = []
+    context = {
+        "frontier": {"allocation_epoch": 24000},
+        "source": {
+            "receipt": {
+                "parent_receipt_hashes": [HASH_B, HASH_A],
+            }
+        },
+    }
+
+    async def load_frontier(**_kwargs):
+        return context
+
+    async def load_parents(**_kwargs):
+        raise AssertionError("current frontier replayed historical selection")
+
+    async def load_graphs(roots):
+        calls.append(roots)
+        return {root: _full_graph(root) for root in roots}
+
+    graphs = await bootstrap._load_frontier_bounded_allocation_graphs(
+        epoch_id=24000,
+        netuid=71,
+        policy={"enabled": True},
+        load_frontier_context=load_frontier,
+        load_parent_graphs=load_parents,
+        load_graphs=load_graphs,
+    )
+
+    assert calls == [[HASH_A, HASH_B]]
+    assert [graph["root_receipt_hash"] for graph in graphs] == [HASH_A, HASH_B]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "context,error",
+    [
+        ({"frontier": {"allocation_epoch": 24001}}, "outside the active epoch"),
+        (
+            {"frontier": {"allocation_epoch": 24000}, "source": {}},
+            "parents are invalid",
+        ),
+        (
+            {
+                "frontier": {"allocation_epoch": 24000},
+                "source": {"receipt": {"parent_receipt_hashes": [HASH_A, HASH_A]}},
+            },
+            "parent set is invalid",
+        ),
+    ],
+)
+async def test_allocation_selection_rejects_invalid_frontier_state(context, error):
+    async def load_frontier(**_kwargs):
+        return context
+
+    with pytest.raises(
+        bootstrap.ActiveAncestryCheckpointBootstrapV2Error,
+        match=error,
+    ):
+        await bootstrap._load_frontier_bounded_allocation_graphs(
+            epoch_id=24000,
+            netuid=71,
+            policy={},
+            load_frontier_context=load_frontier,
+            load_parent_graphs=lambda **_kwargs: [],
+            load_graphs=lambda _roots: {},
+        )
+
+
+@pytest.mark.asyncio
 async def test_partial_resume_loads_only_root_and_direct_parent_proofs(
     orchestration,
 ):

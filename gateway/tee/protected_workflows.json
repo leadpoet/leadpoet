@@ -982,6 +982,11 @@
       "symbol": "_lineage_id"
     },
     {
+      "ast_sha256": "sha256:b1adb49569edbc92a3696f034a0c1ead43af802835aa587a6e74ea9cf3c5786b",
+      "path": "gateway/tee/bootstrap_active_ancestry_checkpoints_v2.py",
+      "symbol": "_load_frontier_bounded_allocation_graphs"
+    },
+    {
       "ast_sha256": "sha256:77fe785367822bf913df0761ff07e949cd71517b44d74775c429d6e048c5bf0a",
       "path": "gateway/tee/bootstrap_active_ancestry_checkpoints_v2.py",
       "symbol": "_load_release_manifest"
@@ -997,7 +1002,7 @@
       "symbol": "_verify_coordinator_capability"
     },
     {
-      "ast_sha256": "sha256:4da1e09d0f051db5c174412da5b954192264dbad621d96290f38b27a53a96c23",
+      "ast_sha256": "sha256:ec74d7481502e819941a20427700fbe78e1cbf80c06f25329f6a550799d239e2",
       "path": "gateway/tee/bootstrap_active_ancestry_checkpoints_v2.py",
       "symbol": "bootstrap_active_ancestry_checkpoints_v2"
     },
@@ -2262,7 +2267,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:696a8cb0f08d49308c0737af847d541d912f3ac940e039f278fc036de7bfc49d",
+  "manifest_hash": "sha256:cb7fc42d043e0cd7b2e312f1e0721412aa1644724d02630225b0d3d0a8bb9d9a",
   "protected_source_commit": "09606c64ec27a07d5531a6e741203b0b0da42164",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

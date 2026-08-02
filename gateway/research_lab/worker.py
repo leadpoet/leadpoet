@@ -482,6 +482,38 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _hosted_worker_recycle_rss_mb() -> int:
+    return max(
+        0,
+        _env_int("RESEARCH_LAB_HOSTED_WORKER_RECYCLE_RSS_MB", 3072),
+    )
+
+
+def _read_own_rss_mb(status_path: str = "/proc/self/status") -> int | None:
+    """Return current resident memory in MiB when procfs is available."""
+
+    try:
+        with open(status_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    if len(parts) < 2:
+                        return None
+                    return int(parts[1]) // 1024
+    except (OSError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _hosted_worker_recycle_required(*, recycle_rss_mb: int) -> int | None:
+    if recycle_rss_mb <= 0:
+        return None
+    rss_mb = _read_own_rss_mb()
+    if rss_mb is None or rss_mb < recycle_rss_mb:
+        return None
+    return rss_mb
+
+
 async def _stop_maintenance_subprocess(process: Any) -> None:
     """Terminate an isolated maintenance process without leaving descendants."""
     if process.returncode is not None:
@@ -1752,6 +1784,7 @@ class ResearchLabHostedWorker:
         last_error_log = 0.0
         idle_log_seconds = _idle_log_seconds()
         error_backoff_seconds = _error_backoff_seconds()
+        recycle_rss_mb = _hosted_worker_recycle_rss_mb()
         base_poll = max(1, self.config.hosted_worker_poll_seconds)
         idle_backoff_max = _idle_backoff_max_seconds(base_poll)
         idle_interval = float(base_poll)
@@ -1771,6 +1804,19 @@ class ResearchLabHostedWorker:
                         )
                     )
                     last_error_log = now
+                rss_mb = _hosted_worker_recycle_required(
+                    recycle_rss_mb=recycle_rss_mb,
+                )
+                if rss_mb is not None:
+                    logger.warning(
+                        "research_lab_hosted_worker_recycle worker_ref=%s "
+                        "reason=between_pass_rss_limit rss_mb=%s "
+                        "recycle_rss_mb=%s pass_status=failed",
+                        self.worker_ref,
+                        rss_mb,
+                        recycle_rss_mb,
+                    )
+                    return
                 await asyncio.sleep(max(self.config.hosted_worker_poll_seconds, error_backoff_seconds))
                 continue
             if outcome.processed or outcome.status != "idle":
@@ -1797,6 +1843,24 @@ class ResearchLabHostedWorker:
             if outcome.processed:
                 processed += 1
             if self.config.hosted_worker_max_runs and processed >= self.config.hosted_worker_max_runs:
+                return
+            # Hosted runs can release every job resource yet retain several
+            # GiB in the Python allocator. Recycle only between passes, after
+            # run state has been persisted (or the normal retry path recorded
+            # an error); the supervisor starts a clean replacement process.
+            rss_mb = _hosted_worker_recycle_required(
+                recycle_rss_mb=recycle_rss_mb,
+            )
+            if rss_mb is not None:
+                logger.warning(
+                    "research_lab_hosted_worker_recycle worker_ref=%s "
+                    "reason=between_pass_rss_limit rss_mb=%s "
+                    "recycle_rss_mb=%s pass_status=%s",
+                    self.worker_ref,
+                    rss_mb,
+                    recycle_rss_mb,
+                    outcome.status,
+                )
                 return
             # Exponential backoff on ALL no-work passes, reset the instant real
             # work happens. Every non-processed status (idle, maintenance-paused,

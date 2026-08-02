@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import gateway.research_lab.worker as hosted_worker_module
 from gateway.research_lab import worker_autostart
 from gateway.research_lab.scoring_worker import (
     BaselineCheckpointRecycle,
@@ -35,6 +36,7 @@ from gateway.research_lab.worker_autostart import (
     _hard_rss_limit_mb,
     _vmrss_mb,
 )
+from gateway.research_lab.worker import HostedWorkerOutcome, ResearchLabHostedWorker
 from research_lab.eval.private_runtime import (
     INCONTAINER_TRACE_MARKER,
     parse_incontainer_trace_lines,
@@ -81,6 +83,102 @@ def test_recycle_thresholds_env_defaults_and_overrides(monkeypatch):
     assert _worker_recycle_max_jobs() == 0
     monkeypatch.setenv("RESEARCH_LAB_SCORING_WORKER_RECYCLE_RSS_MB", "junk")
     assert _worker_recycle_rss_mb() == 3072
+
+
+def test_hosted_recycle_threshold_and_current_rss(monkeypatch, tmp_path):
+    monkeypatch.delenv("RESEARCH_LAB_HOSTED_WORKER_RECYCLE_RSS_MB", raising=False)
+    assert hosted_worker_module._hosted_worker_recycle_rss_mb() == 3072
+    monkeypatch.setenv("RESEARCH_LAB_HOSTED_WORKER_RECYCLE_RSS_MB", "4096")
+    assert hosted_worker_module._hosted_worker_recycle_rss_mb() == 4096
+    monkeypatch.setenv("RESEARCH_LAB_HOSTED_WORKER_RECYCLE_RSS_MB", "junk")
+    assert hosted_worker_module._hosted_worker_recycle_rss_mb() == 3072
+
+    status_path = _write_status(tmp_path, 3_355_648)
+    assert hosted_worker_module._read_own_rss_mb(status_path) == 3277
+    assert hosted_worker_module._read_own_rss_mb(str(tmp_path / "missing")) is None
+
+
+def _hosted_worker_for_recycle_test(outcome):
+    worker = object.__new__(ResearchLabHostedWorker)
+    worker.worker_ref = "hosted-memory-test"
+    worker.config = SimpleNamespace(
+        hosted_worker_poll_seconds=1,
+        hosted_worker_max_runs=0,
+    )
+
+    async def run_once():
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    worker.run_once = run_once
+    return worker
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome, expected_status",
+    (
+        (
+            HostedWorkerOutcome(
+                processed=False,
+                dry_run=False,
+                status="tree_preflight_deferred",
+            ),
+            "tree_preflight_deferred",
+        ),
+        (RuntimeError("pass failed after releasing resources"), "failed"),
+    ),
+)
+async def test_hosted_worker_recycles_between_passes_above_rss_limit(
+    monkeypatch,
+    caplog,
+    outcome,
+    expected_status,
+):
+    worker = _hosted_worker_for_recycle_test(outcome)
+    monkeypatch.setattr(
+        "gateway.research_lab.capture_health.enforce_capture_health",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        hosted_worker_module,
+        "_hosted_worker_recycle_required",
+        lambda **_kwargs: 4096,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await worker.run_forever()
+
+    assert "research_lab_hosted_worker_recycle" in caplog.text
+    assert f"pass_status={expected_status}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_hosted_worker_below_rss_limit_continues_polling(monkeypatch):
+    worker = _hosted_worker_for_recycle_test(
+        HostedWorkerOutcome(processed=False, dry_run=False, status="idle")
+    )
+    monkeypatch.setattr(
+        "gateway.research_lab.capture_health.enforce_capture_health",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        hosted_worker_module,
+        "_hosted_worker_recycle_required",
+        lambda **_kwargs: None,
+    )
+
+    class PollContinued(RuntimeError):
+        pass
+
+    async def stop_after_sleep(_seconds):
+        raise PollContinued
+
+    monkeypatch.setattr(hosted_worker_module.asyncio, "sleep", stop_after_sleep)
+
+    with pytest.raises(PollContinued):
+        await worker.run_forever()
 
 
 def test_baseline_checkpoint_recycle_pressure_uses_existing_limits(monkeypatch):
@@ -342,6 +440,33 @@ def test_supervisor_rss_telemetry_line(monkeypatch, supervisor_with_stub, capsys
     out = capsys.readouterr().out
     assert "research_lab_worker_rss" in out
     assert "scoring:0=777MB" in out
+
+
+def test_supervisor_restarts_worker_after_clean_recycle_exit(monkeypatch):
+    supervisor = ResearchLabWorkerSupervisor.__new__(ResearchLabWorkerSupervisor)
+    supervisor._stop_event = threading.Event()
+    exited = _StubChild()
+    exited.poll = lambda: 0
+    replacement = _StubChild(pid=4343)
+    fleet = _StubFleet()
+    supervisor.children = {"scoring:0": exited}
+    supervisor._child_specs = {"scoring:0": (fleet, 0)}
+    supervisor._ready_children = {"scoring:0"}
+    started: list[tuple[object, int]] = []
+
+    def restart(selected_fleet, index):  # noqa: ANN001
+        started.append((selected_fleet, index))
+        supervisor._stop_event.set()
+        return replacement
+
+    monkeypatch.setenv("RESEARCH_LAB_WORKER_SUPERVISOR_POLL_SECONDS", "0.01")
+    monkeypatch.setattr(supervisor, "_start_child", restart)
+
+    supervisor._monitor_children()
+
+    assert started == [(fleet, 0)]
+    assert supervisor.children == {"scoring:0": replacement}
+    assert supervisor._ready_children == {"scoring:0"}
 
 
 def _fleet(kind: str, count: int) -> ResearchLabWorkerFleetPlan:

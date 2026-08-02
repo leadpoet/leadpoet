@@ -3814,6 +3814,8 @@ def test_workflow_uses_the_strict_exact_external_boundaries(
     monkeypatch,
 ) -> None:
     captured: dict[str, Any] = {}
+    from_sha = "0" * 40
+    candidate_sha = "1" * 40
 
     def run(command):
         captured["command"] = list(command)
@@ -3823,7 +3825,8 @@ def test_workflow_uses_the_strict_exact_external_boundaries(
         "rehearsal-image",
         source_root=tmp_path / "source",
         evidence_root=tmp_path / "evidence",
-        candidate_sha="1" * 40,
+        from_sha=from_sha,
+        candidate_sha=candidate_sha,
         profile="prepush",
         docker_platform="linux/amd64",
     )
@@ -3836,6 +3839,8 @@ def test_workflow_uses_the_strict_exact_external_boundaries(
     }
     assert "REHEARSAL_SCOPE=exact" in environment
     assert "PYTHONPATH=/source:/harness" in environment
+    assert f"REHEARSAL_FROM_SHA={from_sha}" in environment
+    assert f"REHEARSAL_CANDIDATE_SHA={candidate_sha}" in environment
 
 
 def test_local_chain_rejects_unknown_and_joins_finalized_reveal(

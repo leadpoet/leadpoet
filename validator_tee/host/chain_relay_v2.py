@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import select
 import socket
 import threading
@@ -25,11 +26,20 @@ from leadpoet_canonical.chain_source_v2 import (
 
 AF_VSOCK = 40
 VMADDR_CID_ANY = 0xFFFFFFFF
+logger = logging.getLogger(__name__)
+
 CHAIN_RELAY_VSOCK_PORT = 5002
+CHAIN_RELAY_SUPERVISION_INTERVAL_SECONDS = 15
 MAX_CONTROL_BYTES = 16 * 1024
 MAX_BYTES_PER_DIRECTION = 32 * 1024 * 1024
 RELAY_CHUNK_BYTES = 64 * 1024
 CONNECT_TIMEOUT_SECONDS = 15.0
+# Bounds the client control handshake so a peer that connects and stalls
+# before/while sending its control frame cannot pin a handler thread and its
+# accepted fd forever — that leak is what cumulatively exhausts fds and drives
+# the accept() failures the loop now survives. _relay keeps its own idle
+# timeout, so the connection returns to blocking mode for the data pump.
+CONTROL_HANDSHAKE_TIMEOUT_SECONDS = 15.0
 IDLE_TIMEOUT_SECONDS = 90.0
 
 
@@ -184,6 +194,7 @@ def handle_chain_relay_connection(
 ) -> None:
     upstream = None
     try:
+        connection.settimeout(CONTROL_HANDSHAKE_TIMEOUT_SECONDS)
         request = _read_control(connection)
         destination_host = _validate_control(request)
         upstream = connector(destination_host)
@@ -194,6 +205,9 @@ def handle_chain_relay_connection(
                 "policy_hash": chain_source_policy_hash(),
             },
         )
+        # Handshake done; the data pump is bounded by _relay's own idle
+        # timeout, so restore blocking mode for it.
+        connection.settimeout(None)
         _relay(connection, upstream)
     finally:
         for candidate in (upstream, connection):
@@ -222,6 +236,17 @@ class ValidatorChainRelayV2:
     def start(self) -> dict:
         if self._thread is not None and self._thread.is_alive():
             return self.status()
+        # Recovery-safe (re)start: close any stale listener first so a restart
+        # after an unexpected loop-thread death can rebind the port instead of
+        # failing address-in-use, and clear the stop flag so the fresh loop
+        # runs (supervision in main() relies on this).
+        if self._listener is not None:
+            try:
+                self._listener.close()
+            except Exception:
+                pass
+            self._listener = None
+        self._stop.clear()
         listener = self._socket_factory(AF_VSOCK, socket.SOCK_STREAM)
         listener.bind((VMADDR_CID_ANY, self.port))
         listener.listen(8)
@@ -250,24 +275,87 @@ class ValidatorChainRelayV2:
         self._listener = None
 
     def _accept_loop(self) -> None:
+        # A transient accept() failure (EMFILE under fd pressure, ECONNABORTED,
+        # ENOMEM) must not permanently kill this loop: the relay is the
+        # enclave's only chain-RPC path, so a dead accept loop silently stops
+        # all weight-extrinsic signing with the host process still looking
+        # healthy (main() never relaunches it). Only exit when stop() has been
+        # requested; otherwise log and keep serving after a short pause so a
+        # persistently broken listener cannot hot-spin.
+        consecutive_errors = 0
         while not self._stop.is_set():
             try:
                 connection, _address = self._listener.accept()
-            except Exception:
-                return
-            threading.Thread(
-                target=handle_chain_relay_connection,
-                args=(connection,),
-                kwargs={"connector": self._connector},
-                daemon=True,
-            ).start()
+            except Exception as exc:
+                if self._stop.is_set():
+                    return
+                consecutive_errors += 1
+                # Log the first failure and then only periodically, so a
+                # sustained fd/socket outage cannot spam the log at the retry
+                # cadence while still leaving one clear, greppable signal plus
+                # the recovery below.
+                if consecutive_errors == 1 or consecutive_errors % 60 == 0:
+                    logger.warning(
+                        "chain_relay_accept_error type=%s error=%s "
+                        "consecutive=%d; continuing to serve chain RPC",
+                        type(exc).__name__,
+                        str(exc)[:200],
+                        consecutive_errors,
+                    )
+                # Interruptible: a stop() during the backoff exits immediately.
+                self._stop.wait(0.5)
+                continue
+            if consecutive_errors:
+                logger.info(
+                    "chain_relay_accept_recovered after=%d errors",
+                    consecutive_errors,
+                )
+                consecutive_errors = 0
+            # Spawning the handler must not be able to kill the accept loop
+            # either (thread exhaustion raises from start()): on failure close
+            # the connection and keep serving.
+            try:
+                threading.Thread(
+                    target=handle_chain_relay_connection,
+                    args=(connection,),
+                    kwargs={"connector": self._connector},
+                    daemon=True,
+                ).start()
+            except Exception as exc:
+                logger.warning(
+                    "chain_relay_handler_spawn_failed type=%s error=%s",
+                    type(exc).__name__,
+                    str(exc)[:200],
+                )
+                try:
+                    connection.close()
+                except Exception:
+                    pass
 
 
 def main() -> None:
     relay = ValidatorChainRelayV2()
     print(json.dumps(relay.start(), sort_keys=True), flush=True)
+    # Supervise: if the accept-loop thread ever dies for a reason the loop
+    # itself did not handle, restart it instead of leaving the enclave with no
+    # chain-RPC path (and thus no weight signing) while the process looks
+    # healthy. A clean stop() is respected. start() is recovery-safe.
     while True:
-        time.sleep(3600)
+        time.sleep(CHAIN_RELAY_SUPERVISION_INTERVAL_SECONDS)
+        if relay._stop.is_set():
+            continue
+        if relay.status().get("status") != "running":
+            logger.error(
+                "chain_relay_thread_dead; restarting the validator chain relay"
+            )
+            try:
+                relay.start()
+            except Exception as exc:
+                logger.error(
+                    "chain_relay_restart_failed type=%s error=%s",
+                    type(exc).__name__,
+                    str(exc)[:200],
+                )
 
 
 if __name__ == "__main__":

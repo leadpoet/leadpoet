@@ -77,3 +77,14 @@ Code enforcement stops accidental leakage; it is not full security by
 itself. Operationally the collector token should be ingest-only and
 rotated, repository access stays scoped, and the telemetry vendor's
 retention / no-training / deletion terms should be agreed in writing.
+
+## Related: error monitoring (Sentry)
+
+Error capture (crashes and ERROR-level logs) is a separate, equally
+fail-closed integration with the same philosophy — namespaced
+`LEADPOET_SENTRY_*` variables, explicit options, host processes only, never
+the enclaves, and a scrubber that keeps trajectory/training data, prompts,
+benchmarks, and contact data out of every event. See
+[`docs/sentry_error_monitoring.md`](docs/sentry_error_monitoring.md) and
+`leadpoet_observability/sentry_bootstrap.py`;
+`tests/test_sentry_boundary_guard.py` enforces the boundary in CI.

@@ -17,6 +17,18 @@ WORKER_SCRIPT = ROOT / "scripts" / "run_research_lab_scoring_worker.py"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Opt-in, fail-closed error monitoring (docs/sentry_error_monitoring.md).
+# Complete no-op unless the LEADPOET_SENTRY_* environment gate is satisfied.
+try:
+    from leadpoet_observability import init_sentry  # noqa: E402
+
+    init_sentry(component="research-lab-scoring-worker-fleet")
+except Exception as _sentry_exc:  # must never break the fleet supervisor
+    print(
+        "leadpoet_sentry_wiring_skipped error=%s" % type(_sentry_exc).__name__,
+        flush=True,
+    )
+
 from gateway.research_lab.worker_autostart import (  # noqa: E402
     build_research_lab_worker_environment,
 )

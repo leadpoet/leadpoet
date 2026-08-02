@@ -29,6 +29,20 @@ for _path in (_ATTESTED_RUNTIME_DIR, _PACKAGE_PARENT):
         sys.path.remove(_path)
     sys.path.insert(0, _path)
 
+# Opt-in, fail-closed error monitoring (docs/sentry_error_monitoring.md).
+# Wired before the config/service imports so an import-time crash of the
+# gateway host process is still captured. Complete no-op unless the
+# LEADPOET_SENTRY_* environment gate is satisfied.
+try:
+    from leadpoet_observability import init_sentry
+
+    init_sentry(component="gateway")
+except Exception as _sentry_exc:  # error monitoring must never break startup
+    print(
+        "leadpoet_sentry_wiring_skipped error=%s" % type(_sentry_exc).__name__,
+        flush=True,
+    )
+
 # Import configuration
 from gateway.build_info import get_build_info
 from gateway.config import BUILD_ID, GITHUB_COMMIT, TIMESTAMP_TOLERANCE_SECONDS

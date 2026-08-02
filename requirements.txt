@@ -39,6 +39,11 @@ arweave-python-client>=1.0.19
 # Monitoring and metrics
 prometheus_client>=0.19.0
 structlog>=23.2.0
+# Error monitoring for HOST processes only — never enclave images (the
+# sentry boundary guard test fails CI if it enters an enclave requirements
+# file). Optional at runtime and inert without the LEADPOET_SENTRY_* env
+# gate; see docs/sentry_error_monitoring.md.
+sentry-sdk==2.66.1
 # Keep these pinned for Python 3.9 Docker builds. Langfuse 3.x requires
 # OpenTelemetry >=1.33, whose proto exporter requires protobuf >=5; the
 # validator Firestore stack is pinned to protobuf <5.

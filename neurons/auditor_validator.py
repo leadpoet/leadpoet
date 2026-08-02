@@ -25,6 +25,24 @@ import subprocess
 import time
 from urllib.parse import urlparse
 
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+# Opt-in, fail-closed error monitoring (docs/sentry_error_monitoring.md).
+# This precedes the Python auto-update handoff so creation/exec failures are
+# visible. Public auditors simply leave the environment gate unset.
+try:
+    from leadpoet_observability import init_sentry as _init_sentry
+
+    _init_sentry(component="auditor-validator")
+except Exception as _sentry_exc:  # must never break the auditor
+    print(
+        "leadpoet_sentry_wiring_skipped error=%s" % type(_sentry_exc).__name__,
+        flush=True,
+    )
+
 # ════════════════════════════════════════════════════════════════════════════
 # AUTO-UPDATER: Automatically updates entire repo from GitHub for auditors
 # ════════════════════════════════════════════════════════════════════════════
@@ -189,11 +207,6 @@ echo "🛑 Auditor stopped. Run command again to pull latest and restart."
 # NORMAL AUDITOR VALIDATOR CODE STARTS BELOW
 # ════════════════════════════════════════════════════════════════════════════
 
-# Add repo root to path so leadpoet_canonical can be imported from anywhere
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
 import asyncio
 import logging
 import base64

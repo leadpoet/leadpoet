@@ -188,6 +188,17 @@ export VALIDATOR_DEPLOY_SHA VALIDATOR_NETUID VALIDATOR_SUBTENSOR_NETWORK EXPECTE
 
 RESEARCH_LAB_INTERNAL_API_KEY="${RESEARCH_LAB_INTERNAL_API_KEY:-${LEADPOET_INTERNAL_SECRET:-}}"
 
+# Forward names only so Docker reads values from the inherited production
+# environment without exposing the Sentry DSN in the docker CLI argv.
+LEADPOET_SENTRY_ENV_ARGS=(
+    -e LEADPOET_SENTRY_ENABLED
+    -e LEADPOET_SENTRY_DSN
+    -e LEADPOET_SENTRY_ENVIRONMENT
+    -e LEADPOET_SENTRY_RELEASE
+    -e LEADPOET_SENTRY_EXTRA_PROTECTED_MODULES
+    -e LEADPOET_SENTRY_MESSAGE_MODE
+)
+
 is_truthy() {
     case "${1:-}" in
         true|TRUE|True|1|yes|YES|Yes|y|Y|on|ON|On) return 0 ;;
@@ -460,6 +471,7 @@ start_container() {
       $LOG_DRIVER_ARGS \
       -v ~/.bittensor/wallets:/root/.bittensor/wallets:ro \
       -v "$REPO_ROOT/validator_weights:/app/validator_weights" \
+      "${LEADPOET_SENTRY_ENV_ARGS[@]}" \
       -e PYTHONUNBUFFERED=1 \
       -e LEADPOET_CONTAINER_MODE=1 \
       -e LEADPOET_WRAPPER_ACTIVE=1 \
@@ -614,6 +626,7 @@ if [ $QUAL_PROXY_COUNT -gt 0 ]; then
           --log-opt awslogs-stream=qual-worker-$i \
           --log-opt awslogs-create-group=true \
           -v "$REPO_ROOT/validator_weights:/app/validator_weights" \
+          "${LEADPOET_SENTRY_ENV_ARGS[@]}" \
           -e PYTHONUNBUFFERED=1 \
           -e LEADPOET_CONTAINER_MODE=1 \
           -e LEADPOET_WRAPPER_ACTIVE=1 \
@@ -711,6 +724,7 @@ if [ $FF_PROXY_COUNT -gt 0 ]; then
           --log-opt awslogs-stream=ff-worker-$i \
           --log-opt awslogs-create-group=true \
           -v "$REPO_ROOT/validator_weights:/app/validator_weights" \
+          "${LEADPOET_SENTRY_ENV_ARGS[@]}" \
           -e PYTHONUNBUFFERED=1 \
           -e LEADPOET_CONTAINER_MODE=1 \
           -e LEADPOET_WRAPPER_ACTIVE=1 \

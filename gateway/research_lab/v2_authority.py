@@ -2095,6 +2095,7 @@ async def _load_allocation_parent_graphs_v2(
     from gateway.research_lab.allocations import (
         POSTGREST_IN_FILTER_CHUNK,
         _load_latest_finalized_compute_snapshot_v2,
+        champion_reward_requires_allocation_history_v2,
     )
     from gateway.research_lab.champion_settlement_v2 import (
         CHAIN_REALIZED_AUTHORITY_TYPE_V1,
@@ -2343,15 +2344,27 @@ async def _load_allocation_parent_graphs_v2(
     champion_rows = []
     source_rows = []
     for status in champion_statuses:
-        champion_rows.extend(
-            await select_all(
-                "research_lab_champion_reward_current",
-                filters=(
-                    ("current_reward_status", status),
-                    ("start_epoch", "lte", int(epoch_id)),
-                ),
-            )
+        selected_rows = await select_all(
+            "research_lab_champion_reward_current",
+            filters=(
+                ("current_reward_status", status),
+                ("start_epoch", "lte", int(epoch_id)),
+            ),
         )
+        try:
+            champion_rows.extend(
+                row
+                for row in selected_rows
+                if champion_reward_requires_allocation_history_v2(
+                    row,
+                    epoch=int(epoch_id),
+                    enable_champ_cap=bool(
+                        policy.get("enable_champ_cap", True)
+                    ),
+                )
+            )
+        except ValueError as exc:
+            raise ResearchLabV2AuthorityError(str(exc)) from exc
     for status in source_statuses:
         source_rows.extend(
             await select_all(

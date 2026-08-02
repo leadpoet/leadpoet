@@ -21,6 +21,7 @@ import pytest
 from gateway.research_lab.allocations import (
     _champion_paid_alpha_to_date_from_snapshots,
     _champion_replay_obligation,
+    champion_reward_requires_allocation_history_v2,
 )
 
 
@@ -154,6 +155,57 @@ class TestChampionPaidToDate:
             paid_by_reward={"champion_reward:r1": 99.0},
             epoch=103,
         ) is None
+
+
+class TestChampionHistoryRelevance:
+    def test_expired_legacy_paid_reward_needs_no_history(self):
+        row = {
+            "current_reward_status": "paid",
+            "start_epoch": 10,
+            "epoch_count": 20,
+        }
+
+        assert not champion_reward_requires_allocation_history_v2(
+            row,
+            epoch=30,
+            enable_champ_cap=False,
+        )
+        assert champion_reward_requires_allocation_history_v2(
+            row,
+            epoch=29,
+            enable_champ_cap=False,
+        )
+
+    def test_active_and_capped_rewards_remain_history_bound(self):
+        active = {
+            "current_reward_status": "active",
+            "start_epoch": 10,
+            "epoch_count": 20,
+        }
+        paid = {**active, "current_reward_status": "paid"}
+
+        assert champion_reward_requires_allocation_history_v2(
+            active,
+            epoch=100,
+            enable_champ_cap=False,
+        )
+        assert champion_reward_requires_allocation_history_v2(
+            paid,
+            epoch=100,
+            enable_champ_cap=True,
+        )
+
+    def test_invalid_paid_window_fails_closed(self):
+        with pytest.raises(ValueError, match="epoch fields are invalid"):
+            champion_reward_requires_allocation_history_v2(
+                {
+                    "current_reward_status": "paid",
+                    "start_epoch": 10,
+                    "epoch_count": 0,
+                },
+                epoch=100,
+                enable_champ_cap=False,
+            )
 
 
 class TestAllocationSnapshotPersistenceDecision:

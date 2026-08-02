@@ -15,6 +15,7 @@ from gateway.research_lab.allocations import (
     _epoch_active,
     _historical_compute_fallback_from_snapshot,
     _source_add_paid_alpha_to_date_from_snapshots,
+    champion_reward_requires_allocation_history_v2,
 )
 from gateway.research_lab.champion_settlement_v2 import (
     CHAIN_REALIZED_AUTHORITY_TYPE_V1,
@@ -285,6 +286,20 @@ class CoordinatorAllocationSourceV2:
             },
             context,
         )
+        try:
+            champion_source_rows = [
+                row
+                for row in champion_source_rows
+                if champion_reward_requires_allocation_history_v2(
+                    row,
+                    epoch=epoch,
+                    enable_champ_cap=bool(
+                        policy.get("enable_champ_cap", True)
+                    ),
+                )
+            ]
+        except ValueError as exc:
+            raise CoordinatorAllocationSourceV2Error(str(exc)) from exc
         source_add_rows = self._read(
             "allocation_source_add_rewards", {"epoch_id": epoch}, context
         )

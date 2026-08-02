@@ -858,6 +858,75 @@ async def test_allocation_parent_loader_uses_legacy_settlement_receipt(
 
 
 @pytest.mark.asyncio
+async def test_allocation_parent_loader_prunes_expired_legacy_paid_history(
+    monkeypatch,
+):
+    from gateway.research_lab import (
+        attested_v2_store,
+        champion_settlement_v2,
+        store,
+    )
+
+    async def select_all(table, **kwargs):
+        if table == "research_lab_champion_reward_current":
+            filters = dict(
+                (item[0], item[1])
+                for item in kwargs.get("filters") or ()
+                if len(item) == 2
+            )
+            if filters.get("current_reward_status") == "paid":
+                return [
+                    {
+                        "champion_reward_id": (
+                            "champion_reward:expired:%04d" % index
+                        ),
+                        "current_reward_status": "paid",
+                        "start_epoch": 10,
+                        "epoch_count": 20,
+                        "desired_alpha_percent": 7.0,
+                    }
+                    for index in range(2500)
+                ]
+        return []
+
+    async def reject_history(**_kwargs):
+        raise AssertionError("expired paid reward loaded settlement history")
+
+    async def empty_graphs(_values):
+        return {}
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "load_settled_allocation_history_v2",
+        reject_history,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_v2",
+        empty_graphs,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graphs_by_ref_v2",
+        empty_graphs,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_receipt_graphs_v2",
+        empty_graphs,
+    )
+
+    graphs = await v2_authority._load_allocation_parent_graphs_v2(
+        epoch_id=100,
+        netuid=71,
+        policy={"enable_champ_cap": False},
+    )
+
+    assert graphs == []
+
+
+@pytest.mark.asyncio
 async def test_allocation_parent_loader_uses_finalized_allocation_hash(
     monkeypatch,
 ):

@@ -12,11 +12,14 @@ def test_release_workflow_reclaims_all_unreferenced_docker_state():
 
     assert source.count("docker image prune --all --force") == 2
     assert source.count("docker builder prune --all --force") == 2
-    assert source.count("validator_tee/scripts/reclaim_docker_storage_v2.sh") == 2
+    assert source.count("validator_tee/scripts/reclaim_docker_storage_v2.sh") == 4
     assert source.count(
         'sudo rm -rf -- \\\n            "$RUNNER_TEMP/offline-artifacts"'
-    ) == 2
-    assert source.count('"$RUNNER_TEMP/release-evidence" \\') == 2
+    ) == 4
+    assert source.count('"$RUNNER_TEMP/release-evidence" \\') == 4
+    assert source.count("if: always()") == 2
+    assert "Reclaim gateway-parent storage after evidence generation" in source
+    assert "Reclaim validator-parent storage after evidence generation" in source
     assert "docker image prune --force" not in source
     assert "docker builder prune --force" not in source
 

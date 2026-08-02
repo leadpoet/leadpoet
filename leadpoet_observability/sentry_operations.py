@@ -1,6 +1,6 @@
 """Bounded semantic Sentry telemetry for restart and weight operations.
 
-This module is deliberately stdlib-only.  It never imports ``sentry_sdk``;
+This module is deliberately stdlib-only.  It never imports the vendor SDK;
 the single SDK boundary remains :mod:`sentry_bootstrap`.  Every helper is a
 best-effort no-op and every field crosses an explicit allowlist before it can
 reach the bootstrap scrubber.

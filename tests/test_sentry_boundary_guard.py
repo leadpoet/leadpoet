@@ -1,4 +1,4 @@
-"""CI guard: the Sentry error-monitoring boundary is code-enforced.
+"""CI guard: the Sentry observability boundary is code-enforced.
 
 Error monitoring is a single, explicit, opt-in bootstrap in
 ``leadpoet_observability/sentry_bootstrap.py`` (namespaced
@@ -46,6 +46,9 @@ WIRED_ENTRY_POINTS = (
     "gateway/research_lab/worker_process.py",
     "scripts/run_research_lab_scoring_worker.py",
     "scripts/run_research_lab_scoring_worker_fleet.py",
+    "validator_tee/host/gateway_pcr0_builder.py",
+    "validator_tee/host/runtime_v2_bootstrap.py",
+    "validator_tee/host/verify_release_gate_v2.py",
 )
 
 
@@ -137,7 +140,7 @@ def test_bootstrap_hard_off_options_present() -> None:
         'include_local_variables=False',
         'send_default_pii=False',
         'max_request_body_size="never"',
-        'traces_sample_rate=None',
+        'traces_sample_rate=_trace_sample_rate()',
         'propagate_traces=False',
         'enable_logs=False',
         'spotlight=False',
@@ -145,7 +148,7 @@ def test_bootstrap_hard_off_options_present() -> None:
         'auto_session_tracking=False',
         'auto_enabling_integrations=False',
         'default_integrations=False',
-        'max_breadcrumbs=0',
+        'max_breadcrumbs=_MAX_BREADCRUMBS',
         'LoggingIntegration(',
         'level=None',
         'event_level=logging.ERROR',
@@ -153,8 +156,10 @@ def test_bootstrap_hard_off_options_present() -> None:
         'debug=False',
         'before_send=',
         'before_breadcrumb=',
+        'before_send_transaction=',
         'LEADPOET_SENTRY_ENABLED',
         'LEADPOET_SENTRY_DSN',
+        'LEADPOET_SENTRY_TRACES_SAMPLE_RATE',
     ):
         assert marker in source, (
             "the bootstrap's hard-off capture contract drifted: missing "
@@ -176,6 +181,8 @@ def test_validator_containers_receive_only_namespaced_sentry_settings() -> None:
         "LEADPOET_SENTRY_RELEASE",
         "LEADPOET_SENTRY_EXTRA_PROTECTED_MODULES",
         "LEADPOET_SENTRY_MESSAGE_MODE",
+        "LEADPOET_SENTRY_TRACES_SAMPLE_RATE",
+        "LEADPOET_RESTART_INVOCATION_ID",
     ):
         assert f"-e {name}" in source
         assert f"-e {name}=" not in source

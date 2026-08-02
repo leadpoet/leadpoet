@@ -13,6 +13,7 @@ import select
 import socket
 import threading
 import time
+import os
 from typing import Any, Callable, Iterable, Optional
 
 from leadpoet_canonical.chain_source_v2 import (
@@ -21,6 +22,7 @@ from leadpoet_canonical.chain_source_v2 import (
     CHAIN_ENDPOINT_PORT,
     chain_source_policy_hash,
 )
+from leadpoet_observability import capture_failure, record_retry, record_stage
 
 
 AF_VSOCK = 40
@@ -253,14 +255,65 @@ class ValidatorChainRelayV2:
         while not self._stop.is_set():
             try:
                 connection, _address = self._listener.accept()
-            except Exception:
+            except Exception as exc:
+                if not self._stop.is_set():
+                    capture_failure(
+                        "runtime.enclave_relay_unavailable",
+                        component="validator",
+                        stage="chain_relay_accept",
+                        exception=exc,
+                        terminal=True,
+                        retryable=False,
+                        fail_closed=True,
+                        runtime_sha=(
+                            os.environ.get("GITHUB_SHA")
+                            or os.environ.get("GIT_COMMIT")
+                            or ""
+                        ),
+                    )
                 return
             threading.Thread(
-                target=handle_chain_relay_connection,
+                target=self._serve_connection,
                 args=(connection,),
-                kwargs={"connector": self._connector},
                 daemon=True,
             ).start()
+
+    def _serve_connection(self, connection: Any) -> None:
+        started = time.monotonic()
+        try:
+            handle_chain_relay_connection(
+                connection,
+                connector=self._connector,
+            )
+        except Exception as exc:
+            record_retry(
+                "authority.dependency_unreadable",
+                component="validator",
+                stage="chain_relay_request",
+                attempt=1,
+                attempts=1,
+                dependency="finney",
+                exception_class=type(exc).__name__,
+                runtime_sha=(
+                    os.environ.get("GITHUB_SHA")
+                    or os.environ.get("GIT_COMMIT")
+                    or ""
+                ),
+            )
+            raise
+        else:
+            record_stage(
+                component="validator",
+                stage="chain_relay_request",
+                status="passed",
+                duration_seconds=time.monotonic() - started,
+                dependency="finney",
+                runtime_sha=(
+                    os.environ.get("GITHUB_SHA")
+                    or os.environ.get("GIT_COMMIT")
+                    or ""
+                ),
+            )
 
 
 def main() -> None:

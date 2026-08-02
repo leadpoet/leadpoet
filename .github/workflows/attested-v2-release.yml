@@ -23,24 +23,40 @@ jobs:
     name: Independent gateway-parent builds
     runs-on: [self-hosted, linux, x64, leadpoet-gateway-v2-builder]
     timeout-minutes: 720
+    env:
+      LEADPOET_SENTRY_ENABLED: ${{ secrets.LEADPOET_SENTRY_DSN != '' }}
+      LEADPOET_SENTRY_DSN: ${{ secrets.LEADPOET_SENTRY_DSN }}
+      LEADPOET_SENTRY_ENVIRONMENT: release
+      LEADPOET_SENTRY_RELEASE: ${{ github.sha }}
+      LEADPOET_SENTRY_TRACES_SAMPLE_RATE: "0.01"
     steps:
+      - name: Initialize bounded release timing
+        id: telemetry_start
+        continue-on-error: true
+        run: date +%s > "$RUNNER_TEMP/leadpoet-release-started"
+
       - name: Remove stale root-owned V2 builder temp directories
+        id: stale_cleanup
         run: |
           sudo find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -type d \
             -name '.drand-cabi-v2.*' -exec rm -rf -- {} +
 
-      - uses: actions/checkout@v4
+      - name: Check out exact release source
+        id: source_checkout
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Guard gateway builder host memory
+        id: host_memory_guard
         run: |
           python3 gateway/tee/host_memory_guard_v2.py \
             --cleanup-disposable-tests \
             --minimum-available-mib 16384
 
       - name: Reclaim unreferenced gateway build space
+        id: storage_reclaim
         run: |
           sudo rm -rf -- \
             "$RUNNER_TEMP/offline-artifacts" \
@@ -57,11 +73,13 @@ jobs:
           df -h /
 
       - name: Prepare immutable build inputs
+        id: source_prepare
         run: |
           export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"
           nice -n 10 ionice -c2 -n7 bash gateway/tee/prepare_offline_artifacts_v2.sh
 
       - name: Build gateway and validator evidence
+        id: gateway_validator_build
         run: |
           . validator_tee/scripts/docker_operation_lock_v2.sh
           leadpoet_acquire_docker_operation_lock_v2
@@ -100,7 +118,9 @@ jobs:
           cp "$RUNNER_TEMP/validator-evidence"/validator-gateway-*.json \
             "$RUNNER_TEMP/release-evidence/"
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload gateway-parent evidence
+        id: evidence_upload
+        uses: actions/upload-artifact@v4
         with:
           name: v2-evidence-gateway-${{ github.sha }}
           retention-days: 7
@@ -108,6 +128,7 @@ jobs:
           path: ${{ runner.temp }}/release-evidence/*.json
 
       - name: Reclaim gateway-parent storage after evidence generation
+        id: final_cleanup
         if: always()
         run: |
           sudo rm -rf -- \
@@ -124,22 +145,78 @@ jobs:
             bash validator_tee/scripts/reclaim_docker_storage_v2.sh
           df -h /
 
+      - name: Emit bounded gateway-parent release summary
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          JOB_STATUS: ${{ job.status }}
+          STALE_CLEANUP: ${{ steps.stale_cleanup.outcome }}
+          SOURCE_CHECKOUT: ${{ steps.source_checkout.outcome }}
+          HOST_MEMORY_GUARD: ${{ steps.host_memory_guard.outcome }}
+          STORAGE_RECLAIM: ${{ steps.storage_reclaim.outcome }}
+          SOURCE_PREPARE: ${{ steps.source_prepare.outcome }}
+          GATEWAY_VALIDATOR_BUILD: ${{ steps.gateway_validator_build.outcome }}
+          EVIDENCE_UPLOAD: ${{ steps.evidence_upload.outcome }}
+          FINAL_CLEANUP: ${{ steps.final_cleanup.outcome }}
+          LEADPOET_GITHUB_JOB_TOKEN: ${{ github.token }}
+          LEADPOET_GITHUB_JOB_NAME: Independent gateway-parent builds
+        run: |
+          test -f leadpoet_observability/sentry_cli.py || exit 0
+          status=failed
+          test "$JOB_STATUS" = success && status=passed
+          duration_args=()
+          if read -r started < "$RUNNER_TEMP/leadpoet-release-started"; then
+            duration_args=(--duration-seconds "$(( $(date +%s) - started ))")
+          fi
+          timing_args=(--github-job-name "$LEADPOET_GITHUB_JOB_NAME")
+          python3 -m leadpoet_observability.sentry_cli release-summary \
+            --component release-gateway-parent \
+            --physical-role gateway-parent-builder \
+            --status "$status" \
+            --candidate-sha "$GITHUB_SHA" \
+            --stage-status "stale_cleanup=${STALE_CLEANUP:-unexercised}" \
+            --stage-status "source_checkout=${SOURCE_CHECKOUT:-unexercised}" \
+            --stage-status "host_memory_guard=${HOST_MEMORY_GUARD:-unexercised}" \
+            --stage-status "storage_reclaim=${STORAGE_RECLAIM:-unexercised}" \
+            --stage-status "source_prepare=${SOURCE_PREPARE:-unexercised}" \
+            --stage-status "gateway_validator_build=${GATEWAY_VALIDATOR_BUILD:-unexercised}" \
+            --stage-status "evidence_upload=${EVIDENCE_UPLOAD:-unexercised}" \
+            --stage-status "final_cleanup=${FINAL_CLEANUP:-unexercised}" \
+            "${timing_args[@]}" \
+            "${duration_args[@]}"
+
   validator-parent:
     name: Independent validator-parent builds
     runs-on: [self-hosted, linux, x64, leadpoet-validator-v2-builder]
     timeout-minutes: 720
+    env:
+      LEADPOET_SENTRY_ENABLED: ${{ secrets.LEADPOET_SENTRY_DSN != '' }}
+      LEADPOET_SENTRY_DSN: ${{ secrets.LEADPOET_SENTRY_DSN }}
+      LEADPOET_SENTRY_ENVIRONMENT: release
+      LEADPOET_SENTRY_RELEASE: ${{ github.sha }}
+      LEADPOET_SENTRY_TRACES_SAMPLE_RATE: "0.01"
     steps:
+      - name: Initialize bounded release timing
+        id: telemetry_start
+        continue-on-error: true
+        run: date +%s > "$RUNNER_TEMP/leadpoet-release-started"
+
       - name: Remove stale root-owned V2 builder temp directories
+        id: stale_cleanup
         run: |
           sudo find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -type d \
             -name '.drand-cabi-v2.*' -exec rm -rf -- {} +
 
-      - uses: actions/checkout@v4
+      - name: Check out exact release source
+        id: source_checkout
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Reclaim unreferenced validator build space
+        id: storage_reclaim
         run: |
           sudo rm -rf -- \
             "$RUNNER_TEMP/offline-artifacts" \
@@ -156,11 +233,13 @@ jobs:
           df -h /
 
       - name: Prepare immutable build inputs
+        id: source_prepare
         run: |
           export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"
           nice -n 10 ionice -c2 -n7 bash gateway/tee/prepare_offline_artifacts_v2.sh
 
       - name: Build gateway and validator evidence
+        id: gateway_validator_build
         run: |
           . validator_tee/scripts/docker_operation_lock_v2.sh
           leadpoet_acquire_docker_operation_lock_v2
@@ -196,7 +275,9 @@ jobs:
           cp "$RUNNER_TEMP/validator-evidence"/validator-validator-*.json \
             "$RUNNER_TEMP/release-evidence/"
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload validator-parent evidence
+        id: evidence_upload
+        uses: actions/upload-artifact@v4
         with:
           name: v2-evidence-validator-${{ github.sha }}
           retention-days: 7
@@ -204,6 +285,7 @@ jobs:
           path: ${{ runner.temp }}/release-evidence/*.json
 
       - name: Reclaim validator-parent storage after evidence generation
+        id: final_cleanup
         if: always()
         run: |
           sudo rm -rf -- \
@@ -220,24 +302,79 @@ jobs:
             bash validator_tee/scripts/reclaim_docker_storage_v2.sh
           df -h /
 
+      - name: Emit bounded validator-parent release summary
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          JOB_STATUS: ${{ job.status }}
+          STALE_CLEANUP: ${{ steps.stale_cleanup.outcome }}
+          SOURCE_CHECKOUT: ${{ steps.source_checkout.outcome }}
+          STORAGE_RECLAIM: ${{ steps.storage_reclaim.outcome }}
+          SOURCE_PREPARE: ${{ steps.source_prepare.outcome }}
+          GATEWAY_VALIDATOR_BUILD: ${{ steps.gateway_validator_build.outcome }}
+          EVIDENCE_UPLOAD: ${{ steps.evidence_upload.outcome }}
+          FINAL_CLEANUP: ${{ steps.final_cleanup.outcome }}
+          LEADPOET_GITHUB_JOB_TOKEN: ${{ github.token }}
+          LEADPOET_GITHUB_JOB_NAME: Independent validator-parent builds
+        run: |
+          test -f leadpoet_observability/sentry_cli.py || exit 0
+          status=failed
+          test "$JOB_STATUS" = success && status=passed
+          duration_args=()
+          if read -r started < "$RUNNER_TEMP/leadpoet-release-started"; then
+            duration_args=(--duration-seconds "$(( $(date +%s) - started ))")
+          fi
+          timing_args=(--github-job-name "$LEADPOET_GITHUB_JOB_NAME")
+          python3 -m leadpoet_observability.sentry_cli release-summary \
+            --component release-validator-parent \
+            --physical-role validator-parent-builder \
+            --status "$status" \
+            --candidate-sha "$GITHUB_SHA" \
+            --stage-status "stale_cleanup=${STALE_CLEANUP:-unexercised}" \
+            --stage-status "source_checkout=${SOURCE_CHECKOUT:-unexercised}" \
+            --stage-status "storage_reclaim=${STORAGE_RECLAIM:-unexercised}" \
+            --stage-status "source_prepare=${SOURCE_PREPARE:-unexercised}" \
+            --stage-status "gateway_validator_build=${GATEWAY_VALIDATOR_BUILD:-unexercised}" \
+            --stage-status "evidence_upload=${EVIDENCE_UPLOAD:-unexercised}" \
+            --stage-status "final_cleanup=${FINAL_CLEANUP:-unexercised}" \
+            "${timing_args[@]}" \
+            "${duration_args[@]}"
+
   publish:
     name: Assemble and immutably publish exact-commit channel
     needs: [gateway-parent, validator-parent]
     runs-on: [self-hosted, linux, x64, leadpoet-gateway-v2-builder]
     timeout-minutes: 30
+    env:
+      LEADPOET_SENTRY_ENABLED: ${{ secrets.LEADPOET_SENTRY_DSN != '' }}
+      LEADPOET_SENTRY_DSN: ${{ secrets.LEADPOET_SENTRY_DSN }}
+      LEADPOET_SENTRY_ENVIRONMENT: release
+      LEADPOET_SENTRY_RELEASE: ${{ github.sha }}
+      LEADPOET_SENTRY_TRACES_SAMPLE_RATE: "0.01"
     steps:
-      - uses: actions/checkout@v4
+      - name: Initialize bounded release timing
+        id: telemetry_start
+        continue-on-error: true
+        run: date +%s > "$RUNNER_TEMP/leadpoet-release-started"
+
+      - name: Check out exact release source
+        id: source_checkout
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - name: Download independent release evidence
+        id: evidence_download
+        uses: actions/download-artifact@v4
         with:
           pattern: v2-evidence-*-${{ github.sha }}
           path: ${{ runner.temp }}/evidence
           merge-multiple: true
 
       - name: Assemble both six-build manifests
+        id: manifest_assembly
         run: |
           mkdir -p "$RUNNER_TEMP/release"
           GATEWAY_V2_ACCEPTANCE_SIGNER_PUBKEY_HASH="$ACCEPTANCE_SIGNER_PUBKEY_HASH" \
@@ -263,9 +400,43 @@ jobs:
             --output "$RUNNER_TEMP/release/release-channel-v2.json"
 
       - name: Publish with COMPLIANCE Object Lock
+        id: immutable_publication
         run: |
           python3 -m gateway.tee.release_channel_v2 \
             --publish "$RUNNER_TEMP/release/release-channel-v2.json" \
             --bucket "$RELEASE_BUCKET" \
             --prefix "$RELEASE_PREFIX" \
             --retention-days 365
+
+      - name: Emit bounded release publication summary
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          JOB_STATUS: ${{ job.status }}
+          SOURCE_CHECKOUT: ${{ steps.source_checkout.outcome }}
+          EVIDENCE_DOWNLOAD: ${{ steps.evidence_download.outcome }}
+          MANIFEST_ASSEMBLY: ${{ steps.manifest_assembly.outcome }}
+          IMMUTABLE_PUBLICATION: ${{ steps.immutable_publication.outcome }}
+          LEADPOET_GITHUB_JOB_TOKEN: ${{ github.token }}
+          LEADPOET_GITHUB_JOB_NAME: Assemble and immutably publish exact-commit channel
+        run: |
+          test -f leadpoet_observability/sentry_cli.py || exit 0
+          status=failed
+          test "$JOB_STATUS" = success && status=passed
+          duration_args=()
+          if read -r started < "$RUNNER_TEMP/leadpoet-release-started"; then
+            duration_args=(--duration-seconds "$(( $(date +%s) - started ))")
+          fi
+          timing_args=(--github-job-name "$LEADPOET_GITHUB_JOB_NAME")
+          python3 -m leadpoet_observability.sentry_cli release-summary \
+            --component release-publisher \
+            --physical-role release-publisher \
+            --status "$status" \
+            --candidate-sha "$GITHUB_SHA" \
+            --stage-status "source_checkout=${SOURCE_CHECKOUT:-unexercised}" \
+            --stage-status "evidence_download=${EVIDENCE_DOWNLOAD:-unexercised}" \
+            --stage-status "manifest_assembly=${MANIFEST_ASSEMBLY:-unexercised}" \
+            --stage-status "immutable_publication=${IMMUTABLE_PUBLICATION:-unexercised}" \
+            "${timing_args[@]}" \
+            "${duration_args[@]}"

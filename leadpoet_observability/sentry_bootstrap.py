@@ -1,4 +1,4 @@
-"""Opt-in, fail-closed Sentry error monitoring for Leadpoet HOST processes.
+"""Opt-in, fail-open Sentry observability for Leadpoet HOST processes.
 
 Same contract style as ``gateway/observability/otel_bootstrap.py``:
 
@@ -12,13 +12,12 @@ Same contract style as ``gateway/observability/otel_bootstrap.py``:
   images are measured (PCR0) and have no general egress, and
   ``tests/test_sentry_boundary_guard.py`` fails CI if an enclave surface or
   enclave requirements file references Sentry.
-- Errors only. Performance tracing, profiling, session tracking, request
-  bodies, stack-local variables, and PII capture are hard-off, and
-  framework/client auto-instrumentation stays disabled — coverage comes
-  from the process-level excepthook, threading hook, and stdlib logging
-  (ERROR and above), which every runtime already uses (bittensor's
-  ``bt.logging``, uvicorn's ``uvicorn.error``, and asyncio's default task
-  exception handler all route through stdlib logging).
+- Terminal errors are captured at 100 percent. A small, bounded sample of
+  explicitly named operational spans records stage latency; profiling,
+  session tracking, request bodies, stack-local variables, PII capture, and
+  framework/client auto-instrumentation remain hard-off. Error coverage also
+  comes from the process-level excepthook, threading hook, and stdlib logging
+  (ERROR and above).
 - Every outgoing event and breadcrumb passes the fail-closed scrubber in
   ``sentry_scrubbing``; a scrub failure DROPS the event so nothing
   unscrubbed can leave the process. Training/trajectory data, prompts,
@@ -34,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from contextlib import contextmanager
 import hashlib
 import json
 import logging
@@ -54,6 +54,11 @@ ENVIRONMENT_ENV = "LEADPOET_SENTRY_ENVIRONMENT"
 RELEASE_ENV = "LEADPOET_SENTRY_RELEASE"
 EXTRA_PROTECTED_ENV = "LEADPOET_SENTRY_EXTRA_PROTECTED_MODULES"
 MESSAGE_MODE_ENV = "LEADPOET_SENTRY_MESSAGE_MODE"  # "scrub" (default) | "redact-all"
+TRACES_SAMPLE_RATE_ENV = "LEADPOET_SENTRY_TRACES_SAMPLE_RATE"
+
+_DEFAULT_TRACES_SAMPLE_RATE = 0.01
+_MAX_TRACES_SAMPLE_RATE = 0.10
+_MAX_BREADCRUMBS = 50
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -102,6 +107,26 @@ def _extra_protected_prefixes() -> Tuple[str, ...]:
 
 def _redact_all() -> bool:
     return os.getenv(MESSAGE_MODE_ENV, "").strip().lower() == "redact-all"
+
+
+def _trace_sample_rate() -> float:
+    """Return a bounded success-trace rate; malformed values fail to default."""
+
+    raw = os.getenv(TRACES_SAMPLE_RATE_ENV, "").strip()
+    try:
+        value = _DEFAULT_TRACES_SAMPLE_RATE if not raw else float(raw)
+    except (TypeError, ValueError):
+        value = _DEFAULT_TRACES_SAMPLE_RATE
+    return min(_MAX_TRACES_SAMPLE_RATE, max(0.0, value))
+
+
+def scrub_sentry_value(value: Any, max_length: int = 200) -> Any:
+    """Expose the bootstrap's fail-closed scalar scrubber to stdlib helpers."""
+
+    try:
+        return sentry_scrubbing.scrub_text(value, max_length)
+    except BaseException:
+        return sentry_scrubbing.REDACTED
 
 
 def _read_git_release(repo_root: Path) -> Optional[str]:
@@ -179,12 +204,29 @@ def _normalized_signature_text(value: Any) -> str:
     return _DYNAMIC_SIGNATURE_RE.sub("<dynamic>", value)[:300]
 
 
-def _event_signature(event: Dict[str, Any]) -> str:
+def _event_signature(
+    event: Dict[str, Any], *, include_semantic: bool = True
+) -> str:
     """Build a message-safe operational signature for grouping and throttling."""
-    identity: Dict[str, Any] = {
-        "logger": event.get("logger"),
-        "level": event.get("level"),
-    }
+    identity: Dict[str, Any] = {}
+    tags = event.get("tags")
+    if (
+        include_semantic
+        and isinstance(tags, dict)
+        and tags.get("leadpoet.failure_code")
+    ):
+        identity["semantic"] = {
+            "component": tags.get("leadpoet.component"),
+            "stage": tags.get("leadpoet.stage"),
+            "failure_code": tags.get("leadpoet.failure_code"),
+            "correlation_id": tags.get("leadpoet.correlation_id"),
+            "restart_invocation_id": tags.get(
+                "leadpoet.restart_invocation_id"
+            ),
+            "weight_correlation_id": tags.get(
+                "leadpoet.weight_correlation_id"
+            ),
+        }
     exception = event.get("exception")
     exception_values = exception.get("values") if isinstance(exception, dict) else None
     if isinstance(exception_values, list):
@@ -216,6 +258,8 @@ def _event_signature(event: Dict[str, Any]) -> str:
             )
         identity["exceptions"] = values
     else:
+        identity["logger"] = event.get("logger")
+        identity["level"] = event.get("level")
         logentry = event.get("logentry")
         if isinstance(logentry, dict):
             identity["logentry"] = _normalized_signature_text(
@@ -293,6 +337,7 @@ def _build_before_send(
     extra_prefixes: Tuple[str, ...], redact_all: bool
 ) -> Callable[[Any, Any], Optional[Dict[str, Any]]]:
     coalescer = _EventCoalescer()
+    semantic_exception_coalescer = _EventCoalescer()
 
     def _before_send(event: Any, hint: Any) -> Optional[Dict[str, Any]]:
         try:
@@ -304,9 +349,45 @@ def _build_before_send(
             signature = _event_signature(scrubbed)
             if not coalescer.admit(signature):
                 return None
-            # A scrubbed, message-safe fingerprint groups the same failure
-            # across gateway and validator worker processes in Sentry.
-            scrubbed["fingerprint"] = ["leadpoet-error", signature]
+            tags = scrubbed.get("tags")
+            failure_code = (
+                tags.get("leadpoet.failure_code")
+                if isinstance(tags, dict)
+                else None
+            )
+            component = (
+                tags.get("leadpoet.component")
+                if isinstance(tags, dict)
+                else None
+            )
+            stage = (
+                tags.get("leadpoet.stage")
+                if isinstance(tags, dict)
+                else None
+            )
+            if failure_code and component and stage:
+                # A semantic capture is commonly followed by logger.exception
+                # for the same application error. Mark its message-safe
+                # exception identity so that later generic integration event
+                # is dropped while the structured event survives.
+                semantic_exception_coalescer.admit(
+                    _event_signature(scrubbed, include_semantic=False)
+                )
+                scrubbed["fingerprint"] = [
+                    "leadpoet-semantic",
+                    str(component),
+                    str(stage),
+                    str(failure_code),
+                ]
+            else:
+                exception = scrubbed.get("exception")
+                if isinstance(exception, dict) and not semantic_exception_coalescer.admit(
+                    _event_signature(scrubbed, include_semantic=False)
+                ):
+                    return None
+                # A scrubbed, message-safe fingerprint groups the same generic
+                # failure across gateway and validator worker processes.
+                scrubbed["fingerprint"] = ["leadpoet-error", signature]
             return scrubbed
         except BaseException as exc:
             # Fail closed: an event we cannot fully scrub is never sent.
@@ -332,6 +413,26 @@ def _build_before_breadcrumb(
             return None
 
     return _before_breadcrumb
+
+
+def _build_before_send_transaction(
+    extra_prefixes: Tuple[str, ...], redact_all: bool
+) -> Callable[[Any, Any], Optional[Dict[str, Any]]]:
+    def _before_send_transaction(event: Any, hint: Any) -> Optional[Dict[str, Any]]:
+        try:
+            return sentry_scrubbing.scrub_transaction_event(
+                event,
+                extra_prefixes=extra_prefixes,
+                redact_all=redact_all,
+            )
+        except BaseException as exc:
+            _safe_print(
+                "leadpoet_sentry_transaction_scrub_failed error=%s"
+                % type(exc).__name__
+            )
+            return None
+
+    return _before_send_transaction
 
 
 def init_sentry(component: str, tags: Optional[Dict[str, str]] = None) -> bool:
@@ -370,35 +471,45 @@ def init_sentry(component: str, tags: Optional[Dict[str, str]] = None) -> bool:
             redact_all = _redact_all()
 
             sentry_sdk.init(
-            # Explicit options only — ambient SENTRY_* variables never apply.
-            dsn=dsn,
-            environment=environment,
-            release=release,
-            server_name="leadpoet-host",
-            # Errors only: no performance tracing, profiling, or sessions.
-            traces_sample_rate=None,
-            propagate_traces=False,
-            enable_logs=False,
-            spotlight=False,
-            keep_alive=False,
-            auto_session_tracking=False,
-            # Payload capture is hard-off; the scrubber is the second fence.
-            send_default_pii=False,
-            include_local_variables=False,
-            max_request_body_size="never",
-            attach_stacktrace=True,
-            max_breadcrumbs=0,
-            max_value_length=1024,
-            debug=False,
-            shutdown_timeout=2,
-            # Explicit error-only integrations. Framework/DB/HTTP, argv,
-            # module inventory, stdlib breadcrumbs, and Sentry Logs are off.
-            default_integrations=False,
-            auto_enabling_integrations=False,
-            integrations=_core_integrations(),
-            ignore_errors=[KeyboardInterrupt, asyncio.CancelledError, GeneratorExit],
-            before_send=_build_before_send(extra_prefixes, redact_all),
-            before_breadcrumb=_build_before_breadcrumb(extra_prefixes, redact_all),
+                # Explicit options only; ambient SENTRY_* variables never apply.
+                dsn=dsn,
+                environment=environment,
+                release=release,
+                server_name="leadpoet-host",
+                # Only explicit manual Leadpoet spans are sampled. Framework,
+                # HTTP, DB, and chain auto-instrumentation remain disabled.
+                traces_sample_rate=_trace_sample_rate(),
+                propagate_traces=False,
+                enable_logs=False,
+                spotlight=False,
+                keep_alive=False,
+                auto_session_tracking=False,
+                # Payload capture is hard-off; the scrubber is the second fence.
+                send_default_pii=False,
+                include_local_variables=False,
+                max_request_body_size="never",
+                attach_stacktrace=True,
+                max_breadcrumbs=_MAX_BREADCRUMBS,
+                max_value_length=1024,
+                debug=False,
+                shutdown_timeout=1,
+                # Explicit error-only integrations. Framework/DB/HTTP, argv,
+                # module inventory, stdlib breadcrumbs, and Sentry Logs are off.
+                default_integrations=False,
+                auto_enabling_integrations=False,
+                integrations=_core_integrations(),
+                ignore_errors=[
+                    KeyboardInterrupt,
+                    asyncio.CancelledError,
+                    GeneratorExit,
+                ],
+                before_send=_build_before_send(extra_prefixes, redact_all),
+                before_breadcrumb=_build_before_breadcrumb(
+                    extra_prefixes, redact_all
+                ),
+                before_send_transaction=_build_before_send_transaction(
+                    extra_prefixes, redact_all
+                ),
             )
             safe_component = sentry_scrubbing.scrub_text(str(component), 100)
             sentry_sdk.set_tag("leadpoet.component", safe_component)
@@ -431,6 +542,188 @@ def set_sentry_tag(key: str, value: Any) -> None:
         sentry_sdk.set_tag(
             "leadpoet.%s" % key, sentry_scrubbing.scrub_text(str(value), 200)
         )
+    except BaseException:
+        pass
+
+
+def add_sentry_breadcrumb(
+    *,
+    category: str,
+    message: str,
+    level: str,
+    data: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Add one scrubbed operational breadcrumb. Never raises."""
+
+    if not _state["active"]:
+        return
+    try:
+        import sentry_sdk
+
+        sentry_sdk.add_breadcrumb(
+            category=scrub_sentry_value(str(category), 100),
+            message=scrub_sentry_value(str(message), 200),
+            level=str(level)[:20],
+            data=dict(data or {}),
+        )
+    except BaseException:
+        pass
+
+
+def capture_sentry_failure(
+    *,
+    failure_code: str,
+    component: str,
+    stage: str,
+    exception: Optional[BaseException],
+    tags: Dict[str, Any],
+    context: Dict[str, Any],
+) -> bool:
+    """Capture one semantic terminal event using a temporary SDK scope."""
+
+    if not _state["active"]:
+        return False
+    try:
+        import sentry_sdk
+
+        scope_manager = getattr(sentry_sdk, "new_scope", None)
+        if not callable(scope_manager):
+            scope_manager = getattr(sentry_sdk, "push_scope")
+        with scope_manager() as scope:
+            scope.set_tag("leadpoet.component", scrub_sentry_value(component, 100))
+            scope.set_tag(
+                "leadpoet.failure_code", scrub_sentry_value(failure_code, 120)
+            )
+            scope.set_tag("leadpoet.stage", scrub_sentry_value(stage, 120))
+            for key, value in tags.items():
+                scope.set_tag(
+                    "leadpoet.%s" % scrub_sentry_value(str(key), 100),
+                    scrub_sentry_value(str(value), 200),
+                )
+            scope.set_context("leadpoet.operation", dict(context))
+            if exception is not None:
+                sentry_sdk.capture_exception(exception)
+            else:
+                sentry_sdk.capture_event(
+                    {
+                        "level": "error",
+                        "message": "Leadpoet terminal failure: %s" % failure_code,
+                    }
+                )
+        return True
+    except BaseException:
+        return False
+
+
+def record_sentry_distribution(
+    name: str,
+    value: float,
+    *,
+    unit: str,
+    tags: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Best-effort metric emission across Sentry SDK minor API changes."""
+
+    if not _state["active"]:
+        return
+    try:
+        import sentry_sdk
+
+        metrics = getattr(sentry_sdk, "metrics", None)
+        distribution = getattr(metrics, "distribution", None)
+        if callable(distribution):
+            attributes = {
+                str(key)[:100]: scrub_sentry_value(str(item), 100)
+                for key, item in (tags or {}).items()
+            }
+            try:
+                distribution(
+                    str(name)[:120],
+                    float(value),
+                    unit=str(unit)[:40],
+                    attributes=attributes,
+                )
+            except TypeError:
+                # Compatibility with the older SDK metrics spelling.
+                distribution(
+                    str(name)[:120],
+                    float(value),
+                    unit=str(unit)[:40],
+                    tags=attributes,
+                )
+    except BaseException:
+        pass
+
+
+@contextmanager
+def start_sentry_span(
+    *,
+    operation: str,
+    description: str,
+    data: Optional[Dict[str, Any]] = None,
+    trace_id: Optional[str] = None,
+):
+    """Start one manual span; SDK absence or failure leaves behavior unchanged."""
+
+    if not _state["active"]:
+        yield None
+        return
+    try:
+        import sentry_sdk
+
+        # Auto-instrumentation is deliberately disabled, so there is no
+        # ambient transaction to own a standalone span. Each bounded stage is
+        # therefore a sampled manual transaction with a static operation/name.
+        span_kwargs = {
+            "op": scrub_sentry_value(operation, 100),
+            "name": scrub_sentry_value(description, 160),
+        }
+        if isinstance(trace_id, str) and re.fullmatch(r"[0-9a-f]{32}", trace_id):
+            span_kwargs["trace_id"] = trace_id
+        manager = sentry_sdk.start_transaction(
+            **span_kwargs
+        )
+    except BaseException:
+        yield None
+        return
+    try:
+        span = manager.__enter__()
+    except BaseException:
+        yield None
+        return
+    try:
+        set_data = getattr(span, "set_data", None)
+        if callable(set_data):
+            for key, value in dict(data or {}).items():
+                set_data(str(key)[:100], value)
+    except BaseException:
+        # Metadata is optional; a collector/SDK failure cannot affect the
+        # application stage or prevent the transaction from closing.
+        pass
+    try:
+        yield span
+    except BaseException as application_error:
+        try:
+            manager.__exit__(
+                type(application_error), application_error, application_error.__traceback__
+            )
+        except BaseException:
+            pass
+        raise
+    else:
+        try:
+            manager.__exit__(None, None, None)
+        except BaseException:
+            pass
+
+
+def flush_sentry(timeout: float = 1.0) -> None:
+    if not _state["active"]:
+        return
+    try:
+        import sentry_sdk
+
+        sentry_sdk.flush(timeout=max(0.0, min(float(timeout), 1.0)))
     except BaseException:
         pass
 

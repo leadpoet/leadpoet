@@ -22,6 +22,13 @@ from typing import Any, Mapping, Optional, Sequence
 
 from gateway.tee.release_manifest_v2 import BUILD_EVIDENCE_SCHEMA_VERSION
 from gateway.tee.topology import ROLE_SPECS
+from leadpoet_observability import (
+    capture_failure,
+    configure_sentry_context,
+    failure_code_for_exception,
+    init_sentry,
+    record_stage,
+)
 from validator_tee.host.docker_image_normalizer_v2 import normalize_docker_image
 
 
@@ -536,9 +543,47 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         write_cache_entry(cache_path=args.cache_file, entry=entry, pin=args.pin)
         entries.append(entry)
+        record_stage(
+            component="release-gateway-pcr0-builder",
+            stage="gateway_reproducible_pcr0_build",
+            status="passed",
+            physical_role=str(role),
+            candidate_sha=entry.get("commit_sha"),
+            runtime_sha=entry.get("commit_sha"),
+            observed_pcr0_hash=entry.get("pcr0"),
+            build_manifest_hash=entry.get("build_manifest_hash"),
+        )
     print(json.dumps(entries if args.all_roles else entries[0], sort_keys=True, indent=2))
     return 0
 
 
+def _run_cli() -> int:
+    init_sentry(component="release-gateway-pcr0-builder")
+    candidate_sha = str(os.environ.get("GITHUB_SHA") or "").lower()
+    configure_sentry_context(
+        component="release-gateway-pcr0-builder",
+        role="release-builder",
+        candidate_sha=candidate_sha,
+        runtime_sha=candidate_sha,
+    )
+    try:
+        return main()
+    except Exception as exc:
+        capture_failure(
+            failure_code_for_exception(
+                exc,
+                default="release.builder_resource_exhausted",
+            ),
+            component="release-gateway-pcr0-builder",
+            stage="gateway_reproducible_pcr0_build",
+            exception=exc,
+            terminal=True,
+            retryable=False,
+            fail_closed=True,
+            candidate_sha=candidate_sha,
+        )
+        raise
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_run_cli())

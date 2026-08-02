@@ -7,6 +7,13 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
+from leadpoet_observability import (
+    capture_failure,
+    configure_sentry_context,
+    init_sentry,
+    record_stage,
+)
+
 from validator_tee.host.release_v2 import (
     DETERMINISTIC_RELEASE_FIELDS,
     ValidatorReleaseV2Error,
@@ -36,6 +43,7 @@ def _write(path: Path, value: Mapping[str, Any]) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    init_sentry(component="release-validator-gate")
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--emit-evidence", action="store_true")
@@ -90,12 +98,47 @@ def main(argv: Sequence[str] | None = None) -> int:
             "manifest verification requires --local-release"
         )
     local = validate_validator_release(_load(args.local_release))
+    candidate_sha = str(manifest["release"].get("commit_sha") or "").lower()
+    configure_sentry_context(
+        component="release-validator-gate",
+        physical_role="validator-release-gate",
+        role="release-builder",
+        candidate_sha=candidate_sha,
+        runtime_sha=candidate_sha,
+    )
     for field in DETERMINISTIC_RELEASE_FIELDS:
         if local[field] != manifest["release"][field]:
+            code = (
+                "release.pcr0_mismatch"
+                if field == "pcr0"
+                else "release.source_tree_mismatch"
+            )
+            capture_failure(
+                code,
+                component="release-validator-gate",
+                stage="six_build_manifest_verification",
+                terminal=True,
+                retryable=False,
+                fail_closed=True,
+                candidate_sha=candidate_sha,
+                build_manifest_hash=manifest.get("release_manifest_hash"),
+                expected_pcr0_hash=(
+                    manifest["release"][field] if field == "pcr0" else None
+                ),
+                observed_pcr0_hash=(local[field] if field == "pcr0" else None),
+            )
             raise ValidatorReleaseV2Error(
                 "local validator build differs from approved six-build release at %s"
                 % field
             )
+    record_stage(
+        component="release-validator-gate",
+        stage="six_build_manifest_verification",
+        status="passed",
+        candidate_sha=candidate_sha,
+        build_manifest_hash=manifest.get("release_manifest_hash"),
+        expected_pcr0_hash=manifest["release"].get("pcr0"),
+    )
     print("validator_v2_release_gate=verified")
     print("validator_v2_release_manifest_hash=%s" % manifest["release_manifest_hash"])
     return 0

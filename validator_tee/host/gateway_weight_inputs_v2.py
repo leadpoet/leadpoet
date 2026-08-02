@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import zlib
+import os
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 from urllib.parse import urlparse
 
@@ -25,6 +26,14 @@ from leadpoet_canonical.weight_authority_v2 import (
     WEIGHT_INPUT_PURPOSES,
 )
 from validator_tee.host.vsock_client import ValidatorEnclaveClient
+from leadpoet_observability import (
+    capture_failure,
+    failure_code_for_exception,
+    hash_identifier,
+    record_retry,
+    record_stage,
+    weight_correlation_id,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -370,6 +379,26 @@ async def fetch_gateway_weight_inputs_v2(
     """Request one exact, enclave-signed gateway input set and verify its shape."""
 
     calculation = dict(calculation_snapshot)
+    runtime_sha = str(
+        os.environ.get("GITHUB_SHA")
+        or os.environ.get("GIT_COMMIT")
+        or ""
+    ).lower()
+    telemetry = {
+        "runtime_sha": runtime_sha,
+        "netuid": calculation.get("netuid"),
+        "epoch_id": calculation.get("epoch_id"),
+        "validator_role": "primary",
+        "validator_id_hash": hash_identifier(validator_hotkey),
+        "restart_invocation_id": os.environ.get(
+            "LEADPOET_RESTART_INVOCATION_ID"
+        ),
+        "weight_correlation_id": weight_correlation_id(
+            runtime_sha=runtime_sha,
+            netuid=calculation.get("netuid"),
+            epoch_id=calculation.get("epoch_id"),
+        ),
+    }
     try:
         request = build_weight_inputs_request_v2(
             validator_hotkey=validator_hotkey,
@@ -426,8 +455,39 @@ async def fetch_gateway_weight_inputs_v2(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            if attempt >= max_attempts or not _is_retryable_gateway_error(exc):
+            retryable = _is_retryable_gateway_error(exc)
+            if attempt >= max_attempts or not retryable:
+                code = failure_code_for_exception(
+                    exc,
+                    default=(
+                        "weight.gateway_endpoint_unavailable"
+                        if retryable
+                        else "weight.bundle_divergence"
+                    ),
+                )
+                capture_failure(
+                    code,
+                    component="validator",
+                    stage="gateway_weight_input_fetch",
+                    exception=exc,
+                    terminal=True,
+                    retryable=retryable,
+                    fail_closed=True,
+                    attempt=attempt,
+                    attempts=max_attempts,
+                    http_status=getattr(exc, "status_code", None),
+                    **telemetry,
+                )
                 raise
+            record_retry(
+                "weight.gateway_endpoint_unavailable",
+                component="validator",
+                stage="gateway_weight_input_fetch",
+                attempt=attempt,
+                attempts=max_attempts,
+                http_status=getattr(exc, "status_code", None),
+                **telemetry,
+            )
             delay = min(
                 float(retry_delay_seconds) * (2 ** (attempt - 1)),
                 _MAX_RETRY_DELAY_SECONDS,
@@ -505,6 +565,16 @@ async def fetch_gateway_weight_inputs_v2(
                 "gateway allocation authority receipt is absent from the response"
             )
         result["upstream_receipt_set"] = receipt_set
+        receipts = receipt_set.get("receipts")
+        record_stage(
+            component="validator",
+            stage="gateway_weight_input_verified",
+            status="passed",
+            request_hash=request["request_hash"],
+            root_receipt_hash=authority_hash,
+            receipt_count=len(receipts) if isinstance(receipts, list) else None,
+            **telemetry,
+        )
         return result
     compact = _validate_compact_ancestry(
         proofs_value=response["upstream_ancestry_proofs"],
@@ -514,4 +584,18 @@ async def fetch_gateway_weight_inputs_v2(
         epoch_id=int(calculation["epoch_id"]),
     )
     result.update(compact)
+    input_receipt_hashes = result.get("input_receipt_hashes")
+    record_stage(
+        component="validator",
+        stage="gateway_weight_input_verified",
+        status="passed",
+        request_hash=request["request_hash"],
+        root_receipt_hash=authority_hash,
+        receipt_count=(
+            len(input_receipt_hashes)
+            if isinstance(input_receipt_hashes, Mapping)
+            else None
+        ),
+        **telemetry,
+    )
     return result

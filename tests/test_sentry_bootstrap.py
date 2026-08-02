@@ -18,17 +18,83 @@ from leadpoet_observability import sentry_bootstrap
 from leadpoet_observability.sentry_scrubbing import REDACTED_PROTECTED
 
 
+class _StubScope:
+    def __init__(self):
+        self.tags = {}
+        self.contexts = {}
+
+    def set_tag(self, key, value):
+        self.tags[key] = value
+
+    def set_context(self, key, value):
+        self.contexts[key] = value
+
+
+class _StubContextManager:
+    def __init__(self, value):
+        self.value = value
+        self.exits = []
+
+    def __enter__(self):
+        return self.value
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.exits.append((exc_type, exc, traceback))
+        return False
+
+
+class _StubSpan:
+    def __init__(self):
+        self.data = {}
+
+    def set_data(self, key, value):
+        self.data[key] = value
+
+
 class _StubSentrySdk(types.ModuleType):
     def __init__(self):
         super().__init__("sentry_sdk")
         self.init_calls = []
         self.tags = {}
+        self.breadcrumbs = []
+        self.events = []
+        self.exceptions = []
+        self.scopes = []
+        self.transactions = []
+        self.flush_calls = []
+        self.distributions = []
+        self.metrics = types.SimpleNamespace(distribution=self._distribution)
 
     def init(self, **kwargs):
         self.init_calls.append(kwargs)
 
     def set_tag(self, key, value):
         self.tags[key] = value
+
+    def add_breadcrumb(self, **kwargs):
+        self.breadcrumbs.append(kwargs)
+
+    def capture_exception(self, exception):
+        self.exceptions.append(exception)
+
+    def capture_event(self, event):
+        self.events.append(event)
+
+    def new_scope(self):
+        scope = _StubScope()
+        self.scopes.append(scope)
+        return _StubContextManager(scope)
+
+    def start_transaction(self, **kwargs):
+        manager = _StubContextManager(_StubSpan())
+        self.transactions.append((kwargs, manager))
+        return manager
+
+    def flush(self, timeout):
+        self.flush_calls.append(timeout)
+
+    def _distribution(self, name, value, **kwargs):
+        self.distributions.append((name, value, kwargs))
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +120,7 @@ def enabled_env(monkeypatch):
     monkeypatch.delenv(sentry_bootstrap.RELEASE_ENV, raising=False)
     monkeypatch.delenv(sentry_bootstrap.EXTRA_PROTECTED_ENV, raising=False)
     monkeypatch.delenv(sentry_bootstrap.MESSAGE_MODE_ENV, raising=False)
+    monkeypatch.delenv(sentry_bootstrap.TRACES_SAMPLE_RATE_ENV, raising=False)
 
 
 def test_complete_noop_without_env_gate(monkeypatch, stub_sdk):
@@ -83,8 +150,8 @@ def test_initializes_with_hard_off_capture_options(enabled_env, stub_sdk):
     kwargs = stub_sdk.init_calls[0]
     assert kwargs["dsn"] == "https://key@example.ingest.sentry.io/1"
     assert kwargs["environment"] == "production"
-    # Errors only; payload capture hard-off.
-    assert kwargs["traces_sample_rate"] is None
+    # Terminal errors are complete; only explicit operational traces are sampled.
+    assert kwargs["traces_sample_rate"] == 0.01
     assert kwargs["propagate_traces"] is False
     assert kwargs["enable_logs"] is False
     assert kwargs["spotlight"] is False
@@ -96,11 +163,25 @@ def test_initializes_with_hard_off_capture_options(enabled_env, stub_sdk):
     assert kwargs["auto_enabling_integrations"] is False
     assert kwargs["default_integrations"] is False
     assert kwargs["integrations"] == ["core-errors"]
-    assert kwargs["max_breadcrumbs"] == 0
+    assert kwargs["max_breadcrumbs"] == 50
+    assert kwargs["shutdown_timeout"] == 1
     assert kwargs["debug"] is False
     assert callable(kwargs["before_send"])
     assert callable(kwargs["before_breadcrumb"])
+    assert callable(kwargs["before_send_transaction"])
     assert stub_sdk.tags["leadpoet.component"] == "gateway"
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    (("0", 0.0), ("0.05", 0.05), ("1", 0.10), ("invalid", 0.01)),
+)
+def test_trace_sampling_is_bounded(
+    monkeypatch, enabled_env, stub_sdk, configured, expected
+):
+    monkeypatch.setenv(sentry_bootstrap.TRACES_SAMPLE_RATE_ENV, configured)
+    assert sentry_bootstrap.init_sentry("gateway") is True
+    assert stub_sdk.init_calls[0]["traces_sample_rate"] == expected
 
 
 def test_first_call_wins_and_later_calls_do_not_reinit(enabled_env, stub_sdk):
@@ -148,6 +229,38 @@ def test_before_breadcrumb_drops_protected_categories(enabled_env, stub_sdk):
     assert before_breadcrumb({"category": "research_lab.engine_v1", "message": "m"}, None) is None
     kept = before_breadcrumb({"category": "gateway.db", "message": "ok"}, None)
     assert kept["message"] == "ok"
+
+
+def test_before_send_transaction_drops_unknown_and_sensitive_payloads(
+    enabled_env, stub_sdk
+):
+    sentry_bootstrap.init_sentry("gateway")
+    scrub = stub_sdk.init_calls[0]["before_send_transaction"]
+    transaction = scrub(
+        {
+            "type": "transaction",
+            "transaction": "gateway.weight.bundle_generation",
+            "request": {"data": "sk-or-v1-never-send"},
+            "future_payload": "customer contents",
+            "spans": [
+                {
+                    "op": "leadpoet.weight",
+                    "description": "gateway.bundle_generation",
+                    "data": {
+                        "bundle_hash": "sha256:" + "ab" * 32,
+                        "authorization": "Bearer secret-value",
+                    },
+                }
+            ],
+        },
+        None,
+    )
+    encoded = repr(transaction)
+    assert "request" not in transaction
+    assert "future_payload" not in transaction
+    assert "sk-or-v1" not in encoded
+    assert "Bearer secret-value" not in encoded
+    assert transaction["transaction"] == "gateway.weight.bundle_generation"
 
 
 def test_extra_protected_modules_env_widens_redaction(monkeypatch, enabled_env, stub_sdk):
@@ -249,6 +362,61 @@ def test_before_send_groups_dynamic_retries_without_hiding_distinct_errors(
     assert duplicate is None
     assert distinct is not None
     assert first["fingerprint"][0] == "leadpoet-error"
+
+
+def test_semantic_failure_uses_stable_fingerprint(enabled_env, stub_sdk):
+    sentry_bootstrap.init_sentry("gateway")
+    before_send = stub_sdk.init_calls[0]["before_send"]
+    event = before_send(
+        {
+            "level": "error",
+            "tags": {
+                "leadpoet.component": "gateway",
+                "leadpoet.stage": "bundle_generation",
+                "leadpoet.failure_code": "weight.bundle_divergence",
+            },
+            "message": "Leadpoet terminal failure",
+        },
+        None,
+    )
+    assert event["fingerprint"] == [
+        "leadpoet-semantic",
+        "gateway",
+        "bundle_generation",
+        "weight.bundle_divergence",
+    ]
+
+
+def test_manual_span_preserves_original_application_exception(enabled_env, stub_sdk):
+    sentry_bootstrap.init_sentry("gateway")
+    original = RuntimeError("application failure")
+    with pytest.raises(RuntimeError) as raised:
+        with sentry_bootstrap.start_sentry_span(
+            operation="leadpoet.weight",
+            description="gateway.bundle_generation",
+            trace_id="ab" * 16,
+            data={"epoch_id": 24307},
+        ):
+            raise original
+    assert raised.value is original
+    kwargs, manager = stub_sdk.transactions[0]
+    assert kwargs["trace_id"] == "ab" * 16
+    assert manager.value.data == {"epoch_id": 24307}
+    assert manager.exits[0][1] is original
+
+
+def test_manual_span_sdk_failure_is_a_noop(enabled_env, stub_sdk):
+    sentry_bootstrap.init_sentry("gateway")
+
+    def _boom(**kwargs):
+        raise RuntimeError("telemetry unavailable")
+
+    stub_sdk.start_transaction = _boom
+    with sentry_bootstrap.start_sentry_span(
+        operation="leadpoet.weight",
+        description="gateway.bundle_generation",
+    ) as span:
+        assert span is None
 
 
 def test_initialization_is_singleton_under_concurrency(enabled_env, stub_sdk):

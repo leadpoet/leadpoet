@@ -34,6 +34,8 @@ VALIDATOR_RESTART_COMPLETED=0
 VALIDATOR_DOCKER_LOCK_ACQUIRED=0
 VALIDATOR_DEPLOY_STAGE="${VALIDATOR_DEPLOY_STAGE:-bootstrap}"
 VALIDATOR_RESTART_STARTED_EPOCH="${VALIDATOR_RESTART_STARTED_EPOCH:-$(date -u +%s)}"
+VALIDATOR_RESTART_INVOCATION_ID="${VALIDATOR_RESTART_INVOCATION_ID:-validator-${VALIDATOR_RESTART_STARTED_EPOCH}-$$}"
+VALIDATOR_RELEASE_ATTEMPTS_USED="${VALIDATOR_RELEASE_ATTEMPTS_USED:-0}"
 VALIDATOR_RESTART_TIMING_DIR="${VALIDATOR_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
 VALIDATOR_RESTART_TIMING_FILE="${VALIDATOR_RESTART_TIMING_FILE:-$VALIDATOR_RESTART_TIMING_DIR/validator-${VALIDATOR_RESTART_STARTED_EPOCH}-$$.jsonl}"
 VALIDATOR_RESTART_TIMING_INITIALIZED="${VALIDATOR_RESTART_TIMING_INITIALIZED:-0}"
@@ -54,6 +56,8 @@ REQUESTED_VALIDATOR_DEPLOY_COMMIT="${VALIDATOR_DEPLOY_COMMIT:-}"
 unset VALIDATOR_DEPLOY_COMMIT
 REQUESTED_COORDINATED_EXPECTED_COMMIT="${VALIDATOR_COORDINATED_EXPECTED_COMMIT:-}"
 unset VALIDATOR_COORDINATED_EXPECTED_COMMIT
+export VALIDATOR_RESTART_INVOCATION_ID
+export LEADPOET_RESTART_INVOCATION_ID="$VALIDATOR_RESTART_INVOCATION_ID"
 
 run_bounded_validator_restart_artifact_cleanup() {
   local gateway_build_root validator_build_root
@@ -260,6 +264,31 @@ PY
   return 0
 }
 
+emit_validator_restart_sentry_summary() {
+  local status="$1" candidate_sha summary_status shutdown_flag=()
+  command -v timeout >/dev/null 2>&1 || return 0
+  [ -x "$VALIDATOR_PYTHON_BIN" ] || return 0
+  [ -r "$VALIDATOR_ROOT/leadpoet_observability/sentry_cli.py" ] || return 0
+  candidate_sha="${VALIDATOR_DEPLOY_SHA:-}"
+  summary_status="failed"
+  [ "$status" -eq 0 ] && summary_status="passed"
+  if [ "$VALIDATOR_DESTRUCTIVE_PHASE_STARTED" = "1" ]; then
+    shutdown_flag=(--shutdown-started)
+  fi
+  PYTHONPATH="$VALIDATOR_ROOT" timeout 2 \
+    "$VALIDATOR_PYTHON_BIN" -m leadpoet_observability.sentry_cli \
+    restart-summary \
+    --component validator \
+    --status "$summary_status" \
+    --stage "${VALIDATOR_DEPLOY_STAGE:-unknown}" \
+    --ledger "$VALIDATOR_RESTART_TIMING_FILE" \
+    --restart-invocation-id "$VALIDATOR_RESTART_INVOCATION_ID" \
+    --release-attempts "$VALIDATOR_RELEASE_ATTEMPTS_USED" \
+    --candidate-sha "$candidate_sha" \
+    "${shutdown_flag[@]}" >/dev/null 2>&1 || true
+  return 0
+}
+
 if [ "$VALIDATOR_RESTART_TIMING_INITIALIZED" = "1" ]; then
   record_validator_restart_timing "controller_reexec"
 else
@@ -294,6 +323,7 @@ cleanup() {
     record_validator_restart_timing "$VALIDATOR_DEPLOY_STAGE" "failed" \
       >/dev/null 2>&1 || true
   fi
+  emit_validator_restart_sentry_summary "$status"
   if [ "$VALIDATOR_DESTRUCTIVE_PHASE_STARTED" = "1" ] \
       && [ "$VALIDATOR_RESTART_COMPLETED" != "1" ]; then
     echo "Cleaning incomplete validator activation" >&2
@@ -379,6 +409,8 @@ if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
     VALIDATOR_RESTART_REEXECED=1 \
     VALIDATOR_COORDINATED_EXPECTED_COMMIT="$REQUESTED_COORDINATED_EXPECTED_COMMIT" \
     VALIDATOR_RESTART_STARTED_EPOCH="$VALIDATOR_RESTART_STARTED_EPOCH" \
+    VALIDATOR_RESTART_INVOCATION_ID="${VALIDATOR_RESTART_INVOCATION_ID:-validator-${VALIDATOR_RESTART_STARTED_EPOCH:-unknown}-$$}" \
+    VALIDATOR_RELEASE_ATTEMPTS_USED="${VALIDATOR_RELEASE_ATTEMPTS_USED:-0}" \
     VALIDATOR_RESTART_TIMING_DIR="$VALIDATOR_RESTART_TIMING_DIR" \
     VALIDATOR_RESTART_TIMING_FILE="$VALIDATOR_RESTART_TIMING_FILE" \
     VALIDATOR_RESTART_TIMING_INITIALIZED="$VALIDATOR_RESTART_TIMING_INITIALIZED" \
@@ -456,6 +488,8 @@ follow_superseding_validator_release() {
     VALIDATOR_RESTART_CONTROLLER_ROOT="$VALIDATOR_RESTART_CONTROLLER_ROOT" \
     VALIDATOR_HOST_RESTART_SCRIPT="$VALIDATOR_HOST_RESTART_SCRIPT" \
     VALIDATOR_RESTART_STARTED_EPOCH="$VALIDATOR_RESTART_STARTED_EPOCH" \
+    VALIDATOR_RESTART_INVOCATION_ID="${VALIDATOR_RESTART_INVOCATION_ID:-validator-${VALIDATOR_RESTART_STARTED_EPOCH:-unknown}-$$}" \
+    VALIDATOR_RELEASE_ATTEMPTS_USED="${VALIDATOR_RELEASE_ATTEMPTS_USED:-0}" \
     VALIDATOR_RESTART_TIMING_DIR="$VALIDATOR_RESTART_TIMING_DIR" \
     VALIDATOR_RESTART_TIMING_FILE="$VALIDATOR_RESTART_TIMING_FILE" \
     VALIDATOR_RESTART_TIMING_INITIALIZED="$VALIDATOR_RESTART_TIMING_INITIALIZED" \
@@ -708,6 +742,7 @@ echo "Acquiring the independently built V2 release channel"
 VALIDATOR_DEPLOY_STAGE="release_acquisition"
 VALIDATOR_V2_RELEASE_READY=0
 for attempt in $(seq 1 300); do
+  VALIDATOR_RELEASE_ATTEMPTS_USED="$attempt"
   if ! follow_superseding_validator_release; then
     echo "Approved validator release authority is not stable yet; waiting inside the valid restart invocation (${attempt}/300)"
     sleep 12

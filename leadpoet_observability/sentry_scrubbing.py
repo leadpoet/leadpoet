@@ -69,6 +69,44 @@ _ALLOWED_EVENT_KEYS = frozenset(
     }
 )
 
+_ALLOWED_TRANSACTION_KEYS = frozenset(
+    {
+        "contexts",
+        "dist",
+        "environment",
+        "event_id",
+        "measurements",
+        "platform",
+        "release",
+        "server_name",
+        "spans",
+        "start_timestamp",
+        "tags",
+        "timestamp",
+        "transaction",
+        "transaction_info",
+        "type",
+    }
+)
+
+_ALLOWED_SPAN_KEYS = frozenset(
+    {
+        "data",
+        "description",
+        "exclusive_time",
+        "op",
+        "origin",
+        "parent_span_id",
+        "same_process_as_parent",
+        "span_id",
+        "start_timestamp",
+        "status",
+        "tags",
+        "timestamp",
+        "trace_id",
+    }
+)
+
 # Module prefixes whose events keep type/stack/logger but lose message
 # content entirely. A prefix matches itself and any dotted submodule.
 # These are the surfaces where messages can embed trajectory/training IP or
@@ -160,6 +198,15 @@ _SECRET_MARKERS: Tuple[str, ...] = (
     "begin private key",
     "begin rsa private key",
     "begin openssh private key",
+    "raw_attestation",
+    "attestation_document",
+    "receipt_graph",
+    "credential_envelope",
+    "raw_envelope",
+    "complete_signature",
+    "private_nonce",
+    "plaintext_secret",
+    "ciphertext_payload",
 )
 
 _EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
@@ -223,7 +270,11 @@ _CONTENT_KEY_RE = re.compile(
     r"|benchmark|sealed|page_content|\blead(s)?\b|lead_|_lead"
     r"|\bcontact(s)?\b|contact_|_contact|email|phone|linkedin|payload"
     r"|body\b|content\b|candidate_code|source_code|\bdiff\b|diff_|_diff"
-    r"|patch\b|messages\b|provider_response|response_text",
+    r"|patch\b|messages\b|provider_response|response_text"
+    r"|raw_.*(?:attestation|signature|nonce|envelope)"
+    r"|attestation_(?:document|payload)|receipt_graph"
+    r"|(?:complete|full)_signature|credential_envelope"
+    r"|ciphertext|plaintext_secret|private_nonce",
     re.I,
 )
 
@@ -525,8 +576,80 @@ def scrub_event(
         if isinstance(event.get(envelope), dict):
             event[envelope] = _scrub_object(event[envelope])
 
-    # Performance tracing is disabled; a caller-controlled transaction name
-    # adds no error-triage value and may carry request or model identifiers.
+    # Error events never retain caller-controlled transaction names. Manual
+    # operational transactions use the separate strict transaction allowlist.
     event.pop("transaction", None)
 
+    return event
+
+
+def scrub_transaction_event(
+    event: Any,
+    extra_prefixes: Iterable[str] = (),
+    redact_all: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Scrub manually-created operational transactions and spans.
+
+    Auto-instrumentation is disabled in the bootstrap. This allowlist exists
+    solely for static Leadpoet operation/stage names and bounded metadata.
+    """
+
+    if not isinstance(event, dict):
+        return None
+    event.pop("request", None)
+    event.pop("user", None)
+    event.pop("breadcrumbs", None)
+    for key in tuple(event):
+        if key not in _ALLOWED_TRANSACTION_KEYS:
+            event.pop(key, None)
+
+    transaction = event.get("transaction")
+    if isinstance(transaction, str):
+        event["transaction"] = (
+            REDACTED_PROTECTED
+            if redact_all
+            else scrub_text(transaction, 160)
+        )
+    transaction_info = event.get("transaction_info")
+    if isinstance(transaction_info, dict):
+        event["transaction_info"] = _scrub_object(transaction_info)
+
+    spans = event.get("spans")
+    if isinstance(spans, list):
+        kept = []
+        for raw_span in spans[:MAX_LIST_ITEMS]:
+            if not isinstance(raw_span, dict):
+                continue
+            span = {
+                key: value
+                for key, value in raw_span.items()
+                if key in _ALLOWED_SPAN_KEYS
+            }
+            for key in ("description", "op", "origin", "status"):
+                if isinstance(span.get(key), str):
+                    span[key] = (
+                        REDACTED_PROTECTED
+                        if redact_all and key == "description"
+                        else scrub_text(span[key], 160)
+                    )
+            for envelope in ("data", "tags"):
+                if isinstance(span.get(envelope), dict):
+                    span[envelope] = _scrub_object(span[envelope])
+            kept.append(span)
+        event["spans"] = kept
+
+    for envelope in ("contexts", "measurements", "tags"):
+        if isinstance(event.get(envelope), dict):
+            event[envelope] = _scrub_object(event[envelope])
+    for key in (
+        "dist",
+        "environment",
+        "event_id",
+        "platform",
+        "release",
+        "server_name",
+        "type",
+    ):
+        if isinstance(event.get(key), str):
+            event[key] = scrub_text(event[key], 200)
     return event

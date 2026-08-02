@@ -13,8 +13,15 @@ import socket
 import json
 import os
 import subprocess
+import time
 import zlib
 from typing import Dict, Any, Optional
+from leadpoet_observability import (
+    capture_failure,
+    failure_code_for_exception,
+    record_retry,
+    record_stage,
+)
 
 # vsock constants
 AF_VSOCK = 40
@@ -189,6 +196,8 @@ class ValidatorEnclaveClient:
         
         # Create vsock socket
         sock = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
+        started_at = time.monotonic()
+        command = str(request.get("command") or "unknown")[:100]
         try:
             sock.settimeout(timeout_seconds)
 
@@ -229,8 +238,66 @@ class ValidatorEnclaveClient:
             if response.get("status") == "error":
                 raise RuntimeError(f"Enclave error: {response.get('error')}")
             
+            record_stage(
+                component="validator",
+                stage="enclave_rpc",
+                status="passed",
+                duration_seconds=time.monotonic() - started_at,
+                operation=command,
+                logical_bytes=len(request_data) + len(response_data),
+                frame_limit_bytes=MAX_RPC_RESPONSE_FRAME_BYTES,
+                runtime_sha=(
+                    os.environ.get("GITHUB_SHA")
+                    or os.environ.get("GIT_COMMIT")
+                    or ""
+                ),
+            )
             return response
-            
+
+        except Exception as exc:
+            code = failure_code_for_exception(
+                exc,
+                default="runtime.enclave_relay_unavailable",
+            )
+            deterministic = code in {
+                "weight.ancestry_bounds_exceeded",
+                "weight.authoritative_result_invalid",
+                "weight.bundle_divergence",
+            }
+            if deterministic:
+                capture_failure(
+                    code,
+                    component="validator",
+                    stage="enclave_rpc",
+                    exception=exc,
+                    terminal=True,
+                    retryable=False,
+                    fail_closed=True,
+                    operation=command,
+                    frame_limit_bytes=MAX_RPC_RESPONSE_FRAME_BYTES,
+                    runtime_sha=(
+                        os.environ.get("GITHUB_SHA")
+                        or os.environ.get("GIT_COMMIT")
+                        or ""
+                    ),
+                )
+            else:
+                record_retry(
+                    code,
+                    component="validator",
+                    stage="enclave_rpc",
+                    attempt=1,
+                    attempts=1,
+                    operation=command,
+                    exception_class=type(exc).__name__,
+                    runtime_sha=(
+                        os.environ.get("GITHUB_SHA")
+                        or os.environ.get("GIT_COMMIT")
+                        or ""
+                    ),
+                )
+            raise
+
         finally:
             sock.close()
     

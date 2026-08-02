@@ -37,6 +37,8 @@ GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS="${GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTE
 GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS="${GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS:-5}"
 GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT="${GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT:-}"
 GATEWAY_RESTART_STARTED_EPOCH="${GATEWAY_RESTART_STARTED_EPOCH:-$(date -u +%s)}"
+GATEWAY_RESTART_INVOCATION_ID="${GATEWAY_RESTART_INVOCATION_ID:-gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$}"
+GATEWAY_RELEASE_ATTEMPTS_USED="${GATEWAY_RELEASE_ATTEMPTS_USED:-0}"
 GATEWAY_RESTART_TIMING_DIR="${GATEWAY_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
 GATEWAY_RESTART_TIMING_FILE="${GATEWAY_RESTART_TIMING_FILE:-$GATEWAY_RESTART_TIMING_DIR/gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$.jsonl}"
 GATEWAY_RESTART_TIMING_INITIALIZED="${GATEWAY_RESTART_TIMING_INITIALIZED:-0}"
@@ -81,11 +83,14 @@ export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HO
 export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:-$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT/validator-runtime}"
 GATEWAY_DEPLOY_STAGE="${GATEWAY_DEPLOY_STAGE:-bootstrap}"
 GATEWAY_DEPLOY_COMPLETED=0
+GATEWAY_DESTRUCTIVE_PHASE_STARTED="${GATEWAY_DESTRUCTIVE_PHASE_STARTED:-0}"
 GATEWAY_PREFLIGHT_TREE=""
 GATEWAY_HOST_MEMORY_GUARD_PATH="${GATEWAY_HOST_MEMORY_GUARD_PATH:-$GATEWAY_HOST_MEMORY_GUARD_DEFAULT}"
 LEADPOET_DOCKER_OPERATION_LOCK_FILE="${LEADPOET_DOCKER_OPERATION_LOCK_FILE:-/home/ec2-user/.config/leadpoet/docker-operation-v2.lock}"
 REQUESTED_GATEWAY_DEPLOY_COMMIT="${GATEWAY_DEPLOY_COMMIT:-}"
 unset GATEWAY_DEPLOY_COMMIT
+export GATEWAY_RESTART_INVOCATION_ID
+export LEADPOET_RESTART_INVOCATION_ID="$GATEWAY_RESTART_INVOCATION_ID"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -189,6 +194,33 @@ PY
   then
     echo "WARNING: gateway restart timing event could not be recorded: $stage" >&2
   fi
+  return 0
+}
+
+emit_gateway_restart_sentry_summary() {
+  local status="$1" candidate_sha summary_status shutdown_flag=()
+  command -v timeout >/dev/null 2>&1 || return 0
+  [ -x "$GATEWAY_PYTHON_BIN" ] || return 0
+  [ -r "$LEADPOET_REPO_ROOT/leadpoet_observability/sentry_cli.py" ] || return 0
+  candidate_sha="${GATEWAY_DEPLOY_SHA:-${PREPARED_GATEWAY_SHA:-}}"
+  summary_status="failed"
+  [ "$status" -eq 0 ] && summary_status="passed"
+  if [ "${GATEWAY_DESTRUCTIVE_PHASE_STARTED:-0}" = "1" ]; then
+    shutdown_flag=(--shutdown-started)
+  fi
+  PYTHONPATH="$LEADPOET_REPO_ROOT" timeout 2 \
+    "$GATEWAY_PYTHON_BIN" -m leadpoet_observability.sentry_cli \
+    restart-summary \
+    --component gateway \
+    --status "$summary_status" \
+    --stage "${GATEWAY_DEPLOY_STAGE:-unknown}" \
+    --ledger "$GATEWAY_RESTART_TIMING_FILE" \
+    --restart-invocation-id "$GATEWAY_RESTART_INVOCATION_ID" \
+    --release-attempts "$GATEWAY_RELEASE_ATTEMPTS_USED" \
+    --candidate-sha "$candidate_sha" \
+    --evidence "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG" \
+    --evidence "$GATEWAY_ANCESTRY_CHECKPOINT_LOG" \
+    "${shutdown_flag[@]}" >/dev/null 2>&1 || true
   return 0
 }
 
@@ -412,6 +444,8 @@ follow_superseding_gateway_release() {
     GATEWAY_RESTART_LOCK_FILE="$GATEWAY_RESTART_LOCK_FILE" \
     GATEWAY_RESTART_RECOVERY_LOCK_FILE="$GATEWAY_RESTART_RECOVERY_LOCK_FILE" \
     GATEWAY_RESTART_STARTED_EPOCH="$GATEWAY_RESTART_STARTED_EPOCH" \
+    GATEWAY_RESTART_INVOCATION_ID="${GATEWAY_RESTART_INVOCATION_ID:-gateway-${GATEWAY_RESTART_STARTED_EPOCH:-unknown}-$$}" \
+    GATEWAY_RELEASE_ATTEMPTS_USED="${GATEWAY_RELEASE_ATTEMPTS_USED:-0}" \
     GATEWAY_RESTART_TIMING_DIR="$GATEWAY_RESTART_TIMING_DIR" \
     GATEWAY_RESTART_TIMING_FILE="$GATEWAY_RESTART_TIMING_FILE" \
     GATEWAY_RESTART_TIMING_INITIALIZED="$GATEWAY_RESTART_TIMING_INITIALIZED" \
@@ -987,6 +1021,7 @@ on_gateway_restart_exit() {
     record_gateway_restart_timing "${GATEWAY_DEPLOY_STAGE:-unknown}" "failed" \
       >/dev/null 2>&1 || true
   fi
+  emit_gateway_restart_sentry_summary "$status"
   cancel_gateway_offline_artifact_prepare
   cancel_gateway_ancestry_checkpoint_bootstrap
   rm -f -- "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT" 2>/dev/null || true
@@ -1973,6 +2008,7 @@ export GATEWAY_DEPLOY_STAGE
 record_gateway_restart_timing "release_wait_started"
 V2_RELEASE_READY=0
 for attempt in $(seq 1 300); do
+  GATEWAY_RELEASE_ATTEMPTS_USED="$attempt"
   if ! follow_superseding_gateway_release; then
     echo "Approved release authority is not stable yet; waiting inside the valid restart invocation (${attempt}/300)"
     sleep 12
@@ -2270,6 +2306,8 @@ rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
 
 echo "Stopping existing gateway and Research Lab worker processes"
+GATEWAY_DESTRUCTIVE_PHASE_STARTED=1
+export GATEWAY_DESTRUCTIVE_PHASE_STARTED
 sudo systemctl stop leadpoet-tee-egress-forwarder.service 2>/dev/null || true
 sudo systemctl reset-failed leadpoet-tee-egress-forwarder.service 2>/dev/null || true
 pkill -9 -f "python3 main.py" 2>/dev/null || true
@@ -2339,6 +2377,9 @@ exec env \
   GATEWAY_PYTHON_BIN="$GATEWAY_PYTHON_BIN" \
   GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT="$GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT" \
   GATEWAY_RESTART_STARTED_EPOCH="$GATEWAY_RESTART_STARTED_EPOCH" \
+  GATEWAY_RESTART_INVOCATION_ID="${GATEWAY_RESTART_INVOCATION_ID:-gateway-${GATEWAY_RESTART_STARTED_EPOCH:-unknown}-$$}" \
+  GATEWAY_RELEASE_ATTEMPTS_USED="${GATEWAY_RELEASE_ATTEMPTS_USED:-0}" \
+  GATEWAY_DESTRUCTIVE_PHASE_STARTED="$GATEWAY_DESTRUCTIVE_PHASE_STARTED" \
   GATEWAY_RESTART_TIMING_DIR="$GATEWAY_RESTART_TIMING_DIR" \
   GATEWAY_RESTART_TIMING_FILE="$GATEWAY_RESTART_TIMING_FILE" \
   GATEWAY_RESTART_TIMING_INITIALIZED="$GATEWAY_RESTART_TIMING_INITIALIZED" \

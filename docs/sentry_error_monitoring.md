@@ -1,152 +1,127 @@
-# Sentry error monitoring (opt-in, fail-closed)
+# Sentry host observability (opt-in and non-authoritative)
 
-One integration covers every Leadpoet HOST runtime. It exists to answer
-"what is breaking and where" — crashes, unhandled thread/task failures, and
-ERROR-level logs — while guaranteeing that trajectory/training data,
-prompts, benchmarks, model internals, and contact data never leave the
-process. It follows the same philosophy as the OTel bootstrap in
-`TELEMETRY.md`: namespaced env gate, explicit options, swallowed wiring
-failures, code-enforced boundary with a CI guard.
+One integration covers Leadpoet **host** runtimes. It captures terminal errors
+at 100% and a conservative sample of explicitly named operational stage
+transactions. It does not auto-instrument HTTP, databases, chain clients, or
+frameworks, and it never runs inside Nitro enclaves.
 
-## Coverage map
+Sentry is diagnostic only. Missing configuration, a missing SDK, collector
+latency/outage, scrubber failure, or any SDK exception must not change startup,
+restart, scoring, attestation, weight submission, finalization, or cleanup.
+Export fails closed by dropping an event that cannot be scrubbed; application
+behavior fails open by preserving the original result or exception.
 
-`init_sentry(component=...)` is wired at every host entry point:
+The restart and canonical-weight event matrix is in
+[`sentry_restart_weight_instrumentation.md`](sentry_restart_weight_instrumentation.md).
 
-| component | entry point |
+## Coverage
+
+`init_sentry(component=...)` is wired at these host entry points:
+
+| Component | Entry point |
 |---|---|
-| `gateway` | `gateway/main.py` (host FastAPI process; also covers in-process fulfillment/qualification/TEE-host code) |
-| `validator` | `neurons/validator.py` (all container modes; mode is tagged) |
-| `miner` | `neurons/miner.py` |
-| `auditor-validator` | `neurons/auditor_validator.py` |
-| `research-lab-worker` | `gateway/research_lab/worker_process.py` (hosted + scoring kinds, kind tagged) |
-| `research-lab-scoring-worker` | `scripts/run_research_lab_scoring_worker.py` |
-| `research-lab-scoring-worker-fleet` | `scripts/run_research_lab_scoring_worker_fleet.py` |
+| Gateway | `gateway/main.py` |
+| Primary validator | `neurons/validator.py` |
+| Auditor validator | `neurons/auditor_validator.py` |
+| Miner | `neurons/miner.py` |
+| Research Lab workers | `gateway/research_lab/worker_process.py`, `scripts/run_research_lab_scoring_worker.py`, `scripts/run_research_lab_scoring_worker_fleet.py` |
+| Release/PCR0 host tools | `validator_tee/host/gateway_pcr0_builder.py`, `validator_tee/host/runtime_v2_bootstrap.py`, `validator_tee/host/verify_release_gate_v2.py` |
+| Restart controllers | `gw_restart.sh`, `validator_restart.sh` through the bounded `sentry_cli` bridge |
+| Attested release | `.github/workflows/attested-v2-release.yml` through the same release-summary bridge |
 
-Coverage inside a process is automatic, not per-module: the SDK's
-excepthook (crashes), threading hook (thread crashes), and stdlib logging
-integration (any `logging` / `bt.logging` / `uvicorn.error` record at
-ERROR or above becomes an event; asyncio's default handler logs unretrieved
-task exceptions at ERROR) reach every package in the codebase. One-off
-operator scripts can opt in with the same two lines wrapped in
-`try/except`.
+The host-side vsock and chain relay boundaries report sanitized state through
+the initialized parent process. `validator_tee/enclave/*` and the measured
+gateway enclave packages never import Sentry and never gain network egress.
+`tests/test_sentry_boundary_guard.py` enforces this boundary.
 
-**Never wired**: the attested enclaves (`validator_tee/enclave/*`,
-`gateway/tee` enclave service). Enclave images are measured (PCR0) and
-have no general egress. `tests/test_sentry_boundary_guard.py` fails CI if
-Sentry references reach an enclave surface or enclave requirements file.
-
-## Enabling
+## Configuration
 
 ```bash
 export LEADPOET_SENTRY_ENABLED=1
 export LEADPOET_SENTRY_DSN="https://<key>@<org>.ingest.sentry.io/<project>"
-# optional
-export LEADPOET_SENTRY_ENVIRONMENT=production      # default: production
-export LEADPOET_SENTRY_RELEASE=<git sha>           # default: exact deploy SHA, then git HEAD
-export LEADPOET_SENTRY_EXTRA_PROTECTED_MODULES=    # comma-separated prefixes; widens redaction only
-export LEADPOET_SENTRY_MESSAGE_MODE=scrub          # or redact-all
+
+# Optional
+export LEADPOET_SENTRY_ENVIRONMENT=production
+export LEADPOET_SENTRY_RELEASE=<exact-40-character-git-sha>
+export LEADPOET_SENTRY_TRACES_SAMPLE_RATE=0.01
+export LEADPOET_SENTRY_EXTRA_PROTECTED_MODULES=
+export LEADPOET_SENTRY_MESSAGE_MODE=scrub  # or redact-all
+export LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS=900
 ```
 
-Both gate variables are required; anything less is a complete no-op.
-Ambient `SENTRY_*` variables are never read — every option is passed to
-the SDK explicitly. `sentry-sdk` itself is optional at runtime: when the
-package is missing the wiring logs one line and stays off, so no runtime
-grows a hard dependency.
+Both `LEADPOET_SENTRY_ENABLED` and `LEADPOET_SENTRY_DSN` are required.
+Anything less is a complete no-op. Ambient `SENTRY_*` variables are ignored;
+all SDK options are explicit. Successful manual traces default to 1% and are
+clamped to 10%. Terminal errors are not sampled. The SDK shutdown flush is
+bounded to one second.
 
-## What an event may contain — and all it may ever contain
+GitHub release jobs use the same namespaced settings, with the DSN supplied by
+the `LEADPOET_SENTRY_DSN` Actions secret. Every reporting step uses
+`if: always()` and `continue-on-error: true`.
 
-- exception **type**, exception **module**, stack **file/function/line**
-- logger name, level, timestamp, `leadpoet.component` (+ low-cardinality
-  tags such as validator mode / worker kind), environment, release SHA,
-  server name
-- for non-protected surfaces only: the exception/log **message** after
-  regex scrubbing (emails, formatted phone numbers, secret-shaped values,
-  URL query strings removed; 500-char cap). UUID/sha256 join keys survive
-  verbatim so events stay correlatable with `execution_trace:` /
-  `cost_ledger:` refs.
+## Allowed data
 
-## What can never leave the process
+Only allowlisted, bounded operational fields may be exported:
 
-Enforced by `leadpoet_observability/sentry_scrubbing.py` (fail closed: an
-event that cannot be fully scrubbed is dropped, never sent partially):
+- exact public release SHA and sanitized component/role/stage/status;
+- deterministic release/restart/weight correlation IDs;
+- hashes for bundle, weights, snapshot, receipts, publication, extrinsic,
+  vector, finalization, PCR0, boot identity, and manifests;
+- netuid, epoch/block counters, UID, attempts, deadlines, durations, counts,
+  byte limits, response class, HTTP/RPC/SQL error codes, and fail-closed state;
+- exception type/module and stack file/function/line; infrastructure messages
+  only after scrubbing.
 
-1. **Unknown top-level fields** — dropped against a pinned, error-only event
-   allowlist so future/custom SDK payload shapes cannot silently expand export.
+No telemetry path performs an extra Supabase or chain read solely for Sentry.
 
-2. **Stack local variables** — `include_local_variables=False` at init, and
-   any residual `vars` deleted per frame. Locals are the main vector for
-   prompt/lead/trajectory payload leakage.
-3. **Source context lines** — stripped from every frame. An error inside
-   LLM-generated candidate code or a private model artifact must not export
-   source text.
-4. **Messages from protected surfaces** — events whose logger, exception
-   module, or ANY stack frame touches `research_lab`,
-   `gateway.research_lab`, `gateway.fulfillment`, `gateway.qualification`,
-   `qualification`, `leadpoet_verifier`, `miner_models`,
-   `validator_models`, lead-processing code, host model/provider/scoring
-   executors, the lead pool/queue utils, or the `langfuse` /
-   `openai` / `anthropic` / `openrouter` / `firecrawl` clients keep type,
-   stack, and logger but have every message replaced with
-   `[leadpoet-redacted:protected-surface]`. One protected link redacts the
-   whole exception chain (a wrapper message can embed the inner error).
-   Breadcrumb capture is disabled outright.
-5. **Request/user envelopes, cookies, argv, request bodies** — dropped;
-   `send_default_pii=False`, `max_request_body_size="never"`.
-6. **Performance data** — no tracing, no profiling, no sessions; errors
-   only. Framework/DB/HTTP auto-instrumentation stays disabled so query
-   and payload data never becomes event context.
-7. **Secrets** — key-based redaction (`api_key`, `token`, `authorization`,
-   `service_role`, …) plus value-shape redaction (`sk-*`, AKIA keys, JWTs,
-   bearer tokens) plus the marker vocabulary shared with
-   `research_lab/observability/redaction.py` (`judge_prompt`,
-   `hidden_benchmark`, `icp_plaintext`, …). Dynamic mapping keys, wallet
-   names/addresses, hotkeys, coldkeys, seed phrases, and mnemonics are also
-   removed.
+## Data that cannot leave
 
-Repeated log records are coalesced before event construction, and all events
-with the same scrubbed type, message shape, and stack are coalesced in each
-process for five minutes and assigned the same safe Sentry fingerprint across
-processes. The first event is always sent, distinct failure signatures remain
-independent, and each cache is bounded to 1,024 signatures.
+`leadpoet_observability/sentry_scrubbing.py` enforces a strict top-level and
+field allowlist. It removes or redacts:
 
-`LEADPOET_SENTRY_MESSAGE_MODE=redact-all` redacts every message and drops
-every breadcrumb regardless of surface, for maximum privacy at the cost of
-triage detail. The environment can only widen redaction, never narrow it.
+1. Request/user envelopes, cookies, argv, request bodies, query strings, and
+   unknown future SDK fields.
+2. Stack locals and source context lines.
+3. Provider/customer payloads, prompts, trajectories, benchmarks, candidate or
+   private-model source, scoring inputs, and complete vectors/receipt graphs.
+4. Credentials, tokens, API keys, service-role keys, AWS/SSH material, proxy
+   credentials, private keys, seed phrases, nonces, full signatures, raw
+   attestation documents, plaintext/ciphertext envelopes, and contact data.
+5. Raw wallet/hotkey/coldkey identities; only non-reversible join hashes are
+   accepted.
 
-## The boundary is code-enforced
+Messages touching protected model, provider, Research Lab, qualification,
+fulfillment, lead-processing, or LLM-client surfaces are replaced wholesale by
+`[leadpoet-redacted:protected-surface]`. `redact-all` applies that policy to
+every message and drops breadcrumbs.
 
-`tests/test_sentry_boundary_guard.py` fails CI when:
+Manual transactions use static Leadpoet names and separately scrubbed span
+data. Automatic trace propagation is disabled, so correlation metadata never
+enters signed requests or trusted V2 artifacts.
 
-- `sentry_sdk` is imported or initialized anywhere outside
-  `leadpoet_observability/sentry_bootstrap.py`;
-- an enclave requirements file (`validator_tee/enclave/requirements.txt`,
-  `gateway/tee/requirements*.{txt,in,lock}`) gains `sentry-sdk`, or any
-  enclave/TEE module references the bootstrap;
-- a non-namespaced `SENTRY_*` variable is referenced anywhere;
-- the hard-off init options (`include_local_variables=False`,
-  `send_default_pii=False`, `max_request_body_size="never"`,
-  `traces_sample_rate=None`, `auto_enabling_integrations=False`, the
-  scrubbing hooks) drift out of the bootstrap;
-- the scrubber stops stripping source context/locals or dropping the
-  request envelope and argv;
-- a wired entry point loses its `init_sentry(` call.
+## Event volume and grouping
 
-## Operational notes
+- Retries are warning breadcrumbs, not error events.
+- One terminal logical failure is emitted after retry exhaustion.
+- A bounded process-local limiter suppresses duplicate wrapper/rethrow events.
+- Semantic fingerprints use component + stage + stable failure code.
+- Generic ERROR logging still captures unexpected failures, with a five-minute
+  bounded coalescer for repeated message shapes.
+- Up to 50 breadcrumbs are retained and unknown payload fields are dropped.
 
-- **Activation is a release decision.** `sentry-sdk` is in
-  `requirements.txt`/`setup.py`, so first activation on gateway/validator
-  hosts changes installed dependency sets and follows the normal V2
-  release/rehearsal process. The code paths themselves are inert no-ops
-  until the env gate is set, so shipping them changes no behavior.
-- The tested SDK version is pinned (`sentry-sdk==2.66.1`) so a dependency
-  update cannot silently change integrations or payload behavior.
-- The DSN is not committed anywhere; it lives in the operator env files
-  (e.g. the gateway env secret). Rotate it like any ingest token, and
-  agree the vendor's retention / no-training / deletion terms in writing —
-  the same caveat as `TELEMETRY.md`.
-- Wiring failures never break a runtime; look for
-  `leadpoet_sentry_wiring_skipped` / `leadpoet_sentry_init_skipped` /
-  `leadpoet_sentry_scrub_failed` lines (exception class names only) in
-  process logs.
-- Public auditors and external miners simply leave the gate unset; nothing
-  initializes and nothing is sent.
+## Boundary enforcement
+
+CI fails if:
+
+- `sentry_sdk` is imported outside `sentry_bootstrap.py`;
+- enclave code or enclave requirements reference Sentry;
+- non-namespaced `SENTRY_*` variables appear;
+- payload/PII/source/local capture is enabled;
+- framework auto-instrumentation, trace propagation, profiling, or sessions are
+  enabled;
+- scrub hooks, manual trace sampling bounds, or host entry-point initialization
+  disappear;
+- an incident failure code is missing from the instrumentation matrix.
+
+The tested dependency remains pinned at `sentry-sdk==2.66.1`. Public auditors
+and miners can leave the gate unset, in which case all helpers are inert.

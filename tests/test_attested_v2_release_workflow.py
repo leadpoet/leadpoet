@@ -17,11 +17,21 @@ def test_release_workflow_reclaims_all_unreferenced_docker_state():
         'sudo rm -rf -- \\\n            "$RUNNER_TEMP/offline-artifacts"'
     ) == 4
     assert source.count('"$RUNNER_TEMP/release-evidence" \\') == 4
-    assert source.count("if: always()") == 2
     assert "Reclaim gateway-parent storage after evidence generation" in source
     assert "Reclaim validator-parent storage after evidence generation" in source
     assert "docker image prune --force" not in source
     assert "docker builder prune --force" not in source
+
+    workflow = yaml.safe_load(source)
+    cleanup_steps = [
+        step
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        if str(step.get("name", "")).startswith("Reclaim ")
+        and "storage after evidence generation" in str(step.get("name", ""))
+    ]
+    assert len(cleanup_steps) == 2
+    assert all(step.get("if") == "always()" for step in cleanup_steps)
 
 
 def test_release_workflow_is_valid_yaml():

@@ -14,6 +14,7 @@ from leadpoet_observability.sentry_scrubbing import (
     scrub_breadcrumb,
     scrub_event,
     scrub_text,
+    scrub_transaction_event,
 )
 
 
@@ -231,6 +232,33 @@ def test_wallet_material_is_redacted_from_messages():
 def test_secret_marker_redacts_whole_string():
     assert scrub_text("request with sk-or-v1-abc123 embedded") == REDACTED
     assert scrub_text("dump of judge_prompt follows") == REDACTED
+    assert scrub_text("raw_attestation={seeded-document}") == REDACTED
+    assert scrub_text("receipt_graph={seeded-graph}") == REDACTED
+
+
+def test_attestation_and_signature_payload_fields_are_never_exported():
+    scrubbed = scrub_event(
+        {
+            "extra": {
+                "attestation_document": "seeded-attestation",
+                "receipt_graph": {"receipts": ["seeded-receipt"]},
+                "complete_signature": "seeded-signature",
+                "private_nonce": "seeded-nonce",
+                "credential_envelope": "seeded-envelope",
+                "signature_algorithm": "ed25519",
+            }
+        }
+    )["extra"]
+    encoded = repr(scrubbed)
+    for secret in (
+        "seeded-attestation",
+        "seeded-receipt",
+        "seeded-signature",
+        "seeded-nonce",
+        "seeded-envelope",
+    ):
+        assert secret not in encoded
+    assert scrubbed["signature_algorithm"] == "ed25519"
 
 
 def test_url_query_strings_are_stripped():
@@ -257,6 +285,38 @@ def test_long_messages_are_truncated():
     scrubbed = scrub_text("x" * (MAX_MESSAGE_LENGTH * 3), MAX_MESSAGE_LENGTH)
     assert scrubbed.endswith(TRUNCATION_SUFFIX)
     assert len(scrubbed) == MAX_MESSAGE_LENGTH + len(TRUNCATION_SUFFIX)
+
+
+def test_manual_transaction_is_allowlisted_bounded_and_redacted():
+    hotkey = "5" + "E" * 47
+    event = {
+        "type": "transaction",
+        "transaction": "gateway.weight.bundle_generation",
+        "request": {"data": "sk-or-v1-never-send"},
+        "user": {"id": hotkey},
+        "future_payload": "raw provider response",
+        "spans": [
+            {
+                "op": "leadpoet.weight",
+                "description": "validator.signing",
+                "data": {
+                    "bundle_hash": "sha256:" + "ab" * 32,
+                    "wallet_hotkey": hotkey,
+                    "authorization": "Bearer secret-material",
+                },
+            }
+        ]
+        * 200,
+    }
+    scrubbed = scrub_transaction_event(event)
+    encoded = repr(scrubbed)
+    assert "request" not in scrubbed
+    assert "user" not in scrubbed
+    assert "future_payload" not in scrubbed
+    assert len(scrubbed["spans"]) < 200
+    assert hotkey not in encoded
+    assert "secret-material" not in encoded
+    assert scrubbed["transaction"] == "gateway.weight.bundle_generation"
 
 
 # ---------------------------------------------------------------------------

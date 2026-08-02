@@ -34,10 +34,20 @@ for _path in (_ATTESTED_RUNTIME_DIR, _PACKAGE_PARENT):
 # gateway host process is still captured. Complete no-op unless the
 # LEADPOET_SENTRY_* environment gate is satisfied.
 try:
-    from leadpoet_observability import init_sentry
+    from leadpoet_observability import (
+        capture_failure as _capture_sentry_failure,
+        configure_sentry_context as _configure_sentry_context,
+        init_sentry,
+        record_retry as _record_sentry_retry,
+        record_stage as _record_sentry_stage,
+    )
 
     init_sentry(component="gateway")
 except Exception as _sentry_exc:  # error monitoring must never break startup
+    _capture_sentry_failure = lambda *args, **kwargs: False
+    _configure_sentry_context = lambda *args, **kwargs: {}
+    _record_sentry_retry = lambda *args, **kwargs: None
+    _record_sentry_stage = lambda *args, **kwargs: None
     print(
         "leadpoet_sentry_wiring_skipped error=%s" % type(_sentry_exc).__name__,
         flush=True,
@@ -46,6 +56,13 @@ except Exception as _sentry_exc:  # error monitoring must never break startup
 # Import configuration
 from gateway.build_info import get_build_info
 from gateway.config import BUILD_ID, GITHUB_COMMIT, TIMESTAMP_TOLERANCE_SECONDS
+
+_configure_sentry_context(
+    component="gateway",
+    physical_role="gateway-coordinator",
+    runtime_sha=GITHUB_COMMIT,
+    restart_invocation_id=os.environ.get("LEADPOET_RESTART_INVOCATION_ID"),
+)
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 # Import models
@@ -133,6 +150,19 @@ async def lifespan(app: FastAPI):
         print("✅ Receipt integrity ENABLED (canonical hashes + TEE-signed audit events)")
         print("   No transparency-signing private key exists in the parent process")
     except Exception as e:
+        _capture_sentry_failure(
+            "runtime.enclave_relay_unavailable",
+            component="gateway",
+            stage="coordinator_event_signer_startup",
+            exception=e,
+            terminal=True,
+            retryable=False,
+            fail_closed=True,
+            runtime_sha=GITHUB_COMMIT,
+            restart_invocation_id=os.environ.get(
+                "LEADPOET_RESTART_INVOCATION_ID"
+            ),
+        )
         print(f"❌ CRITICAL ERROR initializing coordinator event signer: {e}")
         print("   Refusing gateway startup without Nitro-backed event authority")
         raise RuntimeError("coordinator-enclave event signer initialization failed") from e
@@ -180,23 +210,66 @@ async def lifespan(app: FastAPI):
             break  # Success - exit retry loop
             
         except asyncio.TimeoutError:
+            _record_sentry_retry(
+                "authority.dependency_unreadable",
+                component="gateway",
+                stage="chain_runtime_startup",
+                attempt=attempt,
+                attempts=MAX_RETRIES,
+                dependency="finney",
+                runtime_sha=GITHUB_COMMIT,
+            )
             print(f"⚠️  Attempt {attempt}/{MAX_RETRIES}: Connection timeout after {TIMEOUT_SECONDS}s")
             if attempt < MAX_RETRIES:
                 wait_time = 5 * attempt  # Progressive backoff: 5s, 10s, 15s
                 print(f"   Retrying in {wait_time}s...")
                 await asyncio.sleep(wait_time)
             else:
+                _capture_sentry_failure(
+                    "authority.dependency_unreadable",
+                    component="gateway",
+                    stage="chain_runtime_startup",
+                    terminal=True,
+                    retryable=True,
+                    fail_closed=True,
+                    attempts=MAX_RETRIES,
+                    dependency="finney",
+                    timed_out=True,
+                    runtime_sha=GITHUB_COMMIT,
+                )
                 print(f"❌ FATAL: Failed to connect to {BITTENSOR_NETWORK} after {MAX_RETRIES} attempts")
                 print(f"   Check network connectivity and Bittensor chain status")
                 raise RuntimeError(f"AsyncSubtensor connection failed after {MAX_RETRIES} attempts")
                 
         except Exception as e:
+            _record_sentry_retry(
+                "authority.dependency_unreadable",
+                component="gateway",
+                stage="chain_runtime_startup",
+                attempt=attempt,
+                attempts=MAX_RETRIES,
+                dependency="finney",
+                exception_class=type(e).__name__,
+                runtime_sha=GITHUB_COMMIT,
+            )
             print(f"⚠️  Attempt {attempt}/{MAX_RETRIES}: Connection error: {e}")
             if attempt < MAX_RETRIES:
                 wait_time = 5 * attempt
                 print(f"   Retrying in {wait_time}s...")
                 await asyncio.sleep(wait_time)
             else:
+                _capture_sentry_failure(
+                    "authority.dependency_unreadable",
+                    component="gateway",
+                    stage="chain_runtime_startup",
+                    exception=e,
+                    terminal=True,
+                    retryable=True,
+                    fail_closed=True,
+                    attempts=MAX_RETRIES,
+                    dependency="finney",
+                    runtime_sha=GITHUB_COMMIT,
+                )
                 print(f"❌ FATAL: Failed to initialize AsyncSubtensor: {e}")
                 raise
     
@@ -649,6 +722,18 @@ async def v2_authority_health():
             verify_v2_runtime_ready(),
         )
     except Exception as exc:
+        _record_sentry_retry(
+            "runtime.enclave_relay_unavailable",
+            component="gateway",
+            stage="gateway_v2_authority_health",
+            attempt=1,
+            attempts=1,
+            exception_class=type(exc).__name__,
+            runtime_sha=GITHUB_COMMIT,
+            restart_invocation_id=os.environ.get(
+                "LEADPOET_RESTART_INVOCATION_ID"
+            ),
+        )
         raise HTTPException(
             status_code=503,
             detail=f"authoritative V2 runtime is not ready: {type(exc).__name__}",

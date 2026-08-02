@@ -34,10 +34,40 @@ if _REPO_ROOT not in sys.path:
 # This precedes the Python auto-update handoff so creation/exec failures are
 # visible. Public auditors simply leave the environment gate unset.
 try:
-    from leadpoet_observability import init_sentry as _init_sentry
+    from leadpoet_observability import (
+        capture_failure as _capture_sentry_failure,
+        configure_sentry_context as _configure_sentry_context,
+        failure_code_for_exception as _sentry_failure_code_for_exception,
+        hash_identifier as _sentry_hash_identifier,
+        init_sentry as _init_sentry,
+        record_retry as _record_sentry_retry,
+        record_stage as _record_sentry_stage,
+        weight_correlation_id as _weight_correlation_id,
+    )
 
     _init_sentry(component="auditor-validator")
+    _configure_sentry_context(
+        component="auditor-validator",
+        physical_role="audit-validator",
+        validator_role="auditor",
+        runtime_sha=(
+            os.environ.get("GITHUB_SHA")
+            or os.environ.get("GIT_COMMIT")
+            or os.environ.get("LEADPOET_SENTRY_RELEASE")
+            or ""
+        ),
+        restart_invocation_id=os.environ.get(
+            "LEADPOET_RESTART_INVOCATION_ID"
+        ),
+    )
 except Exception as _sentry_exc:  # must never break the auditor
+    _capture_sentry_failure = lambda *args, **kwargs: False
+    _configure_sentry_context = lambda *args, **kwargs: {}
+    _sentry_failure_code_for_exception = lambda exception, default: default
+    _sentry_hash_identifier = lambda value: "unavailable"
+    _record_sentry_retry = lambda *args, **kwargs: None
+    _record_sentry_stage = lambda *args, **kwargs: None
+    _weight_correlation_id = lambda **kwargs: None
     print(
         "leadpoet_sentry_wiring_skipped error=%s" % type(_sentry_exc).__name__,
         flush=True,
@@ -106,6 +136,7 @@ if [ "$CURRENT_COMMIT" != "$EXPECTED_COMMIT" ]; then
     echo "❌ Auditor startup refused: HEAD differs from fetched origin/main"
     exit 1
 fi
+export LEADPOET_SENTRY_RELEASE="$CURRENT_COMMIT"
 
 echo "✅ Repository updated and verified"
 echo "   Current commit: ${CURRENT_COMMIT:0:12}"
@@ -212,7 +243,7 @@ import logging
 import base64
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import bittensor as bt
 import aiohttp
@@ -329,12 +360,176 @@ def _audit_event(event: str, *, level: int = logging.INFO, **fields: Any) -> Non
             "auditor_event %s",
             json.dumps(payload, sort_keys=True, separators=(",", ":")),
         )
+        _bridge_audit_event_to_sentry(str(event), fields)
     except Exception as exc:  # pragma: no cover - diagnostics must be inert
         logger.warning(
             "auditor_event_serialization_failure event=%s type=%s",
             str(event)[:80],
             type(exc).__name__,
         )
+
+
+_AUDITOR_RETRY_EVENTS = {
+    "archive_connect_failure": "authority.dependency_unreadable",
+    "bundle_fetch_exception": "weight.gateway_endpoint_unavailable",
+    "bundle_fetch_http_failure": "weight.gateway_endpoint_unavailable",
+    "bundle_fetch_not_found": "weight.gateway_endpoint_unavailable",
+    "bundle_fetch_route_absent": "weight.gateway_endpoint_unavailable",
+    "exact_block_verification_failure": "authority.dependency_unreadable",
+    "exact_block_verification_retry": "authority.dependency_unreadable",
+    "live_subtensor_reconnect_failure": "weight.chain_transport_poisoned",
+    "release_evidence_fetch_failure": "release.channel_unavailable",
+    "submission_attempt_exception": "weight.chain_transport_poisoned",
+    "submission_chain_confirmation_failure": "weight.finalization_missing",
+    "submission_confirmation_failure": "weight.finalization_missing",
+    "submission_duplicate_check_failure": "weight.finalization_missing",
+    "submission_transport_reconnect": "weight.chain_transport_poisoned",
+    "verified_bundle_cache_write_failure": "authority.dependency_unreadable",
+    "verified_bundle_fallback_observer_failure": "authority.dependency_unreadable",
+}
+
+_AUDITOR_TERMINAL_EVENTS = {
+    "authority_cryptographic_verification_failure": "weight.bundle_divergence",
+    "authority_unavailable": "weight.gateway_endpoint_unavailable",
+    "authority_verification_failure": "weight.bundle_divergence",
+    "release_evidence_verification_failure": "weight.authoritative_result_invalid",
+    "submission_exception": "weight.finalization_missing",
+    "submission_failed": "weight.finalization_missing",
+    "submission_prepare_failure": "weight.authoritative_result_invalid",
+    "submission_refused": "weight.finalization_missing",
+    "verified_bundle_fallback_unavailable": "weight.gateway_endpoint_unavailable",
+}
+
+_AUDITOR_RETRY_EVENTS["submission_window_authority_unavailable"] = (
+    "weight.gateway_endpoint_unavailable"
+)
+
+_AUDITOR_SUCCESS_EVENTS = {
+    "archive_connect_success",
+    "authority_cryptographic_verification_success",
+    "authority_verification_success",
+    "bundle_fetch_success",
+    "exact_block_verification_success",
+    "release_evidence_fetch_success",
+    "startup_ready",
+    "submission_chain_confirmation",
+    "submission_success",
+    "submission_window_authority_ready",
+}
+
+
+def _bridge_audit_event_to_sentry(event: str, fields: Mapping[str, Any]) -> None:
+    """Mirror stable auditor milestones without changing durable audit logs."""
+
+    try:
+        runtime_sha = str(
+            os.environ.get("GITHUB_SHA")
+            or os.environ.get("GIT_COMMIT")
+            or os.environ.get("LEADPOET_SENTRY_RELEASE")
+            or ""
+        ).lower()
+        epoch_id = fields.get("epoch")
+        netuid = fields.get("netuid")
+        bundle_hash = fields.get("bundle_hash")
+        validator_identity = fields.get("hotkey") or fields.get(
+            "validator_hotkey"
+        )
+        context = dict(fields)
+        context.pop("error", None)
+        context.pop("chain_message", None)
+        context.pop("attempt", None)
+        context.pop("attempts", None)
+        context.pop("elapsed_ms", None)
+        context.pop("hotkey", None)
+        context.pop("validator_hotkey", None)
+        context["epoch_id"] = epoch_id
+        context.pop("epoch", None)
+        if fields.get("submission_epoch") is not None:
+            context["submission_epoch_id"] = fields.get("submission_epoch")
+        context.pop("submission_epoch", None)
+        if fields.get("authority_epoch") is not None:
+            context["authority_epoch_id"] = fields.get("authority_epoch")
+        context.pop("authority_epoch", None)
+        if fields.get("observed_last_update") is not None:
+            context["last_update"] = fields.get("observed_last_update")
+        context.pop("observed_last_update", None)
+        if fields.get("expected_destination_count") is not None:
+            context["expected_vector_count"] = fields.get(
+                "expected_destination_count"
+            )
+        context.pop("expected_destination_count", None)
+        if fields.get("observed_destination_count") is not None:
+            context["observed_vector_count"] = fields.get(
+                "observed_destination_count"
+            )
+        context.pop("observed_destination_count", None)
+        context.update(
+            {
+                "runtime_sha": runtime_sha,
+                "physical_role": "audit-validator",
+                "validator_role": "auditor",
+                "weight_correlation_id": _weight_correlation_id(
+                    runtime_sha=runtime_sha,
+                    netuid=netuid,
+                    epoch_id=epoch_id,
+                    bundle_hash=bundle_hash,
+                ),
+            }
+        )
+        if validator_identity:
+            context["validator_id_hash"] = _sentry_hash_identifier(
+                validator_identity
+            )
+        if event in _AUDITOR_RETRY_EVENTS:
+            code = _AUDITOR_RETRY_EVENTS[event]
+            if fields.get("error"):
+                code = _sentry_failure_code_for_exception(
+                    RuntimeError(str(fields["error"])[:500]),
+                    default=code,
+                )
+            _record_sentry_retry(
+                code,
+                component="auditor-validator",
+                stage=event,
+                attempt=int(fields.get("attempt") or 1),
+                attempts=fields.get("attempts"),
+                **context,
+            )
+        elif event in _AUDITOR_TERMINAL_EVENTS:
+            code = _AUDITOR_TERMINAL_EVENTS[event]
+            if fields.get("error"):
+                code = _sentry_failure_code_for_exception(
+                    RuntimeError(str(fields["error"])[:500]),
+                    default=code,
+                )
+            _capture_sentry_failure(
+                code,
+                component="auditor-validator",
+                stage=event,
+                terminal=True,
+                retryable=code in {
+                    "weight.gateway_endpoint_unavailable",
+                    "authority.dependency_unreadable",
+                    "weight.chain_transport_poisoned",
+                },
+                fail_closed=True,
+                **context,
+            )
+        elif event in _AUDITOR_SUCCESS_EVENTS:
+            elapsed_ms = fields.get("elapsed_ms")
+            _record_sentry_stage(
+                component="auditor-validator",
+                stage=event,
+                status="passed",
+                duration_seconds=(
+                    float(elapsed_ms) / 1000.0
+                    if isinstance(elapsed_ms, (int, float))
+                    else None
+                ),
+                **context,
+            )
+    except BaseException:
+        pass
 
 
 def _default_gateway_url(environ=None) -> str:
@@ -573,6 +768,15 @@ class AuditorValidator:
         self.config = config
         self.gateway_url = _normalize_gateway_url(gateway_url)
         self.wallet = bt.Wallet(config=config)
+        _configure_sentry_context(
+            component="auditor-validator",
+            physical_role="audit-validator",
+            validator_role="auditor",
+            validator_id_hash=_sentry_hash_identifier(
+                self.wallet.hotkey.ss58_address
+            ),
+            netuid=int(config.netuid),
+        )
         # Auditors run from a plain repository checkout with no provisioning
         # step, so fall back to the repo's public SN71 cutover manifest when
         # the operator has not configured one explicitly.
@@ -611,6 +815,8 @@ class AuditorValidator:
         self.should_exit = False
         self.last_submitted_epoch = None
         self.last_authority_epoch = None
+        self._sentry_submission_window_epoch = None
+        self._sentry_submission_bundle_hash = None
         self.consecutive_errors = 0
         self.max_consecutive_errors = 5  # Reconnect subtensor after this many errors
         self._submission_lock = None
@@ -3033,6 +3239,52 @@ class AuditorValidator:
                 current_block = epoch_state.current_block
                 current_epoch = epoch_state.workflow_epoch_id
                 block_within_epoch = epoch_state.epoch_block
+                if (
+                    last_metagraph_epoch_identity is not None
+                    and epoch_state.identity != last_metagraph_epoch_identity
+                ):
+                    missed_epoch = self._sentry_submission_window_epoch
+                    if (
+                        missed_epoch is not None
+                        and self.last_submitted_epoch != missed_epoch
+                    ):
+                        runtime_sha = str(
+                            os.environ.get("GITHUB_SHA")
+                            or os.environ.get("GIT_COMMIT")
+                            or os.environ.get("LEADPOET_SENTRY_RELEASE")
+                            or ""
+                        ).lower()
+                        _capture_sentry_failure(
+                            "weight.finalization_missing",
+                            component="auditor-validator",
+                            stage="auditor_epoch_finalization_deadline",
+                            terminal=True,
+                            retryable=False,
+                            fail_closed=True,
+                            epoch_id=missed_epoch,
+                            netuid=int(self.config.netuid),
+                            uid=getattr(self, "uid", None),
+                            validator_role="auditor",
+                            validator_id_hash=_sentry_hash_identifier(
+                                self.wallet.hotkey.ss58_address
+                            ),
+                            runtime_sha=runtime_sha,
+                            bundle_hash=self._sentry_submission_bundle_hash,
+                            weight_correlation_id=_weight_correlation_id(
+                                runtime_sha=runtime_sha,
+                                netuid=int(self.config.netuid),
+                                epoch_id=missed_epoch,
+                                bundle_hash=self._sentry_submission_bundle_hash,
+                            ),
+                            missing_milestones=[
+                                "auditor_broadcast",
+                                "auditor_finalization",
+                                "auditor_last_update",
+                                "auditor_vector_readback",
+                            ],
+                        )
+                    self._sentry_submission_window_epoch = None
+                    self._sentry_submission_bundle_hash = None
                 
                 print(
                     f"\r⏱️  Block {current_block} | Epoch {current_epoch} | "
@@ -3044,6 +3296,7 @@ class AuditorValidator:
                 # Check if it's time to submit weights
                 if epoch_state.deadline_reached(WEIGHT_SUBMISSION_BLOCK):
                     if self.last_submitted_epoch != current_epoch:
+                        self._sentry_submission_window_epoch = current_epoch
                         _audit_event(
                             "submission_window_entered",
                             epoch=int(current_epoch),
@@ -3147,6 +3400,9 @@ class AuditorValidator:
                             destination_count=len(
                                 weights_data.get("uids", [])
                             ),
+                        )
+                        self._sentry_submission_bundle_hash = weights_data.get(
+                            "bundle_hash"
                         )
                         print("✅ Auditor verification passed")
                         

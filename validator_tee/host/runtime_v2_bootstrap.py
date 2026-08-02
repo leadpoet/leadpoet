@@ -7,6 +7,13 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+from leadpoet_observability import (
+    capture_failure,
+    failure_code_for_exception,
+    init_sentry,
+    record_stage,
+)
+
 from gateway.tee.release_manifest_v2 import validate_release_manifest
 from Leadpoet.utils.subnet_epoch import (
     load_subnet_epoch_cutover,
@@ -93,7 +100,27 @@ def configure_validator_runtime_v2(
         configuration,
         expected_config_hash,
     )
-    boot_verifier(boot, expected_pcr0=validator["pcr0"])
+    try:
+        boot_verifier(boot, expected_pcr0=validator["pcr0"])
+    except Exception as exc:
+        failure_code = failure_code_for_exception(
+            exc,
+            default="restart.terminal_failure",
+        )
+        capture_failure(
+            failure_code,
+            component="validator",
+            stage="validator_boot_attestation_verification",
+            exception=exc,
+            terminal=True,
+            retryable=False,
+            fail_closed=True,
+            runtime_sha=validator["commit_sha"],
+            expected_pcr0_hash=validator["pcr0"],
+            observed_pcr0_hash=boot.get("pcr0"),
+            boot_identity_hash=boot.get("boot_identity_hash"),
+        )
+        raise
     expected = {
         "commit_sha": validator["commit_sha"],
         "build_manifest_hash": validator["app_manifest_hash"],
@@ -113,6 +140,15 @@ def configure_validator_runtime_v2(
         raise ValidatorRuntimeBootstrapV2Error(
             "validator boot identity readback mismatch"
         )
+    record_stage(
+        component="validator",
+        stage="validator_boot_attestation_verification",
+        status="passed",
+        runtime_sha=validator["commit_sha"],
+        expected_pcr0_hash=validator["pcr0"],
+        observed_pcr0_hash=boot.get("pcr0"),
+        boot_identity_hash=boot.get("boot_identity_hash"),
+    )
     return {
         "configuration": configuration,
         "configuration_hash": expected_config_hash,
@@ -133,6 +169,7 @@ def _load(path: Path) -> Dict[str, Any]:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    init_sentry(component="validator-runtime-bootstrap")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--validator-release", type=Path, required=True)
     parser.add_argument("--gateway-release", type=Path, required=True)

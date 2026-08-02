@@ -3,6 +3,7 @@
 # Auto-update trigger: 2025-12-12
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 # CRITICAL: Add project root to sys.path BEFORE any local imports
@@ -17,10 +18,47 @@ os.environ["PYTHONWARNINGS"] = "ignore::UserWarning"
 # Wired before the heavy imports below so import-time crashes are captured.
 # Complete no-op unless the LEADPOET_SENTRY_* environment gate is satisfied.
 try:
-    from leadpoet_observability import init_sentry as _init_sentry
+    from leadpoet_observability import (
+        capture_failure as _capture_sentry_failure,
+        configure_sentry_context as _configure_sentry_context,
+        failure_code_for_exception as _sentry_failure_code_for_exception,
+        hash_identifier as _sentry_hash_identifier,
+        init_sentry as _init_sentry,
+        record_retry as _record_sentry_retry,
+        record_stage as _record_sentry_stage,
+        sentry_stage as _sentry_stage,
+        weight_correlation_id as _weight_correlation_id,
+    )
 
     _init_sentry(component="validator")
+    _configure_sentry_context(
+        component="validator",
+        physical_role="primary-validator",
+        validator_role="primary",
+        runtime_sha=(
+            os.environ.get("GITHUB_SHA")
+            or os.environ.get("GIT_COMMIT")
+            or ""
+        ),
+        restart_invocation_id=os.environ.get(
+            "LEADPOET_RESTART_INVOCATION_ID"
+        ),
+    )
 except Exception as _sentry_exc:  # must never break the validator
+    _capture_sentry_failure = lambda *args, **kwargs: False
+    _configure_sentry_context = lambda *args, **kwargs: {}
+    _sentry_failure_code_for_exception = (
+        lambda exception, default: default
+    )
+    _sentry_hash_identifier = lambda value: "unavailable"
+    _record_sentry_retry = lambda *args, **kwargs: None
+    _record_sentry_stage = lambda *args, **kwargs: None
+    _weight_correlation_id = lambda **kwargs: None
+
+    @contextmanager
+    def _sentry_stage(*args, **kwargs):
+        yield None
+
     print(
         "leadpoet_sentry_wiring_skipped error=%s" % type(_sentry_exc).__name__,
         flush=True,
@@ -4340,6 +4378,29 @@ class Validator(BaseValidatorNeuron):
         gateway_url = str(os.environ.get("VALIDATOR_V2_GATEWAY_URL") or "").strip()
         if not gateway_url:
             raise RuntimeError("VALIDATOR_V2_GATEWAY_URL is required for V2 weight authority")
+        runtime_sha = str(
+            os.environ.get("GITHUB_SHA")
+            or os.environ.get("GIT_COMMIT")
+            or ""
+        ).lower()
+        telemetry = {
+            "runtime_sha": runtime_sha,
+            "netuid": int(self.config.netuid),
+            "epoch_id": int(snapshot["epoch_id"]),
+            "epoch_block": int(epoch_state.epoch_block),
+            "validator_role": "primary",
+            "validator_id_hash": _sentry_hash_identifier(
+                self.wallet.hotkey.ss58_address
+            ),
+            "restart_invocation_id": os.environ.get(
+                "LEADPOET_RESTART_INVOCATION_ID"
+            ),
+            "weight_correlation_id": _weight_correlation_id(
+                runtime_sha=runtime_sha,
+                netuid=int(self.config.netuid),
+                epoch_id=int(snapshot["epoch_id"]),
+            ),
+        }
         expected_chain = str(
             os.environ.get(
                 "EXPECTED_CHAIN",
@@ -4368,21 +4429,74 @@ class Validator(BaseValidatorNeuron):
                     f"epoch={recovery.epoch_id}; continuing current epoch"
                 )
         journal = self._weight_publication_journal_v2
-        publication = await prepare_authoritative_weight_publication_v2(
-            calculation_snapshot=snapshot,
-            host_uids=host_uids,
-            host_weights=host_weights,
-            validator_hotkey=self.wallet.hotkey.ss58_address,
-            allocation_hash=allocation_hash,
-            leaderboard_window_start=leaderboard_window_start,
-            leaderboard_window_end=leaderboard_window_end,
-            gateway_url=gateway_url,
-            expected_chain=expected_chain,
-            client=self._validator_v2_client,
-            before_publish=journal.record_prepared,
-        )
+        try:
+            with _sentry_stage(
+                component="validator",
+                operation="weight_submission",
+                stage="bundle_retrieval_verification_publication",
+                **telemetry,
+            ):
+                publication = await prepare_authoritative_weight_publication_v2(
+                    calculation_snapshot=snapshot,
+                    host_uids=host_uids,
+                    host_weights=host_weights,
+                    validator_hotkey=self.wallet.hotkey.ss58_address,
+                    allocation_hash=allocation_hash,
+                    leaderboard_window_start=leaderboard_window_start,
+                    leaderboard_window_end=leaderboard_window_end,
+                    gateway_url=gateway_url,
+                    expected_chain=expected_chain,
+                    client=self._validator_v2_client,
+                    before_publish=journal.record_prepared,
+                )
+        except Exception as exc:
+            code = _sentry_failure_code_for_exception(
+                exc,
+                default="weight.gateway_endpoint_unavailable",
+            )
+            _capture_sentry_failure(
+                code,
+                component="validator",
+                stage="bundle_retrieval_verification_publication",
+                exception=exc,
+                terminal=True,
+                retryable=code in {
+                    "weight.gateway_endpoint_unavailable",
+                    "authority.dependency_unreadable",
+                },
+                fail_closed=True,
+                **telemetry,
+            )
+            raise
         journal.record_published(publication["publication"])
         self._last_authoritative_weight_v2 = publication
+        published_authority = publication.get("compact_submission") or publication.get(
+            "published_bundle"
+        )
+        bundle_hash = (
+            published_authority.get("bundle_hash")
+            if isinstance(published_authority, Mapping)
+            else None
+        )
+        if isinstance(published_authority, Mapping) and not bundle_hash:
+            published_weight_result = published_authority.get("weight_result")
+            if isinstance(published_weight_result, Mapping):
+                bundle_hash = published_weight_result.get("bundle_hash")
+        telemetry.update(
+            {
+                "bundle_hash": bundle_hash,
+                "weights_hash": publication.get("weights_hash"),
+                "weight_submission_event_hash": publication.get(
+                    "weight_submission_event_hash"
+                ),
+                "weight_correlation_id": _weight_correlation_id(
+                    runtime_sha=runtime_sha,
+                    netuid=int(self.config.netuid),
+                    epoch_id=int(snapshot["epoch_id"]),
+                    bundle_hash=bundle_hash,
+                ),
+            }
+        )
         print(
             "   ✅ Authoritative V2 gateway bundle persisted: "
             f"{publication['weight_submission_event_hash'][:20]}..."
@@ -4390,26 +4504,84 @@ class Validator(BaseValidatorNeuron):
         sdk_uids, sdk_weights = _canonical_sdk_weight_vector(
             publication["enclave_response"]["weight_result"]
         )
-        submitted = await self._set_weights_until_epoch_end(
-            epoch_id=int(snapshot["epoch_id"]),
-            subnet_epoch_index=epoch_state.subnet_epoch_index,
-            uids=sdk_uids,
-            weights=sdk_weights,
-            weight_authorization_id=publication["weight_authorization_id"],
-            weight_submission_event_hash=publication[
-                "weight_submission_event_hash"
-            ],
-            on_signed_extrinsic=journal.record_signed,
-        )
+        with _sentry_stage(
+            component="validator",
+            operation="weight_submission",
+            stage="sign_broadcast_inclusion",
+            **telemetry,
+        ):
+            submitted = await self._set_weights_until_epoch_end(
+                epoch_id=int(snapshot["epoch_id"]),
+                subnet_epoch_index=epoch_state.subnet_epoch_index,
+                uids=sdk_uids,
+                weights=sdk_weights,
+                weight_authorization_id=publication["weight_authorization_id"],
+                weight_submission_event_hash=publication[
+                    "weight_submission_event_hash"
+                ],
+                on_signed_extrinsic=journal.record_signed,
+            )
         if not submitted:
+            _capture_sentry_failure(
+                "weight.finalization_missing",
+                component="validator",
+                stage="sign_broadcast_inclusion",
+                terminal=True,
+                retryable=False,
+                fail_closed=True,
+                blocked_stages=[
+                    "chain_finalization",
+                    "last_update_readback",
+                    "vector_readback",
+                    "gateway_finalization_persistence",
+                ],
+                **telemetry,
+            )
             return False
         finalization_scan_id = journal.reserve_finalization_scan()
-        finalization = await finalize_authoritative_weight_publication_v2(
-            prepared_publication=publication,
-            finalization_scan_id=finalization_scan_id,
-            validator_hotkey=self.wallet.hotkey.ss58_address,
-            gateway_url=gateway_url,
-            client=self._validator_v2_client,
+        try:
+            with _sentry_stage(
+                component="validator",
+                operation="weight_submission",
+                stage="finalization_last_update_vector_readback",
+                **telemetry,
+            ):
+                finalization = await finalize_authoritative_weight_publication_v2(
+                    prepared_publication=publication,
+                    finalization_scan_id=finalization_scan_id,
+                    validator_hotkey=self.wallet.hotkey.ss58_address,
+                    gateway_url=gateway_url,
+                    client=self._validator_v2_client,
+                )
+        except Exception as exc:
+            _capture_sentry_failure(
+                "weight.finalization_missing",
+                component="validator",
+                stage="finalization_last_update_vector_readback",
+                exception=exc,
+                terminal=True,
+                retryable=False,
+                fail_closed=True,
+                **telemetry,
+            )
+            raise
+        acknowledgment = (
+            finalization.get("acknowledgment")
+            if isinstance(finalization, Mapping)
+            else None
+        )
+        if not isinstance(acknowledgment, Mapping):
+            acknowledgment = {}
+        _record_sentry_stage(
+            component="validator",
+            stage="finalization_last_update_vector_readback",
+            status="passed",
+            finalized_block=acknowledgment.get("finalized_block"),
+            extrinsic_hash=acknowledgment.get("extrinsic_hash"),
+            weight_finalization_event_hash=acknowledgment.get(
+                "weight_finalization_event_hash"
+            ),
+            **telemetry,
         )
         self._last_authoritative_weight_finalization_v2 = finalization
         journal.clear(
@@ -4705,6 +4877,20 @@ class Validator(BaseValidatorNeuron):
                         )
                         return False
                     attempt += 1
+                    if attempt > 1:
+                        _record_sentry_retry(
+                            "weight.finalization_missing",
+                            component="validator",
+                            stage="chain_submission_attempt",
+                            attempt=attempt,
+                            epoch_id=epoch_id,
+                            netuid=int(self.config.netuid),
+                            validator_role="primary",
+                            weight_submission_event_hash=(
+                                weight_submission_event_hash
+                            ),
+                            retryable=True,
+                        )
                     try:
                         sdk_result = failed_source.set_weights(
                             netuid=self.config.netuid,
@@ -4717,16 +4903,91 @@ class Validator(BaseValidatorNeuron):
                         )
                     except Exception as exc:
                         if not _is_subtensor_connection_error(exc):
+                            _capture_sentry_failure(
+                                _sentry_failure_code_for_exception(
+                                    exc,
+                                    default="weight.sdk_response_invalid",
+                                ),
+                                component="validator",
+                                stage="sdk_broadcast",
+                                exception=exc,
+                                terminal=True,
+                                retryable=False,
+                                fail_closed=True,
+                                epoch_id=epoch_id,
+                                netuid=int(self.config.netuid),
+                                validator_role="primary",
+                                attempt=attempt,
+                                weight_submission_event_hash=(
+                                    weight_submission_event_hash
+                                ),
+                            )
                             raise
                         transport_error = exc
+                        _record_sentry_retry(
+                            "weight.chain_transport_poisoned",
+                            component="validator",
+                            stage="sdk_broadcast",
+                            attempt=attempt,
+                            epoch_id=epoch_id,
+                            netuid=int(self.config.netuid),
+                            validator_role="primary",
+                            exception_class=type(exc).__name__,
+                            weight_submission_event_hash=(
+                                weight_submission_event_hash
+                            ),
+                        )
                         print(
                             f"   ⚠️ Weight submission attempt {attempt} hit a chain "
                             f"transport error ({type(exc).__name__}); reconnecting "
                             f"within epoch {epoch_id}"
                         )
                         break
-                    outcome = ExtrinsicOutcome.from_sdk(sdk_result)
+                    try:
+                        outcome = ExtrinsicOutcome.from_sdk(sdk_result)
+                    except Exception as exc:
+                        _capture_sentry_failure(
+                            "weight.sdk_response_invalid",
+                            component="validator",
+                            stage="sdk_response_normalization",
+                            exception=exc,
+                            terminal=True,
+                            retryable=False,
+                            fail_closed=True,
+                            epoch_id=epoch_id,
+                            netuid=int(self.config.netuid),
+                            validator_role="primary",
+                            attempt=attempt,
+                            sdk_version=str(getattr(bt, "__version__", "unknown")),
+                            sdk_response_class=type(sdk_result).__name__,
+                            weight_submission_event_hash=(
+                                weight_submission_event_hash
+                            ),
+                        )
+                        raise
                     if outcome.success:
+                        latest_signature = (
+                            signing_context.extrinsic_signature_results[-1]
+                            if signing_context.extrinsic_signature_results
+                            else {}
+                        )
+                        if not isinstance(latest_signature, Mapping):
+                            latest_signature = {}
+                        _record_sentry_stage(
+                            component="validator",
+                            stage="sdk_submission_finalized",
+                            status="passed",
+                            epoch_id=epoch_id,
+                            netuid=int(self.config.netuid),
+                            validator_role="primary",
+                            attempt=attempt,
+                            sdk_version=str(getattr(bt, "__version__", "unknown")),
+                            sdk_response_class=type(sdk_result).__name__,
+                            extrinsic_hash=latest_signature.get("extrinsic_hash"),
+                            weight_submission_event_hash=(
+                                weight_submission_event_hash
+                            ),
+                        )
                         signed_results.extend(
                             signing_context.extrinsic_signature_results
                         )
@@ -4750,6 +5011,21 @@ class Validator(BaseValidatorNeuron):
                             f"   ⏹️ Epoch {epoch_id} ended before the weight "
                             "submission was accepted"
                         )
+                        _capture_sentry_failure(
+                            "weight.finalization_missing",
+                            component="validator",
+                            stage="chain_submission_epoch_deadline",
+                            terminal=True,
+                            retryable=False,
+                            fail_closed=True,
+                            epoch_id=epoch_id,
+                            netuid=int(self.config.netuid),
+                            validator_role="primary",
+                            attempts=attempt,
+                            weight_submission_event_hash=(
+                                weight_submission_event_hash
+                            ),
+                        )
                         return False
 
             signed_results.extend(signing_context.extrinsic_signature_results)
@@ -4768,6 +5044,20 @@ class Validator(BaseValidatorNeuron):
                 reason="weight_submission_transport",
             )
             if not reconnected or self.subtensor is failed_source:
+                _capture_sentry_failure(
+                    "weight.chain_transport_poisoned",
+                    component="validator",
+                    stage="sdk_transport_reconnect_exhausted",
+                    exception=transport_error,
+                    terminal=True,
+                    retryable=True,
+                    fail_closed=True,
+                    epoch_id=epoch_id,
+                    netuid=int(self.config.netuid),
+                    validator_role="primary",
+                    attempt=attempt,
+                    weight_submission_event_hash=weight_submission_event_hash,
+                )
                 raise transport_error
             if not await self._weight_submission_epoch_is_current(
                 epoch_id=epoch_id,
@@ -4850,6 +5140,29 @@ class Validator(BaseValidatorNeuron):
             assert research_lab_guard is not None
             if research_lab_guard.get("abort_chain_submission"):
                 reason = research_lab_guard.get("reason")
+                _capture_sentry_failure(
+                    "weight.allocation_authority_missing",
+                    component="validator",
+                    stage="research_lab_allocation_guard",
+                    terminal=True,
+                    retryable=False,
+                    fail_closed=True,
+                    epoch_id=current_epoch,
+                    epoch_block=blocks_into_epoch,
+                    netuid=int(self.config.netuid),
+                    validator_role="primary",
+                    runtime_sha=(
+                        os.environ.get("GITHUB_SHA")
+                        or os.environ.get("GIT_COMMIT")
+                        or ""
+                    ),
+                    blocked_stages=[
+                        "bundle_generation",
+                        "signing",
+                        "broadcast",
+                        "finalization",
+                    ],
+                )
                 bt.logging.critical(
                     "weight_submission_blocked_by_guard "
                     f"epoch={current_epoch} reason={reason}"
@@ -5664,6 +5977,28 @@ class Validator(BaseValidatorNeuron):
             )
             
             if result:
+                last_authoritative = getattr(
+                    self, "_last_authoritative_weight_v2", None
+                )
+                published_authority = (
+                    last_authoritative.get("compact_submission")
+                    or last_authoritative.get("published_bundle")
+                    or {}
+                    if isinstance(last_authoritative, Mapping)
+                    else {}
+                )
+                if not isinstance(published_authority, Mapping):
+                    published_authority = {}
+                _record_sentry_stage(
+                    component="validator",
+                    stage="primary_weight_submission_complete",
+                    status="passed",
+                    epoch_id=current_epoch,
+                    epoch_block=blocks_into_epoch,
+                    netuid=int(self.config.netuid),
+                    validator_role="primary",
+                    bundle_hash=published_authority.get("bundle_hash"),
+                )
                 print(f"✅ Successfully submitted weights to Bittensor chain")
                 print(f"{'='*80}\n")
                 
@@ -5690,6 +6025,42 @@ class Validator(BaseValidatorNeuron):
                 return False
                 
         except Exception as e:
+            epoch_value = locals().get("current_epoch")
+            code = _sentry_failure_code_for_exception(
+                e,
+                default="weight.finalization_missing",
+            )
+            _capture_sentry_failure(
+                code,
+                component="validator",
+                stage="primary_weight_submission",
+                exception=e,
+                terminal=True,
+                retryable=code in {
+                    "weight.gateway_endpoint_unavailable",
+                    "authority.dependency_unreadable",
+                    "weight.chain_transport_poisoned",
+                },
+                fail_closed=True,
+                epoch_id=epoch_value,
+                epoch_block=locals().get("blocks_into_epoch"),
+                netuid=int(self.config.netuid),
+                validator_role="primary",
+                runtime_sha=(
+                    os.environ.get("GITHUB_SHA")
+                    or os.environ.get("GIT_COMMIT")
+                    or ""
+                ),
+                weight_correlation_id=_weight_correlation_id(
+                    runtime_sha=(
+                        os.environ.get("GITHUB_SHA")
+                        or os.environ.get("GIT_COMMIT")
+                        or ""
+                    ),
+                    netuid=int(self.config.netuid),
+                    epoch_id=epoch_value,
+                ),
+            )
             bt.logging.error(f"Error submitting weights at epoch end: {e}")
             import traceback
             bt.logging.error(traceback.format_exc())

@@ -606,23 +606,29 @@ def _migration_seed_rows(
     normalized: dict[str, list[dict[str, Any]]] = {}
     for target in sorted(expected):
         rows = raw[target]
+        expected_count = (
+            2
+            if target == "research_lab_finalized_allocation_epochs_v2"
+            else 1
+        )
         if (
             not isinstance(rows, list)
-            or len(rows) != 1
-            or not isinstance(rows[0], dict)
+            or len(rows) != expected_count
+            or any(not isinstance(row, dict) for row in rows)
         ):
             raise RuntimeError(
                 "migration-backed allocation authority seed is invalid: %s"
                 % target
             )
-        row = dict(rows[0])
         expected_columns = relation_columns.get(target)
-        if expected_columns is None or set(row) != set(expected_columns):
+        if expected_columns is None or any(
+            set(row) != set(expected_columns) for row in rows
+        ):
             raise RuntimeError(
                 "migration-backed allocation authority seed columns differ: %s"
                 % target
             )
-        normalized[target] = [row]
+        normalized[target] = [dict(row) for row in rows]
     return normalized
 
 
@@ -719,6 +725,26 @@ class LocalPostgRESTState:
                 raise ValueError(
                     "local PostgREST settlement backlog predates cutover"
                 )
+            source_rows = [
+                row
+                for row in self.rows.get(
+                    "research_lab_finalized_allocation_epochs_v2", []
+                )
+                if int(row.get("netuid", -1)) == int(cutover["netuid"])
+                and int(row.get("epoch_id", -1)) == first_epoch
+            ]
+            if self.rows.get("research_lab_finalized_allocation_epochs_v2"):
+                if len(source_rows) != 1:
+                    raise ValueError(
+                        "local PostgREST settlement activation source differs"
+                    )
+                source_bundle_hash = str(source_rows[0]["bundle_hash"])
+                source_finalized_block = int(
+                    source_rows[0]["finalized_block"]
+                )
+            else:
+                source_bundle_hash = "sha256:" + "a" * 64
+                source_finalized_block = current_block - 1
             self.rows[chain_activation_table] = [
                 {
                     "netuid": int(cutover["netuid"]),
@@ -726,9 +752,9 @@ class LocalPostgRESTState:
                         "leadpoet.research_lab_chain_realized_settlement_activation.v1"
                     ),
                     "first_epoch_id": first_epoch,
-                    "source_bundle_hash": "sha256:" + "a" * 64,
+                    "source_bundle_hash": source_bundle_hash,
                     "source_bundle_epoch_id": first_epoch,
-                    "source_finalized_block": current_block - 1,
+                    "source_finalized_block": source_finalized_block,
                 }
             ]
         self._restore_durable_state()

@@ -855,12 +855,20 @@ def verify_migration_backed_database_contract(
         )
     for relation in sorted(required_seed_relations):
         rows = seed_rows.get(relation)
+        expected_count = (
+            2
+            if relation == "research_lab_finalized_allocation_epochs_v2"
+            else 1
+        )
         if (
             relation not in relations
             or not isinstance(rows, list)
-            or len(rows) != 1
-            or not isinstance(rows[0], dict)
-            or set(rows[0]) != set(relations[relation]["columns"])
+            or len(rows) != expected_count
+            or any(
+                not isinstance(row, dict)
+                or set(row) != set(relations[relation]["columns"])
+                for row in rows
+            )
         ):
             raise SystemExit(
                 "migration-backed allocation authority seed differs: "

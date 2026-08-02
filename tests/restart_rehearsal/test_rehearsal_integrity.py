@@ -762,7 +762,11 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
                 {
                     column: None
                     for column in EXPECTED_FINALIZED_VIEW_COLUMNS
-                }
+                },
+                {
+                    column: None
+                    for column in EXPECTED_FINALIZED_VIEW_COLUMNS
+                },
             ],
             "research_lab_emission_allocation_current": [
                 {"schema_version": None},
@@ -975,7 +979,11 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
                 {
                     column: None
                     for column in EXPECTED_FINALIZED_VIEW_COLUMNS
-                }
+                },
+                {
+                    column: None
+                    for column in EXPECTED_FINALIZED_VIEW_COLUMNS
+                },
             ],
             "research_lab_emission_allocation_current": [
                 {"epoch": None},
@@ -4881,7 +4889,14 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
 
     rows = [
         row(["-m", module, "--storage-read-preflight"], "candidate_archive"),
-        row(["-m", module, "--repair"], "candidate_checkout"),
+        row(
+            ["-m", module, "--repair-chain-settlements"],
+            "candidate_checkout",
+        ),
+        row(
+            ["-m", module, "--repair", "--epoch", "24304"],
+            "candidate_checkout",
+        ),
         row(
             [
                 "-m",
@@ -4899,7 +4914,7 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
         candidate_sha=COMMIT,
     )
 
-    rows[2]["argv"][-1] = "30"
+    rows[3]["argv"][-1] = "30"
     with pytest.raises(SystemExit, match="launcher contract"):
         verify_gateway_weight_readiness_invocations(
             rows,
@@ -4926,7 +4941,8 @@ def test_gateway_readiness_accepts_missing_optional_preflight_only_for_rollback(
         }
 
     rows = [
-        row(["-m", module, "--repair"]),
+        row(["-m", module, "--repair-chain-settlements"]),
+        row(["-m", module, "--repair", "--epoch", "24304"]),
         row(
             [
                 "-m",

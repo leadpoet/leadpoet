@@ -799,7 +799,9 @@ def _settlement_fixture(
         "bundle_hash": verified["bundle_hash"],
         "root_receipt_hash": verified["root_receipt_hash"],
         "durable_readback_hash": durable_readback_hash,
-        "transparency_event_hash": "sha256:" + "d" * 64,
+        "transparency_event_hash": sha256_json(
+            {"kind": "transparency", "epoch_id": epoch_id}
+        ),
     }
     publication_receipt = fixture.receipt(
         role="gateway_coordinator",
@@ -837,11 +839,18 @@ def _settlement_fixture(
         "weights_hash": verified["weights_hash"],
         "weight_receipt_hash": verified["weight_receipt_hash"],
         "weight_submission_event_hash": submission_event_hash,
-        "extrinsic_authorization_hash": "sha256:" + "e" * 64,
-        "extrinsic_hash": "0x" + "f" * 64,
+        "extrinsic_authorization_hash": sha256_json(
+            {"kind": "extrinsic-authorization", "epoch_id": epoch_id}
+        ),
+        "extrinsic_hash": "0x"
+        + sha256_json({"kind": "extrinsic", "epoch_id": epoch_id})[7:],
         "finalized_block": int(verified["block"]) + 1,
-        "finalized_block_hash": "1" * 64,
-        "state_transition_hash": "sha256:" + "2" * 64,
+        "finalized_block_hash": sha256_json(
+            {"kind": "finalized-block", "epoch_id": epoch_id}
+        )[7:],
+        "state_transition_hash": sha256_json(
+            {"kind": "state-transition", "epoch_id": epoch_id}
+        ),
     }
     finalization_receipt = fixture.receipt(
         role="validator_weights",
@@ -2091,11 +2100,20 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "pre-134 provider outcome head contract did not fail closed"
             )
 
+        prior_rows, prior_verified, _prior_fixture = _settlement_fixture(
+            candidate_sha=args.candidate_sha,
+            epoch_id=args.epoch_id - 1,
+        )
         rows, verified, fixture = _settlement_fixture(
             candidate_sha=args.candidate_sha,
             epoch_id=args.epoch_id,
         )
-        database.psql("".join(_json_insert_sql(table, row) for table, row in rows))
+        database.psql(
+            "".join(
+                _json_insert_sql(table, row)
+                for table, row in (*prior_rows, *rows)
+            )
+        )
         view_result = database.psql(
             """
             SELECT pg_catalog.row_to_json(authority)::text
@@ -2106,11 +2124,19 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         view_rows = [
             json.loads(line) for line in view_result.stdout.splitlines() if line.strip()
         ]
-        if len(view_rows) != 1:
+        if len(view_rows) != 2:
             raise PostgresContractProbeError(
                 "finalized allocation view returned %d rows" % len(view_rows)
             )
-        view_row = view_rows[0]
+        view_rows_by_epoch = {
+            int(row["epoch_id"]): row for row in view_rows
+        }
+        if set(view_rows_by_epoch) != {args.epoch_id - 1, args.epoch_id}:
+            raise PostgresContractProbeError(
+                "finalized allocation view epochs differ"
+            )
+        prior_view_row = view_rows_by_epoch[args.epoch_id - 1]
+        view_row = view_rows_by_epoch[args.epoch_id]
         if tuple(view_row) != EXPECTED_FINALIZED_VIEW_COLUMNS:
             raise PostgresContractProbeError(
                 "finalized allocation view columns differ: %s" % ",".join(view_row)
@@ -2120,6 +2146,9 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "finalized allocation view synthesized weight_receipt_hash"
             )
         authority = _preliminary_finalized_bundle_authority_v1(view_row)
+        prior_authority = _preliminary_finalized_bundle_authority_v1(
+            prior_view_row
+        )
         if authority["weight_receipt_hash"] != verified["weight_receipt_hash"]:
             raise PostgresContractProbeError(
                 "settlement authority weight receipt differs"
@@ -2161,9 +2190,11 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "settlement_activation.v1"
             ),
             "first_epoch_id": int(verified["epoch_id"]) - 1,
-            "source_bundle_hash": str(verified["bundle_hash"]),
+            "source_bundle_hash": str(prior_verified["bundle_hash"]),
             "source_bundle_epoch_id": int(verified["epoch_id"]) - 1,
-            "source_finalized_block": int(authority["finalized_block"]) - 1,
+            "source_finalized_block": int(
+                prior_authority["finalized_block"]
+            ),
         }
         database.psql(
             "".join(
@@ -2568,7 +2599,10 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "required_schema_migrations_declared": True,
             },
             "seed_rows": {
-                "research_lab_finalized_allocation_epochs_v2": [view_row],
+                "research_lab_finalized_allocation_epochs_v2": [
+                    prior_view_row,
+                    view_row,
+                ],
                 **historical_compute_seed_rows,
             },
             "measured_settlement": measured_settlement,

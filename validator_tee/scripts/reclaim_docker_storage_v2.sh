@@ -4,6 +4,7 @@
 set -euo pipefail
 
 MIN_FREE_BYTES="${VALIDATOR_DOCKER_MIN_FREE_BYTES:-30000000000}"
+LIVE_RUNTIME_MIN_FREE_BYTES="${VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-18000000000}"
 ALLOW_DATA_ROOT_RESET="${VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET:-0}"
 PRUNE_ATTEMPTS="${VALIDATOR_DOCKER_PRUNE_ATTEMPTS:-5}"
 SETTLE_ATTEMPTS="${VALIDATOR_DOCKER_SETTLE_ATTEMPTS:-30}"
@@ -14,6 +15,13 @@ for setting in PRUNE_ATTEMPTS SETTLE_ATTEMPTS; do
   value="${!setting}"
   if ! [[ "$value" =~ ^[1-9][0-9]*$ ]] || [ "$value" -gt 300 ]; then
     echo "ERROR: $setting must be between 1 and 300" >&2
+    exit 2
+  fi
+done
+for setting in MIN_FREE_BYTES LIVE_RUNTIME_MIN_FREE_BYTES; do
+  value="${!setting}"
+  if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: $setting must be a positive integer byte count" >&2
     exit 2
   fi
 done
@@ -191,10 +199,23 @@ if [ "$CONTAINER_COUNT" -eq 0 ] \
 fi
 
 echo "Docker storage state: free_bytes=$AVAILABLE root_bytes=$DOCKER_ROOT_BYTES containers=$CONTAINER_COUNT images=$IMAGE_COUNT volumes=$VOLUME_COUNT containerd_containers=$CONTAINERD_CONTAINER_COUNT containerd_tasks=$CONTAINERD_TASK_COUNT containerd_running_tasks=$CONTAINERD_RUNNING_TASK_COUNT moby_shims=$MOBY_SHIM_COUNT non_moby_namespaces=$NON_MOBY_NAMESPACE_COUNT layerdb_images=$LAYERDB_IMAGE_COUNT layerdb_mounts=$LAYERDB_MOUNT_COUNT overlay_directories=$OVERLAY_DIRECTORY_COUNT orphaned=$ORPHANED_DOCKER_STATE"
-if [ "$AVAILABLE" -ge "$MIN_FREE_BYTES" ] \
+REQUIRED_FREE_BYTES="$MIN_FREE_BYTES"
+RUNTIME_MODE="empty"
+if [ "$CONTAINER_COUNT" -ne 0 ]; then
+  REQUIRED_FREE_BYTES="$LIVE_RUNTIME_MIN_FREE_BYTES"
+  RUNTIME_MODE="live"
+fi
+echo "Docker storage requirement: runtime_mode=$RUNTIME_MODE required_free_bytes=$REQUIRED_FREE_BYTES"
+if [ "$AVAILABLE" -ge "$REQUIRED_FREE_BYTES" ] \
     && [ "$ORPHANED_DOCKER_STATE" -eq 0 ]; then
-  echo "Docker storage ready: free_bytes=$AVAILABLE"
+  echo "Docker storage ready: free_bytes=$AVAILABLE required_free_bytes=$REQUIRED_FREE_BYTES runtime_mode=$RUNTIME_MODE"
   exit 0
+fi
+
+if [ "$CONTAINER_COUNT" -ne 0 ]; then
+  echo "ERROR: live validator runtime has only $AVAILABLE free bytes; $REQUIRED_FREE_BYTES are required for an independent recovery build" >&2
+  echo "ERROR: refusing to stop containers or reset Docker storage from the release builder" >&2
+  exit 1
 fi
 
 if [ "$ALLOW_DATA_ROOT_RESET" != "1" ]; then

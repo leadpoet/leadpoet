@@ -29,6 +29,7 @@ def _run_recovery(
     system_prune_failures: int = 0,
     non_moby_namespaces: int = 0,
     moby_shims: int = 0,
+    live_runtime_min_free_bytes: int = 18_000_000_000,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -218,6 +219,9 @@ fi
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET": "1",
         "VALIDATOR_DOCKER_MIN_FREE_BYTES": "30000000000",
+        "VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES": str(
+            live_runtime_min_free_bytes
+        ),
         "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(
             tmp_path / "docker-operation.lock"
         ),
@@ -433,9 +437,67 @@ def test_validator_docker_recovery_preserves_healthy_live_runtime(
     assert "containers=11" in result.stdout
     assert "containerd_running_tasks=11" in result.stdout
     assert "orphaned=0" in result.stdout
+    assert "runtime_mode=live required_free_bytes=18000000000" in result.stdout
     assert "Waiting for Docker teardown" not in result.stderr
     assert "systemctl stop" not in sudo_log
     assert "rm -rf" not in sudo_log
+
+
+def test_validator_docker_recovery_allows_one_recovery_build_after_failed_deploy(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+        containers=11,
+        containerd_containers=11,
+        containerd_tasks=11,
+        containerd_running_tasks=11,
+        moby_shims=11,
+        layerdb_images=3_889,
+        layerdb_mounts=312,
+        overlay_directories=4_514,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "runtime_mode=live required_free_bytes=18000000000" in result.stdout
+    assert "Docker storage ready: free_bytes=25000000000" in result.stdout
+    assert "systemctl stop" not in sudo_log
+    assert "rm -rf" not in sudo_log
+
+
+def test_validator_docker_recovery_refuses_live_runtime_below_recovery_reserve(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=17_999_999_999,
+        containers=11,
+        containerd_containers=11,
+        containerd_tasks=11,
+        containerd_running_tasks=11,
+        moby_shims=11,
+    )
+
+    assert result.returncode == 1
+    assert "live validator runtime has only 17999999999 free bytes" in result.stderr
+    assert "refusing to stop containers or reset Docker storage" in result.stderr
+    assert "systemctl stop" not in sudo_log
+    assert "rm -rf" not in sudo_log
+
+
+def test_validator_docker_recovery_keeps_strict_empty_runtime_floor(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=25_000_000_000,
+    )
+
+    assert result.returncode == 1
+    assert "runtime_mode=empty required_free_bytes=30000000000" in result.stdout
+    assert "Docker data-root reset left only 25000000000 free bytes" in result.stderr
+    assert "systemctl stop docker.service docker.socket containerd.service" in sudo_log
 
 
 def test_validator_docker_recovery_leaves_clean_root_above_floor_untouched(

@@ -240,9 +240,19 @@ class SanitizedWeightFixture:
         host: str,
         method: str,
     ) -> dict[str, Any]:
+        operation_hash = sha256_json(
+            {
+                "candidate_sha": self.candidate_sha,
+                "epoch_id": self.epoch_id,
+                "job_id": job_id,
+                "purpose": purpose,
+                "category": category,
+                "sequence": sequence,
+            }
+        )[len("sha256:") :]
         return build_transport_attempt(
-            request_id=f"{sequence + 1:032x}",
-            logical_operation_id=f"weight-source:{category}",
+            request_id=operation_hash[:32],
+            logical_operation_id=f"weight-source:{operation_hash}",
             job_id=job_id,
             purpose=purpose,
             provider_id=provider_id,

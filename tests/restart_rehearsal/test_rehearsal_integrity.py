@@ -393,6 +393,33 @@ def test_finalized_settlement_fixture_exports_complete_receipt_graphs() -> None:
     assert finalization_roots.issubset(visited)
 
 
+def test_settlement_fixture_transport_identity_is_unique_across_epochs() -> None:
+    prior_rows, _, _ = postgres_probe._settlement_fixture(
+        candidate_sha=COMMIT,
+        epoch_id=24206,
+    )
+    current_rows, _, _ = postgres_probe._settlement_fixture(
+        candidate_sha=COMMIT,
+        epoch_id=24207,
+    )
+    rows = postgres_probe._deduplicate_settlement_fixture_rows(
+        (*prior_rows, *current_rows)
+    )
+    attempts = [
+        row
+        for table, row in rows
+        if table == "research_lab_attested_transport_attempts_v2"
+    ]
+
+    request_ids = [row["request_id"] for row in attempts]
+    logical_attempts = [
+        (row["logical_operation_id"], row["attempt_number"])
+        for row in attempts
+    ]
+    assert len(request_ids) == len(set(request_ids))
+    assert len(logical_attempts) == len(set(logical_attempts))
+
+
 def test_settlement_fixture_uses_explicit_exact_container_source_root(
     monkeypatch,
 ) -> None:

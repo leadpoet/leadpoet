@@ -26,6 +26,7 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
+from leadpoet_canonical.attested_v2 import merkle_root
 from gateway.research_lab.bundles import build_research_lab_audit_bundle
 from gateway.research_lab.attested_scoring import (
     canonical_json_bytes as attested_canonical_json_bytes,
@@ -171,6 +172,7 @@ from research_lab.eval import (
 )
 from research_lab.eval.baseline_summary import (
     artifact_serving_version_doc as shared_artifact_serving_version_doc,
+    baseline_score_summary_artifact_ref,
     baseline_serving_model_version_doc as shared_baseline_serving_model_version_doc,
     build_baseline_health as shared_build_baseline_health,
     build_baseline_score_summary,
@@ -3570,6 +3572,7 @@ class ResearchLabGatewayScoringWorker:
         self._active_baseline_context: dict[str, Any] | None = None
         self._baseline_publication_failure_logged_key: str | None = None
         self._baseline_publication_failures_in_process: set[str] = set()
+        self._baseline_publication_verified_keys: set[str] = set()
         # True only for the worker holding the scoring-recovery lease this pass.
         self._holds_maintenance_lease = False
         # Globally-unique lease token for THIS process (worker_ref is a stable
@@ -6122,9 +6125,9 @@ class ResearchLabGatewayScoringWorker:
                 raise RuntimeError("image_build candidate is missing candidate_model_manifest_doc")
             candidate_artifact = PrivateModelArtifactManifest.from_mapping(candidate_manifest_doc)
             reused_bundle_row = await self._find_reusable_scored_bundle(
-                candidate_id=candidate_id,
-                run_id=str(candidate["run_id"]),
-                candidate_artifact_hash=candidate_artifact.model_artifact_hash,
+                candidate=candidate,
+                artifact=artifact,
+                candidate_artifact=candidate_artifact,
                 evaluation_epoch=evaluation_epoch,
             )
             if reused_bundle_row is not None:
@@ -7460,50 +7463,350 @@ class ResearchLabGatewayScoringWorker:
     async def _find_reusable_scored_bundle(
         self,
         *,
-        candidate_id: str,
-        run_id: str,
-        candidate_artifact_hash: str,
+        candidate: Mapping[str, Any],
+        artifact: PrivateModelArtifactManifest,
+        candidate_artifact: PrivateModelArtifactManifest,
         evaluation_epoch: int,
     ) -> dict[str, Any] | None:
-        """Locate a signed score bundle already produced for this candidate+epoch.
+        """Locate the signed score bundle already produced for this candidate run.
 
-        Bug #12 rescore path: a candidate whose bundle landed but whose scored
-        event write failed gets re-claimed; without this it re-runs the full
-        evaluation and produces a divergent second signed bundle.
+        Restart recovery: a candidate whose bundle landed but whose scored
+        event write failed gets re-claimed, potentially after epoch rollover;
+        without this it re-runs the full evaluation and can produce a divergent
+        second signed bundle.
         """
         if _env_flag("RESEARCH_LAB_DISABLE_SCORED_BUNDLE_REUSE"):
             return None
+        candidate_id = str(candidate.get("candidate_id") or "")
+        run_id = str(candidate.get("run_id") or "")
+        ticket_id = str(candidate.get("ticket_id") or "")
+        receipt_id = str(candidate.get("receipt_id") or "")
+        candidate_artifact_hash = str(candidate_artifact.model_artifact_hash)
+        candidate_manifest_hash = str(candidate_artifact.manifest_hash)
+        parent_artifact_hash = str(artifact.model_artifact_hash)
+        parent_manifest_hash = str(artifact.manifest_hash)
+        patch = candidate.get("candidate_patch_manifest")
+        if not isinstance(patch, Mapping):
+            raise RuntimeError("candidate recovery is missing its immutable patch manifest")
+        candidate_patch_hash = sha256_json(dict(patch))
+        if (
+            not candidate_id
+            or candidate_id
+            != "candidate:" + candidate_artifact_hash.split(":", 1)[-1]
+            or not run_id
+            or not ticket_id
+            or str(candidate.get("candidate_patch_hash") or "")
+            != candidate_patch_hash
+            or str(candidate.get("parent_artifact_hash") or "")
+            != parent_artifact_hash
+        ):
+            raise RuntimeError("candidate recovery identity differs from its immutable manifests")
+        expected_source_diff_hash = str(
+            candidate.get("candidate_source_diff_hash") or ""
+        )
+        build_doc = (
+            candidate.get("candidate_build_doc")
+            if isinstance(candidate.get("candidate_build_doc"), Mapping)
+            else {}
+        )
+        expected_build_ref = str(
+            build_doc.get("build_doc_hash")
+            or (canonical_hash(build_doc) if build_doc else "")
+        )
+        patch_payload = {
+            key: value for key, value in patch.items() if key != "manifest_hash"
+        }
+        if (
+            not expected_source_diff_hash
+            or str(patch.get("manifest_hash") or "") != sha256_json(patch_payload)
+            or str(patch.get("parent_artifact_hash") or "")
+            != parent_artifact_hash
+            or str(patch.get("candidate_artifact_hash") or "")
+            != candidate_artifact_hash
+            or str(patch.get("candidate_model_manifest_hash") or "")
+            != candidate_manifest_hash
+            or str(patch.get("candidate_source_diff_hash") or "")
+            != expected_source_diff_hash
+            or str(patch.get("patch_payload_hash") or "")
+            != expected_source_diff_hash
+            or str(patch.get("candidate_build_doc_hash") or "")
+            != expected_build_ref
+        ):
+            raise RuntimeError(
+                "candidate recovery patch differs from its immutable build lineage"
+            )
+        durable_candidate = await select_one(
+            "research_lab_candidate_artifacts",
+            columns=(
+                "candidate_id,run_id,ticket_id,receipt_id,miner_hotkey,island,"
+                "parent_artifact_hash,candidate_artifact_hash,"
+                "private_model_manifest_hash,private_model_manifest_doc,"
+                "candidate_patch_hash,candidate_patch_manifest,candidate_kind,"
+                "candidate_model_manifest_hash,candidate_model_manifest_doc,"
+                "candidate_source_diff_hash,candidate_build_doc"
+            ),
+            filters=(("candidate_id", candidate_id),),
+        )
+        if (
+            not isinstance(durable_candidate, Mapping)
+            or str(durable_candidate.get("candidate_id") or "") != candidate_id
+            or str(durable_candidate.get("run_id") or "") != run_id
+            or str(durable_candidate.get("ticket_id") or "") != ticket_id
+            or str(durable_candidate.get("receipt_id") or "") != receipt_id
+            or str(durable_candidate.get("miner_hotkey") or "")
+            != str(candidate.get("miner_hotkey") or "")
+            or str(durable_candidate.get("island") or "")
+            != str(candidate.get("island") or "")
+            or str(durable_candidate.get("candidate_kind") or "")
+            != "image_build"
+            or str(durable_candidate.get("parent_artifact_hash") or "")
+            != parent_artifact_hash
+            or str(durable_candidate.get("candidate_artifact_hash") or "")
+            != candidate_artifact_hash
+            or str(durable_candidate.get("private_model_manifest_hash") or "")
+            != parent_manifest_hash
+            or durable_candidate.get("private_model_manifest_doc")
+            != candidate.get("private_model_manifest_doc")
+            or str(durable_candidate.get("candidate_patch_hash") or "")
+            != candidate_patch_hash
+            or durable_candidate.get("candidate_patch_manifest") != patch
+            or str(durable_candidate.get("candidate_model_manifest_hash") or "")
+            != candidate_manifest_hash
+            or durable_candidate.get("candidate_model_manifest_doc")
+            != candidate.get("candidate_model_manifest_doc")
+            or str(durable_candidate.get("candidate_source_diff_hash") or "")
+            != expected_source_diff_hash
+            or durable_candidate.get("candidate_build_doc") != build_doc
+        ):
+            raise RuntimeError(
+                "candidate recovery differs from its immutable candidate row"
+            )
         try:
             rows = await select_many(
                 "research_evaluation_score_bundle_current",
-                columns="score_bundle_id,score_bundle_doc,signature_ref,icp_set_hash",
+                columns=(
+                    "score_bundle_id,score_bundle_hash,anchored_hash,score_bundle_doc,"
+                    "signature_ref,receipt_id,ticket_id,miner_hotkey,island,icp_set_hash,run_id,"
+                    "parent_artifact_hash,candidate_artifact_hash,"
+                    "private_model_manifest_hash,candidate_patch_hash,"
+                    "evaluation_epoch,bundle_status,"
+                    "current_event_status"
+                ),
                 filters=(
                     ("run_id", run_id),
                     ("candidate_artifact_hash", candidate_artifact_hash),
-                    ("evaluation_epoch", int(evaluation_epoch)),
                     ("bundle_status", "scored"),
                 ),
                 order_by=(("created_at", True),),
-                limit=5,
+                limit=6,
             )
         except Exception as exc:
-            # Best-effort side check: never fail the scoring pass over it.
+            # This read is an idempotency boundary, not an advisory side
+            # check.  A signed bundle may already have landed before the
+            # candidate's terminal event was interrupted.  Treating an
+            # unavailable read as "not found" can spend providers again and
+            # persist a second, divergent signed bundle for the same run.
+            # Fail closed and let the normal retry path repeat this read.
             logger.warning(
                 "research_lab_reusable_bundle_lookup_failed candidate_id=%s error=%s",
                 compact_ref(candidate_id),
                 str(exc)[:200],
             )
-            return None
-        trace_suffix = f":{candidate_id}"
+            raise
+        if len(rows) > 5:
+            raise RuntimeError(
+                "candidate recovery score-bundle lookup exceeded its bounded scan"
+            )
+        reusable: list[dict[str, Any]] = []
         for row in rows:
             doc = row.get("score_bundle_doc") if isinstance(row.get("score_bundle_doc"), Mapping) else None
             if not doc:
+                raise RuntimeError(
+                    "candidate recovery found a malformed durable score bundle"
+                )
+            # Re-run the same full content-hash and secret-material validation
+            # used by the production write path before trusting a durable row.
+            # Matching only the projected hash fields would not detect a
+            # modified nested score document.
+            validated_request = ResearchLabScoreBundleCreateRequest(
+                bundle_status="scored",
+                receipt_id=row.get("receipt_id") or None,
+                score_bundle=dict(doc),
+            )
+            try:
+                row_epoch = int(row.get("evaluation_epoch"))
+                doc_epoch = int(doc.get("evaluation_epoch"))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "reusable signed score bundle has invalid epoch identity"
+                ) from exc
+            if (
+                str(row.get("run_id") or "") != run_id
+                or str(doc.get("run_id") or "") != run_id
+                or str(row.get("ticket_id") or "") != ticket_id
+                or str(doc.get("ticket_id") or "") != ticket_id
+                or str(row.get("receipt_id") or "") != receipt_id
+                or str(row.get("miner_hotkey") or "")
+                != str(candidate.get("miner_hotkey") or "")
+                or str(doc.get("miner_hotkey") or "")
+                != str(candidate.get("miner_hotkey") or "")
+                or str(row.get("island") or "")
+                != str(candidate.get("island") or "")
+                or str(doc.get("island") or "")
+                != str(candidate.get("island") or "")
+                or str(row.get("parent_artifact_hash") or "")
+                != parent_artifact_hash
+                or str(doc.get("parent_artifact_hash") or "")
+                != parent_artifact_hash
+                or str(row.get("candidate_artifact_hash") or "")
+                != candidate_artifact_hash
+                or str(doc.get("candidate_artifact_hash") or "")
+                != candidate_artifact_hash
+                or str(row.get("private_model_manifest_hash") or "")
+                != parent_manifest_hash
+                or str(doc.get("private_model_manifest_hash") or "")
+                != parent_manifest_hash
+                or str(row.get("candidate_patch_hash") or "")
+                != candidate_patch_hash
+                or str(doc.get("candidate_patch_hash") or "")
+                != candidate_patch_hash
+                or str(doc.get("candidate_model_manifest_hash") or "")
+                != candidate_manifest_hash
+                or str(doc.get("candidate_source_diff_hash") or "")
+                != expected_source_diff_hash
+                or str(doc.get("candidate_build_ref") or "")
+                != expected_build_ref
+                or not str(row.get("icp_set_hash") or "")
+                or str(doc.get("icp_set_hash") or "")
+                != str(row.get("icp_set_hash") or "")
+                or str(doc.get("signature_ref") or "")
+                != str(row.get("signature_ref") or "")
+                or str(row.get("bundle_status") or "") != "scored"
+                or row_epoch < 0
+                or doc_epoch != row_epoch
+            ):
+                raise RuntimeError(
+                    "reusable signed score bundle differs from its durable identity"
+                )
+            score_bundle_hash = str(doc.get("score_bundle_hash") or "")
+            expected_bundle_id = (
+                "score_bundle:" + score_bundle_hash.split(":", 1)[1]
+                if score_bundle_hash.startswith("sha256:")
+                else ""
+            )
+            if (
+                not expected_bundle_id
+                or str(row.get("score_bundle_id") or "") != expected_bundle_id
+                or str(row.get("score_bundle_hash") or "") != score_bundle_hash
+                or str(row.get("anchored_hash") or "") != score_bundle_hash
+            ):
+                raise RuntimeError(
+                    "reusable signed score bundle has invalid content identity"
+                )
+            current_event_status = str(row.get("current_event_status") or "")
+            if current_event_status in {"failed", "rejected", "tombstoned"}:
+                logger.warning(
+                    "research_lab_reusable_bundle_skipped_terminal candidate_id=%s "
+                    "score_bundle_id=%s current_event_status=%s",
+                    compact_ref(candidate_id),
+                    compact_ref(str(row.get("score_bundle_id") or "")),
+                    current_event_status,
+                )
                 continue
-            if not str(doc.get("execution_trace_ref") or "").endswith(trace_suffix):
-                continue
+            if not current_event_status:
+                # The immutable signed bundle insert may commit immediately
+                # before its opening lifecycle event.  Re-entering the normal
+                # idempotent store path repairs that exact event without
+                # recomputing or re-signing the paid evaluation.  The durable
+                # readback below observes any concurrent terminal correction
+                # rather than trusting only the returned opening event.
+                recovered_row, _recovered_event = await create_score_bundle(
+                    validated_request
+                )
+                if str(recovered_row.get("score_bundle_id") or "") != expected_bundle_id:
+                    raise RuntimeError(
+                        "recovered signed score bundle differs from durable identity"
+                    )
+            durable_current = await select_one(
+                "research_evaluation_score_bundle_current",
+                columns=(
+                    "score_bundle_id,score_bundle_hash,anchored_hash,"
+                    "current_event_status"
+                ),
+                filters=(("score_bundle_id", expected_bundle_id),),
+            )
+            if (
+                not durable_current
+                or str(durable_current.get("score_bundle_hash") or "")
+                != score_bundle_hash
+                or str(durable_current.get("anchored_hash") or "")
+                != score_bundle_hash
+            ):
+                raise RuntimeError(
+                    "recovered signed score bundle durable readback differs"
+                )
+            current_event_status = str(
+                durable_current.get("current_event_status") or ""
+            )
+            row = {**row, "current_event_status": current_event_status}
+            if current_event_status not in {"scored", "verified"}:
+                if current_event_status in {"failed", "rejected", "tombstoned"}:
+                    continue
+                raise RuntimeError(
+                    "reusable signed score bundle has unknown current lifecycle state"
+                )
+            serving = (
+                doc.get("serving_model_version")
+                if isinstance(doc.get("serving_model_version"), Mapping)
+                else {}
+            )
+            parent_model = (
+                serving.get("parent_model")
+                if isinstance(serving.get("parent_model"), Mapping)
+                else {}
+            )
+            candidate_model = (
+                serving.get("candidate_model")
+                if isinstance(serving.get("candidate_model"), Mapping)
+                else {}
+            )
+            loop_node_id = str(build_doc.get("loop_node_id") or "")
+            execution_trace_ref = str(doc.get("execution_trace_ref") or "")
+            if loop_node_id:
+                expected_execution_trace_ref = (
+                    "execution_trace:"
+                    + execution_trace_id_for_node(run_id, loop_node_id)
+                )
+                trace_matches = execution_trace_ref == expected_execution_trace_ref
+            else:
+                trace_matches = (
+                    execution_trace_ref.startswith("gateway_qualification_worker:")
+                    and execution_trace_ref.endswith(":" + candidate_id)
+                )
+            if (
+                str(serving.get("candidate_id") or "") != candidate_id
+                or str(serving.get("run_id") or "") != run_id
+                or str(serving.get("ticket_id") or "") != ticket_id
+                or str(serving.get("candidate_patch_hash") or "")
+                != candidate_patch_hash
+                or str(serving.get("candidate_source_diff_hash") or "")
+                != expected_source_diff_hash
+                or str(serving.get("candidate_build_ref") or "")
+                != expected_build_ref
+                or str(parent_model.get("model_artifact_hash") or "")
+                != parent_artifact_hash
+                or str(parent_model.get("manifest_hash") or "")
+                != parent_manifest_hash
+                or str(candidate_model.get("model_artifact_hash") or "")
+                != candidate_artifact_hash
+                or str(candidate_model.get("manifest_hash") or "")
+                != candidate_manifest_hash
+                or not trace_matches
+            ):
+                raise RuntimeError(
+                    "reusable signed score bundle differs from candidate lineage"
+                )
             if not str(row.get("signature_ref") or doc.get("signature_ref") or ""):
-                continue
-            if not str(doc.get("score_bundle_hash") or ""):
                 continue
             if self._scoring_health_gate_result(doc).get("decision") == "quarantine":
                 # A degraded measurement is not reusable evidence: a
@@ -7515,8 +7818,89 @@ class ResearchLabGatewayScoringWorker:
                     compact_ref(str(row.get("score_bundle_id") or "")),
                 )
                 continue
-            return dict(row)
-        return None
+            root_receipt, receipt_lineage = await resolve_attested_artifact_lineage(
+                artifact_kind="score_bundle",
+                artifact_ref=expected_bundle_id,
+                artifact_hash=score_bundle_hash,
+            )
+            # V2 compares and attests the score bundle before KMS signing,
+            # when the only signature commitment is the literal ``pending``.
+            # The content-addressed bundle hash intentionally excludes
+            # ``signature_ref``; persistence then replaces it with the KMS
+            # reference.  Reconstruct that exact pre-signing projection when
+            # verifying the immutable execution receipt.
+            attested_score_bundle = {**dict(doc), "signature_ref": "pending"}
+            if not legacy_v1_enabled() and (
+                not isinstance(root_receipt, Mapping)
+                or not receipt_lineage
+                or str(root_receipt.get("role") or "") != "gateway_scoring"
+                or str(root_receipt.get("purpose") or "")
+                != "research_lab.candidate_score.v2"
+                or str(root_receipt.get("status") or "") != "succeeded"
+                or int(
+                    root_receipt.get("epoch_id")
+                    if root_receipt.get("epoch_id") is not None
+                    else -1
+                )
+                != row_epoch
+                or int(
+                    root_receipt.get("sequence")
+                    if root_receipt.get("sequence") is not None
+                    else -1
+                )
+                != 0
+                or str(root_receipt.get("output_root") or "")
+                != sha256_json({"score_bundle": attested_score_bundle})
+            ):
+                raise RuntimeError(
+                    "reusable signed score bundle lacks exact V2 score authority"
+                )
+            reusable.append(dict(row))
+        if len(reusable) > 1:
+            raise RuntimeError(
+                "multiple healthy signed score bundles exist for one candidate run"
+            )
+        if not reusable:
+            return None
+        reused_epoch = int(reusable[0]["evaluation_epoch"])
+        if reused_epoch != int(evaluation_epoch):
+            logger.warning(
+                "research_lab_reusable_bundle_cross_epoch candidate_id=%s "
+                "bundle_epoch=%s current_epoch=%s",
+                compact_ref(candidate_id),
+                reused_epoch,
+                int(evaluation_epoch),
+            )
+        return reusable[0]
+
+    async def _require_reusable_bundle_current(
+        self,
+        bundle_row: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Fail closed if recovery evidence was corrected after discovery."""
+
+        score_bundle_id = str(bundle_row.get("score_bundle_id") or "")
+        score_bundle_hash = str(bundle_row.get("score_bundle_hash") or "")
+        current = await select_one(
+            "research_evaluation_score_bundle_current",
+            columns=(
+                "score_bundle_id,score_bundle_hash,anchored_hash,"
+                "current_event_status"
+            ),
+            filters=(("score_bundle_id", score_bundle_id),),
+        )
+        if (
+            not current
+            or str(current.get("score_bundle_id") or "") != score_bundle_id
+            or str(current.get("score_bundle_hash") or "") != score_bundle_hash
+            or str(current.get("anchored_hash") or "") != score_bundle_hash
+            or str(current.get("current_event_status") or "")
+            not in {"scored", "verified"}
+        ):
+            raise RuntimeError(
+                "reusable signed score bundle is no longer current and promotable"
+            )
+        return dict(current)
 
     async def _complete_candidate_from_reused_bundle(
         self,
@@ -7532,6 +7916,7 @@ class ResearchLabGatewayScoringWorker:
         scored event, then mirror the normal post-scored side-effect sequence."""
         score_bundle = dict(bundle_row.get("score_bundle_doc") or {})
         score_bundle_id = str(bundle_row["score_bundle_id"])
+        await self._require_reusable_bundle_current(bundle_row)
         rolling_window_hash = str(score_bundle.get("icp_set_hash") or bundle_row.get("icp_set_hash") or "")
         gate_result = score_bundle.get("private_holdout_gate")
         private_holdout_rejected = (
@@ -7556,7 +7941,9 @@ class ResearchLabGatewayScoringWorker:
                     if telemetry_session is not None and telemetry_session.run is not None
                     else ""
                 ),
+                preserve_existing_provenance=True,
             )
+        await self._require_reusable_bundle_current(bundle_row)
         logger.warning(
             format_worker_block(
                 "RESEARCH LAB CANDIDATE REUSING SIGNED SCORE BUNDLE",
@@ -7566,7 +7953,7 @@ class ResearchLabGatewayScoringWorker:
                     ("Run", compact_ref(candidate.get("run_id"))),
                     ("Score bundle", compact_ref(score_bundle_id)),
                     ("Evaluation epoch", evaluation_epoch),
-                    ("Reason", "signed bundle exists for this candidate+epoch; skipping re-evaluation"),
+                    ("Reason", "signed bundle exists for this candidate run; skipping re-evaluation"),
                 ),
             )
         )
@@ -7617,6 +8004,7 @@ class ResearchLabGatewayScoringWorker:
                     "reused_signed_score_bundle": True,
                 },
             )
+            await self._require_reusable_bundle_current(bundle_row)
             if private_holdout_rejected:
                 promotion_result = await self._record_public_holdout_rejected(
                     candidate=candidate,
@@ -9833,6 +10221,347 @@ class ResearchLabGatewayScoringWorker:
             "error": _short_error(exc),
         }
 
+    async def _publish_private_baseline_bundle(
+        self,
+        *,
+        bundle: Mapping[str, Any],
+        window: Any,
+        artifact: PrivateModelArtifactManifest,
+        expected_policy_hash: str,
+        attested_baseline_outcome: Mapping[str, Any] | None,
+        baseline_telemetry_session: ScoringTelemetrySession | None,
+        publication_scope_key: str,
+        start: float,
+        recover_existing: bool,
+    ) -> dict[str, Any]:
+        validated = _validate_private_baseline_publication_bundle(
+            bundle,
+            artifact=artifact,
+            window=window,
+            expected_policy_hash=expected_policy_hash,
+        )
+        bundle_payload = dict(validated["bundle_payload"])
+        benchmark_bundle_id = str(validated["benchmark_bundle_id"])
+        if recover_existing:
+            if self._active_baseline_context is not None:
+                self._active_baseline_context["publication_stage"] = (
+                    "private_bundle_event_recovery"
+                )
+            recovered_bundle, _event = await create_private_model_benchmark_bundle(
+                **bundle_payload
+            )
+            if (
+                str(recovered_bundle.get("benchmark_bundle_id") or "")
+                != benchmark_bundle_id
+                or str(recovered_bundle.get("benchmark_bundle_hash") or "")
+                != str(validated["benchmark_bundle_hash"])
+            ):
+                raise RuntimeError("recovered private baseline bundle differs")
+            durable_bundle = await select_one(
+                "research_lab_private_model_benchmark_current",
+                filters=(("benchmark_bundle_id", benchmark_bundle_id),),
+            )
+            if (
+                not isinstance(durable_bundle, Mapping)
+                or durable_bundle.get("current_benchmark_status") != "completed"
+                or str(durable_bundle.get("benchmark_bundle_hash") or "")
+                != str(validated["benchmark_bundle_hash"])
+            ):
+                raise RuntimeError(
+                    "recovered private baseline bundle event is not durably completed"
+                )
+
+        category_assignment = validated.get("category_assignment")
+        if isinstance(category_assignment, Mapping):
+            if self._active_baseline_context is not None:
+                self._active_baseline_context["publication_stage"] = (
+                    "conditional_category_results"
+                )
+            await _persist_baseline_category_results(
+                category_assignment,
+                source_bundle_ref=benchmark_bundle_id,
+                rolling_window_hash=str(validated["rolling_window_hash"]),
+                scoring_run_id=(
+                    str(baseline_telemetry_session.run.scoring_run_id)
+                    if baseline_telemetry_session is not None
+                    and baseline_telemetry_session.run is not None
+                    else ""
+                ),
+                preserve_existing_provenance=recover_existing,
+            )
+
+        if attested_baseline_outcome is None:
+            if legacy_v1_enabled():
+                attested_baseline_outcome = {"status": "off", "protocol": "legacy_v1"}
+            else:
+                if self._active_baseline_context is not None:
+                    self._active_baseline_context["publication_stage"] = (
+                        "attested_summary_lineage_recovery"
+                    )
+                artifact_ref = baseline_score_summary_artifact_ref(
+                    benchmark_date=str(validated["benchmark_date"]),
+                    benchmark_attempt=int(validated["benchmark_attempt"]),
+                    rolling_window_hash=str(validated["rolling_window_hash"]),
+                )
+                root_receipt, receipt_lineage = await resolve_attested_artifact_lineage(
+                    artifact_kind="benchmark_score_summary",
+                    artifact_ref=artifact_ref,
+                    artifact_hash=str(validated["score_summary_hash"]),
+                )
+                if (
+                    not isinstance(root_receipt, Mapping)
+                    or root_receipt.get("role") != "gateway_scoring"
+                    or root_receipt.get("purpose") != "research_lab.rebenchmark.v2"
+                    or root_receipt.get("status") != "succeeded"
+                    or int(root_receipt.get("epoch_id") or -1)
+                    != int(validated["evaluation_epoch"])
+                    or int(
+                        root_receipt.get("sequence")
+                        if root_receipt.get("sequence") is not None
+                        else -1
+                    )
+                    != 0
+                    or root_receipt.get("artifact_root")
+                    != merkle_root(
+                        (str(validated["score_summary_hash"]),),
+                        domain="leadpoet-artifact-v2",
+                    )
+                    or root_receipt.get("output_root")
+                    != sha256_json(validated["protected_result"])
+                ):
+                    raise RuntimeError(
+                        "persisted private baseline attested authority differs"
+                    )
+                attested_baseline_outcome = {
+                    "status": "matched",
+                    "execution_receipt": dict(root_receipt),
+                    "execution_receipt_graph": {
+                        "root_receipt_hash": str(root_receipt["receipt_hash"]),
+                        "receipts": list(receipt_lineage),
+                    },
+                }
+        if self._active_baseline_context is not None:
+            self._active_baseline_context["publication_stage"] = (
+                "attested_artifact_links"
+            )
+        await persist_attested_outcome_artifact_links(
+            attested_baseline_outcome,
+            artifact_links=[
+                {
+                    "artifact_kind": "benchmark_score_summary",
+                    "artifact_ref": benchmark_bundle_id,
+                    "artifact_hash": str(validated["score_summary_hash"]),
+                },
+                {
+                    "artifact_kind": "benchmark_bundle",
+                    "artifact_ref": benchmark_bundle_id,
+                    "artifact_hash": str(validated["benchmark_bundle_hash"]),
+                },
+            ],
+        )
+
+        completed_dispatch = await select_many(
+            "research_lab_scoring_dispatch_events",
+            columns="dispatch_event_id,event_doc",
+            filters=(
+                ("dispatch_type", "private_baseline_rebenchmark"),
+                ("dispatch_status", "completed"),
+                ("rolling_window_hash", str(validated["rolling_window_hash"])),
+                ("benchmark_bundle_id", benchmark_bundle_id),
+            ),
+            order_by=(("created_at", True),),
+            limit=1,
+        )
+        if not completed_dispatch:
+            if self._active_baseline_context is not None:
+                self._active_baseline_context["publication_stage"] = (
+                    "completed_dispatch_insert"
+                )
+            if recover_existing:
+                dispatch_event_doc = {
+                    "benchmark_date": str(validated["benchmark_date"]),
+                    "benchmark_attempt": int(validated["benchmark_attempt"]),
+                    "elapsed_seconds": float(
+                        validated["score_summary_doc"].get("elapsed_seconds") or 0.0
+                    ),
+                    "selected_icp_count": len(window.item_refs),
+                    "public_icp_count": int(
+                        validated["visibility_split"].get("public_count") or 0
+                    ),
+                    "private_holdout_icp_count": int(
+                        validated["visibility_split"].get("private_count") or 0
+                    ),
+                    "conditional_holdout_icp_count": int(
+                        validated["visibility_split"].get("conditional_count") or 0
+                    ),
+                    "private_model_manifest_hash": str(artifact.manifest_hash),
+                    "publication_recovered_after_restart": True,
+                }
+                await create_scoring_dispatch_event(
+                    dispatch_type="private_baseline_rebenchmark",
+                    dispatch_status="completed",
+                    worker_ref=str(bundle_payload["scoring_worker_ref"]),
+                    proxy_ref_hash=bundle_payload.get("proxy_ref_hash"),
+                    rolling_window_hash=str(validated["rolling_window_hash"]),
+                    benchmark_bundle_id=benchmark_bundle_id,
+                    event_doc=dispatch_event_doc,
+                    dispatch_event_id=deterministic_uuid(
+                        "private_baseline_publication_recovery",
+                        benchmark_bundle_id,
+                    ),
+                )
+            else:
+                await create_scoring_dispatch_event(
+                    dispatch_type="private_baseline_rebenchmark",
+                    dispatch_status="completed",
+                    worker_ref=self.worker_ref,
+                    proxy_ref_hash=self.proxy_ref_hash,
+                    rolling_window_hash=str(validated["rolling_window_hash"]),
+                    benchmark_bundle_id=benchmark_bundle_id,
+                    scoring_id=(
+                        baseline_telemetry_session.run.scoring_id
+                        if baseline_telemetry_session is not None
+                        and baseline_telemetry_session.run is not None
+                        else None
+                    ),
+                    scoring_run_id=(
+                        baseline_telemetry_session.run.scoring_run_id
+                        if baseline_telemetry_session is not None
+                        and baseline_telemetry_session.run is not None
+                        else None
+                    ),
+                    event_doc={
+                        "benchmark_date": str(validated["benchmark_date"]),
+                        "benchmark_attempt": int(validated["benchmark_attempt"]),
+                        "elapsed_seconds": round(time.time() - start, 3),
+                        "selected_icp_count": len(window.item_refs),
+                        "public_icp_count": int(
+                            validated["visibility_split"].get("public_count") or 0
+                        ),
+                        "private_holdout_icp_count": int(
+                            validated["visibility_split"].get("private_count") or 0
+                        ),
+                        "conditional_holdout_icp_count": int(
+                            validated["visibility_split"].get("conditional_count") or 0
+                        ),
+                        "private_model_manifest_hash": str(artifact.manifest_hash),
+                        "scoring_worker_source_hash": _scoring_worker_source_hash(),
+                        "publication_retry_token_hash": _baseline_publication_retry_token_hash(),
+                    },
+                )
+
+        if self._active_baseline_context is not None:
+            self._active_baseline_context["publication_stage"] = "public_report_build"
+        if recover_existing:
+            public_total_icps = int(
+                validated["visibility_split"].get("public_count") or 0
+            )
+            public_strength_counts = validated["visibility_split"].get(
+                "public_strength_counts"
+            )
+            public_weak_total = int(
+                public_strength_counts.get("weak") or 0
+                if isinstance(public_strength_counts, Mapping)
+                else 0
+            )
+            public_icps_per_day = max(1, public_total_icps)
+            public_weak_per_day = public_weak_total
+        else:
+            public_icps_per_day = self.config.public_benchmark_public_icps_per_day
+            public_weak_per_day = self.config.public_benchmark_public_weak_per_day
+            public_total_icps = self.config.public_benchmark_public_total_icps
+            public_weak_total = self.config.public_benchmark_public_weak_total
+        public_report_doc = build_public_benchmark_report(
+            benchmark_date=str(validated["benchmark_date"]),
+            rolling_window_hash=str(validated["rolling_window_hash"]),
+            aggregate_score=float(validated["aggregate_score"]),
+            per_icp_summaries=list(validated["per_icp_summaries"]),
+            benchmark_items=window.benchmark_items,
+            public_icps_per_day=public_icps_per_day,
+            public_weak_per_day=public_weak_per_day,
+            public_total_icps=public_total_icps,
+            public_weak_total=public_weak_total,
+            category_assignment=(
+                category_assignment if isinstance(category_assignment, Mapping) else None
+            ),
+        )
+        public_report_doc = {
+            **public_report_doc,
+            "serving_model_version": _public_serving_model_version_doc(
+                validated["serving_model_version"]
+            ),
+            "daily_noise_budget": dict(validated["daily_noise_budget"]),
+        }
+        public_report_doc["report_public_hash"] = sha256_json(
+            {
+                key: value
+                for key, value in public_report_doc.items()
+                if key != "report_public_hash"
+            }
+        )
+        if self._active_baseline_context is not None:
+            self._active_baseline_context["publication_stage"] = "public_report_insert"
+        public_report, _report_event = await create_public_benchmark_report(
+            benchmark_date=str(validated["benchmark_date"]),
+            benchmark_bundle_id=benchmark_bundle_id,
+            private_model_artifact_hash=str(artifact.model_artifact_hash),
+            private_model_manifest_hash=str(artifact.manifest_hash),
+            rolling_window_hash=str(validated["rolling_window_hash"]),
+            aggregate_score=float(validated["aggregate_score"]),
+            benchmark_attempt=int(validated["benchmark_attempt"]),
+            benchmark_quality="passed",
+            report_doc=public_report_doc,
+        )
+        if recover_existing:
+            durable_report = await select_one(
+                "research_lab_public_benchmark_report_current",
+                filters=(("report_id", str(public_report["report_id"])),),
+            )
+            if (
+                not isinstance(durable_report, Mapping)
+                or durable_report.get("current_report_status") != "published"
+                or str(durable_report.get("report_hash") or "")
+                != str(public_report.get("report_hash") or "")
+            ):
+                raise RuntimeError(
+                    "recovered private baseline public report is not durably published"
+                )
+        if self._active_baseline_context is not None:
+            self._active_baseline_context["publication_stage"] = "audit_bundle_write"
+        if recover_existing:
+            # Recovery is the only remaining opportunity to close a crash gap,
+            # so unlike the scoring hot path it must retry a failed audit write.
+            await self._write_audit_bundle_inner(int(validated["evaluation_epoch"]))
+        else:
+            await self._write_audit_bundle(int(validated["evaluation_epoch"]))
+        completed_event_doc = {
+            "public_report_id": str(public_report["report_id"]),
+            "selected_icp_count": len(window.item_refs),
+        }
+        if recover_existing:
+            completed_event_doc["publication_recovered_after_restart"] = True
+        await emit_run_event(
+            (
+                baseline_telemetry_session.run
+                if baseline_telemetry_session is not None
+                else None
+            ),
+            "completed",
+            benchmark_bundle_id=benchmark_bundle_id,
+            telemetry_degraded=(
+                baseline_telemetry_session.degraded
+                if baseline_telemetry_session is not None
+                else False
+            ),
+            event_doc=completed_event_doc,
+        )
+        self._baseline_publication_failures_in_process.discard(publication_scope_key)
+        self._baseline_publication_failure_logged_key = None
+        return {
+            **validated,
+            "public_report": dict(public_report),
+        }
+
     async def _maybe_run_private_baseline(self) -> dict[str, Any] | None:
         now = datetime.now(timezone.utc)
         today = now.date().isoformat()
@@ -9981,25 +10710,41 @@ class ResearchLabGatewayScoringWorker:
             )
         ]
         if valid_existing:
-            if conditional_policy.enabled:
+            existing_bundle = valid_existing[0]
+            publication_scope_key = (
+                f"{today}:{window.window_hash}:{artifact.manifest_hash}"
+            )
+            if publication_scope_key not in self._baseline_publication_verified_keys:
                 try:
-                    await _repair_baseline_category_results_from_row(
-                        valid_existing[0],
+                    await self._publish_private_baseline_bundle(
+                        bundle=existing_bundle,
+                        window=window,
+                        artifact=artifact,
                         expected_policy_hash=expected_policy_hash,
+                        attested_baseline_outcome=None,
+                        baseline_telemetry_session=None,
+                        publication_scope_key=publication_scope_key,
+                        start=start,
+                        recover_existing=True,
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - retry exact repair next pass
                     logger.warning(
-                        "research_lab_conditional_baseline_tracking_repair_failed "
+                        "research_lab_private_baseline_publication_recovery_failed "
                         "benchmark_bundle_id=%s error=%s",
-                        compact_ref(valid_existing[0].get("benchmark_bundle_id")),
+                        compact_ref(existing_bundle.get("benchmark_bundle_id")),
                         _short_error(exc),
+                        exc_info=True,
                     )
                     return {
-                        "status": "conditional_baseline_tracking_repair_failed",
+                        "status": "baseline_publication_recovery_failed",
                         "benchmark_date": today,
                         "rolling_window_hash": window.window_hash,
+                        "benchmark_bundle_id": str(
+                            existing_bundle.get("benchmark_bundle_id") or ""
+                        ),
                         "error": _short_error(exc),
                     }
+                self._baseline_publication_verified_keys.add(publication_scope_key)
             already_key = f"{today}:{window.window_hash}:{artifact.manifest_hash}"
             if self._baseline_already_logged_date != already_key:
                 logger.info(
@@ -10028,27 +10773,56 @@ class ResearchLabGatewayScoringWorker:
             expected_policy_hash=expected_policy_hash,
         )
         if same_day_reference is not None:
-            if conditional_policy.enabled:
+            stored_window_hash = str(
+                same_day_reference.get("rolling_window_hash") or ""
+            )
+            repair_window = window
+            if stored_window_hash != window.window_hash:
+                repair_window = await self._reconstruct_rolling_window(
+                    stored_window_hash
+                )
+                if repair_window is None:
+                    return {
+                        "status": "baseline_publication_recovery_failed",
+                        "benchmark_date": today,
+                        "benchmark_bundle_id": str(
+                            same_day_reference.get("benchmark_bundle_id") or ""
+                        ),
+                        "error": "persisted rolling ICP window could not be reconstructed",
+                    }
+            publication_scope_key = (
+                f"{today}:{stored_window_hash}:{artifact.manifest_hash}"
+            )
+            if publication_scope_key not in self._baseline_publication_verified_keys:
                 try:
-                    await _repair_baseline_category_results_from_row(
-                        same_day_reference,
+                    await self._publish_private_baseline_bundle(
+                        bundle=same_day_reference,
+                        window=repair_window,
+                        artifact=artifact,
                         expected_policy_hash=expected_policy_hash,
+                        attested_baseline_outcome=None,
+                        baseline_telemetry_session=None,
+                        publication_scope_key=publication_scope_key,
+                        start=start,
+                        recover_existing=True,
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - retry exact repair next pass
                     logger.warning(
-                        "research_lab_same_day_conditional_baseline_incompatible "
+                        "research_lab_same_day_baseline_publication_recovery_failed "
                         "benchmark_bundle_id=%s error=%s",
                         compact_ref(same_day_reference.get("benchmark_bundle_id")),
                         _short_error(exc),
+                        exc_info=True,
                     )
                     return {
-                        "status": "same_day_conditional_baseline_incompatible",
+                        "status": "baseline_publication_recovery_failed",
                         "benchmark_date": today,
                         "benchmark_bundle_id": str(
                             same_day_reference.get("benchmark_bundle_id") or ""
                         ),
                         "error": _short_error(exc),
                     }
+                self._baseline_publication_verified_keys.add(publication_scope_key)
             reuse_key = f"{today}:reuse:{artifact.manifest_hash}"
             if self._baseline_already_logged_date != reuse_key:
                 logger.warning(
@@ -11085,122 +11859,21 @@ class ResearchLabGatewayScoringWorker:
             signature_ref=signature_ref,
             score_summary_doc=score_summary_doc,
         )
-        if isinstance(category_assignment, Mapping):
-            await _persist_baseline_category_results(
-                category_assignment,
-                source_bundle_ref=str(bundle["benchmark_bundle_id"]),
-                rolling_window_hash=window.window_hash,
-                scoring_run_id=(
-                    str(baseline_telemetry_session.run.scoring_run_id)
-                    if baseline_telemetry_session is not None
-                    and baseline_telemetry_session.run is not None
-                    else ""
-                ),
-            )
-        await persist_attested_outcome_artifact_links(
-            attested_baseline_outcome,
-            artifact_links=[
-                {
-                    "artifact_kind": "benchmark_score_summary",
-                    "artifact_ref": str(bundle["benchmark_bundle_id"]),
-                    "artifact_hash": bundle_hash,
-                },
-                {
-                    "artifact_kind": "benchmark_bundle",
-                    "artifact_ref": str(bundle["benchmark_bundle_id"]),
-                    "artifact_hash": str(bundle["benchmark_bundle_hash"]),
-                },
-            ],
-        )
         if self._active_baseline_context is not None:
             self._active_baseline_context["benchmark_bundle_id"] = str(bundle["benchmark_bundle_id"])
-            self._active_baseline_context["publication_stage"] = "completed_dispatch_insert"
-        await create_scoring_dispatch_event(
-            dispatch_type="private_baseline_rebenchmark",
-            dispatch_status="completed",
-            worker_ref=self.worker_ref,
-            proxy_ref_hash=self.proxy_ref_hash,
-            rolling_window_hash=window.window_hash,
-            benchmark_bundle_id=str(bundle["benchmark_bundle_id"]),
-            scoring_id=(
-                baseline_telemetry_session.run.scoring_id
-                if baseline_telemetry_session is not None and baseline_telemetry_session.run is not None
-                else None
-            ),
-            scoring_run_id=(
-                baseline_telemetry_session.run.scoring_run_id
-                if baseline_telemetry_session is not None and baseline_telemetry_session.run is not None
-                else None
-            ),
-            event_doc={
-                "benchmark_date": today,
-                "benchmark_attempt": benchmark_attempt,
-                "elapsed_seconds": round(time.time() - start, 3),
-                "selected_icp_count": len(window.item_refs),
-                "public_icp_count": int(visibility_split.get("public_count") or 0),
-                "private_holdout_icp_count": int(visibility_split.get("private_count") or 0),
-                "conditional_holdout_icp_count": int(
-                    visibility_split.get("conditional_count") or 0
-                ),
-                "private_model_manifest_hash": artifact.manifest_hash,
-                "scoring_worker_source_hash": _scoring_worker_source_hash(),
-                "publication_retry_token_hash": _baseline_publication_retry_token_hash(),
-            },
+        publication = await self._publish_private_baseline_bundle(
+            bundle=bundle,
+            window=window,
+            artifact=artifact,
+            expected_policy_hash=expected_policy_hash,
+            attested_baseline_outcome=attested_baseline_outcome,
+            baseline_telemetry_session=baseline_telemetry_session,
+            publication_scope_key=publication_scope_key,
+            start=start,
+            recover_existing=False,
         )
-        if self._active_baseline_context is not None:
-            self._active_baseline_context["publication_stage"] = "public_report_build"
-        public_report_doc = build_public_benchmark_report(
-            benchmark_date=today,
-            rolling_window_hash=window.window_hash,
-            aggregate_score=aggregate_score,
-            per_icp_summaries=per_icp_summaries,
-            benchmark_items=window.benchmark_items,
-            public_icps_per_day=self.config.public_benchmark_public_icps_per_day,
-            public_weak_per_day=self.config.public_benchmark_public_weak_per_day,
-            public_total_icps=self.config.public_benchmark_public_total_icps,
-            public_weak_total=self.config.public_benchmark_public_weak_total,
-            category_assignment=category_assignment,
-        )
-        public_report_doc = {
-            **public_report_doc,
-            "serving_model_version": _public_serving_model_version_doc(serving_model_version),
-            "daily_noise_budget": noise_budget,
-        }
-        public_report_doc["report_public_hash"] = sha256_json(
-            {key: value for key, value in public_report_doc.items() if key != "report_public_hash"}
-        )
-        if self._active_baseline_context is not None:
-            self._active_baseline_context["publication_stage"] = "public_report_insert"
-        public_report, _report_event = await create_public_benchmark_report(
-            benchmark_date=today,
-            benchmark_bundle_id=str(bundle["benchmark_bundle_id"]),
-            private_model_artifact_hash=artifact.model_artifact_hash,
-            private_model_manifest_hash=artifact.manifest_hash,
-            rolling_window_hash=window.window_hash,
-            aggregate_score=aggregate_score,
-            benchmark_attempt=benchmark_attempt,
-            benchmark_quality="passed",
-            report_doc=public_report_doc,
-        )
-        if self._active_baseline_context is not None:
-            self._active_baseline_context["publication_stage"] = "audit_bundle_write"
-        await self._write_audit_bundle(evaluation_epoch)
-        await emit_run_event(
-            baseline_telemetry_session.run if baseline_telemetry_session is not None else None,
-            "completed",
-            benchmark_bundle_id=str(bundle["benchmark_bundle_id"]),
-            telemetry_degraded=(
-                baseline_telemetry_session.degraded
-                if baseline_telemetry_session is not None
-                else False
-            ),
-            event_doc={
-                "public_report_id": str(public_report["report_id"]),
-                "selected_icp_count": len(window.item_refs),
-            },
-        )
-        self._baseline_publication_failures_in_process.discard(publication_scope_key)
-        self._baseline_publication_failure_logged_key = None
+        public_report = publication["public_report"]
+        self._baseline_publication_verified_keys.add(publication_scope_key)
         logger.info(
             format_worker_block(
                 "RESEARCH LAB PRIVATE BASELINE COMPLETED",
@@ -12980,6 +13653,196 @@ def _private_benchmark_row_is_valid(row: Mapping[str, Any]) -> bool:
         return False
 
 
+def _validate_private_baseline_publication_bundle(
+    row: Mapping[str, Any],
+    *,
+    artifact: PrivateModelArtifactManifest,
+    window: Any,
+    expected_policy_hash: str,
+) -> dict[str, Any]:
+    """Rebuild only the pure summary projection and verify an immutable row.
+
+    Recovery must never invoke providers or replace scores.  The persisted
+    per-ICP summaries are therefore the sole score input; rebuilding the pure
+    projection proves that the active artifact and reconstructed ICP window
+    still produce the exact stored document before any missing publication
+    side effects are repaired.
+    """
+
+    if not _private_benchmark_row_is_valid(row):
+        raise RuntimeError("persisted private baseline bundle is not completed and valid")
+    score_summary_doc = row.get("score_summary_doc")
+    if not isinstance(score_summary_doc, Mapping):
+        raise RuntimeError("persisted private baseline score summary is missing")
+    stored_summary = dict(score_summary_doc)
+    benchmark_date = str(row.get("benchmark_date") or "")
+    rolling_window_hash = str(row.get("rolling_window_hash") or "")
+    try:
+        benchmark_attempt = int(row.get("benchmark_attempt") or 0)
+        evaluation_epoch = int(row.get("evaluation_epoch") or 0)
+        aggregate_score = float(row.get("aggregate_score"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("persisted private baseline identity is invalid") from exc
+    if (
+        not benchmark_date
+        or evaluation_epoch <= 0
+        or rolling_window_hash != str(getattr(window, "window_hash", "") or "")
+        or str(row.get("benchmark_quality") or "") != "passed"
+        or str(row.get("private_model_artifact_hash") or "")
+        != str(artifact.model_artifact_hash)
+        or str(row.get("private_model_manifest_hash") or "")
+        != str(artifact.manifest_hash)
+    ):
+        raise RuntimeError("persisted private baseline identity differs from active inputs")
+
+    summaries = stored_summary.get("per_icp_summaries")
+    benchmark_items = list(getattr(window, "benchmark_items", ()) or ())
+    if not isinstance(summaries, list) or len(summaries) != len(benchmark_items):
+        raise RuntimeError("persisted private baseline ICP bank is incomplete")
+    source_summaries: list[dict[str, Any]] = []
+    for index, (summary, item) in enumerate(zip(summaries, benchmark_items), start=1):
+        if not isinstance(summary, Mapping) or not isinstance(item, Mapping):
+            raise RuntimeError("persisted private baseline ICP row is invalid")
+        if (
+            str(summary.get("icp_ref") or "") != str(item.get("icp_ref") or "")
+            or str(summary.get("icp_hash") or "") != str(item.get("icp_hash") or "")
+        ):
+            raise RuntimeError(
+                f"persisted private baseline ICP identity differs at rank {index}"
+            )
+        source_summaries.append(
+            {key: value for key, value in summary.items() if key != "evaluation_context"}
+        )
+
+    visibility_split = stored_summary.get("visibility_split")
+    baseline_health = stored_summary.get("baseline_health")
+    serving_model_version = stored_summary.get("serving_model_version")
+    daily_noise_budget = stored_summary.get("daily_noise_budget")
+    if not all(
+        isinstance(value, Mapping)
+        for value in (
+            visibility_split,
+            baseline_health,
+            serving_model_version,
+            daily_noise_budget,
+        )
+    ):
+        raise RuntimeError("persisted private baseline commitments are incomplete")
+    if float(stored_summary.get("aggregate_score")) != aggregate_score:
+        raise RuntimeError("persisted private baseline aggregate differs from its bundle")
+
+    category_assignment = stored_summary.get("category_assignment")
+    conditional_policy: Mapping[str, Any] | None = None
+    if isinstance(category_assignment, Mapping):
+        conditional_policy = (
+            category_assignment.get("policy")
+            if isinstance(category_assignment.get("policy"), Mapping)
+            else None
+        )
+        if (
+            conditional_policy is None
+            or str(category_assignment.get("policy_hash") or "")
+            != str(expected_policy_hash or "")
+        ):
+            raise RuntimeError("persisted conditional baseline policy differs")
+    elif expected_policy_hash:
+        raise RuntimeError("persisted conditional baseline assignment is missing")
+
+    public_count = _safe_int(visibility_split.get("public_count"), default=0)
+    public_strength_counts = (
+        visibility_split.get("public_strength_counts")
+        if isinstance(visibility_split.get("public_strength_counts"), Mapping)
+        else {}
+    )
+    public_weak_count = _safe_int(public_strength_counts.get("weak"), default=0)
+    build_payload = {
+        "artifact_manifest": _artifact_manifest_mapping(artifact),
+        "benchmark_date": benchmark_date,
+        "benchmark_attempt": benchmark_attempt,
+        "rolling_window_hash": rolling_window_hash,
+        "evaluation_epoch": evaluation_epoch,
+        "benchmark_items": benchmark_items,
+        "per_icp_summaries": source_summaries,
+        # Explicit totals make the historical document independent of the
+        # current per-day configuration while retaining the same pure builder.
+        "public_icps_per_day": max(1, public_count),
+        "public_weak_per_day": public_weak_count,
+        "public_total_icps": public_count,
+        "public_weak_total": public_weak_count,
+        "retried": _safe_int(baseline_health.get("retried"), default=0),
+        "recovered": _safe_int(baseline_health.get("recovered"), default=0),
+        "max_unresolved_icps": _safe_int(
+            baseline_health.get("max_unresolved_icps"), default=0
+        ),
+        "day_jump_points": (
+            float(baseline_health["day_jump_points"])
+            if baseline_health.get("day_jump_points") is not None
+            else None
+        ),
+        "elapsed_seconds": float(stored_summary.get("elapsed_seconds") or 0.0),
+    }
+    if conditional_policy is not None:
+        build_payload["conditional_validation_policy"] = dict(conditional_policy)
+    rebuilt = build_baseline_score_summary(**build_payload)
+    if canonical_json(rebuilt["score_summary_doc"]) != canonical_json(stored_summary):
+        raise RuntimeError(
+            "persisted private baseline score summary differs from its protected projection"
+        )
+
+    bundle_payload = {
+        "benchmark_date": benchmark_date,
+        "private_model_artifact_hash": str(row.get("private_model_artifact_hash") or ""),
+        "private_model_manifest_hash": str(row.get("private_model_manifest_hash") or ""),
+        "rolling_window_hash": rolling_window_hash,
+        "evaluation_epoch": evaluation_epoch,
+        "benchmark_attempt": benchmark_attempt,
+        "benchmark_quality": "passed",
+        "aggregate_score": aggregate_score,
+        "scoring_worker_ref": str(row.get("scoring_worker_ref") or ""),
+        "proxy_ref_hash": row.get("proxy_ref_hash"),
+        "signature_ref": str(row.get("signature_ref") or ""),
+        "score_summary_doc": stored_summary,
+    }
+    expected_bundle_hash = canonical_hash(bundle_payload)
+    expected_bundle_id = "private_benchmark:" + expected_bundle_hash.split(":", 1)[1]
+    if (
+        not bundle_payload["scoring_worker_ref"]
+        or not bundle_payload["signature_ref"]
+        or str(row.get("schema_version") or "")
+        != str(stored_summary.get("schema_version") or "")
+        or str(row.get("benchmark_bundle_hash") or "") != expected_bundle_hash
+        or str(row.get("anchored_hash") or "") != expected_bundle_hash
+        or str(row.get("benchmark_bundle_id") or "") != expected_bundle_id
+    ):
+        raise RuntimeError("persisted private baseline bundle hash differs")
+    return {
+        "bundle_payload": bundle_payload,
+        "benchmark_bundle_id": expected_bundle_id,
+        "benchmark_bundle_hash": expected_bundle_hash,
+        # V2 summary lineage is committed with the Unicode-preserving
+        # canonicalizer in ``compare_baseline_summary_v2``.  Keep the store
+        # canonicalizer above only for the historical private-bundle row id.
+        "score_summary_hash": sha256_json(stored_summary),
+        "score_summary_doc": stored_summary,
+        "aggregate_score": aggregate_score,
+        "benchmark_date": benchmark_date,
+        "benchmark_attempt": benchmark_attempt,
+        "evaluation_epoch": evaluation_epoch,
+        "rolling_window_hash": rolling_window_hash,
+        "per_icp_summaries": list(rebuilt["per_icp_summaries"]),
+        "visibility_split": dict(rebuilt["visibility_split"]),
+        "serving_model_version": dict(rebuilt["serving_model_version"]),
+        "daily_noise_budget": dict(rebuilt["daily_noise_budget"]),
+        "baseline_health": dict(rebuilt["baseline_health"]),
+        "protected_result": dict(rebuilt),
+        "category_assignment": (
+            dict(rebuilt["category_assignment"])
+            if isinstance(rebuilt.get("category_assignment"), Mapping)
+            else None
+        ),
+    }
+
+
 def _private_benchmark_matches_policy(
     row: Mapping[str, Any],
     *,
@@ -13302,6 +14165,7 @@ async def _persist_baseline_category_results(
     source_bundle_ref: str,
     rolling_window_hash: str,
     scoring_run_id: str = "",
+    preserve_existing_provenance: bool = False,
 ) -> None:
     counts = (
         assignment.get("category_counts")
@@ -13317,29 +14181,49 @@ async def _persist_baseline_category_results(
     policy_hash = str(assignment.get("policy_hash") or "")
     if not assignment_hash or not policy_hash:
         raise RuntimeError("conditional baseline category commitments are missing")
-    for category in ("public", "private", "conditional"):
-        await create_scoring_category_result(
+    category_names = ["public", "private", "conditional", "overall"]
+    if preserve_existing_provenance:
+        category_names = await _existing_categories_first(
+            source_bundle_ref=source_bundle_ref,
+            assignment_hash=assignment_hash,
+            categories=category_names,
+        )
+    resolved_scoring_run_id: str | None = scoring_run_id or None
+    provenance_bound = False
+    for category in category_names:
+        if category == "overall":
+            icp_count = sum(
+                _safe_int(counts.get(name), default=0)
+                for name in ("public", "private", "conditional")
+            )
+            aggregate_score = _safe_float(
+                assignment.get("aggregate_score"), default=0.0
+            )
+        else:
+            icp_count = _safe_int(counts.get(category), default=0)
+            aggregate_score = _safe_float(scores.get(category), default=0.0)
+        row = await create_scoring_category_result(
             source_kind="baseline",
             source_bundle_ref=source_bundle_ref,
             category=category,
             assignment_hash=assignment_hash,
             policy_hash=policy_hash,
             rolling_window_hash=rolling_window_hash,
-            icp_count=_safe_int(counts.get(category), default=0),
-            aggregate_score=_safe_float(scores.get(category), default=0.0),
-            scoring_run_id=scoring_run_id or None,
+            icp_count=icp_count,
+            aggregate_score=aggregate_score,
+            scoring_run_id=resolved_scoring_run_id,
+            preserve_existing_provenance=preserve_existing_provenance,
         )
-    await create_scoring_category_result(
-        source_kind="baseline",
-        source_bundle_ref=source_bundle_ref,
-        category="overall",
-        assignment_hash=assignment_hash,
-        policy_hash=policy_hash,
-        rolling_window_hash=rolling_window_hash,
-        icp_count=sum(_safe_int(counts.get(name), default=0) for name in ("public", "private", "conditional")),
-        aggregate_score=_safe_float(assignment.get("aggregate_score"), default=0.0),
-        scoring_run_id=scoring_run_id or None,
-    )
+        if preserve_existing_provenance:
+            returned_run_id = (
+                str(row.get("scoring_run_id")) if row.get("scoring_run_id") else None
+            )
+            if provenance_bound and returned_run_id != resolved_scoring_run_id:
+                raise RuntimeError(
+                    "conditional baseline category recovery has mixed scoring provenance"
+                )
+            resolved_scoring_run_id = returned_run_id
+            provenance_bound = True
 
 
 async def _repair_baseline_category_results_from_row(
@@ -13373,6 +14257,7 @@ async def _repair_baseline_category_results_from_row(
         assignment,
         source_bundle_ref=source_bundle_ref,
         rolling_window_hash=rolling_window_hash,
+        preserve_existing_provenance=True,
     )
 
 
@@ -13479,6 +14364,7 @@ async def _persist_candidate_category_results(
     rolling_window_hash: str,
     candidate_id: str,
     scoring_run_id: str = "",
+    preserve_existing_provenance: bool = False,
 ) -> None:
     if not bool(gate.get("conditional_validation_required")):
         return
@@ -13531,10 +14417,20 @@ async def _persist_candidate_category_results(
                 ),
             ]
         )
+    if preserve_existing_provenance:
+        existing_first = await _existing_categories_first(
+            source_bundle_ref=source_bundle_ref,
+            assignment_hash=assignment_hash,
+            categories=[item[0] for item in categories],
+        )
+        by_name = {item[0]: item for item in categories}
+        categories = [by_name[name] for name in existing_first]
+    resolved_scoring_run_id: str | None = scoring_run_id or None
+    provenance_bound = False
     for category, candidate_field, baseline_field, icp_count in categories:
         candidate_score = _safe_float(gate.get(candidate_field), default=0.0)
         baseline_score = _safe_float(gate.get(baseline_field), default=0.0)
-        await create_scoring_category_result(
+        row = await create_scoring_category_result(
             source_kind="candidate",
             source_bundle_ref=source_bundle_ref,
             category=category,
@@ -13543,10 +14439,58 @@ async def _persist_candidate_category_results(
             rolling_window_hash=rolling_window_hash,
             icp_count=icp_count,
             aggregate_score=candidate_score,
-            scoring_run_id=scoring_run_id or None,
+            scoring_run_id=resolved_scoring_run_id,
             candidate_id=candidate_id,
             delta_vs_baseline=candidate_score - baseline_score,
+            preserve_existing_provenance=preserve_existing_provenance,
         )
+        if preserve_existing_provenance:
+            returned_run_id = (
+                str(row.get("scoring_run_id")) if row.get("scoring_run_id") else None
+            )
+            if provenance_bound and returned_run_id != resolved_scoring_run_id:
+                raise RuntimeError(
+                    "conditional candidate category recovery has mixed scoring provenance"
+                )
+            resolved_scoring_run_id = returned_run_id
+            provenance_bound = True
+
+
+async def _existing_categories_first(
+    *,
+    source_bundle_ref: str,
+    assignment_hash: str,
+    categories: Sequence[str],
+) -> list[str]:
+    """Order immutable recovery rows before any missing category inserts.
+
+    Processing the existing prefix first binds recovery to its original
+    telemetry run before a missing row can be appended.  A concurrent recovery
+    that starts from an empty table still converges on the first category's
+    source-key constraint in ``create_scoring_category_result``.
+    """
+
+    rows = await select_many(
+        "research_lab_scoring_category_results",
+        columns="category",
+        filters=(
+            ("source_bundle_ref", source_bundle_ref),
+            ("assignment_hash", assignment_hash),
+        ),
+        limit=max(1, len(categories) + 1),
+    )
+    existing: set[str] = set()
+    allowed = set(categories)
+    for row in rows:
+        category = str(row.get("category") or "")
+        if category not in allowed or category in existing:
+            raise RuntimeError(
+                "conditional category recovery found an invalid source-key projection"
+            )
+        existing.add(category)
+    return [name for name in categories if name in existing] + [
+        name for name in categories if name not in existing
+    ]
 
 
 def _compact_scoring_health_doc(value: Any) -> dict[str, Any]:

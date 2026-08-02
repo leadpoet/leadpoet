@@ -1244,6 +1244,9 @@ async def compare_baseline_summary_v2(
     persist_links: Any = None,
 ) -> dict[str, Any]:
     from leadpoet_canonical.attested_v2 import sha256_json
+    from research_lab.eval.baseline_summary import (
+        baseline_score_summary_artifact_ref,
+    )
 
     summary = expected_result.get("score_summary_doc")
     if not isinstance(summary, Mapping):
@@ -1261,10 +1264,10 @@ async def compare_baseline_summary_v2(
         input_artifact_hashes=(summary_hash,),
     )
     _assert_equal(outcome.get("result"), dict(expected_result), "baseline summary")
-    artifact_ref = "private_baseline:%s:%s:%s" % (
-        str(build_payload.get("benchmark_date") or ""),
-        int(build_payload.get("benchmark_attempt") or 0),
-        str(build_payload.get("rolling_window_hash") or "").removeprefix("sha256:")[:24],
+    artifact_ref = baseline_score_summary_artifact_ref(
+        benchmark_date=str(build_payload.get("benchmark_date") or ""),
+        benchmark_attempt=int(build_payload.get("benchmark_attempt") or 0),
+        rolling_window_hash=str(build_payload.get("rolling_window_hash") or ""),
     )
     link = await _persist_business_links(
         outcome,

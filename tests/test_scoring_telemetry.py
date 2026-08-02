@@ -16,6 +16,7 @@ import pytest
 from gateway.research_lab import scoring_telemetry as telemetry
 from gateway.research_lab import global_icp_queue
 from gateway.research_lab import store as research_store
+from gateway.research_lab import scoring_worker
 from gateway.research_lab.scoring_worker import _persist_provider_cost_events
 from research_lab.canonical import sha256_json
 from research_lab.eval import evaluator, private_runtime
@@ -25,6 +26,38 @@ from research_lab.eval.private_runtime import PrivateModelRuntimeError
 HASH_A = "sha256:" + "a" * 64
 HASH_B = "sha256:" + "b" * 64
 CANDIDATE_ID = "candidate:" + "c" * 64
+
+
+def _category_row(*, scoring_run_id: str | None, source_kind: str = "candidate") -> dict:
+    payload = {
+        "schema_version": "1.1",
+        "source_kind": source_kind,
+        "source_bundle_ref": "score_bundle:" + "d" * 64,
+        "category": "public",
+        "assignment_hash": HASH_A,
+        "policy_hash": HASH_B,
+        "rolling_window_hash": "sha256:" + "e" * 64,
+        "icp_count": 1,
+        "aggregate_score": 51.25,
+        "scoring_run_id": scoring_run_id,
+        "candidate_id": CANDIDATE_ID if source_kind == "candidate" else None,
+        "delta_vs_baseline": 1.25 if source_kind == "candidate" else None,
+    }
+    result_hash = research_store.canonical_hash(payload)
+    return {
+        "category_result_id": "scoring_category:" + result_hash.split(":", 1)[1],
+        **payload,
+        "result_doc": {
+            "schema_version": "1.1",
+            "source_kind": source_kind,
+            "category": "public",
+            "icp_count": 1,
+            "aggregate_score": 51.25,
+            "delta_vs_baseline": payload["delta_vs_baseline"],
+        },
+        "result_hash": result_hash,
+        "anchored_hash": result_hash,
+    }
 
 
 def _run_context() -> telemetry.ScoringRunContext:
@@ -434,6 +467,234 @@ async def test_dispatch_anchor_is_invariant_to_additive_telemetry_link(monkeypat
     assert rows[0]["anchored_hash"] == rows[1]["anchored_hash"]
     assert "scoring_id" not in rows[0]
     assert rows[1]["scoring_id"] == "scoring:" + HASH_A
+
+
+@pytest.mark.asyncio
+async def test_deterministic_dispatch_recovers_exact_insert_after_lost_response(monkeypatch):
+    dispatch_event_id = "77777777-7777-4777-8777-777777777777"
+    inserted: dict = {}
+    select_calls = 0
+
+    async def select_existing(*args, **kwargs):
+        nonlocal select_calls
+        select_calls += 1
+        return dict(inserted) if inserted else None
+
+    async def insert_then_lose_response(table: str, row: dict):
+        inserted.update(row)
+        raise RuntimeError("response lost after commit")
+
+    monkeypatch.setattr(research_store, "select_one", select_existing)
+    monkeypatch.setattr(research_store, "insert_row", insert_then_lose_response)
+
+    recovered = await research_store.create_scoring_dispatch_event(
+        dispatch_type="private_baseline_rebenchmark",
+        dispatch_status="completed",
+        worker_ref="worker:test",
+        rolling_window_hash=HASH_A,
+        benchmark_bundle_id="private_benchmark:" + HASH_B.removeprefix("sha256:"),
+        event_doc={"publication_recovered_after_restart": True},
+        dispatch_event_id=dispatch_event_id,
+    )
+
+    assert recovered == inserted
+    assert recovered["dispatch_event_id"] == dispatch_event_id
+    assert select_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_deterministic_dispatch_rejects_conflicting_existing_event(monkeypatch):
+    dispatch_event_id = "77777777-7777-4777-8777-777777777777"
+
+    async def conflicting_existing(*args, **kwargs):
+        return {
+            "dispatch_event_id": dispatch_event_id,
+            "dispatch_type": "private_baseline_rebenchmark",
+            "dispatch_status": "failed",
+        }
+
+    async def unexpected_insert(*args, **kwargs):
+        raise AssertionError("conflicting deterministic event must not be replaced")
+
+    monkeypatch.setattr(research_store, "select_one", conflicting_existing)
+    monkeypatch.setattr(research_store, "insert_row", unexpected_insert)
+
+    with pytest.raises(RuntimeError, match="deterministic event conflicts"):
+        await research_store.create_scoring_dispatch_event(
+            dispatch_type="private_baseline_rebenchmark",
+            dispatch_status="completed",
+            worker_ref="worker:test",
+            rolling_window_hash=HASH_A,
+            benchmark_bundle_id="private_benchmark:" + HASH_B.removeprefix("sha256:"),
+            event_doc={"publication_recovered_after_restart": True},
+            dispatch_event_id=dispatch_event_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_category_recovery_preserves_cryptographic_original_run(monkeypatch):
+    old_run = "11111111-1111-4111-8111-111111111111"
+    new_run = "22222222-2222-4222-8222-222222222222"
+    existing = _category_row(scoring_run_id=old_run)
+
+    async def select_existing(_table, *, filters, **_kwargs):
+        return existing if dict(filters).get("source_bundle_ref") else None
+
+    async def duplicate(*_args, **_kwargs):
+        raise RuntimeError("23505 duplicate key")
+
+    monkeypatch.setattr(research_store, "select_one", select_existing)
+    monkeypatch.setattr(research_store, "insert_row", duplicate)
+    common = {
+        "source_kind": "candidate",
+        "source_bundle_ref": existing["source_bundle_ref"],
+        "category": "public",
+        "assignment_hash": HASH_A,
+        "policy_hash": HASH_B,
+        "rolling_window_hash": existing["rolling_window_hash"],
+        "icp_count": 1,
+        "aggregate_score": 51.25,
+        "scoring_run_id": new_run,
+        "candidate_id": CANDIDATE_ID,
+        "delta_vs_baseline": 1.25,
+    }
+
+    with pytest.raises(RuntimeError, match="scoring_run_id"):
+        await research_store.create_scoring_category_result(**common)
+
+    recovered = await research_store.create_scoring_category_result(
+        **common,
+        preserve_existing_provenance=True,
+    )
+    assert recovered == existing
+    assert recovered["scoring_run_id"] == old_run
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tamper", ["result_hash", "anchored_hash", "result_doc"])
+async def test_category_exact_id_fast_path_rejects_tampered_row(monkeypatch, tamper):
+    existing = _category_row(
+        scoring_run_id="11111111-1111-4111-8111-111111111111"
+    )
+    if tamper == "result_doc":
+        existing[tamper] = {**existing[tamper], "aggregate_score": 99.0}
+    else:
+        existing[tamper] = HASH_B
+
+    async def select_exact(*_args, **_kwargs):
+        return existing
+
+    monkeypatch.setattr(research_store, "select_one", select_exact)
+    with pytest.raises(RuntimeError, match="recovery_integrity_mismatch"):
+        await research_store.create_scoring_category_result(
+            source_kind="candidate",
+            source_bundle_ref=existing["source_bundle_ref"],
+            category="public",
+            assignment_hash=HASH_A,
+            policy_hash=HASH_B,
+            rolling_window_hash=existing["rolling_window_hash"],
+            icp_count=1,
+            aggregate_score=51.25,
+            scoring_run_id=existing["scoring_run_id"],
+            candidate_id=CANDIDATE_ID,
+            delta_vs_baseline=1.25,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tamper",
+    ["category_result_id", "result_hash", "anchored_hash", "result_doc"],
+)
+async def test_category_recovery_rejects_tampered_original(monkeypatch, tamper):
+    existing = _category_row(
+        scoring_run_id="11111111-1111-4111-8111-111111111111"
+    )
+    if tamper == "result_doc":
+        existing[tamper] = {**existing[tamper], "aggregate_score": 99.0}
+    else:
+        existing[tamper] = "sha256:" + "f" * 64
+
+    async def select_existing(_table, *, filters, **_kwargs):
+        return existing if dict(filters).get("source_bundle_ref") else None
+
+    async def duplicate(*_args, **_kwargs):
+        raise RuntimeError("23505 duplicate key")
+
+    monkeypatch.setattr(research_store, "select_one", select_existing)
+    monkeypatch.setattr(research_store, "insert_row", duplicate)
+
+    with pytest.raises(RuntimeError, match="recovery_integrity_mismatch"):
+        await research_store.create_scoring_category_result(
+            source_kind="candidate",
+            source_bundle_ref=existing["source_bundle_ref"],
+            category="public",
+            assignment_hash=HASH_A,
+            policy_hash=HASH_B,
+            rolling_window_hash=existing["rolling_window_hash"],
+            icp_count=1,
+            aggregate_score=51.25,
+            scoring_run_id="22222222-2222-4222-8222-222222222222",
+            candidate_id=CANDIDATE_ID,
+            delta_vs_baseline=1.25,
+            preserve_existing_provenance=True,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_kind", ["candidate", "baseline"])
+async def test_category_restart_adopts_original_run_for_remaining_rows(
+    monkeypatch,
+    source_kind,
+):
+    old_run = "11111111-1111-4111-8111-111111111111"
+    new_run = "22222222-2222-4222-8222-222222222222"
+    captured: list[dict] = []
+
+    async def existing_public_first(*_args, **_kwargs):
+        return [{"category": "public"}]
+
+    async def persist(**kwargs):
+        captured.append(dict(kwargs))
+        return {**kwargs, "scoring_run_id": old_run}
+
+    monkeypatch.setattr(scoring_worker, "select_many", existing_public_first)
+    monkeypatch.setattr(scoring_worker, "create_scoring_category_result", persist)
+    if source_kind == "baseline":
+        await scoring_worker._persist_baseline_category_results(
+            {
+                "assignment_hash": HASH_A,
+                "policy_hash": HASH_B,
+                "category_counts": {"public": 1, "private": 1, "conditional": 1},
+                "category_scores": {"public": 51.25, "private": 52.0, "conditional": 53.0},
+                "aggregate_score": 52.0,
+            },
+            source_bundle_ref="private_benchmark:" + "d" * 64,
+            rolling_window_hash="sha256:" + "e" * 64,
+            scoring_run_id="",
+            preserve_existing_provenance=True,
+        )
+    else:
+        await scoring_worker._persist_candidate_category_results(
+            {
+                "conditional_validation_required": True,
+                "category_assignment_hash": HASH_A,
+                "conditional_validation_policy_hash": HASH_B,
+                "public_icp_count": 1,
+                "candidate_public_score": 51.25,
+                "baseline_public_score": 50.0,
+            },
+            source_bundle_ref="score_bundle:" + "d" * 64,
+            rolling_window_hash="sha256:" + "e" * 64,
+            candidate_id=CANDIDATE_ID,
+            scoring_run_id=new_run,
+            preserve_existing_provenance=True,
+        )
+
+    assert captured
+    assert all(row["preserve_existing_provenance"] is True for row in captured)
+    assert captured[0]["scoring_run_id"] in {None, new_run}
+    assert all(row["scoring_run_id"] == old_run for row in captured[1:])
 
 
 @pytest.mark.asyncio

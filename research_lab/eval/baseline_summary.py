@@ -12,6 +12,21 @@ from typing import Any, Mapping, Sequence
 from research_lab.canonical import sha256_json
 
 
+def baseline_score_summary_artifact_ref(
+    *,
+    benchmark_date: str,
+    benchmark_attempt: int,
+    rolling_window_hash: str,
+) -> str:
+    """Return the immutable V2 artifact ref for one daily baseline summary."""
+
+    return "private_baseline:%s:%s:%s" % (
+        str(benchmark_date or ""),
+        int(benchmark_attempt),
+        str(rolling_window_hash or "").removeprefix("sha256:")[:24],
+    )
+
+
 def _average(values: Sequence[float]) -> float:
     return float(sum(values) / len(values)) if values else 0.0
 

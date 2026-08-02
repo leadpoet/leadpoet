@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "c350c43674d5bd470808e542278b5c05bd3f3534",
+  "baseline_commit": "8d287969ae3a60cfd2fc86e505945025bf83ee37",
   "entries": [
     {
       "ast_sha256": "sha256:3906c365a737ef356b96ad974e4ece7b8755b49ad097ed24cdbf2dd3662b0c9a",
@@ -437,7 +437,12 @@
       "symbol": "_verify_built_candidate_artifact"
     },
     {
-      "ast_sha256": "sha256:225c6e0b97fbf125175a9d2e6f32e15649160a68c71e0fc633471c79cc85bd91",
+      "ast_sha256": "sha256:ec77b35b054118f466a0ae885b597d69911187eecb4ba585fc6de1f054e4e436",
+      "path": "gateway/research_lab/code_build.py",
+      "symbol": "validate_private_code_edit_diff_artifact"
+    },
+    {
+      "ast_sha256": "sha256:989c3eca9bf510572802015dc435698d9c78c6d1f8aa96489afa0745a68ab480",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "CodeEditLoopEngine"
     },
@@ -635,6 +640,11 @@
       "ast_sha256": "sha256:71ae256cb2d29f1fd6157d318dc926f9c80157ff44bb92945efed49083e7341d",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "_load_valid_artifact"
+    },
+    {
+      "ast_sha256": "sha256:ecc42ea515da3f77196df08fd375369238a462d33a25951c4229d9be917fce97",
+      "path": "gateway/research_lab/promotion.py",
+      "symbol": "_push_candidate_source_diff_to_repo"
     },
     {
       "ast_sha256": "sha256:3ad1a2e70cf8e8210f0dbf0602df4ed297d5ee37001944f5b3f2fd39ecc24b06",
@@ -837,6 +847,11 @@
       "symbol": "validate_source_add_registration_diff"
     },
     {
+      "ast_sha256": "sha256:e12c1ca02a4cf13e69ee9f295212470ad46094eaa5b642f08e29f01b042997d9",
+      "path": "gateway/research_lab/scoring_worker.py",
+      "symbol": "_load_candidate_source_diff"
+    },
+    {
       "ast_sha256": "sha256:f30b68760230b77cd2e401f6b4aa73649f56129c7ce6a495a66a843e34231656",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "maybe_refresh_dev_snapshot"
@@ -957,9 +972,19 @@
       "symbol": "hourly_batch_task"
     },
     {
-      "ast_sha256": "sha256:2d3c28403d74110aa9d41009e9b0ec21e1e7045e96cd8b1836b3d497cbcd7c6e",
+      "ast_sha256": "sha256:a1270b127f0f80ac37f554fc1c4a298de6f7eadab0435416089a3dc6d85f781b",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "AutoresearchExecutorV2"
+    },
+    {
+      "ast_sha256": "sha256:bcfe8cf6c0c26e801c86e29eeacc52fb0ffb25a9c868e82bcdffee124de1128e",
+      "path": "gateway/tee/autoresearch_executor_v2.py",
+      "symbol": "_HostCandidateBuilder"
+    },
+    {
+      "ast_sha256": "sha256:899d7df54b786760f6c15aa431e1616cbdd21712011a9e936c82aee000cd12a9",
+      "path": "gateway/tee/autoresearch_executor_v2.py",
+      "symbol": "_HostGitTreeRepository"
     },
     {
       "ast_sha256": "sha256:5b8ef524ed49eee74801a83bf0d7ee7ef1b757c856f8ece9556cd309eaade16a",
@@ -1937,6 +1962,11 @@
       "symbol": "compute_reimbursement_award"
     },
     {
+      "ast_sha256": "sha256:b0460f368c49f12a2a4689d8bdc3ad2b3a1de85c63a349671cd4f41b47c6baf0",
+      "path": "research_lab/code_editing.py",
+      "symbol": "_GIT_STRUCTURAL_DIFF_PREFIXES"
+    },
+    {
       "ast_sha256": "sha256:0ea67aea860bc4864bb81e7bdf0154ed37d15d9793cc325382b20c594667c010",
       "path": "research_lab/code_editing.py",
       "symbol": "build_code_edit_auto_research_messages"
@@ -1977,6 +2007,11 @@
       "symbol": "code_edit_candidate_manifest"
     },
     {
+      "ast_sha256": "sha256:f179f8d9ecb8d688103ba0629eb124441b1914a44b8b870f0ef70f972595aa09",
+      "path": "research_lab/code_editing.py",
+      "symbol": "git_diff_structural_metadata"
+    },
+    {
       "ast_sha256": "sha256:b6c7866522d61cf146bf8619e45a5a5b4ef5c2a2c9c01fb491309760e3049bc6",
       "path": "research_lab/code_editing.py",
       "symbol": "parse_code_edit_repair_response"
@@ -2002,7 +2037,7 @@
       "symbol": "parse_plan_alignment_judge_response"
     },
     {
-      "ast_sha256": "sha256:3a5436fbc0c9760cffca0aba0809dbe88bc7c25829e444c74354604cf123d138",
+      "ast_sha256": "sha256:e6174d0072e186d9be77b8d4e8ca33019d8460a23af8bc245be0977d194c0e19",
       "path": "research_lab/code_editing.py",
       "symbol": "validate_code_edit_draft"
     },
@@ -2282,7 +2317,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:5c681bd5aeb99197e9bfbfec07e3ea0b8d271d5e8c215ea5c9a773b27cd789e4",
-  "protected_source_commit": "09606c64ec27a07d5531a6e741203b0b0da42164",
+  "manifest_hash": "sha256:63cb4d279af854f1b840d8b4bb980cb3707ddf6853b1f9e5477d99e61419f745",
+  "protected_source_commit": "8d287969ae3a60cfd2fc86e505945025bf83ee37",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

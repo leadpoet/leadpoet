@@ -117,9 +117,14 @@ class EpochMonitor:
         print(f"   Architecture: Same as validator (proven stable)")
         print("="*80 + "\n")
         
-        # Initialize subtensor (sync version - for polling)
+        # The sync client performs runtime metadata initialization during
+        # construction. Keep that work off FastAPI's event loop so a slow
+        # archive/runtime refresh cannot freeze every gateway endpoint.
         try:
-            self.subtensor = bt.Subtensor(network=self.network)
+            self.subtensor = await asyncio.to_thread(
+                bt.Subtensor,
+                network=self.network,
+            )
             print(f"✅ Connected to {self.network} chain")
         except Exception as e:
             print(f"❌ Failed to connect to chain: {e}")

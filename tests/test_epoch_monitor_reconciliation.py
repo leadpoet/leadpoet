@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import datetime
 
 import pytest
@@ -200,6 +201,46 @@ async def test_stateful_monitor_uses_finalized_scheduler_snapshot(monkeypatch):
 
     assert observed["netuid"] == 71
     assert observed["finalized"] is True
+
+
+@pytest.mark.asyncio
+async def test_epoch_monitor_constructs_sync_subtensor_off_event_loop(monkeypatch):
+    from gateway.tasks import epoch_monitor
+
+    constructor_started = threading.Event()
+    constructor_release = threading.Event()
+
+    class _Subtensor:
+        pass
+
+    def blocking_constructor(**_kwargs):
+        constructor_started.set()
+        if not constructor_release.wait(timeout=2):
+            raise RuntimeError("test did not release Subtensor construction")
+        return _Subtensor()
+
+    monkeypatch.setattr(epoch_monitor.bt, "Subtensor", blocking_constructor)
+    monitor = epoch_monitor.EpochMonitor()
+    task = asyncio.create_task(monitor.start())
+
+    try:
+        started = await asyncio.wait_for(
+            asyncio.to_thread(constructor_started.wait, 1),
+            timeout=1.5,
+        )
+        assert started is True
+
+        # A direct constructor call would block this callback until the test
+        # releases the constructor. The production path must stay responsive.
+        event_loop_tick = asyncio.Event()
+        asyncio.get_running_loop().call_soon(event_loop_tick.set)
+        await asyncio.wait_for(event_loop_tick.wait(), timeout=0.2)
+        assert task.done() is False
+    finally:
+        constructor_release.set()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
 
 @pytest.mark.asyncio

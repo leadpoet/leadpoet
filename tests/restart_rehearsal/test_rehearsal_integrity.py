@@ -90,6 +90,80 @@ COMMIT = "1" * 40
 VALIDATOR_HOTKEY = "5FqLp5QmNRiHGyj3xbLVnDHfCx25qxJX5CUhpndF9GFfZZiK"
 
 
+def _receipt_graph_seed_contract() -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, list[dict[str, Any]]],
+]:
+    boot_hash = "sha256:" + "b" * 64
+    receipt_hash = "sha256:" + "c" * 64
+    attempt_hash = "sha256:" + "d" * 64
+    job_id = "rehearsal-finalized-allocation"
+    purpose = "research_lab.legacy_finalized_allocation.v2"
+    return (
+        {
+            "research_lab_attested_boot_identities_v2": {
+                "kind": "r",
+                "columns": ["boot_identity_hash"],
+            },
+            "research_lab_attested_execution_receipts_v2": {
+                "kind": "r",
+                "columns": [
+                    "receipt_hash",
+                    "boot_identity_hash",
+                    "receipt_doc",
+                ],
+            },
+            "research_lab_attested_receipt_edges_v2": {
+                "kind": "r",
+                "columns": ["child_receipt_hash", "parent_receipt_hash"],
+            },
+            "research_lab_attested_receipt_transport_v2": {
+                "kind": "r",
+                "columns": ["receipt_hash", "attempt_hash"],
+            },
+            "research_lab_attested_transport_attempts_v2": {
+                "kind": "r",
+                "columns": ["attempt_hash", "attempt_doc"],
+            },
+        },
+        {
+            "research_lab_attested_boot_identities_v2": [
+                {"boot_identity_hash": boot_hash},
+            ],
+            "research_lab_attested_execution_receipts_v2": [
+                {
+                    "receipt_hash": receipt_hash,
+                    "boot_identity_hash": boot_hash,
+                    "receipt_doc": {
+                        "receipt_hash": receipt_hash,
+                        "boot_identity_hash": boot_hash,
+                        "parent_receipt_hashes": [],
+                        "job_id": job_id,
+                        "purpose": purpose,
+                    },
+                },
+            ],
+            "research_lab_attested_receipt_edges_v2": [],
+            "research_lab_attested_receipt_transport_v2": [
+                {
+                    "receipt_hash": receipt_hash,
+                    "attempt_hash": attempt_hash,
+                },
+            ],
+            "research_lab_attested_transport_attempts_v2": [
+                {
+                    "attempt_hash": attempt_hash,
+                    "attempt_doc": {
+                        "attempt_hash": attempt_hash,
+                        "job_id": job_id,
+                        "purpose": purpose,
+                    },
+                },
+            ],
+        },
+    )
+
+
 def test_historical_receipt_fixture_binds_candidate_release_identity(
     tmp_path,
     monkeypatch,
@@ -696,6 +770,7 @@ def test_gateway_rehearsal_rejects_columns_absent_from_migration_schema() -> Non
 def test_migration_backed_contract_is_candidate_bound_and_complete(
     tmp_path,
 ) -> None:
+    graph_relations, graph_seed_rows = _receipt_graph_seed_contract()
     relations = {
         name: {"kind": "r", "columns": ["schema_version"]}
         for name in {
@@ -733,6 +808,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "updated_at",
         ],
     }
+    relations.update(graph_relations)
     contract = {
         "schema_version": "leadpoet.restart_rehearsal.postgres_contract.v1",
         "candidate_sha": COMMIT,
@@ -839,12 +915,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_legacy_finalized_allocation_migrations_v2": [
                 {"schema_version": None},
             ],
-            "research_lab_attested_boot_identities_v2": [
-                {"schema_version": None},
-            ],
-            "research_lab_attested_execution_receipts_v2": [
-                {"schema_version": None},
-            ],
+            **graph_seed_rows,
         },
     }
     path = tmp_path / "postgres-contract.json"
@@ -884,11 +955,26 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     with pytest.raises(RuntimeError, match="differs from candidate"):
         _migration_schema_contract(path, candidate_sha="2" * 40)
 
+    incomplete = json.loads(json.dumps(contract))
+    incomplete["seed_rows"][
+        "research_lab_attested_execution_receipts_v2"
+    ][0]["receipt_doc"]["parent_receipt_hashes"] = [
+        "sha256:" + "e" * 64
+    ]
+    path.write_text(json.dumps(incomplete), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="receipt graph is incomplete"):
+        _migration_seed_rows(
+            path,
+            candidate_sha=COMMIT,
+            relation_columns=relation_columns,
+        )
+
 
 def test_rehearsal_evidence_requires_all_postgres_contract_checks(
     tmp_path,
     monkeypatch,
 ) -> None:
+    graph_relations, graph_seed_rows = _receipt_graph_seed_contract()
     state_root = tmp_path / "rehearsal-state"
     state_root.mkdir()
     contract_path = state_root / "postgres-v2-schema-contract.json"
@@ -932,14 +1018,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
                 "kind": "r",
                 "columns": ["epoch_id"],
             },
-            "research_lab_attested_boot_identities_v2": {
-                "kind": "r",
-                "columns": ["boot_identity_hash"],
-            },
-            "research_lab_attested_execution_receipts_v2": {
-                "kind": "r",
-                "columns": ["receipt_hash"],
-            },
+            **graph_relations,
             "research_lab_attested_ancestry_checkpoints_v2": {
                 "kind": "r",
                 "columns": ["root_receipt_hash"],
@@ -1056,12 +1135,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "research_lab_legacy_finalized_allocation_migrations_v2": [
                 {"epoch_id": None},
             ],
-            "research_lab_attested_boot_identities_v2": [
-                {"boot_identity_hash": None},
-            ],
-            "research_lab_attested_execution_receipts_v2": [
-                {"receipt_hash": None},
-            ],
+            **graph_seed_rows,
         },
     }
     contract_path.write_text(json.dumps(contract), encoding="utf-8")

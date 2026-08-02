@@ -845,6 +845,9 @@ def verify_migration_backed_database_contract(
         "research_lab_legacy_finalized_allocation_migrations_v2",
         "research_lab_attested_boot_identities_v2",
         "research_lab_attested_execution_receipts_v2",
+        "research_lab_attested_receipt_edges_v2",
+        "research_lab_attested_receipt_transport_v2",
+        "research_lab_attested_transport_attempts_v2",
     }
     if (
         not isinstance(seed_rows, dict)
@@ -855,15 +858,23 @@ def verify_migration_backed_database_contract(
         )
     for relation in sorted(required_seed_relations):
         rows = seed_rows.get(relation)
-        expected_count = (
-            2
-            if relation == "research_lab_finalized_allocation_epochs_v2"
-            else 1
-        )
+        fixed_count = {
+            "research_lab_finalized_allocation_epochs_v2": 2,
+            "research_lab_emission_allocation_current": 1,
+            "research_lab_legacy_finalized_allocation_migrations_v2": 1,
+        }.get(relation)
         if (
             relation not in relations
             or not isinstance(rows, list)
-            or len(rows) != expected_count
+            or (fixed_count is not None and len(rows) != fixed_count)
+            or (
+                relation
+                in {
+                    "research_lab_attested_boot_identities_v2",
+                    "research_lab_attested_execution_receipts_v2",
+                }
+                and not rows
+            )
             or any(
                 not isinstance(row, dict)
                 or set(row) != set(relations[relation]["columns"])

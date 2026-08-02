@@ -594,6 +594,9 @@ def _migration_seed_rows(
         "research_lab_legacy_finalized_allocation_migrations_v2",
         "research_lab_attested_boot_identities_v2",
         "research_lab_attested_execution_receipts_v2",
+        "research_lab_attested_receipt_edges_v2",
+        "research_lab_attested_receipt_transport_v2",
+        "research_lab_attested_transport_attempts_v2",
     }
     if (
         document.get("candidate_sha") != candidate_sha
@@ -606,14 +609,22 @@ def _migration_seed_rows(
     normalized: dict[str, list[dict[str, Any]]] = {}
     for target in sorted(expected):
         rows = raw[target]
-        expected_count = (
-            2
-            if target == "research_lab_finalized_allocation_epochs_v2"
-            else 1
-        )
+        fixed_count = {
+            "research_lab_finalized_allocation_epochs_v2": 2,
+            "research_lab_emission_allocation_current": 1,
+            "research_lab_legacy_finalized_allocation_migrations_v2": 1,
+        }.get(target)
         if (
             not isinstance(rows, list)
-            or len(rows) != expected_count
+            or (fixed_count is not None and len(rows) != fixed_count)
+            or (
+                target
+                in {
+                    "research_lab_attested_boot_identities_v2",
+                    "research_lab_attested_execution_receipts_v2",
+                }
+                and not rows
+            )
             or any(not isinstance(row, dict) for row in rows)
         ):
             raise RuntimeError(
@@ -629,7 +640,115 @@ def _migration_seed_rows(
                 % target
             )
         normalized[target] = [dict(row) for row in rows]
+    _validate_migration_receipt_graph_seeds(normalized)
     return normalized
+
+
+def _validate_migration_receipt_graph_seeds(
+    rows_by_table: dict[str, list[dict[str, Any]]],
+) -> None:
+    def unique_rows(table: str, field: str) -> dict[str, dict[str, Any]]:
+        indexed: dict[str, dict[str, Any]] = {}
+        for row in rows_by_table[table]:
+            value = str(row.get(field) or "")
+            if not value or value in indexed:
+                raise RuntimeError(
+                    "migration-backed allocation authority seed has an "
+                    "invalid or duplicated %s: %s" % (field, table)
+                )
+            indexed[value] = row
+        return indexed
+
+    boots = unique_rows(
+        "research_lab_attested_boot_identities_v2",
+        "boot_identity_hash",
+    )
+    receipts = unique_rows(
+        "research_lab_attested_execution_receipts_v2",
+        "receipt_hash",
+    )
+    attempts = unique_rows(
+        "research_lab_attested_transport_attempts_v2",
+        "attempt_hash",
+    )
+
+    edges_by_child: dict[str, set[str]] = {}
+    edge_pairs: set[tuple[str, str]] = set()
+    for row in rows_by_table["research_lab_attested_receipt_edges_v2"]:
+        pair = (
+            str(row.get("child_receipt_hash") or ""),
+            str(row.get("parent_receipt_hash") or ""),
+        )
+        if (
+            not all(pair)
+            or pair in edge_pairs
+            or pair[0] not in receipts
+            or pair[1] not in receipts
+        ):
+            raise RuntimeError(
+                "migration-backed allocation authority receipt edge is invalid"
+            )
+        edge_pairs.add(pair)
+        edges_by_child.setdefault(pair[0], set()).add(pair[1])
+
+    receipt_scopes: dict[str, tuple[str, str]] = {}
+    for receipt_hash, row in receipts.items():
+        document = row.get("receipt_doc")
+        if not isinstance(document, dict):
+            raise RuntimeError(
+                "migration-backed allocation authority receipt document is missing"
+            )
+        parent_hashes = document.get("parent_receipt_hashes")
+        boot_hash = str(document.get("boot_identity_hash") or "")
+        if (
+            document.get("receipt_hash") != receipt_hash
+            or row.get("boot_identity_hash") != boot_hash
+            or boot_hash not in boots
+            or not isinstance(parent_hashes, list)
+            or any(not isinstance(value, str) for value in parent_hashes)
+            or len(set(parent_hashes)) != len(parent_hashes)
+            or edges_by_child.get(receipt_hash, set()) != set(parent_hashes)
+        ):
+            raise RuntimeError(
+                "migration-backed allocation authority receipt graph is incomplete"
+            )
+        receipt_scopes[receipt_hash] = (
+            str(document.get("job_id") or ""),
+            str(document.get("purpose") or ""),
+        )
+
+    attempt_scopes: dict[str, tuple[str, str]] = {}
+    for attempt_hash, row in attempts.items():
+        document = row.get("attempt_doc")
+        if (
+            not isinstance(document, dict)
+            or document.get("attempt_hash") != attempt_hash
+        ):
+            raise RuntimeError(
+                "migration-backed allocation authority transport document is invalid"
+            )
+        attempt_scopes[attempt_hash] = (
+            str(document.get("job_id") or ""),
+            str(document.get("purpose") or ""),
+        )
+
+    link_pairs: set[tuple[str, str]] = set()
+    for row in rows_by_table["research_lab_attested_receipt_transport_v2"]:
+        pair = (
+            str(row.get("receipt_hash") or ""),
+            str(row.get("attempt_hash") or ""),
+        )
+        if (
+            not all(pair)
+            or pair in link_pairs
+            or pair[0] not in receipts
+            or pair[1] not in attempts
+            or receipt_scopes[pair[0]] != attempt_scopes[pair[1]]
+        ):
+            raise RuntimeError(
+                "migration-backed allocation authority receipt transport is invalid"
+            )
+        link_pairs.add(pair)
 
 
 class LocalPostgRESTState:

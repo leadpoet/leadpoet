@@ -2397,7 +2397,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:90086e6705a84021e5e8f4f1eceee327385fc35afdfa3866b733bd14cf7ad595",
-  "protected_source_commit": "f9db67b6e78eb88098df239dc9cf002a640e75d2",
+  "manifest_hash": "sha256:1c44fc797f62db18b8ea936c3489247815353c0aa6afbce7dcece642241f1e05",
+  "protected_source_commit": "e78c0b23de35d2a3c02ff1acb97731f58714efd7",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

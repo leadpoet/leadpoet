@@ -4383,21 +4383,30 @@ class Validator(BaseValidatorNeuron):
             or os.environ.get("GIT_COMMIT")
             or ""
         ).lower()
+        config = getattr(self, "config", None)
+        epoch_cutover = getattr(self, "_epoch_cutover", None)
+        telemetry_netuid = getattr(config, "netuid", None)
+        if telemetry_netuid is None:
+            telemetry_netuid = getattr(epoch_cutover, "netuid", None)
+        if telemetry_netuid is None:
+            telemetry_netuid = snapshot.get("netuid")
+        wallet = getattr(self, "wallet", None)
+        hotkey = getattr(wallet, "hotkey", None)
         telemetry = {
             "runtime_sha": runtime_sha,
-            "netuid": int(self.config.netuid),
+            "netuid": telemetry_netuid,
             "epoch_id": int(snapshot["epoch_id"]),
-            "epoch_block": int(epoch_state.epoch_block),
+            "epoch_block": getattr(epoch_state, "epoch_block", None),
             "validator_role": "primary",
             "validator_id_hash": _sentry_hash_identifier(
-                self.wallet.hotkey.ss58_address
+                getattr(hotkey, "ss58_address", None)
             ),
             "restart_invocation_id": os.environ.get(
                 "LEADPOET_RESTART_INVOCATION_ID"
             ),
             "weight_correlation_id": _weight_correlation_id(
                 runtime_sha=runtime_sha,
-                netuid=int(self.config.netuid),
+                netuid=telemetry_netuid,
                 epoch_id=int(snapshot["epoch_id"]),
             ),
         }
@@ -4491,7 +4500,7 @@ class Validator(BaseValidatorNeuron):
                 ),
                 "weight_correlation_id": _weight_correlation_id(
                     runtime_sha=runtime_sha,
-                    netuid=int(self.config.netuid),
+                    netuid=telemetry_netuid,
                     epoch_id=int(snapshot["epoch_id"]),
                     bundle_hash=bundle_hash,
                 ),

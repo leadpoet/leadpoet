@@ -851,7 +851,7 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
         'echo "Preparing exact hash-locked V2 build artifacts before production shutdown"'
         not in script
     )
-    assert script.index('pkill -9 -f "python3 -u -m gateway.main"') > shutdown
+    assert script.index("gateway/tee/scoped_shutdown_v2.py") > shutdown
 
 
 def test_gateway_restart_bounds_active_ancestry_before_weight_preparation() -> None:
@@ -1524,12 +1524,23 @@ def test_gateway_restart_uses_one_canonical_checkout_for_host_processes() -> Non
         in script
     )
     assert 'GATEWAY_PID="$!"' not in script
-    assert 'pkill -9 -f "python3 -u -m gateway.main"' in script
+    # Shutdown must be the identity-scoped module, never a global name-pattern
+    # pkill: an argv-pattern SIGKILL on this shared CI/production host is how
+    # the live gateway was killed mid-epoch on 2026-08-02.
+    assert 'gateway/tee/scoped_shutdown_v2.py' in script
+    assert 'pkill -9 -f "python3 -u -m gateway.main"' not in script
+    assert 'pkill -9 -f "uvicorn"' not in script
+    assert 'refusing global pkill fallback' in script
 
 
 def test_gateway_restart_disables_the_retired_host_provider_proxy() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    assert 'pkill -9 -f "gateway.research_lab.provider_evidence_proxy"' in script
+    shutdown_module = (
+        ROOT / "gateway" / "tee" / "scoped_shutdown_v2.py"
+    ).read_text(encoding="utf-8")
+    # The retired proxy stays covered by the scoped shutdown's managed
+    # component patterns and must never be relaunched by the script.
+    assert '"gateway.research_lab.provider_evidence_proxy"' in shutdown_module
     assert '"$GATEWAY_PYTHON_BIN" -m gateway.research_lab.provider_evidence_proxy' not in script
     assert "legacy_v1" not in script
     assert (
@@ -1543,7 +1554,7 @@ def test_gateway_restart_starts_tee_egress_before_v2_readiness() -> None:
     managed_service_cleanup = (
         "sudo systemctl stop leadpoet-tee-egress-forwarder.service"
     )
-    cleanup = 'pkill -9 -f "gateway.utils.tee_egress_forwarder"'
+    cleanup = 'gateway/tee/scoped_shutdown_v2.py'
     launch = (
         '-m gateway.utils.tee_egress_forwarder \\\n'
         '    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" '

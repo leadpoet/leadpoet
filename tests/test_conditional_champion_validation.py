@@ -1769,8 +1769,12 @@ async def test_reused_signed_bundle_repairs_derivatives_before_scored_event(monk
         order.append("scored")
         raise RuntimeError("stop-after-order-proof")
 
+    async def current(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"current_event_status": "scored"}
+
     monkeypatch.setattr(scoring_worker, "_persist_conditional_finalization_events", finalization)
     monkeypatch.setattr(scoring_worker, "_persist_candidate_category_results", categories)
+    monkeypatch.setattr(worker, "_require_reusable_bundle_current", current)
     monkeypatch.setattr(worker, "_create_scored_evaluation_event", scored)
     monkeypatch.setattr(worker, "_scoring_health_gate_result", lambda _bundle: {"decision": "healthy"})
     with pytest.raises(RuntimeError, match="stop-after-order-proof"):

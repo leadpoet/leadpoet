@@ -2793,6 +2793,7 @@ async def create_scoring_category_result(
     scoring_run_id: str | None = None,
     candidate_id: str | None = None,
     delta_vs_baseline: float | None = None,
+    preserve_existing_provenance: bool = False,
 ) -> dict[str, Any]:
     """Persist one aggregate-only category result idempotently.
 
@@ -2833,6 +2834,7 @@ async def create_scoring_category_result(
         filters=(("category_result_id", category_result_id),),
     )
     if existing is not None:
+        _validate_scoring_category_result_integrity(existing)
         _validate_scoring_category_result(existing, payload)
         return existing
     row = {
@@ -2868,7 +2870,11 @@ async def create_scoring_category_result(
         )
         if recovered is None:
             raise
-        _validate_scoring_category_result(recovered, payload)
+        _validate_scoring_category_result_integrity(recovered)
+        if preserve_existing_provenance:
+            _validate_recovered_scoring_category_result(recovered, payload)
+        else:
+            _validate_scoring_category_result(recovered, payload)
         return recovered
 
 
@@ -2908,3 +2914,84 @@ def _validate_scoring_category_result(
                 "research_lab_scoring_category_result_conflict:"
                 f"{field}:{actual!r}!={wanted!r}"
             )
+
+
+def _validate_recovered_scoring_category_result(
+    existing: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> None:
+    """Validate an immutable category row while preserving its first run.
+
+    A restart may resume publication under a new operational telemetry run,
+    but the source-key row is append-only and its original ``scoring_run_id``
+    is part of its anchored content hash.  Recovery may therefore converge on
+    that original provenance only after proving the complete stored row is
+    self-consistent and every semantic field still matches.  Normal writes do
+    not use this path and remain strict about the run id.
+    """
+
+    stored_payload = _validate_scoring_category_result_integrity(existing)
+    semantic_expected = {
+        key: value
+        for key, value in expected.items()
+        if key != "scoring_run_id"
+    }
+    semantic_stored = {
+        key: value
+        for key, value in stored_payload.items()
+        if key != "scoring_run_id"
+    }
+    _validate_scoring_category_result(semantic_stored, semantic_expected)
+
+
+def _validate_scoring_category_result_integrity(
+    existing: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Rebuild every immutable identity field from the stored row."""
+
+    stored_payload = {
+        "schema_version": str(existing.get("schema_version") or ""),
+        "source_kind": str(existing.get("source_kind") or ""),
+        "source_bundle_ref": str(existing.get("source_bundle_ref") or ""),
+        "category": str(existing.get("category") or ""),
+        "assignment_hash": str(existing.get("assignment_hash") or ""),
+        "policy_hash": str(existing.get("policy_hash") or ""),
+        "rolling_window_hash": str(existing.get("rolling_window_hash") or ""),
+        "icp_count": int(existing.get("icp_count") or 0),
+        "aggregate_score": round(float(existing.get("aggregate_score") or 0.0), 6),
+        "scoring_run_id": (
+            str(existing.get("scoring_run_id"))
+            if existing.get("scoring_run_id")
+            else None
+        ),
+        "candidate_id": (
+            str(existing.get("candidate_id"))
+            if existing.get("candidate_id")
+            else None
+        ),
+        "delta_vs_baseline": (
+            round(float(existing["delta_vs_baseline"]), 6)
+            if existing.get("delta_vs_baseline") is not None
+            else None
+        ),
+    }
+    stored_hash = canonical_hash(stored_payload)
+    stored_id = "scoring_category:" + stored_hash.split(":", 1)[1]
+    expected_result_doc = {
+        "schema_version": "1.1",
+        "source_kind": stored_payload["source_kind"],
+        "category": stored_payload["category"],
+        "icp_count": stored_payload["icp_count"],
+        "aggregate_score": stored_payload["aggregate_score"],
+        "delta_vs_baseline": stored_payload["delta_vs_baseline"],
+    }
+    if (
+        str(existing.get("category_result_id") or "") != stored_id
+        or str(existing.get("result_hash") or "") != stored_hash
+        or str(existing.get("anchored_hash") or "") != stored_hash
+        or existing.get("result_doc") != expected_result_doc
+    ):
+        raise RuntimeError(
+            "research_lab_scoring_category_result_recovery_integrity_mismatch"
+        )
+    return stored_payload

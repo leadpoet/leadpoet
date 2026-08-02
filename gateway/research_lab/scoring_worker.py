@@ -6125,9 +6125,9 @@ class ResearchLabGatewayScoringWorker:
                 raise RuntimeError("image_build candidate is missing candidate_model_manifest_doc")
             candidate_artifact = PrivateModelArtifactManifest.from_mapping(candidate_manifest_doc)
             reused_bundle_row = await self._find_reusable_scored_bundle(
-                candidate_id=candidate_id,
-                run_id=str(candidate["run_id"]),
-                candidate_artifact_hash=candidate_artifact.model_artifact_hash,
+                candidate=candidate,
+                artifact=artifact,
+                candidate_artifact=candidate_artifact,
                 evaluation_epoch=evaluation_epoch,
             )
             if reused_bundle_row is not None:
@@ -7463,9 +7463,9 @@ class ResearchLabGatewayScoringWorker:
     async def _find_reusable_scored_bundle(
         self,
         *,
-        candidate_id: str,
-        run_id: str,
-        candidate_artifact_hash: str,
+        candidate: Mapping[str, Any],
+        artifact: PrivateModelArtifactManifest,
+        candidate_artifact: PrivateModelArtifactManifest,
         evaluation_epoch: int,
     ) -> dict[str, Any] | None:
         """Locate the signed score bundle already produced for this candidate run.
@@ -7477,13 +7477,119 @@ class ResearchLabGatewayScoringWorker:
         """
         if _env_flag("RESEARCH_LAB_DISABLE_SCORED_BUNDLE_REUSE"):
             return None
+        candidate_id = str(candidate.get("candidate_id") or "")
+        run_id = str(candidate.get("run_id") or "")
+        ticket_id = str(candidate.get("ticket_id") or "")
+        receipt_id = str(candidate.get("receipt_id") or "")
+        candidate_artifact_hash = str(candidate_artifact.model_artifact_hash)
+        candidate_manifest_hash = str(candidate_artifact.manifest_hash)
+        parent_artifact_hash = str(artifact.model_artifact_hash)
+        parent_manifest_hash = str(artifact.manifest_hash)
+        patch = candidate.get("candidate_patch_manifest")
+        if not isinstance(patch, Mapping):
+            raise RuntimeError("candidate recovery is missing its immutable patch manifest")
+        candidate_patch_hash = sha256_json(dict(patch))
+        if (
+            not candidate_id
+            or candidate_id
+            != "candidate:" + candidate_artifact_hash.split(":", 1)[-1]
+            or not run_id
+            or not ticket_id
+            or str(candidate.get("candidate_patch_hash") or "")
+            != candidate_patch_hash
+            or str(candidate.get("parent_artifact_hash") or "")
+            != parent_artifact_hash
+        ):
+            raise RuntimeError("candidate recovery identity differs from its immutable manifests")
+        expected_source_diff_hash = str(
+            candidate.get("candidate_source_diff_hash") or ""
+        )
+        build_doc = (
+            candidate.get("candidate_build_doc")
+            if isinstance(candidate.get("candidate_build_doc"), Mapping)
+            else {}
+        )
+        expected_build_ref = str(
+            build_doc.get("build_doc_hash")
+            or (canonical_hash(build_doc) if build_doc else "")
+        )
+        patch_payload = {
+            key: value for key, value in patch.items() if key != "manifest_hash"
+        }
+        if (
+            not expected_source_diff_hash
+            or str(patch.get("manifest_hash") or "") != sha256_json(patch_payload)
+            or str(patch.get("parent_artifact_hash") or "")
+            != parent_artifact_hash
+            or str(patch.get("candidate_artifact_hash") or "")
+            != candidate_artifact_hash
+            or str(patch.get("candidate_model_manifest_hash") or "")
+            != candidate_manifest_hash
+            or str(patch.get("candidate_source_diff_hash") or "")
+            != expected_source_diff_hash
+            or str(patch.get("patch_payload_hash") or "")
+            != expected_source_diff_hash
+            or str(patch.get("candidate_build_doc_hash") or "")
+            != expected_build_ref
+        ):
+            raise RuntimeError(
+                "candidate recovery patch differs from its immutable build lineage"
+            )
+        durable_candidate = await select_one(
+            "research_lab_candidate_artifacts",
+            columns=(
+                "candidate_id,run_id,ticket_id,receipt_id,miner_hotkey,island,"
+                "parent_artifact_hash,candidate_artifact_hash,"
+                "private_model_manifest_hash,private_model_manifest_doc,"
+                "candidate_patch_hash,candidate_patch_manifest,candidate_kind,"
+                "candidate_model_manifest_hash,candidate_model_manifest_doc,"
+                "candidate_source_diff_hash,candidate_build_doc"
+            ),
+            filters=(("candidate_id", candidate_id),),
+        )
+        if (
+            not isinstance(durable_candidate, Mapping)
+            or str(durable_candidate.get("candidate_id") or "") != candidate_id
+            or str(durable_candidate.get("run_id") or "") != run_id
+            or str(durable_candidate.get("ticket_id") or "") != ticket_id
+            or str(durable_candidate.get("receipt_id") or "") != receipt_id
+            or str(durable_candidate.get("miner_hotkey") or "")
+            != str(candidate.get("miner_hotkey") or "")
+            or str(durable_candidate.get("island") or "")
+            != str(candidate.get("island") or "")
+            or str(durable_candidate.get("candidate_kind") or "")
+            != "image_build"
+            or str(durable_candidate.get("parent_artifact_hash") or "")
+            != parent_artifact_hash
+            or str(durable_candidate.get("candidate_artifact_hash") or "")
+            != candidate_artifact_hash
+            or str(durable_candidate.get("private_model_manifest_hash") or "")
+            != parent_manifest_hash
+            or durable_candidate.get("private_model_manifest_doc")
+            != candidate.get("private_model_manifest_doc")
+            or str(durable_candidate.get("candidate_patch_hash") or "")
+            != candidate_patch_hash
+            or durable_candidate.get("candidate_patch_manifest") != patch
+            or str(durable_candidate.get("candidate_model_manifest_hash") or "")
+            != candidate_manifest_hash
+            or durable_candidate.get("candidate_model_manifest_doc")
+            != candidate.get("candidate_model_manifest_doc")
+            or str(durable_candidate.get("candidate_source_diff_hash") or "")
+            != expected_source_diff_hash
+            or durable_candidate.get("candidate_build_doc") != build_doc
+        ):
+            raise RuntimeError(
+                "candidate recovery differs from its immutable candidate row"
+            )
         try:
             rows = await select_many(
                 "research_evaluation_score_bundle_current",
                 columns=(
                     "score_bundle_id,score_bundle_hash,anchored_hash,score_bundle_doc,"
-                    "signature_ref,receipt_id,icp_set_hash,run_id,"
-                    "candidate_artifact_hash,evaluation_epoch,bundle_status,"
+                    "signature_ref,receipt_id,ticket_id,miner_hotkey,island,icp_set_hash,run_id,"
+                    "parent_artifact_hash,candidate_artifact_hash,"
+                    "private_model_manifest_hash,candidate_patch_hash,"
+                    "evaluation_epoch,bundle_status,"
                     "current_event_status"
                 ),
                 filters=(
@@ -7492,7 +7598,7 @@ class ResearchLabGatewayScoringWorker:
                     ("bundle_status", "scored"),
                 ),
                 order_by=(("created_at", True),),
-                limit=5,
+                limit=6,
             )
         except Exception as exc:
             # This read is an idempotency boundary, not an advisory side
@@ -7507,12 +7613,17 @@ class ResearchLabGatewayScoringWorker:
                 str(exc)[:200],
             )
             raise
-        trace_suffix = f":{candidate_id}"
+        if len(rows) > 5:
+            raise RuntimeError(
+                "candidate recovery score-bundle lookup exceeded its bounded scan"
+            )
         reusable: list[dict[str, Any]] = []
         for row in rows:
             doc = row.get("score_bundle_doc") if isinstance(row.get("score_bundle_doc"), Mapping) else None
             if not doc:
-                continue
+                raise RuntimeError(
+                    "candidate recovery found a malformed durable score bundle"
+                )
             # Re-run the same full content-hash and secret-material validation
             # used by the production write path before trusting a durable row.
             # Matching only the projected hash fields would not detect a
@@ -7532,10 +7643,39 @@ class ResearchLabGatewayScoringWorker:
             if (
                 str(row.get("run_id") or "") != run_id
                 or str(doc.get("run_id") or "") != run_id
+                or str(row.get("ticket_id") or "") != ticket_id
+                or str(doc.get("ticket_id") or "") != ticket_id
+                or str(row.get("receipt_id") or "") != receipt_id
+                or str(row.get("miner_hotkey") or "")
+                != str(candidate.get("miner_hotkey") or "")
+                or str(doc.get("miner_hotkey") or "")
+                != str(candidate.get("miner_hotkey") or "")
+                or str(row.get("island") or "")
+                != str(candidate.get("island") or "")
+                or str(doc.get("island") or "")
+                != str(candidate.get("island") or "")
+                or str(row.get("parent_artifact_hash") or "")
+                != parent_artifact_hash
+                or str(doc.get("parent_artifact_hash") or "")
+                != parent_artifact_hash
                 or str(row.get("candidate_artifact_hash") or "")
                 != candidate_artifact_hash
                 or str(doc.get("candidate_artifact_hash") or "")
                 != candidate_artifact_hash
+                or str(row.get("private_model_manifest_hash") or "")
+                != parent_manifest_hash
+                or str(doc.get("private_model_manifest_hash") or "")
+                != parent_manifest_hash
+                or str(row.get("candidate_patch_hash") or "")
+                != candidate_patch_hash
+                or str(doc.get("candidate_patch_hash") or "")
+                != candidate_patch_hash
+                or str(doc.get("candidate_model_manifest_hash") or "")
+                != candidate_manifest_hash
+                or str(doc.get("candidate_source_diff_hash") or "")
+                != expected_source_diff_hash
+                or str(doc.get("candidate_build_ref") or "")
+                != expected_build_ref
                 or not str(row.get("icp_set_hash") or "")
                 or str(doc.get("icp_set_hash") or "")
                 != str(row.get("icp_set_hash") or "")
@@ -7587,27 +7727,85 @@ class ResearchLabGatewayScoringWorker:
                     raise RuntimeError(
                         "recovered signed score bundle differs from durable identity"
                     )
-                durable_current = await select_one(
-                    "research_evaluation_score_bundle_current",
-                    columns="score_bundle_id,current_event_status",
-                    filters=(("score_bundle_id", expected_bundle_id),),
+            durable_current = await select_one(
+                "research_evaluation_score_bundle_current",
+                columns=(
+                    "score_bundle_id,score_bundle_hash,anchored_hash,"
+                    "current_event_status"
+                ),
+                filters=(("score_bundle_id", expected_bundle_id),),
+            )
+            if (
+                not durable_current
+                or str(durable_current.get("score_bundle_hash") or "")
+                != score_bundle_hash
+                or str(durable_current.get("anchored_hash") or "")
+                != score_bundle_hash
+            ):
+                raise RuntimeError(
+                    "recovered signed score bundle durable readback differs"
                 )
-                if not durable_current:
-                    raise RuntimeError(
-                        "recovered signed score bundle durable readback is missing"
-                    )
-                current_event_status = str(
-                    durable_current.get("current_event_status") or ""
-                )
-                row = {**row, "current_event_status": current_event_status}
+            current_event_status = str(
+                durable_current.get("current_event_status") or ""
+            )
+            row = {**row, "current_event_status": current_event_status}
             if current_event_status not in {"scored", "verified"}:
                 if current_event_status in {"failed", "rejected", "tombstoned"}:
                     continue
                 raise RuntimeError(
                     "reusable signed score bundle has unknown current lifecycle state"
                 )
-            if not str(doc.get("execution_trace_ref") or "").endswith(trace_suffix):
-                continue
+            serving = (
+                doc.get("serving_model_version")
+                if isinstance(doc.get("serving_model_version"), Mapping)
+                else {}
+            )
+            parent_model = (
+                serving.get("parent_model")
+                if isinstance(serving.get("parent_model"), Mapping)
+                else {}
+            )
+            candidate_model = (
+                serving.get("candidate_model")
+                if isinstance(serving.get("candidate_model"), Mapping)
+                else {}
+            )
+            loop_node_id = str(build_doc.get("loop_node_id") or "")
+            execution_trace_ref = str(doc.get("execution_trace_ref") or "")
+            if loop_node_id:
+                expected_execution_trace_ref = (
+                    "execution_trace:"
+                    + execution_trace_id_for_node(run_id, loop_node_id)
+                )
+                trace_matches = execution_trace_ref == expected_execution_trace_ref
+            else:
+                trace_matches = (
+                    execution_trace_ref.startswith("gateway_qualification_worker:")
+                    and execution_trace_ref.endswith(":" + candidate_id)
+                )
+            if (
+                str(serving.get("candidate_id") or "") != candidate_id
+                or str(serving.get("run_id") or "") != run_id
+                or str(serving.get("ticket_id") or "") != ticket_id
+                or str(serving.get("candidate_patch_hash") or "")
+                != candidate_patch_hash
+                or str(serving.get("candidate_source_diff_hash") or "")
+                != expected_source_diff_hash
+                or str(serving.get("candidate_build_ref") or "")
+                != expected_build_ref
+                or str(parent_model.get("model_artifact_hash") or "")
+                != parent_artifact_hash
+                or str(parent_model.get("manifest_hash") or "")
+                != parent_manifest_hash
+                or str(candidate_model.get("model_artifact_hash") or "")
+                != candidate_artifact_hash
+                or str(candidate_model.get("manifest_hash") or "")
+                != candidate_manifest_hash
+                or not trace_matches
+            ):
+                raise RuntimeError(
+                    "reusable signed score bundle differs from candidate lineage"
+                )
             if not str(row.get("signature_ref") or doc.get("signature_ref") or ""):
                 continue
             if self._scoring_health_gate_result(doc).get("decision") == "quarantine":
@@ -7620,6 +7818,36 @@ class ResearchLabGatewayScoringWorker:
                     compact_ref(str(row.get("score_bundle_id") or "")),
                 )
                 continue
+            root_receipt, receipt_lineage = await resolve_attested_artifact_lineage(
+                artifact_kind="score_bundle",
+                artifact_ref=expected_bundle_id,
+                artifact_hash=score_bundle_hash,
+            )
+            if not legacy_v1_enabled() and (
+                not isinstance(root_receipt, Mapping)
+                or not receipt_lineage
+                or str(root_receipt.get("role") or "") != "gateway_scoring"
+                or str(root_receipt.get("purpose") or "")
+                != "research_lab.candidate_score.v2"
+                or str(root_receipt.get("status") or "") != "succeeded"
+                or int(
+                    root_receipt.get("epoch_id")
+                    if root_receipt.get("epoch_id") is not None
+                    else -1
+                )
+                != row_epoch
+                or int(
+                    root_receipt.get("sequence")
+                    if root_receipt.get("sequence") is not None
+                    else -1
+                )
+                != 0
+                or str(root_receipt.get("output_root") or "")
+                != sha256_json({"score_bundle": dict(doc)})
+            ):
+                raise RuntimeError(
+                    "reusable signed score bundle lacks exact V2 score authority"
+                )
             reusable.append(dict(row))
         if len(reusable) > 1:
             raise RuntimeError(
@@ -7638,6 +7866,35 @@ class ResearchLabGatewayScoringWorker:
             )
         return reusable[0]
 
+    async def _require_reusable_bundle_current(
+        self,
+        bundle_row: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Fail closed if recovery evidence was corrected after discovery."""
+
+        score_bundle_id = str(bundle_row.get("score_bundle_id") or "")
+        score_bundle_hash = str(bundle_row.get("score_bundle_hash") or "")
+        current = await select_one(
+            "research_evaluation_score_bundle_current",
+            columns=(
+                "score_bundle_id,score_bundle_hash,anchored_hash,"
+                "current_event_status"
+            ),
+            filters=(("score_bundle_id", score_bundle_id),),
+        )
+        if (
+            not current
+            or str(current.get("score_bundle_id") or "") != score_bundle_id
+            or str(current.get("score_bundle_hash") or "") != score_bundle_hash
+            or str(current.get("anchored_hash") or "") != score_bundle_hash
+            or str(current.get("current_event_status") or "")
+            not in {"scored", "verified"}
+        ):
+            raise RuntimeError(
+                "reusable signed score bundle is no longer current and promotable"
+            )
+        return dict(current)
+
     async def _complete_candidate_from_reused_bundle(
         self,
         candidate: Mapping[str, Any],
@@ -7652,6 +7909,7 @@ class ResearchLabGatewayScoringWorker:
         scored event, then mirror the normal post-scored side-effect sequence."""
         score_bundle = dict(bundle_row.get("score_bundle_doc") or {})
         score_bundle_id = str(bundle_row["score_bundle_id"])
+        await self._require_reusable_bundle_current(bundle_row)
         rolling_window_hash = str(score_bundle.get("icp_set_hash") or bundle_row.get("icp_set_hash") or "")
         gate_result = score_bundle.get("private_holdout_gate")
         private_holdout_rejected = (
@@ -7676,7 +7934,9 @@ class ResearchLabGatewayScoringWorker:
                     if telemetry_session is not None and telemetry_session.run is not None
                     else ""
                 ),
+                preserve_existing_provenance=True,
             )
+        await self._require_reusable_bundle_current(bundle_row)
         logger.warning(
             format_worker_block(
                 "RESEARCH LAB CANDIDATE REUSING SIGNED SCORE BUNDLE",
@@ -7737,6 +7997,7 @@ class ResearchLabGatewayScoringWorker:
                     "reused_signed_score_bundle": True,
                 },
             )
+            await self._require_reusable_bundle_current(bundle_row)
             if private_holdout_rejected:
                 promotion_result = await self._record_public_holdout_rejected(
                     candidate=candidate,
@@ -10019,6 +10280,7 @@ class ResearchLabGatewayScoringWorker:
                     and baseline_telemetry_session.run is not None
                     else ""
                 ),
+                preserve_existing_provenance=recover_existing,
             )
 
         if attested_baseline_outcome is None:
@@ -13544,7 +13806,10 @@ def _validate_private_baseline_publication_bundle(
         "bundle_payload": bundle_payload,
         "benchmark_bundle_id": expected_bundle_id,
         "benchmark_bundle_hash": expected_bundle_hash,
-        "score_summary_hash": canonical_hash(stored_summary),
+        # V2 summary lineage is committed with the Unicode-preserving
+        # canonicalizer in ``compare_baseline_summary_v2``.  Keep the store
+        # canonicalizer above only for the historical private-bundle row id.
+        "score_summary_hash": sha256_json(stored_summary),
         "score_summary_doc": stored_summary,
         "aggregate_score": aggregate_score,
         "benchmark_date": benchmark_date,
@@ -13887,6 +14152,7 @@ async def _persist_baseline_category_results(
     source_bundle_ref: str,
     rolling_window_hash: str,
     scoring_run_id: str = "",
+    preserve_existing_provenance: bool = False,
 ) -> None:
     counts = (
         assignment.get("category_counts")
@@ -13902,29 +14168,49 @@ async def _persist_baseline_category_results(
     policy_hash = str(assignment.get("policy_hash") or "")
     if not assignment_hash or not policy_hash:
         raise RuntimeError("conditional baseline category commitments are missing")
-    for category in ("public", "private", "conditional"):
-        await create_scoring_category_result(
+    category_names = ["public", "private", "conditional", "overall"]
+    if preserve_existing_provenance:
+        category_names = await _existing_categories_first(
+            source_bundle_ref=source_bundle_ref,
+            assignment_hash=assignment_hash,
+            categories=category_names,
+        )
+    resolved_scoring_run_id: str | None = scoring_run_id or None
+    provenance_bound = False
+    for category in category_names:
+        if category == "overall":
+            icp_count = sum(
+                _safe_int(counts.get(name), default=0)
+                for name in ("public", "private", "conditional")
+            )
+            aggregate_score = _safe_float(
+                assignment.get("aggregate_score"), default=0.0
+            )
+        else:
+            icp_count = _safe_int(counts.get(category), default=0)
+            aggregate_score = _safe_float(scores.get(category), default=0.0)
+        row = await create_scoring_category_result(
             source_kind="baseline",
             source_bundle_ref=source_bundle_ref,
             category=category,
             assignment_hash=assignment_hash,
             policy_hash=policy_hash,
             rolling_window_hash=rolling_window_hash,
-            icp_count=_safe_int(counts.get(category), default=0),
-            aggregate_score=_safe_float(scores.get(category), default=0.0),
-            scoring_run_id=scoring_run_id or None,
+            icp_count=icp_count,
+            aggregate_score=aggregate_score,
+            scoring_run_id=resolved_scoring_run_id,
+            preserve_existing_provenance=preserve_existing_provenance,
         )
-    await create_scoring_category_result(
-        source_kind="baseline",
-        source_bundle_ref=source_bundle_ref,
-        category="overall",
-        assignment_hash=assignment_hash,
-        policy_hash=policy_hash,
-        rolling_window_hash=rolling_window_hash,
-        icp_count=sum(_safe_int(counts.get(name), default=0) for name in ("public", "private", "conditional")),
-        aggregate_score=_safe_float(assignment.get("aggregate_score"), default=0.0),
-        scoring_run_id=scoring_run_id or None,
-    )
+        if preserve_existing_provenance:
+            returned_run_id = (
+                str(row.get("scoring_run_id")) if row.get("scoring_run_id") else None
+            )
+            if provenance_bound and returned_run_id != resolved_scoring_run_id:
+                raise RuntimeError(
+                    "conditional baseline category recovery has mixed scoring provenance"
+                )
+            resolved_scoring_run_id = returned_run_id
+            provenance_bound = True
 
 
 async def _repair_baseline_category_results_from_row(
@@ -13958,6 +14244,7 @@ async def _repair_baseline_category_results_from_row(
         assignment,
         source_bundle_ref=source_bundle_ref,
         rolling_window_hash=rolling_window_hash,
+        preserve_existing_provenance=True,
     )
 
 
@@ -14064,6 +14351,7 @@ async def _persist_candidate_category_results(
     rolling_window_hash: str,
     candidate_id: str,
     scoring_run_id: str = "",
+    preserve_existing_provenance: bool = False,
 ) -> None:
     if not bool(gate.get("conditional_validation_required")):
         return
@@ -14116,10 +14404,20 @@ async def _persist_candidate_category_results(
                 ),
             ]
         )
+    if preserve_existing_provenance:
+        existing_first = await _existing_categories_first(
+            source_bundle_ref=source_bundle_ref,
+            assignment_hash=assignment_hash,
+            categories=[item[0] for item in categories],
+        )
+        by_name = {item[0]: item for item in categories}
+        categories = [by_name[name] for name in existing_first]
+    resolved_scoring_run_id: str | None = scoring_run_id or None
+    provenance_bound = False
     for category, candidate_field, baseline_field, icp_count in categories:
         candidate_score = _safe_float(gate.get(candidate_field), default=0.0)
         baseline_score = _safe_float(gate.get(baseline_field), default=0.0)
-        await create_scoring_category_result(
+        row = await create_scoring_category_result(
             source_kind="candidate",
             source_bundle_ref=source_bundle_ref,
             category=category,
@@ -14128,10 +14426,58 @@ async def _persist_candidate_category_results(
             rolling_window_hash=rolling_window_hash,
             icp_count=icp_count,
             aggregate_score=candidate_score,
-            scoring_run_id=scoring_run_id or None,
+            scoring_run_id=resolved_scoring_run_id,
             candidate_id=candidate_id,
             delta_vs_baseline=candidate_score - baseline_score,
+            preserve_existing_provenance=preserve_existing_provenance,
         )
+        if preserve_existing_provenance:
+            returned_run_id = (
+                str(row.get("scoring_run_id")) if row.get("scoring_run_id") else None
+            )
+            if provenance_bound and returned_run_id != resolved_scoring_run_id:
+                raise RuntimeError(
+                    "conditional candidate category recovery has mixed scoring provenance"
+                )
+            resolved_scoring_run_id = returned_run_id
+            provenance_bound = True
+
+
+async def _existing_categories_first(
+    *,
+    source_bundle_ref: str,
+    assignment_hash: str,
+    categories: Sequence[str],
+) -> list[str]:
+    """Order immutable recovery rows before any missing category inserts.
+
+    Processing the existing prefix first binds recovery to its original
+    telemetry run before a missing row can be appended.  A concurrent recovery
+    that starts from an empty table still converges on the first category's
+    source-key constraint in ``create_scoring_category_result``.
+    """
+
+    rows = await select_many(
+        "research_lab_scoring_category_results",
+        columns="category",
+        filters=(
+            ("source_bundle_ref", source_bundle_ref),
+            ("assignment_hash", assignment_hash),
+        ),
+        limit=max(1, len(categories) + 1),
+    )
+    existing: set[str] = set()
+    allowed = set(categories)
+    for row in rows:
+        category = str(row.get("category") or "")
+        if category not in allowed or category in existing:
+            raise RuntimeError(
+                "conditional category recovery found an invalid source-key projection"
+            )
+        existing.add(category)
+    return [name for name in categories if name in existing] + [
+        name for name in categories if name not in existing
+    ]
 
 
 def _compact_scoring_health_doc(value: Any) -> dict[str, Any]:

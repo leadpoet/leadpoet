@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.research_lab import scoring_worker as sw
+from leadpoet_canonical.attested_v2 import sha256_json as attested_v2_sha256_json
 from research_lab.eval.baseline_summary import build_baseline_score_summary
 
 
@@ -20,7 +21,11 @@ EVENT_DOC_BANNED_RE = re.compile(
 )
 
 
-def _persisted_baseline_publication_fixture(*, current_status="completed"):
+def _persisted_baseline_publication_fixture(
+    *,
+    current_status="completed",
+    unicode_diagnostics: bool = False,
+):
     artifact = sw.PrivateModelArtifactManifest(
         model_artifact_hash="sha256:" + "1" * 64,
         git_commit_sha="2" * 40,
@@ -53,7 +58,11 @@ def _persisted_baseline_publication_fixture(*, current_status="completed"):
                 "icp_hash": digest,
                 "score": float(index + 1),
                 "company_count": 1,
-                "diagnostics": {},
+                "diagnostics": (
+                    {"provider_note": "München – 東京"}
+                    if unicode_diagnostics and index == 0
+                    else {}
+                ),
             }
         )
     window_hash = "sha256:" + "6" * 64
@@ -323,7 +332,9 @@ async def test_baseline_dispatch_history_is_scoped_to_date_window_and_model(monk
 async def test_persisted_baseline_repairs_post_bundle_publication_without_rescoring(
     monkeypatch,
 ):
-    artifact, window, protected_result, row = _persisted_baseline_publication_fixture()
+    artifact, window, protected_result, row = _persisted_baseline_publication_fixture(
+        unicode_diagnostics=True
+    )
     worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
     worker.config = SimpleNamespace(
         public_benchmark_public_icps_per_day=3,
@@ -343,6 +354,8 @@ async def test_persisted_baseline_repairs_post_bundle_publication_without_rescor
         "report": [],
         "audit": [],
     }
+    summary_hash = attested_v2_sha256_json(protected_result["score_summary_doc"])
+    assert summary_hash != sw.canonical_hash(protected_result["score_summary_doc"])
     root_receipt = {
         "receipt_hash": "sha256:" + "7" * 64,
         "role": "gateway_scoring",
@@ -350,7 +363,7 @@ async def test_persisted_baseline_repairs_post_bundle_publication_without_rescor
         "status": "succeeded",
         "epoch_id": 42,
         "artifact_root": sw.merkle_root(
-            (sw.canonical_hash(protected_result["score_summary_doc"]),),
+            (summary_hash,),
             domain="leadpoet-artifact-v2",
         ),
         "output_root": sw.sha256_json(protected_result),
@@ -361,9 +374,7 @@ async def test_persisted_baseline_repairs_post_bundle_publication_without_rescor
         return dict(row), {"benchmark_status": "completed"}
 
     async def resolve_lineage(**kwargs):
-        assert kwargs["artifact_hash"] == sw.canonical_hash(
-            protected_result["score_summary_doc"]
-        )
+        assert kwargs["artifact_hash"] == summary_hash
         return root_receipt, [root_receipt]
 
     async def select_bundle(*args, **kwargs):
@@ -426,10 +437,28 @@ async def test_persisted_baseline_repairs_post_bundle_publication_without_rescor
 
     assert captured["bundle"][0]["score_summary_doc"] == row["score_summary_doc"]
     assert captured["links"][0][0]["execution_receipt"] == root_receipt
+    assert captured["links"][0][1][0]["artifact_hash"] == summary_hash
     assert captured["dispatch"][0]["event_doc"]["publication_recovered_after_restart"] is True
     assert captured["report"][0]["aggregate_score"] == row["aggregate_score"]
     assert captured["audit"] == [42]
     assert publication["public_report"]["report_id"] == "public-report-1"
+
+
+def test_baseline_recovery_returns_exact_v2_unicode_summary_hash():
+    artifact, window, protected_result, row = _persisted_baseline_publication_fixture(
+        unicode_diagnostics=True
+    )
+
+    validated = sw._validate_private_baseline_publication_bundle(
+        row,
+        artifact=artifact,
+        window=window,
+        expected_policy_hash="",
+    )
+
+    expected = attested_v2_sha256_json(protected_result["score_summary_doc"])
+    assert validated["score_summary_hash"] == expected
+    assert expected != sw.canonical_hash(protected_result["score_summary_doc"])
 
 
 @pytest.mark.asyncio

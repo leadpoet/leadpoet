@@ -71,6 +71,52 @@ def test_gateway_restart_accepts_only_one_exact_commit_argument() -> None:
     assert "--commit conflicts with GATEWAY_DEPLOY_COMMIT" in conflict.stderr
 
 
+def test_unpinned_gateway_release_wait_follows_new_main_before_shutdown() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    start = script.index("follow_superseding_gateway_release() {")
+    follow = script[start : script.index("start_gateway_ancestry_checkpoint_bootstrap() {", start)]
+
+    assert follow.index('if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]') < follow.index(
+        "restart_release_supersession_v2.py"
+    )
+    assert 'git -C "$LEADPOET_REPO_ROOT" archive "$latest_sha"' in follow
+    assert 'GATEWAY_RESTART_LOCK_HELD=1' in follow
+    assert 'GATEWAY_RELEASE_SUPERSESSION_COUNT="$next_count"' in follow
+    assert follow.index("cancel_gateway_offline_artifact_prepare") < follow.index(
+        'bash "$superseding_tree/gw_restart.sh"'
+    )
+    assert follow.index("cancel_gateway_ancestry_checkpoint_bootstrap") < follow.index(
+        'bash "$superseding_tree/gw_restart.sh"'
+    )
+
+    release_start = script.index('echo "Acquiring the independently built V2 release channel"')
+    release_loop = script[script.index("for attempt in $(seq 1 300); do", release_start) :]
+    release_loop = release_loop[: release_loop.index("done")]
+    assert release_loop.count("follow_superseding_gateway_release") == 2
+    assert release_loop.index("follow_superseding_gateway_release") < release_loop.index(
+        "gateway.tee.release_channel_v2"
+    )
+    assert script.index("follow_superseding_gateway_release") < script.index(
+        'echo "Stopping existing gateway and Research Lab worker processes"'
+    )
+
+
+def test_gateway_release_follow_reexec_preserves_existing_restart_lock() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    lock_section = script[
+        script.index('if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then') :
+        script.index('elif [ "$GATEWAY_RESTART_PHASE" = "post_activate" ]; then')
+    ]
+
+    inherited = 'if [ "${GATEWAY_RESTART_LOCK_HELD:-0}" = "1" ]; then'
+    assert inherited in lock_section
+    assert lock_section.index(inherited) < lock_section.index(
+        "acquire_gateway_restart_lock"
+    )
+    assert 'readlink "/proc/$$/fd/9"' in lock_section
+    assert "re-executed gateway restart lost the deployment lock" in lock_section
+
+
 def test_pinned_gateway_rollback_preserves_newer_restart_controller() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 

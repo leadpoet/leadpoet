@@ -82,6 +82,36 @@ def test_restart_accepts_exact_commit_argument_and_rejects_conflicts():
     assert "Pulling latest GitHub main" not in invalid_forward.stdout
 
 
+def test_unpinned_validator_release_wait_follows_new_main_before_shutdown():
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+    start = script.index("follow_superseding_validator_release() {")
+    end = script.index("\n}\n", start) + 3
+    follow = script[start:end]
+
+    assert follow.index('if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]') < follow.index(
+        "restart_release_supersession_v2.py"
+    )
+    assert '|| [ -n "$REQUESTED_COORDINATED_EXPECTED_COMMIT" ]' in follow
+    assert follow.index("cleanup_validator_restart_preparation") < follow.index(
+        'git merge --ff-only "$latest_sha"'
+    )
+    assert follow.index('git merge --ff-only "$latest_sha"') < follow.index(
+        'bash "$VALIDATOR_ROOT/validator_restart.sh"'
+    )
+    assert 'LEADPOET_USE_CAPTURED_RESTART_START=1' in follow
+    assert 'VALIDATOR_RELEASE_SUPERSESSION_COUNT="$next_count"' in follow
+
+    release_loop = script[script.index("for attempt in $(seq 1 300); do") :]
+    release_loop = release_loop[: release_loop.index("done")]
+    assert release_loop.count("follow_superseding_validator_release") == 2
+    assert release_loop.index("follow_superseding_validator_release") < release_loop.index(
+        "gateway.tee.release_channel_v2"
+    )
+    assert script.index("follow_superseding_validator_release") < script.index(
+        'echo "Stopping validator processes and containers"'
+    )
+
+
 def test_secret_hydration_cannot_replace_operator_gateway_barrier(
     tmp_path: Path,
 ) -> None:

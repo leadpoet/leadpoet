@@ -40,6 +40,9 @@ GATEWAY_RESTART_STARTED_EPOCH="${GATEWAY_RESTART_STARTED_EPOCH:-$(date -u +%s)}"
 GATEWAY_RESTART_TIMING_DIR="${GATEWAY_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
 GATEWAY_RESTART_TIMING_FILE="${GATEWAY_RESTART_TIMING_FILE:-$GATEWAY_RESTART_TIMING_DIR/gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$.jsonl}"
 GATEWAY_RESTART_TIMING_INITIALIZED="${GATEWAY_RESTART_TIMING_INITIALIZED:-0}"
+GATEWAY_RELEASE_FOLLOW_ROOT="${GATEWAY_RELEASE_FOLLOW_ROOT:-}"
+GATEWAY_RELEASE_SUPERSESSION_COUNT="${GATEWAY_RELEASE_SUPERSESSION_COUNT:-0}"
+GATEWAY_RELEASE_SUPERSESSION_MAX="${GATEWAY_RELEASE_SUPERSESSION_MAX:-20}"
 GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID=""
 GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG="${GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.offline-artifacts.log}"
 GATEWAY_ANCESTRY_CHECKPOINT_PID=""
@@ -122,6 +125,11 @@ done
 if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \
     && ! [[ "$REQUESTED_GATEWAY_DEPLOY_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
   echo "ERROR: --commit must be a lowercase full 40-character SHA" >&2
+  exit 2
+fi
+if ! [[ "$GATEWAY_RELEASE_SUPERSESSION_COUNT" =~ ^[0-9]+$ ]] \
+    || ! [[ "$GATEWAY_RELEASE_SUPERSESSION_MAX" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: gateway release supersession counters are invalid" >&2
   exit 2
 fi
 V2_CREDENTIAL_ENVELOPES=(
@@ -328,6 +336,109 @@ cancel_gateway_ancestry_checkpoint_bootstrap() {
   process_group_marker="${GATEWAY_ANCESTRY_CHECKPOINT_LOG}.process-group"
   cancel_gateway_owned_process_group "$checkpoint_pid" "$process_group_marker"
   GATEWAY_ANCESTRY_CHECKPOINT_PID=""
+}
+
+follow_superseding_gateway_release() {
+  local helper latest_sha next_count superseding_tree
+
+  if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]; then
+    return 0
+  fi
+  helper="$GATEWAY_PREFLIGHT_TREE/Leadpoet/utils/restart_release_supersession_v2.py"
+  if [ ! -r "$helper" ]; then
+    echo "ERROR: forward restart authority helper is unavailable" >&2
+    return 1
+  fi
+  if ! latest_sha="$(
+      "$GATEWAY_PYTHON_BIN" "$helper" \
+        --repo-root "$LEADPOET_REPO_ROOT" \
+        --expected-commit "$PREPARED_GATEWAY_SHA" \
+        --branch main
+    )"; then
+    echo "Forward restart authority is temporarily unreadable; retaining the running gateway" >&2
+    return 1
+  fi
+  if [ "$latest_sha" = "$PREPARED_GATEWAY_SHA" ]; then
+    return 0
+  fi
+
+  next_count=$((GATEWAY_RELEASE_SUPERSESSION_COUNT + 1))
+  if [ "$next_count" -gt "$GATEWAY_RELEASE_SUPERSESSION_MAX" ]; then
+    echo "ERROR: gateway release changed too many times during one restart invocation" >&2
+    return 1
+  fi
+  if [ -z "$GATEWAY_RELEASE_FOLLOW_ROOT" ]; then
+    GATEWAY_RELEASE_FOLLOW_ROOT="$(
+      mktemp -d /tmp/gateway-release-follow.XXXXXX
+    )"
+    chmod 700 "$GATEWAY_RELEASE_FOLLOW_ROOT"
+  fi
+  superseding_tree="$GATEWAY_RELEASE_FOLLOW_ROOT/$latest_sha"
+  mkdir -p "$superseding_tree"
+  if ! git -C "$LEADPOET_REPO_ROOT" archive "$latest_sha" \
+      | tar -xf - -C "$superseding_tree"; then
+    echo "ERROR: superseding gateway commit could not be materialized" >&2
+    return 1
+  fi
+  if ! grep -Fq 'GATEWAY_GIT_DEPLOY_PROTOCOL="1"' \
+      "$superseding_tree/gw_restart.sh" \
+      || [ ! -r "$superseding_tree/scripts/gateway_git_deploy.py" ] \
+      || [ ! -r "$superseding_tree/Leadpoet/utils/restart_release_supersession_v2.py" ]; then
+    echo "ERROR: superseding gateway commit lacks the restart handoff contract" >&2
+    return 1
+  fi
+
+  echo "Forward gateway release moved from $PREPARED_GATEWAY_SHA to $latest_sha; re-executing before shutdown"
+  record_gateway_restart_timing "release_superseded"
+  cancel_gateway_offline_artifact_prepare
+  cancel_gateway_ancestry_checkpoint_bootstrap
+  rm -f -- "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT"
+  rm -rf -- "$GATEWAY_PREFLIGHT_TREE"
+  GATEWAY_PREFLIGHT_TREE=""
+
+  LEADPOET_REPO_ROOT="$LEADPOET_REPO_ROOT" \
+    GATEWAY_ROOT="$GATEWAY_ROOT" \
+    GATEWAY_LOG_ROOT="$GATEWAY_LOG_ROOT" \
+    GATEWAY_LOG_FILE="$GATEWAY_LOG_FILE" \
+    GATEWAY_ENV_FILE="$GATEWAY_ENV_FILE" \
+    LEADPOET_GATEWAY_ENV_SECRET_ID="$LEADPOET_GATEWAY_ENV_SECRET_ID" \
+    GATEWAY_PYTHON_BIN="$GATEWAY_PYTHON_BIN" \
+    GATEWAY_RESTART_CONTROLLER_ROOT="$GATEWAY_RESTART_CONTROLLER_ROOT" \
+    GATEWAY_GIT_HELPER="$superseding_tree/scripts/gateway_git_deploy.py" \
+    GATEWAY_EXACT_COMMIT_HELPER="$superseding_tree/Leadpoet/utils/exact_commit_restart_v2.py" \
+    GATEWAY_HOST_MEMORY_GUARD_PATH="$superseding_tree/gateway/tee/host_memory_guard_v2.py" \
+    GATEWAY_RESTART_PHASE=prepare \
+    GATEWAY_RESTART_LOCK_HELD=1 \
+    GATEWAY_RESTART_LOCK_FILE="$GATEWAY_RESTART_LOCK_FILE" \
+    GATEWAY_RESTART_RECOVERY_LOCK_FILE="$GATEWAY_RESTART_RECOVERY_LOCK_FILE" \
+    GATEWAY_RESTART_STARTED_EPOCH="$GATEWAY_RESTART_STARTED_EPOCH" \
+    GATEWAY_RESTART_TIMING_DIR="$GATEWAY_RESTART_TIMING_DIR" \
+    GATEWAY_RESTART_TIMING_FILE="$GATEWAY_RESTART_TIMING_FILE" \
+    GATEWAY_RESTART_TIMING_INITIALIZED="$GATEWAY_RESTART_TIMING_INITIALIZED" \
+    GATEWAY_RELEASE_FOLLOW_ROOT="$GATEWAY_RELEASE_FOLLOW_ROOT" \
+    GATEWAY_RELEASE_SUPERSESSION_COUNT="$next_count" \
+    GATEWAY_RELEASE_SUPERSESSION_MAX="$GATEWAY_RELEASE_SUPERSESSION_MAX" \
+    GATEWAY_DEPLOY_PLAN_FILE="$GATEWAY_DEPLOY_PLAN_FILE" \
+    GATEWAY_DEPLOYMENT_DIR="$GATEWAY_DEPLOYMENT_DIR" \
+    GATEWAY_DEPLOYMENT_MANIFEST="$GATEWAY_DEPLOYMENT_MANIFEST" \
+    GATEWAY_LAST_GOOD_MANIFEST="$GATEWAY_LAST_GOOD_MANIFEST" \
+    GATEWAY_HOST_RESTART_SCRIPT="$GATEWAY_HOST_RESTART_SCRIPT" \
+    GATEWAY_TEE_EIF_ROOT="$GATEWAY_TEE_EIF_ROOT" \
+    GATEWAY_V2_RELEASE_ARCHIVE_ROOT="$GATEWAY_V2_RELEASE_ARCHIVE_ROOT" \
+    GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
+    GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
+    GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE" \
+    GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET" \
+    GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX" \
+    GATEWAY_V2_ARTIFACT_POLICY="$GATEWAY_V2_ARTIFACT_POLICY" \
+    GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST="$GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST" \
+    GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT="$GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT" \
+    RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET="$RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET" \
+    GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
+    VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
+    GATEWAY_STATEFUL_CUTOVER_CEREMONY="$GATEWAY_STATEFUL_CUTOVER_CEREMONY" \
+    GATEWAY_DEPLOY_STAGE=bootstrap \
+    exec bash "$superseding_tree/gw_restart.sh"
 }
 
 start_gateway_ancestry_checkpoint_bootstrap() {
@@ -882,6 +993,9 @@ on_gateway_restart_exit() {
   if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ]; then
     rm -rf "$GATEWAY_PREFLIGHT_TREE"
   fi
+  if [ -n "${GATEWAY_RELEASE_FOLLOW_ROOT:-}" ]; then
+    rm -rf "$GATEWAY_RELEASE_FOLLOW_ROOT"
+  fi
   if [ "$status" -ne 0 ] \
       && [ "$GATEWAY_DEPLOY_COMPLETED" != "1" ] \
       && [ -f "$GATEWAY_DEPLOY_PLAN_FILE" ] \
@@ -1380,8 +1494,16 @@ if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then
     echo "ERROR: flock is required for gateway Git deployments" >&2
     exit 1
   }
-  acquire_gateway_restart_lock
-  export GATEWAY_RESTART_LOCK_HELD=1
+  if [ "${GATEWAY_RESTART_LOCK_HELD:-0}" = "1" ]; then
+    if [ ! -e "/proc/$$/fd/9" ] \
+        || [ "$(readlink "/proc/$$/fd/9" 2>/dev/null || true)" != "$GATEWAY_RESTART_LOCK_FILE" ]; then
+      echo "ERROR: re-executed gateway restart lost the deployment lock" >&2
+      exit 1
+    fi
+  else
+    acquire_gateway_restart_lock
+    export GATEWAY_RESTART_LOCK_HELD=1
+  fi
 elif [ "$GATEWAY_RESTART_PHASE" = "post_activate" ]; then
   if [ "${GATEWAY_RESTART_LOCK_HELD:-0}" != "1" ] || [ ! -e "/proc/$$/fd/9" ]; then
     echo "ERROR: post-activation gateway restart lost the deployment lock" >&2
@@ -1527,6 +1649,9 @@ skip_keys = {
     "GATEWAY_RESTART_TIMING_DIR",
     "GATEWAY_RESTART_TIMING_FILE",
     "GATEWAY_RESTART_TIMING_INITIALIZED",
+    "GATEWAY_RELEASE_FOLLOW_ROOT",
+    "GATEWAY_RELEASE_SUPERSESSION_COUNT",
+    "GATEWAY_RELEASE_SUPERSESSION_MAX",
     "GATEWAY_ANCESTRY_SAFE_EPOCH",
     "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
     "LEADPOET_RESTART_START_PATH",
@@ -1618,6 +1743,9 @@ skip_keys = {
     "GATEWAY_RESTART_TIMING_DIR",
     "GATEWAY_RESTART_TIMING_FILE",
     "GATEWAY_RESTART_TIMING_INITIALIZED",
+    "GATEWAY_RELEASE_FOLLOW_ROOT",
+    "GATEWAY_RELEASE_SUPERSESSION_COUNT",
+    "GATEWAY_RELEASE_SUPERSESSION_MAX",
     "GATEWAY_ANCESTRY_SAFE_EPOCH",
     "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
     "LEADPOET_RESTART_START_PATH",
@@ -1845,6 +1973,11 @@ export GATEWAY_DEPLOY_STAGE
 record_gateway_restart_timing "release_wait_started"
 V2_RELEASE_READY=0
 for attempt in $(seq 1 300); do
+  if ! follow_superseding_gateway_release; then
+    echo "Approved release authority is not stable yet; waiting inside the valid restart invocation (${attempt}/300)"
+    sleep 12
+    continue
+  fi
   if run_prepared_gateway_module gateway.tee.release_channel_v2 \
       --ensure \
       --expected-commit "$PREPARED_GATEWAY_SHA" \
@@ -1854,8 +1987,10 @@ for attempt in $(seq 1 300); do
       --lineage-output "$GATEWAY_V2_RELEASE_LINEAGE" \
       --lineage-repository "$LEADPOET_REPO_ROOT" \
       --lineage-authority-commit "$ORIGIN_MAIN_GATEWAY_SHA"; then
-    V2_RELEASE_READY=1
-    break
+    if follow_superseding_gateway_release; then
+      V2_RELEASE_READY=1
+      break
+    fi
   fi
   echo "Approved V2 release is not published yet; waiting inside the valid restart invocation (${attempt}/300)"
   sleep 12
@@ -2207,6 +2342,9 @@ exec env \
   GATEWAY_RESTART_TIMING_DIR="$GATEWAY_RESTART_TIMING_DIR" \
   GATEWAY_RESTART_TIMING_FILE="$GATEWAY_RESTART_TIMING_FILE" \
   GATEWAY_RESTART_TIMING_INITIALIZED="$GATEWAY_RESTART_TIMING_INITIALIZED" \
+  GATEWAY_RELEASE_FOLLOW_ROOT="$GATEWAY_RELEASE_FOLLOW_ROOT" \
+  GATEWAY_RELEASE_SUPERSESSION_COUNT="$GATEWAY_RELEASE_SUPERSESSION_COUNT" \
+  GATEWAY_RELEASE_SUPERSESSION_MAX="$GATEWAY_RELEASE_SUPERSESSION_MAX" \
   GATEWAY_ANCESTRY_SAFE_EPOCH="$GATEWAY_ANCESTRY_SAFE_EPOCH" \
   RESEARCH_LAB_TEE_PROTOCOL="$RESEARCH_LAB_TEE_PROTOCOL" \
   GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \

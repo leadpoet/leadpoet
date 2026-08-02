@@ -37,6 +37,8 @@ VALIDATOR_RESTART_STARTED_EPOCH="${VALIDATOR_RESTART_STARTED_EPOCH:-$(date -u +%
 VALIDATOR_RESTART_TIMING_DIR="${VALIDATOR_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
 VALIDATOR_RESTART_TIMING_FILE="${VALIDATOR_RESTART_TIMING_FILE:-$VALIDATOR_RESTART_TIMING_DIR/validator-${VALIDATOR_RESTART_STARTED_EPOCH}-$$.jsonl}"
 VALIDATOR_RESTART_TIMING_INITIALIZED="${VALIDATOR_RESTART_TIMING_INITIALIZED:-0}"
+VALIDATOR_RELEASE_SUPERSESSION_COUNT="${VALIDATOR_RELEASE_SUPERSESSION_COUNT:-0}"
+VALIDATOR_RELEASE_SUPERSESSION_MAX="${VALIDATOR_RELEASE_SUPERSESSION_MAX:-20}"
 VALIDATOR_V2_RELEASE_BUCKET="${VALIDATOR_V2_RELEASE_BUCKET:-leadpoet-attested-v2-artifacts-493765492819}"
 VALIDATOR_V2_RELEASE_PREFIX="${VALIDATOR_V2_RELEASE_PREFIX:-attested-v2/releases}"
 VALIDATOR_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
@@ -119,6 +121,11 @@ fi
 if [ -n "$REQUESTED_COORDINATED_EXPECTED_COMMIT" ] \
     && ! [[ "$REQUESTED_COORDINATED_EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
   echo "ERROR: VALIDATOR_COORDINATED_EXPECTED_COMMIT must be a lowercase full 40-character SHA" >&2
+  exit 2
+fi
+if ! [[ "$VALIDATOR_RELEASE_SUPERSESSION_COUNT" =~ ^[0-9]+$ ]] \
+    || ! [[ "$VALIDATOR_RELEASE_SUPERSESSION_MAX" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: validator release supersession counters are invalid" >&2
   exit 2
 fi
 if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
@@ -261,6 +268,25 @@ else
   export VALIDATOR_RESTART_TIMING_INITIALIZED
 fi
 
+cleanup_validator_restart_preparation() {
+  if [ -n "${VALIDATOR_ENV_EXPORT:-}" ]; then
+    rm -f "$VALIDATOR_ENV_EXPORT"
+    VALIDATOR_ENV_EXPORT=""
+  fi
+  if [ -n "${SECRET_TMP:-}" ]; then
+    rm -f "$SECRET_TMP"
+    SECRET_TMP=""
+  fi
+  if [ -n "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR" ]; then
+    rm -rf "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR"
+    VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR=""
+  fi
+  if [ -n "$VALIDATOR_PINNED_GATEWAY_VERIFIER" ]; then
+    rm -f "$VALIDATOR_PINNED_GATEWAY_VERIFIER"
+    VALIDATOR_PINNED_GATEWAY_VERIFIER=""
+  fi
+}
+
 cleanup() {
   local status="$?"
   set +e
@@ -278,13 +304,7 @@ cleanup() {
     fi
     VALIDATOR_DOCKER_LOCK_ACQUIRED=0
   fi
-  rm -f "$VALIDATOR_ENV_EXPORT" "$SECRET_TMP"
-  if [ -n "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR" ]; then
-    rm -rf "$VALIDATOR_RESTART_CONTROLLER_SOURCE_DIR"
-  fi
-  if [ -n "$VALIDATOR_PINNED_GATEWAY_VERIFIER" ]; then
-    rm -f "$VALIDATOR_PINNED_GATEWAY_VERIFIER"
-  fi
+  cleanup_validator_restart_preparation
   return "$status"
 }
 trap cleanup EXIT
@@ -362,6 +382,8 @@ if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
     VALIDATOR_RESTART_TIMING_DIR="$VALIDATOR_RESTART_TIMING_DIR" \
     VALIDATOR_RESTART_TIMING_FILE="$VALIDATOR_RESTART_TIMING_FILE" \
     VALIDATOR_RESTART_TIMING_INITIALIZED="$VALIDATOR_RESTART_TIMING_INITIALIZED" \
+    VALIDATOR_RELEASE_SUPERSESSION_COUNT="$VALIDATOR_RELEASE_SUPERSESSION_COUNT" \
+    VALIDATOR_RELEASE_SUPERSESSION_MAX="$VALIDATOR_RELEASE_SUPERSESSION_MAX" \
     bash "$VALIDATOR_ROOT/validator_restart.sh" "$@"
 fi
 if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
@@ -384,6 +406,70 @@ if [ -z "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
   chmod 700 "$VALIDATOR_PINNED_GATEWAY_VERIFIER"
 fi
 capture_validator_restart_controller
+
+follow_superseding_validator_release() {
+  local helper latest_sha next_count
+
+  if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
+      || [ -n "$REQUESTED_COORDINATED_EXPECTED_COMMIT" ]; then
+    return 0
+  fi
+  helper="$VALIDATOR_ROOT/Leadpoet/utils/restart_release_supersession_v2.py"
+  if [ ! -r "$helper" ]; then
+    echo "ERROR: forward validator restart authority helper is unavailable" >&2
+    return 1
+  fi
+  if ! latest_sha="$(
+      "$VALIDATOR_PYTHON_BIN" "$helper" \
+        --repo-root "$VALIDATOR_ROOT" \
+        --expected-commit "$VALIDATOR_DEPLOY_SHA" \
+        --branch main
+    )"; then
+    echo "Forward validator restart authority is temporarily unreadable; retaining the running validator" >&2
+    return 1
+  fi
+  if [ "$latest_sha" = "$VALIDATOR_DEPLOY_SHA" ]; then
+    return 0
+  fi
+
+  next_count=$((VALIDATOR_RELEASE_SUPERSESSION_COUNT + 1))
+  if [ "$next_count" -gt "$VALIDATOR_RELEASE_SUPERSESSION_MAX" ]; then
+    echo "ERROR: validator release changed too many times during one restart invocation" >&2
+    return 1
+  fi
+  echo "Forward validator release moved from $VALIDATOR_DEPLOY_SHA to $latest_sha; re-executing before shutdown"
+  record_validator_restart_timing "release_superseded"
+  cleanup_validator_restart_preparation
+  git checkout main
+  git merge --ff-only "$latest_sha"
+  if [ "$(git rev-parse HEAD)" != "$latest_sha" ]; then
+    echo "ERROR: superseding validator checkout does not match the fetched authority" >&2
+    return 1
+  fi
+
+  exec env \
+    VALIDATOR_ROOT="$VALIDATOR_ROOT" \
+    VALIDATOR_ENV_FILE="$VALIDATOR_ENV_FILE" \
+    LEADPOET_VALIDATOR_ENV_SECRET_ID="$LEADPOET_VALIDATOR_ENV_SECRET_ID" \
+    VALIDATOR_ENV_BACKUP_DIR="$VALIDATOR_ENV_BACKUP_DIR" \
+    VALIDATOR_PYTHON_BIN="$VALIDATOR_PYTHON_BIN" \
+    VALIDATOR_RESTART_CONTROLLER_ROOT="$VALIDATOR_RESTART_CONTROLLER_ROOT" \
+    VALIDATOR_HOST_RESTART_SCRIPT="$VALIDATOR_HOST_RESTART_SCRIPT" \
+    VALIDATOR_RESTART_STARTED_EPOCH="$VALIDATOR_RESTART_STARTED_EPOCH" \
+    VALIDATOR_RESTART_TIMING_DIR="$VALIDATOR_RESTART_TIMING_DIR" \
+    VALIDATOR_RESTART_TIMING_FILE="$VALIDATOR_RESTART_TIMING_FILE" \
+    VALIDATOR_RESTART_TIMING_INITIALIZED="$VALIDATOR_RESTART_TIMING_INITIALIZED" \
+    VALIDATOR_RELEASE_SUPERSESSION_COUNT="$next_count" \
+    VALIDATOR_RELEASE_SUPERSESSION_MAX="$VALIDATOR_RELEASE_SUPERSESSION_MAX" \
+    VALIDATOR_V2_RELEASE_BUCKET="$VALIDATOR_V2_RELEASE_BUCKET" \
+    VALIDATOR_V2_RELEASE_PREFIX="$VALIDATOR_V2_RELEASE_PREFIX" \
+    VALIDATOR_V2_RELEASE_ARCHIVE_ROOT="$VALIDATOR_V2_RELEASE_ARCHIVE_ROOT" \
+    VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
+    VALIDATOR_STATEFUL_CUTOVER_PREPARE_ONLY="$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" \
+    LEADPOET_USE_CAPTURED_RESTART_START=1 \
+    VALIDATOR_RESTART_REEXECED=0 \
+    bash "$VALIDATOR_ROOT/validator_restart.sh"
+}
 
 echo "Preparing validator runtime env from Secrets Manager"
 mkdir -p "$(dirname "$VALIDATOR_ENV_FILE")" "$VALIDATOR_ENV_BACKUP_DIR"
@@ -622,6 +708,11 @@ echo "Acquiring the independently built V2 release channel"
 VALIDATOR_DEPLOY_STAGE="release_acquisition"
 VALIDATOR_V2_RELEASE_READY=0
 for attempt in $(seq 1 300); do
+  if ! follow_superseding_validator_release; then
+    echo "Approved validator release authority is not stable yet; waiting inside the valid restart invocation (${attempt}/300)"
+    sleep 12
+    continue
+  fi
   if python3 -m gateway.tee.release_channel_v2 \
       --ensure \
       --expected-commit "$VALIDATOR_DEPLOY_SHA" \
@@ -632,8 +723,10 @@ for attempt in $(seq 1 300); do
       --lineage-output "$VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE" \
       --lineage-repository "$VALIDATOR_ROOT" \
       --lineage-authority-commit "$VALIDATOR_LINEAGE_AUTHORITY_SHA"; then
-    VALIDATOR_V2_RELEASE_READY=1
-    break
+    if follow_superseding_validator_release; then
+      VALIDATOR_V2_RELEASE_READY=1
+      break
+    fi
   fi
   echo "Approved V2 release is not published yet; waiting inside the valid validator restart invocation (${attempt}/300)"
   sleep 12

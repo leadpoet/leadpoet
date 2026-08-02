@@ -33,6 +33,7 @@ def _run_recovery(
     live_runtime_min_free_bytes: int = 18_000_000_000,
     stale_overlay_mounts: int = 0,
     available_after_stale_reclaim: Optional[int] = None,
+    live_restore_enabled: bool = True,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -101,7 +102,10 @@ case "${1:-}:${2:-}" in
     exit 0
     ;;
   info:--format)
-    printf '/var/lib/docker\\n'
+    case "${3:-}" in
+      *LiveRestoreEnabled*) printf '%s\\n' "$FAKE_LIVE_RESTORE_ENABLED" ;;
+      *) printf '/var/lib/docker\\n' ;;
+    esac
     exit 0
     ;;
   info:)
@@ -160,9 +164,18 @@ emit_rows() {
 case "$command" in
   env)
     printf '%s %s\n' "$command" "$*" >> "$FAKE_SUDO_LOG"
-    touch "$FAKE_STALE_RECLAIM_MARKER"
-    printf '{"active_mount_count":%s,"mounted_overlay_count":%s,"reclaimed_mount_count":%s,"schema_version":"leadpoet.docker_stale_mount_reclaim.v3","status":"ready"}\n' \
-      "$FAKE_CONTAINERS" "$((FAKE_CONTAINERS + FAKE_STALE_OVERLAY_MOUNTS))" "$FAKE_STALE_OVERLAY_MOUNTS"
+    case "$*" in
+      *docker_live_restore_reconciler_v2.py*)
+        printf '{"config_changed":true,"container_count":%s,"image_count":%s,"manifest_hash":"sha256:%064d","schema_version":"leadpoet.docker_live_restore_reconcile.v1","status":"ready"}\n' \
+          "$FAKE_CONTAINERS" "$FAKE_IMAGES" 0
+        ;;
+      *docker_stale_mount_reclaimer_v2.py*)
+        touch "$FAKE_STALE_RECLAIM_MARKER"
+        printf '{"active_mount_count":%s,"mounted_overlay_count":%s,"reclaimed_layer_record_count":0,"reclaimed_mount_count":%s,"reclaimed_mount_record_count":0,"reclaimed_overlay_dir_count":0,"reclaimed_overlay_link_count":0,"schema_version":"leadpoet.docker_stale_mount_reclaim.v3","status":"ready"}\n' \
+          "$FAKE_CONTAINERS" "$((FAKE_CONTAINERS + FAKE_STALE_OVERLAY_MOUNTS))" "$FAKE_STALE_OVERLAY_MOUNTS"
+        ;;
+      *) exit 2 ;;
+    esac
     ;;
   test)
     exit 0
@@ -266,6 +279,9 @@ fi
             available
             if available_after_stale_reclaim is None
             else available_after_stale_reclaim
+        ),
+        "FAKE_LIVE_RESTORE_ENABLED": (
+            "true" if live_restore_enabled else "false"
         ),
         "FAKE_CONTAINERS": str(containers),
         "FAKE_IMAGES": str(images),
@@ -483,6 +499,28 @@ def test_validator_docker_recovery_preserves_healthy_live_runtime(
     assert "Waiting for Docker teardown" not in result.stderr
     assert "systemctl stop" not in sudo_log
     assert "rm -rf" not in sudo_log
+    assert "docker_live_restore_reconciler_v2" not in sudo_log
+
+
+def test_validator_docker_recovery_reconciles_prior_raw_cleanup_state(
+    tmp_path: Path,
+) -> None:
+    result, sudo_log = _run_recovery(
+        tmp_path,
+        available=40_000_000_000,
+        containers=11,
+        containerd_containers=11,
+        containerd_tasks=11,
+        containerd_running_tasks=11,
+        moby_shims=11,
+        live_restore_enabled=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '"reclaimed_mount_count":0' in result.stdout
+    assert "Reconciling dockerd metadata" in result.stdout
+    assert "docker_live_restore_reconciler_v2" in sudo_log
+    assert "systemctl stop" not in sudo_log
 
 
 def test_validator_docker_recovery_allows_one_recovery_build_after_failed_deploy(
@@ -552,6 +590,7 @@ def test_validator_docker_recovery_reclaims_stale_nitro_mounts_before_floor(
     assert '"reclaimed_mount_count":325' in result.stdout
     assert "Docker storage ready: free_bytes=40000000000" in result.stdout
     assert "docker_stale_mount_reclaimer_v2" in sudo_log
+    assert "docker_live_restore_reconciler_v2" in sudo_log
     assert "PYTHONSAFEPATH=1 python3" in sudo_log
     assert "-m validator_tee.host" not in sudo_log
     assert "systemctl stop" not in sudo_log

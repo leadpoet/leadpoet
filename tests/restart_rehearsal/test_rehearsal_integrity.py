@@ -393,6 +393,34 @@ def test_finalized_settlement_fixture_exports_complete_receipt_graphs() -> None:
     assert finalization_roots.issubset(visited)
 
 
+def test_settlement_fixture_uses_explicit_exact_container_source_root(
+    monkeypatch,
+) -> None:
+    source_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setattr(
+        postgres_probe,
+        "__file__",
+        "/harness/postgres_v2_contract_probe.py",
+    )
+
+    with pytest.raises(
+        postgres_probe.PostgresContractProbeError,
+        match="candidate source root is required",
+    ):
+        postgres_probe._settlement_fixture(
+            candidate_sha=COMMIT,
+            epoch_id=24207,
+        )
+
+    rows, verified, _fixture = postgres_probe._settlement_fixture(
+        candidate_sha=COMMIT,
+        epoch_id=24207,
+        source_root=source_root,
+    )
+    assert rows
+    assert verified["epoch_id"] == 24207
+
+
 def test_chain_settlement_activation_fixture_creates_one_epoch_backlog(
     tmp_path,
     monkeypatch,

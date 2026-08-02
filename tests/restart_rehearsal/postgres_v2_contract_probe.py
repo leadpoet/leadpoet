@@ -772,6 +772,7 @@ def _settlement_fixture(
     *,
     candidate_sha: str,
     epoch_id: int,
+    source_root: Path | None = None,
 ) -> tuple[
     list[tuple[str, dict[str, Any]]],
     dict[str, Any],
@@ -843,9 +844,25 @@ def _settlement_fixture(
         "durable_readback_hash": durable_readback_hash,
         "publication_doc": publication_doc,
     }
+    candidate_root = source_root
+    if candidate_root is None:
+        module_path = Path(__file__).resolve()
+        if len(module_path.parents) < 3:
+            raise PostgresContractProbeError(
+                "candidate source root is required outside the repository"
+            )
+        local_candidate = module_path.parents[2]
+        if not (
+            local_candidate
+            / "validator_tee/enclave/chain_signing_profile_v2.json"
+        ).is_file():
+            raise PostgresContractProbeError(
+                "candidate source root is required outside the repository"
+            )
+        candidate_root = local_candidate
     profile_manifest = json.loads(
         (
-            Path(__file__).resolve().parents[2]
+            candidate_root
             / "validator_tee/enclave/chain_signing_profile_v2.json"
         ).read_text(encoding="utf-8")
     )
@@ -2357,10 +2374,12 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         prior_rows, prior_verified, _prior_fixture = _settlement_fixture(
             candidate_sha=args.candidate_sha,
             epoch_id=args.epoch_id - 1,
+            source_root=args.source_root,
         )
         rows, verified, fixture = _settlement_fixture(
             candidate_sha=args.candidate_sha,
             epoch_id=args.epoch_id,
+            source_root=args.source_root,
         )
         settlement_fixture_rows = _deduplicate_settlement_fixture_rows(
             (*prior_rows, *rows)

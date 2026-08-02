@@ -3162,6 +3162,7 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
         pack_parent_receipt_graph_set_v2,
         unpack_parent_receipt_graph_set_v2,
     )
+    from gateway.tee.release_lineage_v2 import _required_commits
     from gateway.research_lab.attested_scoring_v2 import (
         _build_transport_payload_document,
     )
@@ -3186,14 +3187,32 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
         capture_output=True,
         text=True,
     ).stdout.strip()
+    from_sha = str(os.environ.get("REHEARSAL_FROM_SHA") or "").lower()
+    if (
+        len(from_sha) != 40
+        or any(value not in "0123456789abcdef" for value in from_sha)
+        or from_sha == candidate_sha
+    ):
+        raise RuntimeError(
+            "receipt ancestry rehearsal requires a distinct N-1 release"
+        )
     fixture = SanitizedWeightFixture(
         candidate_sha=candidate_sha,
+        epoch_id=30_000,
+    )
+    historical_fixture = SanitizedWeightFixture(
+        candidate_sha=from_sha,
         epoch_id=30_000,
     )
     config_hash = sha256_json({"rehearsal": "shared-receipt-ancestry"})
     boot = fixture._boot(
         role="gateway_coordinator",
         key=fixture.coordinator_key,
+        config_hash=config_hash,
+    )
+    historical_boot = historical_fixture._boot(
+        role="gateway_coordinator",
+        key=historical_fixture.coordinator_key,
         config_hash=config_hash,
     )
     sample_receipt = fixture.receipt(
@@ -3278,13 +3297,19 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
             "transport_attempts": [],
             "host_operations": [],
         }
+        issuer_boot = historical_boot if index == 0 else boot
+        issuer_key = (
+            historical_fixture.coordinator_key
+            if index == 0
+            else fixture.coordinator_key
+        )
         certificate = issue_ancestry_certificate_v2(
             local_delta=delta,
             lineage_id=lineage_id,
             certificate_sequence=0,
-            issuer_boot_identity=boot,
+            issuer_boot_identity=issuer_boot,
             issued_at="2026-07-10T20:00:00Z",
-            sign_digest=fixture.coordinator_key.sign,
+            sign_digest=issuer_key.sign,
             boot_attestation_verifier=verify_boot,
             allowed_issuer_roles=("gateway_coordinator",),
             required_purposes=("research_lab.allocation.v2",),
@@ -3315,6 +3340,11 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
         for graph in graphs
     ) != checkpoint_graph_count:
         raise RuntimeError("mixed checkpoint ancestry fixture is incomplete")
+    required_release_commits = _required_commits(tuple(graphs))
+    if required_release_commits != {candidate_sha, from_sha}:
+        raise RuntimeError(
+            "checkpoint issuer N-1 release was omitted from ancestry lineage"
+        )
 
     try:
         pack_parent_receipt_graph_set_v2(graphs)
@@ -3471,6 +3501,8 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
         "ordinary_graph_bound_preserved": True,
         "checkpointed_graph_count": checkpoint_graph_count,
         "checkpoint_authority_preserved": True,
+        "checkpoint_release_commits": sorted(required_release_commits),
+        "historical_checkpoint_issuer_included": True,
     }
 
 
@@ -3964,6 +3996,11 @@ def main() -> int:
                 "receipt-graph-transport-deduplication",
                 {},
             ).get("ordinary_graph_bound_preserved")
+            is True
+            and behavior_evidence.get(
+                "receipt-graph-transport-deduplication",
+                {},
+            ).get("historical_checkpoint_issuer_included")
             is True
             and behavior_evidence.get(
                 "receipt-graph-transport-deduplication",

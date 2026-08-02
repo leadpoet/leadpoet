@@ -90,6 +90,24 @@ def _identity(release, role="gateway_scoring"):
     }
 
 
+def _checkpoint_proof(issuer_boot_identity):
+    return {
+        "certificate": {
+            "issuer_boot_identity": issuer_boot_identity,
+        },
+    }
+
+
+def _checkpoint_graph(release, issuer_boot_identity):
+    return {
+        "schema_version": (
+            release_lineage_v2.CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        ),
+        "boot_identities": [_identity(release)],
+        "ancestry_proof": _checkpoint_proof(issuer_boot_identity),
+    }
+
+
 def _compact_lineage(current, *historical):
     releases = {}
     for gateway in (current, *historical):
@@ -290,6 +308,54 @@ def test_required_commits_includes_validator_boots():
     commits = release_lineage_v2._required_commits(graphs)
     assert gateway["roles"]["gateway_scoring"]["commit_sha"] in commits
     assert _validator_identity()["commit_sha"] in commits
+
+
+def test_required_commits_includes_historical_checkpoint_issuer():
+    current = _release("1")
+    historical = _release("2")
+    commits = release_lineage_v2._required_commits(
+        (_checkpoint_graph(current, _identity(historical)),)
+    )
+    assert commits == {"1" * 40, "2" * 40}
+
+
+def test_load_lineage_fetches_explicit_checkpoint_issuer_release():
+    current = _release("1")
+    historical = _release("2")
+    calls = []
+
+    releases = load_approved_release_lineage_v2(
+        current_release=current,
+        parent_graphs=({"boot_identities": [_identity(current)]},),
+        parent_ancestry_proofs=(
+            _checkpoint_proof(_identity(historical)),
+        ),
+        release_channel_loader=lambda commit: calls.append(commit)
+        or {"gateway_release_manifest": historical},
+    )
+
+    assert set(releases) == {"1" * 40, "2" * 40}
+    assert calls == ["2" * 40]
+
+
+def test_lineage_rejects_checkpoint_without_issuer_boot_identity():
+    current = _release("1")
+    with pytest.raises(
+        ReleaseLineageV2Error,
+        match="checkpoint ancestry issuer boot identity is unavailable",
+    ):
+        load_approved_release_lineage_v2(
+            current_release=current,
+            parent_graphs=(
+                {
+                    "schema_version": (
+                        release_lineage_v2.CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+                    ),
+                    "boot_identities": [_identity(current)],
+                    "ancestry_proof": {"certificate": {}},
+                },
+            ),
+        )
 
 
 def test_load_lineage_fetches_validator_release_manifest():

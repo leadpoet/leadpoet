@@ -1209,7 +1209,7 @@ def test_gateway_runtime_env_cannot_replace_current_restart_controller_state() -
     assert clone < merge < first_reload
 
 
-def test_gateway_restart_recovers_only_restart_owned_maintenance_after_readiness() -> None:
+def test_gateway_restart_preserves_operator_maintenance_after_readiness() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     v2_health = 'curl -fsS http://localhost:8000/health/v2-authority'
     handoff = "-m gateway.tee.verify_weight_submission_ready_v2"
@@ -1219,6 +1219,14 @@ def test_gateway_restart_recovers_only_restart_owned_maintenance_after_readiness
     )
     completed = 'GATEWAY_DEPLOY_STAGE="completed"'
 
+    assert "scoring and autoresearch remain operator-controlled" in script
+    for command in (
+        "pause-autoresearch",
+        "resume-autoresearch",
+        "pause-scoring",
+        "resume-scoring",
+    ):
+        assert f"-m gateway.research_lab.admin {command}" not in script
     assert script.rindex(v2_health) < script.rindex(handoff)
     assert script.rindex(handoff) < script.rindex(resume) < script.rindex(completed)
 

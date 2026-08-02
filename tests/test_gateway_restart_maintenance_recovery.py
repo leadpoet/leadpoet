@@ -31,7 +31,7 @@ def _pause_state(
 
 
 @pytest.mark.asyncio
-async def test_restart_recovery_preserves_owned_autoresearch_pause_and_resumes_scoring(
+async def test_restart_recovery_preserves_owned_autoresearch_and_scoring_pauses(
     monkeypatch,
 ) -> None:
     autoresearch = _pause_state(
@@ -44,21 +44,15 @@ async def test_restart_recovery_preserves_owned_autoresearch_pause_and_resumes_s
         action="pause-scoring",
         seq=12,
     )
-    writes: list[tuple[str, dict]] = []
 
     async def get_autoresearch():
         return autoresearch
 
     async def get_scoring():
-        return (
-            {"paused": False, "status": "inactive"}
-            if any(kind == "scoring" for kind, _ in writes)
-            else scoring
-        )
+        return scoring
 
-    async def set_scoring(**kwargs):
-        writes.append(("scoring", kwargs))
-        return {"seq": 13, "anchored_hash": "sha256:" + "b" * 64}
+    async def unexpected_write(**_kwargs):
+        raise AssertionError("gateway restart must not change maintenance state")
 
     monkeypatch.setattr(
         maintenance, "get_autoresearch_maintenance_state", get_autoresearch
@@ -67,12 +61,10 @@ async def test_restart_recovery_preserves_owned_autoresearch_pause_and_resumes_s
     monkeypatch.setattr(
         maintenance,
         "set_autoresearch_maintenance_paused",
-        lambda **_kwargs: pytest.fail(
-            "gateway restart must not resume autoresearch"
-        ),
+        unexpected_write,
     )
     monkeypatch.setattr(
-        maintenance, "set_scoring_maintenance_paused", set_scoring
+        maintenance, "set_scoring_maintenance_paused", unexpected_write
     )
     monkeypatch.setattr(
         maintenance,
@@ -86,10 +78,46 @@ async def test_restart_recovery_preserves_owned_autoresearch_pause_and_resumes_s
 
     assert result["ok"] is True
     assert result["autoresearch"]["status"] == "preserved_restart_pause"
-    assert result["scoring"]["status"] == "resumed"
-    assert len(writes) == 1
-    assert writes[0][0] == "scoring"
-    assert writes[0][1]["expected_prior_seq"] == 12
+    assert result["autoresearch"]["state"] == autoresearch
+    assert result["scoring"]["status"] == "preserved_restart_pause"
+    assert result["scoring"]["state"] == scoring
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_preserves_inactive_controls_without_writes(
+    monkeypatch,
+) -> None:
+    autoresearch = {"paused": False, "status": "inactive", "event_seq": 9}
+    scoring = {"paused": False, "status": "inactive", "event_seq": 13}
+
+    async def unexpected_write(**_kwargs):
+        raise AssertionError("gateway restart must not change maintenance state")
+
+    monkeypatch.setattr(
+        maintenance,
+        "get_autoresearch_maintenance_state",
+        lambda: _async_value(autoresearch),
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "get_scoring_maintenance_state",
+        lambda: _async_value(scoring),
+    )
+    monkeypatch.setattr(
+        maintenance, "set_autoresearch_maintenance_paused", unexpected_write
+    )
+    monkeypatch.setattr(
+        maintenance, "set_scoring_maintenance_paused", unexpected_write
+    )
+
+    result = await maintenance.resume_gateway_restart_owned_maintenance()
+
+    assert result == {
+        "ok": True,
+        "action": "resume-restart-maintenance",
+        "autoresearch": {"status": "already_inactive"},
+        "scoring": {"status": "already_inactive"},
+    }
 
 
 @pytest.mark.asyncio
@@ -172,6 +200,40 @@ async def test_restart_recovery_cli_rejects_wrong_runtime_commit(
         "expected_commit": expected,
         "actual_commit": "b" * 40,
     }
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_cli_preserves_controls_for_exact_runtime_commit(
+    monkeypatch,
+) -> None:
+    expected = "a" * 40
+    preserved = {
+        "ok": True,
+        "action": "resume-restart-maintenance",
+        "autoresearch": {"status": "preserved_non_restart_pause"},
+        "scoring": {"status": "preserved_non_restart_pause"},
+    }
+    calls = 0
+
+    async def preserve_controls():
+        nonlocal calls
+        calls += 1
+        return preserved
+
+    monkeypatch.setattr(admin, "get_build_info", lambda: {"git_commit": expected})
+    monkeypatch.setattr(
+        admin, "resume_gateway_restart_owned_maintenance", preserve_controls
+    )
+
+    result = await admin._run(
+        argparse.Namespace(
+            command="resume-restart-maintenance",
+            expected_commit=expected,
+        )
+    )
+
+    assert calls == 1
+    assert result == {**preserved, "verified_commit": expected}
 
 
 @pytest.mark.asyncio

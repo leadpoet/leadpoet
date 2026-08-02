@@ -365,11 +365,12 @@ def is_gateway_restart_owned_pause(
 
 
 async def resume_gateway_restart_owned_maintenance() -> dict[str, Any]:
-    """Recover restart-owned scoring state without resuming autoresearch.
+    """Report maintenance state without changing operator controls.
 
-    Autoresearch admission is an explicit operator control.  A gateway restart
-    may preserve a restart-owned pause, but it must not emit a resume control
-    event or requeue paused runs as a side effect of becoming ready.
+    Scoring and autoresearch admission are explicit operator controls. A
+    gateway restart must not emit pause or resume events, or requeue paused
+    runs, as a side effect of becoming ready. The legacy function name remains
+    for compatibility with deployed restart controllers.
     """
 
     autoresearch_state = await get_autoresearch_maintenance_state()
@@ -406,28 +407,9 @@ async def resume_gateway_restart_owned_maintenance() -> dict[str, Any]:
                 "state": scoring_state,
             }
         else:
-            prior_seq = scoring_state.get("event_seq")
-            if not isinstance(prior_seq, int) or isinstance(prior_seq, bool):
-                raise RuntimeError(
-                    "restart-owned scoring pause has no valid event sequence"
-                )
-            event = await set_scoring_maintenance_paused(
-                paused=False,
-                reason=GATEWAY_RESTART_RESUME_REASON,
-                actor_ref=GATEWAY_RESTART_ACTOR_REF,
-                event_doc={
-                    "operator_action": "resume-scoring",
-                    "resume_source": "gateway_restart_post_readiness",
-                    "previous_event_hash": scoring_state.get("event_hash"),
-                    "previous_event_seq": prior_seq,
-                },
-                expected_prior_seq=prior_seq,
-            )
             result["scoring"] = {
-                "status": "resumed",
-                "event_hash": event.get("anchored_hash"),
-                "event_seq": event.get("seq"),
-                "state": await get_scoring_maintenance_state(),
+                "status": "preserved_restart_pause",
+                "state": scoring_state,
             }
     return result
 

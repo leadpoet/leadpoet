@@ -2519,7 +2519,7 @@ VERIFY_BUILD_INFO
 timeout 30 curl -fsS http://localhost:8000/research-lab/status >/dev/null
 timeout 30 curl -fsS http://localhost:8000/attest >/dev/null
 
-echo "Recovering restart-owned scoring maintenance; autoresearch requires explicit operator resume"
+echo "Verifying Research Lab maintenance state; scoring and autoresearch remain operator-controlled"
 PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
   -m gateway.research_lab.admin resume-restart-maintenance \
   --expected-commit "$GATEWAY_DEPLOY_SHA"

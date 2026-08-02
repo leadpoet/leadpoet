@@ -85,13 +85,39 @@ done
 
 - Never commit credentials, PEM contents, provider payloads, private model
   artifacts, sealed benchmarks, customer data, or unredacted contact data.
-- Never perform production writes, restarts, process kills, Supabase
-  mutations, or chain submissions. Give the operator exact commands.
+- By default, never perform production writes, restarts, process kills,
+  Supabase mutations, or chain submissions. Give the operator exact commands.
 - Read-only SSH is allowed. Use
   `/Users/pranav/Downloads/leadpoet-2026-07-28.pem` for:
   `ec2-user@52.91.135.79` and `ec2-user@100.59.201.156`.
 - One HTTP 200 or a running process is not proof. Require joined logs, durable
   rows or receipts, identical bundle hashes, and chain readback as applicable.
+
+### Explicit overnight recovery authorization
+
+Only a newest-turn explicit instruction to run or start
+`$overnight-weight-recovery` activates this exception. An implicit skill
+trigger, a diagnosis request, or general authorization does not.
+
+While that run is active and the user has not said `STOP`, Codex may:
+
+- Push reviewed permanent fixes under the normal synchronization, testing,
+  epoch-timing, and attestation rules.
+- Apply an exact committed, numbered, idempotent Supabase migration after it
+  passes disposable-PostgreSQL coverage and a read-only live schema check.
+- Run the repository's canonical gateway and validator restart scripts over
+  SSH after the exact candidate attests, then run production probes and monitor
+  logs/readback until the skill's three-consecutive-epoch condition succeeds.
+- Use existing configured credentials without displaying, copying, rotating,
+  or persisting their values. Use repository-owned configuration tooling only
+  when the tested fix requires it, with backup and non-secret readback.
+
+This exception never permits ad hoc remote source edits, arbitrary SQL or row
+deletion, direct/manual/emergency chain submissions, manual weight vectors,
+secret rotation, process manipulation outside the canonical restart scripts,
+or bypassing attestation, PCR0, exact-commit, archive, signature, enclave, or
+fail-closed checks. `STOP` revokes the exception immediately. Every other skill
+and workflow remains under the default production-write prohibition.
 
 ## Deployment timing
 

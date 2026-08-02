@@ -49,6 +49,7 @@ from tests.restart_rehearsal.gateway_boundary_service import (
     _schema_contract,
 )
 from tests.restart_rehearsal.postgres_v2_contract_probe import (
+    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_MIGRATION,
     ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION,
     ANCESTRY_CHECKPOINT_MIGRATION,
     ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
@@ -1058,6 +1059,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             ANCESTRY_CHECKPOINT_MIGRATION,
             ALLOCATION_SETTLEMENT_FRONTIER_MIGRATION,
             ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
+            ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_MIGRATION,
         ],
         "relations": relations,
         "rpcs": [
@@ -1072,7 +1074,9 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "research_lab_active_model_replay_contract_v2",
             "persist_research_lab_ancestry_checkpoint_v2",
             "persist_research_lab_allocation_settlement_frontier_v2",
+            "persist_research_lab_allocation_frontier_bootstrap_v2",
             "research_lab_ancestry_checkpoint_bootstrap_contract_v2",
+            "research_lab_allocation_frontier_bootstrap_contract_v2",
         ],
         "maintenance_lease": {
             "schema_version": "leadpoet.maintenance_lease_contract.v1",
@@ -1097,6 +1101,7 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
             "post_136_ancestry_checkpoint_contract_valid": True,
             "post_137_allocation_settlement_frontier_contract_valid": True,
             "post_138_ancestry_checkpoint_bootstrap_purpose_valid": True,
+            "post_139_allocation_frontier_bootstrap_contract_valid": True,
             "provider_outcome_append_atomic": True,
             "provider_outcome_contention_zero_rollback": True,
             "provider_outcome_conflict_head_exact": True,
@@ -1187,7 +1192,9 @@ def test_migration_backed_contract_is_candidate_bound_and_complete(
     assert "research_lab_active_model_replay_contract_v2" in rpcs
     assert "persist_research_lab_ancestry_checkpoint_v2" in rpcs
     assert "persist_research_lab_allocation_settlement_frontier_v2" in rpcs
+    assert "persist_research_lab_allocation_frontier_bootstrap_v2" in rpcs
     assert "research_lab_ancestry_checkpoint_bootstrap_contract_v2" in rpcs
+    assert "research_lab_allocation_frontier_bootstrap_contract_v2" in rpcs
     assert _migration_seed_rows(
         path,
         candidate_sha=COMMIT,
@@ -1313,7 +1320,9 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "research_lab_active_model_replay_contract_v2",
             "persist_research_lab_ancestry_checkpoint_v2",
             "persist_research_lab_allocation_settlement_frontier_v2",
+            "persist_research_lab_allocation_frontier_bootstrap_v2",
             "research_lab_ancestry_checkpoint_bootstrap_contract_v2",
+            "research_lab_allocation_frontier_bootstrap_contract_v2",
             "create_research_lab_autoresearch_tree",
             "plan_research_lab_autoresearch_tree_node",
             "append_research_lab_autoresearch_tree_event",
@@ -1348,6 +1357,7 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "post_136_ancestry_checkpoint_contract_valid": True,
             "post_137_allocation_settlement_frontier_contract_valid": True,
             "post_138_ancestry_checkpoint_bootstrap_purpose_valid": True,
+            "post_139_allocation_frontier_bootstrap_contract_valid": True,
             "provider_outcome_append_atomic": True,
             "provider_outcome_contention_zero_rollback": True,
             "provider_outcome_conflict_head_exact": True,
@@ -1400,6 +1410,15 @@ def test_rehearsal_evidence_requires_all_postgres_contract_checks(
             "frontier_hash": "sha256:" + "a" * 64,
             "source_receipt_hash": "sha256:" + "b" * 64,
             "idempotent_replay": True,
+            "frontier_count": 1,
+            "activation_count": 1,
+        },
+        "allocation_settlement_frontier_bootstrap": {
+            "frontier_hash": "sha256:" + "c" * 64,
+            "allocation_source_receipt_hash": "sha256:" + "d" * 64,
+            "bootstrap_receipt_hash": "sha256:" + "e" * 64,
+            "idempotent_replay": True,
+            "unmeasured_source_rejected": True,
             "frontier_count": 1,
             "activation_count": 1,
         },

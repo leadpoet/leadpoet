@@ -240,6 +240,9 @@ def test_migration_96_receipt_allowlist_matches_pre_stateful_epoch_contract():
             expected_at_96.discard(
                 "research_lab.ancestry_checkpoint_bootstrap.v2"
             )
+            expected_at_96.discard(
+                "research_lab.allocation_settlement_frontier_bootstrap.v2"
+            )
             expected_at_96.discard("research_lab.subnet_epoch_cutover.v2")
             expected_at_96.discard(
                 "research_lab.chain_weight_observation.v1"

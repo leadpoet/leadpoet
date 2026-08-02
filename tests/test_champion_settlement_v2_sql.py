@@ -258,6 +258,9 @@ def test_chain_realized_receipt_allowlist_matches_canonical_contract_exactly():
             expected_at_126.discard(
                 "research_lab.ancestry_checkpoint_bootstrap.v2"
             )
+            expected_at_126.discard(
+                "research_lab.allocation_settlement_frontier_bootstrap.v2"
+            )
         assert migrated_purposes == expected_at_126, role
 
 
@@ -427,6 +430,9 @@ def test_migration_99_allowlist_matches_canonical_contract_before_migration_101(
         if role == "gateway_coordinator":
             expected_at_99.discard(
                 "research_lab.ancestry_checkpoint_bootstrap.v2"
+            )
+            expected_at_99.discard(
+                "research_lab.allocation_settlement_frontier_bootstrap.v2"
             )
             expected_at_99.discard("research_lab.subnet_epoch_cutover.v2")
             expected_at_99.discard(

@@ -92,6 +92,9 @@ def test_receipt_allowlist_retains_canonical_contract_and_adds_epoch_authorities
             expected_purposes.discard(
                 "research_lab.ancestry_checkpoint_bootstrap.v2"
             )
+            expected_purposes.discard(
+                "research_lab.allocation_settlement_frontier_bootstrap.v2"
+            )
             expected_purposes.add("research_lab.subnet_epoch_cutover.v2")
             expected_purposes.discard(
                 "research_lab.chain_weight_observation.v1"

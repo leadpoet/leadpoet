@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import textwrap
+import types
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,12 +23,17 @@ if str(ROOT) not in sys.path:
 from leadpoet_verifier.research_evaluation import build_research_evaluation_score_bundle  # noqa: E402
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
 from gateway.research_lab.worker_autostart import build_research_lab_worker_autostart_plan  # noqa: E402
+import gateway.research_lab.code_build as code_build_module  # noqa: E402
 from gateway.research_lab.code_build import (  # noqa: E402
     CodeEditBuildError,
     CodeEditCandidateBuilder,
     resolve_source_inspection_requests,
 )
 from gateway.research_lab.code_loop_engine import CodeEditLoopEngine  # noqa: E402
+from gateway.research_lab.git_tree_models import TreePolicy  # noqa: E402
+from gateway.research_lab.provider_capabilities import (  # noqa: E402
+    EffectiveProviderCapabilities,
+)
 from gateway.research_lab.autoresearch_runtime import (  # noqa: E402
     AutoResearchLoopEvent,
     AutoResearchRuntimeSettings,
@@ -58,11 +67,12 @@ from research_lab.code_editing import (
     validate_code_edit_draft,
 )  # noqa: E402
 from research_lab.eval.private_runtime import DEFAULT_ENV_PASSTHROUGH  # noqa: E402
+import research_lab.eval.private_runtime as private_runtime_module  # noqa: E402
 from research_lab.eval.artifacts import PrivateModelArtifactManifest  # noqa: E402
 from research_lab.validator_integration import verify_research_lab_evaluation_bundle_page  # noqa: E402
 
 
-def main() -> int:
+def _run_verification() -> int:
     errors: list[str] = []
 
     async def _verify_builder_not_ready_skips_queue() -> None:
@@ -92,16 +102,16 @@ def main() -> int:
             private_build_cmd="",
         )
         worker = _NoClaimWorker(cfg)
-        original_pause_check = worker_module.is_autoresearch_maintenance_paused
+        original_maintenance_state = worker_module.get_autoresearch_maintenance_state
 
-        async def _not_paused() -> bool:
-            return False
+        async def _not_paused() -> dict[str, object]:
+            return {"paused": False, "status": "active"}
 
-        worker_module.is_autoresearch_maintenance_paused = _not_paused
+        worker_module.get_autoresearch_maintenance_state = _not_paused
         try:
             outcome = await worker.run_once()
         finally:
-            worker_module.is_autoresearch_maintenance_paused = original_pause_check
+            worker_module.get_autoresearch_maintenance_state = original_maintenance_state
         if worker.queue_was_read:
             errors.append("builder-not-ready worker read the queue before readiness passed")
         if outcome.status != "code_edit_builder_not_ready":
@@ -719,10 +729,10 @@ def main() -> int:
     for idx in range(1, 7):
         auto_worker_env[f"RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_{idx}"] = f"http://score-proxy-{idx}"
     auto_plan = build_research_lab_worker_autostart_plan(auto_worker_env)
-    if auto_plan.hosted.worker_count != 4 or len(auto_plan.hosted.proxy_refs) != 4:
-        errors.append("hosted autostart worker count did not follow auto-research proxy count")
-    if auto_plan.scoring.worker_count != 6 or len(auto_plan.scoring.proxy_refs) != 6:
-        errors.append("scoring autostart worker count did not follow qualification proxy count")
+    if auto_plan.hosted.worker_count != 2 or len(auto_plan.hosted.proxy_refs) != 4:
+        errors.append("hosted autostart did not preserve explicit process count and proxy pool")
+    if auto_plan.scoring.worker_count != 3 or len(auto_plan.scoring.proxy_refs) != 6:
+        errors.append("scoring autostart did not preserve explicit process count and proxy pool")
     old_environ = dict(os.environ)
     try:
         os.environ.clear()
@@ -731,10 +741,10 @@ def main() -> int:
     finally:
         os.environ.clear()
         os.environ.update(old_environ)
-    if auto_cfg.hosted_worker_total_workers != 4 or auto_cfg.hosted_worker_index != 1:
-        errors.append("hosted config did not derive total/index from auto-research proxy count")
-    if auto_cfg.scoring_worker_total_workers != 6 or auto_cfg.scoring_worker_index != 1:
-        errors.append("scoring config did not derive total/index from qualification proxy count")
+    if auto_cfg.hosted_worker_total_workers != 2 or auto_cfg.hosted_worker_index != 1:
+        errors.append("hosted config did not preserve explicit worker total/index")
+    if auto_cfg.scoring_worker_total_workers != 3 or auto_cfg.scoring_worker_index != 1:
+        errors.append("scoring config did not preserve explicit worker total/index")
     if not _is_claim_race_error(Exception("duplicate key violates research_loop_run_queue_events_run_seq_key")):
         errors.append("worker claim-race detector missed queue event duplicate-key errors")
     ready_worker = ResearchLabHostedWorker(ResearchLabGatewayConfig(), worker_ref="test-worker-ready")
@@ -827,6 +837,10 @@ def _verify_image_extracted_code_builder(artifact: PrivateModelArtifactManifest)
         os.environ["PATH"] = str(fake_docker.parent) + os.pathsep + old_env["PATH"]
         os.environ["FAKE_PARENT_APP"] = str(fake_app)
         os.environ["FAKE_DOCKER_LOG"] = str(docker_log)
+        original_signature_verify = code_build_module.verify_private_artifact_manifest_signature
+        code_build_module.verify_private_artifact_manifest_signature = (
+            _verify_local_candidate_signature
+        )
         try:
             config = ResearchLabGatewayConfig(
                 private_test_cmd="python3 -m py_compile research_lab_adapter.py sourcing_model/__init__.py",
@@ -923,6 +937,9 @@ def _verify_image_extracted_code_builder(artifact: PrivateModelArtifactManifest)
         except Exception as exc:
             errors.append(f"image-extracted code builder failed valid fake build: {exc}")
         finally:
+            code_build_module.verify_private_artifact_manifest_signature = (
+                original_signature_verify
+            )
             os.environ["PATH"] = old_env["PATH"]
             for key in ("FAKE_PARENT_APP", "FAKE_DOCKER_LOG"):
                 old_value = old_env[key]
@@ -946,6 +963,10 @@ def _verify_image_extracted_code_builder(artifact: PrivateModelArtifactManifest)
         os.environ["PATH"] = str(fake_docker.parent) + os.pathsep + old_env["PATH"]
         os.environ["FAKE_PARENT_APP"] = str(fake_app)
         os.environ["FAKE_DOCKER_LOG"] = str(docker_log)
+        original_signature_verify = code_build_module.verify_private_artifact_manifest_signature
+        code_build_module.verify_private_artifact_manifest_signature = (
+            _verify_local_candidate_signature
+        )
         try:
             config = ResearchLabGatewayConfig(
                 private_test_cmd="python3 -m py_compile research_lab_adapter.py sourcing_model/__init__.py",
@@ -966,6 +987,9 @@ def _verify_image_extracted_code_builder(artifact: PrivateModelArtifactManifest)
         except Exception as exc:
             errors.append(f"missing runtime path check raised wrong exception: {exc}")
         finally:
+            code_build_module.verify_private_artifact_manifest_signature = (
+                original_signature_verify
+            )
             os.environ["PATH"] = old_env["PATH"]
             for key in ("FAKE_PARENT_APP", "FAKE_DOCKER_LOG"):
                 old_value = old_env[key]
@@ -994,10 +1018,24 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
             "PATH": os.environ.get("PATH", ""),
             "FAKE_PARENT_APP": os.environ.get("FAKE_PARENT_APP"),
             "FAKE_DOCKER_LOG": os.environ.get("FAKE_DOCKER_LOG"),
+            "RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED": os.environ.get(
+                "RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED"
+            ),
+            "RESEARCH_LAB_DEV_SNAPSHOT_URI": os.environ.get(
+                "RESEARCH_LAB_DEV_SNAPSHOT_URI"
+            ),
         }
         os.environ["PATH"] = str(fake_docker.parent) + os.pathsep + old_env["PATH"]
         os.environ["FAKE_PARENT_APP"] = str(fake_app)
         os.environ["FAKE_DOCKER_LOG"] = str(docker_log)
+        os.environ["RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED"] = "true"
+        os.environ["RESEARCH_LAB_DEV_SNAPSHOT_URI"] = (
+            "s3://local-rehearsal/snapshots/READY.json"
+        )
+        original_signature_verify = code_build_module.verify_private_artifact_manifest_signature
+        code_build_module.verify_private_artifact_manifest_signature = (
+            _verify_local_candidate_signature
+        )
         inspection_call_count = 0
         repair_call_count = 0
         judge_call_count = 0
@@ -1195,10 +1233,16 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                 private_artifact_manifest_output=".research_lab/candidate_manifest.json",
                 code_edit_build_timeout_seconds=30,
             )
+            from tests.test_code_loop_engine_fixes import (
+                _MemoryTreeArtifactIO,
+                _MemoryTreeEvaluator,
+                _MemoryTreeRepository,
+            )
+
             result = await CodeEditLoopEngine(
                 settings=AutoResearchRuntimeSettings(
                     min_seconds=0,
-                    max_seconds=30,
+                    max_seconds=120,
                     min_iterations=1,
                     max_iterations=1,
                     draft_timeout_seconds=10,
@@ -1209,6 +1253,19 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                 call_openrouter=_call_model,
                 event_sink=_event_sink,
                 builder=CodeEditCandidateBuilder(config),
+                dev_evaluator=_MemoryTreeEvaluator(),
+                tree_repository=_MemoryTreeRepository(),
+                artifact_io=_MemoryTreeArtifactIO(),
+                provider_registry_loader=lambda: (
+                    [],
+                    EffectiveProviderCapabilities(
+                        providers=(),
+                        capability_hash="sha256:" + "c" * 64,
+                        private_snapshot_loaded=False,
+                        source_add_provider_count=0,
+                    ),
+                ),
+                provider_probe_catalog_loader=lambda: [],
             ).run(
                 run_id="99999999-9999-4999-8999-999999999999",
                 ticket={
@@ -1223,7 +1280,11 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                 component_registry={},
                 benchmark_public_summary={"item_count": 10},
                 model_id="test/code-edit-model",
-                budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+                budget_context={
+                    "requested_compute_budget_usd": 5.0,
+                    "research_model_tier": "default",
+                    "tree_policy": _tree_runtime_policy(),
+                },
                 requested_loop_count=1,
             )
             if not result.selected_candidates:
@@ -1281,8 +1342,9 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                 errors.append("code-edit loop did not record candidate_build_passed")
             if "plan_alignment_judged" not in event_types:
                 errors.append("code-edit loop did not record plan_alignment_judged")
-            elif (
+            if (
                 "code_edit_repair_drafted" in event_types
+                and "candidate_build_passed" in event_types
                 and event_types.index("code_edit_repair_drafted") > event_types.index("candidate_build_passed")
             ):
                 errors.append("candidate build passed before repaired patch was drafted")
@@ -1303,8 +1365,16 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
         except Exception as exc:
             errors.append(f"code-edit loop source-context verification failed: {exc}")
         finally:
+            code_build_module.verify_private_artifact_manifest_signature = (
+                original_signature_verify
+            )
             os.environ["PATH"] = old_env["PATH"]
-            for key in ("FAKE_PARENT_APP", "FAKE_DOCKER_LOG"):
+            for key in (
+                "FAKE_PARENT_APP",
+                "FAKE_DOCKER_LOG",
+                "RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED",
+                "RESEARCH_LAB_DEV_SNAPSHOT_URI",
+            ):
                 old_value = old_env[key]
                 if old_value is None:
                     os.environ.pop(key, None)
@@ -1315,8 +1385,12 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
 
 
 def _write_fake_parent_app(root: Path, *, omit: tuple[str, ...] = ()) -> None:
-    root.mkdir(parents=True, exist_ok=True)
-    for rel in ("gateway", "qualification", "sourcing_model", "validator_models"):
+    # Reuse the reviewed consumer-contract fixture so this verifier tracks the
+    # exact v7/v8 source surface instead of maintaining another stale copy.
+    from tests.test_sourcing_model_contract import _conforming_tree
+
+    _conforming_tree(root)
+    for rel in ("gateway", "qualification", "validator_models"):
         if rel in omit:
             continue
         (root / rel).mkdir(parents=True, exist_ok=True)
@@ -1330,13 +1404,9 @@ def _write_fake_parent_app(root: Path, *, omit: tuple[str, ...] = ()) -> None:
         encoding="utf-8",
     )
     (root / "gateway" / ".env").write_text("SHOULD_NOT_BE_INDEXED=1\n", encoding="utf-8")
-    if "research_lab_adapter.py" not in omit:
-        (root / "research_lab_adapter.py").write_text(
-            'def adapter_metadata():\n    return {"adapter_version": "fake-adapter:v1"}\n',
-            encoding="utf-8",
-        )
-    if "requirements.txt" not in omit:
-        (root / "requirements.txt").write_text("", encoding="utf-8")
+    for rel in ("research_lab_adapter.py", "requirements.txt"):
+        if rel in omit:
+            (root / rel).unlink(missing_ok=True)
 
 
 def _write_fake_docker(root: Path) -> Path:
@@ -1402,14 +1472,23 @@ def _write_fake_manifest_writer(root: Path) -> Path:
             if not dockerfile.startswith("FROM 123456789012.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:"):
                 raise SystemExit("candidate Dockerfile should inherit from parent ECR image")
             payload = {
-                "model_artifact_hash": "sha256:" + "8" * 64,
+                "model_artifact_hash": "sha256:" + "a" * 64,
                 "git_commit_sha": git_commit_sha,
                 "image_digest": "123456789012.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:" + "9" * 64,
                 "config_hash": "sha256:" + "a" * 64,
-                "component_registry_version": "sourcing-model-components:v1",
+                "component_registry_version": "sourcing-model-components:v2",
                 "scoring_adapter_version": "qualification-company-scorer:v1",
-                "manifest_uri": "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/candidates/test.json",
-                "signature_ref": "kms-signature:test",
+                "compatibility_contract": {
+                    "contract_id": json.loads(Path("sourcing_model/consumer_contract.json").read_text(encoding="utf-8"))["contract_id"],
+                    "path": "sourcing_model/consumer_contract.json",
+                    "sha256": "sha256:" + hashlib.sha256(Path("sourcing_model/consumer_contract.json").read_bytes()).hexdigest(),
+                },
+                "consumer_parity_fixtures": {
+                    "path": "sourcing_model/consumer_parity_fixtures.json",
+                    "sha256": "sha256:" + hashlib.sha256(Path("sourcing_model/consumer_parity_fixtures.json").read_bytes()).hexdigest(),
+                },
+                "manifest_uri": "s3://local-rehearsal/research-lab/sourcing-model/candidates/test.json",
+                "signature_ref": "s3://local-rehearsal/signatures/test.json",
                 "build_id": "fake-build",
             }
             manifest = {**payload, "manifest_hash": sha256_json(payload)}
@@ -1446,6 +1525,116 @@ def _allowed_runtime_patch_draft() -> CodeEditDraft:
         test_plan="py_compile changed file.",
         rollback_plan="Revert this diff.",
     )
+
+
+def _verify_local_candidate_signature(
+    manifest: PrivateModelArtifactManifest,
+    *,
+    key_id: str,
+) -> dict[str, object]:
+    """Strict local equivalent for the privileged AWS KMS boundary."""
+
+    if not str(manifest.signature_ref).startswith("s3://local-rehearsal/"):
+        raise private_runtime_module.PrivateModelRuntimeError(
+            "candidate signature is outside the local rehearsal authority"
+        )
+
+    algorithm = "ECDSA_SHA_256"
+    expected_signature = hashlib.sha256(
+        json.dumps(
+            {
+                "manifest_hash": manifest.manifest_hash,
+                "key_id": str(key_id),
+                "signing_algorithm": algorithm,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).digest()
+
+    class _SignatureBody:
+        def read(self) -> bytes:
+            return base64.b64encode(expected_signature)
+
+    class _LocalSignatureStore:
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+            if (Bucket, Key) != (
+                "local-rehearsal",
+                "signatures/test.json",
+            ):
+                raise private_runtime_module.PrivateModelRuntimeError(
+                    "candidate signature object identity differs"
+                )
+            return {"Body": _SignatureBody()}
+
+    class _LocalKmsVerifier:
+        def verify(self, **kwargs: object) -> dict[str, object]:
+            if kwargs.get("Message") != manifest.manifest_hash.encode("utf-8"):
+                raise private_runtime_module.PrivateModelRuntimeError(
+                    "candidate KMS message differs from manifest hash"
+                )
+            rebound_signature = hashlib.sha256(
+                json.dumps(
+                    {
+                        "manifest_hash": manifest.manifest_hash,
+                        "key_id": str(kwargs.get("KeyId") or ""),
+                        "signing_algorithm": str(
+                            kwargs.get("SigningAlgorithm") or ""
+                        ),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).digest()
+            if kwargs.get("Signature") != rebound_signature:
+                raise private_runtime_module.PrivateModelRuntimeError(
+                    "candidate KMS signature bytes differ"
+                )
+            if kwargs.get("MessageType") != "RAW":
+                raise private_runtime_module.PrivateModelRuntimeError(
+                    "candidate KMS message type differs"
+                )
+            if kwargs.get("SigningAlgorithm") != algorithm:
+                raise private_runtime_module.PrivateModelRuntimeError(
+                    "candidate KMS algorithm differs"
+                )
+            return {
+                "SignatureValid": True,
+                "KeyId": str(kwargs.get("KeyId") or ""),
+                "SigningAlgorithm": algorithm,
+            }
+
+    return private_runtime_module.verify_private_artifact_manifest_signature(
+        manifest,
+        key_id=key_id,
+        s3_client=_LocalSignatureStore(),
+        kms_client=_LocalKmsVerifier(),
+    )
+
+
+def _tree_runtime_policy() -> dict[str, object]:
+    policy = TreePolicy(
+        mode="active",
+        branch_factor=1,
+        beam_width=1,
+        max_depth=1,
+        max_nodes=1,
+        shortlist_size=1,
+        diversity_floor=1,
+        deadline_seconds=300,
+        finalization_reserve_seconds=30,
+    )
+    return {
+        "schema_version": "research_lab.git_tree_runtime_policy.v2",
+        "policy": policy.to_dict(),
+        "evaluator_enabled": True,
+        "evaluator_commitment": {
+            "snapshot_manifest_hash": "sha256:" + "4" * 64,
+            "dev_set_hash": "sha256:" + "5" * 64,
+            "dev_set_size": policy.live_max_icps_per_node,
+            "evaluation_timeout_seconds": 60,
+        },
+    }
 
 
 def _allowed_runtime_patch_draft_with_bad_hunk_counts() -> CodeEditDraft:
@@ -1599,15 +1788,30 @@ def _candidate_response() -> str:
 
 
 def _artifact() -> PrivateModelArtifactManifest:
+    snapshot = private_runtime_module.reviewed_consumer_snapshots()[
+        private_runtime_module.EXPECTED_CONSUMER_CONTRACT_ID
+    ]
+    contract = snapshot["contract"]
     payload = {
         "model_artifact_hash": "sha256:" + "1" * 64,
         "git_commit_sha": "abcdef1234567890",
         "image_digest": "123456789012.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:" + "2" * 64,
         "config_hash": "sha256:" + "3" * 64,
-        "component_registry_version": "sourcing-model-components:v1",
+        "component_registry_version": "sourcing-model-components:v2",
         "scoring_adapter_version": "qualification-company-scorer:v1",
-        "manifest_uri": "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json",
-        "signature_ref": "kms-signature:research-lab-artifact-signing:test",
+        "compatibility_contract": {
+            "contract_id": str(contract["contract_id"]),
+            "path": str(contract["canonical_path"]),
+            "sha256": str(snapshot["contract_sha256"]),
+        },
+        "consumer_parity_fixtures": {
+            "path": str(contract["parity_fixture_path"]),
+            "sha256": str(snapshot["parity_sha256"]),
+        },
+        "manifest_uri": (
+            "s3://local-rehearsal/research-lab/sourcing-model/current.json"
+        ),
+        "signature_ref": "s3://local-rehearsal/signatures/parent.json",
         "build_id": "test-build",
     }
     return PrivateModelArtifactManifest.from_mapping({**payload, "manifest_hash": sha256_json(payload)})
@@ -1648,6 +1852,100 @@ def _score_bundle() -> dict[str, object]:
         },
         signature_ref="kms-signature:research-lab-eval:test",
     )
+
+
+class _StrictLocalS3:
+    def __init__(self) -> None:
+        self.puts: list[dict[str, object]] = []
+        self.rejections: list[str] = []
+
+    def put_object(self, **kwargs: object) -> dict[str, str]:
+        try:
+            if kwargs.get("Bucket") != "local-rehearsal":
+                raise ValueError("offline verifier attempted a non-local S3 bucket")
+            key = str(kwargs.get("Key") or "")
+            if not re.fullmatch(
+                r"research-lab/sourcing-model/candidates/[^/]+/[0-9]+/source_diff\.json",
+                key,
+            ):
+                raise ValueError("offline verifier attempted an undeclared S3 object")
+            if kwargs.get("ContentType") != "application/json":
+                raise ValueError("offline verifier S3 content type differs")
+            raw_body = kwargs.get("Body")
+            if not isinstance(raw_body, bytes):
+                raise ValueError("offline verifier S3 body is not bytes")
+            body = json.loads(raw_body.decode("utf-8"))
+            artifact_hash = str(body.pop("artifact_hash", ""))
+            if artifact_hash != sha256_json(body):
+                raise ValueError("offline verifier source-diff hash differs")
+            if body.get("artifact_type") != "research_lab_code_edit_source_diff":
+                raise ValueError("offline verifier source-diff type differs")
+            self.puts.append({"Bucket": kwargs["Bucket"], "Key": key})
+            return {"ETag": '"strict-local-etag"'}
+        except Exception as exc:
+            self.rejections.append(str(exc))
+            raise
+
+
+def main() -> int:
+    """Run with hard local adapters so direct invocation cannot write externally."""
+
+    local_s3 = _StrictLocalS3()
+    fake_boto3 = types.ModuleType("boto3")
+
+    def _local_client(service_name: str, *_args: object, **_kwargs: object) -> object:
+        if service_name != "s3":
+            raise RuntimeError(
+                f"offline verifier attempted undeclared AWS service {service_name!r}"
+            )
+        return local_s3
+
+    fake_boto3.client = _local_client  # type: ignore[attr-defined]
+    missing = object()
+    original_boto3 = sys.modules.get("boto3", missing)
+    raw_trace_env = "RESEARCH_LAB_RAW_TRACE_CAPTURE_ENABLED"
+    original_raw_trace = os.environ.get(raw_trace_env)
+    sensitive_env_names = set(DEFAULT_ENV_PASSTHROUGH)
+    sensitive_env_names.update(
+        name
+        for name in os.environ
+        if name.startswith(("AWS_", "SUPABASE_"))
+        or "KMS_KEY" in name
+        or "WEBSHARE_PROXY" in name
+        or name.endswith(("_API_KEY", "_SECRET", "_TOKEN"))
+    )
+    saved_sensitive_env = {
+        name: os.environ[name]
+        for name in sensitive_env_names
+        if name in os.environ
+    }
+    for name in saved_sensitive_env:
+        os.environ.pop(name, None)
+    sys.modules["boto3"] = fake_boto3
+    os.environ[raw_trace_env] = "false"
+    try:
+        result = _run_verification()
+    finally:
+        if original_boto3 is missing:
+            sys.modules.pop("boto3", None)
+        else:
+            sys.modules["boto3"] = original_boto3
+        if original_raw_trace is None:
+            os.environ.pop(raw_trace_env, None)
+        else:
+            os.environ[raw_trace_env] = original_raw_trace
+        os.environ.update(saved_sensitive_env)
+
+    if local_s3.rejections:
+        print("ERROR: strict local S3 boundary rejected: " + "; ".join(local_s3.rejections))
+        return 1
+    if result == 0 and len(local_s3.puts) != 3:
+        print(
+            "ERROR: offline verifier observed an unexpected source-diff write count: "
+            f"{len(local_s3.puts)}"
+        )
+        return 1
+    return result
 
 
 if __name__ == "__main__":

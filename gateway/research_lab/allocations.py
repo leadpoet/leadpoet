@@ -1246,6 +1246,29 @@ def _champion_replay_obligation(
     }
 
 
+def champion_reward_requires_allocation_history_v2(
+    row: Mapping[str, Any],
+    *,
+    epoch: int,
+    enable_champ_cap: bool,
+) -> bool:
+    """Return whether one reward can still affect the requested allocation."""
+
+    status = str(
+        row.get("current_reward_status") or row.get("reward_status") or ""
+    )
+    if status != "paid" or bool(enable_champ_cap):
+        return True
+    try:
+        start_epoch = int(row.get("start_epoch") or 0)
+        epoch_count = int(row.get("epoch_count") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("champion reward epoch fields are invalid") from exc
+    if start_epoch < 0 or epoch_count <= 0:
+        raise ValueError("champion reward epoch fields are invalid")
+    return int(epoch) < start_epoch + epoch_count
+
+
 def allocation_snapshot_persistence_decision(
     *,
     current_epoch: int,

@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "943458ed0e65236d3967e178bd69e702718ee576",
+  "baseline_commit": "29ac70a5b4c46cc4f4ec83a7113830cfced82c3f",
   "entries": [
     {
       "ast_sha256": "sha256:3906c365a737ef356b96ad974e4ece7b8755b49ad097ed24cdbf2dd3662b0c9a",
@@ -90,6 +90,11 @@
       "ast_sha256": "sha256:022e27ef02a23ada50e154871020ce9dda1a393a6fc00bd9d5ff7f8f8d62d291",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "build_research_lab_allocation_bundle"
+    },
+    {
+      "ast_sha256": "sha256:27466232aa93e10093e90509fdaffb340a031c8582270ff1ce85d4296a0678dd",
+      "path": "gateway/research_lab/allocations.py",
+      "symbol": "champion_reward_requires_allocation_history_v2"
     },
     {
       "ast_sha256": "sha256:4bbfd9e9cad89eda2a8bafb715202c2944887d7b931de5bc75f6611b502cb719",
@@ -922,7 +927,7 @@
       "symbol": "normalize_tee_protocol"
     },
     {
-      "ast_sha256": "sha256:e52d58ed0aafa93c8dfdc5baafce816091a3827d23d985fb6eae75ddc670ad05",
+      "ast_sha256": "sha256:d455831464d0dddb0d6e982fde6d9d9be704845f1a35efbef52f509e003413de",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "_load_allocation_parent_graphs_v2"
     },
@@ -1067,7 +1072,7 @@
       "symbol": "select_latest_allocation_source_row_v2"
     },
     {
-      "ast_sha256": "sha256:448d6cb6f97004d7176ece165dceb828a6c17b3c169df9b67a4fd5b8c0bb9dad",
+      "ast_sha256": "sha256:0cb843c77a1c65615d1c74f1717510712f7fd23ce0b9b13fc7fb6b5db898b91d",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
@@ -2397,7 +2402,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:0946975034f285463dde2ed9e2a2c426337b1e12fa2e6a1a164d741ed050aad1",
-  "protected_source_commit": "943458ed0e65236d3967e178bd69e702718ee576",
+  "manifest_hash": "sha256:581ec4e1c0f5ba58afdf0500e967bf9dc2869d867886e8e860be280bca921bf0",
+  "protected_source_commit": "29ac70a5b4c46cc4f4ec83a7113830cfced82c3f",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

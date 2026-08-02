@@ -213,6 +213,54 @@ def test_allocation_is_built_from_measured_empty_sources():
     assert ("allocation_source_add_rewards", {"epoch_id": 100}) in reader.calls
 
 
+def test_expired_legacy_paid_champion_does_not_reopen_history():
+    config = _config()
+    config.reimbursement_policy_doc = lambda enabled: {
+        **_policy(),
+        "enabled": bool(enabled),
+        "enable_champ_cap": False,
+    }
+    reader = FakeReader(
+        {
+            "allocation_champion_rewards": [
+                {
+                    "champion_reward_id": "champion_reward:expired",
+                    "current_reward_status": "paid",
+                    "start_epoch": 10,
+                    "epoch_count": 20,
+                    "desired_alpha_percent": 7.0,
+                }
+            ]
+        }
+    )
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=FakeChainSource(),
+        config_supplier=lambda: config,
+        network_supplier=lambda: "finney",
+    )
+
+    result = resolver.resolve(
+        payload={"epoch": 100, "netuid": 71},
+        context=_context(),
+    )
+
+    assert result["source_state"]["champion_obligations"] == []
+    assert result["source_state"]["settlement_frontier"][
+        "reward_checkpoints"
+    ] == []
+    assert not any(
+        policy_id
+        in {
+            "finalized_allocation_authorities",
+            "legacy_finalized_allocation_migrations",
+            "chain_realized_epoch_settlements",
+            "chain_realized_obligation_credits",
+        }
+        for policy_id, _parameters in reader.calls
+    )
+
+
 def test_allocation_never_falls_back_to_finalized_block_modulo():
     resolver = CoordinatorAllocationSourceV2(
         reader=FakeReader(),

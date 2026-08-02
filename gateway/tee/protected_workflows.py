@@ -427,6 +427,7 @@ PROTECTED_SYMBOLS = {
         "_champion_paid_alpha_to_date_from_snapshots",
         "_champion_lifetime_credit_ledger_from_snapshots",
         "_champion_replay_obligation",
+        "champion_reward_requires_allocation_history_v2",
         "_historical_compute_fallback_from_snapshot",
         "_epoch_active",
     ),

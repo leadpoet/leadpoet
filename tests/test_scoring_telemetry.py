@@ -437,6 +437,68 @@ async def test_dispatch_anchor_is_invariant_to_additive_telemetry_link(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_deterministic_dispatch_recovers_exact_insert_after_lost_response(monkeypatch):
+    dispatch_event_id = "77777777-7777-4777-8777-777777777777"
+    inserted: dict = {}
+    select_calls = 0
+
+    async def select_existing(*args, **kwargs):
+        nonlocal select_calls
+        select_calls += 1
+        return dict(inserted) if inserted else None
+
+    async def insert_then_lose_response(table: str, row: dict):
+        inserted.update(row)
+        raise RuntimeError("response lost after commit")
+
+    monkeypatch.setattr(research_store, "select_one", select_existing)
+    monkeypatch.setattr(research_store, "insert_row", insert_then_lose_response)
+
+    recovered = await research_store.create_scoring_dispatch_event(
+        dispatch_type="private_baseline_rebenchmark",
+        dispatch_status="completed",
+        worker_ref="worker:test",
+        rolling_window_hash=HASH_A,
+        benchmark_bundle_id="private_benchmark:" + HASH_B.removeprefix("sha256:"),
+        event_doc={"publication_recovered_after_restart": True},
+        dispatch_event_id=dispatch_event_id,
+    )
+
+    assert recovered == inserted
+    assert recovered["dispatch_event_id"] == dispatch_event_id
+    assert select_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_deterministic_dispatch_rejects_conflicting_existing_event(monkeypatch):
+    dispatch_event_id = "77777777-7777-4777-8777-777777777777"
+
+    async def conflicting_existing(*args, **kwargs):
+        return {
+            "dispatch_event_id": dispatch_event_id,
+            "dispatch_type": "private_baseline_rebenchmark",
+            "dispatch_status": "failed",
+        }
+
+    async def unexpected_insert(*args, **kwargs):
+        raise AssertionError("conflicting deterministic event must not be replaced")
+
+    monkeypatch.setattr(research_store, "select_one", conflicting_existing)
+    monkeypatch.setattr(research_store, "insert_row", unexpected_insert)
+
+    with pytest.raises(RuntimeError, match="deterministic event conflicts"):
+        await research_store.create_scoring_dispatch_event(
+            dispatch_type="private_baseline_rebenchmark",
+            dispatch_status="completed",
+            worker_ref="worker:test",
+            rolling_window_hash=HASH_A,
+            benchmark_bundle_id="private_benchmark:" + HASH_B.removeprefix("sha256:"),
+            event_doc={"publication_recovered_after_restart": True},
+            dispatch_event_id=dispatch_event_id,
+        )
+
+
+@pytest.mark.asyncio
 async def test_global_queue_enqueue_scopes_every_row_to_one_generation(monkeypatch):
     inserted: list[tuple[str, dict]] = []
 

@@ -8,7 +8,8 @@ copy a fully verified V1 bundle only when the gateway reports that no V2
 authority exists for the requested epoch.
 
 Verification failure is fail-closed: the auditor never substitutes a locally
-computed or burn vector, and an invalid or pending V2 authority never downgrades.
+computed or burn vector. At block 355 only, it may carry forward the exact last
+authority that this wallet fully verified and authenticated to local storage.
 
 USAGE:
     python neurons/auditor_validator.py --netuid 71 --wallet.name my_wallet --wallet.hotkey default
@@ -236,6 +237,12 @@ from leadpoet_canonical.ancestry_checkpoint_v2 import (
 from leadpoet_canonical.compact_auditor_authority_v2 import (
     COMPACT_PUBLISHED_WEIGHT_AUTHORITY_SCHEMA_VERSION,
     verify_compact_published_weight_authority_v2,
+)
+from leadpoet_canonical.auditor_latest_verified_bundle_v2 import (
+    AuditorLatestVerifiedBundleV2Error,
+    LatestVerifiedBundleStoreV2,
+    build_latest_verified_bundle_record_v2,
+    verified_bundle_projection_v2,
 )
 
 # Constants from canonical module
@@ -516,6 +523,25 @@ def _normalize_gateway_url(value: str) -> str:
 
 # File to store pending equivocation check (overwritten each epoch)
 PENDING_EQUIVOCATION_FILE = os.path.join(_SCRIPT_DIR, ".pending_equivocation_check.json")
+VERIFIED_BUNDLE_FALLBACK_BLOCK = 355
+
+
+def _latest_verified_bundle_state_path(*, netuid: int, hotkey: str) -> Path:
+    """Keep one wallet-scoped record outside the mutable Git checkout."""
+
+    normalized_hotkey = str(hotkey or "")
+    if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,64}", normalized_hotkey):
+        raise RuntimeError("auditor hotkey is invalid for local state")
+    return (
+        Path.home()
+        / ".local"
+        / "state"
+        / "leadpoet"
+        / "auditor-validator"
+        / ("netuid-%d" % int(netuid))
+        / normalized_hotkey
+        / "latest_verified_weight_bundle_v1.json"
+    )
 
 
 class AuditorValidator:
@@ -574,6 +600,13 @@ class AuditorValidator:
         self.last_authority_epoch = None
         self.consecutive_errors = 0
         self.max_consecutive_errors = 5  # Reconnect subtensor after this many errors
+        self._submission_lock = None
+        self._verified_bundle_store = LatestVerifiedBundleStoreV2(
+            _latest_verified_bundle_state_path(
+                netuid=int(self.config.netuid),
+                hotkey=self.wallet.hotkey.ss58_address,
+            )
+        )
         
         # Gateway attestation (for log verification)
         self.gateway_pubkey = None
@@ -617,6 +650,8 @@ class AuditorValidator:
             gateway_endpoint=self.gateway_url,
             archive_endpoint=self.epoch_archive_endpoint,
             weight_protocol=weight_protocol,
+            verified_bundle_state_file=str(self._verified_bundle_store.path),
+            verified_bundle_fallback_block=VERIFIED_BUNDLE_FALLBACK_BLOCK,
             transport_auth_mode="public_bundle_with_cryptographic_verification",
             cutover_mapping_hash=(
                 self.epoch_cutover.mapping_hash
@@ -1162,6 +1197,97 @@ class AuditorValidator:
     # ═══════════════════════════════════════════════════════════════════════════
     # Gateway Communication
     # ═══════════════════════════════════════════════════════════════════════════
+
+    def _verified_bundle_signature(self, message: bytes) -> bytes:
+        return bytes(self.wallet.hotkey.sign(message))
+
+    def _verify_verified_bundle_signature(
+        self,
+        message: bytes,
+        signature: bytes,
+    ) -> bool:
+        return bool(self.wallet.hotkey.verify(message, signature))
+
+    def _persist_latest_verified_bundle(
+        self,
+        *,
+        authority: Dict,
+        identity_cache: Dict,
+        verified_bundle: Dict,
+    ) -> None:
+        """Persist only after the complete live V2 verifier has succeeded."""
+
+        store = getattr(self, "_verified_bundle_store", None)
+        if store is None:
+            return
+        record = build_latest_verified_bundle_record_v2(
+            auditor_hotkey=self.wallet.hotkey.ss58_address,
+            authority=authority,
+            identity_cache=identity_cache,
+            verified_bundle=verified_bundle,
+            sign=self._verified_bundle_signature,
+        )
+        replaced = store.replace_if_newer(
+            record,
+            expected_hotkey=self.wallet.hotkey.ss58_address,
+            expected_netuid=int(self.config.netuid),
+            verify_signature=self._verify_verified_bundle_signature,
+        )
+        _audit_event(
+            "verified_bundle_cache_updated" if replaced else "verified_bundle_cache_unchanged",
+            epoch=int(record["source_epoch_id"]),
+            netuid=int(record["netuid"]),
+            uid=getattr(self, "uid", None),
+            weights_hash=record["verified_bundle"]["weights_hash"],
+            bundle_hash=record["verified_bundle"]["bundle_hash"],
+            authority_stage=record["verified_bundle"]["authority_stage"],
+            record_hash=record["record_hash"],
+            state_file=str(store.path),
+        )
+
+    def _load_and_reverify_latest_verified_bundle(
+        self,
+        *,
+        submission_epoch_id: int,
+    ) -> Tuple[Dict, Dict]:
+        """Authenticate local state and replay every current V2 verifier."""
+
+        store = getattr(self, "_verified_bundle_store", None)
+        if store is None:
+            raise AuditorLatestVerifiedBundleV2Error(
+                "verified auditor authority store is unavailable"
+            )
+        record = store.load(
+            expected_hotkey=self.wallet.hotkey.ss58_address,
+            expected_netuid=int(self.config.netuid),
+            verify_signature=self._verify_verified_bundle_signature,
+        )
+        source_epoch = int(record["source_epoch_id"])
+        if source_epoch > int(submission_epoch_id):
+            raise AuditorLatestVerifiedBundleV2Error(
+                "cached auditor authority is from a future epoch"
+            )
+        verified = self.verify_attested_weights_v2(
+            record["authority"],
+            identity_cache=record["identity_cache"],
+        )
+        if verified is None:
+            raise AuditorLatestVerifiedBundleV2Error(
+                "cached auditor authority no longer passes V2 verification"
+            )
+        projection = verified_bundle_projection_v2(verified)
+        if projection != record["verified_bundle"]:
+            raise AuditorLatestVerifiedBundleV2Error(
+                "cached auditor authority verification result differs"
+            )
+        if (
+            int(projection["epoch_id"]) != source_epoch
+            or int(projection["netuid"]) != int(self.config.netuid)
+        ):
+            raise AuditorLatestVerifiedBundleV2Error(
+                "cached auditor authority identity differs"
+            )
+        return verified, record
     
     def _authority_candidate_epochs(self, current_epoch: int) -> List[int]:
         """Return only the unmirrored authority for the live epoch."""
@@ -1462,6 +1588,30 @@ class AuditorValidator:
                     ),
                 )
                 return None, "v2_invalid"
+            try:
+                self._persist_latest_verified_bundle(
+                    authority=v2_bundle,
+                    identity_cache=identity_cache,
+                    verified_bundle=verified,
+                )
+            except Exception as exc:
+                # Local fallback durability must never reduce the probability
+                # of the normal current-epoch gateway submission succeeding.
+                _audit_event(
+                    "verified_bundle_cache_write_failure",
+                    level=logging.ERROR,
+                    epoch=verified_epoch,
+                    netuid=verified_netuid,
+                    uid=getattr(self, "uid", None),
+                    weights_hash=verified.get("weights_hash"),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                logger.error(
+                    "auditor_verified_bundle_cache_write_failed type=%s error=%s",
+                    type(exc).__name__,
+                    str(exc)[:200],
+                )
             _audit_event(
                 "authority_verification_success",
                 epoch=verified_epoch,
@@ -2596,6 +2746,245 @@ class AuditorValidator:
             import traceback
             traceback.print_exc()
             return False
+
+    def _submission_lock_for_loop(self):
+        lock = getattr(self, "_submission_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._submission_lock = lock
+        return lock
+
+    def _submission_already_finalized_for_epoch(
+        self,
+        epoch_state: _AuditorEpochState,
+    ) -> bool:
+        """Suppress restart/concurrency duplicates using finalized LastUpdate."""
+
+        state = self._read_finalized_weight_submission_state()
+        last_update = int(state["last_update"])
+        epoch_start = int(epoch_state.current_block) - int(epoch_state.epoch_block)
+        if last_update > int(epoch_state.current_block):
+            raise RuntimeError("finalized LastUpdate is ahead of finalized head")
+        return last_update >= epoch_start
+
+    async def _submit_verified_authority_once(
+        self,
+        *,
+        source_epoch_id: int,
+        submission_epoch_id: int,
+        bundle: Dict,
+        submission_mode: str,
+        allow_prior_epoch: bool = False,
+    ) -> bool:
+        """Serialize normal and fallback submissions for one live epoch."""
+
+        source_epoch = int(source_epoch_id)
+        submission_epoch = int(submission_epoch_id)
+        if source_epoch != submission_epoch and not allow_prior_epoch:
+            raise RuntimeError("prior-epoch authority requires fallback authorization")
+        async with self._submission_lock_for_loop():
+            if self.last_submitted_epoch == submission_epoch:
+                _audit_event(
+                    "submission_duplicate_suppressed",
+                    epoch=source_epoch,
+                    submission_epoch=submission_epoch,
+                    netuid=int(self.config.netuid),
+                    uid=getattr(self, "uid", None),
+                    submission_mode=submission_mode,
+                    reason="process_state",
+                )
+                return True
+            epoch_state = self._read_epoch_state()
+            if epoch_state.workflow_epoch_id != submission_epoch:
+                return False
+            try:
+                if self._submission_already_finalized_for_epoch(epoch_state):
+                    self.last_submitted_epoch = submission_epoch
+                    _audit_event(
+                        "submission_duplicate_suppressed",
+                        epoch=source_epoch,
+                        submission_epoch=submission_epoch,
+                        netuid=int(self.config.netuid),
+                        uid=getattr(self, "uid", None),
+                        submission_mode=submission_mode,
+                        reason="finalized_last_update",
+                    )
+                    return True
+            except Exception as exc:
+                _audit_event(
+                    "submission_duplicate_check_failure",
+                    level=logging.WARNING,
+                    epoch=source_epoch,
+                    submission_epoch=submission_epoch,
+                    netuid=int(self.config.netuid),
+                    uid=getattr(self, "uid", None),
+                    submission_mode=submission_mode,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                # The existing submit path performs a second fail-closed
+                # finalized-state read before signing anything.
+            _audit_event(
+                "submission_mode_selected",
+                epoch=source_epoch,
+                submission_epoch=submission_epoch,
+                netuid=int(self.config.netuid),
+                uid=getattr(self, "uid", None),
+                submission_mode=submission_mode,
+                weights_hash=bundle.get("weights_hash"),
+                bundle_hash=bundle.get("bundle_hash"),
+            )
+            return self.submit_weights_to_chain(
+                source_epoch,
+                bundle,
+                submission_epoch_id=submission_epoch,
+            )
+
+    def _fallback_epoch_state_from_observer(self, observer) -> _AuditorEpochState:
+        if self.epoch_cutover is None:
+            raise SubnetEpochError("auditor subnet epoch cutover is unavailable")
+        snapshot = read_subnet_epoch_snapshot(
+            observer,
+            netuid=int(self.config.netuid),
+            finalized=False,
+        )
+        return _AuditorEpochState(
+            current_block=snapshot.current_block,
+            workflow_epoch_id=snapshot.settlement_epoch_id(self.epoch_cutover),
+            epoch_block=snapshot.epoch_block,
+            blocks_remaining=snapshot.blocks_remaining,
+            subnet_epoch_index=snapshot.subnet_epoch_index,
+        )
+
+    async def _submit_latest_verified_bundle_fallback(
+        self,
+        epoch_state: _AuditorEpochState,
+    ) -> bool:
+        """At block 355, reverify and submit the one authenticated local record."""
+
+        current_epoch = int(epoch_state.workflow_epoch_id)
+        if (
+            int(epoch_state.epoch_block) < VERIFIED_BUNDLE_FALLBACK_BLOCK
+            or int(epoch_state.blocks_remaining) <= 0
+            or self.last_submitted_epoch == current_epoch
+        ):
+            return False
+        _audit_event(
+            "verified_bundle_fallback_triggered",
+            epoch=current_epoch,
+            current_block=int(epoch_state.current_block),
+            epoch_block=int(epoch_state.epoch_block),
+            blocks_remaining=int(epoch_state.blocks_remaining),
+            netuid=int(self.config.netuid),
+            uid=getattr(self, "uid", None),
+        )
+        try:
+            verified, record = self._load_and_reverify_latest_verified_bundle(
+                submission_epoch_id=current_epoch,
+            )
+        except Exception as exc:
+            _audit_event(
+                "verified_bundle_fallback_unavailable",
+                level=logging.ERROR,
+                epoch=current_epoch,
+                current_block=int(epoch_state.current_block),
+                epoch_block=int(epoch_state.epoch_block),
+                netuid=int(self.config.netuid),
+                uid=getattr(self, "uid", None),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return False
+        source_epoch = int(record["source_epoch_id"])
+        mode = (
+            "current_epoch_verified_retry"
+            if source_epoch == current_epoch
+            else "prior_epoch_verified_carry_forward"
+        )
+        _audit_event(
+            "verified_bundle_fallback_ready",
+            epoch=source_epoch,
+            submission_epoch=current_epoch,
+            current_block=int(epoch_state.current_block),
+            epoch_block=int(epoch_state.epoch_block),
+            netuid=int(self.config.netuid),
+            uid=getattr(self, "uid", None),
+            submission_mode=mode,
+            record_hash=record["record_hash"],
+            weights_hash=verified.get("weights_hash"),
+            bundle_hash=verified.get("bundle_hash"),
+            authority_stage=verified.get("authority_stage"),
+        )
+        return await self._submit_verified_authority_once(
+            source_epoch_id=source_epoch,
+            submission_epoch_id=current_epoch,
+            bundle=verified,
+            submission_mode=mode,
+            allow_prior_epoch=True,
+        )
+
+    async def _run_latest_verified_bundle_fallback_loop(self) -> None:
+        """Observe block 355 independently from every gateway request."""
+
+        observer = None
+        try:
+            while not self.should_exit:
+                try:
+                    if observer is None:
+                        observer = await asyncio.to_thread(
+                            _connect_epoch_archive_subtensor,
+                            endpoint=self.epoch_archive_endpoint,
+                        )
+                        await asyncio.to_thread(
+                            validate_subnet_epoch_cutover_anchor,
+                            observer,
+                            self.epoch_cutover,
+                            expected_archive_endpoint=self.epoch_archive_endpoint,
+                        )
+                        _audit_event(
+                            "verified_bundle_fallback_observer_ready",
+                            netuid=int(self.config.netuid),
+                            uid=getattr(self, "uid", None),
+                            archive_endpoint=self.epoch_archive_endpoint,
+                            fallback_block=VERIFIED_BUNDLE_FALLBACK_BLOCK,
+                        )
+                    state = await asyncio.to_thread(
+                        self._fallback_epoch_state_from_observer,
+                        observer,
+                    )
+                    if (
+                        state.epoch_block >= VERIFIED_BUNDLE_FALLBACK_BLOCK
+                        and self.last_submitted_epoch != state.workflow_epoch_id
+                    ):
+                        await self._submit_latest_verified_bundle_fallback(state)
+                    await asyncio.sleep(1 if state.epoch_block >= 350 else 3)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    _audit_event(
+                        "verified_bundle_fallback_observer_failure",
+                        level=logging.WARNING,
+                        netuid=int(self.config.netuid),
+                        uid=getattr(self, "uid", None),
+                        archive_endpoint=self.epoch_archive_endpoint,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+                    if observer is not None:
+                        await asyncio.to_thread(
+                            _close_subtensor_connection,
+                            observer,
+                            source="fallback_observer_stale",
+                        )
+                    observer = None
+                    await asyncio.sleep(3)
+        finally:
+            if observer is not None:
+                await asyncio.to_thread(
+                    _close_subtensor_connection,
+                    observer,
+                    source="fallback_observer_shutdown",
+                )
     
     # ═══════════════════════════════════════════════════════════════════════════
     # Main Loop
@@ -2615,8 +3004,15 @@ class AuditorValidator:
             gateway_endpoint=getattr(self, "gateway_url", None),
             archive_endpoint=getattr(self, "epoch_archive_endpoint", None),
             submission_block=int(WEIGHT_SUBMISSION_BLOCK),
+            verified_bundle_fallback_block=VERIFIED_BUNDLE_FALLBACK_BLOCK,
         )
         last_metagraph_epoch_identity = None
+        fallback_task = None
+        if getattr(self, "_verified_bundle_store", None) is not None:
+            fallback_task = asyncio.create_task(
+                self._run_latest_verified_bundle_fallback_loop(),
+                name="auditor-verified-bundle-fallback",
+            )
         
         while not self.should_exit:
             try:
@@ -2654,8 +3050,9 @@ class AuditorValidator:
                         print(f"📊 WEIGHT SUBMISSION TIME (Block {block_within_epoch})")
                         print(f"{'='*60}")
                         
-                        # Auditors mirror only the primary's current-epoch
-                        # authority. A missing live bundle remains fail-closed.
+                        # The normal path mirrors only the primary's current-
+                        # epoch authority. The independent block-355 task does
+                        # not alter or wait on this gateway request loop.
                         weights_data = None
                         authority_status = "v2_absent"
                         target_epoch = current_epoch
@@ -2750,10 +3147,11 @@ class AuditorValidator:
                                 weights_data.get("validator_hotkey", "")
                             )
                         
-                        if self.submit_weights_to_chain(
-                            target_epoch,
-                            weights_data,
+                        if await self._submit_verified_authority_once(
+                            source_epoch_id=target_epoch,
                             submission_epoch_id=current_epoch,
+                            bundle=weights_data,
+                            submission_mode="current_epoch_gateway_authority",
                         ):
                             logger.info(
                                 "Timelocked weight commitment finalized for "
@@ -2822,6 +3220,7 @@ class AuditorValidator:
                 backoff = min(30 * (2 ** (self.consecutive_errors - 1)), 300)
                 print(f"   Retrying in {backoff}s...")
                 await asyncio.sleep(backoff)
+
             except Exception as e:
                 # Other errors - log and continue
                 self.consecutive_errors += 1
@@ -2853,6 +3252,10 @@ class AuditorValidator:
                 print(f"   Retrying in {backoff}s...")
                 await asyncio.sleep(backoff)
 
+        if fallback_task is not None:
+            fallback_task.cancel()
+            await asyncio.gather(fallback_task, return_exceptions=True)
+
 
 def _build_bittensor_cli_config(parser, argv=None):
     """Parse auditor CLI flags even when the SDK disables parsing by default."""
@@ -2880,7 +3283,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 VERIFICATION FAILURE HANDLING:
-  If authoritative V2 verification fails, no vector is submitted.
+  Invalid authority is never submitted. At block 355 only, an independently
+  reverified, wallet-authenticated prior canonical authority may be carried forward.
 
 EXAMPLES:
   python neurons/auditor_validator.py --netuid 71

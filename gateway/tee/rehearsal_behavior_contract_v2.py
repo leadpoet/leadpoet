@@ -101,6 +101,7 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "gateway/tee/coordinator_chain_source_v2.py",
     "leadpoet_canonical/chain_source_v2.py",
     "leadpoet_verifier/economics.py",
+    "leadpoet_canonical/auditor_latest_verified_bundle_v2.py",
     "neurons/validator.py",
     "neurons/auditor_validator.py",
     "validator_models/containerizing/deploy_dynamic.sh",

@@ -540,6 +540,10 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "scripts/139-research-lab-allocation-frontier-bootstrap.sql",
         "research_lab_allocation_frontier_bootstrap_contract_v2",
     ),
+    (
+        "scripts/141-research-lab-allocation-frontier-source-contract.sql",
+        "research_lab_allocation_frontier_historical_source_contract_v1",
+    ),
 )
 
 

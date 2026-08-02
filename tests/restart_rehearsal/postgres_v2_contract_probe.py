@@ -169,6 +169,9 @@ ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_MIGRATION = (
 ALLOCATION_SETTLEMENT_FRONTIER_HISTORICAL_SOURCE_MIGRATION = (
     "140-research-lab-allocation-frontier-historical-source.sql"
 )
+ALLOCATION_SETTLEMENT_FRONTIER_SOURCE_CONTRACT_MIGRATION = (
+    "141-research-lab-allocation-frontier-source-contract.sql"
+)
 CHAMPION_LIFETIME_CREDIT_MIGRATION = (
     "132-research-lab-champion-lifetime-credit.sql"
 )
@@ -201,6 +204,7 @@ EXPECTED_APPLIED_MIGRATIONS = (
     ANCESTRY_CHECKPOINT_BOOTSTRAP_PURPOSE_MIGRATION,
     ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_MIGRATION,
     ALLOCATION_SETTLEMENT_FRONTIER_HISTORICAL_SOURCE_MIGRATION,
+    ALLOCATION_SETTLEMENT_FRONTIER_SOURCE_CONTRACT_MIGRATION,
 )
 EXPECTED_FINALIZED_VIEW_COLUMNS = (
     "bundle_hash",
@@ -3915,6 +3919,31 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
         applied.append(
             ALLOCATION_SETTLEMENT_FRONTIER_HISTORICAL_SOURCE_MIGRATION
         )
+        database.apply_migration(
+            scripts / ALLOCATION_SETTLEMENT_FRONTIER_SOURCE_CONTRACT_MIGRATION
+        )
+        applied.append(ALLOCATION_SETTLEMENT_FRONTIER_SOURCE_CONTRACT_MIGRATION)
+        historical_source_contract = json.loads(
+            database.psql(
+                """
+                SELECT public.research_lab_allocation_frontier_historical_source_contract_v1()
+                       ::text;
+                """,
+                tuples_only=True,
+            ).stdout.strip()
+        )
+        if historical_source_contract != {
+            "schema_version": (
+                "leadpoet.allocation_frontier_historical_source_contract.v1"
+            ),
+            "persistence_rpc": (
+                "persist_research_lab_allocation_frontier_bootstrap_v2"
+            ),
+            "settlement_frontier_compatibility": "missing_or_null",
+        }:
+            raise PostgresContractProbeError(
+                "post-141 historical source capability is incomplete"
+            )
         allocation_frontier_bootstrap_contract = (
             _allocation_settlement_frontier_bootstrap_contract(
                 database=database,
@@ -4040,6 +4069,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "post_137_allocation_settlement_frontier_contract_valid": True,
                 "post_138_ancestry_checkpoint_bootstrap_purpose_valid": True,
                 "post_139_allocation_frontier_bootstrap_contract_valid": True,
+                "post_141_allocation_frontier_source_contract_valid": True,
                 "provider_outcome_append_atomic": True,
                 "provider_outcome_contention_zero_rollback": True,
                 "provider_outcome_conflict_head_exact": True,

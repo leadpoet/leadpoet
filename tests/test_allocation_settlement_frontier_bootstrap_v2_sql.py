@@ -36,8 +36,17 @@ HISTORICAL_SOURCE_MIGRATION = (
     / "scripts/140-research-lab-allocation-frontier-historical-source.sql"
 )
 HISTORICAL_SOURCE_SQL = HISTORICAL_SOURCE_MIGRATION.read_text(encoding="utf-8")
+SOURCE_CONTRACT_MIGRATION_NAME = (
+    "scripts/141-research-lab-allocation-frontier-source-contract.sql"
+)
+SOURCE_CONTRACT_SQL = (ROOT / SOURCE_CONTRACT_MIGRATION_NAME).read_text(
+    encoding="utf-8"
+)
 RPC = "persist_research_lab_allocation_frontier_bootstrap_v2"
 CONTRACT_RPC = "research_lab_allocation_frontier_bootstrap_contract_v2"
+SOURCE_CONTRACT_RPC = (
+    "research_lab_allocation_frontier_historical_source_contract_v1"
+)
 
 
 def _sha(character: str) -> str:
@@ -208,6 +217,21 @@ def test_historical_source_migration_accepts_only_absent_or_null_frontier() -> N
     assert "allocation_frontier_bootstrap_historical_source_guard_missing" in (
         HISTORICAL_SOURCE_SQL
     )
+
+
+def test_historical_source_contract_is_guarded_and_required_by_preflight() -> None:
+    assert "pg_get_functiondef" in SOURCE_CONTRACT_SQL
+    assert "COALESCE(" in SOURCE_CONTRACT_SQL
+    assert "allocation_frontier_historical_source_contract_missing" in (
+        SOURCE_CONTRACT_SQL
+    )
+    assert "settlement_frontier_compatibility" in SOURCE_CONTRACT_SQL
+    assert "missing_or_null" in SOURCE_CONTRACT_SQL
+    assert len(SOURCE_CONTRACT_RPC.encode("utf-8")) <= 63
+    assert (
+        SOURCE_CONTRACT_MIGRATION_NAME,
+        SOURCE_CONTRACT_RPC,
+    ) in REQUIRED_SUPABASE_V2_RPCS
     assert not re.search(
         r"^\s*(?:UPDATE|DELETE\s+FROM)\s+",
         HISTORICAL_SOURCE_SQL,

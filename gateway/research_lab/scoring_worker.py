@@ -10308,6 +10308,12 @@ class ResearchLabGatewayScoringWorker:
                     or root_receipt.get("status") != "succeeded"
                     or int(root_receipt.get("epoch_id") or -1)
                     != int(validated["evaluation_epoch"])
+                    or int(
+                        root_receipt.get("sequence")
+                        if root_receipt.get("sequence") is not None
+                        else -1
+                    )
+                    != 0
                     or root_receipt.get("artifact_root")
                     != merkle_root(
                         (str(validated["score_summary_hash"]),),

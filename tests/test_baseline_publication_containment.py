@@ -329,8 +329,10 @@ async def test_baseline_dispatch_history_is_scoped_to_date_window_and_model(monk
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("receipt_sequence", [0, 1])
 async def test_persisted_baseline_repairs_post_bundle_publication_without_rescoring(
     monkeypatch,
+    receipt_sequence,
 ):
     artifact, window, protected_result, row = _persisted_baseline_publication_fixture(
         unicode_diagnostics=True
@@ -362,6 +364,7 @@ async def test_persisted_baseline_repairs_post_bundle_publication_without_rescor
         "purpose": "research_lab.rebenchmark.v2",
         "status": "succeeded",
         "epoch_id": 42,
+        "sequence": receipt_sequence,
         "artifact_root": sw.merkle_root(
             (summary_hash,),
             domain="leadpoet-artifact-v2",
@@ -422,6 +425,28 @@ async def test_persisted_baseline_repairs_post_bundle_publication_without_rescor
     monkeypatch.setattr(sw, "create_public_benchmark_report", create_report)
     monkeypatch.setattr(sw, "emit_run_event", emit_event)
     worker._write_audit_bundle_inner = write_audit
+
+    if receipt_sequence != 0:
+        with pytest.raises(
+            RuntimeError,
+            match="persisted private baseline attested authority differs",
+        ):
+            await worker._publish_private_baseline_bundle(
+                bundle=row,
+                window=window,
+                artifact=artifact,
+                expected_policy_hash="",
+                attested_baseline_outcome=None,
+                baseline_telemetry_session=None,
+                publication_scope_key="scope",
+                start=time.time(),
+                recover_existing=True,
+            )
+        assert captured["links"] == []
+        assert captured["dispatch"] == []
+        assert captured["report"] == []
+        assert captured["audit"] == []
+        return
 
     publication = await worker._publish_private_baseline_bundle(
         bundle=row,

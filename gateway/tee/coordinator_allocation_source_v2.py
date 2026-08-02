@@ -824,8 +824,10 @@ class CoordinatorAllocationSourceV2:
                     != allocation_execution.get("job_id")
                     or allocation_receipt.get("sequence")
                     != allocation_execution.get("sequence")
-                    or allocation_receipt.get("release_hash")
-                    != allocation_execution.get("release_hash")
+                    or not re.fullmatch(
+                        r"sha256:[0-9a-f]{64}",
+                        str(allocation_execution.get("release_hash") or ""),
+                    )
                     or int(allocation_receipt.get("epoch_id", -1))
                     != int(authority_frontier["allocation_epoch"])
                     or allocation_receipt.get("input_root")
@@ -870,7 +872,10 @@ class CoordinatorAllocationSourceV2:
                 or receipt.get("status") != "succeeded"
                 or receipt.get("job_id") != execution.get("job_id")
                 or receipt.get("sequence") != execution.get("sequence")
-                or receipt.get("release_hash") != execution.get("release_hash")
+                or not re.fullmatch(
+                    r"sha256:[0-9a-f]{64}",
+                    str(execution.get("release_hash") or ""),
+                )
                 or int(receipt.get("epoch_id", -1)) != expected_epoch
                 or receipt.get("output_root") != expected_output_root
                 or receipt.get("artifact_root")

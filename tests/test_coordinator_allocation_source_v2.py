@@ -3,6 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+)
 
 from gateway.tee.coordinator_allocation_source_v2 import (
     CoordinatorAllocationSourceV2,
@@ -12,8 +16,18 @@ from gateway.tee import coordinator_allocation_source_v2 as allocation_source
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    EMPTY_HOST_OPERATION_ROOT,
+    EMPTY_TRANSPORT_ROOT,
+    build_execution_receipt_body,
+    create_signed_execution_receipt,
     merkle_root,
     sha256_json,
+)
+from leadpoet_canonical.allocation_settlement_frontier_bootstrap_v2 import (
+    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION,
+    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
+    build_allocation_settlement_frontier_bootstrap_v2,
+    frontier_bootstrap_artifact_hashes_v2,
 )
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     build_allocation_settlement_frontier_v2,
@@ -106,6 +120,50 @@ def _context(parents=()):
         purpose="research_lab.allocation.v2",
         epoch_id=100,
         parent_receipt_hashes=tuple(parents),
+    )
+
+
+def _signed_coordinator_receipt(
+    *,
+    purpose,
+    job_id,
+    epoch_id,
+    input_root,
+    output_root,
+    artifact_root,
+    parents=(),
+):
+    key = Ed25519PrivateKey.generate()
+    pubkey = key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    ).hex()
+    body = build_execution_receipt_body(
+        role="gateway_coordinator",
+        purpose=purpose,
+        job_id=job_id,
+        epoch_id=epoch_id,
+        sequence=0,
+        commit_sha="a" * 40,
+        pcr0="b" * 96,
+        build_manifest_hash="sha256:" + "c" * 64,
+        dependency_lock_hash="sha256:" + "d" * 64,
+        config_hash="sha256:" + "e" * 64,
+        boot_identity_hash="sha256:" + "f" * 64,
+        input_root=input_root,
+        output_root=output_root,
+        transport_root_hash=EMPTY_TRANSPORT_ROOT,
+        host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
+        artifact_root=artifact_root,
+        parent_receipt_hashes=parents,
+        status="succeeded",
+        failure_code=None,
+        issued_at="2026-08-02T18:00:00Z",
+    )
+    return create_signed_execution_receipt(
+        body=body,
+        enclave_pubkey=pubkey,
+        sign_digest=key.sign,
     )
 
 
@@ -526,6 +584,8 @@ def test_prior_settlement_frontier_reconstructs_exact_signed_authority(
         "receipt_hash": receipt_hash,
         "role": "gateway_coordinator",
         "purpose": "research_lab.allocation.v2",
+        "job_id": "allocation-v2:frontier-authority:99",
+        "sequence": 0,
         "status": "succeeded",
         "epoch_id": 99,
         "input_root": input_root,
@@ -579,7 +639,10 @@ def test_prior_settlement_frontier_reconstructs_exact_signed_authority(
                     "role": "gateway_coordinator",
                     "operation": "research_lab_allocation",
                     "purpose": "research_lab.allocation.v2",
+                    "job_id": "allocation-v2:frontier-authority:99",
+                    "sequence": 0,
                     "epoch_id": 99,
+                    "release_hash": "sha256:" + "7" * 64,
                     "result_doc": result,
                     "result_hash": sha256_json(result),
                     "artifact_hashes": artifact_hashes,
@@ -734,6 +797,11 @@ def test_successor_frontier_requires_signed_bootstrap_and_latest_authorities(
             "receipt_hash": receipt_hash,
             "role": "gateway_coordinator",
             "purpose": "research_lab.allocation.v2",
+            "job_id": (
+                "allocation-v2:frontier-authority:"
+                f"{frontier['allocation_epoch']}"
+            ),
+            "sequence": 0,
             "status": "succeeded",
             "epoch_id": frontier["allocation_epoch"],
             "input_root": input_root,
@@ -759,7 +827,10 @@ def test_successor_frontier_requires_signed_bootstrap_and_latest_authorities(
             "role": "gateway_coordinator",
             "operation": "research_lab_allocation",
             "purpose": "research_lab.allocation.v2",
+            "job_id": receipt["job_id"],
+            "sequence": 0,
             "epoch_id": frontier["allocation_epoch"],
+            "release_hash": "sha256:" + "7" * 64,
             "result_doc": result,
             "result_hash": sha256_json(result),
             "artifact_hashes": artifact_hashes,
@@ -870,6 +941,197 @@ def test_successor_frontier_requires_signed_bootstrap_and_latest_authorities(
     with pytest.raises(
         CoordinatorAllocationSourceV2Error,
         match="not a declared source",
+    ):
+        resolver._load_prior_settlement_frontier(
+            epoch=100,
+            netuid=71,
+            context=context,
+            required_parents=set(),
+        )
+
+
+def test_bootstrap_frontier_accepts_canonical_receipts_without_release_hash(
+    monkeypatch,
+):
+    frontier = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=99,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(),
+    )
+    allocation_state = {"netuid": 71, "epoch": 99, "rewards": []}
+    source_state_hash = sha256_json(allocation_state)
+    allocation = {"allocation_hash": "sha256:" + "1" * 64}
+    allocation_result = {
+        "allocation": allocation,
+        "source_state": allocation_state,
+        "source_state_hash": source_state_hash,
+    }
+    allocation_artifacts = [source_state_hash]
+    allocation_artifact_root = merkle_root(
+        allocation_artifacts,
+        domain="leadpoet-artifact-v2",
+    )
+    allocation_output_root = sha256_json({"allocation": allocation})
+    allocation_receipt = _signed_coordinator_receipt(
+        purpose="research_lab.allocation.v2",
+        job_id="allocation-v2:bootstrap-source:99",
+        epoch_id=99,
+        input_root="sha256:" + "2" * 64,
+        output_root=allocation_output_root,
+        artifact_root=allocation_artifact_root,
+    )
+    bootstrap = build_allocation_settlement_frontier_bootstrap_v2(
+        netuid=71,
+        bootstrap_epoch=100,
+        allocation_source_receipt_hash=allocation_receipt["receipt_hash"],
+        source_state_hash=source_state_hash,
+        frontier=frontier,
+    )
+    bootstrap_artifacts = sorted(frontier_bootstrap_artifact_hashes_v2(bootstrap))
+    bootstrap_artifact_root = merkle_root(
+        bootstrap_artifacts,
+        domain="leadpoet-artifact-v2",
+    )
+    bootstrap_receipt = _signed_coordinator_receipt(
+        purpose=ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
+        job_id="allocation-frontier-bootstrap-v2:100",
+        epoch_id=100,
+        input_root="sha256:" + "3" * 64,
+        output_root=sha256_json(bootstrap),
+        artifact_root=bootstrap_artifact_root,
+        parents=(allocation_receipt["receipt_hash"],),
+    )
+    release_hash = "sha256:" + "4" * 64
+    executions = {
+        allocation_receipt["receipt_hash"]: {
+            "schema_version": "leadpoet.attested_execution_result.v2",
+            "receipt_hash": allocation_receipt["receipt_hash"],
+            "role": "gateway_coordinator",
+            "operation": "research_lab_allocation",
+            "purpose": "research_lab.allocation.v2",
+            "job_id": allocation_receipt["job_id"],
+            "epoch_id": 99,
+            "sequence": 0,
+            "release_hash": release_hash,
+            "input_root": allocation_receipt["input_root"],
+            "output_root": allocation_output_root,
+            "artifact_root": allocation_artifact_root,
+            "result_hash": sha256_json(allocation_result),
+            "artifact_hashes": allocation_artifacts,
+            "result_doc": allocation_result,
+        },
+        bootstrap_receipt["receipt_hash"]: {
+            "schema_version": "leadpoet.attested_execution_result.v2",
+            "receipt_hash": bootstrap_receipt["receipt_hash"],
+            "role": "gateway_coordinator",
+            "operation": ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION,
+            "purpose": ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
+            "job_id": bootstrap_receipt["job_id"],
+            "epoch_id": 100,
+            "sequence": 0,
+            "release_hash": release_hash,
+            "input_root": bootstrap_receipt["input_root"],
+            "output_root": bootstrap_receipt["output_root"],
+            "artifact_root": bootstrap_artifact_root,
+            "result_hash": sha256_json(bootstrap),
+            "artifact_hashes": bootstrap_artifacts,
+            "result_doc": bootstrap,
+        },
+    }
+    receipts = {
+        allocation_receipt["receipt_hash"]: allocation_receipt,
+        bootstrap_receipt["receipt_hash"]: bootstrap_receipt,
+    }
+
+    class BootstrapReader(FakeReader):
+        def read(self, *, policy_id, parameters, **_kwargs):
+            self.calls.append((policy_id, dict(parameters)))
+            if policy_id == "allocation_settlement_frontier_activation":
+                return [
+                    {
+                        "schema_version": (
+                            "leadpoet.research_lab_allocation_"
+                            "settlement_frontier_activation.v2"
+                        ),
+                        "netuid": 71,
+                        "first_allocation_epoch": 99,
+                        "first_frontier_hash": frontier["frontier_hash"],
+                        "source_receipt_hash": bootstrap_receipt["receipt_hash"],
+                    }
+                ]
+            if policy_id in {
+                "allocation_settlement_frontiers",
+                "allocation_settlement_frontier_by_epoch",
+            }:
+                return [
+                    {
+                        "schema_version": frontier["schema_version"],
+                        "netuid": 71,
+                        "allocation_epoch": 99,
+                        "settled_through_epoch": 98,
+                        "frontier_hash": frontier["frontier_hash"],
+                        "predecessor_frontier_hash": None,
+                        "source_receipt_hash": bootstrap_receipt["receipt_hash"],
+                        "source_state_hash": source_state_hash,
+                        "frontier_doc": frontier,
+                    }
+                ]
+            receipt_hash = parameters.get("receipt_hash")
+            if policy_id == "attested_execution_result_by_receipt":
+                return [dict(executions[receipt_hash])]
+            if policy_id == "attested_receipt_by_hash":
+                return [
+                    {
+                        "receipt_hash": receipt_hash,
+                        "receipt_doc": dict(receipts[receipt_hash]),
+                    }
+                ]
+            return []
+
+    reader = BootstrapReader()
+    resolver = CoordinatorAllocationSourceV2(
+        reader=reader,
+        chain_source=FakeChainSource(),
+        config_supplier=_config,
+        network_supplier=lambda: "finney",
+    )
+    context = _context((bootstrap_receipt["receipt_hash"],))
+    context.external_receipt_graphs = [
+        {
+            "root_receipt_hash": bootstrap_receipt["receipt_hash"],
+            "receipts": [bootstrap_receipt, allocation_receipt],
+        }
+    ]
+    monkeypatch.setattr(
+        allocation_source,
+        "_receipt_graphs_by_declared_root",
+        lambda _graphs, declared_roots: {
+            root: {"root_receipt_hash": root} for root in declared_roots
+        },
+    )
+    assert "release_hash" not in allocation_receipt
+    assert "release_hash" not in bootstrap_receipt
+
+    required = set()
+    observed = resolver._load_prior_settlement_frontier(
+        epoch=100,
+        netuid=71,
+        context=context,
+        required_parents=required,
+    )
+
+    assert observed == {
+        "frontier": frontier,
+        "receipt_hash": bootstrap_receipt["receipt_hash"],
+    }
+    assert required == {bootstrap_receipt["receipt_hash"]}
+
+    executions[bootstrap_receipt["receipt_hash"]]["release_hash"] = "invalid"
+    with pytest.raises(
+        CoordinatorAllocationSourceV2Error,
+        match="execution authority differs",
     ):
         resolver._load_prior_settlement_frontier(
             epoch=100,

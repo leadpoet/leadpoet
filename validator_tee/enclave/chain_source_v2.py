@@ -1515,7 +1515,44 @@ class ValidatorChainSourceV2:
             block = parse_finalized_block_extrinsics(
                 block_result["result"], expected_block=block_number
             )
-            for extrinsic_hex in block["extrinsics"]:
+            candidate_extrinsics = block["extrinsics"]
+            has_expected_extrinsic = any(
+                normalized.get(
+                    signed_extrinsic_hash_v2(bytes.fromhex(extrinsic_hex))
+                )
+                == extrinsic_hex
+                for extrinsic_hex in candidate_extrinsics
+            )
+            if not has_expected_extrinsic and self._archive_rpc_call is not None:
+                # The live endpoint anchors finality and the canonical block
+                # hash. If its load-balanced block-body read is incomplete,
+                # independently read that exact immutable hash from the
+                # measured archive. Require identical headers before accepting
+                # any archive bytes, then retain the existing exact-extrinsic
+                # and state-transition checks below.
+                archive_block_result = finalization_call(
+                    adapter=self._archive_call,
+                    method="chain_getBlock",
+                    params=["0x" + block_hash],
+                    request_id=request_id,
+                    job_id=job_id,
+                    purpose=purpose,
+                    logical_operation_id=(
+                        job_id + ":archive-block:%d" % block_number
+                    ),
+                )
+                request_id += 1
+                attempts.extend(archive_block_result["attempts"])
+                artifacts.extend(archive_block_result["artifacts"])
+                archive_block = parse_finalized_block_extrinsics(
+                    archive_block_result["result"], expected_block=block_number
+                )
+                if archive_block["header"] != block["header"]:
+                    raise ValidatorChainSourceV2Error(
+                        "live and archive finalized block headers differ"
+                    )
+                candidate_extrinsics = archive_block["extrinsics"]
+            for extrinsic_hex in candidate_extrinsics:
                 extrinsic_hash = signed_extrinsic_hash_v2(
                     bytes.fromhex(extrinsic_hex)
                 )

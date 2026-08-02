@@ -1283,6 +1283,215 @@ def test_finalized_extrinsic_requires_exact_bytes_and_committed_chain_state():
     assert pacing == [FINALIZATION_RPC_PACING_SECONDS] * 4
 
 
+def test_finalized_extrinsic_uses_archive_block_body_across_consecutive_epochs():
+    extrinsic = b"\x10\x84measured-weight-extrinsic"
+    extrinsic_hash = signed_extrinsic_hash_v2(extrinsic)
+    commitment = b"timelocked-commitment"
+    reveal_round = 998877
+    header = {
+        "number": hex(BLOCK),
+        "stateRoot": "0x" + "12" * 32,
+        "parentHash": "0x" + "34" * 32,
+        "extrinsicsRoot": "0x" + "56" * 32,
+    }
+    storage = b"".join(
+        (
+            b"\x04",
+            OWNER,
+            BLOCK.to_bytes(8, "little"),
+            bytes((len(commitment) << 2,)),
+            commitment,
+            reveal_round.to_bytes(8, "little"),
+        )
+    )
+    live_calls = []
+    archive_calls = []
+
+    def response(kwargs, result):
+        attempt = _attempt(
+            job_id=kwargs["job_id"],
+            purpose=kwargs["purpose"],
+            operation=kwargs["logical_operation_id"].removeprefix(
+                kwargs["job_id"] + ":"
+            ),
+            request_id=("%032x" % kwargs["request_id"]),
+        )
+        return {"result": result, "attempts": [attempt], "artifacts": []}
+
+    def live_rpc(**kwargs):
+        live_calls.append(kwargs)
+        values = {
+            "chain_getFinalizedHead": "0x" + "ab" * 32,
+            "chain_getHeader": header,
+            "chain_getBlockHash": "0x" + "cd" * 32,
+            "chain_getBlock": {
+                "block": {
+                    "header": header,
+                    "extrinsics": ["0x1084"],
+                },
+                "justifications": None,
+            },
+        }
+        return response(kwargs, values[kwargs["method"]])
+
+    def archive_rpc(**kwargs):
+        archive_calls.append(kwargs)
+        values = {
+            "chain_getBlock": {
+                "block": {
+                    "header": header,
+                    "extrinsics": ["0x" + extrinsic.hex()],
+                },
+                "justifications": None,
+            },
+            "state_getStorage": "0x" + storage.hex(),
+        }
+        return response(kwargs, values[kwargs["method"]])
+
+    pacing = []
+    source = ValidatorChainSourceV2(
+        rpc_call=live_rpc,
+        archive_rpc_call=_archive_adapter(archive_rpc),
+        finalization_sleep=pacing.append,
+        epoch_authority_supplier=lambda: {
+            "mode": "stateful_v1",
+            "cutover_manifest": _stateful_cutover(),
+        },
+    )
+    results = [
+        source.find_finalized_extrinsic_inclusion(
+            expected_extrinsics={extrinsic_hash: extrinsic.hex()},
+            expected_commitments={
+                extrinsic_hash: {
+                    "netuid": 71,
+                    "subnet_epoch_index": STATEFUL_SUBNET_EPOCH_INDEX,
+                    "hotkey_public_key": OWNER.hex(),
+                    "commitment_hex": commitment.hex(),
+                    "reveal_round": reveal_round,
+                }
+            },
+            minimum_block=BLOCK,
+            maximum_block=BLOCK,
+            epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID + offset,
+            finalization_scan_id="sha256:" + str(9 - offset) * 64,
+        )
+        for offset in range(2)
+    ]
+
+    assert {result["extrinsic_hash"] for result in results} == {extrinsic_hash}
+    assert {result["finalized_block"] for result in results} == {BLOCK}
+    assert results[0]["job_id"] != results[1]["job_id"]
+    assert {
+        attempt["logical_operation_id"] for attempt in results[0]["attempts"]
+    }.isdisjoint(
+        attempt["logical_operation_id"] for attempt in results[1]["attempts"]
+    )
+    assert [call["method"] for call in archive_calls] == [
+        "chain_getBlock",
+        "state_getStorage",
+        "chain_getBlock",
+        "state_getStorage",
+    ]
+    assert archive_calls[0]["params"] == ["0x" + "cd" * 32]
+    assert [call["method"] for call in live_calls] == [
+        "chain_getFinalizedHead",
+        "chain_getHeader",
+        "chain_getBlockHash",
+        "chain_getBlock",
+        "chain_getFinalizedHead",
+        "chain_getHeader",
+        "chain_getBlockHash",
+        "chain_getBlock",
+    ]
+    for result in results:
+        assert [attempt["provider_id"] for attempt in result["attempts"]] == [
+            "bittensor_chain",
+            "bittensor_chain",
+            "bittensor_chain",
+            "bittensor_chain",
+            "bittensor_archive",
+            "bittensor_archive",
+        ]
+    assert pacing == [FINALIZATION_RPC_PACING_SECONDS] * 10
+
+
+def test_finalized_extrinsic_archive_fallback_rejects_header_mismatch():
+    extrinsic = b"\x10\x84measured-weight-extrinsic"
+    extrinsic_hash = signed_extrinsic_hash_v2(extrinsic)
+    live_header = {
+        "number": hex(BLOCK),
+        "stateRoot": "0x" + "12" * 32,
+        "parentHash": "0x" + "34" * 32,
+        "extrinsicsRoot": "0x" + "56" * 32,
+    }
+    archive_header = {**live_header, "stateRoot": "0x" + "99" * 32}
+
+    def rpc_result(kwargs, result):
+        attempt = _attempt(
+            job_id=kwargs["job_id"],
+            purpose=kwargs["purpose"],
+            operation=kwargs["logical_operation_id"].removeprefix(
+                kwargs["job_id"] + ":"
+            ),
+            request_id=("%032x" % kwargs["request_id"]),
+        )
+        return {"result": result, "attempts": [attempt], "artifacts": []}
+
+    def live_rpc(**kwargs):
+        values = {
+            "chain_getFinalizedHead": "0x" + "ab" * 32,
+            "chain_getHeader": live_header,
+            "chain_getBlockHash": "0x" + "cd" * 32,
+            "chain_getBlock": {
+                "block": {"header": live_header, "extrinsics": ["0x1084"]},
+                "justifications": None,
+            },
+        }
+        return rpc_result(kwargs, values[kwargs["method"]])
+
+    def archive_rpc(**kwargs):
+        assert kwargs["method"] == "chain_getBlock"
+        return rpc_result(
+            kwargs,
+            {
+                "block": {
+                    "header": archive_header,
+                    "extrinsics": ["0x" + extrinsic.hex()],
+                },
+                "justifications": None,
+            },
+        )
+
+    with pytest.raises(
+        ValidatorChainSourceV2Error,
+        match="live and archive finalized block headers differ",
+    ):
+        ValidatorChainSourceV2(
+            rpc_call=live_rpc,
+            archive_rpc_call=_archive_adapter(archive_rpc),
+            finalization_sleep=lambda _seconds: None,
+            epoch_authority_supplier=lambda: {
+                "mode": "stateful_v1",
+                "cutover_manifest": _stateful_cutover(),
+            },
+        ).find_finalized_extrinsic_inclusion(
+            expected_extrinsics={extrinsic_hash: extrinsic.hex()},
+            expected_commitments={
+                extrinsic_hash: {
+                    "netuid": 71,
+                    "subnet_epoch_index": STATEFUL_SUBNET_EPOCH_INDEX,
+                    "hotkey_public_key": OWNER.hex(),
+                    "commitment_hex": "aa",
+                    "reveal_round": 1,
+                }
+            },
+            minimum_block=BLOCK,
+            maximum_block=BLOCK,
+            epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
+            finalization_scan_id="sha256:" + "9" * 64,
+        )
+
+
 def test_finalized_extrinsic_rejects_inclusion_without_expected_state_change():
     extrinsic = b"\x10\x84measured-weight-extrinsic"
     extrinsic_hash = signed_extrinsic_hash_v2(extrinsic)

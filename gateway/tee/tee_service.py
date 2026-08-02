@@ -1965,6 +1965,9 @@ def get_v2_coordinator_job_manager():
         from gateway.tee.coordinator_allocation_source_v2 import (
             CoordinatorAllocationSourceV2,
         )
+        from gateway.tee.coordinator_allocation_frontier_bootstrap_v2 import (
+            CoordinatorAllocationFrontierBootstrapV2,
+        )
         from gateway.tee.coordinator_chain_source_v2 import (
             CoordinatorChainSourceV2,
         )
@@ -2023,6 +2026,9 @@ def get_v2_coordinator_job_manager():
                 ]
             ),
         )
+        allocation_frontier_bootstrap = (
+            CoordinatorAllocationFrontierBootstrapV2(source_reader)
+        )
         qualification_admission = CoordinatorQualificationAdmissionV2(
             source_reader
         )
@@ -2073,6 +2079,14 @@ def get_v2_coordinator_job_manager():
                 ),
                 allocation_source_resolver=lambda payload, context: (
                     allocation_source.resolve(payload=payload, context=context)
+                ),
+                allocation_frontier_bootstrap_resolver=(
+                    lambda payload, context: (
+                        allocation_frontier_bootstrap.resolve(
+                            payload=payload,
+                            context=context,
+                        )
+                    )
                 ),
                 source_add_provenance_resolver=lambda payload, context: (
                     source_add_provenance.resolve(

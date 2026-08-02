@@ -760,6 +760,7 @@ def verify_migration_backed_database_contract(
         "post_136_ancestry_checkpoint_contract_valid",
         "post_137_allocation_settlement_frontier_contract_valid",
         "post_138_ancestry_checkpoint_bootstrap_purpose_valid",
+        "post_139_allocation_frontier_bootstrap_contract_valid",
         "provider_outcome_append_atomic",
         "provider_outcome_contention_zero_rollback",
         "provider_outcome_conflict_head_exact",
@@ -1120,7 +1121,10 @@ def verify_migration_backed_database_contract(
         not isinstance(rpcs, list)
         or "persist_research_lab_ancestry_checkpoint_v2" not in rpcs
         or "persist_research_lab_allocation_settlement_frontier_v2" not in rpcs
+        or "persist_research_lab_allocation_settlement_frontier_bootstrap_v2"
+        not in rpcs
         or "research_lab_ancestry_checkpoint_bootstrap_contract_v2" not in rpcs
+        or "research_lab_allocation_frontier_bootstrap_contract_v2" not in rpcs
         or not required_git_tree_rpcs.issubset(rpcs)
     ):
         raise SystemExit(
@@ -1143,6 +1147,34 @@ def verify_migration_backed_database_contract(
     ):
         raise SystemExit(
             "migration-backed allocation settlement frontier evidence is missing"
+        )
+    frontier_bootstrap = document.get(
+        "allocation_settlement_frontier_bootstrap"
+    )
+    if (
+        not isinstance(frontier_bootstrap, dict)
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(frontier_bootstrap.get("frontier_hash") or ""),
+        )
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(
+                frontier_bootstrap.get("allocation_source_receipt_hash")
+                or ""
+            ),
+        )
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(frontier_bootstrap.get("bootstrap_receipt_hash") or ""),
+        )
+        or frontier_bootstrap.get("idempotent_replay") is not True
+        or frontier_bootstrap.get("unmeasured_source_rejected") is not True
+        or frontier_bootstrap.get("frontier_count") != 1
+        or frontier_bootstrap.get("activation_count") != 1
+    ):
+        raise SystemExit(
+            "migration-backed allocation frontier bootstrap evidence is missing"
         )
     seed_rows = document.get("seed_rows")
     required_seed_relations = {

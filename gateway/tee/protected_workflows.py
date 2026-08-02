@@ -86,6 +86,16 @@ PROTECTED_SYMBOLS = {
         "frontier_paid_maps_v2",
         "frontier_artifact_hashes_v2",
     ),
+    "leadpoet_canonical/allocation_settlement_frontier_bootstrap_v2.py": (
+        "ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_SCHEMA_VERSION",
+        "ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_REQUEST_SCHEMA_VERSION",
+        "ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION",
+        "ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE",
+        "AllocationSettlementFrontierBootstrapV2Error",
+        "build_allocation_settlement_frontier_bootstrap_v2",
+        "validate_allocation_settlement_frontier_bootstrap_v2",
+        "frontier_bootstrap_artifact_hashes_v2",
+    ),
     "leadpoet_canonical/compact_weight_authority_v2.py": (
         "compact_gateway_frontier_receipt_hashes_v2",
         "build_weight_ancestry_commitment_v2",
@@ -516,6 +526,20 @@ PROTECTED_SYMBOLS = {
     ),
     "gateway/tee/coordinator_allocation_source_v2.py": (
         "CoordinatorAllocationSourceV2",
+    ),
+    "gateway/tee/coordinator_allocation_frontier_bootstrap_v2.py": (
+        "select_latest_allocation_source_row_v2",
+        "CoordinatorAllocationFrontierBootstrapV2",
+    ),
+    "gateway/tee/bootstrap_allocation_settlement_frontier_v2.py": (
+        "load_latest_checkpointed_allocation_source_v2",
+        "_load_candidate_reward_graphs_v2",
+        "ensure_allocation_settlement_frontier_v2",
+    ),
+    "gateway/tee/supabase_source_v2.py": (
+        "QUERY_POLICIES",
+        "_filters",
+        "SupabaseSourceReaderV2",
     ),
     "gateway/tee/coordinator_legacy_settlement_v2.py": (
         "CoordinatorLegacySettlementSourceV2",

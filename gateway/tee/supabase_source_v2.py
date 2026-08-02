@@ -224,7 +224,7 @@ QUERY_POLICIES = {
         select=(
             "reward_ref,adapter_id,miner_hotkey,leg,reward_kind,alpha_percent,"
             "reward_epochs,start_epoch,current_reward_status,trigger_evidence_doc,"
-            "public_label"
+            "public_label,desired_alpha_percent,epoch_count"
         ),
         parameter_names=("reward_ref",),
         max_pages=1,
@@ -614,6 +614,19 @@ QUERY_POLICIES = {
         parameter_names=("receipt_hash",),
         max_pages=1,
         limit=1,
+    ),
+    "latest_attested_allocation_execution_results": SupabaseQueryV2(
+        policy_id="latest_attested_allocation_execution_results",
+        table="research_lab_attested_execution_results_v2",
+        select=(
+            "receipt_hash,schema_version,role,operation,purpose,job_id,epoch_id,"
+            "sequence,release_hash,input_root,output_root,artifact_root,"
+            "result_hash,artifact_hashes,result_doc"
+        ),
+        parameter_names=("through_epoch",),
+        max_pages=1,
+        order="epoch_id.desc,receipt_hash.asc",
+        limit=100,
     ),
     "attested_artifact_by_ref": SupabaseQueryV2(
         policy_id="attested_artifact_by_ref",
@@ -1163,6 +1176,20 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
                 "receipt_hash",
                 "eq.%s"
                 % _content_hash(parameters["receipt_hash"], "receipt_hash"),
+            ),
+        )
+    if policy.policy_id == "latest_attested_allocation_execution_results":
+        return (
+            ("role", "eq.gateway_coordinator"),
+            ("operation", "eq.research_lab_allocation"),
+            ("purpose", "eq.research_lab.allocation.v2"),
+            (
+                "epoch_id",
+                "lte.%d"
+                % _non_negative_int(
+                    parameters["through_epoch"],
+                    "through_epoch",
+                ),
             ),
         )
     if policy.policy_id == "attested_artifact_by_ref":

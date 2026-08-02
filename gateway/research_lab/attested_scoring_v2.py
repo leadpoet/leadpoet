@@ -27,6 +27,7 @@ from gateway.research_lab.attested_execution_upload_v2 import (
 from gateway.tee.execution_job_manager_v2 import (
     JOB_SCHEMA_VERSION,
     MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
+    MAX_ALLOCATION_FRONTIER_BOOTSTRAP_AUTHORITIES,
     MAX_EXTERNAL_RECEIPT_GRAPHS,
     MAX_INPUT_BYTES,
     PARENT_ANCESTRY_PROOFS_FIELD,
@@ -1158,7 +1159,10 @@ async def execute_scoring_v2(
         provider_credential_ref_hashes=credential_refs,
         max_parent_graph_count=min(
             max_parent_authorities,
-            MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
+            max(
+                MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
+                MAX_ALLOCATION_FRONTIER_BOOTSTRAP_AUTHORITIES,
+            ),
         ),
     )
     payload_bytes = _canonical_bytes(payload_document)

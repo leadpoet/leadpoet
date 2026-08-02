@@ -40,6 +40,11 @@ def test_bootstrap_purpose_migration_is_additive_and_validated() -> None:
 
 
 def test_bootstrap_purpose_migration_matches_canonical_allowlist_exactly() -> None:
+    later_purposes = {
+        "gateway_coordinator": {
+            "research_lab.allocation_settlement_frontier_bootstrap.v2"
+        }
+    }
     for role, expected_purposes in ROLE_PURPOSES.items():
         match = re.search(
             rf"role = '{re.escape(role)}' AND purpose IN \((.*?)\n\s*\)\)",
@@ -48,4 +53,7 @@ def test_bootstrap_purpose_migration_matches_canonical_allowlist_exactly() -> No
         )
         assert match is not None, role
         migrated_purposes = set(re.findall(r"'([^']+)'", match.group(1)))
-        assert migrated_purposes == set(expected_purposes), role
+        historical_purposes = set(expected_purposes) - later_purposes.get(
+            role, set()
+        )
+        assert migrated_purposes == historical_purposes, role

@@ -242,6 +242,12 @@ async def _run(harness: _Harness, **overrides):
     async def resolve_epoch(_value):
         return 24000
 
+    async def ensure_allocation_frontier(**_kwargs):
+        return {
+            "status": "already_initialized",
+            "frontier_hash": HASH_A,
+        }
+
     kwargs = {
         "netuid": 71,
         "release_manifest": {"commit_sha": COMMIT},
@@ -254,9 +260,27 @@ async def _run(harness: _Harness, **overrides):
         "load_checkpointed_graphs": harness.load_bounded,
         "persist_checkpoint": harness.persist,
         "execute": harness.execute,
+        "ensure_allocation_frontier": ensure_allocation_frontier,
     }
     kwargs.update(overrides)
     return await bootstrap.bootstrap_active_ancestry_checkpoints_v2(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_accepts_fresh_database_frontier_state(orchestration) -> None:
+    harness = _Harness([], {})
+
+    async def awaiting_first_allocation(**_kwargs):
+        return {"status": "awaiting_first_allocation"}
+
+    result = await _run(
+        harness,
+        ensure_allocation_frontier=awaiting_first_allocation,
+    )
+
+    assert result["status"] == "complete"
+    assert result["active_root_count"] == 0
+    assert harness.execute_calls == []
 
 
 @pytest.mark.asyncio

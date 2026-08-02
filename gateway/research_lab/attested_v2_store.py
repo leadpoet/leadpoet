@@ -101,6 +101,9 @@ ALLOCATION_SETTLEMENT_FRONTIER_ACTIVATION_TABLE = (
 ALLOCATION_SETTLEMENT_FRONTIER_RPC = (
     "persist_research_lab_allocation_settlement_frontier_v2"
 )
+ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_RPC = (
+    "persist_research_lab_allocation_settlement_frontier_bootstrap_v2"
+)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GRAPH_QUERY_CHUNK = 50
 _MAX_GRAPH_ROWS = 10000
@@ -111,6 +114,10 @@ _DUPLICATE_READBACK_BACKOFF_SECONDS = (0.1, 0.25, 0.5)
 _REPLAYABLE_EXECUTION_PAIRS = frozenset(
     {
         ("research_lab_allocation", "research_lab.allocation.v2"),
+        (
+            "allocation_settlement_frontier_bootstrap_v2",
+            "research_lab.allocation_settlement_frontier_bootstrap.v2",
+        ),
         (
             "attest_active_private_model",
             "research_lab.active_private_model.v2",
@@ -1914,6 +1921,7 @@ async def load_execution_result_by_receipt_v2(
     *,
     expected_operation: str,
     expected_purpose: str,
+    require_checkpointed_graph: bool = False,
 ) -> dict[str, Any]:
     """Load and validate one exact replayable result by signed receipt."""
 
@@ -1934,7 +1942,20 @@ async def load_execution_result_by_receipt_v2(
         or stored.get("role") != "gateway_coordinator"
     ):
         raise AttestedV2StoreError("execution result scope differs")
-    graph = await load_receipt_graph_v2(normalized_receipt_hash)
+    if not isinstance(require_checkpointed_graph, bool):
+        raise AttestedV2StoreError(
+            "execution result graph requirement is invalid"
+        )
+    if require_checkpointed_graph:
+        graph = await load_checkpointed_receipt_graph_v2(
+            normalized_receipt_hash
+        )
+        if not isinstance(graph, Mapping):
+            raise AttestedV2StoreError(
+                "execution result checkpointed authority is unavailable"
+            )
+    else:
+        graph = await load_receipt_graph_v2(normalized_receipt_hash)
     receipts = {
         str(item.get("receipt_hash") or ""): item
         for item in graph.get("receipts") or ()
@@ -1972,6 +1993,12 @@ def _validate_allocation_settlement_frontier_storage_v2(
     *,
     source: Mapping[str, Any],
 ) -> dict[str, Any]:
+    from leadpoet_canonical.allocation_settlement_frontier_bootstrap_v2 import (
+        ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION,
+        ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
+        frontier_bootstrap_artifact_hashes_v2,
+        validate_allocation_settlement_frontier_bootstrap_v2,
+    )
     from leadpoet_canonical.allocation_settlement_frontier_v2 import (
         frontier_artifact_hashes_v2,
         validate_allocation_settlement_frontier_v2,
@@ -1991,20 +2018,96 @@ def _validate_allocation_settlement_frontier_storage_v2(
         or not isinstance(source_artifacts, list)
     ):
         raise AttestedV2StoreError("allocation frontier source is incomplete")
-    source_state = source_result.get("source_state")
-    source_state_hash = str(source_result.get("source_state_hash") or "")
-    required_artifacts = set(frontier_artifact_hashes_v2(frontier)) | {
-        source_state_hash
-    }
+    source_operation = str(source_row.get("operation") or "")
+    source_purpose = str(source_row.get("purpose") or "")
+    if source_operation == "research_lab_allocation":
+        if source_purpose != "research_lab.allocation.v2":
+            raise AttestedV2StoreError(
+                "allocation settlement frontier source purpose differs"
+            )
+        source_state = source_result.get("source_state")
+        source_state_hash = str(source_result.get("source_state_hash") or "")
+        required_artifacts = set(frontier_artifact_hashes_v2(frontier)) | {
+            source_state_hash
+        }
+        source_matches = (
+            isinstance(source_state, Mapping)
+            and source_state_hash == sha256_json(dict(source_state))
+            and source_state.get("settlement_frontier") == frontier
+            and int(source_state.get("netuid", -1)) == int(frontier["netuid"])
+            and int(source_state.get("epoch", -1))
+            == int(frontier["allocation_epoch"])
+            and int(source_row.get("epoch_id", -1))
+            == int(frontier["allocation_epoch"])
+            and required_artifacts.issubset(set(source_artifacts))
+        )
+    elif (
+        source_operation == ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION
+        and source_purpose == ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE
+    ):
+        bootstrap = validate_allocation_settlement_frontier_bootstrap_v2(
+            source_result
+        )
+        allocation_source = source.get("allocation_source")
+        allocation_row = (
+            allocation_source.get("row")
+            if isinstance(allocation_source, Mapping)
+            else None
+        )
+        allocation_result = (
+            allocation_source.get("result")
+            if isinstance(allocation_source, Mapping)
+            else None
+        )
+        allocation_receipt = (
+            allocation_source.get("receipt")
+            if isinstance(allocation_source, Mapping)
+            else None
+        )
+        allocation_state = (
+            allocation_result.get("source_state")
+            if isinstance(allocation_result, Mapping)
+            else None
+        )
+        parent_hashes = source_receipt.get("parent_receipt_hashes")
+        source_state_hash = str(bootstrap["source_state_hash"])
+        required_artifacts = set(
+            frontier_bootstrap_artifact_hashes_v2(bootstrap)
+        )
+        source_matches = (
+            bootstrap["frontier"] == frontier
+            and int(bootstrap["netuid"]) == int(frontier["netuid"])
+            and int(bootstrap["allocation_epoch"])
+            == int(frontier["allocation_epoch"])
+            and int(bootstrap["bootstrap_epoch"])
+            == int(source_row.get("epoch_id", -1))
+            and isinstance(allocation_row, Mapping)
+            and isinstance(allocation_result, Mapping)
+            and isinstance(allocation_receipt, Mapping)
+            and isinstance(allocation_state, Mapping)
+            and allocation_row.get("operation") == "research_lab_allocation"
+            and allocation_row.get("purpose") == "research_lab.allocation.v2"
+            and int(allocation_row.get("epoch_id", -1))
+            == int(frontier["allocation_epoch"])
+            and allocation_receipt.get("receipt_hash")
+            == bootstrap["allocation_source_receipt_hash"]
+            and sha256_json(dict(allocation_state)) == source_state_hash
+            and allocation_result.get("source_state_hash") == source_state_hash
+            and int(allocation_state.get("netuid", -1))
+            == int(frontier["netuid"])
+            and int(allocation_state.get("epoch", -1))
+            == int(frontier["allocation_epoch"])
+            and allocation_state.get("settlement_frontier") is None
+            and isinstance(parent_hashes, list)
+            and bootstrap["allocation_source_receipt_hash"] in parent_hashes
+            and required_artifacts.issubset(set(source_artifacts))
+        )
+    else:
+        raise AttestedV2StoreError(
+            "allocation settlement frontier source operation differs"
+        )
     if (
-        not isinstance(source_state, Mapping)
-        or source_state_hash != sha256_json(dict(source_state))
-        or source_state.get("settlement_frontier") != frontier
-        or int(source_state.get("netuid", -1)) != int(frontier["netuid"])
-        or int(source_state.get("epoch", -1))
-        != int(frontier["allocation_epoch"])
-        or int(source_row.get("epoch_id", -1))
-        != int(frontier["allocation_epoch"])
+        not source_matches
         or source_receipt.get("receipt_hash")
         != str(row.get("source_receipt_hash") or "")
         or str(row.get("source_state_hash") or "") != source_state_hash
@@ -2019,7 +2122,6 @@ def _validate_allocation_settlement_frontier_storage_v2(
         != str(frontier["schema_version"])
         or row.get("predecessor_frontier_hash")
         != frontier.get("predecessor_frontier_hash")
-        or not required_artifacts.issubset(set(source_artifacts))
     ):
         raise AttestedV2StoreError("allocation settlement frontier differs")
     return {
@@ -2040,6 +2142,58 @@ def _validate_allocation_settlement_frontier_storage_v2(
             )
         },
     }
+
+
+async def _load_allocation_settlement_frontier_source_v2(
+    receipt_hash: str,
+) -> dict[str, Any]:
+    from leadpoet_canonical.allocation_settlement_frontier_bootstrap_v2 import (
+        ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION,
+        ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
+        validate_allocation_settlement_frontier_bootstrap_v2,
+    )
+
+    normalized = str(receipt_hash or "").lower()
+    if not _HASH_RE.fullmatch(normalized):
+        raise AttestedV2StoreError("allocation frontier source hash is invalid")
+    row = await select_one(
+        EXECUTION_RESULT_TABLE,
+        filters=(("receipt_hash", normalized),),
+    )
+    if not isinstance(row, Mapping):
+        raise AttestedV2StoreError("allocation frontier source is unavailable")
+    pair = (str(row.get("operation") or ""), str(row.get("purpose") or ""))
+    if pair == ("research_lab_allocation", "research_lab.allocation.v2"):
+        return await load_execution_result_by_receipt_v2(
+            normalized,
+            expected_operation=pair[0],
+            expected_purpose=pair[1],
+            require_checkpointed_graph=True,
+        )
+    if pair != (
+        ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION,
+        ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
+    ):
+        raise AttestedV2StoreError(
+            "allocation frontier source operation is unsupported"
+        )
+    source = await load_execution_result_by_receipt_v2(
+        normalized,
+        expected_operation=pair[0],
+        expected_purpose=pair[1],
+        require_checkpointed_graph=True,
+    )
+    bootstrap = validate_allocation_settlement_frontier_bootstrap_v2(
+        source.get("result")
+    )
+    allocation_source = await load_execution_result_by_receipt_v2(
+        str(bootstrap["allocation_source_receipt_hash"]),
+        expected_operation="research_lab_allocation",
+        expected_purpose="research_lab.allocation.v2",
+        require_checkpointed_graph=True,
+    )
+    source["allocation_source"] = allocation_source
+    return source
 
 
 async def load_allocation_settlement_frontier_context_v2(
@@ -2133,10 +2287,8 @@ async def load_allocation_settlement_frontier_context_v2(
     row = rows[0]
     first_receipt_hash = str(first_row.get("source_receipt_hash") or "")
     latest_receipt_hash = str(row.get("source_receipt_hash") or "")
-    first_source = await load_execution_result_by_receipt_v2(
-        first_receipt_hash,
-        expected_operation="research_lab_allocation",
-        expected_purpose="research_lab.allocation.v2",
+    first_source = await _load_allocation_settlement_frontier_source_v2(
+        first_receipt_hash
     )
     first_validated = _validate_allocation_settlement_frontier_storage_v2(
         first_row,
@@ -2149,10 +2301,8 @@ async def load_allocation_settlement_frontier_context_v2(
     source = (
         first_source
         if latest_receipt_hash == first_receipt_hash
-        else await load_execution_result_by_receipt_v2(
-            latest_receipt_hash,
-            expected_operation="research_lab_allocation",
-            expected_purpose="research_lab.allocation.v2",
+        else await _load_allocation_settlement_frontier_source_v2(
+            latest_receipt_hash
         )
     )
     validated = _validate_allocation_settlement_frontier_storage_v2(
@@ -2184,10 +2334,8 @@ async def persist_allocation_settlement_frontier_v2(
         or not _HASH_RE.fullmatch(normalized_source_state_hash)
     ):
         raise AttestedV2StoreError("allocation frontier source hash is invalid")
-    source = await load_execution_result_by_receipt_v2(
-        normalized_receipt_hash,
-        expected_operation="research_lab_allocation",
-        expected_purpose="research_lab.allocation.v2",
+    source = await _load_allocation_settlement_frontier_source_v2(
+        normalized_receipt_hash
     )
     candidate_row = {
         "netuid": int(normalized_frontier["netuid"]),
@@ -2208,6 +2356,15 @@ async def persist_allocation_settlement_frontier_v2(
         candidate_row,
         source=source,
     )
+    source_row = source.get("row")
+    if not isinstance(source_row, Mapping):
+        raise AttestedV2StoreError("allocation frontier source is incomplete")
+    source_operation = str(source_row.get("operation") or "")
+    rpc_name = (
+        ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_RPC
+        if source_operation == "allocation_settlement_frontier_bootstrap_v2"
+        else ALLOCATION_SETTLEMENT_FRONTIER_RPC
+    )
     rpc_payload = {
         "requested_frontier": normalized_frontier,
         "requested_source_receipt_hash": normalized_receipt_hash,
@@ -2217,7 +2374,7 @@ async def persist_allocation_settlement_frontier_v2(
     for attempt in range(_EXACT_INSERT_ATTEMPTS):
         try:
             result = await call_rpc(
-                ALLOCATION_SETTLEMENT_FRONTIER_RPC,
+                rpc_name,
                 rpc_payload,
             )
             break
@@ -2304,10 +2461,8 @@ async def persist_allocation_settlement_frontier_v2(
             "allocation frontier durable readback is missing"
         )
     stored_receipt_hash = str(stored.get("source_receipt_hash") or "")
-    stored_source = await load_execution_result_by_receipt_v2(
-        stored_receipt_hash,
-        expected_operation="research_lab_allocation",
-        expected_purpose="research_lab.allocation.v2",
+    stored_source = await _load_allocation_settlement_frontier_source_v2(
+        stored_receipt_hash
     )
     validated = _validate_allocation_settlement_frontier_storage_v2(
         stored,

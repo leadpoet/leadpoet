@@ -632,6 +632,7 @@ async def bootstrap_active_ancestry_checkpoints_v2(
     resolve_epoch: Any = None,
     boot_verifier: Any = None,
     release_channel_loader: Any = None,
+    ensure_allocation_frontier: Any = None,
 ) -> dict[str, Any]:
     """Checkpoint all active full roots and prove the selection stayed stable."""
 
@@ -700,7 +701,7 @@ async def bootstrap_active_ancestry_checkpoints_v2(
         release_channel_loader=release_channel_loader,
     )
     started_at = time.monotonic()
-    await _verify_coordinator_capability(
+    health = await _verify_coordinator_capability(
         client=client,
         release=release,
         boot_verifier=verifier,
@@ -712,6 +713,55 @@ async def bootstrap_active_ancestry_checkpoints_v2(
         round_number=0,
         commit_sha=release["commit_sha"],
         operation=OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2,
+    )
+    if ensure_allocation_frontier is None:
+        from gateway.tee.bootstrap_allocation_settlement_frontier_v2 import (
+            ensure_allocation_settlement_frontier_v2,
+        )
+
+        ensure_allocation_frontier = ensure_allocation_settlement_frontier_v2
+    try:
+        frontier_result = await _maybe_await(
+            ensure_allocation_frontier(
+                netuid=effective_netuid,
+                through_epoch=effective_epoch,
+                release_manifest=release,
+                supported_operations=health["supported_operations"],
+                client=client,
+                boot_verifier=verifier,
+                execute=execute,
+            )
+        )
+    except Exception as exc:
+        from gateway.tee.bootstrap_allocation_settlement_frontier_v2 import (
+            AllocationSettlementFrontierBootstrapV2Unsupported,
+        )
+
+        if isinstance(
+            exc,
+            AllocationSettlementFrontierBootstrapV2Unsupported,
+        ):
+            raise ActiveAncestryCheckpointBootstrapV2Unsupported(
+                str(exc)
+            ) from exc
+        raise
+    if not isinstance(frontier_result, Mapping) or frontier_result.get(
+        "status"
+    ) not in {
+        "initialized",
+        "already_initialized",
+        "awaiting_first_allocation",
+        "recovered_signed_frontier",
+    }:
+        raise ActiveAncestryCheckpointBootstrapV2Error(
+            "allocation settlement frontier bootstrap returned no authority"
+        )
+    _marker(
+        started_at=started_at,
+        stage="allocation_frontier_ready",
+        round_number=0,
+        status=frontier_result["status"],
+        frontier_hash=frontier_result.get("frontier_hash", "existing"),
     )
     policy = ResearchLabGatewayConfig.from_env().reimbursement_policy_doc(enabled=True)
     total_new_proofs = 0

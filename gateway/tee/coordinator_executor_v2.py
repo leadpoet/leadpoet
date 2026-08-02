@@ -31,6 +31,11 @@ from leadpoet_canonical.attested_v2 import (
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     frontier_artifact_hashes_v2,
 )
+from leadpoet_canonical.allocation_settlement_frontier_bootstrap_v2 import (
+    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION,
+    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
+    frontier_bootstrap_artifact_hashes_v2,
+)
 from leadpoet_canonical.ancestry_checkpoint_v2 import (
     ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION,
     MAX_ALLOCATION_PARENT_AUTHORITIES,
@@ -180,6 +185,9 @@ def _validated_artifact_persistence_attempts(
 
 
 COORDINATOR_OPERATIONS_V2 = {
+    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION: frozenset(
+        {ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE}
+    ),
     OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2: frozenset(
         {"research_lab.ancestry_checkpoint_bootstrap.v2"}
     ),
@@ -337,6 +345,9 @@ class CoordinatorExecutorV2:
         allocation_source_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
+        allocation_frontier_bootstrap_resolver: Optional[
+            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
+        ] = None,
         source_add_provenance_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
@@ -385,6 +396,9 @@ class CoordinatorExecutorV2:
         self._weight_source_resolver = weight_source_resolver
         self._qualification_admission_resolver = qualification_admission_resolver
         self._allocation_source_resolver = allocation_source_resolver
+        self._allocation_frontier_bootstrap_resolver = (
+            allocation_frontier_bootstrap_resolver
+        )
         self._source_add_provenance_resolver = source_add_provenance_resolver
         self._source_add_functional_probe_resolver = (
             source_add_functional_probe_resolver
@@ -419,6 +433,20 @@ class CoordinatorExecutorV2:
             raise ValueError("unsupported V2 coordinator operation")
         if operation == OP_ANCESTRY_CHECKPOINT_BOOTSTRAP_V2:
             return self._ancestry_checkpoint_bootstrap(payload, context)
+        if operation == ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION:
+            if self._allocation_frontier_bootstrap_resolver is None:
+                raise ValueError(
+                    "measured allocation frontier bootstrap is unavailable"
+                )
+            document = dict(
+                self._allocation_frontier_bootstrap_resolver(payload, context)
+            )
+            return ExecutionResultV2(
+                output=document,
+                artifact_hashes=frontier_bootstrap_artifact_hashes_v2(
+                    document
+                ),
+            )
         if operation == OP_ATTEST_ARTIFACT_PERSISTENCE:
             return self._attest_artifact_persistence(payload, context)
         if operation == OP_ATTEST_QUALIFICATION_ADMISSION:

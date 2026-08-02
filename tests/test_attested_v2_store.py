@@ -2372,7 +2372,7 @@ async def test_allocation_frontier_activation_binds_exact_bootstrap(monkeypatch)
     monkeypatch.setattr(attested_v2_store, "select_many", select_many)
     monkeypatch.setattr(
         attested_v2_store,
-        "load_execution_result_by_receipt_v2",
+        "_load_allocation_settlement_frontier_source_v2",
         load_source,
     )
     monkeypatch.setattr(
@@ -2427,7 +2427,10 @@ async def test_allocation_frontier_recovers_committed_rpc_timeout(monkeypatch):
         "source_state_hash": source_state_hash,
         "frontier_doc": frontier,
     }
-    source = {"source": "validated"}
+    source = {
+        "source": "validated",
+        "row": {"operation": "research_lab_allocation"},
+    }
     rpc_calls = []
     source_loads = []
 
@@ -2446,12 +2449,12 @@ async def test_allocation_frontier_recovers_committed_rpc_timeout(monkeypatch):
 
     def validate_row(row, *, source):
         assert row == stored
-        assert source == {"source": "validated"}
+        assert source["source"] == "validated"
         return {"frontier": frontier, "source": source, "row": row}
 
     monkeypatch.setattr(
         attested_v2_store,
-        "load_execution_result_by_receipt_v2",
+        "_load_allocation_settlement_frontier_source_v2",
         load_source,
     )
     monkeypatch.setattr(attested_v2_store, "call_rpc", call_rpc)
@@ -2506,7 +2509,10 @@ async def test_allocation_frontier_retries_uncommitted_rpc_timeout(monkeypatch):
         "source_state_hash": source_state_hash,
         "frontier_doc": frontier,
     }
-    source = {"source": "validated"}
+    source = {
+        "source": "validated",
+        "row": {"operation": "research_lab_allocation"},
+    }
     rpc_calls = []
     reads = []
     sleeps = []
@@ -2538,12 +2544,12 @@ async def test_allocation_frontier_retries_uncommitted_rpc_timeout(monkeypatch):
 
     def validate_row(row, *, source):
         assert row == stored
-        assert source == {"source": "validated"}
+        assert source["source"] == "validated"
         return {"frontier": frontier, "source": source, "row": row}
 
     monkeypatch.setattr(
         attested_v2_store,
-        "load_execution_result_by_receipt_v2",
+        "_load_allocation_settlement_frontier_source_v2",
         load_source,
     )
     monkeypatch.setattr(attested_v2_store, "call_rpc", call_rpc)
@@ -2584,7 +2590,7 @@ async def test_allocation_frontier_retry_exhaustion_fails_closed(monkeypatch):
     sleeps = []
 
     async def load_source(*_args, **_kwargs):
-        return {}
+        return {"row": {"operation": "research_lab_allocation"}}
 
     def validate_row(*_args, **_kwargs):
         return {}
@@ -2601,7 +2607,7 @@ async def test_allocation_frontier_retry_exhaustion_fails_closed(monkeypatch):
 
     monkeypatch.setattr(
         attested_v2_store,
-        "load_execution_result_by_receipt_v2",
+        "_load_allocation_settlement_frontier_source_v2",
         load_source,
     )
     monkeypatch.setattr(
@@ -2642,7 +2648,7 @@ async def test_allocation_frontier_does_not_retry_contract_failure(monkeypatch):
     calls = []
 
     async def load_source(*_args, **_kwargs):
-        return {}
+        return {"row": {"operation": "research_lab_allocation"}}
 
     def validate_row(*_args, **_kwargs):
         return {}
@@ -2655,7 +2661,7 @@ async def test_allocation_frontier_does_not_retry_contract_failure(monkeypatch):
 
     monkeypatch.setattr(
         attested_v2_store,
-        "load_execution_result_by_receipt_v2",
+        "_load_allocation_settlement_frontier_source_v2",
         load_source,
     )
     monkeypatch.setattr(

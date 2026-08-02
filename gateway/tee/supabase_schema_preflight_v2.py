@@ -532,6 +532,14 @@ REQUIRED_SUPABASE_V2_RPCS = (
         "scripts/138-research-lab-ancestry-checkpoint-bootstrap-purpose.sql",
         "research_lab_ancestry_checkpoint_bootstrap_contract_v2",
     ),
+    (
+        "scripts/139-research-lab-allocation-frontier-bootstrap.sql",
+        "persist_research_lab_allocation_settlement_frontier_bootstrap_v2",
+    ),
+    (
+        "scripts/139-research-lab-allocation-frontier-bootstrap.sql",
+        "research_lab_allocation_frontier_bootstrap_contract_v2",
+    ),
 )
 
 

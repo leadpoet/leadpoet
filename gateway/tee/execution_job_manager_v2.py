@@ -44,6 +44,9 @@ from leadpoet_canonical.ancestry_checkpoint_v2 import (
     issue_legacy_ancestry_checkpoint_bootstrap_v2,
     validate_compact_ancestry_proof_v2,
 )
+from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+    MAX_REWARD_CHECKPOINTS,
+)
 
 
 JOB_SCHEMA_VERSION = "leadpoet.enclave_execution_job.v2"
@@ -68,6 +71,10 @@ MAX_INPUT_BYTES = 64 * 1024 * 1024
 # logical job.  Keep the larger ceiling scoped to the exact authority
 # operation/purpose allowlist below; ordinary V2 jobs remain at 64 MiB.
 MAX_ALLOCATION_ANCESTRY_INPUT_BYTES = 256 * 1024 * 1024
+_ALLOCATION_FRONTIER_BOOTSTRAP_SCOPE = (
+    "allocation_settlement_frontier_bootstrap_v2",
+    "research_lab.allocation_settlement_frontier_bootstrap.v2",
+)
 _ALLOCATION_ANCESTRY_JOB_SCOPES = frozenset(
     {
         (
@@ -82,6 +89,7 @@ _ALLOCATION_ANCESTRY_JOB_SCOPES = frozenset(
         ("attest_weight_input", "research_lab.source_add_reward_input.v2"),
         ("attest_weight_input", "research_lab.anomaly_adjustment_input.v2"),
         ("attest_weight_publication", "gateway.weights.publication.v2"),
+        _ALLOCATION_FRONTIER_BOOTSTRAP_SCOPE,
     }
 )
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
@@ -96,6 +104,7 @@ MAX_EXTERNAL_RECEIPT_GRAPHS = 128
 # authorities than an ordinary scoring job. Keep the larger object bound tied
 # to the same exact operation/purpose allowlist as the 256 MiB input exception.
 MAX_ALLOCATION_ANCESTRY_AUTHORITIES = 256
+MAX_ALLOCATION_FRONTIER_BOOTSTRAP_AUTHORITIES = MAX_REWARD_CHECKPOINTS + 1
 # Checkpoint bootstrap accepts two independently bounded authority sets: up to
 # 256 complete legacy graphs and up to 256 already-issued resume proofs.  The
 # resume proofs are authenticated job inputs, not additional parents of the
@@ -902,7 +911,11 @@ def _bounded_external_authority_limit(value: int) -> int:
         isinstance(value, bool)
         or not isinstance(value, int)
         or value < 1
-        or value > MAX_ALLOCATION_ANCESTRY_AUTHORITIES
+        or value
+        > max(
+            MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
+            MAX_ALLOCATION_FRONTIER_BOOTSTRAP_AUTHORITIES,
+        )
     ):
         raise ExecutionJobV2Error("external ancestry authority limit is invalid")
     return value
@@ -920,6 +933,8 @@ def _job_external_authority_limit(*, operation: str, purpose: str) -> int:
         and purpose == "research_lab.ancestry_checkpoint_bootstrap.v2"
     ):
         return MAX_CHECKPOINT_BOOTSTRAP_INPUT_AUTHORITIES
+    if (operation, purpose) == _ALLOCATION_FRONTIER_BOOTSTRAP_SCOPE:
+        return MAX_ALLOCATION_FRONTIER_BOOTSTRAP_AUTHORITIES
     if (operation, purpose) in _ALLOCATION_ANCESTRY_JOB_SCOPES:
         return MAX_ALLOCATION_ANCESTRY_AUTHORITIES
     return MAX_EXTERNAL_RECEIPT_GRAPHS
@@ -1563,7 +1578,10 @@ class ExecutionJobManagerV2:
                     parent_graph_set,
                     max_graph_count=min(
                         context.max_external_ancestry_authorities,
-                        MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
+                        max(
+                            MAX_ALLOCATION_ANCESTRY_AUTHORITIES,
+                            MAX_ALLOCATION_FRONTIER_BOOTSTRAP_AUTHORITIES,
+                        ),
                     ),
                 )
             elif parent_graphs is None:

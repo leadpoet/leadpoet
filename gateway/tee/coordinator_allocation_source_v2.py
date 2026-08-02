@@ -56,6 +56,12 @@ from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     reward_checkpoint_index_v2,
     validate_allocation_settlement_frontier_v2,
 )
+from leadpoet_canonical.allocation_settlement_frontier_bootstrap_v2 import (
+    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION,
+    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
+    frontier_bootstrap_artifact_hashes_v2,
+    validate_allocation_settlement_frontier_bootstrap_v2,
+)
 from leadpoet_verifier.economics import allocate_research_lab_epoch
 
 
@@ -624,36 +630,211 @@ class CoordinatorAllocationSourceV2:
             normalized_artifacts = sorted(
                 {str(item or "").lower() for item in artifact_hashes}
             )
-            source_state = result.get("source_state")
-            allocation = result.get("allocation")
-            required_artifacts = set(
-                frontier_artifact_hashes_v2(authority_frontier)
-            ) | {authority_state_hash}
-            receipt_projection = (
-                {"allocation": dict(allocation)}
-                if isinstance(allocation, Mapping)
-                else None
-            )
+            operation = str(execution.get("operation") or "")
+            purpose = str(execution.get("purpose") or "")
+            expected_epoch = int(authority_frontier["allocation_epoch"])
+            expected_output_root = ""
+            required_artifacts: Set[str]
+            if operation == "research_lab_allocation":
+                if purpose != "research_lab.allocation.v2":
+                    raise CoordinatorAllocationSourceV2Error(
+                        "allocation frontier execution purpose differs"
+                    )
+                source_state = result.get("source_state")
+                allocation = result.get("allocation")
+                required_artifacts = set(
+                    frontier_artifact_hashes_v2(authority_frontier)
+                ) | {authority_state_hash}
+                if (
+                    not isinstance(source_state, Mapping)
+                    or not isinstance(allocation, Mapping)
+                    or source_state.get("settlement_frontier")
+                    != authority_frontier
+                    or sha256_json(dict(source_state))
+                    != authority_state_hash
+                    or result.get("source_state_hash")
+                    != authority_state_hash
+                ):
+                    raise CoordinatorAllocationSourceV2Error(
+                        "allocation frontier source state differs"
+                    )
+                expected_output_root = sha256_json(
+                    {"allocation": dict(allocation)}
+                )
+            elif (
+                operation
+                == ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION
+                and purpose
+                == ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE
+            ):
+                try:
+                    bootstrap = (
+                        validate_allocation_settlement_frontier_bootstrap_v2(
+                            result
+                        )
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise CoordinatorAllocationSourceV2Error(
+                        "allocation frontier bootstrap authority is invalid"
+                    ) from exc
+                if (
+                    bootstrap["frontier"] != authority_frontier
+                    or bootstrap["source_state_hash"]
+                    != authority_state_hash
+                    or int(bootstrap["netuid"])
+                    != int(authority_frontier["netuid"])
+                    or int(bootstrap["allocation_epoch"])
+                    != int(authority_frontier["allocation_epoch"])
+                ):
+                    raise CoordinatorAllocationSourceV2Error(
+                        "allocation frontier bootstrap authority differs"
+                    )
+                expected_epoch = int(bootstrap["bootstrap_epoch"])
+                expected_output_root = sha256_json(dict(bootstrap))
+                required_artifacts = set(
+                    frontier_bootstrap_artifact_hashes_v2(bootstrap)
+                )
+                allocation_receipt_hash = str(
+                    bootstrap["allocation_source_receipt_hash"]
+                )
+                parent_hashes = receipt.get("parent_receipt_hashes")
+                if (
+                    not isinstance(parent_hashes, list)
+                    or allocation_receipt_hash not in parent_hashes
+                ):
+                    raise CoordinatorAllocationSourceV2Error(
+                        "allocation frontier bootstrap source is undeclared"
+                    )
+                allocation_execution_rows = self._read(
+                    "attested_execution_result_by_receipt",
+                    {"receipt_hash": allocation_receipt_hash},
+                    context,
+                )
+                allocation_receipt_rows = self._read(
+                    "attested_receipt_by_hash",
+                    {"receipt_hash": allocation_receipt_hash},
+                    context,
+                )
+                if (
+                    len(allocation_execution_rows) != 1
+                    or len(allocation_receipt_rows) != 1
+                ):
+                    raise CoordinatorAllocationSourceV2Error(
+                        "allocation frontier bootstrap source is unavailable"
+                    )
+                allocation_execution = allocation_execution_rows[0]
+                allocation_result = allocation_execution.get("result_doc")
+                allocation_receipt = allocation_receipt_rows[0].get(
+                    "receipt_doc"
+                )
+                allocation_artifacts = allocation_execution.get(
+                    "artifact_hashes"
+                )
+                if (
+                    not isinstance(allocation_result, Mapping)
+                    or not isinstance(allocation_receipt, Mapping)
+                    or not isinstance(allocation_artifacts, list)
+                ):
+                    raise CoordinatorAllocationSourceV2Error(
+                        "allocation frontier bootstrap source is incomplete"
+                    )
+                validate_signed_execution_receipt(allocation_receipt)
+                allocation_state = allocation_result.get("source_state")
+                allocation = allocation_result.get("allocation")
+                normalized_allocation_artifacts = sorted(
+                    {str(item or "").lower() for item in allocation_artifacts}
+                )
+                allocation_output_root = (
+                    sha256_json({"allocation": dict(allocation)})
+                    if isinstance(allocation, Mapping)
+                    else ""
+                )
+                if (
+                    len(normalized_allocation_artifacts)
+                    != len(allocation_artifacts)
+                    or any(
+                        not re.fullmatch(r"sha256:[0-9a-f]{64}", item)
+                        for item in normalized_allocation_artifacts
+                    )
+                    or not isinstance(allocation_state, Mapping)
+                    or not isinstance(allocation, Mapping)
+                    or allocation_state.get("settlement_frontier") is not None
+                    or sha256_json(dict(allocation_state))
+                    != authority_state_hash
+                    or allocation_result.get("source_state_hash")
+                    != authority_state_hash
+                    or int(allocation_state.get("netuid", -1))
+                    != int(authority_frontier["netuid"])
+                    or int(allocation_state.get("epoch", -1))
+                    != int(authority_frontier["allocation_epoch"])
+                    or authority_state_hash
+                    not in normalized_allocation_artifacts
+                    or allocation_execution.get("schema_version")
+                    != "leadpoet.attested_execution_result.v2"
+                    or allocation_execution.get("receipt_hash")
+                    != allocation_receipt_hash
+                    or allocation_execution.get("role")
+                    != "gateway_coordinator"
+                    or allocation_execution.get("operation")
+                    != "research_lab_allocation"
+                    or allocation_execution.get("purpose")
+                    != "research_lab.allocation.v2"
+                    or int(allocation_execution.get("epoch_id", -1))
+                    != int(authority_frontier["allocation_epoch"])
+                    or allocation_execution.get("result_hash")
+                    != sha256_json(dict(allocation_result))
+                    or allocation_execution.get("artifact_root")
+                    != merkle_root(
+                        normalized_allocation_artifacts,
+                        domain="leadpoet-artifact-v2",
+                    )
+                    or allocation_execution.get("output_root")
+                    != allocation_output_root
+                    or allocation_receipt.get("receipt_hash")
+                    != allocation_receipt_hash
+                    or allocation_receipt.get("role")
+                    != "gateway_coordinator"
+                    or allocation_receipt.get("purpose")
+                    != "research_lab.allocation.v2"
+                    or allocation_receipt.get("status") != "succeeded"
+                    or allocation_receipt.get("job_id")
+                    != allocation_execution.get("job_id")
+                    or allocation_receipt.get("sequence")
+                    != allocation_execution.get("sequence")
+                    or allocation_receipt.get("release_hash")
+                    != allocation_execution.get("release_hash")
+                    or int(allocation_receipt.get("epoch_id", -1))
+                    != int(authority_frontier["allocation_epoch"])
+                    or allocation_receipt.get("input_root")
+                    != allocation_execution.get("input_root")
+                    or allocation_receipt.get("output_root")
+                    != allocation_output_root
+                    or allocation_receipt.get("artifact_root")
+                    != allocation_execution.get("artifact_root")
+                    or allocation_receipt_rows[0].get("receipt_hash")
+                    != allocation_receipt_hash
+                ):
+                    raise CoordinatorAllocationSourceV2Error(
+                        "allocation frontier bootstrap source differs"
+                    )
+            else:
+                raise CoordinatorAllocationSourceV2Error(
+                    "allocation frontier execution operation differs"
+                )
             if (
                 len(normalized_artifacts) != len(artifact_hashes)
                 or any(
                     not re.fullmatch(r"sha256:[0-9a-f]{64}", item)
                     for item in normalized_artifacts
                 )
-                or not isinstance(source_state, Mapping)
-                or source_state.get("settlement_frontier")
-                != authority_frontier
-                or sha256_json(dict(source_state)) != authority_state_hash
-                or result.get("source_state_hash") != authority_state_hash
                 or not required_artifacts.issubset(set(normalized_artifacts))
                 or execution.get("schema_version")
                 != "leadpoet.attested_execution_result.v2"
                 or execution.get("receipt_hash") != authority_receipt_hash
                 or execution.get("role") != "gateway_coordinator"
-                or execution.get("operation") != "research_lab_allocation"
-                or execution.get("purpose") != "research_lab.allocation.v2"
-                or int(execution.get("epoch_id", -1))
-                != int(authority_frontier["allocation_epoch"])
+                or execution.get("operation") != operation
+                or execution.get("purpose") != purpose
+                or int(execution.get("epoch_id", -1)) != expected_epoch
                 or execution.get("result_hash") != sha256_json(dict(result))
                 or execution.get("artifact_root")
                 != merkle_root(
@@ -662,16 +843,13 @@ class CoordinatorAllocationSourceV2:
                 )
                 or receipt.get("receipt_hash") != authority_receipt_hash
                 or receipt.get("role") != "gateway_coordinator"
-                or receipt.get("purpose") != "research_lab.allocation.v2"
+                or receipt.get("purpose") != purpose
                 or receipt.get("status") != "succeeded"
-                or int(receipt.get("epoch_id", -1))
-                != int(authority_frontier["allocation_epoch"])
-                or receipt.get("output_root")
-                != (
-                    sha256_json(receipt_projection)
-                    if receipt_projection
-                    else ""
-                )
+                or receipt.get("job_id") != execution.get("job_id")
+                or receipt.get("sequence") != execution.get("sequence")
+                or receipt.get("release_hash") != execution.get("release_hash")
+                or int(receipt.get("epoch_id", -1)) != expected_epoch
+                or receipt.get("output_root") != expected_output_root
                 or receipt.get("artifact_root")
                 != execution.get("artifact_root")
                 or receipt.get("input_root") != execution.get("input_root")

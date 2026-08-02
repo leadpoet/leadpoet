@@ -64,6 +64,7 @@ ROLE_PURPOSES = {
             "research_lab.ban_input.v2",
             "research_lab.anomaly_adjustment_input.v2",
             "research_lab.ancestry_checkpoint_bootstrap.v2",
+            "research_lab.allocation_settlement_frontier_bootstrap.v2",
             "gateway.weights.publication.v2",
         }
     ),

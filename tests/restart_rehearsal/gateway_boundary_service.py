@@ -24,6 +24,12 @@ from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     frontier_artifact_hashes_v2,
     validate_allocation_settlement_frontier_v2,
 )
+from leadpoet_canonical.allocation_settlement_frontier_bootstrap_v2 import (
+    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION,
+    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
+    frontier_bootstrap_artifact_hashes_v2,
+    validate_allocation_settlement_frontier_bootstrap_v2,
+)
 from leadpoet_canonical.attested_v2 import sha256_json
 
 try:
@@ -455,11 +461,12 @@ def _migration_schema_contract(
         "136-research-lab-ancestry-checkpoint-sidecars.sql",
         "137-research-lab-allocation-settlement-frontier.sql",
         "138-research-lab-ancestry-checkpoint-bootstrap-purpose.sql",
+        "139-research-lab-allocation-frontier-bootstrap.sql",
     ]
     applied_migrations = document.get("applied_migrations")
     if (
         not isinstance(applied_migrations, list)
-        or applied_migrations[-9:] != expected_final_migrations
+        or applied_migrations[-10:] != expected_final_migrations
     ):
         raise RuntimeError(
             "migration-backed final migration order differs from production"
@@ -540,7 +547,9 @@ def _migration_schema_contract(
         "research_lab_champion_lifetime_credit_contract_v1",
         "persist_research_lab_ancestry_checkpoint_v2",
         "persist_research_lab_allocation_settlement_frontier_v2",
+        "persist_research_lab_allocation_settlement_frontier_bootstrap_v2",
         "research_lab_ancestry_checkpoint_bootstrap_contract_v2",
+        "research_lab_allocation_frontier_bootstrap_contract_v2",
     }
     if not required_rpcs <= set(raw_rpcs):
         raise RuntimeError(
@@ -1818,6 +1827,276 @@ class LocalPostgRESTState:
             "source_state_hash": source_state_hash,
         }
 
+    def persist_allocation_settlement_frontier_bootstrap(
+        self,
+        body: Any,
+    ) -> dict[str, Any]:
+        """Mirror migration 139's measured first-frontier contract."""
+
+        if not isinstance(body, dict) or set(body) != {
+            "requested_frontier",
+            "requested_source_receipt_hash",
+            "requested_source_state_hash",
+        }:
+            raise ValueError("allocation frontier bootstrap RPC body is invalid")
+        frontier = validate_allocation_settlement_frontier_v2(
+            body.get("requested_frontier")
+        )
+        bootstrap_receipt_hash = str(
+            body.get("requested_source_receipt_hash") or ""
+        )
+        source_state_hash = str(
+            body.get("requested_source_state_hash") or ""
+        )
+        if (
+            not HASH_RE.fullmatch(bootstrap_receipt_hash)
+            or not HASH_RE.fullmatch(source_state_hash)
+            or frontier.get("mode") != "legacy_full_history_bootstrap"
+            or frontier.get("predecessor_frontier_hash") is not None
+        ):
+            raise ValueError("allocation frontier bootstrap request is invalid")
+
+        frontier_table = "research_lab_allocation_settlement_frontiers_v2"
+        activation_table = (
+            "research_lab_allocation_settlement_frontier_activation_v2"
+        )
+        execution_table = "research_lab_attested_execution_results_v2"
+        receipt_table = "research_lab_attested_execution_receipts_v2"
+        frontier_columns = self.relation_columns.get(frontier_table)
+        activation_columns = self.relation_columns.get(activation_table)
+        if (
+            frontier_columns is None
+            or activation_columns is None
+            or frontier_table not in self.rows
+            or activation_table not in self.rows
+        ):
+            raise ValueError("allocation frontier bootstrap migration is unavailable")
+
+        netuid = int(frontier["netuid"])
+        epoch = int(frontier["allocation_epoch"])
+        frontier_hash = str(frontier["frontier_hash"])
+        with self.lock:
+            bootstrap_execution = next(
+                (
+                    row
+                    for row in self.rows.get(execution_table, [])
+                    if row.get("receipt_hash") == bootstrap_receipt_hash
+                ),
+                None,
+            )
+            bootstrap_receipt = next(
+                (
+                    row
+                    for row in self.rows.get(receipt_table, [])
+                    if row.get("receipt_hash") == bootstrap_receipt_hash
+                ),
+                None,
+            )
+            bootstrap_doc = (
+                bootstrap_execution.get("result_doc")
+                if isinstance(bootstrap_execution, dict)
+                else None
+            )
+            try:
+                bootstrap = validate_allocation_settlement_frontier_bootstrap_v2(
+                    bootstrap_doc
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "allocation frontier bootstrap authority is invalid"
+                ) from exc
+            allocation_receipt_hash = str(
+                bootstrap.get("allocation_source_receipt_hash") or ""
+            )
+            allocation_execution = next(
+                (
+                    row
+                    for row in self.rows.get(execution_table, [])
+                    if row.get("receipt_hash") == allocation_receipt_hash
+                ),
+                None,
+            )
+            allocation_receipt = next(
+                (
+                    row
+                    for row in self.rows.get(receipt_table, [])
+                    if row.get("receipt_hash") == allocation_receipt_hash
+                ),
+                None,
+            )
+            allocation_result = (
+                allocation_execution.get("result_doc")
+                if isinstance(allocation_execution, dict)
+                else None
+            )
+            allocation_state = (
+                allocation_result.get("source_state")
+                if isinstance(allocation_result, dict)
+                else None
+            )
+            bootstrap_artifacts = (
+                bootstrap_execution.get("artifact_hashes")
+                if isinstance(bootstrap_execution, dict)
+                else None
+            )
+            execution_receipt_fields = (
+                "role",
+                "purpose",
+                "job_id",
+                "epoch_id",
+                "sequence",
+                "input_root",
+                "output_root",
+                "artifact_root",
+            )
+            parent_hashes = (
+                bootstrap_receipt.get("receipt_doc", {}).get(
+                    "parent_receipt_hashes"
+                )
+                if isinstance(bootstrap_receipt, dict)
+                and isinstance(bootstrap_receipt.get("receipt_doc"), dict)
+                else None
+            )
+            if (
+                not isinstance(bootstrap_execution, dict)
+                or not isinstance(bootstrap_receipt, dict)
+                or bootstrap_execution.get("role") != "gateway_coordinator"
+                or bootstrap_execution.get("operation")
+                != ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION
+                or bootstrap_execution.get("purpose")
+                != ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE
+                or bootstrap_receipt.get("receipt_status") != "succeeded"
+                or any(
+                    bootstrap_receipt.get(field)
+                    != bootstrap_execution.get(field)
+                    for field in execution_receipt_fields
+                )
+                or int(bootstrap_execution.get("epoch_id", -1))
+                != int(bootstrap["bootstrap_epoch"])
+                or bootstrap.get("frontier") != frontier
+                or bootstrap.get("source_state_hash") != source_state_hash
+                or not isinstance(bootstrap_artifacts, list)
+                or not set(
+                    frontier_bootstrap_artifact_hashes_v2(bootstrap)
+                ).issubset(set(bootstrap_artifacts))
+                or not isinstance(allocation_execution, dict)
+                or not isinstance(allocation_receipt, dict)
+                or not isinstance(allocation_result, dict)
+                or not isinstance(allocation_state, dict)
+                or allocation_execution.get("role") != "gateway_coordinator"
+                or allocation_execution.get("operation")
+                != "research_lab_allocation"
+                or allocation_execution.get("purpose")
+                != "research_lab.allocation.v2"
+                or int(allocation_execution.get("epoch_id", -1)) != epoch
+                or allocation_result.get("source_state_hash")
+                != source_state_hash
+                or allocation_state.get("epoch") != epoch
+                or allocation_state.get("netuid") != netuid
+                or allocation_state.get("settlement_frontier") is not None
+                or allocation_receipt.get("receipt_status") != "succeeded"
+                or any(
+                    allocation_receipt.get(field)
+                    != allocation_execution.get(field)
+                    for field in execution_receipt_fields
+                )
+                or not isinstance(parent_hashes, list)
+                or allocation_receipt_hash not in parent_hashes
+            ):
+                raise ValueError("allocation frontier bootstrap authority is invalid")
+
+            frontiers = self.rows[frontier_table]
+            activations = self.rows[activation_table]
+            existing = next(
+                (
+                    row
+                    for row in frontiers
+                    if row.get("netuid") == netuid
+                    and row.get("allocation_epoch") == epoch
+                ),
+                None,
+            )
+            activation = next(
+                (row for row in activations if row.get("netuid") == netuid),
+                None,
+            )
+            expected_row = {
+                "netuid": netuid,
+                "allocation_epoch": epoch,
+                "settled_through_epoch": int(frontier["settled_through_epoch"]),
+                "schema_version": str(frontier["schema_version"]),
+                "frontier_hash": frontier_hash,
+                "predecessor_frontier_hash": None,
+                "source_receipt_hash": bootstrap_receipt_hash,
+                "source_state_hash": source_state_hash,
+                "frontier_doc": frontier,
+            }
+            expected_activation = {
+                "netuid": netuid,
+                "schema_version": (
+                    "leadpoet.research_lab_allocation_settlement_"
+                    "frontier_activation.v2"
+                ),
+                "first_allocation_epoch": epoch,
+                "first_frontier_hash": frontier_hash,
+                "source_receipt_hash": bootstrap_receipt_hash,
+            }
+            if existing is not None:
+                durable_row = {
+                    field: value
+                    for field, value in existing.items()
+                    if field != "created_at"
+                }
+                durable_activation = (
+                    {
+                        field: value
+                        for field, value in activation.items()
+                        if field != "activated_at"
+                    }
+                    if isinstance(activation, dict)
+                    else None
+                )
+                if (
+                    durable_row != expected_row
+                    or durable_activation != expected_activation
+                ):
+                    raise ValueError("allocation frontier bootstrap conflicts")
+                status = "already_persisted"
+            else:
+                if activation is not None or any(
+                    row.get("netuid") == netuid for row in frontiers
+                ):
+                    raise ValueError("allocation frontier bootstrap is already initialized")
+                if set(expected_row) != set(frontier_columns) - {"created_at"}:
+                    raise ValueError("allocation frontier bootstrap columns differ")
+                if set(expected_activation) != set(activation_columns) - {
+                    "activated_at"
+                }:
+                    raise ValueError("allocation frontier activation columns differ")
+                frontiers.append(
+                    {
+                        **expected_row,
+                        "created_at": "2026-07-25T00:00:00+00:00",
+                    }
+                )
+                activations.append(
+                    {
+                        **expected_activation,
+                        "activated_at": "2026-07-25T00:00:00+00:00",
+                    }
+                )
+                self._write_durable_state_locked(mutated=True)
+                status = "persisted"
+
+        return {
+            "status": status,
+            "netuid": netuid,
+            "allocation_epoch": epoch,
+            "frontier_hash": frontier_hash,
+            "source_receipt_hash": bootstrap_receipt_hash,
+            "source_state_hash": source_state_hash,
+        }
+
     def persist_chain_realized_settlement(
         self,
         *,
@@ -2256,6 +2535,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.state.record(
                     status="ok",
                     operation="allocation_settlement_frontier_persisted",
+                    method=self.command,
+                    target=name,
+                    result_status=response["status"],
+                    netuid=response["netuid"],
+                    allocation_epoch=response["allocation_epoch"],
+                    frontier_hash=response["frontier_hash"],
+                    source_receipt_hash=response["source_receipt_hash"],
+                )
+            elif name == (
+                "persist_research_lab_allocation_settlement_frontier_bootstrap_v2"
+            ):
+                response = self.server.state.persist_allocation_settlement_frontier_bootstrap(
+                    body
+                )
+                self.server.state.record(
+                    status="ok",
+                    operation="allocation_settlement_frontier_bootstrap_persisted",
                     method=self.command,
                     target=name,
                     result_status=response["status"],

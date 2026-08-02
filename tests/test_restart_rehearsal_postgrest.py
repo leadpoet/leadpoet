@@ -14,6 +14,12 @@ from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     build_allocation_settlement_frontier_v2,
     frontier_artifact_hashes_v2,
 )
+from leadpoet_canonical.allocation_settlement_frontier_bootstrap_v2 import (
+    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION,
+    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
+    build_allocation_settlement_frontier_bootstrap_v2,
+    frontier_bootstrap_artifact_hashes_v2,
+)
 from leadpoet_canonical.attested_v2 import sha256_json
 
 
@@ -158,6 +164,107 @@ def _allocation_frontier_state(
         "requested_source_state_hash": source_state_hash,
     }
     return state, body
+
+
+def _allocation_frontier_bootstrap_state(
+    tmp_path: Path,
+) -> tuple[LocalPostgRESTState, dict[str, object]]:
+    state, _unused = _allocation_frontier_state(tmp_path)
+    state.rpcs.add(
+        "persist_research_lab_allocation_settlement_frontier_bootstrap_v2"
+    )
+    execution_table = "research_lab_attested_execution_results_v2"
+    receipt_table = "research_lab_attested_execution_receipts_v2"
+    state.rows[execution_table].clear()
+    state.rows[receipt_table].clear()
+    source_receipt_hash = "sha256:" + "a" * 64
+    bootstrap_receipt_hash = "sha256:" + "b" * 64
+    source_state = {
+        "epoch": 100,
+        "netuid": 71,
+        "settlement_frontier": None,
+    }
+    source_state_hash = sha256_json(source_state)
+    source_fields = {
+        "role": "gateway_coordinator",
+        "purpose": "research_lab.allocation.v2",
+        "job_id": "allocation:100",
+        "epoch_id": 100,
+        "sequence": 0,
+        "input_root": "sha256:" + "1" * 64,
+        "output_root": "sha256:" + "2" * 64,
+        "artifact_root": "sha256:" + "3" * 64,
+    }
+    state.rows[execution_table].append(
+        {
+            **source_fields,
+            "receipt_hash": source_receipt_hash,
+            "operation": "research_lab_allocation",
+            "result_doc": {
+                "source_state": source_state,
+                "source_state_hash": source_state_hash,
+            },
+            "artifact_hashes": [source_state_hash],
+        }
+    )
+    state.rows[receipt_table].append(
+        {
+            **source_fields,
+            "receipt_hash": source_receipt_hash,
+            "receipt_status": "succeeded",
+            "receipt_doc": {"parent_receipt_hashes": []},
+        }
+    )
+    frontier = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=100,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(),
+    )
+    bootstrap = build_allocation_settlement_frontier_bootstrap_v2(
+        netuid=71,
+        bootstrap_epoch=100,
+        allocation_source_receipt_hash=source_receipt_hash,
+        source_state_hash=source_state_hash,
+        frontier=frontier,
+    )
+    bootstrap_fields = {
+        "role": "gateway_coordinator",
+        "purpose": ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
+        "job_id": "allocation-frontier-bootstrap:100",
+        "epoch_id": 100,
+        "sequence": 0,
+        "input_root": "sha256:" + "4" * 64,
+        "output_root": "sha256:" + "5" * 64,
+        "artifact_root": "sha256:" + "6" * 64,
+    }
+    state.rows[execution_table].append(
+        {
+            **bootstrap_fields,
+            "receipt_hash": bootstrap_receipt_hash,
+            "operation": ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION,
+            "result_doc": bootstrap,
+            "artifact_hashes": list(
+                frontier_bootstrap_artifact_hashes_v2(bootstrap)
+            ),
+        }
+    )
+    state.rows[receipt_table].append(
+        {
+            **bootstrap_fields,
+            "receipt_hash": bootstrap_receipt_hash,
+            "receipt_status": "succeeded",
+            "receipt_doc": {
+                "parent_receipt_hashes": [source_receipt_hash]
+            },
+        }
+    )
+    return state, {
+        "requested_frontier": frontier,
+        "requested_source_receipt_hash": bootstrap_receipt_hash,
+        "requested_source_state_hash": source_state_hash,
+    }
 
 
 def test_json_filters_match_postgrest_text_and_json_semantics() -> None:
@@ -331,6 +438,34 @@ def test_frontier_boundary_rejects_alternate_receipt_authority(
 
     with pytest.raises(ValueError, match="source is invalid"):
         state.persist_allocation_settlement_frontier(altered)
+
+
+def test_frontier_bootstrap_boundary_persists_and_replays_measured_request(
+    tmp_path: Path,
+) -> None:
+    state, body = _allocation_frontier_bootstrap_state(tmp_path)
+
+    first = state.persist_allocation_settlement_frontier_bootstrap(body)
+    replay = state.persist_allocation_settlement_frontier_bootstrap(body)
+
+    assert first["status"] == "persisted"
+    assert replay["status"] == "already_persisted"
+    assert first["source_receipt_hash"] == body[
+        "requested_source_receipt_hash"
+    ]
+
+
+def test_frontier_bootstrap_boundary_rejects_unmeasured_source_receipt(
+    tmp_path: Path,
+) -> None:
+    state, body = _allocation_frontier_bootstrap_state(tmp_path)
+    altered = {
+        **body,
+        "requested_source_receipt_hash": "sha256:" + "a" * 64,
+    }
+
+    with pytest.raises(ValueError, match="authority is invalid"):
+        state.persist_allocation_settlement_frontier_bootstrap(altered)
 
 
 def test_maintenance_lease_matches_acquire_renew_and_contention_contract(

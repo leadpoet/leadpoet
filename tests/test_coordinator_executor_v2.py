@@ -28,6 +28,12 @@ from leadpoet_canonical.attested_v2 import (
 from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     build_allocation_settlement_frontier_v2,
 )
+from leadpoet_canonical.allocation_settlement_frontier_bootstrap_v2 import (
+    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION,
+    ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
+    build_allocation_settlement_frontier_bootstrap_v2,
+    frontier_bootstrap_artifact_hashes_v2,
+)
 from leadpoet_canonical.ancestry_checkpoint_v2 import (
     ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION,
 )
@@ -192,6 +198,52 @@ async def test_coordinator_ancestry_bootstrap_requires_canonical_legacy_roots():
             },
             context,
         )
+
+
+@pytest.mark.asyncio
+async def test_coordinator_allocation_frontier_bootstrap_is_measured_and_bound():
+    frontier = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=100,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(),
+    )
+    document = build_allocation_settlement_frontier_bootstrap_v2(
+        netuid=71,
+        bootstrap_epoch=101,
+        allocation_source_receipt_hash="sha256:" + "1" * 64,
+        source_state_hash="sha256:" + "2" * 64,
+        frontier=frontier,
+    )
+    observed = []
+
+    def resolve(payload, context):
+        observed.append((payload, context.purpose))
+        return document
+
+    result = await CoordinatorExecutorV2(
+        allocation_frontier_bootstrap_resolver=resolve,
+    )(
+        ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_OPERATION,
+        {"request": "measured"},
+        ExecutionContextV2(
+            job_id="allocation-frontier-bootstrap:101",
+            purpose=ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
+            epoch_id=101,
+        ),
+    )
+
+    assert observed == [
+        (
+            {"request": "measured"},
+            ALLOCATION_SETTLEMENT_FRONTIER_BOOTSTRAP_PURPOSE,
+        )
+    ]
+    assert result.output == document
+    assert result.artifact_hashes == frontier_bootstrap_artifact_hashes_v2(
+        document
+    )
 
 
 @pytest.mark.asyncio

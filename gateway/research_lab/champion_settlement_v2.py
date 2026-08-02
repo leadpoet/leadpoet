@@ -2423,6 +2423,7 @@ async def load_chain_realized_allocation_history_v1(
     start_epoch: int,
     end_epoch: int,
     _receipt_graph_records_out: dict[str, dict[str, Any]] | None = None,
+    _coverage_out: dict[str, int | None] | None = None,
 ) -> list[dict[str, Any]]:
     """Load complete realized-chain Lab settlement epochs."""
 
@@ -2492,6 +2493,22 @@ async def load_chain_realized_allocation_history_v1(
     if observed_epochs != expected_epochs:
         raise ChampionSettlementV2Error(
             "chain realized settlement history is incomplete"
+        )
+    covered_start_epoch = max(int(start_epoch), activation_epoch)
+    if covered_start_epoch > int(end_epoch):
+        covered_start_epoch = None
+    if _coverage_out is not None:
+        _coverage_out.clear()
+        _coverage_out.update(
+            {
+                "activation_epoch": activation_epoch,
+                "covered_start_epoch": covered_start_epoch,
+                "covered_end_epoch": (
+                    int(end_epoch)
+                    if covered_start_epoch is not None
+                    else None
+                ),
+            }
         )
     if not settlement_rows:
         return []
@@ -2577,6 +2594,8 @@ async def load_settled_allocation_history_v2(
     }
     chain_kwargs = dict(history_kwargs)
     finalized_kwargs = dict(history_kwargs)
+    chain_coverage: dict[str, int | None] = {}
+    chain_kwargs["_coverage_out"] = chain_coverage
     if _receipt_graph_records_out is not None:
         chain_kwargs["_receipt_graph_records_out"] = (
             _receipt_graph_records_out
@@ -2588,9 +2607,42 @@ async def load_settled_allocation_history_v2(
         **chain_kwargs
     )
     finalized_end_epoch = int(end_epoch)
-    if chain_realized:
-        # Realized chain settlement replaces submitted-weight intent from its
-        # first covered epoch onward.
+    covered_start_epoch = chain_coverage.get("covered_start_epoch")
+    if covered_start_epoch is not None:
+        # Every contiguous settlement row is authoritative, including epochs
+        # with no obligation credits. Credit rows alone cannot define cutover.
+        first_chain_realized_epoch = int(covered_start_epoch)
+        try:
+            activation_epoch = int(chain_coverage["activation_epoch"])
+            covered_end_epoch = int(chain_coverage["covered_end_epoch"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ChampionSettlementV2Error(
+                "chain realized settlement coverage is invalid"
+            ) from exc
+        if (
+            first_chain_realized_epoch
+            != max(int(start_epoch), activation_epoch)
+            or covered_end_epoch != int(end_epoch)
+            or not int(start_epoch)
+            <= first_chain_realized_epoch
+            <= covered_end_epoch
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement coverage is outside the requested range"
+            )
+        if any(
+            not first_chain_realized_epoch
+            <= int(row["epoch"])
+            <= covered_end_epoch
+            for row in chain_realized
+        ):
+            raise ChampionSettlementV2Error(
+                "chain realized settlement history is outside the requested range"
+            )
+        finalized_end_epoch = first_chain_realized_epoch - 1
+    elif chain_realized:
+        # Compatibility for injected loaders that predate explicit coverage
+        # metadata. The production loader always reports the validated window.
         first_chain_realized_epoch = min(
             int(row["epoch"]) for row in chain_realized
         )

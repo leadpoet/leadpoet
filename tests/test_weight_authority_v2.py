@@ -8,12 +8,14 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     COORDINATOR_ROLE,
     EMPTY_ARTIFACT_ROOT,
     EMPTY_HOST_OPERATION_ROOT,
     EMPTY_TRANSPORT_ROOT,
     WEIGHT_ROLE,
     build_boot_identity_body,
+    build_checkpointed_receipt_graph,
     build_execution_receipt_body,
     build_receipt_graph,
     build_transport_attempt,
@@ -21,6 +23,12 @@ from leadpoet_canonical.attested_v2 import (
     create_signed_execution_receipt,
     merkle_root,
     sha256_json,
+)
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    ANCESTRY_DELTA_SCHEMA_VERSION,
+    build_compact_ancestry_proof_from_delta_v2,
+    build_full_graph_parent_v2,
+    issue_ancestry_certificate_v2,
 )
 from leadpoet_canonical.auditor_v2 import (
     AuditorV2Error,
@@ -1210,6 +1218,135 @@ def test_auditor_v2_requires_publication_and_finalized_state_transition():
         finalization_submission,
         chain_signing_profile=_chain_profile(),
     )
+    full_finalization_graph = finalization_submission["receipt_graph"]
+    full_root_hash = full_finalization_graph["root_receipt_hash"]
+    full_root_receipt = next(
+        item
+        for item in full_finalization_graph["receipts"]
+        if item["receipt_hash"] == full_root_hash
+    )
+    parent_graph = build_receipt_graph(
+        root_receipt_hash=extrinsic_receipt["receipt_hash"],
+        boot_identities=full_finalization_graph["boot_identities"],
+        receipts=[
+            item
+            for item in full_finalization_graph["receipts"]
+            if item["receipt_hash"] != full_root_hash
+        ],
+        transport_attempts=[
+            item
+            for item in full_finalization_graph["transport_attempts"]
+            if item["job_id"] != finalization_job
+        ],
+        host_operations=full_finalization_graph["host_operations"],
+    )
+    parent_authority = build_full_graph_parent_v2(
+        parent_graph,
+        required_purposes=(
+            "validator.set_weights_extrinsic.v2",
+            "validator.weights.computed.v2",
+        ),
+    )
+    lineage_id = sha256_json({"lineage": "weight-finalization-test"})
+
+    def checkpointed_submission_for(document, root_receipt):
+        delta = {
+            "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+            "root_receipt_hash": root_receipt["receipt_hash"],
+            "boot_identities": [finalization_boot],
+            "receipts": [root_receipt],
+            "transport_attempts": list(finalization_attempts),
+            "host_operations": [],
+        }
+        certificate = issue_ancestry_certificate_v2(
+            local_delta=delta,
+            lineage_id=lineage_id,
+            certificate_sequence=0,
+            issuer_boot_identity=finalization_boot,
+            issued_at=NOW,
+            sign_digest=weight_key.sign,
+            boot_attestation_verifier=lambda identity: dict(identity),
+            allowed_issuer_roles=(WEIGHT_ROLE,),
+            parent_full_graphs=(parent_authority,),
+            required_purposes=(
+                "validator.weights.finalized.v2",
+            ),
+        )
+        proof = build_compact_ancestry_proof_from_delta_v2(
+            delta,
+            certificate,
+            expected_lineage_id=lineage_id,
+            boot_attestation_verifier=lambda identity: dict(identity),
+            allowed_issuer_roles=(WEIGHT_ROLE,),
+        )
+        checkpointed_graph = build_checkpointed_receipt_graph(
+            root_receipt_hash=root_receipt["receipt_hash"],
+            boot_identities=delta["boot_identities"],
+            receipts=delta["receipts"],
+            transport_attempts=delta["transport_attempts"],
+            host_operations=delta["host_operations"],
+            ancestry_lineage_id=lineage_id,
+            ancestry_proof=proof,
+            boot_attestation_verifier=lambda identity: dict(identity),
+            require_boot_attestation_verification=True,
+        )
+        return {
+            "schema_version": "leadpoet.weight_finalization_submission.v2",
+            "validator_hotkey": VALIDATOR_HOTKEY,
+            "weight_submission_event_hash": submission_event_hash,
+            "finalization": document,
+            "receipt_graph": checkpointed_graph,
+        }
+
+    checkpointed_submission = checkpointed_submission_for(
+        finalization_doc,
+        full_root_receipt,
+    )
+    assert (
+        checkpointed_submission["receipt_graph"]["schema_version"]
+        == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+    )
+    assert checkpointed_submission["receipt_graph"]["receipts"] == [
+        full_root_receipt
+    ]
+    assert validate_weight_finalization_submission_v2(
+        checkpointed_submission,
+        chain_signing_profile=_chain_profile(),
+    ) == verified_finalization
+    assert validate_weight_finalization_submission_v2(
+        checkpointed_submission,
+    ) == verified_finalization
+
+    wrong_extrinsic_hash_doc = {
+        **finalization_doc,
+        "extrinsic_hash": "0x" + "e" * 64,
+    }
+    wrong_extrinsic_hash_root = _receipt(
+        role=WEIGHT_ROLE,
+        purpose="validator.weights.finalized.v2",
+        job_id=finalization_job,
+        private_key=weight_key,
+        public_key=weight_pub,
+        boot=finalization_boot,
+        config_hash=weight_config,
+        input_root=full_root_receipt["input_root"],
+        output_root=sha256_json(wrong_extrinsic_hash_doc),
+        parents=[extrinsic_receipt["receipt_hash"]],
+        sequence=203,
+        transport_root=full_root_receipt["transport_root"],
+        artifact_root=full_root_receipt["artifact_root"],
+    )
+    with pytest.raises(
+        WeightAuthorityV2Error,
+        match="checkpointed finalization extrinsic hash differs",
+    ):
+        validate_weight_finalization_submission_v2(
+            checkpointed_submission_for(
+                wrong_extrinsic_hash_doc,
+                wrong_extrinsic_hash_root,
+            ),
+            chain_signing_profile=_chain_profile(),
+        )
     wrong_archive_attempt = _source_attempt(
         category="weight-finalization-wrong-archive",
         job_id=finalization_job,

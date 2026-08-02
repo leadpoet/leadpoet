@@ -316,15 +316,22 @@ async def test_history_loaders_expose_every_validated_raw_authority_graph(
     )
     assert set(authority_graphs) == {native_root, legacy_root}
 
+    chain_coverage = {}
     assert (
         await settlement.load_chain_realized_allocation_history_v1(
             netuid=71,
             start_epoch=100,
             end_epoch=100,
             _receipt_graph_records_out=authority_graphs,
+            _coverage_out=chain_coverage,
         )
         == []
     )
+    assert chain_coverage == {
+        "activation_epoch": 100,
+        "covered_start_epoch": 100,
+        "covered_end_epoch": 100,
+    }
     assert set(authority_graphs) == {
         native_root,
         legacy_root,
@@ -1449,6 +1456,13 @@ async def test_settled_history_bounds_finalized_authority_at_chain_cutover(
             "epoch_id": 102,
             "graph": {"root_receipt_hash": "chain-root"},
         }
+        kwargs["_coverage_out"].update(
+            {
+                "activation_epoch": 102,
+                "covered_start_epoch": 102,
+                "covered_end_epoch": 103,
+            }
+        )
         return [
             {"epoch": epoch, "netuid": 71, "authority_types": ["chain"]}
             for epoch in (102, 103)
@@ -1516,6 +1530,13 @@ async def test_settled_history_skips_superseded_finalized_graph_scan(
             "epoch_id": 102,
             "graph": {"root_receipt_hash": "chain-root"},
         }
+        kwargs["_coverage_out"].update(
+            {
+                "activation_epoch": 102,
+                "covered_start_epoch": 102,
+                "covered_end_epoch": 103,
+            }
+        )
         return [
             {"epoch": epoch, "netuid": 71, "authority_types": ["chain"]}
             for epoch in (102, 103)
@@ -1545,6 +1566,88 @@ async def test_settled_history_skips_superseded_finalized_graph_scan(
 
     assert [row["epoch"] for row in history] == [102, 103]
     assert set(graph_records) == {"chain-root"}
+
+
+@pytest.mark.asyncio
+async def test_settled_history_uses_settlement_coverage_before_first_credit(
+    monkeypatch,
+):
+    calls: list[tuple[int, int]] = []
+
+    async def chain_history(**kwargs):
+        kwargs["_coverage_out"].update(
+            {
+                "activation_epoch": 102,
+                "covered_start_epoch": 102,
+                "covered_end_epoch": 106,
+            }
+        )
+        return [
+            {"epoch": epoch, "netuid": 71, "authority_types": ["chain"]}
+            for epoch in (105, 106)
+        ]
+
+    async def finalized_history(**kwargs):
+        calls.append((kwargs["start_epoch"], kwargs["end_epoch"]))
+        return [
+            {"epoch": epoch, "netuid": 71, "authority_types": ["native"]}
+            for epoch in (100, 101)
+        ]
+
+    monkeypatch.setattr(
+        settlement,
+        "load_chain_realized_allocation_history_v1",
+        chain_history,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "load_finalized_allocation_history_v2",
+        finalized_history,
+    )
+
+    history = await settlement.load_settled_allocation_history_v2(
+        netuid=71,
+        start_epoch=100,
+        end_epoch=106,
+    )
+
+    assert calls == [(100, 101)]
+    assert [row["epoch"] for row in history] == [100, 101, 105, 106]
+
+
+@pytest.mark.asyncio
+async def test_settled_history_zero_credit_coverage_skips_finalized_scan(
+    monkeypatch,
+):
+    async def chain_history(**kwargs):
+        kwargs["_coverage_out"].update(
+            {
+                "activation_epoch": 100,
+                "covered_start_epoch": 100,
+                "covered_end_epoch": 103,
+            }
+        )
+        return []
+
+    async def unexpected_finalized_history(**_kwargs):
+        raise AssertionError("covered zero-credit epochs must not be rescanned")
+
+    monkeypatch.setattr(
+        settlement,
+        "load_chain_realized_allocation_history_v1",
+        chain_history,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "load_finalized_allocation_history_v2",
+        unexpected_finalized_history,
+    )
+
+    assert await settlement.load_settled_allocation_history_v2(
+        netuid=71,
+        start_epoch=100,
+        end_epoch=103,
+    ) == []
 
 
 @pytest.mark.asyncio

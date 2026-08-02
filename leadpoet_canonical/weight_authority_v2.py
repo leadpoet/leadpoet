@@ -12,6 +12,7 @@ import re
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     COORDINATOR_ROLE,
     EMPTY_HOST_OPERATION_ROOT,
     EMPTY_TRANSPORT_ROOT,
@@ -21,9 +22,14 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
     validate_receipt_graph,
 )
+from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    validate_ancestry_parent_authority_v2,
+)
 from leadpoet_canonical.hotkey_authority_v2 import (
     HotkeyAuthorityV2Error,
     build_application_signature_request_v2,
+    encode_signed_extrinsic_v2,
+    signed_extrinsic_hash_v2,
     validate_weight_extrinsic_authorization_v2,
 )
 from leadpoet_canonical.chain_source_v2 import (
@@ -1086,8 +1092,6 @@ def validate_weight_finalization_submission_v2(
     }
     root_hash = str(graph["root_receipt_hash"])
     root = receipt_by_hash.get(root_hash)
-    extrinsic_receipt = receipt_by_hash.get(extrinsic_receipt_hash)
-    computed_receipt = receipt_by_hash.get(weight_receipt_hash)
     _require(
         isinstance(root, Mapping)
         and root.get("role") == WEIGHT_ROLE
@@ -1096,48 +1100,127 @@ def validate_weight_finalization_submission_v2(
         and root.get("output_root") == sha256_json(dict(finalization)),
         "weight finalization root receipt is invalid",
     )
-    _require(
-        isinstance(computed_receipt, Mapping)
-        and computed_receipt.get("purpose") == "validator.weights.computed.v2",
-        "weight computed receipt is absent from finalization graph",
-    )
-    expected_extrinsic_output = {
-        "schema_version": "leadpoet.weight_extrinsic_signature.v2",
-        "authorization_hash": extrinsic_authorization_hash,
-        "validator_hotkey": hotkey,
-        "signature": signature,
-        "extrinsic_hash": extrinsic_hash,
-    }
-    _require(
-        isinstance(extrinsic_receipt, Mapping)
-        and extrinsic_receipt.get("role") == WEIGHT_ROLE
-        and extrinsic_receipt.get("purpose") == "validator.set_weights_extrinsic.v2"
-        and extrinsic_receipt.get("input_root") == extrinsic_authorization_hash
-        and extrinsic_receipt.get("output_root")
-        == sha256_json(expected_extrinsic_output)
-        and extrinsic_receipt.get("parent_receipt_hashes")
-        == [weight_receipt_hash],
-        "included extrinsic receipt is invalid",
-    )
-    _require(
-        extrinsic_receipt_hash in root.get("parent_receipt_hashes", []),
-        "finalization receipt does not bind included extrinsic",
-    )
     extrinsic_parent_hashes = list(root.get("parent_receipt_hashes") or [])
     _require(
         bool(extrinsic_parent_hashes)
         and extrinsic_parent_hashes == sorted(set(extrinsic_parent_hashes)),
         "finalization extrinsic receipt set is not canonical",
     )
-    for parent_hash in extrinsic_parent_hashes:
-        parent = receipt_by_hash.get(parent_hash)
+    _require(
+        extrinsic_receipt_hash in extrinsic_parent_hashes,
+        "finalization receipt does not bind included extrinsic",
+    )
+    if graph.get("schema_version") == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION:
         _require(
-            isinstance(parent, Mapping)
-            and parent.get("role") == WEIGHT_ROLE
-            and parent.get("purpose") == "validator.set_weights_extrinsic.v2"
-            and parent.get("parent_receipt_hashes") == [weight_receipt_hash],
-            "finalization contains an invalid extrinsic receipt parent",
+            extrinsic_parent_hashes == [extrinsic_receipt_hash],
+            "checkpointed finalization must bind one exact extrinsic receipt",
         )
+        proof = graph.get("ancestry_proof")
+        certificate = (
+            proof.get("certificate") if isinstance(proof, Mapping) else None
+        )
+        claim = (
+            certificate.get("claim")
+            if isinstance(certificate, Mapping)
+            else None
+        )
+        raw_authorities = (
+            claim.get("parent_authorities")
+            if isinstance(claim, Mapping)
+            else None
+        )
+        _require(
+            isinstance(raw_authorities, list),
+            "checkpointed finalization parent authorities are missing",
+        )
+        try:
+            authorities = [
+                validate_ancestry_parent_authority_v2(item)
+                for item in raw_authorities
+            ]
+        except Exception as exc:
+            raise WeightAuthorityV2Error(
+                "checkpointed finalization parent authority is invalid"
+            ) from exc
+        authority_by_hash = {
+            str(item["parent_receipt_hash"]): item for item in authorities
+        }
+        _require(
+            len(authority_by_hash) == len(authorities)
+            and sorted(authority_by_hash) == extrinsic_parent_hashes,
+            "checkpointed finalization authorities differ from root",
+        )
+        extrinsic_authority = authority_by_hash.get(extrinsic_receipt_hash)
+        _require(
+            isinstance(extrinsic_authority, Mapping)
+            and extrinsic_authority.get("parent_role") == WEIGHT_ROLE
+            and extrinsic_authority.get("parent_purpose")
+            == "validator.set_weights_extrinsic.v2"
+            and int(extrinsic_authority.get("parent_epoch_id", -1)) == epoch_id
+            and "validator.weights.computed.v2"
+            in set(extrinsic_authority.get("authority_purposes") or ()),
+            "checkpointed finalization extrinsic authority is invalid",
+        )
+        try:
+            reconstructed_extrinsic = encode_signed_extrinsic_v2(
+                hotkey_public_key_hex=authorization["hotkey_public_key"],
+                signature_hex=signature,
+                era_period=authorization["era_period"],
+                era_current=authorization["era_current"],
+                nonce=authorization["nonce"],
+                call_data_hex=authorization["call_data_hex"],
+            )
+            reconstructed_extrinsic_hash = signed_extrinsic_hash_v2(
+                reconstructed_extrinsic
+            )
+        except (HotkeyAuthorityV2Error, KeyError, TypeError, ValueError) as exc:
+            raise WeightAuthorityV2Error(
+                "checkpointed finalization extrinsic is invalid"
+            ) from exc
+        _require(
+            reconstructed_extrinsic_hash == extrinsic_hash,
+            "checkpointed finalization extrinsic hash differs",
+        )
+    else:
+        extrinsic_receipt = receipt_by_hash.get(extrinsic_receipt_hash)
+        computed_receipt = receipt_by_hash.get(weight_receipt_hash)
+        _require(
+            isinstance(computed_receipt, Mapping)
+            and computed_receipt.get("purpose")
+            == "validator.weights.computed.v2",
+            "weight computed receipt is absent from finalization graph",
+        )
+        expected_extrinsic_output = {
+            "schema_version": "leadpoet.weight_extrinsic_signature.v2",
+            "authorization_hash": extrinsic_authorization_hash,
+            "validator_hotkey": hotkey,
+            "signature": signature,
+            "extrinsic_hash": extrinsic_hash,
+        }
+        _require(
+            isinstance(extrinsic_receipt, Mapping)
+            and extrinsic_receipt.get("role") == WEIGHT_ROLE
+            and extrinsic_receipt.get("purpose")
+            == "validator.set_weights_extrinsic.v2"
+            and extrinsic_receipt.get("input_root")
+            == extrinsic_authorization_hash
+            and extrinsic_receipt.get("output_root")
+            == sha256_json(expected_extrinsic_output)
+            and extrinsic_receipt.get("parent_receipt_hashes")
+            == [weight_receipt_hash],
+            "included extrinsic receipt is invalid",
+        )
+        for parent_hash in extrinsic_parent_hashes:
+            parent = receipt_by_hash.get(parent_hash)
+            _require(
+                isinstance(parent, Mapping)
+                and parent.get("role") == WEIGHT_ROLE
+                and parent.get("purpose")
+                == "validator.set_weights_extrinsic.v2"
+                and parent.get("parent_receipt_hashes")
+                == [weight_receipt_hash],
+                "finalization contains an invalid extrinsic receipt parent",
+            )
     _require(
         root.get("input_root")
         == sha256_json(

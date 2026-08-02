@@ -357,7 +357,7 @@
       "symbol": "champion_v2_cutover_readiness"
     },
     {
-      "ast_sha256": "sha256:4b0593239f1e3b8551285669402a06f93b1af3ce0a7dbae59992de074934519f",
+      "ast_sha256": "sha256:ca4b794868821c91c0920e23a04904a63e39d4f91e6ec08bc8a8c0909bfc7e0c",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "load_chain_realized_allocation_history_v1"
     },
@@ -372,7 +372,7 @@
       "symbol": "load_legacy_allocation_nonfinalizations_v2"
     },
     {
-      "ast_sha256": "sha256:c8f43f9c0ca0dd02a8b9cf5e208bc1ef9eb533ecc6929a877323523b01b5a1b9",
+      "ast_sha256": "sha256:ba79ae1dd424485f0c8c7ea883ef8ddd7c1be2321470757cffb9256e9ab2aac9",
       "path": "gateway/research_lab/champion_settlement_v2.py",
       "symbol": "load_settled_allocation_history_v2"
     },
@@ -1792,7 +1792,7 @@
       "symbol": "validate_published_weight_bundle_v2"
     },
     {
-      "ast_sha256": "sha256:1e6b74da7c8e0e7e4d64d8eec161d5b977192c2fc42f3b5349dbc16d6a2755f3",
+      "ast_sha256": "sha256:562e43fcba00ce7bc80d18d1868cc170f5e6e3c2650caa47a56efaf45f10fcc4",
       "path": "leadpoet_canonical/weight_authority_v2.py",
       "symbol": "validate_weight_finalization_submission_v2"
     },
@@ -2282,7 +2282,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:4899206c114d09f99b723d80352c067677b29114bbd10488c4215d8f6fe311f2",
+  "manifest_hash": "sha256:5c681bd5aeb99197e9bfbfec07e3ea0b8d271d5e8c215ea5c9a773b27cd789e4",
   "protected_source_commit": "09606c64ec27a07d5531a6e741203b0b0da42164",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

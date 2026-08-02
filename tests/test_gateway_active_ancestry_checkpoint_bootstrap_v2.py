@@ -606,6 +606,51 @@ async def test_active_root_change_is_processed_in_second_bounded_round(orchestra
 
 
 @pytest.mark.asyncio
+async def test_epoch_selection_stays_frozen_across_long_bootstrap(orchestration):
+    harness = _Harness([HASH_A], {HASH_A: _full_graph(HASH_A)})
+    resolved_epochs = iter((24000, 24001))
+    resolution_count = 0
+    selected_epochs = []
+
+    async def resolve_epoch(_value):
+        nonlocal resolution_count
+        resolution_count += 1
+        return next(resolved_epochs)
+
+    async def load_allocation(*, epoch_id, netuid, policy):
+        selected_epochs.append(("allocation", epoch_id))
+        return await harness.load_allocation(
+            epoch_id=epoch_id,
+            netuid=netuid,
+            policy=policy,
+        )
+
+    async def load_sourcing(*, current_epoch, window):
+        selected_epochs.append(("sourcing", current_epoch))
+        return await harness.load_sourcing(
+            current_epoch=current_epoch,
+            window=window,
+        )
+
+    result = await _run(
+        harness,
+        resolve_epoch=resolve_epoch,
+        load_allocation_graphs=load_allocation,
+        load_sourcing_graphs=load_sourcing,
+    )
+
+    assert result["status"] == "complete"
+    assert result["epoch_id"] == 24000
+    assert resolution_count == 1
+    assert selected_epochs == [
+        ("allocation", 24000),
+        ("sourcing", 24000),
+        ("allocation", 24000),
+        ("sourcing", 24000),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_continuously_changing_roots_exhaust_bounded_rounds(orchestration):
     harness = _Harness(
         [HASH_A],

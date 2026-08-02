@@ -1002,7 +1002,7 @@
       "symbol": "_verify_coordinator_capability"
     },
     {
-      "ast_sha256": "sha256:ec74d7481502e819941a20427700fbe78e1cbf80c06f25329f6a550799d239e2",
+      "ast_sha256": "sha256:6b5596781923cb590ddf07e73fda84679f3c6f7e2ba72478ea69f7e8d78085f7",
       "path": "gateway/tee/bootstrap_active_ancestry_checkpoints_v2.py",
       "symbol": "bootstrap_active_ancestry_checkpoints_v2"
     },
@@ -2267,7 +2267,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:cb7fc42d043e0cd7b2e312f1e0721412aa1644724d02630225b0d3d0a8bb9d9a",
+  "manifest_hash": "sha256:879b2954ca2a57332f3ab90e843234d33e3850ded988c1010e44a758b4e11323",
   "protected_source_commit": "09606c64ec27a07d5531a6e741203b0b0da42164",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

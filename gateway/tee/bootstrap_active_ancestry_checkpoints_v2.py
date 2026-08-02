@@ -773,9 +773,13 @@ async def bootstrap_active_ancestry_checkpoints_v2(
                 **counts,
             )
 
-        observed_epoch = int(
-            epoch_id if epoch_id is not None else await resolve_epoch(None)
-        )
+        # Freeze the authority snapshot selected after the old gateway stops.
+        # A long first-time conversion can cross an epoch boundary while the
+        # gateway is offline; advancing the selection here would require a
+        # chain-realized settlement that only the restarted gateway can attest.
+        # Re-selecting the frozen epoch still proves that its exact active root
+        # set did not mutate while checkpoints were persisted.
+        observed_epoch = effective_epoch
         observed = await _select_active_graphs(
             epoch_id=observed_epoch,
             netuid=effective_netuid,
@@ -824,9 +828,6 @@ async def bootstrap_active_ancestry_checkpoints_v2(
                 new_proof_count=total_new_proofs,
             )
             return result
-        if observed_epoch != effective_epoch:
-            effective_epoch = observed_epoch
-
     raise ActiveAncestryCheckpointBootstrapV2Error(
         "active ancestry roots did not stabilize within the bounded rounds"
     )

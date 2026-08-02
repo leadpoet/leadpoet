@@ -164,24 +164,29 @@ async def verify_weight_submission_storage_readable_v2(
         effective_netuid = int(BITTENSOR_NETUID)
     else:
         effective_netuid = int(netuid)
-    bootstrap = None
-    try:
-        readiness = await champion_v2_cutover_readiness_report(
-            epoch=effective_epoch,
-            netuid=effective_netuid,
-        )
-    except ChampionSettlementV2Error as exc:
-        if str(exc) != "chain realized settlement history is incomplete":
-            raise
-        bootstrap = await validate_chain_realized_settlement_bootstrap_v1(
-            netuid=effective_netuid,
-            target_epoch=effective_epoch - 1,
-        )
+    bootstrap = await validate_chain_realized_settlement_bootstrap_v1(
+        netuid=effective_netuid,
+        target_epoch=effective_epoch - 1,
+    )
+    backlog_epoch_count = int(bootstrap.get("backlog_epoch_count") or 0)
+    if backlog_epoch_count:
         readiness = {
             "ready": False,
             "receipt_coverage": 0.0,
             "historical_classification_coverage": 0.0,
         }
+    else:
+        try:
+            readiness = await champion_v2_cutover_readiness_report(
+                epoch=effective_epoch,
+                netuid=effective_netuid,
+            )
+        except ChampionSettlementV2Error as exc:
+            if str(exc) != "chain realized settlement history is incomplete":
+                raise
+            raise WeightSubmissionReadinessV2Error(
+                "chain-realized settlement frontier disagrees with authority readiness"
+            ) from exc
     result = {
         "schema_version": "leadpoet.weight_submission_storage_readiness.v2",
         "status": "readable",
@@ -191,7 +196,9 @@ async def verify_weight_submission_storage_readable_v2(
             bootstrap=bootstrap,
         ),
         "netuid": effective_netuid,
-        "authority_ready": bootstrap is None and readiness.get("ready") is True,
+        "authority_ready": (
+            backlog_epoch_count == 0 and readiness.get("ready") is True
+        ),
         "receipt_coverage": float(readiness.get("receipt_coverage") or 0.0),
         "historical_classification_coverage": float(
             readiness.get("historical_classification_coverage")
@@ -199,7 +206,7 @@ async def verify_weight_submission_storage_readable_v2(
             or 0.0
         ),
     }
-    if bootstrap is not None:
+    if backlog_epoch_count:
         result["chain_realized_settlement_bootstrap"] = bootstrap
     return result
 

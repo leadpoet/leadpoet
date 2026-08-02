@@ -371,17 +371,6 @@ class SanitizedWeightFixture:
             key=self.weight_key,
             config_hash=weight_config,
         )
-        finalized_chain_state_root = sha256_json(
-            {"block": preliminary["block"]}
-        )
-        gateway_authority_event_hash = sha256_json(
-            {"epoch": self.epoch_id}
-        )
-        expected_roots = weight_input_output_roots_v2(
-            calculation_snapshot=preliminary,
-            finalized_chain_state_root=finalized_chain_state_root,
-            gateway_authority_event_hash=gateway_authority_event_hash,
-        )
         allocation_authority_receipt = self.receipt(
             role=COORDINATOR_ROLE,
             purpose="research_lab.allocation.v2",
@@ -404,6 +393,17 @@ class SanitizedWeightFixture:
                 }
             ),
             sequence=0,
+        )
+        finalized_chain_state_root = sha256_json(
+            {"block": preliminary["block"]}
+        )
+        gateway_authority_event_hash = allocation_authority_receipt[
+            "receipt_hash"
+        ]
+        expected_roots = weight_input_output_roots_v2(
+            calculation_snapshot=preliminary,
+            finalized_chain_state_root=finalized_chain_state_root,
+            gateway_authority_event_hash=gateway_authority_event_hash,
         )
         ordered_categories = [
             "chain_state",
@@ -479,7 +479,13 @@ class SanitizedWeightFixture:
                     else [input_hashes["metagraph_state"]]
                     if category == "burn_ownership"
                     else [allocation_authority_receipt["receipt_hash"]]
-                    if category == "research_lab_allocation"
+                    if category
+                    in {
+                        "research_lab_allocation",
+                        "champions",
+                        "reimbursements",
+                        "source_add_rewards",
+                    }
                     else []
                 ),
                 sequence=index,

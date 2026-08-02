@@ -366,7 +366,8 @@ def test_gateway_weight_storage_preflight_uses_target_before_shutdown() -> None:
         "          gateway.tee.verify_weight_submission_ready_v2"
         in preflight_block
     )
-    assert 'report["ancestry_safe_epoch"]' in preflight_block
+    assert "gateway_ancestry_safe_epoch_from_report" in preflight_block
+    assert 'report["ancestry_safe_epoch"]' in script
     assert "Pinned active ancestry bootstrap to proven-safe epoch" in preflight_block
     assert "Gateway remains running; production shutdown has not started." in (
         preflight_block
@@ -521,6 +522,95 @@ def test_gateway_restart_preserves_safe_ancestry_epoch_across_reexec() -> None:
         in script
     )
     assert 'epoch_args=(--epoch "$epoch")' in script
+    candidate_env = script.index(
+        '. "$ENV_CLONE"',
+        script.index('GATEWAY_RESTART_PHASE=post_activate'),
+    )
+    candidate_recovery = script.index(
+        "ensure_gateway_ancestry_safe_epoch",
+        candidate_env,
+    )
+    enclave_build = script.index(
+        'GATEWAY_DEPLOY_STAGE="attested_runtime_and_enclave_build"',
+        candidate_recovery,
+    )
+    postcheckpoint = script.index(
+        'verify_gateway_active_ancestry_checkpoints '
+        '"$GATEWAY_ANCESTRY_SAFE_EPOCH"',
+        enclave_build,
+    )
+    assert candidate_env < candidate_recovery < enclave_build < postcheckpoint
+
+
+def test_gateway_candidate_recovers_frontier_from_n_minus_one_controller(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    helper_source = "\n\n".join(
+        _shell_function_source(script, name)
+        for name in (
+            "gateway_ancestry_safe_epoch_from_report",
+            "ensure_gateway_ancestry_safe_epoch",
+            "verify_gateway_active_ancestry_checkpoints",
+        )
+    )
+    fake_python = tmp_path / "gateway-python"
+    calls = tmp_path / "calls"
+    fake_python.write_text(
+        f"""#!/bin/bash
+set -euo pipefail
+if [ "${{1:-}}" = "-" ]; then
+  exec {shlex.quote(sys.executable)} "$@"
+fi
+printf '%s\\n' "$*" >> "$FAKE_CALLS"
+if [ "${{3:-}}" = "--storage-read-preflight" ]; then
+  printf '%s\\n' '{{"schema_version":"leadpoet.weight_submission_storage_readiness.v2","status":"readable","epoch":24307,"ancestry_safe_epoch":24303}}'
+elif [ "${{2:-}}" = "gateway.tee.bootstrap_active_ancestry_checkpoints_v2" ]; then
+  printf '%s\\n' '{{"status":"complete","epoch_id":24303}}'
+else
+  exit 2
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    harness = f"""set -euo pipefail
+record_gateway_restart_timing() {{ :; }}
+{helper_source}
+GATEWAY_PYTHON_BIN="$1"
+LEADPOET_REPO_ROOT="$2"
+GATEWAY_V2_RELEASE_MANIFEST="$3"
+GATEWAY_ANCESTRY_SAFE_EPOCH=""
+ensure_gateway_ancestry_safe_epoch
+verify_gateway_active_ancestry_checkpoints "$GATEWAY_ANCESTRY_SAFE_EPOCH"
+printf 'safe_epoch=%s\\n' "$GATEWAY_ANCESTRY_SAFE_EPOCH"
+"""
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness,
+            "gateway-n-minus-one-frontier-test",
+            str(fake_python),
+            str(tmp_path),
+            str(tmp_path / "release.json"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env={**os.environ, "FAKE_CALLS": str(calls)},
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "safe_epoch=24303" in completed.stdout
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "-m gateway.tee.verify_weight_submission_ready_v2 --storage-read-preflight",
+        (
+            "-m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 "
+            f"--release-manifest {tmp_path / 'release.json'} --epoch 24303"
+        ),
+    ]
 
 
 def test_gateway_weight_preparation_repeats_after_epoch_advance(

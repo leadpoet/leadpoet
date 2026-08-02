@@ -1347,7 +1347,7 @@
       "symbol": "verify_weight_submission_ready_v2"
     },
     {
-      "ast_sha256": "sha256:903768ced34824a59a76c53fb64ea3076d4fd42a1287d05e6f89e5b9173c6957",
+      "ast_sha256": "sha256:8c5b57da68c74c55a58471215db09ea27ad957139305f3882505d00fe14f4ac7",
       "path": "gateway/tee/verify_weight_submission_ready_v2.py",
       "symbol": "verify_weight_submission_storage_readable_v2"
     },
@@ -2282,7 +2282,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:edbe8a3b8b194f53c2f947a02979f27d8071ab739ede3d218a435e597e3cff9e",
+  "manifest_hash": "sha256:4899206c114d09f99b723d80352c067677b29114bbd10488c4215d8f6fe311f2",
   "protected_source_commit": "09606c64ec27a07d5531a6e741203b0b0da42164",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

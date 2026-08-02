@@ -1332,9 +1332,24 @@
       "symbol": "build_checkpoint"
     },
     {
-      "ast_sha256": "sha256:60d5d7bd07fbe854f1cd7bf9c06ca0f6cd9f624e1ce56933322e7cf9c923444b",
+      "ast_sha256": "sha256:69cba124071d4bfe899a9abd5486cfffb78452fd79d8a05c1376463efc0ebfd2",
+      "path": "gateway/tee/verify_weight_submission_ready_v2.py",
+      "symbol": "_ancestry_safe_epoch_from_storage_readiness"
+    },
+    {
+      "ast_sha256": "sha256:1ff964f618bac498f03453eb5f5e23f949ca3002e098e4760ca1522eb291cdfd",
+      "path": "gateway/tee/verify_weight_submission_ready_v2.py",
+      "symbol": "repair_chain_realized_settlements_v1"
+    },
+    {
+      "ast_sha256": "sha256:ed60a0d54caf541f087e1e7ada64a805ec34449d732b5b0996207d057b026af0",
       "path": "gateway/tee/verify_weight_submission_ready_v2.py",
       "symbol": "verify_weight_submission_ready_v2"
+    },
+    {
+      "ast_sha256": "sha256:903768ced34824a59a76c53fb64ea3076d4fd42a1287d05e6f89e5b9173c6957",
+      "path": "gateway/tee/verify_weight_submission_ready_v2.py",
+      "symbol": "verify_weight_submission_storage_readable_v2"
     },
     {
       "ast_sha256": "sha256:f65cae36b11cfed4b59aff1d651cab0f3a2bbe6aed71eced5b9610c2d10be697",
@@ -2267,7 +2282,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:879b2954ca2a57332f3ab90e843234d33e3850ded988c1010e44a758b4e11323",
+  "manifest_hash": "sha256:edbe8a3b8b194f53c2f947a02979f27d8071ab739ede3d218a435e597e3cff9e",
   "protected_source_commit": "09606c64ec27a07d5531a6e741203b0b0da42164",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

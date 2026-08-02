@@ -75,6 +75,7 @@ async def test_storage_read_preflight_exercises_full_authority_read_without_repa
         "schema_version": "leadpoet.weight_submission_storage_readiness.v2",
         "status": "readable",
         "epoch": 24153,
+        "ancestry_safe_epoch": 24153,
         "netuid": 71,
         "authority_ready": False,
         "receipt_coverage": 1.0,
@@ -140,6 +141,159 @@ async def test_storage_read_preflight_accepts_only_pristine_settlement_bootstrap
     assert result["chain_realized_settlement_bootstrap"][
         "backlog_epoch_count"
     ] == 4
+    assert result["ancestry_safe_epoch"] == 24202
+
+
+@pytest.mark.asyncio
+async def test_storage_read_preflight_resumes_at_first_unsettled_epoch(
+    monkeypatch,
+):
+    from gateway.research_lab import champion_settlement_v2 as settlement
+
+    async def resolve(_epoch):
+        return 24304
+
+    async def report(**_kwargs):
+        raise settlement.ChampionSettlementV2Error(
+            "chain realized settlement history is incomplete"
+        )
+
+    async def bootstrap(**_kwargs):
+        return {
+            "activation_epoch": 24202,
+            "target_epoch": 24303,
+            "settled_through_epoch": 24302,
+            "backlog_epoch_count": 1,
+        }
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        maintenance,
+        "champion_v2_cutover_readiness_report",
+        report,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_chain_realized_settlement_bootstrap_v1",
+        bootstrap,
+    )
+
+    result = await readiness.verify_weight_submission_storage_readable_v2(
+        netuid=71,
+    )
+
+    assert result["epoch"] == 24304
+    assert result["ancestry_safe_epoch"] == 24303
+
+
+def test_storage_read_preflight_rejects_inconsistent_safe_epoch():
+    with pytest.raises(
+        readiness.WeightSubmissionReadinessV2Error,
+        match="bootstrap report is inconsistent",
+    ):
+        readiness._ancestry_safe_epoch_from_storage_readiness(
+            effective_epoch=24304,
+            bootstrap={
+                "activation_epoch": 24202,
+                "target_epoch": 24303,
+                "settled_through_epoch": 24302,
+                "backlog_epoch_count": 2,
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_chain_settlement_repair_proves_durable_suffix(monkeypatch):
+    from gateway.research_lab import champion_settlement_v2, v2_authority
+
+    monkeypatch.setenv("RESEARCH_LAB_INTERNAL_API_KEY", "validator-secret")
+    resolved = iter((24304, 24304, 24304))
+    calls = []
+
+    async def resolve(_epoch):
+        return next(resolved)
+
+    async def ensure(**kwargs):
+        calls.append(("ensure", kwargs))
+        return [{"status": "settled"}]
+
+    async def validate(**kwargs):
+        calls.append(("validate", kwargs))
+        return {
+            "activation_epoch": 24202,
+            "target_epoch": 24303,
+            "settled_through_epoch": 24303,
+            "backlog_epoch_count": 0,
+        }
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        v2_authority,
+        "ensure_chain_realized_settlements_v1",
+        ensure,
+    )
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "validate_chain_realized_settlement_bootstrap_v1",
+        validate,
+    )
+
+    result = await readiness.repair_chain_realized_settlements_v1(netuid=71)
+
+    assert result == {
+        "schema_version": "leadpoet.chain_realized_settlement_repair.v1",
+        "status": "ready",
+        "epoch": 24304,
+        "observed_epoch": 24304,
+        "netuid": 71,
+        "settled_through_epoch": 24303,
+        "repaired_epoch_count": 1,
+    }
+    assert calls == [
+        ("ensure", {"epoch_id": 24304, "netuid": 71}),
+        ("validate", {"netuid": 71, "target_epoch": 24303}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chain_settlement_repair_rejects_incomplete_readback(
+    monkeypatch,
+):
+    from gateway.research_lab import champion_settlement_v2, v2_authority
+
+    monkeypatch.setenv("RESEARCH_LAB_INTERNAL_API_KEY", "validator-secret")
+
+    async def resolve(_epoch):
+        return 24304
+
+    async def ensure(**_kwargs):
+        return []
+
+    async def validate(**_kwargs):
+        return {
+            "activation_epoch": 24202,
+            "target_epoch": 24303,
+            "settled_through_epoch": 24302,
+            "backlog_epoch_count": 1,
+        }
+
+    monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
+    monkeypatch.setattr(
+        v2_authority,
+        "ensure_chain_realized_settlements_v1",
+        ensure,
+    )
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "validate_chain_realized_settlement_bootstrap_v1",
+        validate,
+    )
+
+    with pytest.raises(
+        readiness.WeightSubmissionReadinessV2Error,
+        match="left an incomplete suffix",
+    ):
+        await readiness.repair_chain_realized_settlements_v1(netuid=71)
 
 
 @pytest.mark.asyncio

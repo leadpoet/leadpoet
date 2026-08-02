@@ -254,7 +254,7 @@ def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
         'echo "Executing the one-time receipt-backed stateful epoch cutover"'
     )
     repair = script.index(
-        "\nrepair_and_verify_gateway_weight_input\n",
+        "\nrepair_chain_settlements_and_prepare_current_weight_input\n",
         cutover,
     )
     launch = script.index(
@@ -284,6 +284,20 @@ def test_gateway_restart_repairs_and_proves_automatic_weight_input() -> None:
         'GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS:-5}"'
     ) in script
     assert "repair_and_verify_gateway_weight_input()" in script
+    assert "repair_chain_settlements_and_prepare_current_weight_input()" in script
+    repair_function = script[
+        script.index(
+            "repair_chain_settlements_and_prepare_current_weight_input()"
+        ) : script.index("\ninstall_gateway_python_dependencies()")
+    ]
+    _ordered_offsets(
+        repair_function,
+        (
+            "--repair-chain-settlements",
+            "verify_gateway_active_ancestry_checkpoints",
+            'repair_and_verify_gateway_weight_input "$requested_epoch"',
+        ),
+    )
     assert (
         'for attempt in $(seq 1 "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS")'
         in script
@@ -352,6 +366,8 @@ def test_gateway_weight_storage_preflight_uses_target_before_shutdown() -> None:
         "          gateway.tee.verify_weight_submission_ready_v2"
         in preflight_block
     )
+    assert 'report["ancestry_safe_epoch"]' in preflight_block
+    assert "Pinned active ancestry bootstrap to proven-safe epoch" in preflight_block
     assert "Gateway remains running; production shutdown has not started." in (
         preflight_block
     )
@@ -474,10 +490,11 @@ def test_gateway_weight_input_repair_runs_from_canonical_repo_root() -> None:
         'GATEWAY_DEPLOY_STAGE="validator_weight_input_repair"'
     )
     repair_command = script.index(
-        "-m gateway.tee.verify_weight_submission_ready_v2 --repair",
+        "-m gateway.tee.verify_weight_submission_ready_v2 \\\n"
+        '        --repair "${epoch_args[@]}"',
     )
     repair_call = script.index(
-        "\nrepair_and_verify_gateway_weight_input\n",
+        "\nrepair_chain_settlements_and_prepare_current_weight_input\n",
         repair_stage,
     )
     repair_function = script.index(
@@ -487,6 +504,119 @@ def test_gateway_weight_input_repair_runs_from_canonical_repo_root() -> None:
 
     assert 'cd "$LEADPOET_REPO_ROOT"\n' in repair_block
     assert repair_command < repair_stage < repair_call
+
+
+def test_gateway_restart_preserves_safe_ancestry_epoch_across_reexec() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    reexec_start = script.index("exec env ")
+    reexec = script[reexec_start : script.index("\nfi", reexec_start)]
+
+    assert (
+        'GATEWAY_ANCESTRY_SAFE_EPOCH="$GATEWAY_ANCESTRY_SAFE_EPOCH"'
+        in reexec
+    )
+    assert (
+        'verify_gateway_active_ancestry_checkpoints '
+        '"$GATEWAY_ANCESTRY_SAFE_EPOCH"'
+        in script
+    )
+    assert 'epoch_args=(--epoch "$epoch")' in script
+
+
+def test_gateway_weight_preparation_repeats_after_epoch_advance(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    helper_source = "\n\n".join(
+        _shell_function_source(script, name)
+        for name in (
+            "verify_gateway_active_ancestry_checkpoints",
+            "repair_and_verify_gateway_weight_input",
+            "repair_chain_settlements_and_prepare_current_weight_input",
+        )
+    )
+    fake_python = tmp_path / "gateway-python"
+    calls = tmp_path / "calls"
+    chain_count = tmp_path / "chain-count"
+    repair_count = tmp_path / "repair-count"
+    fake_python.write_text(
+        f"""#!/bin/bash
+set -euo pipefail
+if [ "${{1:-}}" = "-" ]; then
+  exec {shlex.quote(sys.executable)} "$@"
+fi
+printf '%s\\n' "$*" >> "$FAKE_CALLS"
+if [ "${{2:-}}" = "gateway.tee.bootstrap_active_ancestry_checkpoints_v2" ]; then
+  printf '%s\\n' '{{"status":"complete"}}'
+elif [ "${{3:-}}" = "--repair-chain-settlements" ]; then
+  count=$(( $(cat "$FAKE_CHAIN_COUNT" 2>/dev/null || printf 0) + 1 ))
+  printf '%s' "$count" > "$FAKE_CHAIN_COUNT"
+  epoch=$((99 + count))
+  printf '{{"schema_version":"leadpoet.chain_realized_settlement_repair.v1","status":"ready","epoch":%s,"observed_epoch":%s,"settled_through_epoch":%s}}\\n' "$epoch" "$epoch" "$((epoch - 1))"
+elif [ "${{3:-}}" = "--repair" ]; then
+  count=$(( $(cat "$FAKE_REPAIR_COUNT" 2>/dev/null || printf 0) + 1 ))
+  printf '%s' "$count" > "$FAKE_REPAIR_COUNT"
+  epoch="${{5}}"
+  observed="$epoch"
+  if [ "$count" = "1" ]; then
+    observed=$((epoch + 1))
+  fi
+  printf '{{"schema_version":"leadpoet.weight_submission_readiness.v2","status":"ready","epoch":%s,"observed_epoch":%s}}\\n' "$epoch" "$observed"
+else
+  exit 2
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    harness = f"""set -euo pipefail
+record_gateway_restart_timing() {{ :; }}
+{helper_source}
+GATEWAY_PYTHON_BIN="$1"
+LEADPOET_REPO_ROOT="$2"
+GATEWAY_V2_RELEASE_MANIFEST="$3"
+GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS=3
+GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS=0
+GATEWAY_WEIGHT_INPUT_REPAIR_REPORT=""
+repair_chain_settlements_and_prepare_current_weight_input
+"""
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            harness,
+            "gateway-weight-epoch-stability-test",
+            str(fake_python),
+            str(tmp_path),
+            str(tmp_path / "release.json"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env={
+            **os.environ,
+            "FAKE_CALLS": str(calls),
+            "FAKE_CHAIN_COUNT": str(chain_count),
+            "FAKE_REPAIR_COUNT": str(repair_count),
+        },
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "-m gateway.tee.verify_weight_submission_ready_v2 --repair-chain-settlements",
+        (
+            "-m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 "
+            f"--release-manifest {tmp_path / 'release.json'} --epoch 100"
+        ),
+        "-m gateway.tee.verify_weight_submission_ready_v2 --repair --epoch 100",
+        "-m gateway.tee.verify_weight_submission_ready_v2 --repair-chain-settlements",
+        (
+            "-m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 "
+            f"--release-manifest {tmp_path / 'release.json'} --epoch 101"
+        ),
+        "-m gateway.tee.verify_weight_submission_ready_v2 --repair --epoch 101",
+    ]
 
 
 def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> None:
@@ -597,11 +727,12 @@ def test_gateway_restart_bounds_active_ancestry_before_weight_preparation() -> N
         'record_gateway_restart_timing "v2_runtime_ready"'
     )
     postcheckpoint = script.index(
-        "verify_gateway_active_ancestry_checkpoints\n",
+        'verify_gateway_active_ancestry_checkpoints '
+        '"$GATEWAY_ANCESTRY_SAFE_EPOCH"',
         runtime_ready,
     )
     repair = script.index(
-        "repair_and_verify_gateway_weight_input\n",
+        "repair_chain_settlements_and_prepare_current_weight_input\n",
         postcheckpoint,
     )
 
@@ -1162,11 +1293,16 @@ def test_gateway_restart_records_nonblocking_commit_bound_stage_timings() -> Non
         in script
     )
     assert (
-        'record_gateway_restart_timing "ancestry_postcheckpoint_started"'
+        'record_gateway_restart_timing "${timing_stage}_started"'
         in script
     )
     assert (
-        'record_gateway_restart_timing "ancestry_postcheckpoint_complete" "passed"'
+        'record_gateway_restart_timing "${timing_stage}_complete" "passed"'
+        in script
+    )
+    assert 'record_gateway_restart_timing "chain_settlement_repair_started"' in script
+    assert (
+        'record_gateway_restart_timing "chain_settlement_repair_complete" "passed"'
         in script
     )
     assert 'record_gateway_restart_timing "candidate_activated"' in script

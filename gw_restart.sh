@@ -46,6 +46,8 @@ GATEWAY_ANCESTRY_CHECKPOINT_PID=""
 GATEWAY_ANCESTRY_CHECKPOINT_STATE="not_started"
 GATEWAY_ANCESTRY_CHECKPOINT_LOG="${GATEWAY_ANCESTRY_CHECKPOINT_LOG:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.ancestry-checkpoint.log}"
 GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT="${GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.running-release.json}"
+GATEWAY_ANCESTRY_SAFE_EPOCH="${GATEWAY_ANCESTRY_SAFE_EPOCH:-}"
+GATEWAY_WEIGHT_INPUT_REPAIR_REPORT=""
 GATEWAY_STATEFUL_CUTOVER_MANIFEST="/home/ec2-user/.config/leadpoet/stateful-epoch-cutover.json"
 GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST="${GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
 GATEWAY_RESTART_START_PATH="/home/ec2-user/.config/leadpoet/restart-start-v1.json"
@@ -420,13 +422,18 @@ set -a
 . "$1"
 set +a
 export PYTHONPATH="$2"
+epoch_args=()
+if [ -n "$5" ]; then
+  epoch_args=(--epoch "$5")
+fi
 exec "$3" -m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 \
-  --release-manifest "$4"
+  --release-manifest "$4" "${epoch_args[@]}"
 ' checkpoint-bootstrap \
       "$ENV_CLONE" \
       "$GATEWAY_PREFLIGHT_TREE" \
       "$GATEWAY_PYTHON_BIN" \
-      "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT"
+      "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT" \
+      "${GATEWAY_ANCESTRY_SAFE_EPOCH:-}"
   )
   if command -v ionice >/dev/null 2>&1; then
     checkpoint_command=(ionice -c2 -n7 "${checkpoint_command[@]}")
@@ -509,18 +516,25 @@ wait_for_gateway_ancestry_checkpoint_bootstrap() {
 }
 
 verify_gateway_active_ancestry_checkpoints() {
-  record_gateway_restart_timing "ancestry_postcheckpoint_started"
+  local epoch="${1:-}"
+  local timing_stage="${2:-ancestry_postcheckpoint}"
+  local -a epoch_args=()
+  if [ -n "$epoch" ]; then
+    epoch_args=(--epoch "$epoch")
+  fi
+  record_gateway_restart_timing "${timing_stage}_started"
   if ! (
       cd "$LEADPOET_REPO_ROOT"
       PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
         -m gateway.tee.bootstrap_active_ancestry_checkpoints_v2 \
-        --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST"
+        --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+        "${epoch_args[@]}"
     ); then
-    record_gateway_restart_timing "ancestry_postcheckpoint_complete" "failed"
+    record_gateway_restart_timing "${timing_stage}_complete" "failed"
     echo "ERROR: candidate runtime did not durably bound active receipt ancestry" >&2
     return 1
   fi
-  record_gateway_restart_timing "ancestry_postcheckpoint_complete" "passed"
+  record_gateway_restart_timing "${timing_stage}_complete" "passed"
 }
 
 if [ "$GATEWAY_RESTART_TIMING_INITIALIZED" = "1" ]; then
@@ -532,7 +546,12 @@ else
 fi
 
 repair_and_verify_gateway_weight_input() {
+  local epoch="${1:-}"
   local attempt status
+  local -a epoch_args=()
+  if [ -n "$epoch" ]; then
+    epoch_args=(--epoch "$epoch")
+  fi
   if ! [[ "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS must be a positive integer" >&2
     return 2
@@ -544,11 +563,15 @@ repair_and_verify_gateway_weight_input() {
 
   for attempt in $(seq 1 "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS"); do
     echo "Authoritative V2 validator weight input repair attempt ${attempt}/${GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS}"
-    if (
+    if GATEWAY_WEIGHT_INPUT_REPAIR_REPORT="$(
+      (
       cd "$LEADPOET_REPO_ROOT"
       PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-        -m gateway.tee.verify_weight_submission_ready_v2 --repair
-    ); then
+        -m gateway.tee.verify_weight_submission_ready_v2 \
+        --repair "${epoch_args[@]}"
+      )
+    )"; then
+      printf '%s\n' "$GATEWAY_WEIGHT_INPUT_REPAIR_REPORT"
       return 0
     else
       status=$?
@@ -560,6 +583,94 @@ repair_and_verify_gateway_weight_input() {
     echo "Authoritative repair did not complete; retrying after durable readback in ${GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS}s" >&2
     sleep "$GATEWAY_WEIGHT_INPUT_REPAIR_RETRY_SECONDS"
   done
+  return 1
+}
+
+repair_chain_settlements_and_prepare_current_weight_input() {
+  local attempt status chain_epochs chain_report epoch observed_epoch
+  local readiness_epochs requested_epoch
+  for attempt in $(seq 1 "$GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS"); do
+    echo "Measured chain settlement and current ancestry attempt ${attempt}/${GATEWAY_WEIGHT_INPUT_REPAIR_MAX_ATTEMPTS}"
+    record_gateway_restart_timing "chain_settlement_repair_started"
+    if chain_report="$(
+      cd "$LEADPOET_REPO_ROOT"
+      PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+        -m gateway.tee.verify_weight_submission_ready_v2 \
+        --repair-chain-settlements
+    )"; then
+      printf '%s\n' "$chain_report"
+    else
+      status=$?
+      record_gateway_restart_timing "chain_settlement_repair_complete" "failed"
+      return "$status"
+    fi
+    record_gateway_restart_timing "chain_settlement_repair_complete" "passed"
+    if ! chain_epochs="$(
+      "$GATEWAY_PYTHON_BIN" - "$chain_report" <<'PY'
+import json
+import sys
+
+report = json.loads(sys.argv[1])
+if (
+    report.get("schema_version")
+    != "leadpoet.chain_realized_settlement_repair.v1"
+    or report.get("status") != "ready"
+):
+    raise SystemExit("chain settlement repair report is invalid")
+epoch = int(report["epoch"])
+observed = int(report["observed_epoch"])
+if epoch < 0 or observed < epoch:
+    raise SystemExit("chain settlement repair epoch is invalid")
+if int(report["settled_through_epoch"]) != epoch - 1:
+    raise SystemExit("chain settlement repair readback is incomplete")
+print(epoch, observed)
+PY
+    )"; then
+      echo "ERROR: chain settlement repair report did not validate" >&2
+      return 1
+    fi
+    read -r epoch observed_epoch <<<"$chain_epochs"
+    if [ "$observed_epoch" != "$epoch" ]; then
+      echo "Research Lab epoch advanced during settlement repair (${epoch} -> ${observed_epoch}); rebuilding from the durable suffix"
+      continue
+    fi
+
+    echo "Verifying current-epoch active receipt ancestry at epoch $epoch"
+    verify_gateway_active_ancestry_checkpoints \
+      "$epoch" "ancestry_current_checkpoint"
+
+    requested_epoch="$epoch"
+    repair_and_verify_gateway_weight_input "$requested_epoch"
+    if ! readiness_epochs="$(
+      "$GATEWAY_PYTHON_BIN" - \
+        "$GATEWAY_WEIGHT_INPUT_REPAIR_REPORT" "$requested_epoch" <<'PY'
+import json
+import sys
+
+report = json.loads(sys.argv[1])
+requested = int(sys.argv[2])
+if (
+    report.get("schema_version") != "leadpoet.weight_submission_readiness.v2"
+    or report.get("status") != "ready"
+):
+    raise SystemExit("weight submission readiness report is invalid")
+epoch = int(report["epoch"])
+observed = int(report["observed_epoch"])
+if epoch != requested or observed < epoch:
+    raise SystemExit("weight submission readiness epoch is invalid")
+print(epoch, observed)
+PY
+    )"; then
+      echo "ERROR: weight submission readiness report did not validate" >&2
+      return 1
+    fi
+    read -r epoch observed_epoch <<<"$readiness_epochs"
+    if [ "$observed_epoch" = "$epoch" ]; then
+      return 0
+    fi
+    echo "Research Lab epoch advanced during authoritative weight preparation (${epoch} -> ${observed_epoch}); repeating from live-chain settlement"
+  done
+  echo "ERROR: Research Lab epoch did not stabilize during bounded weight preparation" >&2
   return 1
 }
 
@@ -1361,6 +1472,7 @@ skip_keys = {
     "GATEWAY_RESTART_TIMING_DIR",
     "GATEWAY_RESTART_TIMING_FILE",
     "GATEWAY_RESTART_TIMING_INITIALIZED",
+    "GATEWAY_ANCESTRY_SAFE_EPOCH",
     "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
     "LEADPOET_RESTART_START_PATH",
     "GATEWAY_RESTART_LOCK_HELD",
@@ -1451,6 +1563,7 @@ skip_keys = {
     "GATEWAY_RESTART_TIMING_DIR",
     "GATEWAY_RESTART_TIMING_FILE",
     "GATEWAY_RESTART_TIMING_INITIALIZED",
+    "GATEWAY_ANCESTRY_SAFE_EPOCH",
     "GATEWAY_STATEFUL_CUTOVER_CEREMONY",
     "LEADPOET_RESTART_START_PATH",
     "GATEWAY_RESTART_LOCK_HELD",
@@ -1823,14 +1936,40 @@ PY
 fi
 case "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_CAPABILITY" in
   supported)
-    if ! (
+    if GATEWAY_WEIGHT_STORAGE_PREFLIGHT_REPORT="$(
+      (
         set -a
         . "$ENV_CLONE"
         set +a
         run_prepared_gateway_module \
           gateway.tee.verify_weight_submission_ready_v2 \
           --storage-read-preflight
-      ); then
+      )
+    )"; then
+      printf '%s\n' "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_REPORT"
+      GATEWAY_ANCESTRY_SAFE_EPOCH="$(
+        "$GATEWAY_PYTHON_BIN" - \
+          "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_REPORT" <<'PY'
+import json
+import sys
+
+report = json.loads(sys.argv[1])
+if (
+    report.get("schema_version")
+    != "leadpoet.weight_submission_storage_readiness.v2"
+    or report.get("status") != "readable"
+):
+    raise SystemExit("weight storage preflight report is invalid")
+epoch = int(report["epoch"])
+safe_epoch = int(report["ancestry_safe_epoch"])
+if epoch < 0 or safe_epoch < 0 or safe_epoch > epoch:
+    raise SystemExit("weight storage preflight ancestry epoch is invalid")
+print(safe_epoch)
+PY
+      )"
+      export GATEWAY_ANCESTRY_SAFE_EPOCH
+      echo "Pinned active ancestry bootstrap to proven-safe epoch $GATEWAY_ANCESTRY_SAFE_EPOCH"
+    else
       echo "ERROR: durable V2 validator weight authority is not readable" >&2
       echo "Gateway remains running; production shutdown has not started." >&2
       exit 1
@@ -2029,6 +2168,7 @@ exec env \
   GATEWAY_RESTART_TIMING_DIR="$GATEWAY_RESTART_TIMING_DIR" \
   GATEWAY_RESTART_TIMING_FILE="$GATEWAY_RESTART_TIMING_FILE" \
   GATEWAY_RESTART_TIMING_INITIALIZED="$GATEWAY_RESTART_TIMING_INITIALIZED" \
+  GATEWAY_ANCESTRY_SAFE_EPOCH="$GATEWAY_ANCESTRY_SAFE_EPOCH" \
   RESEARCH_LAB_TEE_PROTOCOL="$RESEARCH_LAB_TEE_PROTOCOL" \
   GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
   GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
@@ -2401,7 +2541,7 @@ fi
 echo "Verifying active receipt ancestry is durably bounded before authoritative weight preparation"
 GATEWAY_DEPLOY_STAGE="ancestry_postcheckpoint"
 export GATEWAY_DEPLOY_STAGE
-verify_gateway_active_ancestry_checkpoints
+verify_gateway_active_ancestry_checkpoints "$GATEWAY_ANCESTRY_SAFE_EPOCH"
 
 echo "Installing Python dependencies"
 GATEWAY_DEPLOY_STAGE="dependency_install"
@@ -2429,10 +2569,10 @@ unset RESEARCH_LAB_EVIDENCE_PROXY_URL RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true
 
-echo "Repairing and verifying the authoritative V2 validator weight input"
+echo "Repairing live-chain settlements and verifying the authoritative V2 validator weight input"
 GATEWAY_DEPLOY_STAGE="validator_weight_input_repair"
 export GATEWAY_DEPLOY_STAGE
-repair_and_verify_gateway_weight_input
+repair_chain_settlements_and_prepare_current_weight_input
 record_gateway_restart_timing "validator_weight_input_ready"
 
 # Keep attestation/PCR0 Docker builds off this host while the pre-launch

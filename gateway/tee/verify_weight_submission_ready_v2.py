@@ -62,6 +62,45 @@ def _repairable_authority_failure(exc: BaseException) -> bool:
     return any(marker in text for marker in _REPAIRABLE_AUTHORITY_FAILURE_MARKERS)
 
 
+def _ancestry_safe_epoch_from_storage_readiness(
+    *,
+    effective_epoch: int,
+    bootstrap: Mapping[str, Any] | None,
+) -> int:
+    """Return the first epoch whose complete predecessor history is proven."""
+
+    normalized_epoch = int(effective_epoch)
+    if bootstrap is None:
+        return normalized_epoch
+    try:
+        activation_epoch = int(bootstrap["activation_epoch"])
+        target_epoch = int(bootstrap["target_epoch"])
+        backlog_epoch_count = int(bootstrap["backlog_epoch_count"])
+        raw_settled_through = bootstrap.get("settled_through_epoch")
+        settled_through = (
+            activation_epoch - 1
+            if raw_settled_through is None
+            else int(raw_settled_through)
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise WeightSubmissionReadinessV2Error(
+            "chain-realized settlement bootstrap report is invalid"
+        ) from exc
+    safe_epoch = settled_through + 1
+    if (
+        normalized_epoch < 0
+        or activation_epoch < 0
+        or target_epoch != normalized_epoch - 1
+        or settled_through < activation_epoch - 1
+        or safe_epoch > normalized_epoch
+        or backlog_epoch_count != target_epoch - settled_through
+    ):
+        raise WeightSubmissionReadinessV2Error(
+            "chain-realized settlement bootstrap report is inconsistent"
+        )
+    return safe_epoch
+
+
 def _validate_handoff(
     handoff: Mapping[str, Any],
     *,
@@ -147,6 +186,10 @@ async def verify_weight_submission_storage_readable_v2(
         "schema_version": "leadpoet.weight_submission_storage_readiness.v2",
         "status": "readable",
         "epoch": effective_epoch,
+        "ancestry_safe_epoch": _ancestry_safe_epoch_from_storage_readiness(
+            effective_epoch=effective_epoch,
+            bootstrap=bootstrap,
+        ),
         "netuid": effective_netuid,
         "authority_ready": bootstrap is None and readiness.get("ready") is True,
         "receipt_coverage": float(readiness.get("receipt_coverage") or 0.0),
@@ -159,6 +202,68 @@ async def verify_weight_submission_storage_readable_v2(
     if bootstrap is not None:
         result["chain_realized_settlement_bootstrap"] = bootstrap
     return result
+
+
+async def repair_chain_realized_settlements_v1(
+    *,
+    epoch: int | None = None,
+    netuid: int | None = None,
+) -> dict[str, Any]:
+    """Fill and prove the live-metagraph settlement suffix without allocation."""
+
+    from gateway.config import BITTENSOR_NETUID
+    from gateway.research_lab.champion_settlement_v2 import (
+        validate_chain_realized_settlement_bootstrap_v1,
+    )
+    from gateway.research_lab.maintenance import _resolve_maintenance_epoch
+    from gateway.research_lab.v2_authority import (
+        ensure_chain_realized_settlements_v1,
+    )
+
+    if not os.getenv("RESEARCH_LAB_INTERNAL_API_KEY", "").strip():
+        raise WeightSubmissionReadinessV2Error(
+            "Research Lab internal API key is not configured"
+        )
+    effective_epoch = int(await _resolve_maintenance_epoch(epoch))
+    effective_netuid = int(netuid) if netuid is not None else int(BITTENSOR_NETUID)
+    current_epoch = int(await _resolve_maintenance_epoch(None))
+    if effective_epoch < 0 or effective_epoch > current_epoch:
+        raise WeightSubmissionReadinessV2Error(
+            "chain-realized settlement repair epoch is invalid"
+        )
+    repaired = await ensure_chain_realized_settlements_v1(
+        epoch_id=effective_epoch,
+        netuid=effective_netuid,
+    )
+    bootstrap = await validate_chain_realized_settlement_bootstrap_v1(
+        netuid=effective_netuid,
+        target_epoch=effective_epoch - 1,
+    )
+    if int(bootstrap.get("backlog_epoch_count") or 0) != 0:
+        raise WeightSubmissionReadinessV2Error(
+            "chain-realized settlement repair left an incomplete suffix"
+        )
+    activation_epoch = int(bootstrap["activation_epoch"])
+    raw_settled_through = bootstrap.get("settled_through_epoch")
+    settled_through = (
+        activation_epoch - 1
+        if raw_settled_through is None
+        else int(raw_settled_through)
+    )
+    if settled_through != effective_epoch - 1:
+        raise WeightSubmissionReadinessV2Error(
+            "chain-realized settlement repair readback is incomplete"
+        )
+    observed_epoch = int(await _resolve_maintenance_epoch(None))
+    return {
+        "schema_version": "leadpoet.chain_realized_settlement_repair.v1",
+        "status": "ready",
+        "epoch": effective_epoch,
+        "observed_epoch": observed_epoch,
+        "netuid": effective_netuid,
+        "settled_through_epoch": settled_through,
+        "repaired_epoch_count": len(repaired),
+    }
 
 
 async def verify_weight_submission_ready_v2(
@@ -376,7 +481,7 @@ async def verify_weight_submission_ready_v2(
         epoch=effective_epoch,
         netuid=effective_netuid,
     )
-    return {
+    result = {
         "schema_version": "leadpoet.weight_submission_readiness.v2",
         "status": "ready",
         "epoch": effective_epoch,
@@ -384,12 +489,18 @@ async def verify_weight_submission_ready_v2(
         **repairs,
         **verified,
     }
+    if repair and not gateway_url:
+        result["observed_epoch"] = int(
+            await _resolve_maintenance_epoch(None)
+        )
+    return result
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--repair", action="store_true")
+    mode.add_argument("--repair-chain-settlements", action="store_true")
     mode.add_argument("--storage-read-preflight", action="store_true")
     parser.add_argument("--gateway-url")
     parser.add_argument("--epoch", type=int)
@@ -406,6 +517,15 @@ def main() -> int:
             parser.error("--storage-read-preflight cannot use --gateway-url")
         result = asyncio.run(
             verify_weight_submission_storage_readable_v2(
+                epoch=args.epoch,
+                netuid=args.netuid,
+            )
+        )
+    elif args.repair_chain_settlements:
+        if args.gateway_url:
+            parser.error("--repair-chain-settlements cannot use --gateway-url")
+        result = asyncio.run(
+            repair_chain_realized_settlements_v1(
                 epoch=args.epoch,
                 netuid=args.netuid,
             )

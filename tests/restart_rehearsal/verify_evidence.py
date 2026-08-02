@@ -1160,8 +1160,8 @@ def verify_gateway_weight_readiness_invocations(
                 "source_kind": "candidate_archive",
             }
         )
-    repair_contract = {
-        "argv": ["-m", module, "--repair"],
+    chain_repair_contract = {
+        "argv": ["-m", module, "--repair-chain-settlements"],
         "source_kind": "candidate_checkout",
     }
     http_contract = {
@@ -1182,21 +1182,61 @@ def verify_gateway_weight_readiness_invocations(
         and row.get("module") == module
     ]
     prefix_count = len(expected_prefix)
-    if len(observed) < prefix_count + 2:
+    if len(observed) < prefix_count + 3:
         raise SystemExit(
             "gateway launcher did not execute the exact production weight "
             f"readiness invocation contract: {observed!r}"
         )
-    repair_rows = observed[prefix_count:-1]
-    if not repair_rows:
+    body_rows = observed[prefix_count:-1]
+    expected = list(expected_prefix)
+    repair_rows = []
+    active_epoch = None
+    chain_repair_seen = False
+    cycle_has_repair = False
+    for row in body_rows:
+        argv = row.get("argv")
+        if argv == chain_repair_contract["argv"]:
+            if chain_repair_seen and not cycle_has_repair:
+                raise SystemExit(
+                    "gateway chain settlement repair was not followed by "
+                    "pinned weight preparation"
+                )
+            expected.append(chain_repair_contract)
+            active_epoch = None
+            chain_repair_seen = True
+            cycle_has_repair = False
+            continue
+        if (
+            chain_repair_seen
+            and isinstance(argv, list)
+            and len(argv) == 5
+            and argv[:4] == ["-m", module, "--repair", "--epoch"]
+            and str(argv[4]).isdigit()
+        ):
+            if active_epoch is None:
+                active_epoch = str(argv[4])
+            elif str(argv[4]) != active_epoch:
+                raise SystemExit(
+                    "gateway weight repair retries changed their pinned epoch"
+                )
+            repair_rows.append(row)
+            cycle_has_repair = True
+            expected.append(
+                {
+                    "argv": list(argv),
+                    "source_kind": "candidate_checkout",
+                }
+            )
+            continue
         raise SystemExit(
-            "gateway launcher did not execute weight readiness repair"
+            "gateway launcher weight readiness sequence is invalid: "
+            f"{body_rows!r}"
         )
-    expected = [
-        *expected_prefix,
-        *([repair_contract] * len(repair_rows)),
-        http_contract,
-    ]
+    if not repair_rows or active_epoch is None or not cycle_has_repair:
+        raise SystemExit(
+            "gateway launcher did not execute pinned weight readiness repair"
+        )
+    expected.append(http_contract)
     injected = any(
         row.get("kind") == "fault-injection"
         and row.get("module") == module

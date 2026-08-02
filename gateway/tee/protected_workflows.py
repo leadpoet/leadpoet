@@ -615,6 +615,9 @@ PROTECTED_SYMBOLS = {
         "_source_add_migration",
     ),
     "gateway/tee/verify_weight_submission_ready_v2.py": (
+        "_ancestry_safe_epoch_from_storage_readiness",
+        "verify_weight_submission_storage_readable_v2",
+        "repair_chain_realized_settlements_v1",
         "verify_weight_submission_ready_v2",
     ),
     "gateway/tee/release_lineage_v2.py": (

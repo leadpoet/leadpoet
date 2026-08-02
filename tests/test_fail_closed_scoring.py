@@ -19,6 +19,7 @@ from unittest import mock
 import pytest
 
 from gateway.research_lab import scoring_worker as sw
+from gateway.research_lab.models import _score_bundle_hash
 
 
 def _worker(**config_overrides) -> sw.ResearchLabGatewayScoringWorker:
@@ -42,6 +43,58 @@ def _worker(**config_overrides) -> sw.ResearchLabGatewayScoringWorker:
 def _bundle(provider_error_rate: float = 0.0, **health) -> dict:
     doc = {"provider_error_rate": provider_error_rate, **health}
     return {"scoring_health": doc, "icp_set_hash": "sha256:w", "aggregates": {}}
+
+
+def _signed_score_bundle_doc(
+    *,
+    evaluation_epoch: int,
+    provider_error_rate: float = 0.0,
+    identity: str = "default",
+) -> dict:
+    doc = {
+        "bundle_type": "research_lab_evaluation_score_bundle",
+        "schema_version": "1.1",
+        "execution_trace_ref": "trace:cand-1",
+        "scoring_health": {"provider_error_rate": provider_error_rate},
+        "evaluation_epoch": evaluation_epoch,
+        "run_id": "run-1",
+        "candidate_artifact_hash": "sha256:a",
+        "icp_set_hash": "sha256:window",
+        "identity": identity,
+        "reward_path": {
+            "eligible_for_crown": False,
+            "eligible_for_improvement_grant": False,
+        },
+    }
+    score_bundle_hash = _score_bundle_hash(doc)
+    return {
+        **doc,
+        "score_bundle_hash": score_bundle_hash,
+        "anchored_hash": score_bundle_hash,
+        "signature_ref": "s3://sig",
+    }
+
+
+def _durable_score_bundle_row(
+    doc: dict,
+    *,
+    current_event_status: str | None,
+) -> dict:
+    score_bundle_hash = str(doc["score_bundle_hash"])
+    return {
+        "score_bundle_id": "score_bundle:" + score_bundle_hash.split(":", 1)[1],
+        "score_bundle_hash": score_bundle_hash,
+        "anchored_hash": score_bundle_hash,
+        "score_bundle_doc": doc,
+        "signature_ref": "s3://sig",
+        "receipt_id": None,
+        "run_id": str(doc["run_id"]),
+        "candidate_artifact_hash": str(doc["candidate_artifact_hash"]),
+        "icp_set_hash": str(doc["icp_set_hash"]),
+        "evaluation_epoch": int(doc["evaluation_epoch"]),
+        "bundle_status": "scored",
+        "current_event_status": current_event_status,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -399,21 +452,13 @@ def test_recovery_interval_throttles(monkeypatch):
 
 def test_reusable_bundle_skips_quarantine_worthy_bundle():
     worker = _worker()
-    degraded_doc = {
-        "execution_trace_ref": "trace:cand-1",
-        "score_bundle_hash": "sha256:h",
-        "signature_ref": "s3://sig",
-        "scoring_health": {"provider_error_rate": 0.9},
-    }
+    degraded_doc = _signed_score_bundle_doc(
+        evaluation_epoch=1,
+        provider_error_rate=0.9,
+    )
 
     async def fake_select_many(table, **kwargs):
-        return [
-            {
-                "score_bundle_id": "sb-degraded",
-                "score_bundle_doc": degraded_doc,
-                "signature_ref": "s3://sig",
-            }
-        ]
+        return [_durable_score_bundle_row(degraded_doc, current_event_status="scored")]
 
     with mock.patch.object(sw, "select_many", fake_select_many):
         row = asyncio.run(
@@ -429,20 +474,102 @@ def test_reusable_bundle_skips_quarantine_worthy_bundle():
 
 def test_reusable_bundle_returns_healthy_bundle():
     worker = _worker()
-    healthy_doc = {
-        "execution_trace_ref": "trace:cand-1",
-        "score_bundle_hash": "sha256:h",
-        "signature_ref": "s3://sig",
-        "scoring_health": {"provider_error_rate": 0.0},
-    }
+    healthy_doc = _signed_score_bundle_doc(evaluation_epoch=1)
 
     async def fake_select_many(table, **kwargs):
+        return [_durable_score_bundle_row(healthy_doc, current_event_status="scored")]
+
+    with mock.patch.object(sw, "select_many", fake_select_many):
+        row = asyncio.run(
+            worker._find_reusable_scored_bundle(
+                candidate_id="cand-1",
+                run_id="run-1",
+                candidate_artifact_hash="sha256:a",
+                evaluation_epoch=1,
+            )
+        )
+    assert row is not None
+    assert row["score_bundle_id"].startswith("score_bundle:")
+
+
+def test_reusable_bundle_survives_evaluation_epoch_rollover():
+    worker = _worker()
+    captured = {}
+    healthy_doc = _signed_score_bundle_doc(evaluation_epoch=7)
+
+    async def fake_select_many(table, **kwargs):
+        captured.update(kwargs)
+        return [_durable_score_bundle_row(healthy_doc, current_event_status="verified")]
+
+    with mock.patch.object(sw, "select_many", fake_select_many):
+        row = asyncio.run(
+            worker._find_reusable_scored_bundle(
+                candidate_id="cand-1",
+                run_id="run-1",
+                candidate_artifact_hash="sha256:a",
+                evaluation_epoch=8,
+            )
+        )
+
+    assert row is not None
+    assert row["current_event_status"] == "verified"
+    assert ("evaluation_epoch", 8) not in captured["filters"]
+
+
+def test_multiple_reusable_signed_bundles_fail_closed():
+    worker = _worker()
+
+    def row(bundle_id, epoch):
+        doc = _signed_score_bundle_doc(
+            evaluation_epoch=epoch,
+            identity=bundle_id,
+        )
+        return _durable_score_bundle_row(doc, current_event_status="scored")
+
+    async def fake_select_many(table, **kwargs):
+        return [row("first", 7), row("second", 8)]
+
+    with mock.patch.object(sw, "select_many", fake_select_many):
+        with pytest.raises(RuntimeError, match="multiple healthy signed"):
+            asyncio.run(
+                worker._find_reusable_scored_bundle(
+                    candidate_id="cand-1",
+                    run_id="run-1",
+                    candidate_artifact_hash="sha256:a",
+                    evaluation_epoch=8,
+                )
+            )
+
+
+def test_reusable_bundle_lookup_failure_is_not_treated_as_not_found():
+    worker = _worker()
+
+    async def unavailable(*_args, **_kwargs):
+        raise TimeoutError("score bundle read timed out")
+
+    with mock.patch.object(sw, "select_many", unavailable):
+        with pytest.raises(TimeoutError, match="score bundle read timed out"):
+            asyncio.run(
+                worker._find_reusable_scored_bundle(
+                    candidate_id="cand-1",
+                    run_id="run-1",
+                    candidate_artifact_hash="sha256:a",
+                    evaluation_epoch=1,
+                )
+            )
+
+
+@pytest.mark.parametrize("current_status", ["failed", "rejected", "tombstoned"])
+def test_reusable_bundle_does_not_revive_terminal_lifecycle_state(current_status):
+    worker = _worker()
+    score_bundle_doc = _signed_score_bundle_doc(evaluation_epoch=1)
+
+    async def fake_select_many(*_args, **_kwargs):
         return [
-            {
-                "score_bundle_id": "sb-healthy",
-                "score_bundle_doc": healthy_doc,
-                "signature_ref": "s3://sig",
-            }
+            _durable_score_bundle_row(
+                score_bundle_doc,
+                current_event_status=current_status,
+            )
         ]
 
     with mock.patch.object(sw, "select_many", fake_select_many):
@@ -454,4 +581,166 @@ def test_reusable_bundle_returns_healthy_bundle():
                 evaluation_epoch=1,
             )
         )
-    assert row is not None and row["score_bundle_id"] == "sb-healthy"
+    assert row is None
+
+
+def test_reusable_bundle_repairs_missing_opening_event_without_rescoring():
+    worker = _worker()
+    score_bundle_doc = _signed_score_bundle_doc(evaluation_epoch=1)
+    durable_row = _durable_score_bundle_row(
+        score_bundle_doc,
+        current_event_status=None,
+    )
+    requests = []
+
+    async def fake_select_many(*_args, **_kwargs):
+        return [durable_row]
+
+    async def fake_create_score_bundle(request):
+        requests.append(request)
+        assert request.score_bundle == score_bundle_doc
+        return durable_row, {"event_status": "scored"}
+
+    async def fake_select_one(*_args, **_kwargs):
+        return {
+            "score_bundle_id": durable_row["score_bundle_id"],
+            "current_event_status": "scored",
+        }
+
+    with (
+        mock.patch.object(sw, "select_many", fake_select_many),
+        mock.patch.object(sw, "select_one", fake_select_one),
+        mock.patch.object(sw, "create_score_bundle", fake_create_score_bundle),
+    ):
+        row = asyncio.run(
+            worker._find_reusable_scored_bundle(
+                candidate_id="cand-1",
+                run_id="run-1",
+                candidate_artifact_hash="sha256:a",
+                evaluation_epoch=1,
+            )
+        )
+
+    assert row is not None
+    assert row["current_event_status"] == "scored"
+    assert len(requests) == 1
+
+
+def test_reusable_bundle_missing_event_recovery_respects_concurrent_tombstone():
+    worker = _worker()
+    score_bundle_doc = _signed_score_bundle_doc(evaluation_epoch=1)
+    durable_row = _durable_score_bundle_row(
+        score_bundle_doc,
+        current_event_status=None,
+    )
+
+    async def fake_select_many(*_args, **_kwargs):
+        return [durable_row]
+
+    async def fake_create_score_bundle(_request):
+        return durable_row, {"event_status": "scored"}
+
+    async def fake_select_one(*_args, **_kwargs):
+        return {
+            "score_bundle_id": durable_row["score_bundle_id"],
+            "current_event_status": "tombstoned",
+        }
+
+    with (
+        mock.patch.object(sw, "select_many", fake_select_many),
+        mock.patch.object(sw, "select_one", fake_select_one),
+        mock.patch.object(sw, "create_score_bundle", fake_create_score_bundle),
+    ):
+        row = asyncio.run(
+            worker._find_reusable_scored_bundle(
+                candidate_id="cand-1",
+                run_id="run-1",
+                candidate_artifact_hash="sha256:a",
+                evaluation_epoch=1,
+            )
+        )
+    assert row is None
+
+
+def test_reusable_bundle_rejects_altered_body_with_stale_stored_hash():
+    worker = _worker()
+    score_bundle_doc = _signed_score_bundle_doc(evaluation_epoch=1)
+    durable_row = _durable_score_bundle_row(
+        score_bundle_doc,
+        current_event_status="scored",
+    )
+    durable_row["score_bundle_doc"] = {
+        **score_bundle_doc,
+        "identity": "altered-after-hashing",
+    }
+
+    async def fake_select_many(*_args, **_kwargs):
+        return [durable_row]
+
+    with mock.patch.object(sw, "select_many", fake_select_many):
+        with pytest.raises(ValueError, match="score bundle hash mismatch"):
+            asyncio.run(
+                worker._find_reusable_scored_bundle(
+                    candidate_id="cand-1",
+                    run_id="run-1",
+                    candidate_artifact_hash="sha256:a",
+                    evaluation_epoch=1,
+                )
+            )
+
+
+def test_reusable_bundle_rejects_unknown_current_lifecycle_state():
+    worker = _worker()
+    score_bundle_doc = _signed_score_bundle_doc(evaluation_epoch=1)
+    durable_row = _durable_score_bundle_row(
+        score_bundle_doc,
+        current_event_status="future_state",
+    )
+
+    async def fake_select_many(*_args, **_kwargs):
+        return [durable_row]
+
+    with mock.patch.object(sw, "select_many", fake_select_many):
+        with pytest.raises(RuntimeError, match="unknown current lifecycle state"):
+            asyncio.run(
+                worker._find_reusable_scored_bundle(
+                    candidate_id="cand-1",
+                    run_id="run-1",
+                    candidate_artifact_hash="sha256:a",
+                    evaluation_epoch=1,
+                )
+            )
+
+
+def test_reusable_bundle_rejects_valid_doc_under_different_projected_candidate():
+    worker = _worker()
+    score_bundle_doc = _signed_score_bundle_doc(evaluation_epoch=1)
+    score_bundle_doc = {
+        **score_bundle_doc,
+        "candidate_artifact_hash": "sha256:b",
+    }
+    replacement_hash = _score_bundle_hash(score_bundle_doc)
+    score_bundle_doc = {
+        **score_bundle_doc,
+        "score_bundle_hash": replacement_hash,
+        "anchored_hash": replacement_hash,
+    }
+    durable_row = _durable_score_bundle_row(
+        score_bundle_doc,
+        current_event_status="scored",
+    )
+    durable_row["candidate_artifact_hash"] = "sha256:a"
+
+    async def fake_select_many(*_args, **_kwargs):
+        return [durable_row]
+
+    with mock.patch.object(sw, "select_many", fake_select_many):
+        with pytest.raises(RuntimeError, match="durable identity"):
+            asyncio.run(
+                worker._find_reusable_scored_bundle(
+                    candidate_id="cand-1",
+                    run_id="run-1",
+                    candidate_artifact_hash="sha256:a",
+                    evaluation_epoch=1,
+                )
+            )

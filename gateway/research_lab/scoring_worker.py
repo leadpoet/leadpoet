@@ -7465,45 +7465,147 @@ class ResearchLabGatewayScoringWorker:
         candidate_artifact_hash: str,
         evaluation_epoch: int,
     ) -> dict[str, Any] | None:
-        """Locate a signed score bundle already produced for this candidate+epoch.
+        """Locate the signed score bundle already produced for this candidate run.
 
-        Bug #12 rescore path: a candidate whose bundle landed but whose scored
-        event write failed gets re-claimed; without this it re-runs the full
-        evaluation and produces a divergent second signed bundle.
+        Restart recovery: a candidate whose bundle landed but whose scored
+        event write failed gets re-claimed, potentially after epoch rollover;
+        without this it re-runs the full evaluation and can produce a divergent
+        second signed bundle.
         """
         if _env_flag("RESEARCH_LAB_DISABLE_SCORED_BUNDLE_REUSE"):
             return None
         try:
             rows = await select_many(
                 "research_evaluation_score_bundle_current",
-                columns="score_bundle_id,score_bundle_doc,signature_ref,icp_set_hash",
+                columns=(
+                    "score_bundle_id,score_bundle_hash,anchored_hash,score_bundle_doc,"
+                    "signature_ref,receipt_id,icp_set_hash,run_id,"
+                    "candidate_artifact_hash,evaluation_epoch,bundle_status,"
+                    "current_event_status"
+                ),
                 filters=(
                     ("run_id", run_id),
                     ("candidate_artifact_hash", candidate_artifact_hash),
-                    ("evaluation_epoch", int(evaluation_epoch)),
                     ("bundle_status", "scored"),
                 ),
                 order_by=(("created_at", True),),
                 limit=5,
             )
         except Exception as exc:
-            # Best-effort side check: never fail the scoring pass over it.
+            # This read is an idempotency boundary, not an advisory side
+            # check.  A signed bundle may already have landed before the
+            # candidate's terminal event was interrupted.  Treating an
+            # unavailable read as "not found" can spend providers again and
+            # persist a second, divergent signed bundle for the same run.
+            # Fail closed and let the normal retry path repeat this read.
             logger.warning(
                 "research_lab_reusable_bundle_lookup_failed candidate_id=%s error=%s",
                 compact_ref(candidate_id),
                 str(exc)[:200],
             )
-            return None
+            raise
         trace_suffix = f":{candidate_id}"
+        reusable: list[dict[str, Any]] = []
         for row in rows:
             doc = row.get("score_bundle_doc") if isinstance(row.get("score_bundle_doc"), Mapping) else None
             if not doc:
                 continue
+            # Re-run the same full content-hash and secret-material validation
+            # used by the production write path before trusting a durable row.
+            # Matching only the projected hash fields would not detect a
+            # modified nested score document.
+            validated_request = ResearchLabScoreBundleCreateRequest(
+                bundle_status="scored",
+                receipt_id=row.get("receipt_id") or None,
+                score_bundle=dict(doc),
+            )
+            try:
+                row_epoch = int(row.get("evaluation_epoch"))
+                doc_epoch = int(doc.get("evaluation_epoch"))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "reusable signed score bundle has invalid epoch identity"
+                ) from exc
+            if (
+                str(row.get("run_id") or "") != run_id
+                or str(doc.get("run_id") or "") != run_id
+                or str(row.get("candidate_artifact_hash") or "")
+                != candidate_artifact_hash
+                or str(doc.get("candidate_artifact_hash") or "")
+                != candidate_artifact_hash
+                or not str(row.get("icp_set_hash") or "")
+                or str(doc.get("icp_set_hash") or "")
+                != str(row.get("icp_set_hash") or "")
+                or str(doc.get("signature_ref") or "")
+                != str(row.get("signature_ref") or "")
+                or str(row.get("bundle_status") or "") != "scored"
+                or row_epoch < 0
+                or doc_epoch != row_epoch
+            ):
+                raise RuntimeError(
+                    "reusable signed score bundle differs from its durable identity"
+                )
+            score_bundle_hash = str(doc.get("score_bundle_hash") or "")
+            expected_bundle_id = (
+                "score_bundle:" + score_bundle_hash.split(":", 1)[1]
+                if score_bundle_hash.startswith("sha256:")
+                else ""
+            )
+            if (
+                not expected_bundle_id
+                or str(row.get("score_bundle_id") or "") != expected_bundle_id
+                or str(row.get("score_bundle_hash") or "") != score_bundle_hash
+                or str(row.get("anchored_hash") or "") != score_bundle_hash
+            ):
+                raise RuntimeError(
+                    "reusable signed score bundle has invalid content identity"
+                )
+            current_event_status = str(row.get("current_event_status") or "")
+            if current_event_status in {"failed", "rejected", "tombstoned"}:
+                logger.warning(
+                    "research_lab_reusable_bundle_skipped_terminal candidate_id=%s "
+                    "score_bundle_id=%s current_event_status=%s",
+                    compact_ref(candidate_id),
+                    compact_ref(str(row.get("score_bundle_id") or "")),
+                    current_event_status,
+                )
+                continue
+            if not current_event_status:
+                # The immutable signed bundle insert may commit immediately
+                # before its opening lifecycle event.  Re-entering the normal
+                # idempotent store path repairs that exact event without
+                # recomputing or re-signing the paid evaluation.  The durable
+                # readback below observes any concurrent terminal correction
+                # rather than trusting only the returned opening event.
+                recovered_row, _recovered_event = await create_score_bundle(
+                    validated_request
+                )
+                if str(recovered_row.get("score_bundle_id") or "") != expected_bundle_id:
+                    raise RuntimeError(
+                        "recovered signed score bundle differs from durable identity"
+                    )
+                durable_current = await select_one(
+                    "research_evaluation_score_bundle_current",
+                    columns="score_bundle_id,current_event_status",
+                    filters=(("score_bundle_id", expected_bundle_id),),
+                )
+                if not durable_current:
+                    raise RuntimeError(
+                        "recovered signed score bundle durable readback is missing"
+                    )
+                current_event_status = str(
+                    durable_current.get("current_event_status") or ""
+                )
+                row = {**row, "current_event_status": current_event_status}
+            if current_event_status not in {"scored", "verified"}:
+                if current_event_status in {"failed", "rejected", "tombstoned"}:
+                    continue
+                raise RuntimeError(
+                    "reusable signed score bundle has unknown current lifecycle state"
+                )
             if not str(doc.get("execution_trace_ref") or "").endswith(trace_suffix):
                 continue
             if not str(row.get("signature_ref") or doc.get("signature_ref") or ""):
-                continue
-            if not str(doc.get("score_bundle_hash") or ""):
                 continue
             if self._scoring_health_gate_result(doc).get("decision") == "quarantine":
                 # A degraded measurement is not reusable evidence: a
@@ -7515,8 +7617,23 @@ class ResearchLabGatewayScoringWorker:
                     compact_ref(str(row.get("score_bundle_id") or "")),
                 )
                 continue
-            return dict(row)
-        return None
+            reusable.append(dict(row))
+        if len(reusable) > 1:
+            raise RuntimeError(
+                "multiple healthy signed score bundles exist for one candidate run"
+            )
+        if not reusable:
+            return None
+        reused_epoch = int(reusable[0]["evaluation_epoch"])
+        if reused_epoch != int(evaluation_epoch):
+            logger.warning(
+                "research_lab_reusable_bundle_cross_epoch candidate_id=%s "
+                "bundle_epoch=%s current_epoch=%s",
+                compact_ref(candidate_id),
+                reused_epoch,
+                int(evaluation_epoch),
+            )
+        return reusable[0]
 
     async def _complete_candidate_from_reused_bundle(
         self,
@@ -7566,7 +7683,7 @@ class ResearchLabGatewayScoringWorker:
                     ("Run", compact_ref(candidate.get("run_id"))),
                     ("Score bundle", compact_ref(score_bundle_id)),
                     ("Evaluation epoch", evaluation_epoch),
-                    ("Reason", "signed bundle exists for this candidate+epoch; skipping re-evaluation"),
+                    ("Reason", "signed bundle exists for this candidate run; skipping re-evaluation"),
                 ),
             )
         )

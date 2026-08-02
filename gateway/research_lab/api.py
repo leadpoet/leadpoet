@@ -384,7 +384,10 @@ async def _seal_openrouter_credential_v2(
     from gateway.tee.openrouter_credential_v2 import (
         validate_openrouter_ingress_envelope_v2,
     )
-    from gateway.utils.tee_client import coordinator_tee_client
+    from gateway.utils.tee_client import (
+        TEEEnclaveRPCError,
+        coordinator_tee_client,
+    )
     from leadpoet_canonical.attested_v2 import sha256_bytes
 
     try:
@@ -392,18 +395,47 @@ async def _seal_openrouter_credential_v2(
             request_id=str(encrypted.request_id),
             ciphertext_b64=str(encrypted.ciphertext_b64),
         )
+    except TEEEnclaveRPCError as exc:
+        logger.warning(
+            "OPENROUTER_V2_CREDENTIAL_SEAL_REJECTED kind=%s error_type=%s",
+            credential_kind,
+            exc.error_type or "unknown",
+        )
+        if exc.error_type in {"KMSRecipientV2Error", "ValueError"}:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "attested OpenRouter credential ciphertext is invalid or "
+                    "expired"
+                ),
+            ) from exc
+        raise HTTPException(
+            status_code=503,
+            detail="attested OpenRouter credential sealing is unavailable",
+        ) from exc
+    except Exception as exc:
+        logger.warning(
+            "OPENROUTER_V2_CREDENTIAL_SEAL_UNAVAILABLE kind=%s type=%s",
+            credential_kind,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="attested OpenRouter credential sealing is unavailable",
+        ) from exc
+    try:
         envelope = validate_openrouter_ingress_envelope_v2(
             result.get("credential_envelope") or {}
         )
     except Exception as exc:
         logger.warning(
-            "OPENROUTER_V2_CREDENTIAL_SEAL_FAILED kind=%s type=%s",
+            "OPENROUTER_V2_CREDENTIAL_ENVELOPE_INVALID kind=%s type=%s",
             credential_kind,
             type(exc).__name__,
         )
         raise HTTPException(
-            status_code=400,
-            detail="attested OpenRouter credential ciphertext is invalid or expired",
+            status_code=503,
+            detail="attested OpenRouter credential sealing is unavailable",
         ) from exc
     if (
         envelope.get("credential_kind") != credential_kind
@@ -1921,6 +1953,12 @@ async def register_research_lab_openrouter_key(payload: ResearchLabOpenRouterKey
             await persist_openrouter_credential_envelope_v2(
                 envelope
             )
+    except HTTPException:
+        # Credential-recipient validation failures are intentional client
+        # errors. Preserve their fail-closed 4xx contract instead of
+        # misclassifying them as storage failures and inviting retries with
+        # the same expired or already-consumed ciphertext.
+        raise
     except OpenRouterKeyVaultError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

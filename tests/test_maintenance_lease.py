@@ -259,7 +259,7 @@ async def test_nonzero_hosted_lease_holder_runs_snapshot_refresh(monkeypatch) ->
         observed["tree_policy"] = tree_policy
         return {"status": "healthy"}
 
-    monkeypatch.setattr(hosted, "reproject_stale_public_cards", noop)
+    monkeypatch.setattr(hosted, "_run_public_reprojection_subprocess", noop)
     monkeypatch.setattr(hosted, "reconcile_active_private_model_lineage", noop)
     monkeypatch.setattr(hosted, "maybe_refresh_dev_snapshot", snapshot)
     monkeypatch.setattr(hosted, "reconcile_pending_champion_rewards", noop)

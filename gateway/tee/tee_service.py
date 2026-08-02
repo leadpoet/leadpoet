@@ -2607,7 +2607,7 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         print(f"[TEE] ❌ RPC error: {e}", flush=True)
         import traceback
         traceback.print_exc()
-        return {"error": str(e)}
+        return {"error": str(e), "error_type": type(e).__name__}
 
 
 # ============================================================================

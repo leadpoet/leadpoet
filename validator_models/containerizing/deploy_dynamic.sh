@@ -409,7 +409,7 @@ start_container() {
     echo "🚀 Starting $DISPLAY_NAME..."
     echo "   Container ID: $CONTAINER_ID / $TOTAL_CONTAINERS"
     if [ -n "$PROXY_URL" ]; then
-        echo "   Proxy: ${PROXY_URL:0:30}..."
+        echo "   Proxy: configured (credentials redacted)"
     else
         echo "   Proxy: None (EC2 native IP)"
     fi
@@ -596,7 +596,7 @@ if [ $QUAL_PROXY_COUNT -gt 0 ]; then
 
         echo "🚀 Starting Qualification Worker $i (Docker container)..."
         if [ -n "$QUAL_PROXY_VALUE" ]; then
-            echo "   Proxy: ${QUAL_PROXY_VALUE:0:30}..."
+            echo "   Proxy: configured (credentials redacted)"
         fi
 
         QUAL_PROXY_ARGS=""
@@ -693,7 +693,7 @@ if [ $FF_PROXY_COUNT -gt 0 ]; then
 
         echo "🚀 Starting Fulfillment Worker $i (Docker container)..."
         if [ -n "$FF_PROXY_VALUE" ]; then
-            echo "   Proxy: ${FF_PROXY_VALUE:0:30}..."
+            echo "   Proxy: configured (credentials redacted)"
         fi
 
         FF_PROXY_ARGS=""

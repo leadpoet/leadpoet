@@ -301,6 +301,7 @@ PROTECTED_SYMBOLS = {
         "persist_execution_transport_artifacts_v2",
     ),
     "gateway/research_lab/attested_scoring_v2.py": (
+        "_local_failed_receipt_hashes",
         "_is_checkpoint_bootstrap_scope",
         "_resolve_parent_ancestry_transport_v2",
         "_validate_output_ancestry_checkpoint_v2",

@@ -12,9 +12,12 @@ from decimal import Decimal, ROUND_HALF_UP
 import json
 import logging
 import os
+from pathlib import Path
 import random
 import re
+import signal
 import socket
+import sys
 import threading
 import time
 from typing import Any, Iterable, Mapping, Sequence
@@ -104,7 +107,6 @@ from gateway.research_lab.promotion import (
     reconcile_pending_champion_rewards,
 )
 from gateway.research_lab.public_activity import (
-    reproject_stale_public_cards,
     safe_project_public_loop_activity,
 )
 from gateway.research_lab.snapshot_refresh import maybe_refresh_dev_snapshot
@@ -478,6 +480,72 @@ def _env_int(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+async def _stop_maintenance_subprocess(process: Any) -> None:
+    """Terminate an isolated maintenance process without leaving descendants."""
+    if process.returncode is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5.0)
+        return
+    except asyncio.TimeoutError:
+        pass
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        return
+    await process.wait()
+
+
+async def _run_public_reprojection_subprocess() -> None:
+    """Run the projection repair in an exec'd process and reclaim all JSON RSS."""
+    timeout_seconds = max(
+        60,
+        _env_int(
+            "RESEARCH_LAB_PUBLIC_REPROJECTION_SUBPROCESS_TIMEOUT_SECONDS",
+            600,
+        ),
+    )
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "gateway.research_lab.maintenance_process",
+        "--task",
+        "public-reprojection",
+        "--log-level",
+        os.getenv("LOG_LEVEL", "INFO"),
+        cwd=str(Path(__file__).resolve().parents[2]),
+        start_new_session=(os.name == "posix"),
+    )
+    try:
+        return_code = await asyncio.wait_for(
+            process.wait(), timeout=float(timeout_seconds)
+        )
+    except asyncio.CancelledError:
+        await _stop_maintenance_subprocess(process)
+        raise
+    except asyncio.TimeoutError as exc:
+        await _stop_maintenance_subprocess(process)
+        raise RuntimeError(
+            "public reprojection maintenance subprocess timed out "
+            f"after {timeout_seconds}s"
+        ) from exc
+    if return_code != 0:
+        raise RuntimeError(
+            "public reprojection maintenance subprocess exited "
+            f"with status {return_code}"
+        )
 
 
 class HostedResearchLabWorkerError(RuntimeError):
@@ -2288,7 +2356,7 @@ class ResearchLabHostedWorker:
         if lease_guard is not None:
             lease_guard.ensure_held()
         try:
-            await reproject_stale_public_cards(config=self.config)
+            await _run_public_reprojection_subprocess()
         except Exception as exc:
             logger.warning(
                 "research_lab_periodic_reprojection_sweep_failed worker_ref=%s error=%s",

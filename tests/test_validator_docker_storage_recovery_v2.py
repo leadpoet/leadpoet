@@ -552,6 +552,8 @@ def test_validator_docker_recovery_reclaims_stale_nitro_mounts_before_floor(
     assert '"reclaimed_mount_count":325' in result.stdout
     assert "Docker storage ready: free_bytes=40000000000" in result.stdout
     assert "docker_stale_mount_reclaimer_v2" in sudo_log
+    assert "PYTHONSAFEPATH=1 python3" in sudo_log
+    assert "-m validator_tee.host" not in sudo_log
     assert "systemctl stop" not in sudo_log
     assert "rm -rf" not in sudo_log
 

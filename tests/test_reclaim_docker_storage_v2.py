@@ -1,4 +1,6 @@
 from pathlib import Path
+import subprocess
+import sys
 
 
 SCRIPT = Path("validator_tee/scripts/reclaim_docker_storage_v2.sh").read_text()
@@ -55,4 +57,23 @@ def test_live_runtime_reclaims_stale_state_before_rechecking_capacity():
     assert initial_inventory < reclaim < repeated_prune < capacity
     assert 'if [ "$INITIAL_CONTAINER_COUNT" -ne 0 ]' in SCRIPT
     assert "Reclaiming unreachable Docker overlay state" in SCRIPT
-    assert 'sudo env PYTHONPATH="$REPO_ROOT" python3' in SCRIPT
+    assert "sudo env PYTHONSAFEPATH=1 python3" in SCRIPT
+    assert (
+        '"$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py"'
+        in SCRIPT
+    )
+    assert "-m validator_tee.host.docker_stale_mount_reclaimer_v2" not in SCRIPT
+
+
+def test_live_reclaimer_bootstraps_without_validator_package_dependencies():
+    helper = Path("validator_tee/host/docker_stale_mount_reclaimer_v2.py").resolve()
+    result = subprocess.run(
+        [sys.executable, "-I", str(helper), "--help"],
+        cwd="/",
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Reclaim unreachable Docker overlay state" in result.stdout

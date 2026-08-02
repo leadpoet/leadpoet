@@ -92,8 +92,11 @@ INITIAL_CONTAINER_COUNT="$(
 )"
 if [ "$INITIAL_CONTAINER_COUNT" -ne 0 ]; then
   echo "Reclaiming unreachable Docker overlay state without disturbing live containers"
-  sudo env PYTHONPATH="$REPO_ROOT" python3 \
-    -m validator_tee.host.docker_stale_mount_reclaimer_v2
+  # This runs before release dependencies are installed. Execute the
+  # stdlib-only helper directly so validator_tee/__init__.py cannot import
+  # wallet/runtime packages that are intentionally unavailable at this stage.
+  sudo env PYTHONSAFEPATH=1 python3 \
+    "$REPO_ROOT/validator_tee/host/docker_stale_mount_reclaimer_v2.py"
   # A stale Nitro build mount can keep otherwise unreferenced layers alive.
   # Retry the normal Docker-owned reclamation only after the guarded unmount.
   run_prune_with_retry image docker image prune --all --force

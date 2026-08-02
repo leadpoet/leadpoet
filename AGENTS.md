@@ -119,6 +119,38 @@ or bypassing attestation, PCR0, exact-commit, archive, signature, enclave, or
 fail-closed checks. `STOP` revokes the exception immediately. Every other skill
 and workflow remains under the default production-write prohibition.
 
+### Explicit overnight rebenchmark authorization
+
+Only a newest-turn explicit instruction to run or start
+`$overnight-rebenchmark-validation` activates this separate exception. An
+implicit skill trigger, diagnosis request, or general authorization does not.
+
+While that run is active and the user has not said `STOP`, Codex may:
+
+- Push reviewed permanent fixes under the normal synchronization, testing,
+  epoch-timing, attestation, and exact-release rules.
+- Apply an exact committed, numbered, idempotent Supabase migration after it
+  passes disposable-PostgreSQL coverage and a read-only live schema check.
+- Use repository-owned admin/configuration tooling to preserve maintenance
+  state and resume scoring when required for the explicitly requested official
+  rebenchmark. It must not unpause autoresearch or miner submissions when they
+  were paused at invocation.
+- Run the canonical gateway and validator restart scripts after the exact SHA
+  attests, then run production probes and monitor until one complete latest-
+  model rebenchmark scores every configured ICP, derives and persists the
+  candidate policy's public/private/conditional assignment, publishes the
+  aggregate, exposes that score on the subnet dashboard, and leaves candidate
+  evaluation ready.
+
+This exception never permits ad hoc remote source edits, arbitrary SQL or row
+deletion, fabricated scores or provider responses, manual weight vectors,
+direct/manual/emergency chain submissions, secret rotation or disclosure,
+process manipulation outside repository-owned admin and canonical restart
+tools, or bypassing attestation, PCR0, exact-commit, archive, signature,
+enclave, model-lineage, canonical-bundle, settlement, or fail-closed checks.
+`STOP` revokes the exception at the next safe atomic boundary. Every other
+skill and workflow remains under the default production-write prohibition.
+
 ## Deployment timing
 
 Except for the push-now override, before a runtime, restart, release, manifest,

@@ -382,6 +382,29 @@ class SanitizedWeightFixture:
             finalized_chain_state_root=finalized_chain_state_root,
             gateway_authority_event_hash=gateway_authority_event_hash,
         )
+        allocation_authority_receipt = self.receipt(
+            role=COORDINATOR_ROLE,
+            purpose="research_lab.allocation.v2",
+            job_id=f"research-lab-allocation-{self.epoch_id}",
+            key=self.coordinator_key,
+            boot=coordinator_boot,
+            config_hash=HASH,
+            input_root=sha256_json(
+                {
+                    "epoch": self.epoch_id,
+                    "kind": "research-lab-allocation-authority",
+                    "netuid": 71,
+                }
+            ),
+            output_root=sha256_json(
+                {
+                    "allocation": dict(
+                        preliminary["research_lab_allocation_doc"]
+                    )
+                }
+            ),
+            sequence=0,
+        )
         ordered_categories = [
             "chain_state",
             "metagraph_state",
@@ -391,7 +414,9 @@ class SanitizedWeightFixture:
                 - {"chain_state", "metagraph_state", "burn_ownership"}
             ),
         ]
-        source_receipts: list[dict[str, Any]] = []
+        source_receipts: list[dict[str, Any]] = [
+            allocation_authority_receipt
+        ]
         source_attempts: list[dict[str, Any]] = []
         input_hashes: dict[str, str] = {}
         for index, category in enumerate(ordered_categories):
@@ -453,6 +478,8 @@ class SanitizedWeightFixture:
                     if category == "metagraph_state"
                     else [input_hashes["metagraph_state"]]
                     if category == "burn_ownership"
+                    else [allocation_authority_receipt["receipt_hash"]]
+                    if category == "research_lab_allocation"
                     else []
                 ),
                 sequence=index,

@@ -420,6 +420,112 @@ def test_settlement_fixture_transport_identity_is_unique_across_epochs() -> None
     assert len(logical_attempts) == len(set(logical_attempts))
 
 
+def test_weight_fixture_binds_allocation_input_to_attested_authority() -> None:
+    from gateway.research_lab.champion_settlement_v2 import (
+        _allocation_authority_receipt_hash_v2,
+    )
+
+    fixture = SanitizedWeightFixture(candidate_sha=COMMIT, epoch_id=24207)
+    bundle = fixture.bundle()
+    snapshot = bundle["weight_snapshot"]
+    allocation = snapshot["calculation_snapshot"][
+        "research_lab_allocation_doc"
+    ]
+    allocation_input_hash = snapshot["input_receipt_hashes"][
+        "research_lab_allocation"
+    ]
+    receipts = {
+        receipt["receipt_hash"]: receipt
+        for receipt in bundle["receipt_graph"]["receipts"]
+    }
+    allocation_input = receipts[allocation_input_hash]
+
+    assert len(allocation_input["parent_receipt_hashes"]) == 1
+    authority_hash = allocation_input["parent_receipt_hashes"][0]
+    assert _allocation_authority_receipt_hash_v2(
+        bundle_doc=bundle,
+        allocation_input_receipt_hash=allocation_input_hash,
+        allocation=allocation,
+        epoch_id=24207,
+    ) == authority_hash
+
+
+def test_settlement_fixture_passes_full_allocation_authority_validation() -> None:
+    from gateway.research_lab.champion_settlement_v2 import (
+        validate_finalized_allocation_authorities_v2,
+    )
+    from leadpoet_canonical.attested_v2 import build_receipt_graph
+
+    rows, _, _ = postgres_probe._settlement_fixture(
+        candidate_sha=COMMIT,
+        epoch_id=24207,
+    )
+    by_table: dict[str, list[dict[str, Any]]] = {}
+    for table, row in rows:
+        by_table.setdefault(table, []).append(row)
+    bundle_row = by_table[
+        "research_lab_attested_weight_bundles_v2"
+    ][0]
+    publication_row = by_table[
+        "research_lab_attested_publication_events_v2"
+    ][0]
+    finalization_row = by_table[
+        "research_lab_attested_weight_finalizations_v2"
+    ][0]
+    receipts = {
+        row["receipt_hash"]: row["receipt_doc"]
+        for row in by_table[
+            "research_lab_attested_execution_receipts_v2"
+        ]
+    }
+    finalization_doc = finalization_row["finalization_doc"]
+    finalization_receipt = receipts[
+        finalization_row["finalization_receipt_hash"]
+    ]
+    extrinsic_receipt = receipts[
+        finalization_doc["extrinsic_receipt_hash"]
+    ]
+    bundle_graph = bundle_row["bundle_doc"]["receipt_graph"]
+    finalization_attempts = [
+        row["attempt_doc"]
+        for row in by_table[
+            "research_lab_attested_transport_attempts_v2"
+        ]
+        if row["attempt_doc"]["job_id"]
+        == finalization_receipt["job_id"]
+        and row["attempt_doc"]["purpose"]
+        == finalization_receipt["purpose"]
+    ]
+    finalization_graph = build_receipt_graph(
+        root_receipt_hash=finalization_receipt["receipt_hash"],
+        boot_identities=bundle_graph["boot_identities"],
+        receipts=[
+            *[
+                receipt
+                for receipt in bundle_graph["receipts"]
+                if receipt["purpose"]
+                != "validator.hotkey_signature.v2"
+            ],
+            extrinsic_receipt,
+            finalization_receipt,
+        ],
+        transport_attempts=[
+            *bundle_graph["transport_attempts"],
+            *finalization_attempts,
+        ],
+    )
+    authority_rows = validate_finalized_allocation_authorities_v2(
+        [{**bundle_row, **publication_row, **finalization_row}],
+        finalization_graphs={
+            finalization_receipt["receipt_hash"]: finalization_graph
+        },
+    )
+
+    assert len(authority_rows) == 1
+    assert authority_rows[0]["epoch"] == 24207
+    assert authority_rows[0]["allocation_authority_receipt_hash"] in receipts
+
+
 def test_settlement_fixture_uses_explicit_exact_container_source_root(
     monkeypatch,
 ) -> None:

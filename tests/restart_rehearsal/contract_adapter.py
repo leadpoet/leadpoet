@@ -703,9 +703,17 @@ def _docker_run_contract(
                 name = value
             elif item in {"-e", "--env"}:
                 key, separator, env_value = value.partition("=")
-                if not separator or not key:
+                if not key or not re.fullmatch(
+                    r"[A-Za-z_][A-Za-z0-9_]*", key
+                ):
                     raise ValueError("Docker run environment entry is invalid")
-                environment[key] = env_value
+                if separator:
+                    environment[key] = env_value
+                elif key in os.environ:
+                    # Docker's name-only form inherits the value without
+                    # exposing it in process arguments. An absent host value
+                    # remains absent in the container.
+                    environment[key] = os.environ[key]
             elif item in {"-v", "--volume"}:
                 mounts.append(value)
             index += 2

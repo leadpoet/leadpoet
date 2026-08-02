@@ -5733,6 +5733,40 @@ def test_module_provenance_follows_prepared_archive_python_path(
     ) == module_path
 
 
+def test_docker_contract_inherits_name_only_environment_without_argv_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness_root = Path(__file__).resolve().parent
+    secret = "rehearsal-secret-that-must-not-enter-argv"
+    monkeypatch.setenv("REHEARSAL_CANDIDATE_SHA", COMMIT)
+    monkeypatch.setenv("REHEARSAL_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("LEADPOET_SENTRY_DSN", secret)
+    monkeypatch.delenv("LEADPOET_SENTRY_RELEASE", raising=False)
+    specification = importlib.util.spec_from_file_location(
+        "rehearsal_contract_adapter_env_test",
+        harness_root / "contract_adapter.py",
+    )
+    assert specification is not None
+    assert specification.loader is not None
+    adapter = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(adapter)
+    argv = [
+        "run",
+        "-e",
+        "LEADPOET_SENTRY_DSN",
+        "--env",
+        "LEADPOET_SENTRY_RELEASE",
+        "leadpoet-validator:latest",
+    ]
+
+    _, environment, _, invocation = adapter._docker_run_contract(argv)
+
+    assert environment == {"LEADPOET_SENTRY_DSN": secret}
+    assert invocation == ["leadpoet-validator:latest"]
+    assert secret not in argv
+
+
 def test_gateway_readiness_rejects_substituted_or_missing_invocation() -> None:
     module = "gateway.tee.verify_weight_submission_ready_v2"
     rows = [

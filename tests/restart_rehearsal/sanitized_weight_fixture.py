@@ -86,6 +86,7 @@ class SanitizedWeightFixture:
         key: Ed25519PrivateKey,
         config_hash: str,
         release_identity: Mapping[str, Any] | None = None,
+        boot_nonce_context: str | None = None,
     ) -> dict[str, Any]:
         physical_role = (
             "gateway_coordinator"
@@ -138,7 +139,15 @@ class SanitizedWeightFixture:
             "dependency_lock_hash": dependency_lock_hash,
             "config_hash": config_hash,
             "boot_nonce": hashlib.sha256(
-                f"{physical_role}:{self.epoch_id}".encode()
+                ":".join(
+                    part
+                    for part in (
+                        physical_role,
+                        str(self.epoch_id),
+                        boot_nonce_context,
+                    )
+                    if part is not None
+                ).encode()
             ).hexdigest()[:32],
             "signing_pubkey": self._public_key(key),
             "transport_pubkey": hashlib.sha256(

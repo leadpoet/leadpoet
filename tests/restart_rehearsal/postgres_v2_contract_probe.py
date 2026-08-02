@@ -311,13 +311,19 @@ class DisposablePostgres:
             "--",
             *argv,
         ]
-        return subprocess.run(
+        result = subprocess.run(
             command,
             input=input_text,
             text=True,
             capture_output=True,
-            check=check,
+            check=False,
         )
+        if check and result.returncode != 0:
+            raise PostgresContractProbeError(
+                "postgres command failed executable=%s stderr=%s"
+                % (Path(argv[0]).name, result.stderr.strip())
+            )
+        return result
 
     def start(self) -> None:
         self._as_postgres(
@@ -1590,6 +1596,7 @@ def _historical_compute_allocation_seed_rows(
         key=fixture.coordinator_key,
         config_hash=coordinator_config_hash,
         release_identity=coordinator_release_identity,
+        boot_nonce_context="historical-compute-settlement",
     )
     settlement_receipt = fixture.receipt(
         role="gateway_coordinator",

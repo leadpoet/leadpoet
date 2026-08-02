@@ -136,6 +136,15 @@ def test_historical_receipt_fixture_binds_candidate_release_identity(
         config_hash=config_hash,
         release_identity=loaded,
     )
+    same_epoch_boot = fixture._boot(
+        role="gateway_coordinator",
+        key=fixture.coordinator_key,
+        config_hash="sha256:" + "6" * 64,
+        release_identity=loaded,
+        boot_nonce_context="historical-compute-settlement",
+    )
+    assert same_epoch_boot["boot_nonce"] != boot["boot_nonce"]
+    assert same_epoch_boot["boot_identity_hash"] != boot["boot_identity_hash"]
     receipt = fixture.receipt(
         role="gateway_coordinator",
         purpose="research_lab.legacy_finalized_allocation.v2",

@@ -220,6 +220,62 @@ def test_historical_receipt_fixture_binds_candidate_release_identity(
         )
 
 
+def test_finalized_settlement_fixture_exports_complete_receipt_graphs() -> None:
+    prior_rows, _, _ = postgres_probe._settlement_fixture(
+        candidate_sha=COMMIT,
+        epoch_id=24206,
+    )
+    current_rows, _, _ = postgres_probe._settlement_fixture(
+        candidate_sha=COMMIT,
+        epoch_id=24207,
+    )
+    rows = postgres_probe._deduplicate_settlement_fixture_rows(
+        (*prior_rows, *current_rows)
+    )
+    seed_rows = postgres_probe._settlement_graph_seed_rows(rows)
+
+    receipts = {
+        row["receipt_hash"]: row["receipt_doc"]
+        for row in seed_rows["research_lab_attested_execution_receipts_v2"]
+    }
+    boots = {
+        row["boot_identity_hash"]
+        for row in seed_rows["research_lab_attested_boot_identities_v2"]
+    }
+    attempts = {
+        row["attempt_hash"]
+        for row in seed_rows["research_lab_attested_transport_attempts_v2"]
+    }
+    edges_by_child: dict[str, set[str]] = {}
+    for row in seed_rows["research_lab_attested_receipt_edges_v2"]:
+        edges_by_child.setdefault(row["child_receipt_hash"], set()).add(
+            row["parent_receipt_hash"]
+        )
+    for row in seed_rows["research_lab_attested_receipt_transport_v2"]:
+        assert row["receipt_hash"] in receipts
+        assert row["attempt_hash"] in attempts
+
+    finalization_roots = {
+        row["finalization_receipt_hash"]
+        for table, row in rows
+        if table == "research_lab_attested_weight_finalizations_v2"
+    }
+    assert len(finalization_roots) == 2
+    pending = set(finalization_roots)
+    visited: set[str] = set()
+    while pending:
+        receipt_hash = pending.pop()
+        if receipt_hash in visited:
+            continue
+        receipt = receipts[receipt_hash]
+        assert receipt["boot_identity_hash"] in boots
+        parents = set(receipt["parent_receipt_hashes"])
+        assert edges_by_child.get(receipt_hash, set()) == parents
+        pending.update(parents)
+        visited.add(receipt_hash)
+    assert finalization_roots.issubset(visited)
+
+
 def test_chain_settlement_activation_fixture_creates_one_epoch_backlog(
     tmp_path,
     monkeypatch,

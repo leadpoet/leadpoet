@@ -898,11 +898,15 @@ def _settlement_fixture(
         "state_transition_hash": finalization_doc["state_transition_hash"],
         "finalization_doc": finalization_doc,
     }
-    root_receipt = next(
-        receipt
-        for receipt in bundle["receipt_graph"]["receipts"]
-        if receipt["receipt_hash"] == verified["root_receipt_hash"]
-    )
+    graph_receipts = [
+        *bundle["receipt_graph"]["receipts"],
+        publication_receipt,
+        finalization_receipt,
+    ]
+    attempts_by_scope: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for attempt in bundle["receipt_graph"]["transport_attempts"]:
+        scope = (str(attempt["job_id"]), str(attempt["purpose"]))
+        attempts_by_scope.setdefault(scope, []).append(attempt)
     rows = [
         *[
             (
@@ -911,23 +915,116 @@ def _settlement_fixture(
             )
             for identity in bundle["receipt_graph"]["boot_identities"]
         ],
-        (
-            "research_lab_attested_execution_receipts_v2",
-            receipt_storage_row(root_receipt),
-        ),
-        (
-            "research_lab_attested_execution_receipts_v2",
-            receipt_storage_row(publication_receipt),
-        ),
-        (
-            "research_lab_attested_execution_receipts_v2",
-            receipt_storage_row(finalization_receipt),
-        ),
+        *[
+            (
+                "research_lab_attested_transport_attempts_v2",
+                transport_storage_row(attempt),
+            )
+            for attempt in bundle["receipt_graph"]["transport_attempts"]
+        ],
+        *[
+            (
+                "research_lab_attested_execution_receipts_v2",
+                receipt_storage_row(receipt),
+            )
+            for receipt in graph_receipts
+        ],
+        *[
+            (
+                "research_lab_attested_receipt_edges_v2",
+                {
+                    "child_receipt_hash": receipt["receipt_hash"],
+                    "parent_receipt_hash": parent_hash,
+                },
+            )
+            for receipt in graph_receipts
+            for parent_hash in receipt["parent_receipt_hashes"]
+        ],
+        *[
+            (
+                "research_lab_attested_receipt_transport_v2",
+                {
+                    "receipt_hash": receipt["receipt_hash"],
+                    "attempt_hash": attempt["attempt_hash"],
+                },
+            )
+            for receipt in graph_receipts
+            for attempt in attempts_by_scope.get(
+                (str(receipt["job_id"]), str(receipt["purpose"])),
+                [],
+            )
+        ],
         ("research_lab_attested_weight_bundles_v2", bundle_row),
         ("research_lab_attested_publication_events_v2", publication_row),
         ("research_lab_attested_weight_finalizations_v2", finalization_row),
     ]
     return rows, verified, fixture
+
+
+def _deduplicate_settlement_fixture_rows(
+    rows: Sequence[tuple[str, dict[str, Any]]],
+) -> list[tuple[str, dict[str, Any]]]:
+    key_fields = {
+        "research_lab_attested_boot_identities_v2": (
+            "boot_identity_hash",
+        ),
+        "research_lab_attested_transport_attempts_v2": ("attempt_hash",),
+        "research_lab_attested_execution_receipts_v2": ("receipt_hash",),
+        "research_lab_attested_receipt_edges_v2": (
+            "child_receipt_hash",
+            "parent_receipt_hash",
+        ),
+        "research_lab_attested_receipt_transport_v2": (
+            "receipt_hash",
+            "attempt_hash",
+        ),
+        "research_lab_attested_weight_bundles_v2": ("bundle_hash",),
+        "research_lab_attested_publication_events_v2": (
+            "weight_submission_event_hash",
+        ),
+        "research_lab_attested_weight_finalizations_v2": (
+            "weight_finalization_event_hash",
+        ),
+    }
+    deduplicated: list[tuple[str, dict[str, Any]]] = []
+    seen: dict[tuple[str, tuple[Any, ...]], dict[str, Any]] = {}
+    for table, row in rows:
+        fields = key_fields.get(table)
+        if fields is None:
+            raise PostgresContractProbeError(
+                "settlement fixture table has no declared key: %s" % table
+            )
+        identity = (table, tuple(row.get(field) for field in fields))
+        existing = seen.get(identity)
+        if existing is not None:
+            if existing != row:
+                raise PostgresContractProbeError(
+                    "settlement fixture key was reused with different content"
+                )
+            continue
+        seen[identity] = row
+        deduplicated.append((table, row))
+    return deduplicated
+
+
+def _settlement_graph_seed_rows(
+    rows: Sequence[tuple[str, dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    graph_tables = (
+        "research_lab_attested_boot_identities_v2",
+        "research_lab_attested_execution_receipts_v2",
+        "research_lab_attested_receipt_edges_v2",
+        "research_lab_attested_receipt_transport_v2",
+        "research_lab_attested_transport_attempts_v2",
+    )
+    return {
+        table: [
+            _deterministic_seed_row(row)
+            for row_table, row in rows
+            if row_table == table
+        ]
+        for table in graph_tables
+    }
 
 
 def _relation_contract(database: DisposablePostgres) -> dict[str, Any]:
@@ -2115,10 +2212,13 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
             candidate_sha=args.candidate_sha,
             epoch_id=args.epoch_id,
         )
+        settlement_fixture_rows = _deduplicate_settlement_fixture_rows(
+            (*prior_rows, *rows)
+        )
         database.psql(
             "".join(
                 _json_insert_sql(table, row)
-                for table, row in (*prior_rows, *rows)
+                for table, row in settlement_fixture_rows
             )
         )
         view_result = database.psql(
@@ -2540,6 +2640,22 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 coordinator_release_identity=coordinator_release_identity,
             )
         )
+        graph_seed_rows = _settlement_graph_seed_rows(
+            settlement_fixture_rows
+        )
+        merged_seed_rows = {
+            table: [
+                *graph_seed_rows.get(table, ()),
+                *historical_compute_seed_rows.get(table, ()),
+            ]
+            for table in sorted(
+                set(graph_seed_rows) | set(historical_compute_seed_rows)
+            )
+        }
+        merged_seed_rows["research_lab_finalized_allocation_epochs_v2"] = [
+            prior_view_row,
+            view_row,
+        ]
 
         tampered = copy.deepcopy(view_row)
         tampered["finalization_doc"]["weight_receipt_hash"] = "sha256:" + "0" * 64
@@ -2605,13 +2721,7 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 "tampered_weight_receipt_rejected": True,
                 "required_schema_migrations_declared": True,
             },
-            "seed_rows": {
-                "research_lab_finalized_allocation_epochs_v2": [
-                    prior_view_row,
-                    view_row,
-                ],
-                **historical_compute_seed_rows,
-            },
+            "seed_rows": merged_seed_rows,
             "measured_settlement": measured_settlement,
             "champion_lifetime_credit": {
                 "policy": "accelerated_lifetime_cap_v1",

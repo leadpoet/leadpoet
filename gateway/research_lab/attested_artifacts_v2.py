@@ -48,14 +48,14 @@ async def persist_execution_transport_artifacts_v2(
     persist_ancestry_checkpoint: Any = None,
     boot_verifier: Any = None,
 ) -> dict[str, Any]:
-    allowed_failed = {
+    source_allowed_failed = {
         str(item.get("receipt_hash") or "")
         for item in source_graph.get("receipts") or ()
-        if isinstance(item, Mapping) and item.get("status") == "failed"
+        if isinstance(item, Mapping) and item.get("status") != "succeeded"
     }
     validate_receipt_graph(
         source_graph,
-        allowed_failed_receipt_hashes=allowed_failed,
+        allowed_failed_receipt_hashes=source_allowed_failed,
     )
     committed_hashes = [str(item or "") for item in execution_artifact_hashes]
     if any(not _HASH_RE.fullmatch(item) for item in committed_hashes):
@@ -177,7 +177,7 @@ async def persist_execution_transport_artifacts_v2(
             boot_attestation_verifier=boot_verifier,
             persist_graph=persist_graph,
             persist_ancestry_checkpoint=persist_ancestry_checkpoint,
-            allowed_failed_receipt_hashes=allowed_failed,
+            allowed_failed_receipt_hashes=source_allowed_failed,
         )
     )
     outcome = await execute_coordinator_v2(
@@ -188,7 +188,7 @@ async def persist_execution_transport_artifacts_v2(
         payload=lineage_payload,
         parent_graphs=(dict(source_graph),),
         parent_ancestry_proofs=(dict(source_ancestry_compact_proof),),
-        allowed_failed_parent_receipt_hashes=allowed_failed,
+        allowed_failed_parent_receipt_hashes=source_allowed_failed,
         input_artifact_hashes=(),
         release_manifest=release_manifest,
         client=client,
@@ -212,10 +212,23 @@ async def persist_execution_transport_artifacts_v2(
         raise AttestedArtifactPersistenceV2Error(
             "V2 artifact persistence job binding differs"
         )
+    child_allowed_failed = {
+        str(item.get("receipt_hash") or "")
+        for item in graph.get("receipts") or ()
+        if isinstance(item, Mapping) and item.get("status") != "succeeded"
+    }
+    if (
+        outcome.get("status") != "succeeded"
+        or receipt.get("status") != "succeeded"
+        or child_allowed_failed
+    ):
+        raise AttestedArtifactPersistenceV2Error(
+            "V2 artifact persistence lineage did not succeed"
+        )
     validate_receipt_graph(
         graph,
         required_purposes=(purpose, "leadpoet.artifact_persistence.v2"),
-        allowed_failed_receipt_hashes=allowed_failed,
+        allowed_failed_receipt_hashes=child_allowed_failed,
     )
     final_checkpoint_persistence = (
         await _persist_ancestry_checkpoint_after_graph_v2(

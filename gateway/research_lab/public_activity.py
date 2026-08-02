@@ -54,6 +54,67 @@ PUBLIC_LOOP_LIST_MAX_CARDS_ENV = "RESEARCH_LAB_PUBLIC_LOOP_LIST_MAX_CARDS"
 DEFAULT_PUBLIC_LOOP_LIST_MAX_CARDS = 1000
 DEFAULT_REPROJECTION_SWEEP_BATCH_SIZE = 25
 PUBLIC_LOOP_TICKET_ID_PREFIX_MIN_LENGTH = 8
+
+# The public projection intentionally consumes only this compact subset of the
+# private lifecycle documents.  Selecting ``*`` (and the complete auto-loop
+# event_doc/provider_usage payloads) made the periodic 1,000-card repair sweep
+# decode gigabytes of private source/LLM evidence that the projection never
+# reads.  Keep the PostgREST projection and the reconstruction below together:
+# every field is one that derive_public_loop_outcome or candidate_diagnostics
+# actually consumes.
+_AUTO_LOOP_PROVIDER_PROJECTION_WIDTH = 8
+_AUTO_LOOP_EVENT_PROJECTION_COLUMNS = ",".join(
+    (
+        "run_id",
+        "event_type",
+        "loop_status",
+        "seq",
+        "created_at",
+        "cost_stop_reason:cost_ledger->>stop_reason",
+        "event_stage:event_doc->>stage",
+        "event_error:event_doc->>error",
+        "event_reason:event_doc->>reason",
+        "event_stop_reason:event_doc->>stop_reason",
+        "event_failure_reason:event_doc->>failure_reason",
+        "event_failure_class:event_doc->>failure_class",
+        "event_iteration:event_doc->iteration",
+        "event_loop_iteration:event_doc->loop_iteration",
+        "event_read_file_count:event_doc->read_file_count",
+        "event_read_files:event_doc->read_files",
+        "run_stop_reason:event_doc->run_summary->>stop_reason",
+        "run_wall_clock_seconds:event_doc->run_summary->wall_clock_seconds",
+        "run_openrouter_call_count:event_doc->run_summary->openrouter_call_count",
+        "run_iterations_completed:event_doc->run_summary->iterations_completed",
+        "run_selected_candidate_count:event_doc->run_summary->selected_candidate_count",
+        "run_actual_openrouter_cost_usd:"
+        "event_doc->run_summary->cost_ledger->actual_openrouter_cost_usd",
+        "run_estimated_cost_usd:event_doc->run_summary->cost_ledger->estimated_cost_usd",
+        "generation_public_label:event_doc->candidate_generation_failure->>public_label",
+        "generation_latest_stage:event_doc->candidate_generation_failure->>latest_stage",
+        "generation_stage_counts:event_doc->candidate_generation_failure->stage_counts",
+        *(
+            alias
+            for index in range(_AUTO_LOOP_PROVIDER_PROJECTION_WIDTH)
+            for alias in (
+                f"provider_{index}_call_stage:provider_usage->{index}->>call_stage",
+                f"provider_{index}_error_class:"
+                f"provider_usage->{index}->failed_request->>error_class",
+                f"provider_{index}_http_status:"
+                f"provider_usage->{index}->failed_request->>http_status",
+            )
+        ),
+    )
+)
+_SCORE_BUNDLE_PROJECTION_COLUMNS = ",".join(
+    (
+        "candidate_artifact_hash",
+        "current_status_at",
+        "created_at",
+        "score_aggregates:score_bundle_doc->aggregates",
+        "score_private_holdout_gate:score_bundle_doc->private_holdout_gate",
+        "score_improvement_gate:score_bundle_doc->improvement_gate",
+    )
+)
 _FULL_UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
@@ -385,33 +446,54 @@ async def _fetch_projection_inputs(ticket_id: str) -> dict[str, Any] | None:
     """Fetch the row groups the public outcome is derived from, or None if the
     ticket does not exist. Shared by the projection and the reprojection sweep so
     both always derive from identical inputs."""
-    ticket = await select_one("research_loop_ticket_current", filters=(("ticket_id", ticket_id),))
+    ticket = await select_one(
+        "research_loop_ticket_current",
+        columns=(
+            "ticket_id,miner_hotkey,island,ticket_status,ticket_doc,created_at,"
+            "current_ticket_status,current_status_at,unpaid_expires_at"
+        ),
+        filters=(("ticket_id", ticket_id),),
+    )
     if not ticket:
         return None
     queue_rows = await select_many(
         "research_loop_run_queue_current",
+        columns="run_id,current_queue_status,current_reason,current_status_at",
         filters=(("ticket_id", ticket_id),),
         order_by=(("current_status_at", True),),
         limit=1000,
     )
     receipt_rows = await select_many(
         "research_loop_receipt_current",
+        columns=(
+            "receipt_id,run_id,current_receipt_status,current_status_at,created_at"
+        ),
         filters=(("ticket_id", ticket_id),),
         order_by=(("current_status_at", True),),
         limit=1000,
     )
     candidate_rows = await select_many(
         "research_lab_candidate_evaluation_current",
+        columns=(
+            "candidate_id,run_id,receipt_id,candidate_artifact_hash,"
+            "redacted_public_summary,current_candidate_status,current_reason,"
+            "current_status_at,created_at"
+        ),
         filters=(("ticket_id", ticket_id),),
         order_by=(("current_status_at", True),),
         limit=1000,
     )
-    score_bundle_rows = await select_many(
+    compact_score_bundle_rows = await select_many(
         "research_evaluation_score_bundle_current",
+        columns=_SCORE_BUNDLE_PROJECTION_COLUMNS,
         filters=(("ticket_id", ticket_id),),
         order_by=(("current_status_at", True),),
         limit=1000,
     )
+    score_bundle_rows = [
+        _reconstruct_projection_score_bundle(row)
+        for row in compact_score_bundle_rows
+    ]
     promotion_event_rows = await _promotion_events_for_candidates(candidate_rows)
     latest_queue = _latest_row(queue_rows, "current_status_at")
     auto_loop_filters: tuple[tuple[str, Any], ...] = (("ticket_id", ticket_id),)
@@ -420,18 +502,19 @@ async def _fetch_projection_inputs(ticket_id: str) -> dict[str, Any] | None:
             ("ticket_id", ticket_id),
             ("run_id", str(latest_queue.get("run_id") or "")),
         )
-    auto_loop_event_rows = await select_all(
+    compact_auto_loop_event_rows = await select_all(
         "research_lab_auto_research_loop_events",
-        columns=(
-            "event_id,run_id,ticket_id,event_type,loop_status,seq,elapsed_seconds,"
-            "provider_usage,cost_ledger,event_doc,created_at"
-        ),
+        columns=_AUTO_LOOP_EVENT_PROJECTION_COLUMNS,
         filters=auto_loop_filters,
         order_by=(("seq", False),),
         batch_size=1000,
         max_rows=10000,
         allow_partial=True,
     )
+    auto_loop_event_rows = [
+        _reconstruct_projection_auto_loop_event(row)
+        for row in compact_auto_loop_event_rows
+    ]
     return {
         "ticket": ticket,
         "queue_rows": queue_rows,
@@ -441,6 +524,131 @@ async def _fetch_projection_inputs(ticket_id: str) -> dict[str, Any] | None:
         "promotion_event_rows": promotion_event_rows,
         "auto_loop_event_rows": auto_loop_event_rows,
     }
+
+
+def _set_when_present(target: dict[str, Any], key: str, value: Any) -> None:
+    if value is not None:
+        target[key] = value
+
+
+def _reconstruct_projection_score_bundle(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Rebuild the score document shape from the exact metric inputs selected."""
+    score_bundle_doc: dict[str, Any] = {}
+    for source, target in (
+        ("score_aggregates", "aggregates"),
+        ("score_private_holdout_gate", "private_holdout_gate"),
+        ("score_improvement_gate", "improvement_gate"),
+    ):
+        value = row.get(source)
+        if isinstance(value, Mapping):
+            score_bundle_doc[target] = dict(value)
+    return {
+        "candidate_artifact_hash": row.get("candidate_artifact_hash"),
+        "current_status_at": row.get("current_status_at"),
+        "created_at": row.get("created_at"),
+        "score_bundle_doc": score_bundle_doc,
+    }
+
+
+def _reconstruct_projection_auto_loop_event(
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Rebuild only the lifecycle evidence read by the public projection.
+
+    This is a lossless transformation for ``derive_public_loop_outcome`` and
+    ``candidate_diagnostics``: fields omitted here were never inspected by
+    those functions.  Provider diagnostics intentionally preserve the first
+    eight entries because candidate_diagnostics itself has always enforced
+    that exact bound.
+    """
+    event_doc: dict[str, Any] = {}
+    for source, target in (
+        ("event_stage", "stage"),
+        ("event_error", "error"),
+        ("event_reason", "reason"),
+        ("event_stop_reason", "stop_reason"),
+        ("event_failure_reason", "failure_reason"),
+        ("event_failure_class", "failure_class"),
+        ("event_iteration", "iteration"),
+        ("event_loop_iteration", "loop_iteration"),
+        ("event_read_file_count", "read_file_count"),
+        ("event_read_files", "read_files"),
+    ):
+        _set_when_present(event_doc, target, row.get(source))
+
+    run_summary: dict[str, Any] = {}
+    for source, target in (
+        ("run_stop_reason", "stop_reason"),
+        ("run_wall_clock_seconds", "wall_clock_seconds"),
+        ("run_openrouter_call_count", "openrouter_call_count"),
+        ("run_iterations_completed", "iterations_completed"),
+        ("run_selected_candidate_count", "selected_candidate_count"),
+    ):
+        _set_when_present(run_summary, target, row.get(source))
+    cost_ledger: dict[str, Any] = {}
+    _set_when_present(
+        cost_ledger,
+        "actual_openrouter_cost_usd",
+        row.get("run_actual_openrouter_cost_usd"),
+    )
+    _set_when_present(
+        cost_ledger,
+        "estimated_cost_usd",
+        row.get("run_estimated_cost_usd"),
+    )
+    if cost_ledger:
+        run_summary["cost_ledger"] = cost_ledger
+    if run_summary:
+        event_doc["run_summary"] = run_summary
+
+    generation_failure: dict[str, Any] = {}
+    for source, target in (
+        ("generation_public_label", "public_label"),
+        ("generation_latest_stage", "latest_stage"),
+        ("generation_stage_counts", "stage_counts"),
+    ):
+        _set_when_present(generation_failure, target, row.get(source))
+    if generation_failure:
+        event_doc["candidate_generation_failure"] = generation_failure
+
+    provider_usage: list[dict[str, Any]] = []
+    for index in range(_AUTO_LOOP_PROVIDER_PROJECTION_WIDTH):
+        usage: dict[str, Any] = {}
+        failed_request: dict[str, Any] = {}
+        _set_when_present(
+            usage, "call_stage", row.get(f"provider_{index}_call_stage")
+        )
+        _set_when_present(
+            failed_request,
+            "error_class",
+            row.get(f"provider_{index}_error_class"),
+        )
+        _set_when_present(
+            failed_request,
+            "http_status",
+            row.get(f"provider_{index}_http_status"),
+        )
+        if failed_request:
+            usage["failed_request"] = failed_request
+        if usage:
+            provider_usage.append(usage)
+
+    cost_stop_reason = row.get("cost_stop_reason")
+    compact: dict[str, Any] = {
+        "run_id": row.get("run_id"),
+        "event_type": row.get("event_type"),
+        "loop_status": row.get("loop_status"),
+        "seq": row.get("seq"),
+        "created_at": row.get("created_at"),
+        "provider_usage": provider_usage,
+        "cost_ledger": (
+            {"stop_reason": cost_stop_reason}
+            if cost_stop_reason is not None
+            else {}
+        ),
+        "event_doc": event_doc,
+    }
+    return compact
 
 
 async def project_public_loop_activity(
@@ -1371,6 +1579,7 @@ async def reproject_stale_public_cards(
 
     cards = await select_many(
         "research_lab_public_loop_card_current",
+        columns="ticket_id,current_outcome_label,current_event_doc",
         filters=(),
         order_by=(("current_last_activity_at", True), ("created_at", True)),
         limit=max(1, int(max_cards)),
@@ -1471,12 +1680,35 @@ async def _promotion_events_for_candidates(candidate_rows: Sequence[Mapping[str,
     candidate_ids = {str(row.get("candidate_id") or "") for row in candidate_rows if row.get("candidate_id")}
     if not candidate_ids:
         return []
-    rows = await select_many(
+    compact_rows = await select_many(
         "research_lab_candidate_promotion_events",
+        columns=(
+            "event_type,promotion_status,created_at,"
+            "event_reason:event_doc->>reason,"
+            "event_candidate_status_preserved:"
+            "event_doc->>candidate_status_preserved"
+        ),
         filters=(("candidate_id", "in", sorted(candidate_ids)),),
         order_by=(("created_at", True),),
         limit=1000,
     )
+    rows: list[dict[str, Any]] = []
+    for row in compact_rows:
+        event_doc: dict[str, Any] = {}
+        _set_when_present(event_doc, "reason", row.get("event_reason"))
+        _set_when_present(
+            event_doc,
+            "candidate_status_preserved",
+            row.get("event_candidate_status_preserved"),
+        )
+        rows.append(
+            {
+                "event_type": row.get("event_type"),
+                "promotion_status": row.get("promotion_status"),
+                "created_at": row.get("created_at"),
+                "event_doc": event_doc,
+            }
+        )
     return rows
 
 

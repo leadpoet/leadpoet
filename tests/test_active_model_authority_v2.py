@@ -97,6 +97,142 @@ def _active_row(artifact, **overrides):
     return row
 
 
+def _active_result(artifact, row):
+    source = CoordinatorActiveModelSourceV2(
+        reader=_Reader({"active_private_model_current": [row]}),
+        config_supplier=lambda: SimpleNamespace(improvement_threshold_points=0.25),
+    )
+    return source.resolve(payload={"artifact": artifact.to_dict()}, context=_context())
+
+
+def _active_result_with_overrides(result, row, **overrides):
+    active_model = {**result["active_model"], **overrides}
+    return {
+        **result,
+        "active_model": active_model,
+        "source_state_hash": sha256_json(
+            {
+                "active_model": active_model,
+                "redacted_version_doc": dict(row["redacted_version_doc"]),
+                "current_status_at": row["current_status_at"],
+            }
+        ),
+    }
+
+
+def _active_result_for_expected(artifact, row, expected_active_model):
+    active_model = dict(expected_active_model)
+    return {
+        "schema_version": "leadpoet.active_private_model.v2",
+        "artifact": private_model_artifact_replay_identity_v2(artifact),
+        "active_model": active_model,
+        "source_state_hash": sha256_json(
+            {
+                "active_model": active_model,
+                "redacted_version_doc": dict(row["redacted_version_doc"]),
+                "current_status_at": row["current_status_at"],
+            }
+        ),
+    }
+
+
+def _install_release_identity(monkeypatch, release_hash):
+    release = {"release_hash": release_hash}
+    expectation = {
+        "physical_role": "gateway_coordinator",
+        "service_role": "gateway_coordinator",
+        "commit_sha": "a" * 40,
+        "pcr0": "b" * 96,
+        "build_manifest_hash": "sha256:" + "c" * 64,
+        "dependency_lock_hash": "sha256:" + "d" * 64,
+        "release_hash": release_hash,
+    }
+    monkeypatch.setattr(active_model_authority_v2, "_load_release", lambda _path: release)
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "role_expectation",
+        lambda value, role: (
+            expectation
+            if value == release and role == "gateway_coordinator"
+            else pytest.fail("unexpected release expectation lookup")
+        ),
+    )
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "verify_boot_identity_nitro",
+        lambda identity, **_kwargs: identity,
+    )
+    return release, expectation
+
+
+def _assertion_authority(
+    result,
+    *,
+    epoch_id,
+    receipt_char,
+    expectation,
+    parent_receipt_hashes=(),
+):
+    receipt_hash = "sha256:" + receipt_char * 64
+    boot_identity_hash = "sha256:" + "e" * 64
+    receipt = {
+        "receipt_hash": receipt_hash,
+        "role": "gateway_coordinator",
+        "purpose": "research_lab.active_private_model.v2",
+        "epoch_id": epoch_id,
+        "sequence": 0,
+        "status": "succeeded",
+        "output_root": sha256_json(result),
+        "boot_identity_hash": boot_identity_hash,
+        "parent_receipt_hashes": list(parent_receipt_hashes),
+    }
+    graph = {
+        "root_receipt_hash": receipt_hash,
+        "receipts": [receipt],
+        "boot_identities": [
+            {
+                "boot_identity_hash": boot_identity_hash,
+                **{
+                    field: expectation[field]
+                    for field in (
+                        "physical_role",
+                        "commit_sha",
+                        "pcr0",
+                        "build_manifest_hash",
+                        "dependency_lock_hash",
+                    )
+                },
+            }
+        ],
+    }
+    return receipt, graph
+
+
+def _execution_replay(result, receipt, graph, *, artifact, release_hash):
+    return {
+        "row": {
+            "role": "gateway_coordinator",
+            "operation": "attest_active_private_model",
+            "purpose": "research_lab.active_private_model.v2",
+            "epoch_id": receipt["epoch_id"],
+            "sequence": 0,
+            "release_hash": release_hash,
+            "result_hash": sha256_json(result),
+            "output_root": sha256_json(result),
+            "artifact_hashes": sorted(
+                {
+                    artifact.model_artifact_hash,
+                    artifact.manifest_hash,
+                    result["source_state_hash"],
+                }
+            ),
+        },
+        "result": result,
+        "receipt": receipt,
+        "receipt_graph": graph,
+    }
+
+
 def _context(*, graph=None):
     root = str((graph or {}).get("root_receipt_hash") or "")
     return ExecutionContextV2(
@@ -403,21 +539,15 @@ async def test_active_model_authority_uses_measured_execution_receipt(
 ):
     artifact = _artifact(tmp_path)
     row = _active_row(artifact)
-    result = {
-        "schema_version": "leadpoet.active_private_model.v2",
-        "artifact": private_model_artifact_replay_identity_v2(artifact),
-        "active_model": {
-            "private_model_version_id": row["private_model_version_id"]
-        },
-    }
-    execution_receipt = {
-        "receipt_hash": "sha256:" + "a" * 64,
-        "output_root": sha256_json(result),
-    }
-    execution_graph = {
-        "root_receipt_hash": execution_receipt["receipt_hash"],
-        "receipts": [execution_receipt],
-    }
+    result = _active_result(artifact, row)
+    release_hash = "sha256:" + "c" * 64
+    release, expectation = _install_release_identity(monkeypatch, release_hash)
+    execution_receipt, execution_graph = _assertion_authority(
+        result,
+        epoch_id=42,
+        receipt_char="a",
+        expectation=expectation,
+    )
     artifact_receipt = {
         "receipt_hash": "sha256:" + "b" * 64,
         "output_root": "sha256:" + "b" * 64,
@@ -429,16 +559,20 @@ async def test_active_model_authority_uses_measured_execution_receipt(
     validated = []
     linked = []
 
-    async def select_many(*_args, **_kwargs):
+    async def select_many(table, *_args, **_kwargs):
+        if table == active_model_authority_v2.BUSINESS_ARTIFACT_TABLE:
+            return []
         return [row]
 
-    async def execute(**_kwargs):
+    async def execute(**kwargs):
+        assert kwargs["release_manifest"] == release
         return {
             "result": result,
             "receipt": artifact_receipt,
             "receipt_graph": artifact_graph,
             "execution_receipt": execution_receipt,
             "execution_receipt_graph": execution_graph,
+            "release_hash": release_hash,
         }
 
     async def persist_links(**kwargs):
@@ -470,3 +604,608 @@ async def test_active_model_authority_uses_measured_execution_receipt(
         )
     ]
     assert linked[0]["receipt_hash"] == execution_receipt["receipt_hash"]
+    assert linked[0]["artifacts"] == (
+        {
+            "artifact_kind": "active_private_model_assertion_v2",
+            "artifact_ref": active_model_authority_v2._assertion_ref_v2(
+                artifact=artifact,
+                row=row,
+                epoch_id=42,
+                release_hash=release_hash,
+            ),
+            "artifact_hash": sha256_json(result),
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_active_model_assertion_link_is_epoch_scoped_and_replay_safe(
+    tmp_path,
+    monkeypatch,
+):
+    artifact = _artifact(tmp_path)
+    row = _active_row(artifact)
+    result = _active_result(artifact, row)
+    release_hash = "sha256:" + "d" * 64
+    _release, expectation = _install_release_identity(monkeypatch, release_hash)
+    links = {}
+
+    async def select_many(table, *_args, **_kwargs):
+        if table == active_model_authority_v2.BUSINESS_ARTIFACT_TABLE:
+            return []
+        return [row]
+
+    async def execute(**kwargs):
+        receipt, graph = _assertion_authority(
+            result,
+            epoch_id=kwargs["epoch_id"],
+            receipt_char="a" if kwargs["epoch_id"] == 42 else "b",
+            expectation=expectation,
+        )
+        return {
+            "result": result,
+            "receipt": receipt,
+            "receipt_graph": graph,
+            "release_hash": release_hash,
+        }
+
+    async def persist_links(**kwargs):
+        artifact_link = kwargs["artifacts"][0]
+        key = (
+            artifact_link["artifact_kind"],
+            artifact_link["artifact_ref"],
+            artifact_link["artifact_hash"],
+        )
+        previous = links.get(key)
+        assert previous in {None, kwargs["receipt_hash"]}
+        links[key] = kwargs["receipt_hash"]
+        return {"business_artifact_link_count": 1}
+
+    monkeypatch.setattr(active_model_authority_v2, "select_many", select_many)
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+
+    for epoch_id in (42, 43, 43):
+        await active_model_authority_v2.attest_active_private_model_v2(
+            artifact=artifact,
+            epoch_id=epoch_id,
+            execute=execute,
+            persist_links=persist_links,
+        )
+
+    assert len(links) == 2
+    assert set(links.values()) == {
+        "sha256:" + "a" * 64,
+        "sha256:" + "b" * 64,
+    }
+
+
+@pytest.mark.asyncio
+async def test_active_model_reuses_verified_exact_assertion_before_execution(
+    tmp_path,
+    monkeypatch,
+):
+    artifact = _artifact(tmp_path)
+    row = _active_row(artifact)
+    result = _active_result(artifact, row)
+    release_hash = "sha256:" + "f" * 64
+    _release, expectation = _install_release_identity(monkeypatch, release_hash)
+    receipt, graph = _assertion_authority(
+        result,
+        epoch_id=42,
+        receipt_char="6",
+        expectation=expectation,
+    )
+    assertion_ref = active_model_authority_v2._assertion_ref_v2(
+        artifact=artifact,
+        row=row,
+        epoch_id=42,
+        release_hash=release_hash,
+    )
+    artifact_hash = sha256_json(result)
+    replay = _execution_replay(
+        result,
+        receipt,
+        graph,
+        artifact=artifact,
+        release_hash=release_hash,
+    )
+    executions = 0
+
+    async def select_many(table, *_args, **_kwargs):
+        if table == active_model_authority_v2.BUSINESS_ARTIFACT_TABLE:
+            return [
+                {
+                    "receipt_hash": receipt["receipt_hash"],
+                    "artifact_kind": "active_private_model_assertion_v2",
+                    "artifact_ref": assertion_ref,
+                    "artifact_hash": artifact_hash,
+                }
+            ]
+        return [row]
+
+    async def execute(**_kwargs):
+        nonlocal executions
+        executions += 1
+        pytest.fail("an exact durable assertion must be reused before execution")
+
+    async def load_graph(**kwargs):
+        assert kwargs == {
+            "artifact_kind": "active_private_model_assertion_v2",
+            "artifact_ref": assertion_ref,
+            "artifact_hash": artifact_hash,
+        }
+        return graph
+
+    async def load_replay(receipt_hash, **kwargs):
+        assert receipt_hash == receipt["receipt_hash"]
+        assert kwargs == {
+            "expected_operation": "attest_active_private_model",
+            "expected_purpose": "research_lab.active_private_model.v2",
+        }
+        return replay
+
+    monkeypatch.setattr(active_model_authority_v2, "select_many", select_many)
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "load_business_artifact_graph_v2",
+        load_graph,
+    )
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "load_execution_result_by_receipt_v2",
+        load_replay,
+    )
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+
+    outcome = await active_model_authority_v2.attest_active_private_model_v2(
+        artifact=artifact,
+        epoch_id=42,
+        execute=execute,
+    )
+
+    assert executions == 0
+    assert outcome["replay_status"] == "business_artifact_exact"
+    assert outcome["execution_receipt"] == receipt
+    assert outcome["execution_receipt_graph"] == graph
+
+
+@pytest.mark.asyncio
+async def test_active_model_recovers_verified_concurrent_link_winner(
+    tmp_path,
+    monkeypatch,
+):
+    artifact = _artifact(tmp_path)
+    row = _active_row(artifact)
+    result = _active_result(artifact, row)
+    release_hash = "sha256:" + "7" * 64
+    release, expectation = _install_release_identity(monkeypatch, release_hash)
+    loser_receipt, loser_graph = _assertion_authority(
+        result,
+        epoch_id=42,
+        receipt_char="8",
+        expectation=expectation,
+    )
+    winner_receipt, winner_graph = _assertion_authority(
+        result,
+        epoch_id=42,
+        receipt_char="9",
+        expectation=expectation,
+    )
+    assertion_ref = active_model_authority_v2._assertion_ref_v2(
+        artifact=artifact,
+        row=row,
+        epoch_id=42,
+        release_hash=release_hash,
+    )
+    artifact_hash = sha256_json(result)
+    winner_replay = _execution_replay(
+        result,
+        winner_receipt,
+        winner_graph,
+        artifact=artifact,
+        release_hash=release_hash,
+    )
+    business_reads = 0
+
+    async def select_many(table, *_args, **_kwargs):
+        nonlocal business_reads
+        if table == active_model_authority_v2.BUSINESS_ARTIFACT_TABLE:
+            business_reads += 1
+            if business_reads == 1:
+                return []
+            return [
+                {
+                    "receipt_hash": winner_receipt["receipt_hash"],
+                    "artifact_kind": "active_private_model_assertion_v2",
+                    "artifact_ref": assertion_ref,
+                    "artifact_hash": artifact_hash,
+                }
+            ]
+        return [row]
+
+    async def execute(**kwargs):
+        assert kwargs["release_manifest"] == release
+        return {
+            "result": result,
+            "receipt": loser_receipt,
+            "receipt_graph": loser_graph,
+            "release_hash": release_hash,
+        }
+
+    async def persist_links(**_kwargs):
+        raise active_model_authority_v2.AttestedV2StoreError(
+            "research_lab_attested_business_artifact_links_v2 "
+            "stored row conflicts at receipt_hash"
+        )
+
+    async def load_winner_graph(**_kwargs):
+        return winner_graph
+
+    async def load_winner_replay(*_args, **_kwargs):
+        return winner_replay
+
+    monkeypatch.setattr(active_model_authority_v2, "select_many", select_many)
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "load_business_artifact_graph_v2",
+        load_winner_graph,
+    )
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "load_execution_result_by_receipt_v2",
+        load_winner_replay,
+    )
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+
+    outcome = await active_model_authority_v2.attest_active_private_model_v2(
+        artifact=artifact,
+        epoch_id=42,
+        execute=execute,
+        persist_links=persist_links,
+    )
+
+    assert business_reads == 2
+    assert outcome["replay_status"] == "business_artifact_exact"
+    assert outcome["execution_receipt"] == winner_receipt
+
+
+@pytest.mark.asyncio
+async def test_active_model_replay_fails_closed_on_release_substitution(
+    tmp_path,
+    monkeypatch,
+):
+    artifact = _artifact(tmp_path)
+    row = _active_row(artifact)
+    result = _active_result(artifact, row)
+    release_hash = "sha256:" + "1" * 64
+    _release, expectation = _install_release_identity(monkeypatch, release_hash)
+    receipt, graph = _assertion_authority(
+        result,
+        epoch_id=42,
+        receipt_char="2",
+        expectation=expectation,
+    )
+    assertion_ref = active_model_authority_v2._assertion_ref_v2(
+        artifact=artifact,
+        row=row,
+        epoch_id=42,
+        release_hash=release_hash,
+    )
+    artifact_hash = sha256_json(result)
+    replay = _execution_replay(
+        result,
+        receipt,
+        graph,
+        artifact=artifact,
+        release_hash="sha256:" + "3" * 64,
+    )
+
+    async def select_many(table, *_args, **_kwargs):
+        if table == active_model_authority_v2.BUSINESS_ARTIFACT_TABLE:
+            return [
+                {
+                    "receipt_hash": receipt["receipt_hash"],
+                    "artifact_kind": "active_private_model_assertion_v2",
+                    "artifact_ref": assertion_ref,
+                    "artifact_hash": artifact_hash,
+                }
+            ]
+        return [row]
+
+    async def load_graph(**_kwargs):
+        return graph
+
+    async def load_replay(*_args, **_kwargs):
+        return replay
+
+    monkeypatch.setattr(active_model_authority_v2, "select_many", select_many)
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "load_business_artifact_graph_v2",
+        load_graph,
+    )
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "load_execution_result_by_receipt_v2",
+        load_replay,
+    )
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        active_model_authority_v2.ActivePrivateModelAuthorityV2Error,
+        match="stored active private model assertion differs",
+    ):
+        await active_model_authority_v2.attest_active_private_model_v2(
+            artifact=artifact,
+            epoch_id=42,
+            execute=lambda **_kwargs: pytest.fail("substitution must fail closed"),
+        )
+
+
+def test_active_model_assertion_ref_changes_after_same_epoch_reactivation(tmp_path):
+    artifact = _artifact(tmp_path)
+    before = _active_row(artifact, current_status_at="2026-07-12T00:00:00Z")
+    after = _active_row(artifact, current_status_at="2026-07-12T00:05:00Z")
+    release_hash = "sha256:" + "4" * 64
+
+    assert active_model_authority_v2._assertion_ref_v2(
+        artifact=artifact,
+        row=before,
+        epoch_id=42,
+        release_hash=release_hash,
+    ) != active_model_authority_v2._assertion_ref_v2(
+        artifact=artifact,
+        row=after,
+        epoch_id=42,
+        release_hash=release_hash,
+    )
+
+
+def test_active_model_result_rejects_self_consistent_artifact_substitution(tmp_path):
+    artifact = _artifact(tmp_path)
+    row = _active_row(artifact)
+    result = _active_result(artifact, row)
+    expected_active, _parents = (
+        active_model_authority_v2._expected_active_model_authority_v2(
+            artifact=artifact,
+            row=row,
+            promotion_graph=None,
+        )
+    )
+    substituted = _active_result_with_overrides(
+        result,
+        row,
+        private_model_manifest_uri="s3://private/manifests/substituted.json",
+    )
+
+    with pytest.raises(
+        active_model_authority_v2.ActivePrivateModelAuthorityV2Error,
+        match="measured result differs",
+    ):
+        active_model_authority_v2._validate_active_model_result_v2(
+            artifact=artifact,
+            row=row,
+            result=substituted,
+            expected_active_model=expected_active,
+        )
+
+
+@pytest.mark.parametrize("field", ("lineage_root", "lineage_receipt_hash"))
+def test_active_model_result_rejects_self_consistent_lineage_substitution(
+    tmp_path,
+    field,
+):
+    artifact = _artifact(tmp_path)
+    row = _active_row(artifact)
+    result = _active_result(artifact, row)
+    expected_active, _parents = (
+        active_model_authority_v2._expected_active_model_authority_v2(
+            artifact=artifact,
+            row=row,
+            promotion_graph=None,
+        )
+    )
+    substituted = _active_result_with_overrides(
+        result,
+        row,
+        **{field: "sha256:" + "9" * 64},
+    )
+
+    with pytest.raises(
+        active_model_authority_v2.ActivePrivateModelAuthorityV2Error,
+        match="measured result differs",
+    ):
+        active_model_authority_v2._validate_active_model_result_v2(
+            artifact=artifact,
+            row=row,
+            result=substituted,
+            expected_active_model=expected_active,
+        )
+
+
+def test_active_model_result_rejects_unexpected_active_field(tmp_path):
+    artifact = _artifact(tmp_path)
+    row = _active_row(artifact)
+    result = _active_result(artifact, row)
+    expected_active, _parents = (
+        active_model_authority_v2._expected_active_model_authority_v2(
+            artifact=artifact,
+            row=row,
+            promotion_graph=None,
+        )
+    )
+    substituted = _active_result_with_overrides(
+        result,
+        row,
+        unmeasured_authority="accepted",
+    )
+
+    with pytest.raises(
+        active_model_authority_v2.ActivePrivateModelAuthorityV2Error,
+        match="measured result differs",
+    ):
+        active_model_authority_v2._validate_active_model_result_v2(
+            artifact=artifact,
+            row=row,
+            result=substituted,
+            expected_active_model=expected_active,
+        )
+
+
+def test_active_model_receipt_rejects_unexpected_direct_parent(tmp_path, monkeypatch):
+    artifact = _artifact(tmp_path)
+    row = _active_row(artifact)
+    result = _active_result(artifact, row)
+    expected_active, expected_parents = (
+        active_model_authority_v2._expected_active_model_authority_v2(
+            artifact=artifact,
+            row=row,
+            promotion_graph=None,
+        )
+    )
+    release = {"release_hash": "sha256:" + "8" * 64}
+    _unused_release, expectation = _install_release_identity(
+        monkeypatch,
+        release["release_hash"],
+    )
+    receipt, graph = _assertion_authority(
+        result,
+        epoch_id=42,
+        receipt_char="7",
+        expectation=expectation,
+        parent_receipt_hashes=("sha256:" + "6" * 64,),
+    )
+
+    with pytest.raises(
+        active_model_authority_v2.ActivePrivateModelAuthorityV2Error,
+        match="receipt authority differs",
+    ):
+        active_model_authority_v2._validate_assertion_authority_v2(
+            artifact=artifact,
+            row=row,
+            epoch_id=42,
+            release=release,
+            result=result,
+            receipt=receipt,
+            graph=graph,
+            expected_active_model=expected_active,
+            expected_parent_receipt_hashes=expected_parents,
+        )
+
+
+@pytest.mark.asyncio
+async def test_active_model_replay_rejects_changed_current_promotion_graph(
+    tmp_path,
+    monkeypatch,
+):
+    artifact = _artifact(tmp_path)
+    score_bundle_id = "score_bundle:" + "5" * 64
+    row = _active_row(
+        artifact,
+        source_candidate_id="candidate:" + "4" * 64,
+        source_score_bundle_id=score_bundle_id,
+    )
+    previous_promotion_graph = {
+        "root_receipt_hash": "sha256:" + "3" * 64
+    }
+    current_promotion_graph = {
+        "root_receipt_hash": "sha256:" + "2" * 64
+    }
+    previous_active, previous_parents = (
+        active_model_authority_v2._expected_active_model_authority_v2(
+            artifact=artifact,
+            row=row,
+            promotion_graph=previous_promotion_graph,
+        )
+    )
+    result = _active_result_for_expected(artifact, row, previous_active)
+    release_hash = "sha256:" + "1" * 64
+    _release, expectation = _install_release_identity(monkeypatch, release_hash)
+    receipt, assertion_graph = _assertion_authority(
+        result,
+        epoch_id=42,
+        receipt_char="a",
+        expectation=expectation,
+        parent_receipt_hashes=previous_parents,
+    )
+    assertion_ref = active_model_authority_v2._assertion_ref_v2(
+        artifact=artifact,
+        row=row,
+        epoch_id=42,
+        release_hash=release_hash,
+    )
+    artifact_hash = sha256_json(result)
+    replay = _execution_replay(
+        result,
+        receipt,
+        assertion_graph,
+        artifact=artifact,
+        release_hash=release_hash,
+    )
+
+    async def select_many(table, *_args, **_kwargs):
+        if table == active_model_authority_v2.BUSINESS_ARTIFACT_TABLE:
+            return [
+                {
+                    "receipt_hash": receipt["receipt_hash"],
+                    "artifact_kind": "active_private_model_assertion_v2",
+                    "artifact_ref": assertion_ref,
+                    "artifact_hash": artifact_hash,
+                }
+            ]
+        return [row]
+
+    async def load_graph(**kwargs):
+        if kwargs["artifact_kind"] == "promotion_decision":
+            assert kwargs["artifact_ref"] == score_bundle_id
+            return current_promotion_graph
+        assert kwargs["artifact_kind"] == "active_private_model_assertion_v2"
+        return assertion_graph
+
+    async def load_replay(*_args, **_kwargs):
+        return replay
+
+    monkeypatch.setattr(active_model_authority_v2, "select_many", select_many)
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "load_business_artifact_graph_v2",
+        load_graph,
+    )
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "load_execution_result_by_receipt_v2",
+        load_replay,
+    )
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        active_model_authority_v2.ActivePrivateModelAuthorityV2Error,
+        match="measured result differs",
+    ):
+        await active_model_authority_v2.attest_active_private_model_v2(
+            artifact=artifact,
+            epoch_id=42,
+            execute=lambda **_kwargs: pytest.fail(
+                "changed current promotion authority must fail before execution"
+            ),
+        )

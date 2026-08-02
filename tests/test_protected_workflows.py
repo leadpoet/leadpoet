@@ -54,6 +54,12 @@ def test_private_artifact_signature_boundary_is_protected():
     } <= set(PROTECTED_SYMBOLS["gateway/research_lab/promotion.py"])
 
 
+def test_scoring_receipt_failure_policy_is_protected():
+    assert "_local_failed_receipt_hashes" in PROTECTED_SYMBOLS[
+        "gateway/research_lab/attested_scoring_v2.py"
+    ]
+
+
 def test_protected_manifest_detects_logic_change(tmp_path: Path):
     committed = load_manifest(MANIFEST_PATH)
     manifest = build_manifest(

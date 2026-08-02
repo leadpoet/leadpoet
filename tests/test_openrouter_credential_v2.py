@@ -155,6 +155,12 @@ def test_openrouter_seal_rpc_retry_is_idempotent_and_rejects_rebinding(
         tee_service.handle_v2_runtime_rpc(
             "v2_seal_openrouter_ingress_credential", changed
         )
+    monkeypatch.setenv("LEADPOET_ENCLAVE_ROLE", "gateway_coordinator")
+    rejected = tee_service.handle_rpc(
+        "v2_seal_openrouter_ingress_credential", changed
+    )
+    assert rejected["error_type"] == "ValueError"
+    assert "ciphertext changed" in rejected["error"]
     tee_service.v2_ingress_seal_cache.clear()
 
 
@@ -436,6 +442,128 @@ async def test_openrouter_registration_route_rejects_plaintext_before_network(mo
     )
     with pytest.raises(api.HTTPException, match="plaintext OpenRouter"):
         await api.register_research_lab_openrouter_key(payload)
+
+
+@pytest.mark.asyncio
+async def test_openrouter_registration_preserves_attested_ciphertext_client_error(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                miner_submissions_enabled=True,
+            )
+        ),
+    )
+    monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
+    monkeypatch.setattr(
+        api,
+        "_enforce_openrouter_key_registration_rate_limit",
+        lambda _hotkey: None,
+    )
+
+    async def reject_expired_ciphertext(**_kwargs):
+        raise api.HTTPException(
+            status_code=400,
+            detail="attested OpenRouter credential ciphertext is invalid or expired",
+        )
+
+    monkeypatch.setattr(
+        api,
+        "_seal_openrouter_credential_v2",
+        reject_expired_ciphertext,
+    )
+    encrypted = AttestedCredentialCiphertextV2(
+        request_id="sha256:" + "8" * 64,
+        ciphertext_b64=base64.b64encode(b"x" * 384).decode(),
+    )
+    payload = ResearchLabOpenRouterKeyRegisterRequest(
+        miner_hotkey=MINER,
+        signature="s" * 64,
+        timestamp=int(time.time()),
+        idempotency_key="openrouter-registration-expired-v2",
+        openrouter_api_key_v2=encrypted,
+        openrouter_management_key_v2=encrypted.model_copy(
+            update={"request_id": "sha256:" + "9" * 64}
+        ),
+    )
+
+    with pytest.raises(api.HTTPException) as captured:
+        await api.register_research_lab_openrouter_key(payload)
+    assert captured.value.status_code == 400
+    assert captured.value.detail == (
+        "attested OpenRouter credential ciphertext is invalid or expired"
+    )
+
+
+@pytest.mark.asyncio
+async def test_openrouter_seal_preserves_transport_failure_as_retryable_503(
+    monkeypatch,
+):
+    from gateway.utils.tee_client import coordinator_tee_client
+
+    async def unavailable(**_kwargs):
+        raise RuntimeError("Failed to connect to enclave: connection refused")
+
+    monkeypatch.setattr(
+        coordinator_tee_client,
+        "v2_seal_openrouter_ingress_credential",
+        unavailable,
+    )
+    encrypted = AttestedCredentialCiphertextV2(
+        request_id="sha256:" + "8" * 64,
+        ciphertext_b64=base64.b64encode(b"x" * 384).decode(),
+    )
+
+    with pytest.raises(api.HTTPException) as captured:
+        await api._seal_openrouter_credential_v2(
+            encrypted=encrypted,
+            miner_hotkey=MINER,
+            credential_kind="runtime",
+        )
+    assert captured.value.status_code == 503
+    assert captured.value.detail == (
+        "attested OpenRouter credential sealing is unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_openrouter_seal_maps_typed_client_rejection_to_400(monkeypatch):
+    from gateway.utils.tee_client import (
+        TEEEnclaveRPCError,
+        coordinator_tee_client,
+    )
+
+    async def expired(**_kwargs):
+        raise TEEEnclaveRPCError(
+            "OpenRouter ingress recipient request was already used",
+            error_type="KMSRecipientV2Error",
+        )
+
+    monkeypatch.setattr(
+        coordinator_tee_client,
+        "v2_seal_openrouter_ingress_credential",
+        expired,
+    )
+    encrypted = AttestedCredentialCiphertextV2(
+        request_id="sha256:" + "8" * 64,
+        ciphertext_b64=base64.b64encode(b"x" * 384).decode(),
+    )
+
+    with pytest.raises(api.HTTPException) as captured:
+        await api._seal_openrouter_credential_v2(
+            encrypted=encrypted,
+            miner_hotkey=MINER,
+            credential_kind="runtime",
+        )
+    assert captured.value.status_code == 400
+    assert captured.value.detail == (
+        "attested OpenRouter credential ciphertext is invalid or expired"
+    )
 
 
 @pytest.mark.asyncio

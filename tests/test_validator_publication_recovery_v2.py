@@ -32,6 +32,23 @@ def _record(*, published, signatures):
     }
 
 
+def _compact_record(*, published, signatures):
+    record = _record(published=published, signatures=signatures)
+    compact_submission = record.pop("published_bundle")
+    compact_submission.update(
+        {
+            "validator_ancestry_proof": {
+                "schema_version": "leadpoet.validator_ancestry_proof.v2"
+            },
+            "epoch_authority": {
+                "schema_version": "leadpoet.subnet_epoch_authority.v1"
+            },
+        }
+    )
+    record["compact_submission"] = compact_submission
+    return record
+
+
 class _Journal:
     def __init__(self, record):
         self.record = record
@@ -87,6 +104,13 @@ class _Client:
 
     def recover_weight_publication_v2(self, **kwargs):
         self.calls.append(("recover", kwargs))
+        return {
+            "weight_authorization_id": NEW_AUTHORIZATION,
+            "signed_extrinsics": list(self.signed_extrinsics),
+        }
+
+    def recover_compact_weight_publication_v2(self, **kwargs):
+        self.calls.append(("recover_compact", kwargs))
         return {
             "weight_authorization_id": NEW_AUTHORIZATION,
             "signed_extrinsics": list(self.signed_extrinsics),
@@ -256,6 +280,63 @@ async def test_signed_crash_rebroadcasts_only_exact_enclave_bytes_then_finalizes
     )
     assert outcome.epoch_id == 100
     assert outcome.status == "finalized"
+    assert validator.substrate_calls == [
+        ("author_submitExtrinsic", ["0xaabbcc"])
+    ]
+    assert journal.calls[-1] == ("clear", EVENT)
+
+
+@pytest.mark.asyncio
+async def test_compact_signed_recovery_preserves_ancestry_context_across_retry(
+    monkeypatch,
+):
+    recovered_extrinsic = {
+        "authorization_hash": "sha256:" + "4" * 64,
+        "extrinsic_hash": "0x" + "5" * 64,
+        "extrinsic_hex": "aabbcc",
+    }
+    record = _compact_record(
+        published=True,
+        signatures=[{"receipt": True}],
+    )
+    compact_submission = record["compact_submission"]
+    journal = _Journal(record)
+    client = _Client(
+        signed_extrinsics=[recovered_extrinsic],
+        confirm_error=True,
+    )
+    validator = _validator(journal, client)
+    finalization_calls = []
+
+    async def finalize(**kwargs):
+        finalization_calls.append(kwargs)
+        assert kwargs["prepared_publication"] == {
+            "weight_authorization_id": NEW_AUTHORIZATION,
+            "weight_submission_event_hash": EVENT,
+            "compact_submission": compact_submission,
+        }
+        if len(finalization_calls) == 1:
+            raise RuntimeError("finalized head has not reached inclusion yet")
+        return {"acknowledgment": {"weight_finalization_event_hash": EVENT}}
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(
+        validator_module,
+        "finalize_authoritative_weight_publication_v2",
+        finalize,
+    )
+    monkeypatch.setattr(validator_module.asyncio, "sleep", no_sleep)
+
+    outcome = await validator._recover_weight_publication_journal_v2(
+        gateway_url="https://gateway.example"
+    )
+
+    assert outcome.epoch_id == 100
+    assert outcome.status == "finalized"
+    assert client.calls[0][0] == "recover_compact"
+    assert len(finalization_calls) == 2
     assert validator.substrate_calls == [
         ("author_submitExtrinsic", ["0xaabbcc"])
     ]

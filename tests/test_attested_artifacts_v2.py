@@ -50,6 +50,9 @@ async def _exercise(
     *,
     replay: bool,
     partial: bool = False,
+    source_failed: bool = False,
+    child_status: str = "succeeded",
+    policy_events: list | None = None,
 ) -> dict:
     artifacts = _artifacts(persisted=replay)
     if partial:
@@ -61,10 +64,11 @@ async def _exercise(
             committed,
             domain="leadpoet-artifact-v2",
         ),
+        "status": "failed" if source_failed else "succeeded",
     }
     source_graph = {
         "root_receipt_hash": source_receipt["receipt_hash"],
-        "receipts": [],
+        "receipts": [source_receipt],
     }
     transport_attempts = [
         {
@@ -111,10 +115,14 @@ async def _exercise(
         ]
         durability_events.append(("child", None))
         assert kwargs["parent_ancestry_proofs"] == (source_proof,)
+        assert set(kwargs["allowed_failed_parent_receipt_hashes"]) == (
+            {source_receipt["receipt_hash"]} if source_failed else set()
+        )
         job_id = persistence_job_ids[0] if persistence_job_ids else expected_job_id[0]
         receipt = {
             "job_id": job_id,
             "receipt_hash": _hash("8"),
+            "status": child_status,
         }
         return {
             "status": "succeeded",
@@ -154,7 +162,20 @@ async def _exercise(
         expected_job_id.append(value)
         return value
 
-    monkeypatch.setattr(attested_artifacts_v2, "validate_receipt_graph", lambda *_a, **_k: None)
+    def validate_graph(graph, **kwargs):
+        if policy_events is not None:
+            policy_events.append(
+                (
+                    graph["root_receipt_hash"],
+                    set(kwargs.get("allowed_failed_receipt_hashes") or ()),
+                )
+            )
+
+    monkeypatch.setattr(
+        attested_artifacts_v2,
+        "validate_receipt_graph",
+        validate_graph,
+    )
     monkeypatch.setattr(
         "gateway.research_lab.attested_scoring_v2.derive_execution_job_id_v2",
         capture_job_id,
@@ -225,3 +246,37 @@ async def test_transport_artifacts_resume_after_partial_persistence(
     result = await _exercise(monkeypatch, replay=False, partial=True)
     assert len(result["artifacts"]) == 2
     assert all(item["status"] == "persisted" for item in result["artifacts"])
+
+
+@pytest.mark.asyncio
+async def test_failed_source_policy_does_not_leak_into_successful_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy_events = []
+    await _exercise(
+        monkeypatch,
+        replay=True,
+        source_failed=True,
+        policy_events=policy_events,
+    )
+
+    assert policy_events == [
+        (_hash("9"), {_hash("9")}),
+        (_hash("8"), set()),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failed_source_rejects_tampered_failed_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(
+        attested_artifacts_v2.AttestedArtifactPersistenceV2Error,
+        match="lineage did not succeed",
+    ):
+        await _exercise(
+            monkeypatch,
+            replay=True,
+            source_failed=True,
+            child_status="failed",
+        )

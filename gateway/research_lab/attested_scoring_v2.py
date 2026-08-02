@@ -155,6 +155,23 @@ def _failed_receipts_in_graph(
     return tuple(sorted(allowed & receipt_hashes))
 
 
+def _local_failed_receipt_hashes(
+    receipts: Iterable[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Return the exact failure policy for one checkpoint's local delta."""
+
+    return tuple(
+        sorted(
+            {
+                str(item.get("receipt_hash") or "").lower()
+                for item in receipts
+                if isinstance(item, Mapping)
+                and item.get("status") != "succeeded"
+            }
+        )
+    )
+
+
 def _compact_proof_root(proof: Mapping[str, Any]) -> str:
     certificate = proof.get("certificate")
     claim = certificate.get("claim") if isinstance(certificate, Mapping) else None
@@ -201,8 +218,12 @@ async def _resolve_parent_ancestry_transport_v2(
         graph_by_root[root] = graph
         embedded = graph.get("ancestry_proof")
         if graph.get("schema_version") == CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION:
+            graph_allowed_failed = _failed_receipts_in_graph(
+                graph, allowed_failed_receipt_hashes
+            )
             await _validate_receipt_graph_async(
                 graph,
+                allowed_failed_receipt_hashes=graph_allowed_failed,
                 boot_attestation_verifier=boot_attestation_verifier,
                 require_boot_attestation_verification=True,
             )
@@ -1566,9 +1587,14 @@ async def execute_scoring_v2(
         boot_attestation_verifier=verifier,
         trusted_parent_authorities=trusted_parent_authorities,
     )
-    graph_allowed_failed = set(allowed_failed)
-    if not succeeded:
-        graph_allowed_failed.add(str(receipt["receipt_hash"]))
+    local_allowed_failed = set(_local_failed_receipt_hashes(local_receipts))
+    expected_local_failed = (
+        set() if succeeded else {str(receipt["receipt_hash"]).lower()}
+    )
+    if local_allowed_failed != expected_local_failed:
+        raise AttestedScoringV2Error(
+            "V2 scoring local receipt failure policy differs"
+        )
     checkpointed_graph = build_checkpointed_receipt_graph(
         root_receipt_hash=str(receipt["receipt_hash"]),
         boot_identities=(boot_identity,),
@@ -1577,7 +1603,7 @@ async def execute_scoring_v2(
         host_operations=host_operations,
         ancestry_lineage_id=ancestry_lineage_id,
         ancestry_proof=ancestry_compact_proof,
-        allowed_failed_receipt_hashes=graph_allowed_failed,
+        allowed_failed_receipt_hashes=local_allowed_failed,
         boot_attestation_verifier=verifier,
         require_boot_attestation_verification=True,
     )
@@ -1614,7 +1640,7 @@ async def execute_scoring_v2(
         await _validate_receipt_graph_async(
             graph,
             required_purposes=(purpose,),
-            allowed_failed_receipt_hashes=graph_allowed_failed,
+            allowed_failed_receipt_hashes=local_allowed_failed,
             boot_attestation_verifier=verifier,
             require_boot_attestation_verification=True,
         )
@@ -1667,10 +1693,23 @@ async def execute_scoring_v2(
                 raise AttestedScoringV2Error(
                     "V2 scoring failure artifact lineage is unavailable"
                 )
+            artifact_allowed_failed = set(
+                _local_failed_receipt_hashes(
+                    artifact_graph.get("receipts") or ()
+                )
+            )
+            if (
+                artifact_outcome.get("status") != "succeeded"
+                or artifact_receipt.get("status") != "succeeded"
+                or artifact_allowed_failed
+            ):
+                raise AttestedScoringV2Error(
+                    "V2 scoring failure artifact lineage did not succeed"
+                )
             await _validate_receipt_graph_async(
                 artifact_graph,
                 required_purposes=(purpose, "leadpoet.artifact_persistence.v2"),
-                allowed_failed_receipt_hashes=graph_allowed_failed,
+                allowed_failed_receipt_hashes=artifact_allowed_failed,
                 boot_attestation_verifier=verifier,
                 require_boot_attestation_verification=True,
             )
@@ -1702,7 +1741,7 @@ async def execute_scoring_v2(
                 persist_graph = persist_receipt_graph_v2
             persistence = await persist_graph(
                 graph,
-                allowed_failed_receipt_hashes=graph_allowed_failed,
+                allowed_failed_receipt_hashes=local_allowed_failed,
             )
             if persistence.get("root_receipt_hash") != receipt["receipt_hash"]:
                 raise AttestedScoringV2Error(
@@ -1757,7 +1796,7 @@ async def execute_scoring_v2(
     await _validate_receipt_graph_async(
         graph,
         required_purposes=(purpose,),
-        allowed_failed_receipt_hashes=allowed_failed,
+        allowed_failed_receipt_hashes=local_allowed_failed,
         boot_attestation_verifier=verifier,
         require_boot_attestation_verification=True,
     )
@@ -1884,7 +1923,7 @@ async def execute_scoring_v2(
                 boot_attestation_verifier=verifier,
                 persist_graph=persist_graph,
                 persist_ancestry_checkpoint=persist_ancestry_checkpoint,
-                allowed_failed_receipt_hashes=allowed_failed,
+                allowed_failed_receipt_hashes=local_allowed_failed,
             )
         )
         if artifact_lineage_attestor is None:
@@ -1933,7 +1972,7 @@ async def execute_scoring_v2(
             load_ancestry_proofs=load_ancestry_proofs,
             persist_ancestry_checkpoint=persist_ancestry_checkpoint,
             boot_verifier=verifier,
-            allowed_failed_parent_receipt_hashes=allowed_failed,
+            allowed_failed_parent_receipt_hashes=local_allowed_failed,
         )
         lineage_graph = lineage.get("receipt_graph")
         lineage_receipt = lineage.get("receipt")
@@ -1944,10 +1983,21 @@ async def execute_scoring_v2(
             raise AttestedScoringV2Error(
                 "V2 encrypted artifact lineage receipt is unavailable"
             )
+        lineage_allowed_failed = set(
+            _local_failed_receipt_hashes(lineage_graph.get("receipts") or ())
+        )
+        if (
+            lineage.get("status") != "succeeded"
+            or lineage_receipt.get("status") != "succeeded"
+            or lineage_allowed_failed
+        ):
+            raise AttestedScoringV2Error(
+                "V2 encrypted artifact lineage did not succeed"
+            )
         await _validate_receipt_graph_async(
             lineage_graph,
             required_purposes=(purpose, "leadpoet.artifact_persistence.v2"),
-            allowed_failed_receipt_hashes=allowed_failed,
+            allowed_failed_receipt_hashes=lineage_allowed_failed,
             boot_attestation_verifier=verifier,
             require_boot_attestation_verification=True,
         )
@@ -1979,7 +2029,7 @@ async def execute_scoring_v2(
                     source_authority["authority_hash"]
                 )
             },
-            allowed_failed_receipt_hashes=allowed_failed,
+            allowed_failed_receipt_hashes=lineage_allowed_failed,
         )
         lineage_checkpoint_persistence = (
             await _persist_ancestry_checkpoint_after_graph_v2(
@@ -2093,7 +2143,7 @@ async def execute_scoring_v2(
             boot_attestation_verifier=verifier,
             persist_graph=persist_graph,
             persist_ancestry_checkpoint=persist_ancestry_checkpoint,
-            allowed_failed_receipt_hashes=allowed_failed,
+            allowed_failed_receipt_hashes=local_allowed_failed,
         )
     )
     sidecar_persistence = {}

@@ -33,6 +33,7 @@ from Leadpoet.utils.subnet_epoch import CUTOVER_PATH_ENV
 from gateway.tee.coordinator_executor_v2 import (
     COORDINATOR_OPERATIONS_V2,
     CoordinatorExecutorV2,
+    coordinator_failed_parent_graph_policy_v2,
     coordinator_receipt_output_v2,
 )
 from gateway.tee.release_manifest_v2 import (
@@ -1731,6 +1732,87 @@ async def test_v2_bridge_durably_persists_signed_failure_before_raising():
 
 
 @pytest.mark.asyncio
+async def test_v2_bridge_persists_failed_source_artifacts_with_child_local_policy(
+    monkeypatch,
+):
+    release = _release()
+
+    def fail_executor(_operation, _payload, _context):
+        raise ValueError("measured scoring failure")
+
+    artifact_client = _ArtifactCoordinator(release, _hash("1"))
+    original_list = artifact_client.v2_list_encrypted_artifacts
+
+    async def list_persisted(*, job_id, purpose):
+        listed = await original_list(job_id=job_id, purpose=purpose)
+        return {
+            "artifacts": [
+                {
+                    **item,
+                    "artifact_kind": "provider_request",
+                    "persisted": True,
+                }
+                for item in listed["artifacts"]
+            ]
+        }
+
+    artifact_client.v2_list_encrypted_artifacts = list_persisted
+    persisted_policies = []
+
+    async def persist(graph, *, allowed_failed_receipt_hashes=()):
+        allowed = set(allowed_failed_receipt_hashes)
+        validate_receipt_graph(
+            graph,
+            allowed_failed_receipt_hashes=allowed,
+        )
+        persisted_policies.append((graph["root_receipt_hash"], allowed))
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    async def persist_sidecars(**kwargs):
+        return {"artifact_link_count": len(kwargs["artifacts"])}
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "persist_execution_sidecars_v2",
+        persist_sidecars,
+    )
+
+    with pytest.raises(AttestedScoringV2Error, match="failed closed") as captured:
+        await execute_scoring_v2(
+            operation="benchmark_icp_score",
+            purpose="research_lab.benchmark.v2",
+            epoch_id=12,
+            sequence=0,
+            payload={"scores": [1.0]},
+            worker_index=0,
+            input_artifact_hashes=(_hash("1"),),
+            release_manifest=release,
+            client=_Client(release, executor=fail_executor),
+            artifact_coordinator_client=artifact_client,
+            persist_graph=persist,
+            boot_verifier=lambda identity: identity,
+            poll_seconds=0.001,
+        )
+
+    authority = captured.value.authority
+    assert authority is not None
+    source_receipt = authority["execution_receipt"]
+    child_receipt = authority["receipt"]
+    assert source_receipt["status"] == "failed"
+    assert child_receipt["status"] == "succeeded"
+    assert source_receipt["receipt_hash"] in child_receipt[
+        "parent_receipt_hashes"
+    ]
+    assert persisted_policies == [
+        (
+            source_receipt["receipt_hash"],
+            {source_receipt["receipt_hash"]},
+        ),
+        (child_receipt["receipt_hash"], set()),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_v2_bridge_rejects_unauthorized_purpose_before_rpc():
     release = _release()
     with pytest.raises(AttestedScoringV2Error, match="purpose"):
@@ -1886,6 +1968,7 @@ class _ArtifactCoordinator:
                     if artifact["artifact_id"] in ids
                 ]
             ),
+            failed_parent_graph_policy=coordinator_failed_parent_graph_policy_v2,
             worker_count=1,
             configured_worker_count=0,
             ancestry_lineage_id=attested_scoring_v2._gateway_ancestry_lineage_id(),

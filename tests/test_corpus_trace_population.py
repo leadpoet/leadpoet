@@ -853,6 +853,125 @@ async def test_engine_and_node_pointer_aggregation(tables, enabled):
     assert node2["judge_verdicts"] == []  # never scored
 
 
+async def test_shared_artifact_hash_does_not_reassign_node_bound_candidate(
+    tables, enabled, caplog
+):
+    tables = copy.deepcopy(tables)
+    artifact_hash = tables["research_lab_candidate_artifacts"][0][
+        "candidate_artifact_hash"
+    ]
+    tables["research_lab_candidate_artifacts"][0]["candidate_build_doc"] = {
+        "loop_node_id": "node-1"
+    }
+
+    node_2_build = tables["research_lab_auto_research_loop_events"][6]
+    node_2_build.update(
+        {
+            "event_type": "candidate_build_passed",
+            "candidate_artifact_hash": artifact_hash,
+            "elapsed_seconds": 90.0,
+            "event_doc": {
+                "iteration": 2,
+                "candidate_kind": "image_build",
+                "candidate_source_diff_hash": "sha256:source-diff-run1-node-2",
+            },
+        }
+    )
+    tables["research_evaluation_score_bundles"][0]["score_bundle_doc"][
+        "execution_trace_ref"
+    ] = f"execution_trace:{NODE1_TRACE_ID}"
+
+    store = FakeStore(tables)
+    result = await project_run(RUN_ID, store=store, dry_run=False)
+    assert result.status == "projected", result.errors
+
+    evaluated = {
+        row["event"]["node_id"]: row["event"]
+        for row in store.inserted[TRAJECTORY_EVENTS_TABLE]
+        if row["event_type"] == "NODE_EVALUATED"
+    }
+    assert evaluated["node-1"]["status"] == "scored"
+    assert evaluated["node-1"]["evaluation_context"]["score_bundle_ref"] == (
+        SCORE_BUNDLE_ID
+    )
+    assert evaluated["node-2"]["status"] == "timeout"
+    assert evaluated["node-2"]["evaluation_context"]["candidate_ref"] is None
+    assert evaluated["node-2"]["evaluation_context"]["score_bundle_ref"] is None
+    assert evaluated["node-2"]["evaluation_context"]["evidence_bundle_ref"] is None
+
+    traces_by_id = {
+        row["run_id"]: row for row in store.inserted[EXECUTION_TRACES_TABLE]
+    }
+    node_2_trace = traces_by_id[execution_trace_id_for_node(RUN_ID, "node-2")]
+    assert node_2_trace["status"] == "timeout"
+    assert node_2_trace["score_bundle_ref"] == "score_bundle:unavailable"
+    assert node_2_trace["evidence_bundles"] == []
+    assert len(store.inserted[EVIDENCE_BUNDLES_TABLE]) == 1
+    assert "research_lab_trajectory_bundle_trace_ref_mismatch" not in caplog.text
+
+
+async def test_shared_artifact_hash_does_not_reassign_candidate_bound_bundle(
+    tables, enabled
+):
+    tables = copy.deepcopy(tables)
+    artifact_hash = tables["research_lab_candidate_artifacts"][0][
+        "candidate_artifact_hash"
+    ]
+    tables["research_lab_candidate_artifacts"][0]["candidate_build_doc"] = {
+        "loop_node_id": "node-1"
+    }
+    second_candidate = {
+        **copy.deepcopy(tables["research_lab_candidate_artifacts"][0]),
+        "candidate_id": "candidate-node-2",
+        "candidate_build_doc": {"loop_node_id": "node-2"},
+    }
+    tables["research_lab_candidate_artifacts"].append(second_candidate)
+    tables["research_lab_candidate_evaluation_events"].append(
+        {
+            "event_id": str(uuid.uuid4()),
+            "candidate_id": "candidate-node-2",
+            "run_id": RUN_ID,
+            "ticket_id": TICKET_ID,
+            "seq": 4,
+            "event_type": "failed",
+            "candidate_status": "failed",
+            "event_doc": {"reason": "candidate_evaluation_failed"},
+            "created_at": "2026-06-28T11:01:00Z",
+        }
+    )
+
+    node_2_build = tables["research_lab_auto_research_loop_events"][6]
+    node_2_build.update(
+        {
+            "event_type": "candidate_build_passed",
+            "candidate_artifact_hash": artifact_hash,
+            "elapsed_seconds": 90.0,
+            "event_doc": {
+                "iteration": 2,
+                "candidate_kind": "image_build",
+                "candidate_source_diff_hash": "sha256:source-diff-run1-node-2",
+            },
+        }
+    )
+
+    store = FakeStore(tables)
+    result = await project_run(RUN_ID, store=store, dry_run=False)
+    assert result.status == "projected", result.errors
+
+    evaluated = {
+        row["event"]["node_id"]: row["event"]
+        for row in store.inserted[TRAJECTORY_EVENTS_TABLE]
+        if row["event_type"] == "NODE_EVALUATED"
+    }
+    assert evaluated["node-1"]["status"] == "scored"
+    assert evaluated["node-2"]["status"] == "timeout"
+    assert evaluated["node-2"]["evaluation_context"]["candidate_ref"] == (
+        "candidate:candidate-node-2"
+    )
+    assert evaluated["node-2"]["evaluation_context"]["score_bundle_ref"] is None
+    assert evaluated["node-2"]["evaluation_context"]["evidence_bundle_ref"] is None
+
+
 async def test_evidence_bundle_snapshots_and_gate_refs(tables, enabled):
     store = FakeStore(tables)
     await project_run(RUN_ID, store=store, dry_run=False)

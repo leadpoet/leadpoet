@@ -4577,11 +4577,16 @@ class Validator(BaseValidatorNeuron):
         for attempt in range(10):
             try:
                 finalization_scan_id = journal.reserve_finalization_scan()
+                prepared_publication = {
+                    "weight_authorization_id": authorization_id,
+                    "weight_submission_event_hash": event_hash,
+                }
+                if compact_recovery:
+                    prepared_publication["compact_submission"] = record[
+                        "compact_submission"
+                    ]
                 finalization = await finalize_authoritative_weight_publication_v2(
-                    prepared_publication={
-                        "weight_authorization_id": authorization_id,
-                        "weight_submission_event_hash": event_hash,
-                    },
+                    prepared_publication=prepared_publication,
                     finalization_scan_id=finalization_scan_id,
                     validator_hotkey=self.wallet.hotkey.ss58_address,
                     gateway_url=gateway_url,

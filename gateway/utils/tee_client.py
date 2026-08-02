@@ -31,6 +31,14 @@ MAX_RPC_REQUEST_BYTES = 64 * 1024 * 1024
 MAX_RPC_RESPONSE_BYTES = 256 * 1024 * 1024
 
 
+class TEEEnclaveRPCError(RuntimeError):
+    """A structured error returned by the enclave RPC handler."""
+
+    def __init__(self, message: str, *, error_type: str = "") -> None:
+        super().__init__(f"Enclave error: {message}")
+        self.error_type = str(error_type or "")
+
+
 def _recv_exact(sock: socket.socket, size: int) -> bytes:
     output = bytearray()
     while len(output) < size:
@@ -156,7 +164,10 @@ class TEEClient:
 
             response = json.loads(response_bytes.decode("utf-8"))
             if response.get("status") == "error" or "error" in response:
-                raise RuntimeError(f"Enclave error: {response.get('error')}")
+                raise TEEEnclaveRPCError(
+                    str(response.get("error") or "unknown enclave error"),
+                    error_type=str(response.get("error_type") or ""),
+                )
             return response.get("result", {})
         except RuntimeError:
             raise

@@ -2363,6 +2363,7 @@ class _NodeState:
     candidate_artifact_hash: str | None = None
     candidate_source_diff_hash: str | None = None
     candidate_id: str | None = None
+    candidate_artifact_identity_unique: bool = False
     candidate_row: Mapping[str, Any] | None = None
     candidate_build_doc: Mapping[str, Any] | None = None
     evaluated: bool = False
@@ -2433,11 +2434,19 @@ def build_trajectory_projection(
     created_at = _ts(ordered[0].get("created_at"))
 
     # -- index post-loop data ------------------------------------------------
-    candidates_by_hash: dict[str, Mapping[str, Any]] = {}
+    candidates_by_hash: dict[str, list[Mapping[str, Any]]] = {}
+    candidates_by_node_id: dict[str, list[Mapping[str, Any]]] = {}
     for row in candidate_rows:
         artifact_hash = str(row.get("candidate_artifact_hash") or "")
         if artifact_hash:
-            candidates_by_hash[artifact_hash] = row
+            candidates_by_hash.setdefault(artifact_hash, []).append(row)
+        candidate_build_doc = row.get("candidate_build_doc")
+        if isinstance(candidate_build_doc, Mapping):
+            candidate_node_id = str(
+                candidate_build_doc.get("loop_node_id") or ""
+            ).strip()
+            if candidate_node_id:
+                candidates_by_node_id.setdefault(candidate_node_id, []).append(row)
 
     scored_by_candidate: dict[str, Mapping[str, Any]] = {}
     failed_eval_by_candidate: dict[str, Mapping[str, Any]] = {}
@@ -2642,7 +2651,37 @@ def build_trajectory_projection(
             state.candidate_source_diff_hash = (
                 str(doc.get("candidate_source_diff_hash") or "") or None
             )
-            candidate_row = candidates_by_hash.get(state.candidate_artifact_hash or "")
+            state.candidate_artifact_identity_unique = (
+                len(
+                    candidates_by_hash.get(
+                        state.candidate_artifact_hash or "", ()
+                    )
+                )
+                == 1
+            )
+            candidate_row: Mapping[str, Any] | None = None
+            exact_candidates = [
+                candidate
+                for candidate in candidates_by_node_id.get(state.node_id, ())
+                if str(candidate.get("candidate_artifact_hash") or "")
+                == (state.candidate_artifact_hash or "")
+            ]
+            if len(exact_candidates) == 1:
+                candidate_row = exact_candidates[0]
+            elif not exact_candidates:
+                artifact_candidates = candidates_by_hash.get(
+                    state.candidate_artifact_hash or "", ()
+                )
+                if len(artifact_candidates) == 1:
+                    fallback_candidate = artifact_candidates[0]
+                    fallback_build_doc = fallback_candidate.get("candidate_build_doc")
+                    fallback_node_id = (
+                        str(fallback_build_doc.get("loop_node_id") or "").strip()
+                        if isinstance(fallback_build_doc, Mapping)
+                        else ""
+                    )
+                    if not fallback_node_id:
+                        candidate_row = fallback_candidate
             if candidate_row:
                 state.candidate_id = str(candidate_row.get("candidate_id"))
                 state.candidate_row = candidate_row
@@ -3197,17 +3236,33 @@ def _emit_node_evaluated(
                 score_bundle_id = str(candidate_score_bundle_id)
                 bundle_row = candidate_bundle_row
                 break
-        if not bundle_row and state.candidate_artifact_hash:
-            for candidate_score_bundle_id, candidate_bundle_row in bundles_by_id.items():
-                if not isinstance(candidate_bundle_row, Mapping):
-                    continue
-                if (
-                    _score_bundle_artifact_hash_from_row(candidate_bundle_row)
-                    == state.candidate_artifact_hash
-                ):
-                    score_bundle_id = str(candidate_score_bundle_id)
+        if (
+            not bundle_row
+            and state.candidate_id
+            and state.candidate_artifact_hash
+            and state.candidate_artifact_identity_unique
+        ):
+            artifact_matches = [
+                (str(candidate_score_bundle_id), candidate_bundle_row)
+                for candidate_score_bundle_id, candidate_bundle_row in bundles_by_id.items()
+                if isinstance(candidate_bundle_row, Mapping)
+                and _score_bundle_artifact_hash_from_row(candidate_bundle_row)
+                == state.candidate_artifact_hash
+            ]
+            # A content hash is not a candidate identity: two tree nodes may
+            # legitimately produce byte-identical artifacts.  Use this legacy
+            # fallback only when the hash identifies one bundle and that
+            # bundle is either explicitly this candidate or predates candidate
+            # IDs.  Any ambiguity remains unscored instead of borrowing
+            # another node's gate or trace.
+            if len(artifact_matches) == 1:
+                candidate_score_bundle_id, candidate_bundle_row = artifact_matches[0]
+                bundle_candidate_id = _score_bundle_candidate_id_from_row(
+                    candidate_bundle_row
+                )
+                if not bundle_candidate_id or bundle_candidate_id == state.candidate_id:
+                    score_bundle_id = candidate_score_bundle_id
                     bundle_row = candidate_bundle_row
-                    break
     if bundle_row and not gate:
         gate = dict(_score_bundle_gate_from_row(bundle_row))
     state.gate_doc = gate

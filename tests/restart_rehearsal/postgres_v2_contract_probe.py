@@ -1725,18 +1725,31 @@ def _historical_compute_reimbursements(
     ]
 
 
+def _historical_compute_source_epoch(
+    native_finalized_epochs: Sequence[int],
+) -> int:
+    """Place the legacy fixture immediately before native V2 authority."""
+
+    normalized = sorted({int(epoch) for epoch in native_finalized_epochs})
+    if not normalized or normalized[0] <= 0:
+        raise PostgresContractProbeError(
+            "historical compute source epoch is unavailable"
+        )
+    return normalized[0] - 1
+
+
 def _historical_compute_allocation_seed_rows(
     *,
     database: DisposablePostgres,
     source_root: Path,
     candidate_sha: str,
-    current_epoch: int,
+    source_epoch: int,
     netuid: int,
     coordinator_release_identity: Mapping[str, Any],
 ) -> dict[str, list[dict[str, Any]]]:
     """Persist and read back one finalized prior compute allocation."""
 
-    source_epoch = int(current_epoch) - 2
+    source_epoch = int(source_epoch)
     if source_epoch < 0:
         raise PostgresContractProbeError(
             "historical compute source epoch is unavailable"
@@ -2805,7 +2818,12 @@ def _run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 database=database,
                 source_root=args.source_root,
                 candidate_sha=args.candidate_sha,
-                current_epoch=args.epoch_id,
+                source_epoch=_historical_compute_source_epoch(
+                    (
+                        int(prior_verified["epoch_id"]),
+                        int(verified["epoch_id"]),
+                    )
+                ),
                 netuid=int(verified["netuid"]),
                 coordinator_release_identity=coordinator_release_identity,
             )

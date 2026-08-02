@@ -294,6 +294,22 @@ def test_historical_receipt_fixture_binds_candidate_release_identity(
         )
 
 
+def test_historical_compute_seed_precedes_native_finalizations() -> None:
+    assert postgres_probe._historical_compute_source_epoch(
+        (24219, 24218)
+    ) == 24217
+    with pytest.raises(
+        postgres_probe.PostgresContractProbeError,
+        match="historical compute source epoch is unavailable",
+    ):
+        postgres_probe._historical_compute_source_epoch(())
+    with pytest.raises(
+        postgres_probe.PostgresContractProbeError,
+        match="historical compute source epoch is unavailable",
+    ):
+        postgres_probe._historical_compute_source_epoch((0, 1))
+
+
 def test_finalized_settlement_fixture_exports_complete_receipt_graphs() -> None:
     prior_rows, _, _ = postgres_probe._settlement_fixture(
         candidate_sha=COMMIT,
@@ -5278,6 +5294,19 @@ def test_gateway_readiness_requires_exact_production_launcher_invocations() -> N
     ]
     verify_gateway_weight_readiness_invocations(
         rows,
+        candidate_sha=COMMIT,
+    )
+
+    recovered_rows = [
+        rows[0],
+        row(
+            ["-m", module, "--storage-read-preflight"],
+            "candidate_checkout",
+        ),
+        *rows[1:],
+    ]
+    verify_gateway_weight_readiness_invocations(
+        recovered_rows,
         candidate_sha=COMMIT,
     )
 

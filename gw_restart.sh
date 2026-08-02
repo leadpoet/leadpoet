@@ -537,6 +537,61 @@ verify_gateway_active_ancestry_checkpoints() {
   record_gateway_restart_timing "${timing_stage}_complete" "passed"
 }
 
+gateway_ancestry_safe_epoch_from_report() {
+  "$GATEWAY_PYTHON_BIN" - "$1" <<'PY'
+import json
+import sys
+
+report = json.loads(sys.argv[1])
+if (
+    report.get("schema_version")
+    != "leadpoet.weight_submission_storage_readiness.v2"
+    or report.get("status") != "readable"
+):
+    raise SystemExit("weight storage preflight report is invalid")
+epoch = int(report["epoch"])
+safe_epoch = int(report["ancestry_safe_epoch"])
+if epoch < 0 or safe_epoch < 0 or safe_epoch > epoch:
+    raise SystemExit("weight storage preflight ancestry epoch is invalid")
+print(safe_epoch)
+PY
+}
+
+ensure_gateway_ancestry_safe_epoch() {
+  local recovery_report
+  if [ -n "$GATEWAY_ANCESTRY_SAFE_EPOCH" ]; then
+    if ! [[ "$GATEWAY_ANCESTRY_SAFE_EPOCH" =~ ^[0-9]+$ ]]; then
+      echo "ERROR: inherited active ancestry safe epoch is invalid" >&2
+      return 1
+    fi
+    return 0
+  fi
+
+  echo "Re-proving the active ancestry frontier after an N-1 controller handoff"
+  record_gateway_restart_timing "ancestry_frontier_recovery_started"
+  if ! recovery_report="$(
+      cd "$LEADPOET_REPO_ROOT"
+      PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+        -m gateway.tee.verify_weight_submission_ready_v2 \
+        --storage-read-preflight
+    )"; then
+    record_gateway_restart_timing "ancestry_frontier_recovery_complete" "failed"
+    echo "ERROR: candidate could not recover the active ancestry frontier" >&2
+    return 1
+  fi
+  printf '%s\n' "$recovery_report"
+  if ! GATEWAY_ANCESTRY_SAFE_EPOCH="$(
+      gateway_ancestry_safe_epoch_from_report "$recovery_report"
+    )"; then
+    record_gateway_restart_timing "ancestry_frontier_recovery_complete" "failed"
+    echo "ERROR: candidate ancestry frontier report did not validate" >&2
+    return 1
+  fi
+  export GATEWAY_ANCESTRY_SAFE_EPOCH
+  record_gateway_restart_timing "ancestry_frontier_recovery_complete" "passed"
+  echo "Recovered active ancestry bootstrap at proven-safe epoch $GATEWAY_ANCESTRY_SAFE_EPOCH"
+}
+
 if [ "$GATEWAY_RESTART_TIMING_INITIALIZED" = "1" ]; then
   record_gateway_restart_timing "controller_reexec"
 else
@@ -1948,24 +2003,8 @@ case "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_CAPABILITY" in
     )"; then
       printf '%s\n' "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_REPORT"
       GATEWAY_ANCESTRY_SAFE_EPOCH="$(
-        "$GATEWAY_PYTHON_BIN" - \
-          "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_REPORT" <<'PY'
-import json
-import sys
-
-report = json.loads(sys.argv[1])
-if (
-    report.get("schema_version")
-    != "leadpoet.weight_submission_storage_readiness.v2"
-    or report.get("status") != "readable"
-):
-    raise SystemExit("weight storage preflight report is invalid")
-epoch = int(report["epoch"])
-safe_epoch = int(report["ancestry_safe_epoch"])
-if epoch < 0 or safe_epoch < 0 or safe_epoch > epoch:
-    raise SystemExit("weight storage preflight ancestry epoch is invalid")
-print(safe_epoch)
-PY
+        gateway_ancestry_safe_epoch_from_report \
+          "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_REPORT"
       )"
       export GATEWAY_ANCESTRY_SAFE_EPOCH
       echo "Pinned active ancestry bootstrap to proven-safe epoch $GATEWAY_ANCESTRY_SAFE_EPOCH"
@@ -2271,6 +2310,11 @@ set -a
 set +a
 enforce_deployment_environment
 validate_runtime_secret_paths
+GATEWAY_DEPLOY_STAGE="ancestry_frontier_recovery"
+export GATEWAY_DEPLOY_STAGE
+ensure_gateway_ancestry_safe_epoch
+GATEWAY_DEPLOY_STAGE="runtime_env_and_ecr"
+export GATEWAY_DEPLOY_STAGE
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 export RESEARCH_LAB_PRIVATE_REPO_BRANCH="leadpoet-lab"

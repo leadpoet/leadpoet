@@ -1201,6 +1201,20 @@ def verify_gateway_weight_readiness_invocations(
         and row.get("module") == module
     ]
     prefix_count = len(expected_prefix)
+    if (
+        len(observed) > prefix_count
+        and observed[prefix_count].get("argv")
+        == ["-m", module, "--storage-read-preflight"]
+        and observed[prefix_count].get("source_kind")
+        == "candidate_checkout"
+    ):
+        expected_prefix.append(
+            {
+                "argv": ["-m", module, "--storage-read-preflight"],
+                "source_kind": "candidate_checkout",
+            }
+        )
+        prefix_count += 1
     if len(observed) < prefix_count + 3:
         raise SystemExit(
             "gateway launcher did not execute the exact production weight "

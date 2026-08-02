@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import redirect_stdout
 import json
 import logging
 import os
+import sys
 from collections.abc import Mapping
 from typing import Any
 
@@ -164,24 +166,29 @@ async def verify_weight_submission_storage_readable_v2(
         effective_netuid = int(BITTENSOR_NETUID)
     else:
         effective_netuid = int(netuid)
-    bootstrap = None
-    try:
-        readiness = await champion_v2_cutover_readiness_report(
-            epoch=effective_epoch,
-            netuid=effective_netuid,
-        )
-    except ChampionSettlementV2Error as exc:
-        if str(exc) != "chain realized settlement history is incomplete":
-            raise
-        bootstrap = await validate_chain_realized_settlement_bootstrap_v1(
-            netuid=effective_netuid,
-            target_epoch=effective_epoch - 1,
-        )
+    bootstrap = await validate_chain_realized_settlement_bootstrap_v1(
+        netuid=effective_netuid,
+        target_epoch=effective_epoch - 1,
+    )
+    backlog_epoch_count = int(bootstrap.get("backlog_epoch_count") or 0)
+    if backlog_epoch_count:
         readiness = {
             "ready": False,
             "receipt_coverage": 0.0,
             "historical_classification_coverage": 0.0,
         }
+    else:
+        try:
+            readiness = await champion_v2_cutover_readiness_report(
+                epoch=effective_epoch,
+                netuid=effective_netuid,
+            )
+        except ChampionSettlementV2Error as exc:
+            if str(exc) != "chain realized settlement history is incomplete":
+                raise
+            raise WeightSubmissionReadinessV2Error(
+                "chain-realized settlement frontier disagrees with authority readiness"
+            ) from exc
     result = {
         "schema_version": "leadpoet.weight_submission_storage_readiness.v2",
         "status": "readable",
@@ -191,7 +198,9 @@ async def verify_weight_submission_storage_readable_v2(
             bootstrap=bootstrap,
         ),
         "netuid": effective_netuid,
-        "authority_ready": bootstrap is None and readiness.get("ready") is True,
+        "authority_ready": (
+            backlog_epoch_count == 0 and readiness.get("ready") is True
+        ),
         "receipt_coverage": float(readiness.get("receipt_coverage") or 0.0),
         "historical_classification_coverage": float(
             readiness.get("historical_classification_coverage")
@@ -199,7 +208,7 @@ async def verify_weight_submission_storage_readable_v2(
             or 0.0
         ),
     }
-    if bootstrap is not None:
+    if backlog_epoch_count:
         result["chain_realized_settlement_bootstrap"] = bootstrap
     return result
 
@@ -512,34 +521,37 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = _parser()
     args = parser.parse_args()
-    if args.storage_read_preflight:
-        if args.gateway_url:
-            parser.error("--storage-read-preflight cannot use --gateway-url")
-        result = asyncio.run(
-            verify_weight_submission_storage_readable_v2(
-                epoch=args.epoch,
-                netuid=args.netuid,
+    # This CLI is consumed by restart controllers. Keep stdout as a strict
+    # single-document channel even when imported modules emit diagnostics.
+    with redirect_stdout(sys.stderr):
+        if args.storage_read_preflight:
+            if args.gateway_url:
+                parser.error("--storage-read-preflight cannot use --gateway-url")
+            result = asyncio.run(
+                verify_weight_submission_storage_readable_v2(
+                    epoch=args.epoch,
+                    netuid=args.netuid,
+                )
             )
-        )
-    elif args.repair_chain_settlements:
-        if args.gateway_url:
-            parser.error("--repair-chain-settlements cannot use --gateway-url")
-        result = asyncio.run(
-            repair_chain_realized_settlements_v1(
-                epoch=args.epoch,
-                netuid=args.netuid,
+        elif args.repair_chain_settlements:
+            if args.gateway_url:
+                parser.error("--repair-chain-settlements cannot use --gateway-url")
+            result = asyncio.run(
+                repair_chain_realized_settlements_v1(
+                    epoch=args.epoch,
+                    netuid=args.netuid,
+                )
             )
-        )
-    else:
-        result = asyncio.run(
-            verify_weight_submission_ready_v2(
-                repair=bool(args.repair),
-                gateway_url=args.gateway_url,
-                epoch=args.epoch,
-                netuid=args.netuid,
-                http_timeout_seconds=args.http_timeout_seconds,
+        else:
+            result = asyncio.run(
+                verify_weight_submission_ready_v2(
+                    repair=bool(args.repair),
+                    gateway_url=args.gateway_url,
+                    epoch=args.epoch,
+                    netuid=args.netuid,
+                    http_timeout_seconds=args.http_timeout_seconds,
+                )
             )
-        )
     print(json.dumps(result, sort_keys=True))
     return 0
 

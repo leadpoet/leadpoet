@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import HTTPException
 
@@ -19,6 +21,43 @@ def _default_historical_compute_fallback_backfill(monkeypatch):
         "backfill_historical_compute_fallback_v2_authority",
         covered,
     )
+
+
+def test_weight_readiness_cli_reserves_stdout_for_one_json_document(
+    monkeypatch,
+    capsys,
+):
+    async def storage_readable(**_kwargs):
+        print("configuration diagnostic")
+        return {
+            "schema_version": "leadpoet.weight_submission_storage_readiness.v2",
+            "status": "readable",
+            "epoch": 24307,
+            "ancestry_safe_epoch": 24303,
+        }
+
+    monkeypatch.setattr(
+        readiness,
+        "verify_weight_submission_storage_readable_v2",
+        storage_readable,
+    )
+    monkeypatch.setattr(
+        readiness.sys,
+        "argv",
+        ["verify_weight_submission_ready_v2", "--storage-read-preflight"],
+    )
+
+    assert readiness.main() == 0
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "schema_version": "leadpoet.weight_submission_storage_readiness.v2",
+        "status": "readable",
+        "epoch": 24307,
+        "ancestry_safe_epoch": 24303,
+    }
+    assert captured.out.count("\n") == 1
+    assert captured.err == "configuration diagnostic\n"
 
 
 @pytest.mark.asyncio
@@ -46,6 +85,8 @@ async def test_standalone_maintenance_epoch_uses_direct_capable_resolver(
 async def test_storage_read_preflight_exercises_full_authority_read_without_repair(
     monkeypatch,
 ):
+    from gateway.research_lab import champion_settlement_v2 as settlement
+
     calls = []
 
     async def resolve(epoch):
@@ -60,11 +101,25 @@ async def test_storage_read_preflight_exercises_full_authority_read_without_repa
             "historical_classification_coverage": 0.75,
         }
 
+    async def bootstrap(**kwargs):
+        calls.append(("bootstrap", kwargs))
+        return {
+            "activation_epoch": 24100,
+            "target_epoch": 24152,
+            "settled_through_epoch": 24152,
+            "backlog_epoch_count": 0,
+        }
+
     monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
     monkeypatch.setattr(
         maintenance,
         "champion_v2_cutover_readiness_report",
         report,
+    )
+    monkeypatch.setattr(
+        settlement,
+        "validate_chain_realized_settlement_bootstrap_v1",
+        bootstrap,
     )
 
     result = await readiness.verify_weight_submission_storage_readable_v2(
@@ -83,6 +138,7 @@ async def test_storage_read_preflight_exercises_full_authority_read_without_repa
     }
     assert calls == [
         ("resolve", None),
+        ("bootstrap", {"netuid": 71, "target_epoch": 24152}),
         ("report", {"epoch": 24153, "netuid": 71}),
     ]
 
@@ -97,9 +153,7 @@ async def test_storage_read_preflight_accepts_only_pristine_settlement_bootstrap
         return 24206
 
     async def report(**_kwargs):
-        raise settlement.ChampionSettlementV2Error(
-            "chain realized settlement history is incomplete"
-        )
+        raise AssertionError("incomplete settlement suffix must short-circuit")
 
     async def bootstrap(**kwargs):
         assert kwargs == {"netuid": 71, "target_epoch": 24205}
@@ -149,14 +203,18 @@ async def test_storage_read_preflight_resumes_at_first_unsettled_epoch(
     monkeypatch,
 ):
     from gateway.research_lab import champion_settlement_v2 as settlement
+    report_calls = []
 
     async def resolve(_epoch):
         return 24304
 
     async def report(**_kwargs):
-        raise settlement.ChampionSettlementV2Error(
-            "chain realized settlement history is incomplete"
-        )
+        report_calls.append(dict(_kwargs))
+        return {
+            "ready": True,
+            "receipt_coverage": 1.0,
+            "historical_classification_coverage": 1.0,
+        }
 
     async def bootstrap(**_kwargs):
         return {
@@ -184,6 +242,8 @@ async def test_storage_read_preflight_resumes_at_first_unsettled_epoch(
 
     assert result["epoch"] == 24304
     assert result["ancestry_safe_epoch"] == 24303
+    assert result["authority_ready"] is False
+    assert report_calls == []
 
 
 def test_storage_read_preflight_rejects_inconsistent_safe_epoch():
@@ -310,8 +370,13 @@ async def test_storage_read_preflight_does_not_mask_other_settlement_failures(
             "chain realized settlement activation is invalid"
         )
 
-    async def unexpected_bootstrap(**_kwargs):
-        raise AssertionError("non-bootstrap failures must remain fail-closed")
+    async def bootstrap(**_kwargs):
+        return {
+            "activation_epoch": 24202,
+            "target_epoch": 24205,
+            "settled_through_epoch": 24205,
+            "backlog_epoch_count": 0,
+        }
 
     monkeypatch.setattr(maintenance, "_resolve_maintenance_epoch", resolve)
     monkeypatch.setattr(
@@ -322,7 +387,7 @@ async def test_storage_read_preflight_does_not_mask_other_settlement_failures(
     monkeypatch.setattr(
         settlement,
         "validate_chain_realized_settlement_bootstrap_v1",
-        unexpected_bootstrap,
+        bootstrap,
     )
 
     with pytest.raises(

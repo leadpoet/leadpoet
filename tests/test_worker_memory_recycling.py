@@ -13,11 +13,15 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from gateway.research_lab import worker_autostart
 from gateway.research_lab.scoring_worker import (
+    BaselineCheckpointRecycle,
+    ResearchLabGatewayScoringWorker,
+    _baseline_checkpoint_recycle_pressure,
     _read_own_rss_mb,
     _worker_recycle_max_jobs,
     _worker_recycle_rss_mb,
@@ -77,6 +81,191 @@ def test_recycle_thresholds_env_defaults_and_overrides(monkeypatch):
     assert _worker_recycle_max_jobs() == 0
     monkeypatch.setenv("RESEARCH_LAB_SCORING_WORKER_RECYCLE_RSS_MB", "junk")
     assert _worker_recycle_rss_mb() == 3072
+
+
+def test_baseline_checkpoint_recycle_pressure_uses_existing_limits(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_SCORING_WORKER_RECYCLE_RSS_MB", "3072")
+    config = SimpleNamespace(scoring_worker_min_available_memory_mb=4096)
+
+    assert (
+        _baseline_checkpoint_recycle_pressure(
+            config,
+            rss_mb=1024,
+            available_memory_mb=8192,
+        )
+        is None
+    )
+    assert _baseline_checkpoint_recycle_pressure(
+        config,
+        rss_mb=4096,
+        available_memory_mb=8192,
+    )["reason"] == "worker_rss_limit"
+    assert _baseline_checkpoint_recycle_pressure(
+        config,
+        rss_mb=1024,
+        available_memory_mb=2048,
+    )["reason"] == "host_memory_pressure"
+
+
+@pytest.mark.asyncio
+async def test_parallel_baseline_recycles_only_after_checkpointed_wave(monkeypatch):
+    worker = object.__new__(ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_concurrency=2,
+        private_baseline_retry_concurrency=1,
+        private_baseline_provider_retry_rounds=0,
+        scoring_worker_min_available_memory_mb=4096,
+    )
+    window = SimpleNamespace(
+        benchmark_items=[
+            {"icp_ref": f"icp-{index}", "icp_hash": f"hash-{index}"}
+            for index in range(1, 6)
+        ]
+    )
+    called: list[int] = []
+    checkpointed: list[int] = []
+
+    async def run_icp(self, *, item_index, item, **_kwargs):  # noqa: ANN001
+        called.append(item_index)
+        return {
+            "icp_ref": item["icp_ref"],
+            "icp_hash": item["icp_hash"],
+            "score": float(item_index),
+            "company_count": 1,
+            "sourced_count": 1,
+            "diagnostics": {},
+            "_item_index": item_index,
+            "_retryable": False,
+            "_nonempty": True,
+            "_runtime_error": "",
+            "_retry_backoff_seconds": 0.0,
+        }
+
+    async def checkpoint(row):  # noqa: ANN001
+        checkpointed.append(int(row["_item_index"]))
+        return True
+
+    monkeypatch.setattr(ResearchLabGatewayScoringWorker, "_run_baseline_icp", run_icp)
+    monkeypatch.setattr(
+        "gateway.research_lab.scoring_worker._baseline_checkpoint_recycle_pressure",
+        lambda _config: {
+            "reason": "worker_rss_limit",
+            "rss_mb": 4096,
+            "recycle_rss_mb": 3072,
+            "available_memory_mb": 8192,
+            "min_available_memory_mb": 4096,
+        },
+    )
+
+    with pytest.raises(BaselineCheckpointRecycle) as raised:
+        await worker._run_baseline_batch_inner(
+            runner=object(),
+            retry_runner=object(),
+            scorer=object(),
+            window=window,
+            run_start=time.time(),
+            icp_checkpoint=checkpoint,
+            checkpoint_recycle_enabled=True,
+        )
+
+    assert sorted(called) == [1, 2]
+    assert sorted(checkpointed) == [1, 2]
+    assert raised.value.completed_icps == 2
+    assert raised.value.total_icps == 5
+
+
+@pytest.mark.asyncio
+async def test_parallel_baseline_resumes_across_recycles_without_duplicate_icps(
+    monkeypatch,
+):
+    worker = object.__new__(ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_concurrency=2,
+        private_baseline_retry_concurrency=1,
+        private_baseline_provider_retry_rounds=0,
+        scoring_worker_min_available_memory_mb=4096,
+    )
+    window = SimpleNamespace(
+        benchmark_items=[
+            {"icp_ref": f"icp-{index}", "icp_hash": f"hash-{index}"}
+            for index in range(1, 6)
+        ]
+    )
+    called: list[int] = []
+    persisted: dict[str, dict] = {}
+    pressure_checks = iter(
+        (
+            {"reason": "worker_rss_limit", "rss_mb": 4096},
+            {"reason": "worker_rss_limit", "rss_mb": 4096},
+            None,
+        )
+    )
+
+    async def run_icp(self, *, item_index, item, **_kwargs):  # noqa: ANN001
+        called.append(item_index)
+        return {
+            "icp_ref": item["icp_ref"],
+            "icp_hash": item["icp_hash"],
+            "score": float(item_index),
+            "company_count": 1,
+            "sourced_count": 1,
+            "diagnostics": {},
+            "_item_index": item_index,
+            "_retryable": False,
+            "_nonempty": True,
+            "_runtime_error": "",
+            "_retry_backoff_seconds": 0.0,
+        }
+
+    async def checkpoint(row):  # noqa: ANN001
+        persisted[str(row["icp_ref"])] = {
+            key: value for key, value in row.items() if not key.startswith("_")
+        }
+        return True
+
+    monkeypatch.setattr(ResearchLabGatewayScoringWorker, "_run_baseline_icp", run_icp)
+    monkeypatch.setattr(
+        "gateway.research_lab.scoring_worker._baseline_checkpoint_recycle_pressure",
+        lambda _config: next(pressure_checks),
+    )
+
+    for expected_completed in (2, 4):
+        with pytest.raises(BaselineCheckpointRecycle) as raised:
+            await worker._run_baseline_batch_inner(
+                runner=object(),
+                retry_runner=object(),
+                scorer=object(),
+                window=window,
+                run_start=time.time(),
+                resume_results=list(persisted.values()),
+                icp_checkpoint=checkpoint,
+                checkpoint_recycle_enabled=True,
+            )
+        assert raised.value.completed_icps == expected_completed
+
+    rows, stats = await worker._run_baseline_batch_inner(
+        runner=object(),
+        retry_runner=object(),
+        scorer=object(),
+        window=window,
+        run_start=time.time(),
+        resume_results=list(persisted.values()),
+        icp_checkpoint=checkpoint,
+        checkpoint_recycle_enabled=True,
+    )
+
+    assert called == [1, 2, 3, 4, 5]
+    assert [row["icp_ref"] for row in rows] == [
+        "icp-1",
+        "icp-2",
+        "icp-3",
+        "icp-4",
+        "icp-5",
+    ]
+    assert [row["score"] for row in rows] == [1.0, 2.0, 3.0, 4.0, 5.0]
+    assert stats == {"retried": 0, "recovered": 0, "unresolved": 0}
 
 
 def test_hard_rss_limit_env(monkeypatch):

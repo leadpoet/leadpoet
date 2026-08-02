@@ -1121,6 +1121,28 @@ class BaselineHealthGateFailure(RuntimeError):
         self.baseline_health = dict(baseline_health)
 
 
+class BaselineCheckpointRecycle(RuntimeError):
+    """Stop a baseline only after preserving its latest completed ICP."""
+
+    def __init__(
+        self,
+        *,
+        pressure: Mapping[str, Any],
+        completed_icps: int,
+        total_icps: int,
+    ) -> None:
+        self.pressure = dict(pressure)
+        self.completed_icps = int(completed_icps)
+        self.total_icps = int(total_icps)
+        super().__init__(
+            "private baseline checkpoint recycle requested: "
+            f"reason={self.pressure.get('reason')} "
+            f"completed_icps={self.completed_icps}/{self.total_icps} "
+            f"rss_mb={self.pressure.get('rss_mb')} "
+            f"available_memory_mb={self.pressure.get('available_memory_mb')}"
+        )
+
+
 class ConfirmationMeasurementUnhealthy(RuntimeError):
     """Raised when a §5.2-2 confirmation measurement is too degraded to decide
     on (too many unresolved provider errors on either side). The attempt is
@@ -3455,6 +3477,61 @@ def _read_mem_available_mb(meminfo_path: str = "/proc/meminfo") -> int | None:
     return None
 
 
+def _baseline_checkpoint_recycle_pressure(
+    config: Any,
+    *,
+    rss_mb: int | None = None,
+    available_memory_mb: int | None = None,
+) -> dict[str, Any] | None:
+    """Return pressure evidence that warrants a checkpoint-bound recycle.
+
+    The baseline may leave this process only after its latest ICP is durably
+    checkpointed. Reusing the between-pass RSS threshold keeps one policy for
+    normal and in-flight recycling; the host-memory floor is the existing gate
+    that prevents new candidate claims under pressure.
+    """
+
+    observed_rss_mb = _read_own_rss_mb() if rss_mb is None else rss_mb
+    observed_available_mb = (
+        _read_mem_available_mb()
+        if available_memory_mb is None
+        else available_memory_mb
+    )
+    recycle_rss_mb = _worker_recycle_rss_mb()
+    try:
+        memory_floor_mb = max(
+            0,
+            int(getattr(config, "scoring_worker_min_available_memory_mb", 0) or 0),
+        )
+    except (TypeError, ValueError):
+        memory_floor_mb = 0
+    if (
+        recycle_rss_mb > 0
+        and observed_rss_mb is not None
+        and observed_rss_mb >= recycle_rss_mb
+    ):
+        return {
+            "reason": "worker_rss_limit",
+            "rss_mb": int(observed_rss_mb),
+            "recycle_rss_mb": recycle_rss_mb,
+            "available_memory_mb": observed_available_mb,
+            "min_available_memory_mb": memory_floor_mb,
+        }
+    if (
+        memory_floor_mb > 0
+        and observed_available_mb is not None
+        and observed_available_mb < memory_floor_mb
+    ):
+        return {
+            "reason": "host_memory_pressure",
+            "rss_mb": observed_rss_mb,
+            "recycle_rss_mb": recycle_rss_mb,
+            "available_memory_mb": int(observed_available_mb),
+            "min_available_memory_mb": memory_floor_mb,
+        }
+    return None
+
+
 def _load_average_per_cpu() -> float | None:
     try:
         cpu_count = max(1, int(os.cpu_count() or 1))
@@ -3557,6 +3634,16 @@ class ResearchLabGatewayScoringWorker:
                     self.config.scoring_worker_poll_seconds,
                 )
                 last_idle_log = time.monotonic()
+            if outcome.get("recycle_requested"):
+                logger.warning(
+                    "research_lab_scoring_worker_checkpoint_recycle "
+                    "worker_ref=%s baseline_status=%s",
+                    self.worker_ref,
+                    (outcome.get("baseline") or {}).get("status")
+                    if isinstance(outcome.get("baseline"), Mapping)
+                    else None,
+                )
+                return
             # Recycle between passes (never mid-job): scoring passes leave the
             # interpreter's RSS at its high-water mark, so a worker that has
             # finished a heavy bundle can hold gigabytes it will never reuse.
@@ -3649,6 +3736,22 @@ class ResearchLabGatewayScoringWorker:
                 )
             )
             self._baseline_skip_logged = True
+        if (
+            isinstance(baseline_result, Mapping)
+            and str(baseline_result.get("status") or "")
+            == "baseline_checkpoint_recycle"
+        ):
+            return {
+                "processed": True,
+                "status": "baseline_checkpoint_recycle",
+                "candidate_ids": [],
+                "baseline": baseline_result,
+                "confirmation": None,
+                "private_source_reconcile": None,
+                "candidate_claim_capacity": {"available": False},
+                "candidate_start_gate": None,
+                "recycle_requested": True,
+            }
 
         # §5.2-2: run at most one pending confirmation measurement per pass.
         # Any worker may pick these up (leased per candidate via
@@ -10202,9 +10305,9 @@ class ResearchLabGatewayScoringWorker:
 
         baseline_progress_lock = asyncio.Lock()
 
-        async def _checkpoint_completed_baseline_icp(row: Mapping[str, Any]) -> None:
+        async def _checkpoint_completed_baseline_icp(row: Mapping[str, Any]) -> bool:
             if not _baseline_summary_checkpointable(row):
-                return
+                return False
             if baseline_progress_location is None:
                 if baseline_telemetry_session is not None:
                     await baseline_telemetry_session.complete_result(
@@ -10213,14 +10316,14 @@ class ResearchLabGatewayScoringWorker:
                         checkpoint_persisted=False,
                         outcome="scored_without_checkpoint",
                     )
-                return
+                return False
             async with baseline_progress_lock:
                 progress_bucket, progress_key = baseline_progress_location
                 public_row = _baseline_progress_public_row(row)
                 by_ref = _progress_rows_by_icp_ref(baseline_progress_rows)
                 ref = str(public_row.get("icp_ref") or public_row.get("icp_hash") or "")
                 if not ref:
-                    return
+                    return False
                 by_ref[ref] = public_row
                 baseline_progress_rows[:] = list(by_ref.values())
                 telemetry_index = checkpoint_telemetry_index(
@@ -10249,6 +10352,7 @@ class ResearchLabGatewayScoringWorker:
                     checkpoint_persisted=True,
                     outcome="scored",
                 )
+            return True
 
         self._active_baseline_context = {
             "benchmark_date": today,
@@ -10388,6 +10492,9 @@ class ResearchLabGatewayScoringWorker:
                     trace_context=baseline_trace_context,
                     resume_results=baseline_progress_rows,
                     icp_checkpoint=_checkpoint_completed_baseline_icp,
+                    checkpoint_recycle_enabled=(
+                        baseline_progress_location is not None
+                    ),
                     expected_repo_main_git_sha=baseline_repo_main_sha,
                     benchmark_date=today,
                     telemetry_session=baseline_telemetry_session,
@@ -10622,8 +10729,20 @@ class ResearchLabGatewayScoringWorker:
                             "error": runtime_error or scorer_error,
                         },
                     )
-                await _checkpoint_completed_baseline_icp(item_summary)
+                checkpoint_persisted = await _checkpoint_completed_baseline_icp(
+                    item_summary
+                )
                 per_icp_summaries.append(item_summary)
+                if checkpoint_persisted and len(baseline_progress_rows) < total_icps:
+                    recycle_pressure = _baseline_checkpoint_recycle_pressure(
+                        self.config
+                    )
+                    if recycle_pressure is not None:
+                        raise BaselineCheckpointRecycle(
+                            pressure=recycle_pressure,
+                            completed_icps=len(baseline_progress_rows),
+                            total_icps=total_icps,
+                        )
             if nonempty_output_count <= 0:
                 raise PrivateModelRuntimeError(
                     f"private baseline returned zero companies across all {len(window.benchmark_items)} ICPs"
@@ -10650,6 +10769,99 @@ class ResearchLabGatewayScoringWorker:
                 health_gate_enforced=bool(self.config.baseline_health_gate_enforced),
                 max_day_jump=_baseline_max_day_jump_points(),
             )
+        except BaselineCheckpointRecycle as exc:
+            await _stop_baseline_telemetry_heartbeat()
+            event_doc = {
+                "benchmark_date": today,
+                "benchmark_attempt": benchmark_attempt,
+                "selected_icp_count": len(window.item_refs),
+                "completed_icp_count": exc.completed_icps,
+                "private_model_manifest_hash": artifact.manifest_hash,
+                "failure_phase": "checkpoint_recycle",
+                "terminal_no_automatic_retry": False,
+                "scoring_worker_source_hash": _scoring_worker_source_hash(),
+                "publication_retry_token_hash": _baseline_publication_retry_token_hash(),
+                "pressure": dict(exc.pressure),
+                "elapsed_seconds": round(time.time() - start, 3),
+            }
+            try:
+                await create_scoring_dispatch_event(
+                    dispatch_type="private_baseline_rebenchmark",
+                    dispatch_status="failed",
+                    worker_ref=self.worker_ref,
+                    proxy_ref_hash=self.proxy_ref_hash,
+                    rolling_window_hash=window.window_hash,
+                    scoring_id=(
+                        baseline_telemetry_session.run.scoring_id
+                        if baseline_telemetry_session is not None
+                        and baseline_telemetry_session.run is not None
+                        else None
+                    ),
+                    scoring_run_id=(
+                        baseline_telemetry_session.run.scoring_run_id
+                        if baseline_telemetry_session is not None
+                        and baseline_telemetry_session.run is not None
+                        else None
+                    ),
+                    event_doc=event_doc,
+                )
+            except Exception as dispatch_exc:  # noqa: BLE001 - checkpoint is durable
+                logger.exception(
+                    "research_lab_baseline_checkpoint_recycle_dispatch_failed "
+                    "benchmark_date=%s completed_icps=%s error=%s",
+                    today,
+                    exc.completed_icps,
+                    _short_error(dispatch_exc),
+                )
+            if baseline_telemetry_session is not None:
+                try:
+                    await baseline_telemetry_session.cancel_active(
+                        failure_category="baseline_checkpoint_recycle",
+                        error=exc,
+                    )
+                    await emit_run_event(
+                        baseline_telemetry_session.run,
+                        "cancelled",
+                        failure_category="baseline_checkpoint_recycle",
+                        error=exc,
+                        telemetry_degraded=baseline_telemetry_session.degraded,
+                    )
+                except Exception as telemetry_exc:  # noqa: BLE001 - advisory only
+                    logger.exception(
+                        "research_lab_baseline_checkpoint_recycle_telemetry_failed "
+                        "benchmark_date=%s completed_icps=%s error=%s",
+                        today,
+                        exc.completed_icps,
+                        _short_error(telemetry_exc),
+                    )
+            logger.warning(
+                format_worker_block(
+                    "RESEARCH LAB PRIVATE BASELINE CHECKPOINT RECYCLE",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Benchmark date", today),
+                        ("Rolling window", compact_ref(window.window_hash)),
+                        ("Completed ICPs", f"{exc.completed_icps}/{exc.total_icps}"),
+                        ("Reason", exc.pressure.get("reason")),
+                        ("Worker RSS MiB", exc.pressure.get("rss_mb")),
+                        (
+                            "Host available MiB",
+                            exc.pressure.get("available_memory_mb"),
+                        ),
+                        ("Action", "restarting scorer and resuming durable ICP checkpoints"),
+                    ),
+                )
+            )
+            return {
+                "status": "baseline_checkpoint_recycle",
+                "benchmark_date": today,
+                "rolling_window_hash": window.window_hash,
+                "benchmark_attempt": benchmark_attempt,
+                "completed_icp_count": exc.completed_icps,
+                "selected_icp_count": exc.total_icps,
+                "pressure": dict(exc.pressure),
+                "recycle_requested": True,
+            }
         except Exception as exc:
             await _stop_baseline_telemetry_heartbeat()
             await create_scoring_dispatch_event(
@@ -11606,6 +11818,7 @@ class ResearchLabGatewayScoringWorker:
         trace_context: Mapping[str, Any] | None = None,
         resume_results: list[dict[str, Any]] | None = None,
         icp_checkpoint: Callable[[dict[str, Any]], Any] | None = None,
+        checkpoint_recycle_enabled: bool = False,
         expected_repo_main_git_sha: str = "",
         benchmark_date: str = "",
         telemetry_session: ScoringTelemetrySession | None = None,
@@ -11629,6 +11842,7 @@ class ResearchLabGatewayScoringWorker:
                 trace_context=trace_context,
                 resume_results=resume_results,
                 icp_checkpoint=icp_checkpoint,
+                checkpoint_recycle_enabled=checkpoint_recycle_enabled,
                 expected_repo_main_git_sha=expected_repo_main_git_sha,
                 benchmark_date=benchmark_date,
                 telemetry_session=telemetry_session,
@@ -11647,6 +11861,7 @@ class ResearchLabGatewayScoringWorker:
         trace_context: Mapping[str, Any] | None = None,
         resume_results: list[dict[str, Any]] | None = None,
         icp_checkpoint: Callable[[dict[str, Any]], Any] | None = None,
+        checkpoint_recycle_enabled: bool = False,
         expected_repo_main_git_sha: str = "",
         benchmark_date: str = "",
         telemetry_session: ScoringTelemetrySession | None = None,
@@ -11708,6 +11923,7 @@ class ResearchLabGatewayScoringWorker:
         )
         try:
             semaphore = asyncio.Semaphore(concurrency)
+            checkpointed_indexes: set[int] = set()
 
             async def run_one(item_index: int, item: Mapping[str, Any]) -> dict[str, Any]:
                 async with semaphore:
@@ -11729,22 +11945,51 @@ class ResearchLabGatewayScoringWorker:
                         retry_round=0,
                     )
                     if icp_checkpoint is not None and _baseline_summary_checkpointable(entry):
-                        await icp_checkpoint(entry)
+                        if await icp_checkpoint(entry):
+                            checkpointed_indexes.add(item_index)
                     return entry
 
-            # Settle-then-raise: blocking docker waits cannot be cancelled, so a
-            # fail-fast gather would leave containers racing the failure path.
-            # Wait for every task to finish (bounded by the per-container
-            # timeout), then surface the first fatal error.
-            settled = await asyncio.gather(
-                *(run_one(item_index, item) for item_index, item in run_items),
-                return_exceptions=True,
+            # Run one bounded wave at a time. This preserves the configured
+            # concurrency while creating a safe checkpoint boundary where a
+            # high-water process can exit before it starves the gateway host.
+            # Settle each wave before raising because blocking Docker waits
+            # cannot be cancelled safely.
+            first_pass_wave_width = (
+                concurrency
+                if checkpoint_recycle_enabled
+                else max(1, len(run_items))
             )
-            fatal = [entry for entry in settled if isinstance(entry, BaseException)]
-            if fatal:
-                raise fatal[0]
-            for entry in settled:
-                results[entry["_item_index"]] = entry
+            for wave_start in range(0, len(run_items), first_pass_wave_width):
+                wave = run_items[wave_start : wave_start + first_pass_wave_width]
+                settled = await asyncio.gather(
+                    *(run_one(item_index, item) for item_index, item in wave),
+                    return_exceptions=True,
+                )
+                fatal = [entry for entry in settled if isinstance(entry, BaseException)]
+                if fatal:
+                    raise fatal[0]
+                for entry in settled:
+                    results[entry["_item_index"]] = entry
+                more_first_pass_work = wave_start + len(wave) < len(run_items)
+                retry_work_waiting = any(
+                    entry.get("_retryable") for entry in results.values()
+                )
+                if (
+                    checkpoint_recycle_enabled
+                    and checkpointed_indexes
+                    and (more_first_pass_work or retry_work_waiting)
+                ):
+                    recycle_pressure = _baseline_checkpoint_recycle_pressure(
+                        self.config
+                    )
+                    if recycle_pressure is not None:
+                        raise BaselineCheckpointRecycle(
+                            pressure=recycle_pressure,
+                            completed_icps=(
+                                len(resumed_by_ref) + len(checkpointed_indexes)
+                            ),
+                            total_icps=total_icps,
+                        )
 
             retried_total = 0
             recovered_total = 0
@@ -11771,6 +12016,7 @@ class ResearchLabGatewayScoringWorker:
                     retry_runner,
                     retry_round=round_no,
                 )
+                retry_checkpointed_indexes: set[int] = set()
 
                 async def retry_one(item_index: int) -> dict[str, Any]:
                     async with retry_semaphore:
@@ -11804,25 +12050,61 @@ class ResearchLabGatewayScoringWorker:
                             retry_round=round_no,
                         )
                         if icp_checkpoint is not None and _baseline_summary_checkpointable(entry):
-                            await icp_checkpoint(entry)
+                            if await icp_checkpoint(entry):
+                                retry_checkpointed_indexes.add(item_index)
                         return entry
 
-                retried = await asyncio.gather(
-                    *(retry_one(item_index) for item_index in pending),
-                    return_exceptions=True,
+                retry_width = (
+                    self.config.private_baseline_retry_concurrency
+                    if checkpoint_recycle_enabled
+                    else max(1, len(pending))
                 )
-                fatal = [entry for entry in retried if isinstance(entry, BaseException)]
-                if fatal:
-                    raise fatal[0]
-                recovered = 0
-                for entry in retried:
-                    if not entry.get("_runtime_error"):
-                        recovered += 1
-                    # Replace on success AND on repeat failure: the fresher
-                    # attempt carries the more current diagnostics.
-                    results[entry["_item_index"]] = entry
-                retried_total += len(pending)
-                recovered_total += recovered
+                for wave_start in range(0, len(pending), retry_width):
+                    wave_indexes = pending[wave_start : wave_start + retry_width]
+                    retried = await asyncio.gather(
+                        *(retry_one(item_index) for item_index in wave_indexes),
+                        return_exceptions=True,
+                    )
+                    fatal = [
+                        entry for entry in retried if isinstance(entry, BaseException)
+                    ]
+                    if fatal:
+                        raise fatal[0]
+                    recovered = 0
+                    for entry in retried:
+                        if not entry.get("_runtime_error"):
+                            recovered += 1
+                        # Replace on success AND on repeat failure: the fresher
+                        # attempt carries the more current diagnostics.
+                        results[entry["_item_index"]] = entry
+                    retried_total += len(wave_indexes)
+                    recovered_total += recovered
+                    more_retry_work = wave_start + len(wave_indexes) < len(pending)
+                    another_round_needed = (
+                        round_no < self.config.private_baseline_provider_retry_rounds
+                        and any(
+                            entry.get("_retryable")
+                            for entry in results.values()
+                        )
+                    )
+                    if (
+                        checkpoint_recycle_enabled
+                        and retry_checkpointed_indexes
+                        and (more_retry_work or another_round_needed)
+                    ):
+                        recycle_pressure = _baseline_checkpoint_recycle_pressure(
+                            self.config
+                        )
+                        if recycle_pressure is not None:
+                            raise BaselineCheckpointRecycle(
+                                pressure=recycle_pressure,
+                                completed_icps=(
+                                    len(resumed_by_ref)
+                                    + len(checkpointed_indexes)
+                                    + len(retry_checkpointed_indexes)
+                                ),
+                                total_icps=total_icps,
+                            )
             unresolved = sorted(
                 item_index for item_index, entry in results.items() if entry.get("_runtime_error")
             )

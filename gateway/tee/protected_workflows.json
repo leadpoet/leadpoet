@@ -132,7 +132,7 @@
       "symbol": "_trusted_parent_authorities_v2"
     },
     {
-      "ast_sha256": "sha256:636be10361a9bcb6ae064fcc491a4415324f85496343454b6d2b131e28b5796a",
+      "ast_sha256": "sha256:487385875807da1971d0a296f76035a3a57123e0c9fbae100ac0848242f4639e",
       "path": "gateway/research_lab/attested_autoresearch_v2.py",
       "symbol": "execute_autoresearch_v2"
     },
@@ -177,7 +177,7 @@
       "symbol": "_validate_output_ancestry_checkpoint_v2"
     },
     {
-      "ast_sha256": "sha256:8853b68110d3f7a6cf2a494e22fc5f642f82d45601cd5887f8a520b0e5d89495",
+      "ast_sha256": "sha256:31d15a2b846ad42b589d9e2e44713ae8361eacdbf527453823d82454a66a05ff",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "execute_scoring_v2"
     },
@@ -1292,7 +1292,7 @@
       "symbol": "build_release_lineage_boot_verifier_v2"
     },
     {
-      "ast_sha256": "sha256:bddb7fd580c65dbe598383d498a879cbb12a841d8e0103ed4e16262f7f259f5a",
+      "ast_sha256": "sha256:31f61a37fbd62116910a4ada0881593c372f1bb25da42ecf2dec4d3e9a21761a",
       "path": "gateway/tee/release_lineage_v2.py",
       "symbol": "load_approved_release_lineage_v2"
     },
@@ -2397,7 +2397,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:1c44fc797f62db18b8ea936c3489247815353c0aa6afbce7dcece642241f1e05",
-  "protected_source_commit": "e78c0b23de35d2a3c02ff1acb97731f58714efd7",
+  "manifest_hash": "sha256:4b788676ae8a18587d74bc89aa56ad28f067dd47e9d9b0b9c227ba33aaf79e2d",
+  "protected_source_commit": "822cf0492b3dad55dcc59e55027884ca1337446b",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

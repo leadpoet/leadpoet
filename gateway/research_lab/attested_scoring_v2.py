@@ -960,6 +960,7 @@ async def execute_scoring_v2(
                 load_approved_release_lineage_v2,
                 current_release=release,
                 parent_graphs=parent_graphs,
+                parent_ancestry_proofs=parent_ancestry_proofs,
                 release_channel_loader=release_channel_loader,
             )
             verifier = build_release_lineage_boot_verifier_v2(approved_lineage)

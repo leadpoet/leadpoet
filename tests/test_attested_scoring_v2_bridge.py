@@ -17,6 +17,7 @@ from gateway.research_lab.attested_scoring_v2 import (
 from gateway.research_lab import attested_scoring_v2
 from gateway.research_lab import attested_v2_store
 from gateway.tee import execution_job_manager_v2
+from gateway.tee import release_lineage_v2
 from gateway.research_lab.attested_v2_store import (
     AttestedV2StoreError,
     _execution_result_storage_row_v2,
@@ -45,6 +46,7 @@ from gateway.tee.topology import ROLE_SPECS, topology_hash
 from leadpoet_canonical.attested_v2 import (
     CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     build_boot_identity_body,
+    build_checkpointed_receipt_graph,
     build_receipt_graph,
     build_transport_attempt,
     create_boot_identity,
@@ -54,7 +56,10 @@ from leadpoet_canonical.attested_v2 import (
     validate_receipt_graph,
 )
 from leadpoet_canonical.ancestry_checkpoint_v2 import (
+    ANCESTRY_DELTA_SCHEMA_VERSION,
     ANCESTRY_CHECKPOINT_BOOTSTRAP_REQUEST_SCHEMA_VERSION,
+    build_compact_ancestry_proof_from_delta_v2,
+    issue_ancestry_certificate_v2,
 )
 
 
@@ -353,12 +358,12 @@ def test_oversized_graph_without_deduplication_benefit_keeps_ancestry(
     assert PARENT_RECEIPT_GRAPH_SET_FIELD not in document
 
 
-def _release():
+def _release(commit_character="1"):
     rows = []
     for index, (role, spec) in enumerate(sorted(ROLE_SPECS.items())):
         character = "abcdef0123456789"[index]
         values = {
-            "commit_sha": "1" * 40,
+            "commit_sha": commit_character * 40,
             "pcr0": character * 96,
             "normalized_image_hash": _hash(character),
             "eif_hash": _hash(character),
@@ -810,6 +815,116 @@ async def test_v2_bridge_retains_checkpoint_parent_for_business_logic_and_extend
             ],
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_v2_bridge_loads_historical_checkpoint_issuer_release(
+    monkeypatch,
+):
+    current_release = _release("1")
+    historical_release = _release("2")
+    current = _Client(current_release)
+    historical = _Client(historical_release)
+
+    def verify_nitro(
+        identity,
+        *,
+        expected_pcr0,
+        certificate_validity_at_attestation_time,
+    ):
+        assert identity["pcr0"] == expected_pcr0
+        assert certificate_validity_at_attestation_time is True
+        return identity
+
+    monkeypatch.setattr(
+        attested_scoring_v2,
+        "verify_boot_identity_nitro",
+        verify_nitro,
+    )
+    monkeypatch.setattr(
+        release_lineage_v2,
+        "verify_boot_identity_nitro",
+        verify_nitro,
+    )
+
+    async def persist(graph, **_kwargs):
+        return {"root_receipt_hash": graph["root_receipt_hash"]}
+
+    first = await execute_scoring_v2(
+        operation="benchmark_icp_score",
+        purpose="research_lab.benchmark.v2",
+        epoch_id=12,
+        sequence=0,
+        payload={"generation": 1},
+        worker_index=0,
+        release_manifest=current_release,
+        client=current,
+        persist_graph=persist,
+        boot_verifier=lambda identity: identity,
+        poll_seconds=0.001,
+    )
+    first_graph = first["receipt_graph"]
+    delta = {
+        "schema_version": ANCESTRY_DELTA_SCHEMA_VERSION,
+        "root_receipt_hash": first_graph["root_receipt_hash"],
+        "boot_identities": first_graph["boot_identities"],
+        "receipts": first_graph["receipts"],
+        "transport_attempts": first_graph["transport_attempts"],
+        "host_operations": first_graph["host_operations"],
+    }
+    lineage_id = attested_scoring_v2._gateway_ancestry_lineage_id()
+    certificate = issue_ancestry_certificate_v2(
+        local_delta=delta,
+        lineage_id=lineage_id,
+        certificate_sequence=0,
+        issuer_boot_identity=historical.boot,
+        issued_at="2026-07-10T20:00:00Z",
+        sign_digest=historical.key.sign,
+        boot_attestation_verifier=lambda identity: identity,
+        allowed_issuer_roles=("gateway_scoring",),
+        required_purposes=("research_lab.benchmark.v2",),
+    )
+    proof = build_compact_ancestry_proof_from_delta_v2(
+        delta,
+        certificate,
+        expected_lineage_id=lineage_id,
+        boot_attestation_verifier=lambda identity: identity,
+        allowed_issuer_roles=("gateway_scoring",),
+    )
+    checkpointed = build_checkpointed_receipt_graph(
+        root_receipt_hash=first_graph["root_receipt_hash"],
+        boot_identities=first_graph["boot_identities"],
+        receipts=first_graph["receipts"],
+        transport_attempts=first_graph["transport_attempts"],
+        host_operations=first_graph["host_operations"],
+        ancestry_lineage_id=lineage_id,
+        ancestry_proof=proof,
+        boot_attestation_verifier=lambda identity: identity,
+        require_boot_attestation_verification=True,
+    )
+    loaded_commits = []
+
+    second = await execute_scoring_v2(
+        operation="benchmark_icp_score",
+        purpose="research_lab.benchmark.v2",
+        epoch_id=13,
+        sequence=0,
+        payload={"generation": 2},
+        worker_index=0,
+        parent_graphs=(checkpointed,),
+        release_manifest=current_release,
+        release_channel_loader=lambda commit: loaded_commits.append(commit)
+        or {"gateway_release_manifest": historical_release},
+        client=current,
+        persist_graph=persist,
+        poll_seconds=0.001,
+    )
+
+    assert second["result"] == {
+        "operation": "benchmark_icp_score",
+        "echo": {"generation": 2},
+    }
+    assert loaded_commits == [historical_release["commit_sha"]]
 
 
 @pytest.mark.asyncio

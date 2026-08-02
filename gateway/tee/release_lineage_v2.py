@@ -11,7 +11,11 @@ from gateway.tee.release_manifest_v2 import (
     role_expectation,
     validate_release_manifest,
 )
-from leadpoet_canonical.attested_v2 import sha256_json, verify_boot_identity_nitro
+from leadpoet_canonical.attested_v2 import (
+    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
+    sha256_json,
+    verify_boot_identity_nitro,
+)
 
 
 _RELEASE_CHANNEL_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
@@ -212,14 +216,62 @@ def build_compact_release_lineage_boot_verifier_v2(
     return verify
 
 
+def _checkpoint_issuer_boot_identity(
+    proof: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    certificate = proof.get("certificate")
+    issuer = (
+        certificate.get("issuer_boot_identity")
+        if isinstance(certificate, Mapping)
+        else None
+    )
+    if not isinstance(issuer, Mapping):
+        raise ReleaseLineageV2Error(
+            "checkpoint ancestry issuer boot identity is unavailable"
+        )
+    return issuer
+
+
+def _required_boot_identities(
+    parent_graphs: Sequence[Mapping[str, Any]],
+    parent_ancestry_proofs: Sequence[Mapping[str, Any]] = (),
+) -> tuple[Mapping[str, Any], ...]:
+    identities: list[Mapping[str, Any]] = []
+    for graph in parent_graphs:
+        if not isinstance(graph, Mapping):
+            raise ReleaseLineageV2Error("receipt ancestry graph is invalid")
+        for identity in graph.get("boot_identities") or ():
+            if not isinstance(identity, Mapping):
+                raise ReleaseLineageV2Error(
+                    "receipt ancestry boot identity is invalid"
+                )
+            identities.append(identity)
+        if graph.get("schema_version") == (
+            CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
+        ):
+            proof = graph.get("ancestry_proof")
+            if not isinstance(proof, Mapping):
+                raise ReleaseLineageV2Error(
+                    "checkpoint ancestry proof is unavailable"
+                )
+            identities.append(_checkpoint_issuer_boot_identity(proof))
+    for proof in parent_ancestry_proofs:
+        if not isinstance(proof, Mapping):
+            raise ReleaseLineageV2Error("checkpoint ancestry proof is invalid")
+        identities.append(_checkpoint_issuer_boot_identity(proof))
+    return tuple(identities)
+
+
 def _required_commits(
     parent_graphs: Sequence[Mapping[str, Any]],
+    parent_ancestry_proofs: Sequence[Mapping[str, Any]] = (),
 ) -> set[str]:
     commits = {
         str(identity.get("commit_sha") or "").lower()
-        for graph in parent_graphs
-        for identity in graph.get("boot_identities") or ()
-        if isinstance(identity, Mapping)
+        for identity in _required_boot_identities(
+            parent_graphs,
+            parent_ancestry_proofs,
+        )
     }
     if "" in commits:
         raise ReleaseLineageV2Error(
@@ -286,18 +338,28 @@ def load_approved_release_lineage_v2(
     *,
     current_release: Mapping[str, Any],
     parent_graphs: Sequence[Mapping[str, Any]],
+    parent_ancestry_proofs: Sequence[Mapping[str, Any]] = (),
     release_channel_loader: Callable[[str], Mapping[str, Any]] | None = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Load exact manifests for every boot commit present in parent graphs."""
+    """Load exact manifests for every boot that can authorize ancestry."""
 
     current = validate_release_manifest(current_release)
-    required = _required_commits(parent_graphs)
+    identities = _required_boot_identities(
+        parent_graphs,
+        parent_ancestry_proofs,
+    )
+    required = {
+        str(identity.get("commit_sha") or "").lower()
+        for identity in identities
+    }
+    if "" in required:
+        raise ReleaseLineageV2Error(
+            "receipt ancestry contains a boot identity without a commit"
+        )
     required_validator_commits = {
         str(identity.get("commit_sha") or "").lower()
-        for graph in parent_graphs
-        for identity in graph.get("boot_identities") or ()
-        if isinstance(identity, Mapping)
-        and str(identity.get("physical_role") or "")
+        for identity in identities
+        if str(identity.get("physical_role") or "")
         == _VALIDATOR_PHYSICAL_ROLE
     }
     releases: Dict[str, Dict[str, Any]] = {

@@ -29,12 +29,14 @@ from leadpoet_canonical.attested_v2 import sha256_json
 try:
     from fixture_contract import (
         load_rehearsal_current_settlement_epoch_id,
+        validate_rehearsal_finalized_authority_epochs,
     )
 except ModuleNotFoundError as exc:
     if exc.name != "fixture_contract":
         raise
     from tests.restart_rehearsal.fixture_contract import (
         load_rehearsal_current_settlement_epoch_id,
+        validate_rehearsal_finalized_authority_epochs,
     )
 
 
@@ -641,6 +643,7 @@ def _migration_seed_rows(
             )
         normalized[target] = [dict(row) for row in rows]
     _validate_migration_receipt_graph_seeds(normalized)
+    validate_rehearsal_finalized_authority_epochs(normalized)
     return normalized
 
 

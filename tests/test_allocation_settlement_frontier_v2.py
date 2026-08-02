@@ -15,7 +15,12 @@ from leadpoet_canonical.allocation_settlement_frontier_v2 import (
     validate_allocation_settlement_frontier_v2,
     validate_frontier_successor_v2,
 )
-from leadpoet_canonical.attested_v2 import canonical_json
+from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+from gateway.tee.reward_executor_v2 import (
+    champion_reward_row_projection_v2,
+    source_add_reward_row_projection_v2,
+)
+from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
 from leadpoet_verifier.economics import (
     CHAMPION_CREDIT_POLICY_ACCELERATED_LIFETIME_CAP_V1,
 )
@@ -34,6 +39,83 @@ def _checkpoint(*, applied="1.000000", realized="1.000000"):
         applied_alpha_percent=applied,
         realized_alpha_percent=realized,
         excess_alpha_percent=realized_amount - applied_amount,
+    )
+
+
+def _champion_row(*, status="paid", input_hash=None):
+    return {
+        "champion_reward_id": "champion_reward:sha256:" + "a" * 64,
+        "score_bundle_id": "score-bundle-1",
+        "candidate_id": "candidate-1",
+        "run_id": "run-1",
+        "miner_hotkey": "5Champion",
+        "miner_uid": 10,
+        "island": "generalist",
+        "evaluation_epoch": 99,
+        "start_epoch": 100,
+        "epoch_count": 20,
+        "improvement_points": 1.0,
+        "threshold_points": 0.0,
+        "desired_alpha_percent": 7.3,
+        "input_hash": input_hash or "sha256:" + "b" * 64,
+        "anchored_hash": "sha256:" + "c" * 64,
+        "current_reward_status": status,
+    }
+
+
+def _source_add_row(*, status="stopped_forward", alpha_percent=1.0):
+    return {
+        "reward_ref": "source_add_reward:" + "d" * 16,
+        "adapter_id": "adapter-1",
+        "miner_hotkey": "5SourceAdd",
+        "leg": 1,
+        "reward_kind": "source_acceptance",
+        "alpha_percent": alpha_percent,
+        "reward_epochs": 20,
+        "start_epoch": 100,
+        "current_reward_status": status,
+        "trigger_evidence_doc": {
+            "submission_id": "source_add_submission:abcd1234abcd1234"
+        },
+        "public_label": "Source acceptance",
+        "desired_alpha_percent": alpha_percent,
+        "epoch_count": 20,
+    }
+
+
+def _checkpoint_for_row(*, reward_kind, row, applied="30", realized="30"):
+    if reward_kind == "champion":
+        source_id = row["champion_reward_id"]
+        projection = champion_reward_row_projection_v2(row)
+        desired = row["desired_alpha_percent"]
+        epoch_count = row["epoch_count"]
+    else:
+        source_id = row["reward_ref"]
+        projection = source_add_reward_row_projection_v2(
+            "source_add_leg%d" % row["leg"],
+            {**row, "initial_reward_status": "active"},
+        )
+        desired = row["alpha_percent"]
+        epoch_count = row["reward_epochs"]
+    return build_reward_settlement_checkpoint_v2(
+        reward_kind=reward_kind,
+        source_id=source_id,
+        obligation_hash=sha256_json(projection),
+        start_epoch=row["start_epoch"],
+        epoch_count=epoch_count,
+        desired_alpha_percent=desired,
+        applied_alpha_percent=applied,
+        realized_alpha_percent=realized,
+        excess_alpha_percent=Decimal(realized) - Decimal(applied),
+    )
+
+
+def _execution_context():
+    return ExecutionContextV2(
+        job_id="allocation-v2:retirement-test",
+        purpose="research_lab.allocation.v2",
+        epoch_id=121,
+        parent_receipt_hashes=(),
     )
 
 
@@ -118,6 +200,7 @@ def test_frontier_size_remains_bounded_across_one_hundred_epochs():
 def test_long_gap_delta_collapses_to_one_cumulative_checkpoint():
     from gateway.tee.coordinator_allocation_source_v2 import (
         CoordinatorAllocationSourceV2,
+        CoordinatorAllocationSourceV2Error,
     )
 
     reward_id = "champion_reward:" + "a" * 64
@@ -288,6 +371,190 @@ def test_unsettled_reward_cannot_disappear_from_successor_frontier():
             source_add_rows=[],
             history=[],
             predecessor=predecessor,
+        )
+
+
+def test_terminal_paid_champion_retires_with_hash_bound_evidence(monkeypatch):
+    from gateway.tee.coordinator_allocation_source_v2 import (
+        CoordinatorAllocationSourceV2,
+    )
+
+    row = _champion_row()
+    checkpoint = _checkpoint_for_row(reward_kind="champion", row=row)
+    predecessor = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=120,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(checkpoint,),
+    )
+    resolver = object.__new__(CoordinatorAllocationSourceV2)
+    calls = []
+
+    def read(policy_id, parameters, _context):
+        calls.append((policy_id, parameters))
+        return [row]
+
+    monkeypatch.setattr(resolver, "_read", read)
+    retirements = resolver._resolve_settlement_frontier_retirements(
+        predecessor=predecessor,
+        champion_rows=[],
+        source_add_rows=[],
+        context=_execution_context(),
+    )
+    successor = resolver._build_settlement_frontier(
+        epoch=121,
+        netuid=71,
+        champion_rows=[],
+        source_add_rows=[],
+        history=[],
+        predecessor=predecessor,
+        terminal_retirements=retirements,
+    )
+
+    assert calls == [
+        ("champion_reward_by_id", {"champion_reward_id": row["champion_reward_id"]})
+    ]
+    assert retirements[0]["terminal_status"] == "paid"
+    assert retirements[0]["obligation_hash"] == checkpoint["obligation_hash"]
+    assert retirements[0]["predecessor_checkpoint_hash"] == checkpoint[
+        "checkpoint_hash"
+    ]
+    assert successor["reward_checkpoint_count"] == 0
+
+
+def test_terminal_source_add_retires_with_hash_bound_evidence(monkeypatch):
+    from gateway.tee.coordinator_allocation_source_v2 import (
+        CoordinatorAllocationSourceV2,
+    )
+
+    row = _source_add_row()
+    checkpoint = _checkpoint_for_row(
+        reward_kind="source_add",
+        row=row,
+        applied="10",
+        realized="10",
+    )
+    predecessor = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=120,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(checkpoint,),
+    )
+    resolver = object.__new__(CoordinatorAllocationSourceV2)
+
+    monkeypatch.setattr(
+        resolver,
+        "_read",
+        lambda policy_id, parameters, _context: [row],
+    )
+    retirements = resolver._resolve_settlement_frontier_retirements(
+        predecessor=predecessor,
+        champion_rows=[],
+        source_add_rows=[],
+        context=_execution_context(),
+    )
+    successor = resolver._build_settlement_frontier(
+        epoch=121,
+        netuid=71,
+        champion_rows=[],
+        source_add_rows=[],
+        history=[],
+        predecessor=predecessor,
+        terminal_retirements=retirements,
+    )
+
+    assert retirements[0]["terminal_status"] == "stopped_forward"
+    assert successor["reward_checkpoint_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("row", "error"),
+    [
+        (_champion_row(status="active"), "reward is not terminal"),
+        (
+            _champion_row(input_hash="sha256:" + "e" * 64),
+            "terminal reward identity changed",
+        ),
+    ],
+)
+def test_terminal_retirement_fails_closed_on_status_or_identity(
+    monkeypatch,
+    row,
+    error,
+):
+    from gateway.tee.coordinator_allocation_source_v2 import (
+        CoordinatorAllocationSourceV2,
+        CoordinatorAllocationSourceV2Error,
+    )
+
+    original = _champion_row()
+    checkpoint = _checkpoint_for_row(reward_kind="champion", row=original)
+    predecessor = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=120,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(checkpoint,),
+    )
+    resolver = object.__new__(CoordinatorAllocationSourceV2)
+    monkeypatch.setattr(
+        resolver,
+        "_read",
+        lambda policy_id, parameters, _context: [row],
+    )
+
+    with pytest.raises(CoordinatorAllocationSourceV2Error, match=error):
+        resolver._resolve_settlement_frontier_retirements(
+            predecessor=predecessor,
+            champion_rows=[],
+            source_add_rows=[],
+            context=_execution_context(),
+        )
+
+
+def test_terminal_retirement_cannot_be_replayed_for_an_active_reward(monkeypatch):
+    from gateway.tee.coordinator_allocation_source_v2 import (
+        CoordinatorAllocationSourceV2,
+        CoordinatorAllocationSourceV2Error,
+    )
+
+    terminal_row = _champion_row()
+    active_row = _champion_row(status="active")
+    checkpoint = _checkpoint_for_row(reward_kind="champion", row=terminal_row)
+    predecessor = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=120,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(checkpoint,),
+    )
+    resolver = object.__new__(CoordinatorAllocationSourceV2)
+    monkeypatch.setattr(
+        resolver,
+        "_read",
+        lambda policy_id, parameters, _context: [terminal_row],
+    )
+    retirements = resolver._resolve_settlement_frontier_retirements(
+        predecessor=predecessor,
+        champion_rows=[],
+        source_add_rows=[],
+        context=_execution_context(),
+    )
+
+    with pytest.raises(
+        CoordinatorAllocationSourceV2Error,
+        match="active reward has terminal settlement evidence",
+    ):
+        resolver._build_settlement_frontier(
+            epoch=121,
+            netuid=71,
+            champion_rows=[active_row],
+            source_add_rows=[],
+            history=[],
+            predecessor=predecessor,
+            terminal_retirements=retirements,
         )
 
 

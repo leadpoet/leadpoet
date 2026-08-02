@@ -3032,6 +3032,175 @@ def _exercise_research_lab_allocation_conservation() -> dict[str, Any]:
     }
 
 
+def _exercise_settlement_frontier_terminal_retirement() -> dict[str, Any]:
+    """Reproduce and close the terminal-obligation frontier transition."""
+
+    from gateway.tee.coordinator_allocation_source_v2 import (
+        CoordinatorAllocationSourceV2,
+        CoordinatorAllocationSourceV2Error,
+    )
+    from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+    from gateway.tee.reward_executor_v2 import (
+        champion_reward_row_projection_v2,
+        source_add_reward_row_projection_v2,
+    )
+    from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+        build_allocation_settlement_frontier_v2,
+        build_reward_settlement_checkpoint_v2,
+    )
+
+    champion = {
+        "champion_reward_id": "champion_reward:sha256:" + "a" * 64,
+        "score_bundle_id": "score-bundle-rehearsal",
+        "candidate_id": "candidate-rehearsal",
+        "run_id": "run-rehearsal",
+        "miner_hotkey": "5ChampionRehearsal",
+        "miner_uid": 10,
+        "island": "generalist",
+        "evaluation_epoch": 119,
+        "start_epoch": 120,
+        "epoch_count": 20,
+        "improvement_points": 1.0,
+        "threshold_points": 0.0,
+        "desired_alpha_percent": 7.3,
+        "input_hash": "sha256:" + "b" * 64,
+        "anchored_hash": "sha256:" + "c" * 64,
+        "current_reward_status": "paid",
+    }
+    source_add = {
+        "reward_ref": "source_add_reward:" + "d" * 16,
+        "adapter_id": "adapter-rehearsal",
+        "miner_hotkey": "5SourceAddRehearsal",
+        "leg": 1,
+        "reward_kind": "source_acceptance",
+        "alpha_percent": 1.0,
+        "reward_epochs": 20,
+        "start_epoch": 120,
+        "current_reward_status": "stopped_forward",
+        "trigger_evidence_doc": {
+            "submission_id": "source_add_submission:abcd1234abcd1234"
+        },
+        "public_label": "Source acceptance",
+        "desired_alpha_percent": 1.0,
+        "epoch_count": 20,
+    }
+    champion_checkpoint = build_reward_settlement_checkpoint_v2(
+        reward_kind="champion",
+        source_id=champion["champion_reward_id"],
+        obligation_hash=sha256_json(
+            champion_reward_row_projection_v2(champion)
+        ),
+        start_epoch=120,
+        epoch_count=20,
+        desired_alpha_percent=7.3,
+        applied_alpha_percent=30,
+        realized_alpha_percent=30,
+        excess_alpha_percent=0,
+    )
+    source_add_checkpoint = build_reward_settlement_checkpoint_v2(
+        reward_kind="source_add",
+        source_id=source_add["reward_ref"],
+        obligation_hash=sha256_json(
+            source_add_reward_row_projection_v2(
+                "source_add_leg1",
+                {**source_add, "initial_reward_status": "active"},
+            )
+        ),
+        start_epoch=120,
+        epoch_count=20,
+        desired_alpha_percent=1,
+        applied_alpha_percent=10,
+        realized_alpha_percent=10,
+        excess_alpha_percent=0,
+    )
+    predecessor = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=120,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(champion_checkpoint, source_add_checkpoint),
+    )
+    resolver = object.__new__(CoordinatorAllocationSourceV2)
+    try:
+        resolver._build_settlement_frontier(
+            epoch=121,
+            netuid=71,
+            champion_rows=[],
+            source_add_rows=[],
+            history=[],
+            predecessor=predecessor,
+        )
+    except CoordinatorAllocationSourceV2Error as exc:
+        if "unsettled reward disappeared" not in str(exc):
+            raise
+    else:
+        raise RuntimeError("terminal frontier failure was not reproduced")
+
+    rows = {
+        "champion_reward_by_id": [champion],
+        "source_add_reward_by_ref": [source_add],
+    }
+    observed_queries: list[str] = []
+
+    def read(policy_id, parameters, _context):
+        observed_queries.append(str(policy_id))
+        return [dict(row) for row in rows.get(policy_id, [])]
+
+    resolver._read = read
+    context = ExecutionContextV2(
+        job_id="allocation-v2:terminal-retirement-rehearsal",
+        purpose="research_lab.allocation.v2",
+        epoch_id=121,
+        parent_receipt_hashes=(),
+    )
+    retirements = resolver._resolve_settlement_frontier_retirements(
+        predecessor=predecessor,
+        champion_rows=[],
+        source_add_rows=[],
+        context=context,
+    )
+    successor = resolver._build_settlement_frontier(
+        epoch=121,
+        netuid=71,
+        champion_rows=[],
+        source_add_rows=[],
+        history=[],
+        predecessor=predecessor,
+        terminal_retirements=retirements,
+    )
+    if (
+        successor["reward_checkpoint_count"] != 0
+        or observed_queries
+        != ["champion_reward_by_id", "source_add_reward_by_ref"]
+        or {item["terminal_status"] for item in retirements}
+        != {"paid", "stopped_forward"}
+    ):
+        raise RuntimeError("terminal frontier retirement was not exact")
+
+    rows["champion_reward_by_id"] = [
+        {**champion, "input_hash": "sha256:" + "e" * 64}
+    ]
+    try:
+        resolver._resolve_settlement_frontier_retirements(
+            predecessor=predecessor,
+            champion_rows=[],
+            source_add_rows=[],
+            context=context,
+        )
+    except CoordinatorAllocationSourceV2Error as exc:
+        if "terminal reward identity changed" not in str(exc):
+            raise
+    else:
+        raise RuntimeError("mutated terminal reward did not fail closed")
+    return {
+        "original_failure_reproduced": True,
+        "champion_terminal_retired": True,
+        "source_add_terminal_retired": True,
+        "tampered_identity_rejected": True,
+        "successor_reward_checkpoint_count": 0,
+    }
+
+
 def _exercise_receipt_graph_aggregate_pagination() -> dict[str, Any]:
     """Exercise aggregate evidence paging through the candidate store helper."""
 
@@ -3523,6 +3692,9 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     ),
     "research-lab-allocation-conservation": (
         _exercise_research_lab_allocation_conservation
+    ),
+    "settlement-frontier-terminal-retirement": (
+        _exercise_settlement_frontier_terminal_retirement
     ),
 }
 
@@ -4026,6 +4198,28 @@ def main() -> int:
                 "research-lab-allocation-conservation",
                 {},
             ).get("conserved")
+            is True
+        ),
+        "settlement_frontier_terminal_retirement_verified": (
+            behavior_evidence.get(
+                "settlement-frontier-terminal-retirement",
+                {},
+            ).get("original_failure_reproduced")
+            is True
+            and behavior_evidence.get(
+                "settlement-frontier-terminal-retirement",
+                {},
+            ).get("champion_terminal_retired")
+            is True
+            and behavior_evidence.get(
+                "settlement-frontier-terminal-retirement",
+                {},
+            ).get("source_add_terminal_retired")
+            is True
+            and behavior_evidence.get(
+                "settlement-frontier-terminal-retirement",
+                {},
+            ).get("tampered_identity_rejected")
             is True
         ),
         "canonical_vector_primary_auditor_equal": (

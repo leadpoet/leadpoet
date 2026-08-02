@@ -1067,7 +1067,7 @@
       "symbol": "select_latest_allocation_source_row_v2"
     },
     {
-      "ast_sha256": "sha256:ade90c82130388a5f65b78570cd7dd8e67bbcd2bcf1626351143019ecdb9c094",
+      "ast_sha256": "sha256:f0d1775e3b3fcd5009046ef30b949f7a48c463813d0d777b14c1e6568845372b",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
@@ -2397,7 +2397,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:4b788676ae8a18587d74bc89aa56ad28f067dd47e9d9b0b9c227ba33aaf79e2d",
+  "manifest_hash": "sha256:6355e1be61b97dfcb8e5f29d5e7dc06212f8f455ce2dfff9136b5bb656bf0f5d",
   "protected_source_commit": "822cf0492b3dad55dcc59e55027884ca1337446b",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -35,6 +35,7 @@ from gateway.tee.coordinator_chain_source_v2 import CoordinatorChainSourceV2
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.supabase_source_v2 import SupabaseSourceReaderV2
 from gateway.tee.reward_executor_v2 import (
+    RewardExecutorV2Error,
     champion_reward_row_projection_v2,
     reimbursement_reward_row_projection_v2,
     source_add_reward_row_projection_v2,
@@ -67,6 +68,15 @@ from leadpoet_verifier.economics import allocate_research_lab_epoch
 
 class CoordinatorAllocationSourceV2Error(RuntimeError):
     """Authenticated allocation sources are incomplete or inconsistent."""
+
+
+SETTLEMENT_FRONTIER_RETIREMENT_SCHEMA_VERSION = (
+    "leadpoet.allocation_settlement_frontier_retirement.v1"
+)
+_TERMINAL_SETTLEMENT_REWARD_STATUSES = {
+    "champion": frozenset({"paid", "voided", "tombstoned"}),
+    "source_add": frozenset({"stopped_forward"}),
+}
 
 
 def _same(left: Any, right: Any) -> bool:
@@ -301,6 +311,14 @@ class CoordinatorAllocationSourceV2:
             context=context,
             required_parents=required_parent_hashes,
         )
+        settlement_frontier_retirements = (
+            self._resolve_settlement_frontier_retirements(
+                predecessor=prior_frontier,
+                champion_rows=champion_source_rows,
+                source_add_rows=source_add_rows,
+                context=context,
+            )
+        )
         settlement_frontier = self._build_settlement_frontier(
             epoch=epoch,
             netuid=netuid,
@@ -308,6 +326,7 @@ class CoordinatorAllocationSourceV2:
             source_add_rows=source_add_rows,
             history=finalized_reward_history,
             predecessor=prior_frontier,
+            terminal_retirements=settlement_frontier_retirements,
         )
         paid_maps = frontier_paid_maps_v2(settlement_frontier)
         champion_rows, champion_skipped = self._champions(
@@ -447,6 +466,10 @@ class CoordinatorAllocationSourceV2:
             )
             source_state["source_add_obligations"] = source_add_obligations
             source_state["skipped"]["source_add"] = source_add_skipped
+        if settlement_frontier_retirements:
+            source_state["settlement_frontier_retirements"] = (
+                settlement_frontier_retirements
+            )
         if fallback_reimbursement_rows or fallback_reimbursement_skipped:
             source_state.update(
                 {
@@ -504,7 +527,7 @@ class CoordinatorAllocationSourceV2:
         activation = activation_rows[0]
         try:
             first_epoch = int(activation["first_allocation_epoch"])
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, RewardExecutorV2Error) as exc:
             raise CoordinatorAllocationSourceV2Error(
                 "allocation settlement frontier activation is invalid"
             ) from exc
@@ -922,6 +945,119 @@ class CoordinatorAllocationSourceV2:
             )
         return {"frontier": frontier, "receipt_hash": source_receipt_hash}
 
+    @staticmethod
+    def _settlement_retirement_evidence(
+        *,
+        reward_kind: str,
+        checkpoint: Mapping[str, Any],
+        terminal_row: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        source_id = str(checkpoint.get("source_id") or "")
+        terminal_status = str(terminal_row.get("current_reward_status") or "")
+        accepted_statuses = _TERMINAL_SETTLEMENT_REWARD_STATUSES.get(
+            reward_kind
+        )
+        if accepted_statuses is None or terminal_status not in accepted_statuses:
+            raise CoordinatorAllocationSourceV2Error(
+                "settlement frontier reward is not terminal"
+            )
+        try:
+            if reward_kind == "champion":
+                observed_source_id = str(
+                    terminal_row.get("champion_reward_id") or ""
+                )
+                projection = champion_reward_row_projection_v2(terminal_row)
+            else:
+                observed_source_id = str(terminal_row.get("reward_ref") or "")
+                projection = source_add_reward_row_projection_v2(
+                    "source_add_leg%d" % int(terminal_row.get("leg") or 0),
+                    {
+                        **dict(terminal_row),
+                        "initial_reward_status": "active",
+                    },
+                )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CoordinatorAllocationSourceV2Error(
+                "settlement frontier terminal reward is invalid"
+            ) from exc
+        obligation_hash = sha256_json(projection)
+        if (
+            observed_source_id != source_id
+            or obligation_hash != checkpoint.get("obligation_hash")
+        ):
+            raise CoordinatorAllocationSourceV2Error(
+                "settlement frontier terminal reward identity changed"
+            )
+        evidence = {
+            "schema_version": SETTLEMENT_FRONTIER_RETIREMENT_SCHEMA_VERSION,
+            "reward_kind": reward_kind,
+            "source_id": source_id,
+            "terminal_status": terminal_status,
+            "obligation_hash": obligation_hash,
+            "predecessor_checkpoint_hash": str(
+                checkpoint.get("checkpoint_hash") or ""
+            ),
+        }
+        evidence["retirement_hash"] = sha256_json(evidence)
+        return evidence
+
+    def _resolve_settlement_frontier_retirements(
+        self,
+        *,
+        predecessor: Any,
+        champion_rows: Sequence[Mapping[str, Any]],
+        source_add_rows: Sequence[Mapping[str, Any]],
+        context: ExecutionContextV2,
+    ) -> list[Dict[str, Any]]:
+        if predecessor is None:
+            return []
+        previous = validate_allocation_settlement_frontier_v2(predecessor)
+        active_keys = {
+            ("champion", str(row.get("champion_reward_id") or ""))
+            for row in champion_rows
+        }
+        active_keys.update(
+            ("source_add", str(row.get("reward_ref") or ""))
+            for row in source_add_rows
+        )
+        retirements: list[Dict[str, Any]] = []
+        for checkpoint in previous["reward_checkpoints"]:
+            reward_kind = str(checkpoint["reward_kind"])
+            source_id = str(checkpoint["source_id"])
+            if (reward_kind, source_id) in active_keys:
+                continue
+            if reward_kind == "champion":
+                rows = self._read(
+                    "champion_reward_by_id",
+                    {"champion_reward_id": source_id},
+                    context,
+                )
+            elif reward_kind == "source_add":
+                rows = self._read(
+                    "source_add_reward_by_ref",
+                    {"reward_ref": source_id},
+                    context,
+                )
+            else:
+                raise CoordinatorAllocationSourceV2Error(
+                    "settlement frontier reward kind is unsupported"
+                )
+            if len(rows) != 1:
+                raise CoordinatorAllocationSourceV2Error(
+                    "settlement frontier terminal reward is unavailable or ambiguous"
+                )
+            retirements.append(
+                self._settlement_retirement_evidence(
+                    reward_kind=reward_kind,
+                    checkpoint=checkpoint,
+                    terminal_row=rows[0],
+                )
+            )
+        return sorted(
+            retirements,
+            key=lambda item: (item["reward_kind"], item["source_id"]),
+        )
+
     def _build_settlement_frontier(
         self,
         *,
@@ -931,6 +1067,7 @@ class CoordinatorAllocationSourceV2:
         source_add_rows: Sequence[Mapping[str, Any]],
         history: Sequence[Mapping[str, Any]],
         predecessor: Any,
+        terminal_retirements: Sequence[Mapping[str, Any]] = (),
     ) -> Dict[str, Any]:
         previous = (
             validate_allocation_settlement_frontier_v2(predecessor)
@@ -951,6 +1088,42 @@ class CoordinatorAllocationSourceV2:
         )
         checkpoints: list[Dict[str, Any]] = []
         seen: set[Tuple[str, str]] = set()
+        retirement_index: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for raw_retirement in terminal_retirements:
+            if not isinstance(raw_retirement, Mapping):
+                raise CoordinatorAllocationSourceV2Error(
+                    "settlement frontier retirement evidence is invalid"
+                )
+            retirement = dict(raw_retirement)
+            body = {
+                key: retirement.get(key)
+                for key in (
+                    "schema_version",
+                    "reward_kind",
+                    "source_id",
+                    "terminal_status",
+                    "obligation_hash",
+                    "predecessor_checkpoint_hash",
+                )
+            }
+            reward_kind = str(body["reward_kind"] or "")
+            source_id = str(body["source_id"] or "")
+            key = (reward_kind, source_id)
+            if (
+                set(retirement) != set(body) | {"retirement_hash"}
+                or body["schema_version"]
+                != SETTLEMENT_FRONTIER_RETIREMENT_SCHEMA_VERSION
+                or body["terminal_status"]
+                not in _TERMINAL_SETTLEMENT_REWARD_STATUSES.get(
+                    reward_kind, frozenset()
+                )
+                or retirement.get("retirement_hash") != sha256_json(body)
+                or key in retirement_index
+            ):
+                raise CoordinatorAllocationSourceV2Error(
+                    "settlement frontier retirement evidence is invalid"
+                )
+            retirement_index[key] = retirement
 
         def append_checkpoint(
             *,
@@ -968,6 +1141,10 @@ class CoordinatorAllocationSourceV2:
                     "allocation settlement reward is duplicated"
                 )
             seen.add(key)
+            if key in retirement_index:
+                raise CoordinatorAllocationSourceV2Error(
+                    "active reward has terminal settlement evidence"
+                )
             prior = previous_index.get(key)
             if (
                 prior is None
@@ -1091,10 +1268,27 @@ class CoordinatorAllocationSourceV2:
                 raise CoordinatorAllocationSourceV2Error(
                     "retired allocation settlement reward is invalid"
                 )
-            if min(total_due, prior_applied + delta) != total_due:
+            retirement = retirement_index.pop(key, None)
+            if (
+                retirement is None
+                and min(total_due, prior_applied + delta) != total_due
+            ):
                 raise CoordinatorAllocationSourceV2Error(
                     "unsettled reward disappeared from the active frontier"
                 )
+            if retirement is not None and (
+                retirement.get("obligation_hash")
+                != prior.get("obligation_hash")
+                or retirement.get("predecessor_checkpoint_hash")
+                != prior.get("checkpoint_hash")
+            ):
+                raise CoordinatorAllocationSourceV2Error(
+                    "settlement frontier retirement differs from predecessor"
+                )
+        if retirement_index:
+            raise CoordinatorAllocationSourceV2Error(
+                "settlement frontier retirement lacks a predecessor reward"
+            )
         return build_allocation_settlement_frontier_v2(
             mode=(
                 "legacy_full_history_bootstrap"

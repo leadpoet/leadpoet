@@ -187,4 +187,6 @@ def test_validator_enclave_normalizer_uses_root_backed_workspace() -> None:
     assert workflow.count(
         'export VALIDATOR_V2_BUILD_WORK_ROOT="$RUNNER_TEMP/validator-build-work"'
     ) == 2
-    assert workflow.count('"$RUNNER_TEMP/validator-build-work"') == 4
+    assert workflow.count(
+        '\n            "$RUNNER_TEMP/validator-build-work" \\'
+    ) == 4

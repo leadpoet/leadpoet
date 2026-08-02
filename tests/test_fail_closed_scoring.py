@@ -228,13 +228,14 @@ def _durable_candidate_row() -> dict:
 
 
 def _valid_lineage_root(doc: dict) -> dict:
+    attested_doc = {**doc, "signature_ref": "pending"}
     return {
         "role": "gateway_scoring",
         "purpose": "research_lab.candidate_score.v2",
         "status": "succeeded",
         "epoch_id": int(doc["evaluation_epoch"]),
         "sequence": 0,
-        "output_root": sw.sha256_json({"score_bundle": dict(doc)}),
+        "output_root": sw.sha256_json({"score_bundle": attested_doc}),
     }
 
 
@@ -631,9 +632,13 @@ def test_reusable_bundle_skips_quarantine_worthy_bundle():
     assert row is None  # degraded bundle must not be reused
 
 
-def test_reusable_bundle_returns_healthy_bundle():
+def test_reusable_bundle_recovers_post_kms_doc_from_pre_kms_authority():
     worker = _worker()
     healthy_doc = _signed_score_bundle_doc(evaluation_epoch=1)
+    assert healthy_doc["signature_ref"] == "s3://sig"
+    assert _valid_lineage_root(healthy_doc)["output_root"] == sw.sha256_json(
+        {"score_bundle": {**healthy_doc, "signature_ref": "pending"}}
+    )
 
     durable_row = _durable_score_bundle_row(
         healthy_doc, current_event_status="scored"

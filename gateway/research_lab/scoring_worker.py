@@ -7823,6 +7823,13 @@ class ResearchLabGatewayScoringWorker:
                 artifact_ref=expected_bundle_id,
                 artifact_hash=score_bundle_hash,
             )
+            # V2 compares and attests the score bundle before KMS signing,
+            # when the only signature commitment is the literal ``pending``.
+            # The content-addressed bundle hash intentionally excludes
+            # ``signature_ref``; persistence then replaces it with the KMS
+            # reference.  Reconstruct that exact pre-signing projection when
+            # verifying the immutable execution receipt.
+            attested_score_bundle = {**dict(doc), "signature_ref": "pending"}
             if not legacy_v1_enabled() and (
                 not isinstance(root_receipt, Mapping)
                 or not receipt_lineage
@@ -7843,7 +7850,7 @@ class ResearchLabGatewayScoringWorker:
                 )
                 != 0
                 or str(root_receipt.get("output_root") or "")
-                != sha256_json({"score_bundle": dict(doc)})
+                != sha256_json({"score_bundle": attested_score_bundle})
             ):
                 raise RuntimeError(
                     "reusable signed score bundle lacks exact V2 score authority"

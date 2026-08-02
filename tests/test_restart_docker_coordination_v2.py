@@ -16,7 +16,7 @@ def test_gateway_holds_shared_docker_lock_through_authority_repair() -> None:
     )
     enclave = script.index("bash ./start_enclave.sh")
     repair = script.index(
-        "\nrepair_and_verify_gateway_weight_input\n",
+        "\nrepair_chain_settlements_and_prepare_current_weight_input\n",
         enclave,
     )
     release = script.index("leadpoet_release_docker_operation_lock_v2", repair)

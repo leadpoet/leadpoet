@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "ae0e325ec414b72d148c0fba194652ac57873fd3",
+  "baseline_commit": "e4bab354977b14ae0eebfb0cfd89af5d501b2e5a",
   "entries": [
     {
       "ast_sha256": "sha256:72a7a712f2bec439d607b3d764c9ab21d15f4095f1d0989277c38a6d80ce01bd",
@@ -317,7 +317,7 @@
       "symbol": "persist_legacy_finalized_allocation_migration_v2"
     },
     {
-      "ast_sha256": "sha256:e9d17d0d1e12c2637e43672749c6652e386a6315aff31a9c70e8406c619d2617",
+      "ast_sha256": "sha256:633377ac53c312762bcf86a43004fb7955c10c7418b69fc5eae9028726e899cc",
       "path": "gateway/research_lab/attested_v2_store.py",
       "symbol": "persist_receipt_graph_v2"
     },
@@ -2402,7 +2402,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:8f0c9148a15f3dbd1277bef2923674566d7c3b073f8a006d4aa3901ed3a7ed9c",
-  "protected_source_commit": "ae0e325ec414b72d148c0fba194652ac57873fd3",
+  "manifest_hash": "sha256:7f78a451e1d49ab3be32add47ae179a5512fae4b80cc62432e12d91d8a7e178d",
+  "protected_source_commit": "e4bab354977b14ae0eebfb0cfd89af5d501b2e5a",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

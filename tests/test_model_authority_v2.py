@@ -46,6 +46,24 @@ def _artifact(tmp_path):
     )
 
 
+def test_measured_environment_excludes_legacy_host_evidence_proxy():
+    spec = DockerPrivateModelSpec(
+        image_digest=(
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com/private@sha256:"
+            + "b" * 64
+        ),
+        extra_env={
+            "RESEARCH_LAB_EVIDENCE_PROXY_URL": "http://127.0.0.1:8765",
+            "RESEARCH_LAB_PROVIDER_EVIDENCE_RECORD": "1",
+        },
+    )
+
+    measured = model_authority_v2._measured_environment(spec)
+
+    assert "RESEARCH_LAB_EVIDENCE_PROXY_URL" not in measured
+    assert measured["RESEARCH_LAB_PROVIDER_EVIDENCE_RECORD"] == "1"
+
+
 def test_source_bundle_uses_exact_signed_repo_when_image_is_runtime_subset(
     tmp_path, monkeypatch
 ):

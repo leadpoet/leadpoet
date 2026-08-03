@@ -113,8 +113,9 @@ cd /Users/pranav/Downloads/Election_Analysis/Bittensor-subnet
 python3 scripts/configure_sentry_api_token.py
 ```
 
-The utility preserves each document's existing format, updates through the
-host's AWS role, retains the prior Secrets Manager version for rollback, and
+The utility preserves each document's existing format, creates a new immutable
+Secrets Manager version through the host's narrowly scoped AWS role, verifies
+that exact version is `AWSCURRENT`, retains the prior version for rollback, and
 performs a constant-time readback comparison. It never places the token in a
 command argument or local file. No gateway or validator restart is required
 for `query_sentry_api.py`, because that helper reads Secrets Manager directly.

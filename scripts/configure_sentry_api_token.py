@@ -48,18 +48,22 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import uuid
 
 NAME = "LEADPOET_SENTRY_API_TOKEN"
 TOKEN_RE = re.compile(r"^sntryu_[A-Za-z0-9_-]{32,}$")
 
 
-def aws_get(secret_id):
+def aws_get(secret_id, version_id=""):
+    command = [
+        "aws", "secretsmanager", "get-secret-value",
+        "--secret-id", secret_id,
+        "--output", "json",
+    ]
+    if version_id:
+        command.extend(["--version-id", version_id])
     result = subprocess.run(
-        [
-            "aws", "secretsmanager", "get-secret-value",
-            "--secret-id", secret_id,
-            "--output", "json",
-        ],
+        command,
         check=False,
         capture_output=True,
         text=True,
@@ -71,6 +75,49 @@ def aws_get(secret_id):
         return str(document["VersionId"]), str(document["SecretString"])
     except Exception:
         raise SystemExit(32)
+
+
+def aws_error_status(stderr):
+    match = re.search(r"An error occurred \(([^)]+)\)", str(stderr or ""))
+    code = match.group(1) if match else ""
+    if code in {"AccessDenied", "AccessDeniedException", "UnauthorizedException"}:
+        return 35
+    if code in {"ResourceNotFoundException"}:
+        return 37
+    if code in {
+        "DecryptionFailure",
+        "EncryptionFailure",
+        "InvalidParameterException",
+        "InvalidRequestException",
+        "LimitExceededException",
+        "MalformedPolicyDocumentException",
+        "PreconditionNotMetException",
+    }:
+        return 38
+    return 39
+
+
+def aws_version_stages(secret_id):
+    result = subprocess.run(
+        [
+            "aws", "secretsmanager", "describe-secret",
+            "--secret-id", secret_id,
+            "--query", "VersionIdsToStages",
+            "--output", "json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(31)
+    try:
+        parsed = json.loads(result.stdout)
+    except Exception:
+        raise SystemExit(32)
+    if not isinstance(parsed, dict):
+        raise SystemExit(32)
+    return parsed
 
 
 def dotenv_key(line):
@@ -149,6 +196,7 @@ if latest_version_id != version_id:
     raise SystemExit(34)
 
 path = ""
+candidate_version_id = str(uuid.uuid4())
 try:
     handle = tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", prefix="leadpoet-sentry-token-",
@@ -160,17 +208,17 @@ try:
         handle.write(updated)
     result = subprocess.run(
         [
-            "aws", "secretsmanager", "update-secret",
+            "aws", "secretsmanager", "put-secret-value",
             "--secret-id", secret_id,
+            "--client-request-token", candidate_version_id,
             "--secret-string", "file://" + path,
         ],
         check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        capture_output=True,
         text=True,
     )
     if result.returncode != 0:
-        raise SystemExit(35)
+        raise SystemExit(aws_error_status(result.stderr))
 finally:
     if path:
         try:
@@ -178,11 +226,31 @@ finally:
         except OSError:
             pass
 
-_, readback = aws_get(secret_id)
-if not hmac.compare_digest(parsed_value(readback), token):
+readback_version_id, readback = aws_get(secret_id, candidate_version_id)
+if (
+    readback_version_id != candidate_version_id
+    or not hmac.compare_digest(parsed_value(readback), token)
+):
     raise SystemExit(36)
+stages = aws_version_stages(secret_id)
+if "AWSCURRENT" not in stages.get(candidate_version_id, []):
+    raise SystemExit(40)
 print(json.dumps({"updated": True, "format": document_format}, separators=(",", ":")))
 '''
+
+
+_REMOTE_FAILURE_CODES = {
+    31: "secret_read_unavailable",
+    32: "secret_document_invalid",
+    33: "token_format_invalid",
+    34: "secret_changed_concurrently",
+    35: "secret_writer_access_denied",
+    36: "secret_write_readback_mismatch",
+    37: "secret_not_found",
+    38: "secret_write_rejected",
+    39: "secret_write_failed",
+    40: "secret_write_superseded",
+}
 
 
 def _bounded_timeout(value: float) -> float:
@@ -240,9 +308,14 @@ def _update_target(
             "%s:%s" % (name, type(exc).__name__),
         ) from None
     if result.returncode != 0:
+        if result.returncode == 255:
+            raise ConfigurationError("secret_update_unavailable", name)
         raise ConfigurationError(
-            "secret_update_failed",
-            "%s:ssh_status=%d" % (name, result.returncode),
+            _REMOTE_FAILURE_CODES.get(
+                result.returncode,
+                "secret_update_remote_failed",
+            ),
+            "%s:remote_status=%d" % (name, result.returncode),
         )
     try:
         response = json.loads(result.stdout)

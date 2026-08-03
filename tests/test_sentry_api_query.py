@@ -166,6 +166,49 @@ def test_configurator_failure_never_echoes_remote_output(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [
+        (31, "secret_read_unavailable"),
+        (32, "secret_document_invalid"),
+        (34, "secret_changed_concurrently"),
+        (35, "secret_writer_access_denied"),
+        (36, "secret_write_readback_mismatch"),
+        (37, "secret_not_found"),
+        (38, "secret_write_rejected"),
+        (39, "secret_write_failed"),
+        (40, "secret_write_superseded"),
+        (255, "secret_update_unavailable"),
+    ],
+)
+def test_configurator_maps_remote_failure_without_exposing_stderr(
+    monkeypatch,
+    status,
+    expected_code,
+):
+    monkeypatch.setattr(
+        configure.subprocess,
+        "run",
+        lambda *args, **kwargs: _Result(
+            returncode=status,
+            stdout=FAKE_TOKEN,
+            stderr="failure " + FAKE_TOKEN,
+        ),
+    )
+
+    with pytest.raises(configure.ConfigurationError) as raised:
+        configure._update_target(
+            "gateway",
+            FAKE_TOKEN,
+            ssh_key=Path("/tmp/test.pem"),
+            timeout=2,
+        )
+
+    assert raised.value.code == expected_code
+    assert FAKE_TOKEN not in str(raised.value)
+    assert FAKE_TOKEN not in raised.value.detail
+
+
+@pytest.mark.parametrize(
     ("initial", "expected_format"),
     [
         (
@@ -193,7 +236,14 @@ def test_remote_configurator_preserves_document_format_and_verifies_readback(
 ):
     state = tmp_path / "state.json"
     state.write_text(
-        json.dumps({"VersionId": "v1", "SecretString": initial}),
+        json.dumps(
+            {
+                "current": "v1",
+                "versions": {"v1": initial},
+                "stages": {"v1": ["AWSCURRENT"]},
+                "write_argv": [],
+            }
+        ),
         encoding="utf-8",
     )
     aws = tmp_path / "aws"
@@ -208,15 +258,34 @@ state_path = Path(os.environ["FAKE_SECRET_STATE"])
 state = json.loads(state_path.read_text(encoding="utf-8"))
 args = sys.argv[1:]
 if args[:2] == ["secretsmanager", "get-secret-value"]:
-    print(json.dumps(state))
+    version_id = (
+        args[args.index("--version-id") + 1]
+        if "--version-id" in args
+        else state["current"]
+    )
+    print(json.dumps({
+        "VersionId": version_id,
+        "SecretString": state["versions"][version_id],
+    }))
     raise SystemExit(0)
-if args[:2] == ["secretsmanager", "update-secret"]:
+if args[:2] == ["secretsmanager", "put-secret-value"]:
     value = args[args.index("--secret-string") + 1]
+    version_id = args[args.index("--client-request-token") + 1]
     if not value.startswith("file://"):
         raise SystemExit(91)
-    state["SecretString"] = Path(value[7:]).read_text(encoding="utf-8")
-    state["VersionId"] = "v2"
+    previous = state["current"]
+    state["versions"][version_id] = Path(value[7:]).read_text(encoding="utf-8")
+    state["current"] = version_id
+    state["stages"] = {
+        previous: ["AWSPREVIOUS"],
+        version_id: ["AWSCURRENT"],
+    }
+    state["write_argv"] = args
     state_path.write_text(json.dumps(state), encoding="utf-8")
+    print(json.dumps({"VersionId": version_id}))
+    raise SystemExit(0)
+if args[:2] == ["secretsmanager", "describe-secret"]:
+    print(json.dumps(state["stages"]))
     raise SystemExit(0)
 raise SystemExit(92)
 """,
@@ -241,11 +310,78 @@ raise SystemExit(92)
         "updated": True,
         "format": expected_format,
     }
-    updated = json.loads(state.read_text(encoding="utf-8"))["SecretString"]
+    persisted = json.loads(state.read_text(encoding="utf-8"))
+    updated = persisted["versions"][persisted["current"]]
     assert "SAFE_VALUE" in updated
     assert "old-value" not in updated
     assert updated.count(configure.TOKEN_ENV_NAME) == 1
     assert updated.count(FAKE_TOKEN) == 1
+    assert persisted["stages"]["v1"] == ["AWSPREVIOUS"]
+    assert persisted["stages"][persisted["current"]] == ["AWSCURRENT"]
+    assert persisted["write_argv"][:2] == ["secretsmanager", "put-secret-value"]
+    assert "--client-request-token" in persisted["write_argv"]
+    assert FAKE_TOKEN not in persisted["write_argv"]
+
+
+def test_remote_configurator_uses_versioning_not_secret_metadata_update():
+    assert '"put-secret-value"' in configure._REMOTE_UPDATER
+    assert '"--client-request-token"' in configure._REMOTE_UPDATER
+    assert '"update-secret"' not in configure._REMOTE_UPDATER
+
+
+def test_remote_configurator_sanitizes_put_secret_value_access_denied(tmp_path):
+    state = tmp_path / "state.json"
+    state.write_text(
+        json.dumps(
+            {
+                "VersionId": "v1",
+                "SecretString": "export SAFE_VALUE=present\n",
+            }
+        ),
+        encoding="utf-8",
+    )
+    aws = tmp_path / "aws"
+    aws.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+if args[:2] == ["secretsmanager", "get-secret-value"]:
+    print(Path(os.environ["FAKE_SECRET_STATE"]).read_text(encoding="utf-8"))
+    raise SystemExit(0)
+if args[:2] == ["secretsmanager", "put-secret-value"]:
+    print(
+        "An error occurred (AccessDeniedException) when calling the "
+        "PutSecretValue operation: seeded-sensitive-detail",
+        file=sys.stderr,
+    )
+    raise SystemExit(254)
+raise SystemExit(92)
+""",
+        encoding="utf-8",
+    )
+    aws.chmod(0o700)
+    env = dict(os.environ)
+    env["PATH"] = str(tmp_path) + os.pathsep + env.get("PATH", "")
+    env["FAKE_SECRET_STATE"] = str(state)
+
+    result = subprocess.run(
+        ["python3", "-c", configure._REMOTE_UPDATER, "test/secret"],
+        input=FAKE_TOKEN,
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 35
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert FAKE_TOKEN not in result.stdout + result.stderr
+    assert "seeded-sensitive-detail" not in result.stdout + result.stderr
 
 
 def test_issue_query_is_bounded_allowlisted_and_redacted(monkeypatch):

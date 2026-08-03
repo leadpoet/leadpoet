@@ -4259,19 +4259,22 @@ print(",".join((
         broker_root = root / "broker"
         source_root.mkdir(parents=True)
         broker_root.mkdir()
+        runtime_config = RunscSandboxConfigV2(
+            runsc_path=Path(sys.executable),
+            runsc_sha256="sha256:" + "1" * 64,
+            rootfs_path=rootfs,
+            rootfs_manifest_hash="sha256:" + "2" * 64,
+            uid=os.getuid() or 65534,
+            gid=os.getgid() or 65534,
+        )
+        os.chown(broker_root, runtime_config.uid, runtime_config.gid)
         exposed_socket = broker_root / "provider.sock"
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             listener.bind(str(exposed_socket))
             listener.listen(1)
-            runtime_config = RunscSandboxConfigV2(
-                runsc_path=Path(sys.executable),
-                runsc_sha256="sha256:" + "1" * 64,
-                rootfs_path=rootfs,
-                rootfs_manifest_hash="sha256:" + "2" * 64,
-                uid=os.getuid() or 65534,
-                gid=os.getgid() or 65534,
-            )
+            os.chown(exposed_socket, runtime_config.uid, runtime_config.gid)
+            exposed_socket.chmod(0o600)
             oci_config = _oci_config(
                 config=runtime_config,
                 source_root=source_root,

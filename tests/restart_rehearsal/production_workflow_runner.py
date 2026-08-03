@@ -4100,6 +4100,80 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
     }
 
 
+def _exercise_model_sandbox_scope_binding() -> dict[str, Any]:
+    from Leadpoet.utils.subnet_epoch import ensure_cutover_manifest_configured
+    from gateway.research_lab.config import ResearchLabGatewayConfig
+    from gateway.research_lab.model_authority_v2 import (
+        _measured_environment,
+        _measured_environment_for_provider_cost_scope,
+    )
+    from gateway.research_lab.scoring_worker import ResearchLabGatewayScoringWorker
+    from gateway.tee.research_lab_runtime_config_v2 import (
+        ResearchLabRuntimeConfigV2Error,
+        build_research_lab_execution_config,
+        validate_model_sandbox_environment,
+    )
+    from research_lab.eval.private_runtime import (
+        DockerPrivateModelSpec,
+        PROVIDER_COST_EVALUATION_SCOPE_ENV,
+    )
+
+    worker = object.__new__(ResearchLabGatewayScoringWorker)
+    worker.config = ResearchLabGatewayConfig.from_env()
+    worker.proxy_url = None
+    worker.worker_ref = "restart-rehearsal-scoring-worker"
+    preliminary = worker._with_provider_cost_evaluation_scope(
+        worker._private_baseline_scoring_env(),
+        run_type="private_baseline_rebenchmark",
+        rolling_window_hash=sha256_json({"rehearsal": "rolling-window"}),
+        artifact_hash=sha256_json({"rehearsal": "model-artifact"}),
+        benchmark_date="2026-07-10",
+        benchmark_attempt=1,
+        evaluation_epoch=30_000,
+        started_at=1.0,
+    )
+    spec = DockerPrivateModelSpec(
+        image_digest=(
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com/private@sha256:"
+            + "7" * 64
+        ),
+        env_passthrough=worker._private_model_env_passthrough(),
+        extra_env=preliminary,
+    )
+    final_scope = sha256_json({"rehearsal": "final-provider-cost-job"})
+    execution_environment = dict(os.environ)
+    ensure_cutover_manifest_configured(execution_environment)
+    execution_config = build_research_lab_execution_config(
+        config=worker.config,
+        environment=execution_environment,
+    )
+    try:
+        validate_model_sandbox_environment(
+            execution_config,
+            _measured_environment(spec),
+            provider_cost_scope=final_scope,
+        )
+    except ResearchLabRuntimeConfigV2Error:
+        pass
+    else:
+        raise RuntimeError("preliminary provider-cost scope did not fail closed")
+    measured = _measured_environment_for_provider_cost_scope(
+        spec,
+        provider_cost_scope=final_scope,
+    )
+    validated = validate_model_sandbox_environment(
+        execution_config,
+        measured,
+        provider_cost_scope=final_scope,
+    )
+    if validated.get(PROVIDER_COST_EVALUATION_SCOPE_ENV) != final_scope:
+        raise RuntimeError("final provider-cost scope was not bound to model sandbox")
+    return {
+        "final_provider_cost_scope_bound": True,
+        "preliminary_scope_rejected": True,
+    }
+
+
 BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "signed-private-model-contract-transition": (
         _exercise_signed_private_model_contract_transition
@@ -4108,6 +4182,7 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     "conditional-icp-policy": _exercise_conditional_icp_policy,
     "conditional-candidate-gate": _exercise_conditional_candidate_gate,
     "git-tree-replacement": _exercise_git_tree_replacement,
+    "model-sandbox-scope-binding": _exercise_model_sandbox_scope_binding,
     "historical-metagraph-layouts": _exercise_historical_metagraph_layouts,
     "receipt-graph-aggregate-pagination": (
         _exercise_receipt_graph_aggregate_pagination
@@ -4498,6 +4573,18 @@ def main() -> int:
                 "signed-private-model-contract-transition",
                 {},
             ).get("lineage_rebenchmark_verified")
+            is True
+        ),
+        "model_sandbox_final_provider_cost_scope_bound": (
+            behavior_evidence.get(
+                "model-sandbox-scope-binding",
+                {},
+            ).get("preliminary_scope_rejected")
+            is True
+            and behavior_evidence.get(
+                "model-sandbox-scope-binding",
+                {},
+            ).get("final_provider_cost_scope_bound")
             is True
         ),
         "chain_settlement_state_space_complete": (

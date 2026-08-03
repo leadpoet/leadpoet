@@ -490,6 +490,20 @@ def _measured_environment(
     return environment
 
 
+def _measured_environment_for_provider_cost_scope(
+    spec: DockerPrivateModelSpec,
+    *,
+    provider_cost_scope: str,
+    additional_credential_env_names: Sequence[str] = (),
+) -> dict[str, str]:
+    environment = _measured_environment(
+        spec,
+        additional_credential_env_names=additional_credential_env_names,
+    )
+    environment[PROVIDER_COST_EVALUATION_SCOPE_ENV] = str(provider_cost_scope)
+    return environment
+
+
 class AttestedPrivateModelRunnerV2:
     """The existing model-runner interface with V2 enclave authority."""
 
@@ -855,6 +869,11 @@ class AttestedPrivateModelRunnerV2:
             for route in runtime_catalog["routes"]
             for env_name in route["credential_env_refs"]
         )
+        model_environment = _measured_environment_for_provider_cost_scope(
+            self.spec,
+            provider_cost_scope=provider_cost_scope,
+            additional_credential_env_names=dynamic_credential_env_names,
+        )
         purpose = (
             "research_lab.private_model_run.v2"
             if self.model_kind == "private"
@@ -892,10 +911,7 @@ class AttestedPrivateModelRunnerV2:
                 "module_name": self.spec.module_name,
                 "callable_name": self.spec.callable_name,
                 "input": dict(input_doc),
-                "environment": _measured_environment(
-                    self.spec,
-                    additional_credential_env_names=dynamic_credential_env_names,
-                ),
+                "environment": model_environment,
                 "provider_evidence_cache": dict(provider_evidence_cache),
                 "provider_evidence_cache_ref": provider_evidence_cache_ref,
                 "provider_evidence_mode": provider_evidence_mode,

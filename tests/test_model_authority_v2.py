@@ -17,6 +17,7 @@ from gateway.tee.source_bundle_v2 import extract_source_bundle_v2
 from leadpoet_canonical.attested_v2 import sha256_json
 from research_lab.eval import DockerPrivateModelSpec, build_local_private_artifact_manifest
 from research_lab.eval.private_runtime import (
+    PROVIDER_COST_EVALUATION_SCOPE_ENV,
     begin_incontainer_trace_collection,
     compute_private_source_tree_hash,
     end_incontainer_trace_collection,
@@ -445,6 +446,7 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
             env_passthrough=("EXA_API_KEY",),
             extra_env={
                 "EXA_API_KEY": "parent-secret-value",
+                PROVIDER_COST_EVALUATION_SCOPE_ENV: "sha256:" + "6" * 64,
                 "RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR": str(cache_dir),
                 "RESEARCH_LAB_PROVIDER_EVIDENCE_RECORD": "1",
                 V2_PROVIDER_PROFILE_ENV: "benchmark_model",
@@ -469,6 +471,11 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
     payload = observed[0]["payload"]
     assert "EXA_API_KEY" not in payload["environment"]
     assert V2_PROVIDER_PROFILE_ENV not in payload["environment"]
+    assert (
+        payload["environment"][PROVIDER_COST_EVALUATION_SCOPE_ENV]
+        == payload["provider_cost_scope"]
+    )
+    assert payload["provider_cost_scope"] != "sha256:" + "6" * 64
     assert payload["provider_evidence_cache"] == cache_doc
     assert payload["provider_evidence_cache_ref"] == cache_ref
     assert observed[0]["parent_graphs"] == (

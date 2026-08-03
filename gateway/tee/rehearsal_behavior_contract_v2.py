@@ -30,6 +30,7 @@ _PROFILE_EPOCH_COUNTS = {
 # how it reaches them without weakening the release contract.
 BEHAVIOR_SCENARIOS = (
     "signed-private-model-contract-transition",
+    "model-sandbox-scope-binding",
     "chain-settlement-state-space",
     "conditional-icp-policy",
     "conditional-candidate-gate",
@@ -55,6 +56,7 @@ BEHAVIORAL_INVARIANTS = (
     "candidate_identity_exact",
     "protected_source_identity_exact",
     "signed_private_model_contract_transition_exact",
+    "model_sandbox_final_provider_cost_scope_bound",
     "chain_settlement_state_space_complete",
     "conditional_icp_policy_config_bound",
     "conditional_candidate_advancement_exact",
@@ -93,6 +95,7 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "research_lab/sourcing_model_parity_fixtures_v7.json",
     "gateway/research_lab/champion_settlement_v2.py",
     "gateway/research_lab/allocations.py",
+    "gateway/research_lab/model_authority_v2.py",
     "gateway/research_lab/scoring_worker.py",
     "gateway/research_lab/worker.py",
     "gateway/research_lab/autoresearch_authority_v2.py",
@@ -103,6 +106,7 @@ EXACT_PRODUCTION_ENTRYPOINTS = (
     "scripts/115-research-lab-git-tree-root-replacement.sql",
     "gateway/api/weights.py",
     "gateway/tee/coordinator_chain_source_v2.py",
+    "gateway/tee/research_lab_runtime_config_v2.py",
     "leadpoet_canonical/chain_source_v2.py",
     "leadpoet_verifier/economics.py",
     "leadpoet_canonical/auditor_latest_verified_bundle_v2.py",

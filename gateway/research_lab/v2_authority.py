@@ -1143,6 +1143,109 @@ async def _persist_business_links(
     return await persist_links(receipt_hash=root, artifacts=links)
 
 
+def _current_allocation_frontier_outcome_v2(
+    context: Mapping[str, Any],
+    *,
+    epoch_id: int,
+    netuid: int,
+) -> dict[str, Any]:
+    """Recover the exact durable allocation authority for an active epoch.
+
+    Execution receipts are release-bound. Re-executing an already persisted
+    current-epoch frontier after a release change therefore creates a different
+    receipt even when the protected result is byte-identical. The frontier is
+    the immutable epoch authority, so recovery must reuse its authenticated
+    source instead of attempting to mint a competing receipt.
+    """
+
+    source = context.get("source")
+    frontier_row = context.get("row")
+    frontier = context.get("frontier")
+    if not isinstance(source, Mapping):
+        raise ResearchLabV2AuthorityError(
+            "current allocation frontier source is incomplete"
+        )
+    row = source.get("row")
+    result = source.get("result")
+    receipt = source.get("receipt")
+    graph = source.get("receipt_graph")
+    artifact_hashes = source.get("artifact_hashes")
+    if (
+        not isinstance(row, Mapping)
+        or not isinstance(frontier_row, Mapping)
+        or not isinstance(frontier, Mapping)
+        or not isinstance(result, Mapping)
+        or not isinstance(receipt, Mapping)
+        or not isinstance(graph, Mapping)
+        or not isinstance(artifact_hashes, list)
+    ):
+        raise ResearchLabV2AuthorityError(
+            "current allocation frontier source is incomplete"
+        )
+    receipt_hash = str(receipt.get("receipt_hash") or "")
+    release_hash = str(row.get("release_hash") or "").lower()
+    source_state = result.get("source_state")
+    if (
+        row.get("operation") != OP_RESEARCH_LAB_ALLOCATION
+        or row.get("purpose") != "research_lab.allocation.v2"
+        or row.get("role") != "gateway_coordinator"
+        or int(row.get("epoch_id", -1)) != int(epoch_id)
+        or row.get("receipt_hash") != receipt_hash
+        or not _HASH_RE.fullmatch(release_hash)
+        or receipt.get("role") != "gateway_coordinator"
+        or receipt.get("purpose") != "research_lab.allocation.v2"
+        or receipt.get("status") != "succeeded"
+        or int(receipt.get("epoch_id", -1)) != int(epoch_id)
+        or graph.get("root_receipt_hash") != receipt_hash
+        or frontier_row.get("source_receipt_hash") != receipt_hash
+        or not isinstance(source_state, Mapping)
+        or int(source_state.get("epoch", -1)) != int(epoch_id)
+        or int(source_state.get("netuid", -1)) != int(netuid)
+        or source_state.get("settlement_frontier") != frontier
+    ):
+        raise ResearchLabV2AuthorityError(
+            "current allocation frontier source authority differs"
+        )
+    validate_receipt_graph(
+        graph,
+        required_purposes={"research_lab.allocation.v2"},
+    )
+    receipts = {
+        str(item.get("receipt_hash") or ""): item
+        for item in graph.get("receipts") or ()
+        if isinstance(item, Mapping)
+    }
+    if receipts.get(receipt_hash) != dict(receipt):
+        raise ResearchLabV2AuthorityError(
+            "current allocation frontier receipt is absent from its graph"
+        )
+    persistence = {
+        "graph_hash": sha256_json(dict(graph)),
+        "root_receipt_hash": receipt_hash,
+        "boot_count": len(graph.get("boot_identities") or ()),
+        "receipt_count": len(graph.get("receipts") or ()),
+        "transport_attempt_count": len(graph.get("transport_attempts") or ()),
+        "host_operation_count": len(graph.get("host_operations") or ()),
+    }
+    return {
+        "status": "succeeded",
+        "result": dict(result),
+        "receipt": dict(receipt),
+        "execution_receipt": dict(receipt),
+        "receipt_graph": dict(graph),
+        "execution_receipt_graph": dict(graph),
+        "transitions": [],
+        "transport_attempts": [],
+        "artifact_persistence": [],
+        "artifact_hashes": list(artifact_hashes),
+        "persistence": persistence,
+        "sidecar_persistence": {},
+        "release_hash": release_hash,
+        "physical_role": "gateway_coordinator",
+        "replay_status": "durable_current_frontier",
+    }
+
+
 async def execute_company_scores_v2(
     *,
     epoch_id: int,
@@ -1515,14 +1618,21 @@ async def build_allocation_v2(
             )
         graphs = list(await load_allocation_parent_graphs(**parent_loader_kwargs))
     bindings = await asyncio.to_thread(_validate_allocation_parent_graphs, graphs)
-    outcome = await execute(
-        operation=OP_RESEARCH_LAB_ALLOCATION,
-        purpose="research_lab.allocation.v2",
-        epoch_id=int(epoch_id),
-        sequence=0,
-        payload={"epoch": int(epoch_id), "netuid": int(netuid)},
-        parent_graphs=graphs,
-    )
+    if current_frontier_context is not None:
+        outcome = _current_allocation_frontier_outcome_v2(
+            current_frontier_context,
+            epoch_id=int(epoch_id),
+            netuid=int(netuid),
+        )
+    else:
+        outcome = await execute(
+            operation=OP_RESEARCH_LAB_ALLOCATION,
+            purpose="research_lab.allocation.v2",
+            epoch_id=int(epoch_id),
+            sequence=0,
+            payload={"epoch": int(epoch_id), "netuid": int(netuid)},
+            parent_graphs=graphs,
+        )
     authority_result = outcome.get("result")
     if not isinstance(authority_result, Mapping):
         raise ResearchLabV2AuthorityError("allocation authority result is missing")
@@ -1547,34 +1657,6 @@ async def build_allocation_v2(
         raise ResearchLabV2AuthorityError("allocation hash is invalid")
     if authority_result.get("source_state_hash") != sha256_json(dict(source_state)):
         raise ResearchLabV2AuthorityError("allocation source-state hash differs")
-    if current_frontier_context is not None:
-        recovered_source = current_frontier_context.get("source")
-        recovered_result = (
-            recovered_source.get("result")
-            if isinstance(recovered_source, Mapping)
-            else None
-        )
-        recovered_receipt = (
-            recovered_source.get("receipt")
-            if isinstance(recovered_source, Mapping)
-            else None
-        )
-        outcome_receipt = outcome.get("execution_receipt") or outcome.get("receipt")
-        if (
-            not isinstance(recovered_result, Mapping)
-            or not isinstance(recovered_receipt, Mapping)
-            or not isinstance(outcome_receipt, Mapping)
-            or outcome_receipt.get("receipt_hash")
-            != recovered_receipt.get("receipt_hash")
-        ):
-            raise ResearchLabV2AuthorityError(
-                "current allocation frontier replay authority differs"
-            )
-        _assert_equal(
-            authority_result,
-            recovered_result,
-            "current allocation frontier replay",
-        )
     from leadpoet_canonical.allocation_settlement_frontier_v2 import (
         validate_allocation_settlement_frontier_v2,
     )
@@ -1611,7 +1693,11 @@ async def build_allocation_v2(
             fallback_obligations
         )
     _assert_equal(allocation_inputs, expected_inputs, "allocation source projection")
-    if using_default_parent_loader and execute is execute_coordinator_v2:
+    if (
+        using_default_parent_loader
+        and execute is execute_coordinator_v2
+        and current_frontier_context is None
+    ):
         from gateway.research_lab.attested_v2_store import (
             persist_allocation_settlement_frontier_v2,
         )

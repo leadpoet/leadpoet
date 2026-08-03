@@ -450,6 +450,7 @@ PROTECTED_SYMBOLS = {
         "attest_historical_champion_settlement_v2",
         "attest_historical_source_add_reward_v2",
         "classify_historical_champion_allocation_v2",
+        "_current_allocation_frontier_outcome_v2",
         "build_allocation_v2",
         "settle_chain_realized_epoch_v1",
         "ensure_chain_realized_settlements_v1",

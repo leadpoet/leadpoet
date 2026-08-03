@@ -1353,18 +1353,38 @@ async def test_default_allocation_recovers_exact_current_frontier(monkeypatch):
     source_receipt = {
         "receipt_hash": receipt_hash,
         "parent_receipt_hashes": [parent_root],
+        "role": "gateway_coordinator",
+        "purpose": "research_lab.allocation.v2",
+        "status": "succeeded",
+        "epoch_id": 100,
+        "commit_sha": "1" * 40,
+    }
+    source_graph = {
+        "root_receipt_hash": receipt_hash,
+        "receipts": [source_receipt],
+        "boot_identities": [],
+        "transport_attempts": [],
+        "host_operations": [],
     }
     context = {
         "frontier": frontier,
         "row": {"source_receipt_hash": receipt_hash},
         "source": {
+            "row": {
+                "receipt_hash": receipt_hash,
+                "operation": v2_authority.OP_RESEARCH_LAB_ALLOCATION,
+                "purpose": "research_lab.allocation.v2",
+                "role": "gateway_coordinator",
+                "epoch_id": 100,
+                "release_hash": "sha256:" + "8" * 64,
+            },
             "result": authority_result,
             "receipt": source_receipt,
+            "receipt_graph": source_graph,
+            "artifact_hashes": [],
         },
     }
     parent_graph = {"root_receipt_hash": parent_root, "receipts": []}
-    calls = []
-
     async def load_frontier(**kwargs):
         assert kwargs == {"netuid": 71, "before_epoch": 101}
         return context
@@ -1376,17 +1396,8 @@ async def test_default_allocation_recovers_exact_current_frontier(monkeypatch):
     async def parent_loader(**_kwargs):
         raise AssertionError("current frontier recovery rebuilt allocation inputs")
 
-    async def execute(**kwargs):
-        calls.append(kwargs)
-        return {
-            "status": "succeeded",
-            "result": authority_result,
-            "receipt": source_receipt,
-            "receipt_graph": {
-                "root_receipt_hash": receipt_hash,
-                "receipts": [source_receipt],
-            },
-        }
+    async def execute(**_kwargs):
+        raise AssertionError("current frontier recovery re-executed allocation")
 
     async def persist_links(**_kwargs):
         return {"business_artifact_link_count": 1}
@@ -1397,6 +1408,11 @@ async def test_default_allocation_recovers_exact_current_frontier(monkeypatch):
         load_frontier,
     )
     monkeypatch.setattr(v2_authority, "_graphs_for_roots", load_graphs)
+    monkeypatch.setattr(
+        v2_authority,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         v2_authority,
         "_validate_allocation_parent_graphs",
@@ -1424,17 +1440,23 @@ async def test_default_allocation_recovers_exact_current_frontier(monkeypatch):
 
     assert recovered["status"] == "matched"
     assert recovered["result"] == authority_result
-    assert calls[0]["parent_graphs"] == [parent_graph]
+    assert recovered["receipt"] == source_receipt
+    assert recovered["receipt_graph"] == source_graph
+    assert recovered["replay_status"] == "durable_current_frontier"
 
 
 @pytest.mark.asyncio
-async def test_current_frontier_recovery_rejects_another_execution_receipt(
+async def test_current_frontier_recovery_rejects_frontier_source_mismatch(
     monkeypatch,
 ):
     frontier = _frontier(epoch=100)
     source_receipt = {
         "receipt_hash": HASH_A,
         "parent_receipt_hashes": [],
+        "role": "gateway_coordinator",
+        "purpose": "research_lab.allocation.v2",
+        "status": "succeeded",
+        "epoch_id": 100,
     }
     source_state = {
         "epoch": 100,
@@ -1461,17 +1483,122 @@ async def test_current_frontier_recovery_rejects_another_execution_receipt(
     async def load_frontier(**_kwargs):
         return {
             "frontier": frontier,
-            "source": {"result": result, "receipt": source_receipt},
+            "row": {"source_receipt_hash": HASH_B},
+            "source": {
+                "row": {
+                    "receipt_hash": HASH_A,
+                    "operation": v2_authority.OP_RESEARCH_LAB_ALLOCATION,
+                    "purpose": "research_lab.allocation.v2",
+                    "role": "gateway_coordinator",
+                    "epoch_id": 100,
+                    "release_hash": "sha256:" + "8" * 64,
+                },
+                "result": result,
+                "receipt": source_receipt,
+                "receipt_graph": {
+                    "root_receipt_hash": HASH_A,
+                    "receipts": [source_receipt],
+                    "boot_identities": [],
+                    "transport_attempts": [],
+                    "host_operations": [],
+                },
+                "artifact_hashes": [],
+            },
         }
 
     async def execute(**_kwargs):
+        raise AssertionError("mismatched frontier source was re-executed")
+
+    monkeypatch.setattr(
+        "gateway.research_lab.attested_v2_store."
+        "load_allocation_settlement_frontier_context_v2",
+        load_frontier,
+    )
+
+    async def load_graphs(_roots):
+        return []
+
+    monkeypatch.setattr(v2_authority, "_graphs_for_roots", load_graphs)
+    monkeypatch.setattr(
+        v2_authority,
+        "_validate_allocation_parent_graphs",
+        lambda _graphs: [],
+    )
+    with pytest.raises(
+        v2_authority.ResearchLabV2AuthorityError,
+        match="source authority differs",
+    ):
+        await v2_authority.build_allocation_v2(
+            epoch_id=100,
+            netuid=71,
+            policy={},
+            execute=execute,
+        )
+
+
+@pytest.mark.asyncio
+async def test_current_frontier_recovery_rejects_invalid_source_authority(
+    monkeypatch,
+):
+    frontier = _frontier(epoch=100)
+    source_receipt = {
+        "receipt_hash": HASH_A,
+        "parent_receipt_hashes": [],
+        "role": "gateway_coordinator",
+        "purpose": "research_lab.allocation.v2",
+        "status": "succeeded",
+        "epoch_id": 100,
+    }
+    source_state = {
+        "epoch": 100,
+        "netuid": 71,
+        "policy": {},
+        "reimbursement_obligations": [],
+        "champion_obligations": [],
+        "settlement_frontier": frontier,
+    }
+    result = {
+        "allocation": {
+            "allocation_hash": v2_authority.sha256_json({"epoch": 100})
+        },
+        "allocation_inputs": {
+            "epoch": 100,
+            "policy": {},
+            "active_reimbursement_obligations": [],
+            "active_champion_obligations": [],
+        },
+        "source_state": source_state,
+        "source_state_hash": v2_authority.sha256_json(source_state),
+    }
+
+    async def load_frontier(**_kwargs):
         return {
-            "result": result,
-            "receipt": {
-                "receipt_hash": HASH_B,
-                "parent_receipt_hashes": [],
+            "frontier": frontier,
+            "row": {"source_receipt_hash": HASH_A},
+            "source": {
+                "row": {
+                    "receipt_hash": HASH_A,
+                    "operation": v2_authority.OP_RESEARCH_LAB_ALLOCATION,
+                    "purpose": "research_lab.allocation.v2",
+                    "role": "gateway_coordinator",
+                    "epoch_id": 100,
+                    "release_hash": "invalid",
+                },
+                "result": result,
+                "receipt": source_receipt,
+                "receipt_graph": {
+                    "root_receipt_hash": HASH_A,
+                    "receipts": [source_receipt],
+                    "boot_identities": [],
+                    "transport_attempts": [],
+                    "host_operations": [],
+                },
+                "artifact_hashes": [],
             },
         }
+
+    async def execute(**_kwargs):
+        raise AssertionError("invalid current frontier source was re-executed")
 
     monkeypatch.setattr(
         "gateway.research_lab.attested_v2_store."
@@ -1486,7 +1613,7 @@ async def test_current_frontier_recovery_rejects_another_execution_receipt(
 
     with pytest.raises(
         v2_authority.ResearchLabV2AuthorityError,
-        match="replay authority differs",
+        match="source authority differs",
     ):
         await v2_authority.build_allocation_v2(
             epoch_id=100,

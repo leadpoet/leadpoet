@@ -3379,6 +3379,230 @@ def _exercise_settlement_frontier_terminal_retirement() -> dict[str, Any]:
     }
 
 
+def _exercise_current_frontier_release_recovery() -> dict[str, Any]:
+    """Prove a release transition reuses one immutable epoch authority."""
+
+    from gateway.research_lab import attested_v2_store, v2_authority
+    from leadpoet_canonical.allocation_settlement_frontier_v2 import (
+        build_allocation_settlement_frontier_v2,
+        frontier_artifact_hashes_v2,
+    )
+    from leadpoet_canonical.allocation_handoff_v2 import (
+        build_allocation_handoff_v2,
+        validate_allocation_handoff_v2,
+    )
+    from leadpoet_canonical.attested_v2 import (
+        build_boot_identity_body,
+        create_boot_identity,
+    )
+
+    epoch = 24321
+    frontier = build_allocation_settlement_frontier_v2(
+        mode="legacy_full_history_bootstrap",
+        netuid=71,
+        allocation_epoch=epoch,
+        predecessor_frontier_hash=None,
+        reward_checkpoints=(),
+    )
+    policy: dict[str, Any] = {}
+    source_state = {
+        "epoch": epoch,
+        "netuid": 71,
+        "policy": policy,
+        "reimbursement_obligations": [],
+        "champion_obligations": [],
+        "settlement_frontier": frontier,
+    }
+    allocation_inputs = {
+        "epoch": epoch,
+        "policy": policy,
+        "active_reimbursement_obligations": [],
+        "active_champion_obligations": [],
+    }
+    allocation = {
+        "epoch": epoch,
+        "netuid": 71,
+        "allocation_hash": sha256_json({"epoch": epoch, "netuid": 71}),
+    }
+    source_state_hash = sha256_json(source_state)
+    result = {
+        "allocation": allocation,
+        "allocation_inputs": allocation_inputs,
+        "source_state": source_state,
+        "source_state_hash": source_state_hash,
+    }
+    artifact_hashes = sorted(
+        set(frontier_artifact_hashes_v2(frontier)) | {source_state_hash}
+    )
+    signing_key = Ed25519PrivateKey.generate()
+    signing_pubkey = signing_key.public_key().public_bytes_raw().hex()
+    source_commit = "1" * 40
+    boot_body = build_boot_identity_body(
+        role="gateway_coordinator",
+        physical_role="gateway_coordinator",
+        commit_sha=source_commit,
+        pcr0="2" * 96,
+        build_manifest_hash="sha256:" + "3" * 64,
+        dependency_lock_hash="sha256:" + "4" * 64,
+        config_hash="sha256:" + "5" * 64,
+        boot_nonce="6" * 32,
+        signing_pubkey=signing_pubkey,
+        transport_pubkey="7" * 64,
+        transport_certificate_hash="sha256:" + "8" * 64,
+        attestation_user_data_hash="sha256:" + "9" * 64,
+        issued_at=NOW,
+    )
+    boot = create_boot_identity(
+        body=boot_body,
+        attestation_document_b64=base64.b64encode(
+            b"current-frontier-release-recovery"
+        ).decode("ascii"),
+    )
+    receipt_body = build_execution_receipt_body(
+        role="gateway_coordinator",
+        purpose="research_lab.allocation.v2",
+        job_id="allocation-v2:prior-release:24321",
+        epoch_id=epoch,
+        sequence=0,
+        commit_sha=source_commit,
+        pcr0=boot["pcr0"],
+        build_manifest_hash=boot["build_manifest_hash"],
+        dependency_lock_hash=boot["dependency_lock_hash"],
+        config_hash=boot["config_hash"],
+        boot_identity_hash=boot["boot_identity_hash"],
+        input_root=sha256_json({"epoch": epoch, "netuid": 71}),
+        output_root=sha256_json({"allocation": allocation}),
+        transport_root_hash=EMPTY_TRANSPORT_ROOT,
+        host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
+        artifact_root=merkle_root(
+            artifact_hashes,
+            domain="leadpoet-artifact-v2",
+        ),
+        parent_receipt_hashes=(),
+        status="succeeded",
+        failure_code=None,
+        issued_at=NOW,
+    )
+    receipt = create_signed_execution_receipt(
+        body=receipt_body,
+        enclave_pubkey=signing_pubkey,
+        sign_digest=signing_key.sign,
+    )
+    graph = build_receipt_graph(
+        root_receipt_hash=receipt["receipt_hash"],
+        boot_identities=(boot,),
+        receipts=(receipt,),
+        transport_attempts=(),
+    )
+    context = {
+        "frontier": frontier,
+        "row": {
+            "source_receipt_hash": receipt["receipt_hash"],
+        },
+        "source": {
+            "row": {
+                "receipt_hash": receipt["receipt_hash"],
+                "operation": v2_authority.OP_RESEARCH_LAB_ALLOCATION,
+                "purpose": "research_lab.allocation.v2",
+                "role": "gateway_coordinator",
+                "epoch_id": epoch,
+                "release_hash": "sha256:" + "a" * 64,
+            },
+            "result": result,
+            "receipt": receipt,
+            "receipt_graph": graph,
+            "artifact_hashes": artifact_hashes,
+        },
+    }
+    execute_calls = 0
+
+    async def load_context(**kwargs):
+        if kwargs != {"netuid": 71, "before_epoch": epoch + 1}:
+            raise RuntimeError("current frontier lookup scope changed")
+        return context
+
+    async def execute(**_kwargs):
+        nonlocal execute_calls
+        execute_calls += 1
+        raise RuntimeError("current frontier was re-executed under a new release")
+
+    async def persist_links(**kwargs):
+        if kwargs.get("receipt_hash") != receipt["receipt_hash"]:
+            raise RuntimeError("current frontier business link changed authority")
+        return {"business_artifact_link_count": 1}
+
+    original_loader = (
+        attested_v2_store.load_allocation_settlement_frontier_context_v2
+    )
+    attested_v2_store.load_allocation_settlement_frontier_context_v2 = (
+        load_context
+    )
+    try:
+        recovered = asyncio.run(
+            v2_authority.build_allocation_v2(
+                epoch_id=epoch,
+                netuid=71,
+                policy=policy,
+                execute=execute,
+                persist_links=persist_links,
+            )
+        )
+        if (
+            execute_calls != 0
+            or recovered.get("result") != result
+            or recovered.get("receipt") != receipt
+            or recovered.get("receipt_graph") != graph
+            or recovered.get("replay_status")
+            != "durable_current_frontier"
+        ):
+            raise RuntimeError("current frontier release recovery differed")
+        handoff = build_allocation_handoff_v2(
+            bundle={
+                "epoch": epoch,
+                "netuid": 71,
+                "allocation_doc": allocation,
+            },
+            receipt_graph=recovered["receipt_graph"],
+            lineage_bindings=recovered["lineage_bindings"],
+            lineage_complete=recovered["lineage_complete"],
+            persistence=recovered["persistence"],
+        )
+        validate_allocation_handoff_v2(
+            handoff,
+            expected_epoch_id=epoch,
+            expected_netuid=71,
+        )
+
+        context["source"]["row"]["release_hash"] = "invalid"
+        try:
+            asyncio.run(
+                v2_authority.build_allocation_v2(
+                    epoch_id=epoch,
+                    netuid=71,
+                    policy=policy,
+                    execute=execute,
+                    persist_links=persist_links,
+                )
+            )
+        except v2_authority.ResearchLabV2AuthorityError as exc:
+            if "source authority differs" not in str(exc):
+                raise
+        else:
+            raise RuntimeError("malformed current frontier release was accepted")
+    finally:
+        attested_v2_store.load_allocation_settlement_frontier_context_v2 = (
+            original_loader
+        )
+
+    return {
+        "cross_release_execution_skipped": True,
+        "exact_signed_authority_reused": True,
+        "immutable_frontier_preserved": True,
+        "canonical_handoff_verified": True,
+        "malformed_release_rejected": True,
+    }
+
+
 def _exercise_receipt_graph_aggregate_pagination() -> dict[str, Any]:
     """Exercise aggregate evidence paging through the candidate store helper."""
 
@@ -3896,6 +4120,9 @@ BEHAVIOR_ACTIONS: dict[str, Callable[[], dict[str, Any]]] = {
     ),
     "settlement-frontier-terminal-retirement": (
         _exercise_settlement_frontier_terminal_retirement
+    ),
+    "current-frontier-release-recovery": (
+        _exercise_current_frontier_release_recovery
     ),
 }
 
@@ -4436,6 +4663,28 @@ def main() -> int:
                 "settlement-frontier-terminal-retirement",
                 {},
             ).get("execution_release_hash_validated")
+            is True
+        ),
+        "current_frontier_release_recovery_verified": (
+            behavior_evidence.get(
+                "current-frontier-release-recovery",
+                {},
+            ).get("cross_release_execution_skipped")
+            is True
+            and behavior_evidence.get(
+                "current-frontier-release-recovery",
+                {},
+            ).get("exact_signed_authority_reused")
+            is True
+            and behavior_evidence.get(
+                "current-frontier-release-recovery",
+                {},
+            ).get("immutable_frontier_preserved")
+            is True
+            and behavior_evidence.get(
+                "current-frontier-release-recovery",
+                {},
+            ).get("malformed_release_rejected")
             is True
         ),
         "canonical_vector_primary_auditor_equal": (

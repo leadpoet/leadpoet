@@ -275,12 +275,16 @@ def _validate_assertion_authority_v2(
     validate_receipt_graph(graph, required_purposes=(_PURPOSE,))
 
     if replay_row is not None:
-        expected_artifacts = sorted(
-            {
-                artifact.model_artifact_hash,
-                artifact.manifest_hash,
-                str(result.get("source_state_hash") or ""),
-            }
+        required_artifacts = {
+            artifact.model_artifact_hash,
+            artifact.manifest_hash,
+            str(result.get("source_state_hash") or ""),
+        }
+        replay_artifacts = replay_row.get("artifact_hashes")
+        normalized_replay_artifacts = (
+            sorted({str(value).lower() for value in replay_artifacts})
+            if isinstance(replay_artifacts, list)
+            else []
         )
         if (
             replay_row.get("role") != "gateway_coordinator"
@@ -291,7 +295,12 @@ def _validate_assertion_authority_v2(
             or replay_row.get("release_hash") != release_hash
             or replay_row.get("result_hash") != result_hash
             or replay_row.get("output_root") != result_hash
-            or replay_row.get("artifact_hashes") != expected_artifacts
+            or replay_artifacts != normalized_replay_artifacts
+            or any(
+                not _HASH_RE.fullmatch(value)
+                for value in normalized_replay_artifacts
+            )
+            or not required_artifacts.issubset(normalized_replay_artifacts)
             or not isinstance(replay_graph, Mapping)
             or sha256_json(dict(replay_graph)) != sha256_json(dict(graph))
         ):

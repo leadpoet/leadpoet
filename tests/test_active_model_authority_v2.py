@@ -208,7 +208,15 @@ def _assertion_authority(
     return receipt, graph
 
 
-def _execution_replay(result, receipt, graph, *, artifact, release_hash):
+def _execution_replay(
+    result,
+    receipt,
+    graph,
+    *,
+    artifact,
+    release_hash,
+    additional_artifact_hashes=(),
+):
     return {
         "row": {
             "role": "gateway_coordinator",
@@ -224,6 +232,7 @@ def _execution_replay(result, receipt, graph, *, artifact, release_hash):
                     artifact.model_artifact_hash,
                     artifact.manifest_hash,
                     result["source_state_hash"],
+                    *additional_artifact_hashes,
                 }
             ),
         },
@@ -712,6 +721,10 @@ async def test_active_model_reuses_verified_exact_assertion_before_execution(
         graph,
         artifact=artifact,
         release_hash=release_hash,
+        additional_artifact_hashes=(
+            "sha256:" + "4" * 64,
+            "sha256:" + "5" * 64,
+        ),
     )
     executions = 0
 
@@ -775,6 +788,72 @@ async def test_active_model_reuses_verified_exact_assertion_before_execution(
     assert outcome["replay_status"] == "business_artifact_exact"
     assert outcome["execution_receipt"] == receipt
     assert outcome["execution_receipt_graph"] == graph
+    assert outcome["artifact_hashes"] == replay["row"]["artifact_hashes"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "artifact_hashes",
+    (
+        ["sha256:" + "4" * 64],
+        ["not-a-hash"],
+        ["sha256:" + "4" * 64, "sha256:" + "4" * 64],
+    ),
+)
+async def test_active_model_replay_rejects_invalid_authenticated_artifact_set(
+    tmp_path,
+    monkeypatch,
+    artifact_hashes,
+):
+    artifact = _artifact(tmp_path)
+    row = _active_row(artifact)
+    result = _active_result(artifact, row)
+    release_hash = "sha256:" + "6" * 64
+    release, expectation = _install_release_identity(monkeypatch, release_hash)
+    receipt, graph = _assertion_authority(
+        result,
+        epoch_id=42,
+        receipt_char="7",
+        expectation=expectation,
+    )
+    replay_row = _execution_replay(
+        result,
+        receipt,
+        graph,
+        artifact=artifact,
+        release_hash=release_hash,
+    )["row"]
+    replay_row["artifact_hashes"] = artifact_hashes
+    expected_active_model, expected_parent_receipt_hashes = (
+        active_model_authority_v2._expected_active_model_authority_v2(
+            artifact=artifact,
+            row=row,
+            promotion_graph=None,
+        )
+    )
+    monkeypatch.setattr(
+        active_model_authority_v2,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        active_model_authority_v2.ActivePrivateModelAuthorityV2Error,
+        match="stored active private model assertion differs",
+    ):
+        active_model_authority_v2._validate_assertion_authority_v2(
+            artifact=artifact,
+            row=row,
+            epoch_id=42,
+            release=release,
+            result=result,
+            receipt=receipt,
+            graph=graph,
+            replay_row=replay_row,
+            replay_graph=graph,
+            expected_active_model=expected_active_model,
+            expected_parent_receipt_hashes=expected_parent_receipt_hashes,
+        )
 
 
 @pytest.mark.asyncio

@@ -128,6 +128,22 @@ def test_gateway_enclave_uses_the_exact_transition_target_tree() -> None:
     assert '"/source/gateway"' not in service
 
 
+def test_gateway_enclave_measured_runtime_adapter_is_strict() -> None:
+    service = (
+        ROOT / "tests/restart_rehearsal/gateway_enclave_service.py"
+    ).read_text(encoding="utf-8")
+
+    assert "production_prepare_cgroup" in service
+    assert "_prepare_measured_cgroup_boundary" in service
+    assert 'delegated != "leadpoet-model"' in service
+    assert '"--rootless=false"' in service
+    assert '"--network=none"' in service
+    assert '"--host-uds=open"' in service
+    assert '"--platform=ptrace"' in service
+    assert '"model_sandbox_self_test"' in service
+    assert 'raise ValueError("model sandbox runsc operation differs")' in service
+
+
 def test_release_reuses_candidate_migrated_durable_boundary_state() -> None:
     controller = (
         ROOT / "scripts/run_local_restart_rehearsal.py"

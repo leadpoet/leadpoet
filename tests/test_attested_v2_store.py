@@ -692,6 +692,54 @@ def test_v2_storage_rows_preserve_canonical_documents():
     assert receipt["receipt_doc"] == graph["receipts"][0]
 
 
+def test_v2_persistence_derives_parent_first_order_from_validated_membership():
+    graph = _graph(with_parent=True)
+    parent_hash = graph["receipts"][0]["receipt_hash"]
+    child_hash = graph["receipts"][1]["receipt_hash"]
+
+    # Checkpoint certificates expose a canonical membership projection, not a
+    # database insertion order. Reproduce the production child-before-parent
+    # projection that caused the stateful epoch authority trigger to fail.
+    ordered = attested_v2_store._parent_first_receipt_hashes_v2(
+        graph,
+        validated_receipts=(child_hash, parent_hash),
+    )
+
+    assert ordered == (parent_hash, child_hash)
+
+
+@pytest.mark.asyncio
+async def test_v2_graph_persistence_does_not_use_checkpoint_projection_order(
+    monkeypatch,
+):
+    graph = _graph(with_parent=True)
+    parent_hash = graph["receipts"][0]["receipt_hash"]
+    child_hash = graph["receipts"][1]["receipt_hash"]
+    inserted_receipts = []
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "validate_receipt_graph",
+        lambda *_args, **_kwargs: (child_hash, parent_hash),
+    )
+
+    async def _select_all(*_args, **_kwargs):
+        return []
+
+    async def _insert(table, row, *, key_filters):
+        del key_filters
+        if table == attested_v2_store.RECEIPT_TABLE:
+            inserted_receipts.append(row["receipt_hash"])
+        return dict(row)
+
+    monkeypatch.setattr(attested_v2_store, "select_all", _select_all)
+    monkeypatch.setattr(attested_v2_store, "_insert_exact", _insert)
+
+    await attested_v2_store.persist_receipt_graph_v2(graph)
+
+    assert inserted_receipts == [parent_hash, child_hash]
+
+
 @pytest.mark.asyncio
 async def test_v2_graph_persists_identity_transport_receipt_then_links(monkeypatch):
     graph = _graph(with_transport=True)

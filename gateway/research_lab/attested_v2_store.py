@@ -6,6 +6,7 @@ import asyncio
 import base64
 from datetime import datetime, timezone
 import hashlib
+import heapq
 import logging
 import re
 from typing import Any, Iterable, Mapping, Optional
@@ -534,6 +535,66 @@ async def _existing_exact_relations(
     return existing
 
 
+def _parent_first_receipt_hashes_v2(
+    graph: Mapping[str, Any],
+    *,
+    validated_receipts: Iterable[str],
+) -> tuple[str, ...]:
+    """Derive a deterministic persistence order from local parent edges.
+
+    Checkpoint validation returns the certificate's canonical receipt-hash
+    projection. That projection proves membership but is not a topological
+    insertion order. External checkpoint parents are intentionally omitted and
+    remain subject to the durable edge foreign keys.
+    """
+
+    receipt_by_hash = {
+        str(receipt.get("receipt_hash") or ""): receipt
+        for receipt in graph.get("receipts") or ()
+        if isinstance(receipt, Mapping)
+    }
+    validated = tuple(str(receipt_hash) for receipt_hash in validated_receipts)
+    if (
+        len(receipt_by_hash) != len(graph.get("receipts") or ())
+        or len(validated) != len(set(validated))
+        or set(validated) != set(receipt_by_hash)
+    ):
+        raise AttestedV2StoreError(
+            "validated V2 receipt membership differs from graph"
+        )
+
+    local_parent_count = {receipt_hash: 0 for receipt_hash in receipt_by_hash}
+    local_children = {receipt_hash: [] for receipt_hash in receipt_by_hash}
+    for child_hash, receipt in receipt_by_hash.items():
+        for parent_hash in receipt.get("parent_receipt_hashes") or ():
+            parent_hash = str(parent_hash)
+            if parent_hash not in receipt_by_hash:
+                continue
+            local_parent_count[child_hash] += 1
+            local_children[parent_hash].append(child_hash)
+
+    ready = [
+        receipt_hash
+        for receipt_hash, parent_count in local_parent_count.items()
+        if parent_count == 0
+    ]
+    heapq.heapify(ready)
+    ordered = []
+    while ready:
+        receipt_hash = heapq.heappop(ready)
+        ordered.append(receipt_hash)
+        for child_hash in sorted(local_children[receipt_hash]):
+            local_parent_count[child_hash] -= 1
+            if local_parent_count[child_hash] == 0:
+                heapq.heappush(ready, child_hash)
+
+    if len(ordered) != len(receipt_by_hash):
+        raise AttestedV2StoreError(
+            "validated V2 receipt graph has no parent-first persistence order"
+        )
+    return tuple(ordered)
+
+
 async def persist_receipt_graph_v2(
     graph: Mapping[str, Any],
     *,
@@ -546,9 +607,13 @@ async def persist_receipt_graph_v2(
     ordering without loading or reconstructing historical bodies.
     """
 
-    ordered_receipts = validate_receipt_graph(
+    validated_receipts = validate_receipt_graph(
         graph,
         allowed_failed_receipt_hashes=allowed_failed_receipt_hashes,
+    )
+    ordered_receipts = _parent_first_receipt_hashes_v2(
+        graph,
+        validated_receipts=validated_receipts,
     )
     boot_by_hash = {
         str(identity["boot_identity_hash"]): identity

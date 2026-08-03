@@ -3482,9 +3482,32 @@ def _exercise_receipt_graph_aggregate_pagination() -> dict[str, Any]:
         or not structural_limit_enforced
     ):
         raise RuntimeError("V2 receipt graph safety bounds were weakened")
+    parent_hash = "sha256:" + "1" * 64
+    child_hash = "sha256:" + "2" * 64
+    checkpoint_delta = {
+        "receipts": [
+            {
+                "receipt_hash": child_hash,
+                "parent_receipt_hashes": [parent_hash],
+            },
+            {
+                "receipt_hash": parent_hash,
+                "parent_receipt_hashes": [],
+            },
+        ]
+    }
+    parent_first = attested_v2_store._parent_first_receipt_hashes_v2(
+        checkpoint_delta,
+        validated_receipts=(child_hash, parent_hash),
+    )
+    if parent_first != (parent_hash, child_hash):
+        raise RuntimeError(
+            "checkpoint receipt membership was used as insertion order"
+        )
     return {
         "aggregate_rows": row_count,
         "aggregate_evidence_paged": True,
+        "checkpoint_parent_first_persistence": True,
         "per_query_row_limit": row_limit,
         "query_chunk": query_chunk,
         "query_count": len(observed_queries),
@@ -4329,6 +4352,11 @@ def main() -> int:
                 "receipt-graph-aggregate-pagination",
                 {},
             ).get("structural_limit_enforced")
+            is True
+            and behavior_evidence.get(
+                "receipt-graph-aggregate-pagination",
+                {},
+            ).get("checkpoint_parent_first_persistence")
             is True
         ),
         "receipt_graph_transport_deduplicated_and_verified": (

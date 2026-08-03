@@ -231,6 +231,7 @@ _REF_LIKE_RE = re.compile(
 
 _SECRET_VALUE_RE = re.compile(
     r"(?:sk-[A-Za-z0-9\-_]{16,})"
+    r"|(?:sntryu_[A-Za-z0-9_\-]{16,})"
     r"|(?:(?:AKIA|ASIA)[0-9A-Z]{16})"
     r"|(?:sb_secret_[A-Za-z0-9_\-]{8,})"
     r"|(?:ghp_[A-Za-z0-9]{20,})"

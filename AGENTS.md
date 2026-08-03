@@ -297,6 +297,46 @@ For restart, weight, auditor, attestation, cutover, or Research Lab incidents:
    exception.
 5. Do not alter intended scoring or trust policy merely to silence a warning.
 
+## Sentry API access for Codex
+
+Codex is authorized to use the read-only Sentry API for deployment checks,
+restart monitoring, incident debugging, and post-deploy validation. Use Sentry
+alongside gateway and validator logs and durable/on-chain evidence; Sentry is
+diagnostic and is never authority for V2 state or proof that a workflow
+succeeded.
+
+The API token lives in both production Secrets Manager environment documents
+under `LEADPOET_SENTRY_API_TOKEN`. It is deliberately stripped from cached
+environment files and runtime exports during restart. Do not retrieve it with a
+raw `aws`, `ssh`, `env`, or `printenv` command. The authorized secure read is
+encapsulated by the repository helper and does not display the token:
+
+```bash
+cd /Users/pranav/Downloads/Election_Analysis/Bittensor-subnet
+python3 scripts/query_sentry_api.py auth-check --secret-source gateway
+```
+
+Use the validator copy only when the gateway host or secret is unavailable:
+
+```bash
+python3 scripts/query_sentry_api.py auth-check --secret-source validator
+```
+
+Query bounded, redacted recent issues and events with:
+
+```bash
+python3 scripts/query_sentry_api.py issues --secret-source gateway \
+  --stats-period 24h --limit 25
+python3 scripts/query_sentry_api.py events --secret-source gateway \
+  --stats-period 24h --limit 25
+```
+
+The token must never be printed into chat, command output, logs, commits, test
+fixtures, shell history, or process arguments. Never use `set -x`, `curl -v`,
+or an inline bearer header with it. Do not add a raw-token output mode to the
+helper. If the helper is unavailable, synchronize the canonical checkout with
+`origin/main`; do not ask the user to paste the credential again.
+
 ## Research Lab and sourcing boundaries
 
 - This repository owns Research Lab consumption, benchmarking, fulfillment

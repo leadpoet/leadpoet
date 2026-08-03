@@ -66,6 +66,59 @@ GitHub release jobs use the same namespaced settings, with the DSN supplied by
 the `LEADPOET_SENTRY_DSN` Actions secret. Every reporting step uses
 `if: always()` and `continue-on-error: true`.
 
+## Read-only Codex API access
+
+`LEADPOET_SENTRY_API_TOKEN` is an operator-only read credential stored in both
+`leadpoet/prod/gateway/env` and `leadpoet/prod/validator/env`. It is separate
+from the ingestion DSN. Restart hydration removes it from cached environment
+files and runtime exports, so it does not enter gateway, validator, auditor,
+worker, relay, container, enclave, attestation, or weight paths.
+
+The standard-library helper retrieves only the API token, DSN, and optional
+project identifiers over read-only SSH; the token remains in process memory.
+It sends a bounded Bearer-authenticated request to the Sentry API and emits an
+allowlisted, re-scrubbed response. It never prints or persists the token and
+does not support raw event bodies or a raw-token output mode.
+
+```bash
+cd /Users/pranav/Downloads/Election_Analysis/Bittensor-subnet
+
+# Securely read and validate the gateway copy without displaying it.
+python3 scripts/query_sentry_api.py auth-check --secret-source gateway
+
+# Bounded, redacted recent incident views.
+python3 scripts/query_sentry_api.py issues --secret-source gateway \
+  --stats-period 24h --limit 25
+python3 scripts/query_sentry_api.py events --secret-source gateway \
+  --stats-period 24h --limit 25
+
+# Read-only fallback when the gateway host or secret is unavailable.
+python3 scripts/query_sentry_api.py issues --secret-source validator \
+  --stats-period 24h --limit 25
+```
+
+Codex may use this workflow for deployment checks, restart monitoring,
+debugging, and post-deploy validation. Sentry results must be correlated with
+gateway/validator logs and durable or on-chain evidence. They are observability
+only and cannot replace exact-commit, attestation, PCR0, canonical-bundle,
+finalization, `LastUpdate`, or vector-readback checks.
+
+Never display the token through `aws`, `ssh`, `env`, `printenv`, `set -x`, an
+inline command argument, verbose HTTP output, chat, logs, commits, or tests.
+
+An operator configures or rotates both secret copies with one hidden prompt:
+
+```bash
+cd /Users/pranav/Downloads/Election_Analysis/Bittensor-subnet
+python3 scripts/configure_sentry_api_token.py
+```
+
+The utility preserves each document's existing format, updates through the
+host's AWS role, retains the prior Secrets Manager version for rollback, and
+performs a constant-time readback comparison. It never places the token in a
+command argument or local file. No gateway or validator restart is required
+for `query_sentry_api.py`, because that helper reads Secrets Manager directly.
+
 ## Allowed data
 
 Only allowlisted, bounded operational fields may be exported:

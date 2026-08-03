@@ -626,6 +626,7 @@ src = Path(sys.argv[1])
 cache = Path(sys.argv[2])
 export_file = Path(sys.argv[3])
 raw = src.read_text()
+cache_excluded_keys = {"LEADPOET_SENTRY_API_TOKEN"}
 
 try:
     parsed = json.loads(raw)
@@ -635,12 +636,31 @@ except Exception:
 if isinstance(parsed, dict):
     lines = []
     for key, value in parsed.items():
+        if key in cache_excluded_keys:
+            continue
         if isinstance(value, (dict, list)):
             value = json.dumps(value, separators=(",", ":"))
         elif value is None:
             value = ""
         lines.append(f"{key}={value}")
     raw = "\n".join(lines) + "\n"
+else:
+    lines = []
+    for source_line in raw.replace("\x00", "\n").splitlines():
+        line = source_line.strip()
+        candidate = line[len("export "):].strip() if line.startswith("export ") else line
+        try:
+            parts = shlex.split(candidate, posix=True)
+        except ValueError:
+            parts = [candidate]
+        assignment = parts[0] if len(parts) == 1 else candidate
+        key = assignment.split("=", 1)[0].strip() if "=" in assignment else ""
+        if key in cache_excluded_keys:
+            continue
+        lines.append(source_line)
+    raw = "\n".join(lines)
+    if lines:
+        raw += "\n"
 
 cache.parent.mkdir(parents=True, exist_ok=True)
 cache.write_text(raw)
@@ -659,6 +679,7 @@ skip_keys = {
     "VALIDATOR_PINNED_GATEWAY_TIMEOUT_SECONDS",
     "VALIDATOR_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "VALIDATOR_RESTART_CLEANUP_MAX_CANDIDATES",
+    "LEADPOET_SENTRY_API_TOKEN",
 }
 exports = []
 for raw_line in raw.replace("\x00", "\n").splitlines():

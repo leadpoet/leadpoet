@@ -455,7 +455,11 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
     assert payload["provider_evidence_cache_ref"] == cache_ref
     assert observed[0]["parent_graphs"] == (
         tape_graph,
+        _catalog_outcome()["execution_receipt_graph"],
         _catalog_outcome()["receipt_graph"],
+    )
+    assert payload["provider_catalog_evidence"]["root_receipt_hash"] == (
+        _catalog_outcome()["execution_receipt"]["receipt_hash"]
     )
     assert observed[0]["purpose"] == "research_lab.candidate_model_run.v2"
     assert observed[0]["provider_credential_profile"] == "benchmark_model"

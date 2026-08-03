@@ -825,6 +825,9 @@ class AttestedPrivateModelRunnerV2:
                 "measured SOURCE_ADD runtime catalog is invalid"
             ) from exc
         catalog_root = str(catalog_graph.get("root_receipt_hash") or "")
+        catalog_execution_root = str(
+            catalog_execution_graph.get("root_receipt_hash") or ""
+        )
         if (
             runtime_catalog != derived_runtime_catalog
             or catalog_result.get("provisioned_sources_hash")
@@ -866,6 +869,7 @@ class AttestedPrivateModelRunnerV2:
             for graph in (
                 *self.parent_graphs,
                 *additional_parent_graphs,
+                catalog_execution_graph,
                 catalog_graph,
             )
         }
@@ -903,7 +907,7 @@ class AttestedPrivateModelRunnerV2:
                 "provider_runtime_catalog": runtime_catalog,
                 "provider_catalog_evidence": {
                     "result": dict(catalog_result),
-                    "root_receipt_hash": catalog_root,
+                    "root_receipt_hash": catalog_execution_root,
                 },
             },
             worker_index=self.worker_index,
@@ -945,6 +949,7 @@ class AttestedPrivateModelRunnerV2:
                     else ()
                 ),
                 catalog_root,
+                catalog_execution_root,
                 str(catalog_result["provisioned_sources_hash"]),
                 str(catalog_result["private_registry_rows_hash"]),
                 str(catalog_result["runtime_catalog_hash"]),

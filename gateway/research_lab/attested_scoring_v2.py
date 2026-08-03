@@ -1665,7 +1665,22 @@ async def execute_scoring_v2(
                 ancestry_compact_proof
             ),
         }
+        encrypted_failure_artifacts = []
         if job_artifact_hashes:
+            listed_failure_artifacts = (
+                await artifact_coordinator_client.v2_list_encrypted_artifacts(
+                    job_id=job_id,
+                    purpose=purpose,
+                )
+            )
+            encrypted_failure_artifacts = listed_failure_artifacts.get(
+                "artifacts"
+            )
+            if not isinstance(encrypted_failure_artifacts, list):
+                raise AttestedScoringV2Error(
+                    "V2 coordinator encrypted artifact list is invalid"
+                )
+        if transport_artifact_hashes or encrypted_failure_artifacts:
             from gateway.research_lab.attested_artifacts_v2 import (
                 persist_execution_transport_artifacts_v2,
             )

@@ -1088,8 +1088,11 @@ async def run_authoritative_autoresearch_v2(
         raise AutoresearchAuthorityV2Error(
             "active private model measured lineage is unavailable"
         )
-    active_model_receipt_hash = str(
+    active_model_lineage_receipt_hash = str(
         active_model_lineage_receipt["receipt_hash"]
+    )
+    active_model_execution_receipt_hash = str(
+        active_model_execution_receipt["receipt_hash"]
     )
     catalog_outcome = await load_catalog_snapshot(epoch_id=int(epoch_id))
     catalog_result = catalog_outcome.get("result")
@@ -1120,7 +1123,10 @@ async def run_authoritative_autoresearch_v2(
         raise AutoresearchAuthorityV2Error(
             "SOURCE_ADD catalog measured lineage is unavailable"
         )
-    catalog_receipt_hash = str(catalog_lineage_receipt["receipt_hash"])
+    catalog_lineage_receipt_hash = str(catalog_lineage_receipt["receipt_hash"])
+    catalog_execution_receipt_hash = str(
+        catalog_execution_receipt["receipt_hash"]
+    )
     runtime_catalog = validate_source_add_runtime_catalog_v2(
         _mapping(catalog_result.get("runtime_catalog"), "runtime catalog")
     )
@@ -1171,12 +1177,15 @@ async def run_authoritative_autoresearch_v2(
         raise AutoresearchAuthorityV2Error(
             "provider outcome measured lineage is unavailable"
         )
-    provider_outcome_receipt_hash = str(
+    provider_outcome_lineage_receipt_hash = str(
         provider_outcome_lineage_receipt.get("receipt_hash") or ""
+    )
+    provider_outcome_execution_receipt_hash = str(
+        provider_outcome_execution_receipt.get("receipt_hash") or ""
     )
     if (
         provider_outcome_graph.get("root_receipt_hash")
-        != provider_outcome_receipt_hash
+        != provider_outcome_lineage_receipt_hash
         or provider_outcome_execution_graph.get("root_receipt_hash")
         != provider_outcome_execution_receipt.get("receipt_hash")
         or provider_outcome_execution_receipt.get("role")
@@ -1207,18 +1216,18 @@ async def run_authoritative_autoresearch_v2(
         },
         "active_model_evidence": {
             "result": dict(active_model_result),
-            "receipt_graph": dict(active_model_graph),
-            "root_receipt_hash": active_model_receipt_hash,
+            "receipt_graph": dict(active_model_execution_graph),
+            "root_receipt_hash": active_model_execution_receipt_hash,
         },
         "provider_catalog_evidence": {
             "result": dict(catalog_result),
-            "receipt_graph": dict(catalog_graph),
-            "root_receipt_hash": catalog_receipt_hash,
+            "receipt_graph": dict(catalog_execution_graph),
+            "root_receipt_hash": catalog_execution_receipt_hash,
         },
         "provider_outcome_evidence": {
             "result": provider_outcome_result,
-            "receipt_graph": dict(provider_outcome_graph),
-            "root_receipt_hash": provider_outcome_receipt_hash,
+            "receipt_graph": dict(provider_outcome_execution_graph),
+            "root_receipt_hash": provider_outcome_execution_receipt_hash,
         },
         "benchmark_public_summary": dict(benchmark_public_summary),
         "model_id": str(model_id),
@@ -1277,6 +1286,29 @@ async def run_authoritative_autoresearch_v2(
             "SOURCE_ADD provider collides with the measured provider profile"
         )
     provider_refs.update(dynamic_provider_refs)
+    parent_graph_by_root: dict[str, dict[str, Any]] = {}
+    for graph in (
+        guard_graph,
+        component_graph,
+        active_model_execution_graph,
+        active_model_graph,
+        catalog_execution_graph,
+        catalog_graph,
+        provider_outcome_execution_graph,
+        provider_outcome_graph,
+    ):
+        root = str(graph.get("root_receipt_hash") or "")
+        normalized_graph = dict(graph)
+        existing_graph = parent_graph_by_root.get(root)
+        if existing_graph is not None and existing_graph != normalized_graph:
+            raise AutoresearchAuthorityV2Error(
+                "measured parent authorities disagree for one receipt root"
+            )
+        parent_graph_by_root[root] = normalized_graph
+    parent_receipt_hashes = tuple(sorted(parent_graph_by_root))
+    parent_graphs = tuple(
+        parent_graph_by_root[root] for root in parent_receipt_hashes
+    )
     input_artifact_hashes = sorted(
         {
             artifact.model_artifact_hash,
@@ -1284,9 +1316,12 @@ async def run_authoritative_autoresearch_v2(
             str(source_bundle["archive_sha256"]),
             privacy_receipt_hash,
             component_receipt_hash,
-            active_model_receipt_hash,
-            catalog_receipt_hash,
-            provider_outcome_receipt_hash,
+            active_model_lineage_receipt_hash,
+            active_model_execution_receipt_hash,
+            catalog_lineage_receipt_hash,
+            catalog_execution_receipt_hash,
+            provider_outcome_lineage_receipt_hash,
+            provider_outcome_execution_receipt_hash,
             str(provider_outcome_result["provider_outcome_digest_hash"]),
             str(provider_outcome_result["source_state_hash"]),
             str(catalog_result["provisioned_sources_hash"]),
@@ -1302,13 +1337,7 @@ async def run_authoritative_autoresearch_v2(
         epoch_id=int(epoch_id),
         sequence=0,
         payload_sha256=payload_hash,
-        parent_receipt_hashes=(
-            privacy_receipt_hash,
-            component_receipt_hash,
-            active_model_receipt_hash,
-            catalog_receipt_hash,
-            provider_outcome_receipt_hash,
-        ),
+        parent_receipt_hashes=parent_receipt_hashes,
         input_artifact_hashes=input_artifact_hashes,
         release_hash=str(release["release_hash"]),
     )
@@ -2547,13 +2576,7 @@ async def run_authoritative_autoresearch_v2(
             sequence=0,
             payload=payload,
             host_operation_handlers=handlers,
-            parent_graphs=(
-                guard_graph,
-                component_graph,
-                active_model_graph,
-                catalog_graph,
-                provider_outcome_graph,
-            ),
+            parent_graphs=parent_graphs,
             input_artifact_hashes=input_artifact_hashes,
             provider_credential_profile="default",
             provider_credential_ref_hashes=provider_refs,

@@ -439,6 +439,8 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
     )
     outcome_graph = outcome_authority["receipt_graph"]
     outcome_receipt = outcome_authority["receipt"]
+    outcome_execution_graph = outcome_authority["execution_receipt_graph"]
+    outcome_execution_receipt = outcome_authority["execution_receipt"]
     active_result = {
         "schema_version": "leadpoet.active_private_model.v2",
         "artifact": private_model_artifact_replay_identity_v2(artifact),
@@ -453,6 +455,8 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
     )
     active_graph = active_authority["receipt_graph"]
     active_receipt = active_authority["receipt"]
+    active_execution_graph = active_authority["execution_receipt_graph"]
+    active_execution_receipt = active_authority["execution_receipt"]
     catalog = build_source_add_runtime_catalog_v2([])
     catalog_result = {
         "schema_version": "leadpoet.source_add_catalog_snapshot.v2",
@@ -468,6 +472,10 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
         purpose="research_lab.source_add_catalog_snapshot.v2",
     )
     catalog_hash = catalog_authority["receipt"]["receipt_hash"]
+    catalog_execution_graph = catalog_authority["execution_receipt_graph"]
+    catalog_execution_hash = catalog_authority["execution_receipt"][
+        "receipt_hash"
+    ]
     guard_hash = "sha256:" + "8" * 64
     component_hash = "sha256:" + "9" * 64
     observed = {}
@@ -626,11 +634,32 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
     assert observed["payload"]["provider_outcome_digest"] == outcome_result[
         "provider_outcome_digest"
     ]
-    assert observed["parent_graphs"][-1] == outcome_graph
+    assert outcome_graph in observed["parent_graphs"]
+    assert outcome_execution_graph in observed["parent_graphs"]
     assert active_graph in observed["parent_graphs"]
+    assert active_execution_graph in observed["parent_graphs"]
+    assert catalog_execution_graph in observed["parent_graphs"]
+    assert observed["payload"]["active_model_evidence"] == {
+        "result": active_result,
+        "receipt_graph": active_execution_graph,
+        "root_receipt_hash": active_execution_receipt["receipt_hash"],
+    }
+    assert observed["payload"]["provider_catalog_evidence"][
+        "root_receipt_hash"
+    ] == catalog_execution_hash
+    assert observed["payload"]["provider_outcome_evidence"][
+        "root_receipt_hash"
+    ] == outcome_execution_receipt["receipt_hash"]
     assert active_receipt["receipt_hash"] in observed["input_artifact_hashes"]
+    assert active_execution_receipt["receipt_hash"] in observed[
+        "input_artifact_hashes"
+    ]
     assert catalog_hash in observed["input_artifact_hashes"]
+    assert catalog_execution_hash in observed["input_artifact_hashes"]
     assert outcome_receipt["receipt_hash"] in observed["input_artifact_hashes"]
+    assert outcome_execution_receipt["receipt_hash"] in observed[
+        "input_artifact_hashes"
+    ]
     assert len(client.released) == 1
 
 

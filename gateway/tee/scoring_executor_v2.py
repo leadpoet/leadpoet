@@ -430,23 +430,31 @@ class ScoringExecutorV2:
             raise ValueError("model provider catalog result is invalid")
         matching_roots = []
         for graph in context.external_receipt_graphs:
-            if graph.get("root_receipt_hash") != root_hash:
-                continue
-            receipts = {
-                str(item.get("receipt_hash") or ""): item
+            matching_roots.extend(
+                item
                 for item in graph.get("receipts") or ()
                 if isinstance(item, Mapping)
-            }
-            root = receipts.get(root_hash)
-            if isinstance(root, Mapping):
-                matching_roots.append(root)
+                and item.get("receipt_hash") == root_hash
+            )
+        for proof in context.external_ancestry_proofs:
+            matching_roots.extend(
+                item
+                for item in proof.get("disclosed_receipts") or ()
+                if isinstance(item, Mapping)
+                and item.get("receipt_hash") == root_hash
+            )
+        unique_roots = {
+            sha256_json(dict(item)): item for item in matching_roots
+        }
+        matching_root = next(iter(unique_roots.values()), None)
         if (
-            len(matching_roots) != 1
-            or matching_roots[0].get("role") != "gateway_coordinator"
-            or matching_roots[0].get("purpose")
+            len(unique_roots) != 1
+            or not isinstance(matching_root, Mapping)
+            or matching_root.get("role") != "gateway_coordinator"
+            or matching_root.get("purpose")
             != "research_lab.source_add_catalog_snapshot.v2"
-            or matching_roots[0].get("status") != "succeeded"
-            or matching_roots[0].get("output_root")
+            or matching_root.get("status") != "succeeded"
+            or matching_root.get("output_root")
             != sha256_json(dict(result))
         ):
             raise ValueError("model provider catalog ancestry differs")

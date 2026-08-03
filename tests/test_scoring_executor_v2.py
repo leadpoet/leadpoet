@@ -585,7 +585,9 @@ async def test_v2_adapter_routes_model_jobs_through_measured_sandbox():
         job_id="model-job-1",
         purpose="research_lab.private_model_run.v2",
         epoch_id=24000,
-        external_receipt_graphs=[catalog_graph],
+        external_ancestry_proofs=[
+            {"disclosed_receipts": list(catalog_graph["receipts"])}
+        ],
     )
     executor = ScoringExecutorV2(
         provider_execute=lambda _request: {},

@@ -141,12 +141,29 @@ class _MeasuredRunscBoundary:
             for item in linux.get("namespaces") or ()
             if isinstance(item, dict)
         }
-        expected_mapping = [
+        expected_uid_mapping = [
+            {
+                "containerID": 0,
+                "hostID": 0,
+                "size": 1,
+            },
             {
                 "containerID": self._config.uid,
                 "hostID": self._config.uid,
                 "size": 1,
             }
+        ]
+        expected_gid_mapping = [
+            {
+                "containerID": 0,
+                "hostID": 0,
+                "size": 1,
+            },
+            {
+                "containerID": self._config.gid,
+                "hostID": self._config.gid,
+                "size": 1,
+            },
         ]
         capabilities = process.get("capabilities") or {}
         if (
@@ -162,8 +179,8 @@ class _MeasuredRunscBoundary:
             != "leadpoet-model/" + sandbox_id
             or namespace_types
             != {"pid", "ipc", "uts", "mount", "network", "user"}
-            or linux.get("uidMappings") != expected_mapping
-            or linux.get("gidMappings") != expected_mapping
+            or linux.get("uidMappings") != expected_uid_mapping
+            or linux.get("gidMappings") != expected_gid_mapping
         ):
             raise ValueError("model sandbox OCI isolation differs")
         seccomp = linux.get("seccomp") or {}

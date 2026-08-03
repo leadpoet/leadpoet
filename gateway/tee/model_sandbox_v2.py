@@ -932,8 +932,18 @@ def _oci_config(
             {"type": "network"},
             {"type": "user"},
         ],
-        "uidMappings": [{"containerID": config.uid, "hostID": config.uid, "size": 1}],
-        "gidMappings": [{"containerID": config.gid, "hostID": config.gid, "size": 1}],
+        # Rootful runsc starts its measured gofer as namespace root while the
+        # untrusted workload remains the explicit nobody identity below.  Both
+        # identities must be mapped or the gofer cannot re-exec after applying
+        # its setup capabilities (fork/exec /proc/self/exe returns EINVAL).
+        "uidMappings": [
+            {"containerID": 0, "hostID": 0, "size": 1},
+            {"containerID": config.uid, "hostID": config.uid, "size": 1},
+        ],
+        "gidMappings": [
+            {"containerID": 0, "hostID": 0, "size": 1},
+            {"containerID": config.gid, "hostID": config.gid, "size": 1},
+        ],
         "resources": {
             "memory": {"limit": config.memory_limit_bytes},
             "cpu": {"quota": config.cpu_quota, "period": config.cpu_period},

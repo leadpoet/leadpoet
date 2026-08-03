@@ -337,6 +337,22 @@ def test_runsc_model_sandbox_self_test_uses_production_launcher_and_broker(tmp_p
         "uid": sandbox.config.uid,
         "gid": sandbox.config.gid,
     }
+    assert observed["config"]["linux"]["uidMappings"] == [
+        {"containerID": 0, "hostID": 0, "size": 1},
+        {
+            "containerID": sandbox.config.uid,
+            "hostID": sandbox.config.uid,
+            "size": 1,
+        },
+    ]
+    assert observed["config"]["linux"]["gidMappings"] == [
+        {"containerID": 0, "hostID": 0, "size": 1},
+        {
+            "containerID": sandbox.config.gid,
+            "hostID": sandbox.config.gid,
+            "size": 1,
+        },
+    ]
     assert observed["config"]["linux"]["resources"]["memory"]["limit"] == (
         sandbox.config.memory_limit_bytes
     )

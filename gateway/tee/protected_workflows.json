@@ -1157,7 +1157,7 @@
       "symbol": "_normalized_cgroup_relative_path"
     },
     {
-      "ast_sha256": "sha256:3a7cae365e3b250cb96a41a2ae712d73a368d6dfb0f0b57cad62ea4399a715a6",
+      "ast_sha256": "sha256:dd8fd2fd4118f8baa00ad18cebb5281f8c396afcffe4fd2a66cde0d011fc721a",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_oci_config"
     },
@@ -2457,7 +2457,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:36d71dfda757dcae334971ba15a3c5b0044d8d778d2a004ceeb536e0e8c295a6",
+  "manifest_hash": "sha256:fa7a4d1baa2413ac1fd5f4557eba1e32f3e85d33a873a1ea0effe9518b3c6bb2",
   "protected_source_commit": "5053f923484d4d82b13aeb1e2456b88270321648",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

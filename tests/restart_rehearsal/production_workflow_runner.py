@@ -4257,11 +4257,9 @@ print(",".join((
         ):
             raise RuntimeError("model sandbox import origins differ")
 
-    with tempfile.TemporaryDirectory(
-        prefix="leadpoet-rehearsal-model-broker-"
-    ) as raw_tmp:
+    with tempfile.TemporaryDirectory(prefix="lp-") as raw_tmp:
         root = Path(raw_tmp)
-        rootfs = root / "rootfs"
+        rootfs = root / "r"
         rootfs.mkdir()
         runtime_config = RunscSandboxConfigV2(
             runsc_path=Path(sys.executable),
@@ -4273,7 +4271,8 @@ print(",".join((
         )
         visible_parent = rootfs / MODEL_SANDBOX_VISIBLE_ROOT.lstrip("/")
         visible_parent.mkdir(mode=0o711)
-        visible_workspace = visible_parent / "lp-job-rehearsal"
+        workspace_name = "lp-job-" + ("a" * 32)
+        visible_workspace = visible_parent / workspace_name
         visible_workspace.mkdir(mode=0o711)
         source_root = visible_workspace / MODEL_SANDBOX_SOURCE_DIRECTORY
         broker_root = visible_workspace / MODEL_SANDBOX_BROKER_DIRECTORY
@@ -4340,10 +4339,16 @@ print(",".join((
             )
             expected_socket = (
                 MODEL_SANDBOX_VISIBLE_ROOT
-                + "/lp-job-rehearsal/"
+                + "/"
+                + workspace_name
+                + "/"
                 + MODEL_SANDBOX_BROKER_DIRECTORY
                 + "/provider.sock"
             )
+            if len(os.fsencode(expected_socket)) > 107:
+                raise RuntimeError(
+                    "model sandbox provider socket exceeds AF_UNIX path limit"
+                )
             client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 client.connect(str(exposed_socket))
@@ -4368,7 +4373,9 @@ print(",".join((
                 or process_environment.get("LEADPOET_MODEL_SOURCE_ROOT")
                 != (
                     MODEL_SANDBOX_VISIBLE_ROOT
-                    + "/lp-job-rehearsal/"
+                    + "/"
+                    + workspace_name
+                    + "/"
                     + MODEL_SANDBOX_SOURCE_DIRECTORY
                 )
                 or "/dev/log" not in oci_config["linux"]["maskedPaths"]

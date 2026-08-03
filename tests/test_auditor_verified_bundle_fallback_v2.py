@@ -496,8 +496,6 @@ def test_gateway_stall_cannot_stall_the_independent_deadline_observer(
     auditor.epoch_archive_endpoint = "wss://archive.example:443"
     auditor.epoch_cutover = object()
     observer = object()
-    triggered = asyncio.Event()
-    gateway_release = asyncio.Event()
 
     monkeypatch.setattr(
         auditor_module,
@@ -518,17 +516,19 @@ def test_gateway_stall_cannot_stall_the_independent_deadline_observer(
         101, 355
     )
 
-    async def fallback(_state):
-        triggered.set()
-        auditor.should_exit = True
-        return True
-
-    async def stalled_gateway_request():
-        await gateway_release.wait()
-
-    auditor._submit_latest_verified_bundle_fallback = fallback
-
     async def run():
+        triggered = asyncio.Event()
+        gateway_release = asyncio.Event()
+
+        async def fallback(_state):
+            triggered.set()
+            auditor.should_exit = True
+            return True
+
+        async def stalled_gateway_request():
+            await gateway_release.wait()
+
+        auditor._submit_latest_verified_bundle_fallback = fallback
         gateway_task = asyncio.create_task(stalled_gateway_request())
         fallback_task = asyncio.create_task(
             auditor._run_latest_verified_bundle_fallback_loop()
@@ -552,7 +552,6 @@ def test_stalled_archive_snapshot_is_bounded_and_reaches_block_355_fallback(
     auditor.epoch_cutover = object()
     observer = object()
     snapshot_calls = []
-    submitted = asyncio.Event()
 
     monkeypatch.setattr(
         auditor_module,
@@ -583,15 +582,16 @@ def test_stalled_archive_snapshot_is_bounded_and_reaches_block_355_fallback(
 
     auditor._fallback_epoch_state_from_observer = snapshot
 
-    async def fallback(state):
-        assert state.epoch_block == 355
-        submitted.set()
-        auditor.should_exit = True
-        return True
-
-    auditor._submit_latest_verified_bundle_fallback = fallback
-
     async def run():
+        submitted = asyncio.Event()
+
+        async def fallback(state):
+            assert state.epoch_block == 355
+            submitted.set()
+            auditor.should_exit = True
+            return True
+
+        auditor._submit_latest_verified_bundle_fallback = fallback
         task = asyncio.create_task(
             auditor._run_latest_verified_bundle_fallback_loop()
         )

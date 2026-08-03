@@ -311,6 +311,7 @@ PROTECTED_SYMBOLS = {
         "persist_legacy_allocation_nonfinalization_v2",
     ),
     "gateway/research_lab/attested_artifacts_v2.py": (
+        "_select_committed_encrypted_artifacts",
         "persist_execution_transport_artifacts_v2",
     ),
     "gateway/research_lab/attested_scoring_v2.py": (
@@ -639,9 +640,35 @@ PROTECTED_SYMBOLS = {
     "gateway/tee/provider_semantics_v2.py": (
         "ProviderSemanticsAuthorityV2",
     ),
+    "gateway/tee/mtls_identity.py": (
+        "_atomic_private_write",
+        "write_identity_to_tmpfs",
+        "create_mutual_tls_context",
+    ),
+    "gateway/tee/inter_enclave_tls.py": (
+        "MAX_REPLAY_CACHE_BYTES",
+        "MAX_REPLAY_CACHE_ENTRIES",
+        "REPLAY_CACHE_TTL_SECONDS",
+        "REPLAY_WAIT_SECONDS",
+        "InterEnclaveTLSError",
+        "_RetryableInterEnclaveTransportError",
+        "_recv_exact",
+        "_send_frame",
+        "_read_frame",
+        "AttestedPeerRegistry",
+        "AttestedTLSRPCClient",
+        "AttestedTLSRPCServer",
+        "build_rpc_request",
+        "validate_rpc_request",
+    ),
     "gateway/tee/tee_service.py": (
         "acknowledge_checkpoint",
         "build_checkpoint",
+        "handle_v2_runtime_rpc",
+        "get_v2_inter_enclave_client",
+        "execute_v2_provider_request",
+        "handle_inter_enclave_rpc",
+        "start_v2_tls_service",
     ),
     "gateway/tee/rpc_authority.py": (
         "allowed_exact_methods",

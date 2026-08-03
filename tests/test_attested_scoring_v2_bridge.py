@@ -1796,7 +1796,7 @@ async def test_v2_bridge_fails_when_persistence_does_not_read_back_root():
 
 
 @pytest.mark.asyncio
-async def test_v2_bridge_durably_persists_signed_failure_before_raising(
+async def test_v2_bridge_ignores_uncommitted_orphans_and_persists_failure(
     monkeypatch,
 ):
     release = _release()
@@ -1821,11 +1821,22 @@ async def test_v2_bridge_durably_persists_signed_failure_before_raising(
     async def unexpected_artifact_persistence(**_kwargs):
         pytest.fail("static input commitments do not require artifact persistence")
 
-    class EmptyArtifactCoordinator:
+    class OrphanArtifactCoordinator:
         async def v2_list_encrypted_artifacts(self, *, job_id, purpose):
             assert job_id
             assert purpose == "research_lab.benchmark.v2"
-            return {"artifacts": []}
+            return {
+                "artifacts": [
+                    {
+                        "artifact_id": _hash("2"),
+                        "plaintext_hash": _hash("3"),
+                        "ciphertext_hash": _hash("4"),
+                        "encryption_context_hash": _hash("5"),
+                        "artifact_kind": "provider_request",
+                        "persisted": False,
+                    }
+                ]
+            }
 
     monkeypatch.setattr(
         "gateway.research_lab.attested_artifacts_v2."
@@ -1844,7 +1855,7 @@ async def test_v2_bridge_durably_persists_signed_failure_before_raising(
             input_artifact_hashes=(_hash("1"),),
             release_manifest=release,
             client=client,
-            artifact_coordinator_client=EmptyArtifactCoordinator(),
+            artifact_coordinator_client=OrphanArtifactCoordinator(),
             persist_graph=persist,
             boot_verifier=lambda identity: identity,
             poll_seconds=0.001,

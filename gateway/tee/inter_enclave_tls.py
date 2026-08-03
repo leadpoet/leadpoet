@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from collections import OrderedDict
 import hashlib
 import json
 from pathlib import Path
@@ -10,6 +11,7 @@ import re
 import socket
 import ssl
 import threading
+import time
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from cryptography import x509
@@ -33,6 +35,10 @@ PARENT_CID = 3
 RELAY_PORT = 5002
 TLS_SERVICE_PORT = 5003
 MAX_FRAME_BYTES = 64 * 1024 * 1024
+MAX_REPLAY_CACHE_BYTES = 128 * 1024 * 1024
+MAX_REPLAY_CACHE_ENTRIES = 128
+REPLAY_CACHE_TTL_SECONDS = 300.0
+REPLAY_WAIT_SECONDS = 1800.0
 SCHEMA_VERSION = "leadpoet.inter_enclave_rpc.v2"
 _CHANNEL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _ERROR_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
@@ -42,12 +48,21 @@ class InterEnclaveTLSError(RuntimeError):
     """A peer, certificate, frame, or topology binding is invalid."""
 
 
+class _RetryableInterEnclaveTransportError(InterEnclaveTLSError):
+    """A connection ended without an authenticated terminal response."""
+
+
 def _recv_exact(connection: Any, size: int) -> bytes:
     """Read one complete bounded frame without importing the host TEE client."""
 
     output = bytearray()
     while len(output) < size:
-        chunk = connection.recv(min(64 * 1024, size - len(output)))
+        try:
+            chunk = connection.recv(min(64 * 1024, size - len(output)))
+        except OSError as exc:
+            raise _RetryableInterEnclaveTransportError(
+                "inter-enclave connection read failed"
+            ) from exc
         if not chunk:
             break
         output.extend(chunk)
@@ -66,19 +81,28 @@ def _send_frame(connection: Any, value: Mapping[str, Any]) -> None:
     encoded = canonical_json(dict(value)).encode("utf-8")
     if len(encoded) < 2 or len(encoded) > MAX_FRAME_BYTES:
         raise InterEnclaveTLSError("inter-enclave frame is outside size limit")
-    connection.sendall(len(encoded).to_bytes(4, "big") + encoded)
+    try:
+        connection.sendall(len(encoded).to_bytes(4, "big") + encoded)
+    except OSError as exc:
+        raise _RetryableInterEnclaveTransportError(
+            "inter-enclave connection write failed"
+        ) from exc
 
 
 def _read_frame(connection: Any) -> Dict[str, Any]:
     prefix = _recv_exact(connection, 4)
     if len(prefix) != 4:
-        raise InterEnclaveTLSError("inter-enclave frame prefix is incomplete")
+        raise _RetryableInterEnclaveTransportError(
+            "inter-enclave frame prefix is incomplete"
+        )
     size = int.from_bytes(prefix, "big")
     if size < 2 or size > MAX_FRAME_BYTES:
         raise InterEnclaveTLSError("inter-enclave frame is outside size limit")
     encoded = _recv_exact(connection, size)
     if len(encoded) != size:
-        raise InterEnclaveTLSError("inter-enclave frame body is incomplete")
+        raise _RetryableInterEnclaveTransportError(
+            "inter-enclave frame body is incomplete"
+        )
     try:
         value = json.loads(encoded.decode("utf-8"))
     except Exception as exc:
@@ -280,10 +304,41 @@ class AttestedTLSRPCClient:
         if self._connector is not None:
             return self._connector()
         connection = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
-        connection.connect((PARENT_CID, RELAY_PORT))
+        try:
+            connection.connect((PARENT_CID, RELAY_PORT))
+        except OSError as exc:
+            connection.close()
+            raise _RetryableInterEnclaveTransportError(
+                "inter-enclave parent relay connection failed"
+            ) from exc
         return connection
 
     def call(
+        self,
+        *,
+        target_physical_role: str,
+        method: str,
+        params: Mapping[str, Any],
+        channel_id: str,
+    ) -> Dict[str, Any]:
+        last_error = None
+        for attempt in range(2):
+            try:
+                return self._call_once(
+                    target_physical_role=target_physical_role,
+                    method=method,
+                    params=params,
+                    channel_id=channel_id,
+                )
+            except _RetryableInterEnclaveTransportError as exc:
+                last_error = exc
+                if attempt == 0:
+                    continue
+        raise InterEnclaveTLSError(
+            "inter-enclave transport failed after bounded replay"
+        ) from last_error
+
+    def _call_once(
         self,
         *,
         target_physical_role: str,
@@ -309,7 +364,9 @@ class AttestedTLSRPCClient:
             )
             connected = _read_frame(connection)
             if connected.get("result", {}).get("status") != "connected":
-                raise InterEnclaveTLSError("parent relay did not connect target")
+                raise _RetryableInterEnclaveTransportError(
+                    "parent relay did not connect target"
+                )
             context = create_mutual_tls_context(
                 identity_paths=self.identity_paths,
                 trusted_peer_certificate_pem=peer["certificate_pem"],
@@ -388,6 +445,138 @@ class AttestedTLSRPCServer:
             local_tls_identity,
             directory=tmpfs_root / local_physical_role,
         )
+        self._replay_cache = OrderedDict()
+        self._replay_cache_bytes = 0
+        self._replay_inflight = {}
+        self._replay_lock = threading.Lock()
+
+    @staticmethod
+    def _request_hash(request: Mapping[str, Any]) -> str:
+        return "sha256:" + hashlib.sha256(
+            canonical_json(dict(request)).encode("utf-8")
+        ).hexdigest()
+
+    def _purge_replay_cache_locked(self, now: float) -> None:
+        expired = [
+            key
+            for key, record in self._replay_cache.items()
+            if now - float(record["completed_at"]) >= REPLAY_CACHE_TTL_SECONDS
+        ]
+        for key in expired:
+            record = self._replay_cache.pop(key)
+            self._replay_cache_bytes -= int(record["size"])
+
+    def _cached_response(
+        self,
+        *,
+        request: Mapping[str, Any],
+        peer: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        request_hash = self._request_hash(request)
+        key = (
+            str(peer["boot_identity"]["boot_identity_hash"]),
+            str(request["channel_id"]),
+        )
+        with self._replay_lock:
+            self._purge_replay_cache_locked(time.monotonic())
+            cached = self._replay_cache.get(key)
+            if cached is not None:
+                if cached["request_hash"] != request_hash:
+                    raise InterEnclaveTLSError(
+                        "inter-enclave channel was reused with another request"
+                    )
+                self._replay_cache.move_to_end(key)
+                return dict(cached["response"])
+            inflight = self._replay_inflight.get(key)
+            if inflight is None:
+                event = threading.Event()
+                self._replay_inflight[key] = {
+                    "request_hash": request_hash,
+                    "event": event,
+                }
+                owns_request = True
+            else:
+                if inflight["request_hash"] != request_hash:
+                    raise InterEnclaveTLSError(
+                        "inter-enclave channel was reused with another request"
+                    )
+                event = inflight["event"]
+                owns_request = False
+
+        if not owns_request:
+            if not event.wait(REPLAY_WAIT_SECONDS):
+                raise InterEnclaveTLSError(
+                    "inter-enclave replay wait timed out"
+                )
+            with self._replay_lock:
+                cached = self._replay_cache.get(key)
+                if cached is None or cached["request_hash"] != request_hash:
+                    raise InterEnclaveTLSError(
+                        "inter-enclave replay result is unavailable"
+                    )
+                self._replay_cache.move_to_end(key)
+                return dict(cached["response"])
+
+        try:
+            try:
+                result = self.handler(request["method"], request["params"], peer)
+                if not isinstance(result, Mapping):
+                    raise InterEnclaveTLSError(
+                        "inter-enclave handler result is invalid"
+                    )
+                response = {
+                    "result": dict(result),
+                    "channel_id": request["channel_id"],
+                }
+            except Exception as exc:
+                error_type = type(exc).__name__
+                if not _ERROR_TYPE_RE.fullmatch(error_type):
+                    error_type = "Exception"
+                response = {
+                    "error": {
+                        "code": "remote_handler_failed",
+                        "error_type": error_type,
+                    },
+                    "channel_id": request["channel_id"],
+                }
+            response_size = len(canonical_json(response).encode("utf-8"))
+            if response_size < 2 or response_size > MAX_FRAME_BYTES:
+                response = {
+                    "error": {
+                        "code": "remote_handler_failed",
+                        "error_type": "InterEnclaveTLSError",
+                    },
+                    "channel_id": request["channel_id"],
+                }
+                response_size = len(canonical_json(response).encode("utf-8"))
+            record = {
+                "request_hash": request_hash,
+                "response": dict(response),
+                "size": response_size,
+                "completed_at": time.monotonic(),
+            }
+            with self._replay_lock:
+                self._replay_cache[key] = record
+                self._replay_cache.move_to_end(key)
+                self._replay_cache_bytes += response_size
+                while (
+                    len(self._replay_cache) > MAX_REPLAY_CACHE_ENTRIES
+                    or self._replay_cache_bytes > MAX_REPLAY_CACHE_BYTES
+                ):
+                    old_key, old_record = self._replay_cache.popitem(last=False)
+                    self._replay_cache_bytes -= int(old_record["size"])
+                    if old_key == key:
+                        raise InterEnclaveTLSError(
+                            "inter-enclave replay response exceeds cache limit"
+                        )
+                self._replay_inflight.pop(key, None)
+                event.set()
+            return dict(response)
+        except BaseException:
+            with self._replay_lock:
+                self._replay_inflight.pop(key, None)
+                event.set()
+            raise
 
     def handle_connection(self, connection: Any) -> None:
         context = create_mutual_tls_context(
@@ -410,30 +599,9 @@ class AttestedTLSRPCServer:
                     "boot_identity_hash"
                 ],
             )
-            try:
-                result = self.handler(request["method"], request["params"], peer)
-                if not isinstance(result, Mapping):
-                    raise InterEnclaveTLSError(
-                        "inter-enclave handler result is invalid"
-                    )
-            except Exception as exc:
-                error_type = type(exc).__name__
-                if not _ERROR_TYPE_RE.fullmatch(error_type):
-                    error_type = "Exception"
-                _send_frame(
-                    tls,
-                    {
-                        "error": {
-                            "code": "remote_handler_failed",
-                            "error_type": error_type,
-                        },
-                        "channel_id": request["channel_id"],
-                    },
-                )
-                return
             _send_frame(
                 tls,
-                {"result": dict(result), "channel_id": request["channel_id"]},
+                self._cached_response(request=request, peer=peer),
             )
         finally:
             try:

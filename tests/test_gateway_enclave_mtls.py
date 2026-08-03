@@ -1,4 +1,5 @@
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import ssl
 
@@ -128,3 +129,30 @@ def test_mutual_tls_context_requires_exact_peer_and_tls13(tmp_path: Path):
     assert context.verify_mode == ssl.CERT_REQUIRED
     assert context.check_hostname is False
     assert (tmp_path / "coordinator" / "tls-private-key.pem").stat().st_mode & 0o777 == 0o600
+
+
+def test_identity_materialization_is_atomic_and_idempotent(tmp_path, monkeypatch):
+    identity = generate_ephemeral_tls_identity(service_role=COORDINATOR_ROLE)
+    directory = tmp_path / "coordinator"
+
+    def reject_direct_overwrite(_path, _payload):
+        raise AssertionError("identity files must not be overwritten in place")
+
+    monkeypatch.setattr(Path, "write_bytes", reject_direct_overwrite)
+
+    def materialize(_index):
+        paths = write_identity_to_tmpfs(identity, directory=directory)
+        return (
+            paths["certificate"].read_bytes(),
+            paths["private_key"].read_bytes(),
+        )
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        observed = list(executor.map(materialize, range(64)))
+
+    assert set(observed) == {
+        (identity["certificate_pem"], identity["private_key_pem"])
+    }
+    assert not list(directory.glob(".tls-*.pem.*"))
+    assert (directory / "tls-certificate.pem").stat().st_mode & 0o777 == 0o600
+    assert (directory / "tls-private-key.pem").stat().st_mode & 0o777 == 0o600

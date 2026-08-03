@@ -1231,18 +1231,10 @@ def handle_v2_runtime_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]
     if method == "v2_call_peer_health":
         if not isinstance(params, dict) or set(params) != {"physical_role"}:
             raise ValueError("V2 peer health fields are invalid")
-        from gateway.tee.inter_enclave_tls import AttestedTLSRPCClient
-        from gateway.tee.rpc_authority import active_enclave_role
         import secrets
 
-        client = AttestedTLSRPCClient(
-            local_physical_role=active_enclave_role(),
-            local_boot_identity=manager.boot_identity(),
-            local_tls_identity=manager.tls_identity(),
-            peer_registry=get_v2_peer_registry(),
-        )
         return {
-            "result": client.call(
+            "result": get_v2_inter_enclave_client().call(
                 target_physical_role=str(params.get("physical_role") or ""),
                 method="channel_health",
                 params={},

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import socket
 import threading
+import time
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -18,6 +20,7 @@ from gateway.tee.inter_enclave_tls import (
     build_rpc_request,
     validate_rpc_request,
 )
+from gateway.tee import inter_enclave_tls
 from gateway.tee.mtls_identity import (
     MutualAttestationError,
     generate_ephemeral_tls_identity,
@@ -153,7 +156,10 @@ def test_rpc_request_binds_both_boots_and_topology():
         )
 
 
-def test_tls_rpc_round_trip_uses_only_attested_peer_certificates(tmp_path):
+def test_tls_rpc_round_trip_uses_only_attested_peer_certificates(
+    tmp_path,
+    monkeypatch,
+):
     import ssl
 
     if not getattr(ssl, "HAS_TLSv1_3", False):
@@ -175,10 +181,14 @@ def test_tls_rpc_round_trip_uses_only_attested_peer_certificates(tmp_path):
     _register(scoring_registry, coordinator_boot, coordinator_tls)
 
     secret_error = "supabase-service-role-secret must never cross the channel"
+    handler_calls = []
 
     def _handler(method, params, peer):
+        handler_calls.append((method, params.get("job_id")))
         if method == "provider_execute_failure":
             raise RuntimeError(secret_error)
+        if method == "provider_execute_slow":
+            time.sleep(0.05)
         return {
             "method": method,
             "job_id": params["job_id"],
@@ -244,6 +254,80 @@ def test_tls_rpc_round_trip_uses_only_attested_peer_certificates(tmp_path):
         "peer_role": "gateway_scoring",
     }
 
+    original_send_frame = inter_enclave_tls._send_frame
+    dropped = {"value": False}
+
+    def _drop_first_terminal_response(connection, value):
+        result = value.get("result") if isinstance(value, dict) else None
+        if (
+            not dropped["value"]
+            and value.get("channel_id") == "2" * 32
+            and isinstance(result, dict)
+            and result.get("job_id") == "job-replay"
+        ):
+            dropped["value"] = True
+            connection.shutdown(socket.SHUT_RDWR)
+            connection.close()
+            return
+        return original_send_frame(connection, value)
+
+    monkeypatch.setattr(
+        inter_enclave_tls,
+        "_send_frame",
+        _drop_first_terminal_response,
+    )
+    replayed = client.call(
+        target_physical_role="gateway_coordinator",
+        method="provider_execute",
+        params={"job_id": "job-replay"},
+        channel_id="2" * 32,
+    )
+    assert dropped["value"] is True
+    assert replayed == {
+        "method": "provider_execute",
+        "job_id": "job-replay",
+        "peer_role": "gateway_scoring",
+    }
+    assert handler_calls.count(("provider_execute", "job-replay")) == 1
+
+    def concurrent_call(_index):
+        return client.call(
+            target_physical_role="gateway_coordinator",
+            method="provider_execute_slow",
+            params={"job_id": "job-concurrent"},
+            channel_id="3" * 32,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        concurrent_results = list(executor.map(concurrent_call, range(2)))
+    assert concurrent_results == [
+        {
+            "method": "provider_execute_slow",
+            "job_id": "job-concurrent",
+            "peer_role": "gateway_scoring",
+        },
+        {
+            "method": "provider_execute_slow",
+            "job_id": "job-concurrent",
+            "peer_role": "gateway_scoring",
+        },
+    ]
+    assert handler_calls.count(("provider_execute_slow", "job-concurrent")) == 1
+
+    monkeypatch.setattr(inter_enclave_tls, "MAX_REPLAY_CACHE_ENTRIES", 2)
+    for index, channel_character in enumerate(("4", "5", "6")):
+        client.call(
+            target_physical_role="gateway_coordinator",
+            method="provider_execute",
+            params={"job_id": "job-cache-%d" % index},
+            channel_id=channel_character * 32,
+        )
+    assert len(server._replay_cache) == 2
+    assert server._replay_cache_bytes == sum(
+        int(record["size"]) for record in server._replay_cache.values()
+    )
+    assert server._replay_cache_bytes <= inter_enclave_tls.MAX_REPLAY_CACHE_BYTES
+
     with pytest.raises(
         InterEnclaveTLSError,
         match="inter-enclave remote handler failed: RuntimeError",
@@ -255,4 +339,5 @@ def test_tls_rpc_round_trip_uses_only_attested_peer_certificates(tmp_path):
             channel_id="1" * 32,
         )
     assert secret_error not in str(raised.value)
+    assert handler_calls.count(("provider_execute_failure", "job-2")) == 1
     assert not errors

@@ -28,6 +28,34 @@ class AttestedArtifactPersistenceV2Error(RuntimeError):
     """A required hidden request/response artifact was not durably retained."""
 
 
+def _select_committed_encrypted_artifacts(
+    artifacts: Any,
+    *,
+    committed_hashes: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Exclude transient coordinator envelopes absent from the source receipt."""
+
+    if not isinstance(artifacts, list):
+        raise AttestedArtifactPersistenceV2Error(
+            "coordinator encrypted artifact list is invalid"
+        )
+    committed = {str(item or "") for item in committed_hashes}
+    selected = []
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping):
+            raise AttestedArtifactPersistenceV2Error(
+                "coordinator encrypted artifact descriptor is invalid"
+            )
+        plaintext_hash = str(artifact.get("plaintext_hash") or "")
+        if not _HASH_RE.fullmatch(plaintext_hash):
+            raise AttestedArtifactPersistenceV2Error(
+                "coordinator encrypted artifact plaintext hash is invalid"
+            )
+        if plaintext_hash in committed:
+            selected.append(dict(artifact))
+    return selected
+
+
 async def persist_execution_transport_artifacts_v2(
     *,
     job_id: str,
@@ -84,11 +112,10 @@ async def persist_execution_transport_artifacts_v2(
         job_id=str(job_id),
         purpose=str(purpose),
     )
-    artifacts = listed.get("artifacts")
-    if not isinstance(artifacts, list):
-        raise AttestedArtifactPersistenceV2Error(
-            "coordinator encrypted artifact list is invalid"
-        )
+    artifacts = _select_committed_encrypted_artifacts(
+        listed.get("artifacts"),
+        committed_hashes=committed_hashes,
+    )
     observed_hashes = sorted(
         str(item.get("plaintext_hash") or "")
         for item in artifacts

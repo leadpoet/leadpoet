@@ -7,6 +7,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import ssl
+import tempfile
+import threading
 from typing import Any, Dict, Mapping, Sequence, Union
 
 from cryptography import x509
@@ -22,6 +24,42 @@ from leadpoet_canonical.attested_v2 import ROLE_PURPOSES, validate_boot_identity
 
 class MutualAttestationError(ValueError):
     """A TLS certificate is not the key attested for the expected enclave."""
+
+
+_IDENTITY_WRITE_LOCK = threading.RLock()
+
+
+def _atomic_private_write(path: Path, payload: bytes) -> None:
+    """Publish one complete private file without exposing a truncated version."""
+
+    try:
+        if path.read_bytes() == payload:
+            path.chmod(0o600)
+            return
+    except FileNotFoundError:
+        pass
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=os.fspath(path.parent),
+        prefix=".%s." % path.name,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+        path.chmod(0o600)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _public_key_hex(public_key: Ed25519PublicKey) -> str:
@@ -118,17 +156,22 @@ def verify_peer_certificate_binding(
 def write_identity_to_tmpfs(
     identity: Mapping[str, Any], *, directory: Path
 ) -> Dict[str, Path]:
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        directory.chmod(0o700)
-    except OSError:
-        pass
-    certificate_path = directory / "tls-certificate.pem"
-    private_key_path = directory / "tls-private-key.pem"
-    certificate_path.write_bytes(bytes(identity["certificate_pem"]))
-    private_key_path.write_bytes(bytes(identity["private_key_pem"]))
-    certificate_path.chmod(0o600)
-    private_key_path.chmod(0o600)
+    with _IDENTITY_WRITE_LOCK:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            directory.chmod(0o700)
+        except OSError:
+            pass
+        certificate_path = directory / "tls-certificate.pem"
+        private_key_path = directory / "tls-private-key.pem"
+        _atomic_private_write(
+            certificate_path,
+            bytes(identity["certificate_pem"]),
+        )
+        _atomic_private_write(
+            private_key_path,
+            bytes(identity["private_key_pem"]),
+        )
     return {"certificate": certificate_path, "private_key": private_key_path}
 
 

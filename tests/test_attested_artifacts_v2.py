@@ -45,6 +45,30 @@ def _lineage_evidence(artifacts: list[dict]) -> list[dict]:
     ]
 
 
+def test_only_source_receipt_committed_envelopes_are_selected():
+    artifacts = _artifacts(persisted=False)
+    artifacts.append(
+        {
+            "artifact_id": _hash("f"),
+            "plaintext_hash": _hash("3"),
+            "ciphertext_hash": _hash("4"),
+            "encryption_context_hash": _hash("5"),
+            "artifact_kind": "provider_request",
+            "persisted": False,
+        }
+    )
+
+    selected = attested_artifacts_v2._select_committed_encrypted_artifacts(
+        artifacts,
+        committed_hashes=(_hash("1"), _hash("2")),
+    )
+
+    assert [item["artifact_id"] for item in selected] == [
+        _hash("a"),
+        _hash("b"),
+    ]
+
+
 async def _exercise(
     monkeypatch: pytest.MonkeyPatch,
     *,

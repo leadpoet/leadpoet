@@ -65,6 +65,37 @@ def test_scoring_receipt_failure_policy_is_protected():
     ]
 
 
+def test_inter_enclave_replay_and_identity_boundaries_are_protected():
+    assert {
+        "_select_committed_encrypted_artifacts",
+        "persist_execution_transport_artifacts_v2",
+    } <= set(PROTECTED_SYMBOLS["gateway/research_lab/attested_artifacts_v2.py"])
+    assert {
+        "_atomic_private_write",
+        "write_identity_to_tmpfs",
+        "create_mutual_tls_context",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/mtls_identity.py"])
+    assert {
+        "REPLAY_WAIT_SECONDS",
+        "_RetryableInterEnclaveTransportError",
+        "_recv_exact",
+        "_send_frame",
+        "_read_frame",
+        "AttestedPeerRegistry",
+        "AttestedTLSRPCClient",
+        "AttestedTLSRPCServer",
+        "build_rpc_request",
+        "validate_rpc_request",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/inter_enclave_tls.py"])
+    assert {
+        "handle_v2_runtime_rpc",
+        "get_v2_inter_enclave_client",
+        "execute_v2_provider_request",
+        "handle_inter_enclave_rpc",
+        "start_v2_tls_service",
+    } <= set(PROTECTED_SYMBOLS["gateway/tee/tee_service.py"])
+
+
 def test_git_tree_source_authority_boundaries_are_protected():
     assert {
         "_GIT_STRUCTURAL_DIFF_PREFIXES",

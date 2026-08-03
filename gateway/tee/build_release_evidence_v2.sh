@@ -43,7 +43,7 @@ PYTHONPATH="$REPO_ROOT" python3 -m validator_tee.host.gateway_pcr0_builder \
   --builder-domain "$BUILDER_DOMAIN" \
   --builder-id "$BUILDER_ID" \
   --all-roles \
-  > "$TEMP_RESULT"
+  --output-file "$TEMP_RESULT"
 
 PYTHONPATH="$REPO_ROOT" python3 - \
   "$TEMP_RESULT" "$TEMP_EVIDENCE" "$COMMIT" "$BUILDER_DOMAIN" "$BUILDER_ID" <<'PY'

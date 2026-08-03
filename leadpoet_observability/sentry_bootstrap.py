@@ -40,6 +40,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import sys
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -84,7 +85,7 @@ _state_lock = threading.RLock()
 
 def _safe_print(line: str) -> None:
     try:
-        print(line, flush=True)
+        print(line, file=sys.stderr, flush=True)
     except Exception:
         pass
 

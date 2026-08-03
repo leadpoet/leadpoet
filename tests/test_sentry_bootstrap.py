@@ -130,6 +130,14 @@ def test_complete_noop_without_env_gate(monkeypatch, stub_sdk):
     assert stub_sdk.init_calls == []
 
 
+def test_fallback_diagnostics_use_stderr(capsys):
+    sentry_bootstrap._safe_print("leadpoet_sentry_disabled sdk_import=TestError")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "leadpoet_sentry_disabled sdk_import=TestError\n"
+
+
 def test_enabled_flag_alone_is_not_enough(monkeypatch, stub_sdk):
     monkeypatch.setenv(sentry_bootstrap.ENABLED_ENV, "true")
     monkeypatch.delenv(sentry_bootstrap.DSN_ENV, raising=False)

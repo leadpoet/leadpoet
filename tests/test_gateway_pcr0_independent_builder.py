@@ -255,3 +255,60 @@ def test_measurement_parser_rejects_debug_pcr0():
         gateway_pcr0_builder._parse_measurement(
             json.dumps({"Measurements": {"PCR0": "0" * 96}})
         )
+
+
+def test_machine_result_file_is_isolated_from_stdout_diagnostics(
+    tmp_path, monkeypatch, capsys
+):
+    commit = "4" * 40
+    output = tmp_path / "result.json"
+
+    def build(**kwargs):
+        print("optional dependency diagnostic")
+        role = kwargs["role"]
+        return {
+            **_result(commit, role=role),
+            "verified_build_count": 3,
+            "build_evidence": [],
+        }
+
+    monkeypatch.setattr(
+        gateway_pcr0_builder,
+        "build_reproducible_gateway_pcr0",
+        build,
+    )
+    monkeypatch.setattr(
+        gateway_pcr0_builder,
+        "write_cache_entry",
+        lambda **_kwargs: None,
+    )
+
+    assert gateway_pcr0_builder.main(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "--revision",
+            commit,
+            "--work-root",
+            str(tmp_path / "work"),
+            "--cache-file",
+            str(tmp_path / "cache.json"),
+            "--builder-domain",
+            "gateway",
+            "--builder-id",
+            "gateway-parent-test",
+            "--all-roles",
+            "--output-file",
+            str(output),
+        ]
+    ) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out.count("optional dependency diagnostic") == len(
+        gateway_pcr0_builder.GATEWAY_ROLES
+    )
+    records = json.loads(output.read_text(encoding="utf-8"))
+    assert [record["role"] for record in records] == list(
+        gateway_pcr0_builder.GATEWAY_ROLES
+    )
+    assert output.stat().st_mode & 0o777 == 0o600

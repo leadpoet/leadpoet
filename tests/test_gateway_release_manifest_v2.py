@@ -155,6 +155,8 @@ def test_gateway_release_evidence_script_requires_three_builds_for_every_role():
     assert "--all-roles" in script
     assert "--builder-domain \"$BUILDER_DOMAIN\"" in script
     assert "--builder-id \"$BUILDER_ID\"" in script
+    assert "--output-file \"$TEMP_RESULT\"" in script
+    assert '> "$TEMP_RESULT"' not in script
     assert "status --porcelain --untracked-files=no" in script
     assert "normalize_build_evidence" in script
     assert "role/domain/ordinal evidence coverage is incomplete" in script

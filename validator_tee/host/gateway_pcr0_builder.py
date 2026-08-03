@@ -498,6 +498,25 @@ def load_cached_gateway_identity(
     return None
 
 
+def _write_json_result(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=".%s." % path.name,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(str(temporary), 0o600)
+        os.replace(str(temporary), str(path))
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
@@ -521,6 +540,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--builder-id", default="validator-parent")
     parser.add_argument("--role", choices=GATEWAY_ROLES)
     parser.add_argument("--all-roles", action="store_true")
+    parser.add_argument(
+        "--output-file",
+        type=Path,
+        help="write the machine-readable result to this file instead of stdout",
+    )
     parser.add_argument(
         "--pin",
         action="store_true",
@@ -553,7 +577,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             observed_pcr0_hash=entry.get("pcr0"),
             build_manifest_hash=entry.get("build_manifest_hash"),
         )
-    print(json.dumps(entries if args.all_roles else entries[0], sort_keys=True, indent=2))
+    result = entries if args.all_roles else entries[0]
+    if args.output_file is None:
+        print(json.dumps(result, sort_keys=True, indent=2))
+    else:
+        _write_json_result(args.output_file.resolve(), result)
     return 0
 
 

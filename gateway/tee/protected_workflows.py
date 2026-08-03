@@ -622,6 +622,7 @@ PROTECTED_SYMBOLS = {
         "_runsc_run_command",
         "prepare_model_sandbox_cgroup_v2",
         "model_sandbox_job_cgroup_path",
+        "_validate_oci_mount_order",
         "_oci_config",
         "RunscModelSandboxV2",
     ),

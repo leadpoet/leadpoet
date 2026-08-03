@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "7f5927886df014347008585433b5bf5d4e316a8d",
+  "baseline_commit": "02d6e6ff5096ade29714a42d45542208c2e22114",
   "entries": [
     {
       "ast_sha256": "sha256:72a7a712f2bec439d607b3d764c9ab21d15f4095f1d0989277c38a6d80ce01bd",
@@ -1157,7 +1157,7 @@
       "symbol": "_normalized_cgroup_relative_path"
     },
     {
-      "ast_sha256": "sha256:dd8fd2fd4118f8baa00ad18cebb5281f8c396afcffe4fd2a66cde0d011fc721a",
+      "ast_sha256": "sha256:7541c4fac1ca43a52c05ce6d968ebfde8b2f0c48bc8f79d45132eeded429d571",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_oci_config"
     },
@@ -1175,6 +1175,11 @@
       "ast_sha256": "sha256:b0b86442e0cc163918b9a84fe9eb6d0c32ecd91573e16a4959475da05f269375",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_runsc_run_command"
+    },
+    {
+      "ast_sha256": "sha256:f3af0d0e8cf2de9a8cf0b11b7b175fa5a324786ee22835fdf881f816042ea31f",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "_validate_oci_mount_order"
     },
     {
       "ast_sha256": "sha256:c79dcecec6abea4234dc742b8bf701c931d7c2417cbb7859d00e598b5a7fea3b",
@@ -2457,7 +2462,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:fa7a4d1baa2413ac1fd5f4557eba1e32f3e85d33a873a1ea0effe9518b3c6bb2",
-  "protected_source_commit": "5053f923484d4d82b13aeb1e2456b88270321648",
+  "manifest_hash": "sha256:ee9eb6cdeff0546f709c3587ed5ce4bb08fe14e2c5d52578058129b7a4dd535b",
+  "protected_source_commit": "02d6e6ff5096ade29714a42d45542208c2e22114",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -126,6 +126,10 @@ def _runsc_failure_evidence(stderr: str) -> tuple[str, str]:
     sanitized = strip_incontainer_trace_lines(str(stderr or ""))
     lowered = sanitized.lower()
     patterns = (
+        (
+            "no such file or directory: '/workspace/app/self-test-token'",
+            "runsc_source_mount_missing",
+        ),
         ("gofer: fork/exec /proc/self/exe: invalid argument", "runsc_gofer_exec"),
         ("cannot create gofer process", "runsc_gofer_create"),
         ("cannot set up cgroup", "runsc_cgroup_setup"),
@@ -833,6 +837,53 @@ def _normalize_source_permissions(root: Path) -> None:
     root.chmod(0o555)
 
 
+def _validate_oci_mount_order(
+    *,
+    rootfs_path: Path,
+    mounts: Sequence[Mapping[str, Any]],
+) -> None:
+    """Reject mount sequences that hide inputs needed by a later mount."""
+
+    def normalized_path(value: Any) -> Path:
+        raw = str(value or "")
+        path = Path(raw)
+        if (
+            not path.is_absolute()
+            or "\x00" in raw
+            or ".." in path.parts
+        ):
+            raise ModelSandboxV2Error("model sandbox mount path is invalid")
+        return Path(os.path.normpath(raw))
+
+    def within(path: Path, parent: Path) -> bool:
+        try:
+            path.relative_to(parent)
+        except ValueError:
+            return False
+        return True
+
+    destinations: list[Path] = []
+    rootfs_is_host_root = Path(os.path.normpath(str(rootfs_path))) == Path("/")
+    for index, mount in enumerate(mounts):
+        if not isinstance(mount, Mapping):
+            raise ModelSandboxV2Error("model sandbox mount is invalid")
+        destination = normalized_path(mount.get("destination"))
+        if any(within(previous, destination) for previous in destinations):
+            raise ModelSandboxV2Error(
+                "model sandbox mount order replaces an earlier destination"
+            )
+        if rootfs_is_host_root:
+            for later in mounts[index + 1 :]:
+                if not isinstance(later, Mapping) or later.get("type") != "bind":
+                    continue
+                source = normalized_path(later.get("source"))
+                if within(source, destination):
+                    raise ModelSandboxV2Error(
+                        "model sandbox mount order hides a later bind source"
+                    )
+        destinations.append(destination)
+
+
 def _oci_config(
     *,
     config: RunscSandboxConfigV2,
@@ -876,12 +927,6 @@ def _oci_config(
     mounts = [
         {"destination": "/proc", "type": "proc", "source": "proc"},
         {
-            "destination": "/tmp",
-            "type": "tmpfs",
-            "source": "tmpfs",
-            "options": ["nosuid", "nodev", "mode=1777", "size=1073741824"],
-        },
-        {
             "destination": "/workspace/app",
             "type": "bind",
             "source": str(source_root),
@@ -923,6 +968,18 @@ def _oci_config(
                 "options": ["rbind", "ro", "nosuid", "nodev"],
             }
         )
+    # gVisor resolves bind sources while applying mounts in document order.
+    # The measured rootfs is the host root, so /tmp must be mounted only after
+    # every host-backed source beneath /tmp has been captured.
+    mounts.append(
+        {
+            "destination": "/tmp",
+            "type": "tmpfs",
+            "source": "tmpfs",
+            "options": ["nosuid", "nodev", "mode=1777", "size=1073741824"],
+        }
+    )
+    _validate_oci_mount_order(rootfs_path=config.rootfs_path, mounts=mounts)
     linux = {
         "namespaces": [
             {"type": "pid"},

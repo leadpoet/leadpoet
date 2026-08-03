@@ -25,6 +25,7 @@ from gateway.tee.model_sandbox_v2 import (
     RunscSandboxConfigV2,
     _oci_config,
     _runsc_failure_evidence,
+    _validate_oci_mount_order,
     model_source_import_bootstrap,
     prepare_model_sandbox_cgroup_v2,
 )
@@ -243,6 +244,11 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
     source_mount = next(
         item for item in config["mounts"] if item["destination"] == "/workspace/app"
     )
+    mount_positions = {
+        item["destination"]: index
+        for index, item in enumerate(config["mounts"])
+    }
+    assert mount_positions["/workspace/app"] < mount_positions["/tmp"]
     assert "ro" in source_mount["options"]
     assert "/dev/nsm" in config["linux"]["maskedPaths"]
     assert observed["stdin"] == "{}"
@@ -255,6 +261,11 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
     sandbox_socket = Path(process_env["LEADPOET_SANDBOX_PROVIDER_SOCKET"])
     assert sandbox_socket == Path(MODEL_SANDBOX_BROKER_DESTINATION) / "provider.sock"
     broker_mount = observed["broker_mount"]
+    assert (
+        mount_positions["/run"]
+        < mount_positions[MODEL_SANDBOX_BROKER_DESTINATION]
+        < mount_positions["/tmp"]
+    )
     assert broker_mount["type"] == "bind"
     assert set(broker_mount["options"]) >= {
         "rbind",
@@ -333,6 +344,16 @@ def test_runsc_model_sandbox_self_test_uses_production_launcher_and_broker(tmp_p
     assert "--platform=ptrace" in observed["command"]
     assert observed["source_token"] == "leadpoet-model-sandbox-self-test-v2\n"
     assert observed["response"] == b"leadpoet-model-sandbox-self-test-response-v2"
+    mount_positions = {
+        item["destination"]: index
+        for index, item in enumerate(observed["config"]["mounts"])
+    }
+    assert mount_positions[MODEL_SANDBOX_SOURCE_ROOT] < mount_positions["/tmp"]
+    assert (
+        mount_positions["/run"]
+        < mount_positions[MODEL_SANDBOX_BROKER_DESTINATION]
+        < mount_positions["/tmp"]
+    )
     assert observed["config"]["process"]["user"] == {
         "uid": sandbox.config.uid,
         "gid": sandbox.config.gid,
@@ -751,6 +772,11 @@ def test_runsc_model_sandbox_self_test_redacts_launcher_stderr(tmp_path):
         ),
         ("running container: Error setting up root FS: denied", "runsc_rootfs_setup"),
         ("running container: Failure to resolve mounts: denied", "runsc_mount_resolve"),
+        (
+            "FileNotFoundError: [Errno 2] No such file or directory: "
+            "'/workspace/app/self-test-token'",
+            "runsc_source_mount_missing",
+        ),
         ("unexpected failure", "runsc_nonzero"),
     ),
 )
@@ -832,6 +858,46 @@ def test_runsc_model_sandbox_rejects_redirected_broker_mount(tmp_path):
             broker_root=redirected,
             process_args=[sys.executable, "-c", "pass"],
             environment={},
+        )
+
+
+def test_model_sandbox_mount_order_rejects_hidden_later_bind_source():
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="mount order hides a later bind source",
+    ):
+        _validate_oci_mount_order(
+            rootfs_path=Path("/"),
+            mounts=[
+                {
+                    "destination": "/tmp",
+                    "type": "tmpfs",
+                    "source": "tmpfs",
+                },
+                {
+                    "destination": MODEL_SANDBOX_SOURCE_ROOT,
+                    "type": "bind",
+                    "source": "/tmp/leadpoet-model/source",
+                },
+            ],
+        )
+
+
+def test_model_sandbox_mount_order_rejects_later_parent_replacement():
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="mount order replaces an earlier destination",
+    ):
+        _validate_oci_mount_order(
+            rootfs_path=Path("/"),
+            mounts=[
+                {
+                    "destination": "/run/leadpoet",
+                    "type": "bind",
+                    "source": "/tmp/leadpoet-model/broker",
+                },
+                {"destination": "/run", "type": "tmpfs", "source": "tmpfs"},
+            ],
         )
 
 

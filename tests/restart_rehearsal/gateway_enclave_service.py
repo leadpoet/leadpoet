@@ -100,6 +100,43 @@ class _MeasuredRunscBoundary:
             values[name] = value
         return values
 
+    @staticmethod
+    def _verify_mount_order(
+        *,
+        root_path: Path,
+        mounts: list[dict[str, Any]],
+    ) -> None:
+        def normalized(value: Any) -> Path:
+            raw = str(value or "")
+            path = Path(raw)
+            if not path.is_absolute() or "\x00" in raw or ".." in path.parts:
+                raise ValueError("model sandbox mount path differs")
+            return Path(os.path.normpath(str(path)))
+
+        def within(path: Path, parent: Path) -> bool:
+            try:
+                path.relative_to(parent)
+            except ValueError:
+                return False
+            return True
+
+        destinations: list[Path] = []
+        for index, mount in enumerate(mounts):
+            if not isinstance(mount, dict):
+                raise ValueError("model sandbox mount differs")
+            destination = normalized(mount.get("destination"))
+            if any(within(previous, destination) for previous in destinations):
+                raise ValueError("model sandbox mount order differs")
+            if root_path == Path("/"):
+                for later in mounts[index + 1 :]:
+                    if not isinstance(later, dict):
+                        raise ValueError("model sandbox mount differs")
+                    if later.get("type") != "bind":
+                        continue
+                    if within(normalized(later.get("source")), destination):
+                        raise ValueError("model sandbox mount order differs")
+            destinations.append(destination)
+
     def _verify_oci_document(
         self,
         *,
@@ -203,6 +240,10 @@ class _MeasuredRunscBoundary:
             for item in mounts
             if isinstance(item, dict)
         }
+        self._verify_mount_order(
+            root_path=Path(str(root.get("path") or "")),
+            mounts=mounts,
+        )
         source_mount = by_destination.get("/workspace/app") or {}
         broker_mount = by_destination.get("/run/leadpoet") or {}
         run_mount = by_destination.get("/run") or {}

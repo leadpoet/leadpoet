@@ -9,10 +9,124 @@ def test_restart_preserves_all_tracked_diffs_before_pull():
     script = Path("validator_restart.sh").read_text(encoding="utf-8")
     preserve = script.index("preserving tracked local validator checkout changes")
     stash = script.index('git stash push -m "$restart_stash_message" -- .')
-    fetch = script.index("git fetch origin")
+    fetch = script.index("fetch_validator_origin_with_retry", stash)
 
     assert preserve < stash < fetch
     assert "--include-untracked" not in script[preserve:fetch]
+
+
+def _validator_fetch_functions() -> str:
+    script = Path("validator_restart.sh").read_text(encoding="utf-8")
+    functions = []
+    for name in (
+        "git_fetch_failure_is_transient",
+        "fetch_validator_origin_with_retry",
+    ):
+        start = script.index(f"{name}() {{")
+        end = script.index("\n}\n", start) + 3
+        functions.append(script[start:end])
+    return "\n".join(functions)
+
+
+def _run_validator_fetch_fixture(
+    tmp_path: Path,
+    *,
+    mode: str,
+) -> tuple[subprocess.CompletedProcess[str], int, list[str]]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    count_file = tmp_path / "git-count"
+    sleep_file = tmp_path / "sleeps"
+    git = bin_dir / "git"
+    git.write_text(
+        """#!/bin/bash
+set -euo pipefail
+count=0
+[ ! -s "$GIT_COUNT_FILE" ] || count="$(cat "$GIT_COUNT_FILE")"
+count="$((count + 1))"
+printf '%s\\n' "$count" > "$GIT_COUNT_FILE"
+case "$GIT_FETCH_MODE" in
+  transient_then_ok)
+    if [ "$count" -eq 1 ]; then
+      echo "error: RPC failed; HTTP 503 curl 22" >&2
+      echo "fatal: expected 'acknowledgments'" >&2
+      exit 1
+    fi
+    echo "fetch succeeded"
+    ;;
+  exhausted)
+    echo "error: RPC failed; HTTP 503 curl 22" >&2
+    exit 1
+    ;;
+  permanent)
+    echo "remote: Repository not found" >&2
+    exit 1
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    sleep = bin_dir / "sleep"
+    sleep.write_text(
+        '#!/bin/bash\nprintf "%s\\n" "$1" >> "$SLEEP_FILE"\n',
+        encoding="utf-8",
+    )
+    sleep.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-c", "set -euo pipefail\n" + _validator_fetch_functions() + "\nfetch_validator_origin_with_retry"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+            "GIT_COUNT_FILE": str(count_file),
+            "GIT_FETCH_MODE": mode,
+            "SLEEP_FILE": str(sleep_file),
+        },
+    )
+    count = int(count_file.read_text(encoding="utf-8"))
+    sleeps = (
+        sleep_file.read_text(encoding="utf-8").splitlines()
+        if sleep_file.exists()
+        else []
+    )
+    return result, count, sleeps
+
+
+def test_validator_fetch_retries_transient_transport_failure(tmp_path: Path) -> None:
+    result, count, sleeps = _run_validator_fetch_fixture(
+        tmp_path,
+        mode="transient_then_ok",
+    )
+
+    assert result.returncode == 0
+    assert count == 2
+    assert sleeps == ["1"]
+    assert "fetch succeeded" in result.stdout
+
+
+def test_validator_fetch_does_not_retry_permanent_failure(tmp_path: Path) -> None:
+    result, count, sleeps = _run_validator_fetch_fixture(
+        tmp_path,
+        mode="permanent",
+    )
+
+    assert result.returncode == 1
+    assert count == 1
+    assert sleeps == []
+
+
+def test_validator_fetch_exhausts_bounded_transient_retries(tmp_path: Path) -> None:
+    result, count, sleeps = _run_validator_fetch_fixture(
+        tmp_path,
+        mode="exhausted",
+    )
+
+    assert result.returncode == 1
+    assert count == 4
+    assert sleeps == ["1", "2", "4"]
 
 
 def test_restart_allows_only_one_invocation_pinned_ancestor_commit():

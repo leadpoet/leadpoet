@@ -12,6 +12,7 @@ import shlex
 import stat
 import subprocess
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -25,9 +26,32 @@ TREE_VERIFICATION_SCHEMA_VERSION = (
 DEFAULT_REPO_URL = "https://github.com/leadpoet/leadpoet.git"
 DEFAULT_BRANCH = "main"
 RESTART_PROTOCOL_MARKER = 'GATEWAY_GIT_DEPLOY_PROTOCOL="1"'
+GIT_FETCH_MAX_ATTEMPTS = 4
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
+_TRANSIENT_GIT_FETCH_MARKERS = (
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "curl 18",
+    "curl 28",
+    "curl 35",
+    "curl 52",
+    "curl 55",
+    "curl 56",
+    "curl 92",
+    "connection reset",
+    "could not resolve host",
+    "early eof",
+    "expected 'acknowledgments'",
+    "failed to connect",
+    "remote end hung up unexpectedly",
+    "temporary failure in name resolution",
+    "timeoutexpired",
+)
 
 
 class GatewayGitDeployError(RuntimeError):
@@ -91,6 +115,29 @@ def _run_git_bytes(
             rendered = rendered[:500] + "..."
         raise GatewayGitDeployError(f"git {args[0]} failed: {rendered}")
     return result.stdout
+
+
+def _fetch_branch_with_retry(repo_root: Path, branch: str) -> None:
+    """Retry only transport-class fetch failures before production shutdown."""
+
+    for attempt in range(1, GIT_FETCH_MAX_ATTEMPTS + 1):
+        try:
+            _run_git(
+                repo_root,
+                "fetch",
+                "--prune",
+                "origin",
+                f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+            )
+            return
+        except GatewayGitDeployError as exc:
+            detail = str(exc).lower()
+            is_transient = any(
+                marker in detail for marker in _TRANSIENT_GIT_FETCH_MARKERS
+            )
+            if not is_transient or attempt == GIT_FETCH_MAX_ATTEMPTS:
+                raise
+            time.sleep(2 ** (attempt - 1))
 
 
 def _candidate_blob_entries(
@@ -578,13 +625,7 @@ def prepare_deployment(
     _require_clean_checkout(repo_root)
 
     previous_sha = _run_git(repo_root, "rev-parse", "HEAD").lower()
-    _run_git(
-        repo_root,
-        "fetch",
-        "--prune",
-        "origin",
-        f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
-    )
+    _fetch_branch_with_retry(repo_root, branch)
     branch_head_sha = _run_git(
         repo_root,
         "rev-parse",

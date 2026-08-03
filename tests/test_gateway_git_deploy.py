@@ -77,6 +77,78 @@ def _paths(tmp_path: Path) -> tuple[Path, Path, Path]:
     )
 
 
+def test_fetch_branch_retries_transient_transport_failure(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+    sleeps: list[int] = []
+
+    def fake_run_git(_repo_root: Path, *args: str, **_kwargs) -> str:
+        calls.append(args)
+        if len(calls) == 1:
+            raise gateway_git_deploy.GatewayGitDeployError(
+                "git fetch failed: RPC failed; HTTP 503 curl 22; "
+                "fatal: expected 'acknowledgments'"
+            )
+        return ""
+
+    monkeypatch.setattr(gateway_git_deploy, "_run_git", fake_run_git)
+    monkeypatch.setattr(gateway_git_deploy.time, "sleep", sleeps.append)
+
+    gateway_git_deploy._fetch_branch_with_retry(Path("/repo"), "main")
+
+    assert calls == [
+        ("fetch", "--prune", "origin", "+refs/heads/main:refs/remotes/origin/main"),
+        ("fetch", "--prune", "origin", "+refs/heads/main:refs/remotes/origin/main"),
+    ]
+    assert sleeps == [1]
+
+
+def test_fetch_branch_does_not_retry_permanent_failure(monkeypatch) -> None:
+    calls = 0
+
+    def fake_run_git(_repo_root: Path, *_args: str, **_kwargs) -> str:
+        nonlocal calls
+        calls += 1
+        raise gateway_git_deploy.GatewayGitDeployError(
+            "git fetch failed: remote: Repository not found"
+        )
+
+    monkeypatch.setattr(gateway_git_deploy, "_run_git", fake_run_git)
+    monkeypatch.setattr(
+        gateway_git_deploy.time,
+        "sleep",
+        lambda _seconds: pytest.fail("permanent fetch failure was retried"),
+    )
+
+    with pytest.raises(
+        gateway_git_deploy.GatewayGitDeployError,
+        match="Repository not found",
+    ):
+        gateway_git_deploy._fetch_branch_with_retry(Path("/repo"), "main")
+
+    assert calls == 1
+
+
+def test_fetch_branch_exhausts_bounded_transient_retries(monkeypatch) -> None:
+    calls = 0
+    sleeps: list[int] = []
+
+    def fake_run_git(_repo_root: Path, *_args: str, **_kwargs) -> str:
+        nonlocal calls
+        calls += 1
+        raise gateway_git_deploy.GatewayGitDeployError(
+            "git fetch failed: HTTP 503"
+        )
+
+    monkeypatch.setattr(gateway_git_deploy, "_run_git", fake_run_git)
+    monkeypatch.setattr(gateway_git_deploy.time, "sleep", sleeps.append)
+
+    with pytest.raises(gateway_git_deploy.GatewayGitDeployError, match="HTTP 503"):
+        gateway_git_deploy._fetch_branch_with_retry(Path("/repo"), "main")
+
+    assert calls == gateway_git_deploy.GIT_FETCH_MAX_ATTEMPTS
+    assert sleeps == [1, 2, 4]
+
+
 def _materialize_commit(
     repo: Path,
     commit: str,

@@ -410,6 +410,31 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+git_fetch_failure_is_transient() {
+  LC_ALL=C grep -Eiq \
+    "HTTP (429|500|502|503|504)|curl (18|28|35|52|55|56|92)|connection reset|could not resolve host|early EOF|expected 'acknowledgments'|failed to connect|remote end hung up unexpectedly|temporary failure in name resolution|timed out"
+}
+
+fetch_validator_origin_with_retry() {
+  local attempt output
+  for attempt in 1 2 3 4; do
+    if output="$(git fetch origin 2>&1)"; then
+      [ -z "$output" ] || printf '%s\n' "$output"
+      return 0
+    fi
+    printf '%s\n' "$output" >&2
+    if ! printf '%s\n' "$output" | git_fetch_failure_is_transient; then
+      return 1
+    fi
+    if [ "$attempt" -eq 4 ]; then
+      return 1
+    fi
+    echo "Transient Git fetch failure; retrying before validator shutdown ($attempt/4)" >&2
+    sleep "$((1 << (attempt - 1)))"
+  done
+  return 1
+}
+
 cd "$VALIDATOR_ROOT"
 
 echo "Preflight: preserving tracked local validator checkout changes if present"
@@ -421,7 +446,7 @@ fi
 
 echo "Pulling latest GitHub main before stopping validator"
 before_head="$(git rev-parse HEAD)"
-git fetch origin
+fetch_validator_origin_with_retry
 VALIDATOR_LINEAGE_AUTHORITY_SHA="$(git rev-parse origin/main)"
 if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ]; then
   if ! [[ "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then

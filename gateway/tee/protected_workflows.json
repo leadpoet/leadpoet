@@ -1137,9 +1137,19 @@
       "symbol": "MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES"
     },
     {
-      "ast_sha256": "sha256:4300b78de19b72ef68261969f09f692b2789b571c3bfc51a6bcc922cbfd54c6a",
+      "ast_sha256": "sha256:84f316912990861614f622c6faad76d1ff5f55b3407cb3ab61a3c8c328d60484",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "MODEL_SANDBOX_VISIBLE_ROOT"
+    },
+    {
+      "ast_sha256": "sha256:d8a943f123faf4d5a68e417abe8dafaa449500fade49f052e24643d68150cafb",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2"
+    },
+    {
+      "ast_sha256": "sha256:22ac1e3d823221caac0526ce8729cf742b539bc39c44d6543039abfd1c9b0f05",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "_copy_readonly_visible_tree"
     },
     {
       "ast_sha256": "sha256:a3d953b953d8f3fc1622443cd0f5d855713d4a17f9aed1acf8e30a4c4bf8e65e",
@@ -1157,7 +1167,7 @@
       "symbol": "_normalized_cgroup_relative_path"
     },
     {
-      "ast_sha256": "sha256:7541c4fac1ca43a52c05ce6d968ebfde8b2f0c48bc8f79d45132eeded429d571",
+      "ast_sha256": "sha256:407bd02b911324eb51e1da963ab13dfec32b180acb765b12820a77d42605ae65",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_oci_config"
     },
@@ -1177,9 +1187,19 @@
       "symbol": "_runsc_run_command"
     },
     {
-      "ast_sha256": "sha256:f3af0d0e8cf2de9a8cf0b11b7b175fa5a324786ee22835fdf881f816042ea31f",
+      "ast_sha256": "sha256:d01a3ffad093fafc10a3d3a5622416ac584f7b9436c2b4eb85931042705a22a5",
       "path": "gateway/tee/model_sandbox_v2.py",
-      "symbol": "_validate_oci_mount_order"
+      "symbol": "_sandbox_visible_parent"
+    },
+    {
+      "ast_sha256": "sha256:dad384dfea14c8e967676ae24e0a4a505282a1d831fefda423dc880f31c0a602",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "_sandbox_visible_path"
+    },
+    {
+      "ast_sha256": "sha256:8816e525f23db412ebb8e46776fc503f91479943d0387ff090db7453eebe9c90",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "_sandbox_visible_workspace"
     },
     {
       "ast_sha256": "sha256:c79dcecec6abea4234dc742b8bf701c931d7c2417cbb7859d00e598b5a7fea3b",
@@ -2462,7 +2482,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:ee9eb6cdeff0546f709c3587ed5ce4bb08fe14e2c5d52578058129b7a4dd535b",
-  "protected_source_commit": "02d6e6ff5096ade29714a42d45542208c2e22114",
+  "manifest_hash": "sha256:4934646b24611577c00a27d71d7652999e4bf76c47b82cad76dde93059319302",
+  "protected_source_commit": "484579bbc2f47a51af480767df00cbc66ccac7ff",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

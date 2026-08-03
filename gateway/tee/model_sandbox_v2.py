@@ -728,6 +728,12 @@ class RunscModelSandboxV2:
                 _normalize_source_permissions(provider_snapshot_root)
             broker_root = tmp_root / "broker"
             broker_root.mkdir(mode=0o700)
+            try:
+                os.chown(broker_root, self.config.uid, self.config.gid)
+            except OSError as exc:
+                raise ModelSandboxV2Error(
+                    "model sandbox provider broker identity is unavailable"
+                ) from exc
             provider_scope = self._transport.create_scope(
                 job_id=job_id,
                 purpose=purpose,
@@ -749,6 +755,17 @@ class RunscModelSandboxV2:
             )
             server.start()
             try:
+                try:
+                    os.chown(
+                        server.socket_path,
+                        self.config.uid,
+                        self.config.gid,
+                    )
+                    server.socket_path.chmod(0o600)
+                except OSError as exc:
+                    raise ModelSandboxV2Error(
+                        "model sandbox provider socket identity is unavailable"
+                    ) from exc
                 result, trace_entries = self._run(
                     value,
                     artifact=artifact,

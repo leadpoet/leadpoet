@@ -80,11 +80,15 @@ def _runtime(tmp_path: Path):
     rootfs.mkdir()
     marker = rootfs / ROOTFS_MANIFEST_NAME
     marker.write_text('{"rootfs":"pinned"}\n', encoding="utf-8")
+    sandbox_uid = os.getuid() or 65534
+    sandbox_gid = os.getgid() or 65534
     return RunscSandboxConfigV2(
         runsc_path=runsc,
         runsc_sha256=sha256_bytes(runsc.read_bytes()),
         rootfs_path=rootfs,
         rootfs_manifest_hash=sha256_bytes(marker.read_bytes()),
+        uid=sandbox_uid,
+        gid=sandbox_gid,
     )
 
 
@@ -157,6 +161,20 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
             observed["command"] = list(command)
             observed["config"] = config
             observed["stdin"] = kwargs["input"]
+            broker_mount = next(
+                item
+                for item in config["mounts"]
+                if item["destination"] == "/run/leadpoet"
+            )
+            broker_root = Path(broker_mount["source"])
+            provider_socket = broker_root / "provider.sock"
+            observed["broker_identity"] = (
+                broker_root.stat().st_uid,
+                broker_root.stat().st_gid,
+                provider_socket.stat().st_uid,
+                provider_socket.stat().st_gid,
+                provider_socket.stat().st_mode & 0o777,
+            )
             return SimpleNamespace(returncode=0, stdout='{"version":"1"}', stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -207,6 +225,13 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
     assert "ro" in source_mount["options"]
     assert "/dev/nsm" in config["linux"]["maskedPaths"]
     assert observed["stdin"] == "{}"
+    assert observed["broker_identity"] == (
+        sandbox.config.uid,
+        sandbox.config.gid,
+        sandbox.config.uid,
+        sandbox.config.gid,
+        0o600,
+    )
 
 
 def test_model_source_bootstrap_preserves_trusted_gateway_and_canonical_packages(

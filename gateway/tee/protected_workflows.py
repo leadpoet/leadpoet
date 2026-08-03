@@ -613,6 +613,10 @@ PROTECTED_SYMBOLS = {
         "CoordinatorWeightSourceV2",
     ),
     "gateway/tee/model_sandbox_v2.py": (
+        "_runsc_run_command",
+        "prepare_model_sandbox_cgroup_v2",
+        "model_sandbox_job_cgroup_path",
+        "_oci_config",
         "RunscModelSandboxV2",
     ),
     "gateway/tee/provider_broker_v2.py": (

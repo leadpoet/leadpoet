@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import base64
@@ -22,7 +23,9 @@ from gateway.tee.model_sandbox_v2 import (
     RunscModelSandboxV2,
     RunscSandboxConfigV2,
     _oci_config,
+    _runsc_failure_evidence,
     model_source_import_bootstrap,
+    prepare_model_sandbox_cgroup_v2,
 )
 from gateway.tee.sandbox_runtime_artifact import (
     build_rootfs_manifest,
@@ -197,6 +200,7 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
     sandbox = RunscModelSandboxV2(
         config=_runtime(tmp_path),
         transport=transport,
+        cgroup_parent="leadpoet-model",
         process_runner=runner,
     )
     try:
@@ -213,8 +217,11 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
 
     assert result["output"] == {"version": "1"}
     assert result["input_hash"] == sha256_json({})
+    assert "--rootless=false" in observed["command"]
+    assert "--rootless=true" not in observed["command"]
     assert "--network=none" in observed["command"]
     config = observed["config"]
+    assert config["linux"]["cgroupsPath"].startswith("leadpoet-model/lp-")
     assert config["root"]["readonly"] is True
     assert config["process"]["cwd"] == "/tmp"
     process_env = dict(item.split("=", 1) for item in config["process"]["env"])
@@ -268,6 +275,296 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
         0o600,
     )
     assert observed["broker_connected"] is True
+
+
+def test_runsc_model_sandbox_self_test_uses_production_launcher_and_broker(tmp_path):
+    observed = {}
+
+    def runner(command, **_kwargs):
+        if "run" not in command:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        bundle_arg = next(item for item in command if item.startswith("--bundle="))
+        config = json.loads(
+            (Path(bundle_arg.split("=", 1)[1]) / "config.json").read_text()
+        )
+        destinations = {item["destination"]: item for item in config["mounts"]}
+        broker_root = Path(destinations[MODEL_SANDBOX_BROKER_DESTINATION]["source"])
+        source_root = Path(destinations[MODEL_SANDBOX_SOURCE_ROOT]["source"])
+        observed["command"] = list(command)
+        observed["config"] = config
+        observed["source_token"] = (source_root / "self-test-token").read_text()
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client.connect(str(broker_root / "provider.sock"))
+            client.sendall(b"leadpoet-model-sandbox-self-test-request-v2")
+            observed["response"] = client.recv(128)
+        finally:
+            client.close()
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                '{"schema_version":"leadpoet.model_sandbox_self_test.v2",'
+                '"status":"passed"}'
+            ),
+            stderr="",
+        )
+
+    transport = BrokeredProviderTransportV2(lambda _request: {})
+    sandbox = RunscModelSandboxV2(
+        config=_runtime(tmp_path),
+        transport=transport,
+        cgroup_parent="leadpoet-model",
+        process_runner=runner,
+    )
+    try:
+        result = sandbox.self_test()
+    finally:
+        transport.restore()
+
+    assert result == {
+        "schema_version": "leadpoet.model_sandbox_self_test.v2",
+        "status": "passed",
+    }
+    assert "--rootless=false" in observed["command"]
+    assert "--rootless=true" not in observed["command"]
+    assert "--network=none" in observed["command"]
+    assert "--host-uds=open" in observed["command"]
+    assert "--platform=ptrace" in observed["command"]
+    assert observed["source_token"] == "leadpoet-model-sandbox-self-test-v2\n"
+    assert observed["response"] == b"leadpoet-model-sandbox-self-test-response-v2"
+    assert observed["config"]["process"]["user"] == {
+        "uid": sandbox.config.uid,
+        "gid": sandbox.config.gid,
+    }
+    assert observed["config"]["linux"]["resources"]["memory"]["limit"] == (
+        sandbox.config.memory_limit_bytes
+    )
+    assert observed["config"]["linux"]["cgroupsPath"].startswith(
+        "leadpoet-model/lp-self-test-"
+    )
+
+
+def test_prepare_model_sandbox_cgroup_delegates_required_controllers(tmp_path):
+    root = tmp_path / "cgroup"
+    root.mkdir()
+    (root / "cgroup.controllers").write_text("cpu io memory pids\n", encoding="ascii")
+    (root / "cgroup.procs").write_text("101\n202\n", encoding="ascii")
+    (root / "cgroup.subtree_control").write_text("", encoding="ascii")
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    proc_cgroup.write_text("0::/\n", encoding="ascii")
+
+    def writer(path, value):
+        if path.name == "cgroup.procs":
+            current = (root / "cgroup.procs").read_text(encoding="ascii").split()
+            (root / "cgroup.procs").write_text(
+                "\n".join(item for item in current if item != value),
+                encoding="ascii",
+            )
+            path.parent.mkdir(exist_ok=True)
+            existing = path.read_text(encoding="ascii") if path.exists() else ""
+            path.write_text(existing + value + "\n", encoding="ascii")
+            return
+        path.write_text(value.replace("+", ""), encoding="ascii")
+        if path == root / "cgroup.subtree_control":
+            jobs = root / "leadpoet-model"
+            jobs.mkdir(exist_ok=True)
+            (jobs / "cgroup.controllers").write_text(
+                "cpu io memory pids\n", encoding="ascii"
+            )
+            (jobs / "cgroup.subtree_control").touch()
+
+    parent = prepare_model_sandbox_cgroup_v2(
+        cgroup_root=root,
+        proc_self_cgroup_path=proc_cgroup,
+        writer=writer,
+    )
+
+    assert parent == "leadpoet-model"
+    assert (root / "cgroup.procs").read_text(encoding="ascii") == ""
+    assert set(
+        (root / "leadpoet-runtime" / "cgroup.procs")
+        .read_text(encoding="ascii")
+        .split()
+    ) == {"101", "202"}
+    assert set(
+        (root / "cgroup.subtree_control").read_text(encoding="ascii").split()
+    ) == {"cpu", "io", "memory", "pids"}
+    assert set(
+        (root / "leadpoet-model" / "cgroup.subtree_control")
+        .read_text(encoding="ascii")
+        .split()
+    ) == {"cpu", "io", "memory", "pids"}
+
+
+def test_prepare_model_sandbox_cgroup_returns_path_relative_to_nested_parent(
+    tmp_path,
+):
+    root = tmp_path / "cgroup"
+    parent = root / "nested" / "enclave"
+    runtime = parent / "leadpoet-runtime"
+    runtime.mkdir(parents=True)
+    (parent / "cgroup.controllers").write_text(
+        "cpu memory pids\n", encoding="ascii"
+    )
+    (parent / "cgroup.procs").write_text("", encoding="ascii")
+    (parent / "cgroup.subtree_control").write_text(
+        "cpu memory pids\n", encoding="ascii"
+    )
+    (runtime / "cgroup.procs").write_text("101\n", encoding="ascii")
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    proc_cgroup.write_text(
+        "0::/nested/enclave/leadpoet-runtime\n", encoding="ascii"
+    )
+
+    def writer(path, value):
+        path.write_text(value.replace("+", ""), encoding="ascii")
+        if path == parent / "cgroup.subtree_control":
+            jobs = parent / "leadpoet-model"
+            jobs.mkdir(exist_ok=True)
+            (jobs / "cgroup.controllers").write_text(
+                "cpu memory pids\n", encoding="ascii"
+            )
+            (jobs / "cgroup.subtree_control").touch()
+
+    cgroup_parent = prepare_model_sandbox_cgroup_v2(
+        cgroup_root=root,
+        proc_self_cgroup_path=proc_cgroup,
+        writer=writer,
+    )
+
+    assert cgroup_parent == "leadpoet-model"
+
+
+def test_prepare_model_sandbox_cgroup_fails_closed_on_busy_parent(tmp_path):
+    root = tmp_path / "cgroup"
+    root.mkdir()
+    (root / "cgroup.controllers").write_text("cpu memory pids\n", encoding="ascii")
+    (root / "cgroup.procs").write_text("", encoding="ascii")
+    (root / "cgroup.subtree_control").write_text("", encoding="ascii")
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    proc_cgroup.write_text("0::/\n", encoding="ascii")
+
+    def writer(path, value):
+        if path.name == "cgroup.subtree_control":
+            raise OSError(16, "device or resource busy")
+        path.write_text(value, encoding="ascii")
+
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="cgroup controller delegation failed",
+    ):
+        prepare_model_sandbox_cgroup_v2(
+            cgroup_root=root,
+            proc_self_cgroup_path=proc_cgroup,
+            writer=writer,
+        )
+
+
+def test_runsc_model_sandbox_self_test_redacts_launcher_stderr(tmp_path):
+    secret = "provider-secret-must-not-escape"
+
+    def runner(command, **_kwargs):
+        if "run" in command:
+            return SimpleNamespace(
+                returncode=128,
+                stdout="",
+                stderr=(
+                    "running container: cannot set up cgroup for root: "
+                    f"configuring cgroup: device busy {secret}"
+                ),
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    transport = BrokeredProviderTransportV2(lambda _request: {})
+    sandbox = RunscModelSandboxV2(
+        config=_runtime(tmp_path),
+        transport=transport,
+        cgroup_parent="leadpoet-model",
+        process_runner=runner,
+    )
+    try:
+        with pytest.raises(ModelSandboxV2Error) as raised:
+            sandbox.self_test()
+    finally:
+        transport.restore()
+
+    message = str(raised.value)
+    assert "code=runsc_cgroup_setup" in message
+    assert "stderr_hash=sha256:" in message
+    assert secret not in message
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    (
+        (
+            "running container: cannot create gofer process: gofer: "
+            "fork/exec /proc/self/exe: invalid argument",
+            "runsc_gofer_exec",
+        ),
+        ("running container: Error setting up root FS: denied", "runsc_rootfs_setup"),
+        ("running container: Failure to resolve mounts: denied", "runsc_mount_resolve"),
+        ("unexpected failure", "runsc_nonzero"),
+    ),
+)
+def test_runsc_failure_evidence_is_bounded(stderr, expected):
+    code, digest = _runsc_failure_evidence(stderr)
+    assert code == expected
+    assert digest.startswith("sha256:")
+
+
+def test_scoring_manager_runs_model_sandbox_self_test_before_accepting_jobs():
+    service_path = Path(__file__).parents[1] / "gateway" / "tee" / "tee_service.py"
+    tree = ast.parse(service_path.read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "get_v2_scoring_job_manager"
+    )
+    self_test_calls = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "self_test"
+    ]
+    executor_calls = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "ScoringExecutorV2"
+    ]
+    cgroup_calls = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "prepare_model_sandbox_cgroup_v2"
+    ]
+    sandbox_calls = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "RunscModelSandboxV2"
+    ]
+    assert len(cgroup_calls) == 1
+    assert len(sandbox_calls) == 1
+    assert len(self_test_calls) == 1
+    assert len(executor_calls) == 1
+    assert cgroup_calls[0].lineno < sandbox_calls[0].lineno
+    assert sandbox_calls[0].lineno < self_test_calls[0].lineno
+    assert self_test_calls[0].lineno < executor_calls[0].lineno
+    model_sandbox_keywords = [
+        keyword
+        for keyword in executor_calls[0].keywords
+        if keyword.arg == "model_sandbox"
+    ]
+    assert len(model_sandbox_keywords) == 1
+    assert isinstance(model_sandbox_keywords[0].value, ast.Name)
+    assert model_sandbox_keywords[0].value.id == "model_sandbox"
 
 
 def test_runsc_model_sandbox_rejects_redirected_broker_mount(tmp_path):
@@ -390,6 +687,7 @@ def test_private_baseline_builds_exact_measured_provider_evidence_tape(tmp_path)
     sandbox = RunscModelSandboxV2(
         config=_runtime(tmp_path),
         transport=transport,
+        cgroup_parent="leadpoet-model",
         process_runner=lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0, stdout="[]", stderr=""
         ),
@@ -438,6 +736,7 @@ def test_candidate_model_never_claims_to_generate_baseline_tape(tmp_path):
     sandbox = RunscModelSandboxV2(
         config=_runtime(tmp_path),
         transport=transport,
+        cgroup_parent="leadpoet-model",
         process_runner=lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0, stdout="[]", stderr=""
         ),
@@ -488,6 +787,7 @@ def test_runsc_dev_replay_has_snapshot_mount_and_no_live_provider_channel(tmp_pa
     sandbox = RunscModelSandboxV2(
         config=_runtime(tmp_path),
         transport=transport,
+        cgroup_parent="leadpoet-model",
         process_runner=runner,
     )
     try:
@@ -553,6 +853,7 @@ def test_runsc_dev_replay_propagates_typed_snapshot_miss(tmp_path):
     sandbox = RunscModelSandboxV2(
         config=_runtime(tmp_path),
         transport=transport,
+        cgroup_parent="leadpoet-model",
         process_runner=runner,
     )
     try:
@@ -592,6 +893,7 @@ def test_runsc_dev_replay_logs_cleanup_failure(tmp_path, caplog):
     sandbox = RunscModelSandboxV2(
         config=_runtime(tmp_path),
         transport=transport,
+        cgroup_parent="leadpoet-model",
         process_runner=runner,
     )
     try:
@@ -626,6 +928,7 @@ def test_runsc_model_sandbox_rejects_runtime_binary_drift(tmp_path):
         RunscModelSandboxV2(
             config=config,
             transport=BrokeredProviderTransportV2(lambda _request: {}),
+            cgroup_parent="leadpoet-model",
         )
 
 
@@ -636,6 +939,7 @@ def test_runsc_model_sandbox_rejects_secret_environment_fields(tmp_path):
     sandbox = RunscModelSandboxV2(
         config=_runtime(tmp_path),
         transport=transport,
+        cgroup_parent="leadpoet-model",
         process_runner=lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0, stdout="{}", stderr=""
         ),
@@ -661,6 +965,7 @@ def test_runsc_model_sandbox_rejects_parent_supplied_provider_credentials(tmp_pa
     sandbox = RunscModelSandboxV2(
         config=_runtime(tmp_path),
         transport=transport,
+        cgroup_parent="leadpoet-model",
         process_runner=lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0, stdout="{}", stderr=""
         ),
@@ -701,6 +1006,7 @@ def test_model_sandbox_rejects_malformed_provider_catalog_rows(
     sandbox = RunscModelSandboxV2(
         config=_runtime(tmp_path),
         transport=transport,
+        cgroup_parent="leadpoet-model",
         process_runner=lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0, stdout="{}", stderr=""
         ),

@@ -1886,6 +1886,7 @@ def get_v2_scoring_job_manager():
         from gateway.tee.model_sandbox_v2 import (
             RunscModelSandboxV2,
             RunscSandboxConfigV2,
+            prepare_model_sandbox_cgroup_v2,
         )
         from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
         from gateway.tee.scoring_executor_v2 import (
@@ -1908,15 +1909,20 @@ def get_v2_scoring_job_manager():
         sandbox_transport = BrokeredProviderTransportV2(
             execute_v2_provider_request
         )
+        sandbox_config = RunscSandboxConfigV2.from_measured_runtime()
+        cgroup_parent = prepare_model_sandbox_cgroup_v2()
+        model_sandbox = RunscModelSandboxV2(
+            config=sandbox_config,
+            transport=sandbox_transport,
+            cgroup_parent=cgroup_parent,
+        )
+        model_sandbox.self_test()
         executor = ScoringExecutorV2(
             provider_execute=execute_v2_provider_request,
             retry_policy_hashes=retry_hashes,
             config_supplier=runtime.research_lab_config,
             execution_config=configuration["research_lab_execution_config"],
-            model_sandbox=RunscModelSandboxV2(
-                config=RunscSandboxConfigV2.from_measured_runtime(),
-                transport=sandbox_transport,
-            ),
+            model_sandbox=model_sandbox,
             artifact_seal=seal_v2_inter_enclave_artifact,
         )
         v2_scoring_job_manager = ExecutionJobManagerV2(

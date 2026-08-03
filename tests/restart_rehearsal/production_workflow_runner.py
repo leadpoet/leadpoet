@@ -4120,7 +4120,10 @@ def _exercise_model_sandbox_scope_binding() -> dict[str, Any]:
         MODEL_SANDBOX_BROKER_DESTINATION,
         RunscSandboxConfigV2,
         _oci_config,
+        _runsc_run_command,
+        model_sandbox_job_cgroup_path,
         model_source_import_bootstrap,
+        prepare_model_sandbox_cgroup_v2,
     )
     from research_lab.eval.private_runtime import (
         DockerPrivateModelSpec,
@@ -4267,6 +4270,40 @@ print(",".join((
             uid=os.getuid() or 65534,
             gid=os.getgid() or 65534,
         )
+        cgroup_root = root / "cgroup"
+        cgroup_parent = cgroup_root / "nested" / "enclave"
+        cgroup_runtime = cgroup_parent / "leadpoet-runtime"
+        cgroup_runtime.mkdir(parents=True)
+        (cgroup_parent / "cgroup.controllers").write_text(
+            "cpu io memory pids\n", encoding="ascii"
+        )
+        (cgroup_parent / "cgroup.procs").write_text("", encoding="ascii")
+        (cgroup_parent / "cgroup.subtree_control").write_text(
+            "cpu io memory pids\n", encoding="ascii"
+        )
+        (cgroup_runtime / "cgroup.procs").write_text("101\n", encoding="ascii")
+        proc_cgroup = root / "proc-self-cgroup"
+        proc_cgroup.write_text(
+            "0::/nested/enclave/leadpoet-runtime\n", encoding="ascii"
+        )
+
+        def write_cgroup(path: Path, value: str) -> None:
+            path.write_text(value.replace("+", ""), encoding="ascii")
+            if path == cgroup_parent / "cgroup.subtree_control":
+                jobs = cgroup_parent / "leadpoet-model"
+                jobs.mkdir(exist_ok=True)
+                (jobs / "cgroup.controllers").write_text(
+                    "cpu io memory pids\n", encoding="ascii"
+                )
+                (jobs / "cgroup.subtree_control").touch()
+
+        delegated_parent = prepare_model_sandbox_cgroup_v2(
+            cgroup_root=cgroup_root,
+            proc_self_cgroup_path=proc_cgroup,
+            writer=write_cgroup,
+        )
+        if delegated_parent != "leadpoet-model":
+            raise RuntimeError("model sandbox cgroup delegation differs")
         os.chown(broker_root, runtime_config.uid, runtime_config.gid)
         exposed_socket = broker_root / "provider.sock"
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -4281,6 +4318,17 @@ print(",".join((
                 broker_root=broker_root,
                 process_args=[sys.executable, "-c", "pass"],
                 environment={},
+                cgroups_path=model_sandbox_job_cgroup_path(
+                    delegated_parent,
+                    "lp-rehearsal-contract",
+                ),
+            )
+            runsc_command = _runsc_run_command(
+                config=runtime_config,
+                runsc_root=root / "runsc",
+                bundle=root / "bundle",
+                sandbox_id="lp-rehearsal-contract",
+                host_uds=True,
             )
             process_environment = dict(
                 item.split("=", 1)
@@ -4324,6 +4372,21 @@ print(",".join((
                 }.issubset(set(broker_mount.get("options") or []))
                 or broker_root.is_relative_to(rootfs)
                 or "/dev/log" not in oci_config["linux"]["maskedPaths"]
+                or oci_config["linux"].get("cgroupsPath")
+                != "leadpoet-model/lp-rehearsal-contract"
+                or oci_config["linux"]["resources"]
+                != {
+                    "memory": {"limit": runtime_config.memory_limit_bytes},
+                    "cpu": {
+                        "quota": runtime_config.cpu_quota,
+                        "period": runtime_config.cpu_period,
+                    },
+                    "pids": {"limit": runtime_config.pids_limit},
+                }
+                or "--rootless=false" not in runsc_command
+                or "--rootless=true" in runsc_command
+                or "--network=none" not in runsc_command
+                or "--host-uds=open" not in runsc_command
             ):
                 raise RuntimeError(
                     "model sandbox provider broker gofer contract differs"
@@ -4333,6 +4396,8 @@ print(",".join((
     return {
         "final_provider_cost_scope_bound": True,
         "model_provider_broker_gofer_mount_bound": True,
+        "model_sandbox_cgroup_delegated": True,
+        "model_sandbox_rootful_launcher_bound": True,
         "model_source_import_isolated": True,
         "preliminary_scope_rejected": True,
     }
@@ -4759,6 +4824,16 @@ def main() -> int:
                 "model-sandbox-scope-binding",
                 {},
             ).get("model_provider_broker_gofer_mount_bound")
+            is True
+            and behavior_evidence.get(
+                "model-sandbox-scope-binding",
+                {},
+            ).get("model_sandbox_cgroup_delegated")
+            is True
+            and behavior_evidence.get(
+                "model-sandbox-scope-binding",
+                {},
+            ).get("model_sandbox_rootful_launcher_bound")
             is True
         ),
         "chain_settlement_state_space_complete": (

@@ -1132,9 +1132,29 @@
       "symbol": "ExecutionJobManagerV2"
     },
     {
-      "ast_sha256": "sha256:831862ffb71adda4a6aee6b035c21279cf4daa71c31c56717cc7aa3fe59532c5",
+      "ast_sha256": "sha256:4300b78de19b72ef68261969f09f692b2789b571c3bfc51a6bcc922cbfd54c6a",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2"
+    },
+    {
+      "ast_sha256": "sha256:3a7cae365e3b250cb96a41a2ae712d73a368d6dfb0f0b57cad62ea4399a715a6",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "_oci_config"
+    },
+    {
+      "ast_sha256": "sha256:b0b86442e0cc163918b9a84fe9eb6d0c32ecd91573e16a4959475da05f269375",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "_runsc_run_command"
+    },
+    {
+      "ast_sha256": "sha256:c79dcecec6abea4234dc742b8bf701c931d7c2417cbb7859d00e598b5a7fea3b",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "model_sandbox_job_cgroup_path"
+    },
+    {
+      "ast_sha256": "sha256:02467a89536e6a216a6b8a8160703ec9452cf1536ba300d9c1b50670a85374af",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "prepare_model_sandbox_cgroup_v2"
     },
     {
       "ast_sha256": "sha256:184d58505dcf8edd8bc6533c62f58b156f301085a8355a93f0eb4c805958a2f4",
@@ -2407,7 +2427,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:65eef6323314045beee7203458e82f1354afcc9a2f240e31e4464d48eb29826d",
+  "manifest_hash": "sha256:e9ccc9aac1a13bc2f02c93c509bd560a340dff166ac1d643b7eb41cf772c689d",
   "protected_source_commit": "5053f923484d4d82b13aeb1e2456b88270321648",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

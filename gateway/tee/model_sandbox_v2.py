@@ -13,9 +13,11 @@ import platform
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
+from threading import Event, Lock, Thread
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
@@ -78,6 +80,12 @@ MAX_PROVIDER_EVIDENCE_CACHE_BYTES = 32 * 1024 * 1024
 MODEL_SANDBOX_SOURCE_ROOT = "/workspace/app"
 MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT = "/app/gateway/_attested_runtime"
 MODEL_SANDBOX_BROKER_DESTINATION = "/run/leadpoet"
+MODEL_SANDBOX_SELF_TEST_SCHEMA_VERSION = "leadpoet.model_sandbox_self_test.v2"
+MODEL_SANDBOX_SELF_TEST_TIMEOUT_SECONDS = 60
+MODEL_SANDBOX_CGROUP_ROOT = Path("/sys/fs/cgroup")
+MODEL_SANDBOX_RUNTIME_CGROUP_NAME = "leadpoet-runtime"
+MODEL_SANDBOX_JOB_CGROUP_NAME = "leadpoet-model"
+MODEL_SANDBOX_REQUIRED_CONTROLLERS = frozenset({"cpu", "memory", "pids"})
 MODEL_SANDBOX_PYTHONPATH = ":".join(
     (
         "/app",
@@ -100,10 +108,205 @@ _CREDENTIAL_ENV_NAMES = frozenset(
     }
 )
 _MEASURED_CREDENTIAL_PLACEHOLDER = "leadpoet-coordinator-managed-v2"
+_MODEL_SANDBOX_CGROUP_LOCK = Lock()
 
 
 class ModelSandboxV2Error(RuntimeError):
     """A model runtime, bundle, provider path, or output failed validation."""
+
+
+def _runsc_failure_evidence(stderr: str) -> tuple[str, str]:
+    """Return a fixed launcher code and hash without exposing sandbox output."""
+
+    sanitized = strip_incontainer_trace_lines(str(stderr or ""))
+    lowered = sanitized.lower()
+    patterns = (
+        ("gofer: fork/exec /proc/self/exe: invalid argument", "runsc_gofer_exec"),
+        ("cannot create gofer process", "runsc_gofer_create"),
+        ("cannot set up cgroup", "runsc_cgroup_setup"),
+        ("configuring cgroup", "runsc_cgroup_setup"),
+        ("error setting up root fs", "runsc_rootfs_setup"),
+        ("error setting up fs", "runsc_mount_setup"),
+        ("failure to resolve mounts", "runsc_mount_resolve"),
+        ("failed to chroot", "runsc_gofer_chroot"),
+        ("permission denied", "runsc_permission_denied"),
+    )
+    failure_code = "runsc_nonzero"
+    for marker, candidate in patterns:
+        if marker in lowered:
+            failure_code = candidate
+            break
+    return failure_code, sha256_bytes(sanitized.encode("utf-8"))
+
+
+def _runsc_run_command(
+    *,
+    config: "RunscSandboxConfigV2",
+    runsc_root: Path,
+    bundle: Path,
+    sandbox_id: str,
+    host_uds: bool,
+) -> list[str]:
+    command = [
+        str(config.runsc_path),
+        "--root=%s" % runsc_root,
+        # The measured enclave starts runsc as root and the OCI document
+        # supplies an explicit 65534:65534 user namespace. gVisor rootless
+        # mode instead remaps the caller to container root and is incompatible
+        # with that keep-ID contract.
+        "--rootless=false",
+        "--network=none",
+    ]
+    if host_uds:
+        command.append("--host-uds=open")
+    return [
+        *command,
+        "--platform=ptrace",
+        "run",
+        "--bundle=%s" % bundle,
+        sandbox_id,
+    ]
+
+
+def _write_cgroup_value(path: Path, value: str) -> None:
+    with path.open("w", encoding="ascii") as handle:
+        handle.write(value)
+
+
+def _current_cgroup_path(proc_self_cgroup_path: Path) -> str:
+    try:
+        lines = proc_self_cgroup_path.read_text(encoding="ascii").splitlines()
+    except OSError as exc:
+        raise ModelSandboxV2Error("model sandbox cgroup identity is unavailable") from exc
+    unified = [line.split(":", 2)[2] for line in lines if line.startswith("0::")]
+    if len(unified) != 1 or not unified[0].startswith("/"):
+        raise ModelSandboxV2Error("model sandbox requires cgroup v2")
+    relative = Path(unified[0]).as_posix().lstrip("/")
+    if ".." in Path(relative).parts:
+        raise ModelSandboxV2Error("model sandbox cgroup identity is invalid")
+    return relative
+
+
+def prepare_model_sandbox_cgroup_v2(
+    *,
+    cgroup_root: Path = MODEL_SANDBOX_CGROUP_ROOT,
+    proc_self_cgroup_path: Path = Path("/proc/self/cgroup"),
+    writer: Callable[[Path, str], None] = _write_cgroup_value,
+) -> str:
+    """Create a delegated cgroup-v2 subtree without dropping job limits."""
+
+    with _MODEL_SANDBOX_CGROUP_LOCK:
+        root = cgroup_root.resolve()
+        current_relative = _current_cgroup_path(proc_self_cgroup_path)
+        current = root / current_relative
+        if current.name == MODEL_SANDBOX_RUNTIME_CGROUP_NAME:
+            parent = current.parent
+        else:
+            parent = current
+        runtime = parent / MODEL_SANDBOX_RUNTIME_CGROUP_NAME
+        jobs = parent / MODEL_SANDBOX_JOB_CGROUP_NAME
+        required_paths = (
+            parent / "cgroup.controllers",
+            parent / "cgroup.procs",
+            parent / "cgroup.subtree_control",
+        )
+        if not parent.is_dir() or any(not path.is_file() for path in required_paths):
+            raise ModelSandboxV2Error("model sandbox cgroup v2 hierarchy is unavailable")
+        available = set(
+            (parent / "cgroup.controllers").read_text(encoding="ascii").split()
+        )
+        if not MODEL_SANDBOX_REQUIRED_CONTROLLERS.issubset(available):
+            raise ModelSandboxV2Error(
+                "model sandbox required cgroup controllers are unavailable"
+            )
+        runtime.mkdir(mode=0o755, exist_ok=True)
+        if current == parent:
+            for _attempt in range(3):
+                direct_pids = [
+                    item
+                    for item in (parent / "cgroup.procs")
+                    .read_text(encoding="ascii")
+                    .split()
+                    if item.isdigit()
+                ]
+                if not direct_pids:
+                    break
+                for pid in direct_pids:
+                    try:
+                        writer(runtime / "cgroup.procs", pid)
+                    except OSError as exc:
+                        if not Path("/proc").joinpath(pid).exists():
+                            continue
+                        raise ModelSandboxV2Error(
+                            "model sandbox runtime cgroup migration failed"
+                        ) from exc
+            if (parent / "cgroup.procs").read_text(encoding="ascii").split():
+                raise ModelSandboxV2Error(
+                    "model sandbox cgroup parent still owns processes"
+                )
+        elif current != runtime:
+            raise ModelSandboxV2Error("model sandbox runtime cgroup differs")
+
+        # runsc's cgroup-v2 implementation enables every controller exposed by
+        # the namespace root while creating the OCI cgroup path. Delegate that
+        # same set here so its later write cannot fail on an undelegated
+        # controller; the required subset remains the resource-limit contract.
+        controller_value = " ".join("+" + item for item in sorted(available))
+        try:
+            writer(parent / "cgroup.subtree_control", controller_value)
+        except OSError as exc:
+            raise ModelSandboxV2Error(
+                "model sandbox cgroup controller delegation failed"
+            ) from exc
+        enabled = set(
+            (parent / "cgroup.subtree_control")
+            .read_text(encoding="ascii")
+            .replace("+", "")
+            .split()
+        )
+        if not available.issubset(enabled):
+            raise ModelSandboxV2Error(
+                "model sandbox cgroup controller delegation differs"
+            )
+        jobs.mkdir(mode=0o755, exist_ok=True)
+        job_available = set(
+            (jobs / "cgroup.controllers").read_text(encoding="ascii").split()
+        )
+        if not available.issubset(job_available):
+            raise ModelSandboxV2Error(
+                "model sandbox job cgroup controllers differ"
+            )
+        try:
+            writer(jobs / "cgroup.subtree_control", controller_value)
+        except OSError as exc:
+            raise ModelSandboxV2Error(
+                "model sandbox job cgroup delegation failed"
+            ) from exc
+        job_enabled = set(
+            (jobs / "cgroup.subtree_control")
+            .read_text(encoding="ascii")
+            .replace("+", "")
+            .split()
+        )
+        if not available.issubset(job_enabled):
+            raise ModelSandboxV2Error(
+                "model sandbox job cgroup delegation differs"
+            )
+        # Relative OCI cgroup paths are resolved from the parent of runsc's
+        # current cgroup. The service now lives in the sibling runtime cgroup,
+        # so return the job subtree relative to their shared parent.
+        return jobs.relative_to(parent).as_posix()
+
+
+def model_sandbox_job_cgroup_path(parent: str, sandbox_id: str) -> str:
+    if (
+        not parent
+        or parent.startswith("/")
+        or ".." in Path(parent).parts
+        or not re.fullmatch(r"lp-[a-z0-9-]{1,120}", str(sandbox_id or ""))
+    ):
+        raise ModelSandboxV2Error("model sandbox job cgroup identity is invalid")
+    return str(Path(parent) / sandbox_id)
 
 
 def model_source_import_bootstrap(
@@ -502,6 +705,7 @@ def _oci_config(
     process_args: list[str],
     environment: Mapping[str, str],
     readonly_mounts: Optional[Mapping[str, Path]] = None,
+    cgroups_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     process_env = {
         "HOME": "/tmp",
@@ -583,6 +787,74 @@ def _oci_config(
                 "options": ["rbind", "ro", "nosuid", "nodev"],
             }
         )
+    linux = {
+        "namespaces": [
+            {"type": "pid"},
+            {"type": "ipc"},
+            {"type": "uts"},
+            {"type": "mount"},
+            {"type": "network"},
+            {"type": "user"},
+        ],
+        "uidMappings": [{"containerID": config.uid, "hostID": config.uid, "size": 1}],
+        "gidMappings": [{"containerID": config.gid, "hostID": config.gid, "size": 1}],
+        "resources": {
+            "memory": {"limit": config.memory_limit_bytes},
+            "cpu": {"quota": config.cpu_quota, "period": config.cpu_period},
+            "pids": {"limit": config.pids_limit},
+        },
+        "maskedPaths": [
+            "/dev/log",
+            "/dev/nsm",
+            "/proc/acpi",
+            "/proc/keys",
+            "/proc/kcore",
+            "/proc/latency_stats",
+            "/proc/timer_list",
+            "/proc/timer_stats",
+            "/sys/firmware",
+        ],
+        "readonlyPaths": [
+            "/proc/asound",
+            "/proc/bus",
+            "/proc/fs",
+            "/proc/irq",
+            "/proc/sys",
+            "/proc/sysrq-trigger",
+        ],
+        "seccomp": {
+            "defaultAction": "SCMP_ACT_ALLOW",
+            "architectures": ["SCMP_ARCH_X86_64"],
+            "syscalls": [
+                {
+                    "names": ["socket"],
+                    "action": "SCMP_ACT_ERRNO",
+                    "errnoRet": 1,
+                    "args": [
+                        {
+                            "index": 0,
+                            "value": int(socket_af_unix()),
+                            "op": "SCMP_CMP_NE",
+                        }
+                    ],
+                },
+                {
+                    "names": ["mount", "pivot_root", "ptrace", "bpf", "keyctl", "perf_event_open"],
+                    "action": "SCMP_ACT_ERRNO",
+                    "errnoRet": 1,
+                },
+            ],
+        },
+    }
+    if cgroups_path is not None:
+        normalized_cgroups_path = str(cgroups_path or "")
+        if (
+            not normalized_cgroups_path
+            or normalized_cgroups_path.startswith("/")
+            or ".." in Path(normalized_cgroups_path).parts
+        ):
+            raise ModelSandboxV2Error("model sandbox job cgroup path is invalid")
+        linux["cgroupsPath"] = normalized_cgroups_path
     return {
         "ociVersion": "1.0.2",
         "process": {
@@ -610,65 +882,7 @@ def _oci_config(
         "root": {"path": str(config.rootfs_path), "readonly": True},
         "hostname": "leadpoet-model-sandbox",
         "mounts": mounts,
-        "linux": {
-            "namespaces": [
-                {"type": "pid"},
-                {"type": "ipc"},
-                {"type": "uts"},
-                {"type": "mount"},
-                {"type": "network"},
-                {"type": "user"},
-            ],
-            "uidMappings": [{"containerID": config.uid, "hostID": config.uid, "size": 1}],
-            "gidMappings": [{"containerID": config.gid, "hostID": config.gid, "size": 1}],
-            "resources": {
-                "memory": {"limit": config.memory_limit_bytes},
-                "cpu": {"quota": config.cpu_quota, "period": config.cpu_period},
-                "pids": {"limit": config.pids_limit},
-            },
-            "maskedPaths": [
-                "/dev/log",
-                "/dev/nsm",
-                "/proc/acpi",
-                "/proc/keys",
-                "/proc/kcore",
-                "/proc/latency_stats",
-                "/proc/timer_list",
-                "/proc/timer_stats",
-                "/sys/firmware",
-            ],
-            "readonlyPaths": [
-                "/proc/asound",
-                "/proc/bus",
-                "/proc/fs",
-                "/proc/irq",
-                "/proc/sys",
-                "/proc/sysrq-trigger",
-            ],
-            "seccomp": {
-                "defaultAction": "SCMP_ACT_ALLOW",
-                "architectures": ["SCMP_ARCH_X86_64"],
-                "syscalls": [
-                    {
-                        "names": ["socket"],
-                        "action": "SCMP_ACT_ERRNO",
-                        "errnoRet": 1,
-                        "args": [
-                            {
-                                "index": 0,
-                                "value": int(socket_af_unix()),
-                                "op": "SCMP_CMP_NE",
-                            }
-                        ],
-                    },
-                    {
-                        "names": ["mount", "pivot_root", "ptrace", "bpf", "keyctl", "perf_event_open"],
-                        "action": "SCMP_ACT_ERRNO",
-                        "errnoRet": 1,
-                    },
-                ],
-            },
-        },
+        "linux": linux,
     }
 
 
@@ -688,16 +902,203 @@ class RunscModelSandboxV2:
         *,
         config: RunscSandboxConfigV2,
         transport: BrokeredProviderTransportV2,
+        cgroup_parent: str,
         process_runner: Callable[..., Any] = _completed_process_runner,
         utc_day_supplier: Callable[[], str] = lambda: time.strftime(
             "%Y-%m-%d", time.gmtime()
         ),
     ) -> None:
         config.validate()
+        model_sandbox_job_cgroup_path(cgroup_parent, "lp-constructor-check")
         self.config = config
+        self.cgroup_parent = cgroup_parent
         self._transport = transport
         self._process_runner = process_runner
         self._utc_day_supplier = utc_day_supplier
+
+    def self_test(self) -> Dict[str, Any]:
+        """Exercise the measured launcher and broker boundary before job intake."""
+
+        request_token = b"leadpoet-model-sandbox-self-test-request-v2"
+        response_token = b"leadpoet-model-sandbox-self-test-response-v2"
+        expected = {
+            "schema_version": MODEL_SANDBOX_SELF_TEST_SCHEMA_VERSION,
+            "status": "passed",
+        }
+        with tempfile.TemporaryDirectory(
+            prefix="lp-model-self-test-", dir="/tmp"
+        ) as tmp:
+            tmp_root = Path(tmp)
+            source_root = tmp_root / "source"
+            source_root.mkdir(mode=0o755)
+            probe_path = source_root / "self-test-token"
+            probe_path.write_text("leadpoet-model-sandbox-self-test-v2\n", encoding="utf-8")
+            _normalize_source_permissions(source_root)
+
+            broker_root = tmp_root / "broker"
+            broker_root.mkdir(mode=0o700)
+            try:
+                os.chown(broker_root, self.config.uid, self.config.gid)
+            except OSError as exc:
+                raise ModelSandboxV2Error(
+                    "model sandbox self-test broker identity is unavailable"
+                ) from exc
+            socket_path = broker_root / "provider.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.settimeout(MODEL_SANDBOX_SELF_TEST_TIMEOUT_SECONDS)
+            listener.bind(str(socket_path))
+            listener.listen(1)
+            try:
+                os.chown(socket_path, self.config.uid, self.config.gid)
+                socket_path.chmod(0o600)
+            except OSError as exc:
+                listener.close()
+                raise ModelSandboxV2Error(
+                    "model sandbox self-test socket identity is unavailable"
+                ) from exc
+
+            served = Event()
+            server_errors: list[str] = []
+
+            def serve_once() -> None:
+                try:
+                    connection, _ = listener.accept()
+                    with connection:
+                        received = b""
+                        while len(received) < len(request_token):
+                            chunk = connection.recv(len(request_token) - len(received))
+                            if not chunk:
+                                break
+                            received += chunk
+                        if received != request_token:
+                            server_errors.append("request_mismatch")
+                            return
+                        connection.sendall(response_token)
+                        served.set()
+                except (OSError, TimeoutError):
+                    server_errors.append("socket_unavailable")
+
+            server_thread = Thread(
+                target=serve_once,
+                name="model-sandbox-self-test-broker",
+                daemon=True,
+            )
+
+            bundle = tmp_root / "bundle"
+            bundle.mkdir(mode=0o700)
+            runsc_root = tmp_root / "runsc"
+            runsc_root.mkdir(mode=0o700)
+            sandbox_id = "lp-self-test-%s" % secrets.token_hex(8)
+            script = """
+import json
+import os
+from pathlib import Path
+import socket
+import gateway.tee.sandbox_http_shim_v2
+import leadpoet_canonical
+
+if Path('/workspace/app/self-test-token').read_text(encoding='utf-8') != 'leadpoet-model-sandbox-self-test-v2\\n':
+    raise RuntimeError('source mount differs')
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    client.settimeout(10)
+    client.connect(os.environ['LEADPOET_SANDBOX_PROVIDER_SOCKET'])
+    client.sendall(b'leadpoet-model-sandbox-self-test-request-v2')
+    response = client.recv(128)
+finally:
+    client.close()
+if response != b'leadpoet-model-sandbox-self-test-response-v2':
+    raise RuntimeError('broker response differs')
+print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'status': 'passed'}, sort_keys=True, separators=(',', ':')))
+"""
+            config_doc = _oci_config(
+                config=self.config,
+                source_root=source_root,
+                broker_root=broker_root,
+                process_args=[self.config.python_path, "-c", script],
+                environment={},
+                cgroups_path=model_sandbox_job_cgroup_path(
+                    self.cgroup_parent, sandbox_id
+                ),
+            )
+            (bundle / "config.json").write_text(
+                canonical_json(config_doc), encoding="utf-8"
+            )
+            command = _runsc_run_command(
+                config=self.config,
+                runsc_root=runsc_root,
+                bundle=bundle,
+                sandbox_id=sandbox_id,
+                host_uds=True,
+            )
+            completed = None
+            server_thread.start()
+            try:
+                completed = self._process_runner(
+                    command,
+                    input="",
+                    text=True,
+                    capture_output=True,
+                    timeout=MODEL_SANDBOX_SELF_TEST_TIMEOUT_SECONDS,
+                    env={
+                        "HOME": str(tmp_root),
+                        "PATH": "/usr/local/bin:/usr/bin:/bin",
+                    },
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ModelSandboxV2Error(
+                    "model sandbox self-test timed out"
+                ) from exc
+            finally:
+                try:
+                    self._process_runner(
+                        [
+                            str(self.config.runsc_path),
+                            "--root=%s" % runsc_root,
+                            "delete",
+                            "--force",
+                            sandbox_id,
+                        ],
+                        text=True,
+                        capture_output=True,
+                        timeout=30,
+                        env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
+                        check=False,
+                    )
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "model_sandbox_self_test_runsc_cleanup_failed "
+                        "sandbox_id=%s error_type=%s",
+                        sandbox_id,
+                        type(cleanup_exc).__name__,
+                    )
+                listener.close()
+                server_thread.join(timeout=5)
+
+            if completed is None or int(completed.returncode) != 0:
+                stderr = "" if completed is None else str(completed.stderr or "")
+                failure_code, stderr_hash = _runsc_failure_evidence(stderr)
+                returncode = "unknown" if completed is None else str(completed.returncode)
+                raise ModelSandboxV2Error(
+                    "model sandbox self-test failed code=%s returncode=%s stderr_hash=%s"
+                    % (failure_code, returncode, stderr_hash)
+                )
+            if not served.is_set() or server_errors:
+                raise ModelSandboxV2Error(
+                    "model sandbox self-test failed code=broker_round_trip"
+                )
+            try:
+                result = json.loads(str(completed.stdout or ""))
+            except json.JSONDecodeError as exc:
+                raise ModelSandboxV2Error(
+                    "model sandbox self-test output is invalid"
+                ) from exc
+            if result != expected:
+                raise ModelSandboxV2Error(
+                    "model sandbox self-test result differs"
+                )
+            return expected
 
     def execute(
         self,
@@ -1089,6 +1490,10 @@ class RunscModelSandboxV2:
         bundle.mkdir(mode=0o700)
         runsc_root = tmp_root / "runsc"
         runsc_root.mkdir(mode=0o700)
+        sandbox_id = "lp-dev-provider-%s-%s" % (
+            hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:16],
+            secrets.token_hex(8),
+        )
         bootstrap = (
             "from gateway.tee.sandbox_http_shim_v2 import install as _lp_install;"
             "_lp_install();\n"
@@ -1111,24 +1516,20 @@ class RunscModelSandboxV2:
             ],
             environment=environment,
             readonly_mounts=readonly_mounts,
+            cgroups_path=model_sandbox_job_cgroup_path(
+                self.cgroup_parent, sandbox_id
+            ),
         )
         (bundle / "config.json").write_text(
             canonical_json(config_doc), encoding="utf-8"
         )
-        sandbox_id = "lp-dev-provider-%s-%s" % (
-            hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:16],
-            secrets.token_hex(8),
+        command = _runsc_run_command(
+            config=self.config,
+            runsc_root=runsc_root,
+            bundle=bundle,
+            sandbox_id=sandbox_id,
+            host_uds=False,
         )
-        command = [
-            str(self.config.runsc_path),
-            "--root=%s" % runsc_root,
-            "--rootless=true",
-            "--network=none",
-            "--platform=ptrace",
-            "run",
-            "--bundle=%s" % bundle,
-            sandbox_id,
-        ]
         try:
             completed = self._process_runner(
                 command,
@@ -1222,6 +1623,10 @@ class RunscModelSandboxV2:
         bundle.mkdir(mode=0o700)
         runsc_root = tmp_root / "runsc"
         runsc_root.mkdir(mode=0o700)
+        sandbox_id = "lp-dev-%s-%s" % (
+            hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:16],
+            secrets.token_hex(8),
+        )
         config_doc = _oci_config(
             config=self.config,
             source_root=source_root,
@@ -1239,24 +1644,20 @@ class RunscModelSandboxV2:
             readonly_mounts={
                 "/research_lab_dev_snapshots": snapshot_root,
             },
+            cgroups_path=model_sandbox_job_cgroup_path(
+                self.cgroup_parent, sandbox_id
+            ),
         )
         (bundle / "config.json").write_text(
             canonical_json(config_doc), encoding="utf-8"
         )
-        sandbox_id = "lp-dev-%s-%s" % (
-            hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:16],
-            secrets.token_hex(8),
+        command = _runsc_run_command(
+            config=self.config,
+            runsc_root=runsc_root,
+            bundle=bundle,
+            sandbox_id=sandbox_id,
+            host_uds=False,
         )
-        command = [
-            str(self.config.runsc_path),
-            "--root=%s" % runsc_root,
-            "--rootless=true",
-            "--network=none",
-            "--platform=ptrace",
-            "run",
-            "--bundle=%s" % bundle,
-            sandbox_id,
-        ]
         try:
             completed = self._process_runner(
                 command,
@@ -1362,6 +1763,10 @@ class RunscModelSandboxV2:
         bundle.mkdir(mode=0o700)
         runsc_root = tmp_root / "runsc"
         runsc_root.mkdir(mode=0o700)
+        sandbox_id = "lp-%s-%s" % (
+            hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:16],
+            secrets.token_hex(8),
+        )
         environment = {
             **dict(value["environment"]),
             "RESEARCH_LAB_PROVIDER_COST_SCOPE": value["provider_cost_scope"],
@@ -1418,25 +1823,20 @@ class RunscModelSandboxV2:
             ],
             environment=environment,
             readonly_mounts=readonly_mounts,
+            cgroups_path=model_sandbox_job_cgroup_path(
+                self.cgroup_parent, sandbox_id
+            ),
         )
         (bundle / "config.json").write_text(
             canonical_json(config_doc), encoding="utf-8"
         )
-        sandbox_id = "lp-%s-%s" % (
-            hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:16],
-            secrets.token_hex(8),
+        command = _runsc_run_command(
+            config=self.config,
+            runsc_root=runsc_root,
+            bundle=bundle,
+            sandbox_id=sandbox_id,
+            host_uds=True,
         )
-        command = [
-            str(self.config.runsc_path),
-            "--root=%s" % runsc_root,
-            "--rootless=true",
-            "--network=none",
-            "--host-uds=open",
-            "--platform=ptrace",
-            "run",
-            "--bundle=%s" % bundle,
-            sandbox_id,
-        ]
         try:
             completed = self._process_runner(
                 command,
@@ -1468,16 +1868,21 @@ class RunscModelSandboxV2:
                     env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
                     check=False,
                 )
-            except Exception:
-                pass
+            except Exception as cleanup_exc:
+                logger.warning(
+                    "model_sandbox_runsc_cleanup_failed "
+                    "sandbox_id=%s error_type=%s",
+                    sandbox_id,
+                    type(cleanup_exc).__name__,
+                )
         if int(completed.returncode) != 0:
             stripped_stderr = strip_incontainer_trace_lines(
                 str(completed.stderr or "")
             )
-            error_hash = sha256_bytes(stripped_stderr.encode("utf-8"))
+            failure_code, error_hash = _runsc_failure_evidence(stripped_stderr)
             raise ModelSandboxV2Error(
-                "model sandbox failed with code %s stderr_hash=%s"
-                % (completed.returncode, error_hash)
+                "model sandbox failed code=%s returncode=%s stderr_hash=%s"
+                % (failure_code, completed.returncode, error_hash)
             )
         if len(str(completed.stdout).encode("utf-8")) > MAX_MODEL_OUTPUT_BYTES:
             raise ModelSandboxV2Error("model sandbox output exceeds limit")

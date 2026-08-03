@@ -11,6 +11,13 @@ restart, scoring, attestation, weight submission, finalization, or cleanup.
 Export fails closed by dropping an event that cannot be scrubbed; application
 behavior fails open by preserving the original result or exception.
 
+The validator restart controller prepares a hash-locked, host-only telemetry
+environment before production shutdown when its authoritative Python does not
+already contain the SDK. The environment is cached and used only to emit the
+bounded restart summary; it never replaces `VALIDATOR_PYTHON_BIN` or enters a
+validator, worker, auditor, relay, or enclave authority path. Preparation is
+bounded and fail-open, so telemetry installation cannot block a restart.
+
 The restart and canonical-weight event matrix is in
 [`sentry_restart_weight_instrumentation.md`](sentry_restart_weight_instrumentation.md).
 

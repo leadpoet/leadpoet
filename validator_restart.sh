@@ -9,6 +9,8 @@ EXPECTED_AWS_ACCOUNT="${EXPECTED_AWS_ACCOUNT:-493765492819}"
 # Interpreter for the long-lived validator process. The hydrated environment
 # can select the existing production venv without changing restart behavior.
 VALIDATOR_PYTHON_BIN="${VALIDATOR_PYTHON_BIN:-python3}"
+VALIDATOR_TELEMETRY_PYTHON_BIN="$VALIDATOR_PYTHON_BIN"
+VALIDATOR_TELEMETRY_CACHE_ROOT="${VALIDATOR_TELEMETRY_CACHE_ROOT:-$HOME/.cache/leadpoet-observability/validator-host}"
 VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST="${VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/gateway-v2-release-manifest.json}"
 VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE="${VALIDATOR_V2_GATEWAY_RELEASE_LINEAGE:-/home/ec2-user/.config/leadpoet/gateway-v2-release-lineage.json}"
 VALIDATOR_V2_RELEASE_MANIFEST="${VALIDATOR_V2_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
@@ -300,9 +302,10 @@ PY
 }
 
 emit_validator_restart_sentry_summary() {
-  local status="$1" candidate_sha summary_status shutdown_flag=()
+  local status="$1" candidate_sha summary_status telemetry_python shutdown_flag=()
   command -v timeout >/dev/null 2>&1 || return 0
-  [ -x "$VALIDATOR_PYTHON_BIN" ] || return 0
+  telemetry_python="${VALIDATOR_TELEMETRY_PYTHON_BIN:-$VALIDATOR_PYTHON_BIN}"
+  command -v "$telemetry_python" >/dev/null 2>&1 || return 0
   [ -r "$VALIDATOR_ROOT/leadpoet_observability/sentry_cli.py" ] || return 0
   candidate_sha="${VALIDATOR_DEPLOY_SHA:-}"
   summary_status="failed"
@@ -311,7 +314,7 @@ emit_validator_restart_sentry_summary() {
     shutdown_flag=(--shutdown-started)
   fi
   PYTHONPATH="$VALIDATOR_ROOT" timeout 2 \
-    "$VALIDATOR_PYTHON_BIN" -m leadpoet_observability.sentry_cli \
+    "$telemetry_python" -m leadpoet_observability.sentry_cli \
     restart-summary \
     --component validator \
     --status "$summary_status" \
@@ -321,6 +324,36 @@ emit_validator_restart_sentry_summary() {
     --release-attempts "$VALIDATOR_RELEASE_ATTEMPTS_USED" \
     --candidate-sha "$candidate_sha" \
     "${shutdown_flag[@]}" >/dev/null 2>&1 || true
+  return 0
+}
+
+prepare_validator_sentry_host_runtime() {
+  local prepared_python
+  VALIDATOR_TELEMETRY_PYTHON_BIN="$VALIDATOR_PYTHON_BIN"
+  case "${LEADPOET_SENTRY_ENABLED:-}" in
+    1|true|TRUE|yes|YES|on|ON) ;;
+    *) return 0 ;;
+  esac
+  [ -n "${LEADPOET_SENTRY_DSN:-}" ] || return 0
+  command -v timeout >/dev/null 2>&1 || return 0
+  if ! prepared_python="$(
+      PYTHONPATH="$VALIDATOR_ROOT" timeout 35 \
+        "$VALIDATOR_PYTHON_BIN" \
+        -m leadpoet_observability.host_runtime \
+        --base-python "$(command -v "$VALIDATOR_PYTHON_BIN")" \
+        --repo-root "$VALIDATOR_ROOT" \
+        --requirements "$VALIDATOR_ROOT/requirements.txt" \
+        --lock "$VALIDATOR_ROOT/leadpoet_observability/requirements-host.lock" \
+        --cache-root "$VALIDATOR_TELEMETRY_CACHE_ROOT" \
+        --timeout-seconds 30
+    )"; then
+    echo "WARNING: validator host Sentry runtime is unavailable; restart remains fail-open" >&2
+    return 0
+  fi
+  if [ -x "$prepared_python" ]; then
+    VALIDATOR_TELEMETRY_PYTHON_BIN="$prepared_python"
+    echo "Validator host Sentry runtime ready"
+  fi
   return 0
 }
 
@@ -634,6 +667,7 @@ chmod 600 "$VALIDATOR_ENV_FILE"
 set -a
 . "$VALIDATOR_ENV_EXPORT"
 set +a
+prepare_validator_sentry_host_runtime
 
 if [ ! -s "$VALIDATOR_STATEFUL_CUTOVER_MANIFEST" ]; then
   echo "ERROR: canonical stateful epoch cutover manifest is missing" >&2

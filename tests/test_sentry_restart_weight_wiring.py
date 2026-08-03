@@ -51,6 +51,21 @@ def test_restart_summary_is_bounded_best_effort_and_correlated():
         assert "trap " in source
 
 
+def test_validator_restart_uses_an_isolated_host_telemetry_runtime():
+    source = _read("validator_restart.sh")
+
+    hydrate = source.index('. "$VALIDATOR_ENV_EXPORT"')
+    prepare = source.index("prepare_validator_sentry_host_runtime", hydrate)
+    shutdown = source.index("VALIDATOR_DESTRUCTIVE_PHASE_STARTED=1")
+    assert hydrate < prepare < shutdown
+    assert 'VALIDATOR_TELEMETRY_PYTHON_BIN="$VALIDATOR_PYTHON_BIN"' in source
+    assert '"$telemetry_python" -m leadpoet_observability.sentry_cli' in source
+    assert '"$VALIDATOR_PYTHON_BIN" neurons/validator.py' in source
+    assert "requirements-host.lock" in source
+    assert "--require-hashes" in _read("leadpoet_observability/host_runtime.py")
+    assert "restart remains fail-open" in source
+
+
 def test_restart_reexec_preserves_correlation_identity():
     gateway = _read("gw_restart.sh")
     validator = _read("validator_restart.sh")

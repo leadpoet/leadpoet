@@ -1,0 +1,9 @@
+# Host-only Sentry reporter dependencies. This file is intentionally separate
+# from every enclave requirement surface and is installed only into the
+# validator's disposable, non-authoritative telemetry environment.
+certifi==2026.7.22 \
+    --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775
+sentry-sdk==2.66.1 \
+    --hash=sha256:86002793161d9a95ef04bdd8d442e9bfece5d989b755f05d6360215094a7aff6
+urllib3==2.6.3 \
+    --hash=sha256:bf272323e553dfb2e87d9bfd225ca7b0f467b919d7bbd355436d3fd37cb0acd4

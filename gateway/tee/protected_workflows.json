@@ -1132,7 +1132,7 @@
       "symbol": "ExecutionJobManagerV2"
     },
     {
-      "ast_sha256": "sha256:8bb7374b2380f9c2b059db70dcae03f555dab6899f3d051c7d9029ce47b1313e",
+      "ast_sha256": "sha256:ed18cae76a3c111d9e2e880e3d081aa5c8f3570b8f67e3233d8cbcf05efde4e9",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2"
     },
@@ -2407,7 +2407,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:94f11932bb19193ab4e909b48794fc631e8c4c6f8100df624d770bb864a938d5",
+  "manifest_hash": "sha256:964b92dba17f883f7267f11502e2d7bc914e8b9d9a645b6d012fabe355fc35df",
   "protected_source_commit": "5053f923484d4d82b13aeb1e2456b88270321648",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

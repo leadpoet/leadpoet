@@ -161,19 +161,30 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
             observed["command"] = list(command)
             observed["config"] = config
             observed["stdin"] = kwargs["input"]
-            broker_mount = next(
-                item
-                for item in config["mounts"]
-                if item["destination"] == "/run/leadpoet"
+            process_env = dict(
+                item.split("=", 1) for item in config["process"]["env"]
             )
-            broker_root = Path(broker_mount["source"])
-            provider_socket = broker_root / "provider.sock"
+            sandbox_socket = Path(
+                process_env["LEADPOET_SANDBOX_PROVIDER_SOCKET"]
+            )
+            broker_root = (
+                Path(config["root"]["path"])
+                / sandbox_socket.relative_to("/").parent
+            )
+            provider_socket = broker_root / sandbox_socket.name
+            origin_socket = Path(bundle_arg.split("=", 1)[1]).parent / "provider.sock"
             observed["broker_identity"] = (
                 broker_root.stat().st_uid,
                 broker_root.stat().st_gid,
                 provider_socket.stat().st_uid,
                 provider_socket.stat().st_gid,
                 provider_socket.stat().st_mode & 0o777,
+            )
+            observed["broker_link"] = (
+                origin_socket.stat().st_dev,
+                origin_socket.stat().st_ino,
+                provider_socket.stat().st_dev,
+                provider_socket.stat().st_ino,
             )
             return SimpleNamespace(returncode=0, stdout='{"version":"1"}', stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -225,6 +236,20 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
     assert "ro" in source_mount["options"]
     assert "/dev/nsm" in config["linux"]["maskedPaths"]
     assert observed["stdin"] == "{}"
+    assert "--host-uds=open" in observed["command"]
+    run_mount = next(
+        item for item in config["mounts"] if item["destination"] == "/run"
+    )
+    assert run_mount["type"] == "tmpfs"
+    assert "noexec" in run_mount["options"]
+    assert not any(
+        item["destination"].startswith("/leadpoet-model-broker")
+        for item in config["mounts"]
+    )
+    sandbox_socket = Path(process_env["LEADPOET_SANDBOX_PROVIDER_SOCKET"])
+    assert sandbox_socket.parts[1] == "leadpoet-model-broker"
+    assert sandbox_socket.name == "provider.sock"
+    assert "/dev/log" in config["linux"]["maskedPaths"]
     assert observed["broker_identity"] == (
         sandbox.config.uid,
         sandbox.config.gid,
@@ -232,6 +257,42 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
         sandbox.config.gid,
         0o600,
     )
+    assert observed["broker_link"][:2] == observed["broker_link"][2:]
+
+
+def test_runsc_model_sandbox_rejects_redirected_broker_parent(tmp_path):
+    config = _runtime(tmp_path)
+    outside = tmp_path / "outside-broker"
+    outside.mkdir()
+    (config.rootfs_path / "leadpoet-model-broker").symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+    transport = BrokeredProviderTransportV2(
+        lambda _request: pytest.fail("invalid broker root must fail before provider use")
+    )
+    sandbox = RunscModelSandboxV2(
+        config=config,
+        transport=transport,
+        process_runner=lambda *_args, **_kwargs: pytest.fail(
+            "invalid broker root must fail before runsc"
+        ),
+    )
+    try:
+        with pytest.raises(
+            ModelSandboxV2Error,
+            match="provider broker parent is unavailable",
+        ):
+            sandbox.execute(
+                _request(tmp_path),
+                job_id="model-job-invalid-broker-root",
+                purpose="research_lab.private_model_run.v2",
+                retry_policy_hashes={"openrouter": "sha256:" + "1" * 64},
+                terminal_sink=lambda _attempt: None,
+                artifact_sink=lambda _artifact: None,
+            )
+    finally:
+        transport.restore()
 
 
 def test_model_source_bootstrap_preserves_trusted_gateway_and_canonical_packages(
@@ -456,6 +517,7 @@ def test_runsc_dev_replay_has_snapshot_mount_and_no_live_provider_channel(tmp_pa
 
     assert result == [{"company_name": "Measured Co"}]
     assert "--network=none" in observed["command"]
+    assert "--host-uds=open" not in observed["command"]
     config = observed["config"]
     destinations = {item["destination"]: item for item in config["mounts"]}
     assert "/research_lab_dev_snapshots" in destinations

@@ -4101,6 +4101,7 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
 
 
 def _exercise_model_sandbox_scope_binding() -> dict[str, Any]:
+    import socket
     import subprocess
 
     from Leadpoet.utils.subnet_epoch import ensure_cutover_manifest_configured
@@ -4115,7 +4116,12 @@ def _exercise_model_sandbox_scope_binding() -> dict[str, Any]:
         build_research_lab_execution_config,
         validate_model_sandbox_environment,
     )
-    from gateway.tee.model_sandbox_v2 import model_source_import_bootstrap
+    from gateway.tee.model_sandbox_v2 import (
+        MODEL_SANDBOX_BROKER_ROOT,
+        RunscSandboxConfigV2,
+        _oci_config,
+        model_source_import_bootstrap,
+    )
     from research_lab.eval.private_runtime import (
         DockerPrivateModelSpec,
         PROVIDER_COST_EVALUATION_SCOPE_ENV,
@@ -4243,8 +4249,70 @@ print(",".join((
             "trusted,trusted,trusted,source,source,source"
         ):
             raise RuntimeError("model sandbox import origins differ")
+
+    with tempfile.TemporaryDirectory(
+        prefix="leadpoet-rehearsal-model-broker-"
+    ) as raw_tmp:
+        root = Path(raw_tmp)
+        rootfs = root / "rootfs"
+        source_root = rootfs / "workspace-source"
+        broker_root = rootfs / MODEL_SANDBOX_BROKER_ROOT / "job-rehearsal"
+        source_root.mkdir(parents=True)
+        broker_root.mkdir(parents=True)
+        origin_socket = root / "provider.sock"
+        exposed_socket = broker_root / "provider.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            listener.bind(str(origin_socket))
+            os.link(origin_socket, exposed_socket)
+            runtime_config = RunscSandboxConfigV2(
+                runsc_path=Path(sys.executable),
+                runsc_sha256="sha256:" + "1" * 64,
+                rootfs_path=rootfs,
+                rootfs_manifest_hash="sha256:" + "2" * 64,
+                uid=os.getuid() or 65534,
+                gid=os.getgid() or 65534,
+            )
+            oci_config = _oci_config(
+                config=runtime_config,
+                source_root=source_root,
+                broker_root=broker_root,
+                process_args=[sys.executable, "-c", "pass"],
+                environment={},
+            )
+            process_environment = dict(
+                item.split("=", 1)
+                for item in oci_config["process"]["env"]
+            )
+            expected_socket = "/%s/job-rehearsal/provider.sock" % (
+                MODEL_SANDBOX_BROKER_ROOT,
+            )
+            if (
+                process_environment.get("LEADPOET_SANDBOX_PROVIDER_SOCKET")
+                != expected_socket
+                or origin_socket.stat().st_ino != exposed_socket.stat().st_ino
+                or origin_socket.stat().st_dev != exposed_socket.stat().st_dev
+                or not any(
+                    item.get("destination") == "/run"
+                    and item.get("type") == "tmpfs"
+                    for item in oci_config["mounts"]
+                )
+                or any(
+                    str(item.get("destination") or "").startswith(
+                        "/" + MODEL_SANDBOX_BROKER_ROOT
+                    )
+                    for item in oci_config["mounts"]
+                )
+                or "/dev/log" not in oci_config["linux"]["maskedPaths"]
+            ):
+                raise RuntimeError(
+                    "model sandbox provider broker rootfs contract differs"
+                )
+        finally:
+            listener.close()
     return {
         "final_provider_cost_scope_bound": True,
+        "model_provider_broker_rootfs_bound": True,
         "model_source_import_isolated": True,
         "preliminary_scope_rejected": True,
     }
@@ -4666,6 +4734,11 @@ def main() -> int:
                 "model-sandbox-scope-binding",
                 {},
             ).get("model_source_import_isolated")
+            is True
+            and behavior_evidence.get(
+                "model-sandbox-scope-binding",
+                {},
+            ).get("model_provider_broker_rootfs_bound")
             is True
         ),
         "chain_settlement_state_space_complete": (

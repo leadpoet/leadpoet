@@ -13,6 +13,7 @@ import platform
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -77,6 +78,7 @@ MAX_MODEL_OUTPUT_BYTES = 64 * 1024 * 1024
 MAX_PROVIDER_EVIDENCE_CACHE_BYTES = 32 * 1024 * 1024
 MODEL_SANDBOX_SOURCE_ROOT = "/workspace/app"
 MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT = "/app/gateway/_attested_runtime"
+MODEL_SANDBOX_BROKER_ROOT = "leadpoet-model-broker"
 MODEL_SANDBOX_PYTHONPATH = ":".join(
     (
         "/app",
@@ -512,9 +514,21 @@ def _oci_config(
         "PYTHONPATH": MODEL_SANDBOX_PYTHONPATH,
         **dict(environment),
     }
+    sandbox_broker_root: Path | None = None
     if broker_root is not None:
-        process_env["LEADPOET_SANDBOX_PROVIDER_SOCKET"] = (
-            "/run/leadpoet/provider.sock"
+        try:
+            broker_relative = broker_root.relative_to(config.rootfs_path)
+        except ValueError as exc:
+            raise ModelSandboxV2Error(
+                "model sandbox provider broker is outside the measured rootfs"
+            ) from exc
+        if not broker_relative.parts or broker_relative.parts[0] != MODEL_SANDBOX_BROKER_ROOT:
+            raise ModelSandboxV2Error(
+                "model sandbox provider broker root is invalid"
+            )
+        sandbox_broker_root = Path("/") / broker_relative
+        process_env["LEADPOET_SANDBOX_PROVIDER_SOCKET"] = str(
+            sandbox_broker_root / "provider.sock"
         )
     mounts = [
         {"destination": "/proc", "type": "proc", "source": "proc"},
@@ -532,12 +546,16 @@ def _oci_config(
         },
     ]
     if broker_root is not None:
+        # gVisor deliberately omits host sockets from separate bind mounts.
+        # The broker therefore lives at an unguessable path in the measured
+        # rootfs. Hide ordinary runtime sockets before allowing the sandbox to
+        # open that single rootfs-contained endpoint.
         mounts.append(
             {
-                "destination": "/run/leadpoet",
-                "type": "bind",
-                "source": str(broker_root),
-                "options": ["rbind", "ro", "nosuid", "nodev", "noexec"],
+                "destination": "/run",
+                "type": "tmpfs",
+                "source": "tmpfs",
+                "options": ["nosuid", "nodev", "noexec", "mode=755", "size=1048576"],
             }
         )
     for destination, source in sorted((readonly_mounts or {}).items()):
@@ -599,6 +617,7 @@ def _oci_config(
                 "pids": {"limit": config.pids_limit},
             },
             "maskedPaths": [
+                "/dev/log",
                 "/dev/nsm",
                 "/proc/acpi",
                 "/proc/keys",
@@ -726,57 +745,84 @@ class RunscModelSandboxV2:
                     snapshot_evidence["archive_sha256"]
                 )
                 _normalize_source_permissions(provider_snapshot_root)
-            broker_root = tmp_root / "broker"
-            broker_root.mkdir(mode=0o700)
+            broker_parent = self.config.rootfs_path / MODEL_SANDBOX_BROKER_ROOT
             try:
-                os.chown(broker_root, self.config.uid, self.config.gid)
+                broker_parent.mkdir(mode=0o711, exist_ok=True)
+                parent_stat = broker_parent.lstat()
+                if (
+                    not stat.S_ISDIR(parent_stat.st_mode)
+                    or stat.S_ISLNK(parent_stat.st_mode)
+                    or parent_stat.st_uid != os.geteuid()
+                    or parent_stat.st_gid != os.getegid()
+                ):
+                    raise OSError("broker parent identity differs")
+                broker_parent.chmod(0o711)
             except OSError as exc:
                 raise ModelSandboxV2Error(
-                    "model sandbox provider broker identity is unavailable"
+                    "model sandbox provider broker parent is unavailable"
                 ) from exc
-            provider_scope = self._transport.create_scope(
-                job_id=job_id,
-                purpose=purpose,
-                logical_operation_id=job_id,
-                retry_policy_hashes={
-                    **dict(retry_policy_hashes),
-                    **source_add_runtime_retry_hashes_v2(
-                        value["provider_runtime_catalog"]
-                    ),
-                },
-                terminal_sink=terminal_sink,
-                artifact_sink=artifact_sink,
-                dynamic_provider_catalog=value["provider_runtime_catalog"],
-            )
-            server = SandboxProviderSocketServerV2(
-                socket_path=broker_root / "provider.sock",
-                transport=self._transport,
-                execution_scope=provider_scope,
-            )
-            server.start()
-            try:
+            with tempfile.TemporaryDirectory(
+                prefix="job-",
+                dir=str(broker_parent),
+            ) as broker:
+                broker_root = Path(broker)
                 try:
-                    os.chown(
-                        server.socket_path,
-                        self.config.uid,
-                        self.config.gid,
-                    )
-                    server.socket_path.chmod(0o600)
+                    os.chown(broker_root, self.config.uid, self.config.gid)
                 except OSError as exc:
                     raise ModelSandboxV2Error(
-                        "model sandbox provider socket identity is unavailable"
+                        "model sandbox provider broker identity is unavailable"
                     ) from exc
-                result, trace_entries = self._run(
-                    value,
-                    artifact=artifact,
-                    source_root=source_root,
-                    broker_root=broker_root,
-                    tmp_root=tmp_root,
+                provider_scope = self._transport.create_scope(
                     job_id=job_id,
-                    provider_snapshot_root=provider_snapshot_root,
+                    purpose=purpose,
+                    logical_operation_id=job_id,
+                    retry_policy_hashes={
+                        **dict(retry_policy_hashes),
+                        **source_add_runtime_retry_hashes_v2(
+                            value["provider_runtime_catalog"]
+                        ),
+                    },
+                    terminal_sink=terminal_sink,
+                    artifact_sink=artifact_sink,
+                    dynamic_provider_catalog=value["provider_runtime_catalog"],
                 )
-            finally:
-                server.close()
+                server = SandboxProviderSocketServerV2(
+                    socket_path=tmp_root / "provider.sock",
+                    transport=self._transport,
+                    execution_scope=provider_scope,
+                )
+                server.start()
+                try:
+                    try:
+                        os.chown(
+                            server.socket_path,
+                            self.config.uid,
+                            self.config.gid,
+                        )
+                        server.socket_path.chmod(0o600)
+                        # The listener must bind through a short host path, but
+                        # gVisor only exposes host sockets from its rootfs
+                        # gofer. A hard link gives the same socket inode a
+                        # measured-rootfs path without exposing /tmp.
+                        os.link(
+                            server.socket_path,
+                            broker_root / "provider.sock",
+                        )
+                    except OSError as exc:
+                        raise ModelSandboxV2Error(
+                            "model sandbox provider socket identity is unavailable"
+                        ) from exc
+                    result, trace_entries = self._run(
+                        value,
+                        artifact=artifact,
+                        source_root=source_root,
+                        broker_root=broker_root,
+                        tmp_root=tmp_root,
+                        job_id=job_id,
+                        provider_snapshot_root=provider_snapshot_root,
+                    )
+                finally:
+                    server.close()
         output_hash = sha256_json(result)
         generated_evidence_cache = {}
         if value["operation"] == "run_icp" and value["provider_evidence_mode"] == "record":
@@ -1367,7 +1413,10 @@ class RunscModelSandboxV2:
             )
             evidence_cache_path.chmod(0o444)
             environment["RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH"] = (
-                "/run/leadpoet/provider-evidence-cache.json"
+                str(
+                    Path("/")
+                    / evidence_cache_path.relative_to(self.config.rootfs_path)
+                )
             )
         readonly_mounts: dict[str, Path] = {}
         if provider_snapshot_root is not None:
@@ -1401,6 +1450,7 @@ class RunscModelSandboxV2:
             "--root=%s" % runsc_root,
             "--rootless=true",
             "--network=none",
+            "--host-uds=open",
             "--platform=ptrace",
             "run",
             "--bundle=%s" % bundle,

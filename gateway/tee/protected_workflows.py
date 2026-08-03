@@ -613,6 +613,8 @@ PROTECTED_SYMBOLS = {
         "CoordinatorWeightSourceV2",
     ),
     "gateway/tee/model_sandbox_v2.py": (
+        "_pid_is_direct_cgroup_member",
+        "_current_cgroup_path",
         "_runsc_run_command",
         "prepare_model_sandbox_cgroup_v2",
         "model_sandbox_job_cgroup_path",

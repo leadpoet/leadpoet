@@ -135,6 +135,8 @@ def test_gateway_enclave_measured_runtime_adapter_is_strict() -> None:
 
     assert "production_prepare_cgroup" in service
     assert "_prepare_measured_cgroup_boundary" in service
+    assert 'proc_cgroup.write_text("", encoding="ascii")' in service
+    assert 'current_pid = str(os.getpid())' in service
     assert 'delegated != "leadpoet-model"' in service
     assert '"--rootless=false"' in service
     assert '"--network=none"' in service

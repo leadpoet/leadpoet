@@ -82,6 +82,8 @@ def test_git_tree_source_authority_boundaries_are_protected():
 
 def test_model_sandbox_launcher_boundaries_are_protected():
     assert {
+        "_pid_is_direct_cgroup_member",
+        "_current_cgroup_path",
         "_runsc_run_command",
         "prepare_model_sandbox_cgroup_v2",
         "model_sandbox_job_cgroup_path",

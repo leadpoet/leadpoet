@@ -40,25 +40,33 @@ def _prepare_measured_cgroup_boundary(
     ) as raw_tmp:
         root = Path(raw_tmp)
         cgroup_root = root / "sys/fs/cgroup"
-        parent = cgroup_root / "nested/enclave"
+        parent = cgroup_root
         runtime = parent / "leadpoet-runtime"
         runtime.mkdir(parents=True)
         controllers = "cpu io memory pids"
         (parent / "cgroup.controllers").write_text(
             controllers + "\n", encoding="ascii"
         )
-        (parent / "cgroup.procs").write_text("", encoding="ascii")
-        (parent / "cgroup.subtree_control").write_text(
-            controllers + "\n", encoding="ascii"
+        current_pid = str(os.getpid())
+        (parent / "cgroup.procs").write_text(
+            current_pid + "\n", encoding="ascii"
         )
-        (runtime / "cgroup.procs").write_text("101\n", encoding="ascii")
+        (parent / "cgroup.subtree_control").write_text("", encoding="ascii")
         proc_cgroup = root / "proc-self-cgroup"
-        proc_cgroup.write_text(
-            "0::/nested/enclave/leadpoet-runtime\n",
-            encoding="ascii",
-        )
+        proc_cgroup.write_text("", encoding="ascii")
 
         def write_cgroup(path: Path, value: str) -> None:
+            if path == runtime / "cgroup.procs":
+                direct = (parent / "cgroup.procs").read_text(
+                    encoding="ascii"
+                ).split()
+                (parent / "cgroup.procs").write_text(
+                    "\n".join(item for item in direct if item != value),
+                    encoding="ascii",
+                )
+                existing = path.read_text(encoding="ascii") if path.exists() else ""
+                path.write_text(existing + value + "\n", encoding="ascii")
+                return
             path.write_text(value.replace("+", ""), encoding="ascii")
             if path == parent / "cgroup.subtree_control":
                 jobs = parent / "leadpoet-model"
@@ -87,6 +95,9 @@ def _prepare_measured_cgroup_boundary(
         )
         if (
             delegated != "leadpoet-model"
+            or (parent / "cgroup.procs").read_text(encoding="ascii").split()
+            or (runtime / "cgroup.procs").read_text(encoding="ascii").split()
+            != [current_pid]
             or parent_enabled != expected_controllers
             or jobs_enabled != expected_controllers
         ):

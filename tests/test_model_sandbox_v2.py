@@ -396,6 +396,100 @@ def test_prepare_model_sandbox_cgroup_delegates_required_controllers(tmp_path):
     ) == {"cpu", "io", "memory", "pids"}
 
 
+@pytest.mark.parametrize("proc_identity", ["", "0::\n"])
+def test_prepare_model_sandbox_cgroup_resolves_nitro_root_membership(
+    tmp_path,
+    proc_identity,
+):
+    root = tmp_path / "cgroup"
+    root.mkdir()
+    (root / "cgroup.controllers").write_text(
+        "cpu memory pids\n", encoding="ascii"
+    )
+    (root / "cgroup.procs").write_text(
+        "%s\n" % os.getpid(), encoding="ascii"
+    )
+    (root / "cgroup.subtree_control").write_text("", encoding="ascii")
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    proc_cgroup.write_text(proc_identity, encoding="ascii")
+
+    def writer(path, value):
+        if path.name == "cgroup.procs":
+            current = (root / "cgroup.procs").read_text(encoding="ascii").split()
+            (root / "cgroup.procs").write_text(
+                "\n".join(item for item in current if item != value),
+                encoding="ascii",
+            )
+            path.parent.mkdir(exist_ok=True)
+            existing = path.read_text(encoding="ascii") if path.exists() else ""
+            path.write_text(existing + value + "\n", encoding="ascii")
+            return
+        path.write_text(value.replace("+", ""), encoding="ascii")
+        if path == root / "cgroup.subtree_control":
+            jobs = root / "leadpoet-model"
+            jobs.mkdir(exist_ok=True)
+            (jobs / "cgroup.controllers").write_text(
+                "cpu memory pids\n", encoding="ascii"
+            )
+            (jobs / "cgroup.subtree_control").touch()
+
+    assert (
+        prepare_model_sandbox_cgroup_v2(
+            cgroup_root=root,
+            proc_self_cgroup_path=proc_cgroup,
+            writer=writer,
+        )
+        == "leadpoet-model"
+    )
+    assert (root / "cgroup.procs").read_text(encoding="ascii") == ""
+    assert (
+        root / "leadpoet-runtime" / "cgroup.procs"
+    ).read_text(encoding="ascii").split() == [str(os.getpid())]
+
+
+def test_prepare_model_sandbox_cgroup_rejects_unproven_nitro_membership(tmp_path):
+    root = tmp_path / "cgroup"
+    root.mkdir()
+    (root / "cgroup.controllers").write_text(
+        "cpu memory pids\n", encoding="ascii"
+    )
+    (root / "cgroup.procs").write_text("999999\n", encoding="ascii")
+    (root / "cgroup.subtree_control").write_text("", encoding="ascii")
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    proc_cgroup.write_text("", encoding="ascii")
+
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="cgroup identity is unavailable",
+    ):
+        prepare_model_sandbox_cgroup_v2(
+            cgroup_root=root,
+            proc_self_cgroup_path=proc_cgroup,
+        )
+
+
+def test_prepare_model_sandbox_cgroup_rejects_malformed_proc_identity(tmp_path):
+    root = tmp_path / "cgroup"
+    root.mkdir()
+    (root / "cgroup.controllers").write_text(
+        "cpu memory pids\n", encoding="ascii"
+    )
+    (root / "cgroup.procs").write_text(
+        "%s\n" % os.getpid(), encoding="ascii"
+    )
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    proc_cgroup.write_text("0::not-absolute\n", encoding="ascii")
+
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="cgroup identity is invalid",
+    ):
+        prepare_model_sandbox_cgroup_v2(
+            cgroup_root=root,
+            proc_self_cgroup_path=proc_cgroup,
+        )
+
+
 def test_prepare_model_sandbox_cgroup_returns_path_relative_to_nested_parent(
     tmp_path,
 ):

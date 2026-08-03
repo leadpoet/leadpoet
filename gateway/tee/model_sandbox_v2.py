@@ -173,18 +173,48 @@ def _write_cgroup_value(path: Path, value: str) -> None:
         handle.write(value)
 
 
-def _current_cgroup_path(proc_self_cgroup_path: Path) -> str:
+def _pid_is_direct_cgroup_member(cgroup: Path, pid: int) -> bool:
+    try:
+        members = (cgroup / "cgroup.procs").read_text(encoding="ascii").split()
+    except OSError as exc:
+        raise ModelSandboxV2Error(
+            "model sandbox cgroup membership is unavailable"
+        ) from exc
+    return str(pid) in members
+
+
+def _current_cgroup_path(
+    proc_self_cgroup_path: Path,
+    *,
+    cgroup_root: Path,
+    pid: Optional[int] = None,
+) -> str:
     try:
         lines = proc_self_cgroup_path.read_text(encoding="ascii").splitlines()
     except OSError as exc:
         raise ModelSandboxV2Error("model sandbox cgroup identity is unavailable") from exc
     unified = [line.split(":", 2)[2] for line in lines if line.startswith("0::")]
-    if len(unified) != 1 or not unified[0].startswith("/"):
-        raise ModelSandboxV2Error("model sandbox requires cgroup v2")
-    relative = Path(unified[0]).as_posix().lstrip("/")
-    if ".." in Path(relative).parts:
+    if len(unified) > 1:
         raise ModelSandboxV2Error("model sandbox cgroup identity is invalid")
-    return relative
+    if unified and unified[0].startswith("/"):
+        relative = Path(unified[0]).as_posix().lstrip("/")
+        if ".." in Path(relative).parts:
+            raise ModelSandboxV2Error("model sandbox cgroup identity is invalid")
+        return relative
+    if unified and unified[0]:
+        raise ModelSandboxV2Error("model sandbox cgroup identity is invalid")
+
+    # Docker-to-EIF boots a private cgroup-v2 hierarchy but may omit the
+    # conventional ``0::/`` identity line from procfs. In that environment the
+    # enclave service is a direct member of the namespace root. Verify that
+    # membership from cgroupfs itself instead of treating the absent proc line
+    # as evidence that cgroup-v2 is unavailable.
+    root = cgroup_root.resolve()
+    if (root / "cgroup.controllers").is_file() and _pid_is_direct_cgroup_member(
+        root, int(os.getpid() if pid is None else pid)
+    ):
+        return ""
+    raise ModelSandboxV2Error("model sandbox cgroup identity is unavailable")
 
 
 def prepare_model_sandbox_cgroup_v2(
@@ -197,7 +227,10 @@ def prepare_model_sandbox_cgroup_v2(
 
     with _MODEL_SANDBOX_CGROUP_LOCK:
         root = cgroup_root.resolve()
-        current_relative = _current_cgroup_path(proc_self_cgroup_path)
+        current_relative = _current_cgroup_path(
+            proc_self_cgroup_path,
+            cgroup_root=root,
+        )
         current = root / current_relative
         if current.name == MODEL_SANDBOX_RUNTIME_CGROUP_NAME:
             parent = current.parent

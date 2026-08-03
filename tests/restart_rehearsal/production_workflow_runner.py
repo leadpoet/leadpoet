@@ -4117,9 +4117,11 @@ def _exercise_model_sandbox_scope_binding() -> dict[str, Any]:
         validate_model_sandbox_environment,
     )
     from gateway.tee.model_sandbox_v2 import (
-        MODEL_SANDBOX_BROKER_DESTINATION,
+        MODEL_SANDBOX_BROKER_DIRECTORY,
         MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES,
         MODEL_SANDBOX_REQUIRED_CONTROLLERS,
+        MODEL_SANDBOX_SOURCE_DIRECTORY,
+        MODEL_SANDBOX_VISIBLE_ROOT,
         RunscSandboxConfigV2,
         _oci_config,
         _runsc_run_command,
@@ -4260,10 +4262,7 @@ print(",".join((
     ) as raw_tmp:
         root = Path(raw_tmp)
         rootfs = root / "rootfs"
-        source_root = rootfs / "workspace-source"
-        broker_root = root / "broker"
-        source_root.mkdir(parents=True)
-        broker_root.mkdir()
+        rootfs.mkdir()
         runtime_config = RunscSandboxConfigV2(
             runsc_path=Path(sys.executable),
             runsc_sha256="sha256:" + "1" * 64,
@@ -4272,6 +4271,14 @@ print(",".join((
             uid=os.getuid() or 65534,
             gid=os.getgid() or 65534,
         )
+        visible_parent = rootfs / MODEL_SANDBOX_VISIBLE_ROOT.lstrip("/")
+        visible_parent.mkdir(mode=0o711)
+        visible_workspace = visible_parent / "lp-job-rehearsal"
+        visible_workspace.mkdir(mode=0o711)
+        source_root = visible_workspace / MODEL_SANDBOX_SOURCE_DIRECTORY
+        broker_root = visible_workspace / MODEL_SANDBOX_BROKER_DIRECTORY
+        source_root.mkdir()
+        broker_root.mkdir()
         cgroup_root = root / "cgroup"
         proc_cgroup = root / "proc-self-cgroup"
         proc_lines = []
@@ -4331,15 +4338,11 @@ print(",".join((
                 item.split("=", 1)
                 for item in oci_config["process"]["env"]
             )
-            expected_socket = MODEL_SANDBOX_BROKER_DESTINATION + "/provider.sock"
-            broker_mount = next(
-                (
-                    item
-                    for item in oci_config["mounts"]
-                    if item.get("destination")
-                    == MODEL_SANDBOX_BROKER_DESTINATION
-                ),
-                None,
+            expected_socket = (
+                MODEL_SANDBOX_VISIBLE_ROOT
+                + "/lp-job-rehearsal/"
+                + MODEL_SANDBOX_BROKER_DIRECTORY
+                + "/provider.sock"
             )
             client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
@@ -4356,18 +4359,18 @@ print(",".join((
                     and item.get("type") == "tmpfs"
                     for item in oci_config["mounts"]
                 )
-                or broker_mount is None
-                or broker_mount.get("type") != "bind"
-                or Path(str(broker_mount.get("source")))
-                != broker_root.resolve()
-                or not {
-                    "rbind",
-                    "ro",
-                    "nosuid",
-                    "nodev",
-                    "noexec",
-                }.issubset(set(broker_mount.get("options") or []))
-                or broker_root.is_relative_to(rootfs)
+                or any(
+                    item.get("type") == "bind"
+                    for item in oci_config["mounts"]
+                )
+                or not broker_root.is_relative_to(rootfs)
+                or not source_root.is_relative_to(rootfs)
+                or process_environment.get("LEADPOET_MODEL_SOURCE_ROOT")
+                != (
+                    MODEL_SANDBOX_VISIBLE_ROOT
+                    + "/lp-job-rehearsal/"
+                    + MODEL_SANDBOX_SOURCE_DIRECTORY
+                )
                 or "/dev/log" not in oci_config["linux"]["maskedPaths"]
                 or oci_config["linux"].get("cgroupsPath")
                 != "leadpoet-model/lp-rehearsal-contract"
@@ -4386,13 +4389,13 @@ print(",".join((
                 or "--host-uds=open" not in runsc_command
             ):
                 raise RuntimeError(
-                    "model sandbox provider broker gofer contract differs"
+                    "model sandbox rootfs-visible input contract differs"
                 )
         finally:
             listener.close()
     return {
         "final_provider_cost_scope_bound": True,
-        "model_provider_broker_gofer_mount_bound": True,
+        "model_provider_broker_rootfs_path_bound": True,
         "model_sandbox_cgroup_delegated": True,
         "model_sandbox_rootful_launcher_bound": True,
         "model_source_import_isolated": True,
@@ -4820,7 +4823,7 @@ def main() -> int:
             and behavior_evidence.get(
                 "model-sandbox-scope-binding",
                 {},
-            ).get("model_provider_broker_gofer_mount_bound")
+            ).get("model_provider_broker_rootfs_path_bound")
             is True
             and behavior_evidence.get(
                 "model-sandbox-scope-binding",

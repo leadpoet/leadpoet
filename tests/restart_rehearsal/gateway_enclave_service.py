@@ -100,43 +100,6 @@ class _MeasuredRunscBoundary:
             values[name] = value
         return values
 
-    @staticmethod
-    def _verify_mount_order(
-        *,
-        root_path: Path,
-        mounts: list[dict[str, Any]],
-    ) -> None:
-        def normalized(value: Any) -> Path:
-            raw = str(value or "")
-            path = Path(raw)
-            if not path.is_absolute() or "\x00" in raw or ".." in path.parts:
-                raise ValueError("model sandbox mount path differs")
-            return Path(os.path.normpath(str(path)))
-
-        def within(path: Path, parent: Path) -> bool:
-            try:
-                path.relative_to(parent)
-            except ValueError:
-                return False
-            return True
-
-        destinations: list[Path] = []
-        for index, mount in enumerate(mounts):
-            if not isinstance(mount, dict):
-                raise ValueError("model sandbox mount differs")
-            destination = normalized(mount.get("destination"))
-            if any(within(previous, destination) for previous in destinations):
-                raise ValueError("model sandbox mount order differs")
-            if root_path == Path("/"):
-                for later in mounts[index + 1 :]:
-                    if not isinstance(later, dict):
-                        raise ValueError("model sandbox mount differs")
-                    if later.get("type") != "bind":
-                        continue
-                    if within(normalized(later.get("source")), destination):
-                        raise ValueError("model sandbox mount order differs")
-            destinations.append(destination)
-
     def _verify_oci_document(
         self,
         *,
@@ -240,33 +203,28 @@ class _MeasuredRunscBoundary:
             for item in mounts
             if isinstance(item, dict)
         }
-        self._verify_mount_order(
-            root_path=Path(str(root.get("path") or "")),
-            mounts=mounts,
-        )
-        source_mount = by_destination.get("/workspace/app") or {}
-        broker_mount = by_destination.get("/run/leadpoet") or {}
         run_mount = by_destination.get("/run") or {}
-        source = Path(str(source_mount.get("source") or ""))
-        broker = Path(str(broker_mount.get("source") or ""))
-        required_bind_options = {"rbind", "ro", "nosuid", "nodev"}
+        environment = self._environment(document)
+        source_visible = str(environment.get("LEADPOET_MODEL_SOURCE_ROOT") or "")
+        socket_visible = str(
+            environment.get("LEADPOET_SANDBOX_PROVIDER_SOCKET") or ""
+        )
+        rootfs = Path(str(root.get("path") or ""))
+        source = rootfs / source_visible.lstrip("/")
+        broker = rootfs / socket_visible.lstrip("/")
+        broker = broker.parent
         if (
-            source_mount.get("type") != "bind"
-            or not required_bind_options.issubset(
-                set(source_mount.get("options") or ())
-            )
-            or broker_mount.get("type") != "bind"
-            or not (required_bind_options | {"noexec"}).issubset(
-                set(broker_mount.get("options") or ())
-            )
-            or run_mount.get("type") != "tmpfs"
+            run_mount.get("type") != "tmpfs"
+            or any(item.get("type") == "bind" for item in mounts)
+            or not source_visible.startswith("/leadpoet-model-sandboxes/lp-job-")
+            or not socket_visible.startswith(source_visible.rsplit("/", 1)[0])
+            or not socket_visible.endswith("/broker/provider.sock")
             or not source.is_dir()
             or not broker.is_dir()
             or (source / "self-test-token").read_text(encoding="utf-8")
             != "leadpoet-model-sandbox-self-test-v2\n"
         ):
-            raise ValueError("model sandbox measured mounts differ")
-        environment = self._environment(document)
+            raise ValueError("model sandbox measured rootfs inputs differ")
         expected_environment = {
             "HOME": "/tmp",
             "LANG": "C.UTF-8",
@@ -274,10 +232,11 @@ class _MeasuredRunscBoundary:
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONHASHSEED": "0",
-            "PYTHONPATH": "/app:/app/gateway/_attested_runtime:/workspace/app",
-            "LEADPOET_SANDBOX_PROVIDER_SOCKET": (
-                "/run/leadpoet/provider.sock"
+            "PYTHONPATH": (
+                "/app:/app/gateway/_attested_runtime:" + source_visible
             ),
+            "LEADPOET_MODEL_SOURCE_ROOT": source_visible,
+            "LEADPOET_SANDBOX_PROVIDER_SOCKET": socket_visible,
         }
         args = process.get("args") or []
         script = str(args[2]) if len(args) == 3 else ""

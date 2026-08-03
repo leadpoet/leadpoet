@@ -510,6 +510,7 @@ PY
         /app/gateway/tee/requirements-scoring-py39.lock \
       --python-version 3.9.24 \
       --output /leadpoet-model-rootfs.manifest.json
+  install -d -m 0711 -o 0 -g 0 /leadpoet-model-sandboxes
 
   for role in gateway_coordinator gateway_scoring gateway_autoresearch; do
     REHEARSAL_GATEWAY_ENCLAVE_ROLE="$role" \

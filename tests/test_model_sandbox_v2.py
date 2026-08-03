@@ -8,24 +8,27 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+import shutil
+import tempfile
 from types import SimpleNamespace
 
 import pytest
 
 from gateway.tee.model_sandbox_v2 import (
     MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT,
-    MODEL_SANDBOX_BROKER_DESTINATION,
+    MODEL_SANDBOX_BROKER_DIRECTORY,
     MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES,
     MODEL_SANDBOX_PYTHONPATH,
     MODEL_SANDBOX_REQUEST_SCHEMA_VERSION,
-    MODEL_SANDBOX_SOURCE_ROOT,
+    MODEL_SANDBOX_SOURCE_DIRECTORY,
+    MODEL_SANDBOX_VISIBLE_ROOT,
     ROOTFS_MANIFEST_NAME,
     ModelSandboxV2Error,
     RunscModelSandboxV2,
     RunscSandboxConfigV2,
     _oci_config,
     _runsc_failure_evidence,
-    _validate_oci_mount_order,
+    _sandbox_visible_workspace,
     model_source_import_bootstrap,
     prepare_model_sandbox_cgroup_v2,
 )
@@ -45,6 +48,18 @@ from research_lab.eval.provider_evidence_cache import (
 )
 from research_lab.eval.snapshot_store import SNAPSHOT_MISS_SENTINEL, SnapshotMiss
 from tests.private_model_artifact_fixtures import install_reviewed_consumer_snapshot
+
+
+_SHORT_TEST_ROOTFS: list[Path] = []
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_short_test_rootfs():
+    start = len(_SHORT_TEST_ROOTFS)
+    yield
+    for rootfs in _SHORT_TEST_ROOTFS[start:]:
+        shutil.rmtree(rootfs, ignore_errors=True)
+    del _SHORT_TEST_ROOTFS[start:]
 
 
 def _runtime_receipt_stderr(stdin_payload: str) -> str:
@@ -84,10 +99,13 @@ def _runtime(tmp_path: Path):
     runsc = tmp_path / "runsc"
     runsc.write_bytes(b"pinned-runsc-binary")
     runsc.chmod(0o755)
-    rootfs = tmp_path / "rootfs"
-    rootfs.mkdir()
+    rootfs = Path(tempfile.mkdtemp(prefix="lpr-", dir="/tmp"))
+    _SHORT_TEST_ROOTFS.append(rootfs)
     marker = rootfs / ROOTFS_MANIFEST_NAME
     marker.write_text('{"rootfs":"pinned"}\n', encoding="utf-8")
+    visible_parent = rootfs / MODEL_SANDBOX_VISIBLE_ROOT.lstrip("/")
+    visible_parent.mkdir(mode=0o711)
+    visible_parent.chmod(0o711)
     sandbox_uid = os.getuid() or 65534
     sandbox_gid = os.getgid() or 65534
     return RunscSandboxConfigV2(
@@ -172,12 +190,14 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
             process_env = dict(
                 item.split("=", 1) for item in config["process"]["env"]
             )
-            broker_mount = next(
-                item
-                for item in config["mounts"]
-                if item["destination"] == MODEL_SANDBOX_BROKER_DESTINATION
-            )
-            broker_root = Path(broker_mount["source"])
+            rootfs = Path(config["root"]["path"])
+            broker_root = rootfs / process_env[
+                "LEADPOET_SANDBOX_PROVIDER_SOCKET"
+            ].lstrip("/")
+            broker_root = broker_root.parent
+            source_root = rootfs / process_env[
+                "LEADPOET_MODEL_SOURCE_ROOT"
+            ].lstrip("/")
             provider_socket = broker_root / "provider.sock"
             observed["broker_identity"] = (
                 broker_root.stat().st_uid,
@@ -186,7 +206,8 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
                 provider_socket.stat().st_gid,
                 provider_socket.stat().st_mode & 0o777,
             )
-            observed["broker_mount"] = broker_mount
+            observed["broker_root"] = broker_root
+            observed["source_root"] = source_root
             client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 client.connect(str(provider_socket))
@@ -227,11 +248,16 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
     assert config["root"]["readonly"] is True
     assert config["process"]["cwd"] == "/tmp"
     process_env = dict(item.split("=", 1) for item in config["process"]["env"])
-    assert process_env["PYTHONPATH"] == MODEL_SANDBOX_PYTHONPATH
+    assert process_env["PYTHONPATH"].split(":")[:2] == [
+        "/app",
+        MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT,
+    ]
+    assert process_env["PYTHONPATH"].split(":")[2] == process_env[
+        "LEADPOET_MODEL_SOURCE_ROOT"
+    ]
     assert MODEL_SANDBOX_PYTHONPATH.split(":") == [
         "/app",
         MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT,
-        MODEL_SANDBOX_SOURCE_ROOT,
     ]
     assert config["process"]["capabilities"]["effective"] == []
     assert config["process"]["noNewPrivileges"] is True
@@ -241,15 +267,7 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
         "pid",
         "mount",
     }
-    source_mount = next(
-        item for item in config["mounts"] if item["destination"] == "/workspace/app"
-    )
-    mount_positions = {
-        item["destination"]: index
-        for index, item in enumerate(config["mounts"])
-    }
-    assert mount_positions["/workspace/app"] < mount_positions["/tmp"]
-    assert "ro" in source_mount["options"]
+    assert all(item["type"] != "bind" for item in config["mounts"])
     assert "/dev/nsm" in config["linux"]["maskedPaths"]
     assert observed["stdin"] == "{}"
     assert "--host-uds=open" in observed["command"]
@@ -259,25 +277,13 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
     assert run_mount["type"] == "tmpfs"
     assert "noexec" in run_mount["options"]
     sandbox_socket = Path(process_env["LEADPOET_SANDBOX_PROVIDER_SOCKET"])
-    assert sandbox_socket == Path(MODEL_SANDBOX_BROKER_DESTINATION) / "provider.sock"
-    broker_mount = observed["broker_mount"]
-    assert (
-        mount_positions["/run"]
-        < mount_positions[MODEL_SANDBOX_BROKER_DESTINATION]
-        < mount_positions["/tmp"]
-    )
-    assert broker_mount["type"] == "bind"
-    assert set(broker_mount["options"]) >= {
-        "rbind",
-        "ro",
-        "nosuid",
-        "nodev",
-        "noexec",
-    }
-    assert not Path(broker_mount["source"]).is_relative_to(
-        Path(config["root"]["path"])
-    )
-    assert not (Path(config["root"]["path"]) / "leadpoet-model-broker").exists()
+    assert sandbox_socket.parts[:2] == ("/", MODEL_SANDBOX_VISIBLE_ROOT.lstrip("/"))
+    assert sandbox_socket.name == "provider.sock"
+    assert sandbox_socket.parent.name == MODEL_SANDBOX_BROKER_DIRECTORY
+    assert observed["broker_root"].is_relative_to(Path(config["root"]["path"]))
+    assert observed["source_root"].is_relative_to(Path(config["root"]["path"]))
+    assert observed["source_root"].name == MODEL_SANDBOX_SOURCE_DIRECTORY
+    assert observed["source_root"].parent == observed["broker_root"].parent
     assert "/dev/log" in config["linux"]["maskedPaths"]
     assert observed["broker_identity"] == (
         sandbox.config.uid,
@@ -287,6 +293,13 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
         0o600,
     )
     assert observed["broker_connected"] is True
+    assert not observed["broker_root"].exists()
+    assert not observed["source_root"].exists()
+    visible_parent = (
+        Path(config["root"]["path"])
+        / MODEL_SANDBOX_VISIBLE_ROOT.lstrip("/")
+    )
+    assert list(visible_parent.iterdir()) == []
 
 
 def test_runsc_model_sandbox_self_test_uses_production_launcher_and_broker(tmp_path):
@@ -299,11 +312,16 @@ def test_runsc_model_sandbox_self_test_uses_production_launcher_and_broker(tmp_p
         config = json.loads(
             (Path(bundle_arg.split("=", 1)[1]) / "config.json").read_text()
         )
-        destinations = {item["destination"]: item for item in config["mounts"]}
-        broker_root = Path(destinations[MODEL_SANDBOX_BROKER_DESTINATION]["source"])
-        source_root = Path(destinations[MODEL_SANDBOX_SOURCE_ROOT]["source"])
+        process_env = dict(item.split("=", 1) for item in config["process"]["env"])
+        rootfs = Path(config["root"]["path"])
+        broker_root = rootfs / process_env[
+            "LEADPOET_SANDBOX_PROVIDER_SOCKET"
+        ].lstrip("/")
+        broker_root = broker_root.parent
+        source_root = rootfs / process_env["LEADPOET_MODEL_SOURCE_ROOT"].lstrip("/")
         observed["command"] = list(command)
         observed["config"] = config
+        compile(config["process"]["args"][2], "<sandbox-self-test>", "exec")
         observed["source_token"] = (source_root / "self-test-token").read_text()
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -344,16 +362,21 @@ def test_runsc_model_sandbox_self_test_uses_production_launcher_and_broker(tmp_p
     assert "--platform=ptrace" in observed["command"]
     assert observed["source_token"] == "leadpoet-model-sandbox-self-test-v2\n"
     assert observed["response"] == b"leadpoet-model-sandbox-self-test-response-v2"
-    mount_positions = {
-        item["destination"]: index
-        for index, item in enumerate(observed["config"]["mounts"])
-    }
-    assert mount_positions[MODEL_SANDBOX_SOURCE_ROOT] < mount_positions["/tmp"]
-    assert (
-        mount_positions["/run"]
-        < mount_positions[MODEL_SANDBOX_BROKER_DESTINATION]
-        < mount_positions["/tmp"]
+    assert all(
+        item["type"] != "bind" for item in observed["config"]["mounts"]
     )
+    process_env = dict(
+        item.split("=", 1) for item in observed["config"]["process"]["env"]
+    )
+    source_visible = Path(process_env["LEADPOET_MODEL_SOURCE_ROOT"])
+    socket_visible = Path(process_env["LEADPOET_SANDBOX_PROVIDER_SOCKET"])
+    assert source_visible.parts[:2] == (
+        "/",
+        MODEL_SANDBOX_VISIBLE_ROOT.lstrip("/"),
+    )
+    assert source_visible.name == MODEL_SANDBOX_SOURCE_DIRECTORY
+    assert socket_visible.parent.name == MODEL_SANDBOX_BROKER_DIRECTORY
+    assert source_visible.parent == socket_visible.parent.parent
     assert observed["config"]["process"]["user"] == {
         "uid": sandbox.config.uid,
         "gid": sandbox.config.gid,
@@ -777,6 +800,10 @@ def test_runsc_model_sandbox_self_test_redacts_launcher_stderr(tmp_path):
             "'/workspace/app/self-test-token'",
             "runsc_source_mount_missing",
         ),
+        (
+            "RuntimeError: rootfs-visible source differs",
+            "runsc_source_staging_missing",
+        ),
         ("unexpected failure", "runsc_nonzero"),
     ),
 )
@@ -844,61 +871,63 @@ def test_runsc_model_sandbox_rejects_redirected_broker_mount(tmp_path):
     config = _runtime(tmp_path)
     outside = tmp_path / "outside-broker"
     outside.mkdir()
-    redirected = tmp_path / "redirected-broker"
-    redirected.symlink_to(outside, target_is_directory=True)
-    source_root = tmp_path / "source-root"
+    with _sandbox_visible_workspace(config) as workspace:
+        redirected = workspace / MODEL_SANDBOX_BROKER_DIRECTORY
+        redirected.symlink_to(outside, target_is_directory=True)
+        source_root = workspace / MODEL_SANDBOX_SOURCE_DIRECTORY
+        source_root.mkdir()
+        with pytest.raises(
+            ModelSandboxV2Error,
+            match="provider broker identity is invalid",
+        ):
+            _oci_config(
+                config=config,
+                source_root=source_root,
+                broker_root=redirected,
+                process_args=[sys.executable, "-c", "pass"],
+                environment={},
+            )
+
+
+def test_runsc_model_sandbox_rejects_source_outside_visible_root(tmp_path):
+    config = _runtime(tmp_path)
+    source_root = tmp_path / "outside-source"
     source_root.mkdir()
     with pytest.raises(
         ModelSandboxV2Error,
-        match="provider broker identity is invalid",
+        match="source root is outside the visible root",
     ):
         _oci_config(
             config=config,
             source_root=source_root,
-            broker_root=redirected,
+            broker_root=None,
             process_args=[sys.executable, "-c", "pass"],
             environment={},
         )
 
 
-def test_model_sandbox_mount_order_rejects_hidden_later_bind_source():
+def test_runsc_model_sandbox_rejects_permissive_visible_parent(tmp_path):
+    config = _runtime(tmp_path)
+    parent = config.rootfs_path / MODEL_SANDBOX_VISIBLE_ROOT.lstrip("/")
+    parent.chmod(0o755)
     with pytest.raises(
         ModelSandboxV2Error,
-        match="mount order hides a later bind source",
+        match="visible root identity is invalid",
     ):
-        _validate_oci_mount_order(
-            rootfs_path=Path("/"),
-            mounts=[
-                {
-                    "destination": "/tmp",
-                    "type": "tmpfs",
-                    "source": "tmpfs",
-                },
-                {
-                    "destination": MODEL_SANDBOX_SOURCE_ROOT,
-                    "type": "bind",
-                    "source": "/tmp/leadpoet-model/source",
-                },
-            ],
-        )
+        with _sandbox_visible_workspace(config):
+            pytest.fail("invalid visible parent must not be entered")
 
 
-def test_model_sandbox_mount_order_rejects_later_parent_replacement():
+def test_runsc_model_sandbox_rejects_missing_visible_parent(tmp_path):
+    config = _runtime(tmp_path)
+    parent = config.rootfs_path / MODEL_SANDBOX_VISIBLE_ROOT.lstrip("/")
+    parent.rmdir()
     with pytest.raises(
         ModelSandboxV2Error,
-        match="mount order replaces an earlier destination",
+        match="visible root is unavailable",
     ):
-        _validate_oci_mount_order(
-            rootfs_path=Path("/"),
-            mounts=[
-                {
-                    "destination": "/run/leadpoet",
-                    "type": "bind",
-                    "source": "/tmp/leadpoet-model/broker",
-                },
-                {"destination": "/run", "type": "tmpfs", "source": "tmpfs"},
-            ],
-        )
+        with _sandbox_visible_workspace(config):
+            pytest.fail("missing measured visible parent must not be created")
 
 
 def test_model_source_bootstrap_preserves_trusted_gateway_and_canonical_packages(
@@ -1129,14 +1158,15 @@ def test_runsc_dev_replay_has_snapshot_mount_and_no_live_provider_channel(tmp_pa
     assert "--host-uds=open" not in observed["command"]
     config = observed["config"]
     destinations = {item["destination"]: item for item in config["mounts"]}
-    assert "/research_lab_dev_snapshots" in destinations
-    assert "ro" in destinations["/research_lab_dev_snapshots"]["options"]
-    assert "/run/leadpoet" not in destinations
+    assert all(item["type"] != "bind" for item in config["mounts"])
     process_env = dict(item.split("=", 1) for item in config["process"]["env"])
     assert "LEADPOET_SANDBOX_PROVIDER_SOCKET" not in process_env
     assert process_env["EXA_API_KEY"] == "leadpoet-coordinator-managed-v2"
-    assert process_env["RESEARCH_LAB_DEV_SNAPSHOT_DIR"] == (
-        "/research_lab_dev_snapshots"
+    assert process_env["RESEARCH_LAB_DEV_SNAPSHOT_DIR"].startswith(
+        MODEL_SANDBOX_VISIBLE_ROOT + "/lp-job-"
+    )
+    assert process_env["RESEARCH_LAB_DEV_SNAPSHOT_DIR"].endswith(
+        "/dev-snapshots"
     )
     assert "dev_snapshot" in config["process"]["args"][2]
     assert json.loads(observed["stdin"])["context"] == {

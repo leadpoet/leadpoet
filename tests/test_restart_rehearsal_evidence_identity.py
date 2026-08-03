@@ -146,6 +146,10 @@ def test_gateway_enclave_measured_runtime_adapter_is_strict() -> None:
     assert '"--host-uds=open"' in service
     assert '"--platform=ptrace"' in service
     assert '"model_sandbox_self_test"' in service
+    assert '"LEADPOET_MODEL_SOURCE_ROOT"' in service
+    assert '"/leadpoet-model-sandboxes/lp-job-"' in service
+    assert 'item.get("type") == "bind"' in service
+    assert 'model sandbox measured rootfs inputs differ' in service
     assert 'raise ValueError("model sandbox runsc operation differs")' in service
 
 

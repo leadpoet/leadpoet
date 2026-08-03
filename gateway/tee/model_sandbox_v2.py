@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -18,7 +19,7 @@ import subprocess
 import tempfile
 import time
 from threading import Event, Lock, Thread
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Sequence
 
 from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
 from gateway.tee.sandbox_provider_socket_v2 import SandboxProviderSocketServerV2
@@ -77,9 +78,10 @@ MAX_MODEL_INPUT_BYTES = 16 * 1024 * 1024
 MODEL_SANDBOX_TIMEOUT_SECONDS = 900
 MAX_MODEL_OUTPUT_BYTES = 64 * 1024 * 1024
 MAX_PROVIDER_EVIDENCE_CACHE_BYTES = 32 * 1024 * 1024
-MODEL_SANDBOX_SOURCE_ROOT = "/workspace/app"
 MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT = "/app/gateway/_attested_runtime"
-MODEL_SANDBOX_BROKER_DESTINATION = "/run/leadpoet"
+MODEL_SANDBOX_VISIBLE_ROOT = "/leadpoet-model-sandboxes"
+MODEL_SANDBOX_SOURCE_DIRECTORY = "source"
+MODEL_SANDBOX_BROKER_DIRECTORY = "broker"
 MODEL_SANDBOX_SELF_TEST_SCHEMA_VERSION = "leadpoet.model_sandbox_self_test.v2"
 MODEL_SANDBOX_SELF_TEST_TIMEOUT_SECONDS = 60
 MODEL_SANDBOX_CGROUP_ROOT = Path("/sys/fs/cgroup")
@@ -95,7 +97,6 @@ MODEL_SANDBOX_PYTHONPATH = ":".join(
     (
         "/app",
         MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT,
-        MODEL_SANDBOX_SOURCE_ROOT,
     )
 )
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -129,6 +130,10 @@ def _runsc_failure_evidence(stderr: str) -> tuple[str, str]:
         (
             "no such file or directory: '/workspace/app/self-test-token'",
             "runsc_source_mount_missing",
+        ),
+        (
+            "rootfs-visible source differs",
+            "runsc_source_staging_missing",
         ),
         ("gofer: fork/exec /proc/self/exe: invalid argument", "runsc_gofer_exec"),
         ("cannot create gofer process", "runsc_gofer_create"),
@@ -449,23 +454,37 @@ def model_sandbox_job_cgroup_path(parent: str, sandbox_id: str) -> str:
     return str(Path(parent) / sandbox_id)
 
 
-def model_source_import_bootstrap(
-    source_root: str = MODEL_SANDBOX_SOURCE_ROOT,
-) -> str:
+def model_source_import_bootstrap(source_root: Optional[str] = None) -> str:
     """Activate model-owned packages after trusted enclave imports are pinned."""
 
     normalized_root = str(source_root or "").rstrip("/")
-    if not normalized_root.startswith("/") or "\x00" in normalized_root:
+    if source_root is not None and (
+        not normalized_root.startswith("/") or "\x00" in normalized_root
+    ):
         raise ModelSandboxV2Error("model sandbox source root is invalid")
-    source_gateway = normalized_root + "/gateway"
+    root_expression = (
+        repr(normalized_root)
+        if source_root is not None
+        else "_lp_os.environ['LEADPOET_MODEL_SOURCE_ROOT']"
+    )
+    root_guard = (
+        ""
+        if source_root is not None
+        else """
+if not _lp_source_root.startswith('/leadpoet-model-sandboxes/'):
+    raise RuntimeError('model sandbox source root differs')
+"""
+    )
     return f"""
 import gateway as _lp_gateway
 import gateway.tee as _lp_trusted_gateway_tee
 import leadpoet_canonical as _lp_trusted_canonical
+import os as _lp_os
 import sys as _lp_sys
 
-_lp_source_root = {normalized_root!r}
-_lp_source_gateway = {source_gateway!r}
+_lp_source_root = {root_expression}
+{root_guard}
+_lp_source_gateway = _lp_source_root + '/gateway'
 while _lp_source_root in _lp_sys.path:
     _lp_sys.path.remove(_lp_source_root)
 _lp_sys.path.insert(0, _lp_source_root)
@@ -837,51 +856,134 @@ def _normalize_source_permissions(root: Path) -> None:
     root.chmod(0o555)
 
 
-def _validate_oci_mount_order(
-    *,
-    rootfs_path: Path,
-    mounts: Sequence[Mapping[str, Any]],
-) -> None:
-    """Reject mount sequences that hide inputs needed by a later mount."""
+def _sandbox_visible_parent(config: RunscSandboxConfigV2) -> tuple[Path, Path]:
+    configured_rootfs = Path(config.rootfs_path)
+    try:
+        configured_rootfs_stat = configured_rootfs.lstat()
+        rootfs = configured_rootfs.resolve(strict=True)
+        rootfs_stat = rootfs.lstat()
+    except OSError as exc:
+        raise ModelSandboxV2Error("model sandbox rootfs is unavailable") from exc
+    if (
+        not rootfs.is_dir()
+        or configured_rootfs.is_symlink()
+        or configured_rootfs_stat.st_dev != rootfs_stat.st_dev
+        or configured_rootfs_stat.st_ino != rootfs_stat.st_ino
+    ):
+        raise ModelSandboxV2Error("model sandbox rootfs identity is invalid")
+    parent = rootfs / MODEL_SANDBOX_VISIBLE_ROOT.lstrip("/")
+    try:
+        parent_stat = parent.lstat()
+    except OSError as exc:
+        raise ModelSandboxV2Error(
+            "model sandbox visible root is unavailable"
+        ) from exc
+    if (
+        not parent.is_dir()
+        or parent.is_symlink()
+        or parent_stat.st_uid != rootfs_stat.st_uid
+        or parent_stat.st_gid != rootfs_stat.st_gid
+        or parent_stat.st_mode & 0o777 != 0o711
+    ):
+        raise ModelSandboxV2Error(
+            "model sandbox visible root identity is invalid"
+        )
+    return rootfs, parent
 
-    def normalized_path(value: Any) -> Path:
-        raw = str(value or "")
-        path = Path(raw)
-        if (
-            not path.is_absolute()
-            or "\x00" in raw
-            or ".." in path.parts
-        ):
-            raise ModelSandboxV2Error("model sandbox mount path is invalid")
-        return Path(os.path.normpath(raw))
 
-    def within(path: Path, parent: Path) -> bool:
+@contextmanager
+def _sandbox_visible_workspace(
+    config: RunscSandboxConfigV2,
+) -> Iterator[Path]:
+    rootfs, parent = _sandbox_visible_parent(config)
+    workspace: Path | None = None
+    for _attempt in range(4):
+        candidate = parent / ("lp-job-" + secrets.token_hex(8))
         try:
-            path.relative_to(parent)
-        except ValueError:
-            return False
-        return True
-
-    destinations: list[Path] = []
-    rootfs_is_host_root = Path(os.path.normpath(str(rootfs_path))) == Path("/")
-    for index, mount in enumerate(mounts):
-        if not isinstance(mount, Mapping):
-            raise ModelSandboxV2Error("model sandbox mount is invalid")
-        destination = normalized_path(mount.get("destination"))
-        if any(within(previous, destination) for previous in destinations):
+            candidate.mkdir(mode=0o711)
+        except FileExistsError:
+            continue
+        except OSError as exc:
             raise ModelSandboxV2Error(
-                "model sandbox mount order replaces an earlier destination"
-            )
-        if rootfs_is_host_root:
-            for later in mounts[index + 1 :]:
-                if not isinstance(later, Mapping) or later.get("type") != "bind":
+                "model sandbox visible workspace is unavailable"
+            ) from exc
+        workspace = candidate
+        break
+    if workspace is None:
+        raise ModelSandboxV2Error(
+            "model sandbox visible workspace is unavailable"
+        )
+    workspace_stat = workspace.lstat()
+    rootfs_stat = rootfs.lstat()
+    if (
+        workspace.is_symlink()
+        or workspace.parent != parent
+        or workspace_stat.st_uid != rootfs_stat.st_uid
+        or workspace_stat.st_gid != rootfs_stat.st_gid
+        or workspace_stat.st_mode & 0o777 != 0o711
+    ):
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise ModelSandboxV2Error(
+            "model sandbox visible workspace identity is invalid"
+        )
+    try:
+        yield workspace
+    finally:
+        try:
+            for item in sorted(workspace.rglob("*"), reverse=True):
+                if item.is_symlink():
                     continue
-                source = normalized_path(later.get("source"))
-                if within(source, destination):
-                    raise ModelSandboxV2Error(
-                        "model sandbox mount order hides a later bind source"
-                    )
-        destinations.append(destination)
+                if item.is_dir():
+                    item.chmod(0o700)
+                elif item.is_file():
+                    item.chmod(0o600)
+            workspace.chmod(0o700)
+            shutil.rmtree(workspace)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning(
+                "model_sandbox_visible_workspace_cleanup_failed "
+                "workspace_hash=%s error_type=%s",
+                sha256_bytes(str(workspace).encode("utf-8")),
+                type(exc).__name__,
+            )
+
+
+def _sandbox_visible_path(
+    config: RunscSandboxConfigV2,
+    path: Path,
+    *,
+    field: str,
+) -> str:
+    rootfs, parent = _sandbox_visible_parent(config)
+    try:
+        resolved = Path(path).resolve(strict=True)
+        resolved.relative_to(parent)
+        relative = resolved.relative_to(rootfs)
+    except (OSError, ValueError) as exc:
+        raise ModelSandboxV2Error(
+            "model sandbox %s is outside the visible root" % field
+        ) from exc
+    if Path(path).is_symlink() or not resolved.is_dir():
+        raise ModelSandboxV2Error(
+            "model sandbox %s identity is invalid" % field
+        )
+    return "/" + relative.as_posix()
+
+
+def _copy_readonly_visible_tree(source: Path, destination: Path) -> None:
+    source_path = Path(source)
+    if source_path.is_symlink() or not source_path.is_dir():
+        raise ModelSandboxV2Error("sandbox read-only tree is invalid")
+    for item in source_path.rglob("*"):
+        if item.is_symlink():
+            raise ModelSandboxV2Error("sandbox read-only tree contains a symlink")
+    try:
+        shutil.copytree(source_path, destination)
+    except OSError as exc:
+        raise ModelSandboxV2Error("sandbox read-only tree copy failed") from exc
+    _normalize_source_permissions(destination)
 
 
 def _oci_config(
@@ -891,9 +993,13 @@ def _oci_config(
     broker_root: Optional[Path],
     process_args: list[str],
     environment: Mapping[str, str],
-    readonly_mounts: Optional[Mapping[str, Path]] = None,
     cgroups_path: Optional[str] = None,
 ) -> Dict[str, Any]:
+    source_path = _sandbox_visible_path(
+        config,
+        source_root,
+        field="source root",
+    )
     process_env = {
         "HOME": "/tmp",
         "LANG": "C.UTF-8",
@@ -901,8 +1007,9 @@ def _oci_config(
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONHASHSEED": "0",
-        "PYTHONPATH": MODEL_SANDBOX_PYTHONPATH,
         **dict(environment),
+        "LEADPOET_MODEL_SOURCE_ROOT": source_path,
+        "PYTHONPATH": MODEL_SANDBOX_PYTHONPATH + ":" + source_path,
     }
     if broker_root is not None:
         broker_path = Path(broker_root)
@@ -921,22 +1028,26 @@ def _oci_config(
             raise ModelSandboxV2Error(
                 "model sandbox provider broker identity is invalid"
             )
+        broker_visible_path = _sandbox_visible_path(
+            config,
+            broker_path,
+            field="provider broker",
+        )
         process_env["LEADPOET_SANDBOX_PROVIDER_SOCKET"] = (
-            MODEL_SANDBOX_BROKER_DESTINATION + "/provider.sock"
+            broker_visible_path + "/provider.sock"
         )
     mounts = [
         {"destination": "/proc", "type": "proc", "source": "proc"},
         {
-            "destination": "/workspace/app",
-            "type": "bind",
-            "source": str(source_root),
-            "options": ["rbind", "ro", "nosuid", "nodev"],
+            "destination": "/tmp",
+            "type": "tmpfs",
+            "source": "tmpfs",
+            "options": ["nosuid", "nodev", "mode=1777", "size=1073741824"],
         },
     ]
     if broker_root is not None:
-        # Hide ordinary runtime sockets, then expose only this job's broker.
-        # ``--host-uds=open`` permits opening the socket; the scoped read-only
-        # bind is the gofer-supported path that makes its inode visible.
+        # Hide ordinary runtime sockets. The only reachable broker lives under
+        # this job's unpredictable, rootfs-visible workspace.
         mounts.append(
             {
                 "destination": "/run",
@@ -945,41 +1056,6 @@ def _oci_config(
                 "options": ["nosuid", "nodev", "noexec", "mode=755", "size=1048576"],
             }
         )
-        mounts.append(
-            {
-                "destination": MODEL_SANDBOX_BROKER_DESTINATION,
-                "type": "bind",
-                "source": str(broker_path.resolve()),
-                "options": ["rbind", "ro", "nosuid", "nodev", "noexec"],
-            }
-        )
-    for destination, source in sorted((readonly_mounts or {}).items()):
-        if (
-            not str(destination).startswith("/")
-            or ".." in Path(str(destination)).parts
-            or not Path(source).is_dir()
-        ):
-            raise ModelSandboxV2Error("sandbox read-only mount is invalid")
-        mounts.append(
-            {
-                "destination": str(destination),
-                "type": "bind",
-                "source": str(Path(source).resolve()),
-                "options": ["rbind", "ro", "nosuid", "nodev"],
-            }
-        )
-    # gVisor resolves bind sources while applying mounts in document order.
-    # The measured rootfs is the host root, so /tmp must be mounted only after
-    # every host-backed source beneath /tmp has been captured.
-    mounts.append(
-        {
-            "destination": "/tmp",
-            "type": "tmpfs",
-            "source": "tmpfs",
-            "options": ["nosuid", "nodev", "mode=1777", "size=1073741824"],
-        }
-    )
-    _validate_oci_mount_order(rootfs_path=config.rootfs_path, mounts=mounts)
     linux = {
         "namespaces": [
             {"type": "pid"},
@@ -1130,15 +1206,15 @@ class RunscModelSandboxV2:
         }
         with tempfile.TemporaryDirectory(
             prefix="lp-model-self-test-", dir="/tmp"
-        ) as tmp:
+        ) as tmp, _sandbox_visible_workspace(self.config) as visible_root:
             tmp_root = Path(tmp)
-            source_root = tmp_root / "source"
+            source_root = visible_root / MODEL_SANDBOX_SOURCE_DIRECTORY
             source_root.mkdir(mode=0o755)
             probe_path = source_root / "self-test-token"
             probe_path.write_text("leadpoet-model-sandbox-self-test-v2\n", encoding="utf-8")
             _normalize_source_permissions(source_root)
 
-            broker_root = tmp_root / "broker"
+            broker_root = visible_root / MODEL_SANDBOX_BROKER_DIRECTORY
             broker_root.mkdir(mode=0o700)
             try:
                 os.chown(broker_root, self.config.uid, self.config.gid)
@@ -1200,8 +1276,9 @@ import socket
 import gateway.tee.sandbox_http_shim_v2
 import leadpoet_canonical
 
-if Path('/workspace/app/self-test-token').read_text(encoding='utf-8') != 'leadpoet-model-sandbox-self-test-v2\\n':
-    raise RuntimeError('source mount differs')
+source_root = Path(os.environ['LEADPOET_MODEL_SOURCE_ROOT'])
+if (source_root / 'self-test-token').read_text(encoding='utf-8') != 'leadpoet-model-sandbox-self-test-v2\\n':
+    raise RuntimeError('rootfs-visible source differs')
 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 try:
     client.settimeout(10)
@@ -1318,11 +1395,13 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
         errors = validate_private_model_artifact_manifest(artifact)
         if errors:
             raise ModelSandboxV2Error("model artifact is invalid: " + "; ".join(errors))
-        # AF_UNIX paths are limited to roughly 108 bytes on Linux.  A fixed
-        # short parent also keeps the mounted broker socket path reproducible.
-        with tempfile.TemporaryDirectory(prefix="lp-model-v2-", dir="/tmp") as tmp:
+        # AF_UNIX paths are limited to roughly 108 bytes on Linux. The measured
+        # short parent leaves sufficient room for an unpredictable job path.
+        with tempfile.TemporaryDirectory(
+            prefix="lp-model-v2-", dir="/tmp"
+        ) as tmp, _sandbox_visible_workspace(self.config) as visible_root:
             tmp_root = Path(tmp)
-            source_root = tmp_root / "source"
+            source_root = visible_root / MODEL_SANDBOX_SOURCE_DIRECTORY
             source_evidence = extract_source_bundle_v2(
                 value["source_bundle"],
                 destination=source_root,
@@ -1332,7 +1411,7 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             provider_snapshot_root: Path | None = None
             provider_snapshot_archive_hash = sha256_json({})
             if value["provider_snapshot_bundle"]:
-                provider_snapshot_root = tmp_root / "provider-snapshot"
+                provider_snapshot_root = visible_root / "provider-snapshot"
                 snapshot_evidence = extract_source_bundle_v2(
                     value["provider_snapshot_bundle"],
                     destination=provider_snapshot_root,
@@ -1359,7 +1438,7 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                     snapshot_evidence["archive_sha256"]
                 )
                 _normalize_source_permissions(provider_snapshot_root)
-            broker_root = tmp_root / "broker"
+            broker_root = visible_root / MODEL_SANDBOX_BROKER_DIRECTORY
             try:
                 broker_root.mkdir(mode=0o700)
                 os.chown(broker_root, self.config.uid, self.config.gid)
@@ -1527,18 +1606,24 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
         if len(canonical_json(stdin_payload).encode("utf-8")) > MAX_MODEL_INPUT_BYTES:
             raise ModelSandboxV2Error("dev replay input exceeds limit")
 
-        with tempfile.TemporaryDirectory(prefix="lp-dev-replay-v2-", dir="/tmp") as tmp:
+        with tempfile.TemporaryDirectory(
+            prefix="lp-dev-replay-v2-", dir="/tmp"
+        ) as tmp, _sandbox_visible_workspace(self.config) as visible_root:
             tmp_root = Path(tmp)
-            source_root = tmp_root / "source"
+            source_root = visible_root / MODEL_SANDBOX_SOURCE_DIRECTORY
             extract_source_bundle_v2(
                 source_bundle,
                 destination=source_root,
                 expected_source_tree_hash=artifact.model_artifact_hash,
             )
             _normalize_source_permissions(source_root)
+            visible_snapshot_root = visible_root / "dev-snapshots"
+            _copy_readonly_visible_tree(
+                Path(snapshot_root),
+                visible_snapshot_root,
+            )
             return self._run_dev_replay(
                 source_root=source_root,
-                snapshot_root=Path(snapshot_root),
                 module_name=normalized_module,
                 callable_name=normalized_callable,
                 stdin_payload=stdin_payload,
@@ -1549,7 +1634,11 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                         for name in normalized_credential_names
                     },
                     **container_replay_env(
-                        "/research_lab_dev_snapshots",
+                        _sandbox_visible_path(
+                            self.config,
+                            visible_snapshot_root,
+                            field="dev snapshot root",
+                        ),
                         miss_policy=miss_policy,
                     ),
                 },
@@ -1628,21 +1717,30 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
 
         with tempfile.TemporaryDirectory(
             prefix="lp-dev-provider-replay-v2-", dir="/tmp"
-        ) as tmp:
+        ) as tmp, _sandbox_visible_workspace(self.config) as visible_root:
             tmp_root = Path(tmp)
-            source_root = tmp_root / "source"
+            source_root = visible_root / MODEL_SANDBOX_SOURCE_DIRECTORY
             extract_source_bundle_v2(
                 source_bundle,
                 destination=source_root,
                 expected_source_tree_hash=artifact.model_artifact_hash,
             )
             _normalize_source_permissions(source_root)
-            evidence_root = tmp_root / "provider-evidence"
+            evidence_root = visible_root / "provider-evidence"
             evidence_root.mkdir(mode=0o700)
             cache_path = evidence_root / "provider-evidence-cache.json"
             cache_path.write_text(canonical_json(cache), encoding="utf-8")
+            os.chown(cache_path, self.config.uid, self.config.gid)
             cache_path.chmod(0o400)
+            os.chown(evidence_root, self.config.uid, self.config.gid)
             evidence_root.chmod(0o500)
+            visible_snapshot_root: Path | None = None
+            if snapshot_root is not None:
+                visible_snapshot_root = visible_root / "dev-snapshots"
+                _copy_readonly_visible_tree(
+                    Path(snapshot_root),
+                    visible_snapshot_root,
+                )
             return self._run_dev_provider_replay(
                 source_root=source_root,
                 evidence_root=evidence_root,
@@ -1656,20 +1754,26 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                         for name in normalized_credential_names
                     },
                     "RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH": (
-                        "/run/leadpoet/provider-evidence-cache.json"
+                        _sandbox_visible_path(
+                            self.config,
+                            evidence_root,
+                            field="provider evidence root",
+                        )
+                        + "/provider-evidence-cache.json"
                     ),
                     "RESEARCH_LAB_PROVIDER_EVIDENCE_MODE": "frozen",
                     **(
                         {
-                            "RESEARCH_LAB_DEV_SNAPSHOT_DIR": (
-                                "/research_lab_dev_snapshots"
+                            "RESEARCH_LAB_DEV_SNAPSHOT_DIR": _sandbox_visible_path(
+                                self.config,
+                                visible_snapshot_root,
+                                field="dev snapshot root",
                             )
                         }
                         if snapshot_root is not None
                         else {}
                     ),
                 },
-                snapshot_root=snapshot_root,
                 timeout_seconds=normalized_timeout,
                 tmp_root=tmp_root,
                 job_id=job_id,
@@ -1684,7 +1788,6 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
         callable_name: str,
         stdin_payload: Mapping[str, Any],
         environment: Mapping[str, str],
-        snapshot_root: Path | None,
         timeout_seconds: int,
         tmp_root: Path,
         job_id: str,
@@ -1703,9 +1806,6 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             + model_source_import_bootstrap()
             + _DOCKER_ADAPTER_BOOTSTRAP
         )
-        readonly_mounts = {"/run/leadpoet": evidence_root}
-        if snapshot_root is not None:
-            readonly_mounts["/research_lab_dev_snapshots"] = Path(snapshot_root)
         config_doc = _oci_config(
             config=self.config,
             source_root=source_root,
@@ -1718,7 +1818,6 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 callable_name,
             ],
             environment=environment,
-            readonly_mounts=readonly_mounts,
             cgroups_path=model_sandbox_job_cgroup_path(
                 self.cgroup_parent, sandbox_id
             ),
@@ -1813,7 +1912,6 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
         self,
         *,
         source_root: Path,
-        snapshot_root: Path,
         module_name: str,
         callable_name: str,
         stdin_payload: Mapping[str, Any],
@@ -1844,9 +1942,6 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 callable_name,
             ],
             environment=environment,
-            readonly_mounts={
-                "/research_lab_dev_snapshots": snapshot_root,
-            },
             cgroups_path=model_sandbox_job_cgroup_path(
                 self.cgroup_parent, sandbox_id
             ),
@@ -2004,14 +2099,18 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
             )
             evidence_cache_path.chmod(0o444)
             environment["RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH"] = (
-                MODEL_SANDBOX_BROKER_DESTINATION
+                _sandbox_visible_path(
+                    self.config,
+                    broker_root,
+                    field="provider broker",
+                )
                 + "/provider-evidence-cache.json"
             )
-        readonly_mounts: dict[str, Path] = {}
         if provider_snapshot_root is not None:
-            readonly_mounts["/research_lab_dev_snapshots"] = provider_snapshot_root
-            environment["RESEARCH_LAB_DEV_SNAPSHOT_DIR"] = (
-                "/research_lab_dev_snapshots"
+            environment["RESEARCH_LAB_DEV_SNAPSHOT_DIR"] = _sandbox_visible_path(
+                self.config,
+                provider_snapshot_root,
+                field="provider snapshot root",
             )
         config_doc = _oci_config(
             config=self.config,
@@ -2025,7 +2124,6 @@ print(json.dumps({'schema_version': 'leadpoet.model_sandbox_self_test.v2', 'stat
                 value["callable_name"],
             ],
             environment=environment,
-            readonly_mounts=readonly_mounts,
             cgroups_path=model_sandbox_job_cgroup_path(
                 self.cgroup_parent, sandbox_id
             ),

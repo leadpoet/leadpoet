@@ -4118,6 +4118,8 @@ def _exercise_model_sandbox_scope_binding() -> dict[str, Any]:
     )
     from gateway.tee.model_sandbox_v2 import (
         MODEL_SANDBOX_BROKER_DESTINATION,
+        MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES,
+        MODEL_SANDBOX_REQUIRED_CONTROLLERS,
         RunscSandboxConfigV2,
         _oci_config,
         _runsc_run_command,
@@ -4271,36 +4273,25 @@ print(",".join((
             gid=os.getgid() or 65534,
         )
         cgroup_root = root / "cgroup"
-        cgroup_parent = cgroup_root / "nested" / "enclave"
-        cgroup_runtime = cgroup_parent / "leadpoet-runtime"
-        cgroup_runtime.mkdir(parents=True)
-        (cgroup_parent / "cgroup.controllers").write_text(
-            "cpu io memory pids\n", encoding="ascii"
-        )
-        (cgroup_parent / "cgroup.procs").write_text("", encoding="ascii")
-        (cgroup_parent / "cgroup.subtree_control").write_text(
-            "cpu io memory pids\n", encoding="ascii"
-        )
-        (cgroup_runtime / "cgroup.procs").write_text("101\n", encoding="ascii")
         proc_cgroup = root / "proc-self-cgroup"
-        proc_cgroup.write_text(
-            "0::/nested/enclave/leadpoet-runtime\n", encoding="ascii"
-        )
-
-        def write_cgroup(path: Path, value: str) -> None:
-            path.write_text(value.replace("+", ""), encoding="ascii")
-            if path == cgroup_parent / "cgroup.subtree_control":
-                jobs = cgroup_parent / "leadpoet-model"
-                jobs.mkdir(exist_ok=True)
-                (jobs / "cgroup.controllers").write_text(
-                    "cpu io memory pids\n", encoding="ascii"
-                )
-                (jobs / "cgroup.subtree_control").touch()
+        proc_lines = []
+        for hierarchy, controller in enumerate(
+            sorted(MODEL_SANDBOX_REQUIRED_CONTROLLERS),
+            start=1,
+        ):
+            current = cgroup_root / controller / "nested" / "enclave"
+            current.mkdir(parents=True)
+            (current / "tasks").write_text(
+                "%s\n" % os.getpid(), encoding="ascii"
+            )
+            for filename in MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES[controller]:
+                (current / filename).write_text("1\n", encoding="ascii")
+            proc_lines.append(f"{hierarchy}:{controller}:/nested/enclave")
+        proc_cgroup.write_text("\n".join(proc_lines) + "\n", encoding="ascii")
 
         delegated_parent = prepare_model_sandbox_cgroup_v2(
             cgroup_root=cgroup_root,
             proc_self_cgroup_path=proc_cgroup,
-            writer=write_cgroup,
         )
         if delegated_parent != "leadpoet-model":
             raise RuntimeError("model sandbox cgroup delegation differs")

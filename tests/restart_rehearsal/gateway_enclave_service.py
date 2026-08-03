@@ -32,82 +32,47 @@ ROLES = {
 
 def _prepare_measured_cgroup_boundary(
     original_prepare: Any,
+    *,
+    required_controllers: frozenset[str],
+    control_files: dict[str, tuple[str, ...]],
 ) -> str:
-    """Exercise candidate cgroup delegation without writing host cgroups."""
+    """Exercise the candidate against Nitro's measured cgroup-v1 layout."""
 
     with tempfile.TemporaryDirectory(
         prefix="leadpoet-rehearsal-cgroup-"
     ) as raw_tmp:
         root = Path(raw_tmp)
         cgroup_root = root / "sys/fs/cgroup"
-        parent = cgroup_root
-        runtime = parent / "leadpoet-runtime"
-        runtime.mkdir(parents=True)
-        controllers = "cpu io memory pids"
-        (parent / "cgroup.controllers").write_text(
-            controllers + "\n", encoding="ascii"
-        )
         current_pid = str(os.getpid())
-        (parent / "cgroup.procs").write_text(
-            current_pid + "\n", encoding="ascii"
-        )
-        (parent / "cgroup.subtree_control").write_text("", encoding="ascii")
         proc_cgroup = root / "proc-self-cgroup"
-        proc_cgroup.write_text("", encoding="ascii")
-
-        def write_cgroup(path: Path, value: str) -> None:
-            if path == runtime / "cgroup.procs":
-                direct = (parent / "cgroup.procs").read_text(
-                    encoding="ascii"
-                ).split()
-                (parent / "cgroup.procs").write_text(
-                    "\n".join(item for item in direct if item != value),
-                    encoding="ascii",
-                )
-                existing = path.read_text(encoding="ascii") if path.exists() else ""
-                path.write_text(existing + value + "\n", encoding="ascii")
-                return
-            path.write_text(value.replace("+", ""), encoding="ascii")
-            if path == parent / "cgroup.subtree_control":
-                jobs = parent / "leadpoet-model"
-                jobs.mkdir(exist_ok=True)
-                (jobs / "cgroup.controllers").write_text(
-                    controllers + "\n", encoding="ascii"
-                )
-                (jobs / "cgroup.subtree_control").touch()
+        proc_lines = []
+        for hierarchy, controller in enumerate(
+            sorted(required_controllers),
+            start=1,
+        ):
+            controller_root = cgroup_root / controller
+            controller_root.mkdir(parents=True)
+            (controller_root / "tasks").write_text(
+                current_pid + "\n", encoding="ascii"
+            )
+            for filename in control_files[controller]:
+                (controller_root / filename).write_text("1\n", encoding="ascii")
+            proc_lines.append(f"{hierarchy}:{controller}:/")
+        proc_cgroup.write_text("\n".join(proc_lines) + "\n", encoding="ascii")
 
         delegated = original_prepare(
             cgroup_root=cgroup_root,
             proc_self_cgroup_path=proc_cgroup,
-            writer=write_cgroup,
         )
-        jobs = parent / "leadpoet-model"
-        expected_controllers = set(controllers.split())
-        parent_enabled = set(
-            (parent / "cgroup.subtree_control")
-            .read_text(encoding="ascii")
-            .split()
-        )
-        jobs_enabled = set(
-            (jobs / "cgroup.subtree_control")
-            .read_text(encoding="ascii")
-            .split()
-        )
-        if (
-            delegated != "leadpoet-model"
-            or (parent / "cgroup.procs").read_text(encoding="ascii").split()
-            or (runtime / "cgroup.procs").read_text(encoding="ascii").split()
-            != [current_pid]
-            or parent_enabled != expected_controllers
-            or jobs_enabled != expected_controllers
-        ):
+        if delegated != "leadpoet-model":
             raise ValueError("measured model cgroup boundary differs")
     _external_event(
         "nitro_enclaves",
         "measured_runtime_surface",
         phase="model_sandbox_cgroup",
         delegated_parent=delegated,
-        controller_set=sorted(expected_controllers),
+        cgroup_layout="nitro_v1",
+        controller_set=sorted(required_controllers),
     )
     return delegated
 
@@ -560,7 +525,9 @@ def _install_measured_runtime_boundary(gateway_root: Path) -> None:
 
     def prepare_rehearsal_cgroup() -> str:
         return _prepare_measured_cgroup_boundary(
-            production_prepare_cgroup
+            production_prepare_cgroup,
+            required_controllers=model_sandbox_v2.MODEL_SANDBOX_REQUIRED_CONTROLLERS,
+            control_files=model_sandbox_v2.MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES,
         )
 
     class RehearsalRunscModelSandboxV2(production_sandbox):

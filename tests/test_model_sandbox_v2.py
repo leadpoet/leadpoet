@@ -15,6 +15,7 @@ import pytest
 from gateway.tee.model_sandbox_v2 import (
     MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT,
     MODEL_SANDBOX_BROKER_DESTINATION,
+    MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES,
     MODEL_SANDBOX_PYTHONPATH,
     MODEL_SANDBOX_REQUEST_SCHEMA_VERSION,
     MODEL_SANDBOX_SOURCE_ROOT,
@@ -397,7 +398,7 @@ def test_prepare_model_sandbox_cgroup_delegates_required_controllers(tmp_path):
 
 
 @pytest.mark.parametrize("proc_identity", ["", "0::\n"])
-def test_prepare_model_sandbox_cgroup_resolves_nitro_root_membership(
+def test_prepare_model_sandbox_cgroup_resolves_v2_root_membership(
     tmp_path,
     proc_identity,
 ):
@@ -445,6 +446,127 @@ def test_prepare_model_sandbox_cgroup_resolves_nitro_root_membership(
     assert (
         root / "leadpoet-runtime" / "cgroup.procs"
     ).read_text(encoding="ascii").split() == [str(os.getpid())]
+
+
+def _write_nitro_cgroup_v1_layout(
+    root: Path,
+    proc_cgroup: Path,
+    *,
+    pid: int,
+    relative: str = "/",
+) -> None:
+    lines = []
+    for hierarchy, controller in enumerate(
+        sorted(MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES),
+        start=1,
+    ):
+        current = root / controller / relative.lstrip("/")
+        current.mkdir(parents=True)
+        (current / "tasks").write_text(f"{pid}\n", encoding="ascii")
+        for filename in MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES[controller]:
+            (current / filename).write_text("1\n", encoding="ascii")
+        lines.append(f"{hierarchy}:{controller}:{relative}")
+    proc_cgroup.write_text("\n".join(lines) + "\n", encoding="ascii")
+
+
+def test_prepare_model_sandbox_cgroup_accepts_nitro_cgroup_v1(tmp_path):
+    root = tmp_path / "cgroup"
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    _write_nitro_cgroup_v1_layout(
+        root,
+        proc_cgroup,
+        pid=os.getpid(),
+        relative="/enclave/service",
+    )
+
+    assert (
+        prepare_model_sandbox_cgroup_v2(
+            cgroup_root=root,
+            proc_self_cgroup_path=proc_cgroup,
+        )
+        == "leadpoet-model"
+    )
+
+
+def test_prepare_model_sandbox_cgroup_v1_rejects_missing_controller(tmp_path):
+    root = tmp_path / "cgroup"
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    _write_nitro_cgroup_v1_layout(root, proc_cgroup, pid=os.getpid())
+    proc_cgroup.write_text(
+        "1:cpu:/\n2:memory:/\n",
+        encoding="ascii",
+    )
+
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="required cgroup controllers are unavailable",
+    ):
+        prepare_model_sandbox_cgroup_v2(
+            cgroup_root=root,
+            proc_self_cgroup_path=proc_cgroup,
+        )
+
+
+def test_prepare_model_sandbox_cgroup_v1_rejects_unproven_membership(tmp_path):
+    root = tmp_path / "cgroup"
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    _write_nitro_cgroup_v1_layout(root, proc_cgroup, pid=999999)
+
+    with pytest.raises(ModelSandboxV2Error, match="cgroup membership differs"):
+        prepare_model_sandbox_cgroup_v2(
+            cgroup_root=root,
+            proc_self_cgroup_path=proc_cgroup,
+        )
+
+
+def test_prepare_model_sandbox_cgroup_v1_rejects_missing_limit_file(tmp_path):
+    root = tmp_path / "cgroup"
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    _write_nitro_cgroup_v1_layout(root, proc_cgroup, pid=os.getpid())
+    (root / "memory" / "memory.limit_in_bytes").unlink()
+
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="cgroup v1 resource controls are unavailable",
+    ):
+        prepare_model_sandbox_cgroup_v2(
+            cgroup_root=root,
+            proc_self_cgroup_path=proc_cgroup,
+        )
+
+
+def test_prepare_model_sandbox_cgroup_v1_rejects_redirected_controller(tmp_path):
+    root = tmp_path / "cgroup"
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    _write_nitro_cgroup_v1_layout(root, proc_cgroup, pid=os.getpid())
+    outside = tmp_path / "outside-cpu"
+    (root / "cpu").rename(outside)
+    (root / "cpu").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="cgroup v1 hierarchy is invalid",
+    ):
+        prepare_model_sandbox_cgroup_v2(
+            cgroup_root=root,
+            proc_self_cgroup_path=proc_cgroup,
+        )
+
+
+def test_prepare_model_sandbox_cgroup_v1_rejects_duplicate_identity(tmp_path):
+    root = tmp_path / "cgroup"
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    _write_nitro_cgroup_v1_layout(root, proc_cgroup, pid=os.getpid())
+    proc_cgroup.write_text(
+        proc_cgroup.read_text(encoding="ascii") + "4:cpu:/other\n",
+        encoding="ascii",
+    )
+
+    with pytest.raises(ModelSandboxV2Error, match="cgroup identity is invalid"):
+        prepare_model_sandbox_cgroup_v2(
+            cgroup_root=root,
+            proc_self_cgroup_path=proc_cgroup,
+        )
 
 
 def test_prepare_model_sandbox_cgroup_rejects_unproven_nitro_membership(tmp_path):
@@ -497,6 +619,9 @@ def test_prepare_model_sandbox_cgroup_returns_path_relative_to_nested_parent(
     parent = root / "nested" / "enclave"
     runtime = parent / "leadpoet-runtime"
     runtime.mkdir(parents=True)
+    (root / "cgroup.controllers").write_text(
+        "cpu memory pids\n", encoding="ascii"
+    )
     (parent / "cgroup.controllers").write_text(
         "cpu memory pids\n", encoding="ascii"
     )

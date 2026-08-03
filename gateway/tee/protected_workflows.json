@@ -1132,14 +1132,29 @@
       "symbol": "ExecutionJobManagerV2"
     },
     {
+      "ast_sha256": "sha256:70b12c09d43e73672dac812d8cb53f33359fd4401d7fff4777ee9a5daf1d1467",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES"
+    },
+    {
       "ast_sha256": "sha256:4300b78de19b72ef68261969f09f692b2789b571c3bfc51a6bcc922cbfd54c6a",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2"
     },
     {
-      "ast_sha256": "sha256:bbc4896ecf3b0cb030c69664a7784db8fb685105240624229ef8e302ef65f808",
+      "ast_sha256": "sha256:a3d953b953d8f3fc1622443cd0f5d855713d4a17f9aed1acf8e30a4c4bf8e65e",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_current_cgroup_path"
+    },
+    {
+      "ast_sha256": "sha256:7d28b2f8d831e5ca80f41e97c45bbafdd01e94b88d777d86fe377b09ca34ef95",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "_current_cgroup_v1_paths"
+    },
+    {
+      "ast_sha256": "sha256:934d46f6bee216decf7b0e5c1f40441de7bde03a26066c81641f12717bea1a73",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "_normalized_cgroup_relative_path"
     },
     {
       "ast_sha256": "sha256:3a7cae365e3b250cb96a41a2ae712d73a368d6dfb0f0b57cad62ea4399a715a6",
@@ -1147,9 +1162,14 @@
       "symbol": "_oci_config"
     },
     {
-      "ast_sha256": "sha256:baf3a3cde2d86a9bc6031542847c94e67eab77d3da512a205706a86089a8462c",
+      "ast_sha256": "sha256:f016a59521a2b9d6ac4b77fa619ba89c5d0ed172afb115ca4824db7488331be1",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "_pid_is_direct_cgroup_member"
+    },
+    {
+      "ast_sha256": "sha256:0a1a2f51eea9614580286238e9bc961555ad7de444cbeb9d1cebf950da795829",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "_prepare_model_sandbox_cgroup_v1"
     },
     {
       "ast_sha256": "sha256:b0b86442e0cc163918b9a84fe9eb6d0c32ecd91573e16a4959475da05f269375",
@@ -1162,7 +1182,7 @@
       "symbol": "model_sandbox_job_cgroup_path"
     },
     {
-      "ast_sha256": "sha256:432cb3eba7d48b64145d31c9f7886367c0b78c0aed274cef28f9d7277272c5d6",
+      "ast_sha256": "sha256:85447d61ef8c9fb17b3628097a4de4ffaad6137783fce4f2ec51fc16f7961de2",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "prepare_model_sandbox_cgroup_v2"
     },
@@ -2437,7 +2457,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:1ee383ad1d94b7f17131e96af8e855964afdb25b648e9628ce93e7894b5bde96",
+  "manifest_hash": "sha256:f1c4b877d44abc82f7967e4b7a405f82e95b2dc4e49f60b58b02cbc3612e40cb",
   "protected_source_commit": "5053f923484d4d82b13aeb1e2456b88270321648",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

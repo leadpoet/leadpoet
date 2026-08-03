@@ -86,6 +86,11 @@ MODEL_SANDBOX_CGROUP_ROOT = Path("/sys/fs/cgroup")
 MODEL_SANDBOX_RUNTIME_CGROUP_NAME = "leadpoet-runtime"
 MODEL_SANDBOX_JOB_CGROUP_NAME = "leadpoet-model"
 MODEL_SANDBOX_REQUIRED_CONTROLLERS = frozenset({"cpu", "memory", "pids"})
+MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES = {
+    "cpu": ("cpu.cfs_quota_us", "cpu.cfs_period_us"),
+    "memory": ("memory.limit_in_bytes",),
+    "pids": ("pids.max",),
+}
 MODEL_SANDBOX_PYTHONPATH = ":".join(
     (
         "/app",
@@ -173,14 +178,30 @@ def _write_cgroup_value(path: Path, value: str) -> None:
         handle.write(value)
 
 
-def _pid_is_direct_cgroup_member(cgroup: Path, pid: int) -> bool:
+def _pid_is_direct_cgroup_member(
+    cgroup: Path,
+    pid: int,
+    *,
+    membership_file: str = "cgroup.procs",
+) -> bool:
+    if membership_file not in {"cgroup.procs", "tasks"}:
+        raise ModelSandboxV2Error("model sandbox cgroup membership file is invalid")
     try:
-        members = (cgroup / "cgroup.procs").read_text(encoding="ascii").split()
+        members = (cgroup / membership_file).read_text(encoding="ascii").split()
     except OSError as exc:
         raise ModelSandboxV2Error(
             "model sandbox cgroup membership is unavailable"
         ) from exc
     return str(pid) in members
+
+
+def _normalized_cgroup_relative_path(value: str) -> str:
+    if not value.startswith("/") or "\x00" in value:
+        raise ModelSandboxV2Error("model sandbox cgroup identity is invalid")
+    relative = Path(value).as_posix().lstrip("/")
+    if ".." in Path(relative).parts:
+        raise ModelSandboxV2Error("model sandbox cgroup identity is invalid")
+    return relative
 
 
 def _current_cgroup_path(
@@ -197,10 +218,7 @@ def _current_cgroup_path(
     if len(unified) > 1:
         raise ModelSandboxV2Error("model sandbox cgroup identity is invalid")
     if unified and unified[0].startswith("/"):
-        relative = Path(unified[0]).as_posix().lstrip("/")
-        if ".." in Path(relative).parts:
-            raise ModelSandboxV2Error("model sandbox cgroup identity is invalid")
-        return relative
+        return _normalized_cgroup_relative_path(unified[0])
     if unified and unified[0]:
         raise ModelSandboxV2Error("model sandbox cgroup identity is invalid")
 
@@ -217,16 +235,102 @@ def _current_cgroup_path(
     raise ModelSandboxV2Error("model sandbox cgroup identity is unavailable")
 
 
+def _current_cgroup_v1_paths(proc_self_cgroup_path: Path) -> Dict[str, str]:
+    try:
+        lines = proc_self_cgroup_path.read_text(encoding="ascii").splitlines()
+    except OSError as exc:
+        raise ModelSandboxV2Error("model sandbox cgroup identity is unavailable") from exc
+
+    controller_paths: Dict[str, str] = {}
+    for line in lines:
+        if not line:
+            continue
+        fields = line.split(":", 2)
+        if len(fields) != 3 or not fields[0].isdigit():
+            raise ModelSandboxV2Error("model sandbox cgroup identity is invalid")
+        hierarchy, raw_controllers, raw_path = fields
+        if not raw_controllers:
+            continue
+        controllers = raw_controllers.split(",")
+        if (
+            int(hierarchy) <= 0
+            or not controllers
+            or any(
+                not re.fullmatch(r"[A-Za-z0-9_.=-]+", controller)
+                for controller in controllers
+            )
+        ):
+            raise ModelSandboxV2Error("model sandbox cgroup identity is invalid")
+        relative = _normalized_cgroup_relative_path(raw_path)
+        for controller in controllers:
+            if controller in controller_paths:
+                raise ModelSandboxV2Error("model sandbox cgroup identity is invalid")
+            controller_paths[controller] = relative
+    if not MODEL_SANDBOX_REQUIRED_CONTROLLERS.issubset(controller_paths):
+        raise ModelSandboxV2Error(
+            "model sandbox required cgroup controllers are unavailable"
+        )
+    return controller_paths
+
+
+def _prepare_model_sandbox_cgroup_v1(
+    *,
+    cgroup_root: Path,
+    proc_self_cgroup_path: Path,
+    pid: Optional[int] = None,
+) -> str:
+    controller_paths = _current_cgroup_v1_paths(proc_self_cgroup_path)
+    current_pid = int(os.getpid() if pid is None else pid)
+    for controller in sorted(MODEL_SANDBOX_REQUIRED_CONTROLLERS):
+        mount_entry = cgroup_root / controller
+        mount = mount_entry.resolve()
+        if mount_entry.is_symlink() or mount.parent != cgroup_root:
+            raise ModelSandboxV2Error(
+                "model sandbox cgroup v1 hierarchy is invalid"
+            )
+        current = (mount / controller_paths[controller]).resolve()
+        try:
+            current.relative_to(mount)
+        except ValueError as exc:
+            raise ModelSandboxV2Error(
+                "model sandbox cgroup identity is invalid"
+            ) from exc
+        if not mount.is_dir() or not current.is_dir():
+            raise ModelSandboxV2Error(
+                "model sandbox cgroup v1 hierarchy is unavailable"
+            )
+        if not _pid_is_direct_cgroup_member(
+            current,
+            current_pid,
+            membership_file="tasks",
+        ):
+            raise ModelSandboxV2Error("model sandbox cgroup membership differs")
+        required_files = MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES[controller]
+        if any(not (current / name).is_file() for name in required_files):
+            raise ModelSandboxV2Error(
+                "model sandbox cgroup v1 resource controls are unavailable"
+            )
+    # On cgroup v1, rootful runsc resolves this relative path beneath each
+    # controller path of the current process, creates a unique job child, and
+    # applies the OCI CPU, memory, and PID limits there.
+    return MODEL_SANDBOX_JOB_CGROUP_NAME
+
+
 def prepare_model_sandbox_cgroup_v2(
     *,
     cgroup_root: Path = MODEL_SANDBOX_CGROUP_ROOT,
     proc_self_cgroup_path: Path = Path("/proc/self/cgroup"),
     writer: Callable[[Path, str], None] = _write_cgroup_value,
 ) -> str:
-    """Create a delegated cgroup-v2 subtree without dropping job limits."""
+    """Prepare the measured cgroup hierarchy for rootful gVisor jobs."""
 
     with _MODEL_SANDBOX_CGROUP_LOCK:
         root = cgroup_root.resolve()
+        if not (root / "cgroup.controllers").is_file():
+            return _prepare_model_sandbox_cgroup_v1(
+                cgroup_root=root,
+                proc_self_cgroup_path=proc_self_cgroup_path,
+            )
         current_relative = _current_cgroup_path(
             proc_self_cgroup_path,
             cgroup_root=root,

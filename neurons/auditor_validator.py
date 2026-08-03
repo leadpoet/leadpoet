@@ -371,6 +371,7 @@ def _audit_event(event: str, *, level: int = logging.INFO, **fields: Any) -> Non
 
 _AUDITOR_RETRY_EVENTS = {
     "archive_connect_failure": "authority.dependency_unreadable",
+    "verified_bundle_fallback_observer_timeout": "authority.dependency_unreadable",
     "bundle_fetch_exception": "weight.gateway_endpoint_unavailable",
     "bundle_fetch_http_failure": "weight.gateway_endpoint_unavailable",
     "bundle_fetch_not_found": "weight.gateway_endpoint_unavailable",
@@ -732,6 +733,12 @@ def _normalize_gateway_url(value: str) -> str:
 # File to store pending equivocation check (overwritten each epoch)
 PENDING_EQUIVOCATION_FILE = os.path.join(_SCRIPT_DIR, ".pending_equivocation_check.json")
 VERIFIED_BUNDLE_FALLBACK_BLOCK = 355
+# The fallback observer must never let a synchronous SDK call consume the
+# remaining submission window.  The archive client has its own transport
+# timeout, but the asyncio task needs a shorter, explicit deadline so gateway
+# failures and archive stalls cannot suppress the local verified fallback.
+FALLBACK_OBSERVER_OPERATION_TIMEOUT_SECONDS = 8.0
+FALLBACK_OBSERVER_CLEANUP_TIMEOUT_SECONDS = 2.0
 
 
 def _latest_verified_bundle_state_path(*, netuid: int, hotkey: str) -> Path:
@@ -3146,18 +3153,28 @@ class AuditorValidator:
         """Observe block 355 independently from every gateway request."""
 
         observer = None
+        observer_stage = "archive_connect"
         try:
             while not self.should_exit:
                 try:
                     if observer is None:
-                        observer = await asyncio.to_thread(
+                        # The outer loop owns retry timing.  Retrying three
+                        # times inside one blocking call consumed the entire
+                        # block-355 window during the incident in which the
+                        # archive endpoint was unavailable.
+                        observer_stage = "archive_connect"
+                        observer = await self._run_fallback_observer_operation(
                             _connect_epoch_archive_subtensor,
+                            stage="archive_connect",
                             endpoint=self.epoch_archive_endpoint,
+                            attempts=1,
                         )
-                        await asyncio.to_thread(
+                        observer_stage = "archive_anchor_validation"
+                        await self._run_fallback_observer_operation(
                             validate_subnet_epoch_cutover_anchor,
                             observer,
                             self.epoch_cutover,
+                            stage="archive_anchor_validation",
                             expected_archive_endpoint=self.epoch_archive_endpoint,
                         )
                         _audit_event(
@@ -3167,9 +3184,11 @@ class AuditorValidator:
                             archive_endpoint=self.epoch_archive_endpoint,
                             fallback_block=VERIFIED_BUNDLE_FALLBACK_BLOCK,
                         )
-                    state = await asyncio.to_thread(
+                    observer_stage = "epoch_snapshot"
+                    state = await self._run_fallback_observer_operation(
                         self._fallback_epoch_state_from_observer,
                         observer,
+                        stage="epoch_snapshot",
                     )
                     if (
                         state.epoch_block >= VERIFIED_BUNDLE_FALLBACK_BLOCK
@@ -3186,12 +3205,12 @@ class AuditorValidator:
                         netuid=int(self.config.netuid),
                         uid=getattr(self, "uid", None),
                         archive_endpoint=self.epoch_archive_endpoint,
+                        stage=observer_stage,
                         error_type=type(exc).__name__,
                         error=str(exc),
                     )
                     if observer is not None:
-                        await asyncio.to_thread(
-                            _close_subtensor_connection,
+                        await self._close_fallback_observer(
                             observer,
                             source="fallback_observer_stale",
                         )
@@ -3199,11 +3218,63 @@ class AuditorValidator:
                     await asyncio.sleep(3)
         finally:
             if observer is not None:
-                await asyncio.to_thread(
-                    _close_subtensor_connection,
+                await self._close_fallback_observer(
                     observer,
                     source="fallback_observer_shutdown",
                 )
+
+    async def _run_fallback_observer_operation(
+        self,
+        operation,
+        *args,
+        stage: str,
+        **kwargs,
+    ):
+        """Run one blocking archive operation without wedging the fallback task."""
+
+        started_at = time.monotonic()
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(operation, *args, **kwargs),
+                timeout=FALLBACK_OBSERVER_OPERATION_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            _audit_event(
+                "verified_bundle_fallback_observer_timeout",
+                level=logging.WARNING,
+                netuid=int(self.config.netuid),
+                uid=getattr(self, "uid", None),
+                archive_endpoint=self.epoch_archive_endpoint,
+                stage=stage,
+                timeout_seconds=FALLBACK_OBSERVER_OPERATION_TIMEOUT_SECONDS,
+                elapsed_ms=round((time.monotonic() - started_at) * 1000, 1),
+            )
+            raise SubnetEpochError(
+                f"fallback observer {stage} exceeded its bounded deadline"
+            ) from exc
+
+    async def _close_fallback_observer(self, observer, *, source: str) -> None:
+        """Retire a stale observer without making cleanup another hard block."""
+
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    _close_subtensor_connection,
+                    observer,
+                    source=source,
+                ),
+                timeout=FALLBACK_OBSERVER_CLEANUP_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            _audit_event(
+                "verified_bundle_fallback_observer_timeout",
+                level=logging.WARNING,
+                netuid=int(self.config.netuid),
+                uid=getattr(self, "uid", None),
+                archive_endpoint=self.epoch_archive_endpoint,
+                stage="observer_cleanup",
+                timeout_seconds=FALLBACK_OBSERVER_CLEANUP_TIMEOUT_SECONDS,
+            )
     
     # ═══════════════════════════════════════════════════════════════════════════
     # Main Loop
@@ -3224,6 +3295,9 @@ class AuditorValidator:
             archive_endpoint=getattr(self, "epoch_archive_endpoint", None),
             submission_block=int(WEIGHT_SUBMISSION_BLOCK),
             verified_bundle_fallback_block=VERIFIED_BUNDLE_FALLBACK_BLOCK,
+            verified_bundle_fallback_observer_timeout_seconds=(
+                FALLBACK_OBSERVER_OPERATION_TIMEOUT_SECONDS
+            ),
         )
         last_metagraph_epoch_identity = None
         fallback_task = None

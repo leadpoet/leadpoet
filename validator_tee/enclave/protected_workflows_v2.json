@@ -527,7 +527,7 @@
       "symbol": "AuditorValidator._persist_latest_verified_bundle"
     },
     {
-      "ast_sha256": "sha256:9e8becfe495df5c9915eaabbf330471b4a9b5728da6df9dd81f053403612031e",
+      "ast_sha256": "sha256:cf25d1848277e4fcd6d831bf1a1f6f426bb1f85a6a92850f1dce05d0b285f189",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator._run_latest_verified_bundle_fallback_loop"
     },
@@ -552,7 +552,7 @@
       "symbol": "AuditorValidator.fetch_verified_weight_authority"
     },
     {
-      "ast_sha256": "sha256:1d6948ad2e9641ed8e20c1424948e888b803744d9eb440ab2b25e476a16d43d4",
+      "ast_sha256": "sha256:eb74cb091b5858efa649ff6669f9e36630f7731d0c20ea51258893df98c2f2cb",
       "path": "neurons/auditor_validator.py",
       "symbol": "AuditorValidator.run"
     },
@@ -777,7 +777,7 @@
       "symbol": "normalize_weight_protocol"
     }
   ],
-  "manifest_hash": "sha256:e0b70e844ef14963aaee145d31dce12872b276244e3d304901973453b98f9586",
+  "manifest_hash": "sha256:c206cc1be2d72bd25ac3138b91b8e54976fd2a3d1878a81758ef10779da6afdb",
   "protected_source_commit": "acbd8940cce56b70843ac870534e528688fabb4e",
   "schema_version": "leadpoet.validator_protected_workflows.v2"
 }

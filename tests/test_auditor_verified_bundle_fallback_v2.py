@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -538,6 +539,67 @@ def test_gateway_stall_cannot_stall_the_independent_deadline_observer(
         await asyncio.gather(gateway_task, fallback_task, return_exceptions=True)
 
     asyncio.run(run())
+
+
+def test_stalled_archive_snapshot_is_bounded_and_reaches_block_355_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    """A synchronous SDK read cannot consume the fallback submission window."""
+
+    auditor, _ = _auditor(tmp_path, source_epoch=100)
+    auditor.epoch_archive_endpoint = "wss://archive.example:443"
+    auditor.epoch_cutover = object()
+    observer = object()
+    snapshot_calls = []
+    submitted = asyncio.Event()
+
+    monkeypatch.setattr(
+        auditor_module,
+        "FALLBACK_OBSERVER_OPERATION_TIMEOUT_SECONDS",
+        0.02,
+    )
+    monkeypatch.setattr(
+        auditor_module,
+        "_connect_epoch_archive_subtensor",
+        lambda **_kwargs: observer,
+    )
+    monkeypatch.setattr(
+        auditor_module,
+        "validate_subnet_epoch_cutover_anchor",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        auditor_module,
+        "_close_subtensor_connection",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def snapshot(_observer):
+        snapshot_calls.append(len(snapshot_calls) + 1)
+        if len(snapshot_calls) == 1:
+            time.sleep(0.08)
+        return _epoch_state(101, 355)
+
+    auditor._fallback_epoch_state_from_observer = snapshot
+
+    async def fallback(state):
+        assert state.epoch_block == 355
+        submitted.set()
+        auditor.should_exit = True
+        return True
+
+    auditor._submit_latest_verified_bundle_fallback = fallback
+
+    async def run():
+        task = asyncio.create_task(
+            auditor._run_latest_verified_bundle_fallback_loop()
+        )
+        await asyncio.wait_for(submitted.wait(), timeout=5)
+        await asyncio.wait_for(task, timeout=2)
+
+    asyncio.run(run())
+    assert snapshot_calls[:2] == [1, 2]
 
 
 def test_deadline_observer_uses_best_head_for_exact_block_355_timing(

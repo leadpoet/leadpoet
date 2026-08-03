@@ -32,6 +32,11 @@ def test_committed_validator_protected_manifest_matches_source():
         cwd=ROOT,
         check=True,
     )
+    subprocess.run(
+        ["git", "merge-base", "--is-ancestor", protected_source, "HEAD"],
+        cwd=ROOT,
+        check=True,
+    )
     assert len(manifest["entries"]) == sum(
         len(items) for items in PROTECTED_SYMBOLS.values()
     )

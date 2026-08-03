@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "e4bab354977b14ae0eebfb0cfd89af5d501b2e5a",
+  "baseline_commit": "7f5927886df014347008585433b5bf5d4e316a8d",
   "entries": [
     {
       "ast_sha256": "sha256:72a7a712f2bec439d607b3d764c9ab21d15f4095f1d0989277c38a6d80ce01bd",
@@ -927,6 +927,11 @@
       "symbol": "normalize_tee_protocol"
     },
     {
+      "ast_sha256": "sha256:5529705696be27317f56a1955dcfa42f98ab39ed77d27b5088abe31d4e019824",
+      "path": "gateway/research_lab/v2_authority.py",
+      "symbol": "_current_allocation_frontier_outcome_v2"
+    },
+    {
       "ast_sha256": "sha256:d455831464d0dddb0d6e982fde6d9d9be704845f1a35efbef52f509e003413de",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "_load_allocation_parent_graphs_v2"
@@ -947,7 +952,7 @@
       "symbol": "attest_historical_source_add_reward_v2"
     },
     {
-      "ast_sha256": "sha256:f34ad4768327a6b7314baddcd1af021000f0bb19223a92669e4ed6a91c920841",
+      "ast_sha256": "sha256:e914851040458eaa9ee3a432290884255fe3d5e020e6a6b7bca06e6735d377f0",
       "path": "gateway/research_lab/v2_authority.py",
       "symbol": "build_allocation_v2"
     },
@@ -2402,7 +2407,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:7f78a451e1d49ab3be32add47ae179a5512fae4b80cc62432e12d91d8a7e178d",
-  "protected_source_commit": "e4bab354977b14ae0eebfb0cfd89af5d501b2e5a",
+  "manifest_hash": "sha256:c2ce224eb60ed6f6200a5636c74988d9033358e87fcad1e2711c7149436df6fe",
+  "protected_source_commit": "7f5927886df014347008585433b5bf5d4e316a8d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -72,6 +72,11 @@ RESEARCH_LAB_TEE_PROTOCOL="${RESEARCH_LAB_TEE_PROTOCOL:-}"
 GATEWAY_V2_CONFIG_DIR="${GATEWAY_V2_CONFIG_DIR:-/home/ec2-user/.config/leadpoet/v2}"
 GATEWAY_V2_RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-manifest.json}"
 GATEWAY_V2_RELEASE_LINEAGE="${GATEWAY_V2_RELEASE_LINEAGE:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-lineage.json}"
+# Release acquisition happens while the existing gateway is still serving.
+# Keep candidate evidence restart-scoped so its fail-closed verifier remains
+# bound to the release that actually booted it until destructive cutover.
+GATEWAY_PREPARED_V2_RELEASE_MANIFEST="${GATEWAY_PREPARED_V2_RELEASE_MANIFEST:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release.json}"
+GATEWAY_PREPARED_V2_RELEASE_LINEAGE="${GATEWAY_PREPARED_V2_RELEASE_LINEAGE:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release-lineage.json}"
 GATEWAY_V2_ARTIFACT_POLICY="${GATEWAY_V2_ARTIFACT_POLICY:-$GATEWAY_V2_CONFIG_DIR/encrypted-artifact-policy.json}"
 GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST="${GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST:-$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2.json}"
 GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT="${GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT:-$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2}"
@@ -994,7 +999,7 @@ select_gateway_python_runtime() {
 report_gateway_v2_bootstrap_pending() {
   local missing=() path
   for path in \
-    "$GATEWAY_V2_RELEASE_MANIFEST" \
+    "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
     "$GATEWAY_V2_ARTIFACT_POLICY" \
     "$GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST" \
     "$GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT" \
@@ -1048,6 +1053,10 @@ on_gateway_restart_exit() {
   cancel_gateway_offline_artifact_prepare
   cancel_gateway_ancestry_checkpoint_bootstrap
   rm -f -- "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT" 2>/dev/null || true
+  rm -f -- \
+    "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+    "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
+    2>/dev/null || true
   if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ]; then
     rm -rf "$GATEWAY_PREFLIGHT_TREE"
   fi
@@ -2042,8 +2051,8 @@ for attempt in $(seq 1 300); do
       --expected-commit "$PREPARED_GATEWAY_SHA" \
       --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
       --prefix "$GATEWAY_V2_RELEASE_PREFIX" \
-      --gateway-output "$GATEWAY_V2_RELEASE_MANIFEST" \
-      --lineage-output "$GATEWAY_V2_RELEASE_LINEAGE" \
+      --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+      --lineage-output "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
       --lineage-repository "$LEADPOET_REPO_ROOT" \
       --lineage-authority-commit "$ORIGIN_MAIN_GATEWAY_SHA"; then
     if follow_superseding_gateway_release; then
@@ -2240,7 +2249,7 @@ echo "Validating the prepared V2 release before production shutdown"
   done
   if ! run_prepared_gateway_module gateway.tee.restart_preflight_v2 \
       --deploy-commit "$PREPARED_GATEWAY_SHA" \
-      --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+      --release-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
       --topology-manifest "$GATEWAY_PREFLIGHT_TREE/gateway/tee/topology.json" \
       --artifact-policy "$GATEWAY_V2_ARTIFACT_POLICY" \
       --config-dir "$GATEWAY_V2_CONFIG_DIR" \
@@ -2276,7 +2285,7 @@ PY
     export SUPABASE_TIMEOUT_SECONDS="$GATEWAY_STATEFUL_CUTOVER_SUPABASE_TIMEOUT_SECONDS"
     run_prepared_gateway_module \
       gateway.research_lab.stateful_epoch_cutover_cli_v1 \
-      --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+      --release-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
       --validator-release-manifest "$GATEWAY_STATEFUL_CUTOVER_VALIDATOR_RELEASE_MANIFEST" \
       --use-attested-historical-predecessor
   )"

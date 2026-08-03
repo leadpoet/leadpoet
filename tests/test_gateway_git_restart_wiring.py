@@ -845,7 +845,12 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     assert credential_envelopes < script.index("scrub_parent_environment_file_v2")
     assert script.index("gateway.tee.restart_preflight_v2") < shutdown
     assert script.index('--deploy-commit "$PREPARED_GATEWAY_SHA"') < shutdown
-    assert script.index('--release-manifest "$GATEWAY_V2_RELEASE_MANIFEST"') < shutdown
+    assert (
+        script.index(
+            '--release-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"'
+        )
+        < shutdown
+    )
     assert script.index('--parent-env-file "$ENV_CLONE"') < shutdown
     assert script.index(
         '--acceptance-corpus-manifest "$GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST"'
@@ -862,6 +867,44 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
         not in script
     )
     assert script.index('pkill -9 -f "python3 -u -m gateway.main"') > shutdown
+
+
+def test_gateway_restart_isolates_candidate_release_until_shutdown() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    prepare = script.index(
+        'echo "Materializing the prepared commit for pre-shutdown V2 tooling"'
+    )
+    shutdown = script.index(
+        'echo "Stopping existing gateway and Research Lab worker processes"'
+    )
+    pre_shutdown = script[prepare:shutdown]
+
+    assert (
+        '--gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"'
+        in pre_shutdown
+    )
+    assert (
+        '--lineage-output "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE"'
+        in pre_shutdown
+    )
+    assert (
+        '--release-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"'
+        in pre_shutdown
+    )
+    assert '--gateway-output "$GATEWAY_V2_RELEASE_MANIFEST"' not in pre_shutdown
+    assert '--lineage-output "$GATEWAY_V2_RELEASE_LINEAGE"' not in pre_shutdown
+    assert '--release-manifest "$GATEWAY_V2_RELEASE_MANIFEST"' not in pre_shutdown
+
+    revalidator = script[
+        script.index("ensure_activated_gateway_release_lineage()") : prepare
+    ]
+    assert '--gateway-output "$GATEWAY_V2_RELEASE_MANIFEST"' in revalidator
+    assert '--lineage-output "$GATEWAY_V2_RELEASE_LINEAGE"' in revalidator
+    assert (
+        '"$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \\\n'
+        '    "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE"'
+        in script
+    )
 
 
 def test_gateway_restart_bounds_active_ancestry_before_weight_preparation() -> None:

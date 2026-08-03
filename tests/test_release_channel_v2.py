@@ -182,6 +182,33 @@ def test_channel_publish_is_immutable_and_fetch_installs_atomically(tmp_path):
     assert gateway_output.stat().st_mode & 0o777 == 0o600
 
 
+def test_candidate_install_does_not_replace_running_release(tmp_path):
+    running_commit = "2" * 40
+    running_manifest = _gateway_manifest(running_commit)
+    active_output = tmp_path / "active-gateway.json"
+    active_output.write_text(
+        json.dumps(running_manifest, sort_keys=True, separators=(",", ":"))
+        + "\n",
+        encoding="ascii",
+    )
+    active_before = active_output.read_bytes()
+
+    candidate = build_release_channel_v2(
+        gateway_release_manifest=_gateway_manifest(),
+        validator_release_manifest=_validator_manifest(),
+    )
+    candidate_output = tmp_path / "restart" / "candidate-gateway.json"
+    install_release_channel_v2(
+        candidate,
+        expected_commit=COMMIT,
+        gateway_output=candidate_output,
+    )
+
+    assert active_output.read_bytes() == active_before
+    assert json.loads(active_output.read_text())["commit_sha"] == running_commit
+    assert json.loads(candidate_output.read_text())["commit_sha"] == COMMIT
+
+
 def test_release_channel_key_is_content_addressed_by_commit():
     assert release_channel_key(COMMIT).endswith(
         f"/{COMMIT}/release-channel-v2.json"

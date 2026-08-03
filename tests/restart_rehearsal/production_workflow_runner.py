@@ -4279,14 +4279,12 @@ print(",".join((
             sorted(MODEL_SANDBOX_REQUIRED_CONTROLLERS),
             start=1,
         ):
-            current = cgroup_root / controller / "nested" / "enclave"
+            current = cgroup_root / controller
             current.mkdir(parents=True)
             (current / "tasks").write_text(
                 "%s\n" % os.getpid(), encoding="ascii"
             )
-            for filename in MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES[controller]:
-                (current / filename).write_text("1\n", encoding="ascii")
-            proc_lines.append(f"{hierarchy}:{controller}:/nested/enclave")
+            proc_lines.append(f"{hierarchy}:{controller}:/")
         proc_cgroup.write_text("\n".join(proc_lines) + "\n", encoding="ascii")
 
         delegated_parent = prepare_model_sandbox_cgroup_v2(
@@ -4295,6 +4293,14 @@ print(",".join((
         )
         if delegated_parent != "leadpoet-model":
             raise RuntimeError("model sandbox cgroup delegation differs")
+        if any(
+            (cgroup_root / controller / filename).exists()
+            for controller in MODEL_SANDBOX_REQUIRED_CONTROLLERS
+            for filename in MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES[controller]
+        ):
+            raise RuntimeError(
+                "Nitro controller root unexpectedly exposes child limits"
+            )
         os.chown(broker_root, runtime_config.uid, runtime_config.gid)
         exposed_socket = broker_root / "provider.sock"
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

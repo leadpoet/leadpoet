@@ -55,8 +55,6 @@ def _prepare_measured_cgroup_boundary(
             (controller_root / "tasks").write_text(
                 current_pid + "\n", encoding="ascii"
             )
-            for filename in control_files[controller]:
-                (controller_root / filename).write_text("1\n", encoding="ascii")
             proc_lines.append(f"{hierarchy}:{controller}:/")
         proc_cgroup.write_text("\n".join(proc_lines) + "\n", encoding="ascii")
 
@@ -66,12 +64,20 @@ def _prepare_measured_cgroup_boundary(
         )
         if delegated != "leadpoet-model":
             raise ValueError("measured model cgroup boundary differs")
+        if any(
+            (cgroup_root / controller / filename).exists()
+            for controller in sorted(required_controllers)
+            for filename in control_files[controller]
+        ):
+            raise ValueError(
+                "Nitro controller root unexpectedly exposes child limits"
+            )
     _external_event(
         "nitro_enclaves",
         "measured_runtime_surface",
         phase="model_sandbox_cgroup",
         delegated_parent=delegated,
-        cgroup_layout="nitro_v1",
+        cgroup_layout="nitro_v1_controller_root",
         controller_set=sorted(required_controllers),
     )
     return delegated

@@ -454,6 +454,7 @@ def _write_nitro_cgroup_v1_layout(
     *,
     pid: int,
     relative: str = "/",
+    include_current_controls: bool = False,
 ) -> None:
     lines = []
     for hierarchy, controller in enumerate(
@@ -463,8 +464,9 @@ def _write_nitro_cgroup_v1_layout(
         current = root / controller / relative.lstrip("/")
         current.mkdir(parents=True)
         (current / "tasks").write_text(f"{pid}\n", encoding="ascii")
-        for filename in MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES[controller]:
-            (current / filename).write_text("1\n", encoding="ascii")
+        if include_current_controls:
+            for filename in MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES[controller]:
+                (current / filename).write_text("1\n", encoding="ascii")
         lines.append(f"{hierarchy}:{controller}:{relative}")
     proc_cgroup.write_text("\n".join(lines) + "\n", encoding="ascii")
 
@@ -485,6 +487,11 @@ def test_prepare_model_sandbox_cgroup_accepts_nitro_cgroup_v1(tmp_path):
             proc_self_cgroup_path=proc_cgroup,
         )
         == "leadpoet-model"
+    )
+    assert all(
+        not (root / controller / "enclave/service" / filename).exists()
+        for controller in MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES
+        for filename in MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES[controller]
     )
 
 
@@ -519,20 +526,25 @@ def test_prepare_model_sandbox_cgroup_v1_rejects_unproven_membership(tmp_path):
         )
 
 
-def test_prepare_model_sandbox_cgroup_v1_rejects_missing_limit_file(tmp_path):
+def test_prepare_model_sandbox_cgroup_v1_accepts_nitro_root_without_child_limits(
+    tmp_path,
+):
     root = tmp_path / "cgroup"
     proc_cgroup = tmp_path / "proc-self-cgroup"
     _write_nitro_cgroup_v1_layout(root, proc_cgroup, pid=os.getpid())
-    (root / "memory" / "memory.limit_in_bytes").unlink()
 
-    with pytest.raises(
-        ModelSandboxV2Error,
-        match="cgroup v1 resource controls are unavailable",
-    ):
+    assert (
         prepare_model_sandbox_cgroup_v2(
             cgroup_root=root,
             proc_self_cgroup_path=proc_cgroup,
         )
+        == "leadpoet-model"
+    )
+    assert all(
+        not (root / controller / filename).exists()
+        for controller in MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES
+        for filename in MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES[controller]
+    )
 
 
 def test_prepare_model_sandbox_cgroup_v1_rejects_redirected_controller(tmp_path):

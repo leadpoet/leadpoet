@@ -305,14 +305,13 @@ def _prepare_model_sandbox_cgroup_v1(
             membership_file="tasks",
         ):
             raise ModelSandboxV2Error("model sandbox cgroup membership differs")
-        required_files = MODEL_SANDBOX_CGROUP_V1_CONTROL_FILES[controller]
-        if any(not (current / name).is_file() for name in required_files):
-            raise ModelSandboxV2Error(
-                "model sandbox cgroup v1 resource controls are unavailable"
-            )
     # On cgroup v1, rootful runsc resolves this relative path beneath each
     # controller path of the current process, creates a unique job child, and
-    # applies the OCI CPU, memory, and PID limits there.
+    # applies the OCI CPU, memory, and PID limits there. Nitro's enclave init
+    # places the service in each controller root, where Linux does not expose
+    # every child-only limit file. The mandatory runsc startup self-test is the
+    # fail-closed proof that those files exist on the created child and accept
+    # the measured OCI limits.
     return MODEL_SANDBOX_JOB_CGROUP_NAME
 
 

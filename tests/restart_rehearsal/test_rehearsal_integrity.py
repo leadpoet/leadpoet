@@ -4397,6 +4397,7 @@ def test_receipt_graph_aggregate_pagination_scenario_uses_candidate_bounds() -> 
     assert evidence == {
         "aggregate_rows": attested_v2_store._MAX_GRAPH_ROWS + 1,
         "aggregate_evidence_paged": True,
+        "checkpoint_parent_first_persistence": True,
         "per_query_row_limit": attested_v2_store._MAX_GRAPH_ROWS,
         "query_chunk": attested_v2_store._GRAPH_QUERY_CHUNK,
         "query_count": (

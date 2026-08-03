@@ -182,7 +182,7 @@
       "symbol": "_validate_output_ancestry_checkpoint_v2"
     },
     {
-      "ast_sha256": "sha256:31d15a2b846ad42b589d9e2e44713ae8361eacdbf527453823d82454a66a05ff",
+      "ast_sha256": "sha256:86396d20c50204e9596f994a7ad50dec2dc4872b2afcc36d0ce054df03957864",
       "path": "gateway/research_lab/attested_scoring_v2.py",
       "symbol": "execute_scoring_v2"
     },
@@ -332,7 +332,7 @@
       "symbol": "build_gateway_weight_inputs_v2"
     },
     {
-      "ast_sha256": "sha256:d536e8de78833f838eac82520e131d04fca2f76d1c79f5aa451cf900edba205b",
+      "ast_sha256": "sha256:efa7869da409bce73bc622e6a8951b04bd357a38a061d03190135180f3911675",
       "path": "gateway/research_lab/autoresearch_authority_v2.py",
       "symbol": "run_authoritative_autoresearch_v2"
     },
@@ -1352,7 +1352,7 @@
       "symbol": "rpc_method_allowed"
     },
     {
-      "ast_sha256": "sha256:742331ecfc61ae84ac4bbf23a34f149b572246c174561cbf8b36f06ce9cff56c",
+      "ast_sha256": "sha256:b5d00194edc55c4eea7e8a9493105066383a17bc4f5a935527746464de33dd6c",
       "path": "gateway/tee/scoring_executor_v2.py",
       "symbol": "ScoringExecutorV2"
     },
@@ -2407,7 +2407,7 @@
       "symbol": "verify_source_tree_contract"
     }
   ],
-  "manifest_hash": "sha256:c2ce224eb60ed6f6200a5636c74988d9033358e87fcad1e2711c7149436df6fe",
-  "protected_source_commit": "7f5927886df014347008585433b5bf5d4e316a8d",
+  "manifest_hash": "sha256:f43c788ae349ae23165e4c0cb884ce542910166219f28f7b71293f3836056768",
+  "protected_source_commit": "5053f923484d4d82b13aeb1e2456b88270321648",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

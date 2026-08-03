@@ -75,6 +75,15 @@ MAX_MODEL_INPUT_BYTES = 16 * 1024 * 1024
 MODEL_SANDBOX_TIMEOUT_SECONDS = 900
 MAX_MODEL_OUTPUT_BYTES = 64 * 1024 * 1024
 MAX_PROVIDER_EVIDENCE_CACHE_BYTES = 32 * 1024 * 1024
+MODEL_SANDBOX_SOURCE_ROOT = "/workspace/app"
+MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT = "/app/gateway/_attested_runtime"
+MODEL_SANDBOX_PYTHONPATH = ":".join(
+    (
+        "/app",
+        MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT,
+        MODEL_SANDBOX_SOURCE_ROOT,
+    )
+)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,127}$")
 _CALLABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
@@ -94,6 +103,31 @@ _MEASURED_CREDENTIAL_PLACEHOLDER = "leadpoet-coordinator-managed-v2"
 
 class ModelSandboxV2Error(RuntimeError):
     """A model runtime, bundle, provider path, or output failed validation."""
+
+
+def model_source_import_bootstrap(
+    source_root: str = MODEL_SANDBOX_SOURCE_ROOT,
+) -> str:
+    """Activate model-owned packages after trusted enclave imports are pinned."""
+
+    normalized_root = str(source_root or "").rstrip("/")
+    if not normalized_root.startswith("/") or "\x00" in normalized_root:
+        raise ModelSandboxV2Error("model sandbox source root is invalid")
+    source_gateway = normalized_root + "/gateway"
+    return f"""
+import gateway as _lp_gateway
+import gateway.tee as _lp_trusted_gateway_tee
+import leadpoet_canonical as _lp_trusted_canonical
+import sys as _lp_sys
+
+_lp_source_root = {normalized_root!r}
+_lp_source_gateway = {source_gateway!r}
+while _lp_source_root in _lp_sys.path:
+    _lp_sys.path.remove(_lp_source_root)
+_lp_sys.path.insert(0, _lp_source_root)
+if _lp_source_gateway not in _lp_gateway.__path__:
+    _lp_gateway.__path__.insert(0, _lp_source_gateway)
+"""
 
 
 def provider_evidence_tape_input_root(cache_ref: str, cache_hash: str) -> str:
@@ -475,7 +509,7 @@ def _oci_config(
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONHASHSEED": "0",
-        "PYTHONPATH": "/app:/workspace/app",
+        "PYTHONPATH": MODEL_SANDBOX_PYTHONPATH,
         **dict(environment),
     }
     if broker_root is not None:
@@ -528,7 +562,10 @@ def _oci_config(
             "user": {"uid": config.uid, "gid": config.gid},
             "args": process_args,
             "env": ["%s=%s" % item for item in sorted(process_env.items())],
-            "cwd": "/workspace/app",
+            # A model may ship a compatibility ``gateway`` package. Starting
+            # from its source directory would shadow the measured
+            # ``gateway.tee`` package before the trusted HTTP shim is loaded.
+            "cwd": "/tmp",
             "capabilities": {
                 "bounding": [],
                 "effective": [],
@@ -1008,7 +1045,9 @@ class RunscModelSandboxV2:
         runsc_root.mkdir(mode=0o700)
         bootstrap = (
             "from gateway.tee.sandbox_http_shim_v2 import install as _lp_install;"
-            "_lp_install();\n" + _DOCKER_ADAPTER_BOOTSTRAP
+            "_lp_install();\n"
+            + model_source_import_bootstrap()
+            + _DOCKER_ADAPTER_BOOTSTRAP
         )
         readonly_mounts = {"/run/leadpoet": evidence_root}
         if snapshot_root is not None:
@@ -1144,7 +1183,9 @@ class RunscModelSandboxV2:
             process_args=[
                 self.config.python_path,
                 "-c",
-                dev_replay_bootstrap() + _DOCKER_ADAPTER_BOOTSTRAP,
+                dev_replay_bootstrap()
+                + model_source_import_bootstrap()
+                + _DOCKER_ADAPTER_BOOTSTRAP,
                 module_name,
                 callable_name,
             ],
@@ -1263,11 +1304,13 @@ class RunscModelSandboxV2:
             }
             bootstrap = (
                 "from gateway.tee.sandbox_http_shim_v2 import install as _lp_install;"
-                "_lp_install();\n" + _DOCKER_ADAPTER_BOOTSTRAP
+                "_lp_install();\n"
+                + model_source_import_bootstrap()
+                + _DOCKER_ADAPTER_BOOTSTRAP
             )
         else:
             stdin_payload = {}
-            bootstrap = _DOCKER_METADATA_BOOTSTRAP
+            bootstrap = model_source_import_bootstrap() + _DOCKER_METADATA_BOOTSTRAP
         encoded_input = canonical_json(stdin_payload)
         bundle = tmp_root / "bundle"
         bundle.mkdir(mode=0o700)

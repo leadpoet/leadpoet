@@ -4101,6 +4101,8 @@ def _exercise_receipt_graph_transport_deduplication() -> dict[str, Any]:
 
 
 def _exercise_model_sandbox_scope_binding() -> dict[str, Any]:
+    import subprocess
+
     from Leadpoet.utils.subnet_epoch import ensure_cutover_manifest_configured
     from gateway.research_lab.config import ResearchLabGatewayConfig
     from gateway.research_lab.model_authority_v2 import (
@@ -4113,6 +4115,7 @@ def _exercise_model_sandbox_scope_binding() -> dict[str, Any]:
         build_research_lab_execution_config,
         validate_model_sandbox_environment,
     )
+    from gateway.tee.model_sandbox_v2 import model_source_import_bootstrap
     from research_lab.eval.private_runtime import (
         DockerPrivateModelSpec,
         PROVIDER_COST_EVALUATION_SCOPE_ENV,
@@ -4168,8 +4171,81 @@ def _exercise_model_sandbox_scope_binding() -> dict[str, Any]:
     )
     if validated.get(PROVIDER_COST_EVALUATION_SCOPE_ENV) != final_scope:
         raise RuntimeError("final provider-cost scope was not bound to model sandbox")
+
+    with tempfile.TemporaryDirectory(
+        prefix="leadpoet-rehearsal-model-import-"
+    ) as raw_tmp:
+        root = Path(raw_tmp)
+        trusted_root = root / "trusted"
+        attested_root = root / "attested"
+        source_root = root / "source"
+        neutral_root = root / "neutral"
+        neutral_root.mkdir()
+        packages = {
+            trusted_root / "gateway" / "__init__.py": "ORIGIN = 'trusted'\n",
+            trusted_root / "gateway" / "tee" / "__init__.py": (
+                "ORIGIN = 'trusted'\n"
+            ),
+            attested_root / "leadpoet_canonical" / "__init__.py": (
+                "ORIGIN = 'trusted'\n"
+            ),
+            source_root / "gateway" / "__init__.py": "ORIGIN = 'source'\n",
+            source_root / "gateway" / "tasks" / "__init__.py": "",
+            source_root / "gateway" / "tasks" / "fixture.py": (
+                "ORIGIN = 'source'\n"
+            ),
+            source_root / "qualification" / "__init__.py": (
+                "ORIGIN = 'source'\n"
+            ),
+            source_root / "validator_models" / "__init__.py": (
+                "ORIGIN = 'source'\n"
+            ),
+        }
+        for path, content in packages.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        code = model_source_import_bootstrap(str(source_root)) + """
+import gateway
+import gateway.tasks.fixture as model_task
+import gateway.tee as trusted_tee
+import leadpoet_canonical as trusted_canonical
+import qualification as model_qualification
+import validator_models as model_validator
+print(",".join((
+    gateway.ORIGIN,
+    trusted_tee.ORIGIN,
+    trusted_canonical.ORIGIN,
+    model_task.ORIGIN,
+    model_qualification.ORIGIN,
+    model_validator.ORIGIN,
+)))
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=neutral_root,
+            env={
+                **os.environ,
+                "PYTHONPATH": os.pathsep.join(
+                    (str(trusted_root), str(attested_root), str(source_root))
+                ),
+            },
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "model sandbox import isolation failed: "
+                + str(completed.stderr or "")[-500:]
+            )
+        if completed.stdout.strip() != (
+            "trusted,trusted,trusted,source,source,source"
+        ):
+            raise RuntimeError("model sandbox import origins differ")
     return {
         "final_provider_cost_scope_bound": True,
+        "model_source_import_isolated": True,
         "preliminary_scope_rejected": True,
     }
 
@@ -4585,6 +4661,11 @@ def main() -> int:
                 "model-sandbox-scope-binding",
                 {},
             ).get("final_provider_cost_scope_bound")
+            is True
+            and behavior_evidence.get(
+                "model-sandbox-scope-binding",
+                {},
+            ).get("model_source_import_isolated")
             is True
         ),
         "chain_settlement_state_space_complete": (

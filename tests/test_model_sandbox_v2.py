@@ -4,16 +4,22 @@ import json
 import os
 import base64
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 from gateway.tee.model_sandbox_v2 import (
+    MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT,
+    MODEL_SANDBOX_PYTHONPATH,
     MODEL_SANDBOX_REQUEST_SCHEMA_VERSION,
+    MODEL_SANDBOX_SOURCE_ROOT,
     ROOTFS_MANIFEST_NAME,
     ModelSandboxV2Error,
     RunscModelSandboxV2,
     RunscSandboxConfigV2,
+    model_source_import_bootstrap,
 )
 from gateway.tee.sandbox_runtime_artifact import (
     build_rootfs_manifest,
@@ -179,6 +185,14 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
     assert "--network=none" in observed["command"]
     config = observed["config"]
     assert config["root"]["readonly"] is True
+    assert config["process"]["cwd"] == "/tmp"
+    process_env = dict(item.split("=", 1) for item in config["process"]["env"])
+    assert process_env["PYTHONPATH"] == MODEL_SANDBOX_PYTHONPATH
+    assert MODEL_SANDBOX_PYTHONPATH.split(":") == [
+        "/app",
+        MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT,
+        MODEL_SANDBOX_SOURCE_ROOT,
+    ]
     assert config["process"]["capabilities"]["effective"] == []
     assert config["process"]["noNewPrivileges"] is True
     assert {item["type"] for item in config["linux"]["namespaces"]} >= {
@@ -193,6 +207,71 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
     assert "ro" in source_mount["options"]
     assert "/dev/nsm" in config["linux"]["maskedPaths"]
     assert observed["stdin"] == "{}"
+
+
+def test_model_source_bootstrap_preserves_trusted_gateway_and_canonical_packages(
+    tmp_path,
+):
+    trusted_root = tmp_path / "trusted"
+    attested_root = tmp_path / "attested"
+    source_root = tmp_path / "source"
+    neutral_root = tmp_path / "neutral"
+    neutral_root.mkdir()
+
+    packages = {
+        trusted_root / "gateway" / "__init__.py": "ORIGIN = 'trusted'\n",
+        trusted_root / "gateway" / "tee" / "__init__.py": "ORIGIN = 'trusted'\n",
+        attested_root / "leadpoet_canonical" / "__init__.py": "ORIGIN = 'trusted'\n",
+        source_root / "gateway" / "__init__.py": "ORIGIN = 'source'\n",
+        source_root / "gateway" / "tasks" / "__init__.py": "",
+        source_root / "gateway" / "tasks" / "intent_taxonomy.py": (
+            "ORIGIN = 'source'\n"
+        ),
+        source_root / "qualification" / "__init__.py": "ORIGIN = 'source'\n",
+        source_root / "validator_models" / "__init__.py": "ORIGIN = 'source'\n",
+    }
+    for path, content in packages.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    code = model_source_import_bootstrap(str(source_root)) + """
+import gateway
+import gateway.tasks.intent_taxonomy as model_task
+import gateway.tee as trusted_tee
+import leadpoet_canonical as trusted_canonical
+import qualification as model_qualification
+import validator_models as model_validator
+
+print(gateway.ORIGIN)
+print(trusted_tee.ORIGIN)
+print(trusted_canonical.ORIGIN)
+print(model_task.ORIGIN)
+print(model_qualification.ORIGIN)
+print(model_validator.ORIGIN)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=neutral_root,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                (str(trusted_root), str(attested_root), str(source_root))
+            ),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == [
+        "trusted",
+        "trusted",
+        "trusted",
+        "source",
+        "source",
+        "source",
+    ]
 
 
 def test_private_baseline_builds_exact_measured_provider_evidence_tape(tmp_path):

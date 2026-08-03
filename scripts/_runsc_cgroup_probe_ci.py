@@ -47,8 +47,18 @@ def _serve_once(path: Path, ready: threading.Event) -> None:
         server.close()
 
 
-def _run_variant(runsc: Path, root: Path, *, delegated: bool) -> dict[str, object]:
-    broker_root = root / ("broker-delegated" if delegated else "broker-default")
+def _run_variant(
+    runsc: Path,
+    root: Path,
+    *,
+    delegated: bool,
+    rootless: bool,
+) -> dict[str, object]:
+    label = "%s-%s" % (
+        "rootless" if rootless else "rootful",
+        "delegated" if delegated else "default",
+    )
+    broker_root = root / ("broker-" + label)
     broker_root.mkdir(mode=0o700)
     os.chown(broker_root, 65534, 65534)
     socket_path = broker_root / "provider.sock"
@@ -60,11 +70,11 @@ def _run_variant(runsc: Path, root: Path, *, delegated: bool) -> dict[str, objec
 
     source_root = root / "source"
     source_root.mkdir(exist_ok=True)
-    bundle = root / ("bundle-delegated" if delegated else "bundle-default")
+    bundle = root / ("bundle-" + label)
     bundle.mkdir()
-    runsc_root = root / ("runsc-delegated" if delegated else "runsc-default")
+    runsc_root = root / ("runsc-" + label)
     runsc_root.mkdir()
-    sandbox_id = "lp-cgroup-delegated" if delegated else "lp-cgroup-default"
+    sandbox_id = "lp-" + label
     config = RunscSandboxConfigV2(
         runsc_path=runsc,
         runsc_sha256="sha256:" + "0" * 64,
@@ -97,7 +107,7 @@ def _run_variant(runsc: Path, root: Path, *, delegated: bool) -> dict[str, objec
     command = [
         str(runsc),
         "--root=" + str(runsc_root),
-        "--rootless=true",
+        "--rootless=%s" % str(rootless).lower(),
         "--network=none",
         "--host-uds=open",
         "--platform=ptrace",
@@ -115,6 +125,7 @@ def _run_variant(runsc: Path, root: Path, *, delegated: bool) -> dict[str, objec
     )
     return {
         "delegated": delegated,
+        "rootless": rootless,
         "returncode": completed.returncode,
         "stdout": completed.stdout.strip(),
         "stderr": completed.stderr.strip()[:2000],
@@ -129,10 +140,22 @@ def main() -> int:
         root.chmod(0o755)
         runsc = root / "runsc"
         _download_runsc(runsc)
-        default = _run_variant(runsc, root, delegated=False)
-        delegated = _run_variant(runsc, root, delegated=True)
-        print(json.dumps({"default": default, "delegated": delegated}, sort_keys=True))
-        if delegated["returncode"] != 0 or delegated["stdout"] != "ok":
+        variants = {
+            "%s-%s" % (
+                "rootless" if rootless else "rootful",
+                "delegated" if delegated else "default",
+            ): _run_variant(
+                runsc,
+                root,
+                delegated=delegated,
+                rootless=rootless,
+            )
+            for rootless in (True, False)
+            for delegated in (False, True)
+        }
+        print(json.dumps(variants, sort_keys=True))
+        rootful = variants["rootful-default"]
+        if rootful["returncode"] != 0 or rootful["stdout"] != "ok":
             return 1
     return 0
 

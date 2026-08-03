@@ -772,8 +772,8 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     artifact_prepare = script.index(
         'echo "Preparing exact hash-locked V2 build artifacts during release acquisition"'
     )
-    checkpoint_start = script.index(
-        "if ! start_gateway_ancestry_checkpoint_bootstrap; then"
+    checkpoint_prepare = script.index(
+        "if ! prepare_gateway_ancestry_checkpoint_bootstrap; then"
     )
     artifact_start = script.index(
         "if ! start_gateway_offline_artifact_prepare; then",
@@ -799,16 +799,26 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     dependency_preflight = script.index(
         'echo "Installing gateway host Python dependencies before production shutdown"'
     )
+    safe_frontier = script.index(
+        "Pinned active ancestry bootstrap to proven-safe epoch"
+    )
+    checkpoint_start = script.index(
+        "if ! start_gateway_ancestry_checkpoint_bootstrap; then",
+        safe_frontier,
+    )
     assert (
         materialize
         < restart_window
-        < checkpoint_start
+        < checkpoint_prepare
         < artifact_prepare
         < artifact_start
         < release_channel
         < release_ready
         < artifact_join
         < credential_envelopes
+        < dependency_preflight
+        < safe_frontier
+        < checkpoint_start
         < preflight
         < checkpoint_join
     )
@@ -872,7 +882,17 @@ def test_gateway_restart_bounds_active_ancestry_before_weight_preparation() -> N
         postcheckpoint,
     )
 
-    assert script.index("start_gateway_ancestry_checkpoint_bootstrap") < shutdown
+    checkpoint_prepare = script.index(
+        "prepare_gateway_ancestry_checkpoint_bootstrap"
+    )
+    safe_frontier = script.index(
+        "Pinned active ancestry bootstrap to proven-safe epoch"
+    )
+    checkpoint_start = script.index(
+        "if ! start_gateway_ancestry_checkpoint_bootstrap; then",
+        safe_frontier,
+    )
+    assert checkpoint_prepare < safe_frontier < checkpoint_start < shutdown
     assert script.index("wait_for_gateway_ancestry_checkpoint_bootstrap") < shutdown
     assert runtime_ready < postcheckpoint < repair
     assert '--release-manifest "$GATEWAY_V2_RELEASE_MANIFEST"' in script[
@@ -1008,7 +1028,7 @@ fi
     ]
 
 
-def test_gateway_ancestry_precheckpoint_overlaps_and_has_exact_exit_semantics(
+def test_gateway_ancestry_precheckpoint_waits_for_proven_frontier_and_keeps_running_release(
     tmp_path: Path,
 ) -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
@@ -1016,6 +1036,7 @@ def test_gateway_ancestry_precheckpoint_overlaps_and_has_exact_exit_semantics(
         _shell_function_source(script, name)
         for name in (
             "wait_for_gateway_owned_process_group",
+            "prepare_gateway_ancestry_checkpoint_bootstrap",
             "start_gateway_ancestry_checkpoint_bootstrap",
             "wait_for_gateway_ancestry_checkpoint_bootstrap",
         )
@@ -1032,6 +1053,7 @@ def test_gateway_ancestry_precheckpoint_overlaps_and_has_exact_exit_semantics(
     environment = tmp_path / "gateway.env"
     environment.write_text("export TEST_GATEWAY_ENV=ready\n", encoding="utf-8")
     commit = "a" * 40
+    candidate_commit = "b" * 40
     release = tmp_path / "release.json"
     release.write_text(json.dumps({"commit_sha": commit}), encoding="utf-8")
     fake_bin = tmp_path / "bin"
@@ -1062,7 +1084,12 @@ if [ "${{1:-}}" = "-" ]; then
 fi
 test "$1" = "-m"
 test "$2" = "gateway.tee.bootstrap_active_ancestry_checkpoints_v2"
+test "$3" = "--release-manifest"
+grep -Fq '"commit_sha": "{commit}"' "$4"
+test "$5" = "--epoch"
+test "$6" = "24324"
 test "$TEST_GATEWAY_ENV" = "ready"
+printf '%s\n' "$6" > "$FAKE_CHECKPOINT_EPOCH"
 sleep "${{FAKE_CHECKPOINT_SECONDS:-0}}"
 exit "${{FAKE_CHECKPOINT_STATUS:-0}}"
 """,
@@ -1084,6 +1111,14 @@ ENV_CLONE="$6"
 TIMING_LOG="$7"
 GATEWAY_ANCESTRY_CHECKPOINT_PID=""
 GATEWAY_ANCESTRY_CHECKPOINT_STATE="not_started"
+GATEWAY_ANCESTRY_SAFE_EPOCH=""
+GATEWAY_WEIGHT_STORAGE_PREFLIGHT_CAPABILITY="supported"
+printf '%s\n' '{{"commit_sha": "{commit}"}}' > "$GATEWAY_V2_RELEASE_MANIFEST"
+prepare_gateway_ancestry_checkpoint_bootstrap
+test "$GATEWAY_ANCESTRY_CHECKPOINT_STATE" = "prepared"
+test -z "$GATEWAY_ANCESTRY_CHECKPOINT_PID"
+GATEWAY_ANCESTRY_SAFE_EPOCH="24324"
+printf '%s\n' '{{"commit_sha": "{candidate_commit}"}}' > "$GATEWAY_V2_RELEASE_MANIFEST"
 start_gateway_ancestry_checkpoint_bootstrap
 sleep "$FAKE_RELEASE_SECONDS"
 if [ "${{REQUIRE_CHECKPOINT_RUNNING:-0}}" = "1" ]; then
@@ -1109,6 +1144,7 @@ printf '%s\\n' "$GATEWAY_ANCESTRY_CHECKPOINT_STATE"
         **os.environ,
         "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
         "FAKE_RELEASE_SECONDS": "0.05",
+        "FAKE_CHECKPOINT_EPOCH": str(tmp_path / "checkpoint-epoch"),
     }
 
     passed = subprocess.run(
@@ -1125,6 +1161,9 @@ printf '%s\\n' "$GATEWAY_ANCESTRY_CHECKPOINT_STATE"
     )
     assert passed.returncode == 0, passed.stderr
     assert passed.stdout.rstrip().endswith("passed")
+    assert (tmp_path / "checkpoint-epoch").read_text(encoding="utf-8").strip() == (
+        "24324"
+    )
     assert timing_log.read_text(encoding="utf-8").splitlines() == [
         "ancestry_precheckpoint_started:reached",
         "ancestry_precheckpoint_complete:passed",

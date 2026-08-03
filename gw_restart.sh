@@ -475,12 +475,11 @@ follow_superseding_gateway_release() {
     exec bash "$superseding_tree/gw_restart.sh"
 }
 
-start_gateway_ancestry_checkpoint_bootstrap() {
-  local build_info authority_health checkpoint_module process_group_marker
-  local -a checkpoint_command
+prepare_gateway_ancestry_checkpoint_bootstrap() {
+  local build_info authority_health checkpoint_module
   checkpoint_module="$GATEWAY_PREFLIGHT_TREE/gateway/tee/bootstrap_active_ancestry_checkpoints_v2.py"
-  if [ -n "$GATEWAY_ANCESTRY_CHECKPOINT_PID" ]; then
-    echo "ERROR: active ancestry checkpoint bootstrap is already running" >&2
+  if [ "$GATEWAY_ANCESTRY_CHECKPOINT_STATE" != "not_started" ]; then
+    echo "ERROR: active ancestry checkpoint bootstrap was already prepared" >&2
     return 1
   fi
   if [ ! -r "$checkpoint_module" ]; then
@@ -559,6 +558,30 @@ PY
     echo "Running gateway release could not be bound exactly; deferring ancestry checkpoint bootstrap to the candidate runtime"
     rm -f -- "$GATEWAY_ANCESTRY_CHECKPOINT_RELEASE_SNAPSHOT"
     return 0
+  fi
+
+  GATEWAY_ANCESTRY_CHECKPOINT_STATE="prepared"
+  echo "Prepared exact running-release ancestry checkpoint authority"
+}
+
+start_gateway_ancestry_checkpoint_bootstrap() {
+  local process_group_marker
+  local -a checkpoint_command
+  case "$GATEWAY_ANCESTRY_CHECKPOINT_STATE" in
+    skipped)
+      return 0
+      ;;
+    prepared)
+      ;;
+    *)
+      echo "ERROR: active ancestry checkpoint bootstrap was not prepared" >&2
+      return 1
+      ;;
+  esac
+  if [ "${GATEWAY_WEIGHT_STORAGE_PREFLIGHT_CAPABILITY:-}" = "supported" ] \
+      && [ -z "$GATEWAY_ANCESTRY_SAFE_EPOCH" ]; then
+    echo "ERROR: active ancestry checkpoint bootstrap lacks a proven-safe epoch" >&2
+    return 1
   fi
 
   checkpoint_command=(
@@ -1990,8 +2013,8 @@ if ! run_prepared_gateway_module Leadpoet.utils.restart_epoch_gate \
   exit 75
 fi
 
-echo "Checkpointing active legacy ancestry under the verified running gateway while release acquisition proceeds"
-if ! start_gateway_ancestry_checkpoint_bootstrap; then
+echo "Snapshotting active legacy ancestry authority while release acquisition proceeds"
+if ! prepare_gateway_ancestry_checkpoint_bootstrap; then
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 75
 fi
@@ -2201,6 +2224,12 @@ case "$GATEWAY_WEIGHT_STORAGE_PREFLIGHT_CAPABILITY" in
     exit 1
     ;;
 esac
+
+echo "Checkpointing active legacy ancestry at the proven durable settlement frontier"
+if ! start_gateway_ancestry_checkpoint_bootstrap; then
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 75
+fi
 
 echo "Validating the prepared V2 release before production shutdown"
   GATEWAY_DEPLOY_STAGE="v2_pre_shutdown_preflight"

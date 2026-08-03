@@ -44,6 +44,10 @@ def test_committed_validator_protected_manifest_matches_source():
         "Validator._submit_weights_at_epoch_end_locked"
         in PROTECTED_SYMBOLS["neurons/validator.py"]
     )
+    assert (
+        "Validator._finalize_weight_publication_v2_with_retry"
+        in PROTECTED_SYMBOLS["neurons/validator.py"]
+    )
 
 
 def test_validator_protected_manifest_detects_weight_logic_change(tmp_path: Path):

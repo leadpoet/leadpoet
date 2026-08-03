@@ -418,6 +418,9 @@ except ImportError as e:
 # Additional warning suppression
 warnings.filterwarnings("ignore", message=".*leaked semaphore objects.*")
 
+WEIGHT_FINALIZATION_PROOF_ATTEMPTS = 10
+WEIGHT_FINALIZATION_PROOF_RETRY_SECONDS = 12
+
 # The validator restart wrapper owns Git synchronization and rebuilds the
 # measured enclave before launching this process. Runtime self-updates are
 # forbidden because they could move host code away from the approved EIF commit.
@@ -4547,7 +4550,6 @@ class Validator(BaseValidatorNeuron):
                 **telemetry,
             )
             return False
-        finalization_scan_id = journal.reserve_finalization_scan()
         try:
             with _sentry_stage(
                 component="validator",
@@ -4555,12 +4557,10 @@ class Validator(BaseValidatorNeuron):
                 stage="finalization_last_update_vector_readback",
                 **telemetry,
             ):
-                finalization = await finalize_authoritative_weight_publication_v2(
+                finalization = await self._finalize_weight_publication_v2_with_retry(
                     prepared_publication=publication,
-                    finalization_scan_id=finalization_scan_id,
-                    validator_hotkey=self.wallet.hotkey.ss58_address,
                     gateway_url=gateway_url,
-                    client=self._validator_v2_client,
+                    telemetry=telemetry,
                 )
         except Exception as exc:
             _capture_sentry_failure(
@@ -4601,6 +4601,53 @@ class Validator(BaseValidatorNeuron):
             f"{finalization['acknowledgment']['weight_finalization_event_hash'][:20]}..."
         )
         return True
+
+    async def _finalize_weight_publication_v2_with_retry(
+        self,
+        *,
+        prepared_publication: Mapping[str, Any],
+        gateway_url: str,
+        telemetry: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Wait for finalized inclusion without changing signed authority."""
+
+        retry_telemetry = dict(telemetry or {})
+        last_error: Optional[Exception] = None
+        for attempt in range(1, WEIGHT_FINALIZATION_PROOF_ATTEMPTS + 1):
+            finalization_scan_id = (
+                self._weight_publication_journal_v2.reserve_finalization_scan()
+            )
+            try:
+                return await finalize_authoritative_weight_publication_v2(
+                    prepared_publication=prepared_publication,
+                    finalization_scan_id=finalization_scan_id,
+                    validator_hotkey=self.wallet.hotkey.ss58_address,
+                    gateway_url=gateway_url,
+                    client=self._validator_v2_client,
+                )
+            except Exception as exc:
+                last_error = exc
+                if attempt >= WEIGHT_FINALIZATION_PROOF_ATTEMPTS:
+                    raise
+                _record_sentry_retry(
+                    "weight.finalization_missing",
+                    component="validator",
+                    stage="finalization_last_update_vector_readback",
+                    attempt=attempt,
+                    retryable=True,
+                    exception_class=type(exc).__name__,
+                    finalization_scan_id=finalization_scan_id,
+                    **retry_telemetry,
+                )
+                bt.logging.warning(
+                    "authoritative_weight_finalization_pending "
+                    f"attempt={attempt}/{WEIGHT_FINALIZATION_PROOF_ATTEMPTS} "
+                    f"scan_id={finalization_scan_id} "
+                    f"error_type={type(exc).__name__}"
+                )
+                await asyncio.sleep(WEIGHT_FINALIZATION_PROOF_RETRY_SECONDS)
+        assert last_error is not None
+        raise last_error
 
     async def _recover_weight_publication_journal_v2(
         self, *, gateway_url: str

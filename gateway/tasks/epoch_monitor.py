@@ -511,18 +511,17 @@ class EpochMonitor:
                 # finalization stage — skip the authority reload until then.
                 return
             from gateway.research_lab.attested_v2_store import (
-                load_weight_authority_v2,
+                load_compact_weight_authority_for_identity_v2,
             )
 
             published = None
             authority_read_failed = False
             for hotkey in primary_hotkeys:
                 try:
-                    published = await load_weight_authority_v2(
+                    published = await load_compact_weight_authority_for_identity_v2(
                         netuid=int(self.netuid),
                         epoch_id=settlement_epoch,
                         validator_hotkey=hotkey,
-                        require_finalization=False,
                     )
                 except Exception as exc:
                     authority_read_failed = True

@@ -171,6 +171,92 @@ def _validator(journal, client):
 
 
 @pytest.mark.asyncio
+async def test_live_finalization_retries_fresh_scans_until_finality_catches_up(
+    monkeypatch,
+):
+    journal = _Journal(_record(published=True, signatures=[{"receipt": True}]))
+    validator = _validator(journal, _Client(signed_extrinsics=[]))
+    calls = []
+    sleeps = []
+
+    async def finalize(**kwargs):
+        calls.append(kwargs)
+        if len(calls) < 3:
+            raise RuntimeError("finalized head has not reached inclusion yet")
+        return {"acknowledgment": {"weight_finalization_event_hash": EVENT}}
+
+    async def no_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(
+        validator_module,
+        "finalize_authoritative_weight_publication_v2",
+        finalize,
+    )
+    monkeypatch.setattr(validator_module.asyncio, "sleep", no_sleep)
+
+    result = await validator._finalize_weight_publication_v2_with_retry(
+        prepared_publication={
+            "weight_authorization_id": OLD_AUTHORIZATION,
+            "weight_submission_event_hash": EVENT,
+        },
+        gateway_url="https://gateway.example",
+        telemetry={"epoch_id": 100, "netuid": 71},
+    )
+
+    assert result["acknowledgment"]["weight_finalization_event_hash"] == EVENT
+    assert [call["finalization_scan_id"] for call in calls] == [
+        "sha256:" + format(generation, "064x")
+        for generation in (1, 2, 3)
+    ]
+    assert sleeps == [
+        validator_module.WEIGHT_FINALIZATION_PROOF_RETRY_SECONDS,
+        validator_module.WEIGHT_FINALIZATION_PROOF_RETRY_SECONDS,
+    ]
+    assert validator.substrate_calls == []
+
+
+@pytest.mark.asyncio
+async def test_live_finalization_retry_exhaustion_remains_fail_closed(monkeypatch):
+    journal = _Journal(_record(published=True, signatures=[{"receipt": True}]))
+    validator = _validator(journal, _Client(signed_extrinsics=[]))
+    calls = []
+
+    async def fail_finalize(**kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("finalized proof unavailable")
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(
+        validator_module,
+        "WEIGHT_FINALIZATION_PROOF_ATTEMPTS",
+        3,
+    )
+    monkeypatch.setattr(
+        validator_module,
+        "finalize_authoritative_weight_publication_v2",
+        fail_finalize,
+    )
+    monkeypatch.setattr(validator_module.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(RuntimeError, match="finalized proof unavailable"):
+        await validator._finalize_weight_publication_v2_with_retry(
+            prepared_publication={
+                "weight_authorization_id": OLD_AUTHORIZATION,
+                "weight_submission_event_hash": EVENT,
+            },
+            gateway_url="https://gateway.example",
+        )
+
+    assert len(calls) == 3
+    assert len({call["finalization_scan_id"] for call in calls}) == 3
+    assert not any(name == "clear" for name, _value in journal.calls)
+    assert validator.substrate_calls == []
+
+
+@pytest.mark.asyncio
 async def test_prepared_crash_replays_gateway_then_uses_epoch_bounded_chain_call(
     monkeypatch,
 ):

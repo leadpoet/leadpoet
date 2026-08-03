@@ -90,7 +90,7 @@ jobs:
             validator_models
 
       - name: Diagnose pinned gVisor model sandbox cgroup placement
-        run: sudo --preserve-env=PYTHONPATH python scripts/_runsc_cgroup_probe_ci.py
+        run: sudo env PYTHONPATH="$PWD" "$pythonLocation/bin/python" scripts/_runsc_cgroup_probe_ci.py
 
       - name: Exercise validator enclave finalization under Python 3.7
         run: |

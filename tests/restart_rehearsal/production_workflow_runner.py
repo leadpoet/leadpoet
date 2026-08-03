@@ -4117,7 +4117,7 @@ def _exercise_model_sandbox_scope_binding() -> dict[str, Any]:
         validate_model_sandbox_environment,
     )
     from gateway.tee.model_sandbox_v2 import (
-        MODEL_SANDBOX_BROKER_ROOT,
+        MODEL_SANDBOX_BROKER_DESTINATION,
         RunscSandboxConfigV2,
         _oci_config,
         model_source_import_bootstrap,
@@ -4256,15 +4256,14 @@ print(",".join((
         root = Path(raw_tmp)
         rootfs = root / "rootfs"
         source_root = rootfs / "workspace-source"
-        broker_root = rootfs / MODEL_SANDBOX_BROKER_ROOT / "job-rehearsal"
+        broker_root = root / "broker"
         source_root.mkdir(parents=True)
-        broker_root.mkdir(parents=True)
-        origin_socket = root / "provider.sock"
+        broker_root.mkdir()
         exposed_socket = broker_root / "provider.sock"
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            listener.bind(str(origin_socket))
-            os.link(origin_socket, exposed_socket)
+            listener.bind(str(exposed_socket))
+            listener.listen(1)
             runtime_config = RunscSandboxConfigV2(
                 runsc_path=Path(sys.executable),
                 runsc_sha256="sha256:" + "1" * 64,
@@ -4284,35 +4283,53 @@ print(",".join((
                 item.split("=", 1)
                 for item in oci_config["process"]["env"]
             )
-            expected_socket = "/%s/job-rehearsal/provider.sock" % (
-                MODEL_SANDBOX_BROKER_ROOT,
+            expected_socket = MODEL_SANDBOX_BROKER_DESTINATION + "/provider.sock"
+            broker_mount = next(
+                (
+                    item
+                    for item in oci_config["mounts"]
+                    if item.get("destination")
+                    == MODEL_SANDBOX_BROKER_DESTINATION
+                ),
+                None,
             )
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                client.connect(str(exposed_socket))
+                accepted, _ = listener.accept()
+                accepted.close()
+            finally:
+                client.close()
             if (
                 process_environment.get("LEADPOET_SANDBOX_PROVIDER_SOCKET")
                 != expected_socket
-                or origin_socket.stat().st_ino != exposed_socket.stat().st_ino
-                or origin_socket.stat().st_dev != exposed_socket.stat().st_dev
                 or not any(
                     item.get("destination") == "/run"
                     and item.get("type") == "tmpfs"
                     for item in oci_config["mounts"]
                 )
-                or any(
-                    str(item.get("destination") or "").startswith(
-                        "/" + MODEL_SANDBOX_BROKER_ROOT
-                    )
-                    for item in oci_config["mounts"]
-                )
+                or broker_mount is None
+                or broker_mount.get("type") != "bind"
+                or Path(str(broker_mount.get("source")))
+                != broker_root.resolve()
+                or not {
+                    "rbind",
+                    "ro",
+                    "nosuid",
+                    "nodev",
+                    "noexec",
+                }.issubset(set(broker_mount.get("options") or []))
+                or broker_root.is_relative_to(rootfs)
                 or "/dev/log" not in oci_config["linux"]["maskedPaths"]
             ):
                 raise RuntimeError(
-                    "model sandbox provider broker rootfs contract differs"
+                    "model sandbox provider broker gofer contract differs"
                 )
         finally:
             listener.close()
     return {
         "final_provider_cost_scope_bound": True,
-        "model_provider_broker_rootfs_bound": True,
+        "model_provider_broker_gofer_mount_bound": True,
         "model_source_import_isolated": True,
         "preliminary_scope_rejected": True,
     }
@@ -4738,7 +4755,7 @@ def main() -> int:
             and behavior_evidence.get(
                 "model-sandbox-scope-binding",
                 {},
-            ).get("model_provider_broker_rootfs_bound")
+            ).get("model_provider_broker_gofer_mount_bound")
             is True
         ),
         "chain_settlement_state_space_complete": (

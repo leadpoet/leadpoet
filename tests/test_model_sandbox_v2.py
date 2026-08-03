@@ -4,6 +4,7 @@ import json
 import os
 import base64
 from pathlib import Path
+import socket
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ import pytest
 
 from gateway.tee.model_sandbox_v2 import (
     MODEL_SANDBOX_ATTESTED_RUNTIME_ROOT,
+    MODEL_SANDBOX_BROKER_DESTINATION,
     MODEL_SANDBOX_PYTHONPATH,
     MODEL_SANDBOX_REQUEST_SCHEMA_VERSION,
     MODEL_SANDBOX_SOURCE_ROOT,
@@ -19,6 +21,7 @@ from gateway.tee.model_sandbox_v2 import (
     ModelSandboxV2Error,
     RunscModelSandboxV2,
     RunscSandboxConfigV2,
+    _oci_config,
     model_source_import_bootstrap,
 )
 from gateway.tee.sandbox_runtime_artifact import (
@@ -164,15 +167,13 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
             process_env = dict(
                 item.split("=", 1) for item in config["process"]["env"]
             )
-            sandbox_socket = Path(
-                process_env["LEADPOET_SANDBOX_PROVIDER_SOCKET"]
+            broker_mount = next(
+                item
+                for item in config["mounts"]
+                if item["destination"] == MODEL_SANDBOX_BROKER_DESTINATION
             )
-            broker_root = (
-                Path(config["root"]["path"])
-                / sandbox_socket.relative_to("/").parent
-            )
-            provider_socket = broker_root / sandbox_socket.name
-            origin_socket = Path(bundle_arg.split("=", 1)[1]).parent / "provider.sock"
+            broker_root = Path(broker_mount["source"])
+            provider_socket = broker_root / "provider.sock"
             observed["broker_identity"] = (
                 broker_root.stat().st_uid,
                 broker_root.stat().st_gid,
@@ -180,12 +181,13 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
                 provider_socket.stat().st_gid,
                 provider_socket.stat().st_mode & 0o777,
             )
-            observed["broker_link"] = (
-                origin_socket.stat().st_dev,
-                origin_socket.stat().st_ino,
-                provider_socket.stat().st_dev,
-                provider_socket.stat().st_ino,
-            )
+            observed["broker_mount"] = broker_mount
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                client.connect(str(provider_socket))
+            finally:
+                client.close()
+            observed["broker_connected"] = True
             return SimpleNamespace(returncode=0, stdout='{"version":"1"}', stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -242,13 +244,21 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
     )
     assert run_mount["type"] == "tmpfs"
     assert "noexec" in run_mount["options"]
-    assert not any(
-        item["destination"].startswith("/leadpoet-model-broker")
-        for item in config["mounts"]
-    )
     sandbox_socket = Path(process_env["LEADPOET_SANDBOX_PROVIDER_SOCKET"])
-    assert sandbox_socket.parts[1] == "leadpoet-model-broker"
-    assert sandbox_socket.name == "provider.sock"
+    assert sandbox_socket == Path(MODEL_SANDBOX_BROKER_DESTINATION) / "provider.sock"
+    broker_mount = observed["broker_mount"]
+    assert broker_mount["type"] == "bind"
+    assert set(broker_mount["options"]) >= {
+        "rbind",
+        "ro",
+        "nosuid",
+        "nodev",
+        "noexec",
+    }
+    assert not Path(broker_mount["source"]).is_relative_to(
+        Path(config["root"]["path"])
+    )
+    assert not (Path(config["root"]["path"]) / "leadpoet-model-broker").exists()
     assert "/dev/log" in config["linux"]["maskedPaths"]
     assert observed["broker_identity"] == (
         sandbox.config.uid,
@@ -257,42 +267,28 @@ def test_runsc_model_sandbox_builds_no_network_readonly_oci_bundle(tmp_path):
         sandbox.config.gid,
         0o600,
     )
-    assert observed["broker_link"][:2] == observed["broker_link"][2:]
+    assert observed["broker_connected"] is True
 
 
-def test_runsc_model_sandbox_rejects_redirected_broker_parent(tmp_path):
+def test_runsc_model_sandbox_rejects_redirected_broker_mount(tmp_path):
     config = _runtime(tmp_path)
     outside = tmp_path / "outside-broker"
     outside.mkdir()
-    (config.rootfs_path / "leadpoet-model-broker").symlink_to(
-        outside,
-        target_is_directory=True,
-    )
-    transport = BrokeredProviderTransportV2(
-        lambda _request: pytest.fail("invalid broker root must fail before provider use")
-    )
-    sandbox = RunscModelSandboxV2(
-        config=config,
-        transport=transport,
-        process_runner=lambda *_args, **_kwargs: pytest.fail(
-            "invalid broker root must fail before runsc"
-        ),
-    )
-    try:
-        with pytest.raises(
-            ModelSandboxV2Error,
-            match="provider broker parent is unavailable",
-        ):
-            sandbox.execute(
-                _request(tmp_path),
-                job_id="model-job-invalid-broker-root",
-                purpose="research_lab.private_model_run.v2",
-                retry_policy_hashes={"openrouter": "sha256:" + "1" * 64},
-                terminal_sink=lambda _attempt: None,
-                artifact_sink=lambda _artifact: None,
-            )
-    finally:
-        transport.restore()
+    redirected = tmp_path / "redirected-broker"
+    redirected.symlink_to(outside, target_is_directory=True)
+    source_root = tmp_path / "source-root"
+    source_root.mkdir()
+    with pytest.raises(
+        ModelSandboxV2Error,
+        match="provider broker identity is invalid",
+    ):
+        _oci_config(
+            config=config,
+            source_root=source_root,
+            broker_root=redirected,
+            process_args=[sys.executable, "-c", "pass"],
+            environment={},
+        )
 
 
 def test_model_source_bootstrap_preserves_trusted_gateway_and_canonical_packages(

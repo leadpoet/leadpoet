@@ -327,3 +327,80 @@ echo UNEXPECTED_RETURN
     assert "NEW_VALIDATOR_EXECUTED" in completed.stdout
     assert "UNEXPECTED_RETURN" not in completed.stdout
     assert _git("rev-parse", "HEAD", cwd=checkout) == second
+
+
+def test_unpinned_validator_gateway_wait_rechecks_forward_authority(
+    tmp_path: Path,
+) -> None:
+    function = _extract_shell_function(
+        ROOT / "validator_restart.sh",
+        "verify_forward_gateway_release_before_shutdown",
+    )
+    driver = tmp_path / "validator-gateway-wait-driver.sh"
+    driver.write_text(
+        f"""#!/bin/bash
+set -euo pipefail
+REQUESTED_VALIDATOR_DEPLOY_COMMIT=""
+REQUESTED_COORDINATED_EXPECTED_COMMIT=""
+TRACE={tmp_path / 'forward-wait.trace'!s}
+verify_pinned_gateway_release() {{ echo VERIFY:$1 >>"$TRACE"; return 1; }}
+follow_superseding_validator_release() {{ echo FOLLOW >>"$TRACE"; return 0; }}
+{function}
+if verify_forward_gateway_release_before_shutdown 9; then
+  echo UNEXPECTED_SUCCESS
+  exit 1
+fi
+cat "$TRACE"
+""",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        ["bash", str(driver)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == [
+        "VERIFY:4",
+        "FOLLOW",
+        "VERIFY:4",
+        "FOLLOW",
+        "VERIFY:1",
+    ]
+
+
+def test_explicit_validator_gateway_wait_remains_pinned(tmp_path: Path) -> None:
+    function = _extract_shell_function(
+        ROOT / "validator_restart.sh",
+        "verify_forward_gateway_release_before_shutdown",
+    )
+    driver = tmp_path / "validator-pinned-gateway-wait-driver.sh"
+    driver.write_text(
+        f"""#!/bin/bash
+set -euo pipefail
+REQUESTED_VALIDATOR_DEPLOY_COMMIT={'1' * 40}
+REQUESTED_COORDINATED_EXPECTED_COMMIT=""
+TRACE={tmp_path / 'pinned-wait.trace'!s}
+verify_pinned_gateway_release() {{ echo VERIFY:$1 >>"$TRACE"; return 0; }}
+follow_superseding_validator_release() {{ echo FOLLOW >>"$TRACE"; return 1; }}
+{function}
+verify_forward_gateway_release_before_shutdown 9
+cat "$TRACE"
+""",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        ["bash", str(driver)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == ["VERIFY:9"]

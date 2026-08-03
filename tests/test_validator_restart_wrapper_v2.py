@@ -111,6 +111,28 @@ def test_unpinned_validator_release_wait_follows_new_main_before_shutdown():
         'echo "Stopping validator processes and containers"'
     )
 
+    alignment_start = script.index(
+        "verify_forward_gateway_release_before_shutdown() {"
+    )
+    alignment_end = script.index("\n}\n", alignment_start) + 3
+    alignment = script[alignment_start:alignment_end]
+    assert 'batch_attempts=4' in alignment
+    assert alignment.index("verify_pinned_gateway_release") < alignment.index(
+        "follow_superseding_validator_release"
+    )
+    assert (
+        'if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \\\n'
+        '      || [ -n "$REQUESTED_COORDINATED_EXPECTED_COMMIT" ]; then'
+        in alignment
+    )
+    pre_shutdown = script.index(
+        'VALIDATOR_DEPLOY_STAGE="pre_shutdown_gateway_alignment"'
+    )
+    destructive = script.index('VALIDATOR_DEPLOY_STAGE="runtime_rebuild"')
+    assert "verify_forward_gateway_release_before_shutdown" in script[
+        pre_shutdown:destructive
+    ]
+
 
 def test_secret_hydration_cannot_replace_operator_gateway_barrier(
     tmp_path: Path,
@@ -337,7 +359,7 @@ def test_exact_restart_requires_gateway_before_shutdown_and_rechecks_activation(
         'echo "Checking same-SHA gateway readiness before stopping the running validator"'
     )
     pre_shutdown_verify = script.index(
-        "if ! verify_pinned_gateway_release",
+        "if ! verify_forward_gateway_release_before_shutdown",
         pre_shutdown_alignment,
     )
     shutdown = script.index('echo "Stopping validator processes and containers"')

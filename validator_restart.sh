@@ -147,6 +147,41 @@ verify_pinned_gateway_release() {
     "$VALIDATOR_DEPLOY_SHA"
 }
 
+verify_forward_gateway_release_before_shutdown() {
+  local attempts_remaining batch_attempts max_attempts
+  max_attempts="${1:-12}"
+
+  if [ -n "$REQUESTED_VALIDATOR_DEPLOY_COMMIT" ] \
+      || [ -n "$REQUESTED_COORDINATED_EXPECTED_COMMIT" ]; then
+    verify_pinned_gateway_release "$max_attempts"
+    return
+  fi
+
+  attempts_remaining="$max_attempts"
+  while [ "$attempts_remaining" -gt 0 ]; do
+    batch_attempts=4
+    if [ "$attempts_remaining" -lt "$batch_attempts" ]; then
+      batch_attempts="$attempts_remaining"
+    fi
+    if verify_pinned_gateway_release "$batch_attempts"; then
+      return 0
+    fi
+    attempts_remaining=$((attempts_remaining - batch_attempts))
+    if [ "$attempts_remaining" -le 0 ]; then
+      break
+    fi
+
+    # The validator is still running here. A forward release may have moved
+    # while this invocation waited for its gateway, so follow it before any
+    # destructive action instead of waiting forever on an obsolete SHA.
+    if ! follow_superseding_validator_release; then
+      echo "Forward validator release authority remains temporarily unavailable; retaining the running validator" >&2
+    fi
+  done
+
+  return 1
+}
+
 stop_pinned_validator_after_alignment_failure() {
   echo "Stopping pinned validator after persistent gateway release mismatch" >&2
   sudo pkill -TERM -f ".auto_update_wrapper.sh" 2>/dev/null || true
@@ -868,7 +903,7 @@ fi
 if [ "$REQUESTED_STATEFUL_CUTOVER_PREPARE_ONLY" != "1" ]; then
   echo "Checking same-SHA gateway readiness before stopping the running validator"
   VALIDATOR_DEPLOY_STAGE="pre_shutdown_gateway_alignment"
-  if ! verify_pinned_gateway_release \
+  if ! verify_forward_gateway_release_before_shutdown \
       "${VALIDATOR_PINNED_GATEWAY_PRESTART_MAX_ATTEMPTS:-3000}"; then
     echo "Validator remains running; production shutdown has not started." >&2
     exit 1
